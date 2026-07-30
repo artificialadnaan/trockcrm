@@ -15,6 +15,7 @@ import {
   estimateExtractions,
   estimateSourceDocuments,
   files,
+  projects,
 } from "@trock-crm/shared/schema";
 import type {
   WalkthroughIngressPayload,
@@ -22,11 +23,12 @@ import type {
   WalkthroughScopeRow,
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
-import {
-  canonicalizeTradeScopeKey,
-  isKnownTradeScopeKey,
-  resolvePricingScopeFromExtraction,
-} from "./pricing-service.js";
+// The Files subsystem's OWN size ceiling, reused rather than re-declared — see the
+// contactSheetBytes check in `validateWalkthroughIngressPayload`. `file-constants.ts` is the
+// dependency-free half of that module (r2-client.ts already imports from it), so this does not pull
+// the S3 client or the files service onto this pure-database module's import path.
+import { MAX_FILE_SIZE_BYTES } from "../files/file-constants.js";
+import { canonicalizeTradeScopeKey, resolvePricingScopeFromExtraction } from "./pricing-service.js";
 
 /** Same alias document-service.ts:6 uses. */
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -65,6 +67,14 @@ export const WALKTHROUGH_CONTACT_SHEET_MIME_TYPES = ["image/jpeg", "application/
  * on the lookup necessarily collides on this lock, so the lock can never under-serialize. The cost is
  * that the same walkthrough arriving on one deal under two different projects serializes when it did
  * not strictly have to, which is a wait, not a wrong answer.
+ *
+ * REQUIRES CANONICAL IDS — `canonicalizeWalkthroughIngressId` output, which the validator applies
+ * once. This is string concatenation, so it is CASE-SENSITIVE where the `uuid` columns these ids are
+ * compared against are not; feed it a raw wire spelling and two retries naming the same deal in
+ * different hex case take two different locks. See `canonicalizeWalkthroughIngressId` for why that was
+ * a P1 rather than a cosmetic inconsistency. Deliberately does NOT canonicalize its own arguments:
+ * one canonicalization point is the property being enforced, and a defensive `.toLowerCase()` here
+ * would hide a use site that skipped the validator instead of exposing it.
  *
  * Exported so callers and tests agree on one spelling of the key. NOTE for anyone adding a test here:
  * asserting a recorded lock parameter EQUALS this function's output is a tautology — mutating the body
@@ -193,9 +203,25 @@ export const MAX_WALKTHROUGH_RAW_LABEL_CHARS = 500;
  * retry path. Refused loudly here, so the correction is a conversation instead of a surprise.
  *
  * WHAT IS IN IT. Everything a human would call "what this row says": the id, the label, the quantity
- * and unit, the division hint, the trade, the location, and the evidence triple. Deliberately NOT
- * `confidence` — a re-scored confidence on identical content is the model changing its mind about the
- * same utterance, not the utterance changing, and failing a retry over it would be noise.
+ * and unit, the division hint, the trade, the location, the transcript quote, and the evidence triple.
+ *
+ * WHY `evidenceText` IS IN AND `confidence` IS OUT — the one exclusion here, and the contrast is the
+ * reason both belong in this docblock rather than looking like an oversight:
+ *
+ *   `evidenceText` IS THE EVIDENCE. It is the transcript quote the row is grounded in, and promotion
+ *   copies it into `estimate_line_items.notes` (draft-estimate-service.ts:95), so it is read by the
+ *   estimator deciding whether the row means what it claims. A retry that corrects only the quote — a
+ *   re-transcription, a fixed diarization boundary — was matching the fingerprint, reporting a
+ *   successful replay, and leaving the STALE text in place to be promoted later. Same silent-divergence
+ *   shape as the corrected quantity above, one field over.
+ *
+ *   `confidence` IS NOT. It is the model's score for the same utterance, not a claim about what was
+ *   said: a re-scored 0.87 -> 0.42 on byte-identical content is the model changing its mind, and
+ *   failing a retry over it would be pure noise. Nothing downstream reads it as content — it has no
+ *   line-item column at all.
+ *
+ * The distinction, stated once: a field is IN when a change to it means the utterance was described
+ * differently, and OUT when a change to it means the same utterance was judged differently.
  *
  * Canonical by construction: a fixed field ORDER (not object key order) and `JSON.stringify` on
  * primitives only, so the same row always produces the same string. `trade` is already canonicalized
@@ -210,6 +236,7 @@ export function fingerprintWalkthroughScopeRow(row: WalkthroughScopeRow): string
     row.divisionHint,
     row.trade,
     row.locationLabel,
+    row.evidenceText,
     row.evidence.clipId,
     row.evidence.timelineMs,
     row.evidence.frameKey,
@@ -314,8 +341,18 @@ export const MAX_WALKTHROUGH_SITE_LABEL_CHARS =
  * The longest `walkthroughId` the chain can carry.
  *
  * Deliberately NOT validated as a UUID — it lands on `estimate_source_documents.content_hash`, which is
- * `text`, and the contract with trock-scope is an opaque export id rather than a Postgres uuid. But it
- * is COMPOSED into two bounded columns: `files.system_filename` `varchar(500)` and `files.r2_key`
+ * `text`, and the contract with trock-scope is an opaque export id rather than a Postgres uuid. It IS
+ * still canonicalized (lowercased) by the validator, and that is a deliberate choice rather than a
+ * consequence of the UUID one: `content_hash` being `text` means Postgres compares it case-SENSITIVELY,
+ * so unlike `dealId` this id was already consistent across the lookup, the lock and the r2 key, and
+ * there was no divergence to close. It is folded into `canonicalizeWalkthroughIngressId` anyway so the
+ * ingress has exactly ONE canonical spelling per request — the alternative was a retry that re-cased
+ * its own export id silently ingesting a SECOND complete chain, which is the same estimator-facing
+ * outcome as the case bug in `dealId`, just arrived at legitimately. The cost is that two genuinely
+ * distinct case-differing export ids (a base64-ish id, never a uuid) would now collide — and collide as
+ * a LOUD 409 from the drift check, not as a silent merge.
+ *
+ * The id is COMPOSED into two bounded columns: `files.system_filename` `varchar(500)` and `files.r2_key`
  * `varchar(1000)` (files.ts:43, :48). `system_filename` is the tighter of the two by a wide margin —
  * the derived r2 key spends only 105 characters on its fixed segments and its two UUIDs, leaving ~895 —
  * so bounding to `system_filename` covers both. That relationship is asserted in the runtime suite
@@ -348,6 +385,13 @@ export const MAX_WALKTHROUGH_ID_CHARS =
  * the key is bound to walkthrough identity and there is no input from which a caller could name
  * another deal's object. The path is the CONTRACT with trock-scope — the exporter uploads the contact
  * sheet to exactly this key before it posts — so both sides compute it rather than exchange it.
+ *
+ * REQUIRES CANONICAL IDS, exactly as `walkthroughIngressLockKey` does and for the same reason: this is
+ * string interpolation over values that Postgres compares case-insensitively, so an uncanonicalized
+ * `dealId` derives a DIFFERENT key for the same deal — which is what made `files.r2_key`'s unique index
+ * stop being a backstop. The validator canonicalizes once; this function does not re-do it, so a use
+ * site that bypassed the validator shows up as a bug rather than being silently absorbed. Because both
+ * sides of the contract compute this path, "canonical (lowercase) ids" is part of the contract too.
  */
 export function deriveWalkthroughContactSheetR2Key(
   dealId: string,
@@ -567,7 +611,7 @@ export interface InsertWalkthroughExtractionsArgs {
  *     column: `trade` becomes `metadataJson.tradeHint` and then an in-memory `pricingScopeKey` compared
  *     with `===` against market rules (market-rate-service.ts:84); `locationLabel`, `clipId` and
  *     `frameKey` have no reader outside this module at all.
- *   every other metadataJson value — `activeArtifact`, `tradeHintApplied` (booleans),
+ *   every other metadataJson value — `activeArtifact` (a boolean),
  *     `sourceParseRunId`, `sourceWalkthroughId`, `contentFingerprint`, `extractionProvider`,
  *     `extractionMethod`, `pricingScopeType`, `pricingScopeKey` (all server-derived, none caller-
  *     controlled), and `sourceScopeItemId`, which IS caller-controlled but is only ever read back via
@@ -617,9 +661,6 @@ export async function insertWalkthroughExtractions({
       trade: row.trade,
       extractionProvider: "trock-scope",
       extractionMethod: "walkthrough_grounding",
-      // Whether the authoritative trade was usable as a pricing key at all — see below. Recorded so an
-      // unrecognized trade is visible on the row instead of being an invisible fallback.
-      tradeHintApplied: isKnownTradeScopeKey(row.trade),
       // The walkthrough already KNOWS the trade, so it is handed over as `tradeHint` rather than
       // left to be re-guessed. Without it the resolver falls through to text inference
       // (pricing-service.ts:222), which scans rawLabel against a 19-member hardcoded set — and a
@@ -627,19 +668,23 @@ export async function insertWalkthroughExtractions({
       // Precedence note: the tradeHint branch (pricing-service.ts:212-220) returns BEFORE the
       // divisionHint branch (:231-236), so the authoritative trade wins over divisionHint.
       //
-      // The hint is passed ONLY when the canonical trade is one the pricing path can match a rule on.
-      // A trade outside that 19-member set would otherwise become a scope key matching no rule, which
-      // `market-rate-service.ts:84` resolves by falling back to the general adjustment — the row would
-      // look trade-priced while being priced generally. Omitting the hint instead lets the resolver take
-      // its ordinary inference path, which is what every non-walkthrough producer already does, and the
-      // trade is still stored above for provenance.
+      // PASSED UNCONDITIONALLY, and an earlier revision of this line was wrong to do otherwise. It
+      // gated the hint on `isKnownTradeScopeKey(row.trade)` — membership of `tradeScopeHints`
+      // (pricing-service.ts:116) — on the theory that a key matching no rule would be worse than no
+      // key. But that set is the TEXT-INFERENCE VOCABULARY: 19 roofing-heavy terms with no flooring,
+      // millwork, tile or ACT in it. `estimate_market_adjustment_rules.scope_key` is a varchar(120)
+      // that permits ARBITRARY keys, so a tenant with a configured `flooring` rule had the hint
+      // filtered out, the resolver fell back to division or inferred-prose scope, and
+      // `market-rate-service.ts:84`'s `===` never selected the rule they configured — the exact
+      // divergence handing over the trade exists to prevent, reintroduced by the guard against it.
       //
-      // DELIBERATELY NOT a 400: an unrecognized trade is not a malformed payload, and refusing one would
-      // couple this ingress to a hardcoded set living in a service it does not own — trock-scope would
-      // start failing whenever that set was edited. It is surfaced as `tradeHintApplied: false` instead.
+      // A key that matches no rule needs no help from us: market-rate lookup falls through to the
+      // general adjustment on its own, which is its documented job. Filtering here bought nothing and
+      // coupled this ingress to a hardcoded list in a service it does not own — so trock-scope's
+      // pricing basis would have shifted whenever that list was edited.
       ...resolvePricingScopeFromExtraction({
         divisionHint: row.divisionHint,
-        metadataJson: isKnownTradeScopeKey(row.trade) ? { tradeHint: row.trade } : {},
+        metadataJson: { tradeHint: row.trade },
         normalizedIntent: row.rawLabel,
         rawLabel: row.rawLabel,
       }),
@@ -704,22 +749,53 @@ function optionalNonEmptyString(value: unknown, field: string): string | null {
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
- * Optional, and a real UUID if present.
+ * THE SINGLE CANONICALIZATION POINT for every identifier this module derives a key from.
  *
- * `projectId` lands on `estimate_source_documents.project_id`, a `uuid` column, and it is read there by
- * the idempotency lookup BEFORE anything is written. A non-empty non-UUID string ("proj-1", a slug, a
- * name) therefore reached Postgres as a uuid comparison and raised 22P02 — a 500 out of the middle of
- * the transaction, in a validator whose whole contract is a 400 before the first write. Checked here
- * for the same reason the quantity bounds are.
+ * WHY IT HAS TO EXIST, and why it was a P1 rather than tidiness. Postgres compares `uuid` columns by
+ * their 128-bit VALUE, so `A1B2…` and `a1b2…` are the SAME deal row. JavaScript string concatenation
+ * compares bytes, so they are two different strings. Three of this module's protections are strings
+ * built by concatenation from those ids:
  *
- * NOTE on `dealId`: deliberately NOT validated this way. It comes from the authorized URL rather than
- * the body, and the route resolves the deal through `getDealById` before the ingress is called, so an
- * unparseable one is already refused upstream — whereas `projectId` arrives only in the payload and
- * nothing else looks at it first.
+ *   • the advisory lock key (`walkthrough-ingress:${dealId}:${walkthroughId}`),
+ *   • the derived R2 key (`walkthroughs/${dealId}/${projectId}/${walkthroughId}/…`), which is what
+ *     `files.r2_key`'s UNIQUE index sees,
+ *   • …while the idempotency lookup compares `deal_id`/`project_id` as `uuid` and therefore does not
+ *     care about case at all.
+ *
+ * So two overlapping retries spelling one deal id in different hex case RESOLVED TO THE SAME DEAL,
+ * took DIFFERENT advisory locks (no serialization), and derived DIFFERENT r2 keys (no unique-index
+ * backstop) — both passed the idempotency lookup and both built a complete chain. That defeats BOTH
+ * protections this branch added, simultaneously, and neither would have logged anything: the estimator
+ * simply sees every scope row twice.
+ *
+ * WHY HERE AND NOWHERE ELSE. Canonicalizing at each use site would be four `.toLowerCase()` calls that
+ * are individually correct and collectively worthless — the property that matters is that every
+ * derivation sees ONE form, and that is only checkable if there is one place it is established.
+ * Everything downstream (lock key, r2 key, idempotency lookup, `content_hash`, the row fingerprint,
+ * the project-ownership comparison) reads the validator's output, so canonical-in means canonical
+ * everywhere by construction.
+ *
+ * LOWERCASE specifically, because that is the form Postgres itself emits for a `uuid` column — so a
+ * value read BACK out of the database (e.g. `projects.source_deal_id` in the ownership check below)
+ * compares equal to a canonicalized payload id with `===`, without a second canonicalization.
  */
-function optionalUuid(value: unknown, field: string): string | null {
-  if (value === undefined || value === null) return null;
-  const str = requireNonEmptyString(value, field);
+export function canonicalizeWalkthroughIngressId(value: string): string {
+  return value.toLowerCase();
+}
+
+/**
+ * A real UUID, canonicalized.
+ *
+ * `dealId` lands on `files.deal_id`, `estimate_source_documents.deal_id` and
+ * `estimate_extractions.deal_id` — all `uuid` — AND is interpolated into both derived string keys. It
+ * is validated here rather than left to the route for two reasons that only became true with the
+ * canonicalization above: lowercasing is a sound canonical form only for hex (for an arbitrary string
+ * it is a lossy transform, so validating the shape is what MAKES the canonicalization safe), and a
+ * dealId that is not a uuid at all previously reached `getDealById` as a uuid comparison and surfaced
+ * as a 500 from a validator whose whole contract is a 400 naming the field.
+ */
+function requireUuid(value: unknown, field: string): string {
+  const str = canonicalizeWalkthroughIngressId(requireNonEmptyString(value, field));
   if (!UUID_PATTERN.test(str)) {
     throw new AppError(
       400,
@@ -728,6 +804,27 @@ function optionalUuid(value: unknown, field: string): string | null {
     );
   }
   return str;
+}
+
+/**
+ * Optional, and a real UUID if present — canonicalized, as above.
+ *
+ * `projectId` lands on `estimate_source_documents.project_id`, a `uuid` column, and it is read there by
+ * the idempotency lookup BEFORE anything is written. A non-empty non-UUID string ("proj-1", a slug, a
+ * name) therefore reached Postgres as a uuid comparison and raised 22P02 — a 500 out of the middle of
+ * the transaction, in a validator whose whole contract is a 400 before the first write. Checked here
+ * for the same reason the quantity bounds are.
+ *
+ * Canonicalized for CONSISTENCY, and it is worth being exact that this is weaker than `dealId`'s case:
+ * `projectId` is a segment of the derived r2 key, but a case-only difference in it cannot double a chain
+ * the way `dealId`'s can. The idempotency lookup compares `project_id` as a `uuid`, so a re-cased retry
+ * still FINDS the stored document and replays without deriving a key at all. What canonicalizing buys
+ * is that the key stored on the `files` row is the same key both sides of the trock-scope contract
+ * compute — rather than whichever spelling happened to arrive first. Defence in depth, named as such.
+ */
+function optionalUuid(value: unknown, field: string): string | null {
+  if (value === undefined || value === null) return null;
+  return requireUuid(value, field);
 }
 
 function requireFiniteNumber(value: unknown, field: string): number {
@@ -916,6 +1013,32 @@ export function validateWalkthroughIngressPayload(input: unknown): WalkthroughIn
   if (!Number.isInteger(contactSheetBytes) || contactSheetBytes <= 0) {
     throw new AppError(400, "contactSheetBytes must be a positive integer");
   }
+  // THE FILES SUBSYSTEM'S OWN CEILING, imported rather than restated.
+  //
+  // `contactSheetBytes` lands on `files.file_size_bytes` (bigint NOT NULL) — the same column every
+  // ordinary upload goes through `validateFileSize` (files/service.ts:401) to reach. That function is
+  // module-private, so the ceiling it enforces is reused instead: `MAX_FILE_SIZE_BYTES`
+  // (files/file-constants.ts:7), the exported constant `validateFileSize` itself reads. Both limits
+  // therefore move together — if the Files subsystem raises or lowers 200 MB, this seam follows without
+  // anyone remembering it exists. A local `const MAX_CONTACT_SHEET_BYTES` would have been the bug this
+  // check is meant to prevent, one abstraction up.
+  //
+  // Two failures were open without it. A walkthrough announcing a contact sheet larger than the CRM
+  // accepts anywhere else got a `files` row the ordinary upload path would have refused with a 413; and
+  // a nonsense value past signed-bigint range (Number.MAX_SAFE_INTEGER passes `Number.isInteger`) was a
+  // 22003 from the FIRST write of the ingress transaction — a 500, in a validator that promises a 400
+  // before anything is written. 413 rather than 400 to match `validateFileSize`'s own answer for the
+  // same condition: one column, one limit, one status code.
+  if (contactSheetBytes > MAX_FILE_SIZE_BYTES) {
+    throw new AppError(
+      413,
+      `contactSheetBytes ${contactSheetBytes} exceeds the ${MAX_FILE_SIZE_BYTES}-byte limit the Files ` +
+        `subsystem enforces on every other upload (MAX_FILE_SIZE_BYTES, files/file-constants.ts — the ` +
+        `same ceiling validateFileSize applies). It lands on files.file_size_bytes, so a larger value ` +
+        `would be a file the CRM refuses to accept by any other door, and a value past bigint range ` +
+        `would be a numeric overflow on the first write of the ingress transaction.`
+    );
+  }
 
   // BUCKET, not just key. `buildFileDownloadUrlFromRecord` presigns against the CRM's configured
   // bucket and ignores `files.r2_bucket` (see getCrmFileBucket above), so recording a foreign bucket
@@ -943,7 +1066,12 @@ export function validateWalkthroughIngressPayload(input: unknown): WalkthroughIn
   // first write of the ingress transaction — rather than merely stored in text. See
   // MAX_WALKTHROUGH_ID_CHARS / MAX_WALKTHROUGH_SITE_LABEL_CHARS, both derived from the builders that do
   // the composing.
-  const walkthroughId = requireNonEmptyString(raw.walkthroughId, "walkthroughId");
+  // CANONICALIZED BEFORE IT IS MEASURED, in that order and not the other. `toLowerCase()` can
+  // LENGTHEN a string in Unicode (U+0130 lowercases to two code points), so a bound checked on the raw
+  // value would not be a bound on the value actually written into files.system_filename.
+  const walkthroughId = canonicalizeWalkthroughIngressId(
+    requireNonEmptyString(raw.walkthroughId, "walkthroughId")
+  );
   if (walkthroughId.length > MAX_WALKTHROUGH_ID_CHARS) {
     throw new AppError(
       400,
@@ -985,10 +1113,16 @@ export function validateWalkthroughIngressPayload(input: unknown): WalkthroughIn
   }
 
   return {
+    // Canonicalized above, before its length was measured.
     walkthroughId,
-    dealId: requireNonEmptyString(raw.dealId, "dealId"),
-    // Optional, never blank, and a real UUID: it lands on (and is compared against) a uuid column,
-    // where "" and "proj-1" are both a 22P02 rather than a null or a miss.
+    // Canonical, and a real UUID. See `canonicalizeWalkthroughIngressId`: this value is interpolated
+    // into the advisory-lock key and the derived r2 key (case-SENSITIVE string building) while also
+    // being compared as a `uuid` (case-INSENSITIVE), and the disagreement between those two defeated
+    // both the lock and the unique index.
+    dealId: requireUuid(raw.dealId, "dealId"),
+    // Optional, never blank, canonical, and a real UUID: it lands on (and is compared against) a uuid
+    // column, where "" and "proj-1" are both a 22P02 rather than a null or a miss — and it is a segment
+    // of the derived r2 key, so it carries the same case-divergence hazard as `dealId`.
     projectId: optionalUuid(raw.projectId, "projectId"),
     // NO contactSheetR2Key. Whatever the body carried under that name is dropped on the floor here —
     // the key is derived from `walkthroughId` in `ingestWalkthrough`. See
@@ -1095,6 +1229,64 @@ export async function ingestWalkthrough({
         payload.walkthroughId
       )}, 0))`
     );
+
+    // PROJECT AUTHORIZATION, and it belongs HERE rather than in the validator because it is a database
+    // question, not a shape question.
+    //
+    // `estimate_source_documents.project_id` and `estimate_extractions.project_id` carry NO foreign key
+    // (see the schema — both are bare `uuid`), so a syntactically valid projectId that does not exist,
+    // or that belongs to a DIFFERENT deal, was accepted and written. The route authorizes the DEAL
+    // (`getDealById`, deals/routes.ts) and nothing authorized the project, so the payload could aim a
+    // walkthrough's rows at another deal's project id while remaining perfectly well-formed.
+    //
+    // WHY IT MATTERS MORE THAN A STRAY COLUMN VALUE: `projectId` PARTICIPATES IN IDEMPOTENCY. The
+    // lookup below keys on (dealId, projectId, contentHash, documentType), so a wrong project is not a
+    // typo that can be fixed by re-posting — the corrected post is a different key, misses the stored
+    // document, and builds a SECOND complete chain. Meanwhile the workbench loads extractions by DEAL
+    // alone (workbench-service.ts), so the estimator sees both copies of every utterance with nothing
+    // to distinguish them. One bad field, two chains, and no way back without a human deleting rows.
+    //
+    // MIRRORS THE ROUTE'S OWN DEAL PATTERN: `getDealById` resolves the deal and a miss is a 404 "Deal
+    // not found". A project that does not exist gets the same shape (404 naming it); a project that
+    // exists but belongs elsewhere is a 400, because the request is not asking for something absent —
+    // it is asking for something it may not have, and the distinction is worth keeping in the status
+    // code. Neither leaks anything: the caller already knows the id it sent.
+    //
+    // `projects.source_deal_id` IS the deal association (projects.ts:20, a real FK to deals.id), and it
+    // is compared with `===` against `payload.dealId` — sound only because both are canonical lowercase:
+    // Postgres renders a `uuid` column lowercase, and the validator canonicalizes the payload id. See
+    // `canonicalizeWalkthroughIngressId`.
+    //
+    // INSIDE the transaction and under the lock, so the project cannot be re-parented between the check
+    // and the writes that depend on it.
+    if (payload.projectId !== null) {
+      const [project] = await tx
+        .select({ sourceDealId: projects.sourceDealId })
+        .from(projects)
+        .where(eq(projects.id, payload.projectId))
+        .limit(1);
+
+      if (!project) {
+        throw new AppError(
+          404,
+          `Project ${payload.projectId} does not exist. estimate_source_documents.project_id carries no ` +
+            `foreign key, so an unknown project would have been written rather than refused — and ` +
+            `because projectId is part of this walkthrough's idempotency key, correcting it later would ` +
+            `build a second chain instead of amending this one.`
+        );
+      }
+
+      if (project.sourceDealId !== payload.dealId) {
+        throw new AppError(
+          400,
+          `Project ${payload.projectId} belongs to deal ${project.sourceDealId ?? "no deal"}, not to ` +
+            `deal ${payload.dealId}. The route authorizes the DEAL; the project has to be one of that ` +
+            `deal's own or the walkthrough's rows would be filed under a project the caller was never ` +
+            `authorized for. Post it against the owning deal, or omit projectId for a deal-level ` +
+            `walkthrough.`
+        );
+      }
+    }
 
     // IDEMPOTENCY. A lost response is indistinguishable from a lost request, so trock-scope retries —
     // and a retry must not double the deal's estimating rows. `contentHash` carries the walkthrough

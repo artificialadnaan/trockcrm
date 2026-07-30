@@ -51,6 +51,21 @@ const { dealRoutes } = await import("../../../src/modules/deals/routes.js");
 
 const ROUTE_PATH = "/:id/estimating/walkthrough-extractions";
 
+/**
+ * A REAL deal UUID, because the route's `:id` is one in production and the validator now says so.
+ *
+ * This used to be the placeholder "deal-1", and R15 is why it cannot stay: `dealId` is interpolated into
+ * the advisory-lock key and the derived r2 key (case-sensitive string building) while ALSO being compared
+ * as a `uuid` (case-insensitive), so the validator canonicalizes it — and lowercasing is a sound
+ * canonical form only for hex. Validating the shape is what makes the canonicalization safe, which turns
+ * a non-UUID `:id` into a 400 naming the field instead of the 22P02-shaped 500 it used to become at
+ * `getDealById`. Mixed case on purpose: the route hands the URL segment through untouched, so this
+ * fixture also exercises the canonicalization the route depends on.
+ */
+const DEAL_ID = "A1B2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5";
+/** What every downstream derivation must see — see `canonicalizeWalkthroughIngressId`. */
+const CANONICAL_DEAL_ID = DEAL_ID.toLowerCase();
+
 function findRouteHandler(method: "post", path: string) {
   const layer = (dealRoutes as any).stack.find(
     (entry: any) => entry.route?.path === path && entry.route?.methods?.[method]
@@ -156,7 +171,7 @@ const BODY: Omit<WalkthroughIngressPayload, "dealId" | "userId"> = {
 describe("POST /:id/estimating/walkthrough-extractions", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    dealsServiceMocks.getDealById.mockResolvedValue({ id: "deal-1" });
+    dealsServiceMocks.getDealById.mockResolvedValue({ id: CANONICAL_DEAL_ID });
   });
 
   const { rows: _rows, ...BODY_WITHOUT_ROWS } = BODY;
@@ -179,7 +194,7 @@ describe("POST /:id/estimating/walkthrough-extractions", () => {
     ["siteLabel is missing", { ...BODY, siteLabel: undefined }],
   ])("rejects with 400 when %s, without touching the database", async (_label, body) => {
     await expect(
-      invokeRoute("post", ROUTE_PATH, { params: { id: "deal-1" }, body })
+      invokeRoute("post", ROUTE_PATH, { params: { id: DEAL_ID }, body })
     ).rejects.toMatchObject({ statusCode: 400 });
 
     // The point of validating first: a malformed walkthrough must not buy a contact-sheet file row
@@ -190,13 +205,36 @@ describe("POST /:id/estimating/walkthrough-extractions", () => {
     expect(lastCommitTransaction).not.toHaveBeenCalled();
   });
 
+  // R15's route-visible consequence. `dealId` is now UUID-validated because the validator canonicalizes
+  // it and lowercasing is only a sound canonical form for hex — so a `:id` that is not a uuid at all is a
+  // 400 naming the field HERE, rather than a 22P02 out of `getDealById`'s uuid comparison rendered as a
+  // 500. Its own test rather than a row in the table above because the offending value is in the URL, not
+  // the body, and the table's bodies are all posted against a valid `:id`.
+  it.each([["a slug", "deal-1"], ["a name", "Acme HQ reroof"], ["a truncated uuid", "a1b2c3d4-e5f6"]])(
+    "rejects with 400 when the URL deal id is %s, before any lookup or write",
+    async (_label, id) => {
+      await expect(
+        invokeRoute("post", ROUTE_PATH, { params: { id }, body: BODY })
+      ).rejects.toMatchObject({
+        statusCode: 400,
+        message: expect.stringContaining("dealId"),
+      });
+
+      expect(walkthroughIngressMocks.ingestWalkthrough).not.toHaveBeenCalled();
+      // The whole point of the ORDER in the handler: the body is validated before the deal is resolved,
+      // so an unusable id costs no query.
+      expect(dealsServiceMocks.getDealById).not.toHaveBeenCalled();
+      expect(lastCommitTransaction).not.toHaveBeenCalled();
+    }
+  );
+
   // Called out separately from the table above because it is the rule the whole export is built on,
   // and because the message has to NAME the row: downstream a quantity-less row is priced as one unit
   // (`Number(extraction.quantity ?? 1)`), so the sender needs to know which utterance to go fix.
   it("rejects with 400, naming the row, when a scope row has no spoken quantity", async () => {
     await expect(
       invokeRoute("post", ROUTE_PATH, {
-        params: { id: "deal-1" },
+        params: { id: DEAL_ID },
         body: { ...BODY, rows: [SCOPE_ROW, { ...SECOND_SCOPE_ROW, quantity: null }] },
       })
     ).rejects.toMatchObject({
@@ -217,7 +255,7 @@ describe("POST /:id/estimating/walkthrough-extractions", () => {
     });
 
     const { res, commitTransaction } = await invokeRoute("post", ROUTE_PATH, {
-      params: { id: "deal-1" },
+      params: { id: DEAL_ID },
       body: BODY,
     });
 
@@ -232,11 +270,13 @@ describe("POST /:id/estimating/walkthrough-extractions", () => {
     });
 
     // dealId comes from the URL and userId from the session — a body claiming otherwise cannot
-    // redirect a walkthrough onto someone else's deal or forge its uploader.
+    // redirect a walkthrough onto someone else's deal or forge its uploader. CANONICAL, not the URL's own
+    // mixed-case spelling: the validator lowercases it so the lock key, the r2 key and the idempotency
+    // lookup are all derived from one form (R15).
     expect(walkthroughIngressMocks.ingestWalkthrough).toHaveBeenCalledWith(
       expect.objectContaining({
         payload: expect.objectContaining({
-          dealId: "deal-1",
+          dealId: CANONICAL_DEAL_ID,
           userId: "user-1",
           walkthroughId: "walkthrough-1",
           rows: BODY.rows,
@@ -258,19 +298,22 @@ describe("POST /:id/estimating/walkthrough-extractions", () => {
     // `req.body` into the payload makes this the load-bearing detail of the handler — dealId/userId
     // have to be assigned AFTER the spread, and from the request rather than from the body.
     await invokeRoute("post", ROUTE_PATH, {
-      params: { id: "deal-1" },
+      params: { id: DEAL_ID },
       body: { ...BODY, dealId: "someone-elses-deal", userId: "someone-elses-user" },
     });
 
     expect(walkthroughIngressMocks.ingestWalkthrough).toHaveBeenCalledWith(
       expect.objectContaining({
-        payload: expect.objectContaining({ dealId: "deal-1", userId: "user-1" }),
+        payload: expect.objectContaining({ dealId: CANONICAL_DEAL_ID, userId: "user-1" }),
       })
     );
-    // The deal that gets authorized is the one in the URL, so the one in the payload must match it.
+    // The deal that gets AUTHORIZED is the one in the URL — passed through verbatim, because
+    // `getDealById` compares it as a `uuid` and therefore does not care about case. That the payload
+    // carries the canonical spelling while the lookup carries the URL's is not a discrepancy: it is
+    // exactly the asymmetry R15 is about, with the canonicalization on the side that builds strings.
     expect(dealsServiceMocks.getDealById).toHaveBeenCalledWith(
       expect.anything(),
-      "deal-1",
+      DEAL_ID,
       "director",
       "user-1"
     );
@@ -280,7 +323,7 @@ describe("POST /:id/estimating/walkthrough-extractions", () => {
     dealsServiceMocks.getDealById.mockResolvedValue(null);
 
     await expect(
-      invokeRoute("post", ROUTE_PATH, { params: { id: "deal-1" }, body: BODY })
+      invokeRoute("post", ROUTE_PATH, { params: { id: DEAL_ID }, body: BODY })
     ).rejects.toMatchObject({ statusCode: 404 });
 
     expect(walkthroughIngressMocks.ingestWalkthrough).not.toHaveBeenCalled();
@@ -298,7 +341,7 @@ describe("POST /:id/estimating/walkthrough-extractions", () => {
     walkthroughIngressMocks.ingestWalkthrough.mockRejectedValue(failure);
 
     await expect(
-      invokeRoute("post", ROUTE_PATH, { params: { id: "deal-1" }, body: BODY })
+      invokeRoute("post", ROUTE_PATH, { params: { id: DEAL_ID }, body: BODY })
     ).rejects.toBe(failure);
 
     expect(walkthroughIngressMocks.ingestWalkthrough).toHaveBeenCalledTimes(1);

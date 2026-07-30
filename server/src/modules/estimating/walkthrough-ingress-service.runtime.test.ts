@@ -35,17 +35,21 @@ import {
   estimateSections,
   estimateSourceDocuments,
   files,
+  projects,
   properties,
 } from "@trock-crm/shared/schema";
 import type { WalkthroughIngressPayload, WalkthroughScopeRow } from "@trock-crm/shared/types";
 import { tenantSchemaSql } from "../../../tests/helpers/tenant-schema-from-drizzle.js";
+// The ceiling the ingress REUSES rather than re-declares — see the contactSheetBytes tests below.
+import { MAX_FILE_SIZE_BYTES } from "../files/file-constants.js";
 import { reprocessEstimateSourceDocument } from "./document-service.js";
-import { canonicalizeTradeScopeKey, isKnownTradeScopeKey } from "./pricing-service.js";
+import { canonicalizeTradeScopeKey } from "./pricing-service.js";
 import { buildEstimatingWorkbenchState } from "./workbench-service.js";
 import {
   buildWalkthroughContactSheetDisplayName,
   createWalkthroughContactSheetFile,
   createWalkthroughSourceDocument,
+  deriveWalkthroughContactSheetR2Key,
   getCrmFileBucket,
   ingestWalkthrough,
   insertWalkthroughExtractions,
@@ -57,6 +61,7 @@ import {
   MAX_WALKTHROUGH_SITE_LABEL_CHARS,
   MAX_WALKTHROUGH_UNIT_CHARS,
   MIN_WALKTHROUGH_QUANTITY,
+  validateWalkthroughIngressPayload,
   WALKTHROUGH_NO_PROJECT_KEY_SEGMENT,
   walkthroughIngressLockKey,
 } from "./walkthrough-ingress-service.js";
@@ -65,7 +70,29 @@ const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
 const DEAL = U("11111");
 const WALKTHROUGH = U("22222");
 const USER = U("33333");
+/** Two projects of DEAL, and one belonging to somebody else. `estimate_source_documents.project_id`
+ *  carries no FK, so the ingress resolves the project itself and requires its `source_deal_id` to be
+ *  the authorized deal — see "refuses a project that belongs to another deal" below. */
 const PROJECT = U("44444");
+const SECOND_PROJECT_OF_DEAL = U("44445");
+const FOREIGN_DEAL = U("11119");
+const PROJECT_OF_FOREIGN_DEAL = U("44446");
+/** A syntactically perfect projectId with no `projects` row at all. */
+const UNKNOWN_PROJECT = U("44447");
+/**
+ * R15 fixtures, and they cannot come from `U()`: that helper produces UUIDs made ENTIRELY of decimal
+ * digits, so `toUpperCase()` on one is a no-op and a case test built on it would be vacuous. (It was,
+ * in the first draft — `expect(mixedCase(DEAL)).not.toBe(DEAL)` is the assertion that caught it.) These
+ * are hex-letter-dense on purpose, so re-casing them genuinely changes the string.
+ */
+const CASE_DEAL = "a1b2c3d4-e5f6-4a7b-8c9d-e0f1a2b3c4d5";
+const CASE_PROJECT = "b2c3d4e5-f6a7-4b8c-9d0e-f1a2b3c4d5e6";
+/** Uppercase every OTHER hex letter — genuinely mixed, so neither a whole-string `toUpperCase()` nor a
+ *  whole-string `toLowerCase()` in the implementation could satisfy the test by accident. */
+const mixedCase = (id: string) => {
+  let seen = 0;
+  return id.replace(/[a-f]/g, (char) => (seen++ % 2 === 0 ? char.toUpperCase() : char));
+};
 /** Own deals for the workbench tests, so "the state contains exactly this row" / "…contains nothing"
  *  are exact counts rather than containment checks against every row the rest of the suite wrote. */
 const WORKBENCH_DEAL = U("55551");
@@ -121,6 +148,10 @@ beforeAll(async () => {
       estimateMarketZipMappings,
       estimateMarketFallbackGeographies,
       estimateDealMarketOverrides,
+      // R19. On the ingress WRITE path now: `estimate_source_documents.project_id` and
+      // `estimate_extractions.project_id` carry no foreign key, so `ingestWalkthrough` resolves the
+      // project itself and requires `projects.source_deal_id` to equal the authorized deal.
+      projects,
     ])
   );
   tenantDb = drizzle(pg);
@@ -153,6 +184,45 @@ beforeAll(async () => {
       dealNumber: "WB-0003",
       name: "Walkthrough reprocess-guard deal",
       stageId: U("77771"),
+    },
+  ]);
+
+  // R19. Every projectId the suite posts has to resolve to a project OF THE POSTING DEAL, because the
+  // ingress now refuses one that does not. `source_deal_id` is the association it checks (projects.ts:20).
+  // UNKNOWN_PROJECT is deliberately absent from this list.
+  await tenantDb.insert(projects).values([
+    {
+      id: PROJECT,
+      sourceDealId: DEAL,
+      procoreProjectId: "pc-44444",
+      procoreCompanyId: "pc-co-1",
+      name: "Unit 12B",
+    },
+    {
+      id: SECOND_PROJECT_OF_DEAL,
+      sourceDealId: DEAL,
+      procoreProjectId: "pc-44445",
+      procoreCompanyId: "pc-co-1",
+      name: "Unit 12B — phase 2",
+    },
+    {
+      // Belongs to a DIFFERENT deal, which is the whole point of it.
+      id: PROJECT_OF_FOREIGN_DEAL,
+      sourceDealId: FOREIGN_DEAL,
+      procoreProjectId: "pc-44446",
+      procoreCompanyId: "pc-co-1",
+      name: "Somebody else's building",
+    },
+    {
+      // The R15 hex-case pair. Stored canonically, which is how Postgres renders a `uuid` column — the
+      // ownership comparison reads `source_deal_id` back out and compares it with `===` against the
+      // canonicalized payload dealId, so this row is also what proves that comparison survives a
+      // mixed-case post.
+      id: CASE_PROJECT,
+      sourceDealId: CASE_DEAL,
+      procoreProjectId: "pc-case-1",
+      procoreCompanyId: "pc-co-1",
+      name: "Mixed-case identity project",
     },
   ]);
 }, 60_000);
@@ -601,19 +671,19 @@ describe("insertWalkthroughExtractions", () => {
 
     expect(row.metadataJson.pricingScopeKey).toBe("roofing");
     expect(row.metadataJson.trade).toBe("roofing");
-    expect(row.metadataJson.tradeHintApplied).toBe(true);
-
-    // Asserted against the REAL comparison the market path performs, not against a lowercase string:
-    // this is the predicate that decides whether the roofing rule is found at all.
-    expect(isKnownTradeScopeKey(String(row.metadataJson.pricingScopeKey))).toBe(true);
   });
 
-  // A trade outside the pricing path's 19-member set must NOT be passed as a hint: it would become a
-  // scope key matching no rule, which resolves to the general adjustment while the row looks
-  // trade-priced. The hint is dropped so the resolver takes its ordinary inference path (what every
-  // non-walkthrough producer already does), the trade is still stored for provenance, and the fact that
-  // the hint was unusable is recorded rather than invisible. Deliberately not a 400 — see the service.
-  it("withholds the trade hint for a trade the pricing path cannot match, and says so on the row", async () => {
+  // R16. The hint used to be FILTERED through `isKnownTradeScopeKey` — membership of the resolver's
+  // `tradeScopeHints` set (pricing-service.ts:116) — on the theory that a scope key matching no rule was
+  // worse than no key. That set is the TEXT-INFERENCE vocabulary: 19 roofing-heavy terms with no
+  // flooring, millwork, tile or ACT. `estimate_market_adjustment_rules.scope_key` is a varchar(120) that
+  // takes ARBITRARY keys (estimate-markets.ts:117), so a tenant with a configured `flooring` rule had
+  // the hint filtered away, the resolver fell back to division or inferred-prose scope, and
+  // `market-rate-service.ts:84`'s `===` never selected the rule they configured.
+  //
+  // `flooring` is chosen deliberately: it is a real T Rock trade, and it is NOT in the inference
+  // vocabulary — so this test is only green if the hint survives WITHOUT any help from that set.
+  it("passes a trade outside the inference vocabulary through as the pricing key", async () => {
     const walkthroughId = U("22241");
     const { documentId, parseRunId } = await seedChain(walkthroughId);
 
@@ -628,9 +698,13 @@ describe("insertWalkthroughExtractions", () => {
         rows: [
           {
             ...CARPENTRY_ROW,
-            trade: "scaffolding",
-            divisionHint: null,
-            rawLabel: "Erect scaffolding at the north face",
+            trade: "flooring",
+            // Both fallbacks the filtered version would have landed on are set to something ELSE, so
+            // "flooring" can only have come from the hint: divisionHint would have produced the
+            // division scope "09", and prose inference would have produced "carpentry" (which IS in the
+            // vocabulary — that is the point).
+            divisionHint: "09",
+            rawLabel: "Replace carpentry-grade wall base throughout",
           },
         ],
       },
@@ -641,14 +715,24 @@ describe("insertWalkthroughExtractions", () => {
       .from(estimateExtractions)
       .where(eq(estimateExtractions.id, ids[0]));
 
-    // Recorded, so an unrecognized trade is visible instead of being a silent fallback.
-    expect(row.metadataJson.tradeHintApplied).toBe(false);
-    // Provenance is kept regardless — the walkthrough's own classification is not thrown away.
-    expect(row.metadataJson.trade).toBe("scaffolding");
-    // And the pricing key is NOT the unmatched trade: passing it would have produced
-    // pricingScopeKey "scaffolding", which no rule matches.
-    expect(row.metadataJson.pricingScopeKey).not.toBe("scaffolding");
-    expect(isKnownTradeScopeKey("scaffolding")).toBe(false);
+    // THE ASSERTION THIS FINDING IS ABOUT: the hint reached the resolver and became the pricing key.
+    expect(row.metadataJson.pricingScopeType).toBe("trade");
+    expect(row.metadataJson.pricingScopeKey).toBe("flooring");
+    // Provenance unchanged.
+    expect(row.metadataJson.trade).toBe("flooring");
+    // Neither fallback won — proof the key above is the hint and not a coincidence. "carpentry" is what
+    // prose inference yields for this label, and "09" is what the divisionHint branch yields.
+    expect(row.metadataJson.pricingScopeKey).not.toBe("carpentry");
+    expect(row.metadataJson.pricingScopeKey).not.toBe("09");
+    expect(row.divisionHint).toBe("09");
+
+    // ...and the key is one a real market rule can be configured under: the same `scopeType`/`scopeKey`
+    // equality market-rate-service.ts:84 performs, against a rule that is NOT in the inference set.
+    const configuredRule = { scopeType: "trade", scopeKey: "flooring" };
+    expect(
+      configuredRule.scopeType === row.metadataJson.pricingScopeType &&
+        configuredRule.scopeKey === row.metadataJson.pricingScopeKey
+    ).toBe(true);
   });
 
   it("writes SQL NULL for a row whose quantity was never spoken", async () => {
@@ -719,6 +803,64 @@ async function sqlStateOfFailure(work: Promise<unknown>): Promise<string | undef
   }
   // Distinguishable from a wrong code: the write was supposed to FAIL and did not.
   return "no error was raised";
+}
+
+/**
+ * Run a REAL ingress in a REAL transaction, recording the statements it issues in order.
+ *
+ * `ingestWalkthrough` touches `tenantDb` only to open a transaction, so a stub carrying just
+ * `transaction` is a complete stand-in; the tx handed to the body is proxied so every `execute`,
+ * `select`, `insert` and `update` is logged as it happens. Used to assert the ORDER of the transaction's
+ * statements — which no outcome-shaped test can see.
+ */
+async function recordIngressStatements(
+  payload: WalkthroughIngressPayload
+): Promise<Array<{ kind: string; sql: string; params: unknown[] }>> {
+  const log: Array<{ kind: string; sql: string; params: unknown[] }> = [];
+
+  const recordingDb = {
+    transaction: (body: (tx: unknown) => unknown) =>
+      tenantDb.transaction((tx: any) =>
+        body(
+          new Proxy(tx, {
+            get(target: any, prop: string | symbol) {
+              const value = Reflect.get(target, prop);
+              if (prop === "execute" && typeof value === "function") {
+                return async (query: unknown) => {
+                  const compiled = tenantDb.dialect.sqlToQuery(query);
+                  log.push({ kind: "execute", sql: compiled.sql, params: compiled.params });
+                  const result = await value.call(target, query);
+                  // Observe the REAL lock the REAL statement just took, on the same transaction.
+                  // A statement that parses but locks nothing would leave this at 0.
+                  if (compiled.sql.includes("pg_advisory_xact_lock")) {
+                    const held: any = await value.call(
+                      target,
+                      sql`select count(*)::int as n from pg_locks where locktype = 'advisory'`
+                    );
+                    const rows = held?.rows ?? held;
+                    log.push({ kind: "advisory-locks-held", sql: String(rows[0].n), params: [] });
+                  }
+                  return result;
+                };
+              }
+              if (
+                (prop === "select" || prop === "insert" || prop === "update") &&
+                typeof value === "function"
+              ) {
+                return (...args: unknown[]) => {
+                  log.push({ kind: String(prop), sql: "", params: [] });
+                  return value.apply(target, args);
+                };
+              }
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          })
+        )
+      ),
+  };
+
+  await ingestWalkthrough({ tenantDb: recordingDb as never, payload });
+  return log;
 }
 
 /** Whole-table row counts. The suite shares one PGlite instance, so "wrote nothing" can only be
@@ -1227,66 +1369,185 @@ describe("ingestWalkthrough", () => {
     expect(extractions).toHaveLength(2);
   });
 
+  // R15 — THE ONE THAT DEFEATED BOTH PROTECTIONS ABOVE.
+  //
+  // Postgres compares `uuid` columns by VALUE, so "…AB" and "…ab" are the SAME deal row. JavaScript
+  // string concatenation compares BYTES, so they are two different strings. Both of this branch's
+  // safeguards are built by concatenation:
+  //   • the advisory-lock key (`walkthrough-ingress:${dealId}:${walkthroughId}`) — two hex-case
+  //     spellings take two DIFFERENT locks, so neither transaction is serialized against the other;
+  //   • the derived r2 key (`walkthroughs/${dealId}/${projectId}/${walkthroughId}/…`) — two spellings
+  //     derive two DIFFERENT keys, so `files.r2_key`'s UNIQUE index has nothing to collide on.
+  // While the idempotency lookup, comparing `deal_id`/`project_id` as `uuid`, sees one deal and one
+  // project and cannot tell the two calls apart. Both pass, neither is blocked, both build a full chain.
+  //
+  // Fixed at ONE point — the validator canonicalizes, so every derivation downstream sees one form.
+  //
+  // ASSERTED ON ROWS READ BACK, AND COUNTED, IN THAT ORDER — the counts come BEFORE the id comparison
+  // deliberately. A test that only compared the two returned results would pass while two complete chains
+  // sat in the table: the second call returns its OWN internally-consistent ids, so `toEqual` is the only
+  // thing that notices, and it notices the symptom rather than the damage. Counting first means a
+  // regression report names "2 documents where 1 was expected".
+  //
+  // DEAL-LEVEL, and that is a considered choice rather than a convenience. A case-only difference in
+  // `projectId` cannot by itself produce two chains — the idempotency lookup compares `project_id` as a
+  // `uuid` (case-insensitive, so it still finds the document and replays) and the lock omits the project
+  // entirely.
+  //
+  // ── HONEST LIMIT OF THIS TEST, established by mutation rather than reasoned about ──────────────────
+  //
+  // Removing the canonicalization entirely makes this test report 2 documents, so it is not vacuous. But
+  // the two halves of the fix are NOT equally observable here, and the mutations say which is which:
+  //
+  //   • canonicalizing `walkthroughId` is what this test catches. It reaches `content_hash`, which is
+  //     `text` and therefore compared case-SENSITIVELY, so an uncanonicalized retry misses the lookup and
+  //     builds a second chain right here. (Mutation: canonicalize dealId only → 2 documents. Verified.)
+  //   • canonicalizing `dealId` is NOT catchable by any outcome test on PGlite, and pretending otherwise
+  //     would be the third species of false green. `deal_id` is a `uuid`, so the lookup finds the stored
+  //     document whatever the case — the damage from a raw `dealId` is that the LOCK KEY and the R2 KEY
+  //     diverge, and both of those only bite under genuine two-connection concurrency, which PGlite (one
+  //     connection, internal mutex) cannot express. (Mutation: canonicalize walkthroughId only → this
+  //     test stays GREEN, 1 document. Verified — that is why the next test exists.)
+  //
+  // So the `dealId` half is pinned at the DERIVATION level by "canonicalizes the ids once…" below, which
+  // asserts both derived keys agree under re-casing and — the load-bearing part — that they DISAGREE when
+  // handed the raw spellings. Same division of labour the advisory lock itself already has in this suite.
+  it("treats two hex-case spellings of one deal as one walkthrough, not two chains", async () => {
+    // Hex-letter-dense so re-casing it is a real change — see CASE_DEAL for why `U()` cannot be used.
+    const walkthroughId = "c3d4e5f6-a7b8-4c9d-8e0f-a1b2c3d4e5f6";
+
+    // Sanity FIRST: the fixtures really do differ from their canonical spelling, and differ only in
+    // case. Without these the whole test would pass on ids that were never re-cased at all — which is
+    // exactly what happened on the first draft, built on the digit-only `U()` ids.
+    expect(mixedCase(CASE_DEAL)).not.toBe(CASE_DEAL);
+    expect(mixedCase(walkthroughId)).not.toBe(walkthroughId);
+    expect(mixedCase(CASE_DEAL).toLowerCase()).toBe(CASE_DEAL);
+    // Genuinely MIXED, not uniformly upper — so an implementation that happened to uppercase everything
+    // would not satisfy this either.
+    expect(mixedCase(CASE_DEAL)).not.toBe(CASE_DEAL.toUpperCase());
+
+    const first = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, {
+        dealId: CASE_DEAL,
+        projectId: null,
+        rows: [CARPENTRY_ROW],
+      }),
+    });
+
+    // The SAME walkthrough on the SAME deal, spelled in different hex case — which is what a retry from
+    // a sender that re-serialized its ids looks like.
+    const second = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(mixedCase(walkthroughId), {
+        dealId: mixedCase(CASE_DEAL),
+        projectId: null,
+        rows: [CARPENTRY_ROW],
+      }),
+    });
+
+    // ONE document, counted in the database. Note the predicate covers BOTH spellings: a second chain
+    // would have stored `content_hash` in the mixed one and been invisible to a lookup for the canonical
+    // one, so counting only the canonical spelling would have reported "1" either way.
+    const documents = await tenantDb
+      .select({ id: estimateSourceDocuments.id, contentHash: estimateSourceDocuments.contentHash })
+      .from(estimateSourceDocuments)
+      .where(
+        sql`${estimateSourceDocuments.contentHash} IN (${walkthroughId}, ${mixedCase(walkthroughId)})`
+      );
+    expect(documents).toHaveLength(1);
+    // Stored canonically, so the column and every derivation agree.
+    expect(documents[0].contentHash).toBe(walkthroughId);
+    expect(documents[0].id).toBe(first.documentId);
+
+    // ONE set of extractions — the count that would be 2 if a second chain had landed, and the thing an
+    // estimator would actually have seen (the workbench loads them by deal).
+    const extractions = await tenantDb
+      .select({ id: estimateExtractions.id })
+      .from(estimateExtractions)
+      .where(eq(estimateExtractions.dealId, CASE_DEAL));
+    expect(extractions).toHaveLength(1);
+    expect(extractions[0].id).toBe(first.extractionIds[0]);
+
+    // ONE contact-sheet object. This is the assertion that pins the r2-key half of the finding: with an
+    // uncanonicalized dealId there would be TWO `files` rows here, at
+    // `walkthroughs/a1b2…/…` and `walkthroughs/A1b2…/…`, and the UNIQUE index on r2_key would not have
+    // objected to either — which is why the counting predicate is on the walkthrough segment, matching
+    // both spellings of the deal.
+    const chainFiles = await tenantDb
+      .select({ id: files.id, r2Key: files.r2Key })
+      .from(files)
+      .where(
+        sql`${files.r2Key} LIKE ${`%/${walkthroughId}/contact-sheet.jpg`} OR ${files.r2Key} LIKE ${`%/${mixedCase(walkthroughId)}/contact-sheet.jpg`}`
+      );
+    expect(chainFiles).toHaveLength(1);
+    expect(chainFiles[0].r2Key).toBe(
+      `walkthroughs/${CASE_DEAL}/${WALKTHROUGH_NO_PROJECT_KEY_SEGMENT}/${walkthroughId}/contact-sheet.jpg`
+    );
+
+    // ...and only THEN the ids, which is what the sender sees: it cannot tell which call won.
+    expect(second).toEqual(first);
+  });
+
+  // The mechanism the test above depends on, isolated: the two derivations that used to disagree are
+  // driven from the validator's output, so they cannot see a raw wire spelling. Distinct from the
+  // outcome test because it names WHICH values must be canonical rather than only that the outcome
+  // collapsed to one — a fix that deduped some other way would pass that test and fail this one.
+  it("canonicalizes the ids once, so the lock key and the r2 key are derived from one spelling", () => {
+    const walkthroughId = "d4e5f6a7-b8c9-4d0e-8f1a-b2c3d4e5f6a7";
+
+    const payload = validateWalkthroughIngressPayload({
+      ...walkthroughPayload(walkthroughId),
+      dealId: mixedCase(CASE_DEAL),
+      projectId: mixedCase(CASE_PROJECT),
+      walkthroughId: mixedCase(walkthroughId),
+    });
+
+    // The validator is the single canonicalization point — everything downstream reads THESE values.
+    expect(payload.dealId).toBe(CASE_DEAL);
+    expect(payload.projectId).toBe(CASE_PROJECT);
+    expect(payload.walkthroughId).toBe(walkthroughId);
+
+    // ...so the two derived keys, built from the validator's output, equal the ones built from the
+    // canonical ids. That equality IS the property: it is what makes two hex-case retries take the same
+    // advisory lock and want the same `files.r2_key`.
+    expect(walkthroughIngressLockKey(payload.dealId, payload.walkthroughId)).toBe(
+      walkthroughIngressLockKey(CASE_DEAL, walkthroughId)
+    );
+    expect(
+      deriveWalkthroughContactSheetR2Key(
+        payload.dealId,
+        payload.projectId,
+        payload.walkthroughId,
+        "image/jpeg"
+      )
+    ).toBe(deriveWalkthroughContactSheetR2Key(CASE_DEAL, CASE_PROJECT, walkthroughId, "image/jpeg"));
+
+    // The NEGATIVE half, and the one that makes the two above more than a tautology: fed the RAW wire
+    // spellings, the very same builders disagree. That is the finding, reproduced in two lines — string
+    // concatenation is case-sensitive where the `uuid` comparison behind the idempotency lookup is not.
+    expect(walkthroughIngressLockKey(mixedCase(CASE_DEAL), mixedCase(walkthroughId))).not.toBe(
+      walkthroughIngressLockKey(CASE_DEAL, walkthroughId)
+    );
+    expect(
+      deriveWalkthroughContactSheetR2Key(
+        mixedCase(CASE_DEAL),
+        mixedCase(CASE_PROJECT),
+        mixedCase(walkthroughId),
+        "image/jpeg"
+      )
+    ).not.toBe(deriveWalkthroughContactSheetR2Key(CASE_DEAL, CASE_PROJECT, walkthroughId, "image/jpeg"));
+  });
+
   // THE MECHANISM, as opposed to the outcome. Records the statements the real service issues inside its
   // real transaction, so three things are checked that the outcome test cannot see: the lock statement
   // is issued at all, it is issued FIRST (a lock taken after the lookup guards nothing — both racers
   // would already have read "no document"), and it is keyed on THIS walkthrough rather than on some
   // constant that would serialize every ingress in the system.
-  it("takes the advisory lock as its first statement, before the idempotency lookup", async () => {
+  it("takes the advisory lock as its first statement, before every read and every write", async () => {
     const walkthroughId = U("33031");
-    const log: Array<{ kind: string; sql: string; params: unknown[] }> = [];
 
-    // `ingestWalkthrough` touches `tenantDb` only to open a transaction, so a stub with just
-    // `transaction` is a complete stand-in. The tx handed to the body is proxied to record what runs.
-    const recordingDb = {
-      transaction: (body: (tx: unknown) => unknown) =>
-        tenantDb.transaction((tx: any) =>
-          body(
-            new Proxy(tx, {
-              get(target, prop) {
-                const value = Reflect.get(target, prop);
-                if (prop === "execute" && typeof value === "function") {
-                  return async (query: unknown) => {
-                    const compiled = tenantDb.dialect.sqlToQuery(query);
-                    log.push({ kind: "execute", sql: compiled.sql, params: compiled.params });
-                    const result = await value.call(target, query);
-                    // Observe the REAL lock the REAL statement just took, on the same transaction.
-                    // A statement that parses but locks nothing would leave this at 0.
-                    if (compiled.sql.includes("pg_advisory_xact_lock")) {
-                      const held: any = await value.call(
-                        target,
-                        sql`select count(*)::int as n from pg_locks where locktype = 'advisory'`
-                      );
-                      const rows = held?.rows ?? held;
-                      log.push({
-                        kind: "advisory-locks-held",
-                        sql: String(rows[0].n),
-                        params: [],
-                      });
-                    }
-                    return result;
-                  };
-                }
-                if (
-                  (prop === "select" || prop === "insert" || prop === "update") &&
-                  typeof value === "function"
-                ) {
-                  return (...args: unknown[]) => {
-                    log.push({ kind: prop, sql: "", params: [] });
-                    return value.apply(target, args);
-                  };
-                }
-                return typeof value === "function" ? value.bind(target) : value;
-              },
-            })
-          )
-        ),
-    };
-
-    await ingestWalkthrough({
-      tenantDb: recordingDb as never,
-      payload: walkthroughPayload(walkthroughId),
-    });
+    const log = await recordIngressStatements(walkthroughPayload(walkthroughId));
 
     // FIRST statement in the transaction, full stop. Not "somewhere before the select" — first, so
     // there is no window at all between BEGIN and the lock.
@@ -1317,8 +1578,32 @@ describe("ingestWalkthrough", () => {
     // merely being valid SQL.
     expect(log[1]).toMatchObject({ kind: "advisory-locks-held", sql: "1" });
 
-    // ...and the idempotency lookup is the next thing to happen, i.e. it runs UNDER the lock.
-    expect(log[2].kind).toBe("select");
+    // EVERYTHING ELSE RUNS UNDER IT, asserted as the exact prefix rather than as "a select happens
+    // somewhere later": two reads — the R19 project-ownership resolution, then the idempotency lookup —
+    // and no write until both have answered. ("advisory-locks-held" is this test's own probe, injected
+    // right after the lock statement; the rest is the service's.)
+    const firstWriteAt = log.findIndex((entry) => entry.kind === "insert");
+    expect(firstWriteAt).toBeGreaterThan(-1);
+    expect(log.slice(0, firstWriteAt).map((entry) => entry.kind)).toEqual([
+      "execute",
+      "advisory-locks-held",
+      "select",
+      "select",
+    ]);
+
+    // WHICH select is which, established by removing one of them: a deal-level walkthrough has no
+    // project to resolve, so exactly ONE read precedes the first write. That is what attributes the
+    // extra select above to the project resolution rather than to some unrelated query, and it is the
+    // assertion that would fail if the ownership check were moved after the first write.
+    const dealLevelLog = await recordIngressStatements(
+      walkthroughPayload(U("33032"), { projectId: null })
+    );
+    const dealLevelFirstWriteAt = dealLevelLog.findIndex((entry) => entry.kind === "insert");
+    expect(dealLevelLog.slice(0, dealLevelFirstWriteAt).map((entry) => entry.kind)).toEqual([
+      "execute",
+      "advisory-locks-held",
+      "select",
+    ]);
 
     // Transaction-scoped: gone once the transaction ended, without an explicit unlock, so a failed or
     // crashed ingress cannot wedge this walkthrough forever.
@@ -1523,6 +1808,10 @@ describe("ingestWalkthrough", () => {
     ["the evidence timeline offset", U("33085"), { evidence: { ...CARPENTRY_ROW.evidence, timelineMs: 999_000 } }],
     ["the evidence clip", U("33086"), { evidence: { ...CARPENTRY_ROW.evidence, clipId: "clip-z" } }],
     ["the evidence frame", U("33087"), { evidence: { ...CARPENTRY_ROW.evidence, frameKey: "frames/clip-a/00999000.jpg" } }],
+    // R17. The fingerprint carried all three TEMPORAL evidence fields and omitted the transcript quote
+    // itself, so a retry correcting only the words was a "successful replay" — see the dedicated test
+    // below for what the stale text then does.
+    ["evidenceText", U("33088"), { evidenceText: "so this whole eave is rotted, replacing about twelve point five feet" }],
   ])("treats a changed %s as drift rather than a replay", async (_label, walkthroughId, override) => {
     const first = await ingestWalkthrough({
       tenantDb,
@@ -1539,6 +1828,57 @@ describe("ingestWalkthrough", () => {
         }),
       })
     ).rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  // R17, stated as the harm rather than as a table row. `evidenceText` is the transcript quote the row is
+  // grounded in, and promotion copies it into `estimate_line_items.notes`
+  // (draft-estimate-service.ts:95) — it is what an estimator reads to decide whether the row means what
+  // it claims. With the quote outside the fingerprint, a retry that corrected ONLY the words matched,
+  // reported a successful replay, and left the STALE quote in the table to be promoted later. The sender
+  // believed the correction had landed; the estimator was reading the superseded sentence.
+  it("refuses a retry that corrected only the transcript quote, and keeps nothing stale", async () => {
+    const walkthroughId = U("33089");
+    const corrected = "so this whole eave here is rotted, we're replacing about fifteen feet";
+
+    const first = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, { rows: [CARPENTRY_ROW] }),
+    });
+
+    // Everything else identical — the id, the label, the quantity, the unit, the trade, the location and
+    // all three temporal evidence fields. ONLY the words changed, which is exactly the case that used to
+    // pass. (Species-3 guard: nothing else about this row can be what fails the fingerprint.)
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(walkthroughId, {
+          rows: [{ ...CARPENTRY_ROW, evidenceText: corrected }],
+        }),
+      })
+    ).rejects.toMatchObject({
+      statusCode: 409,
+      message: expect.stringContaining(CARPENTRY_ROW.sourceScopeItemId),
+    });
+
+    // READ BACK FROM THE DATABASE, and honest about which assertion does the work: the REJECTION above is
+    // what catches the omission (mutation — drop `row.evidenceText` from the fingerprint and this call
+    // resolves instead of throwing). The two assertions below cannot fail for that mutation, because a
+    // silent replay leaves the ORIGINAL text in place and "original" is what they expect. They guard the
+    // OTHER direction — an implementation that applied the correction and then reported a conflict, which
+    // would leave the table holding the new quote behind a 409.
+    const [stored] = await tenantDb
+      .select({ evidenceText: estimateExtractions.evidenceText })
+      .from(estimateExtractions)
+      .where(eq(estimateExtractions.id, first.extractionIds[0]));
+    expect(stored.evidenceText).toBe(CARPENTRY_ROW.evidenceText);
+    expect(stored.evidenceText).not.toBe(corrected);
+
+    // ...and the refusal did not write a second row for the corrected quote either.
+    const all = await tenantDb
+      .select({ id: estimateExtractions.id })
+      .from(estimateExtractions)
+      .where(eq(estimateExtractions.documentId, first.documentId));
+    expect(all).toHaveLength(1);
   });
 
   // The other half of the contract: a TRUE retry must still be free. If the fingerprint were unstable
@@ -1600,7 +1940,9 @@ describe("ingestWalkthrough", () => {
   // identity.
   it("ingests the same walkthrough onto two projects of one deal, with distinct object keys", async () => {
     const walkthroughId = U("33100");
-    const otherProject = U("44445");
+    // Both projects belong to DEAL — required now that the ingress verifies ownership (R19), and
+    // faithful to the case this test is about: two projects WITHIN one deal.
+    const otherProject = SECOND_PROJECT_OF_DEAL;
 
     const first = await ingestWalkthrough({
       tenantDb,
@@ -1670,6 +2012,116 @@ describe("ingestWalkthrough", () => {
       expect(await tableCounts()).toEqual(before);
     }
   );
+
+  // R19. A SHAPE check is not an EXISTENCE check. `estimate_source_documents.project_id` and
+  // `estimate_extractions.project_id` carry no foreign key, so a syntactically perfect projectId that
+  // belongs to another deal was written — the route authorizes the DEAL and nothing authorized the
+  // project. And because projectId participates in idempotency (dealId, projectId, contentHash,
+  // documentType), the correction is not an amendment: it misses the stored document and builds a SECOND
+  // chain, while the workbench loads extractions by DEAL alone and shows the estimator both copies.
+  it("refuses a project that belongs to another deal, without writing anything", async () => {
+    const before = await tableCounts();
+
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        // Perfectly well-formed, and a real project row — just not one of DEAL's.
+        payload: walkthroughPayload(U("33111"), { projectId: PROJECT_OF_FOREIGN_DEAL }),
+      })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      // Names BOTH deals, so the sender can see which one it actually addressed.
+      message: expect.stringContaining(FOREIGN_DEAL),
+    });
+
+    // Not a shape complaint dressed up as an ownership one: the message has to name the project too.
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(U("33111"), { projectId: PROJECT_OF_FOREIGN_DEAL }),
+      })
+    ).rejects.toMatchObject({ message: expect.stringContaining(PROJECT_OF_FOREIGN_DEAL) });
+
+    // Refused BEFORE the first write, like every other guard in this validator's contract.
+    expect(await tableCounts()).toEqual(before);
+
+    // The control that makes the assertion above about OWNERSHIP rather than about this walkthrough id
+    // being unusable: the identical payload with one of DEAL's own projects ingests.
+    // (Species-2 guard — proof the refusal is reachable from, and specific to, this input.)
+    const ok = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(U("33111"), { projectId: PROJECT }),
+    });
+    expect(ok.extractionIds).toHaveLength(1);
+  });
+
+  // The other half of "resolve the project": a projectId with no `projects` row at all. 404 rather than
+  // 400, mirroring the route's own `getDealById` miss ("Deal not found") — the request names something
+  // absent, as opposed to something it may not have.
+  it("refuses a projectId with no project row, without writing anything", async () => {
+    const before = await tableCounts();
+
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(U("33112"), { projectId: UNKNOWN_PROJECT }),
+      })
+    ).rejects.toMatchObject({
+      statusCode: 404,
+      message: expect.stringContaining(UNKNOWN_PROJECT),
+    });
+
+    expect(await tableCounts()).toEqual(before);
+  });
+
+  // R18. `contactSheetBytes` lands on `files.file_size_bytes` (bigint NOT NULL) — the same column
+  // ordinary uploads reach through `validateFileSize` (files/service.ts:401), which refuses anything over
+  // `MAX_FILE_SIZE_BYTES` with a 413. The ingress checked only "positive integer", so it accepted a file
+  // the CRM refuses by every other door, and a value past signed-bigint range was a 22003 from the FIRST
+  // write of the transaction — a 500 out of a validator that promises a 400 before anything is written.
+  //
+  // The ceiling is IMPORTED, not restated, so the two move together.
+  it.each<[string, number]>([
+    ["one byte over the Files subsystem's ceiling", MAX_FILE_SIZE_BYTES + 1],
+    // Passes `Number.isInteger`, and is what actually produced the 500: beyond signed-bigint range.
+    ["a value past signed-bigint range", Number.MAX_SAFE_INTEGER],
+  ])("refuses a contact sheet of %s, without writing anything", async (_label, contactSheetBytes) => {
+    const before = await tableCounts();
+
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(U("33113"), { contactSheetBytes }),
+      })
+    ).rejects.toMatchObject({
+      // 413, matching `validateFileSize`'s own answer for this condition — one column, one limit, one
+      // status code. A 400 here would mean the two doors disagree about the same file.
+      statusCode: 413,
+      message: expect.stringContaining("contactSheetBytes"),
+    });
+
+    expect(await tableCounts()).toEqual(before);
+  });
+
+  // The boundary, from the other side: EXACTLY the Files subsystem's limit is accepted and stored whole.
+  // Without this the check above would also pass if the ingress refused every contact sheet.
+  it("accepts a contact sheet of exactly the Files subsystem's limit and stores the size unchanged", async () => {
+    const result = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(U("33114"), { contactSheetBytes: MAX_FILE_SIZE_BYTES }),
+    });
+
+    const [file] = await tenantDb
+      .select({ fileSizeBytes: files.fileSizeBytes })
+      .from(files)
+      .where(eq(files.id, result.fileId));
+    expect(file.fileSizeBytes).toBe(MAX_FILE_SIZE_BYTES);
+
+    // The bound is the Files subsystem's, not a copy of it: this is the same constant `validateFileSize`
+    // reads, so a change there moves the ingress too. Pinned as a real number as well, so a mutation
+    // that redefined MAX_FILE_SIZE_BYTES itself does not move both sides of the comparison together.
+    expect(MAX_FILE_SIZE_BYTES).toBe(200 * 1024 * 1024);
+  });
 
   // R10. rawLabel is unbounded `text` here but promotion copies it into
   // estimate_line_items.description, a varchar(500) — so an over-long label is accepted, generated,
@@ -2045,14 +2497,19 @@ describe("ingestWalkthrough", () => {
   it("scopes the retry check to the deal, so the same walkthrough on another deal still ingests", async () => {
     const walkthroughId = U("33010");
 
+    // Deal-level on BOTH sides, so `dealId` is the only component of the dedupe triple that differs —
+    // otherwise this would also pass on a projectId difference and prove less than it claims. (It is
+    // also what keeps the second call clear of the R19 ownership check, which would otherwise refuse
+    // DEAL's project on another deal — correctly, but for an unrelated reason.)
     const first = await ingestWalkthrough({
       tenantDb,
-      payload: walkthroughPayload(walkthroughId),
+      payload: walkthroughPayload(walkthroughId, { projectId: null }),
     });
     const other = await ingestWalkthrough({
       tenantDb,
       payload: walkthroughPayload(walkthroughId, {
         dealId: U("11112"),
+        projectId: null,
       }),
     });
 
@@ -2215,9 +2672,12 @@ describe("walkthrough rows in the estimating workbench", () => {
   it("renders an ingested walkthrough row, id and label intact", async () => {
     const walkthroughId = U("44001");
 
+    // Deal-level: this suite's `projects` fixtures belong to DEAL, and the workbench loads extractions
+    // by deal regardless of project, so a project here would only mean seeding one to satisfy the R19
+    // ownership check without changing anything the test asserts.
     const result = await ingestWalkthrough({
       tenantDb,
-      payload: walkthroughPayload(walkthroughId, { dealId: WORKBENCH_DEAL }),
+      payload: walkthroughPayload(walkthroughId, { dealId: WORKBENCH_DEAL, projectId: null }),
     });
 
     const state = await buildEstimatingWorkbenchState(tenantDb, WORKBENCH_DEAL);
@@ -2245,9 +2705,13 @@ describe("walkthrough rows in the estimating workbench", () => {
     const walkthroughId = U("44002");
     const strangerRunId = U("44003");
 
+    // Deal-level, for the same reason as the positive test above.
     const result = await ingestWalkthrough({
       tenantDb,
-      payload: walkthroughPayload(walkthroughId, { dealId: WORKBENCH_NEGATIVE_DEAL }),
+      payload: walkthroughPayload(walkthroughId, {
+        dealId: WORKBENCH_NEGATIVE_DEAL,
+        projectId: null,
+      }),
     });
 
     // Baseline: it renders. Without this the disappearance below could be a row that never appeared.

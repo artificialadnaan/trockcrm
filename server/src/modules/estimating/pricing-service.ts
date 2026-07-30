@@ -113,6 +113,19 @@ function normalizeScopeKey(value: unknown, fallback: string) {
   return trimmed.length > 0 ? trimmed : fallback;
 }
 
+/**
+ * The vocabulary `inferTradeScopeKeyFromText` scans PROSE against — and NOT the set of valid trade
+ * scope keys. The distinction is worth stating because it has already been misread once: a caller
+ * filtered its authoritative `tradeHint` down to this set on the theory that a key outside it was
+ * unusable, which silently dropped every flooring, millwork, tile and ACT hint (none of the four is
+ * here — the list is roofing-heavy because that is where text inference had to work).
+ *
+ * `estimate_market_adjustment_rules.scope_key` is a `varchar(120)` with no enum and no reference to
+ * this set (estimate-markets.ts:117), so a tenant may configure a rule under ANY key, and
+ * `market-rate-service.ts:84` will match it. A key with no rule needs no gatekeeping either: the market
+ * path falls through to the general adjustment on its own. This set governs inference only; anything
+ * that already KNOWS its trade should pass it through untouched.
+ */
 const tradeScopeHints = new Set([
   "roofing",
   "flashing",
@@ -146,17 +159,6 @@ const tradeScopeHints = new Set([
  */
 export function canonicalizeTradeScopeKey(value: string): string {
   return value.trim().toLowerCase();
-}
-
-/**
- * Whether a canonical trade key is one the pricing path can actually match a rule on.
- *
- * Exported rather than exposing the set itself, and exported rather than copied, so a caller that
- * validates a trade before handing it over as a `tradeHint` cannot drift from the 19 members above.
- * Callers are expected to pass `canonicalizeTradeScopeKey(...)` output.
- */
-export function isKnownTradeScopeKey(value: string): boolean {
-  return tradeScopeHints.has(value);
 }
 
 function inferTradeScopeKeyFromText(value: unknown) {
