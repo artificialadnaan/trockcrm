@@ -22,11 +22,15 @@
  *   part of that person's name, at least one of those accountings is EXACT, and at most one is fuzzy.
  *
  * The load-bearing half of that is "every token". An unmatched token is evidence AGAINST a match, not
- * neutral: the prod value "Nick Cheaham" queried as a superintendent must resolve to nobody, because
- * Nick Cheatam is a project_manager and the only Nick among superintendents is Nick REYES. Anything that
- * falls back to "unique first name in role" emails Nick Reyes somebody else's corrective action. The
- * surname token "Cheaham" matches no superintendent surname, and that is precisely what distinguishes it
- * from "Brett/robert sampley", where the bare "Brett" segment carries no surname arguing otherwise.
+ * neutral. That is what keeps the prod value "Nick Cheaham" away from superintendent Nick REYES — the
+ * surname token argues against a bare first-name hit — while still letting it reach the person actually
+ * meant, Nick Cheatam, on "nick" exact + "cheaham"/"cheatam" at distance 1. Contrast "Brett/robert
+ * sampley", where the bare "Brett" segment carries no surname arguing otherwise and so resolves.
+ *
+ * Note that Cheatam is a project_manager and that text sits in a card's SUPERINTENDENT field. Which field a
+ * name was typed into is NOT evidence of the role that person holds, so role is a preference here rather
+ * than a filter — see matchFieldResponders. The every-token rule, not the role filter, is what protects
+ * identity: "cheaham" against "reyes" is far outside every threshold either way.
  *
  * Lives in shared, not next to the server-only server/src/services/directoryDedup.ts, because BOTH the
  * server (resolving at read time) and the worker (addressing the oversight email) must answer this question
@@ -50,6 +54,16 @@ export interface ResponderMatch<T extends ResponderRosterEntry> {
   confidence: ResponderMatchConfidence;
   /** The input segment this resolved from, verbatim, so a caller can show what it read. */
   matchedText: string;
+  /**
+   * False when this person holds the OTHER role — i.e. their name was typed into the wrong field, which
+   * happens in prod ("Nick Cheaham" in a superintendent field is Nick Cheatam, a project manager).
+   *
+   * The person is still right. What is wrong is the SLOT: write them to the responder column for
+   * `responder.role`, not for the role that was queried. recipientResolutionSql joins on
+   * `fr.role = '<role>' AND fr.id = sc.<role>_responder_id`, so a PM id in the superintendent slot resolves
+   * to nobody and the card silently reaches no one.
+   */
+  roleMatchesQuery: boolean;
 }
 
 export interface ResponderAmbiguity<T extends ResponderRosterEntry> {
@@ -73,7 +87,11 @@ export interface ResponderMatchResult<T extends ResponderRosterEntry> {
 export interface MatchFieldRespondersInput<T extends ResponderRosterEntry> {
   /** The raw free text as typed (field_scorecards.superintendent_name / pm_name). */
   text: string | null | undefined;
-  /** 'superintendent' | 'project_manager'. Candidates are filtered to this; see the role note below. */
+  /**
+   * 'superintendent' | 'project_manager' — the field this text came from. A PREFERENCE, not a filter: the
+   * whole active roster is searched and in-role candidates merely win ties, because the field someone was
+   * typed into does not reliably indicate the role they hold. Check `roleMatchesQuery` on each match.
+   */
   role: string;
   roster: readonly T[];
 }
@@ -116,7 +134,28 @@ const FUZZY_MAX_DISTANCE_LONG = 2;
 //
 // A newline is a delimiter in its own right: this is free text typed on a phone, so "name\nname" is a
 // perfectly ordinary way to enter two people and there is no punctuation to key off.
-const SEGMENT_DELIMITERS = /\s+w\/+\s*|\s*[/&+,;]\s*|\s*[\n\r]+\s*|\s+and\s+/gi;
+const SEGMENT_DELIMITERS = /\s+w\/+\s*|\s*[/&+;]\s*|\s*[\n\r]+\s*|\s+and\s+/gi;
+
+// The comma is handled SEPARATELY from the delimiters above because it is ambiguous: it separates people
+// ("Brett Bell, Robert Sampley") but it also writes ONE person surname-first ("Bell, Robert").
+//
+// Treated as a plain delimiter it produced two WRONG recipients from one person's name: "Bell, Robert" split
+// into "Bell" -> Brett Bell (the only Bell) and "Robert" -> Robert Sampley (the only Robert), with no
+// ambiguity and nothing unmatched, so a caller would email two people neither of whom was named.
+//
+// The disambiguator: a comma separates PEOPLE only when at least one side carries more than one token.
+// Nobody writes two people as "Bell, Robert"; the surname-first form is single-token on both sides. When
+// every side is a lone token the pieces are rejoined and matched as ONE segment, which then either resolves
+// correctly ("Sampley, Robert" -> Robert Sampley, both tokens accounted) or resolves to nobody
+// ("Bell, Robert" -> "bell robert" leaves a token unaccounted against every roster name).
+const COMMA = /\s*,\s*/;
+
+function splitOnCommaIfItSeparatesPeople(segment: string): string[] {
+  const pieces = segment.split(COMMA).filter((piece) => piece.trim().length > 0);
+  if (pieces.length < 2) return [segment];
+  const anyMultiToken = pieces.some((piece) => normalizeResponderName(piece).split(" ").length > 1);
+  return anyMultiToken ? pieces : [pieces.join(" ")];
+}
 
 /**
  * Noise that carries NO identity: honorifics, and role annotations people append to the name field
@@ -127,12 +166,28 @@ const SEGMENT_DELIMITERS = /\s+w\/+\s*|\s*[/&+,;]\s*|\s*[\n\r]+\s*|\s+and\s+/gi;
  * "Brett Bell Jr" may be a different human from "Brett Bell", and guessing which of the two to email is
  * exactly the class of mistake this matcher exists to avoid. It resolves to nobody, on purpose.
  */
+// The role words people append. Enumerated, NOT a blanket parenthetical strip: "(Jr)" is parenthetical too,
+// and blanket-removing it turned "Brett Bell (Jr)" into an EXACT match for the senior Brett Bell — deleting
+// the one token that distinguishes two family members, which is precisely the wrong-recipient outcome the
+// unparenthesised Jr rule below exists to prevent.
+const ROLE_WORD = String.raw`(?:pm|project\s*manager|super(?:intendent)?|supt|foreman)`;
+
 const IDENTITY_NEUTRAL_NOISE: RegExp[] = [
-  /\([^)]*\)/g, // "(PM)", "(super)", "(Dallas)"
+  new RegExp(String.raw`\(\s*${ROLE_WORD}\s*\.?\s*\)`, "gi"), // "(PM)", "(super)" — role words ONLY
   /^\s*(?:mr|mrs|ms|dr|mx)\.?\s+/i, // leading honorific
-  /\s+-\s*(?:pm|project\s*manager|super(?:intendent)?|supt)\.?\s*$/i, // trailing " - PM"
+  new RegExp(String.raw`\s+-\s*${ROLE_WORD}\s*\.?\s*$`, "i"), // trailing " - PM"
 ];
 
+/**
+ * Strip only the annotations that carry NO identity. Removing tokens can never loosen a distance allowance,
+ * so this cannot make a wrong person reachable — provided what it removes is genuinely identity-free, which
+ * is why the parenthetical pattern is an enumerated role list rather than `\([^)]*\)`.
+ *
+ * Generational suffixes (Jr / Sr / II / III) are DELIBERATELY NOT stripped, parenthesised or not. Those DO
+ * distinguish people: "Brett Bell Jr" may be a different human from "Brett Bell", and guessing which of the
+ * two to email is exactly the class of mistake this matcher exists to avoid. Both resolve to nobody, on
+ * purpose — an unrecognised parenthetical survives as a token and then fails the every-token rule.
+ */
 function stripIdentityNeutralNoise(segment: string): string {
   return IDENTITY_NEUTRAL_NOISE.reduce((text, pattern) => text.replace(pattern, " "), segment).trim();
 }
@@ -144,17 +199,25 @@ function stripIdentityNeutralNoise(segment: string): string {
 export function nameEditDistance(a: string, b: string): number {
   if (a === b) return 0;
   if (!a || !b) return Math.max(a.length, b.length);
-  const rows = Array.from({ length: a.length + 1 }, (_, i) => [i]);
-  for (let j = 1; j <= b.length; j++) rows[0][j] = j;
-  for (let i = 1; i <= a.length; i++) {
-    for (let j = 1; j <= b.length; j++) {
-      rows[i][j] =
+  // TWO ROWS, not a full matrix. These inputs are untrusted: field_scorecards.superintendent_name / pm_name
+  // are unbounded text columns and the submission parser caps the NUMBER of fields, never their length, so a
+  // pasted blob reaches here. A full (a.length+1) x (b.length+1) matrix allocated one array per character
+  // could exhaust the heap of a worker or backfill from a single persisted row. Two rows makes the memory
+  // O(min(a,b)) — bounded by the roster NAME, which is always short — while the result stays exact.
+  if (a.length > b.length) [a, b] = [b, a];
+  let previous = Array.from({ length: a.length + 1 }, (_, i) => i);
+  let current = new Array<number>(a.length + 1);
+  for (let j = 1; j <= b.length; j++) {
+    current[0] = j;
+    for (let i = 1; i <= a.length; i++) {
+      current[i] =
         a[i - 1] === b[j - 1]
-          ? rows[i - 1][j - 1]
-          : 1 + Math.min(rows[i - 1][j], rows[i][j - 1], rows[i - 1][j - 1]);
+          ? previous[i - 1]
+          : 1 + Math.min(previous[i], current[i - 1], previous[i - 1]);
     }
+    [previous, current] = [current, previous];
   }
-  return rows[a.length][b.length];
+  return previous[a.length];
 }
 
 /** Case-, punctuation- and whitespace-insensitive. Keeps digits so a junk token stays a token. */
@@ -170,6 +233,7 @@ export function normalizeResponderName(value: string | null | undefined): string
 export function splitResponderSegments(text: string | null | undefined): string[] {
   return (text ?? "")
     .split(SEGMENT_DELIMITERS)
+    .flatMap((segment) => splitOnCommaIfItSeparatesPeople(segment))
     .map((segment) => stripIdentityNeutralNoise(segment))
     .filter((segment) => normalizeResponderName(segment).length > 0);
 }
@@ -225,7 +289,12 @@ function scoreSegmentAgainstName(tokens: string[], parts: string[]): ResponderMa
     const token = unaccounted[0];
     const index = parts.findIndex(
       (part, i) =>
-        !consumed[i] && nameEditDistance(token, part) <= maxEditDistance(token.length, part.length),
+        // Length difference alone is a LOWER BOUND on edit distance, so checking it first turns a pasted
+        // blob into an O(1) rejection instead of an O(token x part) walk. The allowance is never above 2,
+        // so anything meaningfully longer than a real surname is refused before any distance work.
+        !consumed[i] &&
+        Math.abs(token.length - part.length) <= maxEditDistance(token.length, part.length) &&
+        nameEditDistance(token, part) <= maxEditDistance(token.length, part.length),
     );
     if (index < 0) return null;
     return "high";
@@ -237,9 +306,12 @@ function scoreSegmentAgainstName(tokens: string[], parts: string[]): ResponderMa
 /**
  * Resolve free text to roster people. See the module header for the one rule and why it is that strict.
  *
- * Role scoping is absolute: a project_manager can never come back from a superintendent query however well
- * the name matches, and an inactive roster row is never a candidate (a deactivated person must not be
- * emailed a corrective action — the roster row survives only so historical picks still render).
+ * INACTIVE is absolute — a deactivated person is never a candidate (they must not be emailed a corrective
+ * action; the roster row survives only so historical picks still render).
+ *
+ * ROLE is a preference. The whole active roster is searched and in-role candidates win ties; a match that
+ * came from the other role is flagged `roleMatchesQuery: false`. See the note inside for why the filter was
+ * removed and why doing so costs no safety.
  */
 export function matchFieldResponders<T extends ResponderRosterEntry>({
   text,
@@ -252,29 +324,65 @@ export function matchFieldResponders<T extends ResponderRosterEntry>({
   if (segments.length === 0) return result;
 
   const wantedRole = role.trim().toLowerCase();
+  // Inactive is still absolute — a deactivated person must never be emailed a corrective action; the roster
+  // row survives only so historical picks still render.
+  //
+  // ROLE, however, is a PREFERENCE, not a filter. Which of the two name fields someone was typed into is
+  // not reliable evidence of the role they hold: in prod, "Nick Cheaham" sits in a card's SUPERINTENDENT
+  // field and is Nick Cheatam, a project manager. Filtering candidates by role made that unresolvable and
+  // the card reached nobody. Searching the whole roster costs no safety, because the every-token rule is
+  // what protects identity, not the role filter: "cheaham"/"cheatam" is distance 1, while "cheaham" against
+  // superintendent Nick REYES is nowhere near any threshold, so the wrong-Nick outcome the filter was
+  // credited with preventing was never actually reachable.
+  //
+  // In-role candidates are still preferred, so a genuine same-name pair across the two roles resolves to
+  // the one the caller asked for. Every match reports `roleMatchesQuery`, and the caller MUST place the
+  // person by their ACTUAL role: recipientResolutionSql joins
+  // `fr.role = 'superintendent' AND fr.id = sc.superintendent_responder_id`, so writing a PM's id into the
+  // superintendent slot resolves to nobody — silently.
   const candidates = roster
-    .filter((entry) => entry.isActive && entry.role.trim().toLowerCase() === wantedRole)
-    .map((entry) => ({ entry, parts: normalizeResponderName(entry.name).split(" ") }))
+    .filter((entry) => entry.isActive)
+    .map((entry) => ({
+      entry,
+      parts: normalizeResponderName(entry.name).split(" "),
+      inRole: entry.role.trim().toLowerCase() === wantedRole,
+    }))
     .filter((candidate) => candidate.parts[0].length > 0);
 
   const alreadyMatched = new Set<string>();
 
   for (const segment of segments) {
     const tokens = normalizeResponderName(segment).split(" ");
-    const scored = candidates
+    const allScored = candidates
       .map((candidate) => ({
         entry: candidate.entry,
+        inRole: candidate.inRole,
         confidence: scoreSegmentAgainstName(tokens, candidate.parts),
       }))
       .filter(
-        (scored): scored is { entry: T; confidence: ResponderMatchConfidence } =>
+        (scored): scored is { entry: T; inRole: boolean; confidence: ResponderMatchConfidence } =>
           scored.confidence !== null,
       );
 
-    if (scored.length === 0) {
+    if (allScored.length === 0) {
       result.unmatched.push(segment);
       continue;
     }
+
+    // A BARE SINGLE TOKEN must be unique across the WHOLE active roster, not merely within the queried role.
+    //
+    // Role is only a preference now, so in-role tie-breaking is not identity evidence for a lone token. With
+    // it, "Nick" in a superintendent field resolved to Nick REYES purely because he is the only Nick with
+    // that role — while PM Nick Cheatam matched just as well and prod already proves PM names get typed into
+    // the superintendent field. Worse, the honorific/role-annotation strip could manufacture that input:
+    // "Nick - PM" became bare "Nick" and then resolved to Reyes, the exact opposite of what the annotation
+    // said. One token that two people answer to is ambiguous, whatever slot it was typed into.
+    //
+    // Multi-token segments keep the in-role preference: there the tokens themselves carry the identity, so
+    // role only breaks a genuine same-full-name tie across the two roles.
+    const isBareToken = tokens.length === 1;
+    const inRoleScored = allScored.filter((s) => s.inRole);
+    const scored = isBareToken || inRoleScored.length === 0 ? allScored : inRoleScored;
 
     // A full-name hit beats a partial one outright rather than making the segment ambiguous, so a roster
     // holding both "Nick Cheatam" and a hypothetical "Nick" does not go unresolved for "Nick Cheatam".
@@ -291,7 +399,14 @@ export function matchFieldResponders<T extends ResponderRosterEntry>({
     const winner = finalists[0].entry;
     if (alreadyMatched.has(winner.id)) continue;
     alreadyMatched.add(winner.id);
-    result.matches.push({ responder: winner, confidence: best, matchedText: segment });
+    result.matches.push({
+      responder: winner,
+      confidence: best,
+      matchedText: segment,
+      // False means the name was typed into the OTHER role's field. The person is still right; the slot the
+      // caller must write them into is the one for `responder.role`, not the one it queried.
+      roleMatchesQuery: finalists[0].inRole,
+    });
   }
 
   return result;

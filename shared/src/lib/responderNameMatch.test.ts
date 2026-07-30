@@ -71,16 +71,19 @@ function run(testCase: Case) {
 const CASES: Case[] = [
   // 1. Role scoping is absolute, not a tie-breaker.
   {
-    name: "1: a project_manager is NEVER returned for a superintendent query, exact name or not",
+    name: "1: a person typed into the WRONG role's field still resolves — to themselves",
     text: "Adam Sherwood",
     role: "superintendent",
-    unmatched: ["Adam Sherwood"],
+    // Adam Sherwood is a project_manager. Which of the two name fields he was typed into says nothing about
+    // the role he holds, so refusing to resolve him here just loses a real recipient. The caller learns the
+    // slot is wrong from roleMatchesQuery, asserted separately below.
+    matches: [["Adam Sherwood", "exact"]],
   },
   {
-    name: "1: the PM roster does not answer a superintendent query even for a PERFECT full name",
+    name: "1: a PERFECT full name from the other role resolves rather than being discarded",
     text: "Nick Cheatam",
     role: "superintendent",
-    unmatched: ["Nick Cheatam"],
+    matches: [["Nick Cheatam", "exact"]],
   },
 
   // 2. !! Inactive is not a candidate.
@@ -219,13 +222,17 @@ const CASES: Case[] = [
 
   // 13. !! THE case. An unmatched surname token is evidence AGAINST the first-name match.
   {
-    name: "13 !!: 'Nick Cheaham' as SUPERINTENDENT resolves to nobody — it must NOT reach Nick Reyes",
+    // Adnaan confirmed the business fact: "Nick Cheaham" IS Nick Cheatam. He is a project_manager and this
+    // text sits in a card's SUPERINTENDENT field — a wrong-slot typo, not a different person. The property
+    // that still MUST hold is that it does not reach superintendent Nick REYES, and that is enforced by the
+    // every-token rule (the surname argues against a bare first-name hit), never by the role filter.
+    name: "13 !!: 'Nick Cheaham' in the SUPERINTENDENT field reaches Nick Cheatam, NOT Nick Reyes",
     text: "Nick Cheaham",
     role: "superintendent",
-    unmatched: ["Nick Cheaham"],
+    matches: [["Nick Cheatam", "high"]],
   },
   {
-    name: "13 !!: the same text as PROJECT_MANAGER resolves fine — role scoping did the work, not luck",
+    name: "13 !!: the same text queried as PROJECT_MANAGER resolves identically",
     text: "Nick Cheaham",
     role: "project_manager",
     matches: [["Nick Cheatam", "high"]],
@@ -466,7 +473,9 @@ describe("the prod free-text census (19 cards)", () => {
     ["Chris Higingbotham", ["Chris Higingbotham"]],
     ["Corey mcshane", ["Corey McShane"]],
     ["Kevin posey", ["Kevin Posey"]],
-    ["Nick Cheaham", []], // a PM's name in the superintendent field — must not reach Nick Reyes
+    // Nick Cheatam typed into the superintendent field. Resolves to HIM (Adnaan confirmed the identity), and
+    // still never to superintendent Nick REYES — the surname token is what rules Reyes out.
+    ["Nick Cheaham", ["Nick Cheatam"]],
     ["Nick Reyes", ["Nick Reyes"]],
   ];
 
@@ -582,7 +591,144 @@ describe("adversarial findings", () => {
     expect(pm("Addy (PM)").matches).toEqual([]);
     expect(sup("Mr. Brett Sampley").matches).toEqual([]);
     expect(sup("Brett Ball - Superintendent").matches).toEqual([]);
-    // And rule 13 must survive the noise treatment too.
-    expect(sup("Nick Cheaham (super)").matches).toEqual([]);
+    // Rule 13 through the noise treatment: still Cheatam, still never Reyes.
+    expect(names(sup("Nick Cheaham (super)"))).toEqual(["Nick Cheatam"]);
+  });
+});
+
+// ── Role is a preference, not a filter ─────────────────────────────────────────────────────────────────
+// Adnaan's correction: "Nick Cheaham" IS Nick Cheatam. He is a project_manager and that text sits in a
+// card's SUPERINTENDENT field, so the field a name was typed into is not evidence of the role the person
+// holds — and filtering candidates by role turned a resolvable recipient into a card that reached nobody.
+//
+// Removing the filter costs no safety, because the every-token rule is what protects identity: "cheaham"
+// vs "cheatam" is distance 1, while "cheaham" vs "reyes" is far outside every threshold in either
+// direction. The wrong-Nick outcome the filter was credited with preventing was never reachable by the rule.
+describe("role preference", () => {
+  const sup = (text: string) =>
+    matchFieldResponders({ text, role: "superintendent", roster: DALLAS_ROSTER });
+
+  it("flags a cross-role match so the caller writes the person to the RIGHT responder column", () => {
+    // This is the load-bearing assertion of the whole change. recipientResolutionSql joins
+    // `fr.role = 'superintendent' AND fr.id = sc.superintendent_responder_id`, so putting Cheatam's id in
+    // the superintendent slot resolves to NOBODY — the same silent dead end, one step further along.
+    const [match] = sup("Nick Cheaham").matches;
+    expect(match.responder.name).toBe("Nick Cheatam");
+    expect(match.responder.role).toBe("project_manager");
+    expect(match.roleMatchesQuery).toBe(false);
+  });
+
+  it("reports roleMatchesQuery true for an ordinary in-role match", () => {
+    const [match] = sup("Brett Bell").matches;
+    expect(match.responder.role).toBe("superintendent");
+    expect(match.roleMatchesQuery).toBe(true);
+  });
+
+  it("PREFERS the queried role when the same name exists in both", () => {
+    // Two real humans who share a name across the two roles is the one case the old filter genuinely
+    // handled. Preference keeps that: the superintendent wins a superintendent query, and vice versa.
+    const bothRoles = [
+      ...DALLAS_ROSTER,
+      { id: "pm-brett-bell", name: "Brett Bell", role: "project_manager", isActive: true, email: "pm.brett@trockgc.com" },
+    ];
+    const asSuper = matchFieldResponders({ text: "Brett Bell", role: "superintendent", roster: bothRoles });
+    expect(asSuper.matches[0].responder.id).toBe("brett-bell");
+    expect(asSuper.matches[0].roleMatchesQuery).toBe(true);
+
+    const asPm = matchFieldResponders({ text: "Brett Bell", role: "project_manager", roster: bothRoles });
+    expect(asPm.matches[0].responder.id).toBe("pm-brett-bell");
+    expect(asPm.matches[0].roleMatchesQuery).toBe(true);
+  });
+
+  it("still refuses the WRONG person, cross-role search or not", () => {
+    // The refusals that matter are unchanged — widening the candidate pool must not have widened these.
+    expect(sup("Nick Cheahamm Reyes").matches).toEqual([]); // two surnames, one must go unaccounted
+    expect(sup("Brett Sampley").matches).toEqual([]); // one person's first name, another's surname
+    expect(sup("Addy").matches).toEqual([]); // nickname, now searched against the PM roster too
+    expect(sup("Adnaan Iqbal").matches).toEqual([]); // inactive is STILL absolute
+  });
+
+  it("never resolves an INACTIVE person even though role no longer filters", () => {
+    // Widening the pool must not have widened this one. Inactive is the only absolute left.
+    const onlyInactive = [{ id: "x", name: "Adnaan Iqbal", role: "project_manager", isActive: false, email: "x@y.z" }];
+    expect(matchFieldResponders({ text: "Adnaan Iqbal", role: "superintendent", roster: onlyInactive }).matches).toEqual([]);
+  });
+});
+
+// ── Review findings on the noise-stripping and comma handling ──────────────────────────────────────────
+// Three wrong-recipient defects and one resource defect, all introduced by the identity-neutral-noise strip
+// and the comma delimiter. Reproduced before fixing, each pinned here.
+describe("review findings", () => {
+  const sup = (text: string) =>
+    matchFieldResponders({ text, role: "superintendent", roster: DALLAS_ROSTER });
+  const pm = (text: string) =>
+    matchFieldResponders({ text, role: "project_manager", roster: DALLAS_ROSTER });
+  const names = (r: { matches: Array<{ responder: { name: string } }> }) =>
+    r.matches.map((m) => m.responder.name);
+
+  it("does NOT strip a PARENTHESISED generational suffix", () => {
+    // The blanket /\([^)]*\)/ strip deleted "(Jr)" and produced an EXACT match for the senior Brett Bell —
+    // removing the one token that distinguishes two family members. The parenthetical pattern is now an
+    // enumerated role list, so an unrecognised parenthetical survives as a token and fails every-token.
+    expect(sup("Brett Bell (Jr)").matches).toEqual([]);
+    expect(sup("Brett Bell (II)").matches).toEqual([]);
+    expect(sup("Brett Bell (Sr)").matches).toEqual([]);
+    // The role annotations it exists for still strip.
+    expect(names(pm("Adam Sherwood (PM)"))).toEqual(["Adam Sherwood"]);
+    expect(names(sup("Brett Bell (superintendent)"))).toEqual(["Brett Bell"]);
+  });
+
+  it("does not let a surname-first comma become TWO wrong people", () => {
+    // "Bell, Robert" split into "Bell" -> Brett Bell (only Bell) and "Robert" -> Robert Sampley (only
+    // Robert): two recipients, neither of them the person named, with nothing unmatched to signal it.
+    // A comma now separates people only when a side carries more than one token.
+    expect(sup("Bell, Robert").matches).toEqual([]);
+    expect(sup("Bell, Robert").unmatched).toEqual(["Bell Robert"]);
+    // The surname-first form for someone who IS on the roster still resolves, as one person.
+    expect(names(sup("Sampley, Robert"))).toEqual(["Robert Sampley"]);
+    // And a genuine two-person comma list is untouched.
+    expect(names(sup("Brett Bell, Robert Sampley"))).toEqual(["Brett Bell", "Robert Sampley"]);
+  });
+
+  it("does not let a role annotation manufacture a bare first name that resolves to the wrong Nick", () => {
+    // "Nick - PM" had its annotation stripped to bare "Nick", which then matched Nick REYES because he is
+    // the only Nick with the queried role — the exact opposite of what the annotation said. A lone token
+    // must be unique across the WHOLE roster, so two Nicks make it ambiguous instead.
+    expect(sup("Nick - PM").matches).toEqual([]);
+    expect(sup("Nick - PM").ambiguous).toHaveLength(1);
+    expect(sup("Nick").matches).toEqual([]);
+    expect(sup("Nick").ambiguous[0].candidates.map((c) => c.name).sort()).toEqual([
+      "Nick Cheatam",
+      "Nick Reyes",
+    ]);
+    // A first name unique across the roster still resolves — the rule is uniqueness, not token count.
+    expect(names(sup("Brett"))).toEqual(["Brett Bell"]);
+    expect(names(pm("Adam"))).toEqual(["Adam Sherwood"]);
+    // And the full-name form of the ambiguous first name is not ambiguous at all.
+    expect(names(sup("Nick Cheaham"))).toEqual(["Nick Cheatam"]);
+    expect(names(sup("Nick Reyes"))).toEqual(["Nick Reyes"]);
+  });
+
+  it("rejects an oversized token in constant time instead of allocating a matrix per character", () => {
+    // superintendent_name / pm_name are unbounded text columns and the submission parser caps the NUMBER of
+    // fields, never their length, so a pasted blob is persistable and reaches the matcher in a worker or
+    // backfill. The old full matrix allocated one array per character of the token.
+    const blob = `Brett ${"x".repeat(200_000)}`;
+    const started = Date.now();
+    expect(sup(blob).matches).toEqual([]);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it("keeps nameEditDistance exact after the two-row rewrite", () => {
+    // The calibration points, re-asserted against the new implementation — a memory optimisation that
+    // changed any of these would silently retune every threshold.
+    expect(nameEditDistance("cheatham", "cheatam")).toBe(1);
+    expect(nameEditDistance("chatham", "cheatam")).toBe(2);
+    expect(nameEditDistance("addy", "adam")).toBe(2);
+    expect(nameEditDistance("sanders", "sanchez")).toBe(4);
+    // Symmetric, and the argument swap inside must not change the answer.
+    expect(nameEditDistance("cheatam", "chatham")).toBe(2);
+    expect(nameEditDistance("", "bell")).toBe(4);
+    expect(nameEditDistance("bell", "bell")).toBe(0);
   });
 });
