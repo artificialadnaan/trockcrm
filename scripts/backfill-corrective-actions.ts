@@ -3,8 +3,15 @@ import pg from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { sql } from "drizzle-orm";
 import * as schema from "../shared/src/schema/index.js";
+import type { ScorecardRating } from "../shared/src/types/index.js";
 import { reconcileScorecardCorrectiveActions } from "../server/src/modules/field/corrective-actions-service.js";
 import { matchFieldResponders } from "../shared/src/lib/responderNameMatch.js";
+import {
+  BROWSABLE_PROJECT_SQL,
+  WON_BROWSABLE_SLUGS,
+  LOST_EXCLUDED_SLUGS,
+  recipientResolutionSql,
+} from "../worker/src/jobs/scorecard-corrective-action-email.js";
 
 /**
  * One-off backfill: open the corrective-action cycle on below-band scorecards that predate the feature.
@@ -92,11 +99,16 @@ const CANDIDATE_SQL = `
            AS existing_actions
     FROM {S}.field_scorecards sc
     JOIN {S}.deals d ON d.id = sc.deal_id
+    LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
    WHERE sc.rating = 'corrective_action'
      AND sc.status = 'submitted'
      AND sc.is_active = true
-     AND d.is_active = true
      AND COALESCE(d.is_test_data, false) = false
+     -- The SAME browsable-project predicate the responder route (assertActiveCorrectiveActionScorecard)
+     -- and both notification workers apply. Without it a deal that has since gone Lost or terminal is still
+     -- selected: the cycle opens and seeds, then the emails are skipped and the responder link 404s — an
+     -- open corrective action nobody can see or answer, which is worse than not backfilling it.
+     AND ${BROWSABLE_PROJECT_SQL}
    ORDER BY sc.submitted_at DESC`;
 
 function fmt(row: CandidateRow): string {
@@ -120,6 +132,7 @@ async function main() {
 
   let planned = 0;
   let skipped = 0;
+  let failed = 0;
 
   for (const { nspname: officeSchema } of schemas) {
     const slug = officeSchema.replace(/^office_/, "");
@@ -135,6 +148,7 @@ async function main() {
 
     const { rows: candidates } = await pool.query<CandidateRow>(
       CANDIDATE_SQL.replace(/\{S\}/g, `"${officeSchema}"`),
+      [WON_BROWSABLE_SLUGS, LOST_EXCLUDED_SLUGS],
     );
     const scoped = CARD_ARG ? candidates.filter((c) => c.id === CARD_ARG) : candidates;
     if (scoped.length === 0) continue;
@@ -204,42 +218,109 @@ async function main() {
       console.log(`   FLAGGED ITEMS (${actionItems.length + deficiencies.length}):`);
       actionItems.forEach((a, i) => console.log(`     action_item[${i}]  ${a}`));
       deficiencies.forEach((d) => console.log(`     deficiency[${d}]`));
-      console.log(`   WILL EMAIL: ${deliverable.map((r) => `${r.name} <${r.email}>`).join(", ")}`);
+      console.log(`   WILL ASSIGN: ${deliverable.map((r) => `${r.name} <${r.email}>`).join(", ")}`);
 
       // ── Apply, through the real service ───────────────────────────────────────────────────────────────
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
         await client.query(`SET LOCAL search_path TO "${officeSchema}", public`);
-        const tx = drizzle(client, { schema }) as never;
 
+        // RE-READ UNDER LOCK. The candidate list is an office-wide snapshot taken outside any transaction,
+        // so between that read and here somebody could have edited the card (which reconciles it) or another
+        // copy of this script could have processed it. Applying the stale actionItems/deficiencies would then
+        // DELETE the corrective actions that edit created — they are absent from the stale list — and rotate
+        // the notification cycle as though the card were newly opened.
+        const locked = await client.query<{ status: string; n: string; rating: string }>(
+          `SELECT sc.status, sc.rating,
+                  (SELECT count(*) FROM scorecard_corrective_actions WHERE scorecard_id = sc.id) AS n
+             FROM field_scorecards sc WHERE sc.id = $1 FOR UPDATE`,
+          [card.id],
+        );
+        const now = locked.rows[0];
+        if (!now || now.status !== "submitted" || now.rating !== "corrective_action" || Number(now.n) > 0) {
+          await client.query("ROLLBACK");
+          console.log(`   SKIP — changed since the snapshot (status=${now?.status}, actions=${now?.n}); re-run to pick it up\n`);
+          skipped += 1;
+          continue;
+        }
+
+        // Display name AND id together. The create/edit path replaces the display name with the selected
+        // roster person's name for exactly this reason: without it a card can SHOW one person while ROUTING
+        // to another — most visibly in the cross-role case, where somebody typed into the superintendent
+        // field is written to the PM slot.
         if (picks.superintendent) {
-          await client.query(`UPDATE field_scorecards SET superintendent_responder_id = $1 WHERE id = $2`, [picks.superintendent.id, card.id]);
+          await client.query(
+            `UPDATE field_scorecards SET superintendent_responder_id = $1, superintendent_name = $2 WHERE id = $3`,
+            [picks.superintendent.id, picks.superintendent.name, card.id],
+          );
         }
         if (picks.project_manager) {
-          await client.query(`UPDATE field_scorecards SET pm_responder_id = $1 WHERE id = $2`, [picks.project_manager.id, card.id]);
+          await client.query(
+            `UPDATE field_scorecards SET pm_responder_id = $1, pm_name = $2 WHERE id = $3`,
+            [picks.project_manager.id, picks.project_manager.name, card.id],
+          );
         }
 
+        const tx = drizzle(client, { schema }) as unknown as Parameters<
+          typeof reconcileScorecardCorrectiveActions
+        >[0];
+        // NOT cast to `never`. An `as never` on this object silently swallowed a MISSING dealId, and the
+        // enqueued job is rejected by handleScorecardCorrectiveActionEmail as an invalid payload — so every
+        // backfilled card would have committed an open cycle whose responders were never notified, which is
+        // the exact silent failure this backfill exists to undo. The type is spelled out so the compiler
+        // checks the payload.
         await reconcileScorecardCorrectiveActions(tx, {
           scorecardId: card.id,
+          dealId: card.deal_id,
           office,
-          rating: card.rating as never,
+          rating: card.rating as ScorecardRating,
           actionItems,
           deficiencies,
           currentStatus: "submitted",
-        } as never);
+          // The picks above CHANGED who this card addresses, which is precisely the event that must start a
+          // fresh notification cycle rather than reuse a stale one.
+          responderPickChanged: Boolean(picks.superintendent || picks.project_manager),
+        });
 
-        const after = await client.query<{ status: string; n: string; jobs: string }>(
+        // WHO THE WORKER WILL ACTUALLY EMAIL — resolved with the worker's own SQL, after the writes, inside
+        // the transaction. The earlier preview listed only the names this script matched, which ignores the
+        // card's pre-existing responder ids and the per-role deal_team_members fallback: a card could print
+        // one recipient and mail two. The safety promise is that every intended recipient is shown, so it has
+        // to be the same query the worker runs.
+        const resolved = await client.query<{ role: string; name: string | null; email: string | null }>(
+          recipientResolutionSql(`"${officeSchema}"`),
+          [card.deal_id, card.id],
+        );
+        console.log("   WORKER WILL EMAIL:");
+        if (resolved.rows.length === 0) console.log("     (nobody)");
+        for (const r of resolved.rows) {
+          console.log(`     ${String(r.role).padEnd(16)} ${r.name ?? "—"} <${r.email ?? "NO EMAIL"}>`);
+        }
+
+        const after = await client.query<{ status: string; n: string; jobs: string; bad: string }>(
           `SELECT sc.status,
                   (SELECT count(*) FROM scorecard_corrective_actions WHERE scorecard_id = sc.id) AS n,
                   (SELECT count(*) FROM public.job_queue
                     WHERE job_type LIKE 'scorecard_corrective_action%'
-                      AND payload->>'scorecardId' = sc.id::text) AS jobs
+                      AND payload->>'scorecardId' = sc.id::text) AS jobs,
+                  (SELECT count(*) FROM public.job_queue
+                    WHERE job_type LIKE 'scorecard_corrective_action%'
+                      AND payload->>'scorecardId' = sc.id::text
+                      AND (payload->>'dealId' IS NULL OR payload->>'tenantSchema' IS NULL)) AS bad
              FROM field_scorecards sc WHERE sc.id = $1`,
           [card.id],
         );
         const a = after.rows[0];
         console.log(`   RESULT: status=${a.status}  corrective_actions=${a.n}  queued_jobs=${a.jobs}`);
+        // Counting jobs is not enough — a job with a missing dealId is queued and then DISCARDED by the
+        // worker. That is how the `as never` defect stayed invisible in the first dry run.
+        if (Number(a.bad) > 0) {
+          throw new Error(`${a.bad} queued job(s) have an incomplete payload — refusing to commit`);
+        }
+        if (Number(a.jobs) === 0) {
+          throw new Error("no notification job was queued — refusing to commit a cycle nobody is told about");
+        }
 
         if (COMMIT) {
           await client.query("COMMIT");
@@ -252,15 +333,20 @@ async function main() {
       } catch (err) {
         await client.query("ROLLBACK");
         console.log(`   FAILED, rolled back: ${(err as Error).message}\n`);
+        failed += 1;
       } finally {
         client.release();
       }
     }
   }
 
-  console.log(`${planned} card(s) ${COMMIT ? "backfilled" : "would be backfilled"}, ${skipped} skipped.`);
+  console.log(`${planned} card(s) ${COMMIT ? "backfilled" : "would be backfilled"}, ${skipped} skipped, ${failed} failed.`);
   if (!COMMIT && planned > 0) console.log("Re-run with --commit to apply. THAT SENDS EMAIL.");
   await pool.end();
+  // A rolled-back card must not read as success. Continue-on-error is deliberate — one bad card should not
+  // strand the rest — but an operator or a wrapper checking only the exit code would otherwise record a
+  // partially-applied run as clean and never retry the failures.
+  if (failed > 0) process.exitCode = 1;
 }
 
 main().catch((err) => {
