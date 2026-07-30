@@ -21,6 +21,10 @@
       "types": "./dist/lib/bidBoardStatusMap.d.ts",
       "default": "./dist/lib/bidBoardStatusMap.js"
     },
+    "./lib/editDistance": {
+      "types": "./dist/lib/editDistance.d.ts",
+      "default": "./dist/lib/editDistance.js"
+    },
     "./lib/correctiveActionApprovers": {
       "types": "./dist/lib/correctiveActionApprovers.d.ts",
       "default": "./dist/lib/correctiveActionApprovers.js"

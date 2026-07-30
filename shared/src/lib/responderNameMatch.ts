@@ -37,6 +37,12 @@
  * the same way.
  */
 
+import { nameEditDistance } from "./editDistance.js";
+
+// Re-exported so the matcher's own callers and tests keep one import, while the implementation lives in a
+// neutral module that directoryDedup can depend on without importing a responder matcher.
+export { nameEditDistance };
+
 /** Distinguishable so a caller can require a stronger tier before auto-addressing an email. */
 export type ResponderMatchConfidence = "exact" | "high";
 
@@ -153,7 +159,13 @@ const COMMA = /\s*,\s*/;
 function splitOnCommaIfItSeparatesPeople(segment: string): string[] {
   const pieces = segment.split(COMMA).filter((piece) => piece.trim().length > 0);
   if (pieces.length < 2) return [segment];
-  const tokenCount = (piece: string) => normalizeResponderName(piece).split(" ").length;
+  // Counted on the STRIPPED piece. Counting the raw one let an annotation masquerade as a second name
+  // token: "Bell, Robert (PM)" read "Robert (PM)" as two tokens, so the comma was classed as a people
+  // delimiter and the surname-first pair split back into Brett Bell + Robert Sampley — the same two clean
+  // wrong recipients, reached through the annotation stripper this time. The scorer reads the stripped copy,
+  // so the splitter has to reason about the same text the scorer will see.
+  const tokenCount = (piece: string) =>
+    normalizeResponderName(stripIdentityNeutralNoise(piece)).split(" ").length;
 
   // Decided PAIRWISE, walking left to right — NOT by asking whether any piece anywhere is multi-token.
   // The global test rejoined nothing in a MIXED list: "Bell, Robert, Adam Sherwood" contains a full name, so
@@ -220,33 +232,6 @@ function stripIdentityNeutralNoise(segment: string): string {
   return IDENTITY_NEUTRAL_NOISE.reduce((text, pattern) => text.replace(pattern, " "), segment).trim();
 }
 
-/**
- * Levenshtein distance. THE one copy — server/src/services/directoryDedup.ts's private similarity() is a
- * ratio wrapper over this function, so the two matchers cannot drift into disagreeing about what a typo is.
- */
-export function nameEditDistance(a: string, b: string): number {
-  if (a === b) return 0;
-  if (!a || !b) return Math.max(a.length, b.length);
-  // TWO ROWS, not a full matrix. These inputs are untrusted: field_scorecards.superintendent_name / pm_name
-  // are unbounded text columns and the submission parser caps the NUMBER of fields, never their length, so a
-  // pasted blob reaches here. A full (a.length+1) x (b.length+1) matrix allocated one array per character
-  // could exhaust the heap of a worker or backfill from a single persisted row. Two rows makes the memory
-  // O(min(a,b)) — bounded by the roster NAME, which is always short — while the result stays exact.
-  if (a.length > b.length) [a, b] = [b, a];
-  let previous = Array.from({ length: a.length + 1 }, (_, i) => i);
-  let current = new Array<number>(a.length + 1);
-  for (let j = 1; j <= b.length; j++) {
-    current[0] = j;
-    for (let i = 1; i <= a.length; i++) {
-      current[i] =
-        a[i - 1] === b[j - 1]
-          ? previous[i - 1]
-          : 1 + Math.min(previous[i], current[i - 1], previous[i - 1]);
-    }
-    [previous, current] = [current, previous];
-  }
-  return previous[a.length];
-}
 
 /**
  * Case-, punctuation- and whitespace-insensitive. Keeps digits so a junk token stays a token.
@@ -262,6 +247,13 @@ export function nameEditDistance(a: string, b: string): number {
 export function normalizeResponderName(value: string | null | undefined): string {
   return (value ?? "")
     .toLowerCase()
+    // FOLD diacritics, do not delete them. The [^a-z0-9] class below deletes any character it does not
+    // recognise, so "josé" became "jos" — which is a DIFFERENT person's whole name. On a roster holding
+    // "Jos Smith", typing "José Smith" produced an EXACT match for him; and the ordinary ASCII spelling
+    // "Jose Smith" that anyone would actually type matched nobody at all. NFD splits the accent into a
+    // combining mark, which is then removed, so every spelling of the name lands on "jose".
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
     .replace(/['’]/g, "")
     .replace(/[^a-z0-9]+/g, " ")
     .replace(/\s+/g, " ")

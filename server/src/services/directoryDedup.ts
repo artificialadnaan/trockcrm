@@ -17,7 +17,7 @@ import {
   properties,
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
-import { nameEditDistance } from "@trock-crm/shared/lib/responderNameMatch";
+import { nameEditDistance } from "@trock-crm/shared/lib/editDistance";
 import { AppError } from "../middleware/error-handler.js";
 import { refreshEntityEmailStats } from "../modules/email/stats-service.js";
 
@@ -426,7 +426,7 @@ export function buildClusterMergePlan(
   };
 }
 
-// Ratio wrapper only — the Levenshtein itself lives in @trock-crm/shared/lib/responderNameMatch, which is
+// Ratio wrapper only — the Levenshtein itself lives in @trock-crm/shared/lib/editDistance, which is
 // the other fuzzy-name matcher in the platform (typed scorecard names -> field-responder roster) and needs
 // the identical distance. Two copies of an edit distance are two things that can be tuned apart without
 // anyone noticing, and un-linked twin implementations have burned this codebase repeatedly; keep it one.

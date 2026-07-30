@@ -713,11 +713,20 @@ describe("review findings", () => {
     // superintendent_name / pm_name are unbounded text columns and the submission parser caps the NUMBER of
     // fields, never their length, so a pasted blob is persistable and reaches the matcher in a worker or
     // backfill. The old full matrix allocated one array per character of the token.
+    // Measured RELATIVE to a small-input baseline rather than against a fixed wall clock: an absolute
+    // millisecond bound is a CI flake waiting to happen on a loaded runner, and it would not actually be
+    // testing the property we care about. The property is COMPLEXITY — a 200k token must not cost
+    // meaningfully more than a short one, because the length-difference bail rejects it before any distance
+    // work. Quadratic behaviour blows through this by orders of magnitude; scheduler noise does not.
     const blob = `Brett ${"x".repeat(200_000)}`;
+    const baselineStart = Date.now();
+    for (let i = 0; i < 50; i++) sup("Brett Bellington");
+    const baseline = Math.max(Date.now() - baselineStart, 1);
+
     const started = Date.now();
     expect(sup(blob).matches).toEqual([]);
-    expect(Date.now() - started).toBeLessThan(1_000);
-  });
+    expect(Date.now() - started).toBeLessThan(baseline * 50);
+  }, 30_000);
 
   it("keeps nameEditDistance exact after the two-row rewrite", () => {
     // The calibration points, re-asserted against the new implementation — a memory optimisation that
@@ -830,5 +839,64 @@ describe("second review round", () => {
     // Adjacent parts only — joining must not staple together unrelated ones.
     expect(go("SmithMary Jane", "superintendent", [R("mj", "Mary-Jane Smith", "superintendent")]).matches)
       .toEqual([]);
+  });
+});
+
+// ── Third review round ─────────────────────────────────────────────────────────────────────────────────
+// Both are interactions BETWEEN earlier fixes, which is now the recurring shape of every defect in this
+// file: the comma rule vs the annotation stripper, and the punctuation normalizer vs the character class
+// that follows it.
+describe("third review round", () => {
+  const R = (id: string, name: string, role: string, isActive = true) => ({ id, name, role, isActive });
+  const go = (text: string, role: string, roster: ReturnType<typeof R>[]) =>
+    matchFieldResponders({ text, role, roster });
+  const names = (r: { matches: Array<{ responder: { name: string } }> }) =>
+    r.matches.map((m) => m.responder.name);
+  const DALLAS = [
+    R("bbell", "Brett Bell", "superintendent"),
+    R("rsampley", "Robert Sampley", "superintendent"),
+    R("asherwood", "Adam Sherwood", "project_manager"),
+  ];
+
+  it("counts comma pieces on the STRIPPED text, so an annotation cannot fake a second name token", () => {
+    // "Robert (PM)" read as two tokens, so the comma was classed as a people delimiter and the surname-first
+    // pair split back into Brett Bell + Robert Sampley — the same two wrong recipients, reached this time
+    // through the annotation stripper rather than around it.
+    for (const text of ["Bell, Robert (PM)", "Bell, Robert - PM", "Bell (super), Robert"]) {
+      const r = go(text, "superintendent", DALLAS);
+      expect(r.matches).toEqual([]);
+    }
+    // The genuine two-person list is still split, annotations and all.
+    expect(names(go("Brett Bell, Adam Sherwood (PM)", "superintendent", DALLAS)))
+      .toEqual(["Brett Bell", "Adam Sherwood"]);
+  });
+
+  it("FOLDS diacritics instead of deleting the letter", () => {
+    // The [^a-z0-9] class deleted the accented character outright, so "josé" became "jos" — a DIFFERENT
+    // person's entire name. On a roster holding "Jos Smith" that was an exact match for the wrong human,
+    // and the ordinary ASCII spelling anyone would type matched nobody at all.
+    const accented = [R("jose", "José Smith", "superintendent")];
+    expect(names(go("José Smith", "superintendent", accented))).toEqual(["José Smith"]);
+    expect(names(go("Jose Smith", "superintendent", accented))).toEqual(["José Smith"]);
+
+    // And the collision it caused is gone: two genuinely different people stay different.
+    const both = [R("jose", "José Smith", "superintendent"), R("jos", "Jos Smith", "superintendent")];
+    expect(names(go("José Smith", "superintendent", both))).toEqual(["José Smith"]);
+    expect(names(go("Jos Smith", "superintendent", both))).toEqual(["Jos Smith"]);
+    // The accented spelling must NOT reach the unaccented person when only they are on the roster.
+    expect(go("José Smith", "superintendent", [R("jos", "Jos Smith", "superintendent")]).matches).toEqual([]);
+  });
+
+  it("normalizes other common diacritics both directions", () => {
+    for (const [rosterName, typed] of [
+      ["Renée Dubois", "Renee Dubois"],
+      ["Nuñez Garcia", "Nunez Garcia"],
+      ["Müller Schmidt", "Muller Schmidt"],
+      ["Åke Larsson", "Ake Larsson"],
+    ] as const) {
+      const roster = [R("x", rosterName, "superintendent")];
+      expect(names(go(typed, "superintendent", roster))).toEqual([rosterName]);
+      expect(names(go(rosterName, "superintendent", roster))).toEqual([rosterName]);
+    }
   });
 });
