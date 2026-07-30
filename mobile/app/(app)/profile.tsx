@@ -1,5 +1,6 @@
 import React from "react";
 import { Linking, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
+import { router } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useAuth } from "../../src/auth/AuthContext";
@@ -88,6 +89,15 @@ export default function ProfileScreen() {
           onPress={openSupportTicket}
           icon={<Ionicons name="help-buoy-outline" size={18} color={theme.color.textPrimary} />}
         />
+
+        {__DEV__ ? (
+          <Button
+            title="Wearables diagnostic"
+            variant="ghost"
+            onPress={() => router.push("/dev-wearables")}
+            icon={<Ionicons name="glasses-outline" size={18} color={theme.color.textPrimary} />}
+          />
+        ) : null}
 
         <Button title="Sign out" variant="dangerGhost" onPress={() => void signOut()} />
       </ScrollView>

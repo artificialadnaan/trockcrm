@@ -43,6 +43,18 @@ final class WearablesBridge: RCTEventEmitter {
   override func startObserving() { hasListeners = true }
   override func stopObserving() { hasListeners = false }
 
+
+  /// SDK errors conform to `DatError: LocalizedError` and carry a real `.description`
+  /// naming the case. `String(describing:)` on these @objc Int-backed enums prints a
+  /// bridged pointer instead ("rawValue: 4513667408"), which is worse than useless when
+  /// the whole point of a diagnostic is to name what failed.
+  private static func describe(_ error: Error) -> String {
+    if let dat = error as? DatError {
+      return "\(dat.description) [\(String(reflecting: type(of: dat)))]"
+    }
+    return error.localizedDescription
+  }
+
   // MARK: - 1. Configure
 
   @objc(configure:rejecter:)
@@ -59,7 +71,7 @@ final class WearablesBridge: RCTEventEmitter {
     } catch {
       // Surfaced, never swallowed: a failed configure is indistinguishable from "no glasses
       // paired" once you are looking at JS, and that ambiguity costs hours.
-      reject("wearables_configure_failed", "Wearables.configure() failed: \(error)", error)
+      reject("wearables_configure_failed", "Wearables.configure() failed: \(Self.describe(error))", error)
     }
   }
 
@@ -94,7 +106,8 @@ final class WearablesBridge: RCTEventEmitter {
     }
     let sdk = Wearables.shared
     resolve([
-      "registrationState": String(describing: sdk.registrationState),
+      "registrationState": Self.registrationStateName(sdk.registrationState),
+      "registrationStateRaw": sdk.registrationState.rawValue,
       "deviceCount": sdk.devices.count,
       "devices": sdk.devices.map { String(describing: $0) },
     ])
@@ -108,7 +121,7 @@ final class WearablesBridge: RCTEventEmitter {
         try await Wearables.shared.startRegistration()
         resolve(["started": true])
       } catch {
-        reject("wearables_registration_failed", "startRegistration failed: \(error)", error)
+        reject("wearables_registration_failed", "startRegistration failed: \(Self.describe(error))", error)
       }
     }
   }
@@ -125,8 +138,19 @@ final class WearablesBridge: RCTEventEmitter {
       do {
         resolve(["handled": try await Wearables.shared.handleUrl(parsed)])
       } catch {
-        reject("wearables_handle_url_failed", "handleUrl failed: \(error)", error)
+        reject("wearables_handle_url_failed", "handleUrl failed: \(Self.describe(error))", error)
       }
+    }
+  }
+
+  /// RegistrationState is an @objc Int enum whose default printing is unhelpful.
+  private static func registrationStateName(_ state: RegistrationState) -> String {
+    switch state {
+    case .unavailable: return "unavailable"   // no Meta AI / no glasses reachable
+    case .available: return "available"
+    case .registering: return "registering"
+    case .registered: return "registered"
+    @unknown default: return "unknown(\(state.rawValue))"
     }
   }
 
@@ -140,7 +164,7 @@ final class WearablesBridge: RCTEventEmitter {
         let status = try await Wearables.shared.requestPermission(.camera)
         resolve(["status": String(describing: status)])
       } catch {
-        reject("wearables_permission_failed", "requestPermission(.camera) failed: \(error)", error)
+        reject("wearables_permission_failed", "requestPermission(.camera) failed: \(Self.describe(error))", error)
       }
     }
   }
@@ -183,7 +207,7 @@ final class WearablesBridge: RCTEventEmitter {
       newStream.start()
       resolve(["started": true, "config": String(describing: newStream.streamConfiguration)])
     } catch {
-      reject("wearables_stream_failed", "startStream failed: \(error)", error)
+      reject("wearables_stream_failed", "startStream failed: \(Self.describe(error))", error)
     }
   }
 
@@ -302,19 +326,34 @@ final class WearablesBridge: RCTEventEmitter {
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds.doubleValue) {
           recorder.stop()
           let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
-          resolve([
+          let isBluetooth = input?.portType == .bluetoothHFP
+          let payload: [String: Any] = [
             "fileUri": url.absoluteString,
             "bytes": (attrs?[.size] as? Int) ?? 0,
             "negotiatedSampleRate": negotiated,
             "wideband": negotiated >= 16_000,
             "inputPortName": input?.portName ?? "none",
             "inputPortType": input?.portType.rawValue ?? "none",
-            "isBluetoothInput": input?.portType == .bluetoothHFP,
+            "isBluetoothInput": isBluetooth,
             "streamWasRunningFirst": streamWasRunning,
-          ])
+          ]
+          guard isBluetooth else {
+            // The measurement this rung exists to produce is the rate the GLASSES negotiate.
+            // A successful recording from the phone or Mac microphone is not a weaker version
+            // of that answer, it is a different one, and reporting it green would be a lie.
+            reject(
+              "wearables_audio_not_glasses",
+              "Recorded from \(input?.portName ?? "an unknown input"), not the glasses over "
+                + "Bluetooth HFP. \(negotiated) Hz is this device's microphone and says nothing "
+                + "about the glasses. Connect them and retry.",
+              nil
+            )
+            return
+          }
+          resolve(payload)
         }
       } catch {
-        reject("wearables_audio_failed", "HFP capture failed: \(error)", error)
+        reject("wearables_audio_failed", "HFP capture failed: \(Self.describe(error))", error)
       }
     }
 
