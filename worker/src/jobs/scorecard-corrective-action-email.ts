@@ -168,6 +168,23 @@ export function basicValidEmail(email: string): boolean {
  *
  * Nothing here writes deal_team_members — the precedence is applied entirely at read time.
  */
+/**
+ * Which super/PM roles are ASSIGNED AT ALL on a deal, regardless of whether the identity currently resolves
+ * to a usable email. Paired with `recipientResolutionSql`: a role in here but not in there is an assigned
+ * responder this run cannot reach, which is what makes the job throw rather than stamp.
+ *
+ * Exported so anything that has to predict whether a cycle will notify everyone it owes — the backfill
+ * script does, before it commits irreversible mail — asks the same question with the same SQL instead of
+ * re-deriving it and drifting.
+ */
+export function assignedRolesSql(tenantSchema: string): string {
+  return `SELECT DISTINCT dtm.role AS role
+       FROM ${tenantSchema}.deal_team_members dtm
+      WHERE dtm.deal_id = $1::uuid
+        AND dtm.is_active = TRUE
+        AND dtm.role IN ('superintendent', 'project_manager')`;
+}
+
 export function recipientResolutionSql(tenantSchema: string): string {
   // Both branches cast role to TEXT. They are DIFFERENT types in production — field_responders.role is a bare
   // text column with an IN-list CHECK (migration 0198), deal_team_members.role is the deal_team_role ENUM
@@ -493,14 +510,7 @@ export async function handleScorecardCorrectiveActionEmail(
   // whose pick has gone inactive falls back to that same deal-team row, so a genuinely unreachable assignee
   // still blocks. Adding picked-but-unresolvable roles here instead would block forever on a deactivated
   // roster person nobody can replace from the field app — a dead-letter, not a fix.
-  const assignedRes = await query(
-    `SELECT DISTINCT dtm.role AS role
-       FROM ${tenantSchema}.deal_team_members dtm
-      WHERE dtm.deal_id = $1::uuid
-        AND dtm.is_active = TRUE
-        AND dtm.role IN ('superintendent', 'project_manager')`,
-    [dealId]
-  );
+  const assignedRes = await query(assignedRolesSql(tenantSchema), [dealId]);
   const assignedRoles = new Set<RecipientRole>();
   for (const row of assignedRes.rows as any[]) {
     const role = row.role as RecipientRole;
