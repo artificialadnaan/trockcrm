@@ -1,17 +1,19 @@
 import React, { useState } from "react";
 import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery } from "@tanstack/react-query";
 import { useRouter } from "expo-router";
 import { ApiError } from "../../../src/api/client";
 import * as directoryApi from "../../../src/api/endpoints/directory";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
 import { useOffices } from "../../../src/auth/useOffices";
+import { BackLink } from "../../../src/components/BackLink";
 import { RetryBlock } from "../../../src/components/RetryBlock";
 import { RetryNotice } from "../../../src/components/RetryNotice";
 import { ScreenHeader } from "../../../src/components/ScreenHeader";
 import { formatLocation } from "../../../src/format";
+import { useGoBack } from "../../../src/lib/go-back";
 import { useDebouncedSearch } from "../../../src/lib/use-debounced-search";
 import { qk } from "../../../src/query/keys";
 import { MIN_SEARCH_LENGTH, searchIsTooShort } from "../../../src/search-query";
@@ -32,6 +34,7 @@ const PAGE_SIZE = 50;
  */
 export default function CompaniesListScreen() {
   const router = useRouter();
+  const goBack = useGoBack("/(app)/dashboard");
   const { fetcher } = useAuth();
   const scope = useQueryScope();
   const { activeOfficeName, refetch: refetchOffices } = useOffices();
@@ -39,19 +42,35 @@ export default function CompaniesListScreen() {
   const submitted = useDebouncedSearch(search);
   const tooShort = searchIsTooShort(search);
 
-  const query = useQuery({
+  /**
+   * PAGED. A single fixed page made every record past the first fifty unreachable by browsing, in an
+   * office that has more than fifty — which every real one does.
+   *
+   * The end signal is a SHORT page rather than a total: properties answers `{ ..., total }` while
+   * companies answers a differently-shaped set of aggregates, and "fewer rows than I asked for" is the
+   * one thing both routes agree on.
+   */
+  const query = useInfiniteQuery({
     queryKey: qk.companies(scope, { search: submitted || undefined, limit: PAGE_SIZE }),
-    queryFn: () =>
-      directoryApi.listCompanies(fetcher, { search: submitted || undefined, limit: PAGE_SIZE }),
+    initialPageParam: 1,
+    queryFn: ({ pageParam }) =>
+      directoryApi.listCompanies(fetcher, { search: submitted || undefined, limit: PAGE_SIZE, page: pageParam }),
+    getNextPageParam: (last, all) => (last.companies.length < PAGE_SIZE ? undefined : all.length + 1),
   });
 
-  const companies = query.data?.companies ?? [];
+  const companies = (query.data?.pages ?? []).flatMap((p) => p.companies);
   const blocking = !query.data;
   const refreshFailed = Boolean(query.data && query.isError);
   const offline = query.error instanceof ApiError && query.error.status === 0;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
+      {/* A WAY BACK. This route is a sibling of (tabs), so opening it from Home pushes it OVER the tab
+          navigator and the tab bar is gone — and arriving by deep link or restored navigation state
+          leaves no history to gesture through either. ScreenHeader alone left no route out. */}
+      <View style={styles.back}>
+        <BackLink label="Home" onPress={() => goBack()} />
+      </View>
       <ScreenHeader title="Companies" context={activeOfficeName ?? undefined} />
 
       <TextInput
@@ -84,6 +103,16 @@ export default function CompaniesListScreen() {
         </View>
       ) : (
         <FlatList
+          keyboardShouldPersistTaps="handled"
+          onEndReachedThreshold={0.5}
+          onEndReached={() => {
+            if (query.hasNextPage && !query.isFetchingNextPage) void query.fetchNextPage();
+          }}
+          ListFooterComponent={
+            query.isFetchingNextPage ? (
+              <ActivityIndicator color={theme.color.brandRed} style={styles.more} />
+            ) : null
+          }
           data={companies}
           keyExtractor={(c) => c.id}
           contentContainerStyle={styles.body}
@@ -108,8 +137,8 @@ export default function CompaniesListScreen() {
             const location = formatLocation(item.city, item.state);
             // The server folds these onto the row; a card must never fetch its own badges.
             const deals =
-              item.activeDealCount != null && item.totalDealCount != null
-                ? `${item.activeDealCount}/${item.totalDealCount} deals`
+              item.activeDealsCount != null && item.dealCount != null
+                ? `${item.activeDealsCount}/${item.dealCount} deals`
                 : null;
             return (
               <Pressable
@@ -143,6 +172,8 @@ export default function CompaniesListScreen() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.canvas },
+  back: { paddingHorizontal: theme.space.lg, paddingTop: theme.space.sm },
+  more: { paddingVertical: theme.space.lg },
   center: { flex: 1, alignItems: "center", justifyContent: "center", padding: theme.space.lg },
   search: {
     minHeight: 44,

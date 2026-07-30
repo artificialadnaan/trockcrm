@@ -70,13 +70,17 @@ export default function CompanyDetailScreen() {
           </View>
 
           {/* Counts the server already folded onto the record. "Active of total" rather than a bare
-              number, because a company with 1 of 12 live is a different account from one with 12. */}
-          {company.activeDealCount != null && company.totalDealCount != null ? (
+              number, because a company with 1 of 12 live is a different account from one with 12.
+              Each row stands on its OWN presence: nesting contacts inside the deal-count condition
+              meant a company with contacts and no deals showed neither. */}
+          {company.activeDealsCount != null || company.dealCount != null || company.contactCount != null ? (
             <View style={styles.section}>
-              <Row
-                label="Deals"
-                value={`${company.activeDealCount} active of ${company.totalDealCount}`}
-              />
+              {company.activeDealsCount != null && company.dealCount != null ? (
+                <Row
+                  label="Deals"
+                  value={`${company.activeDealsCount} active of ${company.dealCount}`}
+                />
+              ) : null}
               {company.contactCount != null ? (
                 <Row label="Contacts" value={String(company.contactCount)} />
               ) : null}

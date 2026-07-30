@@ -70,7 +70,12 @@ export default function PropertyDetailScreen() {
             <Row label="Address" value={property.address || "—"} />
             <Row label="City" value={formatLocation(property.city, property.state) || "—"} />
             <Row label="ZIP" value={property.zip || "—"} />
-            {property.propertyType ? <Row label="Type" value={property.propertyType} /> : null}
+            {/* `propertyType ?? type` — the server selects both columns and either can hold the
+                classification, which is why the web detail reads them the same way. Checking only one
+                dropped the Type row for every property carrying the other. */}
+            {property.propertyType ?? property.type ? (
+              <Row label="Type" value={(property.propertyType ?? property.type) as string} />
+            ) : null}
             {property.buildYear ? <Row label="Built" value={String(property.buildYear)} /> : null}
             {property.unitCount ? <Row label="Units" value={String(property.unitCount)} /> : null}
           </View>

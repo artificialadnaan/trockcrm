@@ -24,7 +24,13 @@ export type PropertyListItem = {
   city: string | null;
   state: string | null;
   zip: string | null;
+  /**
+   * BOTH, because the server selects both columns and either can hold the classification. The web
+   * detail renders `propertyType ?? type` for exactly this reason; modelling only one silently drops
+   * the Type row for every property carrying the other.
+   */
   propertyType?: string | null;
+  type?: string | null;
   buildYear: number | null;
   unitCount: number | null;
   /** Written by field prospecting since #977; null on everything created before it. */
@@ -42,20 +48,36 @@ export type CompanyListItem = {
   state?: string | null;
   phone?: string | null;
   website?: string | null;
-  /** Server-side counts, so a card never has to fetch its own badges. */
-  activeDealCount?: number | null;
-  totalDealCount?: number | null;
+  /**
+   * THE SERVER'S NAMES, not tidier ones.
+   *
+   * companies/service.ts:197-199 returns `activeDealsCount`, `dealCount` and `contactCount`. I had
+   * declared `activeDealCount` / `totalDealCount`, and because the fetcher's generic is an assertion
+   * rather than a transform, those simply read `undefined` — so every count badge was omitted and the
+   * enclosing condition hid the valid `contactCount` with them. A type that renames a field does not
+   * rename it; it just stops seeing it.
+   */
+  activeDealsCount?: number | null;
+  dealCount?: number | null;
   contactCount?: number | null;
 };
 
+/**
+ * One page. The caller pages until a SHORT page arrives.
+ *
+ * Deliberately not read off a total: properties answers `{ properties, page, limit, total }` while
+ * companies answers a differently-shaped set of aggregates, so "fewer rows than I asked for" is the
+ * one end-of-list signal both routes agree on. A fixed single page was silently unreachable past the
+ * first fifty in an office that has more.
+ */
 export async function listProperties(
   fetcher: Fetcher,
   params: { search?: string; page?: number; limit?: number },
 ): Promise<{ properties: PropertyListItem[] }> {
   const q = new URLSearchParams();
   if (params.search) q.set("search", params.search);
-  if (params.page) q.set("page", String(params.page));
-  if (params.limit) q.set("limit", String(params.limit));
+  q.set("page", String(params.page ?? 1));
+  q.set("limit", String(params.limit ?? 50));
   const res = await fetcher<{ properties?: PropertyListItem[] }>(`/properties?${q.toString()}`);
   // `?? []` because an empty directory answers without the key rather than with an empty array.
   return { properties: res.properties ?? [] };
@@ -72,8 +94,8 @@ export async function listCompanies(
 ): Promise<{ companies: CompanyListItem[] }> {
   const q = new URLSearchParams();
   if (params.search) q.set("search", params.search);
-  if (params.page) q.set("page", String(params.page));
-  if (params.limit) q.set("limit", String(params.limit));
+  q.set("page", String(params.page ?? 1));
+  q.set("limit", String(params.limit ?? 50));
   const res = await fetcher<{ companies?: CompanyListItem[] }>(`/companies?${q.toString()}`);
   return { companies: res.companies ?? [] };
 }
