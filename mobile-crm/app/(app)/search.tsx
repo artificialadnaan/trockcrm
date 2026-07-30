@@ -79,7 +79,7 @@ export default function SearchScreen() {
   const offline = query.error instanceof ApiError && query.error.status === 0;
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
+    <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
       <View style={styles.header}>
         <BackLink label="Home" onPress={() => goBack()} />
         <Text accessibilityRole="header" style={styles.title}>
@@ -129,11 +129,21 @@ export default function SearchScreen() {
           keyExtractor={(r) => `${r.officeSlug ?? ""}:${r.entityType}:${r.id}`}
           contentContainerStyle={styles.body}
           keyboardShouldPersistTaps="handled"
-          ListEmptyComponent={<Text style={styles.idle}>Nothing matches &ldquo;{q}&rdquo;.</Text>}
+          ListEmptyComponent={
+            /* "Nothing matches" is FALSE when the office filter is the reason the list is empty — the
+               screen was saying that and then footing a note that matches exist elsewhere. One state,
+               one sentence: when every hit was in another office, say that instead. */
+            otherOfficeHits > 0 ? null : (
+              <Text style={styles.idle}>Nothing matches &ldquo;{q}&rdquo; in this office.</Text>
+            )
+          }
           ListFooterComponent={
             otherOfficeHits > 0 ? (
               <Text testID="search-other-office" style={styles.otherOffice}>
-                {otherOfficeHits} more {otherOfficeHits === 1 ? "match is" : "matches are"} in another
+                {results.length === 0
+                  ? `Nothing matches “${q}” in this office. `
+                  : ""}
+                {otherOfficeHits} {otherOfficeHits === 1 ? "match is" : "matches are"} in another
                 office. Open them on the web — this app works in one office at a time.
               </Text>
             ) : null

@@ -64,7 +64,7 @@ export default function PropertiesListScreen() {
   const offline = query.error instanceof ApiError && query.error.status === 0;
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
+    <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
       {/* A WAY BACK. This route is a sibling of (tabs), so opening it from Home pushes it OVER the tab
           navigator and the tab bar is gone — and arriving by deep link or restored navigation state
           leaves no history to gesture through either. ScreenHeader alone left no route out. */}

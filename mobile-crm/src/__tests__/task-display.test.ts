@@ -1,4 +1,4 @@
-import { taskPriorityLabel, taskStatusLabel } from "../task-display";
+import { taskEffectiveDate, taskPriorityLabel, taskStatusLabel } from "../task-display";
 
 describe("what a task row says beyond its title and date", () => {
   it("marks the priorities that change the decision", () => {
@@ -49,5 +49,46 @@ describe("what a task row says beyond its title and date", () => {
     // separates nothing, and the markers that DO matter stop standing out.
     expect(taskPriorityLabel("normal")).toBeNull();
     expect(taskStatusLabel("pending")).toBeNull();
+  });
+});
+
+describe("which date a task actually happens on", () => {
+  it("prefers scheduledFor for a scheduled task", () => {
+    // The server clears dueDate on the move to scheduled, and the Later section is where these live.
+    expect(taskEffectiveDate({ status: "scheduled", dueDate: null, scheduledFor: "2026-08-14" }))
+      .toBe("2026-08-14");
+  });
+
+  it("prefers scheduledFor even when BOTH are set", () => {
+    // The case a plain `dueDate ?? scheduledFor` got wrong. `updateTask` permits a due date on a row
+    // that is still scheduled, so editing one in the web dialog leaves both populated — and the server
+    // sorts by scheduled_for. Showing the due date put a row displaying one date in the position of
+    // another, which reads as a broken sort rather than as a stale field.
+    expect(taskEffectiveDate({ status: "scheduled", dueDate: "2026-08-01", scheduledFor: "2026-08-14" }))
+      .toBe("2026-08-14");
+  });
+
+  it("prefers dueDate for everything that is not scheduled", () => {
+    for (const status of ["pending", "in_progress", "waiting_on", "blocked", "completed"]) {
+      expect(taskEffectiveDate({ status, dueDate: "2026-08-01", scheduledFor: "2026-08-14" }))
+        .toBe("2026-08-01");
+    }
+  });
+
+  it("falls back across the flip in both directions", () => {
+    expect(taskEffectiveDate({ status: "scheduled", dueDate: "2026-08-01", scheduledFor: null }))
+      .toBe("2026-08-01");
+    expect(taskEffectiveDate({ status: "pending", dueDate: null, scheduledFor: "2026-08-14" }))
+      .toBe("2026-08-14");
+  });
+
+  it("returns null rather than a fake date when the task has neither", () => {
+    expect(taskEffectiveDate({ status: "pending", dueDate: null, scheduledFor: null })).toBeNull();
+    expect(taskEffectiveDate({})).toBeNull();
+  });
+
+  it("reads the status whatever case it arrives in", () => {
+    expect(taskEffectiveDate({ status: " Scheduled ", dueDate: "2026-08-01", scheduledFor: "2026-08-14" }))
+      .toBe("2026-08-14");
   });
 });

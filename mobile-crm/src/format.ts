@@ -79,3 +79,35 @@ export function formatPostalAddress(
   const locality = [formatLocation(city, state), zip?.trim()].filter(Boolean).join(" ");
   return [address?.trim(), locality].filter(Boolean).join(", ");
 }
+
+/**
+ * A database enum token, as a person would read it.
+ *
+ * These reach the app raw — `property_manager`, `general_contractor`, `mixed_use` — and every screen
+ * that rendered one published the column value. The uppercase card style made it worse, turning
+ * `property_manager` into "PROPERTY_MANAGER", and because those labels are also the accessible name,
+ * VoiceOver read the underscore out.
+ *
+ * Mirrors `client/src/lib/display-format.ts`'s `formatEnumLabel` rather than inventing a second rule,
+ * because a category has to read the same on the phone as it does on the web — mobile-crm sits outside
+ * the npm workspace and cannot import it. Kept to the parts that apply here: separator splitting and
+ * the single-word capital. The web's date and boolean special cases have no enum call site on mobile.
+ *
+ * Unknown values pass through unchanged. A token the server adds tomorrow should render as itself
+ * rather than vanish — a missing category reads as "we have no category", which would be a lie.
+ */
+export function formatEnumLabel(value: string | null | undefined): string {
+  const trimmed = value?.trim();
+  if (!trimmed) return "";
+  if (/[_-]/.test(trimmed)) {
+    return trimmed
+      .split(/[_-]+/)
+      .filter(Boolean)
+      .map((token) => token.charAt(0).toUpperCase() + token.slice(1).toLowerCase())
+      .join(" ");
+  }
+  if (/^[a-z][a-z0-9]*$/.test(trimmed)) {
+    return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
+  }
+  return trimmed;
+}

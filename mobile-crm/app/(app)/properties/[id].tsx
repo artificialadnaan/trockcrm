@@ -11,7 +11,7 @@ import { BackLink } from "../../../src/components/BackLink";
 import { RetryBlock } from "../../../src/components/RetryBlock";
 import { RetryNotice } from "../../../src/components/RetryNotice";
 import { Row } from "../../../src/components/Row";
-import { formatLocation } from "../../../src/format";
+import { formatEnumLabel, formatLocation } from "../../../src/format";
 import { useGoBack } from "../../../src/lib/go-back";
 import { qk } from "../../../src/query/keys";
 import { theme } from "../../../src/theme/theme";
@@ -33,9 +33,11 @@ export default function PropertyDetailScreen() {
   const property = query.data;
   const offline = query.error instanceof ApiError && query.error.status === 0;
   const refreshFailed = Boolean(query.data && query.isError);
+  // `mixed_use` is a column value, not a label. Formatted once here, for both places it is read.
+  const propertyType = formatEnumLabel(property?.propertyType ?? property?.type);
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
+    <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
       <View style={styles.header}>
         <BackLink label="Properties" onPress={() => goBack()} />
         <Text accessibilityRole="header" style={styles.title}>
@@ -107,9 +109,7 @@ export default function PropertyDetailScreen() {
             {/* `propertyType ?? type` — the server selects both columns and either can hold the
                 classification, which is why the web detail reads them the same way. Checking only one
                 dropped the Type row for every property carrying the other. */}
-            {property.propertyType ?? property.type ? (
-              <Row label="Type" value={(property.propertyType ?? property.type) as string} />
-            ) : null}
+            {propertyType ? <Row label="Type" value={propertyType} /> : null}
             {property.buildYear ? <Row label="Built" value={String(property.buildYear)} /> : null}
             {/* `!= null`, not truthiness. A stored unit count of 0 is a real value on legacy records —
                 new writes reject it, old ones kept it — and a truthy check rendered that zero exactly

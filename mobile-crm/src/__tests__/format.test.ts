@@ -1,5 +1,5 @@
 import { mailtoUrl, phoneParts, smsUrl, telUrl } from "../contact-links";
-import { daysSince, formatDate, formatLocation, formatPostalAddress, formatMoney } from "../format";
+import { daysSince, formatDate, formatEnumLabel, formatLocation, formatMoney, formatPostalAddress } from "../format";
 
 describe("formatMoney", () => {
   it("formats the STRING that Postgres numeric actually sends", () => {
@@ -224,5 +224,44 @@ describe("the one-line postal address", () => {
             const out = formatPostalAddress(a, c, st, z);
             expect(out).not.toMatch(/^,|,$|,,|\s\s|,\s*$/);
           }
+  });
+});
+
+describe("database enum tokens, as a person reads them", () => {
+  it("turns a snake_case token into words", () => {
+    // The bug: the uppercase card style rendered these as "PROPERTY_MANAGER", and because the label is
+    // also the accessible name, VoiceOver read the underscore out loud.
+    expect(formatEnumLabel("property_manager")).toBe("Property Manager");
+    expect(formatEnumLabel("general_contractor")).toBe("General Contractor");
+    expect(formatEnumLabel("mixed_use")).toBe("Mixed Use");
+    expect(formatEnumLabel("architecture_engineering")).toBe("Architecture Engineering");
+  });
+
+  it("handles hyphens the same way", () => {
+    expect(formatEnumLabel("insurance-restoration")).toBe("Insurance Restoration");
+  });
+
+  it("capitalises a single lowercase word", () => {
+    expect(formatEnumLabel("office")).toBe("Office");
+    expect(formatEnumLabel("retail")).toBe("Retail");
+  });
+
+  it("leaves an already-readable value alone", () => {
+    // Free-text categories exist alongside the enums; re-casing them would corrupt real names.
+    expect(formatEnumLabel("REIT")).toBe("REIT");
+    expect(formatEnumLabel("Acme Property Group")).toBe("Acme Property Group");
+  });
+
+  it("passes an unknown token through rather than dropping it", () => {
+    // A value the server adds tomorrow must render as itself. An empty label reads as "no category",
+    // which would be a lie about the data.
+    expect(formatEnumLabel("some_new_thing")).toBe("Some New Thing");
+    expect(formatEnumLabel("XYZ_9")).toBe("Xyz 9");
+  });
+
+  it("returns an empty string for nothing at all", () => {
+    expect(formatEnumLabel(null)).toBe("");
+    expect(formatEnumLabel(undefined)).toBe("");
+    expect(formatEnumLabel("   ")).toBe("");
   });
 });

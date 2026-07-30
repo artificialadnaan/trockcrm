@@ -11,7 +11,7 @@ import { BackLink } from "../../../src/components/BackLink";
 import { RetryBlock } from "../../../src/components/RetryBlock";
 import { RetryNotice } from "../../../src/components/RetryNotice";
 import { Row } from "../../../src/components/Row";
-import { formatPostalAddress } from "../../../src/format";
+import { formatEnumLabel, formatPostalAddress } from "../../../src/format";
 import { useGoBack } from "../../../src/lib/go-back";
 import { qk } from "../../../src/query/keys";
 import { theme } from "../../../src/theme/theme";
@@ -33,9 +33,12 @@ export default function CompanyDetailScreen() {
   const company = query.data;
   const offline = query.error instanceof ApiError && query.error.status === 0;
   const refreshFailed = Boolean(query.data && query.isError);
+  // Raw column values: `general_contractor`, `property_manager`. Read by a person, not a database.
+  const category = formatEnumLabel(company?.category);
+  const industry = formatEnumLabel(company?.industry);
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
+    <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
       <View style={styles.header}>
         <BackLink label="Companies" onPress={() => goBack()} />
         <Text accessibilityRole="header" style={styles.title}>
@@ -75,9 +78,23 @@ export default function CompanyDetailScreen() {
               onRetry={() => void query.refetch()}
             />
           ) : null}
-          {company.category ? (
-            <Text accessibilityLabel={company.category} style={styles.company} numberOfLines={2}>
-              {company.category}
+          {/**
+            * ARCHIVED, said first — before any statistic that implies the account is live.
+            *
+            * `getCompanyById` filters on id alone, so it hands back a soft-deleted company that the
+            * directory list would never show. Without this the screen presents a removed account
+            * alongside its deal and contact counts, which reads as a current relationship.
+            */}
+          {company.isActive === false ? (
+            <Text testID="company-archived" style={styles.archived}>
+              Archived. This company has been removed from the directory — it is kept for history and
+              is not part of the active account list.
+            </Text>
+          ) : null}
+
+          {category ? (
+            <Text accessibilityLabel={category} style={styles.company} numberOfLines={2}>
+              {category}
             </Text>
           ) : null}
 
@@ -92,7 +109,7 @@ export default function CompanyDetailScreen() {
                 formatPostalAddress(company.address, company.city, company.state, company.zip) || "—"
               }
             />
-            {company.industry ? <Row label="Industry" value={company.industry} /> : null}
+            {industry ? <Row label="Industry" value={industry} /> : null}
             {company.phone ? <Row label="Phone" value={company.phone} /> : null}
             {company.website ? <Row label="Website" value={company.website} /> : null}
           </View>
@@ -144,4 +161,13 @@ const styles = StyleSheet.create({
   sectionLabel: { ...theme.type.caption, textTransform: "uppercase", color: theme.color.textMuted },
   notes: { ...theme.type.body, color: theme.color.textSecondary },
   note: { ...theme.type.small, color: theme.color.textMuted },
+  archived: {
+    ...theme.type.small,
+    color: theme.color.amberText,
+    backgroundColor: theme.color.amberSurface,
+    borderWidth: 1,
+    borderColor: theme.color.amberBorder,
+    borderRadius: theme.radius.md,
+    padding: theme.space.md,
+  },
 });

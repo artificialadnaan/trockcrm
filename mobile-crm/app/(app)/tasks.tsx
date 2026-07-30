@@ -15,7 +15,7 @@ import { resolveDealDisplayNumber } from "../../src/deal-display-number";
 import { formatDate } from "../../src/format";
 import { useGoBack } from "../../src/lib/go-back";
 import { sanitizeHubspotDealIdentifiers } from "../../src/deal-display-number";
-import { taskPriorityLabel, taskStatusLabel } from "../../src/task-display";
+import { taskEffectiveDate, taskPriorityLabel, taskStatusLabel } from "../../src/task-display";
 import { refreshFailed as pageRefreshFailed, shouldLoadNextPage } from "../../src/paging";
 import { qk } from "../../src/query/keys";
 import { theme } from "../../src/theme/theme";
@@ -88,7 +88,7 @@ export default function TasksScreen() {
   const offline = query.error instanceof ApiError && query.error.status === 0;
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
+    <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
       <View style={styles.header}>
         <BackLink label="Home" onPress={() => goBack()} />
         <Text accessibilityRole="header" style={styles.title}>
@@ -189,11 +189,12 @@ export default function TasksScreen() {
           renderItem={({ item }) => {
             const dealNumber = resolveDealDisplayNumber(item);
             /**
-             * A scheduled task keeps its date in `scheduledFor`, not `dueDate` — the server clears
-             * the latter on the move and the `later` section deliberately includes scheduled work.
-             * Reading only `dueDate` showed those rows with no date at all.
+             * The date the SERVER sorted by, not a guess at it. `updateTask` permits a due date on a
+             * row that is still scheduled, so `dueDate ?? scheduledFor` could show one date while the
+             * list was ordered by the other — a row displaying Friday sitting between Monday and
+             * Tuesday, which reads as a broken sort.
              */
-            const when = item.dueDate ?? item.scheduledFor ?? null;
+            const when = taskEffectiveDate(item);
             /**
              * Priority and lifecycle FIRST, because they change what a rep does with the row.
              *
@@ -229,6 +230,7 @@ export default function TasksScreen() {
              * has sanitized these since it shipped; this is the same rule, mirrored.
              */
             const title = sanitizeHubspotDealIdentifiers(item.title) || item.title;
+            const description = sanitizeHubspotDealIdentifiers(item.description);
             const target = item.dealId
               ? `/(app)/deals/${item.dealId}`
               : item.contactId
@@ -242,6 +244,17 @@ export default function TasksScreen() {
                 {meta ? (
                   <Text style={styles.taskMeta} numberOfLines={2}>
                     {meta}
+                  </Text>
+                ) : null}
+                {/* THE INSTRUCTION, where there is one.
+                    Server-generated tasks put the actionable part in `description` — the inbound-email
+                    disambiguation task lists its candidate deals ONLY there — and this app has no task
+                    detail screen to open, so a row without it left the rep unable to find out what the
+                    task wanted. Sanitized on the same rule as the title: a generated description
+                    interpolates the same deal identifiers. */}
+                {description ? (
+                  <Text style={styles.taskDescription} numberOfLines={3}>
+                    {description}
                   </Text>
                 ) : null}
               </>
@@ -259,6 +272,7 @@ export default function TasksScreen() {
                 accessibilityRole="button"
                 accessibilityLabel={[
                   title,
+                  description,
                   meta,
                   item.dealId ? "Open the deal." : "Open the contact.",
                 ]
@@ -322,4 +336,5 @@ const styles = StyleSheet.create({
   },
   taskTitle: { ...theme.type.title, color: theme.color.textPrimary },
   taskMeta: { ...theme.type.small, color: theme.color.textSecondary },
+  taskDescription: { ...theme.type.small, color: theme.color.textMuted, marginTop: theme.space.xs },
 });

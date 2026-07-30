@@ -12,7 +12,7 @@ import { BackLink } from "../../../src/components/BackLink";
 import { RetryBlock } from "../../../src/components/RetryBlock";
 import { RetryNotice } from "../../../src/components/RetryNotice";
 import { ScreenHeader } from "../../../src/components/ScreenHeader";
-import { formatLocation } from "../../../src/format";
+import { formatEnumLabel, formatLocation } from "../../../src/format";
 import { useGoBack } from "../../../src/lib/go-back";
 import { refreshFailed as pageRefreshFailed, shouldLoadNextPage } from "../../../src/paging";
 import { useDebouncedSearch } from "../../../src/lib/use-debounced-search";
@@ -67,7 +67,7 @@ export default function CompaniesListScreen() {
   const offline = query.error instanceof ApiError && query.error.status === 0;
 
   return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
+    <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
       {/* A WAY BACK. This route is a sibling of (tabs), so opening it from Home pushes it OVER the tab
           navigator and the tab bar is gone — and arriving by deep link or restored navigation state
           leaves no history to gesture through either. ScreenHeader alone left no route out. */}
@@ -149,6 +149,10 @@ export default function CompaniesListScreen() {
             // address and no city used to fall through to "No details on file" while the server was
             // sending the street. Dropping a field is worse than abbreviating it.
             const location = formatLocation(item.city, item.state) || (item.address ?? "").trim();
+            // The raw column value. `styles.company` uppercases by transform, which turned
+            // `property_manager` into "PROPERTY_MANAGER" — and since the label IS the accessible name,
+            // VoiceOver read the underscore out.
+            const category = formatEnumLabel(item.category);
             // The server folds these onto the row; a card must never fetch its own badges.
             const deals =
               item.activeDealsCount != null && item.dealCount != null
@@ -159,7 +163,7 @@ export default function CompaniesListScreen() {
                 testID={`company-${item.id}`}
                 onPress={() => router.push(`/(app)/companies/${item.id}`)}
                 accessibilityRole="button"
-                accessibilityLabel={[item.name, item.category, location, deals]
+                accessibilityLabel={[item.name, category, location, deals]
                   .filter(Boolean)
                   .join(", ")}
                 style={styles.card}
@@ -167,9 +171,9 @@ export default function CompaniesListScreen() {
                 <Text style={styles.name} numberOfLines={1}>
                   {item.name}
                 </Text>
-                {item.category ? (
-                  <Text accessibilityLabel={item.category} style={styles.company} numberOfLines={1}>
-                    {item.category}
+                {category ? (
+                  <Text accessibilityLabel={category} style={styles.company} numberOfLines={1}>
+                    {category}
                   </Text>
                 ) : null}
                 <Text style={styles.meta} numberOfLines={1}>

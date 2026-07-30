@@ -69,3 +69,30 @@ export function taskStatusLabel(status: string | null | undefined): string | nul
  * The status alone is well-defined and already answers the question that matters on a list: this row is
  * not actionable right now. Naming the blocker needs the server to define what it stores first.
  */
+
+/**
+ * WHICH DATE a task actually happens on — mirroring the server's own rule, not approximating it.
+ *
+ * `buildTaskSortOrder` computes an EFFECTIVE date and sorts every bucket by it:
+ *
+ *     status = 'scheduled' → COALESCE(scheduled_for, due_date)
+ *     otherwise            → COALESCE(due_date, scheduled_for)
+ *
+ * The direction flips on status, and that is the whole point. `updateTask` permits a due date on a row
+ * that is still scheduled — editing one in the web dialog can leave both columns populated — so a plain
+ * `dueDate ?? scheduledFor` showed one date while the list was ORDERED by the other. A row displaying
+ * Friday sitting between Monday and Tuesday looks like a broken sort, and the rep believes the date.
+ *
+ * Mirrored here rather than approximated because "the date the server sorted by" and "the date the row
+ * shows" have to be the same value or the screen contradicts itself.
+ */
+export function taskEffectiveDate(task: {
+  status?: string | null;
+  dueDate?: string | null;
+  scheduledFor?: string | null;
+}): string | null {
+  const scheduled = (task.status ?? "").trim().toLowerCase() === "scheduled";
+  const first = scheduled ? task.scheduledFor : task.dueDate;
+  const second = scheduled ? task.dueDate : task.scheduledFor;
+  return first ?? second ?? null;
+}
