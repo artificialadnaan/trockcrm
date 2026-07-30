@@ -182,6 +182,14 @@ export default function MoveStageScreen() {
    * The picker always needs a Date. An unset forecast opens on today rather than on 1970, and a value
    * the picker cannot parse falls back the same way instead of rendering an epoch.
    */
+  /**
+   * Is the calendar SHOWING — a different question from whether a date has been chosen.
+   *
+   * Conflating the two is what produced the last two defects on this control in both directions:
+   * seeding the state to open the picker filed a forecast nobody picked, and not seeding it left a
+   * field displaying a date the Confirm button did not believe in.
+   */
+  const [closeDatePickerOpen, setCloseDatePickerOpen] = useState(false);
   const closeDatePickerValue =
     businessDateStrToPickerDate(expectedCloseDate) ?? businessDateStrToPickerDate(today) ?? new Date();
   /**
@@ -532,10 +540,10 @@ export default function MoveStageScreen() {
                 * almost never a real expected close date — a wrong forecast that passes the gate is
                 * worse than a disabled button that explains itself.
                 */}
-              {expectedCloseDate === "" ? (
+              {expectedCloseDate === "" && !closeDatePickerOpen ? (
                 <Pressable
                   testID="choose-close-date"
-                  onPress={() => setExpectedCloseDate(today)}
+                  onPress={() => setCloseDatePickerOpen(true)}
                   accessibilityRole="button"
                   accessibilityLabel="Pick an exact close date"
                   style={styles.chooseDate}
@@ -548,20 +556,35 @@ export default function MoveStageScreen() {
                   testID="expected-close-date"
                   value={closeDatePickerValue}
                   mode="date"
-                  display={Platform.OS === "ios" ? "compact" : "default"}
+                  /**
+                   * INLINE on iOS, not compact.
+                   *
+                   * Compact renders a field that must be tapped a second time to open, and — the part
+                   * that matters — accepting the date it already displays produces no change event, so
+                   * the one forecast a rep cannot choose is the one on screen. An inline calendar has
+                   * no such gap: picking a day is a tap on that day, including today's.
+                   */
+                  display={Platform.OS === "ios" ? "inline" : "default"}
                   minimumDate={businessDateStrToPickerDate(today) ?? new Date()}
                   accessibilityLabel="Expected close date"
                   themeVariant="dark"
-                  onChange={(_event, picked) => {
-                    // Dismissed on Android delivers no date; keeping the previous value is the only
-                    // reading of "cancel" that does not silently change the forecast.
-                    if (picked) setExpectedCloseDate(pickedDateToBusinessDateStr(picked));
+                  onChange={(event, picked) => {
+                    // Android presents a dialog and reports its own dismissal; iOS renders inline and
+                    // stays put. Closing on "dismissed" keeps the Android flow from stranding an open
+                    // dialog, and keeping the previous value is the only reading of cancel that does
+                    // not silently change the forecast.
+                    if (Platform.OS !== "ios") setCloseDatePickerOpen(false);
+                    if (event.type === "dismissed" || !picked) return;
+                    setExpectedCloseDate(pickedDateToBusinessDateStr(picked));
                   }}
                 />
                 {expectedCloseDate ? (
                   <Pressable
                     testID="clear-close-date"
-                    onPress={() => setExpectedCloseDate("")}
+                    onPress={() => {
+                      setExpectedCloseDate("");
+                      setCloseDatePickerOpen(false);
+                    }}
                     accessibilityRole="button"
                     accessibilityLabel="Clear the close date"
                     style={styles.clearDate}
