@@ -13,7 +13,10 @@ describe("CRM surface policy", () => {
   it.each(["admin", "director", "rep"])("grants %s every current surface", (role) => {
     // Exact list, in SURFACE_ROLES order — the point is that adding a surface is a deliberate act that
     // has to be acknowledged here, not something that quietly widens what a role can reach.
-    expect(accessibleSurfaces(role)).toEqual(["deals", "leads", "contacts", "companies"]);
+    // "reports" acknowledged deliberately: sidebar.tsx:82 gives Reports to all three CRM roles, and
+    // /reports/monday-showcase — the only report this app shows — is `requireAnyRole` on the server.
+    // Most of that module is requireDirector, so widening past this one report means reading the ROUTE.
+    expect(accessibleSurfaces(role)).toEqual(["deals", "leads", "contacts", "companies", "reports"]);
     expect(hasAnyCrmSurface(role)).toBe(true);
   });
 

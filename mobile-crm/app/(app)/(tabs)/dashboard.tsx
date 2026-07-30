@@ -152,6 +152,14 @@ export default function DashboardScreen() {
               onPress={() => router.push("/(app)/contacts")}
             />
           ) : null}
+          {canAccessSurface(user.role, "reports") ? (
+            <NavCard
+              testID="open-reports"
+              icon="bar-chart-outline"
+              label="Reports"
+              onPress={() => router.push("/(app)/reports")}
+            />
+          ) : null}
         </View>
 
         {canSwitchOffice ? (
@@ -161,8 +169,9 @@ export default function DashboardScreen() {
         ) : null}
 
         <Text style={styles.scopeNote}>
-          This release covers deals, leads, contacts and notes. Tasks, email and reports are still to
-          come — if something is missing it is not built yet rather than broken.
+          This release covers deals, leads, contacts, notes and the Monday showcase. Tasks, email and
+          the rest of the reports are still to come — if something is missing it is not built yet
+          rather than broken.
         </Text>
 
         <Pressable
