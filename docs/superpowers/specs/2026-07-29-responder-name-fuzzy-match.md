@@ -1,0 +1,244 @@
+# Responder name fuzzy match — resolving typed scorecard names to the field-responder roster
+
+Date: 2026-07-29
+Implements: QC-D (name-to-responder mapping proposal for the backfill)
+Unblocks: QC-C (make sure the PM is notified on a corrective action), QC-E (backfill the 4 below-band scorecards)
+Code: `shared/src/lib/responderNameMatch.ts` · tests `shared/src/lib/responderNameMatch.test.ts` (75, green)
+
+---
+
+## 1. Why this exists
+
+Corrective-action responders resolve from `field_scorecards.superintendent_responder_id` /
+`pm_responder_id`. Those columns are set **only** when the submitter picked a roster row in the mobile
+app's `ResponderPicker`. In practice almost nobody picks:
+
+| Signal | office_dallas, 19 cards |
+| --- | --- |
+| Cards with a superintendent **pick** | 3 |
+| Cards with a PM **pick** | **0** |
+| `deal_team_members` rows (the only other fallback) | **0 office-wide** — see QC-F |
+
+Both the pick and the fallback are empty, so a below-band card routinely opens a corrective action that
+reaches **nobody**. Meanwhile the free-text `superintendent_name` / `pm_name` fields are filled in on 37
+of 38 card-slots. The information is there; nothing reads it. This matcher is the last-resort fallback:
+given the text that *was* typed, work out who on the roster was meant.
+
+It lives in `shared/`, not beside the server-only `server/src/services/directoryDedup.ts`, because both
+the **server** (resolving at read time) and the **worker** (addressing the oversight email) must answer
+this question identically. Verified importable from both workspace roots through the built `dist`.
+
+## 2. The safety constraint this inherits
+
+`mobile/src/components/ResponderPicker.tsx:104` deliberately refuses to name-match, and says why:
+
+> Typing is never a pick — always clear the recorded responder, even if the typed text happens to spell a
+> roster member exactly. Name-matching is what made the earlier attempt at this feature able to email
+> someone the user never chose.
+
+**Matching too eagerly is a bug that has already shipped on this exact feature.** The two failure costs
+are not symmetric:
+
+- A **missed** match costs somebody a follow-up. The card shows an unresolved name; a human reads it.
+- A **wrong** match emails a real person a corrective action that is not theirs.
+
+So every rule is written to fail towards *unresolved*, and this matcher does **not** relax the picker's
+rule — the picker still records `null`, and this runs strictly downstream as a resolution-time fallback
+whose output a caller must be able to distrust. `ambiguous` and `unmatched` are the product, not noise.
+
+### The one rule the whole matcher reduces to
+
+> A segment matches a roster person only if **every** token in the segment is accounted for by a
+> **distinct** part of that person's name, **at least one** of those accountings is **exact**, and **at
+> most one** is fuzzy.
+
+There is no `if (bareFirstName)` branch. That single rule subsumes the special cases:
+
+- A bare first name is "one token, so it must be exactly right" — which is what makes `"Brett"` safe.
+- An **unaccounted token is evidence against a match**, not neutral — which is what makes
+  `"Nick Cheaham"` resolve to nobody instead of to Nick Reyes. This is the whole distinction between
+  the two, and §6 works it through.
+
+## 3. Confidence tiers and what a caller must do with each
+
+| Field | Meaning | Caller obligation |
+| --- | --- | --- |
+| `matches[].confidence === "exact"` | Every token accounted for exactly, whole name consumed | Safe to auto-address |
+| `matches[].confidence === "high"` | One fuzzy token, or a bare name that left a surname unspoken | Safe to auto-address, but this is the tier to gate on if a surface ever wants full-name-only |
+| `ambiguous[]` | Two or more equally-good people | **Never auto-address.** A human picks |
+| `unmatched[]` | A segment named somebody the roster does not hold | Surface the raw text; may indicate a roster gap (§7) |
+
+Four outcomes are distinguishable without re-parsing: blank field (`matches` and `unmatched` both
+empty), nobody, one confident person, several candidates, and **partially resolved** — `matches`
+populated *alongside* `ambiguous`/`unmatched`.
+
+> **Trap for QC-C / QC-E.** `matches.length > 0` does **not** mean the field is fully resolved. A
+> two-person field where only one name lands populates `matches` **and** `unmatched` together. Gating a
+> backfill on `matches.length > 0` silently drops the second recipient. There is a test locking this
+> shape (`"Brett Bell/Derek Barr"`). Today's corpus happens to have zero partial rows (§5), but the
+> next card typed can create one.
+
+Role scoping is absolute, and both halves are safety rules rather than filters:
+
+1. A `project_manager` can **never** be returned from a `superintendent` query, however well the name
+   matches. This is what forces `"Nick Cheaham"` to nobody.
+2. `is_active = false` is never a candidate. A deactivated person must not be emailed a corrective
+   action; the roster row survives only so historical picks still render.
+
+## 4. Thresholds and why each sits exactly there
+
+Deliberately an **absolute distance ladder, not a similarity ratio**. A ratio is what would let `"Addy"`
+become Adam Sherwood: distance 2 over 4 characters reads as a respectable 0.5, and any ratio loose
+enough to accept the four real prod spellings of Cheatam is loose enough to accept that too.
+
+| Constant | Value | Why not looser | Why not tighter |
+| --- | --- | --- | --- |
+| `FUZZY_MIN_TOKEN_LENGTH` | 5 | At 4 chars one edit separates two families — `Ball`/`Bell`. Below this, exact only | Nothing real needs it |
+| `FUZZY_MAX_DISTANCE_SHORT` (len 5–6) | 1 | `Casey`/`Corey` is distance 2 at length 5 — a different name, not a typo | — |
+| `FUZZY_MAX_DISTANCE_LONG` (len ≥7) | 2 | — | Rule 12 needs 2: `chatham`→`cheatam` is distance 2 |
+| Distance measured on | `min(token, part)` | Measuring on the longer lets `Shane` reach `McShane`, or `bob` reach `robertson` | — |
+
+Calibrated against one real person with four prod spellings, and against the pairs that must not
+collapse:
+
+```
+cheatham / cheatum / cheatem  -> distance 1   accept
+chatham                       -> distance 2   accept  <- forces LONG's cap to be 2
+addy / adam                   -> distance 2 over 4 chars, below MIN -> exact-only -> reject
+```
+
+Both numbers are asserted directly in a `nameEditDistance` describe block, so whoever next tunes this
+sees which distances the ladder stands between rather than guessing.
+
+Multi-person fields split on `/ , & + ;` and the word "and", on the **raw** text before normalization.
+Prod holds `"Brett Bell/Robert Sampley"`, `"Brett bell & Robert Sampley"` and `"Brett/robert sampley"`,
+so two recipients from one field is normal and must come back **in the order typed**.
+
+### Levenshtein is single-copy
+
+`server/src/services/directoryDedup.ts`'s private `similarity()` at ~line 428 is now a ratio wrapper
+over the shared `nameEditDistance`; its own copy is **deleted**, not duplicated, with a comment at the
+site pointing here. `directory-dedup.test.ts` still passes, so the lift is behaviour-preserving. This
+codebase has been burned repeatedly by un-linked twin implementations.
+
+`normalizeDirectoryName` was **not** reused, for two reasons: `shared` cannot import `server` (the
+stated reason this module lives in shared), and it is actively wrong for this input — it rewrites `&` to
+`" and "` and strips company suffixes, where here `&` is a **segment delimiter** and a person's surname
+is not a suffix. Documented at both sites.
+
+## 5. The resolved corpus
+
+Every distinct free-text value in `office_dallas.field_scorecards`, run through the built matcher.
+Reproduce with `node <scratchpad>/resolve-corpus.mjs` — it hardcodes the roster and corpus, no DB.
+"cards" is how many card-slots carry that exact string (19 cards × 2 name fields = 38 slots).
+
+| input                       | role            | cards | matched people + emails                                               | confidence   | ambiguous | unmatched    |
+|-----------------------------|-----------------|-------|-----------------------------------------------------------------------|--------------|-----------|--------------|
+| Adnaan Iqbal                | superintendent  | 3     | —                                                                     | —            | —         | Adnaan Iqbal |
+| Kevin Posey                 | superintendent  | 3     | Kevin Posey <kposey@trockgc.com>                                      | exact        | —         | —            |
+| Brett Bell                  | superintendent  | 2     | Brett Bell <bbell@trockgc.com>                                        | exact        | —         | —            |
+| Eric Burnett                | superintendent  | 2     | Eric Burnett <eburnett@trockgc.com>                                   | exact        | —         | —            |
+| Brett bell                  | superintendent  | 1     | Brett Bell <bbell@trockgc.com>                                        | exact        | —         | —            |
+| Brett bell & Robert Sampley | superintendent  | 1     | Brett Bell <bbell@trockgc.com>; Robert Sampley <rsampley@trockgc.com> | exact; exact | —         | —            |
+| Brett Bell/Robert Sampley   | superintendent  | 1     | Brett Bell <bbell@trockgc.com>; Robert Sampley <rsampley@trockgc.com> | exact; exact | —         | —            |
+| Brett/robert sampley        | superintendent  | 1     | Brett Bell <bbell@trockgc.com>; Robert Sampley <rsampley@trockgc.com> | high; exact  | —         | —            |
+| Chris Higingbotham          | superintendent  | 1     | Chris Higingbotham <chigingbotham@trockgc.com>                        | exact        | —         | —            |
+| Corey mcshane               | superintendent  | 1     | Corey McShane <cmcshane@trockgc.com>                                  | exact        | —         | —            |
+| Kevin posey                 | superintendent  | 1     | Kevin Posey <kposey@trockgc.com>                                      | exact        | —         | —            |
+| Nick Cheaham                | superintendent  | 1     | —                                                                     | —            | —         | Nick Cheaham |
+| Nick Reyes                  | superintendent  | 1     | Nick Reyes <nreyes@trockgc.com>                                       | exact        | —         | —            |
+| Adam Sherwood               | project_manager | 6     | Adam Sherwood <asherwood@trockgc.com>                                 | exact        | —         | —            |
+| Nick Cheatham               | project_manager | 3     | Nick Cheatam <ncheatam@trockgc.com>                                   | high         | —         | —            |
+| Nick Cheatum                | project_manager | 3     | Nick Cheatam <ncheatam@trockgc.com>                                   | high         | —         | —            |
+| Addy                        | project_manager | 1     | —                                                                     | —            | —         | Addy         |
+| Derek Barr                  | project_manager | 1     | —                                                                     | —            | —         | Derek Barr   |
+| James helms                 | project_manager | 1     | —                                                                     | —            | —         | James helms  |
+| Nick Chatham                | project_manager | 1     | Nick Cheatam <ncheatam@trockgc.com>                                   | high         | —         | —            |
+| Nick Cheatem                | project_manager | 1     | Nick Cheatam <ncheatam@trockgc.com>                                   | high         | —         | —            |
+| Test                        | project_manager | 1     | —                                                                     | —            | —         | Test         |
+| (null)                      | project_manager | 1     | —                                                                     | —            | —         | —            |
+
+```
+distinct values: 23   card-slots: 38
+fully resolved:      29 card-slots
+partially resolved:  0 card-slots
+resolved to nobody:  9 card-slots
+
+recipients this yields (distinct people, superintendent + PM):
+  ncheatam@trockgc.com             8 card-slot(s)
+  bbell@trockgc.com                6 card-slot(s)
+  asherwood@trockgc.com            6 card-slot(s)
+  kposey@trockgc.com               4 card-slot(s)
+  rsampley@trockgc.com             3 card-slot(s)
+  eburnett@trockgc.com             2 card-slot(s)
+  chigingbotham@trockgc.com        1 card-slot(s)
+  cmcshane@trockgc.com             1 card-slot(s)
+  nreyes@trockgc.com               1 card-slot(s)
+```
+
+**29 of 38 slots resolve, from 3 today.** Zero rows are ambiguous and zero are partial, so on today's
+corpus every row is cleanly either a confident set of people or nobody — nothing needs a human tiebreak.
+The nine misses are itemised below and **eight of the nine are correct refusals**, not coverage gaps.
+
+**Nick Cheatam is the headline.** Four spellings across 8 card-slots all resolve to one person who,
+before this, had **never** been resolvable — zero PM picks exist office-wide.
+
+## 6. Inputs that deliberately do NOT resolve
+
+| input | role | why it must not resolve |
+| --- | --- | --- |
+| `Adnaan Iqbal` (3) | superintendent | On the roster but **INACTIVE**. A deactivated person must not be emailed a corrective action. Excluded before scoring, so it lands in `unmatched` |
+| `Nick Cheaham` (1) | superintendent | **The critical case.** Nick Cheatam is a `project_manager`, so role scoping excludes him. The only Nick among superintendents is Nick **Reyes**. Any matcher that falls back to "unique first name in role" emails Reyes somebody else's corrective action. `Cheaham` matches no superintendent surname, and that unaccounted surname is evidence *against* the first-name match — precisely what distinguishes this from `"Brett/robert sampley"`, where the bare `Brett` carries no surname arguing otherwise. Almost certainly the PM's name typed into the superintendent field; that card's real superintendent is unknown and cannot be inferred |
+| `Addy` (1) | project_manager | Must not become Adam Sherwood. 4 chars is below the fuzzy floor, so exact-only. Ratio-based matchers accept this (`Adam`/`Addy` = distance 2 over 4 chars ≈ 0.5) — that is why the ladder is absolute. **Worth noting: `Addy` reads as Adnaan's own nickname, not a shortening of Adam**, which would make an Adam Sherwood match not merely unsafe but wrong. Adnaan can confirm; either way it stays unresolved |
+| `Derek Barr` (1) | project_manager | Real person, real CRM user, **not on the PM roster.** A roster gap, not a matching failure — see §7 |
+| `James helms` (1) | project_manager | Same |
+| `Test` (1) | project_manager | Test data |
+| `(null)` (1) | project_manager | Empty. Returns the empty result, no throw. `""` and `"   "` likewise |
+
+Judgement calls extending past the corpus, each locked as an explicitly-commented test rather than left
+to chance — all erring toward *miss*:
+
+| input | resolves to | reasoning |
+| --- | --- | --- |
+| `Addy Sherwood` | nobody | A corroborating exact surname does not make 4 chars carry 2 edits. The cost asymmetry says miss |
+| `Brett Ball` | nobody | One edit at 4 chars separates two families |
+| `Corey Shane` | nobody | Distance measured on the shorter token, so `Shane` cannot reach `McShane` |
+| `Steve Sanders`, `Samply`, `Brett Bell Jr` | nobody | Surplus/insufficiently-anchored tokens |
+| `Chris Higginbotham` | Chris Higingbotham, `high` | The spelling most people reach for, 2 edits. This is what the long cap buys |
+| Bare first name, two holders in role | **ambiguous** | Covered with a synthetic roster, not left to prod happening to have no collision. Prod has superintendent Triston Mitchell while Timothy Mitchell is a CRM submitter, so bare `Mitchell` is exactly the shape that collides as the roster grows |
+
+### Known limitation
+
+`unmatched` does not distinguish "nobody by that name" from "that person is deactivated" — `Adnaan
+Iqbal` and `Derek Barr` are indistinguishable in the output. Deliberate, to keep one code path for
+"do not address this person", and harmless because a caller re-running against the unfiltered roster can
+label the reason for display. Worth doing if the QC dashboard ever shows these to a human.
+
+## 7. Follow-ups this surfaces
+
+1. **Two PMs are missing from the roster.** Derek Barr and James Helms are real CRM users typed into
+   `pm_name` who hold no `field_responders` row. Until added they are structurally unreachable — no
+   matcher can fix that. One roster insert each.
+2. **One card's superintendent is genuinely unknown** (the `Nick Cheaham` card). Needs a human to read
+   the card, not a looser threshold.
+3. **QC-F stands.** This is a *fallback for existing text*, not a fix for the empty pick rate. New cards
+   should still push submitters toward picking, or the free-text corpus keeps growing.
+
+## 8. Verification
+
+| Check | Result |
+| --- | --- |
+| `TZ=UTC npx vitest run shared/src/lib/responderNameMatch.test.ts` | **75 passed**, one case per numbered rule, each named after the behaviour it protects |
+| Shared CI gate config (`test:ci` — the one CI runs) | 29 files / 328 tests passed, new suite included |
+| `npm run build --workspace shared`, `typecheck --workspace server`, `typecheck:tests --workspace shared` | clean |
+| `server/tests` full run | 6586 passed; 3 pre-existing failures (`startup-order`, two `properties` consistency) unrelated — `directory-dedup.test.ts` passes |
+| Importable from server **and** worker through built `dist` | executed from both roots, both returning `[["Brett Bell","high"],["Robert Sampley","exact"]]` for `"Brett/robert sampley"` |
+| `shared/package.json` exports `./lib/responderNameMatch` | shape copied from `./lib/correctiveActionApprovers` / `./lib/correctiveActionOrder` |
+
+**Mutation-tested, because 75/75 passing first try proves nothing.** 17 mutants; the first pass found
+**four survivors** — the length floor, the exact-anchor rule, the short cap and the min-vs-max distance
+basis were all unguarded (the `Addy` case dies at the floor, so it never exercised the caps). Five tests
+added; **16/17 now die, each killed by the test named after that behaviour.** The one survivor,
+`tokens.length > parts.length`, is a confirmed semantically-equivalent early-out — the every-token rule
+rejects the same input anyway — so its comment was reworded to stop claiming to be the enforcer rather
+than left in place lying.

@@ -33,6 +33,10 @@
       "types": "./dist/lib/fieldScorecardEmails.d.ts",
       "default": "./dist/lib/fieldScorecardEmails.js"
     },
+    "./lib/responderNameMatch": {
+      "types": "./dist/lib/responderNameMatch.d.ts",
+      "default": "./dist/lib/responderNameMatch.js"
+    },
     "./lib/rfpReviewerEmails": {
       "types": "./dist/lib/rfpReviewerEmails.d.ts",
       "default": "./dist/lib/rfpReviewerEmails.js"
