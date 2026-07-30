@@ -1,0 +1,291 @@
+import React from "react";
+import { act, fireEvent, render, waitFor } from "@testing-library/react-native";
+import type { FieldPhoto } from "../../api/types";
+
+jest.mock("react-native-safe-area-context", () => {
+  const { View } = require("react-native");
+  return { SafeAreaView: ({ children, ...p }: any) => <View {...p}>{children}</View> };
+});
+jest.mock("expo-image", () => {
+  const { View } = require("react-native");
+  return { Image: (p: any) => <View {...p} /> };
+});
+jest.mock("@expo/vector-icons", () => {
+  const { Text } = require("react-native");
+  return { Ionicons: ({ name }: { name: string }) => <Text>{name}</Text> };
+});
+jest.mock("../../auth/AuthContext", () => ({ useAuth: () => ({ fetcher: jest.fn(), user: { id: "u1" } }) }));
+jest.mock("../VoiceRecorder", () => ({ VoiceRecorder: () => null }));
+
+const mockPreviewReport = jest.fn();
+const mockGenerateReport = jest.fn();
+const mockStartAiReport = jest.fn();
+const mockGetAiReportStatus = jest.fn();
+jest.mock("../../api/endpoints", () => ({
+  previewReport: (...args: unknown[]) => mockPreviewReport(...args),
+  generateReport: (...args: unknown[]) => mockGenerateReport(...args),
+  startAiReport: (...args: unknown[]) => mockStartAiReport(...args),
+  getAiReportStatus: (...args: unknown[]) => mockGetAiReportStatus(...args),
+}));
+
+import { ReportBuilder } from "../ReportBuilder";
+
+function galleryPhoto(id: string, name: string): FieldPhoto {
+  return {
+    id,
+    category: "photo",
+    photoCategory: "construction",
+    subcategory: null,
+    displayName: name,
+    mimeType: "image/jpeg",
+    fileSizeBytes: null,
+    fileExtension: "jpg",
+    dealId: "d1",
+    leadId: null,
+    description: null,
+    tags: [],
+    takenAt: null,
+    createdAt: new Date("2026-01-01T00:00:00Z").toISOString(),
+    uploadedBy: "u1",
+    uploaderName: "Tester",
+    uploaderAvatarUrl: null,
+    latitude: null,
+    longitude: null,
+    address: null,
+    addressSource: null,
+    geocodedAt: null,
+    procoreSyncStatus: null,
+    deletedAt: null,
+    imageUrl: `https://r2.example/${id}.jpg`,
+    fullImageUrl: `https://r2.example/${id}-full.jpg`,
+  };
+}
+
+const PHOTOS = [galleryPhoto("p1", "First"), galleryPhoto("p2", "Second")];
+
+const AI_REPORT = { id: "file-1", title: "Tides Condition Assessment", pdfUrl: "https://r2/signed.pdf", expiresAt: null, createdAt: "" };
+
+function renderBuilder(overrides: Partial<React.ComponentProps<typeof ReportBuilder>> = {}) {
+  const props = { visible: true, onClose: jest.fn(), projectId: "d1", photos: PHOTOS, onGenerated: jest.fn(), ...overrides };
+  return { ui: render(<ReportBuilder {...props} />), props };
+}
+
+/** Advance past one poll interval and let the resulting promise chain settle. */
+async function tickPoll() {
+  await act(async () => {
+    jest.advanceTimersByTime(3_000);
+  });
+}
+
+/** Select every photo and step into the AI focus screen. */
+async function openFocusStep(ui: ReturnType<typeof render>) {
+  await act(async () => {
+    fireEvent.press(ui.getByText("Select all"));
+  });
+  await act(async () => {
+    fireEvent.press(ui.getByLabelText("AI Report"));
+  });
+  await waitFor(() => expect(ui.queryByText("What should this report focus on?")).not.toBeNull());
+}
+
+/** Fire the generate button on the focus screen. */
+async function pressGenerate(ui: ReturnType<typeof render>) {
+  await act(async () => {
+    fireEvent.press(ui.getByLabelText("Generate AI report"));
+  });
+}
+
+describe("ReportBuilder AI report", () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    mockStartAiReport.mockReset();
+    mockGetAiReportStatus.mockReset();
+    mockPreviewReport.mockReset();
+    mockStartAiReport.mockResolvedValue({ runId: "run-1", status: "queued" });
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it("sits next to Preview report and is disabled until photos are selected", () => {
+    const { ui } = renderBuilder();
+    const aiButton = ui.getByLabelText("AI Report");
+    expect(ui.queryByText("Preview report")).not.toBeNull();
+    expect(aiButton.props.accessibilityState?.disabled).toBe(true);
+  });
+
+  it("asks for a focus before generating rather than firing straight off the grid", async () => {
+    const { ui } = renderBuilder();
+    await openFocusStep(ui);
+    // Stepping into the focus screen must not have queued anything yet.
+    expect(mockStartAiReport).not.toHaveBeenCalled();
+    expect(ui.queryByText(/Leave it blank/)).not.toBeNull();
+  });
+
+  it("sends the focus prompt the user typed", async () => {
+    const { ui } = renderBuilder();
+    await openFocusStep(ui);
+    await act(async () => {
+      fireEvent.changeText(
+        ui.getByPlaceholderText(/Roof drainage and flashing only/),
+        "  Roof drainage only  ",
+      );
+    });
+    await pressGenerate(ui);
+
+    await waitFor(() =>
+      expect(mockStartAiReport).toHaveBeenCalledWith(expect.anything(), {
+        projectId: "d1",
+        photoIds: ["p1", "p2"],
+        focusPrompt: "Roof drainage only",
+      }),
+    );
+  });
+
+  it("omits the focus entirely when left blank", async () => {
+    // Blank is a first-class choice — the server reads a missing focus as "general director's read".
+    const { ui } = renderBuilder();
+    await openFocusStep(ui);
+    await pressGenerate(ui);
+
+    await waitFor(() =>
+      expect(mockStartAiReport).toHaveBeenCalledWith(expect.anything(), {
+        projectId: "d1",
+        photoIds: ["p1", "p2"],
+        focusPrompt: undefined,
+      }),
+    );
+  });
+
+  it("enqueues the selected photos and opens the finished report", async () => {
+    mockGetAiReportStatus
+      .mockResolvedValueOnce({ runId: "run-1", status: "running" })
+      .mockResolvedValueOnce({ runId: "run-1", status: "succeeded", report: AI_REPORT });
+
+    const { ui, props } = renderBuilder();
+    await openFocusStep(ui);
+    await pressGenerate(ui);
+
+    await waitFor(() => expect(mockStartAiReport).toHaveBeenCalled());
+
+    await tickPoll(); // first poll → still running
+    expect(props.onGenerated).not.toHaveBeenCalled();
+    await tickPoll(); // second poll → succeeded
+
+    // Reuses the same success handler as "Generate PDF" — the parent shows the toast, refetches the report
+    // list and opens the PDF, so that behaviour lives in exactly one place.
+    await waitFor(() => expect(props.onGenerated).toHaveBeenCalledWith(AI_REPORT));
+  });
+
+  it("rides out a dropped status poll instead of reporting a false failure", async () => {
+    // Jobsite LTE drops individual requests during a 60-90s wait. Treating one as terminal would tell the
+    // user their report failed while it is still running and about to file.
+    mockGetAiReportStatus
+      .mockRejectedValueOnce(new Error("Network request failed"))
+      .mockRejectedValueOnce(new Error("Request timed out"))
+      .mockResolvedValueOnce({ runId: "run-1", status: "succeeded", report: AI_REPORT });
+
+    const { ui, props } = renderBuilder();
+    await openFocusStep(ui);
+    await pressGenerate(ui);
+    await waitFor(() => expect(mockStartAiReport).toHaveBeenCalled());
+
+    await tickPoll();
+    await tickPoll();
+    expect(props.onGenerated).not.toHaveBeenCalled();
+    await tickPoll();
+
+    await waitFor(() => expect(props.onGenerated).toHaveBeenCalledWith(AI_REPORT));
+  });
+
+  it("gives up after a sustained outage rather than polling blind", async () => {
+    mockGetAiReportStatus.mockRejectedValue(new Error("Network request failed"));
+    const { ui } = renderBuilder();
+    await openFocusStep(ui);
+    await pressGenerate(ui);
+    await waitFor(() => expect(mockStartAiReport).toHaveBeenCalled());
+
+    for (let i = 0; i < 6; i += 1) await tickPoll();
+    await waitFor(() => expect(ui.queryByText("Network request failed")).not.toBeNull());
+  });
+
+  it("does not open the report when the sheet was closed while the poll was in flight", async () => {
+    // The cancel check has to run AFTER the await too — a status request can be in flight for seconds.
+    let release: (v: unknown) => void = () => {};
+    mockGetAiReportStatus.mockImplementation(
+      () => new Promise((resolve) => { release = resolve; }),
+    );
+
+    const { ui, props } = renderBuilder();
+    await openFocusStep(ui);
+    await pressGenerate(ui);
+    await waitFor(() => expect(mockStartAiReport).toHaveBeenCalled());
+    await tickPoll(); // poll fires and hangs
+
+    await act(async () => {
+      fireEvent.press(ui.getByText("Back")); // focus step → select
+    });
+    await act(async () => {
+      fireEvent.press(ui.getByText("Cancel")); // select → close(), which stops polling
+    });
+    await act(async () => {
+      release({ runId: "run-1", status: "succeeded", report: AI_REPORT });
+    });
+
+    expect(props.onGenerated).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a failed run instead of polling forever", async () => {
+    mockGetAiReportStatus.mockResolvedValue({ runId: "run-1", status: "failed", error: "Claude request timed out." });
+
+    const { ui, props } = renderBuilder();
+    await openFocusStep(ui);
+    await pressGenerate(ui);
+    await waitFor(() => expect(mockStartAiReport).toHaveBeenCalled());
+    await tickPoll();
+
+    await waitFor(() => expect(ui.queryByText("Claude request timed out.")).not.toBeNull());
+    expect(props.onGenerated).not.toHaveBeenCalled();
+
+    // Polling stopped — no further status calls once the run reached a terminal state.
+    const callsAfterFailure = mockGetAiReportStatus.mock.calls.length;
+    await tickPoll();
+    expect(mockGetAiReportStatus).toHaveBeenCalledTimes(callsAfterFailure);
+  });
+
+  it("shows the enqueue error and does not start polling", async () => {
+    mockStartAiReport.mockRejectedValue(new Error("AI reports are not available right now."));
+
+    const { ui } = renderBuilder();
+    await openFocusStep(ui);
+    await pressGenerate(ui);
+
+    await waitFor(() => expect(ui.queryByText("AI reports are not available right now.")).not.toBeNull());
+    expect(mockGetAiReportStatus).not.toHaveBeenCalled();
+  });
+
+  it("does not put the Preview button into a spinner for an AI request", async () => {
+    // `busy` and `aiBusy` are separate flags; sharing one would spin the wrong control.
+    mockGetAiReportStatus.mockResolvedValue({ runId: "run-1", status: "running" });
+    const { ui } = renderBuilder();
+    await openFocusStep(ui);
+    await pressGenerate(ui);
+    await waitFor(() => expect(mockStartAiReport).toHaveBeenCalled());
+
+    // Back out to the grid: Preview must still be a live button, not stuck mid-spinner from the AI run.
+    await act(async () => {
+      fireEvent.press(ui.getByText("Back"));
+    });
+    expect(ui.queryByText("Preview report")).not.toBeNull();
+  });
+
+  it("returns to the photo grid from the focus screen without losing the selection", async () => {
+    const { ui } = renderBuilder();
+    await openFocusStep(ui);
+    await act(async () => {
+      fireEvent.press(ui.getByText("Back"));
+    });
+    await waitFor(() => expect(ui.queryByText("2 selected")).not.toBeNull());
+    expect(mockStartAiReport).not.toHaveBeenCalled();
+  });
+});

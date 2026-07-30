@@ -9,7 +9,7 @@ import { getFileById, getFileDownloadUrl } from "../files/service.js";
 import { buildDealPhotoTimelineConditions } from "../files/photo-timeline-filters.js";
 import type { FieldAccessContext, FieldPhoto, FieldProject } from "./projects-service.js";
 import { assertActiveFieldProject, listFieldProjectPhotos } from "./projects-service.js";
-import { renderFieldPhotoReportPdf, type ReportRenderSection } from "./pdf-layout.js";
+import { renderFieldPhotoReportPdf, type ReportPhotoLayout, type ReportRenderSection } from "./pdf-layout.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -256,6 +256,13 @@ export async function generateFieldPhotoReport(
       photoIds: string[];
       photoOverrides?: Array<{ id: string; description?: string | null }>;
     }>;
+    /**
+     * Per-photo page layout. Omitted (the mobile/web "Generate PDF" path) keeps the 3-per-page grid.
+     * The AI report passes "findings" so each photo gets a full page with its bulleted assessment.
+     */
+    photoLayout?: ReportPhotoLayout;
+    /** Overrides the file's displayName/description wording so an AI report is labelled as one. */
+    fileDescription?: string | null;
   },
 ) {
   const project = await assertActiveFieldProject(tenantDb, access, input.projectId);
@@ -303,7 +310,12 @@ export async function generateFieldPhotoReport(
   // Cap the free-form summary so a pathological payload can't balloon the PDF into hundreds of pages;
   // blank/whitespace collapses to null (renderer adds no page for it).
   const executiveSummary = input.executiveSummary?.trim() ? input.executiveSummary.trim().slice(0, 5000) : null;
-  const pdfBuffer = await renderFieldPhotoReportPdf({ cover, sections: renderSections, executiveSummary });
+  const pdfBuffer = await renderFieldPhotoReportPdf({
+    cover,
+    sections: renderSections,
+    executiveSummary,
+    photoLayout: input.photoLayout,
+  });
   const bucketName = process.env.R2_BUCKET_NAME || "trock-crm-files";
   const fileExtension = ".pdf";
   const systemFilename = `${slugify(title)}-${now.toISOString().slice(0, 10)}-${crypto.randomUUID().slice(0, 8)}${fileExtension}`;
@@ -329,7 +341,7 @@ export async function generateFieldPhotoReport(
       r2Key,
       r2Bucket: bucketName,
       dealId: project.id,
-      description: `Generated photo report for ${project.name}`,
+      description: input.fileDescription?.trim() || `Generated photo report for ${project.name}`,
       uploadedBy: access.userId,
     }).returning();
   } catch (error) {
@@ -385,6 +397,33 @@ export async function listFieldProjectReports(
         } satisfies FieldProjectReportSummary;
       })
       .filter((row) => !row.expiresAt || new Date(row.expiresAt).getTime() > Date.now()),
+  };
+}
+
+/**
+ * The download URL for an existing report PLUS the metadata the app shows beside it, in exactly the shape
+ * POST /reports/generate returns. Lets the AI report's status poll hand the client the same `report` object
+ * the synchronous path does, so the mobile success handler is shared rather than duplicated.
+ *
+ * Access is delegated to getFieldProjectReportDownload — same report-tag, expiry and project-access gate as
+ * a direct download; the metadata read below only runs once that has passed.
+ */
+export async function getFieldProjectReportDetail(
+  tenantDb: TenantDb,
+  access: FieldAccessContext,
+  reportId: string,
+) {
+  const download = await getFieldProjectReportDownload(tenantDb, access, reportId);
+  const file = await getFileById(tenantDb, reportId);
+  if (!file) throw new AppError(404, "Report not found");
+  return {
+    report: {
+      id: file.id,
+      title: file.displayName,
+      pdfUrl: download.url,
+      expiresAt: readReportExpiryFromTags(file.tags),
+      createdAt: new Date(file.createdAt).toISOString(),
+    },
   };
 }
 

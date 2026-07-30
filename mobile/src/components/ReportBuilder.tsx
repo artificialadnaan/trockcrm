@@ -1,10 +1,10 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { Modal, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { Image as ExpoImage } from "expo-image";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useAuth } from "../auth/AuthContext";
-import { generateReport, previewReport } from "../api/endpoints";
+import { generateReport, getAiReportStatus, previewReport, startAiReport } from "../api/endpoints";
 import type {
   FieldPhoto,
   FieldReportSection,
@@ -18,6 +18,14 @@ import { Banner } from "./Banner";
 import { PhotoPickerGrid } from "./PhotoPickerGrid";
 import { VoiceRecorder } from "./VoiceRecorder";
 import { buildGenerateReportRequest } from "./report-builder-request";
+
+// Poll cadence for the async AI report. 3s is responsive without hammering the endpoint; the ceiling is
+// generous because a 40-photo vision pass legitimately runs 30-90s and a cold worker can add to that.
+const AI_POLL_INTERVAL_MS = 3_000;
+const AI_POLL_TIMEOUT_MS = 5 * 60_000;
+// Consecutive failed status requests tolerated before giving up (~15s of sustained outage at the 3s poll).
+// A jobsite LTE connection drops individual requests routinely; one of those is not a failed report.
+const AI_POLL_MAX_CONSECUTIVE_FAILURES = 5;
 
 const GROUP_OPTIONS: { value: ReportGroupBy; label: string }[] = [
   { value: "none", label: "No grouping" },
@@ -51,7 +59,10 @@ export function ReportBuilder({
   const { width } = useWindowDimensions();
   const cell = Math.floor((width - theme.space.lg * 2 - 8 * 2) / 3);
 
-  const [step, setStep] = useState<"select" | "edit">("select");
+  // "focus" is the AI branch: select photos → state the focus → generate. Kept as its own step rather than
+  // an inline box on "select" so the existing Preview flow isn't cluttered by a control it never uses.
+  const [step, setStep] = useState<"select" | "focus" | "edit">("select");
+  const [focusPrompt, setFocusPrompt] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [groupBy, setGroupBy] = useState<ReportGroupBy>("none");
   const [preview, setPreview] = useState<ReportPreviewResponse | null>(null);
@@ -67,6 +78,13 @@ export function ReportBuilder({
   const [sectionTitles, setSectionTitles] = useState<Record<string, string>>({});
   const [descriptions, setDescriptions] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
+  // Separate from `busy` on purpose: they drive two different footer buttons, and sharing one flag would
+  // spin the Preview button for an AI request that has nothing to do with it.
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiProgress, setAiProgress] = useState<string | null>(null);
+  // Polling kill-switch. A ref (not state) because the poll loop closes over it and must observe a cancel
+  // that happens mid-await — a state value captured at loop entry never would.
+  const aiPollingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
 
   function reset() {
@@ -76,12 +94,18 @@ export function ReportBuilder({
     setPreview(null);
     setSections([]);
     setTitle("");
+    setFocusPrompt("");
     setExecSummary("");
     setSummaryDictating(false);
     setSectionTitles({});
     setDescriptions({});
     setError(null);
     setBusy(false);
+    // Stop any in-flight poll loop. The server-side job keeps running — the finished report still lands in
+    // the project's report list — but this sheet stops waiting on it.
+    aiPollingRef.current = false;
+    setAiBusy(false);
+    setAiProgress(null);
   }
 
   function close() {
@@ -126,6 +150,77 @@ export function ReportBuilder({
       setError(e instanceof Error ? e.message : "Could not build the preview.");
     } finally {
       setBusy(false);
+    }
+  }
+
+  /**
+   * Kick off an AI-authored condition assessment and wait for it.
+   *
+   * The work is async server-side (a Claude vision pass over every selected photo runs far longer than any
+   * request timeout), so this enqueues a run and polls its status. Success reuses the SAME onGenerated
+   * handler as "Generate PDF" — the status endpoint returns an identically shaped `report` — so the toast,
+   * the report-list refresh and opening the PDF all stay in one place.
+   */
+  async function runAiReport() {
+    if (selected.size === 0 || aiBusy) return;
+    setError(null);
+    setAiBusy(true);
+    setAiProgress("Starting the assessment…");
+    aiPollingRef.current = true;
+    const startedAt = Date.now();
+    try {
+      const { runId } = await startAiReport(fetcher, {
+        projectId,
+        photoIds: Array.from(selected),
+        focusPrompt: focusPrompt.trim() || undefined,
+      });
+      setAiProgress(
+        `Reviewing ${selected.size} photo${selected.size === 1 ? "" : "s"}… this usually takes about a minute.`,
+      );
+
+      let consecutiveFailures = 0;
+      while (aiPollingRef.current) {
+        await new Promise((resolve) => setTimeout(resolve, AI_POLL_INTERVAL_MS));
+        if (!aiPollingRef.current) return; // cancelled (sheet closed) while waiting
+
+        let status;
+        try {
+          status = await getAiReportStatus(fetcher, runId);
+          consecutiveFailures = 0;
+        } catch (pollError) {
+          // A dropped poll is not a failed report. On jobsite LTE a single request will lose packets during
+          // a 60-90s wait; treating that as terminal would tell the user their report failed while it is in
+          // fact still running and about to file. Only a sustained outage gives up.
+          consecutiveFailures += 1;
+          if (consecutiveFailures >= AI_POLL_MAX_CONSECUTIVE_FAILURES) throw pollError;
+          continue;
+        }
+
+        // Re-check AFTER the await: the request can be in flight for seconds, and the user may have closed
+        // the sheet in that window. Without this, cancelling still fires onGenerated and reopens the PDF.
+        if (!aiPollingRef.current) return;
+
+        if (status.status === "succeeded" && status.report) {
+          onGenerated(status.report);
+          close();
+          return;
+        }
+        if (status.status === "failed") {
+          throw new Error(status.error || "The AI report could not be generated.");
+        }
+        if (Date.now() - startedAt > AI_POLL_TIMEOUT_MS) {
+          // Stop waiting, but do NOT claim it failed — the job may still finish and file the report.
+          throw new Error(
+            "This is taking longer than expected. The report will appear in this project's reports when it finishes.",
+          );
+        }
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not generate the AI report.");
+    } finally {
+      aiPollingRef.current = false;
+      setAiBusy(false);
+      setAiProgress(null);
     }
   }
 
@@ -181,7 +276,7 @@ export function ReportBuilder({
     }
   }
 
-  const headerTitle = step === "select" ? "Build report" : "Edit report";
+  const headerTitle = step === "select" ? "Build report" : step === "focus" ? "AI report" : "Edit report";
 
   return (
     <Modal
@@ -200,14 +295,14 @@ export function ReportBuilder({
             // transcript, so block teardown until dictation settles.
             onPress={() => {
               if (summaryDictating) return;
-              if (step === "edit") setStep("select");
+              if (step === "edit" || step === "focus") setStep("select");
               else close();
             }}
             disabled={summaryDictating}
             hitSlop={10}
           >
             <Text style={[styles.headerAction, summaryDictating && styles.headerActionDisabled]}>
-              {step === "edit" ? "Back" : "Cancel"}
+              {step === "select" ? "Cancel" : "Back"}
             </Text>
           </Pressable>
           <Text style={styles.headerTitle}>{headerTitle}</Text>
@@ -220,7 +315,37 @@ export function ReportBuilder({
           </View>
         ) : null}
 
-        {step === "select" ? (
+        {step === "focus" ? (
+          <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
+            <SectionLabel>What should this report focus on?</SectionLabel>
+            <Text style={styles.hint}>
+              Optional. Leave it blank and you'll get a director's general read of everything captured.
+            </Text>
+            <TextInput
+              value={focusPrompt}
+              onChangeText={setFocusPrompt}
+              placeholder="e.g. Roof drainage and flashing only — the interior punch list is already handled"
+              multiline
+              style={styles.summaryInput}
+            />
+            {voiceEnabled ? (
+              <VoiceRecorder
+                label="🎤 Dictate focus"
+                onBusyChange={setSummaryDictating}
+                onTranscript={(text) =>
+                  setFocusPrompt((prev) => (prev.trim() ? `${prev.trim()} ${text}` : text))
+                }
+              />
+            ) : null}
+            {/* Sets expectations for the two behaviours people are most likely to be surprised by: their
+                captions are used as input, and a photo with nothing to say keeps its caption unchanged. */}
+            <Text style={[styles.hint, styles.focusNote]}>
+              All {selected.size} selected photo{selected.size === 1 ? "" : "s"} will appear in the report. Their
+              existing captions are given to the AI as field notes, and any photo with nothing relevant to say
+              about it keeps its caption exactly as it is.
+            </Text>
+          </ScrollView>
+        ) : step === "select" ? (
           <PhotoPickerGrid
             photos={photos}
             selected={selected}
@@ -360,12 +485,39 @@ export function ReportBuilder({
 
         <View style={styles.footer}>
           {step === "select" ? (
-            <Button
-              title="Preview report"
-              onPress={runPreview}
-              loading={busy}
-              disabled={selected.size === 0}
-            />
+            <>
+              {/* Button's `loading` swaps the label for a bare spinner, so the "what is it doing / how long"
+                  copy has to live outside it. */}
+              {aiProgress ? <Text style={styles.aiProgress}>{aiProgress}</Text> : null}
+              <View style={styles.footerRow}>
+                <Button
+                  title="Preview report"
+                  onPress={runPreview}
+                  loading={busy}
+                  disabled={selected.size === 0 || aiBusy}
+                  style={styles.footerButton}
+                />
+                <Button
+                  title="AI Report"
+                  variant="ghost"
+                  icon={<Ionicons name="sparkles-outline" size={16} color={theme.color.brandRed} />}
+                  onPress={() => setStep("focus")}
+                  disabled={selected.size === 0 || busy}
+                  style={styles.footerButton}
+                />
+              </View>
+            </>
+          ) : step === "focus" ? (
+            <>
+              {aiProgress ? <Text style={styles.aiProgress}>{aiProgress}</Text> : null}
+              <Button
+                title="Generate AI report"
+                icon={<Ionicons name="sparkles-outline" size={16} color="#FFFFFF" />}
+                onPress={runAiReport}
+                loading={aiBusy}
+                disabled={summaryDictating}
+              />
+            </>
           ) : (
             <Button title="Generate PDF" onPress={runGenerate} loading={busy} disabled={summaryDictating} />
           )}
@@ -419,5 +571,17 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: theme.color.border,
     backgroundColor: theme.color.surfaceCard,
+  },
+  footerRow: { flexDirection: "row", gap: theme.space.md },
+  focusNote: { marginTop: theme.space.lg },
+  // flexBasis:0 with flexGrow:1 so the two buttons split the bar evenly regardless of label width —
+  // plain flex:1 alone lets the longer title ("Preview report") claim more of the row.
+  footerButton: { flexGrow: 1, flexBasis: 0 },
+  aiProgress: {
+    fontFamily: theme.font.body,
+    fontSize: 13,
+    color: theme.color.textMuted,
+    marginBottom: theme.space.sm,
+    textAlign: "center",
   },
 });

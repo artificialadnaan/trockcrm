@@ -24,6 +24,8 @@ import type {
   GenerateReportResponse,
   ReportsResponse,
   ReportDownloadResponse,
+  AiReportStartResponse,
+  AiReportStatusResponse,
   ShareLinkResponse,
   CreateScorecardResponse,
   UpdateScorecardResponse,
@@ -154,6 +156,17 @@ export const previewReport = (
 
 export const generateReport = (f: Fetcher, body: GenerateReportRequest) =>
   f<GenerateReportResponse>("/field/reports/generate", { method: "POST", body });
+
+// The AI report is async — this returns as soon as the job is queued (202), then the caller polls
+// getAiReportStatus. Nothing here waits on the 30-90s Claude pass, so the client's default request timeout
+// is never in play.
+export const startAiReport = (
+  f: Fetcher,
+  body: { projectId: string; photoIds: string[]; reportTitle?: string; focusPrompt?: string },
+) => f<AiReportStartResponse>("/field/reports/ai-generate", { method: "POST", body });
+
+export const getAiReportStatus = (f: Fetcher, runId: string) =>
+  f<AiReportStatusResponse>(`/field/reports/ai-status/${runId}`);
 
 export const getProjectReports = (f: Fetcher, dealId: string) =>
   f<ReportsResponse>(`/field/projects/${dealId}/reports`);

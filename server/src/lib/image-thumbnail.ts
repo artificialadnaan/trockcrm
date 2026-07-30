@@ -144,6 +144,14 @@ export function readHeifDimensions(source: Buffer): { width: number; height: num
 export interface EvidenceJpegOptions {
   /** Opaque permit issued by withHeicDecodePermit when the caller already holds the process-wide gate. */
   heicDecodePermit?: symbol;
+  /**
+   * Longest-edge cap in px. Defaults to THUMBNAIL_MAX_EDGE (600) so every existing PDF-tile caller keeps
+   * byte-identical output. The AI report's vision pass overrides it: 600px is thumbnail-grade and loses the
+   * surface checking, hairline splits and rust bleed the model is being asked to identify.
+   */
+  maxEdge?: number;
+  /** JPEG quality. Defaults to THUMBNAIL_QUALITY (70) — same reasoning as maxEdge. */
+  quality?: number;
 }
 
 /**
@@ -170,11 +178,13 @@ export async function generateEvidenceJpeg(
       : await withHeicDecodePermit(() => convert());
     rasterSource = Buffer.from(converted);
   }
+  const maxEdge = options.maxEdge ?? THUMBNAIL_MAX_EDGE;
+  const quality = options.quality ?? THUMBNAIL_QUALITY;
   return sharp(rasterSource, { failOn: "none", limitInputPixels: EVIDENCE_DECODE_PIXEL_LIMIT })
     .rotate() // honor EXIF orientation so the evidence isn't sideways
-    .resize({ width: THUMBNAIL_MAX_EDGE, height: THUMBNAIL_MAX_EDGE, fit: "inside", withoutEnlargement: true })
+    .resize({ width: maxEdge, height: maxEdge, fit: "inside", withoutEnlargement: true })
     .flatten({ background: { r: 255, g: 255, b: 255 } })
-    .jpeg({ quality: THUMBNAIL_QUALITY, mozjpeg: true })
+    .jpeg({ quality, mozjpeg: true })
     .toBuffer();
 }
 

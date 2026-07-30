@@ -63,6 +63,27 @@ const SUMMARY_BODY_BOTTOM = 720; // stay clear of the footer (drawn at PAGE_HEIG
 const SUMMARY_BODY_FONT_SIZE = 11;
 const SUMMARY_LINE_GAP = 4;
 
+// --- Findings layout (AI condition assessment) ---------------------------------------------------
+// A SECOND per-photo layout, opt-in via `photoLayout: "findings"`. The default grid above packs three
+// photos per page beside a 174pt caption column clamped to ~320 chars — built for short human captions and
+// structurally unable to carry a multi-sentence, multi-bullet AI finding without ellipsising most of it.
+// This layout inverts the proportions to match a written condition assessment: ONE photo per page, image
+// across the full content width, a subject caption under it, then the findings as bullets. Bullets flow
+// onto continuation pages (image not repeated) so a long finding is never truncated — the grid layout's
+// `ellipsis: true` would silently drop exactly the evidence the report exists to communicate.
+const FINDINGS_IMAGE_TOP = 62;
+const FINDINGS_IMAGE_MAX_HEIGHT = 340;
+const FINDINGS_CAPTION_GAP = 14; // image bottom → caption baseline box
+const FINDINGS_CAPTION_FONT_SIZE = 10;
+const FINDINGS_BULLETS_GAP = 16; // caption bottom → first bullet
+const FINDINGS_BODY_BOTTOM = 736; // stay clear of the footer (drawn at PAGE_HEIGHT - 44 = 748)
+const FINDINGS_CONT_BODY_TOP = 58; // continuation pages start just under the header rule
+const FINDINGS_BULLET_FONT_SIZE = 10.5;
+const FINDINGS_BULLET_LINE_GAP = 2.5;
+const FINDINGS_BULLET_SPACING = 9; // vertical gap between consecutive bullets
+const FINDINGS_BULLET_INDENT = 18; // text inset from the margin; the glyph sits in the gutter
+const FINDINGS_BULLET_TEXT_WIDTH = CONTENT_WIDTH - FINDINGS_BULLET_INDENT;
+
 type ReportFontSet = {
   regular: string;
   bold: string;
@@ -461,6 +482,175 @@ async function drawPhotoEntry(
   });
 }
 
+export type ParsedFinding = {
+  /** Short subject/location label rendered under the photo, or null when the text is plain prose. */
+  title: string | null;
+  /** Findings bodies — bulleted when `bulleted`, otherwise plain paragraphs. */
+  bodies: string[];
+  bulleted: boolean;
+};
+
+/**
+ * Split a per-photo finding into its subject label and its finding bodies.
+ *
+ * The AI report serializes each finding into the EXISTING `photoOverrides[].description` string (so
+ * generateFieldPhotoReport's input contract is untouched) in the shape:
+ *
+ *     Northeast stair tower — third-floor landing
+ *     - Rust bleed below the cap flashing indicates water tracking down the post.
+ *     - Deck boards show gapping that reduces bearing under the unit pads.
+ *
+ * A human-written caption has no bullet markers, so it stays a plain paragraph with NO invented title —
+ * inferring a title from prose would silently promote the first sentence into a heading. Continuation
+ * lines (a wrapped bullet in the source text) are folded back into the bullet they belong to rather than
+ * becoming stray bullets of their own. Exported for unit testing.
+ */
+export function parseFindingText(raw: string): ParsedFinding {
+  const lines = raw.replace(/\r\n?/g, "\n").split("\n").map((line) => line.trim());
+  const isMarker = (line: string) => /^[-•*]\s+/.test(line);
+  const stripMarker = (line: string) => line.replace(/^[-•*]\s+/, "");
+  const bulleted = lines.some(isMarker);
+
+  if (!bulleted) {
+    const bodies = lines.filter(Boolean);
+    return { title: null, bodies, bulleted: false };
+  }
+
+  let title: string | null = null;
+  const bodies: string[] = [];
+  for (const line of lines) {
+    if (!line) continue;
+    if (isMarker(line)) {
+      bodies.push(stripMarker(line));
+      continue;
+    }
+    // A non-marker line BEFORE any bullet is the subject label; after one, it is a wrapped continuation.
+    // Anything else — prose sitting between the label and the first bullet — becomes its own body rather
+    // than being dropped, which silently deleted crew caption text from the PDF.
+    if (bodies.length === 0 && title === null) title = line;
+    else if (bodies.length > 0) bodies[bodies.length - 1] += ` ${line}`;
+    else bodies.push(line);
+  }
+  return { title, bodies, bulleted: true };
+}
+
+/**
+ * Render ONE photo as its own page (or pages) in the findings layout: full-width image, subject caption,
+ * then the findings as bullets. Bullets that don't fit continue on a fresh page WITHOUT repeating the
+ * image; a single bullet taller than a whole page is split by paginateTextByHeight, so no finding text is
+ * ever ellipsised away. One pageMeta entry is pushed per addPage, IN ORDER, so the footer pass — which
+ * indexes pageMeta by page — stays aligned.
+ */
+async function drawFindingsPhotoPages(
+  doc: PDFKit.PDFDocument,
+  fonts: ReportFontSet,
+  photo: ReportRenderSection["photos"][number],
+  header: { reportTitle: string; dateLabel: string; projectName: string; footerLabel: string },
+  pageMeta: PageMeta[],
+) {
+  const startPage = () => {
+    doc.addPage();
+    pageMeta.push({
+      kind: "section",
+      footerLabel: header.footerLabel,
+      projectName: header.projectName,
+      reportTitle: header.reportTitle,
+      dateLabel: header.dateLabel,
+    });
+    drawSectionHeader(doc, fonts, header.reportTitle, header.dateLabel);
+  };
+
+  startPage();
+
+  // --- Photo, fit to the full content width and centred -------------------------------------------
+  const imageBuffer = await loadPhotoBuffer(photo);
+  const opened = imageBuffer ? openImageForLayout(doc, imageBuffer) : null;
+  let imageBottom = FINDINGS_IMAGE_TOP + FINDINGS_IMAGE_MAX_HEIGHT;
+  let drawn = false;
+  if (opened) {
+    const scale = Math.min(CONTENT_WIDTH / opened.displayWidth, FINDINGS_IMAGE_MAX_HEIGHT / opened.displayHeight);
+    const drawWidth = opened.displayWidth * scale;
+    const drawHeight = opened.displayHeight * scale;
+    const left = PAGE_MARGIN + (CONTENT_WIDTH - drawWidth) / 2;
+    try {
+      doc.image(opened.image as unknown as Buffer, left, FINDINGS_IMAGE_TOP, { width: drawWidth, height: drawHeight });
+      doc.roundedRect(left, FINDINGS_IMAGE_TOP, drawWidth, drawHeight, 6).lineWidth(1).strokeColor(BRAND_BORDER).stroke();
+      drawIndexBadge(doc, fonts, left, FINDINGS_IMAGE_TOP, photo.reportIndex);
+      imageBottom = FINDINGS_IMAGE_TOP + drawHeight;
+      drawn = true;
+    } catch {
+      drawn = false;
+    }
+  }
+  if (!drawn) {
+    drawImageUnavailable(doc, fonts, PAGE_MARGIN, FINDINGS_IMAGE_TOP, CONTENT_WIDTH, FINDINGS_IMAGE_MAX_HEIGHT);
+    drawIndexBadge(doc, fonts, PAGE_MARGIN, FINDINGS_IMAGE_TOP, photo.reportIndex);
+  }
+
+  const parsed = parseFindingText(photo.descriptionOverride ?? photo.description ?? "");
+
+  // --- Subject caption ----------------------------------------------------------------------------
+  // Only drawn when there IS a subject label. A photo the assessment passed over carries either the crew's
+  // own caption (which renders as body text below) or nothing at all — inventing a "Photo 7" heading for it
+  // would be exactly the manufactured caption this report is designed not to produce. The index badge on
+  // the image already carries the number.
+  let cursor = imageBottom + FINDINGS_CAPTION_GAP;
+  const caption = parsed.title ? clampText(parsed.title, 160) : "";
+  if (caption) {
+    doc.fillColor(BRAND_BLACK).font(fonts.bold).fontSize(FINDINGS_CAPTION_FONT_SIZE);
+    const captionMaxHeight = 28;
+    const captionHeight = Math.min(
+      doc.heightOfString(caption, { width: CONTENT_WIDTH, lineGap: 1 }),
+      captionMaxHeight,
+    );
+    doc.text(caption, PAGE_MARGIN, cursor, {
+      width: CONTENT_WIDTH,
+      lineGap: 1,
+      height: captionMaxHeight,
+      ellipsis: true,
+    });
+    cursor += captionHeight + FINDINGS_BULLETS_GAP;
+  }
+
+  // --- Findings -----------------------------------------------------------------------------------
+  // Measure with the body font set INSIDE the measurer: drawSectionHeader (on every continuation page)
+  // mutates the current font, so a measurer that trusted ambient state would size against the header font.
+  // Width MUST match the draw call below (bulleted bodies are inset by the glyph gutter); measuring at a
+  // different width silently mis-sizes the fit check that keeps text off the footer.
+  const bodyWidth = parsed.bulleted ? FINDINGS_BULLET_TEXT_WIDTH : CONTENT_WIDTH;
+  const bodyLeft = PAGE_MARGIN + (parsed.bulleted ? FINDINGS_BULLET_INDENT : 0);
+  const measure = (chunk: string) => {
+    doc.font(fonts.regular).fontSize(FINDINGS_BULLET_FONT_SIZE);
+    return doc.heightOfString(chunk, { width: bodyWidth, lineGap: FINDINGS_BULLET_LINE_GAP });
+  };
+  const freshPageHeight = FINDINGS_BODY_BOTTOM - FINDINGS_CONT_BODY_TOP;
+
+  for (const body of parsed.bodies) {
+    if (!body.trim()) continue;
+    for (const [pieceIndex, piece] of paginateTextByHeight(body, freshPageHeight, measure).entries()) {
+      const pieceHeight = measure(piece);
+      if (cursor + pieceHeight > FINDINGS_BODY_BOTTOM) {
+        startPage();
+        cursor = FINDINGS_CONT_BODY_TOP;
+      }
+      if (parsed.bulleted && pieceIndex === 0) {
+        doc.fillColor(BRAND_RED).font(fonts.bold).fontSize(FINDINGS_BULLET_FONT_SIZE);
+        doc.text("•", PAGE_MARGIN + 4, cursor, { width: 10, lineBreak: false, height: 14 });
+      }
+      doc.fillColor(BRAND_BLACK).font(fonts.regular).fontSize(FINDINGS_BULLET_FONT_SIZE);
+      // Hard height cap so pdfkit can NEVER auto-create a page outside the pageMeta accounting (which
+      // would desync every following footer). The fit check above already guarantees it, so this is a
+      // backstop that truncates nothing in practice.
+      doc.text(piece, bodyLeft, cursor, {
+        width: bodyWidth,
+        lineGap: FINDINGS_BULLET_LINE_GAP,
+        height: FINDINGS_BODY_BOTTOM - cursor,
+      });
+      cursor += pieceHeight + FINDINGS_BULLET_SPACING;
+    }
+  }
+}
+
 function fallbackReportFonts(): ReportFontSet {
   return {
     regular: "Helvetica",
@@ -497,11 +687,20 @@ function registerReportFonts(doc: PDFKit.PDFDocument): ReportFontSet {
   }
 }
 
+/**
+ * How per-photo entries are laid out.
+ * - `grid` (default): three photos per page with a compact side caption — the human photo-report look.
+ * - `findings`: one photo per page with a subject caption and bulleted findings below — the AI condition
+ *   assessment look. Callers that omit this keep byte-identical output to before the option existed.
+ */
+export type ReportPhotoLayout = "grid" | "findings";
+
 export async function renderFieldPhotoReportPdf(input: {
   cover: ReportCoverData;
   sections: ReportRenderSection[];
   /** Optional free-form executive summary; rendered on its own page(s) right after the cover. */
   executiveSummary?: string | null;
+  photoLayout?: ReportPhotoLayout;
 }): Promise<Buffer> {
   const doc = new PDFDocument({
     autoFirstPage: true,
@@ -582,6 +781,7 @@ export async function renderFieldPhotoReportPdf(input: {
   // A full-page section divider only earns its place when there's MORE THAN ONE section to separate; a
   // single-section report goes straight from the cover to the photos (no near-blank divider page).
   const useSectionDividers = input.sections.length > 1;
+  const photoLayout: ReportPhotoLayout = input.photoLayout ?? "grid";
   let sectionIndex = 0;
   for (const section of input.sections) {
     sectionIndex += 1;
@@ -596,6 +796,27 @@ export async function renderFieldPhotoReportPdf(input: {
         dateLabel: input.cover.reportDateLabel,
       });
       drawSectionTitlePage(doc, reportFonts, input.cover.reportTitle, input.cover.reportDateLabel, section.title);
+    }
+
+    // The findings layout gives every photo its own page, so it drives its own page/pageMeta loop rather
+    // than the 3-per-page chunking. It also skips the compact section title: that band (y=50..63) would
+    // collide with the full-width image at y=62, and the executive summary already introduces the findings.
+    if (photoLayout === "findings") {
+      for (const photo of section.photos) {
+        await drawFindingsPhotoPages(
+          doc,
+          reportFonts,
+          photo,
+          {
+            reportTitle: input.cover.reportTitle,
+            dateLabel: input.cover.reportDateLabel,
+            projectName: input.cover.projectName,
+            footerLabel: `Section ${sectionIndex}`,
+          },
+          pageMeta,
+        );
+      }
+      continue;
     }
 
     // R1: a single-section report skips the full-page divider, so the user's custom section title would be
@@ -625,6 +846,17 @@ export async function renderFieldPhotoReportPdf(input: {
   }
 
   const range = doc.bufferedPageRange();
+  // Page accounting invariant. Footers are drawn by indexing pageMeta BY PAGE, and a page with no entry is
+  // silently skipped — so a layout that calls addPage() without pushing its meta produces a document whose
+  // footers are missing or, worse, shifted onto the wrong pages from that point on. That is invisible to a
+  // page-count assertion, so it is checked here instead of hoped for. Logged rather than thrown: a footer
+  // problem must not cost the user their report, but it must never pass a test run unnoticed.
+  if (pageMeta.length !== range.count) {
+    console.error("[field-report-pdf] page accounting desync — footers will be wrong", {
+      pageMetaEntries: pageMeta.length,
+      pages: range.count,
+    });
+  }
   for (let pageIndex = 0; pageIndex < range.count; pageIndex += 1) {
     doc.switchToPage(pageIndex);
     const meta = pageMeta[pageIndex];

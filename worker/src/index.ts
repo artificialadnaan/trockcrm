@@ -3,7 +3,7 @@ dotenv.config();
 
 import http from "http";
 import { startListener } from "./listener.js";
-import { pollBidBoardIngestJobs, pollJobs, recoverStaleJobs } from "./queue.js";
+import { pollAiReportJobs, pollBidBoardIngestJobs, pollJobs, recoverStaleJobs } from "./queue.js";
 import { registerAllJobs } from "./jobs/index.js";
 import cron from "node-cron";
 import { runStaleDealScan } from "./jobs/stale-deals.js";
@@ -72,6 +72,11 @@ async function main() {
   // jobs. pollJobs excludes bid_board_ingest; this poller claims only that type (one at a time).
   setInterval(pollBidBoardIngestJobs, POLL_INTERVAL_MS);
   console.log(`[Worker] Polling bid_board_ingest queue every ${POLL_INTERVAL_MS}ms (dedicated)`);
+
+  // Same treatment for the AI photo report: a Claude vision pass over up to 60 photographs runs 30-90s
+  // (minutes on retries) and would otherwise hold the main poller's guard for its whole run.
+  setInterval(pollAiReportJobs, POLL_INTERVAL_MS);
+  console.log(`[Worker] Polling ai_report_generation queue every ${POLL_INTERVAL_MS}ms (dedicated)`);
 
   setInterval(async () => {
     try {
