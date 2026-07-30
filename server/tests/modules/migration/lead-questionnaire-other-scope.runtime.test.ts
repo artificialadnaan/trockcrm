@@ -39,6 +39,14 @@ beforeAll(async () => {
       group_order integer
     );
   `);
+  // THE INDEX MATTERS. 0082 created this, it covers INACTIVE rows, and omitting it from this fixture is what
+  // let a migration through that aborts on any database where either key already exists under another UUID.
+  // Same shape of mistake as the 0202 P0: model the table, miss the constraint, ship a migration that cannot
+  // apply. Copied verbatim from `pg_indexes` in production.
+  await db.exec(`
+    CREATE UNIQUE INDEX project_type_question_nodes_universal_key_uidx
+      ON public.project_type_question_nodes USING btree (key) WHERE (project_type_id IS NULL);
+  `);
   // An existing scope group, so ordering and uniqueness are exercised against real neighbours.
   await db.exec(`
     INSERT INTO public.project_type_question_nodes
@@ -135,19 +143,59 @@ describe("migration 0208 — the Other scope", () => {
     expect(rows).toHaveLength(2);
   });
 
-  it("deactivates a stray same-key node so the grid cannot show two Other cards", async () => {
-    // A partial earlier run, or a hand-seeded row, would otherwise leave a second card that looks identical
-    // and writes to the same answer key.
-    await db.exec(`
-      INSERT INTO public.project_type_question_nodes
-        (key, label, input_type, is_required, display_order, section_key, group_key, group_label, group_order)
-      VALUES ('other_applies','Stray duplicate','boolean',false,0,'scope','other','Other',11);
-    `);
-    await db.exec(MIGRATION_SQL);
+  it("APPLIES over rows that already exist under a different UUID", async () => {
+    // The state this migration exists to tolerate: a partial earlier run, or hand-seeded nodes. Because the
+    // universal-key index is UNIQUE and covers inactive rows, an insert keyed on `id` raises a unique
+    // violation and aborts the whole migration before any cleanup can run. Arbitrating on the key makes it
+    // total — and the pre-existing row keeps its own id, which is why the description's parent is resolved
+    // from RETURNING rather than hard-coded.
+    const fresh = new PGlite();
+    try {
+      await fresh.exec(`
+        CREATE TABLE public.project_type_question_nodes (
+          id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+          project_type_id uuid, parent_node_id uuid, parent_option_value varchar,
+          node_type varchar NOT NULL DEFAULT 'question', key varchar NOT NULL, label varchar NOT NULL,
+          prompt text, input_type varchar, options jsonb NOT NULL DEFAULT '[]'::jsonb,
+          is_required boolean NOT NULL DEFAULT false, display_order integer NOT NULL DEFAULT 0,
+          is_active boolean NOT NULL DEFAULT true,
+          created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
+          section_key text, group_key text, group_label text, group_order integer
+        );
+        CREATE UNIQUE INDEX project_type_question_nodes_universal_key_uidx
+          ON public.project_type_question_nodes USING btree (key) WHERE (project_type_id IS NULL);
+      `);
+      // Pre-existing rows: different ids, and INACTIVE — which the index still covers.
+      await fresh.exec(`
+        INSERT INTO public.project_type_question_nodes
+          (id, key, label, input_type, is_active, section_key, group_key, group_label, group_order)
+        VALUES
+          ('11111111-1111-1111-1111-111111111111','other_applies','Stale label','boolean',false,'scope','other','Other',99),
+          ('22222222-2222-2222-2222-222222222222','other_scope_description','Stale desc','text',false,'scope','other','Other',99);
+      `);
 
-    const rows = await otherNodes();
-    expect(rows).toHaveLength(2);
-    expect(rows.map((r) => r.label)).not.toContain("Stray duplicate");
+      await expect(fresh.exec(MIGRATION_SQL)).resolves.toBeDefined();
+
+      const { rows } = await fresh.query<{
+        id: string; key: string; label: string; is_active: boolean;
+        parent_node_id: string | null; group_order: number;
+      }>(
+        `SELECT id, key, label, is_active, parent_node_id, group_order
+           FROM public.project_type_question_nodes WHERE group_key='other' ORDER BY display_order`,
+      );
+      // One row per key — no duplicates, and the originals were reused, not replaced.
+      expect(rows).toHaveLength(2);
+      expect(rows[0].id).toBe("11111111-1111-1111-1111-111111111111");
+      expect(rows[1].id).toBe("22222222-2222-2222-2222-222222222222");
+      // Reactivated, relabelled, reordered...
+      expect(rows.every((r) => r.is_active)).toBe(true);
+      expect(rows[0].label).toBe("Does another scope apply?");
+      expect(rows[0].group_order).toBe(11);
+      // ...and the description parents to the EXISTING applies-node, not the hard-coded literal.
+      expect(rows[1].parent_node_id).toBe("11111111-1111-1111-1111-111111111111");
+    } finally {
+      await fresh.close();
+    }
   });
 
   it("leaves the existing scopes untouched", async () => {

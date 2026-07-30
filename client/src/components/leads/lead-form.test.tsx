@@ -339,6 +339,8 @@ function universalCreateQuestionnaireNodes(): LeadQuestionnaireNode[] {
     ["corridors", "Corridors"],
     ["exterior_amenities", "Exterior Amenities"],
     ["interior_amenities", "Interior Amenities"],
+    // Migration 0208. Mirrors the seed exactly, including the description parented to the applies-node.
+    ["other", "Other"],
   ] as const;
 
   const nodes: LeadQuestionnaireNode[] = [
@@ -388,6 +390,23 @@ function universalCreateQuestionnaireNodes(): LeadQuestionnaireNode[] {
       })
     );
   }
+
+  nodes.push(
+    makeQuestionNode({
+      id: "other-scope-description",
+      key: "other_scope_description",
+      label: "Describe the scope",
+      inputType: "textarea",
+      isRequired: true,
+      displayOrder: 1,
+      sectionKey: "scope",
+      groupKey: "other",
+      groupLabel: "Other",
+      groupOrder: 11,
+      parentNodeId: "other-applies",
+      parentOptionValue: "true",
+    })
+  );
 
   nodes.push(
     makeQuestionNode({
@@ -1496,13 +1515,33 @@ describe("LeadForm", () => {
     expect(container.textContent).not.toContain("Select at least one scope.");
   });
 
-  it("renders scope groups as ten selectable cards and activates a scope panel on click", async () => {
+  it("refuses to create an Other-only lead with no description", async () => {
+    // Seeding the description `is_required: true` does NOT achieve this. getQuestionnaireTemplateSnapshot
+    // returns every create-mode node with `isRequired: false`, so the required-question sweep never sees it —
+    // true of every scope question. Elsewhere that only costs detail; here an empty answer records that the
+    // lead resembles nothing we bid and nothing about what it actually is, which is the whole point of the
+    // card. Hence an explicit check, mirroring site_access === "Other".
+    mockUniversalCreateQuestionnaire();
+    renderCreateForm();
+
+    await clickButton(container.querySelector<HTMLButtonElement>('[data-scope-card="other"]')!);
+    // Selecting it satisfies "at least one scope" — the button enables, which is exactly the trap.
+    expect(findButton("Create Lead")?.disabled).toBe(false);
+
+    await clickButton(findButton("Create Lead")!);
+
+    expect(container.textContent).toContain("Describe the scope when Other is selected.");
+    expect(leadHookMocks.createLead).not.toHaveBeenCalled();
+  });
+
+  it("renders scope groups as eleven selectable cards and activates a scope panel on click", async () => {
     mockUniversalCreateQuestionnaire();
 
     renderCreateForm();
 
     const scopeCards = container.querySelectorAll("[data-scope-card]");
-    expect(scopeCards).toHaveLength(10);
+    // Eleven since 0208 added Other.
+    expect(scopeCards).toHaveLength(11);
     expect(container.textContent).toContain("Roofing");
     expect(container.textContent).not.toContain("Roof Type");
 
