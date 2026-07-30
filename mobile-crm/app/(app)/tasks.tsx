@@ -14,6 +14,7 @@ import { RetryNotice } from "../../src/components/RetryNotice";
 import { resolveDealDisplayNumber } from "../../src/deal-display-number";
 import { formatDate } from "../../src/format";
 import { useGoBack } from "../../src/lib/go-back";
+import { shouldLoadNextPage } from "../../src/paging";
 import { qk } from "../../src/query/keys";
 import { theme } from "../../src/theme/theme";
 
@@ -124,11 +125,18 @@ export default function TasksScreen() {
           data={tasks}
           onEndReachedThreshold={0.5}
           onEndReached={() => {
-            if (query.hasNextPage && !query.isFetchingNextPage) void query.fetchNextPage();
+            if (shouldLoadNextPage(query)) void query.fetchNextPage();
           }}
           ListFooterComponent={
             query.isFetchingNextPage ? (
               <ActivityIndicator color={theme.color.brandRed} style={styles.more} />
+            ) : query.isFetchNextPageError ? (
+              <RetryNotice
+                testID="tasks-more-failed"
+                placement="bottom"
+                message="Couldn't load more. Tap to try again."
+                onRetry={() => void query.fetchNextPage()}
+              />
             ) : null
           }
           keyExtractor={(t) => t.id}
