@@ -851,6 +851,86 @@ function executedSql(tenantDb: { execute: { mock: { calls: unknown[][] } } }): s
     }
   });
 
+  it("rejects a LEGACY update that persists a descriptionless Other payload", async () => {
+    // With ENABLE_LEAD_EDIT_V2 off there is no leadQuestionAnswers write at all — the answers ride in
+    // projectTypeQuestionPayload, which the v2 guard never inspects. So the one path that actually stores
+    // answers in legacy mode was the one path with no Other check, and an owner could patch a valid Other
+    // lead into a descriptionless one.
+    const previousFlag = process.env.ENABLE_LEAD_EDIT_V2;
+    delete process.env.ENABLE_LEAD_EDIT_V2;
+    try {
+      const tenantDb = createFakeTenantDb({
+        id: "lead-1",
+        officeId: "office-1",
+        officeCode: "dfw",
+        projectTypeId: "project-type-commercial",
+        isActive: true,
+        updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+      } as FakeLeadRow);
+      const service = createLeadService({
+        getStageById: pipelineMocks.getStageById as never,
+        getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+        now: () => new Date("2026-04-15T15:00:00.000Z"),
+      });
+
+      await expect(
+        service.updateLead(
+          tenantDb as never,
+          "lead-1",
+          {
+            projectTypeQuestionPayload: {
+              projectTypeId: "project-type-commercial",
+              answers: { other_applies: true, other_scope_description: "   " },
+            },
+          } as never,
+          "director",
+          "director-1"
+        )
+      ).rejects.toMatchObject({ statusCode: 400, code: "LEAD_OTHER_SCOPE_DESCRIPTION_REQUIRED" });
+    } finally {
+      if (previousFlag === undefined) delete process.env.ENABLE_LEAD_EDIT_V2;
+      else process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
+    }
+  });
+
+  it("allows a LEGACY update that supplies the Other description", async () => {
+    const previousFlag = process.env.ENABLE_LEAD_EDIT_V2;
+    delete process.env.ENABLE_LEAD_EDIT_V2;
+    try {
+      const tenantDb = createFakeTenantDb({
+        id: "lead-1",
+        officeId: "office-1",
+        officeCode: "dfw",
+        projectTypeId: "project-type-commercial",
+        isActive: true,
+        updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+      } as FakeLeadRow);
+      const service = createLeadService({
+        getStageById: pipelineMocks.getStageById as never,
+        getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+        now: () => new Date("2026-04-15T15:00:00.000Z"),
+      });
+
+      await expect(
+        service.updateLead(
+          tenantDb as never,
+          "lead-1",
+          {
+            projectTypeQuestionPayload: {
+              projectTypeId: "project-type-commercial",
+              answers: { other_applies: true, other_scope_description: "Fire lane restriping" },
+            },
+          } as never,
+          "director",
+          "director-1"
+        )
+      ).resolves.toBeTruthy();
+    } finally {
+      if (previousFlag === undefined) delete process.env.ENABLE_LEAD_EDIT_V2;
+      else process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
+    }
+  });
+
   it("LOCKS the lead row before validating merged Other answers", async () => {
     // Reading stored answers and merging the patch is not atomic on its own: from `other_applies:false` with
     // a description, one request setting applies=true and another clearing the text each validate a snapshot

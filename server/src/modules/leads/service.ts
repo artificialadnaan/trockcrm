@@ -979,8 +979,15 @@ async function assertOtherScopeDescribedOnUpdate(
   await tenantDb.execute(sql`SELECT id FROM leads WHERE id = ${leadId} FOR UPDATE`);
 
   const stored = await listLeadQuestionAnswers(tenantDb, leadId);
-  const merged = { ...stored, ...incoming } as Record<string, unknown>;
-  if (isOtherScopeMissingDescription(merged)) {
+  assertOtherScopeDescribed({ ...stored, ...incoming } as Record<string, unknown>);
+}
+
+/**
+ * The one place the Other-scope rejection is raised on UPDATE, so the v2 and legacy paths cannot drift into
+ * different status codes or messages for the same invalid state.
+ */
+function assertOtherScopeDescribed(answers: Record<string, unknown>): void {
+  if (isOtherScopeMissingDescription(answers)) {
     throw new AppError(
       400,
       "Describe the scope when Other is selected.",
@@ -2034,10 +2041,21 @@ export function createLeadService(
       updates.qualificationPayload = normalizeQualificationPayload(input.qualificationPayload);
     }
     if (!v2Enabled && (input.projectTypeQuestionPayload !== undefined || input.projectTypeId !== undefined)) {
-      updates.projectTypeQuestionPayload = normalizeProjectTypeQuestionPayload(
+      const legacyPayload = normalizeProjectTypeQuestionPayload(
         effectiveProjectTypeId ?? null,
         input.projectTypeQuestionPayload
       );
+      // The LEGACY update path writes answers too, and the v2 guard above never sees them — it is gated on
+      // `v2Enabled && input.leadQuestionAnswers`. Without this, an owner patching projectTypeQuestionPayload
+      // with `other_applies: true` and a blank description turns a valid Other lead descriptionless.
+      //
+      // No stored-answer merge and no row lock here, unlike the v2 guard: this write REPLACES the payload
+      // outright rather than patching keys into it, so the post-write answers are fully determined by the
+      // request and there is no snapshot for a concurrent update to invalidate.
+      assertOtherScopeDescribed(
+        (legacyPayload?.answers ?? {}) as Record<string, unknown>
+      );
+      updates.projectTypeQuestionPayload = legacyPayload;
     }
 
     const bidDueDateWasProvided = input.bidDueDate !== undefined;
