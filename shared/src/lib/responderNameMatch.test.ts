@@ -732,3 +732,103 @@ describe("review findings", () => {
     expect(nameEditDistance("bell", "bell")).toBe(0);
   });
 });
+
+// ── Second review round: eight findings, all reproduced before fixing ──────────────────────────────────
+// Five were wrong-recipient defects. They cluster on one theme: each of my earlier fixes was correct in
+// isolation and wrong in combination with another — role preference vs confidence ranking, the bare-token
+// rule vs confidence ranking, the comma rule vs a mixed list, the active filter vs an exact inactive hit.
+describe("second review round", () => {
+  const R = (id: string, name: string, role: string, isActive = true) => ({ id, name, role, isActive });
+  const go = (text: string, role: string, roster: ReturnType<typeof R>[]) =>
+    matchFieldResponders({ text, role, roster });
+  const names = (r: { matches: Array<{ responder: { name: string } }> }) =>
+    r.matches.map((m) => m.responder.name);
+
+  it("ranks CONFIDENCE before role — role only breaks an equal-confidence tie", () => {
+    // Filtering to the queried role first discarded a stronger identification: the exact PM was thrown away
+    // in favour of a HIGH in-role partial. Role cannot outrank evidence when the premise of this whole
+    // matcher is that the field's role is unreliable.
+    const roster = [R("pm", "Robert Bell", "project_manager"), R("sup", "Robert Allen Bell", "superintendent")];
+    const r = go("Robert Bell", "superintendent", roster);
+    expect(names(r)).toEqual(["Robert Bell"]);
+    expect(r.matches[0].confidence).toBe("exact");
+    expect(r.matches[0].roleMatchesQuery).toBe(false);
+  });
+
+  it("still lets role break a tie at EQUAL confidence", () => {
+    const roster = [R("pm", "Brett Bell", "project_manager"), R("sup", "Brett Bell", "superintendent")];
+    expect(go("Brett Bell", "superintendent", roster).matches[0].responder.id).toBe("sup");
+    expect(go("Brett Bell", "project_manager", roster).matches[0].responder.id).toBe("pm");
+  });
+
+  it("keeps a BARE token ambiguous whenever more than one person scores, whatever the confidence", () => {
+    // Retaining all candidates was not enough: the confidence ranking still picked one outright, so a bare
+    // "Nick" resolved to a PM mononym on exact-beats-high while superintendent Nick Reyes matched too. With
+    // one token there is no second token to arbitrate, so any contest is ambiguous.
+    const roster = [R("mono", "Nick", "project_manager"), R("reyes", "Nick Reyes", "superintendent")];
+    const r = go("Nick", "superintendent", roster);
+    expect(r.matches).toEqual([]);
+    expect(r.ambiguous[0].candidates.map((c) => c.id).sort()).toEqual(["mono", "reyes"]);
+  });
+
+  it("does not reinterpret single-token comma pieces because a LATER piece has a full name", () => {
+    // The global any-multi-token test split every piece of "Bell, Robert, Adam Sherwood", so the
+    // surname-first "Bell, Robert" became two wrong recipients again. Pairing is decided pairwise.
+    const roster = [
+      R("bbell", "Brett Bell", "superintendent"),
+      R("rsampley", "Robert Sampley", "superintendent"),
+      R("asherwood", "Adam Sherwood", "project_manager"),
+    ];
+    const r = go("Bell, Robert, Adam Sherwood", "superintendent", roster);
+    expect(names(r)).toEqual(["Adam Sherwood"]);
+    expect(r.unmatched).toEqual(["Bell Robert"]);
+  });
+
+  it("lets an EXACT inactive hit block a weaker active alternative", () => {
+    // Filtering inactive rows out before scoring turned an exact identification of a former employee into a
+    // fuzzy match for a different, current one — who would have received someone else's corrective action.
+    const roster = [R("old", "John Smith", "superintendent", false), R("new", "John Smyth", "superintendent")];
+    const r = go("John Smith", "superintendent", roster);
+    expect(r.matches).toEqual([]);
+    expect(r.unmatched).toEqual(["John Smith"]);
+    // An equally exact ACTIVE match still wins — blocking is only about weaker alternatives.
+    const both = [...roster, R("exact", "John Smith", "project_manager")];
+    expect(names(go("John Smith", "superintendent", both))).toEqual(["John Smith"]);
+  });
+
+  it("reports matchedText and unmatched VERBATIM, annotations included", () => {
+    // The contract says verbatim, and a human triaging a backfill has to see the text that drove the
+    // decision. Reporting the noise-stripped copy hid the annotation entirely.
+    const roster = [R("bbell", "Brett Bell", "superintendent"), R("asherwood", "Adam Sherwood", "project_manager")];
+    expect(go("Mr. Brett Bell", "superintendent", roster).matches[0].matchedText).toBe("Mr. Brett Bell");
+    expect(go("Adam Sherwood (PM)", "project_manager", roster).matches[0].matchedText).toBe("Adam Sherwood (PM)");
+    expect(go("Addy (PM)", "project_manager", roster).unmatched).toEqual(["Addy (PM)"]);
+  });
+
+  it("upgrades a duplicated recipient to its STRONGEST confidence, whatever the word order", () => {
+    // "Brett/Brett Bell" returned high and "Brett Bell/Brett" returned exact, so a caller gating auto-send
+    // on the full-name tier accepted or rejected the same field purely on segment order.
+    const roster = [R("bbell", "Brett Bell", "superintendent")];
+    for (const text of ["Brett/Brett Bell", "Brett Bell/Brett"]) {
+      const r = go(text, "superintendent", roster);
+      expect(names(r)).toEqual(["Brett Bell"]);
+      expect(r.matches[0].confidence).toBe("exact");
+    }
+  });
+
+  it("matches a punctuationless spelling of a hyphenated or apostrophised name", () => {
+    // The contract claims punctuation-insensitivity, but turning every punctuation run into a boundary meant
+    // the joined spelling could account for neither half and the real person went unmatched.
+    expect(names(go("MaryJane Smith", "superintendent", [R("mj", "Mary-Jane Smith", "superintendent")])))
+      .toEqual(["Mary-Jane Smith"]);
+    expect(names(go("Mary Jane Smith", "superintendent", [R("mj", "Mary-Jane Smith", "superintendent")])))
+      .toEqual(["Mary-Jane Smith"]);
+    expect(names(go("John ONeil", "superintendent", [R("on", "John O'Neil", "superintendent")])))
+      .toEqual(["John O'Neil"]);
+    expect(names(go("John O'Neil", "superintendent", [R("on", "John O'Neil", "superintendent")])))
+      .toEqual(["John O'Neil"]);
+    // Adjacent parts only — joining must not staple together unrelated ones.
+    expect(go("SmithMary Jane", "superintendent", [R("mj", "Mary-Jane Smith", "superintendent")]).matches)
+      .toEqual([]);
+  });
+});

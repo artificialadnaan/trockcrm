@@ -56,7 +56,7 @@ There is no `if (bareFirstName)` branch. That single rule subsumes the special c
 
 - A bare first name is "one token, so it must be exactly right" — which is what makes `"Brett"` safe.
 - An **unaccounted token is evidence against a match**, not neutral — which is what makes
-  `"Nick Cheaham"` resolve to nobody instead of to Nick Reyes. This is the whole distinction between
+  `"Nick Cheaham"` reach Nick Cheatam and never Nick Reyes. This is the whole distinction between
   the two, and §6 works it through.
 
 ## 3. Confidence tiers and what a caller must do with each
@@ -78,12 +78,28 @@ populated *alongside* `ambiguous`/`unmatched`.
 > shape (`"Brett Bell/Derek Barr"`). Today's corpus happens to have zero partial rows (§5), but the
 > next card typed can create one.
 
-Role scoping is absolute, and both halves are safety rules rather than filters:
+**Role is a PREFERENCE, not a filter.** Which of the two name fields someone was typed into is not reliable
+evidence of the role they hold — Adnaan confirmed that `"Nick Cheaham"`, sitting in a card's *superintendent*
+field, is Nick Cheatam, a **project manager**. Filtering candidates by role made that unresolvable and the
+card reached nobody.
 
-1. A `project_manager` can **never** be returned from a `superintendent` query, however well the name
-   matches. This is what forces `"Nick Cheaham"` to nobody.
-2. `is_active = false` is never a candidate. A deactivated person must not be emailed a corrective
-   action; the roster row survives only so historical picks still render.
+1. The whole active roster is searched. Confidence is ranked **first**; role breaks only an
+   equal-confidence tie. Every match carries `roleMatchesQuery`.
+2. **`is_active = false` is never returned** — but inactive rows are still *scored*, because an EXACT hit on
+   a deactivated person is a positive identification that must block a weaker active alternative. With
+   inactive `John Smith` and active `John Smyth`, filtering the inactive row out early turned an exact
+   identification of a former employee into a fuzzy match for a different, current one.
+
+> ### Caller obligation — read this before writing anything
+> When `roleMatchesQuery` is `false`, the **person is right and the slot is wrong**. Write them to the
+> responder column for `responder.role`, *not* for the role you queried. `recipientResolutionSql` joins
+> `fr.role = '<role>' AND fr.id = sc.<role>_responder_id`, so a PM's id in `superintendent_responder_id`
+> resolves to nobody — the same silent dead end this matcher exists to remove, one step further along.
+
+Removing the role filter costs no safety, and it is worth being precise about why: the **every-token rule**
+protects identity, not the role filter. `cheaham`/`cheatam` is distance 1, while `cheaham` against
+superintendent Nick **Reyes** is far outside every threshold in either direction — so the wrong-Nick outcome
+the filter was credited with preventing was never reachable by the rule itself.
 
 ## 4. Thresholds and why each sits exactly there
 
@@ -145,7 +161,7 @@ Reproduce with `node <scratchpad>/resolve-corpus.mjs` — it hardcodes the roste
 | Chris Higingbotham          | superintendent  | 1     | Chris Higingbotham <chigingbotham@trockgc.com>                        | exact        | —         | —            |
 | Corey mcshane               | superintendent  | 1     | Corey McShane <cmcshane@trockgc.com>                                  | exact        | —         | —            |
 | Kevin posey                 | superintendent  | 1     | Kevin Posey <kposey@trockgc.com>                                      | exact        | —         | —            |
-| Nick Cheaham                | superintendent  | 1     | —                                                                     | —            | —         | Nick Cheaham |
+| Nick Cheaham                | superintendent  | 1     | Nick Cheatam <ncheatam@trockgc.com>                                   | high         | —         | —            |
 | Nick Reyes                  | superintendent  | 1     | Nick Reyes <nreyes@trockgc.com>                                       | exact        | —         | —            |
 | Adam Sherwood               | project_manager | 6     | Adam Sherwood <asherwood@trockgc.com>                                 | exact        | —         | —            |
 | Nick Cheatham               | project_manager | 3     | Nick Cheatam <ncheatam@trockgc.com>                                   | high         | —         | —            |
@@ -160,9 +176,9 @@ Reproduce with `node <scratchpad>/resolve-corpus.mjs` — it hardcodes the roste
 
 ```
 distinct values: 23   card-slots: 38
-fully resolved:      29 card-slots
+fully resolved:      30 card-slots
 partially resolved:  0 card-slots
-resolved to nobody:  9 card-slots
+resolved to nobody:  8 card-slots
 
 recipients this yields (distinct people, superintendent + PM):
   ncheatam@trockgc.com             8 card-slot(s)
@@ -176,7 +192,7 @@ recipients this yields (distinct people, superintendent + PM):
   nreyes@trockgc.com               1 card-slot(s)
 ```
 
-**29 of 38 slots resolve, from 3 today.** Zero rows are ambiguous and zero are partial, so on today's
+**30 of 38 slots resolve, from 3 today.** Zero rows are ambiguous and zero are partial, so on today's
 corpus every row is cleanly either a confident set of people or nobody — nothing needs a human tiebreak.
 The nine misses are itemised below and **eight of the nine are correct refusals**, not coverage gaps.
 
@@ -188,7 +204,6 @@ before this, had **never** been resolvable — zero PM picks exist office-wide.
 | input | role | why it must not resolve |
 | --- | --- | --- |
 | `Adnaan Iqbal` (3) | superintendent | On the roster but **INACTIVE**. A deactivated person must not be emailed a corrective action. Excluded before scoring, so it lands in `unmatched` |
-| `Nick Cheaham` (1) | superintendent | **The critical case.** Nick Cheatam is a `project_manager`, so role scoping excludes him. The only Nick among superintendents is Nick **Reyes**. Any matcher that falls back to "unique first name in role" emails Reyes somebody else's corrective action. `Cheaham` matches no superintendent surname, and that unaccounted surname is evidence *against* the first-name match — precisely what distinguishes this from `"Brett/robert sampley"`, where the bare `Brett` carries no surname arguing otherwise. Almost certainly the PM's name typed into the superintendent field; that card's real superintendent is unknown and cannot be inferred |
 | `Addy` (1) | project_manager | Must not become Adam Sherwood. 4 chars is below the fuzzy floor, so exact-only. Ratio-based matchers accept this (`Adam`/`Addy` = distance 2 over 4 chars ≈ 0.5) — that is why the ladder is absolute. **Worth noting: `Addy` reads as Adnaan's own nickname, not a shortening of Adam**, which would make an Adam Sherwood match not merely unsafe but wrong. Adnaan can confirm; either way it stays unresolved |
 | `Derek Barr` (1) | project_manager | Real person, real CRM user, **not on the PM roster.** A roster gap, not a matching failure — see §7 |
 | `James helms` (1) | project_manager | Same |
@@ -219,8 +234,10 @@ label the reason for display. Worth doing if the QC dashboard ever shows these t
 1. **Two PMs are missing from the roster.** Derek Barr and James Helms are real CRM users typed into
    `pm_name` who hold no `field_responders` row. Until added they are structurally unreachable — no
    matcher can fix that. One roster insert each.
-2. **One card's superintendent is genuinely unknown** (the `Nick Cheaham` card). Needs a human to read
-   the card, not a looser threshold.
+2. **One card names a PM in its superintendent field** (the `Nick Cheaham` card). It now resolves to Nick
+   Cheatam with `roleMatchesQuery: false`, so the backfill must write him to `pm_responder_id`. That card's
+   *superintendent* remains genuinely unknown and cannot be inferred — it needs a human to read the card, not
+   a looser threshold.
 3. **QC-F stands.** This is a *fallback for existing text*, not a fix for the empty pick rate. New cards
    should still push submitters toward picking, or the free-text corpus keeps growing.
 
