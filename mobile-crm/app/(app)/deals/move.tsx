@@ -519,6 +519,30 @@ export default function MoveStageScreen() {
                 * `display="compact"` on iOS renders as a tappable field that opens the system
                 * calendar, so there is no second modal to manage and no state for whether it is open.
                 */}
+              {/**
+                * NOTHING IS PRE-SELECTED, and that is the fix.
+                *
+                * A compact iOS picker always draws a concrete date, so seeding it from `today` made the
+                * field SHOW a valid date while `expectedCloseDate` was still empty — accepting or
+                * dismissing produced no change event, so Confirm stayed disabled next to a field that
+                * looked answered. The screen and the button disagreed about whether a date existed.
+                *
+                * Resolved by not displaying one until there is one. Seeding the state instead would
+                * have agreed at the cost of filing a forecast the rep never chose, and "today" is
+                * almost never a real expected close date — a wrong forecast that passes the gate is
+                * worse than a disabled button that explains itself.
+                */}
+              {expectedCloseDate === "" ? (
+                <Pressable
+                  testID="choose-close-date"
+                  onPress={() => setExpectedCloseDate(today)}
+                  accessibilityRole="button"
+                  accessibilityLabel="Pick an exact close date"
+                  style={styles.chooseDate}
+                >
+                  <Text style={styles.chooseDateText}>Pick an exact date</Text>
+                </Pressable>
+              ) : (
               <View style={styles.pickerRow}>
                 <DateTimePicker
                   testID="expected-close-date"
@@ -546,6 +570,7 @@ export default function MoveStageScreen() {
                   </Pressable>
                 ) : null}
               </View>
+              )}
             </>
           ) : null}
 
@@ -797,6 +822,16 @@ const styles = StyleSheet.create({
   blockBody: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary },
   missingWrap: { marginTop: theme.space.sm, gap: 2 },
   missingItem: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textSecondary },
+  chooseDate: {
+    minHeight: 44,
+    justifyContent: "center",
+    alignSelf: "flex-start",
+    paddingHorizontal: theme.space.md,
+    borderRadius: theme.radius.md,
+    borderWidth: 1,
+    borderColor: theme.color.borderControl,
+  },
+  chooseDateText: { ...theme.type.label, color: theme.color.textPrimary },
   pickerRow: { flexDirection: "row", alignItems: "center", gap: theme.space.md },
   clearDate: { minHeight: 44, justifyContent: "center", paddingHorizontal: theme.space.sm },
   clearDateText: { ...theme.type.label, color: theme.color.redText },
