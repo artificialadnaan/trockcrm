@@ -82,6 +82,7 @@ const CARD_ARG = (() => {
 
 interface CandidateRow {
   id: string;
+  status: string;
   deal_id: string;
   deal_number: string | null;
   deal_name: string | null;
@@ -156,7 +157,10 @@ async function main() {
   for (const { nspname: officeSchema } of schemas) {
     const slug = officeSchema.replace(/^office_/, "");
     const officeRow = await pool.query<{ id: string }>(
-      `SELECT id FROM public.offices WHERE slug = $1 LIMIT 1`,
+      // is_active — the field routes fan out only across ACTIVE offices (cross-office.ts), so a card in a
+      // deactivated office would get emails whose recipients cannot resolve the owning office and whose
+      // response links 404.
+      `SELECT id FROM public.offices WHERE slug = $1 AND is_active = true LIMIT 1`,
       [slug],
     );
     if (officeRow.rowCount === 0) continue;
@@ -181,135 +185,151 @@ async function main() {
     for (const card of scoped) {
       console.log(fmt(card));
 
-      if (card.existing_actions > 0) {
-        console.log(`   SKIP — already has ${card.existing_actions} corrective action(s); this is idempotent\n`);
-        skipped += 1;
-        continue;
-      }
-
-      const actionItems = (card.action_items ?? []).map((s) => s.trim()).filter(Boolean);
-      const deficiencies = card.critical_deficiencies ?? [];
-      if (actionItems.length === 0 && deficiencies.length === 0) {
-        // The reconcile gate is `isCorrectiveActionBand && flagged.length > 0`. A leadership card recorded
-        // no flagged items before the form could capture them, so there is genuinely nothing to ask for.
-        // Inventing findings and emailing them to a superintendent is not this script's call to make.
-        console.log("   SKIP — below band but NOTHING FLAGGED; a human must supply the items first\n");
-        skipped += 1;
-        continue;
-      }
-
-      // ── Recipients ────────────────────────────────────────────────────────────────────────────────────
-      const resolve = (text: string | null, role: string) =>
-        matchFieldResponders({ text, role, roster });
-      const sup = resolve(card.superintendent_name, "superintendent");
-      const pm = resolve(card.pm_name, "project_manager");
-
-      // Written by the person's ACTUAL role, never by the field they were typed into.
-      const picks: { superintendent?: RosterRow; project_manager?: RosterRow } = {};
-      const notes: string[] = [];
-      for (const [label, result] of [["superintendent_name", sup], ["pm_name", pm]] as const) {
-        for (const m of result.matches) {
-          const slot = m.responder.role === "project_manager" ? "project_manager" : "superintendent";
-          if (picks[slot] && picks[slot]!.id !== m.responder.id) {
-            notes.push(`${label}: "${m.matchedText}" -> ${m.responder.name} DROPPED — ${slot} slot already taken by ${picks[slot]!.name} (the flow addresses one per role)`);
-            continue;
-          }
-          picks[slot] = m.responder;
-          notes.push(`${label}: "${m.matchedText}" -> ${m.responder.name} <${m.responder.email ?? "no email"}> [${slot}]${m.roleMatchesQuery ? "" : "  (typed into the other role's field)"}`);
-        }
-        for (const a of result.ambiguous) {
-          notes.push(`${label}: "${a.matchedText}" AMBIGUOUS (${a.candidates.map((c) => c.name).join(" | ")}) — skipped, needs a human`);
-        }
-        for (const u of result.unmatched) {
-          notes.push(`${label}: "${u}" UNMATCHED — nobody on the roster`);
-        }
-      }
-      notes.forEach((n) => console.log(`   ${n}`));
-
-      const recipients = [picks.superintendent, picks.project_manager].filter(Boolean) as RosterRow[];
-      const deliverable = recipients.filter((r) => r.email && r.isActive);
-      if (deliverable.length === 0) {
-        console.log("   SKIP — no deliverable recipient; opening a cycle nobody can answer helps no one\n");
-        skipped += 1;
-        continue;
-      }
-
-      console.log(`   FLAGGED ITEMS (${actionItems.length + deficiencies.length}):`);
-      actionItems.forEach((a, i) => console.log(`     action_item[${i}]  ${a}`));
-      deficiencies.forEach((d) => console.log(`     deficiency[${d}]`));
-      console.log(`   WILL ASSIGN: ${deliverable.map((r) => `${r.name} <${r.email}>`).join(", ")}`);
-
-      // ── Apply, through the real service ───────────────────────────────────────────────────────────────
+      // EVERYTHING below runs inside the card's own transaction, off values re-read under its lock.
+      //
+      // The candidate list is an office-wide snapshot taken outside any transaction, so it is only a
+      // pre-filter. Deriving the flagged items, the names or the visibility from it would let an edit that
+      // landed in between be silently undone: an editor who REMOVED all the flags leaves a below-band card
+      // with zero corrective actions, which passes a count-only guard, and the script would then recreate
+      // the findings that person deleted and email them out.
       const client = await pool.connect();
       try {
         await client.query("BEGIN");
         await client.query(`SET LOCAL search_path TO "${officeSchema}", public`);
 
-        // RE-READ UNDER LOCK. The candidate list is an office-wide snapshot taken outside any transaction,
-        // so between that read and here somebody could have edited the card (which reconciles it) or another
-        // copy of this script could have processed it. Applying the stale actionItems/deficiencies would then
-        // DELETE the corrective actions that edit created — they are absent from the stale list — and rotate
-        // the notification cycle as though the card were newly opened.
-        const locked = await client.query<{ status: string; n: string; rating: string }>(
-          `SELECT sc.status, sc.rating,
-                  (SELECT count(*) FROM scorecard_corrective_actions WHERE scorecard_id = sc.id) AS n
-             FROM field_scorecards sc WHERE sc.id = $1 FOR UPDATE`,
-          [card.id],
+        const locked = await client.query<CandidateRow & { browsable: boolean }>(
+          `SELECT sc.id, sc.deal_id, d.deal_number, d.name AS deal_name, sc.kind, sc.rating, sc.status,
+                  sc.total_score, sc.average_score, sc.week_of::text, sc.submitted_at,
+                  sc.superintendent_name, sc.pm_name,
+                  sc.superintendent_responder_id, sc.pm_responder_id,
+                  sc.action_items, sc.critical_deficiencies,
+                  (SELECT count(*)::int FROM scorecard_corrective_actions ca WHERE ca.scorecard_id = sc.id)
+                    AS existing_actions,
+                  (COALESCE(d.is_test_data, false) = false AND ${BROWSABLE_PROJECT_SQL}) AS browsable
+             FROM field_scorecards sc
+             JOIN deals d ON d.id = sc.deal_id
+             LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+            WHERE sc.id = $3
+            -- OF sc: Postgres refuses FOR UPDATE on the nullable side of the outer join above.
+            FOR UPDATE OF sc`,
+          [WON_BROWSABLE_SLUGS, LOST_EXCLUDED_SLUGS, card.id],
         );
-        const now = locked.rows[0];
-        if (!now || now.status !== "submitted" || now.rating !== "corrective_action" || Number(now.n) > 0) {
+        const row = locked.rows[0];
+
+        if (!row || row.status !== "submitted" || row.rating !== "corrective_action" || row.existing_actions > 0) {
           await client.query("ROLLBACK");
-          console.log(`   SKIP — changed since the snapshot (status=${now?.status}, actions=${now?.n}); re-run to pick it up\n`);
+          console.log(`   SKIP — changed since the snapshot (status=${row?.status}, actions=${row?.existing_actions})\n`);
+          skipped += 1;
+          continue;
+        }
+        if (!row.browsable) {
+          // Re-checked here, not only in the candidate query: a deal that went Lost in between would get a
+          // cycle whose emails are skipped and whose responder link 404s.
+          await client.query("ROLLBACK");
+          console.log("   SKIP — deal is no longer a browsable field project\n");
           skipped += 1;
           continue;
         }
 
-        // Display name AND id together. The create/edit path replaces the display name with the selected
-        // roster person's name for exactly this reason: without it a card can SHOW one person while ROUTING
-        // to another — most visibly in the cross-role case, where somebody typed into the superintendent
-        // field is written to the PM slot.
-        if (picks.superintendent) {
+        const actionItems = (row.action_items ?? []).map((s) => s.trim()).filter(Boolean);
+        const deficiencies = row.critical_deficiencies ?? [];
+        if (actionItems.length === 0 && deficiencies.length === 0) {
+          await client.query("ROLLBACK");
+          console.log("   SKIP — below band but NOTHING FLAGGED; a human must supply the items first\n");
+          skipped += 1;
+          continue;
+        }
+
+        // ── Recipients, matched from the LOCKED names ────────────────────────────────────────────────────
+        const sup = matchFieldResponders({ text: row.superintendent_name, role: "superintendent", roster });
+        const pm = matchFieldResponders({ text: row.pm_name, role: "project_manager", roster });
+        const byId = new Map(roster.map((r) => [r.id, r]));
+
+        // An EXISTING pick is authoritative and is never overwritten: recipientResolutionSql ranks the
+        // card's own pick above everything else, so replacing a deliberate selection with a free-text guess
+        // would redirect the corrective action away from the person somebody actually chose.
+        const picks: { superintendent?: RosterRow; project_manager?: RosterRow } = {};
+        for (const [slot, existingId] of [
+          ["superintendent", row.superintendent_responder_id],
+          ["project_manager", row.pm_responder_id],
+        ] as const) {
+          const held = existingId ? byId.get(existingId) : undefined;
+          if (held && held.isActive && held.role === slot) {
+            picks[slot] = held;
+            console.log(`   ${slot}: KEEPING existing pick ${held.name} <${held.email ?? "no email"}>`);
+          }
+        }
+
+        for (const [label, result] of [["superintendent_name", sup], ["pm_name", pm]] as const) {
+          for (const m of result.matches) {
+            const slot = m.responder.role === "project_manager" ? "project_manager" : "superintendent";
+            if (picks[slot]) {
+              console.log(`   ${label}: "${m.matchedText}" -> ${m.responder.name} NOT APPLIED — ${slot} already resolved to ${picks[slot]!.name}`);
+              continue;
+            }
+            picks[slot] = m.responder;
+            console.log(`   ${label}: "${m.matchedText}" -> ${m.responder.name} <${m.responder.email ?? "no email"}> [${slot}]${m.roleMatchesQuery ? "" : "  (typed into the other role's field)"}`);
+          }
+          for (const a of result.ambiguous) {
+            console.log(`   ${label}: "${a.matchedText}" AMBIGUOUS (${a.candidates.map((c) => c.name).join(" | ")}) — skipped, needs a human`);
+          }
+          for (const u of result.unmatched) {
+            console.log(`   ${label}: "${u}" UNMATCHED — nobody on the roster`);
+          }
+        }
+
+        const deliverable = [picks.superintendent, picks.project_manager]
+          .filter((r): r is RosterRow => Boolean(r))
+          .filter((r) => r.email && r.isActive);
+        if (deliverable.length === 0) {
+          await client.query("ROLLBACK");
+          console.log("   SKIP — no deliverable recipient; opening a cycle nobody can answer helps no one\n");
+          skipped += 1;
+          continue;
+        }
+
+        console.log(`   FLAGGED ITEMS (${actionItems.length + deficiencies.length}):`);
+        actionItems.forEach((a, i) => console.log(`     action_item[${i}]  ${a}`));
+        deficiencies.forEach((d) => console.log(`     deficiency[${d}]`));
+
+        // Display name AND id together, and only for a slot this run is filling. The create/edit path does
+        // this so a card cannot show one person while routing to another.
+        if (picks.superintendent && !row.superintendent_responder_id) {
           await client.query(
             `UPDATE field_scorecards SET superintendent_responder_id = $1, superintendent_name = $2 WHERE id = $3`,
-            [picks.superintendent.id, picks.superintendent.name, card.id],
+            [picks.superintendent.id, picks.superintendent.name, row.id],
           );
         }
-        if (picks.project_manager) {
+        if (picks.project_manager && !row.pm_responder_id) {
           await client.query(
             `UPDATE field_scorecards SET pm_responder_id = $1, pm_name = $2 WHERE id = $3`,
-            [picks.project_manager.id, picks.project_manager.name, card.id],
+            [picks.project_manager.id, picks.project_manager.name, row.id],
           );
         }
 
         const tx = drizzle(client, { schema }) as unknown as Parameters<
           typeof reconcileScorecardCorrectiveActions
         >[0];
-        // NOT cast to `never`. An `as never` on this object silently swallowed a MISSING dealId, and the
-        // enqueued job is rejected by handleScorecardCorrectiveActionEmail as an invalid payload — so every
-        // backfilled card would have committed an open cycle whose responders were never notified, which is
-        // the exact silent failure this backfill exists to undo. The type is spelled out so the compiler
-        // checks the payload.
+        // NOT cast to `never`. An `as never` here silently swallowed a MISSING dealId, whose job the worker
+        // then discards as an invalid payload — committing an open cycle nobody is ever told about, the
+        // exact failure this backfill exists to undo. The type is spelled out so the compiler checks it.
         await reconcileScorecardCorrectiveActions(tx, {
-          scorecardId: card.id,
-          dealId: card.deal_id,
+          scorecardId: row.id,
+          dealId: row.deal_id,
           office,
-          rating: card.rating as ScorecardRating,
+          rating: row.rating as ScorecardRating,
           actionItems,
           deficiencies,
           currentStatus: "submitted",
-          // The picks above CHANGED who this card addresses, which is precisely the event that must start a
-          // fresh notification cycle rather than reuse a stale one.
           responderPickChanged: Boolean(picks.superintendent || picks.project_manager),
         });
 
-        // WHO THE WORKER WILL ACTUALLY EMAIL — resolved with the worker's own SQL, after the writes, inside
-        // the transaction. The earlier preview listed only the names this script matched, which ignores the
-        // card's pre-existing responder ids and the per-role deal_team_members fallback: a card could print
-        // one recipient and mail two. The safety promise is that every intended recipient is shown, so it has
-        // to be the same query the worker runs.
+        // WHO THE WORKER WILL ACTUALLY EMAIL — the worker's own SQL, after the writes, inside the
+        // transaction. Listing only what this script matched ignores the card's existing pick and the
+        // deal_team_members fallback, so it could print one recipient and mail two.
         const resolved = await client.query<{ role: string; name: string | null; email: string | null }>(
           recipientResolutionSql(`"${officeSchema}"`),
-          [card.deal_id, card.id],
+          [row.deal_id, row.id],
         );
         console.log("   WORKER WILL EMAIL:");
         if (resolved.rows.length === 0) console.log("     (nobody)");
@@ -328,18 +348,14 @@ async function main() {
                       AND payload->>'scorecardId' = sc.id::text
                       AND (payload->>'dealId' IS NULL OR payload->>'tenantSchema' IS NULL)) AS bad
              FROM field_scorecards sc WHERE sc.id = $1`,
-          [card.id],
+          [row.id],
         );
         const a = after.rows[0];
         console.log(`   RESULT: status=${a.status}  corrective_actions=${a.n}  queued_jobs=${a.jobs}`);
         // Counting jobs is not enough — a job with a missing dealId is queued and then DISCARDED by the
         // worker. That is how the `as never` defect stayed invisible in the first dry run.
-        if (Number(a.bad) > 0) {
-          throw new Error(`${a.bad} queued job(s) have an incomplete payload — refusing to commit`);
-        }
-        if (Number(a.jobs) === 0) {
-          throw new Error("no notification job was queued — refusing to commit a cycle nobody is told about");
-        }
+        if (Number(a.bad) > 0) throw new Error(`${a.bad} queued job(s) have an incomplete payload — refusing to commit`);
+        if (Number(a.jobs) === 0) throw new Error("no notification job was queued — refusing to commit a cycle nobody is told about");
 
         if (COMMIT) {
           await client.query("COMMIT");
