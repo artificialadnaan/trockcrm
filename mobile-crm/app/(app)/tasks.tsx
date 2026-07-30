@@ -15,6 +15,7 @@ import { resolveDealDisplayNumber } from "../../src/deal-display-number";
 import { formatDate } from "../../src/format";
 import { useGoBack } from "../../src/lib/go-back";
 import { sanitizeHubspotDealIdentifiers } from "../../src/deal-display-number";
+import { taskPriorityLabel, taskStatusLabel } from "../../src/task-display";
 import { refreshFailed as pageRefreshFailed, shouldLoadNextPage } from "../../src/paging";
 import { qk } from "../../src/query/keys";
 import { theme } from "../../src/theme/theme";
@@ -193,7 +194,19 @@ export default function TasksScreen() {
              * Reading only `dueDate` showed those rows with no date at all.
              */
             const when = item.dueDate ?? item.scheduledFor ?? null;
+            /**
+             * Priority and lifecycle FIRST, because they change what a rep does with the row.
+             *
+             * The list groups by date and nothing else, so two rows with the same title and date could
+             * be an urgent task and a low one, or an actionable task and one blocked on somebody else.
+             * `normal` and `pending` stay silent on purpose — a marker on every row distinguishes none
+             * of them.
+             */
+            const priority = taskPriorityLabel(item.priority);
+            const lifecycle = taskStatusLabel(item.status);
             const meta = [
+              priority,
+              lifecycle,
               item.dealName,
               dealNumber,
               when ? formatDate(when) : null,

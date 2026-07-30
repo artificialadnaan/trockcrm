@@ -15,7 +15,12 @@ import { RetryBlock } from "../../src/components/RetryBlock";
 import { useGoBack } from "../../src/lib/go-back";
 import { useDebouncedSearch } from "../../src/lib/use-debounced-search";
 import { qk } from "../../src/query/keys";
-import { MIN_SEARCH_LENGTH, partitionByOffice, searchIsTooShort } from "../../src/search-query";
+import {
+  MIN_SEARCH_LENGTH,
+  compareSearchHits,
+  partitionByOffice,
+  searchIsTooShort,
+} from "../../src/search-query";
 import { theme } from "../../src/theme/theme";
 
 /**
@@ -66,7 +71,9 @@ export default function SearchScreen() {
     ];
     // Office BEFORE rank: a hit this app cannot open must not occupy a slot at the top of the list.
     const split = partitionByOffice(permitted, activeOfficeSlug);
-    return { openable: split.openable.sort((a, b) => b.rank - a.rank), elsewhere: split.elsewhere };
+    // `compareSearchHits`, not a bare rank sort — the server puts live work above closed work and only
+    // compares relevance inside a tier, and re-sorting on rank alone threw that contract away.
+    return { openable: split.openable.sort(compareSearchHits), elsewhere: split.elsewhere };
   }, [query.data, role, activeOfficeSlug]);
 
   const offline = query.error instanceof ApiError && query.error.status === 0;
@@ -117,7 +124,9 @@ export default function SearchScreen() {
       ) : (
         <FlatList
           data={results}
-          keyExtractor={(r) => `${r.entityType}:${r.id}`}
+          // Office in the key: ids are unique within a schema, not across them, so a cross-office
+          // result set can legitimately carry the same id twice.
+          keyExtractor={(r) => `${r.officeSlug ?? ""}:${r.entityType}:${r.id}`}
           contentContainerStyle={styles.body}
           keyboardShouldPersistTaps="handled"
           ListEmptyComponent={<Text style={styles.idle}>Nothing matches &ldquo;{q}&rdquo;.</Text>}
@@ -139,9 +148,11 @@ export default function SearchScreen() {
               accessibilityRole="button"
               accessibilityLabel={[
                 STATUS_LABEL[item.status ?? "active"],
+                item.isChangeOrder ? "Change order" : null,
                 TYPE_LABEL[item.entityType],
                 item.primaryLabel,
                 item.secondaryLabel,
+                item.tertiaryLabel,
               ]
                 .filter(Boolean)
                 .join(", ")}
@@ -162,12 +173,20 @@ export default function SearchScreen() {
                       {STATUS_LABEL[item.status]}
                     </Text>
                   ) : null}
+                  {/* A change order is a real child deal with its own value and stage behaviour, and
+                      it shares its parent's name — so without this marker the two are the same row
+                      twice, and picking the wrong one is invisible until the numbers disagree. */}
+                  {item.isChangeOrder ? <Text style={[styles.badge, styles.badgeCo]}>CO</Text> : null}
                   <Text style={styles.badge}>{TYPE_LABEL[item.entityType]}</Text>
                 </View>
               </View>
-              {item.secondaryLabel ? (
+              {/* BOTH labels. `tertiaryLabel` is often WHY the row matched — a contact reached
+                  through its company's name keeps its email in `secondaryLabel` and the company in
+                  `tertiaryLabel`, so showing only the secondary returns a contact with no visible
+                  connection to what was typed. A result you cannot explain reads as a wrong result. */}
+              {item.secondaryLabel || item.tertiaryLabel ? (
                 <Text style={styles.rowMeta} numberOfLines={1}>
-                  {item.secondaryLabel}
+                  {[item.secondaryLabel, item.tertiaryLabel].filter(Boolean).join(" · ")}
                 </Text>
               ) : null}
             </Pressable>
@@ -265,6 +284,7 @@ const styles = StyleSheet.create({
   statusOnHold: { color: theme.color.amberText, backgroundColor: theme.color.amberSurface },
   statusWon: { color: theme.color.greenText, backgroundColor: theme.color.greenSurface },
   statusLost: { color: theme.color.redText, backgroundColor: theme.color.redSurface },
+  badgeCo: { color: theme.color.textPrimary, backgroundColor: theme.color.surfaceRaised },
   badge: {
     ...theme.type.caption,
     textTransform: "uppercase",
