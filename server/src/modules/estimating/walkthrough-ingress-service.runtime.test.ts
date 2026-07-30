@@ -42,7 +42,7 @@ import type { WalkthroughIngressPayload, WalkthroughScopeRow } from "@trock-crm/
 import { tenantSchemaSql } from "../../../tests/helpers/tenant-schema-from-drizzle.js";
 // The ceiling the ingress REUSES rather than re-declares — see the contactSheetBytes tests below.
 import { MAX_FILE_SIZE_BYTES } from "../files/file-constants.js";
-import { MAX_SOURCE_BYTES as MAX_THUMBNAIL_SOURCE_BYTES } from "../../lib/image-thumbnail.js";
+import { MAX_THUMBNAIL_SOURCE_BYTES } from "../../lib/image-thumbnail-constants.js";
 
 /** The narrower of the two ceilings ingress must satisfy — see the R26 comment in the service. */
 const BINDING_CEILING = Math.min(MAX_FILE_SIZE_BYTES, MAX_THUMBNAIL_SOURCE_BYTES);

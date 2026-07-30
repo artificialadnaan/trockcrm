@@ -28,6 +28,7 @@ import { AppError } from "../../middleware/error-handler.js";
 // dependency-free half of that module (r2-client.ts already imports from it), so this does not pull
 // the S3 client or the files service onto this pure-database module's import path.
 import { MAX_FILE_SIZE_BYTES } from "../files/file-constants.js";
+import { MAX_THUMBNAIL_SOURCE_BYTES } from "../../lib/image-thumbnail-constants.js";
 import { canonicalizeTradeScopeKey, resolvePricingScopeFromExtraction } from "./pricing-service.js";
 
 /** Same alias document-service.ts:6 uses. */
@@ -1324,10 +1325,28 @@ export function validateWalkthroughIngressPayload(input: unknown): WalkthroughIn
   // 22003 from the FIRST write of the ingress transaction — a 500, in a validator that promises a 400
   // before anything is written. 413 rather than 400 to match `validateFileSize`'s own answer for the
   // same condition: one column, one limit, one status code.
-  if (contactSheetBytes > MAX_FILE_SIZE_BYTES) {
+  // R26. `MAX_FILE_SIZE_BYTES` (200 MiB) is NOT the binding constraint. `generateAndStoreThumbnail`
+  // caps its source fetch at MAX_THUMBNAIL_SOURCE_BYTES (40 MiB), so a JPEG in the 40-200 MiB band
+  // produces NO thumbnail — image arm null, pdf arm self-rejects a jpeg — `thumbnailR2Key` stays null,
+  // and `resolveFileThumbnailUrl` (files/service.ts:1574-1580) then presigns the FULL ORIGINAL as the
+  // list tile. Same rule three earlier findings established for columns: bind to the NARROWEST
+  // constraint in the chain, not the one that looks authoritative. Here it is a byte size, not a width.
+  //
+  // FAIL CLOSED. `Math.min(200MiB, undefined)` is NaN and `bytes > NaN` is false, so an uninitialised
+  // import would silently disable this check rather than tighten it. That actually happened: importing
+  // the limit from `image-thumbnail.ts` (which pulls in sharp, heic-convert and the R2 client) left it
+  // undefined under vitest's hoisted mocks. Hence the dependency-free constants module AND this assert.
+  if (!Number.isFinite(MAX_FILE_SIZE_BYTES) || !Number.isFinite(MAX_THUMBNAIL_SOURCE_BYTES)) {
+    throw new Error(
+      `walkthrough ingress cannot determine its contact-sheet ceiling: ` +
+        `MAX_FILE_SIZE_BYTES=${MAX_FILE_SIZE_BYTES}, MAX_THUMBNAIL_SOURCE_BYTES=${MAX_THUMBNAIL_SOURCE_BYTES}`
+    );
+  }
+  const contactSheetCeiling = Math.min(MAX_FILE_SIZE_BYTES, MAX_THUMBNAIL_SOURCE_BYTES);
+  if (contactSheetBytes > contactSheetCeiling) {
     throw new AppError(
       413,
-      `contactSheetBytes ${contactSheetBytes} exceeds the ${MAX_FILE_SIZE_BYTES}-byte limit the Files ` +
+      `contactSheetBytes ${contactSheetBytes} exceeds the ${contactSheetCeiling}-byte binding ceiling (the smaller of the Files ` +
         `subsystem enforces on every other upload (MAX_FILE_SIZE_BYTES, files/file-constants.ts — the ` +
         `same ceiling validateFileSize applies). It lands on files.file_size_bytes, so a larger value ` +
         `would be a file the CRM refuses to accept by any other door, and a value past bigint range ` +
