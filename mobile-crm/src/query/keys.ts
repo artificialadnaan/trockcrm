@@ -37,6 +37,12 @@ export const qk = {
   mondayShowcase: (scope: QueryScope, mode: string) => ["monday-showcase", scope, mode] as const,
   showcaseEvidence: (scope: QueryScope, metric: string, mode: string) =>
     ["showcase-evidence", scope, metric, mode] as const,
+  properties: (scope: QueryScope, params?: Record<string, unknown>) =>
+    ["properties", scope, params ?? {}] as const,
+  property: (scope: QueryScope, id: string) => ["property", scope, id] as const,
+  companies: (scope: QueryScope, params?: Record<string, unknown>) =>
+    ["companies", scope, params ?? {}] as const,
+  company: (scope: QueryScope, id: string) => ["company", scope, id] as const,
   stages: (scope: QueryScope) => ["stages", scope] as const,
   /** Lead stages are a SEPARATE workflow family from deal stages — different endpoint, different rows. */
   leadStages: (scope: QueryScope) => ["lead-stages", scope] as const,

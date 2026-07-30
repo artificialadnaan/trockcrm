@@ -56,3 +56,26 @@ export function formatLocation(city: string | null | undefined, state: string | 
   const parts = [city?.trim(), state?.trim()].filter(Boolean);
   return parts.length ? parts.join(", ") : "";
 }
+
+/**
+ * A full postal address on ONE line — the thing a rep actually needs to drive to.
+ *
+ * `formatLocation` answers "roughly where"; a company row rendered only that, so a record with a
+ * street address and no city read "—" while the server was returning the street the whole time
+ * (`getTableColumns(companies)` includes `address` and `zip`). Withholding the exact location from a
+ * field app is the failure this fixes.
+ *
+ * Written as street / locality / ZIP so the ZIP hangs off the city-state pair the way a mailing label
+ * does — "1200 Main St, Dallas, TX 75201" — and every piece is optional, because in this data most of
+ * them frequently are. Returns "" rather than a lonely separator when nothing is on file, so a caller
+ * can fall back to its own placeholder.
+ */
+export function formatPostalAddress(
+  address: string | null | undefined,
+  city: string | null | undefined,
+  state: string | null | undefined,
+  zip: string | null | undefined
+): string {
+  const locality = [formatLocation(city, state), zip?.trim()].filter(Boolean).join(" ");
+  return [address?.trim(), locality].filter(Boolean).join(", ");
+}
