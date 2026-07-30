@@ -195,6 +195,12 @@ interface ResponderSegment {
    * card to the superintendent — the one person the text explicitly said it did not mean.
    */
   annotatedRole: string | null;
+  /**
+   * True when the segment named MORE THAN ONE role. That is a contradiction, not a preference, so it
+   * withdraws the field's role preference as well as the annotation's — leaving a same-named pair in the two
+   * roles to surface as ambiguous rather than resolving on which annotation was typed first.
+   */
+  roleAnnotationConflict: boolean;
 }
 
 /**
@@ -243,22 +249,29 @@ function stripIdentityNeutralNoise(segment: string): string {
 }
 
 /**
- * Which roster role a stripped annotation named, or null when the segment carried none.
+ * Every roster role the stripped annotations named — empty when the segment carried none, and MORE THAN ONE
+ * when it contradicts itself ("Alex Smith (PM) (Super)").
  *
  * Read off the SAME patterns that do the stripping, so the two can never disagree about what counts as an
  * annotation. Only the role words are consulted; an honorific names nobody.
+ *
+ * Exhaustive on purpose. Reading only the first annotation auto-addressed whichever role happened to be typed
+ * first, while the stripper removed both — so a contradiction was invisible in the text the scorer saw AND in
+ * the outcome, and the recipient came down to word order.
  */
-function annotatedRoleOf(segment: string): string | null {
-  const annotation = ROLE_ANNOTATIONS
-    // A fresh RegExp per read: a `g`-flagged literal carries `lastIndex` between calls, so reusing the shared
-    // instance would make the result depend on how many segments had been scanned before this one.
-    .map((pattern) => segment.match(new RegExp(pattern.source, pattern.flags.replace("g", ""))))
-    .find((match): match is RegExpMatchArray => match !== null);
-  if (!annotation) return null;
-  const word = normalizeResponderName(annotation[0]).replace(/\s+/g, "");
-  if (/^(?:pm|projectmanager)$/.test(word)) return "project_manager";
-  if (/^(?:super|superintendent|supt|foreman)$/.test(word)) return "superintendent";
-  return null;
+function annotatedRolesOf(segment: string): Set<string> {
+  const roles = new Set<string>();
+  for (const pattern of ROLE_ANNOTATIONS) {
+    // EVERY occurrence, not the first. A fresh `g`-flagged RegExp per read, because a shared global literal
+    // carries `lastIndex` between calls and would make the result depend on how many segments had been
+    // scanned before this one.
+    for (const match of segment.matchAll(new RegExp(pattern.source, `${pattern.flags.replace("g", "")}g`))) {
+      const word = normalizeResponderName(match[0]).replace(/\s+/g, "");
+      if (/^(?:pm|projectmanager)$/.test(word)) roles.add("project_manager");
+      else if (/^(?:super|superintendent|supt|foreman)$/.test(word)) roles.add("superintendent");
+    }
+  }
+  return roles;
 }
 
 
@@ -379,7 +392,7 @@ function splitResponderSegmentPairs(text: string | null | undefined): ResponderS
   const raw = text ?? "";
   if (raw.length > MAX_RESPONDER_TEXT_CHARS) {
     return [
-      { raw: `${raw.slice(0, 120).trim()}… (${raw.length} characters — not parsed as names)`, stripped: "", annotatedRole: null },
+      { raw: `${raw.slice(0, 120).trim()}… (${raw.length} characters — not parsed as names)`, stripped: "", annotatedRole: null, roleAnnotationConflict: false },
     ];
   }
   const segments = raw
@@ -389,12 +402,15 @@ function splitResponderSegmentPairs(text: string | null | undefined): ResponderS
     .map((segment) => ({
       raw: segment.trim(),
       stripped: stripIdentityNeutralNoise(segment),
-      annotatedRole: annotatedRoleOf(segment),
+      ...((roles) => ({
+        annotatedRole: roles.size === 1 ? [...roles][0] : null,
+        roleAnnotationConflict: roles.size > 1,
+      }))(annotatedRolesOf(segment)),
     }))
     .filter((segment) => normalizeResponderName(segment.stripped).length > 0);
   if (segments.length > MAX_RESPONDER_SEGMENTS) {
     return [
-      { raw: `${raw.slice(0, 120).trim()}… (${segments.length} segments — not parsed as names)`, stripped: "", annotatedRole: null },
+      { raw: `${raw.slice(0, 120).trim()}… (${segments.length} segments — not parsed as names)`, stripped: "", annotatedRole: null, roleAnnotationConflict: false },
     ];
   }
   return segments;
@@ -668,7 +684,10 @@ export function matchFieldResponders<T extends ResponderRosterEntry>({
     // that is the whole reason role is a preference — whereas an annotation is a deliberate statement by the
     // person filling the card in, and is the only thing that can separate two same-named people in different
     // roles.
-    const effectiveRole = segment.annotatedRole ?? wantedRole;
+    // A CONTRADICTION withdraws the preference rather than falling back to the slot. Falling back would let
+    // "Alex Smith (PM) (Super)" resolve to the superintendent purely because the text sat in that field —
+    // silently picking one of the two roles the segment itself could not choose between.
+    const effectiveRole = segment.roleAnnotationConflict ? null : (segment.annotatedRole ?? wantedRole);
     const tokens = normalizeResponderName(segment.stripped).split(" ");
     // Punctuation-insensitivity has to be SYMMETRIC. The roster side already lets one token cover two
     // hyphen-joined parts ("MaryJane" -> "Mary-Jane"); without the mirror, the reverse spelling failed —
@@ -693,7 +712,7 @@ export function matchFieldResponders<T extends ResponderRosterEntry>({
         // Measured against the role the segment ANNOTATED when it carried one, falling back to the field it
         // was typed into. `roleMatchesQuery` below still reports the QUERIED role — that is what tells a
         // caller which column to write — so the two must not be conflated.
-        inRole: candidate.roleKey === effectiveRole,
+        inRole: effectiveRole !== null && candidate.roleKey === effectiveRole,
         roleMatchesQuery: candidate.roleKey === wantedRole,
         // Best over the readings: the plain tokens, and the punctuation-collapsed variant.
         score: tokenReadings.reduce<SegmentScore | null>((best, reading) => {

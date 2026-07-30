@@ -154,6 +154,11 @@ card reached nobody.
 
    `roleMatchesQuery` still reports the **queried** role, because that is what tells the caller which column
    to write. The two must not be conflated.
+
+   A segment annotating **both** roles (`"Alex Smith (PM) (Super)"`) is a contradiction, not a preference,
+   and withdraws the field's preference too — so a same-named pair in the two roles surfaces as *ambiguous*.
+   Reading only the first annotation made the recipient a function of word order while the stripper removed
+   both, leaving the contradiction invisible in the scored text *and* in the outcome.
 2. **`is_active = false` is never returned as a `match`** — but inactive rows are still *scored*, because a hit on
    a deactivated person is a positive identification that must block a weaker active alternative. With
    inactive `John Smith` and active `John Smyth`, filtering the inactive row out early turned an exact

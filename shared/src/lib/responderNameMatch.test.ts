@@ -1427,6 +1427,32 @@ describe("an explicit role annotation outranks the field it was typed into", () 
     expect(r.matches[0].roleMatchesQuery).toBe(true);
   });
 
+  it("refuses to pick when the segment annotates BOTH roles", () => {
+    // Reading only the first annotation made the recipient a function of word order, while the stripper
+    // removed both — so the contradiction was invisible in the scored text AND in the outcome. A segment
+    // that cannot choose between two roles withdraws the preference entirely, rather than falling back to
+    // the field it was typed into and silently picking one of them anyway.
+    for (const typed of ["Alex Smith (PM) (Super)", "Alex Smith (Super) (PM)"]) {
+      const r = go(typed, "superintendent", SAME_NAME);
+      expect(r.matches).toEqual([]);
+      expect(r.ambiguous[0].candidates.map((c) => c.id).sort()).toEqual(["p", "s"]);
+    }
+  });
+
+  it("treats a REPEATED annotation as agreement, not conflict", () => {
+    // Two annotations naming the same role say the same thing twice. Only disagreement is a contradiction.
+    expect(go("Alex Smith (PM) (PM)", "superintendent", SAME_NAME).matches.map((m) => m.responder.id))
+      .toEqual(["p"]);
+  });
+
+  it("a contradiction still resolves an unambiguous name", () => {
+    // The conflict withdraws the ROLE tie-break, nothing else. With one candidate there is no tie to break,
+    // so a self-contradicting annotation must not turn a clear identification into a non-answer.
+    const roster = [R("s", "Alex Smith", "superintendent")];
+    expect(go("Alex Smith (PM) (Super)", "superintendent", roster).matches.map((m) => m.responder.id))
+      .toEqual(["s"]);
+  });
+
   it("does not let an annotation reach a WEAKER identification", () => {
     // Role only ever breaks a tie. An annotation is still role evidence, not identity evidence, so it must
     // not pull in someone whose name matches less well.
