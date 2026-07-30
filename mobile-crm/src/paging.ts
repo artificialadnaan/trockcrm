@@ -31,3 +31,27 @@ export function shouldLoadNextPage(query: {
 }): boolean {
   return query.hasNextPage && !query.isFetchingNextPage && !query.isFetchNextPageError;
 }
+
+/**
+ * Did a REFRESH fail — as distinct from a page failing?
+ *
+ * `isError` conflates the two. When page 3 fails, TanStack keeps the loaded pages and sets `isError`
+ * AND `isFetchNextPageError`, so a header derived from `data && isError` announced "the refresh
+ * failed" at the top of a list nobody had refreshed, at the same moment the footer correctly said
+ * loading more had failed. Two messages, one failure, and only one of them true.
+ *
+ * The distinction matters because the two failures have different recoveries: a refresh retries with
+ * `refetch()` and reloads page one, a failed page retries with `fetchNextPage()` and fills the gap.
+ * Offering the wrong one silently drops the rows the user was actually reaching for.
+ *
+ * Deliberately not `isRefetchError`: that is false during the very first load, but this predicate is
+ * only ever consulted with data already on screen, and excluding the next-page case by name keeps the
+ * reason legible at the call site.
+ */
+export function refreshFailed(query: {
+  data: unknown;
+  isError: boolean;
+  isFetchNextPageError: boolean;
+}): boolean {
+  return Boolean(query.data) && query.isError && !query.isFetchNextPageError;
+}
