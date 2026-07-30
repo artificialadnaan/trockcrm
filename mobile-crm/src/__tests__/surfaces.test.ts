@@ -16,7 +16,14 @@ describe("CRM surface policy", () => {
     // "reports" acknowledged deliberately: sidebar.tsx:82 gives Reports to all three CRM roles, and
     // /reports/monday-showcase — the only report this app shows — is `requireAnyRole` on the server.
     // Most of that module is requireDirector, so widening past this one report means reading the ROUTE.
-    expect(accessibleSurfaces(role)).toEqual(["deals", "leads", "contacts", "companies", "reports"]);
+    expect(accessibleSurfaces(role)).toEqual([
+      "deals",
+      "leads",
+      "contacts",
+      "companies",
+      "properties",
+      "reports",
+    ]);
     expect(hasAnyCrmSurface(role)).toBe(true);
   });
 

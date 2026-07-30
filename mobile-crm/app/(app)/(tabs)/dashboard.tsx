@@ -171,6 +171,22 @@ export default function DashboardScreen() {
               onPress={() => router.push("/(app)/contacts")}
             />
           ) : null}
+          {canAccessSurface(user.role, "properties") ? (
+            <NavCard
+              testID="open-properties"
+              icon="business-outline"
+              label="Properties"
+              onPress={() => router.push("/(app)/properties")}
+            />
+          ) : null}
+          {canAccessSurface(user.role, "companies") ? (
+            <NavCard
+              testID="open-companies"
+              icon="briefcase-outline"
+              label="Companies"
+              onPress={() => router.push("/(app)/companies")}
+            />
+          ) : null}
           {canAccessSurface(user.role, "reports") ? (
             <NavCard
               testID="open-reports"
