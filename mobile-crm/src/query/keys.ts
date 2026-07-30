@@ -43,6 +43,10 @@ export const qk = {
   companies: (scope: QueryScope, params?: Record<string, unknown>) =>
     ["companies", scope, params ?? {}] as const,
   company: (scope: QueryScope, id: string) => ["company", scope, id] as const,
+  globalSearch: (scope: QueryScope, q: string) => ["global-search", scope, q] as const,
+  tasks: (scope: QueryScope, params?: Record<string, unknown>) =>
+    ["tasks", scope, params ?? {}] as const,
+  taskCounts: (scope: QueryScope) => ["task-counts", scope] as const,
   stages: (scope: QueryScope) => ["stages", scope] as const,
   /** Lead stages are a SEPARATE workflow family from deal stages — different endpoint, different rows. */
   leadStages: (scope: QueryScope) => ["lead-stages", scope] as const,
