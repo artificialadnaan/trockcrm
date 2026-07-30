@@ -52,6 +52,20 @@ import { resolveFieldScorecardRecipients } from "../shared/src/lib/fieldScorecar
  *  - ⚠️ COMMITTING SENDS EMAIL to real people, and email cannot be recalled. The plan prints every intended
  *    recipient and the item text before anything is written. Read it.
  *
+ *    PRECISELY: the plan is accurate AS OF THE COMMIT. Roster rows are read inside the card's transaction
+ *    under FOR SHARE, so nothing can change between the preview and the write. What the plan cannot cover is
+ *    the gap AFTER it: the notification job runs a short delay later and re-runs recipientResolutionSql, so a
+ *    field-responder email edited in that window redirects the notice to the then-current address, which this
+ *    run never printed.
+ *
+ *    That re-resolution is deliberate and is NOT worked around here. Freezing the previewed identities into
+ *    the job payload would have to change reconcileScorecardCorrectiveActions, which the submit and
+ *    corrective-action API paths also call — so every production cycle would inherit it — and it trades a
+ *    small disclosure gap for a worse failure: an address corrected in that window would either be ignored in
+ *    favour of the stale one, or match nothing and notify NOBODY. Re-resolving sends to whoever is actually
+ *    the responder at send time, which is the right answer. The residual exposure is that the operator may
+ *    not have seen that exact address.
+ *
  * USAGE
  * Build shared FIRST. Importing the server service resolves @trock-crm/shared/schema to shared/dist, so on a
  * clean checkout every command below fails at import time — before argument or database validation — with a
@@ -388,12 +402,32 @@ async function main() {
           continue;
         }
 
-        const deliverable = [picks.superintendent, picks.project_manager]
-          .filter((r): r is RosterRow => Boolean(r))
-          .filter((r) => r.email && r.isActive);
-        if (deliverable.length === 0) {
+        // EVERY role this card selects must be deliverable — not merely one of them. Requiring only a
+        // non-empty set let a card naming both a super and a PM proceed when one of the two roster rows had
+        // a null or malformed address: the worker skips that recipient, mails the other, and — with no
+        // deal_team_members row to make the role "assigned" — stamps the cycle as delivered. The named person
+        // is then never notified and the cycle is closed against a retry. Silently omitting a named responder
+        // is the exact failure this backfill exists to undo.
+        const selectedRoles = (["superintendent", "project_manager"] as const).filter((role) => picks[role]);
+        const undeliverable = selectedRoles.filter((role) => {
+          const pick = picks[role]!;
+          return !pick.isActive || !pick.email || !basicValidEmail(pick.email.trim());
+        });
+        if (selectedRoles.length === 0) {
           await client.query("ROLLBACK");
           console.log("   SKIP — no deliverable recipient; opening a cycle nobody can answer helps no one\n");
+          skipped += 1;
+          continue;
+        }
+        if (undeliverable.length > 0) {
+          await client.query("ROLLBACK");
+          for (const role of undeliverable) {
+            const pick = picks[role]!;
+            console.log(
+              `   ${role}: ${pick.name} is not deliverable — ${!pick.isActive ? "roster row is INACTIVE" : `email ${JSON.stringify(pick.email ?? null)} is missing or malformed`}`,
+            );
+          }
+          console.log("   SKIP — a named responder cannot be emailed; notifying only part of the named team is worse than notifying nobody\n");
           skipped += 1;
           continue;
         }
@@ -523,6 +557,19 @@ async function main() {
         if (unresolvedAssignedRoles.length > 0) {
           throw new Error(
             `assigned role(s) ${unresolvedAssignedRoles.join(", ")} resolve to no deliverable address — the worker would notify only part of the team and then retry to dead-letter; refusing to commit`,
+          );
+        }
+
+        // ...AND the roles this script itself selected. The check above is necessary but does NOT cover them:
+        // assignedRolesSql reads deal_team_members, which is EMPTY office-wide, so for every card here it
+        // returns nothing and the guard passes vacuously. The roles that actually matter are the scorecard
+        // picks this transaction just wrote. A picked role the worker cannot resolve is worse than an
+        // unresolvable assigned one, because nothing makes the worker throw — it mails whoever it can and
+        // STAMPS the cycle, so the omission is permanent and silent rather than retried.
+        const unresolvedSelectedRoles = selectedRoles.filter((role) => !resolvedRoles.has(role));
+        if (unresolvedSelectedRoles.length > 0) {
+          throw new Error(
+            `selected role(s) ${unresolvedSelectedRoles.join(", ")} do not resolve to a valid address through the worker's own query — it would mail the other role and stamp the cycle, leaving a named responder silently unnotified; refusing to commit`,
           );
         }
 
