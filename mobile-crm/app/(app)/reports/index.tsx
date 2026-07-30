@@ -9,28 +9,34 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useQuery } from "@tanstack/react-query";
-import { ApiError } from "../../src/api/client";
-import * as reportsApi from "../../src/api/endpoints/reports";
-import type { DepartmentMetric, WeekMode } from "../../src/api/endpoints/reports";
-import { useAuth } from "../../src/auth/AuthContext";
-import { useQueryScope } from "../../src/auth/useOfficeId";
-import { BackLink } from "../../src/components/BackLink";
-import { RetryBlock } from "../../src/components/RetryBlock";
-import { RetryNotice } from "../../src/components/RetryNotice";
-import { useGoBack } from "../../src/lib/go-back";
-import { qk } from "../../src/query/keys";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
+import { useRouter } from "expo-router";
+import { ApiError } from "../../../src/api/client";
+import * as reportsApi from "../../../src/api/endpoints/reports";
+import type {
+  DepartmentMetric,
+  EvidenceMetric,
+  WeekMode,
+} from "../../../src/api/endpoints/reports";
+import { useAuth } from "../../../src/auth/AuthContext";
+import { useQueryScope } from "../../../src/auth/useOfficeId";
+import { BackLink } from "../../../src/components/BackLink";
+import { RetryBlock } from "../../../src/components/RetryBlock";
+import { RetryNotice } from "../../../src/components/RetryNotice";
+import { useGoBack } from "../../../src/lib/go-back";
+import { qk } from "../../../src/query/keys";
 import {
   WEEK_MODES,
   compactMoney,
   deltaChip,
   departmentCountLabel,
+  departmentEvidenceMetric,
   heroBasisLines,
   lastWeekIsInProgress,
   sparklineSummary,
   sparklineHeights,
-} from "../../src/report-format";
-import { theme } from "../../src/theme/theme";
+} from "../../../src/report-format";
+import { theme } from "../../../src/theme/theme";
 
 /**
  * The Monday Showcase, as much of it as belongs on a phone.
@@ -151,9 +157,27 @@ export default function ReportsScreen() {
 
           {/* ---- The three the meeting opens on ---- */}
           <View style={styles.heroRow}>
-            <HeroCell label="Won" metric={data.execHero.won} />
-            <HeroCell label="Sent" metric={data.execHero.sent} />
-            <HeroCell label="Estimated" metric={data.execHero.estimated} />
+            <HeroCell
+              label="Won"
+              evidence="won"
+              mode={mode}
+              periodLabel={data.period.label}
+              metric={data.execHero.won}
+            />
+            <HeroCell
+              label="Sent"
+              evidence="sent"
+              mode={mode}
+              periodLabel={data.period.label}
+              metric={data.execHero.sent}
+            />
+            <HeroCell
+              label="Estimated"
+              evidence="estimated"
+              mode={mode}
+              periodLabel={data.period.label}
+              metric={data.execHero.estimated}
+            />
           </View>
 
           {/* The basis is not decoration, and it is not shared: Won is awarded-first while Sent and
@@ -171,7 +195,7 @@ export default function ReportsScreen() {
 
           <Text style={styles.sectionLabel}>DEPARTMENTS</Text>
           {data.departments.map((d) => (
-            <DepartmentCard key={d.key} metric={d} mode={mode} />
+            <DepartmentCard key={d.key} metric={d} mode={mode} periodLabel={data.period.label} />
           ))}
 
           {data.notes.length ? (
@@ -189,9 +213,40 @@ export default function ReportsScreen() {
   );
 }
 
-function HeroCell({ label, metric }: { label: string; metric: reportsApi.ExecHeroMetric }) {
+/**
+ * A headline figure, and the way into the deals behind it.
+ *
+ * The first question anyone asks a report is "which ones?", and a number that cannot be opened is one
+ * a rep has to take on trust. The drill re-asks the server for the SAME cohort the aggregate came
+ * from, so the list always reconciles to the figure that led to it.
+ */
+function HeroCell({
+  label,
+  metric,
+  evidence,
+  mode,
+  periodLabel,
+}: {
+  label: string;
+  metric: reportsApi.ExecHeroMetric;
+  evidence: EvidenceMetric;
+  mode: WeekMode;
+  /** Carried to the drill for COMPARISON, so a moved window is stated rather than silently differing. */
+  periodLabel: string;
+}) {
+  const router = useRouter();
   return (
-    <View style={styles.hero}>
+    <Pressable
+      testID={`showcase-hero-${evidence}`}
+      onPress={() =>
+        router.push(
+          `/(app)/reports/evidence?metric=${evidence}&mode=${mode}&period=${encodeURIComponent(periodLabel)}`,
+        )
+      }
+      accessibilityRole="button"
+      accessibilityLabel={`${label}, ${metric.count} deals, ${compactMoney(metric.value.amount)}. Show the deals.`}
+      style={styles.hero}
+    >
       <Text accessibilityLabel={label} style={styles.heroLabel}>
         {label}
       </Text>
@@ -199,18 +254,41 @@ function HeroCell({ label, metric }: { label: string; metric: reportsApi.ExecHer
       <Text style={styles.heroCount}>
         {metric.count} {metric.count === 1 ? "deal" : "deals"}
       </Text>
-    </View>
+    </Pressable>
   );
 }
 
-function DepartmentCard({ metric, mode }: { metric: DepartmentMetric; mode: WeekMode }) {
+function DepartmentCard({
+  metric,
+  mode,
+  periodLabel,
+}: {
+  metric: DepartmentMetric;
+  mode: WeekMode;
+  periodLabel: string;
+}) {
+  const router = useRouter();
+  /**
+   * Deferred departments have no cohort to open, and the key vocabularies differ — "estimating" is
+   * backed by the "estimated" metric. Both decisions live in `departmentEvidenceMetric` so a card
+   * either opens the right list or does not offer to.
+   */
+  const evidence = departmentEvidenceMetric(metric);
   const chip = deltaChip(metric, mode);
   const heights = sparklineHeights(metric.sparkline);
   const lastInProgress = lastWeekIsInProgress(mode);
   const trend = sparklineSummary(metric.sparkline, { lastInProgress });
 
-  return (
-    <View style={styles.card}>
+  /**
+   * TWO EXPLICIT BRANCHES, not a `const Container = evidence ? Pressable : View`.
+   *
+   * A dynamic tag renders identically and is invisible to every AST guard in this suite — the
+   * touch-target floor and the accessibility-label checks all key on the tag name, and `Container`
+   * matches none of them. A drillable card would have slipped past the 44pt rule silently. Spelling
+   * both cases out costs a wrapper and keeps the guards honest.
+   */
+  const body = (
+    <>
       <View style={styles.cardHead}>
         <Text accessibilityLabel={metric.label} style={styles.cardLabel}>
           {metric.label}
@@ -277,7 +355,37 @@ function DepartmentCard({ metric, mode }: { metric: DepartmentMetric; mode: Week
       ) : null}
 
       {metric.deferred ? <Text style={styles.deferred}>Not measured yet.</Text> : null}
-    </View>
+    </>
+  );
+
+  if (!evidence) return <View style={styles.card}>{body}</View>;
+  return (
+    <Pressable
+      testID={`showcase-department-${metric.key}`}
+      onPress={() =>
+        router.push(
+          `/(app)/reports/evidence?metric=${evidence}&mode=${mode}&period=${encodeURIComponent(periodLabel)}`,
+        )
+      }
+      accessibilityRole="button"
+      /* EVERYTHING the card shows. An explicit label REPLACES the text composed from the children, so
+         making this card pressable would otherwise have silently removed the value, the delta and the
+         trend from anyone using a screen reader — the same defect the deal cards had, reintroduced by
+         adding a drill. Built from the same values the JSX renders. */
+      accessibilityLabel={[
+        metric.label,
+        departmentCountLabel(metric),
+        metric.value ? compactMoney(metric.value.amount) : null,
+        chip?.label,
+        trend,
+        "Show the deals.",
+      ]
+        .filter(Boolean)
+        .join(", ")}
+      style={styles.card}
+    >
+      {body}
+    </Pressable>
   );
 }
 
@@ -318,6 +426,7 @@ const styles = StyleSheet.create({
 
   heroRow: { flexDirection: "row", gap: theme.space.sm },
   hero: {
+    minHeight: 44,
     flex: 1,
     backgroundColor: theme.color.surface,
     borderRadius: theme.radius.lg,
@@ -334,6 +443,7 @@ const styles = StyleSheet.create({
 
   sectionLabel: { ...theme.type.caption, color: theme.color.textMuted, marginTop: theme.space.sm },
   card: {
+    minHeight: 44,
     backgroundColor: theme.color.surface,
     borderRadius: theme.radius.lg,
     borderWidth: 1,

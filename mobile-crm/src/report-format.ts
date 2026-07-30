@@ -1,4 +1,4 @@
-import type { DepartmentMetric, WeekMode } from "./api/endpoints/reports";
+import type { DepartmentMetric, EvidenceMetric, WeekMode } from "./api/endpoints/reports";
 
 /**
  * The display decisions the showcase screen makes, kept out of the screen.
@@ -175,4 +175,30 @@ export function sparklineSummary(
   const direction = last > first ? "rising" : last < first ? "falling" : "level";
   const head = `${compared.length}-week trend: ${first} to ${last}, ${direction}`;
   return options.lastInProgress ? `${head}. This week so far: ${weeks[weeks.length - 1]}` : head;
+}
+
+/**
+ * Which evidence cohort backs a department card, if any.
+ *
+ * The department keys and the evidence metric names are NOT the same vocabulary — the "estimating"
+ * department is backed by the "estimated" cohort — so the mapping is written down rather than assumed
+ * from the label. `collected` is deferred: it has no number on the card, so there is nothing to open
+ * and the card must not offer to.
+ */
+export function departmentEvidenceMetric(
+  metric: Pick<DepartmentMetric, "key" | "deferred">,
+): EvidenceMetric | null {
+  if (metric.deferred) return null;
+  switch (metric.key) {
+    case "won":
+      return "won";
+    case "sent":
+      return "sent";
+    case "estimating":
+      return "estimated";
+    default:
+      // `collected` today, and anything the server adds tomorrow. A card whose cohort this does not
+      // know is not drillable rather than drilled into the wrong one.
+      return null;
+  }
 }

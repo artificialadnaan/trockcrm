@@ -92,3 +92,51 @@ export async function getMondayShowcase(
   );
   return res.data;
 }
+
+/**
+ * The records behind one showcase number.
+ *
+ * `won`, `sent` and `estimated` only. The endpoint also serves `pipeline`, `projection`, `leads` and
+ * the blind-spot cohorts, but `assertShowcaseEvidenceAccess` restricts `pipeline` — along with an
+ * explicit from/to window and `regionName` — to directors, and this app shows the report to reps. The
+ * three metrics here are exactly the three figures the phone renders, which is the point: every number
+ * on that screen can be opened, and nothing can be opened that the screen does not show.
+ */
+export type EvidenceMetric = "won" | "sent" | "estimated";
+
+export type EvidenceRecord = {
+  id: string;
+  dealNumber: string | null;
+  projectNumber: string | null;
+  name: string;
+  repName: string;
+  stageLabel: string;
+  /** This record's contribution to the number, in the metric's own basis. */
+  value: number | null;
+  /** The canonical date this record sits on FOR THIS METRIC — close date, sent date, and so on. */
+  cohortDate: string | null;
+  companyName: string | null;
+};
+
+export type ShowcaseEvidence = {
+  metric: EvidenceMetric;
+  metricLabel: string;
+  /** Which date axis the records are on. Never a bare list — the server is explicit about this. */
+  dateAxisLabel: string;
+  period: ShowcasePeriod;
+  total: { count: number; value: number | null; basisLabel: string | null };
+  records: EvidenceRecord[];
+};
+
+export async function getShowcaseEvidence(
+  fetcher: Fetcher,
+  metric: EvidenceMetric,
+  mode: WeekMode,
+): Promise<ShowcaseEvidence> {
+  const res = await fetcher<{ data: ShowcaseEvidence }>(
+    `/reports/monday-showcase/evidence?metric=${encodeURIComponent(metric)}&mode=${encodeURIComponent(mode)}`,
+    // Same reasoning as the report itself: this re-runs the cohort query and is not a 30s request.
+    { timeoutMs: SHOWCASE_TIMEOUT_MS },
+  );
+  return res.data;
+}
