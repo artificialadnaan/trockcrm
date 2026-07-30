@@ -289,9 +289,9 @@ label the reason for display. Worth doing if the QC dashboard ever shows these t
 
 | Check | Result |
 | --- | --- |
-| `TZ=UTC npx vitest run shared/src/lib/responderNameMatch.test.ts` | **119 passed** — one case per numbered rule, plus a regression test per review finding, each named after the behaviour it protects |
-| Shared CI gate config (`test:ci` — the one CI runs) | 29 files / **372 tests** passed, new suite included |
-| `npm run check:premerge` (the full gate) | **6,770** server + 2,555 client + 502 worker + 372 shared, zero failures |
+| `TZ=UTC npx vitest run shared/src/lib/responderNameMatch.test.ts` | **121 passed** — one case per numbered rule, plus a regression test per review finding, each named after the behaviour it protects |
+| Shared CI gate config (`test:ci` — the one CI runs) | 29 files / **374 tests** passed, new suite included |
+| `npm run check:premerge` (the full gate) | **6,770** server + 2,555 client + 502 worker + 374 shared, zero failures |
 | Standalone adversarial harness (4 lenses) | **91 probes**, 0 failures |
 | `npm run build --workspace shared`, `typecheck --workspace server`, `typecheck:tests --workspace shared` | clean |
 | `server/tests` full run | 6586 passed; 3 pre-existing failures (`startup-order`, two `properties` consistency) unrelated — `directory-dedup.test.ts` passes |

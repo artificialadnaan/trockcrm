@@ -1169,3 +1169,25 @@ describe("eighth review round", () => {
     expect(go("AnnAbellSmith", [R("a", "Ann Abell Smith", "superintendent")]).matches).toEqual([]);
   });
 });
+
+// One line, and not a roster shape: `.length` counts UTF-16 code units, so an astral-plane letter read as
+// two characters and slipped past the guard whose entire point is "one character is not enough" — while the
+// visually identical ASCII letter was correctly refused. The rest of that review round proposed widening
+// arbitration for collisions that cannot occur on this roster and was declined; this one is a real defect.
+describe("anchor length is counted in code points", () => {
+  const R = (id: string, name: string, role: string) => ({ id, name, role, isActive: true });
+  const go = (text: string, roster: ReturnType<typeof R>[]) =>
+    matchFieldResponders({ text, role: "superintendent", roster });
+
+  it("refuses a single astral-plane letter exactly as it refuses an ASCII one", () => {
+    expect(go("𝐐", [R("x", "John 𝐐 Smith", "superintendent")]).matches).toEqual([]);
+    expect(go("Q", [R("y", "John Q Smith", "superintendent")]).matches).toEqual([]);
+    // Two real characters still anchor, astral or not.
+    expect(go("𝐐𝐐", [R("z", "𝐐𝐐 Smith", "superintendent")]).matches).toHaveLength(1);
+  });
+
+  it("still matches the full name containing that letter", () => {
+    const roster = [R("x", "John 𝐐 Smith", "superintendent")];
+    expect(go("John 𝐐 Smith", roster).matches[0].confidence).toBe("exact");
+  });
+});

@@ -417,7 +417,11 @@ function scoreSegmentAgainstName(
     // A single character is not identity evidence, and neither is a bare generational suffix: "Q" selected
     // the middle initial of "John Q Smith", and "Jr" selected the sole "Brett Bell Jr", each returning a
     // person the field never actually named.
-    if (text.length >= 2 && !indices.some((i) => identitySuffix[i])) hasMeaningfulAnchor = true;
+    //
+    // Measured in CODE POINTS, not `.length`. A UTF-16 code-unit count reads any astral-plane letter as two
+    // characters, so a single styled or non-Latin glyph slipped past a guard whose whole point is "one
+    // character is not enough" — while the visually identical ASCII letter was correctly refused.
+    if ([...text].length >= 2 && !indices.some((i) => identitySuffix[i])) hasMeaningfulAnchor = true;
   };
 
   for (const token of tokens) {
