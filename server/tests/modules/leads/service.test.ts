@@ -792,6 +792,26 @@ describe("lead service canonical progression", () => {
     }
   });
 
+// Drizzle hands `execute` a SQL object, not a string; flatten its chunks so a test can assert on the text.
+// Same shape as the helper in dashboard-rep-ytd-mtd.test.ts.
+function extractSqlText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object") return "";
+  if (Array.isArray((value as { queryChunks?: unknown[] }).queryChunks)) {
+    return (value as { queryChunks: unknown[] }).queryChunks.map(extractSqlText).join("");
+  }
+  if ("value" in (value as Record<string, unknown>)) {
+    const chunkValue = (value as { value: unknown }).value;
+    if (Array.isArray(chunkValue)) return chunkValue.map(extractSqlText).join("");
+    if (typeof chunkValue === "string") return chunkValue;
+  }
+  return "";
+}
+
+function executedSql(tenantDb: { execute: { mock: { calls: unknown[][] } } }): string[] {
+  return tenantDb.execute.mock.calls.map((call) => extractSqlText(call[0]));
+}
+
   it("does not read stored answers when the patch touches neither Other key", async () => {
     // The guard is v2-gated, exactly like all three upsertLeadQuestionAnswerSet sites — with v2 off no
     // answers are written at all, so there is nothing to guard.
@@ -822,6 +842,59 @@ describe("lead service canonical progression", () => {
         "director-1"
       )
     ).resolves.toBeTruthy();
+
+    // ...and no row lock either. The lock is the guard's, so it must not be paid on every questionnaire save.
+    expect(executedSql(tenantDb).some((text) => /FOR UPDATE/i.test(text))).toBe(false);
+    } finally {
+      if (previousFlag === undefined) delete process.env.ENABLE_LEAD_EDIT_V2;
+      else process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
+    }
+  });
+
+  it("LOCKS the lead row before validating merged Other answers", async () => {
+    // Reading stored answers and merging the patch is not atomic on its own: from `other_applies:false` with
+    // a description, one request setting applies=true and another clearing the text each validate a snapshot
+    // in which they are individually fine, and the pair commits the state the guard exists to forbid. Routes
+    // run inside a tenant transaction, so a `FOR UPDATE` on the lead serialises them — the second waits, then
+    // reads the first's committed answers and rejects. Without the lock both succeed.
+    //
+    // This asserts the lock is TAKEN and taken BEFORE the read, which is the part a refactor silently loses;
+    // the fake db cannot run two real transactions to observe the race itself.
+    const previousFlag = process.env.ENABLE_LEAD_EDIT_V2;
+    process.env.ENABLE_LEAD_EDIT_V2 = "true";
+    try {
+      const tenantDb = createFakeTenantDb({
+        id: "lead-1",
+        officeId: "office-1",
+        officeCode: "dfw",
+        isActive: true,
+        updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+      } as FakeLeadRow);
+      const service = createLeadService({
+        getStageById: pipelineMocks.getStageById as never,
+        getActiveProjectTypes: pipelineMocks.getActiveProjectTypes as never,
+        now: () => new Date("2026-04-15T15:00:00.000Z"),
+      });
+
+      await expect(
+        service.updateLead(
+          tenantDb as never,
+          "lead-1",
+          {
+            leadQuestionAnswers: {
+              other_applies: true,
+              other_scope_description: "Fire lane restriping and bollards",
+            },
+          } as never,
+          "director",
+          "director-1"
+        )
+      ).resolves.toBeTruthy();
+
+      const locks = executedSql(tenantDb).filter((text) => /FOR UPDATE/i.test(text));
+      expect(locks).toHaveLength(1);
+      // The lead row specifically — locking anything else serialises nothing.
+      expect(locks[0]).toMatch(/from\s+leads/i);
     } finally {
       if (previousFlag === undefined) delete process.env.ENABLE_LEAD_EDIT_V2;
       else process.env.ENABLE_LEAD_EDIT_V2 = previousFlag;
@@ -1943,6 +2016,17 @@ describe("lead service canonical progression", () => {
       input.projectTypeQuestionPayload = {
         projectTypeId: "project-type-commercial",
         answers: { other_applies: true, other_scope_description: "   " },
+      };
+    }],
+    // THE BYPASS: an EMPTY leadQuestionAnswers alongside a real payload. `{}` is not nullish, so a
+    // `leadQuestionAnswers ?? projectTypeQuestionPayload.answers` guard reads the empty object, sees no
+    // `other_applies`, and passes — while legacy mode (ENABLE_LEAD_EDIT_V2 off) persists the OTHER one.
+    // The guard is descriptionless-Other-anywhere, not descriptionless-Other-in-whichever-field-wins.
+    ["leadQuestionAnswers.other_scope_description", (_db: any, input: any) => {
+      input.leadQuestionAnswers = {};
+      input.projectTypeQuestionPayload = {
+        projectTypeId: "project-type-commercial",
+        answers: { other_applies: true },
       };
     }],
   ])("rejects missing lead create prerequisite %s before insert", async (fieldKey, mutate) => {

@@ -50,6 +50,12 @@ WITH applies AS (
   ON CONFLICT (key) WHERE project_type_id IS NULL DO UPDATE SET
     parent_node_id      = NULL,
     parent_option_value = NULL,
+    -- node_type and options are LOAD-BEARING for rendering, so a pre-existing hand-seeded row has to be
+    -- normalised too, not merely reactivated: a node_type other than 'question' is filtered out of the
+    -- questionnaire entirely (an invisible Other group), and stale non-empty options make a nominal textarea
+    -- normalise as a select. Reactivating a row into either state is worse than leaving it inactive.
+    node_type           = EXCLUDED.node_type,
+    options             = EXCLUDED.options,
     label               = EXCLUDED.label,
     input_type          = EXCLUDED.input_type,
     is_required         = EXCLUDED.is_required,
@@ -77,6 +83,9 @@ FROM applies
 ON CONFLICT (key) WHERE project_type_id IS NULL DO UPDATE SET
   parent_node_id      = EXCLUDED.parent_node_id,
   parent_option_value = EXCLUDED.parent_option_value,
+  -- See the applies-node arm above: both are load-bearing for whether this renders at all, and as what.
+  node_type           = EXCLUDED.node_type,
+  options             = EXCLUDED.options,
   label               = EXCLUDED.label,
   prompt              = EXCLUDED.prompt,
   input_type          = EXCLUDED.input_type,

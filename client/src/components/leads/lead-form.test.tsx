@@ -9,6 +9,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import { getEditableFormState, LeadForm, LeadQuestionnaireSummary } from "./lead-form";
 import type { LeadQuestionnaireNode } from "@/hooks/use-leads";
+import { ApiError } from "@/lib/api";
 import type { PropertySurface } from "@/hooks/use-properties";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -1532,6 +1533,48 @@ describe("LeadForm", () => {
 
     expect(container.textContent).toContain("Describe the scope when Other is selected.");
     expect(leadHookMocks.createLead).not.toHaveBeenCalled();
+  });
+
+  it("re-enables Create Lead when Other is DESELECTED after the server flagged the description", async () => {
+    // The server answers with the missing key NAMESPACED, and the form clears gate keys one at a time as the
+    // matching answer changes. Deselecting Other takes the description off screen without ever changing it —
+    // so its gate key survived, and Create Lead stayed disabled pointing at a field the user could no longer
+    // see or fill. The only escape was a reload, which loses the whole form.
+    mockUniversalCreateQuestionnaire();
+    renderCreateForm();
+
+    // A real scope stays selected throughout, so the only thing under test is the description's gate key —
+    // deselecting the LAST scope would disable the button for the unrelated "select at least one" reason.
+    await clickButton(container.querySelector<HTMLButtonElement>('[data-scope-card="roofing"]')!);
+    const otherCard = container.querySelector<HTMLButtonElement>('[data-scope-card="other"]')!;
+    await clickButton(otherCard);
+    const description = container.querySelector<HTMLTextAreaElement>(
+      '[data-question-key="other_scope_description"] textarea'
+    )!;
+    expect(description).toBeTruthy();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set?.call(
+        description,
+        "Fire lane restriping"
+      );
+      description.dispatchEvent(new Event("input", { bubbles: true }));
+      description.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    leadHookMocks.createLead.mockRejectedValueOnce(
+      new ApiError(422, {
+        message: "Complete the required fields.",
+        code: "LEAD_CREATE_REQUIREMENTS_UNMET",
+        missingRequirements: { fields: [{ key: "leadQuestionAnswers.other_scope_description" }] },
+      })
+    );
+    await clickButton(findButton("Create Lead")!);
+    expect(findButton("Create Lead")?.disabled).toBe(true);
+
+    // Deselect Other: the description is gone, so the requirement it carried must be gone too.
+    await clickButton(otherCard);
+
+    expect(findButton("Create Lead")?.disabled).toBe(false);
   });
 
   it("renders scope groups as eleven selectable cards and activates a scope panel on click", async () => {

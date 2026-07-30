@@ -86,6 +86,8 @@ import {
   shouldNormalizeUnansweredPlaceholder,
   TYPE_OF_ACCESS_OTHER_DETAIL_KEY,
   isOtherScopeMissingDescription,
+  OTHER_SCOPE_APPLIES_KEY,
+  OTHER_SCOPE_DESCRIPTION_KEY,
 } from "./questionnaire-answer-normalization";
 import { ALLOWED_EXTENSIONS, validateFileForUpload } from "@/lib/file-utils";
 import { CLIENT_PROVIDED_DOCS_TAG } from "@/lib/lead-attachment-routing";
@@ -1249,7 +1251,17 @@ function EditableLeadForm({
         [questionKey]: value,
       },
     }));
-    clearCreateGateMissingKeys([`leadQuestionAnswers.${questionKey}`]);
+    // Deselecting Other has to clear the DESCRIPTION's gate key, not just its own.
+    //
+    // The server returns the missing key namespaced (`leadQuestionAnswers.other_scope_description`) and the
+    // gate only clears the key that changed — so a user who selected Other, tried to submit, then changed
+    // their mind and deselected it left the description key stranded in the gate. Create Lead stayed disabled
+    // with the offending field no longer on screen: unrecoverable without a reload.
+    const clearedKeys = [`leadQuestionAnswers.${questionKey}`];
+    if (questionKey === OTHER_SCOPE_APPLIES_KEY && value !== true) {
+      clearedKeys.push(`leadQuestionAnswers.${OTHER_SCOPE_DESCRIPTION_KEY}`);
+    }
+    clearCreateGateMissingKeys(clearedKeys);
   };
 
   const handleSubmit = async (event: React.FormEvent) => {

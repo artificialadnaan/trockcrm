@@ -969,6 +969,15 @@ async function assertOtherScopeDescribedOnUpdate(
     Object.prototype.hasOwnProperty.call(incoming, OTHER_SCOPE_DESCRIPTION_KEY);
   if (!touchesOtherScope) return;
 
+  // LOCK the lead before reading, and hold it through the caller's upsert.
+  //
+  // Two concurrent patches can each validate against the same snapshot and jointly create the forbidden
+  // state: from `other_applies: false` with text, one request sets applies true while the other clears the
+  // text — both merged views are individually valid, and the pair is not. Routes run inside a tenant
+  // transaction (req.commitTransaction), so this row lock serialises them; the second reads the first's
+  // committed answers and fails. Same device as findApprovalByToken's FOR UPDATE in due-diligence-service.
+  await tenantDb.execute(sql`SELECT id FROM leads WHERE id = ${leadId} FOR UPDATE`);
+
   const stored = await listLeadQuestionAnswers(tenantDb, leadId);
   const merged = { ...stored, ...incoming } as Record<string, unknown>;
   if (isOtherScopeMissingDescription(merged)) {
@@ -1026,9 +1035,16 @@ function assertLeadCreateRequirements(
   // Resolved with the SAME precedence createLead itself uses a few lines down
   // (`leadQuestionAnswers ?? projectTypeQuestionPayload.answers`). Reading only one of the two fields would
   // leave the other as a way past the guard, which is the whole reason this check exists server-side.
+  // BOTH payloads, not whichever `??` picks first.
+  //
+  // Which one is PERSISTED depends on ENABLE_LEAD_EDIT_V2 (legacy mode stores projectTypeQuestionPayload),
+  // while `leadQuestionAnswers ?? …` prefers the other — and `{}` is not nullish, so a caller sending an
+  // empty object plus a real payload slipped straight through to the stored descriptionless Other. Checking
+  // both is correct under either flag and needs no reasoning about which is live.
   if (
+    isOtherScopeMissingDescription(input.leadQuestionAnswers as Record<string, unknown> | undefined) ||
     isOtherScopeMissingDescription(
-      (input.leadQuestionAnswers ?? input.projectTypeQuestionPayload?.answers ?? {}) as Record<string, unknown>
+      input.projectTypeQuestionPayload?.answers as Record<string, unknown> | undefined
     )
   ) {
     // NAMESPACED, because the form clears gate keys as `leadQuestionAnswers.<key>` when the answer changes.

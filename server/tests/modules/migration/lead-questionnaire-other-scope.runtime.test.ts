@@ -165,13 +165,15 @@ describe("migration 0208 — the Other scope", () => {
         CREATE UNIQUE INDEX project_type_question_nodes_universal_key_uidx
           ON public.project_type_question_nodes USING btree (key) WHERE (project_type_id IS NULL);
       `);
-      // Pre-existing rows: different ids, and INACTIVE — which the index still covers.
+      // Pre-existing rows: different ids, INACTIVE (the index still covers them), and mis-shaped in the two
+      // ways that break rendering rather than merely looking wrong — a node_type the questionnaire filters
+      // out, and stale options that would make a textarea normalise as a select.
       await fresh.exec(`
         INSERT INTO public.project_type_question_nodes
-          (id, key, label, input_type, is_active, section_key, group_key, group_label, group_order)
+          (id, key, label, input_type, node_type, options, is_active, section_key, group_key, group_label, group_order)
         VALUES
-          ('11111111-1111-1111-1111-111111111111','other_applies','Stale label','boolean',false,'scope','other','Other',99),
-          ('22222222-2222-2222-2222-222222222222','other_scope_description','Stale desc','text',false,'scope','other','Other',99);
+          ('11111111-1111-1111-1111-111111111111','other_applies','Stale label','boolean','section','[]'::jsonb,false,'scope','other','Other',99),
+          ('22222222-2222-2222-2222-222222222222','other_scope_description','Stale desc','text','question','[{"value":"a","label":"A"}]'::jsonb,false,'scope','other','Other',99);
       `);
 
       await expect(fresh.exec(MIGRATION_SQL)).resolves.toBeDefined();
@@ -193,6 +195,16 @@ describe("migration 0208 — the Other scope", () => {
       expect(rows[0].group_order).toBe(11);
       // ...and the description parents to the EXISTING applies-node, not the hard-coded literal.
       expect(rows[1].parent_node_id).toBe("11111111-1111-1111-1111-111111111111");
+
+      // The render-critical fields are normalised, not just reactivated: a stray node_type would filter the
+      // whole group out of the questionnaire, and stale options would render the textarea as a select.
+      const { rows: shape } = await fresh.query<{ node_type: string; options: unknown; input_type: string }>(
+        `SELECT node_type, options, input_type FROM public.project_type_question_nodes
+          WHERE group_key='other' ORDER BY display_order`,
+      );
+      expect(shape.map((r) => r.node_type)).toEqual(["question", "question"]);
+      expect(shape[1].input_type).toBe("textarea");
+      expect(shape[1].options).toEqual([]);
     } finally {
       await fresh.close();
     }
