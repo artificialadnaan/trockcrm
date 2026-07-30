@@ -16,7 +16,13 @@
  * retries on tap. A retry a user asked for is worth any number of retries they did not.
  *
  * Shared and pure because both directories and the task list express the same rule, and every time this
- * app has expressed one rule three times, one copy has been wrong.
+ * app has expressed one rule three times, one copy has been wrong. That is not hypothetical here: the
+ * contacts list shipped without the failure clause that the deals list had carried from the start.
+ *
+ * NOT yet the only expression of it. The deals, contacts and stage lists reach the same conclusion
+ * through their own `listState.pageFailed` state machines, which carry more than this predicate knows
+ * about. Folding them in means touching those machines and their tests, so it is deliberately left
+ * alone rather than half-done — but they are the places to check first if this rule ever changes.
  */
 export function shouldLoadNextPage(query: {
   hasNextPage: boolean;
