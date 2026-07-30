@@ -391,10 +391,24 @@ function maxEditDistance(tokenLength: number, partLength: number): number {
  * leaves "Bell" unspoken is "high", because the caller may reasonably want the full-name tier before
  * auto-sending.
  */
+interface SegmentScore {
+  confidence: ResponderMatchConfidence;
+  /**
+   * Edit distance of the single fuzzy accounting, or 0 when every token matched exactly.
+   *
+   * `high` is a COARSE tier: two candidates in it are not necessarily equally good. Discarding this let the
+   * role preference pick the WEAKER spelling — PM "John Cheatam" (distance 1) lost to superintendent "John
+   * Chattam" (distance 2) for input "John Cheatham", purely because the text sat in a superintendent field,
+   * which is the one thing this matcher treats as unreliable. Role is documented as breaking a TIE; without
+   * this number the code could not tell a tie from a difference.
+   */
+  fuzzDistance: number;
+}
+
 function scoreSegmentAgainstName(
   tokens: string[],
   { parts, joinableWithNext, identitySuffix }: RosterNameParts,
-): ResponderMatchConfidence | null {
+): SegmentScore | null {
   if (tokens.length === 0 || tokens.length > parts.length) return null;
 
   const consumed = parts.map(() => false);
@@ -482,7 +496,7 @@ function scoreSegmentAgainstName(
     if (index < 0) return null;
     consumed[index] = true;
     if (suffixUnspoken()) return null;
-    return "high";
+    return { confidence: "high", fuzzDistance: nameEditDistance(token, parts[index]) };
   }
 
   // A generational suffix left unspoken rejects the match outright. It is not an optional middle name: it
@@ -493,7 +507,7 @@ function scoreSegmentAgainstName(
   // Whole name accounted for, no fuzz. Counted by CONSUMED PARTS rather than `tokens.length === parts.length`,
   // because one token may consume a whole punctuation-linked run — "MaryJane Smith" against
   // ["mary","jane","smith"] is a complete, unfuzzy identification with 2 tokens and 3 parts.
-  return consumed.every(Boolean) ? "exact" : "high";
+  return { confidence: consumed.every(Boolean) ? "exact" : "high", fuzzDistance: 0 };
 }
 
 /**
@@ -563,16 +577,17 @@ export function matchFieldResponders<T extends ResponderRosterEntry>({
         entry: candidate.entry,
         inRole: candidate.inRole,
         // Best over the readings: the plain tokens, and the punctuation-collapsed variant.
-        confidence: tokenReadings.reduce<ResponderMatchConfidence | null>((best, reading) => {
+        score: tokenReadings.reduce<SegmentScore | null>((best, reading) => {
           const scored = scoreSegmentAgainstName(reading, candidate.nameParts);
-          if (scored === "exact" || best === "exact") return "exact";
-          return scored ?? best;
+          if (!scored) return best;
+          if (!best) return scored;
+          if (scored.confidence === "exact" && best.confidence !== "exact") return scored;
+          if (best.confidence === "exact" && scored.confidence !== "exact") return best;
+          return scored.fuzzDistance < best.fuzzDistance ? scored : best;
         }, null),
       }))
-      .filter(
-        (scored): scored is { entry: T; inRole: boolean; confidence: ResponderMatchConfidence } =>
-          scored.confidence !== null,
-      );
+      .filter((scored): scored is { entry: T; inRole: boolean; score: SegmentScore } => scored.score !== null)
+      .map((scored) => ({ ...scored, confidence: scored.score.confidence, fuzz: scored.score.fuzzDistance }));
 
     if (allScored.length === 0) {
       result.unmatched.push(segment.raw);
@@ -629,8 +644,13 @@ export function matchFieldResponders<T extends ResponderRosterEntry>({
         continue;
       }
 
-      const inRoleAtBest = atBest.filter((s) => s.inRole);
-      const finalists = inRoleAtBest.length > 0 ? inRoleAtBest : atBest;
+      // Closeness before role. Within the `high` tier a distance-1 spelling is better evidence than a
+      // distance-2 one, and role — the unreliable signal — must not override that. Role still breaks a
+      // genuine tie, where the spellings are equally close.
+      const closest = Math.min(...atBest.map((s) => s.fuzz));
+      const atClosest = atBest.filter((s) => s.fuzz === closest);
+      const inRoleAtBest = atClosest.filter((s) => s.inRole);
+      const finalists = inRoleAtBest.length > 0 ? inRoleAtBest : atClosest;
       if (finalists.length > 1) {
         result.ambiguous.push({ matchedText: segment.raw, candidates: finalists.map((s) => s.entry) });
         continue;

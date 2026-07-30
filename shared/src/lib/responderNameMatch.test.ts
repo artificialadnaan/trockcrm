@@ -1222,3 +1222,40 @@ describe("suffix words and code-point lengths", () => {
     expect(go("Addy", [R("a", "Adam Sherwood", "superintendent")]).matches).toEqual([]);
   });
 });
+
+describe("closeness ranks before role", () => {
+  const R = (id: string, name: string, role: string) => ({ id, name, role, isActive: true });
+  const go = (text: string, role: string, roster: ReturnType<typeof R>[]) =>
+    matchFieldResponders({ text, role, roster });
+
+  it("prefers the CLOSER fuzzy spelling over the queried role", () => {
+    // `high` is a coarse tier: two candidates in it are not necessarily equally good. Applying the role
+    // preference across the whole tier discarded the better evidence — PM "John Cheatam" (distance 1) lost
+    // to superintendent "John Chattam" (distance 2) purely because the text sat in a superintendent field,
+    // which is the one signal this matcher documents as unreliable.
+    const roster = [R("pm", "John Cheatam", "project_manager"), R("sup", "John Chattam", "superintendent")];
+    const r = go("John Cheatham", "superintendent", roster);
+    expect(r.matches.map((m) => m.responder.id)).toEqual(["pm"]);
+    expect(r.matches[0].roleMatchesQuery).toBe(false);
+  });
+
+  it("still lets role break a GENUINE tie", () => {
+    const both = [R("pm", "Brett Bell", "project_manager"), R("sup", "Brett Bell", "superintendent")];
+    expect(go("Brett Bell", "superintendent", both).matches[0].responder.id).toBe("sup");
+    expect(go("Brett Bell", "project_manager", both).matches[0].responder.id).toBe("pm");
+  });
+
+  it("computes edit distance over code points, so one astral edit costs one", () => {
+    // The threshold and length guard were converted and the distance function was not, so deleting a single
+    // astral character cost 2 on a code-unit walk and blew past a cap of 1 — the two disagreeing about what
+    // one edit is.
+    expect(nameEditDistance("𐐀𐐁𐐂𐐃𐐄", "𐐀𐐁𐐂𐐃𐐄𐐅")).toBe(1);
+    expect(go("John 𐐀𐐁𐐂𐐃𐐄", "superintendent", [R("x", "John 𐐀𐐁𐐂𐐃𐐄𐐅", "superintendent")]).matches)
+      .toHaveLength(1);
+    // ASCII calibration is untouched.
+    expect(nameEditDistance("cheatham", "cheatam")).toBe(1);
+    expect(nameEditDistance("chatham", "cheatam")).toBe(2);
+    expect(nameEditDistance("addy", "adam")).toBe(2);
+    expect(nameEditDistance("sanders", "sanchez")).toBe(4);
+  });
+});
