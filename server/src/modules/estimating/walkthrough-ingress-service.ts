@@ -170,9 +170,36 @@ export function walkthroughContentHash(walkthroughId: string): string {
  *   stores three decimals" is a rule a sender can act on and "below 0.0005 you become zero" is not.)
  *   Scale is 3 at every step of the chain, so unlike the max the min is the same wherever it is
  *   measured — narrowing changed the precision, not the scale.
+ *
+ *   The SAME rounding, at the OTHER end of the range, is what `validateScopeRow`'s excess-precision
+ *   check refuses: 1.2345 does not collapse to zero, it quietly becomes 1.235. Both rules are the
+ *   scale showing through, which is why both are derived from `WALKTHROUGH_QUANTITY_SCALE`.
  */
 export const MAX_WALKTHROUGH_QUANTITY = 999999999.999;
-export const MIN_WALKTHROUGH_QUANTITY = 0.001;
+
+/**
+ * The DECIMAL SCALE every quantity column in the promotion chain carries — written down ONCE.
+ *
+ * `estimate_extractions.quantity` numeric(14,3) ->
+ * `estimate_pricing_recommendations.recommended_quantity` numeric(14,3) ->
+ * `estimate_line_items.quantity` numeric(12,3). Narrowing changed the PRECISION at the last step and
+ * left the scale alone, so unlike `MAX_WALKTHROUGH_QUANTITY` this number is the same wherever in the
+ * chain it is measured.
+ *
+ * TWO rules are derived from it and neither may hardcode a `3` of its own: the floor below (the
+ * smallest value the scale can represent) and the excess-precision refusal in `validateScopeRow`. They
+ * are the two ends of one property — "the columns hold exactly this many decimals" — so a chain
+ * migrated to scale 4 has to move both together, or ingress would start accepting 0.0001 while still
+ * refusing 1.2345.
+ */
+export const WALKTHROUGH_QUANTITY_SCALE = 3;
+
+/**
+ * The smallest quantity the chain can represent — DERIVED from the scale rather than spelled out, so
+ * the floor and the excess-precision check can never disagree about what the scale is.
+ * `10 ** -3` is exactly the double `0.001`, so this is not a floating-point approximation of the bound.
+ */
+export const MIN_WALKTHROUGH_QUANTITY = 10 ** -WALKTHROUGH_QUANTITY_SCALE;
 
 /**
  * The longest `unit` the chain can carry.
@@ -1084,6 +1111,11 @@ export async function insertWalkthroughExtractions({
     quantity: row.quantity === null ? null : String(row.quantity),
     unit: row.unit,
     divisionHint: row.divisionHint,
+    // R35. The ONE value this module rounds to its column's scale, and the asymmetry is deliberate: a
+    // quantity carrying more decimals than the column holds is REFUSED at the door (validateScopeRow),
+    // because it is a human-confirmed measurement and rewriting it would change what was said. A
+    // confidence is the model's judgement of the same utterance — outside the row fingerprint, read as
+    // content by nothing downstream — so folding it to numeric(5,2) changes no claim.
     confidence: row.confidence.toFixed(2),
     evidenceText: row.evidenceText,
     // Temporal evidence occupies the bbox column wholesale: a spoken utterance has a clip and a
@@ -1473,6 +1505,62 @@ function validateScopeRow(value: unknown, index: number): WalkthroughScopeRow {
         `(${MIN_WALKTHROUGH_QUANTITY}). Every quantity column in the chain has three decimal places, ` +
         `so Postgres would ROUND this and store it as 0.000, turning a quantity this contract requires ` +
         `to be greater than zero into exactly the zero it forbids.`
+    );
+  }
+  // R35. EXCESS PRECISION — the same rounding defect as the floor above, at the other end of the range,
+  // and REFUSED rather than rounded.
+  //
+  // Every quantity column in the chain is scale WALKTHROUGH_QUANTITY_SCALE, so a fourth decimal is not
+  // an error to Postgres, it is a ROUNDING instruction: a posted 1.2345 is stored, priced, reviewed and
+  // promoted as 1.235. The floor exists because rounding turns 0.0001 into the zero this contract
+  // forbids; this exists because rounding turns a human-confirmed 1.2345 into a number nobody said. THE
+  // RULE THE WHOLE EXPORT IS BUILT ON (see the null-quantity refusal above) is that a quantity exists
+  // only when it was spoken and confirmed — and rounding a confirmed number is changing it.
+  //
+  // WHY REFUSE RATHER THAN CANONICALIZE. Rounding to scale here would also have closed the finding, and
+  // it was weighed rather than dismissed:
+  //   • This module's ESTABLISHED STANCE is to refuse rather than transform. It already refuses a null
+  //     quantity, one at or below zero, one below the representable floor and one above the promotion
+  //     ceiling — and it refuses an over-long `rawLabel` rather than truncating it, for exactly this
+  //     reason. Silently rounding would be the ONE place it quietly rewrote a human-confirmed value.
+  //   • It fixes REPLAY STRUCTURALLY instead of papering over it. `fingerprintWalkthroughScopeRow`
+  //     hashes the POSTED quantity, so a canonicalized 1.2345 would sit in the table as 1.235 under a
+  //     fingerprint of 1.2345 — and a well-behaved sender that reads back what we stored and replays it
+  //     would be 409'd for content drift, FOR MATCHING US EXACTLY. If an over-precise value can never be
+  //     accepted, the stored value always equals the posted one and replay cannot disagree. Rounding
+  //     would have needed a second fix (fingerprint the canonical form) to reach the same place.
+  //   • Construction quantities do not carry sub-thousandth precision. A 1.2345 LF is far more likely a
+  //     unit confusion or a sender bug than a real measurement, and surfacing that is worth more than
+  //     absorbing it.
+  //
+  // DELIBERATELY ASYMMETRIC WITH `confidence`, which IS transformed — `.toFixed(2)` against its
+  // numeric(5,2) column at insertWalkthroughExtractions — and that transformation STAYS. `confidence` is
+  // a MODEL ARTIFACT, not a human-confirmed measurement: nothing downstream reads it as content, it has
+  // no line-item column at all, and `fingerprintWalkthroughScopeRow` deliberately excludes it, so
+  // rounding it changes no claim and cannot cause replay drift. That docblock's rule — a field is
+  // content when a change to it means the utterance was DESCRIBED differently, and a judgement when a
+  // change means it was JUDGED differently — is precisely why one is refused here and the other rounded
+  // there. Without this paragraph the next reader sees one field rounded and one refused and cannot tell
+  // which was reasoned.
+  //
+  // A ROUND-TRIP rather than counting decimals in the string form: `1e-5` and `0.00001` are the same
+  // number and only one of them LOOKS over-precise. `toFixed` is safe at this point specifically because
+  // the ceiling above has already bounded the magnitude far below the 1e21 threshold at which it starts
+  // emitting exponential notation.
+  if (Number(quantity.toFixed(WALKTHROUGH_QUANTITY_SCALE)) !== quantity) {
+    throw new AppError(
+      400,
+      `${at}.quantity ${quantity} carries more than ${WALKTHROUGH_QUANTITY_SCALE} decimal places. ` +
+        `Every quantity column in the promotion chain is scale ${WALKTHROUGH_QUANTITY_SCALE} ` +
+        `(estimate_extractions.quantity numeric(14,${WALKTHROUGH_QUANTITY_SCALE}) -> ` +
+        `estimate_line_items.quantity numeric(12,${WALKTHROUGH_QUANTITY_SCALE})), so Postgres would not ` +
+        `refuse this — it would ROUND it and store ` +
+        `${quantity.toFixed(WALKTHROUGH_QUANTITY_SCALE)}, a different number from the one that was ` +
+        `spoken and confirmed. It is refused rather than rounded for two reasons: a walkthrough quantity ` +
+        `is a human-confirmed measurement and this module does not rewrite those, and the row ` +
+        `fingerprint is taken over the POSTED value — so a rounded row would 409 as drift the moment a ` +
+        `sender replayed what we actually stored. Post it at ` +
+        `${WALKTHROUGH_QUANTITY_SCALE} decimals if that is genuinely the measurement.`
     );
   }
 

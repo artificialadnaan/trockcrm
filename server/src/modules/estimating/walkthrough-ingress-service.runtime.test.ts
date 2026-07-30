@@ -1308,6 +1308,128 @@ describe("ingestWalkthrough", () => {
     expect(stored.rows.map((r) => r.stored)).toEqual(["999999999.999", "0.001"]);
   });
 
+  // ── R35: excess precision — the SAME rounding as the floor above, at the other end of the range ────
+  //
+  // The floor exists because scale 3 rounds 0.0001 down to the zero the contract forbids. The identical
+  // rounding at a normal magnitude is silent: 1.2345 is stored, priced and promoted as 1.235. That
+  // contradicts the rule the whole export is built on — a quantity exists only when it was spoken and
+  // human-confirmed — and it breaks replay, because `fingerprintWalkthroughScopeRow` hashes the POSTED
+  // number while the table holds the rounded one.
+  //
+  // The fixture value MATTERS. A whole-number quantity (or 12.5, the suite's default) cannot see a
+  // precision rule at all — every assertion about it passes identically with and without the check. Each
+  // case below carries real digits past the third decimal.
+  it.each<[string, number, string]>([
+    // The finding's own value: four decimals, rounds DOWN to 1.234.
+    ["a fourth decimal", 1.2345, "1.234"],
+    // Rounds UP, so the stored number is larger than the one that was spoken — the same defect with the
+    // opposite sign, which a down-only implementation would miss.
+    ["a fourth decimal that rounds up", 2.0006, "2.001"],
+    // Far more decimals than the column holds, at a magnitude nowhere near either bound.
+    ["far more decimals than the column holds", 18.123456, "18.123"],
+  ])(
+    "refuses a quantity carrying %s, naming the row and the scale, without writing anything",
+    async (_label, quantity, wouldStore) => {
+      const before = await tableCounts();
+
+      const failure = await ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(U("33064"), {
+          rows: [{ ...CARPENTRY_ROW, sourceScopeItemId: "scope-item-over-precise", quantity }],
+        }),
+        // A resolved value has no statusCode, so an implementation that ACCEPTED this fails the next
+        // line rather than sliding past a `.catch` that never ran.
+      }).catch((error: Error) => error);
+
+      expect((failure as { statusCode?: number }).statusCode).toBe(400);
+      // NAMES THE ROW, so the sender can look the utterance up...
+      expect((failure as Error).message).toContain("scope-item-over-precise");
+      // ...and names the MECHANISM — the column's scale, and the number that would have been stored in
+      // place of the one that was spoken. Without these two the test would also pass on an arithmetic
+      // complaint thrown from somewhere else entirely.
+      expect((failure as Error).message).toContain("carries more than 3 decimal places");
+      expect((failure as Error).message).toContain(`would ROUND it and store ${wouldStore}`);
+
+      // NOTHING WAS WRITTEN. This is the assertion that separates "refused" from "canonicalized": an
+      // implementation that rounded 1.2345 to 1.235 instead of refusing it would build the whole chain
+      // and move all four counts.
+      expect(await tableCounts()).toEqual(before);
+    }
+  );
+
+  // The other side of the boundary, and it is what keeps the new rule from being over-tight. A value
+  // AT the column's scale, and a value at the representable floor, both have to survive untouched —
+  // READ BACK OUT OF POSTGRES as text, because `quantity::text` is the only thing that can tell 1.234
+  // apart from a rounded 1.230.
+  //
+  // Each case carries its OWN walkthrough id, spelled out rather than derived from the label — the same
+  // precaution the drift table below documents, so one case's "fresh ingest" cannot silently become a
+  // replay of the other's document.
+  it.each<[string, string, number, string]>([
+    ["exactly three decimals", U("33067"), 1.234, "1.234"],
+    // 0.001 is simultaneously the floor and a three-decimal value: proof the new check did not shift
+    // the existing lower bound by rejecting the smallest representable quantity.
+    ["the representable floor", U("33068"), MIN_WALKTHROUGH_QUANTITY, "0.001"],
+  ])("accepts %s and stores it unchanged", async (_label, walkthroughId, quantity, expectedStored) => {
+    const result = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, {
+        rows: [{ ...CARPENTRY_ROW, quantity }],
+      }),
+    });
+
+    const stored = await pg.query<{ stored: string }>(
+      `SELECT quantity::text AS stored FROM public.estimate_extractions WHERE id = $1`,
+      [result.extractionIds[0]]
+    );
+    expect(stored.rows[0].stored).toBe(expectedStored);
+    // ...and the number it round-trips to is the number that was posted, not merely something close.
+    expect(Number(stored.rows[0].stored)).toBe(quantity);
+  });
+
+  // R35, THE STRUCTURAL POINT — why the finding was closed by REFUSING rather than by rounding.
+  //
+  // The row fingerprint is taken over the POSTED quantity. Had ingress canonicalized 1.2345 to 1.235,
+  // the table would hold 1.235 under a fingerprint of 1.2345 — so a well-behaved sender that reads back
+  // what we stored and replays it would be refused with a 409 for content drift, for matching us
+  // exactly. Refusing over-precise values makes stored == posted an invariant, which makes that
+  // divergence unconstructible. This test walks that sender's path: ingest, read the stored value out of
+  // Postgres, and re-post THAT.
+  it("replays a fractional quantity read back out of the database, rather than calling it drift", async () => {
+    const walkthroughId = U("33069");
+    const posted = 1.234;
+
+    const first = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, {
+        rows: [{ ...CARPENTRY_ROW, quantity: posted }],
+      }),
+    });
+
+    // What a sender reading our own storage back would see — from Postgres, not from the payload.
+    const stored = await pg.query<{ stored: string }>(
+      `SELECT quantity::text AS stored FROM public.estimate_extractions WHERE id = $1`,
+      [first.extractionIds[0]]
+    );
+    const readBack = Number(stored.rows[0].stored);
+    expect(readBack).toBe(posted);
+
+    const second = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, {
+        rows: [{ ...CARPENTRY_ROW, quantity: readBack }],
+      }),
+    });
+
+    // A RETRY, not a correction: the same chain replayed, nothing new written.
+    expect(second).toEqual(first);
+    const all = await tenantDb
+      .select({ id: estimateExtractions.id })
+      .from(estimateExtractions)
+      .where(eq(estimateExtractions.documentId, first.documentId));
+    expect(all).toHaveLength(1);
+  });
+
   it("refuses more scope rows than one walkthrough can plausibly carry", async () => {
     const before = await tableCounts();
 
