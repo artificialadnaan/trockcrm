@@ -30,12 +30,14 @@ jest.mock("expo-image", () => {
   return {
     Image: (props: Record<string, unknown>) => {
       mockImageProps.push(props);
-      return <View testID="expo-image" />;
+      // Preserve an incoming testID so components that set one (PhotoGrid's tiles) stay findable.
+      return <View testID={(props.testID as string) ?? "expo-image"} />;
     },
   };
 });
 
 import { ZoomablePhoto } from "../ZoomablePhoto";
+import { PhotoGrid } from "../PhotoGrid";
 
 const URI = "https://r2.example/full.jpg?X-Amz-Signature=abc";
 
@@ -66,8 +68,40 @@ describe("ZoomablePhoto decode + cache behaviour", () => {
     render(
       <ZoomablePhoto uri={URI} width={393} height={500} cacheKey="photo-1" thumbnailUri="https://r2.example/t.jpg" />,
     );
-    const props = mockImageProps[mockImageProps.length - 1] as { placeholder?: { uri: string } };
-    expect(props.placeholder).toEqual({ uri: "https://r2.example/t.jpg" });
+    const props = mockImageProps[mockImageProps.length - 1] as { placeholder?: { uri: string; cacheKey?: string } };
+    // The cacheKey is what makes the placeholder actually resolve from cache. Without it expo-image looks
+    // the thumbnail up by URL, misses the entry the grid wrote under the id, and goes to the network for a
+    // URL that is expired in exactly the situation the placeholder exists to cover.
+    expect(props.placeholder).toEqual({ uri: "https://r2.example/t.jpg", cacheKey: "photo-1#thumb" });
+  });
+
+  it("looks the placeholder up under the SAME key the grid stores its thumbnail as", () => {
+    // The cross-component invariant this whole mechanism rests on. Derived independently in two files it
+    // would drift silently: nothing errors, the placeholder just stops appearing — which surfaces as the
+    // blank pane it exists to prevent. Asserted here rather than trusted.
+    const gridPhotos = [
+      {
+        id: "photo-1",
+        displayName: "Roof detail",
+        description: null,
+        uploaderName: "Tester",
+        imageUrl: "https://r2.example/t.jpg",
+        photoCategory: null,
+      },
+    ] as unknown as Parameters<typeof PhotoGrid>[0]["photos"];
+
+    render(<PhotoGrid photos={gridPhotos} onPress={jest.fn()} />);
+    const gridKey = (mockImageProps[mockImageProps.length - 1] as { source: { cacheKey?: string } }).source.cacheKey;
+
+    mockImageProps.length = 0;
+    render(
+      <ZoomablePhoto uri={URI} width={393} height={500} cacheKey="photo-1" thumbnailUri="https://r2.example/t.jpg" />,
+    );
+    const placeholderKey = (mockImageProps[mockImageProps.length - 1] as { placeholder?: { cacheKey?: string } })
+      .placeholder?.cacheKey;
+
+    expect(placeholderKey).toBe(gridKey);
+    expect(placeholderKey).toBeTruthy();
   });
 
   it("latches native-res decode on the first zoom, and releases it when the page goes inactive", () => {

@@ -3,6 +3,7 @@ import { Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-na
 import { Image as ExpoImage } from "expo-image";
 import type { FieldPhoto } from "../api/types";
 import { categoryLabel } from "../projects/field-projects";
+import { thumbnailCacheKey } from "../photos/cache-keys";
 import { theme } from "../theme/theme";
 
 const GAP = 4;
@@ -41,9 +42,9 @@ function PhotoTile({
           <ExpoImage
             testID={`photo-grid-image-${photo.id}`}
             // Keyed on the photo id, not the presigned URL: the signature changes on every list refetch,
-            // so a URL-keyed cache misses every time and re-downloads a thumbnail it already has. Suffixed
-            // so it can never collide with the viewer's full-size entry for the same photo.
-            source={{ uri: photo.imageUrl, cacheKey: `${photo.id}#thumb` }}
+            // so a URL-keyed cache misses every time and re-downloads a thumbnail it already has. The key
+            // is shared with the viewer, whose placeholder reads THIS entry — see photos/cache-keys.
+            source={{ uri: photo.imageUrl, cacheKey: thumbnailCacheKey(photo.id) }}
             style={styles.image}
             contentFit="cover"
             recyclingKey={photo.id}
