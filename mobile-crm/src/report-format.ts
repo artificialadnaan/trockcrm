@@ -83,13 +83,52 @@ export function compactMoney(amount: number): string {
   if (!Number.isFinite(amount)) return "—";
   const sign = amount < 0 ? "-" : "";
   const abs = Math.abs(amount);
-  if (abs >= 1_000_000) return `${sign}$${trimZero(abs / 1_000_000)}M`;
-  if (abs >= 1_000) return `${sign}$${trimZero(abs / 1_000)}k`;
-  return `${sign}$${Math.round(abs)}`;
+  // The suffix is chosen AFTER rounding, not before. Picking it first meant 999_999 rounded to 1000
+  // inside its own unit and rendered "$1000k" — four digits, which is exactly the noise this exists to
+  // remove, at the boundary a real report total is most likely to sit on.
+  for (const [unit, suffix] of [
+    [1_000_000, "M"],
+    [1_000, "k"],
+  ] as const) {
+    if (abs >= unit) {
+      const scaled = abs / unit;
+      const rounded = Number(scaled.toFixed(1));
+      if (rounded >= 1000 && unit === 1_000) return `${sign}$${trimZero(abs / 1_000_000)}M`;
+      return `${sign}$${trimZero(rounded)}${suffix}`;
+    }
+  }
+  const whole = Math.round(abs);
+  return whole >= 1000 ? `${sign}$${trimZero(whole / 1_000)}k` : `${sign}$${whole}`;
 }
 
 /** One decimal, but only when it says something: 1.2M keeps the .2, 3.0M does not. */
 function trimZero(n: number): string {
   const one = n.toFixed(1);
   return one.endsWith(".0") ? one.slice(0, -2) : one;
+}
+
+/**
+ * The value bases actually in play, attributed to the metrics that use them.
+ *
+ * Won is measured awarded-first while Sent and Estimated are a best current estimate, so three figures
+ * side by side can be counted three different ways. The screen printed only Won's label underneath all
+ * three, which reads as one caption for the row — the most confident possible version of the wrong
+ * thing.
+ *
+ * Deduped, because the common case is two bases across three metrics and repeating "Best current
+ * estimate" twice is noise. A single shared basis returns one unattributed line, since naming all three
+ * metrics to say the same thing about each is worse than saying it once.
+ */
+export function heroBasisLines(
+  metrics: readonly { label: string; basisLabel: string }[],
+): string[] {
+  const byBasis = new Map<string, string[]>();
+  for (const m of metrics) {
+    const basis = m.basisLabel?.trim();
+    if (!basis) continue;
+    byBasis.set(basis, [...(byBasis.get(basis) ?? []), m.label]);
+  }
+  if (byBasis.size === 0) return [];
+  if (byBasis.size === 1) return [...byBasis.keys()];
+  return [...byBasis.entries()].map(([basis, labels]) => `${labels.join(" & ")}: ${basis}`);
 }

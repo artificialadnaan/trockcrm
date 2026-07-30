@@ -1,5 +1,6 @@
 import {
   compactMoney,
+  heroBasisLines,
   deltaChip,
   departmentCountLabel,
   showsWowDelta,
@@ -97,5 +98,48 @@ describe("compact money", () => {
 
   it("does not render NaN as a number", () => {
     expect(compactMoney(Number.NaN)).toBe("—");
+  });
+});
+
+describe("compact money at the suffix boundaries", () => {
+  it("promotes a rounded value into the next unit", () => {
+    // The suffix used to be chosen BEFORE rounding, so 999_999 became "$1000k" — four digits, at the
+    // boundary a real report total is most likely to sit on.
+    expect(compactMoney(999_999)).toBe("$1M");
+    expect(compactMoney(999_950)).toBe("$1M");
+    expect(compactMoney(999)).toBe("$999");
+    expect(compactMoney(1_000)).toBe("$1k");
+  });
+
+  it("still abbreviates normally either side of a boundary", () => {
+    expect(compactMoney(994_000)).toBe("$994k");
+    expect(compactMoney(1_050_000)).toBe("$1.1M");
+  });
+});
+
+describe("which value basis belongs to which hero figure", () => {
+  const won = { label: "Won", basisLabel: "Awarded-first won value" };
+  const sent = { label: "Sent", basisLabel: "Best current estimate" };
+  const est = { label: "Estimated", basisLabel: "Best current estimate" };
+
+  it("attributes each DISTINCT basis to the metrics that use it", () => {
+    // The bug: only Won's label was printed, under all three figures — one caption for a row counted
+    // three different ways.
+    expect(heroBasisLines([won, sent, est])).toEqual([
+      "Won: Awarded-first won value",
+      "Sent & Estimated: Best current estimate",
+    ]);
+  });
+
+  it("says a shared basis once, unattributed", () => {
+    // Naming all three metrics to say the same thing about each is worse than saying it once.
+    expect(heroBasisLines([won, { ...sent, basisLabel: won.basisLabel }])).toEqual([
+      "Awarded-first won value",
+    ]);
+  });
+
+  it("renders nothing rather than an empty caption when the server sends no basis", () => {
+    expect(heroBasisLines([{ label: "Won", basisLabel: "" }])).toEqual([]);
+    expect(heroBasisLines([])).toEqual([]);
   });
 });

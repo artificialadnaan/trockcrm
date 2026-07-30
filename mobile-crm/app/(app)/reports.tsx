@@ -1,5 +1,13 @@
 import React, { useState } from "react";
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import {
+  ActivityIndicator,
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useQuery } from "@tanstack/react-query";
 import { ApiError } from "../../src/api/client";
@@ -17,6 +25,7 @@ import {
   compactMoney,
   deltaChip,
   departmentCountLabel,
+  heroBasisLines,
   sparklineHeights,
 } from "../../src/report-format";
 import { theme } from "../../src/theme/theme";
@@ -40,7 +49,14 @@ export default function ReportsScreen() {
   const goBack = useGoBack("/(app)/dashboard");
   const { fetcher } = useAuth();
   const scope = useQueryScope();
-  const [mode, setMode] = useState<WeekMode>("to_date");
+  /**
+   * "completed", matching the web's `DEFAULT_WEEK_MODE` (client/src/pages/reports/week-mode.ts:12).
+   *
+   * Not a style choice. On a Monday morning `to_date` is a few hours old and usually empty, which is
+   * precisely when this report is opened — and defaulting differently from the web would mean the same
+   * person reading two different numbers for "the showcase" depending on which screen they used.
+   */
+  const [mode, setMode] = useState<WeekMode>("completed");
 
   const query = useQuery({
     queryKey: qk.mondayShowcase(scope, mode),
@@ -102,7 +118,24 @@ export default function ReportsScreen() {
           />
         </View>
       ) : (
-        <ScrollView contentContainerStyle={styles.body}>
+        <ScrollView
+          contentContainerStyle={styles.body}
+          /**
+           * PULL TO REFRESH, because `staleTime` alone cannot refresh anything here.
+           *
+           * `refetchOnWindowFocus` is false app-wide (app/_layout.tsx:23), so five minutes marks the
+           * query stale and nothing acts on it while the screen stays mounted. A rep who opens the
+           * report before a meeting, or backgrounds the app on it, would read the same figures
+           * indefinitely with no way to ask for new ones.
+           */
+          refreshControl={
+            <RefreshControl
+              refreshing={query.isFetching}
+              onRefresh={() => void query.refetch()}
+              tintColor={theme.color.textMuted}
+            />
+          }
+        >
           {refreshFailed ? (
             <RetryNotice
               testID="showcase-refresh-failed"
@@ -121,9 +154,18 @@ export default function ReportsScreen() {
             <HeroCell label="Estimated" metric={data.execHero.estimated} />
           </View>
 
-          {/* The basis is not decoration: Won is measured awarded-first while open pipeline is a
-              best-estimate, so two numbers here can be counted differently. */}
-          <Text style={styles.basis}>{data.execHero.won.value.basisLabel}</Text>
+          {/* The basis is not decoration, and it is not shared: Won is awarded-first while Sent and
+              Estimated are a best current estimate. Printing only Won's label under all three read as
+              one caption for the row. */}
+          {heroBasisLines([
+            { label: "Won", basisLabel: data.execHero.won.value.basisLabel },
+            { label: "Sent", basisLabel: data.execHero.sent.value.basisLabel },
+            { label: "Estimated", basisLabel: data.execHero.estimated.value.basisLabel },
+          ]).map((line) => (
+            <Text key={line} style={styles.basis}>
+              {line}
+            </Text>
+          ))}
 
           <Text style={styles.sectionLabel}>DEPARTMENTS</Text>
           {data.departments.map((d) => (
