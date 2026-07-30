@@ -5,7 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useRouter } from "expo-router";
 import { ApiError } from "../../src/api/client";
 import * as searchApi from "../../src/api/endpoints/search";
-import type { SearchEntityType, SearchResult } from "../../src/api/endpoints/search";
+import type { DealLifecycle, SearchEntityType, SearchResult } from "../../src/api/endpoints/search";
 import { useAuth } from "../../src/auth/AuthContext";
 import { useQueryScope } from "../../src/auth/useOfficeId";
 import { useOffices } from "../../src/auth/useOffices";
@@ -137,7 +137,12 @@ export default function SearchScreen() {
                 if (path) router.push(path);
               }}
               accessibilityRole="button"
-              accessibilityLabel={[TYPE_LABEL[item.entityType], item.primaryLabel, item.secondaryLabel]
+              accessibilityLabel={[
+                STATUS_LABEL[item.status ?? "active"],
+                TYPE_LABEL[item.entityType],
+                item.primaryLabel,
+                item.secondaryLabel,
+              ]
                 .filter(Boolean)
                 .join(", ")}
               style={styles.row}
@@ -146,9 +151,19 @@ export default function SearchScreen() {
                 <Text style={styles.rowName} numberOfLines={1}>
                   {item.primaryLabel}
                 </Text>
-                <Text accessibilityLabel={TYPE_LABEL[item.entityType]} style={styles.badge}>
-                  {TYPE_LABEL[item.entityType]}
-                </Text>
+                {/* The lifecycle first, when there is one. The server keeps won, lost and on-hold
+                    deals findable by LABELLING them rather than hiding them, and a row that shows only
+                    "Deal" throws that labelling away — a deal lost last quarter then looks exactly like
+                    one closing this week. `accessibilityElementsHidden` on the two badges because the
+                    row's own label already speaks both, in order. */}
+                <View style={styles.badges} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+                  {item.status && item.status !== "active" ? (
+                    <Text style={[styles.badge, STATUS_STYLE[item.status]]}>
+                      {STATUS_LABEL[item.status]}
+                    </Text>
+                  ) : null}
+                  <Text style={styles.badge}>{TYPE_LABEL[item.entityType]}</Text>
+                </View>
               </View>
               {item.secondaryLabel ? (
                 <Text style={styles.rowMeta} numberOfLines={1}>
@@ -162,6 +177,14 @@ export default function SearchScreen() {
     </SafeAreaView>
   );
 }
+
+/** Empty for `active`, because the absence of a marker already says it. */
+const STATUS_LABEL: Record<DealLifecycle, string> = {
+  active: "",
+  on_hold: "On hold",
+  won: "Won",
+  lost: "Lost",
+};
 
 const TYPE_LABEL: Record<SearchEntityType, string> = {
   deal: "Deal",
@@ -237,6 +260,11 @@ const styles = StyleSheet.create({
     gap: theme.space.md,
   },
   rowName: { flex: 1, ...theme.type.title, color: theme.color.textPrimary },
+  badges: { flexDirection: "row", gap: theme.space.xs, alignItems: "center" },
+  // Mirrors the web palette's lifecycle colours: paused is a warning, won and lost are terminal.
+  statusOnHold: { color: theme.color.amberText, backgroundColor: theme.color.amberSurface },
+  statusWon: { color: theme.color.greenText, backgroundColor: theme.color.greenSurface },
+  statusLost: { color: theme.color.redText, backgroundColor: theme.color.redSurface },
   badge: {
     ...theme.type.caption,
     textTransform: "uppercase",
@@ -250,3 +278,9 @@ const styles = StyleSheet.create({
   rowMeta: { ...theme.type.small, color: theme.color.textSecondary },
   otherOffice: { ...theme.type.small, color: theme.color.textMuted, paddingVertical: theme.space.md },
 });
+
+const STATUS_STYLE: Record<Exclude<DealLifecycle, "active">, object> = {
+  on_hold: styles.statusOnHold,
+  won: styles.statusWon,
+  lost: styles.statusLost,
+};

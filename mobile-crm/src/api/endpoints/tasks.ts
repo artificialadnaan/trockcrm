@@ -58,6 +58,22 @@ export async function listTasks(
   if (params.assignedTo) q.set("assignedTo", params.assignedTo);
   q.set("page", String(params.page ?? 1));
   q.set("limit", String(params.limit ?? 50));
+  /**
+   * ASK for the effective-date ordering. This screen has no sort control, so whatever the server
+   * defaults to is the only order a rep will ever see — and the default is not the one they need.
+   *
+   * Without `sortBy`, tasks/service.ts falls back to `isOverdue`, then priority, then `due_date`. A
+   * SCHEDULED task has its due date cleared, so it sorts on NULL and sinks; a follow-up surfacing
+   * tomorrow lands behind dated work months out, in the Later bucket where scheduled tasks live. The
+   * server already knows better: `sortBy=due_date` orders by a status-aware effective date that reads
+   * `scheduled_for` for scheduled rows and `due_date` for everything else. Asking for it costs one
+   * query parameter; not asking costs the rep the next thing they were supposed to do.
+   *
+   * The status-aware branch that would have done this server-side keys off `status=scheduled`, which
+   * this app does not send — it filters by SECTION. So the sort has to be requested explicitly.
+   */
+  q.set("sortBy", "due_date");
+  q.set("sortDir", "asc");
   const res = await fetcher<{ tasks?: TaskListItem[]; pagination?: { total?: number } }>(
     `/tasks?${q.toString()}`,
   );

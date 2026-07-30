@@ -14,7 +14,8 @@ import { RetryNotice } from "../../src/components/RetryNotice";
 import { resolveDealDisplayNumber } from "../../src/deal-display-number";
 import { formatDate } from "../../src/format";
 import { useGoBack } from "../../src/lib/go-back";
-import { shouldLoadNextPage } from "../../src/paging";
+import { sanitizeHubspotDealIdentifiers } from "../../src/deal-display-number";
+import { refreshFailed as pageRefreshFailed, shouldLoadNextPage } from "../../src/paging";
 import { qk } from "../../src/query/keys";
 import { theme } from "../../src/theme/theme";
 
@@ -71,7 +72,18 @@ export default function TasksScreen() {
 
   const tasks = (query.data?.pages ?? []).flatMap((p) => p.tasks);
   const blocking = !query.data;
-  const refreshFailed = Boolean(query.data && query.isError);
+  // NOT a bare `isError`: a failed PAGE sets that too, and the header would then claim a refresh had
+  // failed while the footer correctly reported the real failure. One failure, one message.
+  const refreshFailed = pageRefreshFailed(query);
+  /**
+   * The counts are a SEPARATE query, and they fail separately.
+   *
+   * TanStack keeps `counts.data` when a later refetch fails, so the section badges kept rendering the
+   * last totals with nothing saying they were old. That is worse here than a stale row: a rep reads
+   * "Overdue 0", skips the section, and the section has work in it. The number is withdrawn rather
+   * than corrected — an absent badge says "unknown", a wrong one says "nothing to do".
+   */
+  const countsStale = counts.isError;
   const offline = query.error instanceof ApiError && query.error.status === 0;
 
   return (
@@ -87,7 +99,7 @@ export default function TasksScreen() {
       <View style={styles.sections}>
         {SECTIONS.map((s) => {
           const active = s.key === section;
-          const n = s.countKey ? counts.data?.[s.countKey] : undefined;
+          const n = s.countKey && !countsStale ? counts.data?.[s.countKey] : undefined;
           return (
             <Pressable
               key={s.key}
@@ -144,13 +156,28 @@ export default function TasksScreen() {
           refreshing={query.isRefetching}
           onRefresh={() => void Promise.all([query.refetch(), counts.refetch()])}
           ListHeaderComponent={
-            refreshFailed ? (
-              <RetryNotice
-                testID="tasks-refresh-failed"
-                placement="top"
-                message="Showing the last list — the refresh failed."
-                onRetry={() => void query.refetch()}
-              />
+            /* BOTH, not either. The list and the counts are separate endpoints that fail separately,
+               and an exclusive ternary would hide whichever failure came second — including the case
+               where the rows refreshed fine and only the badges are missing. */
+            refreshFailed || countsStale ? (
+              <>
+                {refreshFailed ? (
+                  <RetryNotice
+                    testID="tasks-refresh-failed"
+                    placement="top"
+                    message="Showing the last list — the refresh failed."
+                    onRetry={() => void query.refetch()}
+                  />
+                ) : null}
+                {countsStale ? (
+                  <RetryNotice
+                    testID="tasks-counts-failed"
+                    placement="top"
+                    message="Section totals unavailable. Tap to try again."
+                    onRetry={() => void counts.refetch()}
+                  />
+                ) : null}
+              </>
             ) : null
           }
           ListEmptyComponent={
@@ -179,6 +206,16 @@ export default function TasksScreen() {
              * way, and the server creates several contact-scoped task types. Treating "no deal" as
              * "not openable" made every one of those a dead row beside a record this app can show.
              */
+            /**
+             * The title, with any raw HubSpot id taken out of it.
+             *
+             * The deal-number metadata already suppresses these — `resolveDealDisplayNumber` refuses to
+             * return an HS- number — but the daily close-date rule BUILDS its title by interpolating
+             * `context.dealNumber` into a sentence, so the row published under the metadata what the
+             * metadata was hiding, and the accessibility label read the digits out. The web task list
+             * has sanitized these since it shipped; this is the same rule, mirrored.
+             */
+            const title = sanitizeHubspotDealIdentifiers(item.title) || item.title;
             const target = item.dealId
               ? `/(app)/deals/${item.dealId}`
               : item.contactId
@@ -187,7 +224,7 @@ export default function TasksScreen() {
             const content = (
               <>
                 <Text style={styles.taskTitle} numberOfLines={2}>
-                  {item.title}
+                  {title}
                 </Text>
                 {meta ? (
                   <Text style={styles.taskMeta} numberOfLines={2}>
@@ -208,7 +245,7 @@ export default function TasksScreen() {
                 onPress={() => router.push(target)}
                 accessibilityRole="button"
                 accessibilityLabel={[
-                  item.title,
+                  title,
                   meta,
                   item.dealId ? "Open the deal." : "Open the contact.",
                 ]

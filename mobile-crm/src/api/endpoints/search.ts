@@ -26,6 +26,15 @@ export type SearchResult = {
   rank: number;
   isChangeOrder?: boolean;
   /**
+   * A deal's LIFECYCLE, and the reason a closed deal is in these results at all.
+   *
+   * The server does not filter won, lost and on-hold deals out of search — it labels them, so they
+   * stay findable but never read as live work (`deriveDealStatus`). Dropping the field from this type
+   * kept the finding and discarded the labelling: a deal lost last quarter rendered with exactly the
+   * same "Deal" badge as one closing this week.
+   */
+  status?: DealLifecycle;
+  /**
    * WHICH OFFICE the record lives in.
    *
    * Search is cross-office for an admin or director with multi-office access, and this is how a
@@ -35,10 +44,29 @@ export type SearchResult = {
   officeSlug?: string;
 };
 
+/**
+ * What this app asks the server to search — every type it can OPEN, and nothing else.
+ *
+ * `files` is the omission that matters. The endpoint searches it by default, so every debounced
+ * keystroke ran a full-text query over file content that this screen then threw away, because there is
+ * no file viewer here to route a hit at. For a director the waste multiplies: cross-office search runs
+ * that query once PER accessible office, per keystroke.
+ *
+ * Kept beside the response type so adding a bucket to one without the other is visible in a diff.
+ */
+export const MOBILE_SEARCH_TYPES = ["deals", "contacts", "companies", "leads", "properties"] as const;
+
+/**
+ * Won and lost are terminal; on-hold is live but paused. `active` carries no marker because the
+ * absence of one already says it — a badge on every row would be noise, not information.
+ */
+export type DealLifecycle = "active" | "on_hold" | "won" | "lost";
+
 export type SearchResponse = {
   deals: SearchResult[];
   contacts: SearchResult[];
-  files: SearchResult[];
+  /** Not requested by this app — see MOBILE_SEARCH_TYPES — so the server sends it back empty. */
+  files?: SearchResult[];
   companies: SearchResult[];
   leads: SearchResult[];
   properties: SearchResult[];
@@ -52,5 +80,6 @@ export type SearchResponse = {
  * the client stops short of asking, and the server stops short of answering.
  */
 export async function globalSearch(fetcher: Fetcher, q: string): Promise<SearchResponse> {
-  return fetcher<SearchResponse>(`/search?q=${encodeURIComponent(q)}`);
+  const types = MOBILE_SEARCH_TYPES.join(",");
+  return fetcher<SearchResponse>(`/search?q=${encodeURIComponent(q)}&types=${types}`);
 }
