@@ -16,7 +16,11 @@ const THUMBNAIL_MAX_EDGE = 600;
 const THUMBNAIL_QUALITY = 70;
 // Don't pull originals larger than this into memory just to thumbnail them (defends against a rogue
 // huge upload). A miss here is non-fatal — the grid falls back to the original.
-const MAX_SOURCE_BYTES = 40 * 1024 * 1024;
+/** Exported so callers that gate on "will this be thumbnailable?" bind to this limit rather than
+ *  restating it. A source larger than this yields no thumbnail — `getObjectBuffer`'s cap truncates the
+ *  fetch and a caller-supplied buffer throws — so any upload path that accepts more than this and then
+ *  relies on a thumbnail existing has a silent gap. */
+export const MAX_SOURCE_BYTES = 40 * 1024 * 1024;
 // Hard ceiling on how long thumbnailing may add to the caller. confirmUpload() awaits this on the
 // request path, so a slow R2 fetch/decode/resize must not stall an upload — past this we give up and
 // the grid falls back to the original. (The in-flight work may still finish and write the thumb object;

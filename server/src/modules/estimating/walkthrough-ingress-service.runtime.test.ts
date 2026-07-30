@@ -42,6 +42,10 @@ import type { WalkthroughIngressPayload, WalkthroughScopeRow } from "@trock-crm/
 import { tenantSchemaSql } from "../../../tests/helpers/tenant-schema-from-drizzle.js";
 // The ceiling the ingress REUSES rather than re-declares — see the contactSheetBytes tests below.
 import { MAX_FILE_SIZE_BYTES } from "../files/file-constants.js";
+import { MAX_SOURCE_BYTES as MAX_THUMBNAIL_SOURCE_BYTES } from "../../lib/image-thumbnail.js";
+
+/** The narrower of the two ceilings ingress must satisfy — see the R26 comment in the service. */
+const BINDING_CEILING = Math.min(MAX_FILE_SIZE_BYTES, MAX_THUMBNAIL_SOURCE_BYTES);
 // R22. `createEstimateSourceDocument` is the OTHER producer — the one whose dedupe has no documentType
 // predicate. The namespace test at the bottom of this file drives the real function rather than reasoning
 // about it.
@@ -2192,6 +2196,11 @@ describe("ingestWalkthrough", () => {
     // (It is NOT past signed-bigint range: 2^53-1 is ~1000x below 2^63-1. Nothing here exercises
     // a bigint overflow, and the ceiling makes that path unreachable by design.)
     ["the largest exactly-representable integer", Number.MAX_SAFE_INTEGER],
+    // R26. The band the Files ceiling alone let through. `generateAndStoreThumbnail` caps its source
+    // fetch at MAX_SOURCE_BYTES (40 MiB), so a JPEG above it yields NO thumbnail — image arm null, pdf
+    // arm self-rejects a jpeg — and `resolveFileThumbnailUrl` then presigns the FULL ORIGINAL as the
+    // list tile. Accepted at 200 MiB, that is a 200 MiB download to render one thumbnail.
+    ["one byte over the thumbnailer's readable source limit", MAX_THUMBNAIL_SOURCE_BYTES + 1],
   ])("refuses a contact sheet of %s, without writing anything", async (_label, contactSheetBytes) => {
     const before = await tableCounts();
 
@@ -2212,22 +2221,26 @@ describe("ingestWalkthrough", () => {
 
   // The boundary, from the other side: EXACTLY the Files subsystem's limit is accepted and stored whole.
   // Without this the check above would also pass if the ingress refused every contact sheet.
-  it("accepts a contact sheet of exactly the Files subsystem's limit and stores the size unchanged", async () => {
+  it("accepts a contact sheet of exactly the binding ceiling and stores the size unchanged", async () => {
     const result = await ingestWalkthrough({
       tenantDb,
-      payload: walkthroughPayload(U("33114"), { contactSheetBytes: MAX_FILE_SIZE_BYTES }),
+      payload: walkthroughPayload(U("33114"), { contactSheetBytes: BINDING_CEILING }),
     });
 
     const [file] = await tenantDb
       .select({ fileSizeBytes: files.fileSizeBytes })
       .from(files)
       .where(eq(files.id, result.fileId));
-    expect(file.fileSizeBytes).toBe(MAX_FILE_SIZE_BYTES);
+    expect(file.fileSizeBytes).toBe(BINDING_CEILING);
 
     // The bound is the Files subsystem's, not a copy of it: this is the same constant `validateFileSize`
     // reads, so a change there moves the ingress too. Pinned as a real number as well, so a mutation
     // that redefined MAX_FILE_SIZE_BYTES itself does not move both sides of the comparison together.
+    // Both constants pinned as real numbers, so a mutation redefining either does not move both sides
+    // of the comparison together — and the BINDING one is the thumbnailer's, not the Files subsystem's.
     expect(MAX_FILE_SIZE_BYTES).toBe(200 * 1024 * 1024);
+    expect(MAX_THUMBNAIL_SOURCE_BYTES).toBe(40 * 1024 * 1024);
+    expect(BINDING_CEILING).toBe(MAX_THUMBNAIL_SOURCE_BYTES);
   });
 
   // R10. rawLabel is unbounded `text` here but promotion copies it into
