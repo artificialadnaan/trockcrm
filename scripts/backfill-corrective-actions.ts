@@ -249,14 +249,26 @@ async function main() {
         // card's own pick above everything else, so replacing a deliberate selection with a free-text guess
         // would redirect the corrective action away from the person somebody actually chose.
         const picks: { superintendent?: RosterRow; project_manager?: RosterRow } = {};
+        // Tracks the slots whose STORED id was validated and kept. Guarding the writes below on the raw
+        // column being non-null was wrong: a stale id — deleted, deactivated, or holding the other role — is
+        // correctly refused here, a free-text match then fills the slot, and a raw non-null check would have
+        // refused to WRITE it. recipientResolutionSql would resolve nobody, the notification job would retry
+        // to dead-letter, and the script would have committed an open cycle nobody is told about: exactly
+        // the failure it exists to remove.
+        const heldSlots = new Set<"superintendent" | "project_manager">();
         for (const [slot, existingId] of [
           ["superintendent", row.superintendent_responder_id],
           ["project_manager", row.pm_responder_id],
         ] as const) {
-          const held = existingId ? byId.get(existingId) : undefined;
+          if (!existingId) continue;
+          const held = byId.get(existingId);
           if (held && held.isActive && held.role === slot) {
             picks[slot] = held;
+            heldSlots.add(slot);
             console.log(`   ${slot}: KEEPING existing pick ${held.name} <${held.email ?? "no email"}>`);
+          } else {
+            const why = !held ? "not on the roster" : !held.isActive ? "deactivated" : `holds ${held.role}`;
+            console.log(`   ${slot}: existing pick ${existingId} is UNUSABLE (${why}) — will be replaced if a name matches`);
           }
         }
 
@@ -294,13 +306,13 @@ async function main() {
 
         // Display name AND id together, and only for a slot this run is filling. The create/edit path does
         // this so a card cannot show one person while routing to another.
-        if (picks.superintendent && !row.superintendent_responder_id) {
+        if (picks.superintendent && !heldSlots.has("superintendent")) {
           await client.query(
             `UPDATE field_scorecards SET superintendent_responder_id = $1, superintendent_name = $2 WHERE id = $3`,
             [picks.superintendent.id, picks.superintendent.name, row.id],
           );
         }
-        if (picks.project_manager && !row.pm_responder_id) {
+        if (picks.project_manager && !heldSlots.has("project_manager")) {
           await client.query(
             `UPDATE field_scorecards SET pm_responder_id = $1, pm_name = $2 WHERE id = $3`,
             [picks.project_manager.id, picks.project_manager.name, row.id],
