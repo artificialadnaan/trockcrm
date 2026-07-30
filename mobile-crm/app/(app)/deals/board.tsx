@@ -110,6 +110,17 @@ export default function PipelineBoardScreen() {
    * answers to one question, which is the shape this codebase keeps getting caught by.
    */
   const selectedIndex = selected ? columns.findIndex((c) => c.stage.id === selected.stage.id) : -1;
+  /**
+   * Does the stage strip ACTUALLY have hidden content?
+   *
+   * Measured, not inferred. An office with two short stages fits them both on screen, and telling that
+   * rep to swipe points at a gesture that does nothing — a hint that lies once is a hint nobody reads
+   * again. The 1pt tolerance is for sub-pixel layout rounding, which otherwise reports a strip as
+   * overflowing by a third of a point.
+   */
+  const [stripViewport, setStripViewport] = useState(0);
+  const [stripContent, setStripContent] = useState(0);
+  const stripOverflows = stripContent > stripViewport + 1;
 
   const state = resolveListState({
     isLoading: board.isLoading,
@@ -208,16 +219,20 @@ export default function PipelineBoardScreen() {
               gradient library, and it answers "which one am I on" at the same time. */}
           {selectedIndex >= 0 && columns.length > 1 ? (
             <Text style={styles.stagePosition}>
-              {/* The suffix depends on WHERE you are. "Stage 9 of 9 — swipe for more" promises
-                  something that does not exist, and a hint that is wrong at one end of the strip is a
-                  hint a rep stops reading at both. */}
+              {/* "Browse", not "for more", and only when the strip genuinely overflows.
+                  Two earlier versions of this line were each wrong in one direction: "swipe for more"
+                  promised a tenth stage at 9 of 9, and gating it on the selected position instead
+                  claimed nothing to swipe to at the end when six stages sat off-screen to the LEFT.
+                  Overflow is the real condition, and neutral wording is true at both ends of it. */}
               Stage {selectedIndex + 1} of {columns.length}
-              {selectedIndex < columns.length - 1 ? " — swipe for more" : ""}
+              {stripOverflows ? " — swipe to browse" : ""}
             </Text>
           ) : null}
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
+            onLayout={(e) => setStripViewport(e.nativeEvent.layout.width)}
+            onContentSizeChange={(w) => setStripContent(w)}
             contentContainerStyle={styles.stageRow}
           >
             {columns.map((col) => {
