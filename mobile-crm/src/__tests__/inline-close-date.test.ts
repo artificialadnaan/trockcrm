@@ -1,9 +1,11 @@
 import {
   businessDateInDays,
+  businessDateStrToPickerDate,
   businessTodayDateStr,
   isExpectedCloseDateSoleGateBlocker,
   isGateResolvedByInlineCloseDate,
   isUsableCloseDate,
+  pickedDateToBusinessDateStr,
 } from "../inline-close-date";
 
 const soleBlocker = {
@@ -111,5 +113,45 @@ describe("business date helpers", () => {
     expect(businessDateInDays(0, new Date("2026-07-28T01:30:00Z"))).toBe("2026-07-27");
     expect(businessDateInDays(30, new Date("2026-07-28T01:30:00Z"))).toBe("2026-08-26");
     expect(businessDateInDays(5, new Date("2026-02-25T12:00:00Z"))).toBe("2026-03-02");
+  });
+});
+
+describe("the picker's date conversions", () => {
+  it("reads LOCAL date parts, never toISOString", () => {
+    // A picker hands back local midnight. West of Greenwich that is the NEXT day in UTC, so the round
+    // trip through toISOString() returns tomorrow — this app already shipped that bug once, on the
+    // capture screen's nextStepDueAt.
+    const localMidnight = new Date(2026, 6, 29, 0, 0, 0, 0);
+    expect(pickedDateToBusinessDateStr(localMidnight)).toBe("2026-07-29");
+    const lateEvening = new Date(2026, 6, 29, 23, 59, 0, 0);
+    expect(pickedDateToBusinessDateStr(lateEvening)).toBe("2026-07-29");
+  });
+
+  it("pads single-digit months and days", () => {
+    expect(pickedDateToBusinessDateStr(new Date(2026, 0, 5, 12, 0, 0, 0))).toBe("2026-01-05");
+  });
+
+  it("seeds the picker at local NOON, the one hour that survives every DST shift", () => {
+    const d = businessDateStrToPickerDate("2026-03-08");
+    expect(d).not.toBeNull();
+    expect(d!.getFullYear()).toBe(2026);
+    expect(d!.getMonth()).toBe(2);
+    expect(d!.getDate()).toBe(8);
+    expect(d!.getHours()).toBe(12);
+  });
+
+  it("round-trips", () => {
+    for (const iso of ["2026-01-01", "2026-07-29", "2026-12-31"]) {
+      expect(pickedDateToBusinessDateStr(businessDateStrToPickerDate(iso)!)).toBe(iso);
+    }
+  });
+
+  it("rejects a date the regex accepts but the calendar does not", () => {
+    // new Date(2026, 1, 31) rolls forward to March 3 rather than failing, so the constructor cannot be
+    // trusted to validate. An unparseable value opens the picker on today, not on 1970.
+    expect(businessDateStrToPickerDate("2026-02-31")).toBeNull();
+    expect(businessDateStrToPickerDate("2026-13-01")).toBeNull();
+    expect(businessDateStrToPickerDate("")).toBeNull();
+    expect(businessDateStrToPickerDate("29/07/2026")).toBeNull();
   });
 });

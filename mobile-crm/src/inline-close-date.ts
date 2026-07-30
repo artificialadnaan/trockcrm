@@ -92,3 +92,40 @@ export function businessDateInDays(days: number, now: Date = new Date()): string
   base.setUTCDate(base.getUTCDate() + days);
   return base.toISOString().slice(0, 10);
 }
+
+/**
+ * A picked `Date` as the YYYY-MM-DD business date it represents.
+ *
+ * LOCAL parts, never `toISOString()`. A native date picker hands back a Date at local midnight, and
+ * midnight in Chicago is 05:00 or 06:00 UTC the SAME day — but the reverse trip through
+ * `toISOString()` on any device west of Greenwich returns the day BEFORE. This app has already shipped
+ * that bug once, on the capture screen's `nextStepDueAt`.
+ *
+ * Deliberately NOT re-anchored to America/Chicago the way `businessTodayDateStr` is. That function
+ * answers "what is today in the business timezone", where the device's clock is irrelevant. This one
+ * answers "which square did the rep tap in a calendar rendered in their own timezone" — reinterpreting
+ * that in CT would move their selection by a day whenever the two disagree.
+ */
+export function pickedDateToBusinessDateStr(picked: Date): string {
+  const y = picked.getFullYear();
+  const m = String(picked.getMonth() + 1).padStart(2, "0");
+  const d = String(picked.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+/**
+ * A YYYY-MM-DD business date as a `Date` at LOCAL noon, for seeding the picker.
+ *
+ * Noon, not midnight: a Date built at local midnight can land on the previous day once any DST or
+ * timezone arithmetic touches it, and noon is the one hour that survives every shift in both
+ * directions. Returns null for anything unparseable so a malformed value opens the picker on today
+ * rather than on 1970.
+ */
+export function businessDateStrToPickerDate(value: string): Date | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
+  if (!m) return null;
+  const [, y, mo, d] = m;
+  const date = new Date(Number(y), Number(mo) - 1, Number(d), 12, 0, 0, 0);
+  // Rejects 2026-02-31, which the regex happily accepts and the Date constructor rolls forward.
+  return date.getMonth() === Number(mo) - 1 && date.getDate() === Number(d) ? date : null;
+}

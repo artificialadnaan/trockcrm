@@ -10,8 +10,10 @@ import {
   TextInput,
   View,
 } from "react-native";
+import DateTimePicker from "@react-native-community/datetimepicker";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { useGoBack } from "../../../src/lib/go-back";
+import { hapticFailure, hapticSuccess } from "../../../src/lib/haptics";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError } from "../../../src/api/client";
@@ -25,10 +27,11 @@ import { RetryNotice } from "../../../src/components/RetryNotice";
 import { qk } from "../../../src/query/keys";
 import {
   businessDateInDays,
+  businessDateStrToPickerDate,
   businessTodayDateStr,
   isExpectedCloseDateSoleGateBlocker,
   isGateResolvedByInlineCloseDate,
-  isUsableCloseDate,
+  pickedDateToBusinessDateStr,
 } from "../../../src/inline-close-date";
 import { eligibleStageTargets } from "../../../src/stage-targets";
 import { theme } from "../../../src/theme/theme";
@@ -175,7 +178,29 @@ export default function MoveStageScreen() {
   const today = businessTodayDateStr();
   const needsCloseDate = isExpectedCloseDateSoleGateBlocker(closeDateGate);
   const closeDateResolvesGate = isGateResolvedByInlineCloseDate(closeDateGate, expectedCloseDate, today);
-  const closeDateInvalid = expectedCloseDate.length > 0 && !isUsableCloseDate(expectedCloseDate, today);
+  /**
+   * The picker always needs a Date. An unset forecast opens on today rather than on 1970, and a value
+   * the picker cannot parse falls back the same way instead of rendering an epoch.
+   */
+  /**
+   * Is the calendar SHOWING — a different question from whether a date has been chosen.
+   *
+   * Conflating the two is what produced the last two defects on this control in both directions:
+   * seeding the state to open the picker filed a forecast nobody picked, and not seeding it left a
+   * field displaying a date the Confirm button did not believe in.
+   */
+  const [closeDatePickerOpen, setCloseDatePickerOpen] = useState(false);
+  const closeDatePickerValue =
+    businessDateStrToPickerDate(expectedCloseDate) ?? businessDateStrToPickerDate(today) ?? new Date();
+  /**
+   * No `closeDateInvalid` any more, and that is the point of the picker.
+   *
+   * The screen used to compute it from a typed string and render an error underneath the field. With
+   * `minimumDate` the control cannot produce a past date and the quick-picks only produce future ones,
+   * so the state is unreachable — the constraint moved out of a message and into the input. The
+   * submit gate is unaffected: it turns on `closeDateResolvesGate`, which still runs the server's own
+   * usable-date rule via `isGateResolvedByInlineCloseDate`.
+   */
 
   const canSubmit =
     !moveLock.locked &&
@@ -203,6 +228,9 @@ export default function MoveStageScreen() {
         expectedCloseDate: needsCloseDate && closeDateResolvesGate ? expectedCloseDate : undefined,
       }),
     onSuccess: () => {
+      // Felt before the screen changes. The move navigates away immediately, so the confirmation a rep
+      // gets is the previous screen reappearing — which looks identical to the button not working.
+      hapticSuccess();
       // CONCURRENT, and not awaited before navigating. These four are independent caches; awaiting them
       // in series held the rep on the move screen for four sequential round trips after the move had
       // already succeeded, which reads as the button not having worked. Invalidation marks the caches
@@ -219,6 +247,7 @@ export default function MoveStageScreen() {
       goBack();
     },
     onError: (err) => {
+      hapticFailure();
       // A dropped connection on a POST is INDETERMINATE, not a rollback. The request may have reached
       // the server and committed with only the response lost, so "Nothing was changed" is a claim this
       // client is not in a position to make — and a rep who believes it will move the deal a second
@@ -486,22 +515,85 @@ export default function MoveStageScreen() {
                   );
                 })}
               </View>
-              <TextInput
-                testID="expected-close-date"
-                value={expectedCloseDate}
-                onChangeText={setExpectedCloseDate}
-                placeholder="YYYY-MM-DD"
-                placeholderTextColor={theme.color.textMuted}
-                autoCapitalize="none"
-                autoCorrect={false}
-                keyboardType={Platform.OS === "ios" ? "numbers-and-punctuation" : "default"}
-                style={styles.input}
-              />
-              {closeDateInvalid ? (
-                <Text testID="close-date-invalid" style={styles.error}>
-                  Use a real date of today or later, written as YYYY-MM-DD.
-                </Text>
-              ) : null}
+              {/**
+                * A PICKER, not a typed date.
+                *
+                * This was a TextInput asking for "YYYY-MM-DD" with the format validated after the
+                * fact — ten keystrokes in a remembered format, one-handed, from someone standing on a
+                * ladder, told only afterwards if they got it wrong. `minimumDate` moves the
+                * today-or-later rule into the control, which is error PREVENTION rather than error
+                * messaging: `closeDateInvalid` can no longer be reached from this screen.
+                *
+                * `display="compact"` on iOS renders as a tappable field that opens the system
+                * calendar, so there is no second modal to manage and no state for whether it is open.
+                */}
+              {/**
+                * NOTHING IS PRE-SELECTED, and that is the fix.
+                *
+                * A compact iOS picker always draws a concrete date, so seeding it from `today` made the
+                * field SHOW a valid date while `expectedCloseDate` was still empty — accepting or
+                * dismissing produced no change event, so Confirm stayed disabled next to a field that
+                * looked answered. The screen and the button disagreed about whether a date existed.
+                *
+                * Resolved by not displaying one until there is one. Seeding the state instead would
+                * have agreed at the cost of filing a forecast the rep never chose, and "today" is
+                * almost never a real expected close date — a wrong forecast that passes the gate is
+                * worse than a disabled button that explains itself.
+                */}
+              {expectedCloseDate === "" && !closeDatePickerOpen ? (
+                <Pressable
+                  testID="choose-close-date"
+                  onPress={() => setCloseDatePickerOpen(true)}
+                  accessibilityRole="button"
+                  accessibilityLabel="Pick an exact close date"
+                  style={styles.chooseDate}
+                >
+                  <Text style={styles.chooseDateText}>Pick an exact date</Text>
+                </Pressable>
+              ) : (
+              <View style={styles.pickerRow}>
+                <DateTimePicker
+                  testID="expected-close-date"
+                  value={closeDatePickerValue}
+                  mode="date"
+                  /**
+                   * INLINE on iOS, not compact.
+                   *
+                   * Compact renders a field that must be tapped a second time to open, and — the part
+                   * that matters — accepting the date it already displays produces no change event, so
+                   * the one forecast a rep cannot choose is the one on screen. An inline calendar has
+                   * no such gap: picking a day is a tap on that day, including today's.
+                   */
+                  display={Platform.OS === "ios" ? "inline" : "default"}
+                  minimumDate={businessDateStrToPickerDate(today) ?? new Date()}
+                  accessibilityLabel="Expected close date"
+                  themeVariant="dark"
+                  onChange={(event, picked) => {
+                    // Android presents a dialog and reports its own dismissal; iOS renders inline and
+                    // stays put. Closing on "dismissed" keeps the Android flow from stranding an open
+                    // dialog, and keeping the previous value is the only reading of cancel that does
+                    // not silently change the forecast.
+                    if (Platform.OS !== "ios") setCloseDatePickerOpen(false);
+                    if (event.type === "dismissed" || !picked) return;
+                    setExpectedCloseDate(pickedDateToBusinessDateStr(picked));
+                  }}
+                />
+                {expectedCloseDate ? (
+                  <Pressable
+                    testID="clear-close-date"
+                    onPress={() => {
+                      setExpectedCloseDate("");
+                      setCloseDatePickerOpen(false);
+                    }}
+                    accessibilityRole="button"
+                    accessibilityLabel="Clear the close date"
+                    style={styles.clearDate}
+                  >
+                    <Text style={styles.clearDateText}>Clear</Text>
+                  </Pressable>
+                ) : null}
+              </View>
+              )}
             </>
           ) : null}
 
@@ -753,6 +845,28 @@ const styles = StyleSheet.create({
   blockBody: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary },
   missingWrap: { marginTop: theme.space.sm, gap: 2 },
   missingItem: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textSecondary },
+  chooseDate: {
+    minHeight: 44,
+    justifyContent: "center",
+    alignSelf: "flex-start",
+    paddingHorizontal: theme.space.md,
+    borderRadius: theme.radius.md,
+    borderWidth: 1,
+    borderColor: theme.color.borderControl,
+  },
+  chooseDateText: { ...theme.type.label, color: theme.color.textPrimary },
+  /**
+   * A COLUMN, because the calendar is inline.
+   *
+   * This was a row, written when the picker was `compact` — a small field that left plenty beside it.
+   * Switching to `inline` to fix the accept-the-displayed-date gap made the child a ~320pt calendar,
+   * and 320 plus a 12pt gap plus Clear does not fit the 343pt a 375pt iPhone leaves after the screen's
+   * 16pt padding. Neither child shrinks or wraps, so one of them ran off-screen. Changing the display
+   * mode changed the layout's requirements and I did not revisit them.
+   */
+  pickerRow: { alignItems: "flex-start", gap: theme.space.sm },
+  clearDate: { minHeight: 44, justifyContent: "center", alignSelf: "flex-start" },
+  clearDateText: { ...theme.type.label, color: theme.color.redText },
   input: {
     marginTop: theme.space.sm,
     minHeight: 88,

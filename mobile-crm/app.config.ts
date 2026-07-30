@@ -85,6 +85,9 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   },
   plugins: [
     "expo-router",
+    // Required by expo install: the picker ships native code, so it needs a config plugin entry to be
+    // linked into the prebuild rather than only appearing in package.json.
+    "@react-native-community/datetimepicker",
     "expo-secure-store",
     "expo-font",
     [
