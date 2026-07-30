@@ -148,74 +148,28 @@ const FUZZY_MAX_DISTANCE_LONG = 2;
 // perfectly ordinary way to enter two people and there is no punctuation to key off.
 const SEGMENT_DELIMITERS = /\s+w\/+\s*|\s*[/&+;]\s*|\s*[\n\r]+\s*|\s+and\s+/gi;
 
-// The comma is handled SEPARATELY from the delimiters above because it is ambiguous: it separates people
-// ("Brett Bell, Robert Sampley") but it also writes ONE person surname-first ("Bell, Robert").
+// THE COMMA IS NOT A PERSON DELIMITER. Deliberately, after four rounds of trying to make it one.
 //
-// Treated as a plain delimiter it produced two WRONG recipients from one person's name: "Bell, Robert" split
-// into "Bell" -> Brett Bell (the only Bell) and "Robert" -> Robert Sampley (the only Robert), with no
-// ambiguity and nothing unmatched, so a caller would email two people neither of whom was named.
+// It is genuinely ambiguous: it writes one person surname-first ("Bell, Robert", "De La Cruz, Robert") and
+// it could separate two ("Brett Bell, Robert Sampley"). Every syntactic rule tried to tell those apart, and
+// each produced a fresh WRONG-RECIPIENT bug:
+//   - split always                      -> "Bell, Robert" became Brett Bell + Robert Sampley
+//   - rejoin when every piece is 1 token -> a mixed list re-split them
+//   - pair two adjacent 1-token pieces   -> "De La Cruz, Robert" (multiword surname) split
+//   - split when the piece after is 2+   -> "De La Cruz, Mary Jane" (compound given name) split
+// The last pair is the proof it cannot be done: "De La Cruz, Mary Jane" (ONE person) and "Brett Bell,
+// Robert Sampley" (TWO people) are the same shape token-for-token. Only knowing the actual humans separates
+// them, and when the named person is absent from the roster — exactly when guessing is most dangerous —
+// even that fails.
 //
-// The disambiguator: a comma separates PEOPLE only when at least one side carries more than one token.
-// Nobody writes two people as "Bell, Robert"; the surname-first form is single-token on both sides. When
-// every side is a lone token the pieces are rejoined and matched as ONE segment, which then either resolves
-// correctly ("Sampley, Robert" -> Robert Sampley, both tokens accounted) or resolves to nobody
-// ("Bell, Robert" -> "bell robert" leaves a token unaccounted against every roster name).
-const COMMA = /\s*,\s*/;
-
-function splitOnCommaIfItSeparatesPeople(segment: string): Array<{ raw: string; scoreText: string }> {
-  // Piece boundaries as INDEX RANGES into the original segment, so every reported span can be sliced from
-  // the source rather than rebuilt. Reconstructing it with ", " normalised the punctuation away —
-  // "Sampley,Robert" and "Sampley , Robert" both reported "Sampley, Robert", and "Bell, (PM), Robert" lost
-  // the annotation entirely — against a contract that says verbatim.
-  const ranges: Array<{ start: number; end: number }> = [];
-  let cursor = 0;
-  for (let i = 0; i < segment.length; i++) {
-    if (segment[i] === ",") {
-      ranges.push({ start: cursor, end: i });
-      cursor = i + 1;
-    }
-  }
-  ranges.push({ start: cursor, end: segment.length });
-
-  const textOf = (r: { start: number; end: number }) => segment.slice(r.start, r.end);
-  const tokensOf = (r: { start: number; end: number }) =>
-    normalizeResponderName(stripIdentityNeutralNoise(textOf(r)));
-
-  // Pieces carrying NO name — "(PM)" standing alone between two commas — take no part in the decision. Left
-  // in, such a piece counted as one token (an empty string still splits to a one-element array) and paired
-  // with its neighbour, so "Bell, (PM), Robert" produced Brett Bell + Robert Sampley. Their TEXT is still
-  // inside whichever span encloses them, because the spans are sliced from the original.
-  const named = ranges.filter((r) => tokensOf(r).length > 0);
-  if (named.length < 2) return [{ raw: segment.trim(), scoreText: segment }];
-
-  // A comma separates PEOPLE only when the piece AFTER it is itself a full name.
-  //
-  // The earlier rule — two ADJACENT lone tokens are a surname-first pair — assumed a surname is one word.
-  // A conventional multiword surname breaks it: "De La Cruz, Robert" has a three-token first piece, so both
-  // sides stood alone and the matcher returned Maria De La Cruz + Robert Sampley, neither of whom was named.
-  // Keying on the piece that FOLLOWS the comma holds for both shapes, because the surname-first form always
-  // ends in a lone given name ("Bell, Robert", "De La Cruz, Robert") while a genuine list carries a full
-  // name on both sides ("Brett Bell, Robert Sampley").
-  const groups: Array<Array<{ start: number; end: number }>> = [];
-  let current = [named[0]];
-  for (let i = 1; i < named.length; i++) {
-    if (tokensOf(named[i]).split(" ").length >= 2) {
-      groups.push(current);
-      current = [named[i]];
-    } else {
-      current.push(named[i]);
-    }
-  }
-  groups.push(current);
-
-  return groups.map((group) => ({
-    // Sliced from the source, so it keeps the exact punctuation, spacing and any annotation that fell
-    // between this group's first and last named piece.
-    raw: segment.slice(group[0].start, group[group.length - 1].end).trim(),
-    // The recombined form is what gets SCORED.
-    scoreText: group.map(textOf).join(" "),
-  }));
-}
+// So a comma-delimited run is ONE person-span. `normalizeResponderName` turns the comma into whitespace for
+// scoring, so "Sampley, Robert" still resolves to Robert Sampley on both tokens.
+//
+// THE COST, stated plainly: a genuine two-person comma list ("Brett Bell, Robert Sampley") now resolves to
+// NOBODY and lands in `unmatched` for a human to read. That is the designed failure direction, and it costs
+// nothing on today's data — no value in the corpus uses a comma to separate people; every real multi-person
+// field uses "/" or "&", which ARE unambiguous delimiters and still split. If comma-separated lists ever
+// start appearing, they will surface as unmatched rather than as confidently-wrong recipients.
 
 /**
  * One person-segment: the text exactly as typed, plus the copy the scorer reads.
@@ -369,8 +323,9 @@ function splitResponderSegmentPairs(text: string | null | undefined): ResponderS
   }
   const segments = raw
     .split(SEGMENT_DELIMITERS)
-    .flatMap((segment) => splitOnCommaIfItSeparatesPeople(segment))
-    .map((piece) => ({ raw: piece.raw.trim(), stripped: stripIdentityNeutralNoise(piece.scoreText) }))
+    // The WHOLE segment is the reported span, so a leading or trailing annotation ("(PM), Bell, Robert",
+    // "Sampley, Robert, (PM)") stays visible to whoever triages it instead of being sliced away.
+    .map((segment) => ({ raw: segment.trim(), stripped: stripIdentityNeutralNoise(segment) }))
     .filter((segment) => normalizeResponderName(segment.stripped).length > 0);
   if (segments.length > MAX_RESPONDER_SEGMENTS) {
     return [{ raw: `${raw.slice(0, 120).trim()}… (${segments.length} segments — not parsed as names)`, stripped: "" }];

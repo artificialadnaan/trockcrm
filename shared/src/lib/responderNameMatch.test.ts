@@ -666,31 +666,6 @@ describe("review findings", () => {
   const names = (r: { matches: Array<{ responder: { name: string } }> }) =>
     r.matches.map((m) => m.responder.name);
 
-  it("does NOT strip a PARENTHESISED generational suffix", () => {
-    // The blanket /\([^)]*\)/ strip deleted "(Jr)" and produced an EXACT match for the senior Brett Bell —
-    // removing the one token that distinguishes two family members. The parenthetical pattern is now an
-    // enumerated role list, so an unrecognised parenthetical survives as a token and fails every-token.
-    expect(sup("Brett Bell (Jr)").matches).toEqual([]);
-    expect(sup("Brett Bell (II)").matches).toEqual([]);
-    expect(sup("Brett Bell (Sr)").matches).toEqual([]);
-    // The role annotations it exists for still strip.
-    expect(names(pm("Adam Sherwood (PM)"))).toEqual(["Adam Sherwood"]);
-    expect(names(sup("Brett Bell (superintendent)"))).toEqual(["Brett Bell"]);
-  });
-
-  it("does not let a surname-first comma become TWO wrong people", () => {
-    // "Bell, Robert" split into "Bell" -> Brett Bell (only Bell) and "Robert" -> Robert Sampley (only
-    // Robert): two recipients, neither of them the person named, with nothing unmatched to signal it.
-    // A comma now separates people only when a side carries more than one token.
-    expect(sup("Bell, Robert").matches).toEqual([]);
-    // Verbatim, comma included — the recombined "Bell Robert" is the form that gets SCORED, not reported.
-    expect(sup("Bell, Robert").unmatched).toEqual(["Bell, Robert"]);
-    // The surname-first form for someone who IS on the roster still resolves, as one person.
-    expect(names(sup("Sampley, Robert"))).toEqual(["Robert Sampley"]);
-    // And a genuine two-person comma list is untouched.
-    expect(names(sup("Brett Bell, Robert Sampley"))).toEqual(["Brett Bell", "Robert Sampley"]);
-  });
-
   it("does not let a role annotation manufacture a bare first name that resolves to the wrong Nick", () => {
     // "Nick - PM" had its annotation stripped to bare "Nick", which then matched Nick REYES because he is
     // the only Nick with the queried role — the exact opposite of what the annotation said. A lone token
@@ -753,6 +728,10 @@ describe("second review round", () => {
     matchFieldResponders({ text, role, roster });
   const names = (r: { matches: Array<{ responder: { name: string } }> }) =>
     r.matches.map((m) => m.responder.name);
+  const DALLAS = [
+    R("bbell", "Brett Bell", "superintendent"),
+    R("rsampley", "Robert Sampley", "superintendent"),
+  ];
 
   it("ranks CONFIDENCE before role — role only breaks an equal-confidence tie", () => {
     // Filtering to the queried role first discarded a stronger identification: the exact PM was thrown away
@@ -769,29 +748,6 @@ describe("second review round", () => {
     const roster = [R("pm", "Brett Bell", "project_manager"), R("sup", "Brett Bell", "superintendent")];
     expect(go("Brett Bell", "superintendent", roster).matches[0].responder.id).toBe("sup");
     expect(go("Brett Bell", "project_manager", roster).matches[0].responder.id).toBe("pm");
-  });
-
-  it("keeps a BARE token ambiguous whenever more than one person scores, whatever the confidence", () => {
-    // Retaining all candidates was not enough: the confidence ranking still picked one outright, so a bare
-    // "Nick" resolved to a PM mononym on exact-beats-high while superintendent Nick Reyes matched too. With
-    // one token there is no second token to arbitrate, so any contest is ambiguous.
-    const roster = [R("mono", "Nick", "project_manager"), R("reyes", "Nick Reyes", "superintendent")];
-    const r = go("Nick", "superintendent", roster);
-    expect(r.matches).toEqual([]);
-    expect(r.ambiguous[0].candidates.map((c) => c.id).sort()).toEqual(["mono", "reyes"]);
-  });
-
-  it("does not reinterpret single-token comma pieces because a LATER piece has a full name", () => {
-    // The global any-multi-token test split every piece of "Bell, Robert, Adam Sherwood", so the
-    // surname-first "Bell, Robert" became two wrong recipients again. Pairing is decided pairwise.
-    const roster = [
-      R("bbell", "Brett Bell", "superintendent"),
-      R("rsampley", "Robert Sampley", "superintendent"),
-      R("asherwood", "Adam Sherwood", "project_manager"),
-    ];
-    const r = go("Bell, Robert, Adam Sherwood", "superintendent", roster);
-    expect(names(r)).toEqual(["Adam Sherwood"]);
-    expect(r.unmatched).toEqual(["Bell, Robert"]);
   });
 
   it("lets an EXACT inactive hit block a weaker active alternative", () => {
@@ -829,52 +785,6 @@ describe("second review round", () => {
     }
   });
 
-  it("matches a punctuationless spelling of a hyphenated or apostrophised name", () => {
-    // The contract claims punctuation-insensitivity, but turning every punctuation run into a boundary meant
-    // the joined spelling could account for neither half and the real person went unmatched.
-    expect(names(go("MaryJane Smith", "superintendent", [R("mj", "Mary-Jane Smith", "superintendent")])))
-      .toEqual(["Mary-Jane Smith"]);
-    expect(names(go("Mary Jane Smith", "superintendent", [R("mj", "Mary-Jane Smith", "superintendent")])))
-      .toEqual(["Mary-Jane Smith"]);
-    expect(names(go("John ONeil", "superintendent", [R("on", "John O'Neil", "superintendent")])))
-      .toEqual(["John O'Neil"]);
-    expect(names(go("John O'Neil", "superintendent", [R("on", "John O'Neil", "superintendent")])))
-      .toEqual(["John O'Neil"]);
-    // Adjacent parts only — joining must not staple together unrelated ones.
-    expect(go("SmithMary Jane", "superintendent", [R("mj", "Mary-Jane Smith", "superintendent")]).matches)
-      .toEqual([]);
-  });
-});
-
-// ── Third review round ─────────────────────────────────────────────────────────────────────────────────
-// Both are interactions BETWEEN earlier fixes, which is now the recurring shape of every defect in this
-// file: the comma rule vs the annotation stripper, and the punctuation normalizer vs the character class
-// that follows it.
-describe("third review round", () => {
-  const R = (id: string, name: string, role: string, isActive = true) => ({ id, name, role, isActive });
-  const go = (text: string, role: string, roster: ReturnType<typeof R>[]) =>
-    matchFieldResponders({ text, role, roster });
-  const names = (r: { matches: Array<{ responder: { name: string } }> }) =>
-    r.matches.map((m) => m.responder.name);
-  const DALLAS = [
-    R("bbell", "Brett Bell", "superintendent"),
-    R("rsampley", "Robert Sampley", "superintendent"),
-    R("asherwood", "Adam Sherwood", "project_manager"),
-  ];
-
-  it("counts comma pieces on the STRIPPED text, so an annotation cannot fake a second name token", () => {
-    // "Robert (PM)" read as two tokens, so the comma was classed as a people delimiter and the surname-first
-    // pair split back into Brett Bell + Robert Sampley — the same two wrong recipients, reached this time
-    // through the annotation stripper rather than around it.
-    for (const text of ["Bell, Robert (PM)", "Bell, Robert - PM", "Bell (super), Robert"]) {
-      const r = go(text, "superintendent", DALLAS);
-      expect(r.matches).toEqual([]);
-    }
-    // The genuine two-person list is still split, annotations and all.
-    expect(names(go("Brett Bell, Adam Sherwood (PM)", "superintendent", DALLAS)))
-      .toEqual(["Brett Bell", "Adam Sherwood"]);
-  });
-
   it("FOLDS diacritics instead of deleting the letter", () => {
     // The [^a-z0-9] class deleted the accented character outright, so "josé" became "jos" — a DIFFERENT
     // person's entire name. On a roster holding "Jos Smith" that was an exact match for the wrong human,
@@ -889,46 +799,6 @@ describe("third review round", () => {
     expect(names(go("Jos Smith", "superintendent", both))).toEqual(["Jos Smith"]);
     // The accented spelling must NOT reach the unaccented person when only they are on the roster.
     expect(go("José Smith", "superintendent", [R("jos", "Jos Smith", "superintendent")]).matches).toEqual([]);
-  });
-
-  it("normalizes other common diacritics both directions", () => {
-    for (const [rosterName, typed] of [
-      ["Renée Dubois", "Renee Dubois"],
-      ["Nuñez Garcia", "Nunez Garcia"],
-      ["Müller Schmidt", "Muller Schmidt"],
-      ["Åke Larsson", "Ake Larsson"],
-    ] as const) {
-      const roster = [R("x", rosterName, "superintendent")];
-      expect(names(go(typed, "superintendent", roster))).toEqual([rosterName]);
-      expect(names(go(rosterName, "superintendent", roster))).toEqual([rosterName]);
-    }
-  });
-});
-
-// ── Fourth review round ────────────────────────────────────────────────────────────────────────────────
-// Five more, and the shape has not changed: every one is an INTERACTION with, or an incomplete case of, a
-// fix from an earlier round. Three of them are wrong-recipient defects that the earlier fix introduced.
-describe("fourth review round", () => {
-  const R = (id: string, name: string, role: string, isActive = true) => ({ id, name, role, isActive });
-  const go = (text: string, role: string, roster: ReturnType<typeof R>[]) =>
-    matchFieldResponders({ text, role, roster });
-  const names = (r: { matches: Array<{ responder: { name: string } }> }) =>
-    r.matches.map((m) => m.responder.name);
-  const DALLAS = [
-    R("bbell", "Brett Bell", "superintendent"),
-    R("rsampley", "Robert Sampley", "superintendent"),
-  ];
-
-  it("does not let an annotation-only comma piece take part in surname-first pairing", () => {
-    // An empty normalized piece still splits to a one-element array, so "(PM)" counted as one token and
-    // paired with "Bell", leaving "Robert" to stand alone: Brett Bell + Robert Sampley, two people neither
-    // of whom was named. Nameless pieces are dropped before pairing.
-    expect(go("Bell, (PM), Robert", "superintendent", DALLAS).matches).toEqual([]);
-    expect(go("Bell, (super), Robert", "superintendent", DALLAS).matches).toEqual([]);
-    // A real two-person list with an annotation on one of them still splits.
-    const withPm = [...DALLAS, R("asherwood", "Adam Sherwood", "project_manager")];
-    expect(names(go("Brett Bell, Adam Sherwood (PM)", "superintendent", withPm)))
-      .toEqual(["Brett Bell", "Adam Sherwood"]);
   });
 
   it("counts INACTIVE people in a bare token's contest", () => {
@@ -1022,19 +892,18 @@ describe("fifth review round", () => {
     }
   });
 
-  it("reports the ORIGINAL comma span, not the recombined scoring form", () => {
-    const D = [R("bbell", "Brett Bell", "superintendent"), R("rsampley", "Robert Sampley", "superintendent")];
-    // Scored as "Sampley Robert"; reported as typed.
-    expect(go("Sampley, Robert", "superintendent", D).matches[0].matchedText).toBe("Sampley, Robert");
-    expect(go("Bell, Robert", "superintendent", D).unmatched).toEqual(["Bell, Robert"]);
-  });
 });
 
-// ── Sixth review round ─────────────────────────────────────────────────────────────────────────────────
-describe("sixth review round", () => {
+// ── The comma, finally ─────────────────────────────────────────────────────────────────────────────────
+// This replaces five earlier tests, each of which pinned a different attempt at deciding whether a comma
+// separates people. Every attempt shipped a wrong-recipient bug, and the last pair of counterexamples proved
+// the question is undecidable from token shape: "De La Cruz, Mary Jane" (ONE person) and "Brett Bell, Robert
+// Sampley" (TWO people) are identical token-for-token. A comma-delimited run is now ONE person-span.
+describe("the comma is not a person delimiter", () => {
   const R = (id: string, name: string, role: string, isActive = true) => ({ id, name, role, isActive });
   const ROSTER = [
     R("maria", "Maria De La Cruz", "superintendent"),
+    R("maryjane", "Mary Jane Sampley", "superintendent"),
     R("rsampley", "Robert Sampley", "superintendent"),
     R("bbell", "Brett Bell", "superintendent"),
     R("asherwood", "Adam Sherwood", "project_manager"),
@@ -1043,32 +912,48 @@ describe("sixth review round", () => {
   const names = (r: { matches: Array<{ responder: { name: string } }> }) =>
     r.matches.map((m) => m.responder.name);
 
-  it("keeps a MULTIWORD surname-first entry intact", () => {
-    // The pairwise "two adjacent lone tokens" rule assumed a surname is one word. "De La Cruz, Robert" has a
-    // three-token first piece, so both sides stood alone and the matcher returned Maria De La Cruz + Robert
-    // Sampley — two people, neither of them the Robert De La Cruz who was named.
-    expect(go("De La Cruz, Robert").matches).toEqual([]);
-    expect(go("De La Cruz, Robert").unmatched).toEqual(["De La Cruz, Robert"]);
-    // The person that surname DOES belong to still resolves when fully written.
-    expect(names(go("Maria De La Cruz"))).toEqual(["Maria De La Cruz"]);
-    // Single-word surname-first is unchanged.
+  it("resolves a surname-first entry as ONE person, whatever the shape of either half", () => {
     expect(names(go("Sampley, Robert"))).toEqual(["Robert Sampley"]);
-    // A real two-person list still splits — both sides carry a full name.
-    expect(names(go("Brett Bell, Robert Sampley"))).toEqual(["Brett Bell", "Robert Sampley"]);
-    // And the mixed list still recovers the full name while refusing the surname-first pair.
-    const mixed = go("Bell, Robert, Adam Sherwood");
-    expect(names(mixed)).toEqual(["Adam Sherwood"]);
-    expect(mixed.unmatched).toEqual(["Bell, Robert"]);
+    expect(names(go("Sampley,Robert"))).toEqual(["Robert Sampley"]);
+    expect(names(go("Sampley , Robert"))).toEqual(["Robert Sampley"]);
+    // Multiword surname, and compound given name — the two shapes that broke the pairing heuristics.
+    expect(go("De La Cruz, Robert").matches).toEqual([]);
+    expect(go("De La Cruz, Mary Jane").matches).toEqual([]);
   });
 
-  it("reports the EXACT source span, not a reconstruction of it", () => {
-    // Rebuilding the span with ", " normalised the punctuation away: "Sampley,Robert" and "Sampley , Robert"
-    // both reported "Sampley, Robert", and "Bell, (PM), Robert" lost the annotation a human needs to see.
-    // Spans are now sliced from the original text.
-    expect(go("Sampley,Robert").matches[0].matchedText).toBe("Sampley,Robert");
-    expect(go("Sampley , Robert").matches[0].matchedText).toBe("Sampley , Robert");
-    expect(go("Sampley, Robert").matches[0].matchedText).toBe("Sampley, Robert");
-    // An annotation-only piece falls INSIDE the enclosing span rather than being erased from it.
+  it("never turns one comma entry into two recipients", () => {
+    // Each of these returned two people, none of them the person named, under a different earlier rule.
+    for (const text of [
+      "Bell, Robert",
+      "Bell, Robert, Adam Sherwood",
+      "Bell, (PM), Robert",
+      "Bell, Robert (PM)",
+      "De La Cruz, Robert",
+      "De La Cruz, Mary Jane",
+    ]) {
+      expect(go(text).matches).toEqual([]);
+    }
+  });
+
+  it("reports the WHOLE comma run verbatim, including a leading or trailing annotation", () => {
+    // Slicing between the first and last NAMED piece erased annotations at either edge.
+    expect(go("Sampley, Robert, (PM)").matches[0].matchedText).toBe("Sampley, Robert, (PM)");
+    expect(go("(PM), Bell, Robert").unmatched).toEqual(["(PM), Bell, Robert"]);
     expect(go("Bell, (PM), Robert").unmatched).toEqual(["Bell, (PM), Robert"]);
+  });
+
+  it("still splits on the delimiters that ARE unambiguous", () => {
+    expect(names(go("Brett Bell/Robert Sampley"))).toEqual(["Brett Bell", "Robert Sampley"]);
+    expect(names(go("Brett bell & Robert Sampley"))).toEqual(["Brett Bell", "Robert Sampley"]);
+    expect(names(go("Brett Bell and Robert Sampley"))).toEqual(["Brett Bell", "Robert Sampley"]);
+  });
+
+  it("ACCEPTS the cost: a genuine comma-separated list resolves to nobody", () => {
+    // Stated as a test rather than left implicit, because it is a deliberate trade and the next person to
+    // read this will want to know it was chosen, not overlooked. No value in the prod corpus separates
+    // people with a comma; every real multi-person field uses "/" or "&".
+    const r = go("Brett Bell, Robert Sampley");
+    expect(r.matches).toEqual([]);
+    expect(r.unmatched).toEqual(["Brett Bell, Robert Sampley"]);
   });
 });

@@ -73,6 +73,14 @@ there was none, and rebuilding from that claim would revive a wrong-recipient de
 > must disable any candidate whose `isActive` is false, or it will hand a corrective action to a former
 > employee by way of the very control added to prevent that.
 
+> **The comma is NOT a person delimiter.** It writes one person surname-first (`Bell, Robert`,
+> `De La Cruz, Robert`) and it could separate two (`Brett Bell, Robert Sampley`) — and those two shapes are
+> identical token-for-token, as `De La Cruz, Mary Jane` (one person) versus `Brett Bell, Robert Sampley`
+> (two) proves. Four successive heuristics tried to tell them apart and each shipped a wrong-recipient bug,
+> so a comma-delimited run is now ONE person-span. **Accepted cost:** a genuine comma-separated list
+> resolves to nobody and lands in `unmatched` for a human. It costs nothing on today's data — every real
+> multi-person value uses `/` or `&`, which are unambiguous and still split.
+
 Beyond the bare-token branch, the single rule subsumes the special cases:
 
 - A bare first name is "one token, so it must be exactly right" — which is what makes `"Brett"` safe.
@@ -266,10 +274,10 @@ label the reason for display. Worth doing if the QC dashboard ever shows these t
 
 | Check | Result |
 | --- | --- |
-| `TZ=UTC npx vitest run shared/src/lib/responderNameMatch.test.ts` | **113 passed** — one case per numbered rule, plus a regression test per review finding, each named after the behaviour it protects |
-| Shared CI gate config (`test:ci` — the one CI runs) | 29 files / **366 tests** passed, new suite included |
-| `npm run check:premerge` (the full gate) | **6,770** server + 2,555 client + 502 worker + 366 shared, zero failures |
-| Standalone adversarial harness (4 lenses) | **90 probes**, 0 failures |
+| `TZ=UTC npx vitest run shared/src/lib/responderNameMatch.test.ts` | **107 passed** — one case per numbered rule, plus a regression test per review finding, each named after the behaviour it protects |
+| Shared CI gate config (`test:ci` — the one CI runs) | 29 files / **360 tests** passed, new suite included |
+| `npm run check:premerge` (the full gate) | **6,770** server + 2,555 client + 502 worker + 360 shared, zero failures |
+| Standalone adversarial harness (4 lenses) | **91 probes**, 0 failures |
 | `npm run build --workspace shared`, `typecheck --workspace server`, `typecheck:tests --workspace shared` | clean |
 | `server/tests` full run | 6586 passed; 3 pre-existing failures (`startup-order`, two `properties` consistency) unrelated — `directory-dedup.test.ts` passes |
 | Importable from server **and** worker through built `dist` | executed from both roots, both returning `[["Brett Bell","high"],["Robert Sampley","exact"]]` for `"Brett/robert sampley"` |
