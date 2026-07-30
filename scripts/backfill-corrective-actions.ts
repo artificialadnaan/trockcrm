@@ -137,10 +137,19 @@ function fmt(row: CandidateRow): string {
 }
 
 async function main() {
-  const pool = new pg.Pool({
-    connectionString: process.env.DATABASE_PUBLIC_URL ?? process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false },
-  });
+  // Explicit, trimmed, and required. `??` treats an EMPTY string as present, so a blank
+  // DATABASE_PUBLIC_URL would beat a valid DATABASE_URL; and with neither set pg does not object — it falls
+  // back to ambient PG* / the local OS user, so a --commit run could open cycles and send mail against
+  // whatever database happens to answer on localhost.
+  const connectionString =
+    [process.env.DATABASE_PUBLIC_URL, process.env.DATABASE_URL]
+      .map((v) => (v ?? "").trim())
+      .find((v) => v.length > 0) ?? "";
+  if (!connectionString) {
+    console.error("Neither DATABASE_PUBLIC_URL nor DATABASE_URL is set. Refusing to fall back to a local default.");
+    process.exit(2);
+  }
+  const pool = new pg.Pool({ connectionString, ssl: { rejectUnauthorized: false } });
 
   const { rows: schemas } = await pool.query<{ nspname: string }>(
     `SELECT nspname FROM pg_namespace WHERE nspname ~ '^office_' ORDER BY nspname`,
@@ -210,6 +219,11 @@ async function main() {
              JOIN deals d ON d.id = sc.deal_id
              LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
             WHERE sc.id = $3
+              -- Re-applied here, not just in the candidate query: a card SOFT-DELETED between discovery and
+              -- this transaction would otherwise pass the status/rating/action guards and get a committed
+              -- cycle, while the notification worker and the responder route both exclude inactive
+              -- scorecards — no email, and a response flow nobody can reach.
+              AND sc.is_active = true
             -- OF sc: Postgres refuses FOR UPDATE on the nullable side of the outer join above.
             FOR UPDATE OF sc`,
           [WON_BROWSABLE_SLUGS, LOST_EXCLUDED_SLUGS, card.id],
@@ -218,7 +232,7 @@ async function main() {
 
         if (!row || row.status !== "submitted" || row.rating !== "corrective_action" || row.existing_actions > 0) {
           await client.query("ROLLBACK");
-          console.log(`   SKIP — changed since the snapshot (status=${row?.status}, actions=${row?.existing_actions})\n`);
+          console.log(`   SKIP — gone or changed since the snapshot (status=${row?.status ?? "not found / inactive"}, actions=${row?.existing_actions ?? "-"})\n`);
           skipped += 1;
           continue;
         }
@@ -272,11 +286,26 @@ async function main() {
           }
         }
 
+        // Two DISTINCT people matched for one role slot is a decision this script must not make.
+        //
+        // The card holds one responder per role (recipientResolutionSql is DISTINCT ON (role)), and the
+        // order names appear in free text says nothing about which of them is accountable. Keeping the first
+        // and continuing quietly emailed a real corrective action to an arbitrarily chosen person — it
+        // happened to agree with the human's choice on the one card run so far, which is luck, not a rule.
+        // An authoritative EXISTING pick resolves it; otherwise the card is skipped for a human.
+        const contested = new Set<string>();
         for (const [label, result] of [["superintendent_name", sup], ["pm_name", pm]] as const) {
           for (const m of result.matches) {
             const slot = m.responder.role === "project_manager" ? "project_manager" : "superintendent";
             if (picks[slot]) {
-              console.log(`   ${label}: "${m.matchedText}" -> ${m.responder.name} NOT APPLIED — ${slot} already resolved to ${picks[slot]!.name}`);
+              if (picks[slot]!.id !== m.responder.id) {
+                if (heldSlots.has(slot)) {
+                  console.log(`   ${label}: "${m.matchedText}" -> ${m.responder.name} NOT APPLIED — ${slot} is an explicit existing pick (${picks[slot]!.name})`);
+                } else {
+                  contested.add(slot);
+                  console.log(`   ${label}: "${m.matchedText}" -> ${m.responder.name} COMPETES with ${picks[slot]!.name} for the single ${slot} slot`);
+                }
+              }
               continue;
             }
             picks[slot] = m.responder;
@@ -288,6 +317,13 @@ async function main() {
           for (const u of result.unmatched) {
             console.log(`   ${label}: "${u}" UNMATCHED — nobody on the roster`);
           }
+        }
+
+        if (contested.size > 0) {
+          await client.query("ROLLBACK");
+          console.log(`   SKIP — ${[...contested].join(" and ")} named more than one person; a human must choose (set the responder pick on the card, then re-run)\n`);
+          skipped += 1;
+          continue;
         }
 
         const deliverable = [picks.superintendent, picks.project_manager]
@@ -347,6 +383,13 @@ async function main() {
         if (resolved.rows.length === 0) console.log("     (nobody)");
         for (const r of resolved.rows) {
           console.log(`     ${String(r.role).padEnd(16)} ${r.name ?? "—"} <${r.email ?? "NO EMAIL"}>`);
+        }
+        // The worker's answer is the one that counts, and it is read AFTER the writes. The earlier
+        // `deliverable` check is against the roster snapshot: somebody deactivated between that snapshot and
+        // this transaction passes it, gets their id written, and then resolves to nothing here. Printing
+        // "(nobody)" and committing anyway leaves an open cycle whose job retries to dead-letter.
+        if (!resolved.rows.some((r) => (r.email ?? "").trim().length > 0)) {
+          throw new Error("the worker resolves no deliverable recipient — refusing to commit a cycle nobody is told about");
         }
 
         const after = await client.query<{ status: string; n: string; jobs: string; bad: string }>(
