@@ -1,3 +1,35 @@
+/**
+ * The "Other" scope (migration 0208) — the escape hatch for a project that fits none of the ten seeded scopes.
+ * `other_applies` is the card's toggle; `other_scope_description` is the free text that IS the scope.
+ *
+ * Here, in shared, because the rule is enforced in TWO places and a second copy of these keys would let them
+ * drift: the browser form blocks submit, and assertLeadCreateRequirements blocks every other caller. The form
+ * check alone is not an invariant — anyone posting to /api/leads bypasses it — and the questionnaire's own
+ * `is_required` flag cannot carry it either, because the create snapshot returns every node with
+ * `isRequired: false`.
+ */
+export const OTHER_SCOPE_APPLIES_KEY = "other_applies";
+export const OTHER_SCOPE_DESCRIPTION_KEY = "other_scope_description";
+
+/**
+ * Is the Other scope selected without a description? THE rule — one definition, three enforcement points.
+ *
+ * The browser form blocks submit, assertLeadCreateRequirements blocks every other create caller, and the
+ * update path blocks edits. Three copies of `typeof x === "string" && x.trim()` would be three chances to
+ * disagree about what "blank" means, and this PR has already had to consolidate keys twice for that reason.
+ *
+ * Pass the EFFECTIVE answers. On update that means stored merged with incoming: an edit is a partial patch,
+ * so checking the patch alone misses both "already selected, now blanking the text" and "selecting Other
+ * without touching the description".
+ */
+export function isOtherScopeMissingDescription(
+  answers: Record<string, unknown> | null | undefined
+): boolean {
+  if (!answers || answers[OTHER_SCOPE_APPLIES_KEY] !== true) return false;
+  const description = answers[OTHER_SCOPE_DESCRIPTION_KEY];
+  return typeof description !== "string" || description.trim().length === 0;
+}
+
 export type LeadValidationQuestionSetKey = "service" | "normal";
 export type LeadValidationAnswerValue = string | boolean | number | null;
 

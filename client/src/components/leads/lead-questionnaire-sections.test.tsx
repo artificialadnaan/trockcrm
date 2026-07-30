@@ -169,6 +169,83 @@ describe("LeadQuestionnaireSections", () => {
     container.remove();
   });
 
+  // ── The "Other" scope (migration 0208) ───────────────────────────────────────────────────────────
+  //
+  // 0208 is a DATA-only change: it seeds a scope group and relies on this component rendering any group it
+  // finds. That claim is the whole basis for shipping no client code, so it is asserted here against the
+  // exact node shape the migration writes, rather than trusted.
+  function otherScopeNodes() {
+    return [
+      makeQuestionNode({
+        id: "other-applies",
+        key: "other_applies",
+        label: "Does another scope apply?",
+        inputType: "boolean",
+        isRequired: false,
+        displayOrder: 0,
+        sectionKey: "scope",
+        groupKey: "other",
+        groupLabel: "Other",
+        groupOrder: 11,
+      }),
+      makeQuestionNode({
+        id: "other-description",
+        key: "other_scope_description",
+        label: "Describe the scope",
+        inputType: "textarea",
+        isRequired: true,
+        displayOrder: 1,
+        sectionKey: "scope",
+        groupKey: "other",
+        groupLabel: "Other",
+        groupOrder: 11,
+        // CHILD of the applies-node — the panel lists a group's questions as
+        // `node.parentNodeId === appliesNode.id`. Without this the card selects and opens onto an empty
+        // panel, which is exactly what this test caught in the migration's first version.
+        parentNodeId: "other-applies",
+        parentOptionValue: "true",
+      }),
+    ];
+  }
+
+  it("renders an Other scope card from seeded nodes alone, with no client change", () => {
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <LeadQuestionnaireSections
+          nodes={otherScopeNodes()}
+          answers={{}}
+          onAnswerChange={() => {}}
+        />
+      );
+    });
+
+    expect(container.textContent).toContain("Other");
+    // Unselected, exactly like the ten seeded scopes in the screenshot.
+    expect(container.textContent).toContain("Not selected");
+    expect(container.textContent).toContain("No answers yet");
+  });
+
+  it("reveals the free-text field once Other is selected", () => {
+    // Selection is `answers[appliesNode.key] === true`. With that set, the group's remaining question — the
+    // textarea — must be the thing the user sees. If the applies-node convention were wrong, the card would
+    // render and never open, which is the failure this pins.
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <LeadQuestionnaireSections
+          nodes={otherScopeNodes()}
+          answers={{ other_applies: true }}
+          onAnswerChange={() => {}}
+        />
+      );
+    });
+
+    expect(container.textContent).toContain("Describe the scope");
+    expect(container.querySelector("textarea")).toBeTruthy();
+    expect(container.textContent).not.toContain("Not selected");
+  });
+
   it("renders placeholder text instead of a stored __unanswered__ dropdown value", () => {
     root = createRoot(container);
     act(() => {

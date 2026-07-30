@@ -20,6 +20,11 @@ import {
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import {
+  OTHER_SCOPE_APPLIES_KEY,
+  OTHER_SCOPE_DESCRIPTION_KEY,
+  isOtherScopeMissingDescription,
+} from "@trock-crm/shared/types";
+import {
   toCanonicalLeadStageSlug,
   resolveOfficeCodeFromOffice,
   type UserRole,
@@ -40,6 +45,7 @@ import {
   listQuestionnaireNodes,
   type LeadQuestionAnswerValue,
   upsertLeadQuestionAnswerSet,
+  listLeadQuestionAnswers,
 } from "./questionnaire-service.js";
 import {
   computeExistingCustomerStatus,
@@ -945,6 +951,54 @@ async function resolveCreateStage(
   return stage;
 }
 
+/**
+ * The same rule on the UPDATE path, against stored answers merged with the incoming patch.
+ *
+ * Create-only enforcement is not enforcement: once a valid Other lead exists, an owner could edit the
+ * questionnaire and blank the description, reaching exactly the state the create guard exists to prevent.
+ * That includes converted leads, whose answers-only branch is the one edit they still permit.
+ */
+async function assertOtherScopeDescribedOnUpdate(
+  tenantDb: TenantDb,
+  leadId: string,
+  incoming: Record<string, unknown>
+): Promise<void> {
+  // Cheap exit: if neither key is in the patch, the stored state cannot have been made invalid by it.
+  const touchesOtherScope =
+    Object.prototype.hasOwnProperty.call(incoming, OTHER_SCOPE_APPLIES_KEY) ||
+    Object.prototype.hasOwnProperty.call(incoming, OTHER_SCOPE_DESCRIPTION_KEY);
+  if (!touchesOtherScope) return;
+
+  // LOCK the lead before reading, and hold it through the caller's upsert.
+  //
+  // Two concurrent patches can each validate against the same snapshot and jointly create the forbidden
+  // state: from `other_applies: false` with text, one request sets applies true while the other clears the
+  // text — both merged views are individually valid, and the pair is not. Routes run inside a tenant
+  // transaction (req.commitTransaction), so this row lock serialises them; the second reads the first's
+  // committed answers and fails. Same device as findApprovalByToken's FOR UPDATE in due-diligence-service.
+  await tenantDb.execute(sql`SELECT id FROM leads WHERE id = ${leadId} FOR UPDATE`);
+
+  const stored = await listLeadQuestionAnswers(tenantDb, leadId);
+  assertOtherScopeDescribed({ ...stored, ...incoming } as Record<string, unknown>);
+}
+
+/**
+ * The one place the Other-scope rejection is raised on UPDATE, so the v2 and legacy paths cannot drift into
+ * different status codes or messages for the same invalid state.
+ */
+function assertOtherScopeDescribed(answers: Record<string, unknown>): void {
+  if (isOtherScopeMissingDescription(answers)) {
+    throw new AppError(
+      400,
+      "Describe the scope when Other is selected.",
+      "LEAD_OTHER_SCOPE_DESCRIPTION_REQUIRED"
+    );
+  }
+}
+
+/** The gate key the CLIENT matches on. It clears gate keys as `leadQuestionAnswers.<key>`. */
+const OTHER_SCOPE_MISSING_KEY = `leadQuestionAnswers.${OTHER_SCOPE_DESCRIPTION_KEY}`;
+
 function assertLeadCreateRequirements(
   input: CreateLeadInput,
   property: typeof properties.$inferSelect,
@@ -974,6 +1028,36 @@ function assertLeadCreateRequirements(
   }
   if (!input.bidDueDate || !normalizeIsoDateString(input.bidDueDate)) {
     missing.push("bidDueDate");
+  }
+
+  // The "Other" scope must carry its description (migration 0208).
+  //
+  // Server-side because the browser form's check is not an invariant — any authenticated caller posting to
+  // /api/leads bypasses it, and the questionnaire's own `is_required` flag cannot help: the create snapshot
+  // returns every node with `isRequired: false`, so nothing downstream enforces it either. Selecting Other
+  // alone satisfies "at least one scope", so without this a lead can be filed recording that it resembles
+  // nothing we bid and nothing about what it actually is — the single case where an empty scope answer
+  // removes the entire point of the scope. Mirrors primaryContactRole === "other" above.
+  //
+  // Resolved with the SAME precedence createLead itself uses a few lines down
+  // (`leadQuestionAnswers ?? projectTypeQuestionPayload.answers`). Reading only one of the two fields would
+  // leave the other as a way past the guard, which is the whole reason this check exists server-side.
+  // BOTH payloads, not whichever `??` picks first.
+  //
+  // Which one is PERSISTED depends on ENABLE_LEAD_EDIT_V2 (legacy mode stores projectTypeQuestionPayload),
+  // while `leadQuestionAnswers ?? …` prefers the other — and `{}` is not nullish, so a caller sending an
+  // empty object plus a real payload slipped straight through to the stored descriptionless Other. Checking
+  // both is correct under either flag and needs no reasoning about which is live.
+  if (
+    isOtherScopeMissingDescription(input.leadQuestionAnswers as Record<string, unknown> | undefined) ||
+    isOtherScopeMissingDescription(
+      input.projectTypeQuestionPayload?.answers as Record<string, unknown> | undefined
+    )
+  ) {
+    // NAMESPACED, because the form clears gate keys as `leadQuestionAnswers.<key>` when the answer changes.
+    // A bare key never matches, so it would sit in createRequirementErrors forever and keep Create Lead
+    // disabled even after the user typed a description — the server rejecting, then refusing to un-reject.
+    missing.push(OTHER_SCOPE_MISSING_KEY);
   }
 
   if (missing.length > 0) {
@@ -1757,6 +1841,7 @@ export function createLeadService(
       }
 
       if (v2Enabled && input.leadQuestionAnswers) {
+        await assertOtherScopeDescribedOnUpdate(tenantDb, leadId, input.leadQuestionAnswers);
         await upsertLeadQuestionAnswerSet(tenantDb, {
           leadId,
           projectTypeId: existing.projectTypeId ?? null,
@@ -1800,6 +1885,9 @@ export function createLeadService(
             existing.qualificationPayload as Record<string, string | boolean | number | null>
           );
     const effectiveLeadQuestionAnswers = input.leadQuestionAnswers ?? {};
+    if (v2Enabled && input.leadQuestionAnswers) {
+      await assertOtherScopeDescribedOnUpdate(tenantDb, leadId, input.leadQuestionAnswers);
+    }
 
     if (input.stageId !== undefined) {
       const stage = await deps.getStageById(input.stageId, "lead");
@@ -1953,10 +2041,21 @@ export function createLeadService(
       updates.qualificationPayload = normalizeQualificationPayload(input.qualificationPayload);
     }
     if (!v2Enabled && (input.projectTypeQuestionPayload !== undefined || input.projectTypeId !== undefined)) {
-      updates.projectTypeQuestionPayload = normalizeProjectTypeQuestionPayload(
+      const legacyPayload = normalizeProjectTypeQuestionPayload(
         effectiveProjectTypeId ?? null,
         input.projectTypeQuestionPayload
       );
+      // The LEGACY update path writes answers too, and the v2 guard above never sees them — it is gated on
+      // `v2Enabled && input.leadQuestionAnswers`. Without this, an owner patching projectTypeQuestionPayload
+      // with `other_applies: true` and a blank description turns a valid Other lead descriptionless.
+      //
+      // No stored-answer merge and no row lock here, unlike the v2 guard: this write REPLACES the payload
+      // outright rather than patching keys into it, so the post-write answers are fully determined by the
+      // request and there is no snapshot for a concurrent update to invalidate.
+      assertOtherScopeDescribed(
+        (legacyPayload?.answers ?? {}) as Record<string, unknown>
+      );
+      updates.projectTypeQuestionPayload = legacyPayload;
     }
 
     const bidDueDateWasProvided = input.bidDueDate !== undefined;
