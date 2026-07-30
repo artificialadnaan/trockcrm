@@ -155,9 +155,14 @@ addy / adam                   -> distance 2 over 4 chars, below MIN -> exact-onl
 Both numbers are asserted directly in a `nameEditDistance` describe block, so whoever next tunes this
 sees which distances the ladder stands between rather than guessing.
 
-Multi-person fields split on `/ , & + ;` and the word "and", on the **raw** text before normalization.
-Prod holds `"Brett Bell/Robert Sampley"`, `"Brett bell & Robert Sampley"` and `"Brett/robert sampley"`,
-so two recipients from one field is normal and must come back **in the order typed**.
+Multi-person fields split on `/ & + ;`, a newline, `w/`, and the word "and" — on the **raw** text before
+normalization. Prod holds `"Brett Bell/Robert Sampley"`, `"Brett bell & Robert Sampley"` and
+`"Brett/robert sampley"`, so two recipients from one field is normal and must come back **in the order
+typed**.
+
+**The comma is deliberately NOT in that list** — see the invariant above. A comma-delimited run is one
+person-span, so `"Brett Bell, Robert Sampley"` returns **nobody** and lands in `unmatched`. Anyone
+reimplementing from this section must not add it back.
 
 ### Levenshtein is single-copy
 
@@ -274,9 +279,9 @@ label the reason for display. Worth doing if the QC dashboard ever shows these t
 
 | Check | Result |
 | --- | --- |
-| `TZ=UTC npx vitest run shared/src/lib/responderNameMatch.test.ts` | **107 passed** — one case per numbered rule, plus a regression test per review finding, each named after the behaviour it protects |
-| Shared CI gate config (`test:ci` — the one CI runs) | 29 files / **360 tests** passed, new suite included |
-| `npm run check:premerge` (the full gate) | **6,770** server + 2,555 client + 502 worker + 360 shared, zero failures |
+| `TZ=UTC npx vitest run shared/src/lib/responderNameMatch.test.ts` | **115 passed** — one case per numbered rule, plus a regression test per review finding, each named after the behaviour it protects |
+| Shared CI gate config (`test:ci` — the one CI runs) | 29 files / **368 tests** passed, new suite included |
+| `npm run check:premerge` (the full gate) | **6,770** server + 2,555 client + 502 worker + 368 shared, zero failures |
 | Standalone adversarial harness (4 lenses) | **91 probes**, 0 failures |
 | `npm run build --workspace shared`, `typecheck --workspace server`, `typecheck:tests --workspace shared` | clean |
 | `server/tests` full run | 6586 passed; 3 pre-existing failures (`startup-order`, two `properties` consistency) unrelated — `directory-dedup.test.ts` passes |

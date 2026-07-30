@@ -957,3 +957,159 @@ describe("the comma is not a person delimiter", () => {
     expect(r.unmatched).toEqual(["Brett Bell, Robert Sampley"]);
   });
 });
+
+// ── Metamorphic coverage ───────────────────────────────────────────────────────────────────────────────
+// Every wrong-recipient defect found in review so far came from two rules INTERACTING, and the example-based
+// tests above kept passing because each exercises one rule at a time. Enumerating more single-rule examples
+// cannot find the next one.
+//
+// These relations are independent of the implementation: each asserts that transforming the input a certain
+// way must not change WHO is matched. Composing them PAIRWISE is what exercises the seams directly — and it
+// immediately found one the examples had missed (the trailing-comma case below), so this is load-bearing
+// coverage rather than decoration.
+describe("metamorphic relations", () => {
+  const R = (id: string, name: string, role: string, isActive = true) => ({ id, name, role, isActive });
+  const ROSTER = [
+    ...DALLAS_ROSTER,
+    R("maria", "Maria De La Cruz", "superintendent"),
+    R("oneil", "John O'Neil", "superintendent"),
+    R("maryjane", "Mary-Jane Smith", "superintendent"),
+  ];
+  const who = (text: string, role: string) =>
+    matchFieldResponders({ text, role, roster: ROSTER })
+      .matches.map((m) => m.responder.id).sort().join(",");
+
+  // Real prod values plus every shape that has broken a rule in review.
+  const INPUTS = [
+    "Brett Bell", "Brett bell", "Kevin posey", "Corey mcshane", "Eric Burnett", "Nick Reyes",
+    "Nick Cheaham", "Adam Sherwood", "Nick Cheatham", "Nick Chatham", "Addy", "Derek Barr", "Test",
+    "Adnaan Iqbal", "Brett Bell/Robert Sampley", "Brett bell & Robert Sampley", "Brett/robert sampley",
+    "Sampley, Robert", "Bell, Robert", "De La Cruz, Mary Jane", "Maria De La Cruz", "John O'Neil",
+    "John ONeil", "MaryJane Smith", "Brett", "Nick", "Brett Sampley", "Brett Ball",
+    "Brett Bell w/ Robert Sampley",
+  ];
+
+  // Each must leave the matched SET untouched.
+  const RELATIONS: Array<{ name: string; f: (t: string) => string; only?: (t: string) => boolean }> = [
+    { name: "append '(PM)'", f: (t) => `${t} (PM)` },
+    { name: "append ' - PM'", f: (t) => `${t} - PM` },
+    { name: "prepend honorific", f: (t) => `Mr. ${t}` },
+    { name: "upper-case", f: (t) => t.toUpperCase() },
+    { name: "lower-case", f: (t) => t.toLowerCase() },
+    { name: "pad with whitespace", f: (t) => `   ${t}\t ` },
+    { name: "double internal spaces", f: (t) => t.replace(/ /g, "  ") },
+    { name: "trailing comma", f: (t) => `${t},` },
+    // "w/" is a delimiter in its own right, so swapping its slash would manufacture an orphan "w" token —
+    // that is the relation misfiring, not the matcher, hence the guard.
+    { name: "'/' -> ' & '", f: (t) => t.replace(/\//g, " & "), only: (t) => t.includes("/") && !/w\//i.test(t) },
+    { name: "accent-equivalent spelling", f: (t) => t.replace(/e/g, "é") },
+    { name: "curly apostrophe", f: (t) => t.replace(/'/g, "’"), only: (t) => t.includes("'") },
+  ];
+
+  for (const role of ["superintendent", "project_manager"]) {
+    it(`holds under every single relation (${role})`, () => {
+      for (const input of INPUTS) {
+        const expected = who(input, role);
+        for (const rel of RELATIONS) {
+          if (rel.only && !rel.only(input)) continue;
+          const mutated = rel.f(input);
+          if (mutated === input) continue;
+          expect(`${rel.name} | ${input} -> ${who(mutated, role)}`).toBe(`${rel.name} | ${input} -> ${expected}`);
+        }
+      }
+    });
+
+    it(`holds under PAIRWISE composition (${role})`, () => {
+      // The interaction surface. This is what caught "Brett Bell - PM," matching nobody: the trailing
+      // dash-annotation strip was `$`-anchored and tolerated only a period, so the comma left "pm" as an
+      // unaccountable token. Neither relation triggers it alone.
+      for (const input of INPUTS) {
+        const expected = who(input, role);
+        for (const a of RELATIONS) {
+          if (a.only && !a.only(input)) continue;
+          const once = a.f(input);
+          for (const b of RELATIONS) {
+            if (a === b) continue;
+            if (b.only && !b.only(once)) continue;
+            const twice = b.f(once);
+            if (twice === input) continue;
+            expect(`${a.name}+${b.name} | ${input} -> ${who(twice, role)}`)
+              .toBe(`${a.name}+${b.name} | ${input} -> ${expected}`);
+          }
+        }
+      }
+    });
+  }
+
+  it("never returns a person sharing no exact token with the input", () => {
+    // An absolute invariant, checked with a deliberately naive tokenizer written independently of the
+    // matcher's own, so an implementation bug cannot make the check agree with it by construction.
+    const naive = (s: string) =>
+      new Set(
+        s.toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "").replace(/['’]/g, "")
+          .split(/[^\p{L}\p{N}]+/u).filter(Boolean),
+      );
+    for (const role of ["superintendent", "project_manager"]) {
+      for (const input of INPUTS) {
+        for (const m of matchFieldResponders({ text: input, role, roster: ROSTER }).matches) {
+          const inputTokens = naive(input);
+          const nameTokens = [...naive(m.responder.name)];
+          // `joined` covers the punctuation-boundary join ("MaryJane" for "Mary-Jane").
+          const shares = nameTokens.some((t) => inputTokens.has(t)) || inputTokens.has(nameTokens.join(""));
+          expect(`${input} -> ${m.responder.name}: shares=${shares}`).toBe(`${input} -> ${m.responder.name}: shares=true`);
+        }
+      }
+    }
+  });
+});
+
+// ── Seventh review round ───────────────────────────────────────────────────────────────────────────────
+describe("seventh review round", () => {
+  const R = (id: string, name: string, role: string, isActive = true) => ({ id, name, role, isActive });
+  const go = (text: string, roster: ReturnType<typeof R>[]) =>
+    matchFieldResponders({ text, role: "superintendent", roster });
+  const names = (r: { matches: Array<{ responder: { name: string } }> }) =>
+    r.matches.map((m) => m.responder.name);
+
+  it("requires a generational suffix on the ROSTER name to be spoken", () => {
+    // The typed direction was already enforced; the mirror was not. With only "Brett Bell Jr" on the roster,
+    // "Brett Bell" consumed both base parts, left "jr" unused and resolved the junior at `high` — a card
+    // meant for an absent senior addressed to his son. A suffix is not an optional middle name.
+    for (const suffix of ["Jr", "Sr", "II", "III", "IV"]) {
+      const roster = [R("x", `Brett Bell ${suffix}`, "superintendent")];
+      expect(go("Brett Bell", roster).matches).toEqual([]);
+      // Spoken in full, they resolve.
+      expect(names(go(`Brett Bell ${suffix}`, roster))).toEqual([`Brett Bell ${suffix}`]);
+    }
+    // And the typed direction still holds.
+    expect(go("Brett Bell Jr", [R("bb", "Brett Bell", "superintendent")]).matches).toEqual([]);
+    // A given name that merely LOOKS like a numeral suffix is not one — only non-first parts qualify.
+    expect(names(go("Ivy Brown", [R("iv", "Ivy Brown", "superintendent")]))).toEqual(["Ivy Brown"]);
+  });
+
+  it("refuses a bare single CHARACTER even when it uniquely matches", () => {
+    // "Q" scored the middle initial of "John Q Smith" exactly, won unopposed and resolved him at `high` — a
+    // responder nobody meaningfully named. Uniqueness is not enough when the token carries no information.
+    const roster = [R("jq", "John Q Smith", "superintendent")];
+    expect(go("Q", roster).matches).toEqual([]);
+    expect(go("q", roster).matches).toEqual([]);
+    // An initial INSIDE a fuller segment is fine — the other tokens do the identifying.
+    expect(names(go("John Q Smith", roster))).toEqual(["John Q Smith"]);
+    expect(names(go("John Smith", roster))).toEqual(["John Q Smith"]);
+  });
+
+  it("is SYMMETRIC about punctuation in compound names", () => {
+    // The roster side already let one token cover two hyphen-joined parts. Without the mirror, the reverse
+    // spelling failed: roster "DeAngelo Smith" against input "De-Angelo Smith" produced three tokens for two
+    // parts and was rejected outright.
+    const joinedRoster = [R("da", "DeAngelo Smith", "superintendent")];
+    expect(names(go("De-Angelo Smith", joinedRoster))).toEqual(["DeAngelo Smith"]);
+    expect(names(go("DeAngelo Smith", joinedRoster))).toEqual(["DeAngelo Smith"]);
+    const hyphenRoster = [R("mj", "Mary-Jane Smith", "superintendent")];
+    expect(names(go("MaryJane Smith", hyphenRoster))).toEqual(["Mary-Jane Smith"]);
+    expect(names(go("Mary-Jane Smith", hyphenRoster))).toEqual(["Mary-Jane Smith"]);
+    // The collapse is an ALTERNATIVE reading only — it must not manufacture a match across a real space.
+    expect(go("Annabell", [R("aa", "Ann Abell", "superintendent")]).matches).toEqual([]);
+    expect(go("Ann Abell", [R("bb", "Annabell Smith", "superintendent")]).matches).toEqual([]);
+  });
+});

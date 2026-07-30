@@ -202,7 +202,10 @@ const ROLE_WORD = String.raw`(?:pm|project\s*manager|super(?:intendent)?|supt|fo
 const IDENTITY_NEUTRAL_NOISE: RegExp[] = [
   new RegExp(String.raw`\(\s*${ROLE_WORD}\s*\.?\s*\)`, "gi"), // "(PM)", "(super)" — role words ONLY
   /^\s*(?:mr|mrs|ms|dr|mx)\.?\s+/i, // leading honorific
-  new RegExp(String.raw`\s+-\s*${ROLE_WORD}\s*\.?\s*$`, "i"), // trailing " - PM"
+  // Trailing punctuation after the role word must not defeat the anchor. `\.?$` tolerated only a period, so
+  // "Brett Bell - PM," kept "pm" as a token, failed the every-token rule and matched NOBODY. Found by
+  // COMPOSING the annotation and trailing-comma metamorphic relations — neither triggers it alone.
+  new RegExp(String.raw`\s+-\s*${ROLE_WORD}\s*[.,;]*\s*$`, "i"), // trailing " - PM", " - PM," ...
 ];
 
 /**
@@ -284,7 +287,20 @@ function foldNameLetters(value: string | null | undefined): string {
 interface RosterNameParts {
   parts: string[];
   joinableWithNext: boolean[];
+  /**
+   * True for a generational suffix — the part that says WHICH of two same-named people this is.
+   *
+   * Typed suffixes were already respected ("Brett Bell Jr" does not reach roster "Brett Bell"), but the
+   * mirror was not: with only "Brett Bell Jr" on the roster, input "Brett Bell" consumed both base parts,
+   * left "jr" unused and resolved the junior at `high` — so a card meant for an absent senior addressed his
+   * son. A suffix on the ROSTER name is required, not an optional middle name.
+   */
+  identitySuffix: boolean[];
 }
+
+// Not "v": a lone V is far likelier to be an initial than a fifth-generation suffix, and treating it as
+// identity-bearing would block ordinary names for no real gain.
+const GENERATIONAL_SUFFIXES = new Set(["jr", "jnr", "sr", "snr", "ii", "iii", "iv"]);
 
 function splitRosterNameParts(name: string): RosterNameParts {
   const parts: string[] = [];
@@ -298,7 +314,9 @@ function splitRosterNameParts(name: string): RosterNameParts {
       joinableWithNext.push(index < pieces.length - 1);
     });
   }
-  return { parts, joinableWithNext };
+  // Never the FIRST part: a person whose given name is "Ivy" or similar must not have it read as a suffix.
+  const identitySuffix = parts.map((part, i) => i > 0 && GENERATIONAL_SUFFIXES.has(part));
+  return { parts, joinableWithNext, identitySuffix };
 }
 
 /** The raw, trimmed person-segments of a free-text field, in the order they were typed. */
@@ -363,7 +381,7 @@ function maxEditDistance(tokenLength: number, partLength: number): number {
  */
 function scoreSegmentAgainstName(
   tokens: string[],
-  { parts, joinableWithNext }: RosterNameParts,
+  { parts, joinableWithNext, identitySuffix }: RosterNameParts,
 ): ResponderMatchConfidence | null {
   if (tokens.length === 0 || tokens.length > parts.length) return null;
 
@@ -420,6 +438,11 @@ function scoreSegmentAgainstName(
     return "high";
   }
 
+  // A generational suffix left unspoken rejects the match outright. It is not an optional middle name: it
+  // is the part that distinguishes two same-named people, so "Brett Bell" must not resolve a roster holding
+  // only "Brett Bell Jr". This mirrors the typed-suffix rule, which was already enforced by every-token.
+  if (parts.some((_, i) => identitySuffix[i] && !consumed[i])) return null;
+
   // Whole name accounted for, no fuzz. Counted by CONSUMED PARTS rather than `tokens.length === parts.length`,
   // because one token may now consume two adjacent parts — "MaryJane Smith" against ["mary","jane","smith"]
   // is a complete, unfuzzy identification with 2 tokens and 3 parts.
@@ -471,11 +494,33 @@ export function matchFieldResponders<T extends ResponderRosterEntry>({
 
   for (const segment of segments) {
     const tokens = normalizeResponderName(segment.stripped).split(" ");
+    // Punctuation-insensitivity has to be SYMMETRIC. The roster side already lets one token cover two
+    // hyphen-joined parts ("MaryJane" -> "Mary-Jane"); without the mirror, the reverse spelling failed —
+    // roster "DeAngelo Smith" against input "De-Angelo Smith" produced three tokens for two parts and was
+    // rejected outright. This collapses runs of punctuation-adjacent INPUT tokens, and is only ever tried as
+    // an ALTERNATIVE reading, so it can add a match but never change one that already succeeded.
+    const inputParts = splitRosterNameParts(segment.stripped);
+    const collapsed: string[] = [];
+    for (let i = 0; i < inputParts.parts.length; i++) {
+      let joined = inputParts.parts[i];
+      while (inputParts.joinableWithNext[i] && i + 1 < inputParts.parts.length) {
+        joined += inputParts.parts[i + 1];
+        i += 1;
+      }
+      collapsed.push(joined);
+    }
+    const tokenReadings =
+      collapsed.length > 0 && collapsed.join(" ") !== tokens.join(" ") ? [tokens, collapsed] : [tokens];
     const allScored = candidates
       .map((candidate) => ({
         entry: candidate.entry,
         inRole: candidate.inRole,
-        confidence: scoreSegmentAgainstName(tokens, candidate.nameParts),
+        // Best over the readings: the plain tokens, and the punctuation-collapsed variant.
+        confidence: tokenReadings.reduce<ResponderMatchConfidence | null>((best, reading) => {
+          const scored = scoreSegmentAgainstName(reading, candidate.nameParts);
+          if (scored === "exact" || best === "exact") return "exact";
+          return scored ?? best;
+        }, null),
       }))
       .filter(
         (scored): scored is { entry: T; inRole: boolean; confidence: ResponderMatchConfidence } =>
@@ -500,6 +545,15 @@ export function matchFieldResponders<T extends ResponderRosterEntry>({
       //
       // This is also what stops the annotation strip manufacturing a resolvable input: "Nick - PM" reduces
       // to a bare "Nick" and lands here.
+      // A single CHARACTER is never identity evidence, even when it uniquely matches. With "John Q Smith"
+      // on the roster, a field containing just "Q" scored his middle initial exactly, won unopposed and
+      // resolved him at `high` — a responder nobody meaningfully named. Uniqueness is not enough when the
+      // token carries almost no information. (Initials inside a fuller segment are fine: "John Q Smith"
+      // still matches, because the other tokens do the identifying.)
+      if (tokens[0].length < 2) {
+        result.unmatched.push(segment.raw);
+        continue;
+      }
       if (allScored.length > 1) {
         result.ambiguous.push({ matchedText: segment.raw, candidates: allScored.map((s) => s.entry) });
         continue;
