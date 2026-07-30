@@ -1,6 +1,7 @@
 import sharp from "sharp";
 import heicConvert from "heic-convert";
 import { getObjectBuffer, putObject, isR2Configured } from "./r2-client.js";
+import { MAX_THUMBNAIL_SOURCE_BYTES } from "./image-thumbnail-constants.js";
 
 /**
  * Server-side photo thumbnails. The grid loads a small JPEG generated here; the lightbox keeps the
@@ -16,7 +17,9 @@ const THUMBNAIL_MAX_EDGE = 600;
 const THUMBNAIL_QUALITY = 70;
 // Don't pull originals larger than this into memory just to thumbnail them (defends against a rogue
 // huge upload). A miss here is non-fatal — the grid falls back to the original.
-const MAX_SOURCE_BYTES = 40 * 1024 * 1024;
+// Lives in image-thumbnail-constants.ts so callers can gate on it without importing sharp, heic-convert
+// and the R2 client. Aliased to the historical local name to keep the call sites below unchanged.
+const MAX_SOURCE_BYTES = MAX_THUMBNAIL_SOURCE_BYTES;
 // Hard ceiling on how long thumbnailing may add to the caller. confirmUpload() awaits this on the
 // request path, so a slow R2 fetch/decode/resize must not stall an upload — past this we give up and
 // the grid falls back to the original. (The in-flight work may still finish and write the thumb object;

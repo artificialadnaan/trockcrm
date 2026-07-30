@@ -155,6 +155,11 @@ import {
 import {
   updateEstimatePricingRecommendationReviewState,
 } from "../estimating/workbench-service.js";
+import {
+  ingestWalkthrough,
+  validateWalkthroughIngressPayload,
+} from "../estimating/walkthrough-ingress-service.js";
+import { createWalkthroughContactSheetStore } from "../estimating/walkthrough-contact-sheet-store.js";
 
 function buildRouteAuditContext(req: { user?: any; headers: Record<string, unknown>; ip?: string | undefined }) {
   const actor = buildAuditActorFromUser({
@@ -3418,6 +3423,75 @@ router.post("/:id/estimating/manual-rows/:recommendationId/promote-local-catalog
 
     await req.commitTransaction!();
     res.status(200).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * The ONLY inbound way to create estimate extractions.
+ *
+ * Every other estimating route above edits, approves, or rejects rows that a parse run already
+ * produced — none of them can bring a row into existence. A TROCK Scope walkthrough arrives with its
+ * scope ALREADY extracted, so it has nothing to hand an OCR pipeline; it needs a door of its own.
+ * `ingestWalkthrough` synthesizes the whole file -> document -> parse-run -> extractions chain in one
+ * transaction (walkthrough-ingress-service.ts).
+ *
+ * Conventions here are lifted wholesale from the manual-rows handler directly above: tenant db off
+ * `req.tenantDb!`, actor off `req.user!.id`, the `getDealById` 404 guard, `req.commitTransaction!()`
+ * before the response, and every error to `next`. 201 rather than 200 because, unlike manual-rows,
+ * this call brings new resources into being.
+ *
+ * The request is IDEMPOTENT on `walkthroughId`: a retry after a lost response replays the ids of the
+ * chain the first call committed instead of building a second one (walkthrough-ingress-service.ts).
+ *
+ * THE CONTACT SHEET MUST ALREADY BE UPLOADED when this is posted, to the key the ingress DERIVES from
+ * (dealId, projectId, walkthroughId, contactSheetMimeType) — the body never carries a key. The ingress
+ * HEADs that object and compares its Content-Type and Content-Length to the declared ones before its
+ * first write, so a pre-upload that failed or is still in flight is a 400 naming the derived key rather
+ * than a 201 for a chain whose evidence 404s. The key composes `walkthroughId` percent-encoded as ONE
+ * path segment (R30), so both sides of the contract must encode it the same way.
+ *
+ * …AND A RETRY MUST NOT RE-UPLOAD IT (R31). The key is derived from walkthrough identity, so every
+ * attempt targets the SAME object: a retry that uploads again overwrites evidence this deal has already
+ * committed, before any drift check can look at it. A true retry has nothing to upload — the object is
+ * already there, byte-identical, from the attempt whose response was lost. The ingress HEADs the stored
+ * key on the replay path and 409s if the object no longer matches what the `files` row recorded.
+ *
+ * STATUS CODES THE SENDER MUST DISTINGUISH: a 400 means "your upload is not at the key, fix it" and is
+ * NOT retryable; a 503 means "we could not reach object storage to check" and IS (R33). Conflating the
+ * two is how a valid upload gets abandoned.
+ */
+router.post("/:id/estimating/walkthrough-extractions", async (req, res, next) => {
+  try {
+    // The WHOLE body is validated BEFORE the deal lookup, so a malformed export costs no query at all
+    // and can never reach a write. `validateWalkthroughIngressPayload` throws AppError(400, …) naming
+    // the offending field — a 400 the sender can act on, rather than a 500 from a NOT NULL violation
+    // or a `.toFixed` on a string deep inside the transaction. `ingestWalkthrough` runs the same
+    // validation again on its own input: the receiver does not trust the sender, and this route is not
+    // the only possible caller.
+    const payload = validateWalkthroughIngressPayload({
+      ...(req.body as Record<string, unknown> | undefined),
+      // Taken from the URL and the session, never from the body: otherwise a caller could aim a
+      // walkthrough at a deal it cannot see, or forge the uploader stamped on the contact-sheet file.
+      dealId: req.params.id,
+      userId: req.user!.id,
+    });
+
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    // R23/R25. Object storage is INJECTED, not imported by the ingress module — it verifies the sender's
+    // pre-uploaded contact sheet at the derived key before its first write, and renders the list
+    // thumbnail through the same helpers `confirmUpload` uses. See walkthrough-contact-sheet-store.ts.
+    const result = await ingestWalkthrough({
+      tenantDb: req.tenantDb! as any,
+      payload,
+      contactSheetStore: createWalkthroughContactSheetStore(),
+    });
+
+    await req.commitTransaction!();
+    res.status(201).json(result);
   } catch (err) {
     next(err);
   }
