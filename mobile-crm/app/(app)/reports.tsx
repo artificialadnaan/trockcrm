@@ -9,7 +9,7 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { ApiError } from "../../src/api/client";
 import * as reportsApi from "../../src/api/endpoints/reports";
 import type { DepartmentMetric, WeekMode } from "../../src/api/endpoints/reports";
@@ -61,6 +61,19 @@ export default function ReportsScreen() {
   const query = useQuery({
     queryKey: qk.mondayShowcase(scope, mode),
     queryFn: () => reportsApi.getMondayShowcase(fetcher, mode),
+    /**
+     * Keep the report on screen while another period loads.
+     *
+     * Each mode is its own cache entry, so switching one emptied `data` and replaced the whole report
+     * with a spinner — the toggle is the most-used control here and every use of it blanked the thing
+     * it was meant to change. With a placeholder the first load is still a genuine spinner and every
+     * switch after it is an update.
+     *
+     * It also introduces the one hazard worth naming: the visible figures now briefly belong to a
+     * DIFFERENT period than the highlighted toggle. `period.mode` comes back in the payload, so the
+     * screen can say so rather than let the two quietly disagree — see `showingOtherPeriod` below.
+     */
+    placeholderData: keepPreviousData,
     // A report is a statement about a moment and this one is cheap to re-ask; five minutes keeps the
     // toggle instant without serving Monday's numbers on Tuesday.
     staleTime: 5 * 60_000,
@@ -72,6 +85,8 @@ export default function ReportsScreen() {
   // exists to stop. A stale-but-present report says so inline instead.
   const blocking = !data;
   const refreshFailed = Boolean(data && query.isError);
+  /** The figures on screen are last period's, because this one has not arrived yet. */
+  const showingOtherPeriod = Boolean(data && data.period.mode !== mode);
   const offline = query.error instanceof ApiError && query.error.status === 0;
 
   return (
@@ -145,7 +160,12 @@ export default function ReportsScreen() {
             />
           ) : null}
 
-          <Text style={styles.period}>{data.period.label}</Text>
+          {/* The label always describes the NUMBERS, never the toggle — so when a switch is still in
+              flight it says which period is actually on screen, and says that it is changing. */}
+          <Text style={styles.period}>
+            {data.period.label}
+            {showingOtherPeriod ? " · updating…" : ""}
+          </Text>
 
           {/* ---- The three the meeting opens on ---- */}
           <View style={styles.heroRow}>
