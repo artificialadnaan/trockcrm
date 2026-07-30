@@ -52,7 +52,28 @@ whose output a caller must be able to distrust. `ambiguous` and `unmatched` are 
 > **distinct** part of that person's name, **at least one** of those accountings is **exact**, and **at
 > most one** is fuzzy.
 
-There is no `if (bareFirstName)` branch. That single rule subsumes the special cases:
+That rule decides whether a person *scores at all*. On top of it sit two arbitration invariants, and the
+implementation has an explicit **bare-token branch** for the first — earlier drafts of this document claimed
+there was none, and rebuilding from that claim would revive a wrong-recipient defect:
+
+> **Bare-token uniqueness.** A segment of ONE token resolves only if exactly one roster row scores —
+> across **every** confidence tier, **both** roles, and **active and inactive alike**. Confidence must not
+> arbitrate it (a PM mononym `Nick` scoring *exact* beat superintendent `Nick Reyes` scoring *high*, when
+> both people plainly answer to the token), role must not (the slot is unreliable), and neither may active
+> status (a bare `John` silently picked active `John Smyth` over inactive `John Smith`). With one token
+> there is no second token to arbitrate, so **any** contest is ambiguous.
+
+> **Best-tier inactive blocking.** For a multi-token segment, if any INACTIVE row ties the best tier
+> reached, the segment does not resolve — ambiguous when an active row ties it too, unmatched when the
+> inactive row is alone there. An active *exact* still beats an inactive *high*, because the inactive is
+> then not at the best tier at all.
+
+> ⚠️ **`ambiguous[].candidates` MAY CONTAIN INACTIVE ROWS.** They are listed so a human can see the
+> deactivated namesake that caused the doubt — they are **not selectable**. A caller rendering a picker
+> must disable any candidate whose `isActive` is false, or it will hand a corrective action to a former
+> employee by way of the very control added to prevent that.
+
+Beyond the bare-token branch, the single rule subsumes the special cases:
 
 - A bare first name is "one token, so it must be exactly right" — which is what makes `"Brett"` safe.
 - An **unaccounted token is evidence against a match**, not neutral — which is what makes
@@ -85,7 +106,7 @@ card reached nobody.
 
 1. The whole active roster is searched. Confidence is ranked **first**; role breaks only an
    equal-confidence tie. Every match carries `roleMatchesQuery`.
-2. **`is_active = false` is never returned** — but inactive rows are still *scored*, because an EXACT hit on
+2. **`is_active = false` is never returned as a `match`** — but inactive rows are still *scored*, because a hit on
    a deactivated person is a positive identification that must block a weaker active alternative. With
    inactive `John Smith` and active `John Smyth`, filtering the inactive row out early turned an exact
    identification of a former employee into a fuzzy match for a different, current one.
@@ -245,9 +266,9 @@ label the reason for display. Worth doing if the QC dashboard ever shows these t
 
 | Check | Result |
 | --- | --- |
-| `TZ=UTC npx vitest run shared/src/lib/responderNameMatch.test.ts` | **111 passed** — one case per numbered rule, plus a regression test per review finding, each named after the behaviour it protects |
-| Shared CI gate config (`test:ci` — the one CI runs) | 29 files / **364 tests** passed, new suite included |
-| `npm run check:premerge` (the full gate) | **6,770** server + 2,555 client + 502 worker + 364 shared, zero failures |
+| `TZ=UTC npx vitest run shared/src/lib/responderNameMatch.test.ts` | **113 passed** — one case per numbered rule, plus a regression test per review finding, each named after the behaviour it protects |
+| Shared CI gate config (`test:ci` — the one CI runs) | 29 files / **366 tests** passed, new suite included |
+| `npm run check:premerge` (the full gate) | **6,770** server + 2,555 client + 502 worker + 366 shared, zero failures |
 | Standalone adversarial harness (4 lenses) | **90 probes**, 0 failures |
 | `npm run build --workspace shared`, `typecheck --workspace server`, `typecheck:tests --workspace shared` | clean |
 | `server/tests` full run | 6586 passed; 3 pre-existing failures (`startup-order`, two `properties` consistency) unrelated — `directory-dedup.test.ts` passes |

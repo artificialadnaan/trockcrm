@@ -163,43 +163,58 @@ const SEGMENT_DELIMITERS = /\s+w\/+\s*|\s*[/&+;]\s*|\s*[\n\r]+\s*|\s+and\s+/gi;
 const COMMA = /\s*,\s*/;
 
 function splitOnCommaIfItSeparatesPeople(segment: string): Array<{ raw: string; scoreText: string }> {
-  // Pieces that carry NO name at all — "(PM)" standing alone between two commas — are dropped before
-  // pairing. Left in, such a piece counted as one token (an empty string still splits to a one-element
-  // array), so "Bell, (PM), Robert" paired "Bell" with the annotation and left "Robert" to stand alone:
-  // Brett Bell + Robert Sampley, two people neither of whom was named.
-  const pieces = segment
-    .split(COMMA)
-    .filter((piece) => normalizeResponderName(stripIdentityNeutralNoise(piece)).length > 0);
-  if (pieces.length < 2) return [{ raw: segment, scoreText: segment }];
-  // Counted on the STRIPPED piece. Counting the raw one let an annotation masquerade as a second name
-  // token: "Bell, Robert (PM)" read "Robert (PM)" as two tokens, so the comma was classed as a people
-  // delimiter and the surname-first pair split back into Brett Bell + Robert Sampley — the same two clean
-  // wrong recipients, reached through the annotation stripper this time. The scorer reads the stripped copy,
-  // so the splitter has to reason about the same text the scorer will see.
-  const tokenCount = (piece: string) =>
-    normalizeResponderName(stripIdentityNeutralNoise(piece)).split(" ").length;
-
-  // Decided PAIRWISE, walking left to right — NOT by asking whether any piece anywhere is multi-token.
-  // The global test rejoined nothing in a MIXED list: "Bell, Robert, Adam Sherwood" contains a full name, so
-  // every piece was split, and "Bell" -> Brett Bell plus "Robert" -> Robert Sampley reproduced the same two
-  // clean wrong recipients the pairwise rule exists to prevent. A surname-first pair is two ADJACENT lone
-  // tokens; a piece that already carries a full name stands alone regardless of its neighbours.
-  // The recombined form is what gets SCORED; the original span, comma and all, is what gets REPORTED.
-  // Rebuilding the segment with a space made "Sampley, Robert" report matchedText "Sampley Robert",
-  // dropping punctuation a human needs when triaging — and the output contract says verbatim.
-  const out: Array<{ raw: string; scoreText: string }> = [];
-  for (let i = 0; i < pieces.length; i++) {
-    if (tokenCount(pieces[i]) === 1 && i + 1 < pieces.length && tokenCount(pieces[i + 1]) === 1) {
-      out.push({
-        raw: `${pieces[i].trim()}, ${pieces[i + 1].trim()}`,
-        scoreText: `${pieces[i]} ${pieces[i + 1]}`,
-      });
-      i += 1;
-    } else {
-      out.push({ raw: pieces[i], scoreText: pieces[i] });
+  // Piece boundaries as INDEX RANGES into the original segment, so every reported span can be sliced from
+  // the source rather than rebuilt. Reconstructing it with ", " normalised the punctuation away —
+  // "Sampley,Robert" and "Sampley , Robert" both reported "Sampley, Robert", and "Bell, (PM), Robert" lost
+  // the annotation entirely — against a contract that says verbatim.
+  const ranges: Array<{ start: number; end: number }> = [];
+  let cursor = 0;
+  for (let i = 0; i < segment.length; i++) {
+    if (segment[i] === ",") {
+      ranges.push({ start: cursor, end: i });
+      cursor = i + 1;
     }
   }
-  return out;
+  ranges.push({ start: cursor, end: segment.length });
+
+  const textOf = (r: { start: number; end: number }) => segment.slice(r.start, r.end);
+  const tokensOf = (r: { start: number; end: number }) =>
+    normalizeResponderName(stripIdentityNeutralNoise(textOf(r)));
+
+  // Pieces carrying NO name — "(PM)" standing alone between two commas — take no part in the decision. Left
+  // in, such a piece counted as one token (an empty string still splits to a one-element array) and paired
+  // with its neighbour, so "Bell, (PM), Robert" produced Brett Bell + Robert Sampley. Their TEXT is still
+  // inside whichever span encloses them, because the spans are sliced from the original.
+  const named = ranges.filter((r) => tokensOf(r).length > 0);
+  if (named.length < 2) return [{ raw: segment.trim(), scoreText: segment }];
+
+  // A comma separates PEOPLE only when the piece AFTER it is itself a full name.
+  //
+  // The earlier rule — two ADJACENT lone tokens are a surname-first pair — assumed a surname is one word.
+  // A conventional multiword surname breaks it: "De La Cruz, Robert" has a three-token first piece, so both
+  // sides stood alone and the matcher returned Maria De La Cruz + Robert Sampley, neither of whom was named.
+  // Keying on the piece that FOLLOWS the comma holds for both shapes, because the surname-first form always
+  // ends in a lone given name ("Bell, Robert", "De La Cruz, Robert") while a genuine list carries a full
+  // name on both sides ("Brett Bell, Robert Sampley").
+  const groups: Array<Array<{ start: number; end: number }>> = [];
+  let current = [named[0]];
+  for (let i = 1; i < named.length; i++) {
+    if (tokensOf(named[i]).split(" ").length >= 2) {
+      groups.push(current);
+      current = [named[i]];
+    } else {
+      current.push(named[i]);
+    }
+  }
+  groups.push(current);
+
+  return groups.map((group) => ({
+    // Sliced from the source, so it keeps the exact punctuation, spacing and any annotation that fell
+    // between this group's first and last named piece.
+    raw: segment.slice(group[0].start, group[group.length - 1].end).trim(),
+    // The recombined form is what gets SCORED.
+    scoreText: group.map(textOf).join(" "),
+  }));
 }
 
 /**

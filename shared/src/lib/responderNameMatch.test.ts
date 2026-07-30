@@ -1029,3 +1029,46 @@ describe("fifth review round", () => {
     expect(go("Bell, Robert", "superintendent", D).unmatched).toEqual(["Bell, Robert"]);
   });
 });
+
+// ── Sixth review round ─────────────────────────────────────────────────────────────────────────────────
+describe("sixth review round", () => {
+  const R = (id: string, name: string, role: string, isActive = true) => ({ id, name, role, isActive });
+  const ROSTER = [
+    R("maria", "Maria De La Cruz", "superintendent"),
+    R("rsampley", "Robert Sampley", "superintendent"),
+    R("bbell", "Brett Bell", "superintendent"),
+    R("asherwood", "Adam Sherwood", "project_manager"),
+  ];
+  const go = (text: string) => matchFieldResponders({ text, role: "superintendent", roster: ROSTER });
+  const names = (r: { matches: Array<{ responder: { name: string } }> }) =>
+    r.matches.map((m) => m.responder.name);
+
+  it("keeps a MULTIWORD surname-first entry intact", () => {
+    // The pairwise "two adjacent lone tokens" rule assumed a surname is one word. "De La Cruz, Robert" has a
+    // three-token first piece, so both sides stood alone and the matcher returned Maria De La Cruz + Robert
+    // Sampley — two people, neither of them the Robert De La Cruz who was named.
+    expect(go("De La Cruz, Robert").matches).toEqual([]);
+    expect(go("De La Cruz, Robert").unmatched).toEqual(["De La Cruz, Robert"]);
+    // The person that surname DOES belong to still resolves when fully written.
+    expect(names(go("Maria De La Cruz"))).toEqual(["Maria De La Cruz"]);
+    // Single-word surname-first is unchanged.
+    expect(names(go("Sampley, Robert"))).toEqual(["Robert Sampley"]);
+    // A real two-person list still splits — both sides carry a full name.
+    expect(names(go("Brett Bell, Robert Sampley"))).toEqual(["Brett Bell", "Robert Sampley"]);
+    // And the mixed list still recovers the full name while refusing the surname-first pair.
+    const mixed = go("Bell, Robert, Adam Sherwood");
+    expect(names(mixed)).toEqual(["Adam Sherwood"]);
+    expect(mixed.unmatched).toEqual(["Bell, Robert"]);
+  });
+
+  it("reports the EXACT source span, not a reconstruction of it", () => {
+    // Rebuilding the span with ", " normalised the punctuation away: "Sampley,Robert" and "Sampley , Robert"
+    // both reported "Sampley, Robert", and "Bell, (PM), Robert" lost the annotation a human needs to see.
+    // Spans are now sliced from the original text.
+    expect(go("Sampley,Robert").matches[0].matchedText).toBe("Sampley,Robert");
+    expect(go("Sampley , Robert").matches[0].matchedText).toBe("Sampley , Robert");
+    expect(go("Sampley, Robert").matches[0].matchedText).toBe("Sampley, Robert");
+    // An annotation-only piece falls INSIDE the enclosing span rather than being erased from it.
+    expect(go("Bell, (PM), Robert").unmatched).toEqual(["Bell, (PM), Robert"]);
+  });
+});
