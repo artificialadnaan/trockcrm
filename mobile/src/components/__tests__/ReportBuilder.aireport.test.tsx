@@ -114,6 +114,21 @@ describe("ReportBuilder AI report", () => {
     expect(aiButton.props.accessibilityState?.disabled).toBe(true);
   });
 
+  it("disables the AI action past the photo cap, and says why", async () => {
+    // The server rejects >60. Letting the user through the whole focus step first, only to be refused at
+    // generation, wastes their time — and the cap must NOT restrict the human preview flow.
+    const many = Array.from({ length: 61 }, (_, i) => galleryPhoto(`p${i}`, `Photo ${i}`));
+    const { ui } = renderBuilder({ photos: many });
+    await act(async () => {
+      fireEvent.press(ui.getByText("Select all"));
+    });
+
+    expect(ui.getByLabelText("AI Report").props.accessibilityState?.disabled).toBe(true);
+    expect(ui.queryByText(/deselect 1 to use it/i)).not.toBeNull();
+    // Preview is unaffected — it has no such cap.
+    expect(ui.getByLabelText("Preview report").props.accessibilityState?.disabled).toBeFalsy();
+  });
+
   it("asks for a focus before generating rather than firing straight off the grid", async () => {
     const { ui } = renderBuilder();
     await openFocusStep(ui);

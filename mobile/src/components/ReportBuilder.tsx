@@ -26,6 +26,13 @@ const AI_POLL_TIMEOUT_MS = 5 * 60_000;
 // Consecutive failed status requests tolerated before giving up (~15s of sustained outage at the 3s poll).
 // A jobsite LTE connection drops individual requests routinely; one of those is not a failed report.
 const AI_POLL_MAX_CONSECUTIVE_FAILURES = 5;
+// Mirrors AI_REPORT_MAX_PHOTOS on the server. Enforced here too so "Select all" on a large project can't
+// walk the user through the whole focus step only to be rejected at generation. Deliberately scoped to the
+// AI action — the human preview/PDF flow has no such cap and must keep working on any selection.
+const AI_REPORT_MAX_PHOTOS = 60;
+// Mirrors MAX_FOCUS_PROMPT_LENGTH. The server slices to this; without the same cap here the user would see
+// a complete scope statement while the assessment quietly dropped its final sentences.
+const AI_FOCUS_MAX_LENGTH = 1000;
 
 const GROUP_OPTIONS: { value: ReportGroupBy; label: string }[] = [
   { value: "none", label: "No grouping" },
@@ -338,14 +345,26 @@ export function ReportBuilder({
               onChangeText={setFocusPrompt}
               placeholder="e.g. Roof drainage and flashing only — the interior punch list is already handled"
               multiline
+              // Same cap the server applies. Without it the user sees a complete scope statement while the
+              // assessment quietly drops everything past the limit.
+              maxLength={AI_FOCUS_MAX_LENGTH}
               style={styles.summaryInput}
             />
+            {focusPrompt.length > AI_FOCUS_MAX_LENGTH - 100 ? (
+              <Text style={styles.hint}>
+                {AI_FOCUS_MAX_LENGTH - focusPrompt.length} characters left.
+              </Text>
+            ) : null}
             {voiceEnabled ? (
               <VoiceRecorder
                 label="🎤 Dictate focus"
                 onBusyChange={setSummaryDictating}
                 onTranscript={(text) =>
-                  setFocusPrompt((prev) => (prev.trim() ? `${prev.trim()} ${text}` : text))
+                  // Dictation appends programmatically, so the input's maxLength does not apply — cap here
+                  // too or a long dictated scope silently overruns what the server will actually read.
+                  setFocusPrompt((prev) =>
+                    (prev.trim() ? `${prev.trim()} ${text}` : text).slice(0, AI_FOCUS_MAX_LENGTH),
+                  )
                 }
               />
             ) : null}
@@ -501,6 +520,13 @@ export function ReportBuilder({
               {/* Button's `loading` swaps the label for a bare spinner, so the "what is it doing / how long"
                   copy has to live outside it. */}
               {aiProgress ? <Text style={styles.aiProgress}>{aiProgress}</Text> : null}
+              {/* Say WHY the AI action is unavailable — a silently disabled button reads as a bug. */}
+              {selected.size > AI_REPORT_MAX_PHOTOS ? (
+                <Text style={styles.aiProgress}>
+                  An AI report covers up to {AI_REPORT_MAX_PHOTOS} photos — deselect{" "}
+                  {selected.size - AI_REPORT_MAX_PHOTOS} to use it.
+                </Text>
+              ) : null}
               <View style={styles.footerRow}>
                 <Button
                   title="Preview report"
@@ -514,7 +540,7 @@ export function ReportBuilder({
                   variant="ghost"
                   icon={<Ionicons name="sparkles-outline" size={16} color={theme.color.brandRed} />}
                   onPress={() => setStep("focus")}
-                  disabled={selected.size === 0 || busy}
+                  disabled={selected.size === 0 || selected.size > AI_REPORT_MAX_PHOTOS || busy}
                   style={styles.footerButton}
                 />
               </View>

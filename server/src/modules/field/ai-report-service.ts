@@ -324,6 +324,8 @@ async function callAnthropicTool(
     deadlineAt: number;
     /** Called for EVERY billed response, including ones this function then rejects or retries. */
     onUsage?: (inputTokens: number, outputTokens: number) => void;
+    /** Shape check on the tool payload; a false result is retried rather than accepted as empty. */
+    validate?: (input: Record<string, unknown>) => boolean;
   },
   fetchFn: typeof fetch,
 ): Promise<{ input: Record<string, unknown> }> {
@@ -403,7 +405,13 @@ async function callAnthropicTool(
       }
 
       const toolUse = payload.content?.find((block) => block.type === "tool_use" && block.name === opts.tool.name);
-      if (!toolUse || typeof toolUse.input !== "object" || toolUse.input === null) {
+      // `validate` checks the payload actually carries what the caller needs. Without it a tool_use whose
+      // input is object-shaped but missing `findings` sails through as a CLEAN empty result, and the summary
+      // is then told nothing warranted a finding — a confidently wrong report rather than a retry.
+      const usable =
+        toolUse && typeof toolUse.input === "object" && toolUse.input !== null &&
+        (!opts.validate || opts.validate(toolUse.input as Record<string, unknown>));
+      if (!usable) {
         // Forced tool_choice makes this near-impossible; treat it as retryable rather than shipping an
         // empty report, but never loop forever on a model that keeps refusing the tool.
         const message = "Claude returned no structured assessment.";
@@ -626,6 +634,10 @@ export async function generateAiPhotoAssessment(
   if (input.photos.length === 0) throw new AiReportError("Select at least one photo for an AI report.", false);
 
   const focusPrompt = sanitizeUntrusted(input.focusPrompt).slice(0, MAX_FOCUS_PROMPT_LENGTH) || null;
+  // The project name is a deal name off the CRM (much of it HubSpot-imported), so it is end-user text on the
+  // same channel as the instructions — sanitised like every other untrusted input rather than trusted
+  // because it happens to come from our own database.
+  const projectName = sanitizeUntrusted(input.projectName).slice(0, 200) || "this project";
   const fetchFn = deps.fetchFn ?? fetch;
   const model = resolveModel();
 
@@ -675,7 +687,7 @@ export async function generateAiPhotoAssessment(
           model,
           system: DIRECTOR_SYSTEM_PROMPT,
           content: [
-            { type: "text", text: buildFindingsInstruction(batch.length, input.projectName, focusPrompt) },
+            { type: "text", text: buildFindingsInstruction(batch.length, projectName, focusPrompt) },
             ...imageContent(batch),
           ],
           tool: FINDINGS_TOOL,
@@ -683,6 +695,7 @@ export async function generateAiPhotoAssessment(
           maxTokens: Math.min(32_000, Math.max(4_000, batch.length * 700)),
           deadlineAt,
           onUsage: bankUsage,
+          validate: (input) => Array.isArray(input.findings),
         },
         fetchFn,
       ).catch(withUsage);
@@ -715,13 +728,18 @@ export async function generateAiPhotoAssessment(
       content: [
         {
           type: "text",
-          text: buildSummaryInstruction(input.projectName, input.photos.length, findings.length, digest, focusPrompt),
+          // readableCount, NOT the selection size. Photos skipped as oversized/undecodable/external-only
+          // were never shown to the model, and telling the summary the full set was examined would put a
+          // false claim of thoroughness in front of the owner — the exact opposite of the evidence-only
+          // guarantee this report is built on.
+          text: buildSummaryInstruction(projectName, readableCount, findings.length, digest, focusPrompt),
         },
       ],
       tool: SUMMARY_TOOL,
       maxTokens: 8_000,
       deadlineAt,
       onUsage: bankUsage,
+      validate: (input) => typeof input.executiveSummary === "string" && input.executiveSummary.trim().length > 0,
     },
     fetchFn,
   ).catch(withUsage);
@@ -732,7 +750,8 @@ export async function generateAiPhotoAssessment(
   return {
     executiveSummary,
     findings,
-    reviewedCount: input.photos.length,
+    /** How many were actually SHOWN to the model — never the raw selection size. */
+    reviewedCount: readableCount,
     usage: { model, inputTokens, outputTokens, costUsd: estimateCostUsd(inputTokens, outputTokens) },
   };
 }

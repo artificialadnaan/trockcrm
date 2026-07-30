@@ -226,9 +226,14 @@ export async function runFieldAiReportJob(
     const stored = await renderAndStoreFieldPhotoReportPdf(prepared, office.slug);
 
     // ── Phase E: short transaction — record the file row ─────────────────────────────────────────
-    const { report } = await runInOfficeTransaction(office, requester.id, (db) =>
-      recordFieldPhotoReportFile(db, access, prepared, stored),
-    );
+    const { report } = await runInOfficeTransaction(office, requester.id, async (db) => {
+      // Re-check the project. Phase D can run for minutes, and a project archived or moved to an excluded
+      // stage in that window would otherwise be recorded against anyway — leaving a run marked 'succeeded'
+      // whose report the status endpoint refuses to hand back (it re-runs the same assertion), i.e. a
+      // success the user can never open.
+      await assertActiveFieldProject(db, access, run.dealId);
+      return recordFieldPhotoReportFile(db, access, prepared, stored);
+    });
 
     // From here the PDF EXISTS — it is committed to `files` and uploaded to R2, and it is already visible in
     // the project's report list. A failure to write the terminal ledger row is a bookkeeping problem, not a

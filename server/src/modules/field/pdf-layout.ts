@@ -1,7 +1,7 @@
 import PDFDocument from "pdfkit";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { getObjectBuffer, isR2Configured } from "../../lib/r2-client.js";
+import { getObjectBuffer, isR2Configured, isR2ObjectNotFoundError, ObjectTooLargeError } from "../../lib/r2-client.js";
 import { generateEvidenceJpeg } from "../../lib/image-thumbnail.js";
 import { TROCK_LOGO_PNG_BASE64 } from "./pdf-logo.js";
 
@@ -266,22 +266,49 @@ const MAX_RENDER_SOURCE_BYTES = 40 * 1024 * 1024;
 const PDFKIT_NATIVE_MIME = /^image\/(jpeg|jpg|png)$/i;
 /** Generous enough to stay sharp at full page width, without re-encoding a 4000px original at full size. */
 const RENDER_TRANSCODE_MAX_EDGE = 2000;
+/**
+ * Above this, even a NATIVE JPEG/PNG is downscaled before being handed to PDFKit.
+ *
+ * PDFKit retains every embedded image for the life of the document, so a 60-photo report of full-resolution
+ * originals holds all of them at once and writes them all into the file. Bounding each one keeps both peak
+ * memory and the finished PDF proportional to the page count rather than to camera resolution. Small images
+ * skip the re-encode entirely, so the common case costs nothing.
+ */
+const RENDER_TRANSCODE_ABOVE_BYTES = 2 * 1024 * 1024;
 
-async function loadPhotoBuffer(photo: ReportRenderablePhoto): Promise<Buffer | null> {
+async function loadPhotoBuffer(
+  photo: ReportRenderablePhoto,
+  /**
+   * When true, a TRANSIENT storage failure is re-thrown instead of degrading to a placeholder. The AI
+   * report uses this: silently emitting an "Image unavailable" panel — potentially beside findings derived
+   * from that very photograph — and then marking the run succeeded is worse than failing and retrying.
+   * The human path leaves it false to keep its long-standing degrade-gracefully behaviour.
+   */
+  strictStorage = false,
+): Promise<Buffer | null> {
   if (photo.r2Key && isR2Configured()) {
+    let buffer: Buffer;
+    let contentType: string | undefined;
     try {
-      const { buffer, contentType } = await getObjectBuffer(photo.r2Key, { maxBytes: MAX_RENDER_SOURCE_BYTES });
-      const mime = photo.mimeType ?? contentType ?? null;
-      if (mime && PDFKIT_NATIVE_MIME.test(mime)) return buffer;
-      // Unknown or non-native format: transcode. Falls back to the raw bytes if that fails, so a format
-      // sharp cannot read behaves exactly as before (placeholder) rather than regressing.
-      try {
-        return await generateEvidenceJpeg(buffer, mime, { maxEdge: RENDER_TRANSCODE_MAX_EDGE, quality: 82 });
-      } catch {
-        return buffer;
-      }
-    } catch {
+      ({ buffer, contentType } = await getObjectBuffer(photo.r2Key, { maxBytes: MAX_RENDER_SOURCE_BYTES }));
+    } catch (error) {
+      // Permanent, photo-specific failures still degrade to a placeholder in BOTH modes — the photo is
+      // genuinely unusable and no retry changes that.
+      const permanent = error instanceof ObjectTooLargeError || isR2ObjectNotFoundError(error);
+      if (strictStorage && !permanent) throw error;
       return null;
+    }
+
+    const mime = photo.mimeType ?? contentType ?? null;
+    const needsTranscode =
+      !mime || !PDFKIT_NATIVE_MIME.test(mime) || buffer.byteLength > RENDER_TRANSCODE_ABOVE_BYTES;
+    if (!needsTranscode) return buffer;
+    try {
+      return await generateEvidenceJpeg(buffer, mime, { maxEdge: RENDER_TRANSCODE_MAX_EDGE, quality: 82 });
+    } catch {
+      // sharp cannot read it. Hand PDFKit the raw bytes: a native format still embeds, and anything else
+      // falls through to the placeholder exactly as it did before transcoding existed.
+      return buffer;
     }
   }
   if (photo.externalUrl?.startsWith("data:image/")) return fetchExternalImageBuffer(photo.externalUrl);
@@ -598,7 +625,9 @@ async function drawFindingsPhotoPages(
   startPage();
 
   // --- Photo, fit to the full content width and centred -------------------------------------------
-  const imageBuffer = await loadPhotoBuffer(photo);
+  // strictStorage: this is the AI report. A placeholder panel sitting beside findings written about that
+  // very photograph, in a document then marked succeeded, is a worse outcome than failing the run.
+  const imageBuffer = await loadPhotoBuffer(photo, true);
   const opened = imageBuffer ? openImageForLayout(doc, imageBuffer) : null;
   let imageBottom = FINDINGS_IMAGE_TOP + FINDINGS_IMAGE_MAX_HEIGHT;
   let drawn = false;
