@@ -11,8 +11,10 @@ import {
   WON_BROWSABLE_SLUGS,
   LOST_EXCLUDED_SLUGS,
   recipientResolutionSql,
+  assignedRolesSql,
   basicValidEmail,
 } from "../worker/src/jobs/scorecard-corrective-action-email.js";
+import { resolveFieldScorecardRecipients } from "../shared/src/lib/fieldScorecardEmails.js";
 
 /**
  * One-off backfill: open the corrective-action cycle on below-band scorecards that predate the feature.
@@ -405,6 +407,30 @@ async function main() {
         for (const r of resolved.rows) {
           console.log(`     ${String(r.role).padEnd(16)} ${r.name ?? "—"} <${r.email ?? "NO EMAIL"}>`);
         }
+
+        // ...AND THE OVERSIGHT WATCHERS. Reconcile enqueues a SECOND job,
+        // scorecard_corrective_action_oversight_email, which mails FIELD_SCORECARD_EMAIL_RECIPIENTS minus the
+        // cycle's responders. Previewing only the responder job broke this script's one promise — that every
+        // address about to receive irreversible mail is printed BEFORE the commit prompt — because those
+        // watchers were mailed moments later having never appeared in the plan.
+        //
+        // The subtraction and the phase are the oversight job's, not a paraphrase: the backfill opens a cycle,
+        // so the notice is `opened`, which is the one phase that excludes responders.
+        const responderEmails = new Set(
+          resolved.rows
+            .map((r) => r.email?.trim().toLowerCase())
+            .filter((email): email is string => !!email),
+        );
+        const watchers = [
+          ...new Set(
+            resolveFieldScorecardRecipients(process.env)
+              .filter((email) => !responderEmails.has(email.trim().toLowerCase()))
+              .map((email) => email.trim().toLowerCase()),
+          ),
+        ];
+        console.log("   OVERSIGHT WILL EMAIL:");
+        if (watchers.length === 0) console.log("     (nobody — FIELD_SCORECARD_EMAIL_RECIPIENTS is unset or all responders)");
+        for (const email of watchers) console.log(`     watcher          <${email}>`);
         // The worker's answer is the one that counts, and it is read AFTER the writes. The earlier
         // `deliverable` check is against the roster snapshot: somebody deactivated between that snapshot and
         // this transaction passes it, gets their id written, and then resolves to nothing here. Printing
@@ -415,6 +441,27 @@ async function main() {
         // unnotified cycle while this guard reported success.
         if (!resolved.rows.some((r) => r.email && basicValidEmail(r.email.trim()))) {
           throw new Error("the worker resolves no VALID email recipient — refusing to commit a cycle nobody is told about");
+        }
+
+        // EVERY assigned role must resolve, not merely one of them. `some(...)` above answers "will anyone be
+        // told?"; the worker asks a strictly harder question and throws unless EVERY role with an active
+        // deal_team_members row resolved to a deliverable address. So a deal assigning both a super and a PM,
+        // where only the super has a usable email, passes the check above, mails the super, and then throws —
+        // retrying to dead-letter without ever stamping, leaving a committed cycle permanently half-notified.
+        // assignedRolesSql is the worker's OWN query, imported so the two cannot drift.
+        const resolvedRoles = new Set(
+          resolved.rows
+            .filter((r) => r.email && basicValidEmail(r.email.trim()))
+            .map((r) => String(r.role)),
+        );
+        const assigned = await client.query<{ role: string }>(assignedRolesSql(`"${officeSchema}"`), [row.deal_id]);
+        const unresolvedAssignedRoles = assigned.rows
+          .map((r) => String(r.role))
+          .filter((role) => !resolvedRoles.has(role));
+        if (unresolvedAssignedRoles.length > 0) {
+          throw new Error(
+            `assigned role(s) ${unresolvedAssignedRoles.join(", ")} resolve to no deliverable address — the worker would notify only part of the team and then retry to dead-letter; refusing to commit`,
+          );
         }
 
         const after = await client.query<{ status: string; n: string; jobs: string; bad: string }>(
