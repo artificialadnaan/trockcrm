@@ -33,6 +33,13 @@ export type PropertyListItem = {
   type?: string | null;
   buildYear: number | null;
   unitCount: number | null;
+  /**
+   * SOFT-DELETED or not. `getPropertyDetail` returns the record regardless, so a deep link, a restored
+   * navigation stack or a cached detail can land on an archived property — and without this field the
+   * screen presented it as an ordinary one, including the claim that a rep could match it by standing
+   * outside. Modelled explicitly rather than assumed true.
+   */
+  isActive?: boolean | null;
   /** Written by field prospecting since #977; null on everything created before it. */
   lat?: number | null;
   lng?: number | null;

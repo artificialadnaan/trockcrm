@@ -75,6 +75,21 @@ export default function PropertyDetailScreen() {
               onRetry={() => void query.refetch()}
             />
           ) : null}
+          {/**
+            * ARCHIVED, said first.
+            *
+            * `getPropertyDetail` returns a soft-deleted property unchanged, so a deep link or a restored
+            * navigation stack lands here on a record that no longer participates in anything — and the
+            * screen otherwise renders it as an ordinary building, right down to telling a rep they can
+            * walk up to it and match it. Every claim below this line is about live properties.
+            */}
+          {property.isActive === false ? (
+            <Text testID="property-archived" style={styles.archived}>
+              Archived. This property has been removed from the directory — it is kept for history and
+              cannot be matched or linked to new work.
+            </Text>
+          ) : null}
+
           {property.companyName ? (
             <Text
               accessibilityLabel={property.companyName}
@@ -96,7 +111,12 @@ export default function PropertyDetailScreen() {
               <Row label="Type" value={(property.propertyType ?? property.type) as string} />
             ) : null}
             {property.buildYear ? <Row label="Built" value={String(property.buildYear)} /> : null}
-            {property.unitCount ? <Row label="Units" value={String(property.unitCount)} /> : null}
+            {/* `!= null`, not truthiness. A stored unit count of 0 is a real value on legacy records —
+                new writes reject it, old ones kept it — and a truthy check rendered that zero exactly
+                like a missing one. "0 units" and "we do not know" are different answers. */}
+            {property.unitCount != null ? (
+              <Row label="Units" value={String(property.unitCount)} />
+            ) : null}
           </View>
 
           {/**
@@ -107,11 +127,16 @@ export default function PropertyDetailScreen() {
             * shipped have them, and a building without them can never be matched by proximity when a
             * rep is standing outside it.
             */}
-          <Text style={styles.note}>
-            {property.lat != null && property.lng != null
-              ? "Has coordinates — a rep standing here can match it by proximity."
-              : "No coordinates yet. It can be found by address, but not by standing at it."}
-          </Text>
+          {/* Silent for an archived property: BOTH branches are claims about being findable, and both
+              are false once the record is out of the directory. Saying the softer one would be no more
+              true than saying the other. */}
+          {property.isActive === false ? null : (
+            <Text style={styles.note}>
+              {property.lat != null && property.lng != null
+                ? "Has coordinates — a rep standing here can match it by proximity."
+                : "No coordinates yet. It can be found by address, but not by standing at it."}
+            </Text>
+          )}
 
           {property.notes ? (
             <View style={styles.section}>
@@ -153,4 +178,13 @@ const styles = StyleSheet.create({
   sectionLabel: { ...theme.type.caption, textTransform: "uppercase", color: theme.color.textMuted },
   notes: { ...theme.type.body, color: theme.color.textSecondary },
   note: { ...theme.type.small, color: theme.color.textMuted },
+  archived: {
+    ...theme.type.small,
+    color: theme.color.amberText,
+    backgroundColor: theme.color.amberSurface,
+    borderWidth: 1,
+    borderColor: theme.color.amberBorder,
+    borderRadius: theme.radius.md,
+    padding: theme.space.md,
+  },
 });
