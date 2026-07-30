@@ -56,13 +56,13 @@ export function buildArchivedDescription(
 
 ---
 
-## Feature A — Rep manual archive (opportunity-only, reason required)
+## Feature A — Rep manual archive (any stage they own, reason required)
 
 ### Rename
 - `filter-bar.tsx:63` label `"Removed"` → `"Archived"` (value stays `"inactive"`; update the adjacent comment). Server contract unchanged.
 
 ### Client (`deal-detail-page.tsx`)
-- Menu item **"Delete Deal" → "Archive Deal"**. Enabled when `admin || (viewerOwnsDeal && dealStageSlug === "opportunity")`. For an owner on a non-opportunity stage: render the item **disabled with a tooltip** ("Only opportunity-stage deals can be archived — ask an admin"), so it stays discoverable.
+- Menu item **"Delete Deal" → "Archive Deal"**. Enabled when `admin || viewerOwnsDeal` — stage is not a factor. **UPDATED 2026-07-30:** the disabled-with-tooltip branch is REMOVED; the item is now either clickable or absent. That branch was also where the bug surfaced — its disabled styling used Tailwind v4 syntax under a v3 build, so it rendered looking enabled and silently swallowed clicks.
 - Replace the `window.confirm` with a small **modal**: a required "Reason for archiving" textarea + Cancel/Archive. Archive is disabled until the reason is non-empty (mirrors the RFP vote-reason UX). On submit call the archive API with `{ reason }`.
 - Fix the misleading copy: the modal states the deal will be archived and hidden from active lists (no false "undone by an admin" promise; restore is out of scope).
 
