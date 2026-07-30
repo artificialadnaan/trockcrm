@@ -279,11 +279,24 @@ const styles = StyleSheet.create({
   /* WRAPS. A role with all four surfaces put four flex:1 cards in one row, so at 320-360 dp "Log a
      visit" and "Contacts" squeezed to unreadable. minWidth forces the fourth onto a second line
      instead. */
-  grid: { flexDirection: "row", flexWrap: "wrap", gap: theme.space.md },
+  grid: { flexDirection: "row", flexWrap: "wrap", alignItems: "flex-start", gap: theme.space.md },
   navCard: {
     minHeight: 44,
     justifyContent: "center",
-    flex: 1,
+    /**
+     * `flexBasis`, NOT `flex: 1` — these cards WRAP.
+     *
+     * `flex: 1` means `flexBasis: 0%`, which tells Yoga every card has zero natural width, so all five
+     * "fit" on one line and the wrap points become arbitrary. The row then stretched its items to the
+     * tallest line and reported a height smaller than what it had laid out — which is why the release
+     * note and Sign out rendered ON TOP of the Leads and Contacts cards.
+     *
+     * A real basis makes wrapping deterministic: two per row at 47%, with the 12pt gap absorbed by the
+     * remainder. `flexGrow` lets an odd last card take the full width instead of sitting as a lonely
+     * half, which is what the fifth card — Reports — now does.
+     */
+    flexBasis: "47%",
+    flexGrow: 1,
     minWidth: 140,
     backgroundColor: theme.color.surface,
     borderRadius: theme.radius.lg,

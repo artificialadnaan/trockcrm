@@ -5,6 +5,7 @@ import {
   sparklineSummary,
   deltaChip,
   departmentCountLabel,
+  departmentEvidenceMetric,
   showsWowDelta,
   sparklineHeights,
 } from "../report-format";
@@ -184,5 +185,31 @@ describe("the eight-week shape, for anyone who cannot see the bars", () => {
     expect(sparklineSummary([], { lastInProgress: false })).toBeNull();
     expect(sparklineSummary([4], { lastInProgress: false })).toBeNull();
     expect(sparklineSummary([4, 7], { lastInProgress: true })).toBeNull();
+  });
+});
+
+describe("which evidence cohort a department card opens", () => {
+  it("maps each measured department to its cohort", () => {
+    expect(departmentEvidenceMetric({ key: "won", deferred: false })).toBe("won");
+    expect(departmentEvidenceMetric({ key: "sent", deferred: false })).toBe("sent");
+  });
+
+  it("knows estimating is backed by the ESTIMATED cohort", () => {
+    // The two vocabularies differ. Guessing the metric from the label would have sent this card at a
+    // metric name the server rejects — or worse, one it accepts and answers differently.
+    expect(departmentEvidenceMetric({ key: "estimating", deferred: false })).toBe("estimated");
+  });
+
+  it("gives a deferred department nothing to open", () => {
+    // `collected` has no number on the card, so there is no cohort behind it and the card must not
+    // offer a drill that lands on an empty list.
+    expect(departmentEvidenceMetric({ key: "collected", deferred: true })).toBeNull();
+    expect(departmentEvidenceMetric({ key: "collected", deferred: false })).toBeNull();
+  });
+
+  it("refuses a department it does not recognise rather than guessing", () => {
+    // A key the server adds tomorrow is not drillable until this map is taught it — not drilled into
+    // whichever cohort happens to sort first.
+    expect(departmentEvidenceMetric({ key: "brand_new_thing", deferred: false })).toBeNull();
   });
 });

@@ -35,6 +35,8 @@ export const qk = {
   lead: (scope: QueryScope, id: string) => ["lead", scope, id] as const,
   /** One payload per period mode — the whole showcase arrives in a single request. */
   mondayShowcase: (scope: QueryScope, mode: string) => ["monday-showcase", scope, mode] as const,
+  showcaseEvidence: (scope: QueryScope, metric: string, mode: string) =>
+    ["showcase-evidence", scope, metric, mode] as const,
   stages: (scope: QueryScope) => ["stages", scope] as const,
   /** Lead stages are a SEPARATE workflow family from deal stages — different endpoint, different rows. */
   leadStages: (scope: QueryScope) => ["lead-stages", scope] as const,
