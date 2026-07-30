@@ -29,6 +29,7 @@ import { AppError } from "../../middleware/error-handler.js";
 // the S3 client or the files service onto this pure-database module's import path.
 import { MAX_FILE_SIZE_BYTES } from "../files/file-constants.js";
 import { MAX_THUMBNAIL_SOURCE_BYTES } from "../../lib/image-thumbnail-constants.js";
+import { isThumbnailableImage } from "../../lib/image-thumbnail.js";
 import { canonicalizeTradeScopeKey, resolvePricingScopeFromExtraction } from "./pricing-service.js";
 
 /** Same alias document-service.ts:6 uses. */
@@ -931,6 +932,13 @@ function requireString(value: unknown, field: string): string {
   if (typeof value !== "string") {
     throw new AppError(400, `${field} must be a string`);
   }
+  // JSON can carry \u0000, Postgres cannot store it in text, varchar OR jsonb. Without this the first
+  // insert that touches the offending value raises a database error mid-transaction — a 500 out of a
+  // validator whose entire contract is a 400 before anything is written. Rejected centrally here rather
+  // than per-field, because every string this module accepts ends up in one of those three types.
+  if (value.includes("\u0000")) {
+    throw new AppError(400, `${field} must not contain a NUL character (\\u0000); Postgres cannot store it`);
+  }
   return value;
 }
 
@@ -1342,7 +1350,17 @@ export function validateWalkthroughIngressPayload(input: unknown): WalkthroughIn
         `MAX_FILE_SIZE_BYTES=${MAX_FILE_SIZE_BYTES}, MAX_THUMBNAIL_SOURCE_BYTES=${MAX_THUMBNAIL_SOURCE_BYTES}`
     );
   }
-  const contactSheetCeiling = Math.min(MAX_FILE_SIZE_BYTES, MAX_THUMBNAIL_SOURCE_BYTES);
+  // MIME-AWARE. The 40 MiB thumbnailer cap only matters where an unthumbnailed original would be
+  // served as the list tile — and `resolveFileThumbnailUrl` (files/service.ts) gates that fallback on
+  // `isThumbnailableImage`, which excludes PDFs. A PDF with no thumbnail resolves to null and the UI
+  // shows a type badge, so applying the image cap to it would refuse a legitimate 100 MiB contact sheet
+  // for a hazard it does not have. `generateAndStorePdfThumbnail` has no byte cap of its own either.
+  //
+  // Gated on the SAME predicate the fallback uses rather than on `mimeType === "image/jpeg"`, so the
+  // ceiling cannot drift from the behaviour it exists to prevent if that predicate ever changes.
+  const contactSheetCeiling = isThumbnailableImage(contactSheetMimeType)
+    ? Math.min(MAX_FILE_SIZE_BYTES, MAX_THUMBNAIL_SOURCE_BYTES)
+    : MAX_FILE_SIZE_BYTES;
   if (contactSheetBytes > contactSheetCeiling) {
     throw new AppError(
       413,

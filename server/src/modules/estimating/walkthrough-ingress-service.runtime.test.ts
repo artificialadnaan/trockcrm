@@ -2243,6 +2243,47 @@ describe("ingestWalkthrough", () => {
     expect(BINDING_CEILING).toBe(MAX_THUMBNAIL_SOURCE_BYTES);
   });
 
+  // R27. The ceiling is MIME-AWARE, and this is the half a blanket `Math.min` got wrong. The 40 MiB cap
+  // exists only because an unthumbnailed IMAGE gets its original served as the list tile — and
+  // `resolveFileThumbnailUrl` gates that fallback on `isThumbnailableImage`, which excludes PDFs. A PDF
+  // with no thumbnail resolves to null and the UI shows a type badge, so the image cap would have
+  // refused a legitimate ~100 MiB pdf contact sheet for a hazard it does not have.
+  it("accepts a pdf contact sheet far above the image thumbnail cap", async () => {
+    const bytes = MAX_THUMBNAIL_SOURCE_BYTES * 2;
+    expect(bytes).toBeLessThan(MAX_FILE_SIZE_BYTES); // the band this test is about
+
+    const result = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(U("33116"), {
+        contactSheetMimeType: "application/pdf",
+        contactSheetBytes: bytes,
+      }),
+    });
+
+    const [file] = await tenantDb
+      .select({ fileSizeBytes: files.fileSizeBytes, mimeType: files.mimeType })
+      .from(files)
+      .where(eq(files.id, result.fileId));
+    expect(file.mimeType).toBe("application/pdf");
+    expect(file.fileSizeBytes).toBe(bytes);
+  });
+
+  // R28. JSON can carry \u0000; Postgres cannot store it in text, varchar OR jsonb. Without a central
+  // guard the first insert touching the value raises a database error mid-transaction — a 500 out of a
+  // validator whose whole contract is a 400 before anything is written.
+  it("refuses a NUL character in a string field, without writing anything", async () => {
+    const before = await tableCounts();
+
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(U("33117"), { siteLabel: "Unit\u000012B" }),
+      })
+    ).rejects.toMatchObject({ statusCode: 400 });
+
+    expect(await tableCounts()).toEqual(before);
+  });
+
   // R10. rawLabel is unbounded `text` here but promotion copies it into
   // estimate_line_items.description, a varchar(500) — so an over-long label is accepted, generated,
   // APPROVED by an estimator, and only then fails promotion with a 22001.
