@@ -10,9 +10,11 @@ import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
 import { BackLink } from "../../../src/components/BackLink";
 import { RetryBlock } from "../../../src/components/RetryBlock";
+import { RetryNotice } from "../../../src/components/RetryNotice";
 import { formatDate } from "../../../src/format";
 import { useGoBack } from "../../../src/lib/go-back";
 import { qk } from "../../../src/query/keys";
+import { resolveDealDisplayNumber } from "../../../src/deal-display-number";
 import { compactMoney } from "../../../src/report-format";
 import { theme } from "../../../src/theme/theme";
 
@@ -33,7 +35,7 @@ export default function ShowcaseEvidenceScreen() {
   const goBack = useGoBack("/(app)/reports");
   const { fetcher } = useAuth();
   const scope = useQueryScope();
-  const params = useLocalSearchParams<{ metric?: string; mode?: string }>();
+  const params = useLocalSearchParams<{ metric?: string; mode?: string; period?: string }>();
 
   // Params arrive as strings from the URL; narrowing here keeps a hand-typed link from reaching the
   // endpoint as a 400 the screen cannot explain.
@@ -52,6 +54,14 @@ export default function ShowcaseEvidenceScreen() {
 
   const data = query.data;
   const offline = query.error instanceof ApiError && query.error.status === 0;
+  /**
+   * A refresh that fails AFTER records are on screen.
+   *
+   * TanStack keeps the previous list, so the error branch below is skipped and `isFetching` simply
+   * goes false — the old records sit there looking current. Same shape the parent showcase screen
+   * already handles, and the same one `list-state.ts` exists to stop.
+   */
+  const refreshFailed = Boolean(data && query.isError);
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
@@ -86,6 +96,14 @@ export default function ShowcaseEvidenceScreen() {
           onRefresh={() => void query.refetch()}
           ListHeaderComponent={
             <View style={styles.summary}>
+              {refreshFailed ? (
+                <RetryNotice
+                  testID="evidence-refresh-failed"
+                  placement="top"
+                  message="Showing the last list — the refresh failed."
+                  onRetry={() => void query.refetch()}
+                />
+              ) : null}
               <Text style={styles.summaryCount}>
                 {data.total.count} {data.total.count === 1 ? "deal" : "deals"}
                 {data.total.value !== null ? ` · ${compactMoney(data.total.value)}` : ""}
@@ -97,6 +115,28 @@ export default function ShowcaseEvidenceScreen() {
                 <Text style={styles.summaryAxis}>{data.total.basisLabel}</Text>
               ) : null}
             </View>
+          }
+          ListFooterComponent={
+            /**
+             * THE WINDOW CAN MOVE UNDER A REPORT LEFT OPEN.
+             *
+             * Only `mode` is carried across, so the server recomputes from/to at request time. A
+             * `to_date` report loaded before midnight opens a list covering an extra day; `completed`
+             * becomes a different week on Sunday. The total then no longer reconciles with the figure
+             * that was tapped.
+             *
+             * Passing an explicit from/to instead is not available: `assertShowcaseEvidenceAccess`
+             * restricts an explicit window to directors and this screen is shown to reps. So the
+             * period the report displayed is carried across for COMPARISON only, and a disagreement
+             * is stated rather than left for someone to notice in the arithmetic. The real fix is
+             * server-side and is filed.
+             */
+            params.period && params.period !== data.period.label ? (
+              <Text testID="evidence-period-moved" style={styles.moved}>
+                The report showed {params.period}; the period has since moved on, so these are the
+                deals for {data.period.label}. Reopen the report for figures that match.
+              </Text>
+            ) : null
           }
           ListEmptyComponent={
             <Text style={styles.empty}>
@@ -127,7 +167,9 @@ export default function ShowcaseEvidenceScreen() {
                   item.stageLabel,
                   item.repName,
                   item.cohortDate ? formatDate(item.cohortDate) : null,
-                  item.projectNumber ?? item.dealNumber,
+                  // The canonical resolver, not `??`: a bid-board deal has projectNumber "" and its
+                  // real number in dealNumber, and a HubSpot-imported deal must never show its id.
+                  resolveDealDisplayNumber(item),
                 ]
                   .filter(Boolean)
                   .join(" · ")}
@@ -158,6 +200,16 @@ const styles = StyleSheet.create({
   summaryCount: { ...theme.type.h2, color: theme.color.textPrimary, fontVariant: ["tabular-nums"] },
   summaryAxis: { ...theme.type.small, color: theme.color.textMuted },
   empty: { ...theme.type.body, color: theme.color.textMuted },
+  moved: {
+    ...theme.type.small,
+    color: theme.color.amberText,
+    backgroundColor: theme.color.amberSurface,
+    borderWidth: 1,
+    borderColor: theme.color.amberBorder,
+    borderRadius: theme.radius.md,
+    padding: theme.space.md,
+    marginTop: theme.space.md,
+  },
 
   row: {
     backgroundColor: theme.color.surface,

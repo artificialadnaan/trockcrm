@@ -157,12 +157,25 @@ export default function ReportsScreen() {
 
           {/* ---- The three the meeting opens on ---- */}
           <View style={styles.heroRow}>
-            <HeroCell label="Won" evidence="won" mode={mode} metric={data.execHero.won} />
-            <HeroCell label="Sent" evidence="sent" mode={mode} metric={data.execHero.sent} />
+            <HeroCell
+              label="Won"
+              evidence="won"
+              mode={mode}
+              periodLabel={data.period.label}
+              metric={data.execHero.won}
+            />
+            <HeroCell
+              label="Sent"
+              evidence="sent"
+              mode={mode}
+              periodLabel={data.period.label}
+              metric={data.execHero.sent}
+            />
             <HeroCell
               label="Estimated"
               evidence="estimated"
               mode={mode}
+              periodLabel={data.period.label}
               metric={data.execHero.estimated}
             />
           </View>
@@ -182,7 +195,7 @@ export default function ReportsScreen() {
 
           <Text style={styles.sectionLabel}>DEPARTMENTS</Text>
           {data.departments.map((d) => (
-            <DepartmentCard key={d.key} metric={d} mode={mode} />
+            <DepartmentCard key={d.key} metric={d} mode={mode} periodLabel={data.period.label} />
           ))}
 
           {data.notes.length ? (
@@ -212,18 +225,23 @@ function HeroCell({
   metric,
   evidence,
   mode,
+  periodLabel,
 }: {
   label: string;
   metric: reportsApi.ExecHeroMetric;
   evidence: EvidenceMetric;
   mode: WeekMode;
+  /** Carried to the drill for COMPARISON, so a moved window is stated rather than silently differing. */
+  periodLabel: string;
 }) {
   const router = useRouter();
   return (
     <Pressable
       testID={`showcase-hero-${evidence}`}
       onPress={() =>
-        router.push(`/(app)/reports/evidence?metric=${evidence}&mode=${mode}`)
+        router.push(
+          `/(app)/reports/evidence?metric=${evidence}&mode=${mode}&period=${encodeURIComponent(periodLabel)}`,
+        )
       }
       accessibilityRole="button"
       accessibilityLabel={`${label}, ${metric.count} deals, ${compactMoney(metric.value.amount)}. Show the deals.`}
@@ -240,7 +258,15 @@ function HeroCell({
   );
 }
 
-function DepartmentCard({ metric, mode }: { metric: DepartmentMetric; mode: WeekMode }) {
+function DepartmentCard({
+  metric,
+  mode,
+  periodLabel,
+}: {
+  metric: DepartmentMetric;
+  mode: WeekMode;
+  periodLabel: string;
+}) {
   const router = useRouter();
   /**
    * Deferred departments have no cohort to open, and the key vocabularies differ — "estimating" is
@@ -336,9 +362,26 @@ function DepartmentCard({ metric, mode }: { metric: DepartmentMetric; mode: Week
   return (
     <Pressable
       testID={`showcase-department-${metric.key}`}
-      onPress={() => router.push(`/(app)/reports/evidence?metric=${evidence}&mode=${mode}`)}
+      onPress={() =>
+        router.push(
+          `/(app)/reports/evidence?metric=${evidence}&mode=${mode}&period=${encodeURIComponent(periodLabel)}`,
+        )
+      }
       accessibilityRole="button"
-      accessibilityLabel={`${metric.label}, ${departmentCountLabel(metric)}. Show the deals.`}
+      /* EVERYTHING the card shows. An explicit label REPLACES the text composed from the children, so
+         making this card pressable would otherwise have silently removed the value, the delta and the
+         trend from anyone using a screen reader — the same defect the deal cards had, reintroduced by
+         adding a drill. Built from the same values the JSX renders. */
+      accessibilityLabel={[
+        metric.label,
+        departmentCountLabel(metric),
+        metric.value ? compactMoney(metric.value.amount) : null,
+        chip?.label,
+        trend,
+        "Show the deals.",
+      ]
+        .filter(Boolean)
+        .join(", ")}
       style={styles.card}
     >
       {body}
