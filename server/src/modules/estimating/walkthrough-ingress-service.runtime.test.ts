@@ -42,15 +42,22 @@ import type { WalkthroughIngressPayload, WalkthroughScopeRow } from "@trock-crm/
 import { tenantSchemaSql } from "../../../tests/helpers/tenant-schema-from-drizzle.js";
 // The ceiling the ingress REUSES rather than re-declares — see the contactSheetBytes tests below.
 import { MAX_FILE_SIZE_BYTES } from "../files/file-constants.js";
-import { reprocessEstimateSourceDocument } from "./document-service.js";
+// R22. `createEstimateSourceDocument` is the OTHER producer — the one whose dedupe has no documentType
+// predicate. The namespace test at the bottom of this file drives the real function rather than reasoning
+// about it.
+import {
+  createEstimateSourceDocument,
+  reprocessEstimateSourceDocument,
+} from "./document-service.js";
 import { buildEstimatingWorkbenchState } from "./workbench-service.js";
+import type { WalkthroughContactSheetStore } from "./walkthrough-ingress-service.js";
 import {
   buildWalkthroughContactSheetDisplayName,
   createWalkthroughContactSheetFile,
   createWalkthroughSourceDocument,
   deriveWalkthroughContactSheetR2Key,
   getCrmFileBucket,
-  ingestWalkthrough,
+  ingestWalkthrough as ingestWalkthroughService,
   insertWalkthroughExtractions,
   MAX_WALKTHROUGH_DIVISION_HINT_CHARS,
   MAX_WALKTHROUGH_ID_CHARS,
@@ -62,8 +69,57 @@ import {
   MIN_WALKTHROUGH_QUANTITY,
   validateWalkthroughIngressPayload,
   WALKTHROUGH_NO_PROJECT_KEY_SEGMENT,
+  walkthroughContentHash,
   walkthroughIngressLockKey,
 } from "./walkthrough-ingress-service.js";
+
+/**
+ * R23/R25. The object store the ingress verifies its contact sheet through, faked.
+ *
+ * DEFAULTS TO A HEALTHY STORE THAT AGREES WITH THE PAYLOAD — configured, the object present, its
+ * Content-Type and Content-Length exactly what was declared. That is deliberate: every one of this
+ * suite's ~60 happy-path ingests now runs THROUGH the verification, so a guard that refused a valid
+ * upload would break all of them rather than hiding behind a stub that says "not configured".
+ *
+ * The two thumbnail fakes SELF-GATE on mime type exactly as the real helpers do
+ * (`isThumbnailableImage` / `isPdfThumbnailable`), because the implementation calls them as a fallback
+ * CHAIN rather than branching on the mime type — a fake that answered for both types would make the
+ * chain's order unobservable.
+ */
+function contactSheetStoreFor(
+  payload: WalkthroughIngressPayload,
+  overrides: Partial<WalkthroughContactSheetStore> = {}
+): WalkthroughContactSheetStore {
+  return {
+    isConfigured: () => true,
+    head: async () => ({
+      contentType: payload.contactSheetMimeType,
+      contentLength: payload.contactSheetBytes,
+    }),
+    generateImageThumbnail: async (r2Key, mimeType) =>
+      mimeType === "image/jpeg" ? `thumbnails/${r2Key}` : null,
+    generatePdfThumbnail: async (r2Key, mimeType) =>
+      mimeType === "application/pdf" ? `thumbnails/${r2Key}` : null,
+    ...overrides,
+  };
+}
+
+/**
+ * Every test's door into the service, so the injected store has ONE default and the ~60 call sites that
+ * do not care about object storage did not have to grow an argument. Tests that DO care pass
+ * `contactSheetStore` overrides, which are merged over the healthy default above.
+ */
+function ingestWalkthrough(args: {
+  tenantDb: unknown;
+  payload: WalkthroughIngressPayload;
+  contactSheetStore?: Partial<WalkthroughContactSheetStore>;
+}) {
+  return ingestWalkthroughService({
+    tenantDb: args.tenantDb as never,
+    payload: args.payload,
+    contactSheetStore: contactSheetStoreFor(args.payload, args.contactSheetStore),
+  });
+}
 
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
 const DEAL = U("11111");
@@ -112,6 +168,19 @@ let pg: PGlite;
 // but not structurally identical, which is why the repo's other runtime suites hold it loosely.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let tenantDb: any;
+/**
+ * R20. A SECOND Drizzle handle over the SAME PGlite instance, differing only in that it records every
+ * statement it executes — through Drizzle's supported `logger` hook rather than a monkey-patch, so it
+ * sees statements issued INSIDE a transaction too (those go through the transaction's own client, which
+ * a patch on `pg.query` would miss entirely).
+ *
+ * Needed because the `recordIngressStatements` proxy above logs only the KIND of a select, not its SQL —
+ * a select's SQL is not compiled until the builder is awaited, by which point the chain has returned the
+ * raw builder rather than the proxy.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let loggingDb: any;
+const executedSql: string[] = [];
 
 beforeAll(async () => {
   pg = new PGlite();
@@ -154,6 +223,13 @@ beforeAll(async () => {
     ])
   );
   tenantDb = drizzle(pg);
+  loggingDb = drizzle(pg, {
+    logger: {
+      logQuery: (query: string) => {
+        executedSql.push(query);
+      },
+    },
+  });
 
   // A global default market. Without one, resolveMarketContext (market-resolution-service.ts:159-162)
   // throws "No default estimating market is configured" and the workbench never renders for ANY deal —
@@ -239,6 +315,7 @@ describe("createWalkthroughContactSheetFile", () => {
         walkthroughId: WALKTHROUGH,
         siteLabel: "Unit 12B",
         r2Key: "walkthroughs/22222222/contact-sheet.jpg",
+        thumbnailR2Key: null,
         r2Bucket: CRM_BUCKET,
         bytes: 184320,
         mimeType: "image/jpeg",
@@ -289,6 +366,7 @@ describe("createWalkthroughContactSheetFile", () => {
         walkthroughId: U("22299"),
         siteLabel: "Unit 12B",
         r2Key: "walkthroughs/22299/contact-sheet.pdf",
+        thumbnailR2Key: null,
         r2Bucket: CRM_BUCKET,
         bytes: 184320,
         mimeType: "application/pdf",
@@ -312,6 +390,7 @@ describe("createWalkthroughSourceDocument", () => {
         walkthroughId: WALKTHROUGH,
         siteLabel: "Unit 12B",
         r2Key: "walkthroughs/22222222/contact-sheet.jpg",
+        thumbnailR2Key: null,
         r2Bucket: CRM_BUCKET,
         bytes: 184320,
         mimeType: "image/jpeg",
@@ -355,7 +434,14 @@ describe("createWalkthroughSourceDocument", () => {
     // (dealId, projectId, contentHash) triple document-service.ts:104-130 dedupes against. This
     // helper itself performs no dedupe check and the column carries no unique constraint, so calling
     // it twice still writes a second document — detection is available, not enforced.
-    expect(doc.contentHash).toBe(WALKTHROUGH);
+    //
+    // R22. NAMESPACED, because that same triple is what `createEstimateSourceDocument` dedupes ORDINARY
+    // uploads on, with no documentType predicate — see the R22 test below for what a bare id costs. Both
+    // halves are asserted: the exact stored value, and that it is NOT the bare id (which is what makes
+    // this more than a restatement of the implementation).
+    expect(doc.contentHash).toBe(`walkthrough:${WALKTHROUGH}`);
+    expect(doc.contentHash).toBe(walkthroughContentHash(WALKTHROUGH));
+    expect(doc.contentHash).not.toBe(WALKTHROUGH);
     expect(doc.dealId).toBe(DEAL);
     expect(doc.projectId).toBe(PROJECT);
     expect(doc.fileId).toBe(fileId);
@@ -394,6 +480,7 @@ async function seedChain(walkthroughId: string) {
       walkthroughId,
       siteLabel: "Unit 12B",
       r2Key: `walkthroughs/${walkthroughId}/contact-sheet.jpg`,
+      thumbnailR2Key: null,
       r2Bucket: CRM_BUCKET,
       bytes: 184320,
       mimeType: "image/jpeg",
@@ -1281,7 +1368,7 @@ describe("ingestWalkthrough", () => {
     const documents = await tenantDb
       .select({ id: estimateSourceDocuments.id })
       .from(estimateSourceDocuments)
-      .where(eq(estimateSourceDocuments.contentHash, walkthroughId));
+      .where(eq(estimateSourceDocuments.contentHash, walkthroughContentHash(walkthroughId)));
     expect(documents).toHaveLength(1);
 
     const extractions = await tenantDb
@@ -1370,7 +1457,7 @@ describe("ingestWalkthrough", () => {
     const documents = await tenantDb
       .select({ id: estimateSourceDocuments.id })
       .from(estimateSourceDocuments)
-      .where(eq(estimateSourceDocuments.contentHash, walkthroughId));
+      .where(eq(estimateSourceDocuments.contentHash, walkthroughContentHash(walkthroughId)));
     expect(documents).toHaveLength(1);
 
     // ...and exactly one set of extractions under it, not the doubled scope an estimator would
@@ -1466,11 +1553,11 @@ describe("ingestWalkthrough", () => {
       .select({ id: estimateSourceDocuments.id, contentHash: estimateSourceDocuments.contentHash })
       .from(estimateSourceDocuments)
       .where(
-        sql`${estimateSourceDocuments.contentHash} IN (${walkthroughId}, ${mixedCase(walkthroughId)})`
+        sql`${estimateSourceDocuments.contentHash} IN (${walkthroughContentHash(walkthroughId)}, ${walkthroughContentHash(mixedCase(walkthroughId))})`
       );
     expect(documents).toHaveLength(1);
-    // Stored canonically, so the column and every derivation agree.
-    expect(documents[0].contentHash).toBe(walkthroughId);
+    // Stored canonically (and namespaced — R22), so the column and every derivation agree.
+    expect(documents[0].contentHash).toBe(walkthroughContentHash(walkthroughId));
     expect(documents[0].id).toBe(first.documentId);
 
     // ONE set of extractions — the count that would be 2 if a second chain had landed, and the thing an
@@ -1654,6 +1741,7 @@ describe("ingestWalkthrough", () => {
         walkthroughId: U("33041"),
         siteLabel: "A plan set",
         r2Key: `plans/${walkthroughId}/plan-set.pdf`,
+        thumbnailR2Key: null,
         r2Bucket: CRM_BUCKET,
         bytes: 4096,
         mimeType: "application/pdf",
@@ -2536,6 +2624,569 @@ describe("ingestWalkthrough", () => {
     // uses — so it cannot swallow a legitimate second ingress onto a different deal.
     expect(other.documentId).not.toBe(first.documentId);
   });
+
+  // ── R20: the project-ownership check takes a ROW LOCK ───────────────────────────────────────────────
+  //
+  // WHAT PGLITE CAN AND CANNOT SHOW, stated before the assertions so neither is oversold.
+  //
+  // CANNOT: PGlite is a SINGLE-CONNECTION engine. The hazard is a genuinely concurrent
+  // `upsertProjectMirror` re-parenting the project between our ownership SELECT and our writes
+  // (projects/service.ts:412, `source_deal_id = COALESCE(EXCLUDED.source_deal_id, …)`), and two
+  // connections cannot be expressed here at all. A test that "simulated" it by interleaving awaits on one
+  // connection would prove nothing about locking — species 6.
+  //
+  // CAN, and these are the two assertions below:
+  //   1. STATEMENT LEVEL — the SQL the service actually sends carries `for share`. That is what pins the
+  //      MODE, and it is the only thing that distinguishes `for share` from `for key share` here.
+  //   2. ENGINE LEVEL — while the ingress transaction is still open, `pg_locks` shows a RowShareLock on
+  //      `projects` rather than the AccessShareLock a plain SELECT takes. That proves the clause is in
+  //      force in the engine and not merely present in a string. It does NOT distinguish the strengths:
+  //      verified in PGlite that `for key share`, `for share` and `for update` all report RowShareLock at
+  //      relation level (the strength lives in the tuple header, not in pg_locks), which is exactly why
+  //      assertion 1 exists.
+  //
+  // THE BLOCKING CLAIM ITSELF was verified out of band on real Postgres 16.14 with two concurrent
+  // connections — session A holding the lock, session B running the re-parent UPDATE under `lock_timeout`:
+  //   no clause → UPDATE proceeds (the race);  for key share → UPDATE proceeds (a non-key column update
+  //   is precisely what KEY SHARE permits);  for share → UPDATE blocks, 55P03, row unchanged;
+  //   for update → blocks too, but needlessly also blocks another ingress that merely reads the project.
+  // Recorded in the PR discussion; it cannot be re-run from this suite.
+  it("locks the project row it just authorized, in the mode that blocks a re-parent", async () => {
+    const walkthroughId = U("34010");
+
+    executedSql.length = 0;
+    let heldModes: string[] = [];
+
+    // Run the real ingress inside an OUTER transaction we control, so we are still inside it when the
+    // ingress returns: row locks are held until the transaction ends, so this is the only window in which
+    // the lock is observable from one connection. The fake `transaction` hands the body our own tx rather
+    // than opening a nested one.
+    await loggingDb.transaction(async (outerTx: any) => {
+      await ingestWalkthroughService({
+        tenantDb: { transaction: (body: (tx: unknown) => unknown) => body(outerTx) } as never,
+        payload: walkthroughPayload(walkthroughId),
+        contactSheetStore: contactSheetStoreFor(walkthroughPayload(walkthroughId)),
+      });
+
+      const held: any = await outerTx.execute(
+        sql`select mode from pg_locks l join pg_class c on c.oid = l.relation where c.relname = 'projects'`
+      );
+      heldModes = (held?.rows ?? held).map((row: { mode: string }) => row.mode);
+    });
+
+    // 1. STATEMENT LEVEL. Filtered rather than indexed, and the count is asserted: a filter that matched
+    //    nothing would otherwise make every assertion below vacuously true — the species-4 shape.
+    const projectSelects = executedSql.filter((statement) => /from "projects"/i.test(statement));
+    expect(projectSelects).toHaveLength(1);
+    expect(projectSelects[0].toLowerCase()).toContain("for share");
+    // ...and NOT the weaker mode, spelled out because the two read almost identically. "for key share"
+    // does not contain "for share" as a substring, so the assertion above already excludes it; this one
+    // says so in the failure message.
+    expect(projectSelects[0].toLowerCase()).not.toContain("for key share");
+
+    // 2. ENGINE LEVEL. The clause really took a row-level lock: a plain SELECT leaves only
+    //    AccessShareLock on the relation.
+    expect(heldModes).toContain("RowShareLock");
+    expect(heldModes).not.toEqual(["AccessShareLock"]);
+  });
+
+  // The negative half of assertion 2, and what makes it non-vacuous: the SAME probe on a table the ingress
+  // only READS shows the plain-select mode. Without this, "RowShareLock is present" could be an artifact
+  // of anything else the transaction did.
+  it("leaves the tables it only reads on the plain-select lock mode", async () => {
+    const walkthroughId = U("34011");
+    let documentModes: string[] = [];
+
+    await loggingDb.transaction(async (outerTx: any) => {
+      await ingestWalkthroughService({
+        tenantDb: { transaction: (body: (tx: unknown) => unknown) => body(outerTx) } as never,
+        payload: walkthroughPayload(walkthroughId, { projectId: null }),
+        contactSheetStore: contactSheetStoreFor(walkthroughPayload(walkthroughId)),
+      });
+      const held: any = await outerTx.execute(
+        sql`select mode from pg_locks l join pg_class c on c.oid = l.relation
+             where c.relname = 'projects' and l.mode = 'RowShareLock'`
+      );
+      documentModes = (held?.rows ?? held).map((row: { mode: string }) => row.mode);
+    });
+
+    // A DEAL-LEVEL walkthrough never resolves a project, so nothing locked a projects row — the mode the
+    // test above found is attributable to the ownership SELECT specifically.
+    expect(documentModes).toEqual([]);
+  });
+
+  // ── R21: replay compares row fingerprints AND the envelope ──────────────────────────────────────────
+  //
+  // The replay path validated per-row fingerprints and returned the original chain while never looking at
+  // `contactSheetMimeType`, `contactSheetBytes`, `capturedAt` or `siteLabel`. The MIME case is the
+  // damaging one: the R2 key is DERIVED from the mime type, so a corrected mime means the sender uploaded
+  // the corrected sheet to a NEW key while the replayed response still points at the old one — a 200, and
+  // a sender that believes the correction landed.
+  //
+  // Each case changes exactly ONE envelope field and nothing else, so no other guard can be what fires
+  // (species 3). All four go through the same 409 path as the row-level drift, naming the field.
+  it.each<[string, string, Partial<WalkthroughIngressPayload>]>([
+    ["contactSheetMimeType", U("34020"), { contactSheetMimeType: "application/pdf" }],
+    ["contactSheetBytes", U("34021"), { contactSheetBytes: 999_999 }],
+    ["siteLabel", U("34022"), { siteLabel: "Unit 14C" }],
+    ["capturedAt", U("34023"), { capturedAt: "2026-07-30T14:05:00Z" }],
+  ])("refuses a replay whose %s changed, naming that field", async (field, walkthroughId, override) => {
+    const first = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId),
+    });
+    // Proof this case built its own chain rather than replaying another case's document.
+    expect(first.extractionIds).toHaveLength(1);
+
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(walkthroughId, override),
+      })
+    ).rejects.toMatchObject({
+      statusCode: 409,
+      // NAMES THE FIELD. A single "the envelope changed" message would satisfy the status code for all
+      // four cases while telling the sender nothing, and would let one comparison stand in for four.
+      message: expect.stringContaining(field),
+    });
+
+    // READ BACK FROM THE DATABASE. The failure being guarded is "the original was silently kept and
+    // reported as success", so the stored row is the only place the outcome is visible.
+    const [storedFile] = await tenantDb.select().from(files).where(eq(files.id, first.fileId));
+    expect(storedFile.mimeType).toBe("image/jpeg");
+    expect(storedFile.fileSizeBytes).toBe(184320);
+    expect(storedFile.displayName).toBe(buildWalkthroughContactSheetDisplayName("Unit 12B"));
+
+    // And the refusal wrote no second chain for the corrected envelope either — counted, because
+    // duplication is the risk.
+    const documents = await tenantDb
+      .select({ id: estimateSourceDocuments.id })
+      .from(estimateSourceDocuments)
+      .where(eq(estimateSourceDocuments.contentHash, walkthroughContentHash(walkthroughId)));
+    expect(documents).toHaveLength(1);
+  });
+
+  // The mime case stated as its HARM rather than as a table row: the two keys, side by side. This is the
+  // assertion that explains why an envelope check was worth a 409 at all.
+  it("names both R2 keys when the corrected mime type moved the object", async () => {
+    const walkthroughId = U("34024");
+
+    const first = await ingestWalkthrough({ tenantDb, payload: walkthroughPayload(walkthroughId) });
+
+    const storedKey = `walkthroughs/${DEAL}/${PROJECT}/${walkthroughId}/contact-sheet.jpg`;
+    const correctedKey = `walkthroughs/${DEAL}/${PROJECT}/${walkthroughId}/contact-sheet.pdf`;
+
+    // The stored chain really is on the .jpg key — otherwise the message assertions below would be about
+    // strings this test invented.
+    const [storedFile] = await tenantDb.select().from(files).where(eq(files.id, first.fileId));
+    expect(storedFile.r2Key).toBe(storedKey);
+
+    const failure = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, { contactSheetMimeType: "application/pdf" }),
+    }).catch((error: Error) => error);
+
+    expect((failure as { statusCode?: number }).statusCode).toBe(409);
+    // BOTH keys, so the sender can see that its corrected upload went somewhere this document does not
+    // point at — the whole reason a 200 here was dangerous rather than merely untidy.
+    expect((failure as Error).message).toContain(storedKey);
+    expect((failure as Error).message).toContain(correctedKey);
+  });
+
+  // The other half of the contract, and the guard against an over-tight envelope check: a byte-identical
+  // envelope must still replay, and two SPELLINGS of one instant are the same capture. `capturedAt` is
+  // compared as an instant precisely so this does not 409.
+  it("still replays when only the capturedAt spelling differs, naming the same instant", async () => {
+    const walkthroughId = U("34025");
+
+    const first = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, { capturedAt: "2026-07-29T14:05:00Z" }),
+    });
+
+    // Same instant, three ways of writing it: with milliseconds, and as a -05:00 offset. All must replay.
+    for (const spelling of ["2026-07-29T14:05:00.000Z", "2026-07-29T09:05:00-05:00"]) {
+      const replay = await ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(walkthroughId, { capturedAt: spelling }),
+      });
+      expect(replay).toEqual(first);
+    }
+  });
+
+  // ── R23: the object has to be there, and be what was declared ───────────────────────────────────────
+  //
+  // The sender uploads the contact sheet to the derived key BEFORE it posts, and nothing checked. A failed
+  // or in-flight pre-upload produced a full chain and a 201 — and because retries REPLAY that chain, no
+  // later attempt would fix it: the estimator opens the evidence and gets a 404.
+  //
+  // Each case fails a DIFFERENT one of `confirmUpload`'s three checks (files/service.ts:773-785), and each
+  // asserts nothing was written — the guard runs before the first write.
+  it("refuses a walkthrough whose contact sheet is not in object storage", async () => {
+    const before = await tableCounts();
+
+    const failure = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(U("34030")),
+      // The pre-upload never landed.
+      contactSheetStore: { head: async () => null },
+    }).catch((error: Error) => error);
+
+    expect((failure as { statusCode?: number }).statusCode).toBe(400);
+    // The DERIVED key, in the message: the sender cannot fix this without being told where to upload, and
+    // it never sent the key in the first place (it is derived on both sides).
+    expect((failure as Error).message).toContain(
+      `walkthroughs/${DEAL}/${PROJECT}/${U("34030")}/contact-sheet.jpg`
+    );
+    // Refused BEFORE the first write, like every other guard in this seam's contract.
+    expect(await tableCounts()).toEqual(before);
+  });
+
+  it("refuses a contact sheet whose stored Content-Type is not the declared one", async () => {
+    const before = await tableCounts();
+
+    const failure = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(U("34031")),
+      // Present, but it is a PDF sitting at the .jpg key the jpeg declaration derived.
+      contactSheetStore: {
+        head: async () => ({ contentType: "application/pdf", contentLength: 184320 }),
+      },
+    }).catch((error: Error) => error);
+
+    expect((failure as { statusCode?: number }).statusCode).toBe(400);
+    // Names WHICH field disagreed and both values.
+    expect((failure as Error).message).toContain("Content-Type");
+    expect((failure as Error).message).toContain("application/pdf");
+    expect((failure as Error).message).toContain("image/jpeg");
+    expect(await tableCounts()).toEqual(before);
+  });
+
+  it("refuses a contact sheet whose stored byte count is not the declared one", async () => {
+    const before = await tableCounts();
+
+    const failure = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(U("34032")),
+      contactSheetStore: {
+        head: async () => ({ contentType: "image/jpeg", contentLength: 77 }),
+      },
+    }).catch((error: Error) => error);
+
+    expect((failure as { statusCode?: number }).statusCode).toBe(400);
+    expect((failure as Error).message).toContain("Content-Length");
+    expect((failure as Error).message).toContain("77");
+    expect((failure as Error).message).toContain("184320");
+    expect(await tableCounts()).toEqual(before);
+  });
+
+  // The header-absent case, which is `confirmUpload`'s own tolerance rather than a hole we invented: R2 may
+  // not report either header, and an absent header is not a mismatch. Without this, the two `!= null`
+  // guards in the implementation would be untested and could be "simplified" away.
+  it("accepts a verified object that reports no Content-Type or Content-Length", async () => {
+    const walkthroughId = U("34033");
+
+    const result = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId),
+      contactSheetStore: { head: async () => ({}) },
+    });
+
+    expect(result.extractionIds).toHaveLength(1);
+  });
+
+  // The configured gate, mirroring `confirmUpload`'s `isR2Configured()`: with no object store the
+  // verification is skipped rather than failing every ingress. Asserted so the behaviour is a decision on
+  // the record — and so the gate cannot be removed silently, which would break every local dev ingest.
+  it("skips verification entirely when no object store is configured", async () => {
+    const walkthroughId = U("34034");
+    const head = vi.fn(async () => null);
+
+    const result = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId),
+      // A store that would REFUSE if it were consulted — so a green here means it was not consulted.
+      contactSheetStore: { isConfigured: () => false, head },
+    });
+
+    expect(result.extractionIds).toHaveLength(1);
+    expect(head).not.toHaveBeenCalled();
+  });
+
+  // The verification reads the DERIVED key, not anything the payload could name. Pinned because a version
+  // of this check that HEADed a caller-supplied key would restore exactly the confused-deputy read
+  // primitive R1 removed — the caller could confirm the existence of any object in the bucket.
+  it("verifies the derived key rather than any key the payload carried", async () => {
+    const walkthroughId = U("34035");
+    const seen: string[] = [];
+
+    await ingestWalkthrough({
+      tenantDb,
+      // A hostile key smuggled under the wire name the validator drops. Cast because the field is not on
+      // the contract at all — which is the point: it cannot reach a column even if a sender sends it.
+      payload: {
+        ...walkthroughPayload(walkthroughId),
+        contactSheetR2Key: "deals/other-deal/contracts/master-agreement.pdf",
+      } as WalkthroughIngressPayload,
+      contactSheetStore: {
+        head: async (r2Key) => {
+          seen.push(r2Key);
+          return { contentType: "image/jpeg", contentLength: 184320 };
+        },
+      },
+    });
+
+    expect(seen).toEqual([`walkthroughs/${DEAL}/${PROJECT}/${walkthroughId}/contact-sheet.jpg`]);
+  });
+
+  // ── R25: the file list must not present the original as its tile image ──────────────────────────────
+  //
+  // `resolveFileThumbnailUrl` (files/service.ts:1574-1580) presigns `thumbnailR2Key` when there is one and
+  // otherwise falls through to `isThumbnailableImage(mimeType) && r2Key` — the ORIGINAL. So a jpeg contact
+  // sheet with a null thumbnail makes opening a deal's file list download the whole sheet to draw one
+  // tile. (A pdf sheet fails that predicate and gets a badge, which is why only jpeg was affected.)
+  //
+  // Fixed by calling the Files subsystem's OWN helpers rather than by adding a second derived key the
+  // sender must upload: see the parity audit on `WalkthroughContactSheetStore`.
+  it("stores the thumbnail key the image helper produced for a jpeg contact sheet", async () => {
+    const walkthroughId = U("34040");
+    const derivedKey = `walkthroughs/${DEAL}/${PROJECT}/${walkthroughId}/contact-sheet.jpg`;
+    const pdfArm = vi.fn(async () => null);
+
+    const result = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId),
+      contactSheetStore: { generatePdfThumbnail: pdfArm },
+    });
+
+    // READ BACK FROM THE DATABASE: the column is what `resolveFileThumbnailUrl` reads.
+    const [file] = await tenantDb.select().from(files).where(eq(files.id, result.fileId));
+    expect(file.thumbnailR2Key).toBe(`thumbnails/${derivedKey}`);
+    // Non-null is the property that actually matters — a null here is the fallback that serves the
+    // original as the list image.
+    expect(file.thumbnailR2Key).not.toBeNull();
+    // The image arm answered, so the fallback chain stopped there.
+    expect(pdfArm).not.toHaveBeenCalled();
+  });
+
+  it("falls through to the pdf arm for a pdf contact sheet", async () => {
+    const walkthroughId = U("34041");
+    const derivedKey = `walkthroughs/${DEAL}/${PROJECT}/${walkthroughId}/contact-sheet.pdf`;
+
+    const result = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, { contactSheetMimeType: "application/pdf" }),
+    });
+
+    // The default fakes self-gate exactly as the real helpers do, so reaching this key means the image arm
+    // returned null and the chain continued — the composition confirmUpload uses.
+    const [file] = await tenantDb.select().from(files).where(eq(files.id, result.fileId));
+    expect(file.thumbnailR2Key).toBe(`thumbnails/${derivedKey}`);
+  });
+
+  it("still ingests when neither thumbnail arm can produce one", async () => {
+    const walkthroughId = U("34042");
+
+    const result = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId),
+      contactSheetStore: {
+        generateImageThumbnail: async () => null,
+        generatePdfThumbnail: async () => null,
+      },
+    });
+
+    // BEST-EFFORT, matching confirmUpload: a thumbnail is a tile, not a reason to refuse a walkthrough.
+    expect(result.extractionIds).toHaveLength(1);
+    const [file] = await tenantDb.select().from(files).where(eq(files.id, result.fileId));
+    expect(file.thumbnailR2Key).toBeNull();
+  });
+});
+
+// ── R24: capturedAt has to name a date that exists ────────────────────────────────────────────────────
+//
+// `Number.isNaN(new Date(value).getTime())` — the whole of the old check — PASSES for 2026-02-30, which
+// JavaScript silently normalizes to March 2. `files.taken_at` then records a capture instant two days off
+// and every chronological view of the evidence misorders it, which is the exact problem storing `taken_at`
+// structurally was meant to solve.
+//
+// The cases are split by WHICH check catches them, because that is the species-2 question: an impossible
+// date that was already NaN would never reach the new calendar check, and a test that could not tell the
+// difference would pass either way.
+describe("capturedAt calendar validation", () => {
+  // SILENT SHIFTS — not NaN, so the old check accepted them. Verified on this Node: 2026-02-30 parses to
+  // 2026-03-02 and 2026-04-31 to 2026-05-01. These are the cases the calendar round-trip exists for, and
+  // the ONLY ones that reach it.
+  it.each([
+    ["february 30th", "2026-02-30T00:00:00Z", "2026-03-02"],
+    ["april 31st", "2026-04-31T00:00:00Z", "2026-05-01"],
+    ["february 29th of a non-leap year", "2026-02-29T00:00:00Z", "2026-03-01"],
+  ])("refuses %s, which JavaScript would have shifted", async (_label, capturedAt, shiftsTo) => {
+    // The premise, asserted rather than assumed: this string really does parse without NaN, so the check
+    // that catches it can only be the calendar one. Without this the test would still pass if the value
+    // were rejected for being unparseable — a different bug, and not the one under test.
+    expect(Number.isNaN(new Date(capturedAt).getTime())).toBe(false);
+    expect(new Date(capturedAt).toISOString().slice(0, 10)).toBe(shiftsTo);
+
+    const before = await tableCounts();
+    await expect(
+      ingestWalkthrough({ tenantDb, payload: walkthroughPayload(U("34050"), { capturedAt }) })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      // Names the field AND the day it would have become, so the sender can see the shift.
+      message: expect.stringContaining("capturedAt"),
+    });
+    await expect(
+      ingestWalkthrough({ tenantDb, payload: walkthroughPayload(U("34050"), { capturedAt }) })
+    ).rejects.toMatchObject({ message: expect.stringContaining(shiftsTo) });
+    expect(await tableCounts()).toEqual(before);
+  });
+
+  // An out-of-range month, which V8 rejects outright — so this is caught by the calendar check ONLY
+  // because the calendar check runs first. Recorded as a distinct case so the ordering is deliberate
+  // rather than incidental: swap the two checks and the message changes.
+  it("refuses a thirteenth month", async () => {
+    expect(Number.isNaN(new Date("2026-13-01T00:00:00Z").getTime())).toBe(true);
+
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(U("34051"), { capturedAt: "2026-13-01T00:00:00Z" }),
+      })
+    ).rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining("capturedAt") });
+  });
+
+  // The one case that reaches the PARSE check — the calendar day exists, so only the time-of-day is
+  // wrong. Without it that check would be unreachable from any test and could be deleted as dead.
+  it("refuses a twenty-fifth hour on a real calendar day", async () => {
+    // The date part is a real day, so the calendar check passes it through: the parse check is what fires.
+    expect(new Date(Date.UTC(2026, 6, 29)).getUTCDate()).toBe(29);
+    expect(Number.isNaN(new Date("2026-07-29T25:00:00Z").getTime())).toBe(true);
+
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(U("34056"), { capturedAt: "2026-07-29T25:00:00Z" }),
+      })
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringContaining("not a parseable timestamp"),
+    });
+  });
+
+  // A timestamp with no offset names a LOCAL wall-clock time, not an instant, so what lands on
+  // `files.taken_at` would depend on the server's timezone.
+  it("refuses a timestamp with no UTC designator or offset", async () => {
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(U("34052"), { capturedAt: "2026-07-29T14:05:00" }),
+      })
+    ).rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining("offset") });
+  });
+
+  // THE OVER-TIGHTNESS CONTROL, and it is the half that makes the rest of this block meaningful: a check
+  // that refused everything would satisfy every assertion above. A real leap day, a real offset timestamp
+  // whose UTC day is the NEXT one (which is why the calendar check reads the string's own components
+  // rather than the parsed instant), and a plain UTC timestamp all have to be accepted and stored as the
+  // instant they name.
+  it.each([
+    ["a leap day", U("34053"), "2028-02-29T09:30:00Z", "2028-02-29T09:30:00.000Z"],
+    ["an offset timestamp whose UTC day differs", U("34054"), "2026-07-29T23:00:00-05:00", "2026-07-30T04:00:00.000Z"],
+    ["fractional seconds", U("34055"), "2026-07-29T14:05:00.250Z", "2026-07-29T14:05:00.250Z"],
+  ])("accepts %s and stores the instant it names", async (_label, walkthroughId, capturedAt, instant) => {
+    const result = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId, { capturedAt }),
+    });
+
+    const [file] = await tenantDb.select().from(files).where(eq(files.id, result.fileId));
+    expect(file.takenAt.toISOString()).toBe(instant);
+  });
+});
+
+// ── R22: our content hash must not share a namespace with an upload's ─────────────────────────────────
+//
+// We protected OURSELVES with `documentType = 'walkthrough'` on the idempotency lookup and left the other
+// producer exposed. `createEstimateSourceDocument` (document-service.ts:104-130) dedupes ORDINARY uploads
+// on (dealId, projectId, contentHash) with NO documentType predicate — so a walkthrough id that happened
+// to equal an upload's content hash on the same deal and project would make that upload match OUR
+// completed walkthrough document, return it, and skip its OCR enqueue entirely. The upload is accepted and
+// silently never parsed.
+//
+// Fixed on our side only, by prefixing the stored hash: the shared function is left alone.
+describe("walkthrough content hash namespace", () => {
+  it("leaves an ordinary upload sharing the raw walkthrough id free to enqueue its own parse", async () => {
+    const walkthroughId = U("34060");
+
+    const ingested = await ingestWalkthrough({
+      tenantDb,
+      payload: walkthroughPayload(walkthroughId),
+    });
+
+    // A real `files` row for the ordinary upload, so this goes through createEstimateSourceDocument the
+    // way routes.ts does rather than through a stub.
+    const uploadFileId = await createWalkthroughContactSheetFile({
+      tenantDb,
+      input: {
+        dealId: DEAL,
+        walkthroughId: U("34061"),
+        siteLabel: "Level 2 plan set",
+        r2Key: `estimate/${DEAL}/level-2-plans.pdf`,
+        thumbnailR2Key: null,
+        r2Bucket: CRM_BUCKET,
+        bytes: 8192,
+        mimeType: "application/pdf",
+        capturedAt: "2026-07-29T14:05:00Z",
+        userId: USER,
+      },
+    });
+
+    // Typed on its payload so the assertion below can read `documentId` off the recorded call rather than
+    // only counting invocations.
+    const enqueue = vi.fn(async (_payload: { documentId: string }) => {});
+    const upload = await createEstimateSourceDocument({
+      tenantDb,
+      enqueueEstimateDocumentOcr: enqueue,
+      input: {
+        dealId: DEAL,
+        projectId: PROJECT,
+        fileId: uploadFileId,
+        filename: "Level 2 plan set.pdf",
+        mimeType: "application/pdf",
+        // THE COLLISION: an ordinary upload whose content hash is exactly the walkthrough's raw id, on the
+        // same deal and the same project. This is the input that used to match the walkthrough document.
+        contentHash: walkthroughId,
+        userId: USER,
+        officeId: null,
+      },
+    });
+
+    // It got its OWN document, not the walkthrough's.
+    expect(upload.id).not.toBe(ingested.documentId);
+    // ...and — the part that was silently skipped — its parse was ENQUEUED. A dedupe hit returns early,
+    // before the enqueue, so this assertion is the one that fails when the namespaces collide.
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(enqueue.mock.calls[0][0]).toMatchObject({ documentId: upload.id });
+
+    // Two documents on this (deal, project) whose hash mentions this walkthrough id — ours namespaced,
+    // theirs raw. COUNTED, because "the upload silently became the walkthrough" is a missing row.
+    const documents = await tenantDb
+      .select({ id: estimateSourceDocuments.id, contentHash: estimateSourceDocuments.contentHash })
+      .from(estimateSourceDocuments)
+      .where(
+        sql`${estimateSourceDocuments.contentHash} IN (${walkthroughId}, ${walkthroughContentHash(walkthroughId)})`
+      );
+    expect(documents).toHaveLength(2);
+    expect(documents.map((row: { contentHash: string }) => row.contentHash).sort()).toEqual(
+      [walkthroughId, walkthroughContentHash(walkthroughId)].sort()
+    );
+
+    // The walkthrough's own replay still works — the prefix is applied on BOTH sides of the lookup, and a
+    // one-sided change would make every retry build a second chain instead.
+    const replay = await ingestWalkthrough({ tenantDb, payload: walkthroughPayload(walkthroughId) });
+    expect(replay).toEqual(ingested);
+  });
 });
 
 // R3 — THE DATA-LOSS PATH THROUGH AN ALREADY-SHIPPED ENDPOINT.
@@ -2612,6 +3263,7 @@ describe("reprocessEstimateSourceDocument on a walkthrough document", () => {
         walkthroughId: U("55002"),
         siteLabel: "Level 2 plans",
         r2Key: "plans/55002/level-2.pdf",
+        thumbnailR2Key: null,
         r2Bucket: CRM_BUCKET,
         bytes: 8192,
         mimeType: "application/pdf",

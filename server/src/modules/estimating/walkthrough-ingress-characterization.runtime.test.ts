@@ -34,7 +34,33 @@ import {
 import type { WalkthroughIngressPayload, WalkthroughScopeRow } from "@trock-crm/shared/types";
 import { tenantSchemaSql } from "../../../tests/helpers/tenant-schema-from-drizzle.js";
 import { rankExtractionMatches } from "./matching-service.js";
-import { getCrmFileBucket, ingestWalkthrough } from "./walkthrough-ingress-service.js";
+import {
+  getCrmFileBucket,
+  ingestWalkthrough as ingestWalkthroughService,
+} from "./walkthrough-ingress-service.js";
+
+/**
+ * R23/R25. Object storage, faked as HEALTHY and in agreement with the payload — the object is present and
+ * its Content-Type/Content-Length are what was declared, so these characterization tests exercise the
+ * defects they are about rather than the new verification. The dedicated R23 coverage lives in
+ * walkthrough-ingress-service.runtime.test.ts.
+ */
+function ingestWalkthrough(args: { tenantDb: unknown; payload: WalkthroughIngressPayload }) {
+  return ingestWalkthroughService({
+    tenantDb: args.tenantDb as never,
+    payload: args.payload,
+    contactSheetStore: {
+      isConfigured: () => true,
+      head: async () => ({
+        contentType: args.payload.contactSheetMimeType,
+        contentLength: args.payload.contactSheetBytes,
+      }),
+      generateImageThumbnail: async (r2Key, mimeType) =>
+        mimeType === "image/jpeg" ? `thumbnails/${r2Key}` : null,
+      generatePdfThumbnail: async () => null,
+    },
+  });
+}
 
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
 const DEAL = U("c1111");

@@ -86,6 +86,42 @@ export function walkthroughIngressLockKey(dealId: string, walkthroughId: string)
   return `walkthrough-ingress:${dealId}:${walkthroughId}`;
 }
 
+/** The namespace prefix on every walkthrough `content_hash`. See `walkthroughContentHash`. */
+export const WALKTHROUGH_CONTENT_HASH_PREFIX = "walkthrough:";
+
+/**
+ * The `estimate_source_documents.content_hash` a walkthrough is stored under — NAMESPACED, so it cannot
+ * collide with an ordinary upload's.
+ *
+ * `content_hash` is one column with unrelated meanings per producer: an ordinary estimate upload stores
+ * the file's R2 KEY there (routes.ts hands `createEstimateSourceDocument` `contentHash:
+ * uploadedFile.r2Key`), a walkthrough stores its export id. This ingress's own lookup already excluded a
+ * foreign document with `documentType = 'walkthrough'`, so WE were safe — but the collision runs the
+ * OTHER WAY TOO, and that direction was left open:
+ *
+ *   `createEstimateSourceDocument` (document-service.ts:104-130) dedupes on
+ *   (dealId, projectId, contentHash) with NO documentType predicate. So if a walkthrough id ever equalled
+ *   an ordinary upload's content hash on the same deal and project, that later upload would match THIS
+ *   completed walkthrough document, return it, and — because the early return happens before the enqueue
+ *   — SKIP ITS OCR ENQUEUE ENTIRELY. The upload is accepted and silently never parsed: no failed job, no
+ *   error, just a plan set that produces no extractions.
+ *
+ * Prefixing is a ONE-SIDED fix and is chosen deliberately over adding a predicate to
+ * `createEstimateSourceDocument`: that function is a shared code path with several callers, and changing
+ * what it considers a duplicate is a far larger blast radius than making this producer's keys
+ * unmistakable. A prefixed hash cannot equal an R2 key that starts with a deal id or an `estimate/`
+ * prefix, so the two namespaces are now disjoint by construction rather than by predicate.
+ *
+ * The column is unbounded `text` (estimate-source-documents.ts:33), so the prefix costs no width bound.
+ * EVERY read and write of a walkthrough's content hash goes through this function — the write in
+ * `createWalkthroughSourceDocument` and the idempotency lookup in `ingestWalkthrough` — because the
+ * stored form IS the idempotency key: one side unprefixed would make every retry miss and build a second
+ * chain.
+ */
+export function walkthroughContentHash(walkthroughId: string): string {
+  return `${WALKTHROUGH_CONTENT_HASH_PREFIX}${walkthroughId}`;
+}
+
 /**
  * The quantity band a walkthrough quantity can survive ALL THE WAY to a promoted estimate.
  *
@@ -244,6 +280,108 @@ export function fingerprintWalkthroughScopeRow(row: WalkthroughScopeRow): string
   return createHash("sha256").update(canonical).digest("hex");
 }
 
+/** What a stored walkthrough's contact-sheet `files` row says about the ARTIFACT, read back on replay
+ *  and compared with the incoming envelope. Named separately from the payload so the comparison below
+ *  reads as "stored vs posted" rather than as two similar objects. */
+export interface StoredWalkthroughContactSheet {
+  mimeType: string;
+  fileSizeBytes: number;
+  takenAt: Date | null;
+  displayName: string;
+  r2Key: string;
+}
+
+/**
+ * The ENVELOPE half of the replay drift check — everything the row fingerprint above does not cover.
+ *
+ * WHY IT EXISTS. `fingerprintWalkthroughScopeRow` compares what each row SAYS; the replay path validated
+ * those and returned the original chain while ignoring the payload's envelope entirely:
+ * `contactSheetMimeType`, `contactSheetBytes`, `capturedAt` and `siteLabel` were never looked at. A
+ * submission could therefore change the ARTIFACT and still be reported as a successful retry.
+ *
+ * THE MIME CASE IS THE DAMAGING ONE, and it is worth spelling out because it is not merely a stale
+ * column. `files.r2_key` is DERIVED from the mime type (`deriveWalkthroughContactSheetR2Key` —
+ * ".../contact-sheet.jpg" vs ".../contact-sheet.pdf"), and the trock-scope contract is that the sender
+ * uploads the sheet to exactly that key BEFORE it posts. So a corrected mime type means the corrected
+ * contact sheet was uploaded to a NEW key, while the replayed response still points at the old one: the
+ * request succeeds, the sender believes the correction landed, and the estimator opens the superseded
+ * artifact (or a 404, if the old object was replaced). Silent, and identical in shape to the row-level
+ * drift R7 already refuses — one level up.
+ *
+ * WHY THESE FOUR AND NOT `confidence`. The reasoning in `fingerprintWalkthroughScopeRow` is unchanged
+ * and this check does not weaken it: `confidence` is the model's judgement of the same utterance, so a
+ * re-score on identical content is the model changing its mind and failing a retry over it would be
+ * noise. Envelope fields are not judgements — they describe the artifact itself (what it is, how big it
+ * is, when it was captured, what site it shows). A change to one of them means a different artifact is
+ * being announced, which is exactly the "IN" side of that docblock's rule.
+ *
+ * COMPARED AGAINST THE STORED `files` ROW rather than against a stored fingerprint of the envelope,
+ * because a fingerprint can only say "something changed" and the sender needs to be told WHICH field —
+ * the same courtesy the row-level check extends by naming scope item ids.
+ *
+ * Two deliberate looseness decisions, both stated so they are not mistaken for oversights:
+ *   • `capturedAt` is compared as an INSTANT, not as a string. Two spellings of one moment
+ *     ("…T14:05:00Z" and "…T14:05:00.000Z") describe the same capture and must not 409 — `files.taken_at`
+ *     is `timestamptz`, so the stored value is the instant and the string form is not recoverable anyway.
+ *   • `siteLabel` is compared through `buildWalkthroughContactSheetDisplayName`, i.e. as the composed
+ *     `files.display_name` the writer actually stored. That couples this check to that builder: if the
+ *     fixed prefix is ever edited, already-stored rows compare unequal and their replays start
+ *     409ing. The bound `MAX_WALKTHROUGH_SITE_LABEL_CHARS` is derived from the same builder, so the
+ *     coupling already exists in this module — but a prefix change now needs a data migration, not just
+ *     a re-measure.
+ */
+export function detectWalkthroughEnvelopeDrift(
+  stored: StoredWalkthroughContactSheet,
+  payload: WalkthroughIngressPayload
+): string[] {
+  const drifted: string[] = [];
+
+  if (stored.mimeType !== payload.contactSheetMimeType) {
+    // The derived key is named in full, because "the mime type changed" understates it: the object the
+    // sender uploaded and the object this document points at are two different keys.
+    const wouldBeKey = deriveWalkthroughContactSheetR2Key(
+      payload.dealId,
+      payload.projectId,
+      payload.walkthroughId,
+      payload.contactSheetMimeType
+    );
+    drifted.push(
+      `contactSheetMimeType (stored "${stored.mimeType}", posted "${payload.contactSheetMimeType}") — ` +
+        `the contact sheet's R2 key is DERIVED from its mime type, so the posted sheet was uploaded to ` +
+        `"${wouldBeKey}" while this document still points at "${stored.r2Key}"`
+    );
+  }
+
+  if (Number(stored.fileSizeBytes) !== payload.contactSheetBytes) {
+    drifted.push(
+      `contactSheetBytes (stored ${Number(stored.fileSizeBytes)}, posted ${payload.contactSheetBytes})`
+    );
+  }
+
+  const expectedDisplayName = buildWalkthroughContactSheetDisplayName(payload.siteLabel);
+  if (stored.displayName !== expectedDisplayName) {
+    drifted.push(
+      `siteLabel (stored contact sheet is named "${stored.displayName}", posted "${payload.siteLabel}" ` +
+        `would name it "${expectedDisplayName}")`
+    );
+  }
+
+  // A stored row with no `taken_at` cannot be compared, so it is left alone rather than reported as
+  // drift — the same treatment a stored row with no `contentFingerprint` gets, and for the same reason:
+  // this module always writes one, so a null can only come from a row it did not write.
+  if (stored.takenAt !== null) {
+    const storedAt = stored.takenAt.getTime();
+    const postedAt = new Date(payload.capturedAt).getTime();
+    if (storedAt !== postedAt) {
+      drifted.push(
+        `capturedAt (stored ${stored.takenAt.toISOString()}, posted ${payload.capturedAt})`
+      );
+    }
+  }
+
+  return drifted;
+}
+
 /**
  * A ceiling on one walkthrough's scope rows. Not a storage limit — a runaway-export limit: a real
  * walkthrough is a human talking through a building, and an export claiming thousands of spoken scope
@@ -261,6 +399,53 @@ export const MAX_WALKTHROUGH_SCOPE_ROWS = 1000;
  */
 const EXTRACTION_INSERT_CHUNK_ROWS = 200;
 
+/**
+ * The object-storage operations this ingress needs, INJECTED by the caller.
+ *
+ * WHY A PORT RATHER THAN AN IMPORT. Every other note in this module says it does not pull the S3 client
+ * onto its import path (see `getCrmFileBucket`, and the `file-constants.ts` note at the top) — that is
+ * still true, and injecting is what keeps it true now that the seam has to touch storage. It is also the
+ * pattern the neighbouring `createEstimateSourceDocument` already uses for `enqueueEstimateDocumentOcr`.
+ *
+ * REQUIRED, NOT OPTIONAL, and this is the load-bearing part of the design. An optional port defaulting
+ * to "skip verification" is exactly how a guard becomes decorative: every caller that forgot it would
+ * still get a 201. Making it required means the compiler names any new caller that has not decided.
+ *
+ * ── PARITY AUDIT AGAINST `confirmUpload` ─────────────────────────────────────────────────────────────
+ *
+ * This module is a PARALLEL file-creation path, and it has been repaired one skipped `confirmUpload`
+ * invariant at a time (the mime whitelist, the leading-dot `fileExtension`, the bucket, the size
+ * ceiling, and now these two). So the whole of `confirmUpload` (files/service.ts:773-860) was walked
+ * once and recorded here, to stop the next reviewer finding a fifth omission:
+ *
+ *   HEAD-verify the object, Content-Type and Content-Length  → `head` below (was missing).
+ *   thumbnail, image then PDF fallback                       → `generate*Thumbnail` below (was missing).
+ *   leading-dot `fileExtension`                              → EXTENSION_BY_MIME.
+ *   `r2Bucket` from R2_BUCKET_NAME with the same default     → getCrmFileBucket.
+ *   size ceiling                                             → MAX_FILE_SIZE_BYTES in the validator.
+ *   `takenAt` from the caller                                 → `capturedAt`, calendar-validated.
+ *   `isActive: true`, `version` default                       → set / defaulted.
+ *   photo address + EXIF geocoding (`category === "photo"`)   → N/A: this row is `category: "estimate"`.
+ *   `clientUploadId` dedupe, its partial unique index, and
+ *     the losing-writer `deleteObject` cleanup               → N/A: idempotency here is the walkthrough
+ *                                                              id triple, and no clientUploadId is set.
+ *   submitted-scorecard edit binding, pending-upload token    → N/A: no token flow; there is no
+ *                                                              browser-issued presign to consume.
+ * Nothing else in `confirmUpload` writes to or validates a `files` row.
+ */
+export interface WalkthroughContactSheetStore {
+  /** `isR2Configured()`. Mirrors `confirmUpload`'s own gate: with no object store configured (local dev,
+   *  CI) the verification below is skipped rather than failing every ingress. Same posture as the rest of
+   *  the CRM — deliberately not stricter here, so the seam behaves the way the Files subsystem does. */
+  isConfigured: () => boolean;
+  /** `headObject(r2Key)` — the object's Content-Type/Content-Length, or null when it is absent. */
+  head: (r2Key: string) => Promise<{ contentType?: string; contentLength?: number } | null>;
+  /** `generateAndStoreThumbnail(r2Key, mimeType)` — best-effort, returns the stored key or null. */
+  generateImageThumbnail: (r2Key: string, mimeType: string) => Promise<string | null>;
+  /** `generateAndStorePdfThumbnail(r2Key, mimeType)` — the PDF arm of the same fallback chain. */
+  generatePdfThumbnail: (r2Key: string, mimeType: string) => Promise<string | null>;
+}
+
 /** Narrow, storage-shaped input for ONE link of the chain; `WalkthroughIngressPayload`'s wire names
  *  (contactSheetBucket/…) are mapped onto it in `ingestWalkthrough`, and its `r2Key` is DERIVED there
  *  rather than carried on the wire — see `deriveWalkthroughContactSheetR2Key`. */
@@ -272,6 +457,20 @@ export interface CreateWalkthroughContactSheetFileArgs {
     siteLabel: string;
     r2Key: string;
     r2Bucket: string;
+    /**
+     * R25. The small JPEG the file LIST renders, or null when one could not be produced.
+     *
+     * Not optional, so a caller has to have thought about it. Left null, `resolveFileThumbnailUrl`
+     * (files/service.ts:1574-1580) falls through to `isThumbnailableImage(mimeType) && r2Key` and
+     * presigns THE ORIGINAL as the list image — so opening a deal's file list downloads the entire
+     * contact sheet to draw one tile. (An `application/pdf` sheet fails that predicate and gets a type
+     * badge instead, which is why this only ever bit the jpeg case.)
+     *
+     * DERIVED SERVER-SIDE by the Files subsystem's own `deriveThumbnailKey`, never accepted from the
+     * wire — the confused-deputy read primitive `deriveWalkthroughContactSheetR2Key` exists to prevent
+     * applies to this key exactly as much as to the main one.
+     */
+    thumbnailR2Key: string | null;
     bytes: number;
     mimeType: "image/jpeg" | "application/pdf";
     /** When the walkthrough was captured — stored structurally on `files.taken_at`. */
@@ -340,8 +539,10 @@ export const MAX_WALKTHROUGH_SITE_LABEL_CHARS =
 /**
  * The longest `walkthroughId` the chain can carry.
  *
- * Deliberately NOT validated as a UUID — it lands on `estimate_source_documents.content_hash`, which is
- * `text`, and the contract with trock-scope is an opaque export id rather than a Postgres uuid. It IS
+ * Deliberately NOT validated as a UUID — it reaches `estimate_source_documents.content_hash` (prefixed,
+ * via `walkthroughContentHash`), which is unbounded `text`, and the contract with trock-scope is an
+ * opaque export id rather than a Postgres uuid. The prefix costs nothing against a `text` column, so
+ * this bound is still governed by `files.system_filename` as derived below. It IS
  * still canonicalized (lowercased) by the validator, and that is a deliberate choice rather than a
  * consequence of the UUID one: `content_hash` being `text` means Postgres compares it case-SENSITIVELY,
  * so unlike `dealId` this id was already consistent across the lookup, the lock and the r2 key, and
@@ -381,8 +582,9 @@ export const MAX_WALKTHROUGH_ID_CHARS =
  * with a deal they legitimately access, and then download it through the ordinary files endpoint.
  *
  * No amount of validation closes that hole, because a hostile key is a perfectly well-formed key.
- * Deriving it does: `walkthroughId` is the same value that becomes the document's `contentHash`, so
- * the key is bound to walkthrough identity and there is no input from which a caller could name
+ * Deriving it does: `walkthroughId` is the same value the document's `contentHash` is built from
+ * (`walkthroughContentHash`), so the key is bound to walkthrough identity and there is no input from
+ * which a caller could name
  * another deal's object. The path is the CONTRACT with trock-scope — the exporter uploads the contact
  * sheet to exactly this key before it posts — so both sides compute it rather than exchange it.
  *
@@ -452,6 +654,8 @@ export async function createWalkthroughContactSheetFile({
       fileSizeBytes: input.bytes,
       fileExtension: extension,
       r2Key: input.r2Key,
+      // R25. Without it the file list presigns the ORIGINAL as its tile image — see the field's docblock.
+      thumbnailR2Key: input.thumbnailR2Key,
       r2Bucket: input.r2Bucket,
       // WHEN the evidence was captured, as a timestamp rather than as characters inside a filename.
       // Everything that orders files chronologically does it on COALESCE(taken_at, created_at)
@@ -510,13 +714,20 @@ export async function createWalkthroughSourceDocument({
       storageKey: input.storageKey,
       mimeType: input.mimeType,
       fileSize: input.bytes,
-      // Deliberate: the walkthrough id IS the content hash, so a re-ingest of the same walkthrough is
-      // recognizable on the same (dealId, projectId, contentHash) triple document-service.ts:104-130
-      // dedupes against. `ingestWalkthrough` reads exactly that triple before it writes anything, and
-      // replays the existing chain instead of building a second one. This helper itself performs no
-      // dedupe check and the column carries no unique constraint, so calling IT twice directly still
-      // writes two documents — the guard lives one level up.
-      contentHash: input.walkthroughId,
+      // Deliberate: the walkthrough id, NAMESPACED, is the content hash — so a re-ingest of the same
+      // walkthrough is recognizable on the same (dealId, projectId, contentHash) triple
+      // document-service.ts:104-130 dedupes against. `ingestWalkthrough` reads exactly that triple
+      // before it writes anything, and replays the existing chain instead of building a second one.
+      //
+      // The `walkthrough:` prefix is not decoration: `createEstimateSourceDocument` dedupes ordinary
+      // uploads on that triple with NO documentType predicate, so an unprefixed id colliding with an
+      // upload's content hash would make that upload "find" this document and skip its OCR enqueue. See
+      // `walkthroughContentHash` — which is also what the lookup reads, because the stored form is the
+      // idempotency key.
+      //
+      // This helper itself performs no dedupe check and the column carries no unique constraint, so
+      // calling IT twice directly still writes two documents — the guard lives one level up.
+      contentHash: walkthroughContentHash(input.walkthroughId),
       parseStatus: "completed",
       ocrStatus: "completed",
       parseProvider: "trock-scope",
@@ -827,6 +1038,90 @@ function optionalUuid(value: unknown, field: string): string | null {
   return requireUuid(value, field);
 }
 
+/**
+ * An ISO-8601 date-time WITH an explicit UTC designator or offset.
+ *
+ * The offset is required, not optional, and that is deliberate: `new Date("2026-07-29T14:05:00")` — no
+ * Z, no offset — is parsed as LOCAL time, so the instant recorded on `files.taken_at` would depend on
+ * the server's timezone. A string with no offset does not name an instant at all, which makes
+ * "round-trips to the instant the string names" meaningless for it.
+ *
+ * The component groups are deliberately loose (`\d{2}`, not `0[1-9]|1[0-2]`): the calendar check below
+ * is what decides validity, and encoding month/day ranges in a regex is where "31 April" gets accepted
+ * by a pattern that looks rigorous.
+ */
+const ISO_TIMESTAMP_PATTERN =
+  /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})$/;
+
+/**
+ * A timestamp that names a date THAT EXISTS.
+ *
+ * `Number.isNaN(new Date(value).getTime())` — the whole check this replaces — passes for
+ * `2026-02-30T00:00:00Z`, because JavaScript SILENTLY NORMALIZES an impossible day: February 30 becomes
+ * March 2, April 31 becomes May 1. `files.taken_at` then records a capture instant up to two days from
+ * the one the sender named, and every chronological view of the deal's evidence (everything orders on
+ * COALESCE(taken_at, created_at), files/service.ts:2031) misorders it — which is the exact problem
+ * storing `taken_at` structurally was meant to solve. Nothing later notices: the value is a perfectly
+ * valid timestamp, just not the right one.
+ *
+ * Verified rather than assumed, on this Node: `2026-02-30T00:00:00Z` and `2026-04-31T00:00:00Z` both
+ * parse WITHOUT NaN and both shift; `2026-13-01T00:00:00Z`, `2026-07-32T00:00:00Z` and
+ * `2026-07-29T25:00:00Z` are NaN and so were already refused. Only the silent-shift family was open,
+ * and it is the family that cannot be detected by parsing alone.
+ *
+ * CHECKED BY ROUND-TRIP ON THE STRING'S OWN CALENDAR COMPONENTS, not on the parsed instant. Building a
+ * UTC date from (year, month, day) and asking whether it still names that day is what exposes the
+ * normalization — and it has to be the string's components rather than the instant's, because a
+ * legitimate offset timestamp names a different UTC day on purpose ("2026-07-29T23:00:00-05:00" is
+ * 2026-07-30 in UTC and must be accepted).
+ *
+ * The calendar check runs BEFORE the parse check so an out-of-range month gets the calendar message
+ * rather than a generic "unparseable" — the two overlap for month/day and only the calendar check
+ * covers the silent-shift cases.
+ */
+function requireCalendarTimestamp(value: unknown, field: string): string {
+  const str = requireNonEmptyString(value, field);
+
+  const match = ISO_TIMESTAMP_PATTERN.exec(str);
+  if (!match) {
+    throw new AppError(
+      400,
+      `${field} must be an ISO-8601 timestamp with an explicit UTC designator or offset ` +
+        `(e.g. "2026-07-29T14:05:00Z"), received "${str}". Without an offset the string names a local ` +
+        `wall-clock time rather than an instant, and files.taken_at would record whatever the server's ` +
+        `timezone made of it.`
+    );
+  }
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const roundTrip = new Date(Date.UTC(year, month - 1, day));
+  if (
+    roundTrip.getUTCFullYear() !== year ||
+    roundTrip.getUTCMonth() !== month - 1 ||
+    roundTrip.getUTCDate() !== day
+  ) {
+    throw new AppError(
+      400,
+      `${field} "${str}" names a date that does not exist. JavaScript normalizes an impossible day ` +
+        `instead of rejecting it (February 30 becomes March 2, April 31 becomes May 1), so this would ` +
+        `have been stored on files.taken_at as ${roundTrip.toISOString().slice(0, 10)} and the deal's ` +
+        `evidence would sort as though the walkthrough happened on a different day.`
+    );
+  }
+
+  if (Number.isNaN(new Date(str).getTime())) {
+    throw new AppError(
+      400,
+      `${field} "${str}" is not a parseable timestamp (the calendar date exists, so the time-of-day or ` +
+        `offset is out of range).`
+    );
+  }
+
+  return str;
+}
+
 function requireFiniteNumber(value: unknown, field: string): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new AppError(400, `${field} must be a finite number`);
@@ -1043,9 +1338,12 @@ export function validateWalkthroughIngressPayload(input: unknown): WalkthroughIn
   // BUCKET, not just key. `buildFileDownloadUrlFromRecord` presigns against the CRM's configured
   // bucket and ignores `files.r2_bucket` (see getCrmFileBucket above), so recording a foreign bucket
   // produces a download link to an object that is not there — an estimator clicking the evidence gets
-  // a 404 with nothing to explain it. A cross-bucket copy is out of scope for this seam (it performs
-  // no object I/O at all), so the contact sheet has to be uploaded into the CRM's bucket before it is
-  // announced, and a payload that says otherwise is refused loudly here.
+  // a 404 with nothing to explain it. A cross-bucket COPY is still out of scope for this seam — and note
+  // that the older version of this comment said the seam "performs no object I/O at all", which stopped
+  // being true when R23 added the HEAD verification and R25 the thumbnail render. What it does now is
+  // READ from the CRM's own bucket (`getBucket()`, the only bucket `headObject`/`getObjectBuffer` reach);
+  // it still cannot fetch from a foreign one. So the contact sheet has to be uploaded into the CRM's
+  // bucket before it is announced, and a payload that says otherwise is refused loudly here.
   const contactSheetBucket = requireNonEmptyString(raw.contactSheetBucket, "contactSheetBucket");
   const crmBucket = getCrmFileBucket();
   if (contactSheetBucket !== crmBucket) {
@@ -1057,10 +1355,10 @@ export function validateWalkthroughIngressPayload(input: unknown): WalkthroughIn
     );
   }
 
-  const capturedAt = requireNonEmptyString(raw.capturedAt, "capturedAt");
-  if (Number.isNaN(new Date(capturedAt).getTime())) {
-    throw new AppError(400, "capturedAt must be a parseable timestamp");
-  }
+  // R24. STRICTLY, on the calendar — a "parseable" timestamp is not the same as a real date. See
+  // `requireCalendarTimestamp`: `2026-02-30T00:00:00Z` parses fine and silently becomes March 2 on
+  // `files.taken_at`.
+  const capturedAt = requireCalendarTimestamp(raw.capturedAt, "capturedAt");
 
   // Bounded because both of these are COMPOSED into varchar(500) columns on the `files` row — the very
   // first write of the ingress transaction — rather than merely stored in text. See
@@ -1175,9 +1473,13 @@ export function validateWalkthroughIngressPayload(input: unknown): WalkthroughIn
 export async function ingestWalkthrough({
   tenantDb,
   payload: rawPayload,
+  contactSheetStore,
 }: {
   tenantDb: TenantDb;
   payload: WalkthroughIngressPayload;
+  /** R23/R25. Object storage, injected — see `WalkthroughContactSheetStore` for why it is a required
+   *  port rather than an import or an optional dependency. */
+  contactSheetStore: WalkthroughContactSheetStore;
 }): Promise<WalkthroughIngressResult> {
   // Validated BEFORE the transaction opens, not inside it. `WalkthroughIngressPayload` is a
   // compile-time promise made by a caller across a network — the receiver checks it anyway. A
@@ -1257,14 +1559,39 @@ export async function ingestWalkthrough({
     // Postgres renders a `uuid` column lowercase, and the validator canonicalizes the payload id. See
     // `canonicalizeWalkthroughIngressId`.
     //
-    // INSIDE the transaction and under the lock, so the project cannot be re-parented between the check
-    // and the writes that depend on it.
+    // `FOR SHARE` — A ROW LOCK, and an earlier revision of this comment claimed the transaction alone
+    // was enough. It is not, and that claim was the more dangerous half of the bug: it told the next
+    // reader a hazard was handled.
+    //
+    // THE RACE. `upsertProjectMirror` (projects/service.ts:393-412) RE-PARENTS an existing project on
+    // every Procore sync — `ON CONFLICT (procore_project_id) DO UPDATE SET source_deal_id =
+    // COALESCE(EXCLUDED.source_deal_id, …)`. Without a row lock, a plain SELECT reads the OLD owning
+    // deal, that UPDATE commits, and this transaction then writes documents and extractions against a
+    // project that now belongs to somebody else. Nothing else stops it: the advisory lock above is keyed
+    // on (dealId, walkthroughId) and binds only other walkthrough ingresses — the projects table is not
+    // in its key space at all — and neither `estimate_source_documents.project_id` nor
+    // `estimate_extractions.project_id` carries an FK that would notice.
+    //
+    // WHY `FOR SHARE` AND NOT `FOR KEY SHARE`. VERIFIED rather than reasoned from the mode names, on
+    // real Postgres 16.14 with two genuinely concurrent connections: session A holds the lock, session B
+    // runs the re-parent UPDATE with `lock_timeout`, and the question is whether B blocks.
+    //   • no lock clause  → UPDATE proceeds immediately. The race, reproduced.
+    //   • `FOR KEY SHARE` → UPDATE proceeds immediately. `source_deal_id` is a NON-KEY column, and
+    //     permitting exactly that update is what KEY SHARE is FOR. It reads like a lock and isn't one
+    //     here.
+    //   • `FOR SHARE`     → UPDATE blocks (55P03 on lock_timeout, row unchanged). What we need.
+    //   • `FOR UPDATE`    → blocks too, but it is stronger than the property requires: it would also
+    //     block another walkthrough ingress that merely READS the same project, serializing two
+    //     unrelated deals' work. `FOR SHARE` lockers do not conflict with each other.
+    // The lock is held until this transaction ends, so the ownership answer is still true at the moment
+    // the writes below depend on it.
     if (payload.projectId !== null) {
       const [project] = await tx
         .select({ sourceDealId: projects.sourceDealId })
         .from(projects)
         .where(eq(projects.id, payload.projectId))
-        .limit(1);
+        .limit(1)
+        .for("share");
 
       if (!project) {
         throw new AppError(
@@ -1289,9 +1616,9 @@ export async function ingestWalkthrough({
     }
 
     // IDEMPOTENCY. A lost response is indistinguishable from a lost request, so trock-scope retries —
-    // and a retry must not double the deal's estimating rows. `contentHash` carries the walkthrough
-    // id, so (dealId, projectId, contentHash) identifies THIS walkthrough on THIS deal: the same
-    // triple document-service.ts:104-130 dedupes parsed uploads against. Found means the first call
+    // and a retry must not double the deal's estimating rows. `contentHash` carries the NAMESPACED
+    // walkthrough id, so (dealId, projectId, contentHash) identifies THIS walkthrough on THIS deal: the
+    // same triple document-service.ts:104-130 dedupes parsed uploads against. Found means the first call
     // already committed the whole chain, so the retry replays its ids and writes nothing. (Without
     // this: a retry reusing the contact-sheet key dies on `files.r2_key`'s unique index with a 23505,
     // and a retry that regenerated the key succeeds into a second document and a second set of rows.)
@@ -1308,16 +1635,21 @@ export async function ingestWalkthrough({
           payload.projectId === null
             ? isNull(estimateSourceDocuments.projectId)
             : eq(estimateSourceDocuments.projectId, payload.projectId),
-          eq(estimateSourceDocuments.contentHash, payload.walkthroughId),
-          // DOCUMENT TYPE, not just the hash. `contentHash` means different things to different
-          // producers: an ordinary upload stores the file's R2 KEY there (routes.ts, the
-          // createEstimateSourceDocument call passes `contentHash: uploadedFile.r2Key`), while a
-          // walkthrough stores the walkthrough id. Nothing makes those two namespaces disjoint, so
-          // without this predicate a walkthrough id that happens to equal some existing document's
-          // content hash on the same deal would make this lookup "find" that FOREIGN document and
-          // replay it — handing trock-scope a 200, a plan set's document id, and whatever extraction
-          // ids that document owns, while the walkthrough's own scope was never written at all. The
-          // guard is cheap and it keeps idempotency keyed on this producer's own records only.
+          // NAMESPACED, and it has to be the SAME spelling the writer stored — this comparison IS the
+          // idempotency key, so an unprefixed read against a prefixed write would miss every retry and
+          // build a second chain. See `walkthroughContentHash` for why the prefix exists (the collision
+          // runs both ways, and `createEstimateSourceDocument` has no documentType predicate to protect
+          // ITS side).
+          eq(estimateSourceDocuments.contentHash, walkthroughContentHash(payload.walkthroughId)),
+          // DOCUMENT TYPE, not just the hash — kept even though the prefix now makes the two namespaces
+          // disjoint, because it is what protects THIS side of the collision and it is free. `contentHash`
+          // means different things to different producers: an ordinary upload stores the file's R2 KEY
+          // there (routes.ts, the createEstimateSourceDocument call passes `contentHash:
+          // uploadedFile.r2Key`), while a walkthrough stores its namespaced export id. Without this
+          // predicate a walkthrough hash that happened to equal some existing document's content hash on
+          // the same deal would make this lookup "find" that FOREIGN document and replay it — handing
+          // trock-scope a 200, a plan set's document id, and whatever extraction ids that document owns,
+          // while the walkthrough's own scope was never written at all.
           eq(estimateSourceDocuments.documentType, "walkthrough")
         )
       )
@@ -1334,6 +1666,48 @@ export async function ingestWalkthrough({
           `Walkthrough ${payload.walkthroughId} already has a source document (${existing.id}) with ` +
             `no active parse run; its extractions cannot be displayed. Investigate before re-ingesting.`
         );
+      }
+
+      // R21. THE ENVELOPE, checked BEFORE the rows. A submission that announces a different contact
+      // sheet is not describing this document's artifact at all, so there is no point reconciling its
+      // rows against it — and the field most likely to have changed (the mime type) is the one that
+      // re-derives the R2 key, which is what makes the old response actively misleading. See
+      // `detectWalkthroughEnvelopeDrift`.
+      //
+      // Read from the `files` row rather than from `estimate_source_documents`, because the file row is
+      // the artifact record: it carries the mime type, the byte count, the capture instant and the
+      // derived key as separate columns, where the document's `filename` mashes the site label and the
+      // timestamp into one string that cannot name which of them moved.
+      const [storedSheet] = await tx
+        .select({
+          mimeType: files.mimeType,
+          fileSizeBytes: files.fileSizeBytes,
+          takenAt: files.takenAt,
+          displayName: files.displayName,
+          r2Key: files.r2Key,
+        })
+        .from(files)
+        .where(eq(files.id, existing.fileId));
+
+      // `estimate_source_documents.file_id` is NOT NULL with an FK to `files`, so this row exists. The
+      // guard is here so a hypothetical absence degrades to "cannot compare" rather than to a TypeError
+      // in the middle of a replay.
+      if (storedSheet) {
+        const envelopeDrift = detectWalkthroughEnvelopeDrift(storedSheet, payload);
+        if (envelopeDrift.length > 0) {
+          // Same 409 and the same reasoning as the row-level drift below: a retry replays what was
+          // stored and never rewrites it, so a submission describing a different artifact is a
+          // correction wearing a retry's clothes.
+          throw new AppError(
+            409,
+            `Walkthrough ${payload.walkthroughId} was already ingested on this deal as document ` +
+              `${existing.id}, and this submission describes a different contact sheet: ` +
+              `${envelopeDrift.join("; ")}. A retry replays what was stored and never rewrites it, so ` +
+              `this submission is not a retry — it is a correction, and returning the stored chain ` +
+              `would report success while leaving this deal pointing at the superseded artifact. ` +
+              `Re-export under a new walkthrough id, or land the correction through the export ledger.`
+          );
+        }
       }
 
       const existingRows = await tx
@@ -1456,6 +1830,78 @@ export async function ingestWalkthrough({
       payload.contactSheetMimeType
     );
 
+    // R23. THE OBJECT HAS TO ACTUALLY BE THERE, verified before the first write.
+    //
+    // The contract with trock-scope is that the sender uploads the contact sheet to the derived key
+    // BEFORE it posts — and until now nothing checked. A pre-upload that failed, is still in flight, or
+    // stored a different Content-Type or Content-Length than the payload declares produced a complete
+    // chain and a 201, and because retries REPLAY that chain there was no later attempt that fixed it.
+    // The estimator opens the evidence and gets a 404 with nothing to explain it.
+    //
+    // The same three checks `confirmUpload` (files/service.ts:773-785) makes, in the same order, with the
+    // same 400: one condition, one status code. The two `!= null` guards are its guards too — R2 may not
+    // report either header, and an absent header is not a mismatch.
+    //
+    // INSIDE the transaction, which is a real cost stated plainly: the advisory lock and a database
+    // connection are held across a HEAD round-trip and a bounded thumbnail render. It buys the ordering
+    // that matters — verification happens after the idempotency lookup has established this is a FRESH
+    // ingest, so a RETRY still replays without needing the object to still exist, and it happens before
+    // the first write, so a failed verification writes nothing. Verifying before the transaction would
+    // either re-verify on every retry or move the check to where the answer can go stale.
+    if (contactSheetStore.isConfigured()) {
+      const head = await contactSheetStore.head(contactSheetR2Key);
+      if (!head) {
+        throw new AppError(
+          400,
+          `Contact sheet for walkthrough ${payload.walkthroughId} is not in object storage at its ` +
+            `derived key "${contactSheetR2Key}". The key is derived from (dealId, projectId, ` +
+            `walkthroughId, contactSheetMimeType) and both sides of this contract compute it, so upload ` +
+            `the contact sheet to exactly that key and re-post. Nothing was written.`
+        );
+      }
+      if (head.contentType != null && head.contentType !== payload.contactSheetMimeType) {
+        throw new AppError(
+          400,
+          `Contact sheet at "${contactSheetR2Key}" has Content-Type "${head.contentType}", but this ` +
+            `walkthrough declares contactSheetMimeType "${payload.contactSheetMimeType}". The mime type ` +
+            `also decides the key's extension, so a disagreement here means the object at this key is ` +
+            `not the artifact being announced. Nothing was written.`
+        );
+      }
+      if (head.contentLength != null && head.contentLength !== payload.contactSheetBytes) {
+        throw new AppError(
+          400,
+          `Contact sheet at "${contactSheetR2Key}" has Content-Length ${head.contentLength}, but this ` +
+            `walkthrough declares contactSheetBytes ${payload.contactSheetBytes}. ` +
+            `files.file_size_bytes is what every download and quota reads, so the two have to agree. ` +
+            `Nothing was written.`
+        );
+      }
+    }
+
+    // R25. The list thumbnail, produced by the Files subsystem's OWN helpers rather than by a second
+    // derived key the sender would have to upload.
+    //
+    // A FALLBACK CHAIN, not a branch on the mime type: each helper self-gates
+    // (`isThumbnailableImage` / `isPdfThumbnailable`) and returns null when the type is not its own, so
+    // this composition does not have to be kept in sync with WALKTHROUGH_CONTACT_SHEET_MIME_TYPES.
+    // Exactly what `confirmUpload` (files/service.ts:801-804) does.
+    //
+    // BEST-EFFORT, matching that same posture: both helpers are time-bounded and neither throws, so a
+    // slow or undecodable sheet yields null and the list falls back to today's behaviour instead of
+    // failing an ingest over a tile. The object was just verified present, so the fetch has something to
+    // read.
+    let thumbnailR2Key = await contactSheetStore.generateImageThumbnail(
+      contactSheetR2Key,
+      payload.contactSheetMimeType
+    );
+    if (thumbnailR2Key === null) {
+      thumbnailR2Key = await contactSheetStore.generatePdfThumbnail(
+        contactSheetR2Key,
+        payload.contactSheetMimeType
+      );
+    }
+
     const fileId = await createWalkthroughContactSheetFile({
       tenantDb: tx,
       input: {
@@ -1463,6 +1909,7 @@ export async function ingestWalkthrough({
         walkthroughId: payload.walkthroughId,
         siteLabel: payload.siteLabel,
         r2Key: contactSheetR2Key,
+        thumbnailR2Key,
         // Equal to getCrmFileBucket() by validation above — the file is recorded against the bucket
         // its download will actually be presigned against.
         r2Bucket: payload.contactSheetBucket,

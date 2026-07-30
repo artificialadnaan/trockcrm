@@ -159,6 +159,7 @@ import {
   ingestWalkthrough,
   validateWalkthroughIngressPayload,
 } from "../estimating/walkthrough-ingress-service.js";
+import { createWalkthroughContactSheetStore } from "../estimating/walkthrough-contact-sheet-store.js";
 
 function buildRouteAuditContext(req: { user?: any; headers: Record<string, unknown>; ip?: string | undefined }) {
   const actor = buildAuditActorFromUser({
@@ -3443,6 +3444,12 @@ router.post("/:id/estimating/manual-rows/:recommendationId/promote-local-catalog
  *
  * The request is IDEMPOTENT on `walkthroughId`: a retry after a lost response replays the ids of the
  * chain the first call committed instead of building a second one (walkthrough-ingress-service.ts).
+ *
+ * THE CONTACT SHEET MUST ALREADY BE UPLOADED when this is posted, to the key the ingress DERIVES from
+ * (dealId, projectId, walkthroughId, contactSheetMimeType) — the body never carries a key. The ingress
+ * HEADs that object and compares its Content-Type and Content-Length to the declared ones before its
+ * first write, so a pre-upload that failed or is still in flight is a 400 naming the derived key rather
+ * than a 201 for a chain whose evidence 404s.
  */
 router.post("/:id/estimating/walkthrough-extractions", async (req, res, next) => {
   try {
@@ -3463,7 +3470,14 @@ router.post("/:id/estimating/walkthrough-extractions", async (req, res, next) =>
     const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
     if (!deal) throw new AppError(404, "Deal not found");
 
-    const result = await ingestWalkthrough({ tenantDb: req.tenantDb! as any, payload });
+    // R23/R25. Object storage is INJECTED, not imported by the ingress module — it verifies the sender's
+    // pre-uploaded contact sheet at the derived key before its first write, and renders the list
+    // thumbnail through the same helpers `confirmUpload` uses. See walkthrough-contact-sheet-store.ts.
+    const result = await ingestWalkthrough({
+      tenantDb: req.tenantDb! as any,
+      payload,
+      contactSheetStore: createWalkthroughContactSheetStore(),
+    });
 
     await req.commitTransaction!();
     res.status(201).json(result);
