@@ -158,6 +158,21 @@ const withDatSwiftPackage = (config, opts) =>
     return cfg;
   });
 
+/**
+ * Set DEVELOPMENT_TEAM in build settings.
+ *
+ * Prebuild does not carry the team over from eas.json, so a fresh ios/ has it unset. That
+ * breaks device signing, and it also silently empties `MWDAT.TeamID`, which is written as
+ * `$(DEVELOPMENT_TEAM)` and substituted by Xcode at build time — the SDK would receive a
+ * blank team with no indication why.
+ */
+const withDevelopmentTeam = (config, teamId) =>
+  withXcodeProject(config, (cfg) => {
+    if (!teamId) return cfg;
+    cfg.modResults.updateBuildProperty("DEVELOPMENT_TEAM", teamId);
+    return cfg;
+  });
+
 /** Copy the bridge sources next to AppDelegate so Xcode can compile them in-target. */
 const withBridgeSources = (config) =>
   withDangerousMod(config, [
@@ -196,12 +211,14 @@ const withWearablesDat = (config, options = {}) => {
     metaAppId: options.metaAppId ?? "0",
     clientToken: options.clientToken ?? null,
     version: options.version ?? DEFAULT_VERSION,
+    appleTeamId: options.appleTeamId ?? null,
   };
   // Order matters: sources must exist on disk before they are referenced in the pbxproj.
   let next = withDatInfoPlist(config, opts);
   next = withDatSwiftPackage(next, opts);
   next = withBridgeSources(next);
   next = withBridgeInTarget(next);
+  next = withDevelopmentTeam(next, opts.appleTeamId);
   return next;
 };
 

@@ -100,6 +100,9 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
         scheme: "trockcam",
         metaAppId: process.env.META_APP_ID ?? "0",
         clientToken: process.env.META_CLIENT_TOKEN ?? null,
+        // Prebuild does not carry the team over from eas.json; without it, device signing
+        // fails and MWDAT.TeamID resolves to an empty string.
+        appleTeamId: process.env.APPLE_TEAM_ID ?? "WKX5A3KC28",
       },
     ],
   ],
