@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { Linking, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
+import { FlatList, Linking, Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { theme } from "../../../src/theme/theme";
@@ -22,13 +22,18 @@ import {
 import { Badge, Button, Chip, EmptyState, LoadingState, SectionLabel } from "../../../src/components/ui";
 import { Banner } from "../../../src/components/Banner";
 import { ScreenHeader } from "../../../src/components/ScreenHeader";
-import { PhotoGrid } from "../../../src/components/PhotoGrid";
+import { PHOTO_GRID_COLUMNS, PhotoGridRow, usePhotoTileSize } from "../../../src/components/PhotoGrid";
 import { PhotoViewerModal } from "../../../src/components/PhotoViewerModal";
 import { ReportBuilder } from "../../../src/components/ReportBuilder";
 import { PhotoShareModal } from "../../../src/components/PhotoShareModal";
 import { Ionicons } from "@expo/vector-icons";
 import { RatingBadge } from "../../../src/components/RatingBadge";
 import { formatShortDate } from "../../../src/scorecards/detail-view";
+
+/** A row of the virtualized gallery: either a group heading or one row of thumbnails. */
+type GalleryItem =
+  | { kind: "label"; key: string; label: string }
+  | { kind: "row"; key: string; photos: FieldPhoto[] };
 
 const GROUPINGS: { value: PhotoGrouping; label: string }[] = [
   { value: "date", label: "Date" },
@@ -125,26 +130,29 @@ export default function ProjectDetailScreen() {
     }
   }
 
+  // The gallery flattened into list rows: a label per group, then that group's photos chunked into rows of
+  // PHOTO_GRID_COLUMNS. Keys are derived from photo ids (stable across refetches) rather than the index, so
+  // a refetch doesn't remount every row. The group label is part of the label key because two groups can
+  // legitimately share a name once a filter narrows them.
+  const tileSize = usePhotoTileSize();
+  const galleryItems = useMemo(() => {
+    const items: GalleryItem[] = [];
+    for (const group of groups) {
+      if (group.photos.length === 0) continue;
+      items.push({ kind: "label", key: `label:${group.label}`, label: group.label });
+      for (let i = 0; i < group.photos.length; i += PHOTO_GRID_COLUMNS) {
+        const rowPhotos = group.photos.slice(i, i + PHOTO_GRID_COLUMNS);
+        items.push({ kind: "row", key: `row:${group.label}:${rowPhotos[0].id}`, photos: rowPhotos });
+      }
+    }
+    return items;
+  }, [groups]);
+
   const refreshing = photosQuery.isRefetching || reportsQuery.isRefetching || scorecardsQuery.isRefetching;
 
-  return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
-      <ScreenHeader onBack={() => router.back()} title={toStr(params.name) || "Project"} />
-
-      <ScrollView
-        contentContainerStyle={styles.body}
-        refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={() => {
-              void photosQuery.refetch();
-              void reportsQuery.refetch();
-              void scorecardsQuery.refetch();
-            }}
-            tintColor={theme.color.brandRed}
-          />
-        }
-      >
+  // Everything above the gallery, handed to the list as its header so it scrolls with the photos.
+  const galleryHeader = (
+    <View style={styles.headerStack}>
         {/* Name lives in the persistent header band now; the body leads with stage + address + meta. */}
         <View style={{ gap: theme.space.xs }}>
           {params.stage ? <Badge label={toStr(params.stage)} /> : null}
@@ -242,88 +250,11 @@ export default function ProjectDetailScreen() {
           )}
         </View>
 
-        {/* Grouping + filters — only meaningful once there are photos to group/filter (#13). */}
-        {allPhotos.length > 0 ? (
-          <View style={{ gap: theme.space.sm }}>
-            <View style={styles.rowBetween}>
-              <SectionLabel>Group by</SectionLabel>
-              <Pressable onPress={() => setShowFilters((s) => !s)} hitSlop={10}>
-                <Text style={styles.linkMuted}>{showFilters ? "Hide filters" : "Filters"}</Text>
-              </Pressable>
-            </View>
-          <View style={styles.chipRow}>
-            {GROUPINGS.map((g) => (
-              <Chip key={g.value} label={g.label} selected={grouping === g.value} onPress={() => setGrouping(g.value)} />
-            ))}
-          </View>
-
-          {showFilters ? (
-            <View style={{ gap: theme.space.md, marginTop: theme.space.sm }}>
-              {availableCategories.length > 0 ? (
-                <View style={{ gap: theme.space.xs }}>
-                  <SectionLabel>Category</SectionLabel>
-                  <View style={styles.chipRow}>
-                    {availableCategories.map((c) => (
-                      <Chip
-                        key={c}
-                        label={categoryLabel(c === "uncategorized" ? null : c)}
-                        selected={categories.includes(c)}
-                        onPress={() => toggle(categories, c, setCategories)}
-                      />
-                    ))}
-                  </View>
-                </View>
-              ) : null}
-              {availableTags.length > 0 ? (
-                <View style={{ gap: theme.space.xs }}>
-                  <SectionLabel>Tags</SectionLabel>
-                  <View style={styles.chipRow}>
-                    {availableTags.map((t) => (
-                      <Chip key={t} label={t} selected={tags.includes(t)} onPress={() => toggle(tags, t, setTags)} />
-                    ))}
-                  </View>
-                </View>
-              ) : null}
-              {availableUploaders.length > 1 ? (
-                <View style={{ gap: theme.space.xs }}>
-                  <SectionLabel>Uploader</SectionLabel>
-                  <View style={styles.chipRow}>
-                    {availableUploaders.map((u) => (
-                      <Chip
-                        key={u.id}
-                        label={u.name}
-                        selected={uploaderIds.includes(u.id)}
-                        onPress={() => toggle(uploaderIds, u.id, setUploaderIds)}
-                      />
-                    ))}
-                  </View>
-                </View>
-              ) : null}
-            </View>
-            ) : null}
-          </View>
-        ) : null}
-
-        {/* Gallery */}
-        {photosQuery.isLoading ? (
-          <LoadingState label="Loading photos…" />
-        ) : flattened.length === 0 ? (
-          <EmptyState
-            title="No photos"
-            subtitle={allPhotos.length === 0 ? "Capture photos to see them here." : "No photos match these filters."}
-          />
-        ) : (
-          <View style={{ gap: theme.space.lg }}>
-            {groups.map((group) => (
-              <View key={group.label} style={{ gap: theme.space.sm }}>
-                <Text style={styles.groupLabel}>{group.label}</Text>
-                <PhotoGrid photos={group.photos} onPress={openPhoto} />
-              </View>
-            ))}
-          </View>
-        )}
-
-        {/* Scorecards — count on detail is the sole discoverability surface (no list badge, per non-goals). */}
+        {/* Scorecards — count on detail is the sole discoverability surface (no list badge, per non-goals).
+            ABOVE the gallery, directly under Reports, for the same reason Reports moved there: these rows
+            use the same styling as report rows and field users read them as reports too, so leaving them
+            under a few thousand photo tiles made the one section with an outstanding corrective action the
+            hardest thing on the screen to reach. Keep both lists together above the photo-scoped controls. */}
         <View style={{ gap: theme.space.sm }}>
           <SectionLabel>Scorecards ({scorecards.length})</SectionLabel>
           {scorecardsQuery.isLoading ? (
@@ -434,7 +365,121 @@ export default function ProjectDetailScreen() {
             })
           )}
         </View>
-      </ScrollView>
+
+        {/* Grouping + filters — only meaningful once there are photos to group/filter (#13). */}
+        {allPhotos.length > 0 ? (
+          <View style={{ gap: theme.space.sm }}>
+            <View style={styles.rowBetween}>
+              <SectionLabel>Group by</SectionLabel>
+              <Pressable onPress={() => setShowFilters((s) => !s)} hitSlop={10}>
+                <Text style={styles.linkMuted}>{showFilters ? "Hide filters" : "Filters"}</Text>
+              </Pressable>
+            </View>
+          <View style={styles.chipRow}>
+            {GROUPINGS.map((g) => (
+              <Chip key={g.value} label={g.label} selected={grouping === g.value} onPress={() => setGrouping(g.value)} />
+            ))}
+          </View>
+
+          {showFilters ? (
+            <View style={{ gap: theme.space.md, marginTop: theme.space.sm }}>
+              {availableCategories.length > 0 ? (
+                <View style={{ gap: theme.space.xs }}>
+                  <SectionLabel>Category</SectionLabel>
+                  <View style={styles.chipRow}>
+                    {availableCategories.map((c) => (
+                      <Chip
+                        key={c}
+                        label={categoryLabel(c === "uncategorized" ? null : c)}
+                        selected={categories.includes(c)}
+                        onPress={() => toggle(categories, c, setCategories)}
+                      />
+                    ))}
+                  </View>
+                </View>
+              ) : null}
+              {availableTags.length > 0 ? (
+                <View style={{ gap: theme.space.xs }}>
+                  <SectionLabel>Tags</SectionLabel>
+                  <View style={styles.chipRow}>
+                    {availableTags.map((t) => (
+                      <Chip key={t} label={t} selected={tags.includes(t)} onPress={() => toggle(tags, t, setTags)} />
+                    ))}
+                  </View>
+                </View>
+              ) : null}
+              {availableUploaders.length > 1 ? (
+                <View style={{ gap: theme.space.xs }}>
+                  <SectionLabel>Uploader</SectionLabel>
+                  <View style={styles.chipRow}>
+                    {availableUploaders.map((u) => (
+                      <Chip
+                        key={u.id}
+                        label={u.name}
+                        selected={uploaderIds.includes(u.id)}
+                        onPress={() => toggle(uploaderIds, u.id, setUploaderIds)}
+                      />
+                    ))}
+                  </View>
+                </View>
+              ) : null}
+            </View>
+            ) : null}
+          </View>
+        ) : null}
+    </View>
+  );
+
+  return (
+    <SafeAreaView style={styles.safe} edges={["top"]}>
+      <ScreenHeader onBack={() => router.back()} title={toStr(params.name) || "Project"} />
+
+      {/* The gallery is VIRTUALIZED. It used to be a ScrollView rendering every photo of every group,
+          which on a project with thousands of photos mounted thousands of native image views and held
+          each decoded thumbnail for as long as the screen stayed open — memory the photo viewer then had
+          to allocate its full-size decode on top of. A row at a time lets offscreen ones unmount. */}
+      <FlatList
+        data={galleryItems}
+        keyExtractor={(item) => item.key}
+        renderItem={({ item }) =>
+          item.kind === "label" ? (
+            <Text style={styles.groupLabel}>{item.label}</Text>
+          ) : (
+            <View style={styles.galleryRow}>
+              <PhotoGridRow photos={item.photos} size={tileSize} onPress={openPhoto} />
+            </View>
+          )
+        }
+        ListHeaderComponent={galleryHeader}
+        ListEmptyComponent={
+          photosQuery.isLoading ? (
+            <LoadingState label="Loading photos…" />
+          ) : (
+            <EmptyState
+              title="No photos"
+              subtitle={allPhotos.length === 0 ? "Capture photos to see them here." : "No photos match these filters."}
+            />
+          )
+        }
+        contentContainerStyle={styles.listContent}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => {
+              void photosQuery.refetch();
+              void reportsQuery.refetch();
+              void scorecardsQuery.refetch();
+            }}
+            tintColor={theme.color.brandRed}
+          />
+        }
+        // Row heights vary (a group label vs a thumbnail row), so no getItemLayout — these keep the
+        // mounted window small without it.
+        windowSize={7}
+        initialNumToRender={9}
+        maxToRenderPerBatch={9}
+        removeClippedSubviews
+      />
 
       {viewer !== null ? (
         <PhotoViewerModal photos={viewer.photos} initialIndex={viewer.index} visible projectDealId={dealId} onClose={() => setViewer(null)} />
@@ -466,7 +511,12 @@ export default function ProjectDetailScreen() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.surfaceApp },
-  body: { padding: theme.space.lg, gap: theme.space.lg, paddingBottom: theme.space.xxl },
+  // Replaces the old `body` style, which carried gap:lg. As a LIST content container that gap would apply
+  // between every row, spacing thumbnail rows 16pt apart instead of the grid's 4 — so spacing is per item
+  // now: rows sit tight on the grid's own gutter, group headings get real separation.
+  listContent: { padding: theme.space.lg, paddingBottom: theme.space.xxl },
+  headerStack: { gap: theme.space.lg, marginBottom: theme.space.lg },
+  galleryRow: { marginBottom: 4 },
   address: { fontFamily: theme.font.body, fontSize: 14, color: theme.color.textMuted },
   meta: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted },
   actions: { flexDirection: "row", gap: theme.space.md },
@@ -475,7 +525,14 @@ const styles = StyleSheet.create({
   // Muted so the "Filters" toggle doesn't compete with the red primary "Add photos".
   linkMuted: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textMuted },
   chipRow: { flexDirection: "row", flexWrap: "wrap", gap: theme.space.sm },
-  groupLabel: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textPrimary },
+  groupLabel: {
+    fontFamily: theme.font.semibold,
+    fontSize: 15,
+    color: theme.color.textPrimary,
+    // Was inherited from the old nested gaps; now that every group heading is a list row it carries its own.
+    marginTop: theme.space.md,
+    marginBottom: theme.space.sm,
+  },
   reportRow: {
     flexDirection: "row",
     alignItems: "center",

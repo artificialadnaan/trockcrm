@@ -2028,7 +2028,12 @@ export async function getDealPhotoTimeline(
     .from(files)
     .leftJoin(users, eq(users.id, files.uploadedBy))
     .where(conditions)
-    .orderBy(desc(sql`COALESCE(${files.takenAt}, ${files.createdAt})`))
+    // Unique tiebreak, mirroring getFiles' stable paging. COALESCE(taken_at, created_at) ties in bulk —
+    // a CompanyCam import carries per-second captured_at values, and rows with a null taken_at all fall
+    // back to the same created_at — and LIMIT/OFFSET over a non-deterministic order lets one row come
+    // back on two pages while another never comes back at all. A client that concatenates 18 pages then
+    // holds duplicate ids, which is a blank-cell hazard for any list keyed on id.
+    .orderBy(desc(sql`COALESCE(${files.takenAt}, ${files.createdAt})`), asc(files.id))
     .limit(limit)
     .offset(offset);
 

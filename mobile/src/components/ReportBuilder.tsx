@@ -2,9 +2,16 @@ import React, { useState } from "react";
 import { Modal, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { Image as ExpoImage } from "expo-image";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { Ionicons } from "@expo/vector-icons";
 import { useAuth } from "../auth/AuthContext";
 import { generateReport, previewReport } from "../api/endpoints";
-import type { FieldPhoto, GeneratedReport, ReportGroupBy, ReportPreviewResponse } from "../api/types";
+import type {
+  FieldPhoto,
+  FieldReportSection,
+  GeneratedReport,
+  ReportGroupBy,
+  ReportPreviewResponse,
+} from "../api/types";
 import { theme } from "../theme/theme";
 import { Button, Chip, SectionLabel, TextInput } from "./ui";
 import { Banner } from "./Banner";
@@ -48,6 +55,11 @@ export function ReportBuilder({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [groupBy, setGroupBy] = useState<ReportGroupBy>("none");
   const [preview, setPreview] = useState<ReportPreviewResponse | null>(null);
+  // A MUTABLE copy of the previewed sections — the order here is the order the PDF is printed in. Both
+  // endpoints reindex by the client's photoIds array rather than re-sorting, and the "Photo N" badge is a
+  // running counter over that same array, so reordering here renumbers the PDF correctly for free.
+  // Kept separate from `preview` so the untouched server response stays available for the cover data.
+  const [sections, setSections] = useState<FieldReportSection[]>([]);
   const [title, setTitle] = useState("");
   const [execSummary, setExecSummary] = useState("");
   // Held while the summary is being dictated/transcribed so Generate can't fire and drop the transcript.
@@ -62,6 +74,7 @@ export function ReportBuilder({
     setSelected(new Set());
     setGroupBy("none");
     setPreview(null);
+    setSections([]);
     setTitle("");
     setExecSummary("");
     setSummaryDictating(false);
@@ -100,6 +113,7 @@ export function ReportBuilder({
         groupBy,
       });
       setPreview(result);
+      setSections(result.sections);
       setTitle(result.cover.reportTitle);
       const initialDescriptions: Record<string, string> = {};
       for (const section of result.sections) {
@@ -115,6 +129,31 @@ export function ReportBuilder({
     }
   }
 
+  /**
+   * Move one photo a single position within its section. Mirrors the web builder's reorderPhoto: splice the
+   * photo out and back in at index+direction, leaving every other photo's relative order untouched. Bounds
+   * are a no-op rather than a wrap, and the controls are disabled at the ends anyway.
+   *
+   * Up/down controls rather than drag-and-drop deliberately: every mainstream RN drag-list needs
+   * react-native-reanimated, which this app does not have — adding it means a new native dependency in an
+   * app CI never compiles. Tap targets also beat a drag gesture on a jobsite, in gloves.
+   */
+  function reorderPhoto(sectionId: string, photoId: string, direction: -1 | 1) {
+    setSections((current) =>
+      current.map((section) => {
+        if (section.id !== sectionId) return section;
+        const index = section.photos.findIndex((photo) => photo.id === photoId);
+        if (index < 0) return section;
+        const nextIndex = index + direction;
+        if (nextIndex < 0 || nextIndex >= section.photos.length) return section;
+        const photos = [...section.photos];
+        const [moved] = photos.splice(index, 1);
+        photos.splice(nextIndex, 0, moved);
+        return { ...section, photos };
+      }),
+    );
+  }
+
   async function runGenerate() {
     if (!preview) return;
     setError(null);
@@ -127,7 +166,8 @@ export function ReportBuilder({
           reportTitle: title,
           executiveSummary: execSummary,
           cover: preview.cover,
-          sections: preview.sections,
+          // The reordered copy, not the server's original — this is what carries the user's ordering.
+          sections,
           sectionTitles,
           descriptions,
         }),
@@ -233,7 +273,7 @@ export function ReportBuilder({
                 }
               />
             ) : null}
-            {preview?.sections.map((section) => (
+            {sections.map((section) => (
               <View key={section.id} style={{ gap: theme.space.sm, marginTop: theme.space.lg }}>
                 <SectionLabel>Section</SectionLabel>
                 <TextInput
@@ -241,7 +281,10 @@ export function ReportBuilder({
                   onChangeText={(text) => setSectionTitles((prev) => ({ ...prev, [section.id]: text }))}
                   placeholder="Section title"
                 />
-                {section.photos.map((photo) => (
+                {/* The PDF prints 3 photos per page in exactly this order, so the position number is the
+                    page-composition control, not decoration. */}
+                <Text style={styles.hint}>Photos print in this order — use ↑ ↓ to rearrange.</Text>
+                {section.photos.map((photo, photoIndex) => (
                   <View key={photo.id} style={styles.editPhoto}>
                     {photo.imageUrl ? (
                       <ExpoImage
@@ -262,6 +305,52 @@ export function ReportBuilder({
                       multiline
                       style={{ flex: 1, minHeight: 64, textAlignVertical: "top", paddingTop: 10 }}
                     />
+                    <View style={styles.reorderColumn}>
+                      <Text style={styles.reorderPosition}>
+                        {photoIndex + 1}/{section.photos.length}
+                      </Text>
+                      <Pressable
+                        onPress={() => reorderPhoto(section.id, photo.id, -1)}
+                        disabled={photoIndex === 0}
+                        hitSlop={2}
+                        accessibilityRole="button"
+                        // Leads with the POSITION because displayName is not unique — names seed from the
+                        // uploader's filename and are freely editable, so a section routinely holds two
+                        // photos called IMG_0001. Position first also matches what the control does.
+                        accessibilityLabel={`Move photo ${photoIndex + 1} of ${section.photos.length} earlier, ${photo.displayName}`}
+                        style={({ pressed }) => [
+                          styles.reorderButton,
+                          photoIndex === 0 && styles.reorderButtonDisabled,
+                          pressed && { opacity: 0.6 },
+                        ]}
+                      >
+                        <Ionicons
+                          name="chevron-up"
+                          size={18}
+                          color={photoIndex === 0 ? theme.color.textMuted : theme.color.brandRed}
+                        />
+                      </Pressable>
+                      <Pressable
+                        onPress={() => reorderPhoto(section.id, photo.id, 1)}
+                        disabled={photoIndex === section.photos.length - 1}
+                        hitSlop={2}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Move photo ${photoIndex + 1} of ${section.photos.length} later, ${photo.displayName}`}
+                        style={({ pressed }) => [
+                          styles.reorderButton,
+                          photoIndex === section.photos.length - 1 && styles.reorderButtonDisabled,
+                          pressed && { opacity: 0.6 },
+                        ]}
+                      >
+                        <Ionicons
+                          name="chevron-down"
+                          size={18}
+                          color={
+                            photoIndex === section.photos.length - 1 ? theme.color.textMuted : theme.color.brandRed
+                          }
+                        />
+                      </Pressable>
+                    </View>
                   </View>
                 ))}
               </View>
@@ -308,6 +397,22 @@ const styles = StyleSheet.create({
   gridFooter: { marginTop: theme.space.lg, gap: theme.space.sm },
   groupRow: { flexDirection: "row", flexWrap: "wrap", gap: theme.space.sm },
   editPhoto: { flexDirection: "row", gap: theme.space.md, alignItems: "flex-start" },
+  // The gap must stay WIDER than twice the buttons' hitSlop, or the two slop rectangles overlap and the
+  // later sibling (down) claims the shared band — including part of the up button's own visible frame, so a
+  // tap aimed at the bottom of "up" would move the photo DOWN. gap 8 vs hitSlop 2 leaves 4pt of clearance.
+  reorderColumn: { alignItems: "center", gap: theme.space.sm, paddingTop: 2 },
+  reorderPosition: { fontFamily: theme.font.semibold, fontSize: 11, color: theme.color.textMuted },
+  reorderButton: {
+    // 44x40 + 2pt slop on each side = a 48x44 touch target, the iOS minimum. These get used in gloves.
+    width: 44,
+    height: 40,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: theme.radius.sm,
+    borderWidth: 1,
+    borderColor: theme.color.border,
+  },
+  reorderButtonDisabled: { opacity: 0.4 },
   editThumb: { width: 72, height: 72, borderRadius: theme.radius.sm, backgroundColor: theme.color.surfaceMuted },
   footer: {
     padding: theme.space.lg,
