@@ -242,88 +242,11 @@ export default function ProjectDetailScreen() {
           )}
         </View>
 
-        {/* Grouping + filters — only meaningful once there are photos to group/filter (#13). */}
-        {allPhotos.length > 0 ? (
-          <View style={{ gap: theme.space.sm }}>
-            <View style={styles.rowBetween}>
-              <SectionLabel>Group by</SectionLabel>
-              <Pressable onPress={() => setShowFilters((s) => !s)} hitSlop={10}>
-                <Text style={styles.linkMuted}>{showFilters ? "Hide filters" : "Filters"}</Text>
-              </Pressable>
-            </View>
-          <View style={styles.chipRow}>
-            {GROUPINGS.map((g) => (
-              <Chip key={g.value} label={g.label} selected={grouping === g.value} onPress={() => setGrouping(g.value)} />
-            ))}
-          </View>
-
-          {showFilters ? (
-            <View style={{ gap: theme.space.md, marginTop: theme.space.sm }}>
-              {availableCategories.length > 0 ? (
-                <View style={{ gap: theme.space.xs }}>
-                  <SectionLabel>Category</SectionLabel>
-                  <View style={styles.chipRow}>
-                    {availableCategories.map((c) => (
-                      <Chip
-                        key={c}
-                        label={categoryLabel(c === "uncategorized" ? null : c)}
-                        selected={categories.includes(c)}
-                        onPress={() => toggle(categories, c, setCategories)}
-                      />
-                    ))}
-                  </View>
-                </View>
-              ) : null}
-              {availableTags.length > 0 ? (
-                <View style={{ gap: theme.space.xs }}>
-                  <SectionLabel>Tags</SectionLabel>
-                  <View style={styles.chipRow}>
-                    {availableTags.map((t) => (
-                      <Chip key={t} label={t} selected={tags.includes(t)} onPress={() => toggle(tags, t, setTags)} />
-                    ))}
-                  </View>
-                </View>
-              ) : null}
-              {availableUploaders.length > 1 ? (
-                <View style={{ gap: theme.space.xs }}>
-                  <SectionLabel>Uploader</SectionLabel>
-                  <View style={styles.chipRow}>
-                    {availableUploaders.map((u) => (
-                      <Chip
-                        key={u.id}
-                        label={u.name}
-                        selected={uploaderIds.includes(u.id)}
-                        onPress={() => toggle(uploaderIds, u.id, setUploaderIds)}
-                      />
-                    ))}
-                  </View>
-                </View>
-              ) : null}
-            </View>
-            ) : null}
-          </View>
-        ) : null}
-
-        {/* Gallery */}
-        {photosQuery.isLoading ? (
-          <LoadingState label="Loading photos…" />
-        ) : flattened.length === 0 ? (
-          <EmptyState
-            title="No photos"
-            subtitle={allPhotos.length === 0 ? "Capture photos to see them here." : "No photos match these filters."}
-          />
-        ) : (
-          <View style={{ gap: theme.space.lg }}>
-            {groups.map((group) => (
-              <View key={group.label} style={{ gap: theme.space.sm }}>
-                <Text style={styles.groupLabel}>{group.label}</Text>
-                <PhotoGrid photos={group.photos} onPress={openPhoto} />
-              </View>
-            ))}
-          </View>
-        )}
-
-        {/* Scorecards — count on detail is the sole discoverability surface (no list badge, per non-goals). */}
+        {/* Scorecards — count on detail is the sole discoverability surface (no list badge, per non-goals).
+            ABOVE the gallery, directly under Reports, for the same reason Reports moved there: these rows
+            use the same styling as report rows and field users read them as reports too, so leaving them
+            under a few thousand photo tiles made the one section with an outstanding corrective action the
+            hardest thing on the screen to reach. Keep both lists together above the photo-scoped controls. */}
         <View style={{ gap: theme.space.sm }}>
           <SectionLabel>Scorecards ({scorecards.length})</SectionLabel>
           {scorecardsQuery.isLoading ? (
@@ -434,6 +357,87 @@ export default function ProjectDetailScreen() {
             })
           )}
         </View>
+
+        {/* Grouping + filters — only meaningful once there are photos to group/filter (#13). */}
+        {allPhotos.length > 0 ? (
+          <View style={{ gap: theme.space.sm }}>
+            <View style={styles.rowBetween}>
+              <SectionLabel>Group by</SectionLabel>
+              <Pressable onPress={() => setShowFilters((s) => !s)} hitSlop={10}>
+                <Text style={styles.linkMuted}>{showFilters ? "Hide filters" : "Filters"}</Text>
+              </Pressable>
+            </View>
+          <View style={styles.chipRow}>
+            {GROUPINGS.map((g) => (
+              <Chip key={g.value} label={g.label} selected={grouping === g.value} onPress={() => setGrouping(g.value)} />
+            ))}
+          </View>
+
+          {showFilters ? (
+            <View style={{ gap: theme.space.md, marginTop: theme.space.sm }}>
+              {availableCategories.length > 0 ? (
+                <View style={{ gap: theme.space.xs }}>
+                  <SectionLabel>Category</SectionLabel>
+                  <View style={styles.chipRow}>
+                    {availableCategories.map((c) => (
+                      <Chip
+                        key={c}
+                        label={categoryLabel(c === "uncategorized" ? null : c)}
+                        selected={categories.includes(c)}
+                        onPress={() => toggle(categories, c, setCategories)}
+                      />
+                    ))}
+                  </View>
+                </View>
+              ) : null}
+              {availableTags.length > 0 ? (
+                <View style={{ gap: theme.space.xs }}>
+                  <SectionLabel>Tags</SectionLabel>
+                  <View style={styles.chipRow}>
+                    {availableTags.map((t) => (
+                      <Chip key={t} label={t} selected={tags.includes(t)} onPress={() => toggle(tags, t, setTags)} />
+                    ))}
+                  </View>
+                </View>
+              ) : null}
+              {availableUploaders.length > 1 ? (
+                <View style={{ gap: theme.space.xs }}>
+                  <SectionLabel>Uploader</SectionLabel>
+                  <View style={styles.chipRow}>
+                    {availableUploaders.map((u) => (
+                      <Chip
+                        key={u.id}
+                        label={u.name}
+                        selected={uploaderIds.includes(u.id)}
+                        onPress={() => toggle(uploaderIds, u.id, setUploaderIds)}
+                      />
+                    ))}
+                  </View>
+                </View>
+              ) : null}
+            </View>
+            ) : null}
+          </View>
+        ) : null}
+
+        {/* Gallery */}
+        {photosQuery.isLoading ? (
+          <LoadingState label="Loading photos…" />
+        ) : flattened.length === 0 ? (
+          <EmptyState
+            title="No photos"
+            subtitle={allPhotos.length === 0 ? "Capture photos to see them here." : "No photos match these filters."}
+          />
+        ) : (
+          <View style={{ gap: theme.space.lg }}>
+            {groups.map((group) => (
+              <View key={group.label} style={{ gap: theme.space.sm }}>
+                <Text style={styles.groupLabel}>{group.label}</Text>
+                <PhotoGrid photos={group.photos} onPress={openPhoto} />
+              </View>
+            ))}
+          </View>
+        )}
       </ScrollView>
 
       {viewer !== null ? (
