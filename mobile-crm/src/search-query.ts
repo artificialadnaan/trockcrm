@@ -44,3 +44,34 @@ export function searchIsTooShort(raw: string, minLength: number = MIN_SEARCH_LEN
   const trimmed = raw.trim();
   return trimmed.length > 0 && trimmed.length < minLength;
 }
+
+/**
+ * SPLIT a result set into what this app can open and what it merely found.
+ *
+ * `/search` is cross-office for an admin or director: the server searches every accessible office and
+ * stamps each hit with its `officeSlug` (search/service.ts:302). Every OTHER request this app makes
+ * carries the active office's `x-office-id`, and offices are separate Postgres schemas — so following a
+ * hit from elsewhere asks the wrong schema for that id and gets a 404. The app cannot switch to it
+ * either; office switching is not built yet.
+ *
+ * So a record that cannot be opened is not offered as a row. It is COUNTED instead, because silently
+ * dropping matches is how a search box teaches someone it does not have their data.
+ *
+ * Both `null` cases mean "no office information to act on" and therefore pass: a single-office response
+ * stamps no slug, and the office list is a cached side-request that can still be in flight. Filtering on
+ * an unknown active office would empty the screen for the ordinary single-office rep, which is the far
+ * worse failure.
+ */
+export function partitionByOffice<T extends { officeSlug?: string }>(
+  hits: readonly T[],
+  activeOfficeSlug: string | null
+): { openable: T[]; elsewhere: number } {
+  if (!activeOfficeSlug) return { openable: [...hits], elsewhere: 0 };
+  const openable: T[] = [];
+  let elsewhere = 0;
+  for (const hit of hits) {
+    if (!hit.officeSlug || hit.officeSlug === activeOfficeSlug) openable.push(hit);
+    else elsewhere += 1;
+  }
+  return { openable, elsewhere };
+}

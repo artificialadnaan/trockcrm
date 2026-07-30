@@ -8,13 +8,14 @@ import * as searchApi from "../../src/api/endpoints/search";
 import type { SearchEntityType, SearchResult } from "../../src/api/endpoints/search";
 import { useAuth } from "../../src/auth/AuthContext";
 import { useQueryScope } from "../../src/auth/useOfficeId";
+import { useOffices } from "../../src/auth/useOffices";
 import { canAccessSurface } from "../../src/auth/surfaces";
 import { BackLink } from "../../src/components/BackLink";
 import { RetryBlock } from "../../src/components/RetryBlock";
 import { useGoBack } from "../../src/lib/go-back";
 import { useDebouncedSearch } from "../../src/lib/use-debounced-search";
 import { qk } from "../../src/query/keys";
-import { MIN_SEARCH_LENGTH, searchIsTooShort } from "../../src/search-query";
+import { MIN_SEARCH_LENGTH, partitionByOffice, searchIsTooShort } from "../../src/search-query";
 import { theme } from "../../src/theme/theme";
 
 /**
@@ -32,6 +33,8 @@ export default function SearchScreen() {
   const goBack = useGoBack("/(app)/dashboard");
   const { fetcher, session } = useAuth();
   const scope = useQueryScope();
+  const { activeOffice } = useOffices();
+  const activeOfficeSlug = activeOffice?.slug ?? null;
   const [raw, setRaw] = useState("");
   const q = useDebouncedSearch(raw);
   const tooShort = searchIsTooShort(raw);
@@ -51,18 +54,20 @@ export default function SearchScreen() {
    * `files` is dropped: there is no file surface here yet, so a row for one would be a result that
    * cannot be tapped. A search that returns things you cannot reach teaches people not to search.
    */
-  const results = useMemo(() => {
+  const { openable: results, elsewhere: otherOfficeHits } = useMemo(() => {
     const data = query.data;
-    if (!data) return [];
-    const openable: SearchResult[] = [
+    if (!data) return { openable: [] as SearchResult[], elsewhere: 0 };
+    const permitted: SearchResult[] = [
       ...(canAccessSurface(role, "deals") ? data.deals : []),
       ...(canAccessSurface(role, "leads") ? data.leads : []),
       ...(canAccessSurface(role, "contacts") ? data.contacts : []),
       ...(canAccessSurface(role, "companies") ? data.companies : []),
       ...(canAccessSurface(role, "properties") ? data.properties : []),
     ];
-    return openable.sort((a, b) => b.rank - a.rank);
-  }, [query.data, role]);
+    // Office BEFORE rank: a hit this app cannot open must not occupy a slot at the top of the list.
+    const split = partitionByOffice(permitted, activeOfficeSlug);
+    return { openable: split.openable.sort((a, b) => b.rank - a.rank), elsewhere: split.elsewhere };
+  }, [query.data, role, activeOfficeSlug]);
 
   const offline = query.error instanceof ApiError && query.error.status === 0;
 
@@ -116,6 +121,14 @@ export default function SearchScreen() {
           contentContainerStyle={styles.body}
           keyboardShouldPersistTaps="handled"
           ListEmptyComponent={<Text style={styles.idle}>Nothing matches &ldquo;{q}&rdquo;.</Text>}
+          ListFooterComponent={
+            otherOfficeHits > 0 ? (
+              <Text testID="search-other-office" style={styles.otherOffice}>
+                {otherOfficeHits} more {otherOfficeHits === 1 ? "match is" : "matches are"} in another
+                office. Open them on the web — this app works in one office at a time.
+              </Text>
+            ) : null
+          }
           renderItem={({ item }) => (
             <Pressable
               testID={`search-${item.entityType}-${item.id}`}
@@ -235,4 +248,5 @@ const styles = StyleSheet.create({
     overflow: "hidden",
   },
   rowMeta: { ...theme.type.small, color: theme.color.textSecondary },
+  otherOffice: { ...theme.type.small, color: theme.color.textMuted, paddingVertical: theme.space.md },
 });

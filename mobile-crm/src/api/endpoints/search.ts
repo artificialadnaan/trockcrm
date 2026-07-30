@@ -25,6 +25,14 @@ export type SearchResult = {
   tertiaryLabel?: string;
   rank: number;
   isChangeOrder?: boolean;
+  /**
+   * WHICH OFFICE the record lives in.
+   *
+   * Search is cross-office for an admin or director with multi-office access, and this is how a
+   * result says so. It matters because every other request carries the ACTIVE office's `x-office-id`,
+   * so a hit from elsewhere would be fetched from the wrong tenant.
+   */
+  officeSlug?: string;
 };
 
 export type SearchResponse = {

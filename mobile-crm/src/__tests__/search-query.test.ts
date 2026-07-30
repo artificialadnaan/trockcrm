@@ -1,4 +1,9 @@
-import { MIN_SEARCH_LENGTH, effectiveSearchQuery, searchIsTooShort } from "../search-query";
+import {
+  MIN_SEARCH_LENGTH,
+  effectiveSearchQuery,
+  partitionByOffice,
+  searchIsTooShort,
+} from "../search-query";
 
 describe("what a typed search box asks the server for", () => {
   it("sends nothing for an empty box", () => {
@@ -45,5 +50,44 @@ describe("what a typed search box asks the server for", () => {
     expect(effectiveSearchQuery("bi", 3)).toBe("");
     expect(effectiveSearchQuery("bis", 3)).toBe("bis");
     expect(MIN_SEARCH_LENGTH).toBe(2);
+  });
+});
+
+describe("which search hits this app can actually open", () => {
+  const hits = [
+    { id: "a", officeSlug: "dallas" },
+    { id: "b", officeSlug: "austin" },
+    { id: "c", officeSlug: "dallas" },
+  ];
+
+  it("keeps hits from the active office and counts the rest", () => {
+    // Offices are separate Postgres schemas and every other request sends the ACTIVE office's
+    // x-office-id, so an austin record fetched from dallas is a 404 — not a row worth offering.
+    const { openable, elsewhere } = partitionByOffice(hits, "dallas");
+    expect(openable.map((h) => h.id)).toEqual(["a", "c"]);
+    expect(elsewhere).toBe(1);
+  });
+
+  it("passes everything through when the active office is not known yet", () => {
+    // The office list is a cached side-request. Filtering against a null active office would empty the
+    // screen for the ordinary single-office rep — a far worse failure than showing one unopenable row.
+    const { openable, elsewhere } = partitionByOffice(hits, null);
+    expect(openable).toHaveLength(3);
+    expect(elsewhere).toBe(0);
+  });
+
+  it("passes hits that carry no office at all", () => {
+    // A single-office search response stamps no slug; absence means "not cross-office", not "elsewhere".
+    const noSlug: Array<{ id: string; officeSlug?: string }> = [{ id: "a" }, { id: "b" }];
+    const { openable, elsewhere } = partitionByOffice(noSlug, "dallas");
+    expect(openable).toHaveLength(2);
+    expect(elsewhere).toBe(0);
+  });
+
+  it("never counts a hit it also shows", () => {
+    for (const active of ["dallas", "austin", "houston"]) {
+      const { openable, elsewhere } = partitionByOffice(hits, active);
+      expect(openable.length + elsewhere).toBe(hits.length);
+    }
   });
 });
