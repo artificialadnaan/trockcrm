@@ -53,12 +53,27 @@ import { resolveFieldScorecardRecipients } from "../shared/src/lib/fieldScorecar
  *    recipient and the item text before anything is written. Read it.
  *
  * USAGE
+ * Build shared FIRST. Importing the server service resolves @trock-crm/shared/schema to shared/dist, so on a
+ * clean checkout every command below fails at import time — before argument or database validation — with a
+ * module-not-found that says nothing about the real cause. The premerge sequence happens to build shared
+ * first, which is what kept this hidden.
+ *
+ *   npm run build --workspace=shared
  *   node --import tsx scripts/backfill-corrective-actions.ts                    # dry run, all candidates
  *   node --import tsx scripts/backfill-corrective-actions.ts --card <uuid>      # dry run, one card
  *   node --import tsx scripts/backfill-corrective-actions.ts --card <uuid> --commit
+ *
+ * FIELD_SCORECARD_EMAIL_RECIPIENTS should hold the DEPLOYED WORKER's value, so the plan can show the
+ * oversight watchers that worker will mail. Committing without it requires --allow-unpreviewable-oversight.
  */
 
 const COMMIT = process.argv.includes("--commit");
+/**
+ * Commit even though this process cannot see FIELD_SCORECARD_EMAIL_RECIPIENTS, and therefore cannot show who
+ * the deployed worker will mail the oversight notice to. An explicit opt-out, never a default: the whole
+ * value of the plan is that nobody is mailed who was not printed first.
+ */
+const ALLOW_UNPREVIEWABLE_OVERSIGHT = process.argv.includes("--allow-unpreviewable-oversight");
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
@@ -165,6 +180,12 @@ async function main() {
   if (CARD_ARG) console.log(`scoped to card ${CARD_ARG}`);
   console.log();
 
+  // Whether `--card` matched a candidate in ANY office. A syntactically valid but mistyped UUID, or a real
+  // card that no longer meets the candidate predicate, otherwise takes the `continue` in every office and the
+  // run exits 0 reporting "0 card(s) would be backfilled" — indistinguishable from "nothing left to do". A
+  // wrapper checking the exit code records a targeted production backfill as completed having examined
+  // nothing at all.
+  let scopedCardSeen = false;
   let planned = 0;
   let skipped = 0;
   let failed = 0;
@@ -190,10 +211,7 @@ async function main() {
     );
     const scoped = CARD_ARG ? candidates.filter((c) => c.id === CARD_ARG) : candidates;
     if (scoped.length === 0) continue;
-
-    const { rows: roster } = await pool.query<RosterRow>(
-      `SELECT id, name, role, is_active AS "isActive", email FROM "${officeSchema}".field_responders`,
-    );
+    scopedCardSeen = scopedCardSeen || scoped.length > 0;
 
     console.log(`### ${officeSchema} — ${scoped.length} candidate(s)\n`);
 
@@ -230,8 +248,12 @@ async function main() {
               -- cycle, while the notification worker and the responder route both exclude inactive
               -- scorecards — no email, and a response flow nobody can reach.
               AND sc.is_active = true
-            -- OF sc: Postgres refuses FOR UPDATE on the nullable side of the outer join above.
-            FOR UPDATE OF sc`,
+            -- sc AND d: locking only the scorecard left the browsable flag a read-time answer. A deal deactivated
+            -- or moved to a Lost/terminal stage between this SELECT and the COMMIT would still pass the check
+            -- here, and the cycle would be seeded against a deal the notification worker then skips and the
+            -- responder route rejects — an open cycle nobody is told about and nobody can answer.
+            -- psc is excluded because Postgres refuses FOR UPDATE on the nullable side of the outer join.
+            FOR UPDATE OF sc, d`,
           [WON_BROWSABLE_SLUGS, LOST_EXCLUDED_SLUGS, card.id],
         );
         const row = locked.rows[0];
@@ -261,6 +283,23 @@ async function main() {
         }
 
         // ── Recipients, matched from the LOCKED names ────────────────────────────────────────────────────
+        // The roster is read HERE — inside the card's transaction, immediately before matching, and locked —
+        // not once per office outside it. An office-level snapshot is stale for every card after the first:
+        // a responder added, renamed, re-roled or reactivated in between would be matched against yesterday's
+        // roster, and the failure is silent in the worst direction. A newly-added SAME-NAMED person makes a
+        // formerly unique name ambiguous, and the matcher's whole contract is that an ambiguous name resolves
+        // to nobody — but against the stale snapshot it still looks unique, so the script writes an
+        // authoritative pick and emails a person who may not be the one meant.
+        //
+        // FOR SHARE holds the rows read: none of them can be renamed, re-roled or deactivated between this
+        // match and the COMMIT that acts on it. A brand-new row INSERTed after this read is still theoretically
+        // possible — READ COMMITTED has no predicate lock to prevent it — but that window is now microseconds
+        // inside one transaction rather than the whole office's run, and this script is operator-run, not
+        // concurrent with roster administration.
+        const { rows: roster } = await client.query<RosterRow>(
+          `SELECT id, name, role, is_active AS "isActive", email FROM field_responders FOR SHARE`,
+        );
+
         const sup = matchFieldResponders({ text: row.superintendent_name, role: "superintendent", roster });
         const pm = matchFieldResponders({ text: row.pm_name, role: "project_manager", roster });
         const byId = new Map(roster.map((r) => [r.id, r]));
@@ -421,16 +460,39 @@ async function main() {
             .map((r) => r.email?.trim().toLowerCase())
             .filter((email): email is string => !!email),
         );
+        //
+        // READ THE PROVENANCE NOTE. This resolves FIELD_SCORECARD_EMAIL_RECIPIENTS from THIS process, while
+        // the queued job is executed later by the deployed worker against the WORKER's environment. When the
+        // two differ — a local shell, a one-off container, an operator who never exported the variable — the
+        // preview is not merely incomplete, it is confidently wrong in the one direction that matters: it
+        // prints "(nobody)" and production then mails a watcher list this run never showed anybody.
+        //
+        // So an unset variable REFUSES TO COMMIT rather than previewing an empty list. There is no way for
+        // this process to read the worker's environment, and quietly presenting its own as authoritative is
+        // what turns "every recipient is printed before the commit" into a promise this script cannot keep.
+        const oversightConfigured = resolveFieldScorecardRecipients(process.env);
         const watchers = [
           ...new Set(
-            resolveFieldScorecardRecipients(process.env)
+            oversightConfigured
               .filter((email) => !responderEmails.has(email.trim().toLowerCase()))
               .map((email) => email.trim().toLowerCase()),
           ),
         ];
-        console.log("   OVERSIGHT WILL EMAIL:");
-        if (watchers.length === 0) console.log("     (nobody — FIELD_SCORECARD_EMAIL_RECIPIENTS is unset or all responders)");
+        console.log("   OVERSIGHT WILL EMAIL (as configured in THIS process — the worker resolves its own):");
+        if (watchers.length === 0 && oversightConfigured.length > 0) {
+          console.log("     (nobody — every configured watcher is already a responder on this card)");
+        }
         for (const email of watchers) console.log(`     watcher          <${email}>`);
+        if (oversightConfigured.length === 0) {
+          console.log("     (UNSET in this process — cannot preview who the worker will mail)");
+          if (COMMIT && !ALLOW_UNPREVIEWABLE_OVERSIGHT) {
+            throw new Error(
+              "FIELD_SCORECARD_EMAIL_RECIPIENTS is unset in this process, so the oversight watchers the WORKER " +
+                "will email cannot be previewed. Export the worker's value to preview it, or pass " +
+                "--allow-unpreviewable-oversight to commit knowing addresses will be mailed that were never shown.",
+            );
+          }
+        }
         // The worker's answer is the one that counts, and it is read AFTER the writes. The earlier
         // `deliverable` check is against the roster snapshot: somebody deactivated between that snapshot and
         // this transaction passes it, gets their id written, and then resolves to nothing here. Printing
@@ -504,6 +566,31 @@ async function main() {
 
   console.log(`${planned} card(s) ${COMMIT ? "backfilled" : "would be backfilled"}, ${skipped} skipped, ${failed} failed.`);
   if (!COMMIT && planned > 0) console.log("Re-run with --commit to apply. THAT SENDS EMAIL.");
+
+  // Say WHICH of the three it was, because the operator's next step differs in each case: a typo is retyped,
+  // an already-processed card is left alone, and an ineligible one is a question about the card.
+  if (CARD_ARG && !scopedCardSeen) {
+    const found = await pool.query<{ schema: string; status: string; rating: string; is_active: boolean; actions: string }>(
+      schemas
+        .map(
+          ({ nspname }) => `SELECT '${nspname}' AS schema, sc.status, sc.rating::text AS rating, sc.is_active,
+                     (SELECT count(*) FROM "${nspname}".scorecard_corrective_actions ca WHERE ca.scorecard_id = sc.id)::text AS actions
+                FROM "${nspname}".field_scorecards sc WHERE sc.id = $1`,
+        )
+        .join(" UNION ALL "),
+      [CARD_ARG],
+    );
+    const hit = found.rows[0];
+    console.error(
+      hit
+        ? `--card ${CARD_ARG} exists in ${hit.schema} but is NOT a backfill candidate ` +
+            `(status=${hit.status}, rating=${hit.rating}, is_active=${hit.is_active}, existing corrective actions=${hit.actions}). ` +
+            "Nothing was examined."
+        : `--card ${CARD_ARG} matches no scorecard in any office. Nothing was examined — check the UUID.`,
+    );
+    process.exitCode = 1;
+  }
+
   await pool.end();
   // A rolled-back card must not read as success. Continue-on-error is deliberate — one bad card should not
   // strand the rest — but an operator or a wrapper checking only the exit code would otherwise record a
