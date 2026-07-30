@@ -22,6 +22,10 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   slug: "trockcam",
   scheme: "trockcam",
   version: "1.0.0",
+  // iOS only, in fact and not just by convention: react-native-web is not a dependency, so
+  // Metro's default ["ios","android","web"] makes every web bundle attempt fail noisily and
+  // for no reason. The ios block below is already the only platform block in this config.
+  platforms: ["ios"],
   orientation: "portrait",
   userInterfaceStyle: "light",
   newArchEnabled: true,
