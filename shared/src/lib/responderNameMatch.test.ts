@@ -1191,3 +1191,34 @@ describe("anchor length is counted in code points", () => {
     expect(go("John 𝐐 Smith", roster).matches[0].confidence).toBe("exact");
   });
 });
+
+// Two completions of rules already written, from a later review round. The other findings in that round
+// were declined and the reasons are recorded on the PR — briefly: requiring name-part ORDER would break the
+// surname-first convention this matcher depends on ("Sampley, Robert"), and re-introducing the comma-aware
+// transform it would need is exactly the heuristic that produced five wrong-recipient bugs.
+describe("suffix words and code-point lengths", () => {
+  const R = (id: string, name: string, role: string) => ({ id, name, role, isActive: true });
+  const go = (text: string, roster: ReturnType<typeof R>[]) =>
+    matchFieldResponders({ text, role: "superintendent", roster });
+
+  it("treats the FULL-WORD generational suffixes as identity-bearing", () => {
+    // The set held only the abbreviations, so a roster using the conventional full form let "John Smith"
+    // resolve "John Smith Junior" — the same wrong-recipient shape the abbreviation rule blocks.
+    for (const suffix of ["Junior", "Senior", "Jr", "Sr"]) {
+      const roster = [R("x", `John Smith ${suffix}`, "superintendent")];
+      expect(go("John Smith", roster).matches).toEqual([]);
+      expect(go(`John Smith ${suffix}`, roster).matches).toHaveLength(1);
+    }
+    // A given name that merely starts like one is untouched.
+    expect(go("Junia Brown", [R("j", "Junia Brown", "superintendent")]).matches).toHaveLength(1);
+  });
+
+  it("measures the fuzzy ladder in code points, like the anchor rule", () => {
+    // The anchor count was fixed to code points and this ladder was not, so a three-character astral
+    // surname measured as six and cleared the five-character floor that keeps short strings exact-only.
+    expect(go("John 𐐀𐐁𐐂", [R("x", "John 𐐀𐐁𐐃", "superintendent")]).matches).toEqual([]);
+    // The ASCII calibration points are unchanged.
+    expect(go("Nick Cheatham", [R("n", "Nick Cheatam", "superintendent")]).matches[0].confidence).toBe("high");
+    expect(go("Addy", [R("a", "Adam Sherwood", "superintendent")]).matches).toEqual([]);
+  });
+});

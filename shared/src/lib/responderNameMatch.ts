@@ -300,7 +300,9 @@ interface RosterNameParts {
 
 // Not "v": a lone V is far likelier to be an initial than a fifth-generation suffix, and treating it as
 // identity-bearing would block ordinary names for no real gain.
-const GENERATIONAL_SUFFIXES = new Set(["jr", "jnr", "sr", "snr", "ii", "iii", "iv"]);
+const GENERATIONAL_SUFFIXES = new Set([
+  "jr", "jnr", "junior", "sr", "snr", "senior", "ii", "iii", "iv",
+]);
 
 function splitRosterNameParts(name: string): RosterNameParts {
   const parts: string[] = [];
@@ -356,7 +358,17 @@ function splitResponderSegmentPairs(text: string | null | undefined): ResponderS
  *
  * Shorter, not longer, so a stub cannot ride a long part's allowance — "bob" must not reach "robertson".
  */
+/** Characters, not UTF-16 code units — see the two call sites for what counting units let through. */
+function codePointLength(value: string): number {
+  let n = 0;
+  for (const _ of value) n += 1;
+  return n;
+}
+
 function maxEditDistance(tokenLength: number, partLength: number): number {
+  // Callers pass CODE POINT counts, not `.length`. The anchor rule was fixed to count code points and this
+  // ladder was not, so an astral surname of three characters measured as six and cleared the five-character
+  // fuzzy floor that exists to keep short strings exact-only.
   const length = Math.min(tokenLength, partLength);
   if (length < FUZZY_MIN_TOKEN_LENGTH) return 0;
   if (length < FUZZY_LONG_TOKEN_LENGTH) return FUZZY_MAX_DISTANCE_SHORT;
@@ -421,7 +433,7 @@ function scoreSegmentAgainstName(
     // Measured in CODE POINTS, not `.length`. A UTF-16 code-unit count reads any astral-plane letter as two
     // characters, so a single styled or non-Latin glyph slipped past a guard whose whole point is "one
     // character is not enough" — while the visually identical ASCII letter was correctly refused.
-    if ([...text].length >= 2 && !indices.some((i) => identitySuffix[i])) hasMeaningfulAnchor = true;
+    if (codePointLength(text) >= 2 && !indices.some((i) => identitySuffix[i])) hasMeaningfulAnchor = true;
   };
 
   for (const token of tokens) {
@@ -461,8 +473,11 @@ function scoreSegmentAgainstName(
         // blob into an O(1) rejection instead of an O(token x part) walk. The allowance is never above 2,
         // so anything meaningfully longer than a real surname is refused before any distance work.
         !consumed[i] &&
-        Math.abs(token.length - part.length) <= maxEditDistance(token.length, part.length) &&
-        nameEditDistance(token, part) <= maxEditDistance(token.length, part.length),
+        // Measured in code points for the same reason the anchor is: `.length` reads one astral character
+        // as two, which both inflates a token past the fuzzy floor and mis-states the length difference.
+        Math.abs(codePointLength(token) - codePointLength(part)) <=
+          maxEditDistance(codePointLength(token), codePointLength(part)) &&
+        nameEditDistance(token, part) <= maxEditDistance(codePointLength(token), codePointLength(part)),
     );
     if (index < 0) return null;
     consumed[index] = true;

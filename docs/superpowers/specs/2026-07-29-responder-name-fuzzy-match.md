@@ -247,7 +247,7 @@ before this, had **never** been resolvable — zero PM picks exist office-wide.
 
 | input | role | why it must not resolve |
 | --- | --- | --- |
-| `Adnaan Iqbal` (3) | superintendent | On the roster but **INACTIVE**. A deactivated person must not be emailed a corrective action. Excluded before scoring, so it lands in `unmatched` |
+| `Adnaan Iqbal` (3) | superintendent | On the roster but **INACTIVE**. A deactivated person must not be emailed a corrective action. Inactive rows ARE scored — see the blocking invariant above — so an exact hit on one blocks a weaker active namesake instead of handing them somebody else's corrective action; nothing inactive is ever returned as a `match` |
 | `Addy` (1) | project_manager | Must not become Adam Sherwood. 4 chars is below the fuzzy floor, so exact-only. Ratio-based matchers accept this (`Adam`/`Addy` = distance 2 over 4 chars ≈ 0.5) — that is why the ladder is absolute. **Worth noting: `Addy` reads as Adnaan's own nickname, not a shortening of Adam**, which would make an Adam Sherwood match not merely unsafe but wrong. Adnaan can confirm; either way it stays unresolved |
 | `Derek Barr` (1) | project_manager | Real person, real CRM user, **not on the PM roster.** A roster gap, not a matching failure — see §7 |
 | `James helms` (1) | project_manager | Same |
@@ -289,9 +289,9 @@ label the reason for display. Worth doing if the QC dashboard ever shows these t
 
 | Check | Result |
 | --- | --- |
-| `TZ=UTC npx vitest run shared/src/lib/responderNameMatch.test.ts` | **121 passed** — one case per numbered rule, plus a regression test per review finding, each named after the behaviour it protects |
-| Shared CI gate config (`test:ci` — the one CI runs) | 29 files / **374 tests** passed, new suite included |
-| `npm run check:premerge` (the full gate) | **6,770** server + 2,555 client + 502 worker + 374 shared, zero failures |
+| `TZ=UTC npx vitest run shared/src/lib/responderNameMatch.test.ts` | **123 passed** — one case per numbered rule, plus a regression test per review finding, each named after the behaviour it protects |
+| Shared CI gate config (`test:ci` — the one CI runs) | 29 files / **376 tests** passed, new suite included |
+| `npm run check:premerge` (the full gate) | **6,770** server + 2,555 client + 502 worker + 376 shared, zero failures |
 | Standalone adversarial harness (4 lenses) | **91 probes**, 0 failures |
 | `npm run build --workspace shared`, `typecheck --workspace server`, `typecheck:tests --workspace shared` | clean |
 | `server/tests` full run | 6586 passed; 3 pre-existing failures (`startup-order`, two `properties` consistency) unrelated — `directory-dedup.test.ts` passes |
