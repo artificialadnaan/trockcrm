@@ -7,6 +7,7 @@ import {
   formatLocation,
   formatMoney,
   formatPostalAddress,
+  formatTimeOfDay,
 } from "../format";
 
 describe("formatMoney", () => {
@@ -298,5 +299,38 @@ describe("a timestamp with the time it actually carries", () => {
     expect(formatDateTime(undefined)).toBe("—");
     expect(formatDateTime("")).toBe("—");
     expect(formatDateTime("not a date")).toBe("—");
+  });
+});
+
+describe("a time-of-day column, as a clock reading", () => {
+  it("reads a Postgres time value", () => {
+    expect(formatTimeOfDay("09:00:00")).toBe("9:00 AM");
+    expect(formatTimeOfDay("15:30:00")).toBe("3:30 PM");
+    expect(formatTimeOfDay("13:05")).toBe("1:05 PM");
+  });
+
+  it("gets the two midnight/noon edges right", () => {
+    // `hours % 12` is 0 for both, and printing "0:00" is the classic version of this bug.
+    expect(formatTimeOfDay("00:00:00")).toBe("12:00 AM");
+    expect(formatTimeOfDay("12:00:00")).toBe("12:00 PM");
+    expect(formatTimeOfDay("12:45:00")).toBe("12:45 PM");
+    expect(formatTimeOfDay("00:30:00")).toBe("12:30 AM");
+  });
+
+  it("does not shift with the device's timezone", () => {
+    // The reason this is arithmetic rather than `new Date(...)`: a bare time parsed as a Date picks up
+    // today's date AND the local offset, which is how a 9:00 task starts reading as 8:00 for half the
+    // year. The column has no zone, so neither does the output.
+    expect(formatTimeOfDay("09:00:00")).toBe("9:00 AM");
+  });
+
+  it("returns an empty string for anything it cannot read", () => {
+    // "" rather than a dash: the caller composes a metadata line and simply omits the piece.
+    expect(formatTimeOfDay(null)).toBe("");
+    expect(formatTimeOfDay(undefined)).toBe("");
+    expect(formatTimeOfDay("")).toBe("");
+    expect(formatTimeOfDay("not a time")).toBe("");
+    expect(formatTimeOfDay("25:00:00")).toBe("");
+    expect(formatTimeOfDay("09:75:00")).toBe("");
   });
 });

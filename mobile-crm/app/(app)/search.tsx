@@ -159,7 +159,10 @@ export default function SearchScreen() {
                screen was saying that and then footing a note that matches exist elsewhere. One state,
                one sentence: when every hit was in another office, say that instead. */
             otherOfficeHits > 0 ? null : (
-              <Text style={styles.idle}>Nothing matches &ldquo;{q}&rdquo; in this office.</Text>
+              <Text style={styles.idle}>
+                Nothing matches &ldquo;{q}&rdquo; in this office. Records in another office are only
+                reachable on the web — this app works in one office at a time.
+              </Text>
             )
           }
           ListFooterComponent={

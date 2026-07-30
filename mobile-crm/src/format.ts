@@ -136,3 +136,24 @@ export function formatEnumLabel(value: string | null | undefined): string {
   }
   return trimmed;
 }
+
+/**
+ * A `time` column — "09:00:00" — as a clock reading.
+ *
+ * `tasks.due_time` is stored separately from `due_date`, so a task due at 9am and one due at 3pm shared
+ * a row until this existed. It is a wall-clock time with no date and no zone: parsing it through `Date`
+ * would attach today's date and the device's offset, which is how a 9:00 task starts displaying as 8:00
+ * for half the year. Formatted arithmetically instead, so it says exactly what the column says.
+ *
+ * Returns "" for anything it cannot read, so a caller composing a metadata line just omits it.
+ */
+export function formatTimeOfDay(value: string | null | undefined): string {
+  const match = /^(\d{1,2}):(\d{2})(?::\d{2})?/.exec(value?.trim() ?? "");
+  if (!match) return "";
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours > 23 || minutes > 59) return "";
+  const suffix = hours < 12 ? "AM" : "PM";
+  const hour12 = hours % 12 === 0 ? 12 : hours % 12;
+  return `${hour12}:${String(minutes).padStart(2, "0")} ${suffix}`;
+}

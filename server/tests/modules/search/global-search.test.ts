@@ -207,3 +207,63 @@ describe("globalSearch — change-order child deals are flagged for badging", ()
     expect(dealWhere).toContain("is_active = false");
   });
 });
+
+/**
+ * `crossOffice=false` — the opt-out a client uses when it can only ACT in one office.
+ *
+ * Cross-office is chosen by role alone, and its per-entity cap is applied AFTER the offices merge, so a
+ * caller that cannot open another office's records gets a page whose slots were already spent on rows it
+ * has no route to. Filtering on the client cannot recover them: they were never sent. With enough
+ * offices the active one can receive no slots at all, and the screen then says "nothing matches here"
+ * about records that exist and were truncated server-side.
+ *
+ * The two paths are told apart by WHICH handle does the work. Single-office runs the entity searches on
+ * the office-scoped `tenantDb` passed in; cross-office reads the office list from the module-level pool
+ * and never touches it. So `tenantDb.select` being called is the proof of confinement.
+ */
+describe("globalSearch — the cross-office opt-out", () => {
+  function singleOfficeStub() {
+    const execute = vi.fn().mockResolvedValue({ rows: [] });
+    const select = vi.fn(() => chainable([]));
+    return { execute, select };
+  }
+
+  it("keeps a director on the cross-office path by default", async () => {
+    // Back-compat is the point: the web palette and search page pass no option and must not change.
+    const tenantDb = singleOfficeStub();
+    await globalSearch(tenantDb as any, "acme", undefined, "director", "dir-1").catch(() => {});
+    expect(tenantDb.select).not.toHaveBeenCalled();
+  });
+
+  it("confines a director to the request's office when asked", async () => {
+    const tenantDb = singleOfficeStub();
+    const result = await globalSearch(
+      tenantDb as any, "acme", undefined, "director", "dir-1", { crossOffice: false }
+    );
+    expect(tenantDb.select).toHaveBeenCalled();
+    expect(result.query).toBe("acme");
+  });
+
+  it("confines an admin too", async () => {
+    const tenantDb = singleOfficeStub();
+    await globalSearch(tenantDb as any, "acme", undefined, "admin", "admin-1", { crossOffice: false });
+    expect(tenantDb.select).toHaveBeenCalled();
+  });
+
+  it("changes nothing for a rep, who was never cross-office", async () => {
+    const tenantDb = singleOfficeStub();
+    await globalSearch(tenantDb as any, "acme", undefined, "rep", "rep-1", { crossOffice: false });
+    expect(tenantDb.select).toHaveBeenCalled();
+  });
+
+  it("treats an explicit true, and an absent key, as the default", async () => {
+    // Only `=== false` confines. A truthy value or an omitted key keeps role-driven routing, which is
+    // what makes this safe to add to a shared endpoint.
+    for (const options of [{ crossOffice: true }, {}]) {
+      const tenantDb = singleOfficeStub();
+      await globalSearch(tenantDb as any, "acme", undefined, "director", "dir-1", options)
+        .catch(() => {});
+      expect(tenantDb.select).not.toHaveBeenCalled();
+    }
+  });
+});

@@ -81,5 +81,20 @@ export type SearchResponse = {
  */
 export async function globalSearch(fetcher: Fetcher, q: string): Promise<SearchResponse> {
   const types = MOBILE_SEARCH_TYPES.join(",");
-  return fetcher<SearchResponse>(`/search?q=${encodeURIComponent(q)}&types=${types}`);
+  /**
+   * `crossOffice=false` — asked for, not filtered for.
+   *
+   * For an admin or director the endpoint searches every accessible office and caps each entity bucket
+   * AFTER merging them. Dropping the foreign rows on the client is therefore too late: the slots they
+   * occupied were already spent, and the active office's remaining matches were truncated server-side
+   * and never sent. With enough offices the active one can get no slots at all, and the screen would
+   * report "nothing matches here" about records that exist.
+   *
+   * This app works in one office at a time and has no switcher to follow a foreign hit with, so it says
+   * so in the request. `partitionByOffice` stays as a guard — cheap, tested, and the thing that keeps
+   * this honest if the parameter is ever dropped or ignored.
+   */
+  return fetcher<SearchResponse>(
+    `/search?q=${encodeURIComponent(q)}&types=${types}&crossOffice=false`,
+  );
 }

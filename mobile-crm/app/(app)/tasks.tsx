@@ -12,7 +12,7 @@ import { BackLink } from "../../src/components/BackLink";
 import { RetryBlock } from "../../src/components/RetryBlock";
 import { RetryNotice } from "../../src/components/RetryNotice";
 import { resolveDealDisplayNumber } from "../../src/deal-display-number";
-import { formatDate, formatDateTime } from "../../src/format";
+import { formatDate, formatDateTime, formatTimeOfDay } from "../../src/format";
 import { useGoBack } from "../../src/lib/go-back";
 import { sanitizeHubspotDealIdentifiers } from "../../src/deal-display-number";
 import { taskEffectiveDate, taskPriorityLabel, taskStatusLabel } from "../../src/task-display";
@@ -202,8 +202,15 @@ export default function TasksScreen() {
               when.value == null
                 ? null
                 : when.source === "scheduledFor"
-                  ? formatDateTime(when.value)
-                  : formatDate(when.value);
+                  ? // `scheduled_for` is a timestamptz someone picked an hour on — the instant IS the value.
+                    formatDateTime(when.value)
+                  : // `due_date` is a Postgres `date`, and the hour lives in the SEPARATE `due_time`
+                    // column. Two tasks due at 9am and 3pm carry the same date, so without appending it
+                    // they were one row twice — and with no task detail screen, the omitted appointment
+                    // time is not recoverable anywhere in this app.
+                    [formatDate(when.value), formatTimeOfDay(item.dueTime)]
+                      .filter(Boolean)
+                      .join(" · ");
             /**
              * Priority and lifecycle FIRST, because they change what a rep does with the row.
              *
