@@ -900,3 +900,85 @@ describe("third review round", () => {
     }
   });
 });
+
+// ── Fourth review round ────────────────────────────────────────────────────────────────────────────────
+// Five more, and the shape has not changed: every one is an INTERACTION with, or an incomplete case of, a
+// fix from an earlier round. Three of them are wrong-recipient defects that the earlier fix introduced.
+describe("fourth review round", () => {
+  const R = (id: string, name: string, role: string, isActive = true) => ({ id, name, role, isActive });
+  const go = (text: string, role: string, roster: ReturnType<typeof R>[]) =>
+    matchFieldResponders({ text, role, roster });
+  const names = (r: { matches: Array<{ responder: { name: string } }> }) =>
+    r.matches.map((m) => m.responder.name);
+  const DALLAS = [
+    R("bbell", "Brett Bell", "superintendent"),
+    R("rsampley", "Robert Sampley", "superintendent"),
+  ];
+
+  it("does not let an annotation-only comma piece take part in surname-first pairing", () => {
+    // An empty normalized piece still splits to a one-element array, so "(PM)" counted as one token and
+    // paired with "Bell", leaving "Robert" to stand alone: Brett Bell + Robert Sampley, two people neither
+    // of whom was named. Nameless pieces are dropped before pairing.
+    expect(go("Bell, (PM), Robert", "superintendent", DALLAS).matches).toEqual([]);
+    expect(go("Bell, (super), Robert", "superintendent", DALLAS).matches).toEqual([]);
+    // A real two-person list with an annotation on one of them still splits.
+    const withPm = [...DALLAS, R("asherwood", "Adam Sherwood", "project_manager")];
+    expect(names(go("Brett Bell, Adam Sherwood (PM)", "superintendent", withPm)))
+      .toEqual(["Brett Bell", "Adam Sherwood"]);
+  });
+
+  it("counts INACTIVE people in a bare token's contest", () => {
+    // They stay non-returnable, but a lone token cannot say which person who answers to it was meant.
+    // Narrowing silently to the active ones handed a former employee's corrective action to a colleague.
+    const roster = [R("old", "John Smith", "superintendent", false), R("new", "John Smyth", "superintendent")];
+    const r = go("John", "superintendent", roster);
+    expect(r.matches).toEqual([]);
+    expect(r.ambiguous).toHaveLength(1);
+    // A bare token matching only an inactive person is unresolved, not a match.
+    expect(go("John", "superintendent", [R("old", "John Smith", "superintendent", false)]).matches).toEqual([]);
+  });
+
+  it("folds letters NFD does not decompose, instead of deleting them", () => {
+    // NFD leaves đ / ø / ł intact — the diacritic is a stroke, not a combining mark — so the ASCII class
+    // deleted the letter and "Đan Nguyen" became "an nguyen": an EXACT match for a different person.
+    expect(go("Đan Nguyen", "superintendent", [R("an", "An Nguyen", "superintendent")]).matches).toEqual([]);
+    for (const [rosterName, typed] of [
+      ["Søren Smith", "Soren Smith"],
+      ["Đan Nguyen", "Dan Nguyen"],
+      ["Łukasz Nowak", "Lukasz Nowak"],
+      ["Ægir Olsen", "Aegir Olsen"],
+    ] as const) {
+      const roster = [R("x", rosterName, "superintendent")];
+      expect(names(go(typed, "superintendent", roster))).toEqual([rosterName]);
+      expect(names(go(rosterName, "superintendent", roster))).toEqual([rosterName]);
+    }
+  });
+
+  it("joins tokens ONLY across a boundary punctuation created", () => {
+    // Joining any adjacent pair let bare "Annabell" consume both parts of "Ann Abell" for an exact match on
+    // someone never named. A space between two names is a real boundary; a hyphen inside one is not.
+    expect(go("Annabell", "superintendent", [R("aa", "Ann Abell", "superintendent")]).matches).toEqual([]);
+    expect(go("MarySmith", "superintendent", [R("ms", "Mary Smith", "superintendent")]).matches).toEqual([]);
+    expect(go("BrettBell", "superintendent", DALLAS).matches).toEqual([]);
+    // The hyphenated case the join exists for still works, both spellings.
+    const hyphen = [R("mj", "Mary-Jane Smith", "superintendent")];
+    expect(names(go("MaryJane Smith", "superintendent", hyphen))).toEqual(["Mary-Jane Smith"]);
+    expect(names(go("Mary Jane Smith", "superintendent", hyphen))).toEqual(["Mary-Jane Smith"]);
+  });
+
+  it("refuses to parse an absurd field as a name list rather than scoring every piece", () => {
+    // "x/" a few hundred thousand times materialised that many segments and scored each against every roster
+    // row. Refusing the whole field beats parsing the first N: a truncated read of a name list is a silent
+    // half-answer. The single unmatched entry is excerpted, because echoing the blob is the same problem.
+    const blob = "x/".repeat(200_000);
+    const r = go(blob, "superintendent", DALLAS);
+    expect(r.matches).toEqual([]);
+    expect(r.unmatched).toHaveLength(1);
+    expect(r.unmatched[0].length).toBeLessThan(200);
+    expect(r.unmatched[0]).toContain("not parsed as names");
+    // A long single value is refused the same way, and a normal two-person field is untouched.
+    expect(go("Brett ".repeat(400), "superintendent", DALLAS).matches).toEqual([]);
+    expect(names(go("Brett Bell/Robert Sampley", "superintendent", DALLAS)))
+      .toEqual(["Brett Bell", "Robert Sampley"]);
+  });
+});

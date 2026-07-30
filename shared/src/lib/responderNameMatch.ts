@@ -118,6 +118,12 @@ export interface MatchFieldRespondersInput<T extends ResponderRosterEntry> {
  *   addy / adam    -> distance 2 over 4 chars, below MIN, so exact-only        -> no match
  *   cheaham/reyes  -> compared at min length 5, cap 1, actual distance far above -> no match
  */
+// Bounds on the untrusted free text itself. Generous next to any real value — the longest in prod is
+// "Brett bell & Robert Sampley" at 27 characters — and small enough that a pasted blob cannot turn one
+// persisted row into meaningful CPU or heap in a worker or backfill.
+const MAX_RESPONDER_TEXT_CHARS = 1_000;
+const MAX_RESPONDER_SEGMENTS = 24;
+
 const FUZZY_MIN_TOKEN_LENGTH = 5;
 const FUZZY_LONG_TOKEN_LENGTH = 7;
 const FUZZY_MAX_DISTANCE_SHORT = 1;
@@ -157,7 +163,13 @@ const SEGMENT_DELIMITERS = /\s+w\/+\s*|\s*[/&+;]\s*|\s*[\n\r]+\s*|\s+and\s+/gi;
 const COMMA = /\s*,\s*/;
 
 function splitOnCommaIfItSeparatesPeople(segment: string): string[] {
-  const pieces = segment.split(COMMA).filter((piece) => piece.trim().length > 0);
+  // Pieces that carry NO name at all — "(PM)" standing alone between two commas — are dropped before
+  // pairing. Left in, such a piece counted as one token (an empty string still splits to a one-element
+  // array), so "Bell, (PM), Robert" paired "Bell" with the annotation and left "Robert" to stand alone:
+  // Brett Bell + Robert Sampley, two people neither of whom was named.
+  const pieces = segment
+    .split(COMMA)
+    .filter((piece) => normalizeResponderName(stripIdentityNeutralNoise(piece)).length > 0);
   if (pieces.length < 2) return [segment];
   // Counted on the STRIPPED piece. Counting the raw one let an annotation masquerade as a second name
   // token: "Bell, Robert (PM)" read "Robert (PM)" as two tokens, so the comma was classed as a people
@@ -245,19 +257,68 @@ function stripIdentityNeutralNoise(segment: string): string {
  * Doing it there rather than here keeps this function a pure text normalizer.
  */
 export function normalizeResponderName(value: string | null | undefined): string {
-  return (value ?? "")
-    .toLowerCase()
-    // FOLD diacritics, do not delete them. The [^a-z0-9] class below deletes any character it does not
-    // recognise, so "josé" became "jos" — which is a DIFFERENT person's whole name. On a roster holding
-    // "Jos Smith", typing "José Smith" produced an EXACT match for him; and the ordinary ASCII spelling
-    // "Jose Smith" that anyone would actually type matched nobody at all. NFD splits the accent into a
-    // combining mark, which is then removed, so every spelling of the name lands on "jose".
-    .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
-    .replace(/['’]/g, "")
+  return foldNameLetters(value)
     .replace(/[^a-z0-9]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/**
+ * Letters that NFD does NOT decompose, because their diacritic is a stroke or the glyph is a ligature rather
+ * than a base letter plus a combining mark. Without an explicit map the ASCII-only class below deletes them
+ * outright, which is the same wrong-recipient bug the NFD fold was added to close: "Đan Nguyen" collapsed to
+ * "an nguyen" and became an EXACT match for a distinct active responder named An Nguyen, and the ASCII
+ * spelling "Soren Smith" could not reach roster entry "Søren Smith".
+ */
+const NON_DECOMPOSING_LETTERS: Record<string, string> = {
+  đ: "d", ð: "d", ø: "o", ł: "l", ħ: "h", ŧ: "t", ŋ: "n", ı: "i", ĸ: "k",
+  æ: "ae", œ: "oe", ß: "ss", þ: "th",
+};
+
+/**
+ * Case-fold, fold diacritics, and drop apostrophes — WITHOUT collapsing the remaining punctuation, so a
+ * caller can still see where a hyphen was. `normalizeResponderName` finishes the job for plain comparison;
+ * `splitRosterNameParts` needs the punctuation intact to know which boundaries a join may cross.
+ */
+function foldNameLetters(value: string | null | undefined): string {
+  return (value ?? "")
+    .toLowerCase()
+    // NFD splits an accent into a base letter plus a combining mark, which the next replace removes, so every
+    // spelling of the name lands on the same ASCII base. Deleting the accented character instead turned
+    // "josé" into "jos" — a different person's whole name.
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/['\u2019]/g, "")
+    .replace(/[\u00df-\u0180]/g, (ch) => NON_DECOMPOSING_LETTERS[ch] ?? ch);
+}
+
+/**
+ * A roster name split into comparable parts, remembering which boundaries were created by removing
+ * IDENTITY-INTERNAL punctuation.
+ *
+ * `joinableWithNext[i]` is true only when part i and part i+1 came from the same whitespace-delimited word —
+ * i.e. a hyphen stood between them. Allowing a token to span any adjacent pair was a wrong-recipient bug:
+ * bare "Annabell" consumed both parts of "Ann Abell" for an EXACT match, and "MarySmith" did the same to
+ * "Mary Smith". A space between two names is a real boundary; a hyphen inside one is not.
+ */
+interface RosterNameParts {
+  parts: string[];
+  joinableWithNext: boolean[];
+}
+
+function splitRosterNameParts(name: string): RosterNameParts {
+  const parts: string[] = [];
+  const joinableWithNext: boolean[] = [];
+  for (const word of foldNameLetters(name).split(/\s+/).filter(Boolean)) {
+    const pieces = word.split(/[^a-z0-9]+/).filter(Boolean);
+    pieces.forEach((piece, index) => {
+      parts.push(piece);
+      // True for every boundary INSIDE this word; false at the word's last piece, where the next boundary is
+      // whitespace.
+      joinableWithNext.push(index < pieces.length - 1);
+    });
+  }
+  return { parts, joinableWithNext };
 }
 
 /** The raw, trimmed person-segments of a free-text field, in the order they were typed. */
@@ -267,11 +328,28 @@ export function splitResponderSegments(text: string | null | undefined): string[
 
 /** As above, but keeping the scorer's noise-stripped copy beside each verbatim segment. */
 function splitResponderSegmentPairs(text: string | null | undefined): ResponderSegment[] {
-  return (text ?? "")
+  // A name field naming more than this many people is not a name field. The cap exists because the input is
+  // untrusted — superintendent_name / pm_name are unbounded text columns and the submission parser caps the
+  // NUMBER of fields, never their length — so a persisted value of "x/" repeated a few hundred thousand
+  // times would otherwise materialise that many segments and score each against every roster row.
+  //
+  // Refusing the whole field, rather than parsing the first N, is deliberate: a truncated read of a name
+  // list is a silent half-answer, and half-answers are what this matcher exists to eliminate. The single
+  // unmatched entry is EXCERPTED rather than verbatim — the one place that contract yields, because echoing
+  // the blob back is the same resource problem one layer up.
+  const raw = text ?? "";
+  if (raw.length > MAX_RESPONDER_TEXT_CHARS) {
+    return [{ raw: `${raw.slice(0, 120).trim()}… (${raw.length} characters — not parsed as names)`, stripped: "" }];
+  }
+  const segments = raw
     .split(SEGMENT_DELIMITERS)
     .flatMap((segment) => splitOnCommaIfItSeparatesPeople(segment))
     .map((segment) => ({ raw: segment.trim(), stripped: stripIdentityNeutralNoise(segment) }))
     .filter((segment) => normalizeResponderName(segment.stripped).length > 0);
+  if (segments.length > MAX_RESPONDER_SEGMENTS) {
+    return [{ raw: `${raw.slice(0, 120).trim()}… (${segments.length} segments — not parsed as names)`, stripped: "" }];
+  }
+  return segments;
 }
 
 /**
@@ -302,7 +380,10 @@ function maxEditDistance(tokenLength: number, partLength: number): number {
  * leaves "Bell" unspoken is "high", because the caller may reasonably want the full-name tier before
  * auto-sending.
  */
-function scoreSegmentAgainstName(tokens: string[], parts: string[]): ResponderMatchConfidence | null {
+function scoreSegmentAgainstName(
+  tokens: string[],
+  { parts, joinableWithNext }: RosterNameParts,
+): ResponderMatchConfidence | null {
   if (tokens.length === 0 || tokens.length > parts.length) return null;
 
   const consumed = parts.map(() => false);
@@ -320,8 +401,16 @@ function scoreSegmentAgainstName(tokens: string[], parts: string[]): ResponderMa
     // (which normalizes to three parts) while people ordinarily type "MaryJane Smith". Without this the
     // joined token accounted for neither half and a real person went unmatched, contradicting the
     // punctuation-insensitive contract. Adjacent only, so it cannot staple together unrelated name parts.
+    // ONLY across a boundary that punctuation created. Joining any adjacent pair let bare "Annabell" consume
+    // both parts of "Ann Abell" for an EXACT match on a person who was never named, and "MarySmith" do the
+    // same to "Mary Smith". A space between two names is a real boundary; a hyphen inside one is not.
     const pairIndex = parts.findIndex(
-      (part, i) => !consumed[i] && !consumed[i + 1] && i + 1 < parts.length && part + parts[i + 1] === token,
+      (part, i) =>
+        joinableWithNext[i] &&
+        !consumed[i] &&
+        !consumed[i + 1] &&
+        i + 1 < parts.length &&
+        part + parts[i + 1] === token,
     );
     if (pairIndex >= 0) {
       consumed[pairIndex] = true;
@@ -392,10 +481,10 @@ export function matchFieldResponders<T extends ResponderRosterEntry>({
   const candidates = roster
     .map((entry) => ({
       entry,
-      parts: normalizeResponderName(entry.name).split(" "),
+      nameParts: splitRosterNameParts(entry.name),
       inRole: entry.role.trim().toLowerCase() === wantedRole,
     }))
-    .filter((candidate) => candidate.parts[0].length > 0);
+    .filter((candidate) => candidate.nameParts.parts.length > 0);
 
   const matchIndexById = new Map<string, number>();
 
@@ -405,7 +494,7 @@ export function matchFieldResponders<T extends ResponderRosterEntry>({
       .map((candidate) => ({
         entry: candidate.entry,
         inRole: candidate.inRole,
-        confidence: scoreSegmentAgainstName(tokens, candidate.parts),
+        confidence: scoreSegmentAgainstName(tokens, candidate.nameParts),
       }))
       .filter(
         (scored): scored is { entry: T; inRole: boolean; confidence: ResponderMatchConfidence } =>
@@ -447,10 +536,20 @@ export function matchFieldResponders<T extends ResponderRosterEntry>({
     // the slot is unreliable. This is also what stops the annotation strip manufacturing a resolvable input:
     // "Nick - PM" reduces to bare "Nick" and lands here.
     const isBareToken = tokens.length === 1;
-    const finalists = isBareToken ? active : inRoleAtBest.length > 0 ? inRoleAtBest : atBest;
+    // For a bare token the contest includes INACTIVE people. They are still never returnable, but a lone
+    // token cannot say WHICH person who answers to it was meant, and silently narrowing to the active ones
+    // hands a former employee's corrective action to a current colleague: with inactive "John Smith" and
+    // active "John Smyth", a bare "John" scored both and cleanly picked Smyth. Any contest is ambiguous.
+    const finalists = isBareToken ? allScored : inRoleAtBest.length > 0 ? inRoleAtBest : atBest;
 
     if (finalists.length > 1) {
       result.ambiguous.push({ matchedText: segment.raw, candidates: finalists.map((s) => s.entry) });
+      continue;
+    }
+
+    // A lone finalist can still be inactive (the bare-token branch scores them), and inactive is absolute.
+    if (!finalists[0].entry.isActive) {
+      result.unmatched.push(segment.raw);
       continue;
     }
 
