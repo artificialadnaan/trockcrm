@@ -88,6 +88,26 @@ const COMMIT = process.argv.includes("--commit");
  * value of the plan is that nobody is mailed who was not printed first.
  */
 const ALLOW_UNPREVIEWABLE_OVERSIGHT = process.argv.includes("--allow-unpreviewable-oversight");
+
+/**
+ * Ask the operator, on the terminal, immediately after the card's plan is printed.
+ *
+ * A NON-INTERACTIVE stdin answers NO, never yes. Piping this script or running it from CI must not be a way
+ * to skip the one human checkpoint in front of irreversible mail; if nobody can be asked, nobody approved.
+ */
+async function confirm(prompt: string): Promise<boolean> {
+  if (!process.stdin.isTTY) {
+    console.log(`${prompt}\n   (stdin is not a terminal — nobody can approve this, so declining)`);
+    return false;
+  }
+  const { createInterface } = await import("node:readline/promises");
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return /^y(es)?$/i.test((await rl.question(prompt)).trim());
+  } finally {
+    rl.close();
+  }
+}
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
@@ -244,6 +264,21 @@ async function main() {
         await client.query("BEGIN");
         await client.query(`SET LOCAL search_path TO "${officeSchema}", public`);
 
+        // The office's active state has to hold through the COMMIT, not merely at discovery. The field
+        // responder path resolves scorecards only across ACTIVE offices (cross-office.ts), so an office
+        // deactivated between the office list and this card's commit leaves a committed cycle whose emailed
+        // links all 404 — notified, and unanswerable. Locked, so it cannot change until this card is done.
+        const officeStillActive = await client.query<{ is_active: boolean }>(
+          `SELECT is_active FROM public.offices WHERE id = $1 FOR SHARE`,
+          [office.id],
+        );
+        if (!officeStillActive.rows[0]?.is_active) {
+          await client.query("ROLLBACK");
+          console.log("   SKIP — office is no longer active; its response links would 404\n");
+          skipped += 1;
+          continue;
+        }
+
         const locked = await client.query<CandidateRow & { browsable: boolean }>(
           `SELECT sc.id, sc.deal_id, d.deal_number, d.name AS deal_name, sc.kind, sc.rating, sc.status,
                   sc.total_score, sc.average_score, sc.week_of::text, sc.submitted_at,
@@ -354,7 +389,25 @@ async function main() {
         // An authoritative EXISTING pick resolves it; otherwise the card is skipped for a human.
         const contested = new Set<string>();
         let unresolvedSegments = 0;
-        for (const [label, result] of [["superintendent_name", sup], ["pm_name", pm]] as const) {
+        // Per SOURCE field: did every name it held resolve into the OTHER role's slot?
+        //
+        // The write below fills the slot for a person's ACTUAL role, which is right, but it left the source
+        // column's text untouched — so a superintendent-field "Nick Cheatam" who is a project manager set
+        // pm_name AND kept superintendent_name, and the QC report, the deal scorecard view and the generated
+        // PDF all read those two raw columns directly. The card then showed one person as BOTH the
+        // superintendent and the PM. Tracked per field so the source text is only cleared when nobody
+        // in-role remains to justify it.
+        const sourceFieldMovedAway: Record<"superintendent" | "project_manager", boolean> = {
+          superintendent: false,
+          project_manager: false,
+        };
+        for (const [label, result, sourceRole] of [
+          ["superintendent_name", sup, "superintendent"],
+          ["pm_name", pm, "project_manager"],
+        ] as const) {
+          if (result.matches.length > 0) {
+            sourceFieldMovedAway[sourceRole] = result.matches.every((m) => !m.roleMatchesQuery);
+          }
           for (const m of result.matches) {
             const slot = m.responder.role === "project_manager" ? "project_manager" : "superintendent";
             if (picks[slot]) {
@@ -449,6 +502,19 @@ async function main() {
             `UPDATE field_scorecards SET pm_responder_id = $1, pm_name = $2 WHERE id = $3`,
             [picks.project_manager.id, picks.project_manager.name, row.id],
           );
+        }
+
+        // A source field whose names ALL belong to the other role no longer names anybody in ITS role, and
+        // leaving the text there makes three read surfaces show the same person twice. Cleared only when the
+        // slot is also unfilled — a held or freshly-matched in-role pick is the legitimate occupant.
+        for (const [role, column] of [
+          ["superintendent", "superintendent_name"],
+          ["project_manager", "pm_name"],
+        ] as const) {
+          if (sourceFieldMovedAway[role] && !picks[role]) {
+            await client.query(`UPDATE field_scorecards SET ${column} = NULL WHERE id = $1`, [row.id]);
+            console.log(`   ${column}: CLEARED — every name in it resolved to the other role`);
+          }
         }
 
         const tx = drizzle(client, { schema }) as unknown as Parameters<
@@ -594,6 +660,17 @@ async function main() {
         if (Number(a.jobs) === 0) throw new Error("no notification job was queued — refusing to commit a cycle nobody is told about");
 
         if (COMMIT) {
+          // The plan above is only a safeguard if somebody reads it BEFORE the mail is queued. Committing
+          // straight after printing gave the operator nothing to act on, and a prior dry run is not a
+          // substitute: this run deliberately re-reads live cards, rosters and recipients under its own
+          // locks, so its plan can legitimately differ from the one that was reviewed.
+          const approved = await confirm(`   Commit this card and send the mail above? [y/N] `);
+          if (!approved) {
+            await client.query("ROLLBACK");
+            console.log("   DECLINED — rolled back, no mail sent\n");
+            skipped += 1;
+            continue;
+          }
           await client.query("COMMIT");
           console.log("   *** COMMITTED ***\n");
         } else {

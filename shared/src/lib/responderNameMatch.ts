@@ -352,6 +352,14 @@ interface RosterNameParts {
 
 // Not "v": a lone V is far likelier to be an initial than a fifth-generation suffix, and treating it as
 // identity-bearing would block ordinary names for no real gain.
+//
+// DELIBERATELY NOT CANONICALIZED across spellings. "Junior" does not reach roster "Jr", and that is a MISSED
+// match — the safe side of this matcher's asymmetry, costing somebody a follow-up rather than sending a real
+// person a corrective action that is not theirs. Canonicalizing would LOOSEN matching, which is the direction
+// every wrong-recipient defect in this file has come from, and it buys nothing measurable: a census of prod
+// found 0 of 16 responders and 0 of 19 typed name fields carrying any generational suffix at all. Revisit if
+// that ever stops being true, and add the position-awareness it needs first — "Junior" is also a given name,
+// which is why identitySuffix already excludes index 0.
 const GENERATIONAL_SUFFIXES = new Set([
   "jr", "jnr", "junior", "sr", "snr", "senior", "ii", "iii", "iv",
 ]);
