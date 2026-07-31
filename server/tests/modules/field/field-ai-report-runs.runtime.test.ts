@@ -4,7 +4,7 @@ import { sql } from "drizzle-orm";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { beforeAll, describe, expect, it } from "vitest";
-import { isInFlightRunConflict } from "../../../src/modules/field/ai-report-runs.js";
+import { insertAiReportRunTx, isInFlightRunConflict } from "../../../src/modules/field/ai-report-runs.js";
 
 /**
  * REAL SQL, no mocks. The route suite mocks insertAiReportRunTx, so it cannot see whether the statement is
@@ -162,6 +162,48 @@ describe("field_ai_report_runs — real SQL", () => {
     expect(succeed.affectedRows).toBe(0);
     const after = await client.query<{ status: string }>(`SELECT status FROM public.field_ai_report_runs WHERE id=$1`, [id]);
     expect(after.rows[0].status).toBe("failed");
+  });
+
+  it("enqueues through the REAL insert path, taking a requester lock that does not leak", async () => {
+    // The quota predicate lives inside the INSERT, but that is still a READ COMMITTED snapshot: parallel
+    // enqueues for DIFFERENT projects each fail to see the others' uncommitted rows, and the in-flight
+    // unique index only collides on the same (deal, requester) — so the lock is what actually serialises
+    // them. PGlite is single-connection and cannot stage that race, but running the REAL function here does
+    // prove two things a mocked db never could: that the added statement is valid Postgres (a bad hashtext()
+    // call would 500 every enqueue), and that the lock is TRANSACTION-scoped.
+    const quotaUser = (
+      await client.query<{ id: string }>(`INSERT INTO public.users (email) VALUES ('quota@t.co') RETURNING id`)
+    ).rows[0].id;
+
+    // Run it inside an explicit transaction, the way the route does, so the lock can be OBSERVED while it is
+    // still held. Asserting only after the fact would pass just as happily with no lock at all.
+    const created = await db.transaction(async (tx) => {
+      const run = await insertAiReportRunTx(tx as unknown as Parameters<typeof insertAiReportRunTx>[0], {
+        dealId: "aaaaaaaa-9999-9999-9999-999999999999",
+        officeId,
+        officeSlug: "dallas",
+        requestedBy: quotaUser,
+        photoIds: PHOTOS,
+        reportTitle: "Title",
+        focusPrompt: null,
+      });
+      const held = await tx.execute<{ n: number }>(
+        sql`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory'`,
+      );
+      // The lock is held for the rest of the caller's transaction — this is the assertion that fails if the
+      // statement is ever dropped, and the reason the quota holds under a parallel burst.
+      expect((held as unknown as { rows: Array<{ n: number }> }).rows[0].n).toBe(1);
+      return run;
+    });
+
+    expect(created.status).toBe("queued");
+    expect(created.photoIds).toEqual(PHOTOS);
+    // ...and released by the commit. A session-scoped pg_advisory_lock would still be held here and would
+    // accumulate one entry per enqueue for the life of the connection.
+    const locks = await client.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory'`,
+    );
+    expect(locks.rows[0].n).toBe(0);
   });
 
   it("renews a live run's lease out from under the reaper, but cannot revive a terminal one", async () => {

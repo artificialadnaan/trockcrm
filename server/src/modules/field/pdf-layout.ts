@@ -143,6 +143,29 @@ function clampText(value: string, maxLength: number): string {
 }
 
 /**
+ * Bound a string's LENGTH while leaving its line structure intact.
+ *
+ * clampText above normalises whitespace, which is right for a single-line caption and wrong for anything
+ * parseFindingText reads: that function splits a title from its bullets on newlines, so collapsing them
+ * would silently turn a structured finding into one run-on paragraph.
+ */
+function clampLength(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+/**
+ * Ceiling on the text a single findings page will paginate.
+ *
+ * `files.description` is an unbounded `text` column and the generic metadata/import paths write it with no
+ * cap. Unlike the grid renderer — which clamps its caption to a fixed box — drawFindingsPhotoPages
+ * paginates the WHOLE value across as many continuation pages as it takes, so one pathological imported
+ * caption (or several long ones in a 60-photo selection) can buffer thousands of pages and exhaust the
+ * worker. Generous enough for a real multi-bullet finding, which runs to a few hundred characters.
+ */
+const MAX_FINDINGS_BODY_CHARS = 4_000;
+
+/**
  * Break a single word that is taller than the page budget into character slices that each fit. PDFKit
  * DOES char-wrap a space-less token (a pasted URL / base64 blob), so its rendered height can exceed a
  * whole page — and an unbounded doc.text of such a chunk auto-creates continuation pages OUTSIDE the
@@ -678,7 +701,12 @@ async function drawFindingsPhotoPages(
     drawIndexBadge(doc, fonts, PAGE_MARGIN, FINDINGS_IMAGE_TOP, photo.reportIndex);
   }
 
-  const parsed = parseFindingText(photo.descriptionOverride ?? photo.description ?? "");
+  // Bounded before parsing. The override is model output and already shaped, but the fallback is the crew's
+  // own caption straight off files.description — and this is the one renderer that paginates a raw
+  // description rather than clamping it into a fixed box.
+  const parsed = parseFindingText(
+    clampLength(photo.descriptionOverride ?? photo.description ?? "", MAX_FINDINGS_BODY_CHARS),
+  );
 
   // --- Subject caption ----------------------------------------------------------------------------
   // Only drawn when there IS a subject label. A photo the assessment passed over carries either the crew's

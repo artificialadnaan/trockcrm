@@ -312,6 +312,24 @@ describe("renderFieldPhotoReportPdf findings layout", () => {
     // (15s). Pinned here so the test can't flake depending on which config picked it up.
   }, 30_000);
 
+  it("bounds a pathological crew caption instead of paginating the whole column value", async () => {
+    // A passed-over photo falls back to files.description — an unbounded text column that the generic
+    // metadata and import paths write with no cap. This renderer paginates the WHOLE value across as many
+    // continuation pages as it takes (the grid renderer clamps into a fixed box instead), so one imported
+    // caption could buffer hundreds of pages and exhaust the worker.
+    const runOn = Array.from({ length: 1_200 }, (_, i) => `sentence ${i} about the north elevation`).join(". ");
+    expect(runOn.length).toBeGreaterThan(40_000); // ten times the cap — genuinely pathological
+    const buffer = await renderFieldPhotoReportPdf({
+      cover,
+      sections: [{ title: "Photo Findings", photos: [findingsPhoto(1, runOn)] }],
+      photoLayout: "findings",
+    });
+    expect(buffer.subarray(0, 5).toString("latin1")).toBe("%PDF-");
+    // The page count follows the CAP, not the input: 40k+ characters in, 3 pages out. Uncapped this same
+    // fixture renders 13, so the bound discriminates rather than merely passing.
+    expect(countPdfPages(buffer)).toBeLessThan(6);
+  }, 30_000);
+
   it("prints a passed-over photo with no invented caption", async () => {
     // The AI writes about only the photos worth citing. A photo it passed over still prints — but must not
     // acquire a manufactured "Photo 3" heading or a "no issues found" line just to fill the space.

@@ -24,8 +24,16 @@ describe("ai_report_generation shim", () => {
   it("does not reach the server module for an invalid payload", async () => {
     // The guard must run BEFORE the dynamic import: a bad payload should never pay the cost of loading the
     // server render stack (sharp, pdfkit, the R2 client) just to discover it has nothing to do.
-    const before = Date.now();
-    await expect(handleAiReportGeneration({})).rejects.toThrow();
-    expect(Date.now() - before).toBeLessThan(1_000);
+    //
+    // Asserted on the error's IDENTITY rather than with a stopwatch. A wall-clock bound is both flaky and
+    // vacuous — it passes whether or not the import ran, as long as the machine was quick. Reaching the
+    // import first would instead surface a module-resolution or initialisation error from the server tree,
+    // which cannot match the guard's message.
+    const error = await handleAiReportGeneration({}).then(
+      () => { throw new Error("expected the payload guard to reject"); },
+      (e: unknown) => e,
+    );
+    expect((error as Error).message).toBe("ai_report_generation payload is missing runId");
+    expect((error as { code?: string }).code).toBeUndefined();
   });
 });

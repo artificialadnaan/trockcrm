@@ -26,12 +26,23 @@ type AiReportJobModule = {
 /** Mirrors JobHandlerResult's deferral shape without importing the queue into this shim. */
 export type AiReportShimResult = void | { status: "pending"; error: string; runAfterSeconds: number };
 
+/** True only for "this specifier does not resolve", never for a module that exists and threw while loading. */
+function isModuleNotFound(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return code === "ERR_MODULE_NOT_FOUND" || code === "MODULE_NOT_FOUND";
+}
+
 async function importFirstAvailable<T>(paths: readonly string[]): Promise<T> {
   let lastError: unknown;
   for (const path of paths) {
     try {
       return (await import(path)) as T;
     } catch (error) {
+      // Fall through ONLY when the candidate isn't there. If the module exists and its own initialisation
+      // threw — a missing env var, a bad top-level import — trying the next candidate buries the real cause
+      // behind whatever the fallback reports, which in production (where only `dist` exists) is a bare
+      // "cannot find module server/src/...". Propagate that immediately instead.
+      if (!isModuleNotFound(error)) throw error;
       lastError = error;
     }
   }

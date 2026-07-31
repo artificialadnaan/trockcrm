@@ -203,6 +203,9 @@ async function loadReportRenderPhotos(
   r2Key: string | null;
   externalUrl: string | null;
   externalThumbnailUrl: string | null;
+  // Declared, not just selected: the renderer reads it to decide whether a HEIC original needs transcoding,
+  // and omitting it here dropped it from the type the moment these rows were spread into a render photo.
+  mimeType: string | null;
 }>> {
   // Keep report rendering aligned with the project timeline scope so converted
   // lead-origin photos survive final rendering and out-of-scope photos do not.
@@ -475,9 +478,10 @@ export async function getFieldProjectReportDetail(
   access: FieldAccessContext,
   reportId: string,
 ) {
-  const download = await getFieldProjectReportDownload(tenantDb, access, reportId);
-  const file = await getFileById(tenantDb, reportId);
-  if (!file) throw new AppError(404, "Report not found");
+  // Gate and metadata come from ONE read. Calling getFieldProjectReportDownload and then re-fetching the
+  // same row fetched it twice for a single poll.
+  const file = await assertReadableFieldProjectReport(tenantDb, access, reportId);
+  const download = await getFileDownloadUrl(tenantDb, reportId);
   return {
     report: {
       id: file.id,
@@ -489,7 +493,15 @@ export async function getFieldProjectReportDetail(
   };
 }
 
-export async function getFieldProjectReportDownload(
+/**
+ * The report-tag, expiry and project-access gate, returning the row it had to read anyway.
+ *
+ * Shared by the download and detail paths so a caller that also needs the file's metadata does not fetch the
+ * same row a second time. Every rejection here is deliberate: a non-report file 404s rather than 403s (the
+ * id is opaque; confirming it exists leaks that a report was generated), an expired one 410s, and project
+ * access is checked LAST so it cannot be used to probe for report ids.
+ */
+async function assertReadableFieldProjectReport(
   tenantDb: TenantDb,
   access: FieldAccessContext,
   reportId: string,
@@ -503,5 +515,14 @@ export async function getFieldProjectReportDownload(
     throw new AppError(410, "Report has expired");
   }
   await assertActiveFieldProject(tenantDb, access, file.dealId);
+  return file;
+}
+
+export async function getFieldProjectReportDownload(
+  tenantDb: TenantDb,
+  access: FieldAccessContext,
+  reportId: string,
+) {
+  await assertReadableFieldProjectReport(tenantDb, access, reportId);
   return getFileDownloadUrl(tenantDb, reportId);
 }

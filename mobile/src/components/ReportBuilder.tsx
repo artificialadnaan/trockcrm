@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Modal, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { Image as ExpoImage } from "expo-image";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -97,6 +97,13 @@ export function ReportBuilder({
   // kill the live loop. Each run captures its own token and stops the moment it is no longer the current one.
   const aiRunTokenRef = useRef(0);
   const [error, setError] = useState<string | null>(null);
+
+  // Cancelling through close()/Cancel bumps the token, but an UNMOUNT never runs either — navigating off the
+  // project screen mid-run left the loop polling, and it could still call onGenerated (reopening a PDF on a
+  // screen the user has left) or setState on a component that is gone. Invalidate on teardown too.
+  useEffect(() => () => {
+    aiRunTokenRef.current += 1;
+  }, []);
 
   function reset() {
     setStep("select");

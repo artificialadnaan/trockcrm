@@ -58,10 +58,13 @@ CREATE TABLE IF NOT EXISTS public.field_ai_report_runs (
 -- snapshot is not authoritative under concurrency (two taps can both read "none in flight" before either
 -- commits). The route catches the resulting unique violation and hands back the run already in flight, so a
 -- double-tap polls the first run instead of erroring.
--- It is also the ONLY index this table needs: every other statement the feature runs is keyed on the primary
--- key, and this one covers the (deal_id, requested_by, status) lookups that the enqueue path performs. A
--- second index on (deal_id, created_at) was dropped before merge — nothing queried it, and it would have
--- cost a B-tree maintenance write on every insert and every status transition for no reader.
+-- It also carries the only non-primary-key reads the feature performs. Two of those — the enqueue quota
+-- count and the stale-run sweep — filter on requested_by + status WITHOUT a deal_id, so they cannot use this
+-- index for a direct lookup. They do not need one: the index is PARTIAL, so it holds only queued/running
+-- rows (bounded by users x MAX_IN_FLIGHT_RUNS_PER_USER) even as the table accumulates every terminal run
+-- ever made, and scanning that is trivial. A requested_by-led index was considered and rejected on the same
+-- grounds a (deal_id, created_at) index was dropped before merge: a B-tree maintenance write on every insert
+-- and every status transition, to serve a scan that is already measured in dozens of rows.
 CREATE UNIQUE INDEX IF NOT EXISTS field_ai_report_runs_inflight_uidx
   ON public.field_ai_report_runs (deal_id, requested_by)
   WHERE status IN ('queued', 'running');

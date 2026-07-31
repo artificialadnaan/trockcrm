@@ -391,7 +391,16 @@ async function callAnthropicTool(
 
       if (!response.ok) {
         const body = await response.text().catch(() => "");
-        const message = `Claude request failed: ${response.status} ${body.slice(0, 500)}`;
+        // The body stays in the LOG, not in the error. An AiReportError message is written to the run row
+        // and shown verbatim on the phone, and a provider error body can echo request detail back — the
+        // same reason a raw driver error is never surfaced there. The status is stable, safe, and is what
+        // actually separates the two failure classes.
+        console.error("[field-ai-report] Claude request failed", {
+          status: response.status,
+          attempt,
+          body: body.slice(0, 2_000),
+        });
+        const message = `Claude request failed (${response.status}). Please try again, or contact support if it keeps happening.`;
         if (isRetryableStatus(response.status) && attempt < MAX_ATTEMPTS) {
           lastError = new AiReportError(message, true);
           await sleep(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1));

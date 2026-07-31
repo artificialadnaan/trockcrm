@@ -121,6 +121,44 @@ async function loadPhotosForAssessment(
 }
 
 /**
+ * Delete an uploaded report PDF that nothing references — and ONLY that.
+ *
+ * Phase E usually fails deterministically, before its insert: the project re-validation rejects and no row
+ * was ever written. But a transaction can also reject AFTER its COMMIT is durable, when the connection drops
+ * before the acknowledgement arrives. Deleting on that path would strip the object out from under a
+ * committed `files` row and hand the user a report that 404s on download — strictly worse than the orphan
+ * being cleaned up.
+ *
+ * So the key is only deleted once no row is found claiming it, and ANY uncertainty (including a failure of
+ * the reconciliation query itself) leaves the object in place: an unreferenced object costs storage, a
+ * missing one costs the report.
+ */
+async function discardUnreferencedReportPdf(
+  office: Awaited<ReturnType<typeof getFieldOfficeById>>,
+  userId: string,
+  r2Key: string,
+): Promise<void> {
+  try {
+    const claimed = await runInOfficeTransaction(office, userId, async (db) => {
+      const rows = await db.select({ id: files.id }).from(files).where(eq(files.r2Key, r2Key)).limit(1);
+      return rows.length > 0;
+    });
+    if (claimed) {
+      console.warn("[field-ai-report] Phase E reported a failure but the file row is committed; keeping the PDF", {
+        r2Key,
+      });
+      return;
+    }
+    await deleteObject(r2Key);
+  } catch (cleanupError) {
+    console.error("[field-ai-report] could not reconcile an uploaded PDF; leaving it in place", {
+      r2Key,
+      error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+    });
+  }
+}
+
+/**
  * Run the job for `runId`. Terminal outcomes are written to the run row, so the phone always sees either a
  * pdf or a reason — never a silent hang.
  *
@@ -256,11 +294,10 @@ export async function runFieldAiReportJob(
         return recordFieldPhotoReportFile(db, access, prepared, stored);
       });
     } catch (error) {
-      // The PDF is uploaded but nothing references it. recordFieldPhotoReportFile cleans up after its OWN
-      // insert failure; this covers the re-validation above, which throws BEFORE the insert is ever reached
-      // — so without it every project archived mid-render leaves an orphaned object in the bucket. Deleting
-      // an already-deleted key is a no-op, so overlapping with that inner cleanup is harmless.
-      await deleteObject(stored.r2Key).catch(() => undefined);
+      // The PDF is uploaded but probably nothing references it. recordFieldPhotoReportFile cleans up after
+      // its OWN insert failure; this covers the re-validation above, which throws BEFORE the insert is ever
+      // reached — without it every project archived mid-render leaves an orphaned object in the bucket.
+      await discardUnreferencedReportPdf(office, requester.id, stored.r2Key);
       throw error;
     }
     const { report } = recorded;

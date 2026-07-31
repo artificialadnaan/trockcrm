@@ -94,11 +94,18 @@ export async function insertAiReportRunTx(db: FieldTenantDb, input: NewAiReportR
   // a value LIST — `($1, $2)::uuid[]` — which is not valid array syntax and fails EVERY insert with a
   // syntax error. sql.param binds the whole array as one parameter. Pinned by a real-SQL runtime test
   // (field-ai-report-runs.runtime.test.ts) rather than a mock, because a mocked insert cannot catch this.
-  // The per-user quota is enforced INSIDE this statement, not by a preceding SELECT. A count-then-insert is
-  // a pre-lock snapshot: concurrent POSTs for DIFFERENT projects each read "under the limit" before any of
-  // them commits, and the unique index only serialises the same (deal, requester) — so a parallel burst
-  // walks straight through a JS check and queues an unbounded number of paid 60-photo runs. Making the
-  // predicate part of the INSERT is what actually holds under concurrency.
+  // The per-user quota is enforced INSIDE this statement, not by a preceding SELECT: a count-then-insert
+  // reads a pre-lock snapshot, so concurrent POSTs for DIFFERENT projects each see "under the limit" before
+  // any of them commits, and the in-flight unique index only collides on the SAME (deal, requester) — a
+  // parallel burst would walk straight through a JS check and queue an unbounded number of paid 60-photo
+  // runs.
+  //
+  // Moving the predicate into the INSERT is necessary but NOT sufficient: under READ COMMITTED the
+  // sub-select still reads a snapshot that excludes other transactions' uncommitted rows, so the same burst
+  // across different projects still passes. The advisory lock is what actually serialises it. Transaction
+  // scoped, so it releases on the caller's commit or rollback; keyed per requester, so two users never wait
+  // on each other; namespaced, because the hashtext(bigint) key space is global to the database.
+  await db.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`field-ai-report-quota:${input.requestedBy}`}))`);
   const result = await db.execute<RunRow>(sql`
     INSERT INTO public.field_ai_report_runs
       (deal_id, office_id, office_slug, requested_by, photo_ids, report_title, focus_prompt, status)

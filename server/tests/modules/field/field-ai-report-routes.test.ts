@@ -16,14 +16,18 @@ vi.mock("../../../src/middleware/field-auth.js", () => ({
 }));
 
 const photoMocks = vi.hoisted(() => ({
-  assertValidCaptureTargetIds: vi.fn(),
-  assertValidUuid: vi.fn(),
   requestFieldPhotoUploadUrl: vi.fn(),
   confirmFieldPhotoUpload: vi.fn(),
   listPendingFieldPhotos: vi.fn(),
   assignPendingFieldPhotoTarget: vi.fn(),
 }));
-vi.mock("../../../src/modules/field/photos-service.js", () => photoMocks);
+// ONLY the pool-dependent functions are replaced. assertValidUuid and assertValidCaptureTargetIds are pure
+// validators that the route depends on for its 400s — stubbing them to no-ops made every id in this file
+// pass a check production actually performs, so the malformed-id paths below were never really exercised.
+vi.mock("../../../src/modules/field/photos-service.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../src/modules/field/photos-service.js")>()),
+  ...photoMocks,
+}));
 
 const aiMocks = vi.hoisted(() => ({
   isAiReportConfigured: vi.fn(() => true),
@@ -366,6 +370,35 @@ describe("POST /field/reports/ai-generate", () => {
 
   it("rejects an empty selection", async () => {
     const res = await request(buildApp()).post("/api/field/reports/ai-generate").send({ projectId: PROJECT, photoIds: [] });
+    expect(res.status).toBe(400);
+    expect(runMocks.insertAiReportRunTx).not.toHaveBeenCalled();
+  });
+
+  it("rejects a malformed photo id before enqueuing anything", async () => {
+    // The route validates every selected id, not just the project — a non-uuid reaching the insert would
+    // become a `::uuid` cast error surfaced as a 500. Exercised against the REAL validator, which this
+    // file used to stub out.
+    const res = await request(buildApp())
+      .post("/api/field/reports/ai-generate")
+      .send({ projectId: PROJECT, photoIds: [PHOTO_A, "not-a-uuid"] });
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toMatch(/photoId/i);
+    expect(runMocks.insertAiReportRunTx).not.toHaveBeenCalled();
+  });
+
+  it("rejects a malformed project id before enqueuing anything", async () => {
+    const res = await request(buildApp())
+      .post("/api/field/reports/ai-generate")
+      .send({ projectId: "definitely-not-a-uuid", photoIds: [PHOTO_A] });
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toMatch(/projectId/i);
+    expect(runMocks.insertAiReportRunTx).not.toHaveBeenCalled();
+  });
+
+  it("rejects a request with no JSON body as a 400, not a 500", async () => {
+    // Under express 5 body-parser leaves req.body UNDEFINED when the content-type isn't JSON, so reading a
+    // field straight off it threw a TypeError and the client saw an opaque 500.
+    const res = await request(buildApp()).post("/api/field/reports/ai-generate");
     expect(res.status).toBe(400);
     expect(runMocks.insertAiReportRunTx).not.toHaveBeenCalled();
   });

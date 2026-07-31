@@ -917,10 +917,14 @@ fieldRoutes.post("/reports/ai-generate", requireFieldContractor, async (req, res
     if (!isAiReportConfigured()) {
       throw new AppError(503, "AI reports are not available right now.");
     }
-    const projectId = String(req.body.projectId ?? "");
+    // Normalised before anything reads through it. Under express 5, body-parser leaves req.body UNDEFINED
+    // when a request arrives without a JSON content-type, so reading a field off it directly turns a
+    // malformed request into a TypeError — a 500 — instead of reaching the 400s below.
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const projectId = String(body.projectId ?? "");
     assertValidUuid(projectId, "projectId");
-    const rawPhotoIds: string[] = Array.isArray(req.body.photoIds)
-      ? req.body.photoIds.map((id: unknown) => String(id)).filter((id: string) => id.length > 0)
+    const rawPhotoIds: string[] = Array.isArray(body.photoIds)
+      ? body.photoIds.map((id: unknown) => String(id)).filter((id: string) => id.length > 0)
       : [];
     // De-duplicate but PRESERVE ORDER: this array is the report's print order and the order the model is
     // shown the photographs in, so a Set round-trip that re-sorted it would mis-caption every page.
@@ -932,11 +936,11 @@ fieldRoutes.post("/reports/ai-generate", requireFieldContractor, async (req, res
       throw new AppError(400, `An AI report can cover at most ${AI_REPORT_MAX_PHOTOS} photos at a time.`);
     }
     for (const photoId of photoIds) assertValidUuid(photoId, "photoId");
-    const reportTitle = typeof req.body.reportTitle === "string" ? req.body.reportTitle.trim().slice(0, 140) : "";
+    const reportTitle = typeof body.reportTitle === "string" ? body.reportTitle.trim().slice(0, 140) : "";
     // Optional. Scopes both the executive summary's subject and what the per-photo findings may raise —
     // blank means a general director's read of the whole set.
     const focusPrompt =
-      typeof req.body.focusPrompt === "string" ? req.body.focusPrompt.trim().slice(0, MAX_FOCUS_PROMPT_LENGTH) : "";
+      typeof body.focusPrompt === "string" ? body.focusPrompt.trim().slice(0, MAX_FOCUS_PROMPT_LENGTH) : "";
 
     // Release any slot held by an abandoned run (worker died mid-flight), across ALL of this user's
     // projects. Without this the guards below would lock them out permanently.

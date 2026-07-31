@@ -87,10 +87,23 @@ function photoRow(id: string, caption: string | null) {
   return { id, displayName: `IMG_${id.slice(0, 4)}`, r2Key: `k/${id}.jpg`, mimeType: "image/jpeg", caption };
 }
 
-/** A drizzle-ish select chain returning the photo rows, on a db handle that records transaction entry. */
-function officeDb(rows: unknown[]) {
+/**
+ * A drizzle-ish select chain returning the photo rows, on a db handle that records transaction entry.
+ *
+ * `.where()` is awaited directly by the photo load but chained with `.limit(1)` by Phase E's cleanup
+ * reconciliation, so it has to serve both — hence the thenable. `claimedRows` is what that reconciliation
+ * sees: non-empty means a committed `files` row already claims the uploaded key.
+ */
+function officeDb(rows: unknown[], claimedRows: unknown[] = []) {
   return {
-    select: () => ({ from: () => ({ where: async () => rows }) }),
+    select: () => ({
+      from: () => ({
+        where: () => ({
+          then: (resolve: (value: unknown) => unknown) => resolve(rows),
+          limit: async () => claimedRows,
+        }),
+      }),
+    }),
   };
 }
 
@@ -363,6 +376,52 @@ describe("runFieldAiReportJob", () => {
     expect(reportMocks.recordFieldPhotoReportFile).not.toHaveBeenCalled();
     // The run still terminates as a failure the phone can read, not a silent hang.
     expect(runMocks.markAiReportRunFailed).toHaveBeenCalledWith("run-1", expect.any(String), expect.anything());
+  });
+
+  it("keeps the PDF when Phase E rejected but the file row is committed anyway", async () => {
+    // A transaction can reject AFTER its COMMIT is durable — the connection drops before the acknowledgement
+    // arrives. Deleting on that path strips the object out from under a committed `files` row and leaves the
+    // user a report that 404s on download, which is strictly worse than the orphan being cleaned up. So the
+    // cleanup only fires once it has confirmed nothing claims the key.
+    xoMocks.runInOfficeTransaction.mockImplementation(async (office: any, _userId: any, run: any) => {
+      timeline.events.push("tx:open");
+      // The reconciliation finds a row claiming the uploaded key.
+      const result = await run(officeDb([photoRow(PHOTO_A, null), photoRow(PHOTO_B, null)], [{ id: "file-1" }]), office);
+      timeline.events.push("tx:close");
+      return result;
+    });
+    let seen = 0;
+    projectMocks.assertActiveFieldProject.mockImplementation(async (_db: any, _access: any, id: string) => {
+      seen += 1;
+      if (seen > 1) throw new Error("connection terminated unexpectedly");
+      return { id, name: "Tides at Park Lane", dealNumber: "D-1" } as any;
+    });
+
+    await runFieldAiReportJob({ runId: "run-1" });
+
+    expect(r2Mocks.deleteObject).not.toHaveBeenCalled();
+  });
+
+  it("leaves the PDF alone when the reconciliation itself cannot be completed", async () => {
+    // Uncertainty must not resolve to deletion: an unreferenced object costs storage, a missing one costs
+    // the report.
+    let seen = 0;
+    xoMocks.runInOfficeTransaction.mockImplementation(async (office: any, _userId: any, run: any) => {
+      seen += 1;
+      // Phase A loads; Phase E rejects; the reconciliation that follows cannot reach the database either.
+      if (seen === 1) return run(officeDb([photoRow(PHOTO_A, null), photoRow(PHOTO_B, null)]), office);
+      if (seen === 2) return run(officeDb([]), office);
+      throw new Error("pool exhausted");
+    });
+    projectMocks.assertActiveFieldProject.mockImplementation(async (_db: any, _access: any, id: string) => {
+      if (seen > 2) throw new Error("Project not found");
+      return { id, name: "Tides at Park Lane", dealNumber: "D-1" } as any;
+    });
+
+    await runFieldAiReportJob({ runId: "run-1" });
+
+    expect(r2Mocks.deleteObject).not.toHaveBeenCalled();
+    expect(runMocks.markAiReportRunFailed).toHaveBeenCalled();
   });
 
   it("keeps the uploaded PDF when Phase E succeeds", async () => {
