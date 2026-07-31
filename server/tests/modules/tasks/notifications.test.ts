@@ -254,6 +254,62 @@ describe("task assignment notifications", () => {
     expect(executed.some((s) => s.includes("RELEASE SAVEPOINT"))).toBe(true);
   });
 
+  it("fails the request when the savepoint itself cannot be opened", async () => {
+    // Codex P2 on the previous round's fix: a failing SAVEPOINT means the transaction is ALREADY
+    // aborted (25P02) and the failed statement leaves it that way. Swallowing it would let the
+    // caller COMMIT — a silent rollback — and still report success, which is the very P1 the
+    // savepoint was added to close.
+    const tenantDb = {
+      execute: vi.fn(async () => {
+        throw new Error("current transaction is aborted");
+      }),
+      select: vi.fn(() => ({
+        from: () => ({ where: () => ({ limit: async () => [] }) }),
+      })),
+    };
+
+    await expect(
+      sendTaskAssignmentEmail(tenantDb as any, {
+        task: { id: "task-1", title: "Need Property info", description: null, dueDate: null, dealId: "deal-1" },
+        assigneeId: "assignee-1",
+        assigner: { id: "assigner-1", displayName: "Colby Burling", email: "colby@trockgc.com" },
+      })
+    ).rejects.toThrow(/could not open a savepoint/i);
+
+    // Nothing may be sent for a task whose write is about to be rolled back.
+    expect(resendMocks.sendSystemEmail).not.toHaveBeenCalled();
+  });
+
+  it("fails the request when the savepoint rollback itself fails", async () => {
+    let call = 0;
+    const tenantDb = {
+      execute: vi.fn(async () => {
+        call += 1;
+        if (call === 1) return { rows: [] }; // SAVEPOINT opens fine
+        throw new Error("rollback failed"); // ROLLBACK TO SAVEPOINT does not
+      }),
+      select: vi.fn(() => ({
+        from: () => ({
+          where: () => ({
+            limit: async () => {
+              throw new Error("assignee lookup exploded");
+            },
+          }),
+        }),
+      })),
+    };
+
+    await expect(
+      sendTaskAssignmentEmail(tenantDb as any, {
+        task: { id: "task-1", title: "Need Property info", description: null, dueDate: null, dealId: null },
+        assigneeId: "assignee-1",
+        assigner: { id: "assigner-1", displayName: "Colby Burling", email: "colby@trockgc.com" },
+      })
+    ).rejects.toThrow(/could not roll back/i);
+
+    expect(resendMocks.sendSystemEmail).not.toHaveBeenCalled();
+  });
+
   it("still sends when the linked deal lookup fails", async () => {
     const tenantDb = {
       execute: vi.fn(async () => ({ rows: [] })),

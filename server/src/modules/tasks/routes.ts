@@ -25,6 +25,7 @@ import {
 import {
   prepareTaskAssignmentEmail,
   sendPreparedTaskAssignmentEmail,
+  TaskTransactionUnusableError,
   type PreparedTaskAssignmentEmail,
 } from "./notifications.js";
 
@@ -97,6 +98,10 @@ async function prepareTaskAssignmentEmailBestEffort(
       },
     });
   } catch (err) {
+    // Preparing the email is best-effort — EXCEPT when the failure means the task transaction can
+    // no longer be committed safely. Swallowing that would let the COMMIT below degrade to a silent
+    // ROLLBACK while we returned success for a task that was never written.
+    if (err instanceof TaskTransactionUnusableError) throw err;
     console.error("[Tasks] Failed to prepare task assignment email:", err);
     return null;
   }

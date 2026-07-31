@@ -109,6 +109,20 @@ export function formatLinkedProjectLabel(resolution: ProjectResolution): string 
   return display.isPending ? "Project linked" : display.label;
 }
 
+/**
+ * The task transaction can no longer be protected, so the caller MUST NOT commit.
+ *
+ * Distinct from ordinary email failures, which are best-effort and deliberately swallowed: this one
+ * has to escape the route's best-effort wrapper or the request would commit an aborted transaction
+ * (a silent rollback) and still report success.
+ */
+export class TaskTransactionUnusableError extends Error {
+  constructor(message: string, cause?: unknown) {
+    super(message, { cause });
+    this.name = "TaskTransactionUnusableError";
+  }
+}
+
 // Fixed statements — no interpolation, so the savepoint name can never be caller-controlled.
 const SAVEPOINT_OPEN = sql`SAVEPOINT task_assignment_email_read`;
 const SAVEPOINT_RELEASE = sql`RELEASE SAVEPOINT task_assignment_email_read`;
@@ -127,9 +141,11 @@ async function readInSavepoint<T>(tenantDb: TenantDb, read: () => Promise<T>, fa
   try {
     await tenantDb.execute(SAVEPOINT_OPEN);
   } catch (err) {
-    // Without a savepoint we cannot make this read safe, so skip it rather than risk the task write.
-    console.error("[Tasks] Could not open savepoint for the assignment-email read:", err);
-    return fallback;
+    // A failing SAVEPOINT means the transaction is ALREADY unusable (e.g. 25P02
+    // in_failed_sql_transaction) — and the failed statement leaves it that way. Returning a fallback
+    // here would let the caller COMMIT, which degrades to a silent ROLLBACK while the route still
+    // reports success. There is nothing to roll back to, so the request must fail.
+    throw new TaskTransactionUnusableError("Could not open a savepoint for the assignment-email read", err);
   }
 
   try {
@@ -137,11 +153,16 @@ async function readInSavepoint<T>(tenantDb: TenantDb, read: () => Promise<T>, fa
     await tenantDb.execute(SAVEPOINT_RELEASE);
     return value;
   } catch (err) {
+    if (err instanceof TaskTransactionUnusableError) throw err;
     console.error("[Tasks] Assignment-email read failed; rolling back to savepoint:", err);
     try {
       await tenantDb.execute(SAVEPOINT_ROLLBACK);
     } catch (rollbackErr) {
-      console.error("[Tasks] Savepoint rollback failed:", rollbackErr);
+      // Same reasoning: if we cannot get back to a good state, the caller must not commit.
+      throw new TaskTransactionUnusableError(
+        "Could not roll back to the assignment-email savepoint",
+        rollbackErr
+      );
     }
     return fallback;
   }
