@@ -54,6 +54,32 @@ wrapper, while `step0-verdicts.ts` is pure and carries the reasoning worth testi
 
 ## Task 1: Verdict functions (pure TypeScript)
 
+> **IMPLEMENTED — and the code below is the SKETCH, not the shipped version.**
+> Commits `b12907bc7` → `04f1e98c6` → `dd2e5e43a`. Final: 19 tests, not 9.
+>
+> Two review rounds plus an implementer self-audit found **four** false-green paths in the
+> sketch below. Do not re-apply it. Read `src/wearables/step0-verdicts.ts` instead.
+>
+> What the sketch got wrong, recorded because each is easy to reintroduce:
+> 1. `describePhoneCameraCheck` never checked `after.isBluetoothHFP` alone, so a route lost
+>    *after* the camera closed (Bluetooth renegotiation on teardown — the reason the check takes
+>    three snapshots) returned `pass` while naming the built-in mic as the safe route.
+> 2. Its pass branch never compared `after.sampleRate` to `WIDEBAND_HZ`, printing `8000 Hz`
+>    beside the word "safe".
+> 3. It never read `during.sampleRate` at all, so a rate that collapsed for exactly the window
+>    the photo was open and recovered reported `pass` — despite the sibling branch already
+>    encoding that a *recovering* dropout is still a failure.
+> 4. The "recovered" wording claimed recovery unconditionally, including when `after` was itself
+>    narrowband.
+>
+> Also added: `before.sampleRate < WIDEBAND_HZ` → `inconclusive`, because a narrowband baseline
+> makes the rate question unmeasurable. It sits *after* the port-loss checks so a genuine route
+> loss still fails rather than being masked by a bad baseline.
+>
+> The shipped `describePhoneCameraCheck` returns `pass` for exactly one of 27
+> `(before, during, after)` combinations. That is the intended shape: this module's job is
+> refusing to report a green it did not measure.
+
 **Files:**
 - Create: `mobile/src/wearables/step0-verdicts.ts`
 - Test: `mobile/src/wearables/__tests__/step0-verdicts.test.ts`
