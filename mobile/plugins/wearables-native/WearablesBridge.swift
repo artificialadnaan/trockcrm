@@ -33,6 +33,11 @@ final class WearablesBridge: RCTEventEmitter {
   private var firstFrameAt: Date?
   private var streamStartedAt: Date?
 
+  /// Frames arrive on the SDK's delivery thread at video rate while `streamInfo()` reads from
+  /// the RN bridge queue and `teardown()` writes from a Task. Three threads, unsynchronised
+  /// stored properties: a data race by construction.
+  private let stateLock = NSLock()
+
   /// `Wearables.configure()` is not idempotent in 0.8.0, so the guard lives here rather
   /// than trusting every JS caller to remember.
   private static var configured = false
@@ -92,6 +97,14 @@ final class WearablesBridge: RCTEventEmitter {
       "metaAppId": appId,
       "developerMode": appId == "0",   // the SDK's documented Developer Mode sentinel
       "appLinkURLScheme": info["AppLinkURLScheme"] as? String ?? "",
+      // The stream ceiling, read straight from the SDK instead of inferred from one run.
+      // `StreamConfiguration()` defaults to .medium, so a single measured stream says nothing
+      // about what .high would deliver — and that is the number the stills-vs-frames decision
+      // actually turns on. No session or glasses required to read it.
+      "streamResolutions": StreamingResolution.allCases.reduce(into: [String: String]()) { acc, res in
+        let size = res.videoFrameSize
+        acc[String(describing: res)] = "\(size.width)x\(size.height)"
+      },
     ])
   }
 
@@ -143,6 +156,78 @@ final class WearablesBridge: RCTEventEmitter {
     }
   }
 
+  // MARK: - 4b. Why is there no eligible device?
+
+  /// `noEligibleDevice` is the least informative error this SDK produces. It means exactly one
+  /// thing — `AutoDeviceSelector.activeDevice` was nil when `createSession` asked — and it says
+  /// nothing about WHICH gate failed. Every gate is readable, so read them all and report them.
+  ///
+  /// The `immediate` vs `afterWait` pair is the important measurement: `activeDevice` is
+  /// published through an async stream, so it is nil for a short window after construction. If
+  /// immediate is nil and afterWait is not, the device was never ineligible — the call site was
+  /// simply racing the selector.
+  @objc(diagnose:rejecter:)
+  func diagnose(_ resolve: @escaping RCTPromiseResolveBlock,
+                rejecter reject: @escaping RCTPromiseRejectBlock) {
+    guard Self.configured else {
+      reject("wearables_not_configured", "Call configure() first", nil)
+      return
+    }
+    let sdk = Wearables.shared
+    Task {
+      let details: [[String: Any]] = sdk.devices.map { id in
+        guard let device = sdk.deviceForIdentifier(id) else {
+          return ["id": String(describing: id), "resolved": false]
+        }
+        return [
+          "name": device.name,
+          // .disconnected here means the glasses are paired for Bluetooth audio but not linked
+          // over the DAT transport, which is a completely different connection.
+          "linkState": String(describing: device.linkState),
+          // .deviceUpdateRequired / .sdkUpdateRequired both make a device ineligible while
+          // still leaving it registered and counted.
+          "compatibility": String(describing: device.compatibility()),
+          "deviceType": device.deviceType().rawValue,
+          "supportsDisplay": device.supportsDisplay(),
+        ]
+      }
+
+      let selector = AutoDeviceSelector(wearables: sdk)
+      let immediate = selector.activeDevice
+      var afterWait = immediate
+      let deadline = Date().addingTimeInterval(8)
+      while afterWait == nil, Date() < deadline {
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        afterWait = selector.activeDevice
+      }
+
+      // Read, never request: requestPermission() bounces to Meta AI and back, which is far too
+      // heavy for a diagnostic and loses the answer if the round trip breaks.
+      var permission: String
+      do {
+        permission = String(describing: try await sdk.checkPermissionStatus(.camera))
+      } catch {
+        permission = "error: \(Self.describe(error))"
+      }
+
+      resolve([
+        "deviceCount": sdk.devices.count,
+        "devices": details,
+        "cameraPermission": permission,
+        "activeDeviceImmediate": immediate.map { String(describing: $0) } ?? "nil",
+        "activeDeviceAfterWait": afterWait.map { String(describing: $0) } ?? "nil",
+        "verdict": Self.eligibilityVerdict(immediate: immediate, afterWait: afterWait),
+      ])
+    }
+  }
+
+  private static func eligibilityVerdict(immediate: DeviceIdentifier?,
+                                         afterWait: DeviceIdentifier?) -> String {
+    if immediate != nil { return "eligible immediately — noEligibleDevice is NOT a selector race" }
+    if afterWait != nil { return "RACE: nil at first, resolved after waiting. startStream was asking too early." }
+    return "genuinely ineligible after 8s — check linkState and compatibility above"
+  }
+
   /// RegistrationState is an @objc Int enum whose default printing is unhelpful.
   private static func registrationStateName(_ state: RegistrationState) -> String {
     switch state {
@@ -174,30 +259,94 @@ final class WearablesBridge: RCTEventEmitter {
   @objc(startStream:rejecter:)
   func startStream(_ resolve: @escaping RCTPromiseResolveBlock,
                    rejecter reject: @escaping RCTPromiseRejectBlock) {
-    do {
-      let created = try Wearables.shared.createSession(
-        deviceSelector: AutoDeviceSelector(wearables: Wearables.shared))
-      session = created
-      try created.start()
+    // The guard `status()` has and this method did not. `Self.configured` is per-process, so a
+    // relaunched app reaches createSession against an unconfigured SDK and gets back
+    // `noEligibleDevice` — which blames the glasses for something that happened in here.
+    guard Self.configured else {
+      reject("wearables_not_configured", "Call configure() first", nil)
+      return
+    }
+    // Clear anything a previous attempt left behind. Every early return below used to abandon
+    // a live SDK session, so the NEXT attempt failed with `sessionAlreadyExists` — an error
+    // about our own litter that reads like a problem with the glasses. Retrying a diagnostic
+    // must not be what breaks it.
+    teardown()
 
-      guard let newStream = try created.addStream() else {
-        reject("wearables_stream_nil", "addStream() returned nil", nil)
-        return
-      }
-      stream = newStream
+    Task {
+      do {
+        let sdk = Wearables.shared
+        let selector = AutoDeviceSelector(wearables: sdk)
+        // AutoDeviceSelector publishes activeDevice through an async stream, so it is nil for a
+        // window after construction. Calling createSession on the next line races that window,
+        // and createSession turns a nil activeDevice into `noEligibleDevice` — an error that
+        // reads as "your glasses are missing" when it actually means "you asked too early".
+        let deadline = Date().addingTimeInterval(8)
+        while selector.activeDevice == nil, Date() < deadline {
+          try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        guard selector.activeDevice != nil else {
+          reject(
+            "wearables_no_active_device",
+            "No active device after 8s (registered: \(sdk.devices.count)). Run rung 4b for link "
+              + "state and compatibility.",
+            nil
+          )
+          return
+        }
+        let created = try sdk.createSession(deviceSelector: selector)
+        session = created
+        try created.start()
 
+        // start() only moves the session to .starting. The transition to .started happens
+        // asynchronously, and addStream() on a session that has not reached .started returns
+        // nil — the same "asked too early" mistake as the selector race, one layer down. nil
+        // carries no reason, so the state is reported instead of guessed at.
+        let startDeadline = Date().addingTimeInterval(10)
+        while created.state != .started, Date() < startDeadline {
+          try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        guard created.state == .started else {
+          let stalled = created.state.description
+          teardown()
+          reject(
+            "wearables_session_not_started",
+            "Session never reached .started — stalled in \(stalled) after 10s",
+            nil
+          )
+          return
+        }
+
+        guard let newStream = try created.addStream() else {
+          let state = created.state.description
+          teardown()
+          reject("wearables_stream_nil", "addStream() returned nil (session state: \(state))", nil)
+          return
+        }
+        stream = newStream
+
+      stateLock.lock()
       firstFrameSize = nil
       firstFrameAt = nil
       streamStartedAt = Date()
+      stateLock.unlock()
 
       // Record what the FIRST frame actually measures. The configuration says what we asked
       // for; only a delivered frame says what the glasses sent.
       frameToken = newStream.videoFramePublisher.listen { [weak self] (frame: VideoFrame) in
-        guard let self, self.firstFrameSize == nil else { return }
-        if let image = frame.makeUIImage() {
+        guard let self else { return }
+        // Check under the lock before decoding: at 30fps an unguarded read races every write
+        // below, and decoding each frame only to discard it is pure waste once we have one.
+        self.stateLock.lock()
+        let alreadyMeasured = self.firstFrameSize != nil
+        self.stateLock.unlock()
+        guard !alreadyMeasured, let image = frame.makeUIImage() else { return }
+
+        self.stateLock.lock()
+        if self.firstFrameSize == nil {
           self.firstFrameSize = image.size
           self.firstFrameAt = Date()
         }
+        self.stateLock.unlock()
       }
 
       photoToken = newStream.photoDataPublisher.listen { [weak self] (photo: PhotoData) in
@@ -206,15 +355,20 @@ final class WearablesBridge: RCTEventEmitter {
 
       newStream.start()
       resolve(["started": true, "config": String(describing: newStream.streamConfiguration)])
-    } catch {
-      reject("wearables_stream_failed", "startStream failed: \(Self.describe(error))", error)
+      } catch {
+        teardown()
+        reject("wearables_stream_failed", "startStream failed: \(Self.describe(error))", error)
+      }
     }
   }
 
   @objc(streamInfo:rejecter:)
   func streamInfo(_ resolve: @escaping RCTPromiseResolveBlock,
                   rejecter reject: @escaping RCTPromiseRejectBlock) {
-    guard let size = firstFrameSize, let at = firstFrameAt, let started = streamStartedAt else {
+    stateLock.lock()
+    let snapshot = (firstFrameSize, firstFrameAt, streamStartedAt)
+    stateLock.unlock()
+    guard let size = snapshot.0, let at = snapshot.1, let started = snapshot.2 else {
       resolve(["hasFrame": false])
       return
     }
@@ -230,13 +384,19 @@ final class WearablesBridge: RCTEventEmitter {
   @objc(stopStream:rejecter:)
   func stopStream(_ resolve: @escaping RCTPromiseResolveBlock,
                   rejecter reject: @escaping RCTPromiseRejectBlock) {
+    teardown()
+    resolve(["stopped": true])
+  }
+
+  /// Stop and forget the current session and stream. Safe to call when there is nothing to tear
+  /// down, which is what lets `startStream` use it as a precondition rather than a cleanup.
+  private func teardown() {
     stream?.stop()
     session?.stop()
     frameToken = nil
     photoToken = nil
     stream = nil
     session = nil
-    resolve(["stopped": true])
   }
 
   // MARK: - 7. THE photo question

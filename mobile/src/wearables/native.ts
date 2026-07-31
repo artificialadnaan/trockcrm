@@ -59,10 +59,33 @@ export type AudioMeasurement = {
   streamWasRunningFirst: boolean;
 };
 
+/**
+ * Why `createSession` reported no eligible device. `noEligibleDevice` collapses several
+ * distinct causes into one string; this pulls them back apart.
+ */
+export type Diagnosis = {
+  deviceCount: number;
+  devices: Array<{
+    name?: string;
+    /** `disconnected` here means paired for Bluetooth audio but NOT linked over DAT. */
+    linkState?: string;
+    /** `deviceUpdateRequired` / `sdkUpdateRequired` leave a device registered but ineligible. */
+    compatibility?: string;
+    deviceType?: string;
+    supportsDisplay?: boolean;
+    resolved?: false;
+  }>;
+  cameraPermission: string;
+  activeDeviceImmediate: string;
+  activeDeviceAfterWait: string;
+  verdict: string;
+};
+
 type WearablesNativeModule = {
   configure(): Promise<ConfigureResult>;
   capabilities(): Promise<Capabilities>;
   status(): Promise<WearablesStatus>;
+  diagnose(): Promise<Diagnosis>;
   startRegistration(): Promise<{ started: boolean }>;
   handleUrl(url: string): Promise<{ handled: boolean }>;
   requestCameraPermission(): Promise<{ status: string }>;
@@ -88,6 +111,7 @@ export const Wearables = {
   configure: () => require_().configure(),
   capabilities: () => require_().capabilities(),
   status: () => require_().status(),
+  diagnose: () => require_().diagnose(),
   startRegistration: () => require_().startRegistration(),
   handleUrl: (url: string) => require_().handleUrl(url),
   requestCameraPermission: () => require_().requestCameraPermission(),

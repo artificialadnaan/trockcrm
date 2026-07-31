@@ -19,6 +19,8 @@ RCT_EXTERN_METHOD(status : (RCTPromiseResolveBlock)resolve rejecter : (RCTPromis
 
 RCT_EXTERN_METHOD(startRegistration : (RCTPromiseResolveBlock)resolve rejecter : (RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(diagnose : (RCTPromiseResolveBlock)resolve rejecter : (RCTPromiseRejectBlock)reject)
+
 RCT_EXTERN_METHOD(handleUrl : (NSString *)url resolver : (RCTPromiseResolveBlock)resolve rejecter : (RCTPromiseRejectBlock)reject)
 
 RCT_EXTERN_METHOD(requestCameraPermission : (RCTPromiseResolveBlock)resolve rejecter : (RCTPromiseRejectBlock)reject)

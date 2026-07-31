@@ -13,6 +13,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import * as Linking from "expo-linking";
 import { theme } from "../../src/theme/theme";
 import {
   Wearables,
@@ -41,6 +42,7 @@ export default function DevWearablesScreen() {
 function Diagnostic() {
   const [state, setState] = useState<Record<string, RungState>>({});
   const [result, setResult] = useState<Record<string, string>>({});
+  const [callback, setCallback] = useState("");
   const photoSub = useRef<(() => void) | null>(null);
 
   useEffect(() => {
@@ -51,11 +53,37 @@ function Diagnostic() {
     return () => photoSub.current?.();
   }, []);
 
+  // The step that actually COMPLETES rung 3, and the one rung that had no owner.
+  //
+  // startRegistration() hands off to Meta AI, which returns on `trockcam://`. The SDK only
+  // learns the outcome if that URL reaches handleUrl(). Nothing called it, and expo-router
+  // claims incoming URLs for navigation, so the callback was consumed as a route and dropped.
+  // Registration therefore never finished: deviceCount stayed 0 and every rung from 6 down
+  // failed with "No eligible device available" — an error that names the glasses when the real
+  // culprit was this missing line.
+  useEffect(() => {
+    const handle = (url: string) => {
+      setCallback(url);
+      Wearables.handleUrl(url)
+        .then((r) => setCallback(`${url}\nhandled: ${r.handled}`))
+        .catch((e) => setCallback(`${url}\n${String(e)}`));
+    };
+    // A cold launch from the callback delivers the URL here instead of as an event.
+    void Linking.getInitialURL().then((url) => {
+      if (url) handle(url);
+    });
+    const sub = Linking.addEventListener("url", ({ url }) => handle(url));
+    return () => sub.remove();
+  }, []);
+
   const rungs: Rung[] = [
     { key: "configure", label: "1  SDK configured", run: Wearables.configure },
     { key: "capabilities", label: "2  Developer Mode", run: Wearables.capabilities },
     { key: "register", label: "3  Start registration", run: Wearables.startRegistration },
     { key: "status", label: "4  Registration status", run: Wearables.status },
+    // Reads every gate that feeds `noEligibleDevice` and names the one that failed, instead of
+    // leaving you to guess between link state, compatibility, permission and a selector race.
+    { key: "diagnose", label: "4b Why no eligible device", run: Wearables.diagnose },
     { key: "permission", label: "5  Camera permission", run: Wearables.requestCameraPermission },
     { key: "stream", label: "6  Start stream", run: Wearables.startStream },
     { key: "streamInfo", label: "6b Delivered frame size", run: Wearables.streamInfo },
@@ -104,9 +132,25 @@ function Diagnostic() {
     <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
       <Text style={styles.title}>Wearables diagnostic</Text>
       <Text style={styles.subtitle}>
-        Run top to bottom. Rungs 7 and 8 return the measurements that decide the capture
-        architecture.
+        Run 1–5, then 8, then 6 → 6b → 7. Rung 8 comes BEFORE rung 6: HFP must settle before a
+        DAT stream starts, or the audio route fails silently. Rungs 7 and 8 return the
+        measurements that decide the capture architecture.
       </Text>
+
+      {/* Always rendered, even empty. A callback that never arrives is the single most likely
+          failure here, and hiding the row would make that indistinguishable from the row not
+          existing at all — which is exactly the confusion this screen is built to prevent. */}
+      <View style={[styles.rung, styles.rungCallback]}>
+        <View style={styles.rungHeader}>
+          <Text style={[styles.mark, callback ? styles.markOk : styles.markIdle]}>
+            {callback ? "✓" : "·"}
+          </Text>
+          <Text style={styles.rungLabel}>Registration callback (automatic)</Text>
+        </View>
+        <Text style={styles.output}>
+          {callback || "waiting — run rung 3, approve in Meta AI, and return here"}
+        </Text>
+      </View>
 
       {rungs.map((rung) => {
         const s = state[rung.key] ?? "idle";
@@ -169,6 +213,9 @@ const styles = StyleSheet.create({
   // The two measurement rungs are marked with the brand red: they are the reason the
   // screen exists, and everything above them is plumbing.
   rungMeasurement: { borderTopWidth: 2, borderTopColor: theme.color.brandRed },
+  // Not a rung: it fires on its own when Meta AI returns, so it is marked apart from the
+  // things you tap.
+  rungCallback: { borderTopWidth: 2, borderTopColor: theme.color.success },
   rungHeader: { flexDirection: "row", alignItems: "center", gap: theme.space.md, padding: theme.space.md },
   pressed: { opacity: 0.7 },
   mark: { fontSize: 15, width: 16, fontVariant: ["tabular-nums"] },
