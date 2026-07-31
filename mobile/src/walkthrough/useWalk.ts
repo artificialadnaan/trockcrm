@@ -60,8 +60,11 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
     dispatch({ type: "starting" });
     const id = newWalkId();
     try {
-      await Recorder.startWalk(id);
-      dispatch({ type: "started", at: Date.now(), videoUri: null });
+      const started = await Recorder.startWalk(id);
+      // Record the path native reports rather than null. It is not playable yet — the writer
+      // finalises in endWalk — but holding it means a walk that FAILS mid-recording still knows
+      // where its partial file is, and a partial walk is still a site visit that happened.
+      dispatch({ type: "started", at: Date.now(), videoUri: started.videoUri });
     } catch (err) {
       // Verbatim: native's rejection message (e.g. `walk_no_hfp`) names the input it would
       // otherwise have recorded from. That text IS the instruction — replacing it with
@@ -94,7 +97,10 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
     dispatch({ type: "ended", at: Date.now() });
     try {
       const result = await Recorder.endWalk();
-      dispatch({ type: "finalized", audioUri: result.audioUri });
+      // audioUri is null by design: audio is a track inside the .mp4, not a separate artifact.
+      // videoUri comes from here rather than from `started` because native only resolves once
+      // AVAssetWriter reports .completed — so this path, unlike that one, is a finalised file.
+      dispatch({ type: "finalized", audioUri: null, videoUri: result.videoUri });
     } catch (err) {
       const message = errorMessage(err);
       setError(message);

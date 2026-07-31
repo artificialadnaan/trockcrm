@@ -42,7 +42,18 @@ export type WalkEvent =
   | { type: "started"; at: number; videoUri: string | null }
   | { type: "still"; uri: string; at: number; source: StillSource }
   | { type: "ended"; at: number }
-  | { type: "finalized"; audioUri: string | null }
+  /**
+   * `videoUri` is the AUTHORITATIVE path, and it is why this event carries one at all even
+   * though `started` already set it. Native only resolves `endWalk` once `AVAssetWriter` reports
+   * `.completed`; before that the file on disk is a truncated `.mp4` that would look like a
+   * successful walk to the uploader. Taking the path from here rather than trusting the one
+   * captured at start means only a finalised file is ever handed on.
+   *
+   * `audioUri` is now always null: audio is muxed into the video track, so there is no separate
+   * audio artifact. The field stays because a walk that fails before the writer produces a video
+   * still needs somewhere for a future audio-only fallback to land.
+   */
+  | { type: "finalized"; audioUri: string | null; videoUri?: string | null }
   | { type: "failed"; reason: string };
 
 export function initialWalk(dealId: string, projectId: string | null): Walk {
@@ -109,6 +120,9 @@ export function reduceWalk(walk: Walk, event: WalkEvent): Walk {
             ...walk,
             state: "complete",
             audioUri: event.audioUri,
+            // Only overwrite when the event actually carries one, so a caller that omits it
+            // keeps whatever `started` recorded rather than having it silently nulled.
+            videoUri: event.videoUri !== undefined ? event.videoUri : walk.videoUri,
             durationMs:
               walk.startedAt !== null && walk.endedAt !== null
                 ? walk.endedAt - walk.startedAt

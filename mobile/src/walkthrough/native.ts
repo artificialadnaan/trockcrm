@@ -19,7 +19,15 @@ const native = NativeModules.WalkthroughRecorder as WalkthroughNativeModule | un
 export type WalkStarted = {
   walkId: string;
   directory: string;
-  audioUri: string;
+  /**
+   * The `.mp4` being written. Audio is muxed into it rather than living in a separate file —
+   * the DAT video stream carries no audio (`audioCodec: nil`), so the HFP microphone is written
+   * as a second track against the same clock origin.
+   *
+   * This path exists from the moment recording starts, but the file is NOT playable until
+   * `endWalk` finalises the writer. Use the URI from `endWalk` for anything downstream.
+   */
+  videoUri: string;
   inputPortName: string;
   negotiatedSampleRate: number;
 };
@@ -30,8 +38,13 @@ export type StillEvent = {
   source: StillSource;
 };
 
+/**
+ * Native rejects rather than resolving unless `AVAssetWriter` reached `.completed`, so a
+ * `videoUri` here is a finalised file. A truncated `.mp4` that the upload queue then ships would
+ * be worse than an outright failure, because it looks like success.
+ */
 export type WalkEnded = {
-  audioUri: string | null;
+  videoUri: string;
   stills: number;
 };
 

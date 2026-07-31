@@ -42,7 +42,7 @@ describe("useWalk", () => {
     mockStartWalk.mockResolvedValue({
       walkId: "w1",
       directory: "file:///docs/walkthroughs/w1",
-      audioUri: "file:///docs/walkthroughs/w1/audio.m4a",
+      videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
       inputPortName: "RB Meta 014K",
       negotiatedSampleRate: 16000,
     });
@@ -69,7 +69,7 @@ describe("useWalk", () => {
     mockStartWalk.mockResolvedValue({
       walkId: "w1",
       directory: "d",
-      audioUri: "a",
+      videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
       inputPortName: "RB Meta 014K",
       negotiatedSampleRate: 16000,
     });
@@ -104,7 +104,7 @@ describe("useWalk", () => {
     mockStartWalk.mockResolvedValue({
       walkId: "w1",
       directory: "d",
-      audioUri: "a",
+      videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
       inputPortName: "RB Meta 014K",
       negotiatedSampleRate: 16000,
     });
@@ -144,33 +144,46 @@ describe("useWalk", () => {
     expect(result.current.walk.error).toBe("walk_no_hfp: RB Meta 014K");
   });
 
-  it("finalizes a walk with the audio uri returned from endWalk", async () => {
+  // The finalised path must come from endWalk, NOT from startWalk. Native only resolves endWalk
+  // once AVAssetWriter reports .completed; the path known at start points at a file that is still
+  // being written. Taking the wrong one hands the uploader a truncated .mp4 that looks like a
+  // successful walk — worse than a failure, because nothing surfaces it.
+  it("finalizes with the video uri from endWalk, not the one known at start", async () => {
     mockStartWalk.mockResolvedValue({
       walkId: "w1",
       directory: "d",
-      audioUri: "a",
+      videoUri: "file:///docs/walkthroughs/w1/PARTIAL.mp4",
       inputPortName: "RB Meta 014K",
       negotiatedSampleRate: 16000,
     });
-    mockEndWalk.mockResolvedValue({ audioUri: "file:///docs/walkthroughs/w1/audio.m4a", stills: 0 });
+    mockEndWalk.mockResolvedValue({
+      videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
+      stills: 0,
+    });
     const { result } = renderHook(() => useWalk("deal-1", null));
 
     await act(async () => {
       await result.current.start();
     });
+    // Mid-walk the partial path is held deliberately: a walk that fails here still needs to know
+    // where its file is, because a partial site visit is not a site visit that can be redone.
+    expect(result.current.walk.videoUri).toBe("file:///docs/walkthroughs/w1/PARTIAL.mp4");
+
     await act(async () => {
       await result.current.end();
     });
 
     expect(result.current.walk.state).toBe("complete");
-    expect(result.current.walk.audioUri).toBe("file:///docs/walkthroughs/w1/audio.m4a");
+    expect(result.current.walk.videoUri).toBe("file:///docs/walkthroughs/w1/walk.mp4");
+    // Null by design — audio is a track inside the .mp4, not a separate artifact.
+    expect(result.current.walk.audioUri).toBeNull();
   });
 
   it("surfaces a recorder error event without disturbing the walk state", async () => {
     mockStartWalk.mockResolvedValue({
       walkId: "w1",
       directory: "d",
-      audioUri: "a",
+      videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
       inputPortName: "RB Meta 014K",
       negotiatedSampleRate: 16000,
     });
