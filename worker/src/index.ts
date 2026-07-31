@@ -29,6 +29,7 @@ import {
   runRfpBidBoardCreateStuckDealSweep,
 } from "./jobs/rfp-bidboard-create.js";
 import { runRfpVoteInvitationDeadLetterSweep } from "./jobs/rfp-vote-invitation.js";
+import { runGlassesWalkthroughForwardDeadLetterSweep } from "./jobs/glasses-walkthrough-forward.js";
 import { runReportsExecutionTick } from "./jobs/reports-execution.js";
 import { runRepPerformanceRollup } from "./jobs/rep-performance-rollup.js";
 import { runBidBoardIngestInboxRecovery } from "./jobs/bid-board-ingest.js";
@@ -110,8 +111,21 @@ async function main() {
     }
     // Re-enqueue orphaned Bid Board ingestion inbox rows (self-healing; never throws).
     await runBidBoardIngestInboxRecovery();
+    // Glasses-walkthrough forward dead-letter alert: emails ops the FIRST time this sweep sees a
+    // permanently-failed glasses_walkthrough_forward job (either dead-lettered immediately on a config
+    // error, or after exhausting its 10 retries) — never a silent failure, and never more than once per
+    // job (the payload's alertSent marker). See the block comment above
+    // runGlassesWalkthroughForwardDeadLetterSweep for the full rationale.
+    try {
+      const alerted = await runGlassesWalkthroughForwardDeadLetterSweep();
+      if (alerted > 0) {
+        console.log(`[Worker:glasses_walkthrough_forward] Alerted on ${alerted} permanently-failed forward job(s)`);
+      }
+    } catch (err) {
+      console.error("[Worker:glasses_walkthrough_forward] Dead-letter alert sweep failed:", err);
+    }
   }, RFP_DEAD_LETTER_SWEEP_INTERVAL_MS);
-  console.log(`[Worker] RFP dead-letter sweeps (request delivery + Bid Board create + vote invitation) every ${RFP_DEAD_LETTER_SWEEP_INTERVAL_MS}ms`);
+  console.log(`[Worker] RFP dead-letter sweeps (request delivery + Bid Board create + vote invitation + glasses-walkthrough forward alert) every ${RFP_DEAD_LETTER_SWEEP_INTERVAL_MS}ms`);
 
   setInterval(async () => {
     try {
