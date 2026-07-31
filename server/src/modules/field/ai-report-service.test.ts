@@ -270,6 +270,26 @@ describe("ai-report-service", () => {
     expect(result.reviewedCount).toBe(2);
   });
 
+  it("retries a payload whose bullets cannot represent findings", async () => {
+    // `bullets: [""]` passes a shape check and every index is answered, but coerceBullets strips blank
+    // elements — so it reaches shapeFindings as zero bullets and reads as a deliberate pass-over. That puts
+    // the same false "nothing warranted attention" in the summary as an omitted entry, one photo at a time.
+    const blank = {
+      name: "submit_findings",
+      input: { findings: [{ photoIndex: 0, title: "T", bullets: [""] }, { photoIndex: 1, title: "", bullets: [] }] },
+    };
+    const fetchFn = stubFetch([blank, FINDINGS_OK, SUMMARY_OK]);
+
+    const result = await generateAiPhotoAssessment(
+      { projectName: "P", photos: [photo("a"), photo("b")] },
+      { fetchFn: fetchFn as unknown as typeof fetch, loadPhotoBuffer },
+    );
+
+    // Retried, and the retry's real answer is what gets used.
+    expect(result.findings.map((f) => f.photoId)).toEqual(["a", "b"]);
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+  }, 30_000);
+
   it("retries a payload that does not answer for every photograph", async () => {
     // An omitted entry is NOT a pass-over. Accepting it would tell the summary that the model judged those
     // photographs not worth writing about, which nobody did — a confidently wrong report, and an invisible

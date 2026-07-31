@@ -126,12 +126,34 @@ export async function insertAiReportRunTx(db: FieldTenantDb, input: NewAiReportR
        WHERE requested_by = ${input.requestedBy}::uuid
          AND status IN ('queued', 'running')
     ) < ${MAX_IN_FLIGHT_RUNS_PER_USER}
+      AND (
+        -- The cumulative bound. Both predicates live in the same INSERT under the same advisory lock, so
+        -- neither can be raced past.
+        SELECT count(*)
+          FROM public.field_ai_report_runs
+         WHERE requested_by = ${input.requestedBy}::uuid
+           AND created_at > now() - interval '24 hours'
+      ) < ${MAX_RUNS_PER_ROLLING_DAY}
     RETURNING *
   `);
   const row = (result as unknown as { rows: RunRow[] }).rows[0];
-  // No row means the WHERE predicate rejected it — the user is at their quota.
-  if (!row) throw new AiReportQuotaExceededError(MAX_IN_FLIGHT_RUNS_PER_USER);
-  return toRun(row);
+  if (row) return toRun(row);
+
+  // No row means one of the two predicates rejected it, and the caller needs to know WHICH — "wait for one
+  // to finish" is useless advice to someone who has hit the daily cap. Read back under the same lock, so
+  // the answer matches the decision that was just made.
+  const counts = await db.execute<{ in_flight: number; today: number }>(sql`
+    SELECT
+      count(*) FILTER (WHERE status IN ('queued', 'running'))::int AS in_flight,
+      count(*) FILTER (WHERE created_at > now() - interval '24 hours')::int AS today
+    FROM public.field_ai_report_runs
+    WHERE requested_by = ${input.requestedBy}::uuid
+  `);
+  const tally = (counts as unknown as { rows: Array<{ in_flight: number; today: number }> }).rows[0];
+  if (tally && tally.today >= MAX_RUNS_PER_ROLLING_DAY) {
+    throw new AiReportDailyQuotaExceededError(MAX_RUNS_PER_ROLLING_DAY);
+  }
+  throw new AiReportQuotaExceededError(MAX_IN_FLIGHT_RUNS_PER_USER);
 }
 
 
@@ -217,11 +239,35 @@ export function isInFlightRunConflict(error: unknown): boolean {
  */
 export const MAX_IN_FLIGHT_RUNS_PER_USER = 3;
 
+/**
+ * How many AI reports one user may START in a rolling 24 hours, whatever their outcome.
+ *
+ * The concurrency cap alone bounds nothing cumulative: a terminal run stops counting the instant it
+ * finishes, so a client that queues a replacement each time one completes keeps three paid 60-photo
+ * assessments running forever, monopolises the serial poller, and spends without limit. /api/field carries
+ * no apiLimiter, so this endpoint has to bound its own spend as well as its own concurrency.
+ *
+ * Sized off real use rather than a round number: a busy superintendent documents a handful of projects a
+ * day, so twenty-five reports is far past a legitimate day's work and still nowhere near the cost of a
+ * runaway client. Counts every run STARTED in the window — failures included — because a failing run costs
+ * model tokens too, and excluding them would leave the cap trivially bypassable by a client whose requests
+ * keep dying.
+ */
+export const MAX_RUNS_PER_ROLLING_DAY = 25;
+
 /** Raised when the INSERT is refused because the user is already at their concurrent-run quota. */
 export class AiReportQuotaExceededError extends Error {
   constructor(readonly limit: number) {
     super(`Quota of ${limit} concurrent AI reports reached.`);
     this.name = "AiReportQuotaExceededError";
+  }
+}
+
+/** Raised when the INSERT is refused because the user has started too many runs in the last 24 hours. */
+export class AiReportDailyQuotaExceededError extends Error {
+  constructor(readonly limit: number) {
+    super(`Quota of ${limit} AI reports per day reached.`);
+    this.name = "AiReportDailyQuotaExceededError";
   }
 }
 

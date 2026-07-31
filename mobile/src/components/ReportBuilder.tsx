@@ -52,6 +52,7 @@ export function ReportBuilder({
   photos,
   onGenerated,
   onLeftRunning,
+  backgroundRunActive = false,
   voiceEnabled = false,
 }: {
   visible: boolean;
@@ -65,6 +66,12 @@ export function ReportBuilder({
   // reports" promise is not kept until a manual pull-to-refresh. The RUN ID is handed over rather than a
   // bare signal: only the run itself says whether THIS report landed.
   onLeftRunning?: (runId: string) => void;
+  /**
+   * True while the OWNER is still following a handed-off run. Owned there, not here, because only the owner
+   * learns when the run reaches a terminal state — a lock held locally could only ever be cleared by closing
+   * and reopening the sheet, so it went on claiming the report was still being written long after it landed.
+   */
+  backgroundRunActive?: boolean;
   // Gates the summary dictation button — true only when server transcription is configured, matching the
   // capture/scorecard surfaces. When false the summary is typing-only (no dead mic button).
   voiceEnabled?: boolean;
@@ -107,11 +114,6 @@ export function ReportBuilder({
   // is current") because the hand-off has to fire exactly once, only for a run that never reached a terminal
   // state, and it has to name WHICH run so the owner can follow that one specifically.
   const aiRunIdRef = useRef<string | null>(null);
-  // Set when a run was handed to the background watcher while this sheet STAYED OPEN — the poll timed out,
-  // or gave up after a sustained outage. `finally` clears aiBusy on both paths, which put a live Generate
-  // button in front of a user whose report is still being written; tapping it buys a second paid assessment
-  // for work already in flight. Cleared by reset(), so closing and deliberately coming back starts fresh.
-  const [handedOffToBackground, setHandedOffToBackground] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Cancelling through close()/Cancel bumps the token, but an UNMOUNT never runs either — navigating off the
@@ -147,7 +149,6 @@ export function ReportBuilder({
     aiRunTokenRef.current += 1;
     setAiBusy(false);
     setAiProgress(null);
-    setHandedOffToBackground(false);
   }
 
   function close() {
@@ -271,7 +272,6 @@ export function ReportBuilder({
           // off here rather than at reset(): the sheet stays open on this error, so close() may not run for a
           // long time, and the message below promises the report will turn up on its own.
           aiRunIdRef.current = null;
-          setHandedOffToBackground(true);
           onLeftRunning?.(runId);
           throw new Error(
             "This is taking longer than expected. The report will appear in this project's reports when it finishes.",
@@ -287,7 +287,6 @@ export function ReportBuilder({
       const abandoned = aiRunIdRef.current;
       if (abandoned) {
         aiRunIdRef.current = null;
-        setHandedOffToBackground(true);
         onLeftRunning?.(abandoned);
       }
       // A stale loop must not report ITS failure over a run the user has since started, or paint an error
@@ -608,7 +607,7 @@ export function ReportBuilder({
           ) : step === "focus" ? (
             <>
               {aiProgress ? <Text style={styles.aiProgress}>{aiProgress}</Text> : null}
-              {handedOffToBackground ? (
+              {backgroundRunActive ? (
                 <Text style={styles.aiProgress}>
                   That report is still being written and will appear in this project&apos;s reports when it
                   finishes. Starting another would generate a second one.
@@ -620,8 +619,9 @@ export function ReportBuilder({
                 onPress={runAiReport}
                 loading={aiBusy}
                 // Blocked while a handed-off run is still going: `finally` has cleared aiBusy, so without
-                // this the button is live again and a second tap pays for the same report twice.
-                disabled={summaryDictating || handedOffToBackground}
+                // this the button is live again and a second tap pays for the same report twice. Driven by
+                // the OWNER's watcher, so it releases the moment that run reaches a terminal state.
+                disabled={summaryDictating || backgroundRunActive}
               />
             </>
           ) : (

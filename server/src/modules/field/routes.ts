@@ -4,6 +4,7 @@ import { requireFieldContractor } from "../../middleware/field-auth.js";
 import { isAiReportConfigured, MAX_FOCUS_PROMPT_LENGTH } from "./ai-report-service.js";
 import {
   AI_REPORT_JOB_TYPE,
+  AiReportDailyQuotaExceededError,
   AiReportQuotaExceededError,
   expireStaleAiReportRuns,
   getAiReportRun,
@@ -994,6 +995,14 @@ fieldRoutes.post("/reports/ai-generate", requireFieldContractor, async (req, res
     } catch (err) {
       // The INSERT's own quota predicate refused it — serialized by the advisory lock, so the count is
       // authoritative rather than a snapshot.
+      // The cumulative cap. Distinct from the concurrency one because "wait for one to finish" is useless
+      // advice to someone who has hit the daily limit — nothing they wait for will free it up.
+      if (err instanceof AiReportDailyQuotaExceededError) {
+        throw new AppError(
+          429,
+          `You have started ${err.limit} AI reports today, which is the daily limit. Try again tomorrow.`,
+        );
+      }
       if (err instanceof AiReportQuotaExceededError) {
         // ...but an identical double-tap can still arrive HERE rather than at the unique-violation branch
         // below. The pre-flight duplicate check ran before the concurrent request committed, so with the

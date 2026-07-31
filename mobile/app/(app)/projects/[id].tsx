@@ -575,6 +575,8 @@ export default function ProjectDetailScreen() {
           if (report.pdfUrl) void Linking.openURL(report.pdfUrl);
         }}
         onLeftRunning={(runId) => setBackgroundRunId(runId)}
+        // The watcher owns the lock: it is the only thing that learns when the run reaches a terminal state.
+        backgroundRunActive={backgroundRunId !== null}
       />
 
       <PhotoShareModal

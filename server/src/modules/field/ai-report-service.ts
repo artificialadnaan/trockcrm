@@ -659,6 +659,15 @@ export function coversEveryPhoto(rawFindings: unknown, batchSize: number): boole
     if (!Number.isInteger(index) || index < 0 || index >= batchSize) return false;
     if (seen.has(index)) return false; // a duplicate means some other index is unanswered
     if (typeof record.title !== "string" || !Array.isArray(record.bullets)) return false;
+    // An EMPTY bullets array is the documented pass-over and is accepted. A NON-empty one has to actually
+    // carry findings: coerceBullets strips blank and non-string elements, so `bullets: [""]` would survive
+    // this check, arrive at shapeFindings as zero bullets, and be read as a deliberate pass-over — putting
+    // the same false "nothing warranted attention" in the summary that complete-coverage exists to prevent,
+    // just one photograph at a time.
+    const bullets = record.bullets as unknown[];
+    if (bullets.length > 0 && !bullets.every((bullet) => typeof bullet === "string" && bullet.trim().length > 0)) {
+      return false;
+    }
     seen.add(index);
   }
   return seen.size === batchSize;

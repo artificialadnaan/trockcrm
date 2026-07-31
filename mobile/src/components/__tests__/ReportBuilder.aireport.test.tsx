@@ -345,19 +345,39 @@ describe("ReportBuilder AI report", () => {
     expect(props.onLeftRunning).not.toHaveBeenCalled();
   });
 
-  it("blocks a second submission after handing a still-running report to the background", async () => {
+  it("blocks a second submission while the owner is still following a handed-off run", async () => {
     // The sheet STAYS OPEN on a sustained outage and `finally` clears aiBusy, so the Generate button came
     // back while the first report was still being written. Tapping it pays for the same assessment twice.
-    mockGetAiReportStatus.mockRejectedValue(new Error("Network request failed"));
-
-    const { ui } = renderBuilder();
+    const { ui } = renderBuilder({ backgroundRunActive: true });
     await openFocusStep(ui);
-    await pressGenerate(ui);
-    await waitFor(() => expect(mockStartAiReport).toHaveBeenCalledTimes(1));
-    for (let i = 0; i < 6; i += 1) await tickPoll();
 
     // The user is told why, rather than left looking at a live button.
-    await waitFor(() => expect(ui.queryByText(/still being written/i)).not.toBeNull());
+    expect(ui.queryByText(/still being written/i)).not.toBeNull();
+    await pressGenerate(ui);
+    expect(mockStartAiReport).not.toHaveBeenCalled();
+  });
+
+  it("re-enables Generate as soon as the owner reports that run settled", async () => {
+    // The lock lives with the watcher, which is the only thing that learns the run reached a terminal
+    // state. Held locally it could only ever be cleared by closing and reopening the sheet, so the UI went
+    // on claiming the report was being written long after it had landed.
+    const { ui } = renderBuilder({ backgroundRunActive: true });
+    await openFocusStep(ui);
+    expect(ui.queryByText(/still being written/i)).not.toBeNull();
+
+    ui.rerender(
+      <ReportBuilder
+        visible
+        onClose={jest.fn()}
+        projectId="d1"
+        photos={PHOTOS}
+        onGenerated={jest.fn()}
+        onLeftRunning={jest.fn()}
+        backgroundRunActive={false}
+      />,
+    );
+
+    expect(ui.queryByText(/still being written/i)).toBeNull();
     await pressGenerate(ui);
     expect(mockStartAiReport).toHaveBeenCalledTimes(1);
   });
