@@ -7,6 +7,7 @@
  * problems and look identical otherwise.
  */
 import { NativeEventEmitter, NativeModules, Platform } from "react-native";
+import type { HfpStreamCheck, PhoneCameraCheck } from "./step0-verdicts";
 
 const native = NativeModules.WearablesBridge as WearablesNativeModule | undefined;
 
@@ -86,6 +87,8 @@ type WearablesNativeModule = {
   capabilities(): Promise<Capabilities>;
   status(): Promise<WearablesStatus>;
   diagnose(): Promise<Diagnosis>;
+  checkHfpWithStream(): Promise<HfpStreamCheck>;
+  checkPhoneCameraDuringHfp(): Promise<PhoneCameraCheck>;
   startRegistration(): Promise<{ started: boolean }>;
   handleUrl(url: string): Promise<{ handled: boolean }>;
   requestCameraPermission(): Promise<{ status: string }>;
@@ -112,6 +115,8 @@ export const Wearables = {
   capabilities: () => require_().capabilities(),
   status: () => require_().status(),
   diagnose: () => require_().diagnose(),
+  checkHfpWithStream: () => require_().checkHfpWithStream(),
+  checkPhoneCameraDuringHfp: () => require_().checkPhoneCameraDuringHfp(),
   startRegistration: () => require_().startRegistration(),
   handleUrl: (url: string) => require_().handleUrl(url),
   requestCameraPermission: () => require_().requestCameraPermission(),
