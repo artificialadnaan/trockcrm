@@ -1,5 +1,6 @@
 import { getObjectBuffer, isR2ObjectNotFoundError, ObjectTooLargeError } from "../../lib/r2-client.js";
 import { generateEvidenceJpeg } from "../../lib/image-thumbnail.js";
+import { MAX_TOTAL_DEADLINE_MS, STALE_RUN_MINUTES } from "./ai-report-limits.js";
 
 /**
  * Claude vision pass behind the T Rock Cam "AI Report" button: hands a set of jobsite photographs to a
@@ -61,9 +62,24 @@ const DEFAULT_TOTAL_DEADLINE_MS = 12 * 60 * 1000;
 
 function resolveTotalDeadlineMs(env: NodeJS.ProcessEnv = process.env): number {
   const raw = Number(env.AI_REPORT_TOTAL_DEADLINE_MS);
-  // Must stay well under STALE_RUN_MINUTES (ai-report-runs.ts) — see the note above.
-  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TOTAL_DEADLINE_MS;
+  const configured = Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_TOTAL_DEADLINE_MS;
+  // CLAMPED, not merely documented. An override at or above the stale window lets a later enqueue by the
+  // same user reap a run whose model call is still spending, free its quota and unique-index slot, and
+  // queue a second paid assessment against the first — so the invariant is enforced here rather than
+  // trusted to whoever sets the variable.
+  if (configured > MAX_TOTAL_DEADLINE_MS) {
+    console.warn("[field-ai-report] AI_REPORT_TOTAL_DEADLINE_MS exceeds the safe ceiling; clamping", {
+      configuredMs: configured,
+      ceilingMs: MAX_TOTAL_DEADLINE_MS,
+      staleRunMinutes: STALE_RUN_MINUTES,
+    });
+    return MAX_TOTAL_DEADLINE_MS;
+  }
+  return configured;
 }
+
+/** Exported for test: the clamp is the whole point, and it is otherwise only observable via a live run. */
+export const resolveTotalDeadlineMsForTest = resolveTotalDeadlineMs;
 
 /**
  * Per-million-token rates used ONLY for the cost figure recorded on the run row — nothing bills off these.

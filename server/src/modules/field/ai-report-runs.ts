@@ -2,6 +2,8 @@ import { sql } from "drizzle-orm";
 import { pool } from "../../db.js";
 import type { FieldTenantDb } from "./cross-office.js";
 import type { AiReportUsage } from "./ai-report-service.js";
+// Paired with the model-phase deadline ceiling — see ai-report-limits.ts for why they live together.
+import { STALE_RUN_MINUTES } from "./ai-report-limits.js";
 
 /**
  * Reads/writes for public.field_ai_report_runs — the status row the phone polls while an AI report is being
@@ -132,15 +134,6 @@ export async function insertAiReportRunTx(db: FieldTenantDb, input: NewAiReportR
   return toRun(row);
 }
 
-/**
- * How long a run may sit in queued/running before it is considered abandoned.
- *
- * This exists because of the in-flight unique index: without a way out, a run orphaned by a worker that
- * died mid-flight would occupy that (deal, requester) slot FOREVER and permanently lock the user out of AI
- * reports on that project. Generous on purpose — a 60-photo run that exhausts its retries can legitimately
- * run ~10 minutes — so this only ever fires on a genuinely dead run.
- */
-const STALE_RUN_MINUTES = 20;
 
 /**
  * Fail this user's abandoned runs ACROSS EVERY PROJECT, and report how many were cleared. Called before

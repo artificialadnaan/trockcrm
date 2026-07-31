@@ -71,6 +71,24 @@ describe("ai-report-service", () => {
     vi.unstubAllEnvs();
   });
 
+  it("clamps a total-deadline override that would outlive the stale-run window", async () => {
+    // The deadline bounds the MODEL phase only, and the lease is not renewed until rendering starts. An
+    // override at or past the stale window lets a later enqueue by the same user reap a run whose model call
+    // is still spending tokens, free its slot, and queue a second paid assessment against the first.
+    const { MAX_TOTAL_DEADLINE_MS, STALE_RUN_MINUTES } = await import("./ai-report-limits.js");
+    expect(MAX_TOTAL_DEADLINE_MS).toBeLessThan(STALE_RUN_MINUTES * 60_000);
+
+    const { resolveTotalDeadlineMsForTest } = await import("./ai-report-service.js");
+    // Well past the window — clamped to the ceiling, not honoured.
+    expect(resolveTotalDeadlineMsForTest({ AI_REPORT_TOTAL_DEADLINE_MS: String(45 * 60_000) })).toBe(MAX_TOTAL_DEADLINE_MS);
+    // Exactly at the stale window is still too long.
+    expect(resolveTotalDeadlineMsForTest({ AI_REPORT_TOTAL_DEADLINE_MS: String(STALE_RUN_MINUTES * 60_000) })).toBe(MAX_TOTAL_DEADLINE_MS);
+    // A value inside the ceiling is passed through untouched.
+    expect(resolveTotalDeadlineMsForTest({ AI_REPORT_TOTAL_DEADLINE_MS: "60000" })).toBe(60_000);
+    // ...as is the default when nothing is set.
+    expect(resolveTotalDeadlineMsForTest({})).toBeLessThanOrEqual(MAX_TOTAL_DEADLINE_MS);
+  });
+
   it("reports configuration from the API key", () => {
     expect(isAiReportConfigured({ ANTHROPIC_API_KEY: "k" } as NodeJS.ProcessEnv)).toBe(true);
     expect(isAiReportConfigured({} as NodeJS.ProcessEnv)).toBe(false);

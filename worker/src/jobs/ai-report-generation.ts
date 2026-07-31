@@ -40,10 +40,15 @@ export function isCandidateMissing(error: unknown, candidate: string): boolean {
   if (code !== "ERR_MODULE_NOT_FOUND" && code !== "MODULE_NOT_FOUND") return false;
   const message = (error as { message?: unknown } | null)?.message;
   if (typeof message !== "string") return false;
-  // "Cannot find module '<specifier>' imported from '<importer>'". Only the SPECIFIER half may be matched:
-  // when a candidate's own dependency is missing, the candidate appears as the IMPORTER, and matching the
-  // whole message would read that as "the candidate is absent" and fall through.
-  const [specifier] = message.split(" imported from ");
+  // ONLY the quoted specifier may be compared. Both message forms name the candidate somewhere else when
+  // the real problem is inside it: ESM writes "Cannot find module '<specifier>' imported from '<importer>'",
+  // and CommonJS writes "Cannot find module '<specifier>'\nRequire stack:\n- <importer>". Matching anything
+  // beyond the quoted name reads the candidate's appearance as an IMPORTER as "the candidate is absent" and
+  // falls through, hiding the missing dependency behind the fallback's own resolution error.
+  const specifier = /Cannot find module ['"]([^'"]+)['"]/.exec(message)?.[1];
+  // An unrecognised message shape is treated as NOT-missing on purpose: propagating a real error beats
+  // silently trying the next path.
+  if (!specifier) return false;
   return specifier.includes(candidate.replace(/^(?:\.\.\/)+/, ""));
 }
 

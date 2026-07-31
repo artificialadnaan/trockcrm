@@ -46,6 +46,24 @@ describe("ai_report_generation shim", () => {
       expect(isCandidateMissing(error, CANDIDATE)).toBe(false);
     });
 
+    it("does NOT skip a CommonJS dependency failure, where the candidate is in the require stack", () => {
+      // The CJS form names the importer under "Require stack:" rather than after "imported from", so a
+      // predicate that looked at anything but the quoted specifier saw the candidate in that stack and
+      // wrongly declared it absent.
+      const error = Object.assign(
+        new Error(
+          "Cannot find module 'sharp'\nRequire stack:\n- /srv/app/server/dist/modules/field/ai-report-job.js\n- /srv/app/worker/dist/jobs/ai-report-generation.js",
+        ),
+        { code: "MODULE_NOT_FOUND" },
+      );
+      expect(isCandidateMissing(error, CANDIDATE)).toBe(false);
+    });
+
+    it("does NOT skip on an unrecognised message shape", () => {
+      // Conservative by design: propagating a real error beats silently trying the next path.
+      expect(isCandidateMissing(Object.assign(new Error("something else entirely"), { code: "ERR_MODULE_NOT_FOUND" }), CANDIDATE)).toBe(false);
+    });
+
     it("does NOT skip an initialisation failure", () => {
       expect(isCandidateMissing(new TypeError("R2_ACCOUNT_ID is required"), CANDIDATE)).toBe(false);
       expect(isCandidateMissing(null, CANDIDATE)).toBe(false);
