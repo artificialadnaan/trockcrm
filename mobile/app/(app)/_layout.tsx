@@ -66,6 +66,10 @@ export default function AppLayout() {
           a fifth "dev-wearables" tab that a crew can tap into a blank screen. href: null keeps it
           reachable by direct navigation (e.g. for testing) without ever appearing in the tab bar. */}
       <Tabs.Screen name="dev-wearables" options={{ href: null }} />
+      {/* The AI walk is entered from a project's capture flow, never from the tab bar — it needs
+          a deal to attach to, and a tab has no way to carry one. Same auto-registration trap as
+          above: without this it ships as a tab that opens a walk bound to nothing. */}
+      <Tabs.Screen name="walk" options={{ href: null }} />
     </Tabs>
   );
 }
