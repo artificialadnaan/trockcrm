@@ -308,6 +308,13 @@ export async function runFieldAiReportJob(
         // whose report the status endpoint refuses to hand back (it re-runs the same assertion), i.e. a
         // success the user can never open.
         await assertActiveFieldProject(db, access, run.dealId);
+        // Re-check the PHOTOS on the same terms. Deletion is soft — the row is marked inactive and its R2
+        // object stays readable — so a photo removed during the long Phase D render is still embedded in the
+        // PDF that was just uploaded. Publishing it would put a photograph the user deleted into a brand-new
+        // downloadable report. Same predicate as Phase A, so "still in scope" means the same thing at both
+        // ends of the run; it throws if any selected photo no longer qualifies, and the catch below discards
+        // the PDF. Re-rendering without it is not an option at this point — the pages are already written.
+        await loadPhotosForAssessment(db, run.dealId, run.photoIds);
         return recordFieldPhotoReportFile(db, access, prepared, stored);
       });
     } catch (error) {

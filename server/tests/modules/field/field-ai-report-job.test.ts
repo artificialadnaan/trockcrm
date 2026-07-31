@@ -471,6 +471,33 @@ describe("runFieldAiReportJob", () => {
     expect(runMocks.markAiReportRunFailed).toHaveBeenCalled();
   });
 
+  it("discards the report when a selected photo is deleted during the render", async () => {
+    // Deletion is SOFT — the row goes inactive but its R2 object stays readable — so a photo removed during
+    // the long Phase D render is still embedded in the PDF that was just uploaded. Checking only the project
+    // at Phase E would publish a brand-new downloadable report containing a photograph the user deleted.
+    let tx = 0;
+    xoMocks.runInOfficeTransaction.mockImplementation(async (office: any, _userId: any, run: any) => {
+      tx += 1;
+      // Phase A (tx 1) and Phase C (tx 2) see both photos; by Phase E (tx 3) one has left the scope.
+      const rows = tx >= 3
+        ? [photoRow(PHOTO_A, null)]
+        : [photoRow(PHOTO_A, null), photoRow(PHOTO_B, null)];
+      return run(officeDb(rows), office);
+    });
+    reportMocks.renderAndStoreFieldPhotoReportPdf.mockImplementation(async () => ({ r2Key: "office_dallas/report.pdf" } as any));
+
+    await runFieldAiReportJob({ runId: "run-1" });
+
+    // Not published, and the uploaded object does not linger.
+    expect(reportMocks.recordFieldPhotoReportFile).not.toHaveBeenCalled();
+    expect(r2Mocks.deleteObject).toHaveBeenCalledWith("office_dallas/report.pdf");
+    expect(runMocks.markAiReportRunFailed).toHaveBeenCalledWith(
+      "run-1",
+      expect.stringMatching(/unavailable/i),
+      expect.anything(),
+    );
+  });
+
   it("keeps the uploaded PDF when Phase E succeeds", async () => {
     // The counterweight to the test above: the cleanup must be reachable ONLY on the failure path, or a
     // perfectly good report loses its object right after it is recorded.
