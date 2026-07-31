@@ -683,7 +683,16 @@ final class WearablesBridge: RCTEventEmitter {
         let during = Self.routeSnapshot(audio)
 
         capture.stopRunning()
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        // A route lost on teardown can take a moment to renegotiate, and this file already
+        // budgets 3s for exactly that in activateHfpAndSettle. Reading after a fixed 1s could
+        // catch the route mid-transition and report a recovery failure that never happened.
+        // Polling does not mask a genuine loss: if HFP never comes back, the deadline expires
+        // and whatever the route actually is gets reported.
+        let recoveryDeadline = Date().addingTimeInterval(3)
+        while !audio.currentRoute.inputs.contains(where: { $0.portType == .bluetoothHFP }),
+              Date() < recoveryDeadline {
+          try? await Task.sleep(nanoseconds: 100_000_000)
+        }
         let after = Self.routeSnapshot(audio)
 
         try? audio.setActive(false, options: .notifyOthersOnDeactivation)
