@@ -172,17 +172,46 @@ PHONE   ──CameraCapture ─────────────────�
 
 ---
 
-## Step 0 — de-risk before building
+## Step 0 — CLEARED. Both checks PASS (2026-07-30, real hardware)
 
-Two silent-failure modes gate this design. Both are cheap to test and expensive to discover late.
+The two silent-failure modes that gated this design were measured on device via rungs 9 and 10.
+**Both passed. The design proceeds as written — no fallback, no spec change.**
 
-1. **Does HFP survive a DAT stream started in the documented order?** Never verified. Tonight's
-   audio measurement ran while rung 6 was failing, so no stream existed
-   (`streamWasRunningFirst: false`).
-2. **Does opening the phone camera for a still kill the HFP route?**
+**Rung 9 — does HFP survive a DAT camera stream?** PASS.
 
-Both are added as diagnostic rungs, reporting the audio route before and after. If (1) fails,
-fall back to audio + stills — already proven, already accepted by the engine, ~27 MB per walk.
+```
+beforeStreamStart   BluetoothHFP · RB Meta 014K · 16000 Hz
+afterStreamStart    BluetoothHFP · RB Meta 014K · 16000 Hz
+```
+
+The route survived, and the *rate* held at 16 kHz — the check fails a narrowband downgrade even
+when the port stays HFP, so this is wideband confirmed on both sides, not merely "still
+Bluetooth". Video + glasses audio can be captured simultaneously.
+
+**Rung 10 — does the phone camera tear down the HFP route?** PASS.
+
+```
+before   BluetoothHFP · RB Meta 014K · 16000 Hz
+during   BluetoothHFP · RB Meta 014K · 16000 Hz
+after    BluetoothHFP · RB Meta 014K · 16000 Hz
+```
+
+The `during` reading is the load-bearing one: the route was intact *while the capture session was
+running*, not merely restored afterwards. Phone stills during a glasses walk are safe — provided
+the capture session stays **photo-output only with no audio input**, which is the configuration
+this check exercised. Adding an audio input would invalidate this result.
+
+**Method, so the result can be trusted.** Rung 9 runs Meta's documented order exactly:
+`addStream()` → configure HFP → poll for route stabilization → `stream.start()` → wait 4s (past
+the measured 2.2–2.5s first-frame latency) → read. Rung 10 polls up to 3s for route recovery
+after `stopRunning()` rather than reading at a fixed offset, because a fixed read can catch a
+Bluetooth renegotiation mid-transition and report a recovery failure that never happened.
+
+Native reports raw route snapshots and decides nothing; the verdicts are computed by pure
+TypeScript in `mobile/src/wearables/step0-verdicts.ts` (19 tests). `describePhoneCameraCheck`
+returns `pass` for exactly one of 27 `(before, during, after)` combinations — an `INCONCLUSIVE`
+outcome exists specifically so a run that measured nothing cannot be mistaken for a run that
+measured success.
 
 ---
 
