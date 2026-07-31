@@ -60,6 +60,32 @@ final class WearablesBridge: RCTEventEmitter {
     return error.localizedDescription
   }
 
+  /// One audio-route reading, reported raw. Whether a reading is good or bad is decided in JS
+  /// (`step0-verdicts.ts`), because that is the part that can be unit-tested.
+  private static func routeSnapshot(_ session: AVAudioSession) -> [String: Any] {
+    let input = session.currentRoute.inputs.first
+    return [
+      "portType": input?.portType.rawValue ?? "none",
+      "portName": input?.portName ?? "none",
+      "sampleRate": session.sampleRate,
+      "isBluetoothHFP": input?.portType == .bluetoothHFP,
+    ]
+  }
+
+  /// Bring up the HFP microphone route and wait for it to stabilize. Meta's guidance is explicit
+  /// that the route "needs time to stabilize"; reading it immediately reports the built-in mic.
+  private static func activateHfpAndSettle() async throws -> AVAudioSession {
+    let session = AVAudioSession.sharedInstance()
+    try session.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothHFP])
+    try session.setActive(true)
+    let deadline = Date().addingTimeInterval(3)
+    while !session.currentRoute.inputs.contains(where: { $0.portType == .bluetoothHFP }),
+          Date() < deadline {
+      try? await Task.sleep(nanoseconds: 100_000_000)
+    }
+    return session
+  }
+
   // MARK: - 1. Configure
 
   @objc(configure:rejecter:)
