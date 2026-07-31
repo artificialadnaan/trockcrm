@@ -35,7 +35,7 @@ const COVER_LOGO_FIT: [number, number] = [210, 210];
 // gray panel — that dead gray gutter was the bulk of the "small image + lots of white space" problem.
 const PHOTOS_PER_PAGE = 4;
 const CONTENT_WIDTH = PAGE_WIDTH - PAGE_MARGIN * 2;
-const PHOTO_ROWS_TOP = 64;
+const PHOTO_ROWS_TOP = 72;
 const PHOTO_ROWS_BOTTOM = 742; // stay clear of the footer (drawn at PAGE_HEIGHT - 44)
 const PHOTO_ROW_PITCH = 172;
 /**
@@ -426,12 +426,15 @@ function drawSectionHeader(doc: PDFKit.PDFDocument, fonts: ReportFontSet, report
 // divider is skipped — without this the user's custom section title would be dropped entirely.
 function drawCompactSectionTitle(doc: PDFKit.PDFDocument, fonts: ReportFontSet, title: string) {
   doc.save();
-  doc.fillColor(BRAND_BLACK).font(fonts.bold).fontSize(11);
-  doc.text(title, PAGE_MARGIN, 50, {
+  // LEFT-aligned, on the margin the tiles below start from. Centred, it floated between the header rule and
+  // the first tile belonging to neither — and it is a section label, not a page heading.
+  doc.fillColor(BRAND_MUTED).font(fonts.bold).fontSize(10);
+  doc.text(title.toUpperCase(), PAGE_MARGIN, 52, {
     width: PAGE_WIDTH - PAGE_MARGIN * 2,
-    align: "center",
+    align: "left",
     lineBreak: false,
     height: 13,
+    characterSpacing: 0.6,
     ellipsis: true,
   });
   doc.restore();
@@ -620,16 +623,21 @@ async function drawPhotoEntry(
     });
   });
 
-  // The crew's caption (or the AI's finding) above the metadata. Only drawn when there is one — an absent
-  // caption leaves clean space rather than the words "No description".
+  // The crew's caption (or the AI's finding) sits DIRECTLY above the metadata, as one bottom-anchored
+  // group. Pinning it to the top of the tile instead left ~100pt of dead air between the caption and the
+  // data it describes — the two belong together, and the whitespace then falls above the group where it
+  // reads as breathing room rather than a gap. Only drawn when there is one: an absent caption leaves clean
+  // space rather than the words "No description".
   const description = clampText(photo.descriptionOverride ?? photo.description ?? "", 200);
   if (description) {
-    const descriptionMaxHeight = metaTop - top - 6;
     doc.fillColor(BRAND_BLACK).font(fonts.regular).fontSize(10.5);
-    doc.text(description, CAPTION_LEFT, top + 2, {
+    const available = metaTop - top - 8;
+    const measured = doc.heightOfString(description, { width: CAPTION_WIDTH, lineGap: 2 });
+    const descriptionHeight = Math.min(measured, available);
+    doc.text(description, CAPTION_LEFT, metaTop - 8 - descriptionHeight, {
       width: CAPTION_WIDTH,
       lineGap: 2,
-      height: Math.max(META_LINE_PITCH, descriptionMaxHeight),
+      height: descriptionHeight,
       ellipsis: true,
     });
   }
