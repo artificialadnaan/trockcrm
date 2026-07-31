@@ -384,6 +384,14 @@ git commit -m "feat(mobile): route-snapshot helper for the Step 0 checks"
 
 ## Task 3: Native — rung 9, HFP under a DAT stream
 
+> **IMPLEMENTED — one value below is SUPERSEDED. Do not re-apply verbatim.**
+> Commit `56a9deeb9`, hardened in `9f3ef4549`.
+>
+> The code below reads the route `3_000_000_000` ns after `stream.start()`. Shipped code uses
+> **`4_000_000_000`**. Measured first-frame latency on this hardware is 2.2–2.5s, so 3s left only
+> a ~20% margin. Reading early would produce a spurious FAIL on a measurement that gates the
+> whole capture architecture — wrongly pushing the design onto the audio-plus-stills fallback.
+
 **Files:**
 - Modify: `mobile/plugins/wearables-native/WearablesBridge.swift`
 - Modify: `mobile/plugins/wearables-native/WearablesBridge.m`
@@ -497,6 +505,19 @@ git commit -m "feat(mobile): rung 9 — does HFP survive a DAT stream"
 ---
 
 ## Task 4: Native — rung 10, phone camera during HFP
+
+> **IMPLEMENTED — one value below is SUPERSEDED. Do not re-apply verbatim.**
+> Commit `9f3ef4549`, fixed in `aa81b64bf`.
+>
+> The code below reads the `after` snapshot a fixed `1_000_000_000` ns after `stopRunning()`.
+> Shipped code **polls up to 3s** for the HFP route to return, mirroring `activateHfpAndSettle`.
+> A route lost on teardown can take a moment to renegotiate, and this file already budgets 3s for
+> exactly that elsewhere — so a fixed 1s read can catch the route mid-transition and report a
+> recovery failure that never happened. Polling does not mask a genuine loss: if HFP never comes
+> back, the deadline expires and whatever the route actually is gets reported.
+>
+> The `during` read stays a fixed 2s deliberately. It samples the window while the camera is
+> open; polling there would change what is measured rather than stabilise it.
 
 **Files:**
 - Modify: `mobile/plugins/wearables-native/WearablesBridge.swift`
@@ -755,11 +776,13 @@ git commit -m "docs(mobile): Step 0 results — HFP under stream, phone camera d
 
 ## Definition of done
 
-- [ ] 9 new unit tests pass; full suite at 633 passing
-- [ ] `BUILD SUCCEEDED` with no warnings in `WearablesBridge.swift`
-- [ ] Typecheck clean for every touched file
-- [ ] Rungs 9 and 10 have been **run on hardware** and their verdicts recorded in the spec
-- [ ] The spec's Step 0 section states measured outcomes, not open questions
+- [x] Unit tests pass — **19** new (not the 9 planned; review rounds added 10), suite at **643**
+- [x] `BUILD SUCCEEDED` with no warnings in `WearablesBridge.swift`
+- [x] Typecheck clean for every touched file (5 pre-existing errors in
+      `scorecards/corrective-action/[id].tsx` remain the only ones, and are unrelated)
+- [x] Rungs 9 and 10 **run on hardware** 2026-07-30 — **both PASS**, `BluetoothHFP` at 16000 Hz
+      on every snapshot
+- [x] The spec's Step 0 section states measured outcomes, not open questions
 
 ## What happens next
 
