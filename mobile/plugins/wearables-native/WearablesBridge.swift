@@ -572,4 +572,78 @@ final class WearablesBridge: RCTEventEmitter {
       AVAudioSession.sharedInstance().requestRecordPermission(proceed)
     }
   }
+
+  // MARK: - 9. Step 0 check: does HFP survive a DAT stream?
+
+  /// Runs Meta's documented sequence exactly — addStream(), THEN configure HFP and let the route
+  /// settle, THEN stream.start() — and reports the route either side of the start. The old code
+  /// called addStream() and stream.start() back to back, which leaves no window for HFP at all.
+  @objc(checkHfpWithStream:rejecter:)
+  func checkHfpWithStream(_ resolve: @escaping RCTPromiseResolveBlock,
+                          rejecter reject: @escaping RCTPromiseRejectBlock) {
+    guard Self.configured else {
+      reject("wearables_not_configured", "Call configure() first", nil)
+      return
+    }
+    teardown()
+
+    Task {
+      let audio = AVAudioSession.sharedInstance()
+      do {
+        let sdk = Wearables.shared
+        let selector = AutoDeviceSelector(wearables: sdk)
+        var deadline = Date().addingTimeInterval(8)
+        while selector.activeDevice == nil, Date() < deadline {
+          try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        guard selector.activeDevice != nil else {
+          reject("wearables_no_active_device", "No active device after 8s. Run rung 4b.", nil)
+          return
+        }
+
+        let created = try sdk.createSession(deviceSelector: selector)
+        session = created
+        try created.start()
+        deadline = Date().addingTimeInterval(10)
+        while created.state != .started, Date() < deadline {
+          try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        guard created.state == .started else {
+          let stalled = created.state.description
+          teardown()
+          reject("wearables_session_not_started", "Stalled in \(stalled) after 10s", nil)
+          return
+        }
+
+        // Meta step 1: the stream exists but is NOT started.
+        guard let newStream = try created.addStream() else {
+          teardown()
+          reject("wearables_stream_nil", "addStream() returned nil", nil)
+          return
+        }
+        stream = newStream
+
+        // Meta step 2: HFP comes up while the stream is still stopped.
+        _ = try await Self.activateHfpAndSettle()
+        let before = Self.routeSnapshot(audio)
+
+        // Meta step 3: only now.
+        newStream.start()
+        // Three seconds is well past the 2.2-2.5s first-frame latency measured on this
+        // hardware, so the route is read after frames are genuinely flowing.
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
+        let after = Self.routeSnapshot(audio)
+
+        teardown()
+        try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+
+        resolve(["beforeStreamStart": before, "afterStreamStart": after])
+      } catch {
+        teardown()
+        try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+        reject("wearables_hfp_stream_check_failed",
+               "checkHfpWithStream failed: \(Self.describe(error))", error)
+      }
+    }
+  }
 }

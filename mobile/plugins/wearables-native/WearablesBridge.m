@@ -35,4 +35,6 @@ RCT_EXTERN_METHOD(capturePhoto : (RCTPromiseResolveBlock)resolve rejecter : (RCT
 
 RCT_EXTERN_METHOD(recordGlassesAudio : (nonnull NSNumber *)seconds resolver : (RCTPromiseResolveBlock)resolve rejecter : (RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(checkHfpWithStream : (RCTPromiseResolveBlock)resolve rejecter : (RCTPromiseRejectBlock)reject)
+
 @end
