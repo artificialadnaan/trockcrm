@@ -195,6 +195,31 @@ PHONE   ──CameraCapture ─────────────────�
 >
 > Until both are re-run: treat "video + audio simultaneously" as well-supported, and "phone
 > stills during a walk are safe" as **untested**.
+>
+> ### Both fixes have LANDED. Only the re-run remains.
+>
+> `e42f20f7b` (Swift) + `f676b09c0` (verdicts). Rung 9 now counts delivered frames and reports
+> `framesDelivered` / `firstFrameSeconds`; a zero-frame run returns **inconclusive**, because an
+> undisturbed route is ambiguous between "a stream ran and did not disturb it" and "nothing ran
+> to disturb it with". Rung 10 now fires a real shutter, samples the route **during the capture**,
+> and reports `capturePhotoSucceeded` / `capturePhotoTimedOut` / `capturePhotoError`; a failed or
+> timed-out shutter is inconclusive, and `duringCapture` is evaluated with the same rigour as
+> `during` on both port and rate.
+>
+> Note the Swift fix alone was inert — native measured the new facts for one commit before the
+> verdicts read them, during which rung 9 would still have passed a zero-frame run. Both commits
+> are required.
+>
+> The zero-frames gate sits **last**, after route-loss and rate-degradation. A route that actually
+> dropped is real evidence something touched the microphone whether or not a frame decoded, so
+> gating earlier would downgrade genuine failures to inconclusive and discard evidence. Two
+> regression tests pin that ordering.
+>
+> 180 input combinations were enumerated across both verdict functions; none returns `pass` while
+> claiming more than its inputs support. `step0-verdicts.ts` now carries 209 tests.
+>
+> **What is left is purely the hardware re-run.** Rebuild, run rung 1 then 9 then 10, and record
+> the verdicts here, replacing this block.
 
 The two silent-failure modes that gated this design were measured on device via rungs 9 and 10.
 **Both passed. The design proceeds as written — no fallback, no spec change.**
