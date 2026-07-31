@@ -1,3 +1,5 @@
+import sharp from "sharp";
+import zlib from "node:zlib";
 import { describe, expect, it } from "vitest";
 import { renderFieldPhotoReportPdf, type ReportRenderSection } from "../../../src/modules/field/pdf-layout.js";
 
@@ -33,6 +35,27 @@ function photo(i: number): ReportRenderSection["photos"][number] {
 }
 
 describe("renderFieldPhotoReportPdf page count", () => {
+  it("clips each photograph to the rounded tile instead of drawing over its corners", async () => {
+    // roundedRect().fill() paints a background and establishes NO clipping path. A photograph whose aspect
+    // is close to the tile's fills it almost exactly — 16:9 lands at 268.4x151 inside a 270x151 tile, which
+    // is most jobsite panoramas — so its square corners cover the rounded cutouts and it reads as spilling
+    // out of the frame. Asserted on the emitted clip operator because the defect is invisible to a page
+    // count and to every geometry assertion: the numbers are identical either way.
+    // A REAL image is required: the placeholder path draws no image and so emits no clip, which would make
+    // this pass for the wrong reason. 16:9 on purpose — the aspect that actually reaches the corners.
+    const panorama = await sharp({ create: { width: 1920, height: 1080, channels: 3, background: { r: 90, g: 110, b: 130 } } })
+      .jpeg()
+      .toBuffer();
+    const buffer = await renderFieldPhotoReportPdf({
+      cover,
+      sections: [{
+        title: "Doors",
+        photos: [{ ...photo(1), externalUrl: `data:image/jpeg;base64,${panorama.toString("base64")}` }],
+      }],
+    });
+    expect(countClipOperators(buffer)).toBeGreaterThanOrEqual(1);
+  });
+
   it("a single section of 4 photos is COVER + one photo page — no divider, no trailing blank pages", async () => {
     const buffer = await renderFieldPhotoReportPdf({
       cover,
@@ -108,3 +131,28 @@ describe("renderFieldPhotoReportPdf page count", () => {
     expect(countPdfPages(buffer)).toBe(2);
   });
 });
+
+/**
+ * Count clipping operators (`W n`) across the document's content streams.
+ *
+ * PDFKit flate-compresses each stream, so they are inflated first. Anything that does not inflate is not a
+ * content stream (font programs, images) and is skipped.
+ */
+function countClipOperators(buffer: Buffer): number {
+  const raw = buffer.toString("latin1");
+  const streamStart = /stream\r?\n/g;
+  let count = 0;
+  let match: RegExpExecArray | null;
+  while ((match = streamStart.exec(raw))) {
+    const start = match.index + match[0].length;
+    const end = raw.indexOf("endstream", start);
+    if (end < 0) continue;
+    try {
+      const text = zlib.inflateSync(Buffer.from(raw.slice(start, end), "latin1")).toString("latin1");
+      count += (text.match(/\bW\s+n\b/g) || []).length;
+    } catch {
+      // not a flate-compressed content stream
+    }
+  }
+  return count;
+}
