@@ -638,9 +638,13 @@ function shapeFindings(rawFindings: unknown, batch: PreparedImage[]): AiReportFi
     findings.push({
       photoId: image.photo.id,
       // Fall back to the crew's caption, then the file name, so a cited photo always has a subject label.
-      // SANITISED: this title is re-sent verbatim inside the summary digest, so an unsanitised caption here
-      // would reach the summary prompt outside any fence — the exact escape the <field_note> tags close.
-      title: found.title || fieldNote(image.photo.caption) || image.photo.displayName,
+      // SANITISED ON EVERY BRANCH: this title is re-sent inside the summary digest, which is interpolated
+      // into that prompt WITHOUT a fence — so anything user-controlled reaching it arrives at the second
+      // model call as prose. The caption was already covered; displayName is just as user-editable (files
+      // get renamed), and the model's own title goes through the same filter rather than being trusted,
+      // since it can quote a note back. Sanitised per branch, not once at the end, so a value that reduces
+      // to nothing still falls through to the next candidate instead of yielding an empty label.
+      title: fieldNote(found.title) || fieldNote(image.photo.caption) || fieldNote(image.photo.displayName),
       bullets: found.bullets,
     });
   });

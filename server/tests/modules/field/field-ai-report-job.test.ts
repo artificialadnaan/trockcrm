@@ -141,7 +141,7 @@ beforeEach(() => {
     async (_db: any, _access: any, id: string) => ({ id, name: "Tides at Park Lane", dealNumber: "D-1" }) as any,
   );
   poolMocks.query.mockResolvedValue({
-    rows: [{ id: "user-1", role: "admin", display_name: "Sam Super", first_name: null, last_name: null, email: "s@t.com" }],
+    rows: [{ id: "user-1", role: "admin", display_name: "Sam Super", first_name: null, last_name: null, email: "s@t.com", is_active: true }],
   } as any);
   xoMocks.runInOfficeTransaction.mockImplementation(async (office: any, _userId: any, run: any) => {
     timeline.events.push("tx:open");
@@ -320,6 +320,36 @@ describe("runFieldAiReportJob", () => {
   it("throws for an unknown run so the queue can retry a lost row", async () => {
     runMocks.getAiReportRun.mockResolvedValue(null as any);
     await expect(runFieldAiReportJob({ runId: "run-404" })).rejects.toThrow(/not found/);
+  });
+
+  it("refuses to run for a requester deactivated while the run sat queued", async () => {
+    // requireFieldContractor gated the ENQUEUE, but the serial poller can leave a run queued for minutes.
+    // Without a re-check the worker spends on the model and files a report as a deactivated account.
+    poolMocks.query.mockResolvedValue({
+      rows: [{ id: "user-1", role: "admin", display_name: "Sam", first_name: null, last_name: null, email: "s@t.com", is_active: false }],
+    } as any);
+
+    await runFieldAiReportJob({ runId: "run-1" });
+
+    // Refused BEFORE the expensive part — no model call, no PDF, no file row.
+    expect(aiMocks.generateAiPhotoAssessment).not.toHaveBeenCalled();
+    expect(reportMocks.renderAndStoreFieldPhotoReportPdf).not.toHaveBeenCalled();
+    expect(reportMocks.recordFieldPhotoReportFile).not.toHaveBeenCalled();
+    // The phone still gets a terminal reason rather than a run that hangs.
+    expect(runMocks.markAiReportRunFailed).toHaveBeenCalledWith("run-1", expect.stringMatching(/no longer has access/i), null);
+  });
+
+  it("refuses to run for a requester whose role is outside the field-app set", async () => {
+    // A backstop rather than a live path: every currently assignable role is field-app allowed, but the
+    // column is not constrained to that enum and the list could narrow.
+    poolMocks.query.mockResolvedValue({
+      rows: [{ id: "user-1", role: "legacy_role", display_name: "Sam", first_name: null, last_name: null, email: "s@t.com", is_active: true }],
+    } as any);
+
+    await runFieldAiReportJob({ runId: "run-1" });
+
+    expect(aiMocks.generateAiPhotoAssessment).not.toHaveBeenCalled();
+    expect(runMocks.markAiReportRunFailed).toHaveBeenCalledWith("run-1", expect.stringMatching(/no longer has access/i), null);
   });
 
   it("renews the lease on the run it is actually working", async () => {

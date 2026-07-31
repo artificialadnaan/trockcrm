@@ -2,6 +2,7 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import { files } from "@trock-crm/shared/schema";
 import type { UserRole } from "@trock-crm/shared/types";
 import { pool } from "../../db.js";
+import { FIELD_APP_ALLOWED_ROLE_SET } from "../../middleware/field-auth.js";
 import { deleteObject } from "../../lib/r2-client.js";
 import { buildDealPhotoTimelineConditions } from "../files/photo-timeline-filters.js";
 import { getFieldOfficeById, runInOfficeTransaction } from "./cross-office.js";
@@ -68,9 +69,25 @@ async function loadRequester(userId: string): Promise<Requester> {
     first_name: string | null;
     last_name: string | null;
     email: string;
-  }>(`SELECT id, role, display_name, first_name, last_name, email FROM public.users WHERE id = $1::uuid`, [userId]);
+    is_active: boolean;
+  }>(
+    `SELECT id, role, display_name, first_name, last_name, email, is_active FROM public.users WHERE id = $1::uuid`,
+    [userId],
+  );
   const row = result.rows[0];
   if (!row) throw new AiReportError("The user who requested this report no longer exists.", false);
+  // Re-apply the field-app gate, not just "the row exists". requireFieldContractor ran at ENQUEUE time, and
+  // a run can sit behind the serial poller for minutes — long enough for an admin to deactivate the account.
+  // Nothing later restores that check (assertActiveFieldProject validates the PROJECT, not the actor), so
+  // without this the worker would spend on the model and file a report as a deactivated account. Not
+  // retryable: a revocation does not resolve itself.
+  //
+  // Deactivation is the reachable path today — USER_ROLES and FIELD_APP_ALLOWED_ROLE_SET currently hold the
+  // same members, so no assignable role fails the second test. It is checked anyway, both to stay correct
+  // if that list ever narrows and because the column is not constrained to the current enum.
+  if (!row.is_active || !FIELD_APP_ALLOWED_ROLE_SET.has(row.role)) {
+    throw new AiReportError("The user who requested this report no longer has access to the field app.", false);
+  }
   const displayName =
     row.display_name?.trim() ||
     [row.first_name, row.last_name].filter(Boolean).join(" ").trim() ||

@@ -15,7 +15,12 @@ type FieldUserRequest = {
   active: boolean;
 };
 
-const FIELD_APP_ALLOWED_ROLE_SET = new Set<UserRole>([
+/**
+ * Who may use the field app at all. Exported because background work has to re-apply the same rule: a job
+ * that was enqueued through this middleware can execute minutes later, by which time the account may have
+ * been deactivated or its role revoked, and nothing downstream re-checks it.
+ */
+export const FIELD_APP_ALLOWED_ROLE_SET = new Set<UserRole>([
   "admin",
   "director",
   "rep",
