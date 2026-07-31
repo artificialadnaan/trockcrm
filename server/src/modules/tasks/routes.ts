@@ -10,6 +10,7 @@ import {
   getTasks,
   getTaskCounts,
   getTaskById,
+  getTaskRowById,
   createTask,
   queueTaskCreateSideEffects,
   updateTask,
@@ -79,6 +80,7 @@ async function prepareTaskAssignmentEmailBestEffort(
     title: string;
     description?: string | null;
     dueDate?: string | Date | null;
+    dealId?: string | null;
   },
   assigneeId: string
 ) {
@@ -262,8 +264,9 @@ router.patch("/:id", async (req, res, next) => {
       await assertAssignableUser(req, body.assignedTo);
     }
 
+    // Only the previous assignee is read here, so the lean row is enough.
     const existingTask = body.assignedTo !== undefined
-      ? await getTaskById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id)
+      ? await getTaskRowById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id)
       : null;
     if (body.assignedTo !== undefined && !existingTask) {
       throw new AppError(404, "Task not found");

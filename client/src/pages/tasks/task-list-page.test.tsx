@@ -274,6 +274,35 @@ describe("TaskListPage project context", () => {
     expect(mocks.useTaskMock).toHaveBeenCalledWith("linked-task");
     expect(container.textContent).toContain("Linked task");
     expect(container.textContent).toContain("Review linked task");
+    // The whole point of the email deep link: the assignee must be able to tell which project the
+    // task belongs to, and who it is assigned to. GET /tasks/:id has to supply the joined deal
+    // columns and the assignee name for these to render.
+    expect(container.textContent).toContain("Palm Villas");
+    expect(container.textContent).toContain("Brett Jones");
+    expect(container.textContent).not.toContain("Project linked");
+    expect(container.textContent).not.toContain("Unassigned");
+  });
+
+  it("degrades to the generic fallbacks when the API omits the joined deal/assignee columns", () => {
+    // Guards the shape the endpoint used to return: dealId present, deal columns absent.
+    const { dealName: _dealName, dealNumber: _dealNumber, assignedToName: _assignedToName, ...bare } = makeTask();
+    mocks.useTasksMock.mockImplementation(() => ({
+      tasks: [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    }));
+    mocks.useTaskMock.mockReturnValue({
+      task: { ...bare, id: "linked-task", title: "Review linked task" },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    renderPage("/tasks/linked-task");
+
+    expect(container.textContent).toContain("Project linked");
+    expect(container.textContent).toContain("Unassigned");
   });
 
   it("keeps child action keydown events from opening the row edit dialog", () => {

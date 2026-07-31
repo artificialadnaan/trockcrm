@@ -4,6 +4,7 @@ const taskServiceMocks = vi.hoisted(() => ({
   getTasks: vi.fn(),
   getTaskCounts: vi.fn(),
   getTaskById: vi.fn(),
+  getTaskRowById: vi.fn(),
   createTask: vi.fn(),
   queueTaskCreateSideEffects: vi.fn(),
   updateTask: vi.fn(),
@@ -44,6 +45,7 @@ vi.mock("../../../src/modules/tasks/service.js", async () => {
     getTasks: taskServiceMocks.getTasks,
     getTaskCounts: taskServiceMocks.getTaskCounts,
     getTaskById: taskServiceMocks.getTaskById,
+    getTaskRowById: taskServiceMocks.getTaskRowById,
     createTask: taskServiceMocks.createTask,
     queueTaskCreateSideEffects: taskServiceMocks.queueTaskCreateSideEffects,
     updateTask: taskServiceMocks.updateTask,
@@ -399,7 +401,7 @@ describe("task routes", () => {
   });
 
   it("emails the new assignee when a task is reassigned", async () => {
-    taskServiceMocks.getTaskById.mockResolvedValue({
+    taskServiceMocks.getTaskRowById.mockResolvedValue({
       id: "task-1",
       title: "Existing task",
       assignedTo: "rep-1",
@@ -442,7 +444,7 @@ describe("task routes", () => {
   });
 
   it("skips task assignment email when assignedTo is unchanged on update", async () => {
-    taskServiceMocks.getTaskById.mockResolvedValue({
+    taskServiceMocks.getTaskRowById.mockResolvedValue({
       id: "task-1",
       title: "Existing task",
       assignedTo: "rep-1",
