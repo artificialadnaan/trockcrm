@@ -1,15 +1,22 @@
 import { initialWalk, reduceWalk, type Walk } from "../session";
 import {
+  MAX_IDEMPOTENCY_KEY_LENGTH,
+  MAX_WALK_COMPLETION_ATTEMPTS,
   MAX_WALK_UPLOAD_ATTEMPTS,
   bumpArtifactAttempts,
+  bumpCompletionAttempts,
   drainableArtifacts,
   isArtifactDrainable,
+  isArtifactPut,
   isArtifactTerminal,
-  isArtifactUploaded,
+  isCompletionTerminal,
+  isWalkCompleted,
   isWalkDrainable,
-  isWalkFullyUploaded,
+  isWalkFullyPut,
   isWalkTerminal,
-  markArtifactsUploaded,
+  markArtifactPut,
+  markWalkCompleted,
+  needsCompletion,
   outstandingArtifacts,
   removeQueuedWalk,
   sanitizeWalkOwnerKey,
@@ -17,9 +24,12 @@ import {
   upsertQueuedWalk,
   walkArtifactIdempotencyKey,
   type QueuedWalk,
+  type WalkQueueMeta,
 } from "../upload-core";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────────────────────────
+
+const META: WalkQueueMeta = { title: "Front elevation walkthrough", siteLabel: "123 Main St" };
 
 const started: Walk = reduceWalk(
   reduceWalk(initialWalk("deal-1", "proj-7"), { type: "starting" }),
@@ -41,60 +51,65 @@ function withStills(walk: Walk, n: number): Walk {
 
 function completedWalk(stillCount = 2): Walk {
   const ended = reduceWalk(withStills(started, stillCount), { type: "ended", at: 5000 });
-  return reduceWalk(ended, { type: "finalized", audioUri: "file:///docs/walkthroughs/walk-1/audio.m4a" });
+  // Audio is muxed into the video now (session.ts) — a completed walk carries a null audioUri.
+  return reduceWalk(ended, { type: "finalized", audioUri: null });
 }
 
-function failedWalk(stillCount = 1, opts: { withAudio?: boolean } = {}): Walk {
+function failedWalk(stillCount = 1): Walk {
   const withCaptures = withStills(started, stillCount);
-  const failed = reduceWalk(withCaptures, { type: "failed", reason: "glasses disconnected" });
-  return opts.withAudio ? { ...failed, audioUri: "file:///docs/walkthroughs/walk-1/audio.m4a" } : failed;
+  return reduceWalk(withCaptures, { type: "failed", reason: "glasses disconnected" });
 }
 
 // ── toQueuedWalk ─────────────────────────────────────────────────────────────────────────────────
 
 describe("toQueuedWalk", () => {
-  it("enqueues every artifact of a completed walk: audio, video, and every still", () => {
+  it("enqueues every artifact of a completed walk: video + every photo (audio is muxed into video, so never separate)", () => {
     const walk = completedWalk(2);
-    const queued = toQueuedWalk("walk-1", walk, 9999)!;
+    expect(walk.audioUri).toBeNull();
+    const queued = toQueuedWalk("walk-1", walk, META, 9999)!;
     expect(queued).not.toBeNull();
     expect(queued.walkId).toBe("walk-1");
     expect(queued.dealId).toBe("deal-1");
     expect(queued.projectId).toBe("proj-7");
-    expect(queued.artifacts).toHaveLength(4); // audio + video + 2 stills
-    expect(queued.artifacts.map((a) => a.kind).sort()).toEqual(["audio", "still", "still", "video"]);
-    // Every artifact starts fresh: zero attempts, not uploaded.
-    expect(queued.artifacts.every((a) => a.attempts === 0 && a.uploadedAt === undefined)).toBe(true);
+    expect(queued.title).toBe(META.title);
+    expect(queued.siteLabel).toBe(META.siteLabel);
+    expect(queued.completionAttempts).toBe(0);
+    expect(queued.artifacts).toHaveLength(3); // video + 2 photos
+    expect(queued.artifacts.map((a) => a.kind).sort()).toEqual(["photo", "photo", "video"]);
+    // Every artifact starts fresh: zero attempts, not put, no completion.
+    expect(queued.artifacts.every((a) => a.attempts === 0 && a.putAt === undefined)).toBe(true);
+    expect(queued.completedAt).toBeUndefined();
   });
 
-  it("carries the still's own source and capture time, not the walk's", () => {
+  it("still enqueues an audio artifact if a walk somehow carries one (the documented future fallback path)", () => {
+    // audioUri is always null in practice today, but toQueuedWalk must not assume that forever.
+    const walk: Walk = { ...completedWalk(0), audioUri: "file:///docs/walkthroughs/walk-1/audio.m4a" };
+    const queued = toQueuedWalk("walk-1", walk, META, 9999)!;
+    expect(queued.artifacts.map((a) => a.kind).sort()).toEqual(["audio", "video"]);
+  });
+
+  it("carries the photo's own source and capture time, not the walk's", () => {
     const walk = completedWalk(2);
-    const queued = toQueuedWalk("walk-1", walk, 9999)!;
-    const stills = queued.artifacts.filter((a) => a.kind === "still");
-    expect(stills[0]!.source).toBe("glasses");
-    expect(stills[0]!.at).toBe(2000);
-    expect(stills[1]!.source).toBe("phone");
-    expect(stills[1]!.at).toBe(2001);
+    const queued = toQueuedWalk("walk-1", walk, META, 9999)!;
+    const photos = queued.artifacts.filter((a) => a.kind === "photo");
+    expect(photos[0]!.source).toBe("glasses");
+    expect(photos[0]!.at).toBe(2000);
+    expect(photos[1]!.source).toBe("phone");
+    expect(photos[1]!.at).toBe(2001);
   });
 
   it("returns null for a walk still in progress — nothing durable to queue yet", () => {
-    expect(toQueuedWalk("walk-1", started, 9999)).toBeNull();
-    expect(toQueuedWalk("walk-1", initialWalk("deal-1", null), 9999)).toBeNull();
+    expect(toQueuedWalk("walk-1", started, META, 9999)).toBeNull();
+    expect(toQueuedWalk("walk-1", initialWalk("deal-1", null), META, 9999)).toBeNull();
   });
 
-  it("a failed walk with no audio (glasses disconnected before finalizing) still enqueues its stills", () => {
-    const walk = failedWalk(3); // failed() never sets audioUri; videoUri is set from "started"
+  it("a failed walk with only photos (glasses disconnected before finalizing) still enqueues them", () => {
+    const walk = failedWalk(3);
     expect(walk.audioUri).toBeNull();
-    const queued = toQueuedWalk("walk-1", walk, 9999)!;
+    const queued = toQueuedWalk("walk-1", walk, META, 9999)!;
     expect(queued).not.toBeNull();
     const kinds = queued.artifacts.map((a) => a.kind).sort();
-    expect(kinds).toEqual(["still", "still", "still", "video"]);
-    expect(kinds).not.toContain("audio");
-  });
-
-  it("a failed walk that DID finish writing audio before failing keeps it", () => {
-    const walk = failedWalk(1, { withAudio: true });
-    const queued = toQueuedWalk("walk-1", walk, 9999)!;
-    expect(queued.artifacts.map((a) => a.kind).sort()).toEqual(["audio", "still", "video"]);
+    expect(kinds).toEqual(["photo", "photo", "photo", "video"]);
   });
 
   it("returns null for a terminal walk that captured nothing at all", () => {
@@ -102,39 +117,64 @@ describe("toQueuedWalk", () => {
     const neverStarted = reduceWalk(initialWalk("deal-1", null), { type: "starting" });
     const failed = reduceWalk(neverStarted, { type: "failed", reason: "no glasses paired" });
     expect(failed.videoUri).toBeNull();
-    expect(failed.audioUri).toBeNull();
     expect(failed.stills).toHaveLength(0);
-    expect(toQueuedWalk("walk-1", failed, 9999)).toBeNull();
+    expect(toQueuedWalk("walk-1", failed, META, 9999)).toBeNull();
   });
 
   it("is idempotent in the keys it derives: calling it twice for the same walk produces identical idempotencyKeys", () => {
     const walk = completedWalk(2);
-    const a = toQueuedWalk("walk-1", walk, 1)!;
-    const b = toQueuedWalk("walk-1", walk, 2)!; // different `now` — keys must not depend on it
+    const a = toQueuedWalk("walk-1", walk, META, 1)!;
+    const b = toQueuedWalk("walk-1", walk, META, 2)!; // different `now` — keys must not depend on it
     expect(a.artifacts.map((x) => x.idempotencyKey).sort()).toEqual(
       b.artifacts.map((x) => x.idempotencyKey).sort(),
     );
   });
+});
 
-  it("derives distinct keys per walk, per kind, and per still index", () => {
+// ── walkArtifactIdempotencyKey ──────────────────────────────────────────────────────────────────
+
+describe("walkArtifactIdempotencyKey", () => {
+  it("derives distinct keys per walk, per kind, and per photo index", () => {
     expect(walkArtifactIdempotencyKey("w1", "audio")).not.toBe(walkArtifactIdempotencyKey("w1", "video"));
-    expect(walkArtifactIdempotencyKey("w1", "still", 0)).not.toBe(walkArtifactIdempotencyKey("w1", "still", 1));
+    expect(walkArtifactIdempotencyKey("w1", "photo", 0)).not.toBe(walkArtifactIdempotencyKey("w1", "photo", 1));
     expect(walkArtifactIdempotencyKey("w1", "audio")).not.toBe(walkArtifactIdempotencyKey("w2", "audio"));
+  });
+
+  it("never exceeds the server's files.client_upload_id budget, even for a pathologically long walkId", () => {
+    const longWalkId = `walk-${"x".repeat(200)}`;
+    const key = walkArtifactIdempotencyKey(longWalkId, "photo", 12);
+    expect(key.length).toBeLessThanOrEqual(MAX_IDEMPOTENCY_KEY_LENGTH);
+  });
+
+  it("folds an over-budget key deterministically — the same inputs always fold to the same output", () => {
+    const longWalkId = `walk-${"y".repeat(200)}`;
+    const a = walkArtifactIdempotencyKey(longWalkId, "video");
+    const b = walkArtifactIdempotencyKey(longWalkId, "video");
+    expect(a).toBe(b);
+    expect(a.length).toBeLessThanOrEqual(MAX_IDEMPOTENCY_KEY_LENGTH);
+  });
+
+  it("a realistic walkId (newWalkId()'s shape) fits comfortably under budget unfolded", () => {
+    // newWalkId() in useWalk.ts: `walk-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+    const realistic = `walk-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    const key = walkArtifactIdempotencyKey(realistic, "photo", 999);
+    expect(key.length).toBeLessThanOrEqual(MAX_IDEMPOTENCY_KEY_LENGTH);
+    expect(key).toBe(`${realistic}:photo:999`); // short enough that it's never actually folded
   });
 });
 
-// ── outstanding / drainable / terminal (artifact-level) ─────────────────────────────────────────
+// ── artifact-level: isArtifactPut / isArtifactDrainable / isArtifactTerminal ────────────────────
 
 function artifact(
   overrides: Partial<QueuedWalk["artifacts"][number]> = {},
 ): QueuedWalk["artifacts"][number] {
   return {
-    idempotencyKey: overrides.idempotencyKey ?? "walk-1:still:0",
-    kind: overrides.kind ?? "still",
-    uri: overrides.uri ?? "file:///docs/walkthroughs/walk-1/still-0.jpg",
-    at: overrides.at ?? 2000,
-    order: overrides.order ?? 1,
-    attempts: overrides.attempts ?? 0,
+    idempotencyKey: "walk-1:photo:0",
+    kind: "photo",
+    uri: "file:///docs/walkthroughs/walk-1/still-0.jpg",
+    at: 2000,
+    order: 1,
+    attempts: 0,
     ...overrides,
   };
 }
@@ -144,37 +184,37 @@ function queuedWalk(overrides: Partial<QueuedWalk> = {}): QueuedWalk {
     walkId: "walk-1",
     dealId: "deal-1",
     projectId: "proj-7",
+    title: META.title,
+    siteLabel: META.siteLabel,
     startedAt: 1000,
     endedAt: 5000,
     durationMs: 4000,
     enqueuedAt: 9999,
     artifacts: [],
+    completionAttempts: 0,
     ...overrides,
   };
 }
 
-describe("artifact-level outstanding / drainable / terminal", () => {
-  it("isArtifactUploaded / isArtifactDrainable / isArtifactTerminal implement the retry cap", () => {
-    expect(isArtifactUploaded(artifact())).toBe(false);
-    expect(isArtifactUploaded(artifact({ uploadedAt: 1234 }))).toBe(true);
+describe("artifact-level isArtifactPut / isArtifactDrainable / isArtifactTerminal", () => {
+  it("implement the PUT retry cap", () => {
+    expect(isArtifactPut(artifact())).toBe(false);
+    expect(isArtifactPut(artifact({ putAt: 1234 }))).toBe(true);
 
     expect(isArtifactDrainable(artifact({ attempts: 0 }))).toBe(true);
     expect(isArtifactDrainable(artifact({ attempts: MAX_WALK_UPLOAD_ATTEMPTS - 1 }))).toBe(true);
     expect(isArtifactDrainable(artifact({ attempts: MAX_WALK_UPLOAD_ATTEMPTS }))).toBe(false);
     expect(isArtifactTerminal(artifact({ attempts: MAX_WALK_UPLOAD_ATTEMPTS }))).toBe(true);
 
-    // An uploaded artifact is never terminal or drainable, no matter its attempt count.
-    const uploaded = artifact({ attempts: MAX_WALK_UPLOAD_ATTEMPTS, uploadedAt: 1 });
-    expect(isArtifactTerminal(uploaded)).toBe(false);
-    expect(isArtifactDrainable(uploaded)).toBe(false);
+    // A put artifact is never terminal or drainable, no matter its attempt count.
+    const put = artifact({ attempts: MAX_WALK_UPLOAD_ATTEMPTS, putAt: 1 });
+    expect(isArtifactTerminal(put)).toBe(false);
+    expect(isArtifactDrainable(put)).toBe(false);
   });
 
   it("bumpArtifactAttempts increments only the named artifacts within one walk and stamps lastTriedAt", () => {
     const walk = queuedWalk({
-      artifacts: [
-        artifact({ idempotencyKey: "a" }),
-        artifact({ idempotencyKey: "b", attempts: 2 }),
-      ],
+      artifacts: [artifact({ idempotencyKey: "a" }), artifact({ idempotencyKey: "b", attempts: 2 })],
     });
     const bumped = bumpArtifactAttempts(walk, ["a"], 5555);
     expect(bumped.artifacts[0]).toMatchObject({ idempotencyKey: "a", attempts: 1, lastTriedAt: 5555 });
@@ -193,130 +233,169 @@ describe("artifact-level outstanding / drainable / terminal", () => {
     expect(isArtifactTerminal(walk.artifacts[0]!)).toBe(true);
   });
 
-  it("markArtifactsUploaded stamps uploadedAt only on the named artifacts", () => {
+  it("markArtifactPut stamps putAt and sizeBytes only on the named artifact", () => {
     const walk = queuedWalk({
       artifacts: [artifact({ idempotencyKey: "a" }), artifact({ idempotencyKey: "b" })],
     });
-    const done = markArtifactsUploaded(walk, ["a"], 7777);
-    expect(done.artifacts[0]).toMatchObject({ idempotencyKey: "a", uploadedAt: 7777 });
-    expect(done.artifacts[1]!.uploadedAt).toBeUndefined();
+    const done = markArtifactPut(walk, "a", 4096, 7777);
+    expect(done.artifacts[0]).toMatchObject({ idempotencyKey: "a", putAt: 7777, sizeBytes: 4096 });
+    expect(done.artifacts[1]!.putAt).toBeUndefined();
+    expect(done.artifacts[1]!.sizeBytes).toBeUndefined();
   });
 });
 
 // ── resuming a partially-uploaded walk ───────────────────────────────────────────────────────────
 
 describe("resuming a partially-uploaded walk", () => {
-  it("outstandingArtifacts excludes only what the server already confirmed", () => {
+  it("outstandingArtifacts excludes only what has already been PUT to R2", () => {
     const walk = queuedWalk({
       artifacts: [
-        artifact({ idempotencyKey: "audio", kind: "audio", order: 0, uploadedAt: 111 }), // done
-        artifact({ idempotencyKey: "video", kind: "video", order: 0 }), // still pending
-        artifact({ idempotencyKey: "still-0", kind: "still", order: 1 }), // still pending
+        artifact({ idempotencyKey: "video", kind: "video", order: 0, putAt: 111 }), // done
+        artifact({ idempotencyKey: "photo-0", kind: "photo", order: 1 }), // still pending
       ],
     });
-    const outstanding = outstandingArtifacts(walk).map((a) => a.idempotencyKey);
-    expect(outstanding.sort()).toEqual(["still-0", "video"]);
+    expect(outstandingArtifacts(walk).map((a) => a.idempotencyKey)).toEqual(["photo-0"]);
   });
 
-  it("a resumed drain retries only outstanding artifacts, never a re-send of an already-confirmed one", () => {
+  it("a resumed drain retries only outstanding artifacts, never a re-PUT of an already-confirmed one", () => {
     const walk = queuedWalk({
       artifacts: [
-        artifact({ idempotencyKey: "audio", kind: "audio", order: 0, uploadedAt: 111 }),
-        artifact({ idempotencyKey: "video", kind: "video", order: 0, attempts: 1 }),
-        artifact({ idempotencyKey: "still-0", kind: "still", order: 1 }),
+        artifact({ idempotencyKey: "video", kind: "video", order: 0, putAt: 111 }),
+        artifact({ idempotencyKey: "photo-0", kind: "photo", order: 1, attempts: 1 }),
       ],
     });
-    const toDrain = drainableArtifacts(walk).map((a) => a.idempotencyKey);
-    expect(toDrain).toEqual(["video", "still-0"]); // audio (confirmed) is excluded
+    expect(drainableArtifacts(walk).map((a) => a.idempotencyKey)).toEqual(["photo-0"]);
   });
 
-  it("a walk with everything confirmed but one terminal artifact still reports that artifact as outstanding", () => {
+  it("a walk whose only outstanding artifact went terminal still reports it as outstanding (but not drainable)", () => {
     const walk = queuedWalk({
       artifacts: [
-        artifact({ idempotencyKey: "video", kind: "video", order: 0, uploadedAt: 111 }),
-        artifact({ idempotencyKey: "still-0", kind: "still", order: 1, attempts: MAX_WALK_UPLOAD_ATTEMPTS }),
+        artifact({ idempotencyKey: "video", kind: "video", order: 0, putAt: 111 }),
+        artifact({ idempotencyKey: "photo-0", kind: "photo", order: 1, attempts: MAX_WALK_UPLOAD_ATTEMPTS }),
       ],
     });
-    expect(outstandingArtifacts(walk).map((a) => a.idempotencyKey)).toEqual(["still-0"]);
+    expect(outstandingArtifacts(walk).map((a) => a.idempotencyKey)).toEqual(["photo-0"]);
     expect(drainableArtifacts(walk)).toEqual([]); // terminal — a drain must not retry it
   });
 });
 
-// ── drain ordering: audio/video before stills ────────────────────────────────────────────────────
+// ── drain ordering: audio/video before photos ────────────────────────────────────────────────────
 
 describe("drainableArtifacts ordering", () => {
-  it("always drains audio/video before any still, regardless of insertion order", () => {
+  it("always drains audio/video before any photo, regardless of insertion order", () => {
     const walk = queuedWalk({
       artifacts: [
-        artifact({ idempotencyKey: "still-1", kind: "still", order: 1, at: 100 }),
-        artifact({ idempotencyKey: "still-0", kind: "still", order: 1, at: 50 }),
+        artifact({ idempotencyKey: "photo-1", kind: "photo", order: 1, at: 100 }),
+        artifact({ idempotencyKey: "photo-0", kind: "photo", order: 1, at: 50 }),
         artifact({ idempotencyKey: "video", kind: "video", order: 0, at: 9999 }), // later `at`, still first
         artifact({ idempotencyKey: "audio", kind: "audio", order: 0, at: 1 }),
       ],
     });
     const order = drainableArtifacts(walk).map((a) => a.idempotencyKey);
-    // Media (order 0) both precede stills (order 1); within media, earlier `at` first; within
-    // stills, earlier capture (`at`) first.
-    expect(order).toEqual(["audio", "video", "still-0", "still-1"]);
+    expect(order).toEqual(["audio", "video", "photo-0", "photo-1"]);
   });
 });
 
-// ── walk-level aggregates ────────────────────────────────────────────────────────────────────────
+// ── the two-phase walk lifecycle: put → (all put) → completion ─────────────────────────────────
 
-describe("walk-level aggregates", () => {
-  it("isWalkFullyUploaded is true only when every artifact is confirmed, and never for an empty walk", () => {
-    expect(isWalkFullyUploaded(queuedWalk({ artifacts: [] }))).toBe(false);
+describe("isWalkFullyPut / needsCompletion / isWalkCompleted", () => {
+  it("isWalkFullyPut is true only when every artifact is put, and never for an empty walk", () => {
+    expect(isWalkFullyPut(queuedWalk({ artifacts: [] }))).toBe(false);
     expect(
-      isWalkFullyUploaded(queuedWalk({ artifacts: [artifact({ uploadedAt: 1 }), artifact({ idempotencyKey: "b" })] })),
+      isWalkFullyPut(queuedWalk({ artifacts: [artifact({ putAt: 1 }), artifact({ idempotencyKey: "b" })] })),
     ).toBe(false);
     expect(
-      isWalkFullyUploaded(
-        queuedWalk({ artifacts: [artifact({ uploadedAt: 1 }), artifact({ idempotencyKey: "b", uploadedAt: 2 })] }),
+      isWalkFullyPut(
+        queuedWalk({ artifacts: [artifact({ putAt: 1 }), artifact({ idempotencyKey: "b", putAt: 2 })] }),
       ),
     ).toBe(true);
   });
 
-  it("isWalkDrainable is true iff at least one artifact is drainable", () => {
-    expect(isWalkDrainable(queuedWalk({ artifacts: [artifact({ uploadedAt: 1 })] }))).toBe(false);
-    expect(
-      isWalkDrainable(queuedWalk({ artifacts: [artifact({ attempts: MAX_WALK_UPLOAD_ATTEMPTS })] })),
-    ).toBe(false);
-    expect(isWalkDrainable(queuedWalk({ artifacts: [artifact()] }))).toBe(true);
+  it("needsCompletion is true exactly when fully put, not yet completed, and completion hasn't gone terminal", () => {
+    const notFullyPut = queuedWalk({ artifacts: [artifact()] });
+    expect(needsCompletion(notFullyPut)).toBe(false);
+
+    const fullyPut = queuedWalk({ artifacts: [artifact({ putAt: 1 })] });
+    expect(needsCompletion(fullyPut)).toBe(true);
+
+    const alreadyCompleted = queuedWalk({ artifacts: [artifact({ putAt: 1 })], completedAt: 999 });
+    expect(needsCompletion(alreadyCompleted)).toBe(false);
+    expect(isWalkCompleted(alreadyCompleted)).toBe(true);
+
+    const completionExhausted = queuedWalk({
+      artifacts: [artifact({ putAt: 1 })],
+      completionAttempts: MAX_WALK_COMPLETION_ATTEMPTS,
+    });
+    expect(needsCompletion(completionExhausted)).toBe(false);
+    expect(isCompletionTerminal(completionExhausted)).toBe(true);
   });
 
-  it("isWalkTerminal is true only when nothing uploaded, nothing drainable, but something was attempted", () => {
-    // All confirmed → not terminal (it's done).
-    expect(isWalkTerminal(queuedWalk({ artifacts: [artifact({ uploadedAt: 1 })] }))).toBe(false);
-    // Still drainable → not terminal yet.
-    expect(isWalkTerminal(queuedWalk({ artifacts: [artifact({ attempts: 1 })] }))).toBe(false);
-    // Exhausted retries, never uploaded → terminal.
-    expect(
-      isWalkTerminal(queuedWalk({ artifacts: [artifact({ attempts: MAX_WALK_UPLOAD_ATTEMPTS })] })),
-    ).toBe(true);
-    // A mix: one confirmed, one exhausted — still terminal (nothing left a drain can do).
-    expect(
-      isWalkTerminal(
-        queuedWalk({
-          artifacts: [
-            artifact({ idempotencyKey: "a", uploadedAt: 1 }),
-            artifact({ idempotencyKey: "b", attempts: MAX_WALK_UPLOAD_ATTEMPTS }),
-          ],
-        }),
-      ),
-    ).toBe(true);
-    // A mix: one confirmed, one still retryable — not terminal.
-    expect(
-      isWalkTerminal(
-        queuedWalk({
-          artifacts: [
-            artifact({ idempotencyKey: "a", uploadedAt: 1 }),
-            artifact({ idempotencyKey: "b", attempts: 1 }),
-          ],
-        }),
-      ),
-    ).toBe(false);
-    // Empty walk is never terminal (toQueuedWalk never produces one, but keep the aggregate honest).
-    expect(isWalkTerminal(queuedWalk({ artifacts: [] }))).toBe(false);
+  it("markWalkCompleted stamps completedAt; bumpCompletionAttempts increments the completion-only counter", () => {
+    const walk = queuedWalk({ artifacts: [artifact({ putAt: 1 })] });
+    const bumped = bumpCompletionAttempts(walk, 4242);
+    expect(bumped.completionAttempts).toBe(1);
+    expect(bumped.completionLastTriedAt).toBe(4242);
+    // Bumping completion attempts never touches artifact-level attempts.
+    expect(bumped.artifacts[0]!.attempts).toBe(0);
+
+    const completed = markWalkCompleted(bumped, 5000);
+    expect(completed.completedAt).toBe(5000);
+    expect(isWalkCompleted(completed)).toBe(true);
+  });
+});
+
+describe("isWalkDrainable / isWalkTerminal", () => {
+  it("a walk with outstanding, retryable artifacts is drainable and not terminal", () => {
+    const walk = queuedWalk({ artifacts: [artifact({ attempts: 1 })] });
+    expect(isWalkDrainable(walk)).toBe(true);
+    expect(isWalkTerminal(walk)).toBe(false);
+  });
+
+  it("a fully-put walk awaiting its first completion attempt is drainable (needs completion) and not terminal", () => {
+    const walk = queuedWalk({ artifacts: [artifact({ putAt: 1 })] });
+    expect(isWalkDrainable(walk)).toBe(true);
+    expect(isWalkTerminal(walk)).toBe(false);
+  });
+
+  it("a completed walk is neither drainable nor terminal — it's simply done", () => {
+    const walk = queuedWalk({ artifacts: [artifact({ putAt: 1 })], completedAt: 1 });
+    expect(isWalkDrainable(walk)).toBe(false);
+    expect(isWalkTerminal(walk)).toBe(false);
+  });
+
+  it("one permanently-failed artifact dooms the WHOLE walk — no partial completion", () => {
+    // A second, still-healthy artifact exists, but completion needs ALL artifacts, so nothing it does
+    // can ever unlock completion once its sibling is terminal.
+    const walk = queuedWalk({
+      artifacts: [
+        artifact({ idempotencyKey: "a", attempts: MAX_WALK_UPLOAD_ATTEMPTS }), // terminal
+        artifact({ idempotencyKey: "b", attempts: 0 }), // otherwise perfectly retryable
+      ],
+    });
+    expect(isWalkDrainable(walk)).toBe(false); // no point continuing to drain "b"
+    expect(isWalkTerminal(walk)).toBe(true);
+  });
+
+  it("a fully-put walk whose completion call keeps failing goes terminal once exhausted, not before", () => {
+    const walk = queuedWalk({
+      artifacts: [artifact({ putAt: 1 })],
+      completionAttempts: MAX_WALK_COMPLETION_ATTEMPTS - 1,
+    });
+    expect(isWalkDrainable(walk)).toBe(true); // one retry left
+    expect(isWalkTerminal(walk)).toBe(false);
+
+    const exhausted = queuedWalk({
+      artifacts: [artifact({ putAt: 1 })],
+      completionAttempts: MAX_WALK_COMPLETION_ATTEMPTS,
+    });
+    expect(isWalkDrainable(exhausted)).toBe(false);
+    expect(isWalkTerminal(exhausted)).toBe(true);
+  });
+
+  it("an empty walk is neither drainable nor terminal (toQueuedWalk never produces one, but keep the aggregate honest)", () => {
+    const walk = queuedWalk({ artifacts: [] });
+    expect(isWalkDrainable(walk)).toBe(false);
+    expect(isWalkTerminal(walk)).toBe(false);
   });
 });
 
@@ -332,7 +411,7 @@ describe("upsertQueuedWalk / removeQueuedWalk", () => {
   it("never clobbers an already-queued walk's progress with a fresh (all-zero) re-derivation", () => {
     const inProgress = queuedWalk({
       walkId: "walk-1",
-      artifacts: [artifact({ idempotencyKey: "video", kind: "video", uploadedAt: 111, attempts: 0 })],
+      artifacts: [artifact({ idempotencyKey: "video", kind: "video", putAt: 111, attempts: 0 })],
     });
     const freshlyDerived = queuedWalk({
       walkId: "walk-1",

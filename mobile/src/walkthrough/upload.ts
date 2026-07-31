@@ -1,11 +1,21 @@
 /**
- * Durable, resumable upload queue for glasses walkthrough artifacts (audio, video, stills).
+ * Durable, resumable upload queue for glasses walkthrough artifacts (video with muxed audio, plus N
+ * photos).
  *
  * A completed walk's files already live under Documents/walkthroughs/<walkId>/ — native writes them
  * there directly (never `tmp`), so unlike the photo queue this module never copies a file into a
  * separate queue directory. Enqueuing a walk persists a JSON MANIFEST that references those files by
  * their existing uris; the manifest — not the files — is what has to survive an app kill/restart, and
  * what has to self-heal a rotated iOS container UUID (see rebaseWalkUris below).
+ *
+ * TWO-PHASE drain, mirroring the server's two-step contract:
+ *   1. Per artifact: request a presigned R2 URL and PUT the bytes. Safe to repeat — the server derives
+ *      the object key deterministically from (walkId, idempotencyKey), so re-PUTting the same artifact
+ *      overwrites the same object rather than forking a duplicate.
+ *   2. Once per walk, ONLY after every artifact has been PUT: call completion, which atomically writes
+ *      every `files` row and enqueues forwarding. Local files are deleted ONLY after this call
+ *      succeeds — see upload-core.ts's module header for why "bytes are in R2" and "the server filed
+ *      the walk" are tracked as two separate, durable facts (putAt vs. completedAt).
  *
  * See ./upload-core.ts for why this deliberately does NOT reuse ../capture/upload-queue.ts's
  * machinery (enqueue-time compression, `staging`, GPS back-patch) even though the on-disk shape here
@@ -16,14 +26,16 @@ import * as FileSystem from "expo-file-system/legacy";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import type { Fetcher } from "../api/endpoints";
 import { rebaseDocumentDirectoryUri } from "../capture/doc-dir-uri";
-import type { StillSource, Walk } from "./session";
+import type { Walk } from "./session";
 import {
   bumpArtifactAttempts,
+  bumpCompletionAttempts,
   drainableArtifacts,
   isWalkDrainable,
-  isWalkFullyUploaded,
   isWalkTerminal,
-  markArtifactsUploaded,
+  markArtifactPut,
+  markWalkCompleted,
+  needsCompletion,
   removeQueuedWalk,
   sanitizeWalkOwnerKey,
   toQueuedWalk,
@@ -31,23 +43,30 @@ import {
   type QueuedWalk,
   type QueuedWalkArtifact,
   type WalkArtifactKind,
+  type WalkQueueMeta,
 } from "./upload-core";
 
 export {
+  MAX_IDEMPOTENCY_KEY_LENGTH,
+  MAX_WALK_COMPLETION_ATTEMPTS,
   MAX_WALK_UPLOAD_ATTEMPTS,
   drainableArtifacts,
   isArtifactDrainable,
+  isArtifactPut,
   isArtifactTerminal,
-  isArtifactUploaded,
+  isCompletionTerminal,
+  isWalkCompleted,
   isWalkDrainable,
-  isWalkFullyUploaded,
+  isWalkFullyPut,
   isWalkTerminal,
+  needsCompletion,
   outstandingArtifacts,
   toQueuedWalk,
   walkArtifactIdempotencyKey,
   type QueuedWalk,
   type QueuedWalkArtifact,
   type WalkArtifactKind,
+  type WalkQueueMeta,
 } from "./upload-core";
 
 const ROOT_DIR = `${FileSystem.documentDirectory ?? ""}walkthrough-uploads/`;
@@ -61,56 +80,67 @@ function manifestFile(ownerKey: string): string {
 }
 
 // ── SERVER CONTRACT SEAM ──────────────────────────────────────────────────────────────────────────
-// The walkthrough ingress endpoint is being built concurrently (server/) and does not exist yet. This
-// is the exact contract this queue is written against — not a real fetch call, not a guessed URL.
-// `drainWalkQueue` takes an implementation of `WalkthroughUploadClient` as a parameter; the ONLY thing
-// that needs to change once the server lands is providing a real implementation at the call site
-// (almost certainly two thin functions in a new src/api/*.ts file, mirroring createUploadUrl /
-// confirmUpload in ../api/endpoints.ts — see that file for the shape this deliberately follows).
-// Nothing in this module or upload-core.ts needs to change.
+// The walkthrough ingress endpoint (server/, worker/) is real as of commit e901547bc. This is the
+// exact contract this queue is written against — not a bare fetch call, not a guessed URL.
+// `drainWalkQueue` takes an implementation of `WalkthroughUploadClient` as a parameter; the ONLY
+// thing that needs to change to go live is providing a real implementation at the call site
+// (two thin functions mirroring createUploadUrl/confirmUpload in ../api/endpoints.ts). Nothing in
+// this module or upload-core.ts needs to change.
+//
+//   Step 1 (per artifact) — POST /api/deals/:dealId/glasses-walkthroughs/artifacts/upload-url
+//   Step 2 (once per walk, after every artifact is PUT) — POST /api/deals/:dealId/glasses-walkthroughs
 
 export type WalkArtifactUploadUrlRequest = {
-  dealId: string;
-  projectId: string | null;
   walkId: string;
-  kind: WalkArtifactKind;
-  /** See QueuedWalkArtifact.idempotencyKey. The server must dedupe confirm-upload on this, exactly
-   *  like clientUploadId does for photos (../api/types.ts ConfirmUploadRequest). */
   idempotencyKey: string;
-  contentType: string;
-  sizeBytes: number;
+  kind: WalkArtifactKind;
+  mimeType: string;
+  fileSizeBytes: number;
 };
 
 export type WalkArtifactUploadUrlResponse = {
   uploadUrl: string;
-  objectKey: string;
-  uploadToken: string;
+  r2Key: string;
+  expiresIn: number;
 };
 
-export type WalkArtifactConfirmRequest = {
-  dealId: string;
-  projectId: string | null;
-  walkId: string;
-  kind: WalkArtifactKind;
+export type WalkCompletionArtifact = {
   idempotencyKey: string;
-  objectKey: string;
-  uploadToken: string;
-  /** Capture timestamp (epoch ms): a still's own `at`, or the walk's startedAt for audio/video. */
-  capturedAt: number;
-  /** Present only for a still. */
-  source?: StillSource;
+  kind: WalkArtifactKind;
+  originalFilename: string;
+  mimeType: string;
+  fileSizeBytes: number;
+  /** Epoch ms — QueuedWalkArtifact.at. */
+  capturedAtMs: number;
 };
 
-export type WalkArtifactConfirmResponse = {
-  /** Server-assigned id for the stored artifact (e.g. a files/transcript row) — echoed back so a
-   *  caller doesn't need a second round trip to learn it. */
-  id: string;
+export type WalkCompletionRequest = {
+  walkId: string;
+  title: string;
+  siteLabel: string;
+  projectId: string | null;
+  /** ISO-8601 — converted from QueuedWalk.startedAt (epoch ms). */
+  capturedAt: string;
+  artifacts: WalkCompletionArtifact[];
 };
 
-/** THE SEAM. Everything in this module is written against this interface, never a bare fetch/URL. */
+export type WalkCompletionResponse = {
+  walkId: string;
+  /** Opaque to the client — the created `files` rows. Not consumed here. */
+  files: unknown[];
+  forwarding: { status: string; jobId: string | null };
+};
+
+/** THE SEAM. Everything in this module is written against this interface, never a bare fetch/URL.
+ *  `dealId` is a separate parameter (not a body field) because it's the URL path segment on both
+ *  real endpoints, not part of either request body. */
 export type WalkthroughUploadClient = {
-  requestUploadUrl(f: Fetcher, req: WalkArtifactUploadUrlRequest): Promise<WalkArtifactUploadUrlResponse>;
-  confirmArtifactUpload(f: Fetcher, req: WalkArtifactConfirmRequest): Promise<WalkArtifactConfirmResponse>;
+  requestUploadUrl(
+    f: Fetcher,
+    dealId: string,
+    req: WalkArtifactUploadUrlRequest,
+  ): Promise<WalkArtifactUploadUrlResponse>;
+  completeWalk(f: Fetcher, dealId: string, req: WalkCompletionRequest): Promise<WalkCompletionResponse>;
 };
 
 // ── Manifest read/write (crash-safe: tmp → primary → bak, same shape as ../capture/upload-queue.ts) ─
@@ -181,8 +211,8 @@ async function writeManifest(ownerKey: string, walks: QueuedWalk[]): Promise<voi
   await FileSystem.moveAsync({ from: tmp, to: file });
 }
 
-// Serializes every manifest read-modify-write (enqueue vs. drain's per-artifact mark/bump) so
-// concurrent mutations can't clobber each other. Pure reads (getQueuedWalks) stay lock-free —
+// Serializes every manifest read-modify-write (enqueue vs. drain's per-artifact/per-walk mutations)
+// so concurrent mutations can't clobber each other. Pure reads (getQueuedWalks) stay lock-free —
 // writeManifest is atomic (tmp+move), so a read always sees a whole manifest, never a torn one.
 function createMutex(): <T>(task: () => Promise<T>) => Promise<T> {
   let tail: Promise<unknown> = Promise.resolve();
@@ -218,7 +248,7 @@ export async function getSchedulableWalkCount(ownerKey: string): Promise<number>
   return (await readManifest(ownerKey)).filter(isWalkDrainable).length;
 }
 
-/** Count of walks that exhausted every artifact's retries — drives a "failed" banner. */
+/** Count of walks that exhausted every retry available to them — drives a "failed" banner. */
 export async function getFailedWalkCount(ownerKey: string): Promise<number> {
   return (await readManifest(ownerKey)).filter(isWalkTerminal).length;
 }
@@ -234,9 +264,10 @@ export async function enqueueWalk(
   ownerKey: string,
   walkId: string,
   walk: Walk,
+  meta: WalkQueueMeta,
   now: number = Date.now(),
 ): Promise<QueuedWalk | null> {
-  const queued = toQueuedWalk(walkId, walk, now);
+  const queued = toQueuedWalk(walkId, walk, meta, now);
   if (!queued) return null;
   await mutateManifest(ownerKey, (walks) => upsertQueuedWalk(walks, queued));
   return queued;
@@ -246,78 +277,103 @@ export async function enqueueWalk(
 
 function contentTypeForArtifact(kind: WalkArtifactKind, uri: string): string {
   const ext = uri.slice(uri.lastIndexOf(".") + 1).toLowerCase();
-  if (kind === "still") return ext === "png" ? "image/png" : "image/jpeg";
+  if (kind === "photo") return ext === "png" ? "image/png" : "image/jpeg";
   if (kind === "video") return ext === "mov" ? "video/quicktime" : "video/mp4";
   return ext === "wav" ? "audio/wav" : "audio/mp4"; // m4a/aac/mp4 default
 }
 
-async function uploadArtifact(
+function filenameFromUri(uri: string): string {
+  const withoutQuery = uri.split(/[?#]/)[0]!;
+  const idx = withoutQuery.lastIndexOf("/");
+  return idx >= 0 ? withoutQuery.slice(idx + 1) : withoutQuery;
+}
+
+/** Step 1: request a presigned URL and PUT one artifact's bytes. Returns the size that was actually
+ *  uploaded (for markArtifactPut / the later completion payload). Throws on any failure — the caller
+ *  bumps the artifact's attempt count and moves on. */
+async function putArtifactBytes(
   client: WalkthroughUploadClient,
   f: Fetcher,
   walk: QueuedWalk,
   artifact: QueuedWalkArtifact,
-): Promise<WalkArtifactConfirmResponse> {
+): Promise<number> {
   const info = await FileSystem.getInfoAsync(artifact.uri);
   if (!info.exists) {
     throw new Error(`Walk artifact missing on disk: ${artifact.kind} ${artifact.idempotencyKey}`);
   }
-  const contentType = contentTypeForArtifact(artifact.kind, artifact.uri);
-  const sizeBytes = typeof info.size === "number" ? info.size : 0;
+  const mimeType = contentTypeForArtifact(artifact.kind, artifact.uri);
+  const fileSizeBytes = typeof info.size === "number" ? info.size : 0;
 
-  const { uploadUrl, objectKey, uploadToken } = await client.requestUploadUrl(f, {
-    dealId: walk.dealId,
-    projectId: walk.projectId,
+  const { uploadUrl } = await client.requestUploadUrl(f, walk.dealId, {
     walkId: walk.walkId,
-    kind: artifact.kind,
     idempotencyKey: artifact.idempotencyKey,
-    contentType,
-    sizeBytes,
+    kind: artifact.kind,
+    mimeType,
+    fileSizeBytes,
   });
 
   const put = await FileSystem.uploadAsync(uploadUrl, artifact.uri, {
     httpMethod: "PUT",
     uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
-    headers: { "Content-Type": contentType },
+    headers: { "Content-Type": mimeType },
   });
   if (put.status < 200 || put.status >= 300) {
     throw new Error(`Walk artifact upload to storage failed (R2 returned ${put.status}).`);
   }
+  return fileSizeBytes;
+}
 
-  return client.confirmArtifactUpload(f, {
-    dealId: walk.dealId,
-    projectId: walk.projectId,
+/** Step 2: the ONE completion call for a fully-put walk. Sizes/filenames come from the artifact
+ *  records as they were AT PUT TIME (QueuedWalkArtifact.sizeBytes), not a fresh re-stat — that's
+ *  exactly what was actually uploaded, and it doesn't require the file to still exist unchanged. */
+async function callCompletion(
+  client: WalkthroughUploadClient,
+  f: Fetcher,
+  walk: QueuedWalk,
+): Promise<WalkCompletionResponse> {
+  return client.completeWalk(f, walk.dealId, {
     walkId: walk.walkId,
-    kind: artifact.kind,
-    idempotencyKey: artifact.idempotencyKey,
-    objectKey,
-    uploadToken,
-    capturedAt: artifact.at,
-    source: artifact.source,
+    title: walk.title,
+    siteLabel: walk.siteLabel,
+    projectId: walk.projectId,
+    capturedAt: new Date(walk.startedAt ?? Date.now()).toISOString(),
+    artifacts: walk.artifacts.map((a) => ({
+      idempotencyKey: a.idempotencyKey,
+      kind: a.kind,
+      originalFilename: filenameFromUri(a.uri),
+      mimeType: contentTypeForArtifact(a.kind, a.uri),
+      fileSizeBytes: a.sizeBytes ?? 0,
+      capturedAtMs: a.at,
+    })),
   });
 }
 
 export type WalkDrainSummary = {
-  succeeded: number;
-  failed: number;
+  /** Artifacts whose bytes were successfully PUT to R2 this drain. */
+  puts: number;
+  putFailures: number;
+  /** Walks whose completion call succeeded this drain (server accepted, local files deleted). */
+  completed: number;
+  completionFailures: number;
   remainingWalks: number;
-  /** idempotencyKey → server-confirmed artifact id, for every artifact THIS drain confirmed. */
-  confirmedArtifactIds: Record<string, string>;
 };
 
 // A drain must never run twice at once (foreground + background, or a double trigger): a second
-// caller would re-upload in-flight artifacts. Module-local guard — both entry points share this
+// caller would re-PUT/re-complete in-flight work. Module-local guard — both entry points share this
 // process, same as ../capture/upload-queue.ts's `draining` flag.
 let draining = false;
 
 /**
  * Upload everything currently queued for `ownerKey`. Walks drain oldest-enqueued first; within a
- * walk, audio/video land before stills (drainableArtifacts' order) — the transcript produces the
- * scope line items, the stills are evidence attached to it. Each artifact's outcome is persisted to
- * the manifest IMMEDIATELY (not batched at the end), so an interrupted drain (app suspended, a short
- * background window) resumes at worst the single artifact that was mid-flight. Never throws — returns
- * a summary. Safe to call repeatedly and from a background task once one is wired up (see the header
- * note in this file's report / the module's git history for why that wiring isn't included yet: it
- * depends on `client`, which depends on the server endpoint that doesn't exist yet).
+ * walk, every artifact is PUT (audio/video before photos — drainableArtifacts' order) before the
+ * walk's ONE completion call is even attempted. A local file is deleted ONLY after that walk's
+ * completion call has succeeded — never after an individual PUT, no matter how many artifacts show
+ * putAt. Each step's outcome is persisted to the manifest IMMEDIATELY (not batched), so an
+ * interrupted drain (app suspended, a short background window, or an outright crash) resumes at
+ * worst the single PUT or completion call that was mid-flight; the resumed drain never re-attempts a
+ * PUT already recorded as putAt, and it always re-attempts completion if completedAt was never
+ * recorded — see upload-core.ts's module header for why that asymmetry is deliberate. Never throws —
+ * returns a summary.
  */
 export async function drainWalkQueue(
   ownerKey: string,
@@ -325,20 +381,23 @@ export async function drainWalkQueue(
   client: WalkthroughUploadClient,
   opts: { onProgress?: (summary: WalkDrainSummary) => void } = {},
 ): Promise<WalkDrainSummary> {
-  const confirmedArtifactIds: Record<string, string> = {};
   if (draining) {
     return {
-      succeeded: 0,
-      failed: 0,
+      puts: 0,
+      putFailures: 0,
+      completed: 0,
+      completionFailures: 0,
       remainingWalks: (await getQueuedWalks(ownerKey)).length,
-      confirmedArtifactIds,
     };
   }
   draining = true;
   let keptAwake = false;
   try {
     const walks = await getQueuedWalks(ownerKey);
-    if (walks.length === 0) return { succeeded: 0, failed: 0, remainingWalks: 0, confirmedArtifactIds };
+    const ordered = walks.filter(isWalkDrainable).sort((a, b) => a.enqueuedAt - b.enqueuedAt);
+    if (ordered.length === 0) {
+      return { puts: 0, putFailures: 0, completed: 0, completionFailures: 0, remainingWalks: walks.length };
+    }
 
     try {
       await activateKeepAwakeAsync(KEEP_AWAKE_TAG);
@@ -347,43 +406,65 @@ export async function drainWalkQueue(
       // Keep-awake is best-effort; draining continues without it.
     }
 
-    let succeeded = 0;
-    let failed = 0;
-    const ordered = [...walks].sort((a, b) => a.enqueuedAt - b.enqueuedAt);
+    let puts = 0;
+    let putFailures = 0;
+    let completed = 0;
+    let completionFailures = 0;
+
     for (const walk of ordered) {
+      // Phase 1: PUT every currently-drainable artifact's bytes.
       for (const artifact of drainableArtifacts(walk)) {
         try {
-          const confirmed = await uploadArtifact(client, fetcher, walk, artifact);
-          confirmedArtifactIds[artifact.idempotencyKey] = confirmed.id;
-          // Persist the confirmation BEFORE deleting the local file: a crash between these two steps
-          // leaves at worst a harmless orphaned file, never a "confirmed" artifact whose bytes are
-          // already gone with no way to re-upload it. Never delete before this write lands.
+          const sizeBytes = await putArtifactBytes(client, fetcher, walk, artifact);
           await mutateManifest(ownerKey, (current) =>
             current.map((w) =>
-              w.walkId === walk.walkId ? markArtifactsUploaded(w, [artifact.idempotencyKey], Date.now()) : w,
+              w.walkId === walk.walkId ? markArtifactPut(w, artifact.idempotencyKey, sizeBytes, Date.now()) : w,
             ),
           );
-          await FileSystem.deleteAsync(artifact.uri, { idempotent: true }).catch(() => undefined);
-          succeeded++;
+          puts++;
         } catch {
           await mutateManifest(ownerKey, (current) =>
             current.map((w) =>
               w.walkId === walk.walkId ? bumpArtifactAttempts(w, [artifact.idempotencyKey], Date.now()) : w,
             ),
           );
-          failed++;
+          putFailures++;
         }
       }
-      // Every artifact's file is already deleted the moment it's confirmed (above); once the whole
-      // walk is done there's nothing left to track, so drop its manifest row.
-      await mutateManifest(ownerKey, (current) => {
-        const fresh = current.find((w) => w.walkId === walk.walkId);
-        return fresh && isWalkFullyUploaded(fresh) ? removeQueuedWalk(current, walk.walkId) : current;
-      });
+
+      // Phase 2: the walk's ONE completion call, only once every artifact is confirmed in R2.
+      // Re-read first — phase 1 above may have just changed this walk's state, and a walk that was
+      // ALREADY fully-put on entry (a prior drain PUT everything but never completed) never entered
+      // the phase-1 loop at all (drainableArtifacts would be empty), so this is the only place its
+      // completion gets attempted.
+      const fresh = (await readManifest(ownerKey)).find((w) => w.walkId === walk.walkId);
+      if (fresh && needsCompletion(fresh)) {
+        try {
+          await callCompletion(client, fetcher, fresh);
+          // Persist completedAt BEFORE deleting anything: a crash between these two steps leaves at
+          // worst a walk with local files still on disk that a future drain would try to re-complete
+          // (harmless — the server dedupes on idempotencyKey) — never a walk whose files are gone
+          // with no server record, which is the failure mode this ordering exists to prevent.
+          await mutateManifest(ownerKey, (current) =>
+            current.map((w) => (w.walkId === walk.walkId ? markWalkCompleted(w, Date.now()) : w)),
+          );
+          await Promise.all(
+            fresh.artifacts.map((a) => FileSystem.deleteAsync(a.uri, { idempotent: true }).catch(() => undefined)),
+          );
+          // Every file is gone and the server has the walk — nothing left to track.
+          await mutateManifest(ownerKey, (current) => removeQueuedWalk(current, walk.walkId));
+          completed++;
+        } catch {
+          await mutateManifest(ownerKey, (current) =>
+            current.map((w) => (w.walkId === walk.walkId ? bumpCompletionAttempts(w, Date.now()) : w)),
+          );
+          completionFailures++;
+        }
+      }
     }
 
     const remainingWalks = (await getQueuedWalks(ownerKey)).length;
-    const summary = { succeeded, failed, remainingWalks, confirmedArtifactIds };
+    const summary = { puts, putFailures, completed, completionFailures, remainingWalks };
     opts.onProgress?.(summary);
     return summary;
   } finally {

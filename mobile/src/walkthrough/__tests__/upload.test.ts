@@ -1,7 +1,8 @@
 // Integration coverage for the effectful walk-upload queue: manifest persistence, container-UUID
-// rebasing on read, and the drain's confirm-before-delete ordering. Mocks only the leaf native deps
-// (expo-file-system, expo-keep-awake) so the REAL manifest read/write/drain logic in upload.ts runs
-// against an in-memory FS, same approach as ../../capture/__tests__/upload-queue-rebase.test.ts.
+// rebasing on read, and the two-phase drain (PUT every artifact, then ONE completion call, then
+// delete local files). Mocks only the leaf native deps (expo-file-system, expo-keep-awake) so the
+// REAL manifest read/write/drain logic in upload.ts runs against an in-memory FS, same approach as
+// ../../capture/__tests__/upload-queue-rebase.test.ts.
 //
 // documentDirectory deliberately mirrors iOS's real shape (…/<container-UUID>/Documents/) rather than
 // a flat fake path — rebaseDocumentDirectoryUri splices on the literal "/Documents/" segment, so a
@@ -65,7 +66,9 @@ import {
   getFailedWalkCount,
   getQueuedWalks,
   getSchedulableWalkCount,
-  type WalkArtifactConfirmResponse,
+  type WalkArtifactUploadUrlResponse,
+  type WalkCompletionResponse,
+  type WalkQueueMeta,
   type WalkthroughUploadClient,
 } from "../upload";
 
@@ -87,26 +90,27 @@ beforeEach(() => {
 });
 
 const OWNER = "user-1:office-a";
+const META: WalkQueueMeta = { title: "Front elevation walkthrough", siteLabel: "123 Main St" };
+
+const VIDEO_URI = `${DOC}walkthroughs/walk-1/video.mp4`;
+const PHOTO_URI = `${DOC}walkthroughs/walk-1/still-0.jpg`;
 
 function completedWalk(): Walk {
   const started = reduceWalk(reduceWalk(initialWalk("deal-1", "proj-7"), { type: "starting" }), {
     type: "started",
     at: 1000,
-    videoUri: `${DOC}walkthroughs/walk-1/video.mp4`,
+    videoUri: VIDEO_URI,
   });
   const withStill = reduceWalk(started, {
     type: "still",
-    uri: `${DOC}walkthroughs/walk-1/still-0.jpg`,
+    uri: PHOTO_URI,
     at: 2000,
     source: "glasses",
   });
   const ended = reduceWalk(withStill, { type: "ended", at: 5000 });
-  return reduceWalk(ended, { type: "finalized", audioUri: `${DOC}walkthroughs/walk-1/audio.m4a` });
+  // Audio is muxed into the video (session.ts) — audioUri is always null on a completed walk.
+  return reduceWalk(ended, { type: "finalized", audioUri: null });
 }
-
-const AUDIO_URI = `${DOC}walkthroughs/walk-1/audio.m4a`;
-const VIDEO_URI = `${DOC}walkthroughs/walk-1/video.mp4`;
-const STILL_URI = `${DOC}walkthroughs/walk-1/still-0.jpg`;
 
 /** Seed the in-memory FS so `FileSystem.getInfoAsync` reports each artifact file as present. */
 function seedFiles(uris: string[]): void {
@@ -116,15 +120,23 @@ function seedFiles(uris: string[]): void {
   }
 }
 
+let urlCounter = 0;
 function stubClient(overrides: Partial<WalkthroughUploadClient> = {}): WalkthroughUploadClient {
-  let counter = 0;
   return {
-    requestUploadUrl: jest.fn(async () => ({
-      uploadUrl: "https://upload.test/artifact",
-      objectKey: `office_atlanta/artifact-${counter++}`,
-      uploadToken: "token-1",
-    })),
-    confirmArtifactUpload: jest.fn(async (): Promise<WalkArtifactConfirmResponse> => ({ id: `server-${counter}` })),
+    requestUploadUrl: jest.fn(
+      async (): Promise<WalkArtifactUploadUrlResponse> => ({
+        uploadUrl: "https://upload.test/artifact",
+        r2Key: `office_atlanta/artifact-${urlCounter++}`,
+        expiresIn: 900,
+      }),
+    ),
+    completeWalk: jest.fn(
+      async (): Promise<WalkCompletionResponse> => ({
+        walkId: "walk-1",
+        files: [],
+        forwarding: { status: "queued", jobId: "job-1" },
+      }),
+    ),
     ...overrides,
   };
 }
@@ -132,28 +144,30 @@ function stubClient(overrides: Partial<WalkthroughUploadClient> = {}): Walkthrou
 const fetcher = jest.fn() as never;
 
 describe("enqueueWalk / getQueuedWalks", () => {
-  it("persists a completed walk's artifacts and they're readable back", async () => {
+  it("persists a completed walk's artifacts (video + photo — no separate audio artifact) and they're readable back", async () => {
     const walk = completedWalk();
-    const queued = await enqueueWalk(OWNER, "walk-1", walk, 1000);
+    const queued = await enqueueWalk(OWNER, "walk-1", walk, META, 1000);
     expect(queued).not.toBeNull();
 
     const stored = await getQueuedWalks(OWNER);
     expect(stored).toHaveLength(1);
-    expect(stored[0]!.artifacts).toHaveLength(3); // audio + video + 1 still
+    expect(stored[0]!.title).toBe(META.title);
+    expect(stored[0]!.siteLabel).toBe(META.siteLabel);
+    expect(stored[0]!.artifacts.map((a) => a.kind).sort()).toEqual(["photo", "video"]);
   });
 
   it("is idempotent: enqueuing the same walkId twice keeps the first entry", async () => {
     const walk = completedWalk();
-    await enqueueWalk(OWNER, "walk-1", walk, 1000);
-    await enqueueWalk(OWNER, "walk-1", walk, 2000); // second call, different `now`
+    await enqueueWalk(OWNER, "walk-1", walk, META, 1000);
+    await enqueueWalk(OWNER, "walk-1", walk, META, 2000); // second call, different `now`
     const stored = await getQueuedWalks(OWNER);
     expect(stored).toHaveLength(1);
     expect(stored[0]!.enqueuedAt).toBe(1000); // the FIRST enqueue wins
   });
 
   it("scopes storage per owner — two owners' manifests never collide", async () => {
-    await enqueueWalk("owner-a", "walk-1", completedWalk(), 1000);
-    await enqueueWalk("owner-b", "walk-2", completedWalk(), 1000);
+    await enqueueWalk("owner-a", "walk-1", completedWalk(), META, 1000);
+    await enqueueWalk("owner-b", "walk-2", completedWalk(), META, 1000);
     expect((await getQueuedWalks("owner-a")).map((w) => w.walkId)).toEqual(["walk-1"]);
     expect((await getQueuedWalks("owner-b")).map((w) => w.walkId)).toEqual(["walk-2"]);
   });
@@ -164,10 +178,13 @@ describe("enqueueWalk / getQueuedWalks", () => {
       walkId: "walk-1",
       dealId: "deal-1",
       projectId: null,
+      title: META.title,
+      siteLabel: META.siteLabel,
       startedAt: 1000,
       endedAt: 5000,
       durationMs: 4000,
       enqueuedAt: 1000,
+      completionAttempts: 0,
       artifacts: [
         {
           idempotencyKey: "walk-1:video",
@@ -185,109 +202,197 @@ describe("enqueueWalk / getQueuedWalks", () => {
   });
 
   it("leaves a uri already rooted at the live directory unchanged", async () => {
-    await enqueueWalk(OWNER, "walk-1", completedWalk(), 1000);
+    await enqueueWalk(OWNER, "walk-1", completedWalk(), META, 1000);
     const [walk] = await getQueuedWalks(OWNER);
-    expect(walk!.artifacts.map((a) => a.uri).sort()).toEqual([AUDIO_URI, STILL_URI, VIDEO_URI].sort());
+    expect(walk!.artifacts.map((a) => a.uri).sort()).toEqual([PHOTO_URI, VIDEO_URI].sort());
   });
 });
 
 describe("drainWalkQueue", () => {
-  it("uploads media before stills, confirms, deletes the local file, and prunes the completed walk", async () => {
+  it("PUTs media before photos, then calls completion ONCE, then deletes local files and prunes the walk", async () => {
     const walk = completedWalk();
-    seedFiles([AUDIO_URI, VIDEO_URI, STILL_URI]);
-    await enqueueWalk(OWNER, "walk-1", walk, 1000);
+    seedFiles([VIDEO_URI, PHOTO_URI]);
+    await enqueueWalk(OWNER, "walk-1", walk, META, 1000);
 
-    const kindsSeen: string[] = [];
+    const kindsPut: string[] = [];
     const client = stubClient({
-      requestUploadUrl: jest.fn(async (_f, req) => {
-        kindsSeen.push(req.kind);
-        return { uploadUrl: "https://upload.test/x", objectKey: `k-${req.kind}`, uploadToken: "t" };
+      requestUploadUrl: jest.fn(async (_f, _dealId, req) => {
+        kindsPut.push(req.kind);
+        return { uploadUrl: "https://upload.test/x", r2Key: `k-${req.kind}`, expiresIn: 900 };
       }),
     });
 
     const summary = await drainWalkQueue(OWNER, fetcher, client);
 
-    expect(summary.succeeded).toBe(3);
-    expect(summary.failed).toBe(0);
+    expect(summary.puts).toBe(2);
+    expect(summary.putFailures).toBe(0);
+    expect(summary.completed).toBe(1);
+    expect(summary.completionFailures).toBe(0);
     expect(summary.remainingWalks).toBe(0);
-    expect(Object.keys(summary.confirmedArtifactIds)).toHaveLength(3);
-    // Audio + video (order 0) both precede the still (order 1).
-    expect(kindsSeen.slice(0, 2).sort()).toEqual(["audio", "video"]);
-    expect(kindsSeen[2]).toBe("still");
+    // Video (order 0) precedes the photo (order 1).
+    expect(kindsPut).toEqual(["video", "photo"]);
+    // Completion is called exactly once for the whole walk, not once per artifact.
+    expect(client.completeWalk).toHaveBeenCalledTimes(1);
+    const [, dealId, req] = (client.completeWalk as jest.Mock).mock.calls[0];
+    expect(dealId).toBe("deal-1");
+    expect(req.walkId).toBe("walk-1");
+    expect(req.title).toBe(META.title);
+    expect(req.siteLabel).toBe(META.siteLabel);
+    expect(req.artifacts).toHaveLength(2);
+    expect(req.artifacts.map((a: { kind: string }) => a.kind).sort()).toEqual(["photo", "video"]);
 
     // Every local file is gone, and the whole walk is pruned from the manifest.
-    expect(fs.__store.has(AUDIO_URI)).toBe(false);
     expect(fs.__store.has(VIDEO_URI)).toBe(false);
-    expect(fs.__store.has(STILL_URI)).toBe(false);
+    expect(fs.__store.has(PHOTO_URI)).toBe(false);
     expect(await getQueuedWalks(OWNER)).toEqual([]);
   });
 
-  it("never deletes the local file when the server PUT fails, and bumps the attempt count for retry", async () => {
+  it("never deletes a local file when a PUT fails, bumps that artifact's attempts, and never attempts completion", async () => {
     const walk = completedWalk();
-    seedFiles([AUDIO_URI, VIDEO_URI, STILL_URI]);
-    await enqueueWalk(OWNER, "walk-1", walk, 1000);
+    seedFiles([VIDEO_URI, PHOTO_URI]);
+    await enqueueWalk(OWNER, "walk-1", walk, META, 1000);
 
     uploadAsyncMock.mockResolvedValue({ status: 500 }); // R2 PUT fails for every artifact
     const client = stubClient();
 
     const summary = await drainWalkQueue(OWNER, fetcher, client);
 
-    expect(summary.succeeded).toBe(0);
-    expect(summary.failed).toBe(3);
-    // The rule that matters: a local artifact is NEVER deleted until the server confirms it.
-    expect(fs.__store.has(AUDIO_URI)).toBe(true);
+    expect(summary.puts).toBe(0);
+    expect(summary.putFailures).toBe(2);
+    expect(summary.completed).toBe(0);
+    // The rule that matters: a local artifact is NEVER deleted before completion, and completion is
+    // never even attempted while artifacts are outstanding.
     expect(fs.__store.has(VIDEO_URI)).toBe(true);
-    expect(fs.__store.has(STILL_URI)).toBe(true);
-    // confirmArtifactUpload must never be reached when the PUT itself failed.
-    expect(client.confirmArtifactUpload).not.toHaveBeenCalled();
+    expect(fs.__store.has(PHOTO_URI)).toBe(true);
+    expect(client.completeWalk).not.toHaveBeenCalled();
 
     const [remaining] = await getQueuedWalks(OWNER);
     expect(remaining!.artifacts.every((a) => a.attempts === 1)).toBe(true);
-    expect(remaining!.artifacts.every((a) => a.uploadedAt === undefined)).toBe(true);
+    expect(remaining!.artifacts.every((a) => a.putAt === undefined)).toBe(true);
   });
 
-  it("a resumed drain (some artifacts already confirmed) only re-sends what's outstanding", async () => {
+  it("a resumed drain (one artifact already PUT) only re-PUTs what's outstanding", async () => {
     const walk = completedWalk();
-    seedFiles([AUDIO_URI, VIDEO_URI, STILL_URI]);
-    await enqueueWalk(OWNER, "walk-1", walk, 1000);
+    seedFiles([VIDEO_URI, PHOTO_URI]);
+    await enqueueWalk(OWNER, "walk-1", walk, META, 1000);
 
-    // First drain succeeds for audio + video (both order 0, drained first) but fails the still.
+    // First drain: the video (order 0, drained first) PUTs fine; the photo fails.
     uploadAsyncMock.mockResolvedValueOnce({ status: 200 });
-    uploadAsyncMock.mockResolvedValueOnce({ status: 200 });
-    uploadAsyncMock.mockResolvedValueOnce({ status: 500 }); // the still fails
+    uploadAsyncMock.mockResolvedValueOnce({ status: 500 });
     const client = stubClient();
     const first = await drainWalkQueue(OWNER, fetcher, client);
-    expect(first.succeeded).toBe(2);
-    expect(first.failed).toBe(1);
-    expect(first.remainingWalks).toBe(1); // the walk stays queued — the still is still outstanding
+    expect(first.puts).toBe(1);
+    expect(first.putFailures).toBe(1);
+    expect(first.completed).toBe(0); // not fully put yet — completion never attempted
+    expect(client.completeWalk).not.toHaveBeenCalled();
+    expect(fs.__store.has(VIDEO_URI)).toBe(true); // still on disk — not yet completed
+    expect(fs.__store.has(PHOTO_URI)).toBe(true);
 
-    // Confirm the audio/video files were already cleaned up, but the still's was not.
-    expect(fs.__store.has(AUDIO_URI)).toBe(false);
-    expect(fs.__store.has(VIDEO_URI)).toBe(false);
-    expect(fs.__store.has(STILL_URI)).toBe(true);
-
-    // Second drain: only the still is drainable now; a fresh client call count proves audio/video
-    // are never re-sent.
+    // Second drain: only the photo is outstanding; a fresh call-count proves the video is never re-PUT.
     uploadAsyncMock.mockResolvedValue({ status: 200 });
     const requestCallsBefore = (client.requestUploadUrl as jest.Mock).mock.calls.length;
     const second = await drainWalkQueue(OWNER, fetcher, client);
-    expect(second.succeeded).toBe(1);
-    expect(second.remainingWalks).toBe(0);
+    expect(second.puts).toBe(1);
     expect((client.requestUploadUrl as jest.Mock).mock.calls.length).toBe(requestCallsBefore + 1);
-    expect((client.requestUploadUrl as jest.Mock).mock.calls[requestCallsBefore]![1].kind).toBe("still");
+    expect((client.requestUploadUrl as jest.Mock).mock.calls[requestCallsBefore]![2].kind).toBe("photo");
+    // Now fully put — completion fires and the walk is done.
+    expect(second.completed).toBe(1);
+    expect(second.remainingWalks).toBe(0);
+  });
+
+  // The exact scenario the redesign introduces: every PUT succeeds, but the app "dies" (or the network
+  // drops) before the completion call lands. The walk must NOT be treated as finished — its bytes are
+  // orphaned in R2 with no `files` row until completion actually succeeds.
+  it("crash between the last PUT and completion: bytes are all in R2, but the walk stays queued, un-completed, and its files un-deleted until completion actually succeeds", async () => {
+    const walk = completedWalk();
+    seedFiles([VIDEO_URI, PHOTO_URI]);
+    await enqueueWalk(OWNER, "walk-1", walk, META, 1000);
+
+    // Every PUT succeeds this drain, but completion fails (simulating the crash/network drop right
+    // after the last PUT, before the completion call could be confirmed).
+    uploadAsyncMock.mockResolvedValue({ status: 200 });
+    const client = stubClient({ completeWalk: jest.fn(async () => { throw new Error("network dropped"); }) });
+
+    const first = await drainWalkQueue(OWNER, fetcher, client);
+    expect(first.puts).toBe(2);
+    expect(first.putFailures).toBe(0);
+    expect(first.completed).toBe(0);
+    expect(first.completionFailures).toBe(1);
+    expect(first.remainingWalks).toBe(1); // the walk is NOT gone — it is not finished
+
+    // Bytes are all "in R2" per our bookkeeping, but the walk must not look done: completedAt unset,
+    // and — the load-bearing assertion — the local files are STILL on disk. If they were deleted here,
+    // a walk whose completion never landed would have no way to ever be retried, and the bytes sitting
+    // in R2 (with no `files` row) would be permanently invisible to the crew.
+    const [midCrash] = await getQueuedWalks(OWNER);
+    expect(midCrash!.artifacts.every((a) => a.putAt !== undefined)).toBe(true); // "bytes are in R2"
+    expect(midCrash!.completedAt).toBeUndefined(); // "the server has NOT accepted this walk"
+    expect(midCrash!.completionAttempts).toBe(1);
+    expect(fs.__store.has(VIDEO_URI)).toBe(true);
+    expect(fs.__store.has(PHOTO_URI)).toBe(true);
+
+    // "Resume" (a later drain — could be the next foreground open or a background task) with a client
+    // whose completion now succeeds. Per the redesign: re-PUTting is cheap/safe (deterministic keys),
+    // but skipping completion is never acceptable — so what matters most is that completion gets
+    // retried, not that we avoid re-sending bytes. Assert the walk resolves correctly either way:
+    // completion is attempted, succeeds, and only THEN are files deleted / the walk removed.
+    const requestCallsBeforeResume = (client.requestUploadUrl as jest.Mock).mock.calls.length;
+    const resumedClient: WalkthroughUploadClient = { ...client, completeWalk: jest.fn(async () => ({
+      walkId: "walk-1",
+      files: [],
+      forwarding: { status: "queued", jobId: "job-2" },
+    })) };
+    const second = await drainWalkQueue(OWNER, fetcher, resumedClient);
+
+    expect(resumedClient.completeWalk).toHaveBeenCalledTimes(1); // completion WAS retried, not skipped
+    expect(second.completed).toBe(1);
+    expect(second.remainingWalks).toBe(0);
+    // Already-put artifacts are not blindly re-sent (efficiency), but this is secondary to correctness:
+    // the real requirement above is that completion always fires when completedAt is unset.
+    expect((client.requestUploadUrl as jest.Mock).mock.calls.length).toBe(requestCallsBeforeResume);
+
+    expect(fs.__store.has(VIDEO_URI)).toBe(false);
+    expect(fs.__store.has(PHOTO_URI)).toBe(false);
+    expect(await getQueuedWalks(OWNER)).toEqual([]);
+  });
+
+  it("a walk whose completion call keeps failing goes terminal after MAX_WALK_COMPLETION_ATTEMPTS and stops being drained", async () => {
+    const walk = completedWalk();
+    seedFiles([VIDEO_URI, PHOTO_URI]);
+    await enqueueWalk(OWNER, "walk-1", walk, META, 1000);
+    uploadAsyncMock.mockResolvedValue({ status: 200 });
+    const client = stubClient({ completeWalk: jest.fn(async () => { throw new Error("500"); }) });
+
+    // Drain repeatedly until completion should be exhausted.
+    let summary;
+    for (let i = 0; i < 5; i++) {
+      summary = await drainWalkQueue(OWNER, fetcher, client);
+    }
+    expect(summary!.remainingWalks).toBe(1); // terminal walks stay queued for the UI to surface/dismiss
+    expect(await getFailedWalkCount(OWNER)).toBe(1);
+    expect(await getSchedulableWalkCount(OWNER)).toBe(0);
+    // Files are STILL never deleted for a terminal (never-completed) walk.
+    expect(fs.__store.has(VIDEO_URI)).toBe(true);
+    expect(fs.__store.has(PHOTO_URI)).toBe(true);
+
+    const callsBefore = (client.completeWalk as jest.Mock).mock.calls.length;
+    await drainWalkQueue(OWNER, fetcher, client);
+    // A terminal walk is no longer drained at all — no further completion attempts.
+    expect((client.completeWalk as jest.Mock).mock.calls.length).toBe(callsBefore);
   });
 
   it("reports an empty summary and touches nothing when the queue is empty", async () => {
     const client = stubClient();
     const summary = await drainWalkQueue(OWNER, fetcher, client);
-    expect(summary).toEqual({ succeeded: 0, failed: 0, remainingWalks: 0, confirmedArtifactIds: {} });
+    expect(summary).toEqual({ puts: 0, putFailures: 0, completed: 0, completionFailures: 0, remainingWalks: 0 });
     expect(client.requestUploadUrl).not.toHaveBeenCalled();
+    expect(client.completeWalk).not.toHaveBeenCalled();
   });
 });
 
 describe("getSchedulableWalkCount / getFailedWalkCount", () => {
-  it("counts drainable walks as schedulable, and reports 0 failed while retries remain", async () => {
-    await enqueueWalk(OWNER, "walk-1", completedWalk(), 1000);
+  it("counts a drainable walk as schedulable, and reports 0 failed while retries remain", async () => {
+    await enqueueWalk(OWNER, "walk-1", completedWalk(), META, 1000);
     expect(await getSchedulableWalkCount(OWNER)).toBe(1);
     expect(await getFailedWalkCount(OWNER)).toBe(0);
   });
