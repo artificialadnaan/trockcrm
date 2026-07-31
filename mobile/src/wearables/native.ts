@@ -19,6 +19,23 @@ export type Capabilities = {
   metaAppId: string;
   developerMode: boolean;
   appLinkURLScheme: string;
+  /**
+   * The stream ceiling for each SDK resolution tier, read straight from the SDK rather than
+   * inferred from one measured stream — `StreamConfiguration()` defaults to `.medium`, so a
+   * single run says nothing about `.high`. This is the number the stills-vs-frames decision
+   * (rung 7) actually turns on.
+   */
+  streamResolutions: StreamResolutions;
+};
+
+/**
+ * One "WIDTHxHEIGHT" entry per case of the SDK's `StreamingResolution` (MWDATCamera), which is
+ * `CaseIterable` over exactly these three — keyed by `String(describing:)` of the case name.
+ */
+export type StreamResolutions = {
+  high: string;
+  medium: string;
+  low: string;
 };
 
 export type WearablesStatus = {

@@ -2,14 +2,22 @@
  * Meta Wearables diagnostic. Development builds only.
  *
  * A ladder, not a UI: each rung runs one native call and shows its raw result, so a failure
- * names itself instead of surfacing as "glasses don't work". Rungs 1-6 are plumbing. Rungs 7
- * and 8 are the reason this screen exists — they return MEASUREMENTS that decide whether
- * walkthrough capture moves into this app:
+ * names itself instead of surfacing as "glasses don't work". Rungs 1-6 are plumbing.
  *
- *   7. Is `capturePhoto` full-sensor, or capped at the 720x1280 stream ceiling?
- *   8. Does Bluetooth HFP negotiate wideband (16 kHz, what ASR consumes) or narrowband (8 kHz)?
+ * Rungs 7 and 8 are ANSWERED, measured on real hardware 2026-07-30:
  *
- * Neither is documented. Both are one tap away here.
+ *   7. `capturePhoto` is 1080x1440 (1.56 MP), full-sensor against the 720x1280 (0.92 MP) .high
+ *      stream ceiling — stills win by 1.7x.
+ *   8. Bluetooth HFP negotiates wideband (16 kHz, what ASR consumes).
+ *
+ * Rungs 9 and 10 are now the open Step 0 questions, and they gate the capture design:
+ *
+ *   9. Does the HFP mic route survive a DAT camera stream? If not, video and glasses audio
+ *      cannot be captured together and the feature falls back to audio + stills.
+ *   10. Does opening the phone camera tear down HFP? The feature needs phone stills during a
+ *       glasses walk, and both share one `AVAudioSession`.
+ *
+ * One tap away here.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
@@ -157,8 +165,10 @@ function Diagnostic() {
       <Text style={styles.title}>Wearables diagnostic</Text>
       <Text style={styles.subtitle}>
         Run 1–5, then 8, then 6 → 6b → 7. Rung 8 comes BEFORE rung 6: HFP must settle before a
-        DAT stream starts, or the audio route fails silently. Rungs 7 and 8 return the
-        measurements that decide the capture architecture.
+        DAT stream starts, or the audio route fails silently. Rungs 7 and 8 are answered —
+        see the file header. Rungs 9 and 10 are the open questions now, and each manages its
+        own audio session and stream, so neither depends on the order above. Rung 9 still needs
+        rung 1 run first this session; rung 10 needs only the glasses connected over Bluetooth.
       </Text>
 
       {/* Always rendered, even empty. A callback that never arrives is the single most likely
