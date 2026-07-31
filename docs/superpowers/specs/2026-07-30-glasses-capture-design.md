@@ -277,6 +277,41 @@ produce measurements rather than impressions.
 
 ---
 
+## Owner decisions — 2026-07-30, Adnaan
+
+**1. A permanently-failed forward sends an email.** When a walk reaches the project folder but
+forwarding to TROCK Scope exhausts its retries (or dies on a config error), someone gets told.
+Without this the failure is invisible: the estimator's phone said "uploaded" and was telling the
+truth, the walk is filed, and no scope ever comes back. A site visit is not repeatable — by the
+time anyone notices, the estimator has left the site.
+
+**2. A walk is attributed to the estimator who captured it, not to a robot account.** TROCK Scope
+records `capturedBy` from whoever is logged in, but the CRM forwards machine-to-machine with
+nobody logged in. The decision is that TROCK Scope **trusts the CRM's `capturedByUserId`** rather
+than stamping every forwarded walk with one shared service identity. Framing: it is Dave's walk,
+captured with AI assistance — not the robot's walk.
+
+*This is a TROCK Scope change and is NOT built* — `routes/walkthroughs.ts` reads `req.user!.id`
+directly, so it needs a machine-auth path that accepts a trusted `capturedByUserId`. Deferred
+with decision 3.
+
+**3. TROCK Scope is not deployed yet, deliberately.** The scope pipeline is already proven
+end-to-end (6/6 stages, real line items — see `trock-scope/docs/HANDOFF.md`); what is unproven is
+the *capture* half. The crew-facing outcome — a walk landing in the project folder — works with
+TROCK Scope switched off entirely, which is exactly why the two destinations were built
+independent of each other.
+
+So: prove video ingestion on hardware first, then deploy and turn forwarding on. Decisions 1 and 2
+only bite once media is actually flowing, and both are better made against a real walk than in the
+abstract.
+
+**Consequence for sequencing:** the next hardware session is about the `.mp4`, not the server.
+Record a walk, pull the file, play it. If the audio track is empty or drifts from the video,
+that is a bigger correction than anything downstream, and everything above it is moot until it
+holds.
+
+---
+
 ## Out of scope
 
 - Voice-triggered capture (needs on-device keyword spotting off the same mic feed)
