@@ -28,7 +28,12 @@ const path = require("path");
 // The bridge has to compile INTO the app target: it imports MWDATCore/MWDATCamera, which are
 // Swift Package products attached to that target, and a CocoaPods-built Expo module cannot
 // see them. So the sources are copied in and registered on every prebuild instead.
-const BRIDGE_FILES = ["WearablesBridge.swift", "WearablesBridge.m"];
+const BRIDGE_FILES = [
+  "WearablesBridge.swift",
+  "WearablesBridge.m",
+  "WalkthroughRecorder.swift",
+  "WalkthroughRecorder.m",
+];
 
 const PACKAGE_URL = "https://github.com/facebook/meta-wearables-dat-ios";
 const DEFAULT_VERSION = "0.8.0";
