@@ -108,6 +108,34 @@ export async function insertAiReportRunTx(db: FieldTenantDb, input: NewAiReportR
   // scoped, so it releases on the caller's commit or rollback; keyed per requester, so two users never wait
   // on each other; namespaced, because the hashtext(bigint) key space is global to the database.
   await db.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`field-ai-report-quota:${input.requestedBy}`}))`);
+
+  // Idempotent replay of a LOST RESPONSE, before anything is spent.
+  //
+  // The in-flight unique index catches a double-tap only while the first run is queued/running. The gap it
+  // leaves: the POST commits, the response is lost to a dropped connection, the run then SUCCEEDS, and the
+  // user — who never got a runId and so could never poll — taps again. Nothing in flight collides, and an
+  // identical tap buys a second Claude pass over the same sixty photographs.
+  //
+  // A request key threaded from the phone would be the textbook fix, but every input needed to recognise the
+  // replay is ALREADY stored on the row: same requester, same project, same photographs in the same print
+  // order, same focus. Matching on those costs no column, no migration and no client change.
+  //
+  // The window is deliberately short. Re-running the identical selection is a legitimate thing to want (the
+  // model is not deterministic), so this only absorbs the taps close enough together to be a retry rather
+  // than a decision — and changing the focus or the selection at all still starts a fresh run immediately.
+  const replay = await db.execute<RunRow>(sql`
+    SELECT * FROM public.field_ai_report_runs
+     WHERE requested_by = ${input.requestedBy}::uuid
+       AND deal_id = ${input.dealId}::uuid
+       AND photo_ids = ${sql.param(input.photoIds)}::uuid[]
+       AND focus_prompt IS NOT DISTINCT FROM ${input.focusPrompt}
+       AND created_at > now() - ${`${DUPLICATE_REPLAY_WINDOW_MINUTES} minutes`}::interval
+     ORDER BY created_at DESC
+     LIMIT 1
+  `);
+  const replayed = (replay as unknown as { rows: RunRow[] }).rows[0];
+  if (replayed) return toRun(replayed);
+
   const result = await db.execute<RunRow>(sql`
     INSERT INTO public.field_ai_report_runs
       (deal_id, office_id, office_slug, requested_by, photo_ids, report_title, focus_prompt, status)
@@ -254,6 +282,15 @@ export const MAX_IN_FLIGHT_RUNS_PER_USER = 3;
  * keep dying.
  */
 export const MAX_RUNS_PER_ROLLING_DAY = 25;
+
+/**
+ * How long an identical enqueue is treated as a RETRY of the previous one rather than a new request.
+ *
+ * Long enough to cover a lost response plus the run it belongs to finishing (a 60-photo assessment runs
+ * 30-90s, minutes on retries) and the user noticing and tapping again. Short enough that deliberately
+ * re-running the same selection later still costs nothing but the wait.
+ */
+export const DUPLICATE_REPLAY_WINDOW_MINUTES = 10;
 
 /** Raised when the INSERT is refused because the user is already at their concurrent-run quota. */
 export class AiReportQuotaExceededError extends Error {

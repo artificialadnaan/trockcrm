@@ -234,6 +234,57 @@ describe("field_ai_report_runs — real SQL", () => {
     expect(locks.rows[0].n).toBe(0);
   });
 
+  it("replays an identical enqueue instead of billing a second pass, even once the first has SUCCEEDED", async () => {
+    // The gap the in-flight unique index leaves: the POST commits, the response is lost, the run finishes,
+    // and the user — who never received a runId and so could never poll — taps again. Nothing is in flight
+    // to collide with, so without the replay lookup this queues a second paid Claude pass over the same
+    // photographs. Asserted on the SUCCEEDED state specifically, because a test against a queued original
+    // would pass on the unique index alone and prove nothing about this code.
+    const replayUser = (
+      await client.query<{ id: string }>(`INSERT INTO public.users (email) VALUES ('replay@t.co') RETURNING id`)
+    ).rows[0].id;
+    const deal = "aaaaaaaa-7777-7777-7777-777777777777";
+    const enqueue = () =>
+      db.transaction(async (tx) =>
+        insertAiReportRunTx(tx as unknown as Parameters<typeof insertAiReportRunTx>[0], {
+          dealId: deal,
+          officeId,
+          officeSlug: "dallas",
+          requestedBy: replayUser,
+          photoIds: PHOTOS,
+          reportTitle: "Title",
+          focusPrompt: null,
+        }),
+      );
+
+    const first = await enqueue();
+    await client.query(`UPDATE public.field_ai_report_runs SET status = 'succeeded' WHERE id = $1`, [first.id]);
+
+    const retry = await enqueue();
+    expect(retry.id).toBe(first.id);
+    expect(retry.status).toBe("succeeded");
+    const total = await client.query<{ n: number }>(
+      `SELECT count(*)::int AS n FROM public.field_ai_report_runs WHERE requested_by = $1`,
+      [replayUser],
+    );
+    expect(total.rows[0].n).toBe(1);
+
+    // ...but a DIFFERENT selection is a new request, not a retry, and must still start its own run.
+    const different = await db.transaction(async (tx) =>
+      insertAiReportRunTx(tx as unknown as Parameters<typeof insertAiReportRunTx>[0], {
+        dealId: deal,
+        officeId,
+        officeSlug: "dallas",
+        requestedBy: replayUser,
+        photoIds: [PHOTOS[0]],
+        reportTitle: "Title",
+        focusPrompt: null,
+      }),
+    );
+    expect(different.id).not.toBe(first.id);
+    expect(different.status).toBe("queued");
+  });
+
   it("does not expire a long-queued run that still has a live delivery, but does expire an orphaned one", async () => {
     // The AI-report poller is serial, so a perfectly good run can sit queued far longer than the lease
     // window behind other work. Testing its AGE failed untouched requests before any worker had claimed
