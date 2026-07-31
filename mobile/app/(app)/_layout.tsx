@@ -61,6 +61,11 @@ export default function AppLayout() {
         name="profile"
         options={{ title: "Profile", tabBarIcon: ({ color }) => <TabIcon name="person-outline" color={color} /> }}
       />
+      {/* __DEV__-gated diagnostic screen (renders null in release builds). Expo Router auto-adds
+          any route under this layout as a tab, so without this explicit registration it ships as
+          a fifth "dev-wearables" tab that a crew can tap into a blank screen. href: null keeps it
+          reachable by direct navigation (e.g. for testing) without ever appearing in the tab bar. */}
+      <Tabs.Screen name="dev-wearables" options={{ href: null }} />
     </Tabs>
   );
 }
