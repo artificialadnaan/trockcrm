@@ -255,14 +255,14 @@ describe("renderFieldPhotoReportPdf findings layout", () => {
     });
   }, 30_000);
 
-  it("gives each photo its own page, unlike the 3-per-page grid", async () => {
+  it("gives each photo its own page, unlike the 4-per-page grid", async () => {
     const sections = [findingsSection(6, SHORT_FINDING)];
     const findings = await renderFieldPhotoReportPdf({ cover, sections, photoLayout: "findings" });
     const grid = await renderFieldPhotoReportPdf({ cover, sections, photoLayout: "grid" });
 
     // cover + one page per photo
     expect(countPdfPages(findings)).toBe(7);
-    // cover + ceil(6/3) grid pages
+    // cover + ceil(6/4) grid pages.
     expect(countPdfPages(grid)).toBe(3);
   });
 
