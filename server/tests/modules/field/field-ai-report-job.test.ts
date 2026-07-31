@@ -55,7 +55,7 @@ vi.mock("../../../src/modules/field/projects-service.js", async (importOriginal)
 // The job re-applies the office authorization the enqueue middleware performed, so the canonical check has
 // to be observable. Only getOfficeAccess is imported from this module.
 const authMocks = vi.hoisted(() => ({ getOfficeAccess: vi.fn(async () => ({ hasAccess: true })) }));
-vi.mock("../../../src/modules/auth/service.js", () => authMocks);
+vi.mock("../../../src/modules/auth/office-access.js", () => authMocks);
 
 const r2Mocks = vi.hoisted(() => ({ deleteObject: vi.fn(async () => undefined) }));
 vi.mock("../../../src/lib/r2-client.js", async (importOriginal) => ({

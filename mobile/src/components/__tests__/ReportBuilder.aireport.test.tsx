@@ -345,6 +345,23 @@ describe("ReportBuilder AI report", () => {
     expect(props.onLeftRunning).not.toHaveBeenCalled();
   });
 
+  it("blocks a second submission after handing a still-running report to the background", async () => {
+    // The sheet STAYS OPEN on a sustained outage and `finally` clears aiBusy, so the Generate button came
+    // back while the first report was still being written. Tapping it pays for the same assessment twice.
+    mockGetAiReportStatus.mockRejectedValue(new Error("Network request failed"));
+
+    const { ui } = renderBuilder();
+    await openFocusStep(ui);
+    await pressGenerate(ui);
+    await waitFor(() => expect(mockStartAiReport).toHaveBeenCalledTimes(1));
+    for (let i = 0; i < 6; i += 1) await tickPoll();
+
+    // The user is told why, rather than left looking at a live button.
+    await waitFor(() => expect(ui.queryByText(/still being written/i)).not.toBeNull());
+    await pressGenerate(ui);
+    expect(mockStartAiReport).toHaveBeenCalledTimes(1);
+  });
+
   it("a stale poll loop cannot resurrect itself once a new run has started", async () => {
     // With a shared boolean, a newly started report set the flag back to true while an OLD loop was still
     // resolving — the stale loop then resumed as current and could open the previous PDF, or clear the new

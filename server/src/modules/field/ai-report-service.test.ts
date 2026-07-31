@@ -128,13 +128,24 @@ describe("ai-report-service", () => {
       externalUrl: "https://cdn.example.com/x.jpg",
       externalThumbnailUrl: null,
     };
-    vi.stubGlobal("fetch", vi.fn(async () => ({
-      ok: true,
-      status: 200,
-      url: "https://cdn.example.com/x.jpg",
-      headers: { get: (name: string) => (name.toLowerCase() === "content-type" ? "image/jpeg" : null) },
-      arrayBuffer: async () => TINY_JPEG.buffer.slice(TINY_JPEG.byteOffset, TINY_JPEG.byteOffset + TINY_JPEG.byteLength),
-    } as unknown as Response)));
+    // The body is a STREAM: fetchBoundedExternalImage reads it chunk by chunk so it can stop at its cap
+    // rather than buffering an unbounded response first.
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      let sent = false;
+      return {
+        ok: true,
+        status: 200,
+        url: "https://cdn.example.com/x.jpg",
+        headers: { get: (name: string) => (name.toLowerCase() === "content-type" ? "image/jpeg" : null) },
+        body: {
+          getReader: () => ({
+            read: async () => (sent ? { done: true, value: undefined } : ((sent = true), { done: false, value: new Uint8Array(TINY_JPEG) })),
+            cancel: async () => undefined,
+            releaseLock: () => undefined,
+          }),
+        },
+      } as unknown as Response;
+    }));
 
     const result = await generateAiPhotoAssessment(
       { projectName: "P", photos: [external] },

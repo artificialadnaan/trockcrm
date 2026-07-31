@@ -3,7 +3,9 @@ import { files } from "@trock-crm/shared/schema";
 import type { UserRole } from "@trock-crm/shared/types";
 import { pool } from "../../db.js";
 import { FIELD_APP_ALLOWED_ROLE_SET } from "./field-app-roles.js";
-import { getOfficeAccess } from "../auth/service.js";
+// The lightweight module, not auth/service.js: this file is dynamic-imported by the worker, and reaching
+// through the session layer would drag jsonwebtoken and the local-auth gate along for one office check.
+import { getOfficeAccess } from "../auth/office-access.js";
 import { deleteObject } from "../../lib/r2-client.js";
 import { buildDealPhotoTimelineConditions } from "../files/photo-timeline-filters.js";
 import { getFieldOfficeById, isFieldCrossOfficeWritesEnabled, runInOfficeTransaction } from "./cross-office.js";

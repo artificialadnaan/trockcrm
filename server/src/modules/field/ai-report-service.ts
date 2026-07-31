@@ -505,13 +505,22 @@ async function defaultLoadPhotoBuffer(photo: AiReportPhotoInput) {
   // The durable R2 copy always wins: on an R2-backed import the external URL is metadata that can expire.
   if (photo.r2Key) return getObjectBuffer(photo.r2Key, { maxBytes: MAX_SOURCE_BYTES });
 
-  // No R2 copy — an external-only import. Read the CDN original (its thumbnail if the original will not
-  // come), bounded, instead of declaring the photo unreadable and quietly dropping it from the assessment.
-  const external =
-    (await fetchBoundedExternalImage(photo.externalUrl, MAX_SOURCE_BYTES))
-    ?? (await fetchBoundedExternalImage(photo.externalThumbnailUrl, MAX_SOURCE_BYTES));
-  if (external) return external;
+  // No R2 copy — an external-only import. Read the CDN original (its thumbnail if the original is
+  // permanently unusable), bounded, instead of declaring the photo unreadable and dropping it silently.
+  const primary = await fetchBoundedExternalImage(photo.externalUrl, MAX_SOURCE_BYTES);
+  const attempt = primary.status === "ok"
+    ? primary
+    : primary.status === "unusable"
+      ? await fetchBoundedExternalImage(photo.externalThumbnailUrl, MAX_SOURCE_BYTES)
+      : primary;
+  if (attempt.status === "ok") return attempt.image;
 
+  // RETRYABLE when the CDN was merely unreachable, so this photo is NOT counted as unreadable and quietly
+  // skipped: isUnreadableObjectError treats only a non-retryable AiReportError as "skip it". Shrinking the
+  // analysed set because a CDN blipped is the same failure as swallowing an R2 outage.
+  if (attempt.status === "unavailable") {
+    throw new AiReportError(`Photo ${photo.displayName} could not be fetched from its source.`, true);
+  }
   throw new AiReportError(`Photo ${photo.displayName} has no stored original.`, false);
 }
 

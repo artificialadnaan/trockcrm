@@ -356,10 +356,25 @@ async function loadPhotoBuffer(
   // No R2 copy — an external-only import (CompanyCam and similar keep a plain CDN URL). Every other surface
   // serves these, so the report reads them too instead of drawing a placeholder over a photograph that is
   // perfectly available. Bounded and scheme-restricted; `data:` still works exactly as before.
-  const external =
-    (await fetchBoundedExternalImage(photo.externalUrl, MAX_RENDER_SOURCE_BYTES))
-    ?? (await fetchBoundedExternalImage(photo.externalThumbnailUrl, MAX_RENDER_SOURCE_BYTES));
-  if (!external) return null;
+  const primary = await fetchBoundedExternalImage(photo.externalUrl, MAX_RENDER_SOURCE_BYTES);
+  const attempt = primary.status === "ok"
+    ? primary
+    // Only fall back to the CDN thumbnail when the original is permanently unusable. A TRANSIENT failure on
+    // the original must not be quietly downgraded to its thumbnail — or worse, to a placeholder.
+    : primary.status === "unusable"
+      ? await fetchBoundedExternalImage(photo.externalThumbnailUrl, MAX_RENDER_SOURCE_BYTES)
+      : primary;
+
+  if (attempt.status !== "ok") {
+    // Same rule the R2 branch above applies: in strict mode a transient failure fails the render rather
+    // than emitting a placeholder. This is the AI report, where that panel would sit beside findings
+    // written about this very photograph, in a document then marked succeeded.
+    if (strictStorage && attempt.status === "unavailable") {
+      throw new Error(`External image for ${photo.displayName ?? "photo"} was temporarily unavailable.`);
+    }
+    return null;
+  }
+  const external = attempt.image;
   // Same transcode decision as an R2 original: PDFKit takes JPEG/PNG only, and a CDN can serve HEIC/WebP.
   const externalMime = external.contentType ?? photo.mimeType ?? null;
   if (externalMime && PDFKIT_NATIVE_MIME.test(externalMime) && external.buffer.byteLength <= RENDER_TRANSCODE_ABOVE_BYTES) {
