@@ -52,6 +52,14 @@ const runMocks = vi.hoisted(() => ({
       this.name = "AiReportQuotaExceededError";
     }
   },
+  // The ROLLING cap, mirrored for the same reason: the route narrows on it before the concurrency error, so
+  // an undefined here makes `instanceof` throw and every enqueue path 500s.
+  AiReportDailyQuotaExceededError: class AiReportDailyQuotaExceededError extends Error {
+    constructor(readonly limit: number) {
+      super(`Quota of ${limit} AI reports per day reached.`);
+      this.name = "AiReportDailyQuotaExceededError";
+    }
+  },
   // Real predicate, not a stub that always agrees — a mock that returned true for everything would make
   // the conflict path swallow unrelated database errors and the test would never notice.
   isInFlightRunConflict: (error: unknown) =>
@@ -344,6 +352,20 @@ describe("POST /field/reports/ai-generate", () => {
     expect(res.status).toBe(202);
     expect(res.body).toEqual({ runId: "run-existing", status: "running" });
     expect(runMocks.insertAiReportRunTx).not.toHaveBeenCalled();
+  });
+
+  it("reports the ROLLING daily cap distinctly from the concurrency cap", async () => {
+    // "Wait for one to finish" is useless advice to someone who has hit the daily limit — nothing they wait
+    // for frees it up. The two rejections are different errors for exactly that reason.
+    runMocks.insertAiReportRunTx.mockRejectedValueOnce(new runMocks.AiReportDailyQuotaExceededError(25) as never);
+
+    const res = await request(buildApp())
+      .post("/api/field/reports/ai-generate")
+      .send({ projectId: PROJECT, photoIds: [PHOTO_A] });
+
+    expect(res.status).toBe(429);
+    expect(res.body.error.message).toMatch(/daily limit/i);
+    expect(res.body.error.message).not.toMatch(/wait for one to finish/i);
   });
 
   it("resolves an identical double-tap that reached the quota instead of the in-flight index", async () => {

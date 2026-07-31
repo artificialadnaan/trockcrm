@@ -580,11 +580,30 @@ async function drawPhotoEntry(
     const drawHeight = opened.displayHeight * scale;
     const drawLeft = PAGE_MARGIN + (boxWidth - drawWidth) / 2;
     const drawTop = top + (boxHeight - drawHeight) / 2;
+    // CLIPPED to the tile, not merely drawn on top of it. roundedRect().fill() paints a background and
+    // establishes no clipping path, so a photograph whose aspect is close to the tile's — 16:9 lands at
+    // 268.4x151 inside a 270x151 tile, which is most jobsite panoramas — covers the rounded corner cutouts
+    // with its own square ones and reads as spilling out of the frame.
+    //
+    // save/clip OUTSIDE the try and restore in `finally`, so the pairing cannot come apart: a throw from
+    // doc.image would otherwise leave the clip on the graphics stack and silently crop everything drawn
+    // after it, on this page and every page that follows.
+    doc.save();
+    doc.roundedRect(PAGE_MARGIN, top, boxWidth, boxHeight, PHOTO_TILE_RADIUS).clip();
     try {
       doc.image(opened.image as unknown as Buffer, drawLeft, drawTop, { width: drawWidth, height: drawHeight });
       drew = true;
-    } catch {
+    } catch (error) {
+      // Named, not swallowed. This degrades to a placeholder in a document the user is about to send to an
+      // owner, and without the photo id there is nothing to work back from — the PDF looks merely incomplete.
+      console.warn("[field-photo-report] could not embed a photo; drawing the placeholder", {
+        photoId: photo.id,
+        displayName: photo.displayName,
+        error: error instanceof Error ? error.message : String(error),
+      });
       drew = false;
+    } finally {
+      doc.restore();
     }
   }
   if (!drew) {
