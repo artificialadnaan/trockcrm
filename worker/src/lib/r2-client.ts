@@ -85,3 +85,39 @@ export async function getObjectBuffer(r2Key: string): Promise<Buffer | null> {
   }
   return Buffer.concat(chunks);
 }
+
+/**
+ * Fetch ONE byte range of an object (inclusive `endByte`, HTTP Range semantics). Used by
+ * glasses-walkthrough-forward.ts to relay a clip to TROCK Scope's multipart upload one 32MiB part at a
+ * time instead of buffering an entire (potentially multi-GB) video/audio file in the worker's memory.
+ * Returns an empty buffer (rather than throwing) when R2 is not configured, matching `getObjectBuffer`'s
+ * own dev/CI posture — callers that need bytes to actually exist should check `isR2Configured()` first.
+ */
+export async function getObjectRangeBuffer(r2Key: string, startByte: number, endByteInclusive: number): Promise<Buffer> {
+  if (!isR2Configured()) {
+    console.log("[R2:worker] R2 not configured -- skipping ranged object fetch");
+    return Buffer.alloc(0);
+  }
+
+  const client = getR2Client();
+  const bucket = getR2Bucket();
+
+  const response = await client.send(
+    new GetObjectCommand({
+      Bucket: bucket,
+      Key: r2Key,
+      Range: `bytes=${startByte}-${endByteInclusive}`,
+    })
+  );
+
+  if (!response.Body) {
+    return Buffer.alloc(0);
+  }
+
+  const chunks: Uint8Array[] = [];
+  const reader = response.Body as AsyncIterable<Uint8Array>;
+  for await (const chunk of reader) {
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
+}
