@@ -116,6 +116,10 @@ async function loadPhotosForAssessment(
       // The crew's caption. Sent to the model as field context AND left in place on any photo the model
       // passes over, so a photo without AI findings still reads exactly as the field left it.
       caption: files.description,
+      // Where the image lives when there is no R2 copy. Selected so an external-only import is READ rather
+      // than skipped as unreadable — the same URLs every other surface already serves.
+      externalUrl: files.externalUrl,
+      externalThumbnailUrl: files.externalThumbnailUrl,
     })
     .from(files)
     .where(and(inArray(files.id, photoIds), scope));
@@ -126,15 +130,17 @@ async function loadPhotosForAssessment(
     throw new AiReportError("One or more selected photos are unavailable for this project.", false);
   }
   // A photo with no stored original is an external-only import (CompanyCam and similar keep externalUrl /
-  // externalThumbnailUrl with no r2Key) — a supported, ordinary row. It is passed through and handled as
-  // unreadable by the vision pass, so it still prints with its own caption instead of failing the whole
-  // report the way an up-front rejection did.
+  // externalThumbnailUrl with no r2Key) — a supported, ordinary row. Its URLs are carried through so the
+  // vision pass and the renderer can both READ it; only a row with neither an R2 copy nor a usable URL is
+  // treated as unreadable, and even then it still prints with its own caption rather than failing the run.
   return ordered.map((row) => ({
     id: row.id,
     r2Key: row.r2Key,
     mimeType: row.mimeType,
     displayName: row.displayName,
     caption: row.caption,
+    externalUrl: row.externalUrl,
+    externalThumbnailUrl: row.externalThumbnailUrl,
   }));
 }
 

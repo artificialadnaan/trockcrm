@@ -88,8 +88,17 @@ const { runFieldAiReportJob } = await import("../../../src/modules/field/ai-repo
 const PHOTO_A = "aaaaaaaa-1111-1111-1111-111111111111";
 const PHOTO_B = "bbbbbbbb-2222-2222-2222-222222222222";
 
-function photoRow(id: string, caption: string | null) {
-  return { id, displayName: `IMG_${id.slice(0, 4)}`, r2Key: `k/${id}.jpg`, mimeType: "image/jpeg", caption };
+function photoRow(id: string, caption: string | null, overrides: Record<string, unknown> = {}) {
+  return {
+    id,
+    displayName: `IMG_${id.slice(0, 4)}`,
+    r2Key: `k/${id}.jpg`,
+    mimeType: "image/jpeg",
+    caption,
+    externalUrl: null,
+    externalThumbnailUrl: null,
+    ...overrides,
+  };
 }
 
 /**
@@ -413,6 +422,25 @@ describe("runFieldAiReportJob", () => {
     // Must RESOLVE, not reject: a rejection is what triggers the queue retry.
     await expect(runFieldAiReportJob({ runId: "run-1" })).resolves.toEqual({ claimed: true });
     expect(runMocks.markAiReportRunFailed).toHaveBeenCalled();
+  });
+
+  it("carries an external-only photo's URLs through to the assessment", async () => {
+    // The mapper used to pass r2Key alone, so a CompanyCam-style row arrived with nothing to read and the
+    // vision pass skipped it — an all-external selection failed the whole run.
+    xoMocks.runInOfficeTransaction.mockImplementation(async (office: any, _userId: any, run: any) =>
+      run(
+        officeDb([
+          photoRow(PHOTO_A, null, { r2Key: null, externalUrl: "https://cdn.example.com/a.jpg" }),
+          photoRow(PHOTO_B, null),
+        ]),
+        office,
+      ),
+    );
+
+    await runFieldAiReportJob({ runId: "run-1" });
+
+    const photos = (aiMocks.generateAiPhotoAssessment.mock.calls[0][0] as any).photos;
+    expect(photos[0]).toMatchObject({ id: PHOTO_A, r2Key: null, externalUrl: "https://cdn.example.com/a.jpg" });
   });
 
   it("renews the lease on the run it is actually working", async () => {

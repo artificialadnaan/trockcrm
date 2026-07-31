@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { getObjectBuffer, isR2Configured, isR2ObjectNotFoundError, ObjectTooLargeError } from "../../lib/r2-client.js";
 import { generateEvidenceJpeg } from "../../lib/image-thumbnail.js";
+import { fetchBoundedExternalImage } from "../../lib/external-image.js";
 import { TROCK_LOGO_PNG_BASE64 } from "./pdf-logo.js";
 
 const PAGE_WIDTH = 612;
@@ -258,17 +259,8 @@ function formatPhotoDate(value: string | null, fallback: string): string {
   }).replace(/^/, ", ");
 }
 
-async function fetchExternalImageBuffer(url: string): Promise<Buffer | null> {
-  if (!url.startsWith("data:image/")) return null;
-  try {
-    const response = await fetch(url);
-    if (!response.ok) return null;
-    const arrayBuffer = await response.arrayBuffer();
-    return Buffer.from(arrayBuffer);
-  } catch {
-    return null;
-  }
-}
+// Replaced by fetchBoundedExternalImage (lib/external-image.ts): the old helper accepted only `data:` URLs
+// and read them with no size or time bound.
 
 /**
  * Ceiling on an original read into memory to embed in the PDF.
@@ -361,9 +353,23 @@ async function loadPhotoBuffer(
       return untranscodedFallback(buffer, mime);
     }
   }
-  if (photo.externalUrl?.startsWith("data:image/")) return fetchExternalImageBuffer(photo.externalUrl);
-  if (photo.externalThumbnailUrl?.startsWith("data:image/")) return fetchExternalImageBuffer(photo.externalThumbnailUrl);
-  return null;
+  // No R2 copy — an external-only import (CompanyCam and similar keep a plain CDN URL). Every other surface
+  // serves these, so the report reads them too instead of drawing a placeholder over a photograph that is
+  // perfectly available. Bounded and scheme-restricted; `data:` still works exactly as before.
+  const external =
+    (await fetchBoundedExternalImage(photo.externalUrl, MAX_RENDER_SOURCE_BYTES))
+    ?? (await fetchBoundedExternalImage(photo.externalThumbnailUrl, MAX_RENDER_SOURCE_BYTES));
+  if (!external) return null;
+  // Same transcode decision as an R2 original: PDFKit takes JPEG/PNG only, and a CDN can serve HEIC/WebP.
+  const externalMime = external.contentType ?? photo.mimeType ?? null;
+  if (externalMime && PDFKIT_NATIVE_MIME.test(externalMime) && external.buffer.byteLength <= RENDER_TRANSCODE_ABOVE_BYTES) {
+    return external.buffer;
+  }
+  try {
+    return await generateEvidenceJpeg(external.buffer, externalMime, { maxEdge: RENDER_TRANSCODE_MAX_EDGE, quality: 82 });
+  } catch {
+    return untranscodedFallback(external.buffer, externalMime);
+  }
 }
 
 function drawFooter(

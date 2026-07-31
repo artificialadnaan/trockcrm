@@ -1,6 +1,7 @@
 import { getObjectBuffer, isR2ObjectNotFoundError, ObjectTooLargeError } from "../../lib/r2-client.js";
 import { generateEvidenceJpeg } from "../../lib/image-thumbnail.js";
 import { MAX_TOTAL_DEADLINE_MS, STALE_RUN_MINUTES } from "./ai-report-limits.js";
+import { fetchBoundedExternalImage } from "../../lib/external-image.js";
 
 /**
  * Claude vision pass behind the T Rock Cam "AI Report" button: hands a set of jobsite photographs to a
@@ -97,6 +98,13 @@ export type AiReportPhotoInput = {
   displayName: string;
   /** The crew's own caption (files.description), shown to the model as authoritative field context. */
   caption: string | null;
+  /**
+   * Where the image lives when there is no R2 copy — a CompanyCam-style import. The rest of the app serves
+   * these URLs directly (resolvePhotoDisplayUrls), so the report reads them too rather than treating the
+   * photo as unreadable. Full-size first, its CDN thumbnail as a fallback.
+   */
+  externalUrl?: string | null;
+  externalThumbnailUrl?: string | null;
 };
 
 /** Longest focus prompt accepted; also the cap the route enforces. */
@@ -494,8 +502,17 @@ async function callAnthropicTool(
 type PreparedImage = { photo: AiReportPhotoInput; base64: string; bytes: number };
 
 async function defaultLoadPhotoBuffer(photo: AiReportPhotoInput) {
-  if (!photo.r2Key) throw new AiReportError(`Photo ${photo.displayName} has no stored original.`, false);
-  return getObjectBuffer(photo.r2Key, { maxBytes: MAX_SOURCE_BYTES });
+  // The durable R2 copy always wins: on an R2-backed import the external URL is metadata that can expire.
+  if (photo.r2Key) return getObjectBuffer(photo.r2Key, { maxBytes: MAX_SOURCE_BYTES });
+
+  // No R2 copy — an external-only import. Read the CDN original (its thumbnail if the original will not
+  // come), bounded, instead of declaring the photo unreadable and quietly dropping it from the assessment.
+  const external =
+    (await fetchBoundedExternalImage(photo.externalUrl, MAX_SOURCE_BYTES))
+    ?? (await fetchBoundedExternalImage(photo.externalThumbnailUrl, MAX_SOURCE_BYTES));
+  if (external) return external;
+
+  throw new AiReportError(`Photo ${photo.displayName} has no stored original.`, false);
 }
 
 /**
@@ -630,6 +647,35 @@ function coerceBullets(value: unknown): string[] {
  * caption, and simply gets no AI text. That is the anti-nitpick guarantee, and it is enforced HERE as well
  * as in the prompt, so a model that ignores the instruction still can't manufacture a caption.
  */
+/**
+ * Does the tool payload actually answer for every photograph in the batch?
+ *
+ * The instruction is "return one entry per photograph", and a photograph the model passes over is
+ * represented by an entry with an EMPTY bullets array — not by omission. An `Array.isArray` check accepted
+ * `{ findings: [] }` as a valid answer, which is indistinguishable from "I judged every one of these not
+ * worth writing about". shapeFindings then produced nothing and the summary was told citedCount = 0, so the
+ * report stated the model had reviewed the set and found nothing to raise — a claim nobody had made. On a
+ * report whose entire premise is that it only says what the evidence supports, that is the worst possible
+ * failure mode, and it is invisible: a clean-looking PDF.
+ *
+ * A false result is retried rather than accepted, so a model that simply omitted entries gets another go.
+ * Exported for test — the whole point is the payloads it REJECTS.
+ */
+export function coversEveryPhoto(rawFindings: unknown, batchSize: number): boolean {
+  if (!Array.isArray(rawFindings)) return false;
+  const seen = new Set<number>();
+  for (const entry of rawFindings) {
+    if (!entry || typeof entry !== "object") return false;
+    const record = entry as Record<string, unknown>;
+    const index = Number(record.photoIndex);
+    if (!Number.isInteger(index) || index < 0 || index >= batchSize) return false;
+    if (seen.has(index)) return false; // a duplicate means some other index is unanswered
+    if (typeof record.title !== "string" || !Array.isArray(record.bullets)) return false;
+    seen.add(index);
+  }
+  return seen.size === batchSize;
+}
+
 function shapeFindings(rawFindings: unknown, batch: PreparedImage[]): AiReportFinding[] {
   const byIndex = new Map<number, { title: string; bullets: string[] }>();
   if (Array.isArray(rawFindings)) {
@@ -742,7 +788,7 @@ export async function generateAiPhotoAssessment(
           maxTokens: Math.min(32_000, Math.max(4_000, batch.length * 700)),
           deadlineAt,
           onUsage: bankUsage,
-          validate: (input) => Array.isArray(input.findings),
+          validate: (input) => coversEveryPhoto(input.findings, batch.length),
         },
         fetchFn,
       ).catch(withUsage);
