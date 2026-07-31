@@ -146,6 +146,20 @@ async function loadPhotosForAssessment(
   }));
 }
 
+/** Short bounded retry for a write whose failure is a bookkeeping problem, not a generation failure. */
+async function withRetries<T>(operation: () => Promise<T>, attempts: number): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+    }
+  }
+  throw lastError;
+}
+
 /**
  * Delete an uploaded report PDF that nothing references — and ONLY that.
  *
@@ -376,7 +390,15 @@ export async function runFieldAiReportJob(
     // pay for a second identical run while a perfectly good one sits in the list. Recorded separately from
     // the generation try/catch for exactly that reason.
     try {
-      await markAiReportRunSucceeded(runId, report.id, usage);
+      // Retried before giving up. Swallowing the first transient error left the run 'running' over a report
+      // that EXISTS: both mobile watchers only refetch once they see 'succeeded', so they time out having
+      // never shown it, and the stale sweep later marks a completed run failed and clears the way for a
+      // duplicate paid assessment. A few short retries turn the common blip into a non-event.
+      //
+      // Not a durability guarantee — that would need an outbox the queue could re-drive, which is a bigger
+      // change than this PR should carry. What it does is shrink the window, and the fallback below is
+      // unchanged: never report a failure for a report the user can already open.
+      await withRetries(() => markAiReportRunSucceeded(runId, report.id, usage), 3);
     } catch (ledgerError) {
       // Swallowed on purpose. Re-throwing would land in the catch below and mark the run FAILED — telling
       // the user their report failed while it sits, complete, in the project's report list, and inviting a

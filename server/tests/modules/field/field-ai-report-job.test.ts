@@ -444,6 +444,20 @@ describe("runFieldAiReportJob", () => {
     expect(photos[0]).toMatchObject({ id: PHOTO_A, r2Key: null, externalUrl: "https://cdn.example.com/a.jpg" });
   });
 
+  it("retries the success ledger write rather than stranding a report that exists", async () => {
+    // The file is committed and openable. Giving up on the first blip left the run 'running', and both
+    // mobile watchers only refetch once they see 'succeeded' — so they time out having never shown it, and
+    // the stale sweep later marks a COMPLETED run failed and clears the way for a duplicate paid run.
+    runMocks.markAiReportRunSucceeded
+      .mockRejectedValueOnce(new Error("connection terminated unexpectedly"))
+      .mockResolvedValueOnce(undefined);
+
+    const result = await runFieldAiReportJob({ runId: "run-1" });
+
+    expect(result).toEqual({ claimed: true, fileId: "file-1" });
+    expect(runMocks.markAiReportRunSucceeded).toHaveBeenCalledTimes(2);
+  }, 15_000);
+
   it("renews the lease on the run it is actually working", async () => {
     // started_at doubles as the lease and is stamped once at claim, but only the model call is
     // deadline-bounded — Phase D is deliberately unbounded. Without a renewal a slow-but-healthy run crosses

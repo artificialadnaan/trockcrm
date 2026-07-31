@@ -555,7 +555,11 @@ async function prepareImages(photos: AiReportPhotoInput[], deps: AiReportDeps): 
     }
 
     try {
-      const jpeg = await generateEvidenceJpeg(source.buffer, photo.mimeType ?? source.contentType ?? null, {
+      // The FETCHED representation's type wins over the stored one, matching the PDF renderer. An external
+      // row recorded as HEIC whose CDN actually serves JPEG would otherwise be sent through the HEIC
+      // decoder, which refuses the bytes — and the photo is dropped from the assessment over a stale
+      // database column. For an R2 original there is no contentType, so the stored value still applies.
+      const jpeg = await generateEvidenceJpeg(source.buffer, source.contentType ?? photo.mimeType ?? null, {
         maxEdge: VISION_MAX_EDGE,
         quality: VISION_JPEG_QUALITY,
       });

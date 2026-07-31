@@ -149,11 +149,18 @@ export function isPrivateAddress(ip: string): boolean {
       const [g6, g7] = [groups[6], groups[7]];
       return isPrivateIpv4(`${g6 >> 8}.${g6 & 0xff}.${g7 >> 8}.${g7 & 0xff}`);
     }
-    const first = groups[0];
+    const [first, second] = groups;
     if ((first & 0xfe00) === 0xfc00) return true; // fc00::/7  unique-local
     if ((first & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
     if ((first & 0xffc0) === 0xfec0) return true; // fec0::/10 site-local (deprecated, still routable inside)
     if ((first & 0xff00) === 0xff00) return true; // ff00::/8  multicast
+    // Same completeness the IPv4 table has: special-use is not only "local". These are routed internally in
+    // real environments, so a documentation or benchmarking address is no more public than RFC1918 is.
+    if (first === 0x0100 && second === 0x0000) return true; // 100::/64   discard-only
+    if (first === 0x2001 && second === 0x0db8) return true; // 2001:db8::/32 documentation
+    if (first === 0x2001 && second <= 0x01ff) return true;  // 2001::/23  IETF protocol assignments,
+                                                            //            incl. 2001:2::/48 benchmarking
+    if (first === 0x0064 && second === 0xff9b) return true; // 64:ff9b::/96 NAT64 — carries embedded IPv4
     return false;
   }
   return true; // unparseable — refuse rather than guess
@@ -168,19 +175,26 @@ function isHttpsUrl(raw: string): boolean {
 }
 
 /** Every address the hostname resolves to must be public; a single private answer refuses the whole host. */
-async function hasPublicDestination(raw: string): Promise<boolean> {
+async function hasPublicDestination(raw: string, budgetMs: number): Promise<"public" | "blocked" | "timeout"> {
   let hostname: string;
   try {
     hostname = new URL(raw).hostname.replace(/^\[|\]$/g, "");
   } catch {
-    return false;
+    return "blocked";
   }
-  if (net.isIP(hostname)) return !isPrivateAddress(hostname);
+  if (net.isIP(hostname)) return isPrivateAddress(hostname) ? "blocked" : "public";
   try {
-    const resolved = await lookup(hostname, { all: true });
-    return resolved.length > 0 && resolved.every((entry) => !isPrivateAddress(entry.address));
-  } catch {
-    return false;
+    // Bounded by the SAME wall-clock budget as the request. dns.lookup has no timeout of its own, so a
+    // stalled resolver sat outside the deadline entirely — and with photos fetched sequentially inside the
+    // synchronous path's office transaction, each stall added to a held connection.
+    const resolved = await Promise.race([
+      lookup(hostname, { all: true }),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("dns-timeout")), Math.max(1, budgetMs))),
+    ]);
+    return resolved.length > 0 && resolved.every((entry) => !isPrivateAddress(entry.address)) ? "public" : "blocked";
+  } catch (error) {
+    // A resolver that timed out says nothing about the object; NXDOMAIN does.
+    return (error as Error)?.message === "dns-timeout" ? "timeout" : "blocked";
   }
 }
 
@@ -230,6 +244,23 @@ async function readBounded(response: Response, maxBytes: number): Promise<Buffer
  * length — which means the oversize can be rejected without allocating the image at all. A percent-encoded
  * payload is likewise never shorter than what it decodes to.
  */
+/** Percent escapes straight to bytes; every other character is its own latin-1 octet. */
+function decodePercentEncodedBytes(payload: string): Buffer {
+  const bytes: number[] = [];
+  for (let i = 0; i < payload.length; i += 1) {
+    if (payload[i] === "%" && i + 2 < payload.length) {
+      const hex = payload.slice(i + 1, i + 3);
+      if (/^[0-9a-f]{2}$/i.test(hex)) {
+        bytes.push(parseInt(hex, 16));
+        i += 2;
+        continue;
+      }
+    }
+    bytes.push(payload.charCodeAt(i) & 0xff);
+  }
+  return Buffer.from(bytes);
+}
+
 function decodeBoundedDataUrl(url: string, maxBytes: number): ExternalImageResult {
   const comma = url.indexOf(",");
   if (comma < 0) return UNUSABLE;
@@ -244,7 +275,10 @@ function decodeBoundedDataUrl(url: string, maxBytes: number): ExternalImageResul
 
   let buffer: Buffer;
   try {
-    buffer = isBase64 ? Buffer.from(payload, "base64") : Buffer.from(decodeURIComponent(payload), "binary");
+    // Percent escapes are decoded to RAW BYTES, not through decodeURIComponent — that parses the payload as
+    // UTF-8 and throws on a lone high byte, so a perfectly valid `data:image/png,%89PNG...` was being
+    // classified unusable and dropped from the assessment.
+    buffer = isBase64 ? Buffer.from(payload, "base64") : decodePercentEncodedBytes(payload);
   } catch {
     return UNUSABLE; // a malformed data: url is permanent, not transient
   }
@@ -295,10 +329,16 @@ export async function fetchBoundedExternalImage(
   for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
     // Re-validated on EVERY hop, before the request is issued rather than after it completes.
     if (!isHttpsUrl(target)) return UNUSABLE;
-    if (!(await hasPublicDestination(target))) return UNUSABLE;
 
-    const remainingMs = deadlineAt - Date.now();
-    if (remainingMs <= 0) return UNAVAILABLE; // the budget went on earlier hops
+    // Resolution shares the request's budget, and is charged against it before the fetch is issued.
+    let remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) return UNAVAILABLE;
+    const destination = await hasPublicDestination(target, remainingMs);
+    if (destination === "blocked") return UNUSABLE;
+    if (destination === "timeout") return UNAVAILABLE;
+
+    remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) return UNAVAILABLE; // the budget went on earlier hops and resolution
 
     let response: Response;
     try {

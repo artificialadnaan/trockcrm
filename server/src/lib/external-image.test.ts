@@ -91,6 +91,20 @@ describe("isPrivateAddress", () => {
     }
   });
 
+  it("rejects non-global IPv6 ranges, not only the local ones", () => {
+    // Same completeness the IPv4 table has. Documentation and benchmarking prefixes are routed internally
+    // in real environments, so they are no more public than fc00::/7 is.
+    for (const ip of [
+      "2001:db8::1",   // documentation
+      "2001:2::1",     // benchmarking (inside 2001::/23)
+      "2001:1::1",     // IETF protocol assignments
+      "100::1",        // discard-only
+      "64:ff9b::7f00:1", // NAT64, carrying embedded IPv4
+    ]) {
+      expect(isPrivateAddress(ip), ip).toBe(true);
+    }
+  });
+
   it("lets ordinary public addresses through", () => {
     for (const ip of ["93.184.216.34", "8.8.8.8", "172.15.0.1", "172.32.0.1", "2606:2800:220:1::1"]) {
       expect(isPrivateAddress(ip), ip).toBe(false);
@@ -265,6 +279,15 @@ describe("fetchBoundedExternalImage", () => {
     expect(result.status === "ok" && result.image.buffer.toString()).toBe("tiny-image-bytes");
     expect(result.status === "ok" && result.image.contentType).toBe("image/png");
     expect(fetchImpl).not.toHaveBeenCalled(); // decoded directly, never round-tripped through fetch
+  });
+
+  it("decodes a percent-encoded data image as raw bytes", async () => {
+    // decodeURIComponent parses the payload as UTF-8 and throws on a lone high byte, so a valid
+    // `data:image/png,%89PNG...` was classified unusable — the vision pass skipped it and the PDF drew a
+    // placeholder over an image that was right there.
+    const result = await fetchBoundedExternalImage("data:image/png,%89PNG%0D%0A", CAP, vi.fn() as never);
+    expect(result.status).toBe("ok");
+    expect(result.status === "ok" && [...result.image.buffer]).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]);
   });
 
   it("returns unusable for a missing url rather than making a request", async () => {
