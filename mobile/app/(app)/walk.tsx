@@ -8,14 +8,22 @@
  * NO lifecycle logic — it renders `walk.state` from `useWalk` and calls `start` / `capture` /
  * `end`. All the rules about when those are legal live in useWalk.ts and session.ts.
  */
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import { theme } from "../../src/theme/theme";
+import { apiFetch } from "../../src/api/client";
+import type { Fetcher } from "../../src/api/endpoints";
+import { useAuth } from "../../src/auth/AuthContext";
 import { canCapture } from "../../src/walkthrough/session";
 import { useWalk } from "../../src/walkthrough/useWalk";
+import { deriveWalkSiteLabel, deriveWalkTitle } from "../../src/walkthrough/walk-meta";
+import { walkOwnerKey } from "../../src/walkthrough/owner-key";
+import { drainWalkQueue, enqueueWalk, type WalkQueueMeta } from "../../src/walkthrough/upload";
+import { walkthroughUploadClient } from "../../src/walkthrough/upload-client";
+import { registerWalkUploadBackgroundTask } from "../../src/walkthrough/upload-background-task";
 
 // Distinct from upload-queue's tag so the two features' keep-awake locks never interact —
 // each activates and releases its own.
@@ -30,19 +38,81 @@ function formatElapsed(ms: number): string {
 
 export default function WalkScreen() {
   // Same param-reading shape as capture.tsx, so a link into this screen matches the one already
-  // proven to attach a capture to the right deal.
+  // proven to attach a capture to the right deal. propertyAddress rides along too — capture.tsx
+  // only forwards it when its OWN dealId param matches the selected target (see detailParamsFor
+  // there), same rule this screen inherits by construction.
   const params = useLocalSearchParams<{
     dealId?: string;
     targetName?: string;
     projectId?: string;
+    propertyAddress?: string;
   }>();
   const router = useRouter();
 
   const dealId = typeof params.dealId === "string" ? params.dealId : "";
   const projectId = typeof params.projectId === "string" && params.projectId ? params.projectId : null;
   const targetName = typeof params.targetName === "string" && params.targetName ? params.targetName : "this project";
+  const propertyAddress = typeof params.propertyAddress === "string" ? params.propertyAddress : null;
 
-  const { walk, error, start, capture, end, stillCount, bridgeAvailable } = useWalk(dealId, projectId);
+  const { walk, error, walkId, start, capture, end, stillCount, bridgeAvailable } = useWalk(dealId, projectId);
+
+  // Identity for the upload queue: user + ACTIVE OFFICE, same resolution rule (activeOfficeId ??
+  // primary office) as capture.tsx's own queue — and the SAME rule the background drain task uses,
+  // so a walk enqueued here is a walk the background task can actually find.
+  const { user, activeOfficeId, token, signOut } = useAuth();
+  const resolvedOfficeId = activeOfficeId ?? user?.tenantId ?? null;
+  const ownerKey = walkOwnerKey(user?.id, resolvedOfficeId);
+  const queueFetcher = useCallback<Fetcher>(
+    (path, opts) =>
+      apiFetch(path, { ...opts, token: token ?? undefined, officeId: resolvedOfficeId, onUnauthorized: () => void signOut() }),
+    [token, resolvedOfficeId, signOut],
+  );
+
+  // Best-effort: schedule the background drain once signed in, so a walk still ships if the app is
+  // killed/backgrounded before the foreground drain below finishes. Registration itself is
+  // idempotent (BackgroundTask.registerTaskAsync no-ops if already registered), so re-running this
+  // on every mount of this screen is harmless.
+  useEffect(() => {
+    if (!ownerKey) return;
+    void registerWalkUploadBackgroundTask();
+  }, [ownerKey]);
+
+  // Enqueue the walk the MOMENT it reaches a terminal state — complete OR failed. A failed walk that
+  // captured artifacts is still a site visit that happened (session.ts's reducer keeps everything
+  // captured before the failure on purpose); enqueueWalk/toQueuedWalk already never filter by
+  // walk.state, so this effect must not add a filter here either. Owner decision: auto-upload, no
+  // review gate — the estimator is free the moment the walk ends, so this never awaits anything the
+  // UI is blocked on. enqueuedWalkIdRef guards against double-enqueueing the SAME walk across
+  // re-renders (enqueueWalk itself is also idempotent per walkId, so this is a belt-and-suspenders
+  // cheap-write avoidance, not a correctness requirement).
+  const enqueuedWalkIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (walk.state !== "complete" && walk.state !== "failed") return;
+    if (!walkId || !ownerKey) return;
+    if (enqueuedWalkIdRef.current === walkId) return;
+    enqueuedWalkIdRef.current = walkId;
+    const meta: WalkQueueMeta = {
+      title: deriveWalkTitle(targetName, walk.startedAt ?? walk.endedAt ?? Date.now()),
+      siteLabel: deriveWalkSiteLabel(propertyAddress),
+    };
+    void enqueueWalk(ownerKey, walkId, walk, meta)
+      .then((queued) => {
+        // null = nothing to enqueue (not yet terminal, or terminal with zero captured artifacts —
+        // e.g. failed before anything was recorded). Only kick a drain when there is something to
+        // drain; the background task above still covers the case where this foreground kick itself
+        // gets interrupted.
+        if (queued) void drainWalkQueue(ownerKey, queueFetcher, walkthroughUploadClient).catch(() => undefined);
+      })
+      .catch(() => {
+        // Best-effort: a failed enqueue here (e.g. storage full) is not surfaced to the estimator —
+        // per the owner decision there is no review gate to surface it INTO. The walk's artifacts
+        // remain on disk (never deleted before a successful completion call — see upload.ts), so
+        // nothing is lost; a future resume of this screen (or an app-level recovery pass, not yet
+        // built) is the retry path. Not silently losing evidence matters more here than surfacing a
+        // banner the estimator has already walked away from.
+        enqueuedWalkIdRef.current = null;
+      });
+  }, [walk, walkId, ownerKey, targetName, propertyAddress, queueFetcher]);
 
   // Local UI-only state: whether the harder-to-hit End walk control is asking for confirmation.
   // Not lifecycle — nothing here decides whether ending is ALLOWED, only how many taps it takes.

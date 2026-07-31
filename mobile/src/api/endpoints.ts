@@ -38,6 +38,12 @@ import type {
   CorrectiveActionConfirmUploadResponse,
 } from "./types";
 import type { ScorecardSubmissionPayload, ScorecardUpdatePayload } from "../scorecards/draft";
+import type {
+  WalkArtifactUploadUrlRequest,
+  WalkArtifactUploadUrlResponse,
+  WalkCompletionRequest,
+  WalkCompletionResponse,
+} from "../walkthrough/upload";
 
 /**
  * A `Fetcher` is `apiFetch` already bound to the current token / officeId /
@@ -307,3 +313,23 @@ export const getDealTeam = (f: Fetcher, dealId: string) =>
 // the app selects from the same roster the CRM shows. Any failure degrades to free-text entry in the picker.
 export const getFieldResponders = (f: Fetcher, dealId: string) =>
   f<FieldRespondersResponse>(`/field/projects/${dealId}/responders`);
+
+// ── Glasses walkthroughs (AI walk) ──────────────────────────────────────────────
+// The real server contract as of commit e901547bc — see ../walkthrough/upload.ts's "SERVER CONTRACT
+// SEAM" comment and ../walkthrough/upload-client.ts, which binds these two calls into the
+// WalkthroughUploadClient the upload queue is written against. `/deals/...` (not `/field/...`): these
+// routes live on the deal itself (server/src/modules/deals/routes.ts), not the field surface.
+//
+// Step 1 (per artifact): presign an R2 PUT. dealId is a URL path segment on both calls, never a body
+// field — the server derives it from the URL so a caller can never presign/file a walk under a deal it
+// doesn't have write access to (see routes.ts's comment on both routes).
+export const requestGlassesWalkthroughArtifactUploadUrl = (
+  f: Fetcher,
+  dealId: string,
+  body: WalkArtifactUploadUrlRequest,
+) => f<WalkArtifactUploadUrlResponse>(`/deals/${dealId}/glasses-walkthroughs/artifacts/upload-url`, { method: "POST", body });
+
+// Step 2 (once per walk, after every artifact from step 1 is PUT): files the walk into the deal's
+// project folder and hands forwarding to TROCK Scope off to the job queue.
+export const submitGlassesWalkthrough = (f: Fetcher, dealId: string, body: WalkCompletionRequest) =>
+  f<WalkCompletionResponse>(`/deals/${dealId}/glasses-walkthroughs`, { method: "POST", body });

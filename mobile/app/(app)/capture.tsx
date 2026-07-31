@@ -1157,7 +1157,17 @@ export default function CaptureScreen() {
             onPress={() =>
               router.push({
                 pathname: "/(app)/walk",
-                params: { dealId: target.id, targetName: target.name },
+                // propertyAddress only carries over when it's the SAME deal this screen's own
+                // route params describe (same guard as detailParamsFor) — a target picked via
+                // TargetPicker has no address on it, so the walk screen falls back to "" (no
+                // prompt; see walk-meta.ts) rather than a stale/wrong address from a prior deal.
+                params: {
+                  dealId: target.id,
+                  targetName: target.name,
+                  ...(typeof params.dealId === "string" && params.dealId === target.id && typeof params.propertyAddress === "string"
+                    ? { propertyAddress: params.propertyAddress }
+                    : {}),
+                },
               })
             }
             accessibilityLabel="Start AI walk"

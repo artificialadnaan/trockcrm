@@ -29,6 +29,14 @@ export type UseWalkResult = {
    *  reflects a fatal ("failed") transition — this also carries non-fatal surfaced problems,
    *  such as a still request native didn't accept. */
   error: string | null;
+  /**
+   * The id `start()` minted for the current/most-recent walk, or null before a walk has ever
+   * started. `Walk` (session.ts) deliberately carries no id of its own — native mints the
+   * directory name, so this is the one place it is known — so a caller that needs to enqueue a
+   * completed/failed walk (the upload queue's `enqueueWalk(ownerKey, walkId, walk, meta)`) reads
+   * it from here rather than re-deriving or threading a second id through.
+   */
+  walkId: string | null;
   start: () => Promise<void>;
   capture: () => Promise<void>;
   end: () => Promise<void>;
@@ -39,6 +47,7 @@ export type UseWalkResult = {
 export function useWalk(dealId: string, projectId: string | null): UseWalkResult {
   const [walk, dispatch] = useReducer(reduceWalk, undefined, () => initialWalk(dealId, projectId));
   const [error, setError] = useState<string | null>(null);
+  const [walkId, setWalkId] = useState<string | null>(null);
 
   useEffect(() => {
     const offStill = onStill((still) => {
@@ -59,6 +68,10 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
   const start = useCallback(async () => {
     dispatch({ type: "starting" });
     const id = newWalkId();
+    // Set BEFORE the native call resolves: even a walk that fails at startWalk() is "that" id (it's
+    // what was passed to native, which may already have created the directory) — and a caller that
+    // reads walkId off a "failed" state relies on it being populated by the time that state lands.
+    setWalkId(id);
     try {
       const started = await Recorder.startWalk(id);
       // Record the path native reports rather than null. It is not playable yet — the writer
@@ -111,6 +124,7 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
   return {
     walk,
     error,
+    walkId,
     start,
     capture,
     end,

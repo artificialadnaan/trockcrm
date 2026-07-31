@@ -18,6 +18,9 @@ import { isAvailable as wearablesAvailable, Wearables } from "../src/wearables/n
 // Side-effect import: registers the background upload-drain task at startup so the OS can invoke it even
 // when the app is cold-launched in the background (before the capture screen mounts).
 import "../src/capture/upload-background-task";
+// Same, for the glasses-walkthrough upload queue. A second, independently-named task — see that
+// module's header for why this coexists with (rather than conflicts with) the import above.
+import "../src/walkthrough/upload-background-task";
 
 // retry once, treat data as fresh for 30s — same defaults as the reference app.
 const queryClient = new QueryClient({

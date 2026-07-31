@@ -60,6 +60,28 @@ describe("useWalk", () => {
     expect(usedId).toMatch(/^[a-z0-9-]+$/);
     expect(result.current.walk.state).toBe("recording");
     expect(result.current.error).toBeNull();
+    // Exposed so a caller can enqueue this walk once it reaches a terminal state — session.ts's Walk
+    // carries no id of its own, so this is the only place it's available.
+    expect(result.current.walkId).toBe(usedId);
+  });
+
+  it("exposes null walkId before a walk has ever started", () => {
+    const { result } = renderHook(() => useWalk("deal-1", null));
+    expect(result.current.walkId).toBeNull();
+  });
+
+  // Even a walk that fails at startWalk() itself is still "that" id — the id was already handed to
+  // native before the rejection, so a caller reading walkId off a failed state must see it populated.
+  it("keeps the minted walkId even when start() rejects", async () => {
+    mockStartWalk.mockRejectedValue(new Error("walk_no_hfp: RB Meta 014K"));
+    const { result } = renderHook(() => useWalk("deal-1", null));
+
+    await act(async () => {
+      await result.current.start();
+    });
+
+    expect(result.current.walk.state).toBe("failed");
+    expect(result.current.walkId).not.toBeNull();
   });
 
   // The exact defect called out in the plan: captureStill() resolving with `requested: false`
