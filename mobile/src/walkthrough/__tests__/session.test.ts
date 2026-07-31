@@ -6,11 +6,10 @@ import {
   type Walk,
 } from "../session";
 
-const started: Walk = reduceWalk(initialWalk("deal-1", "proj-7"), {
-  type: "started",
-  at: 1000,
-  videoUri: "file:///docs/walk/video.mp4",
-});
+const started: Walk = reduceWalk(
+  reduceWalk(initialWalk("deal-1", "proj-7"), { type: "starting" }),
+  { type: "started", at: 1000, videoUri: "file:///docs/walk/video.mp4" }
+);
 
 describe("initialWalk", () => {
   it("starts idle with no artifacts and remembers what it is attached to", () => {
@@ -101,6 +100,23 @@ describe("reduceWalk", () => {
       audioUri: null,
     });
     expect(reduceWalk(done, { type: "starting" })).toBe(done);
+  });
+
+  it("is inert once failed", () => {
+    const failed = reduceWalk(started, { type: "failed", reason: "boom" });
+    expect(reduceWalk(failed, { type: "ended", at: 9000 })).toBe(failed);
+  });
+
+  // A "started" that arrives without the app having initiated one is a spurious native event.
+  // Accepting it would put the walk into "recording" with no directory, no recorder and no
+  // audio route — reporting capture that is not happening.
+  it("ignores a started event when no walk was initiated", () => {
+    const walk = reduceWalk(initialWalk("deal-1", null), {
+      type: "started",
+      at: 1000,
+      videoUri: null,
+    });
+    expect(walk.state).toBe("idle");
   });
 });
 

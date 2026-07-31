@@ -80,10 +80,10 @@ export function reduceWalk(walk: Walk, event: WalkEvent): Walk {
       return walk.state === "idle" ? { ...walk, state: "starting" } : walk;
 
     case "started":
-      // Accepted from "idle" too, not just "starting": "starting" is an optional optimistic
-      // UI step (show a spinner while the native session spins up), not a required hop — a
-      // caller that dispatches the native confirmation directly must still land in "recording".
-      return walk.state === "idle" || walk.state === "starting"
+      // Only accepted from "starting": a "started" that arrives without the app having
+      // initiated one is a spurious or duplicated native event. Accepting it would put an
+      // untouched walk into "recording" with no directory, no recorder, and no audio route.
+      return walk.state === "starting"
         ? { ...walk, state: "recording", startedAt: event.at, videoUri: event.videoUri }
         : walk;
 
