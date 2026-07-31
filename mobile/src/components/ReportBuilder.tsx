@@ -272,6 +272,16 @@ export function ReportBuilder({
         }
       }
     } catch (e) {
+      // The loop stopped without the run reaching a terminal state — a sustained polling outage is the usual
+      // way here. The generation is still going, so hand it to the background watcher exactly as the timeout
+      // path does; otherwise nothing refreshes the finished report, and a retry from the re-enabled Generate
+      // button would buy a second paid assessment for work that already completed. (The timeout and
+      // terminal-status paths clear the id first, so this cannot fire twice for one run.)
+      const abandoned = aiRunIdRef.current;
+      if (abandoned) {
+        aiRunIdRef.current = null;
+        onLeftRunning?.(abandoned);
+      }
       // A stale loop must not report ITS failure over a run the user has since started, or paint an error
       // onto a sheet that has already moved on.
       if (isCurrent()) setError(e instanceof Error ? e.message : "Could not generate the AI report.");

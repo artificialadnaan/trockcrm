@@ -1,5 +1,21 @@
-import { describe, it, expect } from "vitest";
-import { handleAiReportGeneration, isCandidateMissing } from "../../src/jobs/ai-report-generation.js";
+import { beforeEach, describe, it, expect, vi } from "vitest";
+
+// The shim writes its dead-letter reconciliation through the WORKER's pool (never a server module — the
+// case it exists for is the server import failing), so the pool is what has to be observable here.
+const dbMocks = vi.hoisted(() => ({
+  pool: { query: vi.fn(async () => ({ rows: [], rowCount: 1 })) },
+}));
+vi.mock("../../src/db.js", () => dbMocks);
+
+const { handleAiReportGeneration, isCandidateMissing } = await import("../../src/jobs/ai-report-generation.js");
+
+const RUN_ID = "11111111-1111-1111-1111-111111111111";
+const FINAL = { attempt: 3, maxAttempts: 3, isFinalAttempt: true };
+const NOT_FINAL = { attempt: 1, maxAttempts: 3, isFinalAttempt: false };
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
 
 /**
  * The worker job is a thin shim over the server orchestrator (server/src/modules/field/ai-report-job.ts),
@@ -19,6 +35,35 @@ describe("ai_report_generation shim", () => {
     await expect(handleAiReportGeneration(undefined)).rejects.toThrow(/missing runId/);
     await expect(handleAiReportGeneration({ runId: "   " })).rejects.toThrow(/missing runId/);
     await expect(handleAiReportGeneration({ runId: null })).rejects.toThrow(/missing runId/);
+  });
+
+  it("marks the run failed when the FINAL delivery dies before the server module loads", async () => {
+    // The queue is about to mark this delivery 'dead'. Nothing else will ever write a terminal state onto
+    // the run — runFieldAiReportJob owns that and was never reached — so the phone would poll a 'queued' run
+    // indefinitely while it holds a project slot and a quota slot.
+    await expect(handleAiReportGeneration({ runId: RUN_ID }, null, undefined, FINAL)).rejects.toThrow();
+
+    expect(dbMocks.pool.query).toHaveBeenCalledTimes(1);
+    const [sql, params] = dbMocks.pool.query.mock.calls[0] as unknown as [string, unknown[]];
+    expect(sql).toContain("field_ai_report_runs");
+    expect(sql).toContain("status = 'failed'");
+    // Guarded on a NON-terminal status so a real outcome that landed meanwhile is never stomped.
+    expect(sql).toContain("status IN ('queued', 'running')");
+    expect(params[0]).toBe(RUN_ID);
+    // The generic driver text never reaches the phone — the run carries the user-facing line.
+    expect(String(params[1])).toMatch(/could not be generated/i);
+  });
+
+  it("leaves the run alone on an earlier attempt, which is expected to retry", async () => {
+    // Failing the run here would make it unclaimable, so the retry that was supposed to fix things would
+    // find a terminal run and quietly do nothing.
+    await expect(handleAiReportGeneration({ runId: RUN_ID }, null, undefined, NOT_FINAL)).rejects.toThrow();
+    expect(dbMocks.pool.query).not.toHaveBeenCalled();
+  });
+
+  it("does not reconcile a payload that never had a run id", async () => {
+    await expect(handleAiReportGeneration({}, null, undefined, FINAL)).rejects.toThrow(/missing runId/);
+    expect(dbMocks.pool.query).not.toHaveBeenCalled();
   });
 
   describe("isCandidateMissing", () => {

@@ -50,7 +50,21 @@ const GROUPINGS: { value: PhotoGrouping; label: string }[] = [
  * the time it closes.
  */
 const AWAIT_REPORT_POLL_MS = 10_000;
-const AWAIT_REPORT_WINDOW_MS = 10 * 60_000;
+/**
+ * Sized from the SERVER's lifecycle rather than picked to feel long enough — but deliberately NOT sized for
+ * its absolute worst case.
+ *
+ * It covers a normal run comfortably: the model phase runs to a 12-minute default with a 15-minute
+ * configurable ceiling (server ai-report-limits.ts), plus the render and upload that follow. A ten-minute
+ * watch gave up well inside that and left healthy runs' reports to be found by hand.
+ *
+ * It does NOT cover every path, and that is a choice. A run queued behind others on the serial poller, or
+ * one reclaimed after a worker died (STALE_RUN_MINUTES, then the queue's own reclaim deferral, then a fresh
+ * attempt), can outlast this. Sizing for that would mean polling a phone every ten seconds for the better
+ * part of an hour, which costs the user more than it returns — the report still lands, and still shows on
+ * the next visit or pull-to-refresh. What this window guarantees is that the watcher always terminates.
+ */
+const AWAIT_REPORT_WINDOW_MS = 30 * 60_000;
 
 function toStr(v: string | string[] | undefined): string {
   return Array.isArray(v) ? v[0] ?? "" : v ?? "";

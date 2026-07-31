@@ -47,5 +47,12 @@ export const jobQueue = pgTable(
         sql`created_at DESC`
       )
       .where(sql`job_type = 'rfp_bidboard_create'`),
+    // Backs the AI-report stale-run sweep (server/src/modules/field/ai-report-runs.ts), which decides
+    // whether a QUEUED run is abandoned by asking whether a live delivery still exists for it. Partial on
+    // this job type AND the two live statuses, so it holds only in-flight AI-report deliveries and rows
+    // leave it the moment they reach a terminal status.
+    index("job_queue_ai_report_run_idx")
+      .on(sql`(payload->>'runId')`)
+      .where(sql`job_type = 'ai_report_generation' AND status IN ('pending', 'processing')`),
   ]
 );

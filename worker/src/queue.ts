@@ -23,7 +23,31 @@ export type JobHandlerResult =
       runAfterSeconds: number;
     };
 
-type JobHandler = (payload: any, officeId: string | null) => Promise<JobHandlerResult>;
+/**
+ * What the queue can tell a handler about THIS delivery.
+ *
+ * Optional third argument, so the 40-odd existing handlers are unaffected. It exists for handlers that own
+ * state outside job_queue: when a throw dead-letters the final attempt, the queue row is resolved but that
+ * external state is not, and only the handler knows how to reconcile it.
+ */
+export type JobAttemptContext = {
+  /** 1-based attempt number for this delivery. */
+  attempt: number;
+  maxAttempts: number;
+  /** True when a throw from this delivery will dead-letter the row rather than schedule another retry. */
+  isFinalAttempt: boolean;
+};
+
+type JobHandler = (
+  payload: any,
+  officeId: string | null,
+  /**
+   * Test-only dependency-injection slot that a dozen handlers already declare. The queue never supplies it,
+   * but it occupies the third position, which is why the attempt context comes fourth.
+   */
+  deps?: any,
+  ctx?: JobAttemptContext,
+) => Promise<JobHandlerResult>;
 
 const jobHandlers = new Map<string, JobHandler>();
 
@@ -399,7 +423,11 @@ async function processJob(job: any): Promise<void> {
   const claimedAttempt = job.attempts + 1;
   let outcome: Outcome;
   try {
-    const result = await handler(job.payload, job.office_id);
+    const result = await handler(job.payload, job.office_id, undefined, {
+      attempt: claimedAttempt,
+      maxAttempts: job.max_attempts,
+      isFinalAttempt: claimedAttempt >= job.max_attempts,
+    });
     if (result && result.status === "dead") {
       outcome = { status: "dead", error: result.error };
       console.error(`[Worker] Job ${job.id} (${job.job_type}) rejected without retry: ${result.error}`);

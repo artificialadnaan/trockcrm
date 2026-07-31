@@ -12,6 +12,9 @@
  * `tsx` development falls through to `server/src`.
  */
 
+import { pool } from "../db.js";
+import type { JobAttemptContext } from "../queue.js";
+
 const SERVER_AI_REPORT_MODULES = [
   "../../../server/dist/modules/field/ai-report-job.js",
   "../../../server/src/modules/field/ai-report-job.js",
@@ -69,13 +72,63 @@ async function importFirstAvailable<T>(paths: readonly string[]): Promise<T> {
   throw lastError instanceof Error ? lastError : new Error("Unable to import server module");
 }
 
-export async function handleAiReportGeneration(payload: unknown): Promise<AiReportShimResult> {
+/**
+ * Write a terminal failure straight onto the run row, using the WORKER's own pool.
+ *
+ * Raw SQL rather than the server's ai-report-runs module on purpose: the case this exists for is the server
+ * import failing, so anything that reaches for a server module would fail the same way. Guarded on a
+ * non-terminal status so it can never stomp a real outcome that landed in the meantime.
+ */
+async function failRunAfterDeadLetter(runId: string, reason: string): Promise<void> {
+  try {
+    await pool.query(
+      `UPDATE public.field_ai_report_runs
+          SET status = 'failed', error = $2, finished_at = now(), updated_at = now()
+        WHERE id = $1::uuid AND status IN ('queued', 'running')`,
+      [runId, "The report could not be generated. Please try again, or contact support if it keeps happening."],
+    );
+    console.error("[field-ai-report] delivery dead-lettered; run marked failed", { runId, reason });
+  } catch (writeError) {
+    // Nothing left to try. The run stays non-terminal and the enqueue-time reaper is the last line of
+    // defence — logged loudly because at this point two things are broken, not one.
+    console.error("[field-ai-report] delivery dead-lettered AND the run row could not be updated", {
+      runId,
+      reason,
+      error: writeError instanceof Error ? writeError.message : String(writeError),
+    });
+  }
+}
+
+export async function handleAiReportGeneration(
+  payload: unknown,
+  _officeId?: string | null,
+  // Third position is the queue's test-injection slot, which this handler does not use; the attempt context
+  // arrives fourth. See JobHandler in queue.ts.
+  _deps?: unknown,
+  ctx?: JobAttemptContext,
+): Promise<AiReportShimResult> {
   const runId = String((payload as { runId?: unknown } | null)?.runId ?? "").trim();
   if (!runId) {
     // A payload with no run id can never succeed on a retry — fail loudly rather than burning attempts.
     throw new Error("ai_report_generation payload is missing runId");
   }
 
+  try {
+    return await runWithServerModule(runId);
+  } catch (error) {
+    // On the LAST attempt the queue is about to mark this delivery 'dead', and nothing else will ever write
+    // a terminal state onto the run: runFieldAiReportJob owns that, and we never reached it. The phone would
+    // poll a 'queued' run indefinitely while it holds a project slot and a quota slot, until some later
+    // enqueue happened to trip the reaper. Reconcile it here instead. Earlier attempts are left alone — the
+    // retry is expected to succeed, and failing the run now would make it unclaimable.
+    if (ctx?.isFinalAttempt) {
+      await failRunAfterDeadLetter(runId, error instanceof Error ? error.message : String(error));
+    }
+    throw error;
+  }
+}
+
+async function runWithServerModule(runId: string): Promise<AiReportShimResult> {
   const { runFieldAiReportJob } = await importFirstAvailable<AiReportJobModule>(SERVER_AI_REPORT_MODULES);
   // runFieldAiReportJob records its own terminal outcome on the run row (that row is what the phone polls)
   // and does NOT re-throw a generation failure — a retry would only re-spend on the model for a run already

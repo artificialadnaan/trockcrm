@@ -224,6 +224,22 @@ describe("ReportBuilder AI report", () => {
     await waitFor(() => expect(ui.queryByText("Network request failed")).not.toBeNull());
   });
 
+  it("hands the run off when polling is abandoned after a sustained outage", async () => {
+    // Giving up on the POLL is not giving up on the RUN. The generation is still going, and the Generate
+    // button is live again — so without a hand-off nothing refreshes the finished report, and a retry buys a
+    // second paid assessment for work that already completed.
+    mockGetAiReportStatus.mockRejectedValue(new Error("Network request failed"));
+    const { ui, props } = renderBuilder();
+    await openFocusStep(ui);
+    await pressGenerate(ui);
+    await waitFor(() => expect(mockStartAiReport).toHaveBeenCalled());
+
+    for (let i = 0; i < 6; i += 1) await tickPoll();
+
+    await waitFor(() => expect(props.onLeftRunning).toHaveBeenCalledWith("run-1"));
+    expect(props.onLeftRunning).toHaveBeenCalledTimes(1);
+  });
+
   it("does not open the report when the sheet was closed while the poll was in flight", async () => {
     // The cancel check has to run AFTER the await too — a status request can be in flight for seconds.
     let release: (v: unknown) => void = () => {};
