@@ -167,6 +167,34 @@ describe("TaskCreateDialog", () => {
     expect(container.textContent).toContain("DFW-1-12826-AH - Palm Villas");
   });
 
+  it("retires the previous results as soon as the query changes", async () => {
+    // Codex P2: results for the OLD query stayed rendered (and clickable) for the whole debounce
+    // window, so a project that does not match what the user just typed could still be selected.
+    vi.useFakeTimers();
+    mocks.api.mockImplementation(async (path: string) => {
+      if (path.startsWith("/tasks/assignees")) return { users: [] };
+      return { deals: [{ id: "deal-9", dealNumber: "HS-1", projectNumber: "DFW-1-12826-AH", name: "Palm Villas" }] };
+    });
+
+    const container = renderDialog();
+    openProjectPicker(container);
+    await act(async () => {
+      vi.advanceTimersByTime(300);
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("DFW-1-12826-AH - Palm Villas");
+
+    // Type a new query but do NOT let the debounce fire.
+    setValue(projectSearchInput(container)!, "warehouse");
+
+    expect(container.textContent).not.toContain("DFW-1-12826-AH - Palm Villas");
+    expect(
+      Array.from(container.querySelectorAll("button")).some((b) =>
+        b.textContent?.includes("DFW-1-12826-AH")
+      )
+    ).toBe(false);
+  });
+
   it("does not create the task when Enter is pressed in the project search", async () => {
     vi.useFakeTimers();
     mocks.api.mockImplementation(async (path: string) => {

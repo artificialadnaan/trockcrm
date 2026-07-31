@@ -98,9 +98,14 @@ export function TaskCreateDialog({
         ? `/deals?limit=20&isActive=true&search=${encodeURIComponent(trimmed)}`
         : "/deals?limit=50&isActive=true";
 
+    // Retire the previous results *now*, not when the debounce fires — otherwise results for the
+    // old query stay on screen and selectable for PROJECT_SEARCH_DEBOUNCE_MS after the user has
+    // typed something they no longer match.
+    setDeals([]);
+    setDealsLoading(true);
+    setDealsError(null);
+
     const timer = setTimeout(() => {
-      setDealsLoading(true);
-      setDealsError(null);
       api<{ deals: DealOption[] }>(query)
         .then((data) => {
           if (!cancelled) setDeals(data.deals ?? []);
