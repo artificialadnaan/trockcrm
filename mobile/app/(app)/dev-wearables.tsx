@@ -21,6 +21,10 @@ import {
   onPhoto,
   type PhotoMeasurement,
 } from "../../src/wearables/native";
+import {
+  describeHfpStreamCheck,
+  describePhoneCameraCheck,
+} from "../../src/wearables/step0-verdicts";
 
 type RungState = "idle" | "running" | "ok" | "fail";
 
@@ -95,6 +99,26 @@ function Diagnostic() {
       measurement: true,
     },
     { key: "stop", label: "—  Stop stream", run: Wearables.stopStream },
+    {
+      key: "hfpWithStream",
+      label: "9  Step 0 — HFP under a DAT stream",
+      run: async () => {
+        const check = await Wearables.checkHfpWithStream();
+        const verdict = describeHfpStreamCheck(check);
+        return { verdict: verdict.outcome.toUpperCase(), summary: verdict.summary, ...check };
+      },
+      measurement: true,
+    },
+    {
+      key: "phoneCamera",
+      label: "10 Step 0 — phone camera during HFP",
+      run: async () => {
+        const check = await Wearables.checkPhoneCameraDuringHfp();
+        const verdict = describePhoneCameraCheck(check);
+        return { verdict: verdict.outcome.toUpperCase(), summary: verdict.summary, ...check };
+      },
+      measurement: true,
+    },
   ];
 
   const run = useCallback(async (rung: Rung) => {
