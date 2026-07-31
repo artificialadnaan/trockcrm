@@ -67,6 +67,56 @@ describe("renderFieldPhotoReportPdf page count", () => {
     expect(countPdfPages(buffer)).toBe(2);
   });
 
+  it("packs EIGHT photographs onto a page, two cells across", async () => {
+    // The page-count assertions elsewhere in this file cannot see the two-up change: at 4 photos, 4-per-page
+    // and 8-per-page both give cover + 1. These two counts are the ones that differ — 8 photos was two photo
+    // pages under the old grid and is one under this one, and 9 is the boundary that proves the chunk size
+    // is 8 rather than "everything on one page".
+    const eight = await renderFieldPhotoReportPdf({
+      cover,
+      sections: [{ title: "Doors", photos: Array.from({ length: 8 }, (_, i) => photo(i + 1)) }],
+    });
+    expect(countPdfPages(eight)).toBe(2);
+
+    const nine = await renderFieldPhotoReportPdf({
+      cover,
+      sections: [{ title: "Doors", photos: Array.from({ length: 9 }, (_, i) => photo(i + 1)) }],
+    });
+    expect(countPdfPages(nine)).toBe(3);
+  });
+
+  it("lays the two cells of a row out side by side, both inside the page margins", async () => {
+    // Guards the column arithmetic itself. A cell drawn at the wrong x is invisible to a page count, and the
+    // failure mode that matters — the right-hand column running off the page — still produces a valid PDF.
+    // The tile is a filled roundedRect, so its left edge is the first coordinate of the `re`-equivalent path
+    // PDFKit emits; asserting on the two DISTINCT x origins is what proves the row is two-up and not
+    // one-up-drawn-twice.
+    const buffer = await renderFieldPhotoReportPdf({
+      cover,
+      sections: [{ title: "Doors", photos: [photo(1), photo(2)] }],
+    });
+    const streams = [...buffer.toString("latin1").matchAll(/stream\r?\n([\s\S]*?)endstream/g)]
+      .map((m) => {
+        try {
+          return zlib.inflateSync(Buffer.from(m[1], "latin1")).toString("latin1");
+        } catch {
+          return "";
+        }
+      })
+      .join("\n");
+    // A rounded rect's path opens at (left + radius), not at left, so these coordinates are offset by the
+    // 8pt corner radius — the arithmetic below carries it rather than pretending it isn't there.
+    const RADIUS = 8;
+    const tileLefts = [...streams.matchAll(/([\d.]+) 72 m/g)].map((m) => Number(m[1]) - RADIUS);
+    const distinct = [...new Set(tileLefts)].sort((a, b) => a - b);
+    expect(distinct.length).toBe(2);
+    // Left column starts at the page margin; the right column is a full column + gutter across.
+    expect(distinct[0]).toBeCloseTo(32, 1);
+    expect(distinct[1]).toBeCloseTo(32 + 264 + 20, 1);
+    // ...and the right-hand cell's tile still ends inside the right margin.
+    expect(distinct[1] + 148).toBeLessThanOrEqual(612 - 32);
+  });
+
   it("preserves a single-section custom title compactly without adding a divider page", async () => {
     const buffer = await renderFieldPhotoReportPdf({
       cover,
