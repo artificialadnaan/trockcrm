@@ -4,6 +4,7 @@ const taskServiceMocks = vi.hoisted(() => ({
   getTasks: vi.fn(),
   getTaskCounts: vi.fn(),
   getTaskById: vi.fn(),
+  getTaskRowById: vi.fn(),
   createTask: vi.fn(),
   queueTaskCreateSideEffects: vi.fn(),
   updateTask: vi.fn(),
@@ -44,6 +45,7 @@ vi.mock("../../../src/modules/tasks/service.js", async () => {
     getTasks: taskServiceMocks.getTasks,
     getTaskCounts: taskServiceMocks.getTaskCounts,
     getTaskById: taskServiceMocks.getTaskById,
+    getTaskRowById: taskServiceMocks.getTaskRowById,
     createTask: taskServiceMocks.createTask,
     queueTaskCreateSideEffects: taskServiceMocks.queueTaskCreateSideEffects,
     updateTask: taskServiceMocks.updateTask,
@@ -80,7 +82,15 @@ vi.mock("../../../src/events/bus.js", () => ({
   eventBus: eventBusMocks,
 }));
 
-vi.mock("../../../src/modules/tasks/notifications.js", () => taskNotificationMocks);
+// Keep the real module's non-function exports — routes.ts does an `instanceof
+// TaskTransactionUnusableError` check, which needs the actual class, not a stub.
+vi.mock("../../../src/modules/tasks/notifications.js", async () => {
+  const actual = await vi.importActual<typeof import("../../../src/modules/tasks/notifications.js")>(
+    "../../../src/modules/tasks/notifications.js"
+  );
+
+  return { ...actual, ...taskNotificationMocks };
+});
 
 const { taskRoutes } = await import("../../../src/modules/tasks/routes.js");
 
@@ -398,8 +408,39 @@ describe("task routes", () => {
     expect(taskNotificationMocks.sendPreparedTaskAssignmentEmail).not.toHaveBeenCalled();
   });
 
+  it("fails the reassignment instead of committing when the task transaction is unusable", async () => {
+    // The email prep is best-effort, but NOT when the failure means the transaction can no longer be
+    // committed: swallowing that would let COMMIT degrade to a silent ROLLBACK while the route
+    // returned success for a reassignment that never persisted.
+    const { TaskTransactionUnusableError } = await import("../../../src/modules/tasks/notifications.js");
+
+    taskServiceMocks.getTaskRowById.mockResolvedValue({
+      id: "task-1",
+      title: "Existing task",
+      assignedTo: "rep-1",
+    });
+    taskServiceMocks.updateTask.mockResolvedValue({
+      id: "task-1",
+      title: "Existing task",
+      assignedTo: "admin-1",
+    });
+    taskNotificationMocks.prepareTaskAssignmentEmail.mockRejectedValue(
+      new TaskTransactionUnusableError("Could not open a savepoint for the assignment-email read")
+    );
+
+    const req = invokeRoute({
+      method: "patch",
+      url: "/task-1",
+      user: makeDirectorUser({ id: "director-1", displayName: "Director One", email: "director@example.com" }),
+      body: { assignedTo: "admin-1" },
+    });
+
+    await expect(req).rejects.toThrow(/could not open a savepoint/i);
+    expect(taskNotificationMocks.sendPreparedTaskAssignmentEmail).not.toHaveBeenCalled();
+  });
+
   it("emails the new assignee when a task is reassigned", async () => {
-    taskServiceMocks.getTaskById.mockResolvedValue({
+    taskServiceMocks.getTaskRowById.mockResolvedValue({
       id: "task-1",
       title: "Existing task",
       assignedTo: "rep-1",
@@ -442,7 +483,7 @@ describe("task routes", () => {
   });
 
   it("skips task assignment email when assignedTo is unchanged on update", async () => {
-    taskServiceMocks.getTaskById.mockResolvedValue({
+    taskServiceMocks.getTaskRowById.mockResolvedValue({
       id: "task-1",
       title: "Existing task",
       assignedTo: "rep-1",
