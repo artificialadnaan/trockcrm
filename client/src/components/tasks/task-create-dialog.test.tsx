@@ -167,6 +167,38 @@ describe("TaskCreateDialog", () => {
     expect(container.textContent).toContain("DFW-1-12826-AH - Palm Villas");
   });
 
+  it("searches the office-wide project scope, not just the caller's own deals", async () => {
+    // Codex P2: /deals defaults to scope=mine (readListScope), so without scope=all the picker
+    // cannot find a project the assigner does not own — which is the reported case exactly.
+    vi.useFakeTimers();
+    mocks.api.mockImplementation(async (path: string) => {
+      if (path.startsWith("/tasks/assignees")) return { users: [] };
+      return { deals: [] };
+    });
+
+    const container = renderDialog();
+    openProjectPicker(container);
+    await act(async () => {
+      vi.advanceTimersByTime(300);
+      await Promise.resolve();
+    });
+
+    const dealCalls = mocks.api.mock.calls.map(([path]) => String(path)).filter((p) => p.startsWith("/deals"));
+    expect(dealCalls.length).toBeGreaterThan(0);
+    expect(dealCalls.every((p) => p.includes("scope=all"))).toBe(true);
+
+    // …and on the search request too.
+    setValue(projectSearchInput(container)!, "palm");
+    await act(async () => {
+      vi.advanceTimersByTime(300);
+      await Promise.resolve();
+    });
+
+    const searchCalls = mocks.api.mock.calls.map(([path]) => String(path)).filter((p) => p.includes("search="));
+    expect(searchCalls.length).toBeGreaterThan(0);
+    expect(searchCalls.every((p) => p.includes("scope=all"))).toBe(true);
+  });
+
   it("retires the previous results as soon as the query changes", async () => {
     // Codex P2: results for the OLD query stayed rendered (and clickable) for the whole debounce
     // window, so a project that does not match what the user just typed could still be selected.

@@ -93,10 +93,14 @@ export function TaskCreateDialog({
 
     let cancelled = false;
     const trimmed = dealQuery.trim();
+    // scope=all because /deals otherwise defaults to the caller's OWN deals (readListScope →
+    // "mine"), which is the whole bug: you cannot attach a project you don't own, which is exactly
+    // the cross-user assignment case reported. POST /tasks accepts any deal id, and scope=all
+    // elevates the read office-wide — the same thing the photo-feed deal picker does.
     const query =
       trimmed.length >= PROJECT_SEARCH_MIN_CHARS
-        ? `/deals?limit=20&isActive=true&search=${encodeURIComponent(trimmed)}`
-        : "/deals?limit=50&isActive=true";
+        ? `/deals?scope=all&limit=20&isActive=true&search=${encodeURIComponent(trimmed)}`
+        : "/deals?scope=all&limit=50&isActive=true";
 
     // Retire the previous results *now*, not when the debounce fires — otherwise results for the
     // old query stay on screen and selectable for PROJECT_SEARCH_DEBOUNCE_MS after the user has

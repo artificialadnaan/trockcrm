@@ -10,10 +10,21 @@ vi.mock("../../../src/lib/resend-client.js", () => resendMocks);
 
 const { sendTaskAssignmentEmail } = await import("../../../src/modules/tasks/notifications.js");
 
-/** A tenantDb whose successive `.select()` calls resolve to the next queued row set. */
+/**
+ * A tenantDb whose successive `.select()` calls resolve to the next queued row set.
+ *
+ * `execute` records the savepoint statements: these reads run inside the caller's open task
+ * transaction, so each must be savepointed or a failed read aborts the task write.
+ */
 function createSequencedDb(rowSets: unknown[][]) {
   let call = 0;
-  return {
+  const executed: string[] = [];
+  const db = {
+    executed,
+    execute: vi.fn(async (statement: unknown) => {
+      executed.push(JSON.stringify(statement));
+      return { rows: [] };
+    }),
     select: vi.fn(() => {
       const rows = rowSets[call++] ?? [];
       return {
@@ -25,6 +36,7 @@ function createSequencedDb(rowSets: unknown[][]) {
       };
     }),
   };
+  return db;
 }
 
 describe("task assignment notifications", () => {
@@ -35,6 +47,7 @@ describe("task assignment notifications", () => {
 
   it("sends task assignment email with subject, body, deep link, and assigner CC", async () => {
     const tenantDb = {
+      execute: vi.fn(async () => ({ rows: [] })),
       select: vi.fn(() => ({
         from: vi.fn(() => ({
           where: vi.fn(() => ({
@@ -85,6 +98,7 @@ describe("task assignment notifications", () => {
 
   it("escapes user-controlled task fields before rendering HTML", async () => {
     const tenantDb = {
+      execute: vi.fn(async () => ({ rows: [] })),
       select: vi.fn(() => ({
         from: vi.fn(() => ({
           where: vi.fn(() => ({
@@ -183,8 +197,66 @@ describe("task assignment notifications", () => {
     expect(html).toContain("Project: No project linked");
   });
 
+  it("rolls back to a savepoint instead of aborting the caller's task transaction", async () => {
+    // Codex P1: these reads run inside the OPEN task transaction (routes.ts prepares the email
+    // before commitTransaction). A failed SELECT aborts that transaction in PostgreSQL — catching
+    // it in JS does not recover it, and the later COMMIT then silently degrades to a ROLLBACK, so
+    // the task write is lost while the route still reports success and sends the email.
+    const executed: string[] = [];
+    const tenantDb = {
+      execute: vi.fn(async (statement: unknown) => {
+        executed.push(JSON.stringify(statement).toUpperCase());
+        return { rows: [] };
+      }),
+      select: vi
+        .fn()
+        .mockImplementationOnce(() => ({
+          from: () => ({
+            where: () => ({
+              limit: async () => [
+                { id: "assignee-1", email: "derek@trockgc.com", displayName: "Derek Barr", firstName: "Derek" },
+              ],
+            }),
+          }),
+        }))
+        .mockImplementationOnce(() => ({
+          from: () => ({
+            where: () => ({
+              limit: async () => {
+                throw new Error("deal lookup exploded");
+              },
+            }),
+          }),
+        })),
+    };
+
+    const result = await sendTaskAssignmentEmail(tenantDb as any, {
+      task: { id: "task-1", title: "Need Property info", description: null, dueDate: null, dealId: "deal-1" },
+      assigneeId: "assignee-1",
+      assigner: { id: "assigner-1", displayName: "Colby Burling", email: "colby@trockgc.com" },
+    });
+
+    expect(result).toBe(true);
+
+    // Assert the ORDER, not just the presence of a rollback: rolling back to a savepoint that was
+    // never opened is itself an error in PostgreSQL, so "a ROLLBACK was issued" proves nothing on
+    // its own. An open must precede the rollback.
+    const isOpen = (s: string) =>
+      s.includes("SAVEPOINT") && !s.includes("RELEASE") && !s.includes("ROLLBACK TO");
+    const firstOpen = executed.findIndex(isOpen);
+    const rollbackAt = executed.findIndex((s) => s.includes("ROLLBACK TO SAVEPOINT"));
+
+    expect(firstOpen).toBeGreaterThanOrEqual(0);
+    expect(rollbackAt).toBeGreaterThanOrEqual(0);
+    expect(firstOpen).toBeLessThan(rollbackAt);
+    // Both reads (assignee + deal) are savepointed, and the successful one released.
+    expect(executed.filter(isOpen).length).toBe(2);
+    expect(executed.some((s) => s.includes("RELEASE SAVEPOINT"))).toBe(true);
+  });
+
   it("still sends when the linked deal lookup fails", async () => {
     const tenantDb = {
+      execute: vi.fn(async () => ({ rows: [] })),
       select: vi
         .fn()
         .mockImplementationOnce(() => ({
@@ -241,6 +313,7 @@ describe("task assignment notifications", () => {
 
   it("removes CRLF characters from the subject line", async () => {
     const tenantDb = {
+      execute: vi.fn(async () => ({ rows: [] })),
       select: vi.fn(() => ({
         from: vi.fn(() => ({
           where: vi.fn(() => ({

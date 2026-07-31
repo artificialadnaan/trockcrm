@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { deals, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
@@ -109,6 +109,44 @@ export function formatLinkedProjectLabel(resolution: ProjectResolution): string 
   return display.isPending ? "Project linked" : display.label;
 }
 
+// Fixed statements — no interpolation, so the savepoint name can never be caller-controlled.
+const SAVEPOINT_OPEN = sql`SAVEPOINT task_assignment_email_read`;
+const SAVEPOINT_RELEASE = sql`RELEASE SAVEPOINT task_assignment_email_read`;
+const SAVEPOINT_ROLLBACK = sql`ROLLBACK TO SAVEPOINT task_assignment_email_read`;
+
+/**
+ * Run a best-effort read inside the caller's ALREADY-OPEN task transaction without risking it.
+ *
+ * `routes.ts` prepares this email before `commitTransaction()`. In PostgreSQL a failed statement
+ * aborts the whole transaction, and catching the error in JS does NOT recover it — the later COMMIT
+ * silently degrades to a ROLLBACK *without throwing*, so the task write would be lost while the
+ * route still returned success and sent the assignee a deep link to a task that never existed.
+ * A SAVEPOINT keeps any failure local to the read.
+ */
+async function readInSavepoint<T>(tenantDb: TenantDb, read: () => Promise<T>, fallback: T): Promise<T> {
+  try {
+    await tenantDb.execute(SAVEPOINT_OPEN);
+  } catch (err) {
+    // Without a savepoint we cannot make this read safe, so skip it rather than risk the task write.
+    console.error("[Tasks] Could not open savepoint for the assignment-email read:", err);
+    return fallback;
+  }
+
+  try {
+    const value = await read();
+    await tenantDb.execute(SAVEPOINT_RELEASE);
+    return value;
+  } catch (err) {
+    console.error("[Tasks] Assignment-email read failed; rolling back to savepoint:", err);
+    try {
+      await tenantDb.execute(SAVEPOINT_ROLLBACK);
+    } catch (rollbackErr) {
+      console.error("[Tasks] Savepoint rollback failed:", rollbackErr);
+    }
+    return fallback;
+  }
+}
+
 async function resolveLinkedProject(
   tenantDb: TenantDb,
   dealId: string | null | undefined
@@ -116,39 +154,48 @@ async function resolveLinkedProject(
   if (!dealId) return { kind: "none" };
 
   // Best-effort: a task assignment must still notify the assignee if this lookup fails — but it
-  // must not then claim the task has no project.
-  try {
-    const [deal] = await tenantDb
-      .select({
-        name: deals.name,
-        dealNumber: deals.dealNumber,
-        projectNumber: deals.projectNumber,
-      })
-      .from(deals)
-      .where(eq(deals.id, dealId))
-      .limit(1);
+  // must not then claim the task has no project, nor take the task transaction down with it.
+  return readInSavepoint<ProjectResolution>(
+    tenantDb,
+    async () => {
+      const [deal] = await tenantDb
+        .select({
+          name: deals.name,
+          dealNumber: deals.dealNumber,
+          projectNumber: deals.projectNumber,
+        })
+        .from(deals)
+        .where(eq(deals.id, dealId))
+        .limit(1);
 
-    if (!deal) return { kind: "unavailable" };
-    return { kind: "resolved", project: deal as LinkedProject };
-  } catch (err) {
-    console.error("[Tasks] Failed to resolve linked project for assignment email:", err);
-    return { kind: "unavailable" };
-  }
+      if (!deal) return { kind: "unavailable" };
+      return { kind: "resolved", project: deal as LinkedProject };
+    },
+    { kind: "unavailable" }
+  );
 }
 
 async function getAssigneeEmailRecipient(tenantDb: TenantDb, assigneeId: string) {
-  const [assignee] = await tenantDb
-    .select({
-      id: users.id,
-      email: users.email,
-      displayName: users.displayName,
-      firstName: users.firstName,
-    })
-    .from(users)
-    .where(eq(users.id, assigneeId))
-    .limit(1);
+  // Savepointed for the same reason as the project lookup: this runs inside the open task
+  // transaction, so its failure must not abort the task write.
+  return readInSavepoint<AssigneeEmailRecipient | null>(
+    tenantDb,
+    async () => {
+      const [assignee] = await tenantDb
+        .select({
+          id: users.id,
+          email: users.email,
+          displayName: users.displayName,
+          firstName: users.firstName,
+        })
+        .from(users)
+        .where(eq(users.id, assigneeId))
+        .limit(1);
 
-  return (assignee ?? null) as AssigneeEmailRecipient | null;
+      return (assignee ?? null) as AssigneeEmailRecipient | null;
+    },
+    null
+  );
 }
 
 export function buildTaskAssignmentEmail(input: {
