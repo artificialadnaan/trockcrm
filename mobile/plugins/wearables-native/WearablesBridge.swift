@@ -38,6 +38,14 @@ final class WearablesBridge: RCTEventEmitter {
   /// stored properties: a data race by construction.
   private let stateLock = NSLock()
 
+  /// Bumped by `teardown()` every time it runs. `startStream`'s `Task` captures the value as of
+  /// when it began and rechecks it at each significant step; a mismatch means a `stopStream()`
+  /// (or a newer `startStream()`) ran while this Task was waiting on the selector, the session,
+  /// or `addStream()` — and continuing would create and start a stream after the UI was already
+  /// told everything stopped. Guarded by `stateLock` for the same reason `firstFrameSize` is:
+  /// written from the bridge queue (`teardown()`) and read from a Task.
+  private var teardownGeneration = 0
+
   /// `Wearables.configure()` is not idempotent in 0.8.0, so the guard lives here rather
   /// than trusting every JS caller to remember.
   private static var configured = false
@@ -298,6 +306,12 @@ final class WearablesBridge: RCTEventEmitter {
     // must not be what breaks it.
     teardown()
 
+    // Captured after the teardown() above, so it reflects this call's own starting point. Every
+    // significant await below rechecks this: if it has moved on, a stop() (or a newer
+    // startStream()) ran while this Task was waiting, and creating or starting anything past
+    // that point would run behind the UI's back.
+    let myGeneration = currentTeardownGeneration()
+
     // Reset the frame measurement synchronously, BEFORE the Task. NSLock's lock()/unlock() are
     // unavailable from async contexts — a task can suspend while holding the lock — and that is
     // a hard error under Swift 6. Nothing here needs to be async, so it simply moves out.
@@ -328,6 +342,13 @@ final class WearablesBridge: RCTEventEmitter {
           )
           return
         }
+        // Checkpoint 1: nothing has been created yet, so a mismatch here needs no teardown —
+        // just stop before creating anything the UI no longer expects.
+        guard currentTeardownGeneration() == myGeneration else {
+          reject("wearables_stream_superseded",
+                 "startStream was superseded by stop() while waiting for a device", nil)
+          return
+        }
         let created = try sdk.createSession(deviceSelector: selector)
         session = created
         try created.start()
@@ -350,11 +371,31 @@ final class WearablesBridge: RCTEventEmitter {
           )
           return
         }
+        // Checkpoint 2: a concurrent teardown() may already have stopped and nilled
+        // `self.session` — or, if the user was fast enough, a NEWER startStream() may already
+        // own that property. Either way it is no longer safe to touch `self.session` here; only
+        // stop the LOCAL `created` reference, which is unambiguously ours.
+        guard currentTeardownGeneration() == myGeneration else {
+          created.stop()
+          reject("wearables_stream_superseded",
+                 "startStream was superseded by stop() after the session reached .started", nil)
+          return
+        }
 
         guard let newStream = try created.addStream() else {
           let state = created.state.description
           teardown()
           reject("wearables_stream_nil", "addStream() returned nil (session state: \(state))", nil)
+          return
+        }
+        // Checkpoint 3: same reasoning as checkpoint 2, one step later. `self.stream` has not
+        // been assigned yet, so a concurrent teardown() could not have stopped `newStream` —
+        // stopping it here is not defensive, it is the only place it happens.
+        guard currentTeardownGeneration() == myGeneration else {
+          newStream.stop()
+          created.stop()
+          reject("wearables_stream_superseded",
+                 "startStream was superseded by stop() after addStream()", nil)
           return
         }
         stream = newStream
@@ -426,6 +467,20 @@ final class WearablesBridge: RCTEventEmitter {
     photoToken = nil
     stream = nil
     session = nil
+    // Synchronous, no `await` between lock and unlock — safe under the same rule as every other
+    // lock in this file. This runs on whichever thread called teardown() (bridge queue for
+    // stopStream(), the Task itself on startStream()'s own failure paths).
+    stateLock.lock()
+    teardownGeneration += 1
+    stateLock.unlock()
+  }
+
+  /// Reads `teardownGeneration` under `stateLock`. Always call this instead of touching the
+  /// property directly — and never from code that might suspend between lock and unlock.
+  private func currentTeardownGeneration() -> Int {
+    stateLock.lock()
+    defer { stateLock.unlock() }
+    return teardownGeneration
   }
 
   // MARK: - 7. THE photo question
@@ -489,8 +544,12 @@ final class WearablesBridge: RCTEventEmitter {
         reject("wearables_mic_denied", "Microphone permission denied", nil)
         return
       }
+      // Declared outside the `do` so the `catch` below can deactivate it too — anything thrown
+      // after `setActive(true)` (constructing AVAudioRecorder, most plausibly) must not leave
+      // the glasses pinned in HFP just because the failure path never reaches the deactivate
+      // call the success path has.
+      let audioSession = AVAudioSession.sharedInstance()
       do {
-        let audioSession = AVAudioSession.sharedInstance()
         // HFP is the correct profile: Meta's guidance is "use HFP when you need microphone
         // input from the wearer", and A2DP is output-only. The two are mutually exclusive —
         // activating HFP drops glasses OUTPUT to 8 kHz mono — which is why the session is
@@ -519,7 +578,16 @@ final class WearablesBridge: RCTEventEmitter {
           AVSampleRateKey: 48_000.0,
           AVNumberOfChannelsKey: 1,
         ])
-        recorder.record()
+        // record() reports startup failure by returning false rather than throwing, so a
+        // plain call here is silently ignorable — and was ignored: the delayed callback below
+        // would still resolve a nominally-wideband result over a zero-byte file, reporting a
+        // capture that never happened as a pass.
+        guard recorder.record() else {
+          try? audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+          reject("wearables_audio_record_failed",
+                 "AVAudioRecorder.record() returned false — recording did not start", nil)
+          return
+        }
 
         let route = audioSession.currentRoute
         let input = route.inputs.first
@@ -560,6 +628,11 @@ final class WearablesBridge: RCTEventEmitter {
           resolve(payload)
         }
       } catch {
+        // Without this, anything thrown after setActive(true) above — most plausibly
+        // AVAudioRecorder's initializer — leaves the glasses pinned in HFP. HFP and A2DP are
+        // mutually exclusive, so every other app's playback through them stays 8 kHz mono until
+        // something else happens to reset the session.
+        try? audioSession.setActive(false, options: .notifyOthersOnDeactivation)
         reject("wearables_audio_failed", "HFP capture failed: \(Self.describe(error))", error)
       }
     }

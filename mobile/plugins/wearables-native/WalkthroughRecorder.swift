@@ -125,7 +125,16 @@ final class WalkthroughRecorder: RCTEventEmitter {
           AVSampleRateKey: 16_000.0,
           AVNumberOfChannelsKey: 1,
         ])
-        rec.record()
+        // record() reports startup failure by returning false rather than throwing. Ignoring it
+        // here is worse than in the diagnostic rung: the estimator walks an entire site
+        // believing audio is recording, and the gap is only discovered once the scope comes
+        // back with no narration.
+        guard rec.record() else {
+          await teardown()
+          reject("walk_audio_record_failed",
+                 "AVAudioRecorder.record() returned false — recording did not start", nil)
+          return
+        }
         recorder = rec
 
         // Meta step: only now.
