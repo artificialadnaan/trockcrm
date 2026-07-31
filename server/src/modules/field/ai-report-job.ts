@@ -172,17 +172,22 @@ async function discardUnreferencedReportPdf(
   office: Awaited<ReturnType<typeof getFieldOfficeById>>,
   userId: string,
   r2Key: string,
-): Promise<void> {
+): Promise<{ committedFileId: string | null }> {
   try {
     const claimed = await runInOfficeTransaction(office, userId, async (db) => {
       const rows = await db.select({ id: files.id }).from(files).where(eq(files.r2Key, r2Key)).limit(1);
-      return rows.length > 0;
+      return rows[0]?.id ?? null;
     });
     if (claimed) {
+      // The COMMIT was durable and only its acknowledgement was lost, so Phase E threw over work that
+      // actually landed. The id goes back to the caller rather than being logged and dropped: without it the
+      // run is marked failed while the report sits, complete and downloadable, in the project's list —
+      // which is precisely the state that invites the user to buy a second identical assessment.
       console.warn("[field-ai-report] Phase E reported a failure but the file row is committed; keeping the PDF", {
         r2Key,
+        fileId: claimed,
       });
-      return;
+      return { committedFileId: claimed };
     }
     await deleteObject(r2Key);
   } catch (cleanupError) {
@@ -191,6 +196,7 @@ async function discardUnreferencedReportPdf(
       error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
     });
   }
+  return { committedFileId: null };
 }
 
 /**
@@ -374,8 +380,16 @@ export async function runFieldAiReportJob(
       // The PDF is uploaded but probably nothing references it. recordFieldPhotoReportFile cleans up after
       // its OWN insert failure; this covers the re-validation above, which throws BEFORE the insert is ever
       // reached — without it every project archived mid-render leaves an orphaned object in the bucket.
-      await discardUnreferencedReportPdf(office, requester.id, stored.r2Key);
-      throw error;
+      const { committedFileId } = await discardUnreferencedReportPdf(office, requester.id, stored.r2Key);
+      // ...unless the reconciliation found the row. Then the transaction COMMITTED and only its
+      // acknowledgement was lost, so this is a successful run that merely threw on the way out. Rethrowing
+      // would mark it failed over a report the user can already open. Carry on down the success path.
+      if (!committedFileId) throw error;
+      console.warn("[field-ai-report] Phase E threw after a durable commit; continuing as a success", {
+        runId,
+        fileId: committedFileId,
+      });
+      recorded = { report: { id: committedFileId } } as typeof recorded;
     }
     const { report } = recorded;
 
@@ -430,7 +444,12 @@ export async function runFieldAiReportJob(
         : "The report could not be generated. Please try again, or contact support if it keeps happening.";
     console.error("[field-ai-report] report failed", { runId, error: message });
     try {
-      await markAiReportRunFailed(runId, userFacing, usage);
+      // RETRIED, on the same terms as the success path. The fallback below is a genuine backstop but a poor
+      // primary: expireStaleAiReportRuns only runs on this user's NEXT enqueue, so a single transient blip
+      // here leaves the phone polling a 'running' row that will never resolve on its own, holding the
+      // project and quota slots until the user happens to start another report. Three attempts turn "the
+      // status write blipped" back into a non-event.
+      await withRetries(() => markAiReportRunFailed(runId, userFacing, usage), 3);
     } catch (ledgerError) {
       // Guarded for the same reason the success path is, and it matters MORE here. Letting a transient
       // database error escape this catch would hand the queue a throw, and the run row is still 'running':

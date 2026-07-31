@@ -409,11 +409,29 @@ describe("runFieldAiReportJob", () => {
     aiMocks.generateAiPhotoAssessment.mockRejectedValue(new aiMocks.AiReportError("Claude timed out.", true));
     // Once, not a standing rejection: an implementation set here survives clearAllMocks and would otherwise
     // leak into every later test in this file.
-    runMocks.markAiReportRunFailed.mockRejectedValueOnce(new Error("connection terminated unexpectedly"));
+    // Exhaust every attempt — the write is retried now, so a single rejection would simply succeed on the
+    // next one and never reach the swallow path this test exists to cover. Chained `Once` rather than a
+    // standing rejection, which would survive clearAllMocks and leak into every later test in this file.
+    runMocks.markAiReportRunFailed
+      .mockRejectedValueOnce(new Error("connection terminated unexpectedly"))
+      .mockRejectedValueOnce(new Error("connection terminated unexpectedly"))
+      .mockRejectedValueOnce(new Error("connection terminated unexpectedly"));
 
     // Must RESOLVE, not reject: a rejection is what triggers the queue retry.
     await expect(runFieldAiReportJob({ runId: "run-1" })).resolves.toEqual({ claimed: true });
-    expect(runMocks.markAiReportRunFailed).toHaveBeenCalled();
+    expect(runMocks.markAiReportRunFailed).toHaveBeenCalledTimes(3);
+  });
+
+  it("retries a blipped terminal-failure write rather than stranding the run as 'running'", async () => {
+    // The fallback below this write is a real backstop but a poor primary: expireStaleAiReportRuns only runs
+    // on the user's NEXT enqueue, so one transient blip left the phone polling a 'running' row that would
+    // never resolve on its own, holding the project and quota slots until they started another report.
+    aiMocks.generateAiPhotoAssessment.mockRejectedValue(new aiMocks.AiReportError("Claude timed out.", true));
+    runMocks.markAiReportRunFailed.mockRejectedValueOnce(new Error("connection terminated unexpectedly"));
+
+    await expect(runFieldAiReportJob({ runId: "run-1" })).resolves.toEqual({ claimed: true });
+    // Second attempt landed, so the phone reaches its terminal state on this delivery.
+    expect(runMocks.markAiReportRunFailed).toHaveBeenCalledTimes(2);
   });
 
   it("renews the lease on the run it is actually working", async () => {
@@ -494,6 +512,11 @@ describe("runFieldAiReportJob", () => {
     await runFieldAiReportJob({ runId: "run-1" });
 
     expect(r2Mocks.deleteObject).not.toHaveBeenCalled();
+    // ...and the run is recorded as a SUCCESS. The commit was durable and only its acknowledgement was
+    // lost, so the report is in the project list and downloadable — reporting a failure over it would tell
+    // the user to buy a second identical assessment for a report they already have.
+    expect(runMocks.markAiReportRunSucceeded).toHaveBeenCalledWith("run-1", "file-1", expect.anything());
+    expect(runMocks.markAiReportRunFailed).not.toHaveBeenCalled();
   });
 
   it("leaves the PDF alone when the reconciliation itself cannot be completed", async () => {
