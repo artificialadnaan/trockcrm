@@ -133,6 +133,8 @@ beforeEach(() => {
   runMocks.markAiReportRunRunning.mockResolvedValue(true);
   // clearAllMocks wipes recorded calls but NOT implementations, so anything a test overrides below has to be
   // restored here or it silently leaks into the next one.
+  runMocks.markAiReportRunFailed.mockResolvedValue(undefined);
+  runMocks.markAiReportRunSucceeded.mockResolvedValue(undefined);
   runMocks.touchAiReportRunLease.mockImplementation(async () => {
     timeline.events.push("lease:renew");
     return true;
@@ -350,6 +352,21 @@ describe("runFieldAiReportJob", () => {
 
     expect(aiMocks.generateAiPhotoAssessment).not.toHaveBeenCalled();
     expect(runMocks.markAiReportRunFailed).toHaveBeenCalledWith("run-1", expect.stringMatching(/no longer has access/i), null);
+  });
+
+  it("does not re-run a failed assessment when the terminal write itself fails", async () => {
+    // The generation already failed; only the status write blipped. Letting that escape hands the queue a
+    // throw while the row is still 'running' — the redelivery cannot claim it, is deferred until the
+    // 20-minute lease expires, and then repeats the WHOLE assessment, paying for the model again purely
+    // because a status write failed. expireStaleAiReportRuns reconciles the row instead.
+    aiMocks.generateAiPhotoAssessment.mockRejectedValue(new aiMocks.AiReportError("Claude timed out.", true));
+    // Once, not a standing rejection: an implementation set here survives clearAllMocks and would otherwise
+    // leak into every later test in this file.
+    runMocks.markAiReportRunFailed.mockRejectedValueOnce(new Error("connection terminated unexpectedly"));
+
+    // Must RESOLVE, not reject: a rejection is what triggers the queue retry.
+    await expect(runFieldAiReportJob({ runId: "run-1" })).resolves.toEqual({ claimed: true });
+    expect(runMocks.markAiReportRunFailed).toHaveBeenCalled();
   });
 
   it("renews the lease on the run it is actually working", async () => {

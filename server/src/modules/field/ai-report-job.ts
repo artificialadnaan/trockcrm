@@ -360,8 +360,23 @@ export async function runFieldAiReportJob(
       error instanceof AiReportError
         ? message
         : "The report could not be generated. Please try again, or contact support if it keeps happening.";
-    await markAiReportRunFailed(runId, userFacing, usage);
     console.error("[field-ai-report] report failed", { runId, error: message });
+    try {
+      await markAiReportRunFailed(runId, userFacing, usage);
+    } catch (ledgerError) {
+      // Guarded for the same reason the success path is, and it matters MORE here. Letting a transient
+      // database error escape this catch would hand the queue a throw, and the run row is still 'running':
+      // the redelivery cannot claim it and is deferred until the 20-minute lease expires, at which point the
+      // whole assessment re-runs — paying for the model a second time purely because a status write blipped.
+      //
+      // Left 'running' instead. expireStaleAiReportRuns is the reconciler: it fails the row on this user's
+      // next enqueue (or after the lease elapses) with its own abandoned-run message, so the phone still
+      // reaches a terminal state and the in-flight slot still frees, without regenerating anything.
+      console.error("[field-ai-report] report FAILED but the run row could not be updated", {
+        runId,
+        error: ledgerError instanceof Error ? ledgerError.message : String(ledgerError),
+      });
+    }
     // Swallowed on purpose: the run row carries the terminal failure the phone polls for, so re-throwing
     // would only make job_queue retry a run that is already reported as failed (and re-spend on the model).
     return { claimed: true };
