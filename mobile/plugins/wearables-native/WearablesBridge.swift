@@ -629,9 +629,11 @@ final class WearablesBridge: RCTEventEmitter {
 
         // Meta step 3: only now.
         newStream.start()
-        // Three seconds is well past the 2.2-2.5s first-frame latency measured on this
-        // hardware, so the route is read after frames are genuinely flowing.
-        try? await Task.sleep(nanoseconds: 3_000_000_000)
+        // First-frame latency measured 2.2-2.5s on this hardware. Four seconds keeps a real
+        // margin: reading early would report a route the stream had not yet had a chance to
+        // disturb, and a spurious FAIL here would wrongly push the whole design onto the
+        // audio-plus-stills fallback.
+        try? await Task.sleep(nanoseconds: 4_000_000_000)
         let after = Self.routeSnapshot(audio)
 
         teardown()
@@ -643,6 +645,53 @@ final class WearablesBridge: RCTEventEmitter {
         try? audio.setActive(false, options: .notifyOthersOnDeactivation)
         reject("wearables_hfp_stream_check_failed",
                "checkHfpWithStream failed: \(Self.describe(error))", error)
+      }
+    }
+  }
+
+  // MARK: - 10. Step 0 check: does the phone camera disturb the HFP route?
+
+  /// The design needs phone stills DURING a glasses walk, and both share one AVAudioSession.
+  /// The capture session here is deliberately photo-output only with NO audio input — that is
+  /// the configuration the real feature must use, so this tests the actual proposed code path
+  /// rather than a worst case nobody would ship.
+  @objc(checkPhoneCameraDuringHfp:rejecter:)
+  func checkPhoneCameraDuringHfp(_ resolve: @escaping RCTPromiseResolveBlock,
+                                 rejecter reject: @escaping RCTPromiseRejectBlock) {
+    Task {
+      let audio = AVAudioSession.sharedInstance()
+      do {
+        _ = try await Self.activateHfpAndSettle()
+        let before = Self.routeSnapshot(audio)
+
+        let capture = AVCaptureSession()
+        capture.sessionPreset = .photo
+        guard let device = AVCaptureDevice.default(for: .video),
+              let input = try? AVCaptureDeviceInput(device: device) else {
+          try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+          reject("wearables_no_camera", "No video capture device available", nil)
+          return
+        }
+        capture.beginConfiguration()
+        if capture.canAddInput(input) { capture.addInput(input) }
+        let photo = AVCapturePhotoOutput()
+        if capture.canAddOutput(photo) { capture.addOutput(photo) }
+        capture.commitConfiguration()
+
+        capture.startRunning()
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        let during = Self.routeSnapshot(audio)
+
+        capture.stopRunning()
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        let after = Self.routeSnapshot(audio)
+
+        try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+        resolve(["before": before, "during": during, "after": after])
+      } catch {
+        try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+        reject("wearables_phone_camera_check_failed",
+               "checkPhoneCameraDuringHfp failed: \(Self.describe(error))", error)
       }
     }
   }

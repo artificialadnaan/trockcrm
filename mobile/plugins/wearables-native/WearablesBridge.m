@@ -37,4 +37,6 @@ RCT_EXTERN_METHOD(recordGlassesAudio : (nonnull NSNumber *)seconds resolver : (R
 
 RCT_EXTERN_METHOD(checkHfpWithStream : (RCTPromiseResolveBlock)resolve rejecter : (RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(checkPhoneCameraDuringHfp : (RCTPromiseResolveBlock)resolve rejecter : (RCTPromiseRejectBlock)reject)
+
 @end
