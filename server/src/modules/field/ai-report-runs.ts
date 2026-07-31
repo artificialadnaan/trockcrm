@@ -143,23 +143,43 @@ export async function insertAiReportRunTx(db: FieldTenantDb, input: NewAiReportR
  * abandoned runs on OTHER projects would otherwise 429 the user forever — a project-scoped sweep can never
  * clear them, and they would have to revisit each original project just to unstick themselves.
  *
- * Staleness is measured from COALESCE(started_at, created_at), not created_at. The AI-report poller is
- * serial, so a run can legitimately sit queued for a long while and only start recently; measuring from
- * creation would expire a run that is actively mid-model-call, free its slot, and let a replacement be
- * queued while the original keeps spending. `started_at` is renewed at each long phase boundary
- * (touchAiReportRunLease), so this measures time since the last sign of progress rather than total runtime.
+ * The two in-flight states are abandoned for different reasons, so they are tested differently.
+ *
+ * A RUNNING run is abandoned once its lease has gone unrenewed for STALE_RUN_MINUTES. `started_at` doubles
+ * as that lease and is renewed at each long phase boundary (touchAiReportRunLease), so this measures time
+ * since the last sign of progress rather than total runtime — a run actively mid-model-call is never
+ * expired out from under itself.
+ *
+ * A QUEUED run is abandoned when no live job_queue delivery remains to run it — NOT when it simply gets
+ * old. The AI-report poller is serial, so a legitimate run can wait far longer than the lease window behind
+ * other work; testing its AGE failed untouched requests before any worker had claimed them, and the user's
+ * retry then went to the back of the very same queue.
  */
 export async function expireStaleAiReportRuns(requestedBy: string): Promise<number> {
   const result = await pool.query(
-    `UPDATE public.field_ai_report_runs
+    `UPDATE public.field_ai_report_runs AS r
         SET status = 'failed',
             error = 'This report was abandoned before it finished. Please try again.',
             finished_at = now(),
             updated_at = now()
-      WHERE requested_by = $1::uuid
-        AND status IN ('queued', 'running')
-        AND COALESCE(started_at, created_at) < now() - ($2 || ' minutes')::interval`,
-    [requestedBy, String(STALE_RUN_MINUTES)],
+      WHERE r.requested_by = $1::uuid
+        AND (
+          -- A claimed attempt that has gone quiet: its lease was not renewed inside the window.
+          (r.status = 'running' AND r.started_at < now() - ($2 || ' minutes')::interval)
+          -- ...or a queued run with no delivery left to run it. Age is deliberately NOT the test here.
+          -- The AI-report poller is serial, so a perfectly good run can sit queued far longer than the
+          -- lease window behind other work; expiring it on age alone failed an untouched request before
+          -- any worker had claimed it, and the user's retry then went to the back of the same queue.
+          -- A live job_queue row is the real evidence that something will still run it.
+          OR (r.status = 'queued' AND NOT EXISTS (
+                SELECT 1
+                  FROM public.job_queue q
+                 WHERE q.job_type = $3
+                   AND q.status IN ('pending', 'processing')
+                   AND q.payload->>'runId' = r.id::text
+              ))
+        )`,
+    [requestedBy, String(STALE_RUN_MINUTES), AI_REPORT_JOB_TYPE],
   );
   return result.rowCount ?? 0;
 }

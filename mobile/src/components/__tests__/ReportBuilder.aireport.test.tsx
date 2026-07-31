@@ -66,7 +66,7 @@ const PHOTOS = [galleryPhoto("p1", "First"), galleryPhoto("p2", "Second")];
 const AI_REPORT = { id: "file-1", title: "Tides Condition Assessment", pdfUrl: "https://r2/signed.pdf", expiresAt: null, createdAt: "" };
 
 function renderBuilder(overrides: Partial<React.ComponentProps<typeof ReportBuilder>> = {}) {
-  const props = { visible: true, onClose: jest.fn(), projectId: "d1", photos: PHOTOS, onGenerated: jest.fn(), ...overrides };
+  const props = { visible: true, onClose: jest.fn(), projectId: "d1", photos: PHOTOS, onGenerated: jest.fn(), onLeftRunning: jest.fn(), ...overrides };
   return { ui: render(<ReportBuilder {...props} />), props };
 }
 
@@ -270,6 +270,39 @@ describe("ReportBuilder AI report", () => {
     await act(async () => { release({ runId: "run-1" }); });
 
     expect(ui.queryByText(/Reviewing/)).toBeNull();
+  });
+
+  it("hands a still-running generation back to the owner when the sheet is closed", async () => {
+    // The job carries on server-side and files its report, but nothing in this sheet is watching for it any
+    // more — and the project screen's report list has no polling interval. Without the hand-off the report
+    // simply never appears until a manual pull-to-refresh, despite the UI promising it will.
+    mockGetAiReportStatus.mockResolvedValue({ runId: "run-1", status: "running" });
+
+    const { ui, props } = renderBuilder();
+    await openFocusStep(ui);
+    await pressGenerate(ui);
+    await waitFor(() => expect(mockStartAiReport).toHaveBeenCalled());
+    await tickPoll(); // one poll, still running
+
+    await act(async () => { fireEvent.press(ui.getByText("Back")); });
+    await act(async () => { fireEvent.press(ui.getByText("Cancel")); });
+
+    expect(props.onLeftRunning).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT hand off a generation that already finished", async () => {
+    // The counterweight: onGenerated already refreshes the list, so firing the hand-off here would start a
+    // pointless background wait after every successful report.
+    mockGetAiReportStatus.mockResolvedValue({ runId: "run-1", status: "succeeded", report: AI_REPORT });
+
+    const { ui, props } = renderBuilder();
+    await openFocusStep(ui);
+    await pressGenerate(ui);
+    await waitFor(() => expect(mockStartAiReport).toHaveBeenCalled());
+    await tickPoll();
+
+    await waitFor(() => expect(props.onGenerated).toHaveBeenCalled());
+    expect(props.onLeftRunning).not.toHaveBeenCalled();
   });
 
   it("a stale poll loop cannot resurrect itself once a new run has started", async () => {

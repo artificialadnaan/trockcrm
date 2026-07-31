@@ -51,6 +51,7 @@ export function ReportBuilder({
   projectId,
   photos,
   onGenerated,
+  onLeftRunning,
   voiceEnabled = false,
 }: {
   visible: boolean;
@@ -58,6 +59,11 @@ export function ReportBuilder({
   projectId: string;
   photos: FieldPhoto[];
   onGenerated: (report: GeneratedReport) => void;
+  // Fired when this sheet STOPS waiting on a generation that is still running — the user closed the builder,
+  // or the foreground poll hit its timeout. The job carries on server-side and files the report, but nothing
+  // here is watching for it any more, so the owner has to keep the report list fresh or the "it will appear
+  // in this project's reports" promise is not kept until a manual pull-to-refresh.
+  onLeftRunning?: () => void;
   // Gates the summary dictation button — true only when server transcription is configured, matching the
   // capture/scorecard surfaces. When false the summary is typing-only (no dead mic button).
   voiceEnabled?: boolean;
@@ -96,6 +102,10 @@ export function ReportBuilder({
   // could open the previous PDF, close the new sheet, or clear the flag in its own `finally` and silently
   // kill the live loop. Each run captures its own token and stops the moment it is no longer the current one.
   const aiRunTokenRef = useRef(0);
+  // Whether a generation is still running server-side with this sheet watching it. Distinct from the token
+  // (which only says "this loop is current") because the hand-off has to fire exactly once, and only for a
+  // run that never reached a terminal state.
+  const aiRunActiveRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
 
   // Cancelling through close()/Cancel bumps the token, but an UNMOUNT never runs either — navigating off the
@@ -119,6 +129,12 @@ export function ReportBuilder({
     setDescriptions({});
     setError(null);
     setBusy(false);
+    // Hand the run off BEFORE invalidating the loop: the job carries on and files its report, but nothing
+    // here will see it land, so the owner has to keep the report list fresh for that to be true.
+    if (aiRunActiveRef.current) {
+      aiRunActiveRef.current = false;
+      onLeftRunning?.();
+    }
     // Invalidate any in-flight poll loop. The server-side job keeps running — the finished report still
     // lands in the project's report list — but this sheet stops waiting on it.
     aiRunTokenRef.current += 1;
@@ -198,6 +214,8 @@ export function ReportBuilder({
       // invalidated this token, and the `finally` below deliberately leaves stale state alone — so setting
       // it here first would strand "Reviewing …" on the sheet, still showing the next time it is opened.
       if (!isCurrent()) return; // the sheet was closed (or another run started) during the enqueue
+      // From here the job exists server-side and will finish whether or not this sheet is still watching.
+      aiRunActiveRef.current = true;
       setAiProgress(
         `Reviewing ${selected.size} photo${selected.size === 1 ? "" : "s"}… this usually takes about a minute.`,
       );
@@ -224,15 +242,22 @@ export function ReportBuilder({
         if (!isCurrent()) return;
 
         if (status.status === "succeeded" && status.report) {
+          // Terminal, and this sheet saw it — nothing to hand off.
+          aiRunActiveRef.current = false;
           onGenerated(status.report);
           close();
           return;
         }
         if (status.status === "failed") {
+          aiRunActiveRef.current = false;
           throw new Error(status.error || "The AI report could not be generated.");
         }
         if (Date.now() - startedAt > AI_POLL_TIMEOUT_MS) {
-          // Stop waiting, but do NOT claim it failed — the job may still finish and file the report.
+          // Stop waiting, but do NOT claim it failed — the job may still finish and file the report. Hand it
+          // off here rather than at reset(): the sheet stays open on this error, so close() may not run for a
+          // long time, and the message below promises the report will turn up on its own.
+          aiRunActiveRef.current = false;
+          onLeftRunning?.();
           throw new Error(
             "This is taking longer than expected. The report will appear in this project's reports when it finishes.",
           );

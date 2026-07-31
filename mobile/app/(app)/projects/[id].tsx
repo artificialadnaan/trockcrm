@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { FlatList, Linking, Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
@@ -41,6 +41,16 @@ const GROUPINGS: { value: PhotoGrouping; label: string }[] = [
   { value: "uploader", label: "Uploader" },
   { value: "none", label: "None" },
 ];
+
+/**
+ * How the screen waits for a report the builder stopped watching.
+ *
+ * The interval is slow on purpose — this is a background courtesy, not the foreground poll, and it re-reads
+ * a list rather than a status row. The window comfortably outlasts the server's own total deadline, so a run
+ * that is going to file at all has filed by the time it closes.
+ */
+const AWAIT_REPORT_POLL_MS = 10_000;
+const AWAIT_REPORT_WINDOW_MS = 10 * 60_000;
 
 function toStr(v: string | string[] | undefined): string {
   return Array.isArray(v) ? v[0] ?? "" : v ?? "";
@@ -94,6 +104,8 @@ export default function ProjectDetailScreen() {
   // filter change can never desync the viewer onto a different photo.
   const [viewer, setViewer] = useState<{ photos: FieldPhoto[]; index: number } | null>(null);
   const [reportOpen, setReportOpen] = useState(false);
+  // Set when the builder hands back a generation it stopped waiting on — see the effect below.
+  const [awaitingReportSince, setAwaitingReportSince] = useState<number | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
   const [notice, setNotice] = useState<{ message: string; tone: "success" | "error" } | null>(null);
 
@@ -147,6 +159,31 @@ export default function ProjectDetailScreen() {
     }
     return items;
   }, [groups]);
+
+  // A generation the builder stopped waiting on — the sheet was closed, or its foreground poll timed out —
+  // still finishes server-side and files its report. Nothing here would ever notice: useProjectReports has
+  // no polling interval and refreshes only from onGenerated or a manual pull, so "the report will appear in
+  // this project's reports when it finishes" held only if the user happened to pull to refresh.
+  //
+  // The LIST is polled rather than the run: its arrival is the only thing this screen cares about, and that
+  // needs no run id. Bounded by a window so an abandoned or failed run can't leave a timer running forever.
+  // reportsQuery is deliberately not a dependency — it changes identity on every fetch and would restart the
+  // interval each time; the count is snapshotted when the wait begins.
+  useEffect(() => {
+    if (awaitingReportSince === null) return;
+    const countAtHandoff = (reportsQuery.data?.reports ?? []).length;
+    const timer = setInterval(() => {
+      if (Date.now() - awaitingReportSince > AWAIT_REPORT_WINDOW_MS) {
+        setAwaitingReportSince(null);
+        return;
+      }
+      void reportsQuery.refetch().then((result) => {
+        if ((result.data?.reports ?? []).length > countAtHandoff) setAwaitingReportSince(null);
+      });
+    }, AWAIT_REPORT_POLL_MS);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [awaitingReportSince]);
 
   const refreshing = photosQuery.isRefetching || reportsQuery.isRefetching || scorecardsQuery.isRefetching;
 
@@ -496,6 +533,7 @@ export default function ProjectDetailScreen() {
           void reportsQuery.refetch();
           if (report.pdfUrl) void Linking.openURL(report.pdfUrl);
         }}
+        onLeftRunning={() => setAwaitingReportSince(Date.now())}
       />
 
       <PhotoShareModal

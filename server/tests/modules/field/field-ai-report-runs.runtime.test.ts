@@ -3,8 +3,27 @@ import { drizzle } from "drizzle-orm/pglite";
 import { sql } from "drizzle-orm";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { beforeAll, describe, expect, it } from "vitest";
-import { insertAiReportRunTx, isInFlightRunConflict } from "../../../src/modules/field/ai-report-runs.js";
+import { beforeAll, describe, expect, it, vi } from "vitest";
+/**
+ * Point the module's shared pg pool at this PGlite instance, so the functions that use it (rather than a
+ * caller-supplied drizzle handle) can be exercised for real instead of having their SQL copied into the
+ * test. A copied predicate proves the SEMANTICS are right but never notices the production string changing.
+ */
+const poolHolder = vi.hoisted(() => ({ client: null as { query: (t: string, p?: unknown[]) => Promise<any> } | null }));
+vi.mock("../../../src/db.js", () => ({
+  pool: {
+    query: async (text: string, params?: unknown[]) => {
+      const result = await poolHolder.client!.query(text, params ?? []);
+      // pg reports rowCount; PGlite reports affectedRows.
+      return { rows: result.rows, rowCount: result.affectedRows ?? result.rows.length };
+    },
+  },
+  db: {},
+}));
+
+const { expireStaleAiReportRuns, insertAiReportRunTx, isInFlightRunConflict } = await import(
+  "../../../src/modules/field/ai-report-runs.js"
+);
 
 /**
  * REAL SQL, no mocks. The route suite mocks insertAiReportRunTx, so it cannot see whether the statement is
@@ -31,9 +50,18 @@ const PHOTOS = ["aaaaaaaa-1111-1111-1111-111111111111", "bbbbbbbb-2222-2222-2222
 
 beforeAll(async () => {
   client = new PGlite();
+  poolHolder.client = client;
   await client.exec(`
     CREATE TABLE public.offices (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), slug text NOT NULL);
     CREATE TABLE public.users   (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), email text NOT NULL);
+    -- Enough of job_queue for the reaper's NOT EXISTS: a queued run is only abandoned when no live delivery
+    -- is left to run it, so the sweep genuinely reads this table.
+    CREATE TABLE public.job_queue (
+      id        bigserial PRIMARY KEY,
+      job_type  text NOT NULL,
+      payload   jsonb NOT NULL,
+      status    text NOT NULL
+    );
   `);
   await client.exec(readFileSync(MIGRATION, "utf8"));
   db = drizzle(client);
@@ -204,6 +232,44 @@ describe("field_ai_report_runs — real SQL", () => {
       `SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory'`,
     );
     expect(locks.rows[0].n).toBe(0);
+  });
+
+  it("does not expire a long-queued run that still has a live delivery, but does expire an orphaned one", async () => {
+    // The AI-report poller is serial, so a perfectly good run can sit queued far longer than the lease
+    // window behind other work. Testing its AGE failed untouched requests before any worker had claimed
+    // them — the user's retry then went to the back of the very same queue, and the original delivery found
+    // a terminal run and did nothing. A live job_queue row is the real evidence something will still run it.
+    const sweepUser = (
+      await client.query<{ id: string }>(`INSERT INTO public.users (email) VALUES ('sweep@t.co') RETURNING id`)
+    ).rows[0].id;
+    const backlogged = (await insertRun("cccccccc-9999-9999-9999-999999999999", sweepUser)).id as string;
+    const orphaned = (await insertRun("dddddddd-9999-9999-9999-999999999999", sweepUser)).id as string;
+
+    // Both have been queued for well over the lease window and neither has ever started.
+    await client.query(
+      `UPDATE public.field_ai_report_runs SET created_at = now() - interval '90 minutes' WHERE id IN ($1, $2)`,
+      [backlogged, orphaned],
+    );
+    // Only the first still has a delivery waiting behind the backlog.
+    await client.query(
+      `INSERT INTO public.job_queue (job_type, payload, status) VALUES ('ai_report_generation', $1::jsonb, 'pending')`,
+      [JSON.stringify({ runId: backlogged })],
+    );
+
+    // The REAL sweep, against real Postgres — not a copy of its predicate.
+    expect(await expireStaleAiReportRuns(sweepUser)).toBe(1); // the orphan only
+
+    const after = await client.query<{ id: string; status: string }>(
+      `SELECT id, status FROM public.field_ai_report_runs WHERE id IN ($1, $2)`,
+      [backlogged, orphaned],
+    );
+    const statusOf = (id: string) => after.rows.find((row) => row.id === id)?.status;
+    expect(statusOf(backlogged)).toBe("queued"); // still waiting its turn — the user keeps their place
+    expect(statusOf(orphaned)).toBe("failed"); // nothing left to run it, so the slot is released
+
+    // ...and once the backlogged run's delivery is gone, it becomes reclaimable too.
+    await client.query(`UPDATE public.job_queue SET status = 'dead'`);
+    expect(await expireStaleAiReportRuns(sweepUser)).toBe(1);
   });
 
   it("renews a live run's lease out from under the reaper, but cannot revive a terminal one", async () => {
