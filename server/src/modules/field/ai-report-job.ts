@@ -330,6 +330,14 @@ export async function runFieldAiReportJob(
     // ── Phase E: short transaction — record the file row ─────────────────────────────────────────
     let recorded: Awaited<ReturnType<typeof recordFieldPhotoReportFile>>;
     try {
+      // Do we still own this run? The lease was renewed before Phase D, but rendering is unbounded and can
+      // outlast even a fresh window — at which point the requester's next enqueue reaps this run and starts
+      // a replacement. Publishing anyway would commit the file while the guarded success write silently
+      // matched zero rows: the phone shows 'failed' next to a report that exists, and the replacement bills
+      // a second assessment for it. Checked BEFORE the insert so the catch below discards the upload.
+      if (!(await touchAiReportRunLease(runId))) {
+        throw new AiReportError("This report was superseded before it finished. Please try again.", false);
+      }
       // Re-resolve the OFFICE as well. Everything from Phase A on uses the office object cached before the
       // render, and an office deactivated during those minutes would still be written to — leaving a run
       // marked 'succeeded' whose report the status endpoint refuses to hand back, because it resolves the

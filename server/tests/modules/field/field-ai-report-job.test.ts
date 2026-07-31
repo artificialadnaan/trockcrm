@@ -201,8 +201,9 @@ describe("runFieldAiReportJob", () => {
       "tx:open", "tx:close",        // Phase A — load project + photos
       "model:call",                 // Phase B — Claude, no transaction held
       "tx:open", "prepare", "tx:close", // Phase C — read what the renderer needs
-      "lease:renew",                // the lease is renewed BEFORE the unbounded phase, not after it
+      "lease:renew",                // renewed BEFORE the unbounded phase, not after it
       "render+upload",              // Phase D — render + R2, no transaction held
+      "lease:renew",                // ...and re-checked before publishing, since D can outlast even that
       "tx:open", "record", "tx:close",  // Phase E — write the files row
     ]);
   });
@@ -593,6 +594,26 @@ describe("runFieldAiReportJob", () => {
     expect(reportMocks.recordFieldPhotoReportFile).not.toHaveBeenCalled();
     expect(r2Mocks.deleteObject).toHaveBeenCalledWith("office_dallas/report.pdf");
     expect(runMocks.markAiReportRunFailed).toHaveBeenCalled();
+  });
+
+  it("does not publish a report whose lease was lost during the render", async () => {
+    // Rendering is unbounded and can outlast even a freshly renewed lease, at which point the requester's
+    // next enqueue reaps this run and starts a replacement. Committing the file anyway would leave the
+    // phone showing 'failed' beside a report that exists, while the replacement bills a second assessment.
+    reportMocks.renderAndStoreFieldPhotoReportPdf.mockImplementation(async () => {
+      timeline.events.push("render+upload");
+      return { r2Key: "office_dallas/report.pdf" } as any;
+    });
+    // Held before the render, lost by the time it is time to publish.
+    runMocks.touchAiReportRunLease
+      .mockImplementationOnce(async () => { timeline.events.push("lease:renew"); return true; })
+      .mockImplementationOnce(async () => false);
+
+    await runFieldAiReportJob({ runId: "run-1" });
+
+    expect(reportMocks.recordFieldPhotoReportFile).not.toHaveBeenCalled();
+    expect(r2Mocks.deleteObject).toHaveBeenCalledWith("office_dallas/report.pdf");
+    expect(runMocks.markAiReportRunSucceeded).not.toHaveBeenCalled();
   });
 
   it("keeps the uploaded PDF when Phase E succeeds", async () => {

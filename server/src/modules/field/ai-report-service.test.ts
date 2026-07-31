@@ -125,7 +125,7 @@ describe("ai-report-service", () => {
       mimeType: "image/jpeg",
       displayName: "IMG_x",
       caption: null,
-      externalUrl: "https://cdn.example.com/x.jpg",
+      externalUrl: "https://93.184.216.34/x.jpg",
       externalThumbnailUrl: null,
     };
     // The body is a STREAM: fetchBoundedExternalImage reads it chunk by chunk so it can stop at its cap
@@ -135,7 +135,7 @@ describe("ai-report-service", () => {
       return {
         ok: true,
         status: 200,
-        url: "https://cdn.example.com/x.jpg",
+        url: "https://93.184.216.34/x.jpg",
         headers: { get: (name: string) => (name.toLowerCase() === "content-type" ? "image/jpeg" : null) },
         body: {
           getReader: () => ({
