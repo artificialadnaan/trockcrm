@@ -244,20 +244,24 @@ function formatPhotoDate(value: string | null, fallback: string): string {
 }
 
 /**
- * The photo-grid date. "Jul 31, 4:52 PM" rather than "July 31, 2026, 4:52 PM".
+ * The photo-grid date. "Jul 31, 2026, 4:52 PM" — abbreviated month, but the YEAR IS KEPT.
  *
- * The cell's metadata column is ~106pt wide, and the long form overruns it and ellipsises mid-timestamp —
- * a truncated time is worse than a short one. The YEAR is dropped rather than the month or time: it is on
- * the cover, in every page header and in the footer, and a photo report spanning a year boundary would
- * still be unambiguous from those. A photograph that genuinely belongs to another project still names it on
- * its own line below.
+ * Only the month name is shortened. Dropping the year looked safe on the grounds that it appears on the
+ * cover, the page header and the footer — but that is the REPORT's year, not the photograph's. A report can
+ * carry historical photos or straddle a year boundary, and "Jul 31, 4:52 PM" then reads identically for a
+ * 2025 and a 2026 capture, which for an evidence document is a real loss.
+ *
+ * It fits: measured against Geist at META_FONT_SIZE, the long form is 74.7pt (82.4pt worst case) inside a
+ * ~106pt column. The width worry that prompted the short form came from the one-up grid's 8.5pt text and
+ * did not survive the move to 7.5pt.
  */
 function formatPhotoDateCompact(value: string | null, fallback: string): string {
   const date = new Date(value ?? fallback);
-  return `${date.toLocaleDateString("en-US", { month: "short", day: "numeric" })}, ${date.toLocaleTimeString("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-  })}`;
+  return `${date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  })}, ${date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}`;
 }
 
 async function fetchExternalImageBuffer(url: string): Promise<Buffer | null> {
@@ -421,17 +425,34 @@ type OpenedImage = { width: number; height: number; orientation?: number };
 function openImageForLayout(
   doc: PDFKit.PDFDocument,
   buffer: Buffer,
+  photo: Pick<ReportRenderablePhoto, "id" | "displayName">,
 ): { image: OpenedImage; displayWidth: number; displayHeight: number } | null {
   try {
     const image = (doc as unknown as { openImage(src: Buffer): OpenedImage }).openImage(buffer);
-    if (!image || !(image.width > 0) || !(image.height > 0)) return null;
+    if (!image || !(image.width > 0) || !(image.height > 0)) {
+      // Decoded, but to nothing usable. Distinct from a throw and worth its own line: it is what a
+      // zero-byte or truncated upload looks like from here.
+      console.warn("[field-photo-report] a photo decoded to no usable dimensions; drawing the placeholder", {
+        photoId: photo.id,
+        displayName: photo.displayName,
+      });
+      return null;
+    }
     const rotated = (image.orientation ?? 1) > 4;
     return {
       image,
       displayWidth: rotated ? image.height : image.width,
       displayHeight: rotated ? image.width : image.height,
     };
-  } catch {
+  } catch (error) {
+    // THIS is where a corrupt file or a format pdfkit cannot read actually fails — before any draw is
+    // attempted. Swallowing it silently made a report missing evidence look identical to one whose
+    // photograph simply would not decode, with nothing naming which photograph was lost.
+    console.warn("[field-photo-report] could not decode a photo; drawing the placeholder", {
+      photoId: photo.id,
+      displayName: photo.displayName,
+      error: error instanceof Error ? error.message : String(error),
+    });
     return null;
   }
 }
@@ -461,7 +482,18 @@ async function drawPhotoEntry(
   doc.roundedRect(left, top, boxWidth, boxHeight, PHOTO_TILE_RADIUS).fillColor(PHOTO_TILE_FILL).fill();
 
   const imageBuffer = await loadPhotoBuffer(photo);
-  const opened = imageBuffer ? openImageForLayout(doc, imageBuffer) : null;
+  // Only a FAILED LOAD is worth a line. A row with no key and no external URL had nothing to fetch in the
+  // first place — that is the placeholder working as intended, not a fault — whereas a key that would not
+  // resolve means R2 refused it or the object is gone, and nothing else raises so the placeholder would
+  // otherwise be the only trace.
+  if (!imageBuffer && (photo.r2Key || photo.externalUrl || photo.externalThumbnailUrl)) {
+    console.warn("[field-photo-report] could not load a photo's bytes; drawing the placeholder", {
+      photoId: photo.id,
+      displayName: photo.displayName,
+      r2Key: photo.r2Key,
+    });
+  }
+  const opened = imageBuffer ? openImageForLayout(doc, imageBuffer, photo) : null;
   let drew = false;
   if (opened) {
     // Contain, then centre. NOT cover: this is an evidence document, and filling the tile would silently

@@ -1,6 +1,6 @@
 import sharp from "sharp";
 import zlib from "node:zlib";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { renderFieldPhotoReportPdf, type ReportRenderSection } from "../../../src/modules/field/pdf-layout.js";
 
 // Count actual page objects in a PDF buffer (/Type /Page, NOT /Pages).
@@ -65,6 +65,30 @@ describe("renderFieldPhotoReportPdf page count", () => {
     // pages (footer text spilled onto auto-created blank pages); the guard is that there are NO trailing
     // blank pages, not the exact per-page count.
     expect(countPdfPages(buffer)).toBe(2);
+  });
+
+  it("names the photograph in the log when its bytes will not decode", async () => {
+    // The decode throws inside openImageForLayout, which returns null — so a handler wrapped around the
+    // later doc.image call never sees it, and a report quietly missing evidence looked exactly like one
+    // whose photograph merely failed to render, with nothing recording which.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const corrupt = {
+        ...photo(1),
+        displayName: "IMG_4021.jpg",
+        // Loads to real bytes (the data: path), then fails to decode — a truncated or mislabelled upload.
+        externalUrl: `data:image/jpeg;base64,${Buffer.from("not actually a jpeg").toString("base64")}`,
+      };
+      const buffer = await renderFieldPhotoReportPdf({ cover, sections: [{ title: "Doors", photos: [corrupt] }] });
+      // Still renders — a bad photograph must never take the whole report down.
+      expect(countPdfPages(buffer)).toBe(2);
+
+      const logged = warn.mock.calls.find((call) => String(call[0]).includes("could not decode"));
+      expect(logged).toBeDefined();
+      expect(logged![1]).toMatchObject({ photoId: "p1", displayName: "IMG_4021.jpg" });
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("packs EIGHT photographs onto a page, two cells across", async () => {
