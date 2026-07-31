@@ -58,13 +58,20 @@ CREATE TABLE IF NOT EXISTS public.field_ai_report_runs (
 -- snapshot is not authoritative under concurrency (two taps can both read "none in flight" before either
 -- commits). The route catches the resulting unique violation and hands back the run already in flight, so a
 -- double-tap polls the first run instead of erroring.
--- It also carries the only non-primary-key reads the feature performs. Two of those — the enqueue quota
--- count and the stale-run sweep — filter on requested_by + status WITHOUT a deal_id, so they cannot use this
--- index for a direct lookup. They do not need one: the index is PARTIAL, so it holds only queued/running
--- rows (bounded by users x MAX_IN_FLIGHT_RUNS_PER_USER) even as the table accumulates every terminal run
--- ever made, and scanning that is trivial. A requested_by-led index was considered and rejected on the same
--- grounds a (deal_id, created_at) index was dropped before merge: a B-tree maintenance write on every insert
--- and every status transition, to serve a scan that is already measured in dozens of rows.
+-- It also carries the in-flight reads the feature performs. The concurrent-run check and the stale-run sweep
+-- filter on requested_by + status WITHOUT a deal_id, so they cannot use this index for a direct lookup. They
+-- do not need one: the index is PARTIAL, so it holds only queued/running rows (bounded by
+-- users x MAX_IN_FLIGHT_RUNS_PER_USER) even as the table accumulates every terminal run ever made.
 CREATE UNIQUE INDEX IF NOT EXISTS field_ai_report_runs_inflight_uidx
   ON public.field_ai_report_runs (deal_id, requested_by)
   WHERE status IN ('queued', 'running');
+
+-- The rolling daily cap is the one read the partial index above CANNOT serve, and the reason this table
+-- needs a second index at all. It counts a user's runs in the last 24 hours across EVERY status, so it walks
+-- terminal rows — and this ledger is never pruned, so that set grows without bound for the life of the
+-- install. Unindexed it degrades from trivial to a full scan of one user's entire history, inside the
+-- enqueue transaction that already holds an advisory lock and runs under a 30-second statement timeout:
+-- starting a report would get slower every week and eventually just fail.
+-- created_at DESC so the 24-hour window is a leading-edge range scan rather than a walk to the tail.
+CREATE INDEX IF NOT EXISTS field_ai_report_runs_requester_recent_idx
+  ON public.field_ai_report_runs (requested_by, created_at DESC);

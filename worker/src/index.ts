@@ -35,14 +35,6 @@ import { runBidBoardIngestInboxRecovery } from "./jobs/bid-board-ingest.js";
 import { runCorrectiveActionUploadJanitor } from "./jobs/corrective-action-upload-janitor.js";
 
 const POLL_INTERVAL_MS = 2000; // Poll job queue every 2 seconds
-/**
- * How often to re-run the stale-'processing' sweep.
- *
- * Comfortably longer than the 5-minute threshold it tests, because it exists to catch rows that CROSS that
- * threshold after startup — not to shorten it. A minute of extra latency on an already-crashed delivery is
- * irrelevant; running it every poll tick would be one pointless UPDATE per two seconds forever.
- */
-const STALE_JOB_SWEEP_INTERVAL_MS = 60_000;
 const RFP_DEAD_LETTER_SWEEP_INTERVAL_MS = 60000;
 const CALL_RECORDING_TRANSCRIPTION_INTERVAL_MS = parseInt(
   process.env.CALL_RECORDING_TRANSCRIPTION_INTERVAL_MS || "60000",
@@ -86,21 +78,12 @@ async function main() {
   setInterval(pollAiReportJobs, POLL_INTERVAL_MS);
   console.log(`[Worker] Polling ai_report_generation queue every ${POLL_INTERVAL_MS}ms (dedicated)`);
 
-  // recoverStaleJobs on its OWN interval, not only at startup. A row that was 'processing' for less than
-  // five minutes when the worker died does not match the startup sweep, and every poller selects only
-  // 'pending' rows — so nothing ever revisits it once it crosses the threshold a moment later. The delivery
-  // and, for an AI report, its run row both sit in limbo until some unrelated enqueue happens to reap them.
-  // Cheap: one indexed UPDATE that normally matches nothing.
-  setInterval(async () => {
-    try {
-      await recoverStaleJobs();
-    } catch (error) {
-      // Never let a sweep failure take the worker down — the next tick tries again.
-      console.error("[Worker] Periodic stale-job recovery failed:", error);
-    }
-  }, STALE_JOB_SWEEP_INTERVAL_MS);
-  console.log(`[Worker] Sweeping stale processing jobs every ${STALE_JOB_SWEEP_INTERVAL_MS}ms`);
-
+  // NOTE: recoverStaleJobs stays STARTUP-ONLY, deliberately. It requeues any row that has been 'processing'
+  // for five minutes, and nothing renews that timestamp while a handler runs, so on a timer it cannot tell a
+  // crashed delivery from a live one — it would reclaim long-running jobs mid-flight and hand a second worker
+  // the same work. An AI report alone may legitimately run 15 minutes (MAX_TOTAL_DEADLINE_MS), which would
+  // mean a second paid Claude vision pass over the same sixty photographs. Abandoned AI runs are already
+  // reaped by the queue-aware sweep in ai-report-runs.ts, so nothing here needs a timer.
   setInterval(async () => {
     try {
       const handled = await runRfpRequestDeadLetterSweep();
