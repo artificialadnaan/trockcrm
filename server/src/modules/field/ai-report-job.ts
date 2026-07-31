@@ -6,7 +6,7 @@ import { FIELD_APP_ALLOWED_ROLE_SET } from "./field-app-roles.js";
 import { getOfficeAccess } from "../auth/service.js";
 import { deleteObject } from "../../lib/r2-client.js";
 import { buildDealPhotoTimelineConditions } from "../files/photo-timeline-filters.js";
-import { getFieldOfficeById, runInOfficeTransaction } from "./cross-office.js";
+import { getFieldOfficeById, isFieldCrossOfficeWritesEnabled, runInOfficeTransaction } from "./cross-office.js";
 import { assertActiveFieldProject } from "./projects-service.js";
 import {
   prepareFieldPhotoReport,
@@ -220,15 +220,22 @@ export async function runFieldAiReportJob(
         currentSlug: office.slug,
       });
     }
-    // Re-apply the OFFICE authorization, not just the account's. requireFieldContractor validates access to
-    // the requested office through getOfficeAccess at enqueue time, and this run writes into run.officeId —
-    // but a secondary-office grant can be revoked, or the user moved to a different primary office, while
-    // the run sits queued behind the serial poller. loadRequester's checks are global to the account, and
-    // nothing downstream re-checks the office (runInOfficeTransaction selects the schema; it does not
-    // authorize), so without this a revoked user still files a report into an office they can no longer
-    // write to. The canonical rule is reused rather than restated, so the two cannot drift. Not retryable:
-    // a revocation does not undo itself.
-    if (!(await getOfficeAccess(requester.id, run.officeId)).hasAccess) {
+    // Re-apply the OFFICE authorization the ENQUEUE used — which is deliberately NOT the same rule in both
+    // modes, so this has to follow the flag rather than always demanding a grant.
+    //
+    // Cross-office writes OFF: the write office is the uploader's ACTIVE office, and requireFieldContractor
+    // authorized it through getOfficeAccess. That grant can be revoked (or the user moved to a different
+    // primary office) while the run sits queued behind the serial poller, and nothing downstream re-checks
+    // it — runInOfficeTransaction selects the schema, it does not authorize — so a revoked user would still
+    // file a report into an office they can no longer write to.
+    //
+    // Cross-office writes ON: the write office is the DEAL's owning office, resolved from the database, and
+    // no per-user grant was ever required. Demanding one here would reject runs the enqueue deliberately
+    // accepted — and only after the user had already been told 202. The gate in that mode is the account
+    // checks above plus assertActiveFieldProject, which runs at both ends of the job.
+    //
+    // Not retryable either way: a revocation does not undo itself.
+    if (!isFieldCrossOfficeWritesEnabled() && !(await getOfficeAccess(requester.id, run.officeId)).hasAccess) {
       throw new AiReportError("You no longer have access to the office this report belongs to.", false);
     }
 

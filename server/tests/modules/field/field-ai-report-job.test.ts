@@ -367,6 +367,26 @@ describe("runFieldAiReportJob", () => {
     );
   });
 
+  it("still runs a cross-office report when the writes flag is ON and no grant exists", async () => {
+    // With the flag ON the enqueue resolves the DEAL's owning office and never asks for a user_office_access
+    // grant — so demanding one here would fail runs that were deliberately accepted, and only after the user
+    // had already been told 202. The gate in that mode is the account checks plus assertActiveFieldProject.
+    const previous = process.env.FIELD_CROSS_OFFICE_WRITES_ENABLED;
+    process.env.FIELD_CROSS_OFFICE_WRITES_ENABLED = "true";
+    authMocks.getOfficeAccess.mockResolvedValue({ hasAccess: false });
+    try {
+      const result = await runFieldAiReportJob({ runId: "run-1" });
+
+      expect(result).toEqual({ claimed: true, fileId: "file-1" });
+      expect(aiMocks.generateAiPhotoAssessment).toHaveBeenCalled();
+      // The grant is not even consulted in this mode.
+      expect(authMocks.getOfficeAccess).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) delete process.env.FIELD_CROSS_OFFICE_WRITES_ENABLED;
+      else process.env.FIELD_CROSS_OFFICE_WRITES_ENABLED = previous;
+    }
+  });
+
   it("refuses to run for a requester whose role is outside the field-app set", async () => {
     // A backstop rather than a live path: every currently assignable role is field-app allowed, but the
     // column is not constrained to that enum and the list could narrow.
