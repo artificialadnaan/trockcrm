@@ -33,15 +33,15 @@ function photo(i: number): ReportRenderSection["photos"][number] {
 }
 
 describe("renderFieldPhotoReportPdf page count", () => {
-  it("a single section of 4 photos is COVER + two photo pages — no divider, no trailing blank pages", async () => {
+  it("a single section of 4 photos is COVER + one photo page — no divider, no trailing blank pages", async () => {
     const buffer = await renderFieldPhotoReportPdf({
       cover,
       sections: [{ title: "Doors", photos: [photo(1), photo(2), photo(3), photo(4)] }],
     });
-    // Image-forward layout packs 3 photos per page (bigger images), so 4 photos = 2 photo pages + cover.
-    // Previously this produced ~12 pages (footer text spilled onto auto-created blank pages); the guard is
-    // that there are NO trailing blank pages, not the exact per-page count.
-    expect(countPdfPages(buffer)).toBe(3);
+    // Four fixed-size tiles fit one page, so 4 photos = 1 photo page + cover. Previously this produced ~12
+    // pages (footer text spilled onto auto-created blank pages); the guard is that there are NO trailing
+    // blank pages, not the exact per-page count.
+    expect(countPdfPages(buffer)).toBe(2);
   });
 
   it("preserves a single-section custom title compactly without adding a divider page", async () => {
@@ -60,8 +60,8 @@ describe("renderFieldPhotoReportPdf page count", () => {
       cover: { ...cover, projectName: longName },
       sections: [{ title: "Doors", photos: [photo(1), photo(2), photo(3), photo(4)] }],
     });
-    // No-wrap + ellipsis footer text keeps it at cover + two photo pages (3 photos/page) — no spill pages.
-    expect(countPdfPages(buffer)).toBe(3);
+    // No-wrap + ellipsis footer text keeps it at cover + one photo page (4 photos/page) — no spill pages.
+    expect(countPdfPages(buffer)).toBe(2);
   });
 
   it("keeps a divider page per section when there are multiple sections", async () => {
@@ -92,9 +92,9 @@ describe("renderFieldPhotoReportPdf page count", () => {
       cover: { ...cover, projectName: longName },
       sections: [{ title: "Untagged", photos }],
     });
-    // 4 photos at 3/page = cover + 2 photo pages; single-line ellipsised metadata + height-capped
-    // descriptions keep the third-row caption inside its row, so no footer-overlap blank page appears.
-    expect(countPdfPages(buffer)).toBe(3);
+    // 4 photos at 4/page = cover + 1 photo page; single-line ellipsised metadata + a height-capped
+    // description keep the LAST row's caption inside its tile, so no footer-overlap blank page appears.
+    expect(countPdfPages(buffer)).toBe(2);
   });
 
   it("caps a very long report title on the cover — no overflow page", async () => {
