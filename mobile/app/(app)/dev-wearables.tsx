@@ -86,6 +86,13 @@ function Diagnostic() {
   // Registration therefore never finished: deviceCount stayed 0 and every rung from 6 down
   // failed with "No eligible device available" — an error that names the glasses when the real
   // culprit was this missing line.
+  //
+  // This only covers a WARM return (app stayed alive while Meta AI was in front). A COLD return
+  // — iOS terminated the app during the handoff — delivers the same URL as the app's *initial*
+  // route instead of an event here, and that route is not this screen, so an effect scoped to
+  // this screen would never mount to receive it. That case is handled once, unconditionally, in
+  // the root layout (app/_layout.tsx) instead. This effect intentionally does not duplicate
+  // Linking.getInitialURL() — that would call handleUrl() twice for the same launch.
   useEffect(() => {
     const handle = (url: string) => {
       setCallback(url);
@@ -93,10 +100,6 @@ function Diagnostic() {
         .then((r) => setCallback(`${url}\nhandled: ${r.handled}`))
         .catch((e) => setCallback(`${url}\n${String(e)}`));
     };
-    // A cold launch from the callback delivers the URL here instead of as an event.
-    void Linking.getInitialURL().then((url) => {
-      if (url) handle(url);
-    });
     const sub = Linking.addEventListener("url", ({ url }) => handle(url));
     return () => sub.remove();
   }, []);
