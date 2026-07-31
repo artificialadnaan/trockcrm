@@ -287,7 +287,31 @@ describe("ReportBuilder AI report", () => {
     await act(async () => { fireEvent.press(ui.getByText("Back")); });
     await act(async () => { fireEvent.press(ui.getByText("Cancel")); });
 
+    // Named, not just signalled: only the run itself says whether THIS report landed.
     expect(props.onLeftRunning).toHaveBeenCalledTimes(1);
+    expect(props.onLeftRunning).toHaveBeenCalledWith("run-1");
+  });
+
+  it("hands off a run that was enqueued after the sheet had already closed", async () => {
+    // Closing DURING the enqueue: reset() runs while no run id exists yet, so it has nothing to hand off —
+    // but the server still commits a run. Without a hand-off at the response, a real generation is left with
+    // neither the foreground loop nor the background watcher following it.
+    let release: (v: unknown) => void = () => {};
+    mockStartAiReport.mockImplementationOnce(
+      () => new Promise((resolve) => { release = resolve; }),
+    );
+
+    const { ui, props } = renderBuilder();
+    await openFocusStep(ui);
+    await pressGenerate(ui);
+    await waitFor(() => expect(mockStartAiReport).toHaveBeenCalled());
+
+    await act(async () => { fireEvent.press(ui.getByText("Back")); });
+    await act(async () => { fireEvent.press(ui.getByText("Cancel")); });
+    // The enqueue only now comes back, with a run the server has committed.
+    await act(async () => { release({ runId: "run-late" }); });
+
+    expect(props.onLeftRunning).toHaveBeenCalledWith("run-late");
   });
 
   it("does NOT hand off a generation that already finished", async () => {

@@ -6,7 +6,7 @@ import { theme } from "../../../src/theme/theme";
 import { useQuery } from "@tanstack/react-query";
 import { useProjectPhotos, useProjectReports, useProjectScorecards } from "../../../src/query/hooks";
 import { useAuth } from "../../../src/auth/AuthContext";
-import { getReportDownload, getTranscriptionConfig } from "../../../src/api/endpoints";
+import { getAiReportStatus, getReportDownload, getTranscriptionConfig } from "../../../src/api/endpoints";
 import {
   categoryLabel,
   correctiveAffordance,
@@ -43,11 +43,11 @@ const GROUPINGS: { value: PhotoGrouping; label: string }[] = [
 ];
 
 /**
- * How the screen waits for a report the builder stopped watching.
+ * How the screen follows a run the builder stopped watching.
  *
- * The interval is slow on purpose — this is a background courtesy, not the foreground poll, and it re-reads
- * a list rather than a status row. The window comfortably outlasts the server's own total deadline, so a run
- * that is going to file at all has filed by the time it closes.
+ * The interval is slow on purpose — this is a background courtesy, not the foreground poll. The window
+ * comfortably outlasts the server's own total deadline, so a run that is going to file at all has filed by
+ * the time it closes.
  */
 const AWAIT_REPORT_POLL_MS = 10_000;
 const AWAIT_REPORT_WINDOW_MS = 10 * 60_000;
@@ -104,8 +104,8 @@ export default function ProjectDetailScreen() {
   // filter change can never desync the viewer onto a different photo.
   const [viewer, setViewer] = useState<{ photos: FieldPhoto[]; index: number } | null>(null);
   const [reportOpen, setReportOpen] = useState(false);
-  // Set when the builder hands back a generation it stopped waiting on — see the effect below.
-  const [awaitingReportSince, setAwaitingReportSince] = useState<number | null>(null);
+  // The run id the builder handed back when it stopped waiting on a generation — see the effect below.
+  const [backgroundRunId, setBackgroundRunId] = useState<string | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
   const [notice, setNotice] = useState<{ message: string; tone: "success" | "error" } | null>(null);
 
@@ -165,25 +165,52 @@ export default function ProjectDetailScreen() {
   // no polling interval and refreshes only from onGenerated or a manual pull, so "the report will appear in
   // this project's reports when it finishes" held only if the user happened to pull to refresh.
   //
-  // The LIST is polled rather than the run: its arrival is the only thing this screen cares about, and that
-  // needs no run id. Bounded by a window so an abandoned or failed run can't leave a timer running forever.
-  // reportsQuery is deliberately not a dependency — it changes identity on every fetch and would restart the
-  // interval each time; the count is snapshotted when the wait begins.
+  // The RUN is followed, not the report count. A count only says "some report arrived", so an unrelated
+  // report filed against this project in the meantime would end the watch on the wrong event — and the
+  // refetch that ended it would not yet contain the AI report. Only the run says whether THIS one landed.
+  // Bounded by a window so an abandoned run cannot leave a timer going indefinitely.
+  // reportsQuery/fetcher are deliberately not dependencies: they change identity on every fetch and would
+  // restart the poll each time.
   useEffect(() => {
-    if (awaitingReportSince === null) return;
-    const countAtHandoff = (reportsQuery.data?.reports ?? []).length;
-    const timer = setInterval(() => {
-      if (Date.now() - awaitingReportSince > AWAIT_REPORT_WINDOW_MS) {
-        setAwaitingReportSince(null);
+    if (!backgroundRunId) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const startedAt = Date.now();
+
+    const check = async () => {
+      if (cancelled) return;
+      try {
+        const status = await getAiReportStatus(fetcher, backgroundRunId);
+        if (cancelled) return;
+        if (status.status === "succeeded") {
+          setBackgroundRunId(null);
+          void reportsQuery.refetch();
+          setNotice({ message: "Your AI report is ready.", tone: "success" });
+          return;
+        }
+        if (status.status === "failed") {
+          setBackgroundRunId(null);
+          setNotice({ message: status.error || "The AI report could not be generated.", tone: "error" });
+          return;
+        }
+      } catch {
+        // A dropped poll on jobsite LTE is not a verdict — keep waiting until the window closes.
+      }
+      if (cancelled) return;
+      if (Date.now() - startedAt > AWAIT_REPORT_WINDOW_MS) {
+        setBackgroundRunId(null);
         return;
       }
-      void reportsQuery.refetch().then((result) => {
-        if ((result.data?.reports ?? []).length > countAtHandoff) setAwaitingReportSince(null);
-      });
-    }, AWAIT_REPORT_POLL_MS);
-    return () => clearInterval(timer);
+      timer = setTimeout(check, AWAIT_REPORT_POLL_MS);
+    };
+
+    timer = setTimeout(check, AWAIT_REPORT_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [awaitingReportSince]);
+  }, [backgroundRunId]);
 
   const refreshing = photosQuery.isRefetching || reportsQuery.isRefetching || scorecardsQuery.isRefetching;
 
@@ -533,7 +560,7 @@ export default function ProjectDetailScreen() {
           void reportsQuery.refetch();
           if (report.pdfUrl) void Linking.openURL(report.pdfUrl);
         }}
-        onLeftRunning={() => setAwaitingReportSince(Date.now())}
+        onLeftRunning={(runId) => setBackgroundRunId(runId)}
       />
 
       <PhotoShareModal
