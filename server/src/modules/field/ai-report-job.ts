@@ -3,6 +3,7 @@ import { files } from "@trock-crm/shared/schema";
 import type { UserRole } from "@trock-crm/shared/types";
 import { pool } from "../../db.js";
 import { FIELD_APP_ALLOWED_ROLE_SET } from "./field-app-roles.js";
+import { getOfficeAccess } from "../auth/service.js";
 import { deleteObject } from "../../lib/r2-client.js";
 import { buildDealPhotoTimelineConditions } from "../files/photo-timeline-filters.js";
 import { getFieldOfficeById, runInOfficeTransaction } from "./cross-office.js";
@@ -219,6 +220,18 @@ export async function runFieldAiReportJob(
         currentSlug: office.slug,
       });
     }
+    // Re-apply the OFFICE authorization, not just the account's. requireFieldContractor validates access to
+    // the requested office through getOfficeAccess at enqueue time, and this run writes into run.officeId —
+    // but a secondary-office grant can be revoked, or the user moved to a different primary office, while
+    // the run sits queued behind the serial poller. loadRequester's checks are global to the account, and
+    // nothing downstream re-checks the office (runInOfficeTransaction selects the schema; it does not
+    // authorize), so without this a revoked user still files a report into an office they can no longer
+    // write to. The canonical rule is reused rather than restated, so the two cannot drift. Not retryable:
+    // a revocation does not undo itself.
+    if (!(await getOfficeAccess(requester.id, run.officeId)).hasAccess) {
+      throw new AiReportError("You no longer have access to the office this report belongs to.", false);
+    }
+
     const access = { userId: requester.id, userRole: requester.role };
 
     // ── Phase A: short transaction — project + photo rows ────────────────────────────────────────

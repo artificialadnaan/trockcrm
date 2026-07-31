@@ -52,6 +52,11 @@ vi.mock("../../../src/modules/field/projects-service.js", async (importOriginal)
 
 // Phase E deletes the uploaded object when its re-validation rejects the report, so the delete has to be
 // observable. Everything else in r2-client stays real — pdf-layout reads from it during a real render.
+// The job re-applies the office authorization the enqueue middleware performed, so the canonical check has
+// to be observable. Only getOfficeAccess is imported from this module.
+const authMocks = vi.hoisted(() => ({ getOfficeAccess: vi.fn(async () => ({ hasAccess: true })) }));
+vi.mock("../../../src/modules/auth/service.js", () => authMocks);
+
 const r2Mocks = vi.hoisted(() => ({ deleteObject: vi.fn(async () => undefined) }));
 vi.mock("../../../src/lib/r2-client.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../src/lib/r2-client.js")>()),
@@ -133,6 +138,7 @@ beforeEach(() => {
   runMocks.markAiReportRunRunning.mockResolvedValue(true);
   // clearAllMocks wipes recorded calls but NOT implementations, so anything a test overrides below has to be
   // restored here or it silently leaks into the next one.
+  authMocks.getOfficeAccess.mockResolvedValue({ hasAccess: true });
   runMocks.markAiReportRunFailed.mockResolvedValue(undefined);
   runMocks.markAiReportRunSucceeded.mockResolvedValue(undefined);
   runMocks.touchAiReportRunLease.mockImplementation(async () => {
@@ -339,6 +345,25 @@ describe("runFieldAiReportJob", () => {
     expect(reportMocks.recordFieldPhotoReportFile).not.toHaveBeenCalled();
     // The phone still gets a terminal reason rather than a run that hangs.
     expect(runMocks.markAiReportRunFailed).toHaveBeenCalledWith("run-1", expect.stringMatching(/no longer has access/i), null);
+  });
+
+  it("refuses to run when access to the run's OFFICE was revoked while it sat queued", async () => {
+    // The account can still be perfectly valid — active, right role — while the secondary-office grant that
+    // allowed this run is gone. Nothing downstream re-checks it: runInOfficeTransaction selects the schema,
+    // it does not authorize, so the report would be filed into an office the user can no longer write to.
+    authMocks.getOfficeAccess.mockResolvedValue({ hasAccess: false });
+
+    await runFieldAiReportJob({ runId: "run-1" });
+
+    // Checked against the RUN's office, not the requester's current one.
+    expect(authMocks.getOfficeAccess).toHaveBeenCalledWith("user-1", "office-1");
+    expect(aiMocks.generateAiPhotoAssessment).not.toHaveBeenCalled();
+    expect(reportMocks.recordFieldPhotoReportFile).not.toHaveBeenCalled();
+    expect(runMocks.markAiReportRunFailed).toHaveBeenCalledWith(
+      "run-1",
+      expect.stringMatching(/no longer have access to the office/i),
+      null,
+    );
   });
 
   it("refuses to run for a requester whose role is outside the field-app set", async () => {
