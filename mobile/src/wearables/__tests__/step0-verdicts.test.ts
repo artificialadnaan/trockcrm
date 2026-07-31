@@ -114,4 +114,73 @@ describe("describePhoneCameraCheck", () => {
     expect(result.outcome).toBe("fail");
     expect(result.summary).toContain("8000");
   });
+
+  // The rate can collapse to narrowband for exactly the window the photo was open, on the same
+  // HFP port, then recover. The "recovered" branch's own principle — a mid-check gap is still
+  // the evidence being tested for — applies identically to a rate dip as to a port dip.
+  it("fails when the rate drops during the photo on the same port and recovers after", () => {
+    const narrowband: RouteSnapshot = { ...hfp, sampleRate: 8000 };
+    const result = describePhoneCameraCheck({ before: hfp, during: narrowband, after: hfp });
+    expect(result.outcome).toBe("fail");
+    expect(result.summary).toContain("8000");
+  });
+
+  // A narrowband baseline makes the rate dimension unmeasurable: this run cannot say whether the
+  // camera degrades the rate, since the pairing was already narrowband before the camera opened.
+  it("is inconclusive when the baseline itself was already narrowband", () => {
+    const narrowband: RouteSnapshot = { ...hfp, sampleRate: 8000 };
+    const result = describePhoneCameraCheck({
+      before: narrowband,
+      during: narrowband,
+      after: narrowband,
+    });
+    expect(result.outcome).toBe("inconclusive");
+  });
+
+  // The baseline-narrowband inconclusive fires on `before` alone — not because during/after also
+  // happen to be narrowband. A pairing that never proved it can do wideband is unmeasurable even
+  // if this particular run reads clean throughout.
+  it("is inconclusive on a narrowband baseline even when during and after read wideband", () => {
+    const narrowband: RouteSnapshot = { ...hfp, sampleRate: 8000 };
+    const result = describePhoneCameraCheck({ before: narrowband, during: hfp, after: hfp });
+    expect(result.outcome).toBe("inconclusive");
+  });
+
+  // A genuine route loss is conclusive regardless of what rate the baseline started at — it must
+  // not be masked by the narrowband-baseline inconclusive check.
+  it("still fails on route loss even when the baseline was narrowband", () => {
+    const narrowband: RouteSnapshot = { ...hfp, sampleRate: 8000 };
+    const result = describePhoneCameraCheck({ before: narrowband, during: builtIn, after: builtIn });
+    expect(result.outcome).toBe("fail");
+  });
+
+  // A route lost entirely during the photo and recovered only to a narrowband rate afterward is
+  // not a real recovery. The summary must not claim "recovered" for a still-degraded result.
+  it("does not claim recovery when the route is lost during and comes back narrowband", () => {
+    const narrowbandAfter: RouteSnapshot = { ...hfp, sampleRate: 8000 };
+    const result = describePhoneCameraCheck({ before: hfp, during: builtIn, after: narrowbandAfter });
+    expect(result.outcome).toBe("fail");
+    expect(result.summary).not.toContain("recovered");
+    expect(result.summary).toContain("8000");
+  });
+
+  // The route can be present but narrowband during the photo, then lost entirely once the camera
+  // closes. The summary should surface during's degraded rate rather than implying it was fine.
+  it("surfaces the degraded during-rate when the route is then lost after the camera closes", () => {
+    const narrowbandDuring: RouteSnapshot = { ...hfp, sampleRate: 8000 };
+    const result = describePhoneCameraCheck({ before: hfp, during: narrowbandDuring, after: builtIn });
+    expect(result.outcome).toBe("fail");
+    expect(result.summary).toContain("8000");
+    expect(result.summary).toContain("lost once it closed");
+  });
+
+  // If the rate drops during the photo and never comes back — still narrowband afterward too —
+  // the summary must say so plainly rather than reusing "recovered" wording.
+  it("reports no recovery when the rate is narrowband both during and after", () => {
+    const duringNarrow: RouteSnapshot = { ...hfp, sampleRate: 8000 };
+    const afterNarrow: RouteSnapshot = { ...hfp, sampleRate: 9000 };
+    const result = describePhoneCameraCheck({ before: hfp, during: duringNarrow, after: afterNarrow });
+    expect(result.outcome).toBe("fail");
+    expect(result.summary).toContain("never recovered");
+  });
 });
