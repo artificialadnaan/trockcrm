@@ -59,6 +59,23 @@ describe("isPrivateAddress", () => {
     }
   });
 
+  it("rejects private IPv6 in the forms new URL() actually produces", () => {
+    // The address that reaches the check is the CANONICALISED one, not what was written:
+    // [::ffff:127.0.0.1] arrives as ::ffff:7f00:1, which no dotted-decimal pattern matches. And prefix
+    // matching is the wrong shape — fe80::/10 runs to febf, so fe90::1 is link-local without the "fe80".
+    for (const ip of [
+      "::ffff:7f00:1",   // ::ffff:127.0.0.1, canonicalised to hex
+      "::ffff:a00:1",    // ::ffff:10.0.0.1
+      "::ffff:c0a8:101", // ::ffff:192.168.1.1
+      "::ffff:a9fe:a9fe", // ::ffff:169.254.169.254 — the metadata endpoint
+      "fe90::1", "feaf::1", "febf::1", // all inside fe80::/10
+      "fec0::1", "fcff::1", "fd12:3456::1", "ff02::1",
+      "0:0:0:0:0:0:0:1", // fully expanded loopback
+    ]) {
+      expect(isPrivateAddress(ip), ip).toBe(true);
+    }
+  });
+
   it("lets ordinary public addresses through", () => {
     for (const ip of ["93.184.216.34", "8.8.8.8", "172.15.0.1", "172.32.0.1", "2606:2800:220:1::1"]) {
       expect(isPrivateAddress(ip), ip).toBe(false);
@@ -173,6 +190,32 @@ describe("fetchBoundedExternalImage", () => {
       body: { getReader: () => ({ read: async () => { throw new Error("ECONNRESET"); }, cancel: async () => undefined }) },
     } as unknown as Response;
     expect((await fetchBoundedExternalImage(PUBLIC_HOST, CAP, (async () => response) as never)).status).toBe("unavailable");
+  });
+
+  it("refuses an oversized data: url, and never hands it to fetch", async () => {
+    // NOTE on what this does and does not prove. The refusal is asserted here; the ENCODED-length pre-check
+    // that makes it happen before `Buffer.from` allocates anything is a memory property, and the outcome is
+    // identical either way — so no assertion can distinguish it. What IS observable, and is the other half
+    // of the fix, is that the payload never reaches fetch: fetch must materialise the entire inline value
+    // to build a Response, which is the allocation the cap exists to prevent.
+    const fetchImpl = vi.fn();
+    const oversized = `data:image/jpeg;base64,${"A".repeat(CAP * 2)}`;
+    expect((await fetchBoundedExternalImage(oversized, CAP, fetchImpl as never)).status).toBe("unusable");
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("still reads a data: url that fits", async () => {
+    const fetchImpl = vi.fn();
+    const payload = Buffer.from("tiny-image-bytes");
+    const result = await fetchBoundedExternalImage(
+      `data:image/png;base64,${payload.toString("base64")}`,
+      CAP,
+      fetchImpl as never,
+    );
+    expect(result.status).toBe("ok");
+    expect(result.status === "ok" && result.image.buffer.toString()).toBe("tiny-image-bytes");
+    expect(result.status === "ok" && result.image.contentType).toBe("image/png");
+    expect(fetchImpl).not.toHaveBeenCalled(); // decoded directly, never round-tripped through fetch
   });
 
   it("returns unusable for a missing url rather than making a request", async () => {

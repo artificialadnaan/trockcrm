@@ -55,25 +55,68 @@ export type ExternalImageResult =
 const UNUSABLE = { status: "unusable" } as const;
 const UNAVAILABLE = { status: "unavailable" } as const;
 
+function isPrivateIpv4(ip: string): boolean {
+  const [a, b] = ip.split(".").map(Number);
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 169 && b === 254) return true; // link-local, incl. the cloud metadata endpoint
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+  if (a >= 224) return true; // multicast + reserved
+  return false;
+}
+
+/**
+ * Expand an IPv6 address to its eight 16-bit groups.
+ *
+ * Ranges have to be compared NUMERICALLY, not by string prefix. `new URL()` canonicalises, so the address
+ * that actually reaches this function is often not the one that was written: `[::ffff:127.0.0.1]` arrives
+ * as `::ffff:7f00:1`, which no dotted-decimal pattern matches. And a prefix test is the wrong shape anyway
+ * — `fe80::/10` covers fe80 through febf, so `fe90::1` is link-local while not starting with "fe80".
+ */
+function ipv6Groups(address: string): number[] | null {
+  let addr = address.split("%")[0].toLowerCase(); // drop any zone id
+  // A trailing dotted-quad (::ffff:127.0.0.1) becomes two hex groups so one code path handles both forms.
+  const embedded = /^(.*:)(\d{1,3}(?:\.\d{1,3}){3})$/.exec(addr);
+  if (embedded) {
+    const octets = embedded[2].split(".").map(Number);
+    if (octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+    addr = `${embedded[1]}${(((octets[0] << 8) | octets[1]) >>> 0).toString(16)}:${(((octets[2] << 8) | octets[3]) >>> 0).toString(16)}`;
+  }
+
+  const halves = addr.split("::");
+  if (halves.length > 2) return null;
+  const left = halves[0] ? halves[0].split(":").filter(Boolean) : [];
+  const right = halves.length === 2 && halves[1] ? halves[1].split(":").filter(Boolean) : [];
+  if (halves.length === 1 && left.length !== 8) return null;
+  const missing = 8 - left.length - right.length;
+  if (missing < 0) return null;
+  const parts = halves.length === 2 ? [...left, ...Array(missing).fill("0"), ...right] : left;
+  if (parts.length !== 8) return null;
+
+  const groups = parts.map((part) => parseInt(part, 16));
+  return groups.some((group) => !Number.isFinite(group) || group < 0 || group > 0xffff) ? null : groups;
+}
+
 /** Loopback, link-local, RFC1918, CGNAT, multicast/reserved — anything not routable on the public internet. */
 export function isPrivateAddress(ip: string): boolean {
-  if (net.isIPv4(ip)) {
-    const [a, b] = ip.split(".").map(Number);
-    if (a === 0 || a === 10 || a === 127) return true;
-    if (a === 169 && b === 254) return true; // link-local, incl. the cloud metadata endpoint
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
-    if (a >= 224) return true; // multicast + reserved
-    return false;
-  }
+  if (net.isIPv4(ip)) return isPrivateIpv4(ip);
   if (net.isIPv6(ip)) {
-    const address = ip.toLowerCase();
-    if (address === "::1" || address === "::") return true;
-    if (address.startsWith("fc") || address.startsWith("fd")) return true; // unique-local
-    if (address.startsWith("fe80")) return true; // link-local
-    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(address);
-    if (mapped) return isPrivateAddress(mapped[1]);
+    const groups = ipv6Groups(ip);
+    if (!groups) return true; // could not be parsed — refuse rather than guess
+    if (groups.every((group) => group === 0)) return true; // ::
+    if (groups.slice(0, 7).every((group) => group === 0) && groups[7] === 1) return true; // ::1
+    // IPv4-mapped (::ffff:0:0/96) and IPv4-compatible: judge the address they actually carry.
+    const mappedPrefix = groups.slice(0, 5).every((group) => group === 0);
+    if (mappedPrefix && (groups[5] === 0xffff || groups[5] === 0)) {
+      const [g6, g7] = [groups[6], groups[7]];
+      return isPrivateIpv4(`${g6 >> 8}.${g6 & 0xff}.${g7 >> 8}.${g7 & 0xff}`);
+    }
+    const first = groups[0];
+    if ((first & 0xfe00) === 0xfc00) return true; // fc00::/7  unique-local
+    if ((first & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
+    if ((first & 0xffc0) === 0xfec0) return true; // fec0::/10 site-local (deprecated, still routable inside)
+    if ((first & 0xff00) === 0xff00) return true; // ff00::/8  multicast
     return false;
   }
   return true; // unparseable — refuse rather than guess
@@ -143,6 +186,35 @@ async function readBounded(response: Response, maxBytes: number): Promise<Buffer
   return Buffer.concat(chunks, total);
 }
 
+/**
+ * Decode a `data:image/...` URL, refusing an oversized one from its ENCODED length first.
+ *
+ * base64 carries 3 bytes per 4 characters, so the encoded length is a hard upper bound on the decoded
+ * length — which means the oversize can be rejected without allocating the image at all. A percent-encoded
+ * payload is likewise never shorter than what it decodes to.
+ */
+function decodeBoundedDataUrl(url: string, maxBytes: number): ExternalImageResult {
+  const comma = url.indexOf(",");
+  if (comma < 0) return UNUSABLE;
+  const meta = url.slice(5, comma); // between "data:" and the comma
+  const payload = url.slice(comma + 1);
+  const isBase64 = /;base64$/i.test(meta);
+  const contentType = meta.split(";")[0] || undefined;
+
+  // Cheap upper bound, checked BEFORE decoding.
+  const maxDecoded = isBase64 ? Math.floor((payload.length * 3) / 4) : payload.length;
+  if (maxDecoded > maxBytes) return UNUSABLE;
+
+  let buffer: Buffer;
+  try {
+    buffer = isBase64 ? Buffer.from(payload, "base64") : Buffer.from(decodeURIComponent(payload), "binary");
+  } catch {
+    return UNUSABLE; // a malformed data: url is permanent, not transient
+  }
+  if (buffer.byteLength === 0 || buffer.byteLength > maxBytes) return UNUSABLE;
+  return { status: "ok", image: { buffer, contentType } };
+}
+
 async function finish(response: Response, maxBytes: number): Promise<ExternalImageResult> {
   if (!response.ok) return isTransientStatus(response.status) ? UNAVAILABLE : UNUSABLE;
 
@@ -169,14 +241,12 @@ export async function fetchBoundedExternalImage(
   // No url at all is not a failure to report — the photo simply has no external copy.
   if (!url) return UNUSABLE;
 
-  // Inline data, already in hand: no network, so none of the destination rules apply.
-  if (url.startsWith("data:image/")) {
-    try {
-      return await finish(await fetchImpl(url, { signal: AbortSignal.timeout(EXTERNAL_FETCH_TIMEOUT_MS) }), maxBytes);
-    } catch {
-      return UNUSABLE; // a malformed data: url is permanent, not transient
-    }
-  }
+  // Inline data: no network, so none of the destination rules apply — but the cap still does. Decoded here
+  // rather than handed to fetch, because fetch has to materialise the ENTIRE payload to build a Response
+  // before anything could stream or measure it; an oversized value in the database would allocate in full
+  // and exhaust the worker despite maxBytes. The encoded length bounds the decoded length, so the oversize
+  // is caught before a single byte is decoded.
+  if (url.startsWith("data:image/")) return decodeBoundedDataUrl(url, maxBytes);
 
   let target = url;
   for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
