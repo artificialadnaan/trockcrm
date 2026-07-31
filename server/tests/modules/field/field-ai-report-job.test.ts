@@ -13,6 +13,7 @@ const runMocks = vi.hoisted(() => ({
   markAiReportRunRunning: vi.fn(async () => true),
   markAiReportRunSucceeded: vi.fn(async () => undefined),
   markAiReportRunFailed: vi.fn(async () => undefined),
+  touchAiReportRunLease: vi.fn(async () => true),
   AI_REPORT_JOB_TYPE: "ai_report_generation",
 }));
 vi.mock("../../../src/modules/field/ai-report-runs.js", () => runMocks);
@@ -41,9 +42,20 @@ vi.mock("../../../src/modules/field/photo-reports-service.js", async (importOrig
   ...reportMocks,
 }));
 
+const projectMocks = vi.hoisted(() => ({
+  assertActiveFieldProject: vi.fn(),
+}));
 vi.mock("../../../src/modules/field/projects-service.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../src/modules/field/projects-service.js")>()),
-  assertActiveFieldProject: vi.fn(async (_db: any, _access: any, id: string) => ({ id, name: "Tides at Park Lane", dealNumber: "D-1" })),
+  ...projectMocks,
+}));
+
+// Phase E deletes the uploaded object when its re-validation rejects the report, so the delete has to be
+// observable. Everything else in r2-client stays real — pdf-layout reads from it during a real render.
+const r2Mocks = vi.hoisted(() => ({ deleteObject: vi.fn(async () => undefined) }));
+vi.mock("../../../src/lib/r2-client.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../src/lib/r2-client.js")>()),
+  ...r2Mocks,
 }));
 
 vi.mock("../../../src/modules/files/photo-timeline-filters.js", () => ({
@@ -106,6 +118,15 @@ beforeEach(() => {
   timeline.events = [];
   runMocks.getAiReportRun.mockResolvedValue(baseRun() as any);
   runMocks.markAiReportRunRunning.mockResolvedValue(true);
+  // clearAllMocks wipes recorded calls but NOT implementations, so anything a test overrides below has to be
+  // restored here or it silently leaks into the next one.
+  runMocks.touchAiReportRunLease.mockImplementation(async () => {
+    timeline.events.push("lease:renew");
+    return true;
+  });
+  projectMocks.assertActiveFieldProject.mockImplementation(
+    async (_db: any, _access: any, id: string) => ({ id, name: "Tides at Park Lane", dealNumber: "D-1" }) as any,
+  );
   poolMocks.query.mockResolvedValue({
     rows: [{ id: "user-1", role: "admin", display_name: "Sam Super", first_name: null, last_name: null, email: "s@t.com" }],
   } as any);
@@ -149,6 +170,7 @@ describe("runFieldAiReportJob", () => {
       "tx:open", "tx:close",        // Phase A — load project + photos
       "model:call",                 // Phase B — Claude, no transaction held
       "tx:open", "prepare", "tx:close", // Phase C — read what the renderer needs
+      "lease:renew",                // the lease is renewed BEFORE the unbounded phase, not after it
       "render+upload",              // Phase D — render + R2, no transaction held
       "tx:open", "record", "tx:close",  // Phase E — write the files row
     ]);
@@ -285,5 +307,68 @@ describe("runFieldAiReportJob", () => {
   it("throws for an unknown run so the queue can retry a lost row", async () => {
     runMocks.getAiReportRun.mockResolvedValue(null as any);
     await expect(runFieldAiReportJob({ runId: "run-404" })).rejects.toThrow(/not found/);
+  });
+
+  it("renews the lease on the run it is actually working", async () => {
+    // started_at doubles as the lease and is stamped once at claim, but only the model call is
+    // deadline-bounded — Phase D is deliberately unbounded. Without a renewal a slow-but-healthy run crosses
+    // the stale window, the user's next enqueue reaps it, and they pay for a replacement while this attempt
+    // is still working. (The ORDER — before the render, not after — is pinned by the phase-split test above.)
+    await runFieldAiReportJob({ runId: "run-1" });
+    expect(runMocks.touchAiReportRunLease).toHaveBeenCalledWith("run-1");
+  });
+
+  it("abandons the attempt when the lease is already lost rather than rendering a duplicate", async () => {
+    runMocks.touchAiReportRunLease.mockImplementation(async () => {
+      timeline.events.push("lease:renew");
+      return false;
+    });
+
+    const result = await runFieldAiReportJob({ runId: "run-1" });
+
+    // The row is terminal and a replacement may already be in flight. Carrying on would upload a second PDF
+    // and commit a second files row for a run the user was told had failed — the exact duplicate the
+    // guarded terminal write can't prevent, because Phase E commits to `files` regardless.
+    expect(result).toEqual({ claimed: true });
+    expect(reportMocks.renderAndStoreFieldPhotoReportPdf).not.toHaveBeenCalled();
+    expect(reportMocks.recordFieldPhotoReportFile).not.toHaveBeenCalled();
+    expect(timeline.events).not.toContain("render+upload");
+    // ...and it must not write a terminal state either: one is already recorded, and 'failed' here would be
+    // reporting a second failure for a run that was reaped, not one that broke.
+    expect(runMocks.markAiReportRunFailed).not.toHaveBeenCalled();
+    expect(runMocks.markAiReportRunSucceeded).not.toHaveBeenCalled();
+  });
+
+  it("deletes the uploaded PDF when the final re-validation rejects the report", async () => {
+    // Phase D uploads BEFORE Phase E validates. recordFieldPhotoReportFile cleans up after its own insert
+    // failure, but a project archived or moved to an excluded stage mid-render throws before the insert is
+    // ever reached — which left an unreferenced object in the bucket on every such run.
+    reportMocks.renderAndStoreFieldPhotoReportPdf.mockImplementation(async () => {
+      timeline.events.push("render+upload");
+      return { r2Key: "office_dallas/deals/D-1/documents/photo-reports/2026-07/report.pdf" } as any;
+    });
+    let seen = 0;
+    projectMocks.assertActiveFieldProject.mockImplementation(async (_db: any, _access: any, id: string) => {
+      seen += 1;
+      // Phase A passes; the Phase E re-check is the one that rejects.
+      if (seen > 1) throw new Error("Project not found");
+      return { id, name: "Tides at Park Lane", dealNumber: "D-1" } as any;
+    });
+
+    await runFieldAiReportJob({ runId: "run-1" });
+
+    expect(r2Mocks.deleteObject).toHaveBeenCalledWith(
+      "office_dallas/deals/D-1/documents/photo-reports/2026-07/report.pdf",
+    );
+    expect(reportMocks.recordFieldPhotoReportFile).not.toHaveBeenCalled();
+    // The run still terminates as a failure the phone can read, not a silent hang.
+    expect(runMocks.markAiReportRunFailed).toHaveBeenCalledWith("run-1", expect.any(String), expect.anything());
+  });
+
+  it("keeps the uploaded PDF when Phase E succeeds", async () => {
+    // The counterweight to the test above: the cleanup must be reachable ONLY on the failure path, or a
+    // perfectly good report loses its object right after it is recorded.
+    await runFieldAiReportJob({ runId: "run-1" });
+    expect(r2Mocks.deleteObject).not.toHaveBeenCalled();
   });
 });

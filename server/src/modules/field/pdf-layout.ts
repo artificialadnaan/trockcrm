@@ -276,6 +276,34 @@ const RENDER_TRANSCODE_MAX_EDGE = 2000;
  */
 const RENDER_TRANSCODE_ABOVE_BYTES = 2 * 1024 * 1024;
 
+/**
+ * Ceiling on an original PDFKit may embed WITHOUT a successful transcode.
+ *
+ * sharp legitimately refuses some images it cannot bound — most often a native JPEG whose decoded raster is
+ * over its pixel limit. Handing the raw original back on that path re-opens the exact bound the transcode
+ * exists to enforce (PDFKit retains every embedded image for the life of the document), so a report full of
+ * rejected originals is unbounded again. A moderately-large native still embeds — better a real photograph
+ * than a placeholder — but past this it renders as "Image unavailable" instead.
+ */
+export const MAX_UNTRANSCODED_EMBED_BYTES = 8 * 1024 * 1024;
+
+/**
+ * What PDFKit gets when the bounded transcode fails.
+ *
+ * Only a native format could embed at all — anything else makes openImage throw and draws the placeholder —
+ * so a non-native buffer is dropped here rather than carried through the renderer just to be rejected. A
+ * native one passes through only while it stays inside the ceiling; past that the memory bound matters more
+ * than the photograph.
+ *
+ * Exported for test on purpose: this decision IS the bound, and exercising it through a full render would
+ * need a genuinely valid multi-megabyte JPEG that sharp also refuses — a fixture that would make the test
+ * slow and, if it were merely random bytes, pass whether or not the bound existed.
+ */
+export function untranscodedFallback(buffer: Buffer, mime: string | null): Buffer | null {
+  const native = mime ? PDFKIT_NATIVE_MIME.test(mime) : false;
+  return native && buffer.byteLength <= MAX_UNTRANSCODED_EMBED_BYTES ? buffer : null;
+}
+
 async function loadPhotoBuffer(
   photo: ReportRenderablePhoto,
   /**
@@ -306,9 +334,8 @@ async function loadPhotoBuffer(
     try {
       return await generateEvidenceJpeg(buffer, mime, { maxEdge: RENDER_TRANSCODE_MAX_EDGE, quality: 82 });
     } catch {
-      // sharp cannot read it. Hand PDFKit the raw bytes: a native format still embeds, and anything else
-      // falls through to the placeholder exactly as it did before transcoding existed.
-      return buffer;
+      // sharp cannot read it — most often a native JPEG whose decoded raster is over its pixel limit.
+      return untranscodedFallback(buffer, mime);
     }
   }
   if (photo.externalUrl?.startsWith("data:image/")) return fetchExternalImageBuffer(photo.externalUrl);

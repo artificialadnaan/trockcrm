@@ -187,6 +187,24 @@ function sanitizeUntrusted(value: string | null | undefined): string {
     .trim();
 }
 
+/**
+ * Ceiling on ONE photo's field note as sent to the model.
+ *
+ * `files.description` is an unbounded `text` column — the generic file-metadata path stores it with no
+ * length cap — and captions can arrive from a CRM edit or an importer rather than from someone typing on a
+ * phone. The batch splitter bounds IMAGE bytes only, so it would happily call a batch safe while sixty
+ * multi-kilobyte captions push the text past the request limit and fail an otherwise valid assessment.
+ * Generous enough that a real jobsite note is never touched.
+ */
+const MAX_FIELD_NOTE_CHARS = 500;
+
+/** A caption, sanitised and bounded, ready to be fenced into a prompt. */
+function fieldNote(value: string | null | undefined): string {
+  const clean = sanitizeUntrusted(value);
+  // Marked when clipped, so the model reads it as a truncated note rather than a sentence that trails off.
+  return clean.length > MAX_FIELD_NOTE_CHARS ? `${clean.slice(0, MAX_FIELD_NOTE_CHARS).trimEnd()}…` : clean;
+}
+
 /** The scope paragraph shared by the findings and summary calls, so both obey the same instruction. */
 function buildScopeClause(focusPrompt: string | null): string {
   if (!focusPrompt) {
@@ -556,7 +574,7 @@ function imageContent(images: PreparedImage[]): AnthropicContentBlock[] {
     // "Photograph 21" label next to a required photoIndex of 0 is an invitation to mis-caption a whole
     // batch, and each call is independent anyway. The crew's caption rides with the label — it is the only
     // account of what the person standing there meant, and what stops the model flagging known work.
-    const caption = sanitizeUntrusted(image.photo.caption);
+    const caption = fieldNote(image.photo.caption);
     const label = caption
       ? `Photograph ${index + 1}\n<field_note>${caption}</field_note>`
       : `Photograph ${index + 1}\n(no field note)`;
@@ -613,7 +631,7 @@ function shapeFindings(rawFindings: unknown, batch: PreparedImage[]): AiReportFi
       // Fall back to the crew's caption, then the file name, so a cited photo always has a subject label.
       // SANITISED: this title is re-sent verbatim inside the summary digest, so an unsanitised caption here
       // would reach the summary prompt outside any fence — the exact escape the <field_note> tags close.
-      title: found.title || sanitizeUntrusted(image.photo.caption) || image.photo.displayName,
+      title: found.title || fieldNote(image.photo.caption) || image.photo.displayName,
       bullets: found.bullets,
     });
   });

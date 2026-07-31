@@ -1,8 +1,10 @@
 import { describe, it, expect, vi } from "vitest";
 import {
+  MAX_UNTRANSCODED_EMBED_BYTES,
   paginateTextByHeight,
   parseFindingText,
   renderFieldPhotoReportPdf,
+  untranscodedFallback,
   type ReportCoverData,
   type ReportRenderSection,
 } from "./pdf-layout.js";
@@ -48,6 +50,37 @@ describe("paginateTextByHeight", () => {
 
   it("preserves paragraph breaks within a page", () => {
     expect(paginateTextByHeight("one\ntwo", 100, byLength)).toEqual(["one\ntwo"]);
+  });
+});
+
+describe("untranscodedFallback", () => {
+  // The transcode exists to bound what a report costs in memory and file size: PDFKit retains every embedded
+  // image for the life of the document, so a 60-photo report is a LOOP over originals. sharp legitimately
+  // refuses some it cannot bound — most often a native JPEG whose decoded raster is over its pixel limit —
+  // and that failure path used to hand the RAW original straight back, which put the bound right back where
+  // it started.
+  const original = (bytes: number) => Buffer.alloc(bytes);
+
+  it("passes a native original through while it stays inside the ceiling", () => {
+    // Better a real photograph than a placeholder, as long as it is bounded. Exactly AT the ceiling counts
+    // as inside it.
+    const jpeg = original(MAX_UNTRANSCODED_EMBED_BYTES);
+    expect(untranscodedFallback(jpeg, "image/jpeg")).toBe(jpeg);
+    const png = original(1024);
+    expect(untranscodedFallback(png, "image/png")).toBe(png);
+  });
+
+  it("drops a native original past the ceiling instead of embedding it full-size", () => {
+    expect(untranscodedFallback(original(MAX_UNTRANSCODED_EMBED_BYTES + 1), "image/jpeg")).toBeNull();
+  });
+
+  it("drops a non-native original, which PDFKit could never have embedded anyway", () => {
+    // HEIC straight off an iPhone. Passing it on only carried the bytes through the renderer for openImage
+    // to reject at the far end — the same placeholder, having held the whole buffer to get there.
+    expect(untranscodedFallback(original(1024), "image/heic")).toBeNull();
+    expect(untranscodedFallback(original(1024), "image/webp")).toBeNull();
+    // Unknown type: no r2 content-type and no stored mime.
+    expect(untranscodedFallback(original(1024), null)).toBeNull();
   });
 });
 

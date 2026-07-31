@@ -146,7 +146,8 @@ const STALE_RUN_MINUTES = 20;
  * Staleness is measured from COALESCE(started_at, created_at), not created_at. The AI-report poller is
  * serial, so a run can legitimately sit queued for a long while and only start recently; measuring from
  * creation would expire a run that is actively mid-model-call, free its slot, and let a replacement be
- * queued while the original keeps spending.
+ * queued while the original keeps spending. `started_at` is renewed at each long phase boundary
+ * (touchAiReportRunLease), so this measures time since the last sign of progress rather than total runtime.
  */
 export async function expireStaleAiReportRuns(requestedBy: string): Promise<number> {
   const result = await pool.query(
@@ -245,6 +246,33 @@ export async function markAiReportRunRunning(runId: string): Promise<boolean> {
           OR (status = 'running' AND started_at < now() - ($2 || ' minutes')::interval)
         )`,
     [runId, String(STALE_RUN_MINUTES)],
+  );
+  return (result.rowCount ?? 0) > 0;
+}
+
+/**
+ * Renew this run's lease, and report whether we still hold it.
+ *
+ * `started_at` doubles as the lease timestamp — it is what BOTH the enqueue-time reaper and the re-claim
+ * guard above measure staleness from. Stamping it only at claim time bounds the whole job by
+ * STALE_RUN_MINUTES, but only the model call is actually deadline-bounded: rendering and uploading a
+ * 60-page PDF is deliberately unbounded, so a run that spends most of its model budget and then renders
+ * slowly can cross the window while it is still very much alive. The next enqueue then fails it, frees the
+ * in-flight slot, and queues a paid replacement — while the original carries on and commits a second PDF.
+ *
+ * Renewed at a PHASE BOUNDARY rather than on a timer, on purpose. A periodic heartbeat proves the event
+ * loop is alive, not that the job is progressing, so a wedged run would hold its slot forever and the reaper
+ * could never do its job. Renewing once per long phase gives that phase a full fresh window and no more.
+ *
+ * Returns false when the row is no longer 'running' — the run was already reaped (or finished) and a
+ * replacement may be in flight. The caller MUST stop rather than spend on work whose result is unusable.
+ */
+export async function touchAiReportRunLease(runId: string): Promise<boolean> {
+  const result = await pool.query(
+    `UPDATE public.field_ai_report_runs
+        SET started_at = now(), updated_at = now()
+      WHERE id = $1::uuid AND status = 'running'`,
+    [runId],
   );
   return (result.rowCount ?? 0) > 0;
 }

@@ -163,4 +163,52 @@ describe("field_ai_report_runs — real SQL", () => {
     const after = await client.query<{ status: string }>(`SELECT status FROM public.field_ai_report_runs WHERE id=$1`, [id]);
     expect(after.rows[0].status).toBe("failed");
   });
+
+  it("renews a live run's lease out from under the reaper, but cannot revive a terminal one", async () => {
+    // The lease is what stops a slow-but-healthy run being reaped mid-render: Phase D is deliberately
+    // unbounded, so a run that spends most of its model budget and then renders slowly crosses the 20-minute
+    // window while it is still working. Its own requester, so the user-scoped reaper below can't be
+    // perturbed by rows other tests left behind.
+    const dealId = "99999999-9999-9999-9999-999999999999";
+    const leaseUser = (
+      await client.query<{ id: string }>(`INSERT INTO public.users (email) VALUES ('lease@t.co') RETURNING id`)
+    ).rows[0].id;
+    const id = (await insertRun(dealId, leaseUser)).id as string;
+
+    // Working for 25 minutes: past the window, but alive.
+    await client.query(
+      `UPDATE public.field_ai_report_runs SET status='running', started_at = now() - interval '25 minutes' WHERE id=$1`,
+      [id],
+    );
+
+    // The EXACT reaper predicate from expireStaleAiReportRuns.
+    const reap = () =>
+      client.query(
+        `UPDATE public.field_ai_report_runs
+            SET status='failed', finished_at=now(), updated_at=now()
+          WHERE requested_by = $1::uuid
+            AND status IN ('queued', 'running')
+            AND COALESCE(started_at, created_at) < now() - ($2 || ' minutes')::interval`,
+        [leaseUser, "20"],
+      );
+    // The EXACT statement touchAiReportRunLease issues.
+    const renew = () =>
+      client.query(
+        `UPDATE public.field_ai_report_runs
+            SET started_at = now(), updated_at = now()
+          WHERE id = $1::uuid AND status = 'running'`,
+        [id],
+      );
+
+    expect((await renew()).affectedRows).toBe(1);
+    // Renewed, so the reaper now has nothing to take — which is the entire point of the heartbeat.
+    expect((await reap()).affectedRows).toBe(0);
+
+    // Once the row IS terminal the renewal must not resurrect it: a reaped attempt reviving itself would
+    // hold the in-flight slot open against the replacement the user already started.
+    await client.query(`UPDATE public.field_ai_report_runs SET status='failed' WHERE id=$1`, [id]);
+    expect((await renew()).affectedRows).toBe(0);
+    const after = await client.query<{ status: string }>(`SELECT status FROM public.field_ai_report_runs WHERE id=$1`, [id]);
+    expect(after.rows[0].status).toBe("failed");
+  });
 });

@@ -2,6 +2,7 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import { files } from "@trock-crm/shared/schema";
 import type { UserRole } from "@trock-crm/shared/types";
 import { pool } from "../../db.js";
+import { deleteObject } from "../../lib/r2-client.js";
 import { buildDealPhotoTimelineConditions } from "../files/photo-timeline-filters.js";
 import { getFieldOfficeById, runInOfficeTransaction } from "./cross-office.js";
 import { assertActiveFieldProject } from "./projects-service.js";
@@ -24,6 +25,7 @@ import {
   markAiReportRunFailed,
   markAiReportRunRunning,
   markAiReportRunSucceeded,
+  touchAiReportRunLease,
 } from "./ai-report-runs.js";
 
 export { AI_REPORT_JOB_TYPE };
@@ -219,6 +221,23 @@ export async function runFieldAiReportJob(
       }),
     );
 
+    // Renew the lease before the last long phase. Phase B can legitimately eat most of the stale window on
+    // a large report, and Phase D below is deliberately unbounded — without this a live run ages out
+    // mid-render, the user's next enqueue reaps it, and they pay for a duplicate while this attempt is
+    // still working.
+    if (!(await touchAiReportRunLease(runId))) {
+      // The row is no longer 'running': it was reaped (or otherwise finished) and a replacement may already
+      // be in flight. Stop BEFORE rendering — otherwise this attempt uploads a PDF and commits a second
+      // files row for a run the user was already told had failed.
+      console.warn("[field-ai-report] lease lost before rendering — abandoning this attempt", {
+        runId,
+        // The model spend already happened and can no longer be written to the (terminal) row, so log it
+        // rather than lose it entirely.
+        costUsd: usage ? Number(usage.costUsd.toFixed(6)) : null,
+      });
+      return { claimed: true };
+    }
+
     // ── Phase D: NO transaction — render the PDF and upload it ───────────────────────────────────
     // Same reasoning as Phase B. Rendering a 60-page report downloads and decodes every original and then
     // uploads the result: minutes of work, and none of it touches the database. Doing it inside the
@@ -226,14 +245,25 @@ export async function runFieldAiReportJob(
     const stored = await renderAndStoreFieldPhotoReportPdf(prepared, office.slug);
 
     // ── Phase E: short transaction — record the file row ─────────────────────────────────────────
-    const { report } = await runInOfficeTransaction(office, requester.id, async (db) => {
-      // Re-check the project. Phase D can run for minutes, and a project archived or moved to an excluded
-      // stage in that window would otherwise be recorded against anyway — leaving a run marked 'succeeded'
-      // whose report the status endpoint refuses to hand back (it re-runs the same assertion), i.e. a
-      // success the user can never open.
-      await assertActiveFieldProject(db, access, run.dealId);
-      return recordFieldPhotoReportFile(db, access, prepared, stored);
-    });
+    let recorded: Awaited<ReturnType<typeof recordFieldPhotoReportFile>>;
+    try {
+      recorded = await runInOfficeTransaction(office, requester.id, async (db) => {
+        // Re-check the project. Phase D can run for minutes, and a project archived or moved to an excluded
+        // stage in that window would otherwise be recorded against anyway — leaving a run marked 'succeeded'
+        // whose report the status endpoint refuses to hand back (it re-runs the same assertion), i.e. a
+        // success the user can never open.
+        await assertActiveFieldProject(db, access, run.dealId);
+        return recordFieldPhotoReportFile(db, access, prepared, stored);
+      });
+    } catch (error) {
+      // The PDF is uploaded but nothing references it. recordFieldPhotoReportFile cleans up after its OWN
+      // insert failure; this covers the re-validation above, which throws BEFORE the insert is ever reached
+      // — so without it every project archived mid-render leaves an orphaned object in the bucket. Deleting
+      // an already-deleted key is a no-op, so overlapping with that inner cleanup is harmless.
+      await deleteObject(stored.r2Key).catch(() => undefined);
+      throw error;
+    }
+    const { report } = recorded;
 
     // From here the PDF EXISTS — it is committed to `files` and uploaded to R2, and it is already visible in
     // the project's report list. A failure to write the terminal ledger row is a bookkeeping problem, not a
