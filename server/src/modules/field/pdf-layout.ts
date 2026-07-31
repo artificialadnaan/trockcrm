@@ -32,23 +32,42 @@ const COVER_LOGO_FIT: [number, number] = [210, 210];
 // taller rows and bigger images. The image is fit to its exact rendered rectangle (decoded via
 // openImage) and framed tightly, so off-aspect photos sit on clean page-white instead of an oversized
 // gray panel — that dead gray gutter was the bulk of the "small image + lots of white space" problem.
-const PHOTOS_PER_PAGE = 3;
+const PHOTOS_PER_PAGE = 4;
 const CONTENT_WIDTH = PAGE_WIDTH - PAGE_MARGIN * 2;
-const PHOTO_ROWS_TOP = 66;
-const PHOTO_ROWS_BOTTOM = 740; // stay clear of the footer (drawn at PAGE_HEIGHT - 44)
-const PHOTO_ROW_GAP = 16;
-const PHOTO_ROW_PITCH = (PHOTO_ROWS_BOTTOM - PHOTO_ROWS_TOP) / PHOTOS_PER_PAGE;
-const PHOTO_ROW_HEIGHT = PHOTO_ROW_PITCH - PHOTO_ROW_GAP;
-const CAPTION_WIDTH = 174;
-const CAPTION_GAP = 22;
-const IMAGE_BOX_WIDTH = CONTENT_WIDTH - CAPTION_WIDTH - CAPTION_GAP;
-const CAPTION_LEFT = PAGE_MARGIN + IMAGE_BOX_WIDTH + CAPTION_GAP;
+const PHOTO_ROWS_TOP = 72;
+const PHOTO_ROW_PITCH = 172;
+/**
+ * The photo sits in a FIXED grey tile and is letterboxed inside it, rather than being drawn at whatever
+ * size its aspect happens to produce.
+ *
+ * This is the difference between a report that reads as designed and one that reads as broken. Fitting each
+ * image to its own rectangle on page-white meant a portrait, a landscape and a panorama all started and
+ * ended in different places — 0 to 196pt of ragged dead space per row — and the metadata, hung off the
+ * rendered image, drifted with them. A constant tile gives every photograph the same footprint whatever its
+ * shape, and letterboxing onto grey reads as deliberate framing where the identical letterbox on white just
+ * reads as a mistake.
+ */
+const PHOTO_TILE_WIDTH = 270;
+const PHOTO_TILE_HEIGHT = 151;
+const PHOTO_TILE_RADIUS = 8;
+const PHOTO_TILE_FILL = "#F4F5F7";
+const PHOTO_ROW_HEIGHT = PHOTO_TILE_HEIGHT;
 // Metadata is drawn as three single-line, ellipsised rows (Project/Date/Creator). Each line is capped to
 // one line so a long deal/project name (the deal schema allows up to 500 chars) can never wrap and push the
 // block past the footer / page bottom — the exact blank-page/overlap regression the report layout avoids.
 const META_FONT_SIZE = 8.5;
 const META_LINE_PITCH = 11;
 const META_BLOCK_HEIGHT = META_LINE_PITCH * 3;
+// Caption + metadata sit to the RIGHT of the tile and are BOTTOM-aligned to it, so the last metadata line
+// always lands on the tile's bottom edge no matter how tall the photograph rendered. The 174pt caption
+// COLUMN this replaces was costing a third of the page width.
+const CAPTION_LEFT = PAGE_MARGIN + PHOTO_TILE_WIDTH + 14;
+const CAPTION_WIDTH = CONTENT_WIDTH - PHOTO_TILE_WIDTH - 14;
+/** Metadata is a two-column label/value block: labels on the left, values on a common left edge. */
+const META_LABEL_WIDTH = 44;
+const META_VALUE_LEFT = CAPTION_LEFT + META_LABEL_WIDTH + 6;
+const IMAGE_BOX_WIDTH = PHOTO_TILE_WIDTH;
+const IMAGE_BOX_HEIGHT = PHOTO_TILE_HEIGHT;
 
 // --- Executive summary page(s) -------------------------------------------------------------------
 // The optional executive summary renders on its own page(s) immediately after the cover, before any
@@ -270,12 +289,15 @@ function drawSectionHeader(doc: PDFKit.PDFDocument, fonts: ReportFontSet, report
 // divider is skipped — without this the user's custom section title would be dropped entirely.
 function drawCompactSectionTitle(doc: PDFKit.PDFDocument, fonts: ReportFontSet, title: string) {
   doc.save();
-  doc.fillColor(BRAND_BLACK).font(fonts.bold).fontSize(11);
-  doc.text(title, PAGE_MARGIN, 50, {
+  // LEFT-aligned, on the margin the tiles below start from. Centred, it floated between the header rule and
+  // the first tile belonging to neither — and it is a section label, not a page heading.
+  doc.fillColor(BRAND_MUTED).font(fonts.bold).fontSize(10);
+  doc.text(title.toUpperCase(), PAGE_MARGIN, 52, {
     width: PAGE_WIDTH - PAGE_MARGIN * 2,
-    align: "center",
+    align: "left",
     lineBreak: false,
     height: 13,
+    characterSpacing: 0.6,
     ellipsis: true,
   });
   doc.restore();
@@ -388,13 +410,6 @@ function drawIndexBadge(doc: PDFKit.PDFDocument, fonts: ReportFontSet, x: number
   });
 }
 
-function drawImageUnavailable(doc: PDFKit.PDFDocument, fonts: ReportFontSet, x: number, y: number, w: number, h: number) {
-  doc.roundedRect(x, y, w, h, 6).fillColor("#F3F4F6").fill();
-  doc.fillColor(BRAND_MUTED).font(fonts.bold).fontSize(12).text("Image unavailable", x, y + h / 2 - 8, {
-    width: w,
-    align: "center",
-  });
-}
 
 async function drawPhotoEntry(
   doc: PDFKit.PDFDocument,
@@ -402,63 +417,96 @@ async function drawPhotoEntry(
   photo: ReportRenderSection["photos"][number],
   top: number,
 ) {
-  const imageLeft = PAGE_MARGIN;
   const boxWidth = IMAGE_BOX_WIDTH;
-  const boxHeight = PHOTO_ROW_HEIGHT;
+  const boxHeight = IMAGE_BOX_HEIGHT;
+
+  // The tile is drawn FIRST and always, whether or not the photo loads. It is what gives every row an
+  // identical footprint; the image is a guest inside it.
+  doc.roundedRect(PAGE_MARGIN, top, boxWidth, boxHeight, PHOTO_TILE_RADIUS).fillColor(PHOTO_TILE_FILL).fill();
 
   const imageBuffer = await loadPhotoBuffer(photo);
   const opened = imageBuffer ? openImageForLayout(doc, imageBuffer) : null;
+  let drew = false;
   if (opened) {
-    // Scale to fit the box while preserving aspect, then draw + frame the EXACT rendered rectangle so a
-    // portrait or panoramic photo is bounded by a tight border on page-white — no oversized gray panel.
+    // Contain, then centre. NOT cover: this is an evidence document, and filling the tile would silently
+    // crop the edges off the thing being photographed. The letterbox shows as tile grey, which reads as
+    // deliberate framing — the same letterbox on page-white is what made the old layout look broken.
     const scale = Math.min(boxWidth / opened.displayWidth, boxHeight / opened.displayHeight);
     const drawWidth = opened.displayWidth * scale;
     const drawHeight = opened.displayHeight * scale;
+    const drawLeft = PAGE_MARGIN + (boxWidth - drawWidth) / 2;
+    const drawTop = top + (boxHeight - drawHeight) / 2;
+    // CLIPPED to the tile, not merely drawn on top of it. roundedRect().fill() paints a background and
+    // establishes no clipping path, so a photograph whose aspect is close to the tile's — 16:9 lands at
+    // 268.4x151 inside a 270x151 tile, which is most jobsite panoramas — covers the rounded corner cutouts
+    // with its own square ones and reads as spilling out of the frame.
+    //
+    // save/clip OUTSIDE the try and restore in `finally`, so the pairing cannot come apart: a throw from
+    // doc.image would otherwise leave the clip on the graphics stack and silently crop everything drawn
+    // after it, on this page and every page that follows.
+    doc.save();
+    doc.roundedRect(PAGE_MARGIN, top, boxWidth, boxHeight, PHOTO_TILE_RADIUS).clip();
     try {
-      doc.image(opened.image as unknown as Buffer, imageLeft, top, { width: drawWidth, height: drawHeight });
-      doc.roundedRect(imageLeft, top, drawWidth, drawHeight, 6).lineWidth(1).strokeColor(BRAND_BORDER).stroke();
-      drawIndexBadge(doc, fonts, imageLeft, top, photo.reportIndex);
+      doc.image(opened.image as unknown as Buffer, drawLeft, drawTop, { width: drawWidth, height: drawHeight });
+      drew = true;
     } catch {
-      drawImageUnavailable(doc, fonts, imageLeft, top, boxWidth, boxHeight);
-      drawIndexBadge(doc, fonts, imageLeft, top, photo.reportIndex);
+      drew = false;
+    } finally {
+      doc.restore();
     }
-  } else {
-    drawImageUnavailable(doc, fonts, imageLeft, top, boxWidth, boxHeight);
-    drawIndexBadge(doc, fonts, imageLeft, top, photo.reportIndex);
   }
+  if (!drew) {
+    doc.fillColor(BRAND_MUTED).font(fonts.bold).fontSize(11).text("Image unavailable", PAGE_MARGIN, top + boxHeight / 2 - 7, {
+      width: boxWidth,
+      align: "center",
+    });
+  }
+  // Badge on the TILE corner, not the image corner, so it sits in the same place on every row.
+  drawIndexBadge(doc, fonts, PAGE_MARGIN, top, photo.reportIndex);
 
-  // Compact, image-forward caption: smaller fonts, metadata flows directly under the (measured)
-  // description instead of a fixed offset, and the whole block is clamped to the row so it never spills.
-  // The description is height-capped + ellipsised so even a pathological caption (or a denser
-  // PHOTOS_PER_PAGE) can't push text past the page bottom and spawn the blank pages this report avoids.
-  const description = clampText(photo.descriptionOverride ?? photo.description ?? "No description", 320);
-  const descriptionMaxHeight = boxHeight - 40;
-  doc.fillColor(BRAND_BLACK).font(fonts.bold).fontSize(12);
-  doc.text(description, CAPTION_LEFT, top, { width: CAPTION_WIDTH, lineGap: 1.5, height: descriptionMaxHeight, ellipsis: true });
-  const descriptionHeight = Math.min(
-    doc.heightOfString(description, { width: CAPTION_WIDTH, lineGap: 1.5 }),
-    descriptionMaxHeight,
-  );
-  const metaTop = Math.min(top + descriptionHeight + 10, top + boxHeight - META_BLOCK_HEIGHT);
-  // One line each, no-wrap + ellipsis + capped height: a long project/creator name truncates instead of
-  // wrapping, so the block stays exactly 3 lines tall and can't spill the page or collide with the footer.
-  // Every field is still rendered (Project, Date, Creator) — only an over-long single value is shortened,
-  // and the full project name still appears on the cover and in the footer.
-  const metaLines = [
-    `Project: ${photo.projectName}`,
-    `Date: ${formatPhotoDate(photo.takenAt, photo.createdAt)}`,
-    `Creator: ${photo.uploaderName}`,
+  // --- Caption + metadata, to the right of the tile and BOTTOM-aligned to it ------------------------
+  // Bottom-aligned rather than top-aligned: the metadata is a fixed three-line block, so anchoring it to
+  // the tile's bottom edge lands it in exactly the same place on every row.
+  const metaTop = top + boxHeight - META_BLOCK_HEIGHT;
+  const metaRows: Array<[string, string]> = [
+    ["Project:", photo.projectName],
+    ["Date:", formatPhotoDate(photo.takenAt, photo.createdAt)],
+    ["Creator:", photo.uploaderName],
   ];
-  doc.fillColor(BRAND_MUTED).font(fonts.regular).fontSize(META_FONT_SIZE);
-  metaLines.forEach((line, index) => {
-    doc.text(line, CAPTION_LEFT, metaTop + index * META_LINE_PITCH, {
-      width: CAPTION_WIDTH,
+  metaRows.forEach(([label, value], index) => {
+    const y = metaTop + index * META_LINE_PITCH;
+    doc.fillColor(BRAND_MUTED).font(fonts.regular).fontSize(META_FONT_SIZE);
+    doc.text(label, CAPTION_LEFT, y, { width: META_LABEL_WIDTH, align: "left", lineBreak: false, height: META_LINE_PITCH });
+    // Values a shade darker than their labels, on a common left edge — that alignment is most of why the
+    // block reads as a table rather than three loose sentences. One line each, ellipsised, so a 500-char
+    // project name truncates instead of wrapping into the next row.
+    doc.fillColor(BRAND_BLACK).font(fonts.regular).fontSize(META_FONT_SIZE);
+    doc.text(value, META_VALUE_LEFT, y, {
+      width: CAPTION_WIDTH - META_LABEL_WIDTH - 6,
       align: "left",
       lineBreak: false,
       height: META_LINE_PITCH,
       ellipsis: true,
     });
   });
+
+  // The crew's caption sits DIRECTLY above the metadata, as one bottom-anchored group. Pinning it to the
+  // top of the tile instead left ~100pt of dead air between the caption and the data describing that same
+  // photograph. Only drawn when there is one: an absent caption leaves clean space rather than the words
+  // "No description".
+  const description = clampText(photo.descriptionOverride ?? photo.description ?? "", 200);
+  if (description) {
+    doc.fillColor(BRAND_BLACK).font(fonts.regular).fontSize(10.5);
+    const available = metaTop - top - 8;
+    const measured = doc.heightOfString(description, { width: CAPTION_WIDTH, lineGap: 2 });
+    const descriptionHeight = Math.min(measured, available);
+    doc.text(description, CAPTION_LEFT, metaTop - 8 - descriptionHeight, {
+      width: CAPTION_WIDTH,
+      lineGap: 2,
+      height: descriptionHeight,
+      ellipsis: true,
+    });
+  }
 }
 
 function fallbackReportFonts(): ReportFontSet {

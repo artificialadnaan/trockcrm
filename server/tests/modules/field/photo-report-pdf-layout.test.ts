@@ -1,3 +1,5 @@
+import sharp from "sharp";
+import zlib from "node:zlib";
 import { describe, expect, it } from "vitest";
 import { renderFieldPhotoReportPdf, type ReportRenderSection } from "../../../src/modules/field/pdf-layout.js";
 
@@ -33,15 +35,36 @@ function photo(i: number): ReportRenderSection["photos"][number] {
 }
 
 describe("renderFieldPhotoReportPdf page count", () => {
-  it("a single section of 4 photos is COVER + two photo pages — no divider, no trailing blank pages", async () => {
+  it("clips each photograph to the rounded tile instead of drawing over its corners", async () => {
+    // roundedRect().fill() paints a background and establishes NO clipping path. A photograph whose aspect
+    // is close to the tile's fills it almost exactly — 16:9 lands at 268.4x151 inside a 270x151 tile, which
+    // is most jobsite panoramas — so its square corners cover the rounded cutouts and it reads as spilling
+    // out of the frame. Asserted on the emitted clip operator because the defect is invisible to a page
+    // count and to every geometry assertion: the numbers are identical either way.
+    // A REAL image is required: the placeholder path draws no image and so emits no clip, which would make
+    // this pass for the wrong reason. 16:9 on purpose — the aspect that actually reaches the corners.
+    const panorama = await sharp({ create: { width: 1920, height: 1080, channels: 3, background: { r: 90, g: 110, b: 130 } } })
+      .jpeg()
+      .toBuffer();
+    const buffer = await renderFieldPhotoReportPdf({
+      cover,
+      sections: [{
+        title: "Doors",
+        photos: [{ ...photo(1), externalUrl: `data:image/jpeg;base64,${panorama.toString("base64")}` }],
+      }],
+    });
+    expect(countClipOperators(buffer)).toBeGreaterThanOrEqual(1);
+  });
+
+  it("a single section of 4 photos is COVER + one photo page — no divider, no trailing blank pages", async () => {
     const buffer = await renderFieldPhotoReportPdf({
       cover,
       sections: [{ title: "Doors", photos: [photo(1), photo(2), photo(3), photo(4)] }],
     });
-    // Image-forward layout packs 3 photos per page (bigger images), so 4 photos = 2 photo pages + cover.
-    // Previously this produced ~12 pages (footer text spilled onto auto-created blank pages); the guard is
-    // that there are NO trailing blank pages, not the exact per-page count.
-    expect(countPdfPages(buffer)).toBe(3);
+    // Four fixed-size tiles fit one page, so 4 photos = 1 photo page + cover. Previously this produced ~12
+    // pages (footer text spilled onto auto-created blank pages); the guard is that there are NO trailing
+    // blank pages, not the exact per-page count.
+    expect(countPdfPages(buffer)).toBe(2);
   });
 
   it("preserves a single-section custom title compactly without adding a divider page", async () => {
@@ -60,8 +83,8 @@ describe("renderFieldPhotoReportPdf page count", () => {
       cover: { ...cover, projectName: longName },
       sections: [{ title: "Doors", photos: [photo(1), photo(2), photo(3), photo(4)] }],
     });
-    // No-wrap + ellipsis footer text keeps it at cover + two photo pages (3 photos/page) — no spill pages.
-    expect(countPdfPages(buffer)).toBe(3);
+    // No-wrap + ellipsis footer text keeps it at cover + one photo page (4 photos/page) — no spill pages.
+    expect(countPdfPages(buffer)).toBe(2);
   });
 
   it("keeps a divider page per section when there are multiple sections", async () => {
@@ -92,9 +115,9 @@ describe("renderFieldPhotoReportPdf page count", () => {
       cover: { ...cover, projectName: longName },
       sections: [{ title: "Untagged", photos }],
     });
-    // 4 photos at 3/page = cover + 2 photo pages; single-line ellipsised metadata + height-capped
-    // descriptions keep the third-row caption inside its row, so no footer-overlap blank page appears.
-    expect(countPdfPages(buffer)).toBe(3);
+    // 4 photos at 4/page = cover + 1 photo page; single-line ellipsised metadata + a height-capped
+    // description keep the LAST row's caption inside its tile, so no footer-overlap blank page appears.
+    expect(countPdfPages(buffer)).toBe(2);
   });
 
   it("caps a very long report title on the cover — no overflow page", async () => {
@@ -108,3 +131,28 @@ describe("renderFieldPhotoReportPdf page count", () => {
     expect(countPdfPages(buffer)).toBe(2);
   });
 });
+
+/**
+ * Count clipping operators (`W n`) across the document's content streams.
+ *
+ * PDFKit flate-compresses each stream, so they are inflated first. Anything that does not inflate is not a
+ * content stream (font programs, images) and is skipped.
+ */
+function countClipOperators(buffer: Buffer): number {
+  const raw = buffer.toString("latin1");
+  const streamStart = /stream\r?\n/g;
+  let count = 0;
+  let match: RegExpExecArray | null;
+  while ((match = streamStart.exec(raw))) {
+    const start = match.index + match[0].length;
+    const end = raw.indexOf("endstream", start);
+    if (end < 0) continue;
+    try {
+      const text = zlib.inflateSync(Buffer.from(raw.slice(start, end), "latin1")).toString("latin1");
+      count += (text.match(/\bW\s+n\b/g) || []).length;
+    } catch {
+      // not a flate-compressed content stream
+    }
+  }
+  return count;
+}
