@@ -36,6 +36,19 @@ import {
 
 type RungState = "idle" | "running" | "ok" | "fail";
 
+/**
+ * Narrow `rung.run()`'s `Promise<unknown>` return down to capturePhoto's actual shape
+ * (`{ requested: boolean }`) with an honest runtime check, rather than casting.
+ */
+function isCapturePhotoResult(value: unknown): value is { requested: boolean } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "requested" in value &&
+    typeof (value as { requested: unknown }).requested === "boolean"
+  );
+}
+
 type Rung = {
   key: string;
   label: string;
@@ -134,9 +147,20 @@ function Diagnostic() {
     setResult((r) => ({ ...r, [rung.key]: "" }));
     try {
       const value = await rung.run();
-      // capturePhoto only reports that the request was ACCEPTED; the image and its
-      // dimensions arrive later on the photo event, so this rung stays "running".
-      if (rung.key === "photo") {
+      // capturePhoto only reports whether the request was ACCEPTED. When accepted, the image
+      // and its dimensions arrive later on the photo event, so this rung stays "running" until
+      // onPhoto() resolves it above. When rejected (stream busy, or not ready), no photo event
+      // ever follows — leaving the rung "running" forever, with its button disabled and no way
+      // to retry short of leaving the screen — so that case must fail immediately instead.
+      if (rung.key === "photo" && isCapturePhotoResult(value)) {
+        if (!value.requested) {
+          setState((s) => ({ ...s, photo: "fail" }));
+          setResult((r) => ({
+            ...r,
+            photo: "request rejected — stream is busy or not ready. Retry once the stream is running.",
+          }));
+          return;
+        }
         setResult((r) => ({ ...r, photo: "requested — waiting for image…" }));
         return;
       }
