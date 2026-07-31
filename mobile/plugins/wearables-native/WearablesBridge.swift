@@ -272,6 +272,15 @@ final class WearablesBridge: RCTEventEmitter {
     // must not be what breaks it.
     teardown()
 
+    // Reset the frame measurement synchronously, BEFORE the Task. NSLock's lock()/unlock() are
+    // unavailable from async contexts — a task can suspend while holding the lock — and that is
+    // a hard error under Swift 6. Nothing here needs to be async, so it simply moves out.
+    stateLock.lock()
+    firstFrameSize = nil
+    firstFrameAt = nil
+    streamStartedAt = Date()
+    stateLock.unlock()
+
     Task {
       do {
         let sdk = Wearables.shared
@@ -323,12 +332,6 @@ final class WearablesBridge: RCTEventEmitter {
           return
         }
         stream = newStream
-
-      stateLock.lock()
-      firstFrameSize = nil
-      firstFrameAt = nil
-      streamStartedAt = Date()
-      stateLock.unlock()
 
       // Record what the FIRST frame actually measures. The configuration says what we asked
       // for; only a delivered frame says what the glasses sent.
@@ -462,11 +465,24 @@ final class WearablesBridge: RCTEventEmitter {
       }
       do {
         let audioSession = AVAudioSession.sharedInstance()
-        // .allowBluetoothHFP is what opens the glasses microphone; A2DP output options do
-        // not provide input at all. This is a rename of the old .allowBluetooth, not a new
-        // API, so it needs no availability guard.
+        // HFP is the correct profile: Meta's guidance is "use HFP when you need microphone
+        // input from the wearer", and A2DP is output-only. The two are mutually exclusive —
+        // activating HFP drops glasses OUTPUT to 8 kHz mono — which is why the session is
+        // deactivated again below rather than left holding the glasses in HFP.
+        // `.allowBluetoothHFP` is a rename of `.allowBluetooth`, not a new API, so no
+        // availability guard is needed.
         try audioSession.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothHFP])
         try audioSession.setActive(true)
+
+        // "The Bluetooth HFP route needs time to stabilize." Reading currentRoute straight
+        // after setActive races the switch: the built-in mic is still the input for a beat,
+        // so both the port type AND the negotiated sample rate would describe the phone
+        // rather than the glasses. Same "asked too early" class as the startStream races.
+        let routeDeadline = Date().addingTimeInterval(3)
+        while !audioSession.currentRoute.inputs.contains(where: { $0.portType == .bluetoothHFP }),
+              Date() < routeDeadline {
+          Thread.sleep(forTimeInterval: 0.1)
+        }
 
         let url = FileManager.default.temporaryDirectory
           .appendingPathComponent("wearables-audio-\(Int(Date().timeIntervalSince1970)).m4a")
@@ -485,6 +501,11 @@ final class WearablesBridge: RCTEventEmitter {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds.doubleValue) {
           recorder.stop()
+          // Hand the glasses back. HFP and A2DP are mutually exclusive, so an audio session
+          // left active after a 10-second recording keeps the glasses in HFP indefinitely and
+          // every other app's playback through them stays 8 kHz mono. Deactivating is the
+          // other half of choosing HFP deliberately.
+          try? audioSession.setActive(false, options: .notifyOthersOnDeactivation)
           let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
           let isBluetooth = input?.portType == .bluetoothHFP
           let payload: [String: Any] = [
