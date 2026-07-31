@@ -57,6 +57,20 @@ describe("describeHfpStreamCheck", () => {
     expect(result.outcome).toBe("fail");
     expect(result.summary).toContain("8000");
   });
+
+  // If the pairing never reached wideband, before and after read the same narrowband rate.
+  // The summary must not claim a drop occurred, and must not blame the DAT stream for a
+  // limitation that predates it.
+  it("fails without claiming a drop when the route was narrowband before the stream too", () => {
+    const narrowband: RouteSnapshot = { ...hfp, sampleRate: 8000 };
+    const result = describeHfpStreamCheck({
+      beforeStreamStart: narrowband,
+      afterStreamStart: narrowband,
+    });
+    expect(result.outcome).toBe("fail");
+    expect(result.summary).not.toContain("dropped");
+    expect(result.summary).toContain("8000");
+  });
 });
 
 describe("describePhoneCameraCheck", () => {
@@ -82,5 +96,22 @@ describe("describePhoneCameraCheck", () => {
   it("is inconclusive when HFP never came up at all", () => {
     const result = describePhoneCameraCheck({ before: builtIn, during: builtIn, after: builtIn });
     expect(result.outcome).toBe("inconclusive");
+  });
+
+  // A Bluetooth renegotiation on stopRunning() teardown can drop the route only after the
+  // camera closes, even though it survived the camera being open. This is exactly why the
+  // check takes three snapshots instead of two — collapsing it to a pass would be a false
+  // green.
+  it("fails when the route survives the camera being open but is lost once it closes", () => {
+    const result = describePhoneCameraCheck({ before: hfp, during: hfp, after: builtIn });
+    expect(result.outcome).toBe("fail");
+    expect(result.summary).toContain("lost once it closed");
+  });
+
+  it("fails when the port stays HFP after the camera closes but the rate is narrowband", () => {
+    const narrowband: RouteSnapshot = { ...hfp, sampleRate: 8000 };
+    const result = describePhoneCameraCheck({ before: hfp, during: hfp, after: narrowband });
+    expect(result.outcome).toBe("fail");
+    expect(result.summary).toContain("8000");
   });
 });

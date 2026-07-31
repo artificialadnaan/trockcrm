@@ -52,13 +52,16 @@ export function describeHfpStreamCheck(check: HfpStreamCheck): Verdict {
   }
 
   if (after.sampleRate < WIDEBAND_HZ) {
-    return {
-      outcome: "fail",
-      summary:
-        `The route stayed HFP but dropped to ${after.sampleRate} Hz after stream.start() ` +
-        `(was ${before.sampleRate} Hz). Below ${WIDEBAND_HZ} Hz the ASR stage measurably ` +
-        `degrades, so this is not usable for a walkthrough.`,
-    };
+    const summary =
+      before.sampleRate >= WIDEBAND_HZ
+        ? `The route stayed HFP but dropped to ${after.sampleRate} Hz after stream.start() ` +
+          `(was ${before.sampleRate} Hz). Below ${WIDEBAND_HZ} Hz the ASR stage measurably ` +
+          `degrades, so this is not usable for a walkthrough.`
+        : `The route is HFP but negotiated ${after.sampleRate} Hz after stream.start(), and was ` +
+          `already sub-wideband before it (${before.sampleRate} Hz) — this pairing never ` +
+          `reached wideband HFP, so the DAT stream is not the cause. Below ${WIDEBAND_HZ} Hz ` +
+          `the ASR stage measurably degrades, so this is not usable for a walkthrough.`;
+    return { outcome: "fail", summary };
   }
 
   return {
@@ -103,6 +106,27 @@ export function describePhoneCameraCheck(check: PhoneCameraCheck): Verdict {
         `The phone camera took the audio route and it recovered afterwards, but audio dropped ` +
         `to ${during.portName} while the camera was open. That gap is exactly the narration the ` +
         `still was documenting, so it still has to be prevented.`,
+    };
+  }
+
+  if (!after.isBluetoothHFP) {
+    return {
+      outcome: "fail",
+      summary:
+        `The audio route survived the camera being open but was lost once it closed — the ` +
+        `input was ${during.portName} during the photo and is now ${after.portName}. A ` +
+        `Bluetooth renegotiation on camera teardown would end glasses audio for the rest of the ` +
+        `walk, so this still has to be prevented.`,
+    };
+  }
+
+  if (after.sampleRate < WIDEBAND_HZ) {
+    return {
+      outcome: "fail",
+      summary:
+        `The route stayed HFP through the phone camera but is at ${after.sampleRate} Hz ` +
+        `afterwards (was ${during.sampleRate} Hz during the photo). Below ${WIDEBAND_HZ} Hz ` +
+        `the ASR stage measurably degrades, so this is not usable for a walkthrough.`,
     };
   }
 
