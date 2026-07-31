@@ -1,7 +1,6 @@
 import { getObjectBuffer, isR2ObjectNotFoundError, ObjectTooLargeError } from "../../lib/r2-client.js";
 import { generateEvidenceJpeg } from "../../lib/image-thumbnail.js";
 import { MAX_TOTAL_DEADLINE_MS, STALE_RUN_MINUTES } from "./ai-report-limits.js";
-import { fetchBoundedExternalImage } from "../../lib/external-image.js";
 
 /**
  * Claude vision pass behind the T Rock Cam "AI Report" button: hands a set of jobsite photographs to a
@@ -98,13 +97,6 @@ export type AiReportPhotoInput = {
   displayName: string;
   /** The crew's own caption (files.description), shown to the model as authoritative field context. */
   caption: string | null;
-  /**
-   * Where the image lives when there is no R2 copy — a CompanyCam-style import. The rest of the app serves
-   * these URLs directly (resolvePhotoDisplayUrls), so the report reads them too rather than treating the
-   * photo as unreadable. Full-size first, its CDN thumbnail as a fallback.
-   */
-  externalUrl?: string | null;
-  externalThumbnailUrl?: string | null;
 };
 
 /** Longest focus prompt accepted; also the cap the route enforces. */
@@ -502,26 +494,13 @@ async function callAnthropicTool(
 type PreparedImage = { photo: AiReportPhotoInput; base64: string; bytes: number };
 
 async function defaultLoadPhotoBuffer(photo: AiReportPhotoInput) {
-  // The durable R2 copy always wins: on an R2-backed import the external URL is metadata that can expire.
-  if (photo.r2Key) return getObjectBuffer(photo.r2Key, { maxBytes: MAX_SOURCE_BYTES });
-
-  // No R2 copy — an external-only import. Read the CDN original (its thumbnail if the original is
-  // permanently unusable), bounded, instead of declaring the photo unreadable and dropping it silently.
-  const primary = await fetchBoundedExternalImage(photo.externalUrl, MAX_SOURCE_BYTES);
-  const attempt = primary.status === "ok"
-    ? primary
-    : primary.status === "unusable"
-      ? await fetchBoundedExternalImage(photo.externalThumbnailUrl, MAX_SOURCE_BYTES)
-      : primary;
-  if (attempt.status === "ok") return attempt.image;
-
-  // RETRYABLE when the CDN was merely unreachable, so this photo is NOT counted as unreadable and quietly
-  // skipped: isUnreadableObjectError treats only a non-retryable AiReportError as "skip it". Shrinking the
-  // analysed set because a CDN blipped is the same failure as swallowing an R2 outage.
-  if (attempt.status === "unavailable") {
-    throw new AiReportError(`Photo ${photo.displayName} could not be fetched from its source.`, true);
-  }
-  throw new AiReportError(`Photo ${photo.displayName} has no stored original.`, false);
+  // R2 originals only. An external-only import (CompanyCam and similar keep a CDN url with no r2Key) is
+  // NOT analysed: reading it would mean the server issuing outbound requests to addresses it does not
+  // choose, and that belongs behind its own review rather than riding along with this feature. Treated as
+  // unreadable — non-retryable, so isUnreadableObjectError skips just this photo and the rest of the report
+  // proceeds. Fetching them lives on feat/trockcam-external-photos.
+  if (!photo.r2Key) throw new AiReportError(`Photo ${photo.displayName} has no stored original.`, false);
+  return getObjectBuffer(photo.r2Key, { maxBytes: MAX_SOURCE_BYTES });
 }
 
 /**
@@ -555,11 +534,7 @@ async function prepareImages(photos: AiReportPhotoInput[], deps: AiReportDeps): 
     }
 
     try {
-      // The FETCHED representation's type wins over the stored one, matching the PDF renderer. An external
-      // row recorded as HEIC whose CDN actually serves JPEG would otherwise be sent through the HEIC
-      // decoder, which refuses the bytes — and the photo is dropped from the assessment over a stale
-      // database column. For an R2 original there is no contentType, so the stored value still applies.
-      const jpeg = await generateEvidenceJpeg(source.buffer, source.contentType ?? photo.mimeType ?? null, {
+      const jpeg = await generateEvidenceJpeg(source.buffer, photo.mimeType ?? source.contentType ?? null, {
         maxEdge: VISION_MAX_EDGE,
         quality: VISION_JPEG_QUALITY,
       });

@@ -3,7 +3,6 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { getObjectBuffer, isR2Configured, isR2ObjectNotFoundError, ObjectTooLargeError } from "../../lib/r2-client.js";
 import { generateEvidenceJpeg } from "../../lib/image-thumbnail.js";
-import { fetchBoundedExternalImage } from "../../lib/external-image.js";
 import { TROCK_LOGO_PNG_BASE64 } from "./pdf-logo.js";
 
 const PAGE_WIDTH = 612;
@@ -259,8 +258,16 @@ function formatPhotoDate(value: string | null, fallback: string): string {
   }).replace(/^/, ", ");
 }
 
-// Replaced by fetchBoundedExternalImage (lib/external-image.ts): the old helper accepted only `data:` URLs
-// and read them with no size or time bound.
+async function fetchExternalImageBuffer(url: string): Promise<Buffer | null> {
+  if (!url.startsWith("data:image/")) return null;
+  try {
+    const response = await fetch(url);
+    if (!response.ok) return null;
+    return Buffer.from(await response.arrayBuffer());
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Ceiling on an original read into memory to embed in the PDF.
@@ -353,38 +360,14 @@ async function loadPhotoBuffer(
       return untranscodedFallback(buffer, mime);
     }
   }
-  // No R2 copy — an external-only import (CompanyCam and similar keep a plain CDN URL). Every other surface
-  // serves these, so the report reads them too instead of drawing a placeholder over a photograph that is
-  // perfectly available. Bounded and scheme-restricted; `data:` still works exactly as before.
-  const primary = await fetchBoundedExternalImage(photo.externalUrl, MAX_RENDER_SOURCE_BYTES);
-  const attempt = primary.status === "ok"
-    ? primary
-    // Only fall back to the CDN thumbnail when the original is permanently unusable. A TRANSIENT failure on
-    // the original must not be quietly downgraded to its thumbnail — or worse, to a placeholder.
-    : primary.status === "unusable"
-      ? await fetchBoundedExternalImage(photo.externalThumbnailUrl, MAX_RENDER_SOURCE_BYTES)
-      : primary;
-
-  if (attempt.status !== "ok") {
-    // Same rule the R2 branch above applies: in strict mode a transient failure fails the render rather
-    // than emitting a placeholder. This is the AI report, where that panel would sit beside findings
-    // written about this very photograph, in a document then marked succeeded.
-    if (strictStorage && attempt.status === "unavailable") {
-      throw new Error(`External image for ${photo.displayName ?? "photo"} was temporarily unavailable.`);
-    }
-    return null;
-  }
-  const external = attempt.image;
-  // Same transcode decision as an R2 original: PDFKit takes JPEG/PNG only, and a CDN can serve HEIC/WebP.
-  const externalMime = external.contentType ?? photo.mimeType ?? null;
-  if (externalMime && PDFKIT_NATIVE_MIME.test(externalMime) && external.buffer.byteLength <= RENDER_TRANSCODE_ABOVE_BYTES) {
-    return external.buffer;
-  }
-  try {
-    return await generateEvidenceJpeg(external.buffer, externalMime, { maxEdge: RENDER_TRANSCODE_MAX_EDGE, quality: 82 });
-  } catch {
-    return untranscodedFallback(external.buffer, externalMime);
-  }
+  // No R2 copy — an external-only import (CompanyCam and similar keep a plain CDN URL with no stored
+  // original). Only INLINE data is readable here: reaching a CDN would mean the server issuing outbound
+  // requests to addresses it does not choose, which is deliberately not part of this feature. Such a photo
+  // draws the "Image unavailable" placeholder. Support for fetching them lives on
+  // feat/trockcam-external-photos, where the destination allow-listing gets its own review.
+  if (photo.externalUrl?.startsWith("data:image/")) return fetchExternalImageBuffer(photo.externalUrl);
+  if (photo.externalThumbnailUrl?.startsWith("data:image/")) return fetchExternalImageBuffer(photo.externalThumbnailUrl);
+  return null;
 }
 
 function drawFooter(

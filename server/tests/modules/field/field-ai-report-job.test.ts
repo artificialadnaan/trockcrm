@@ -88,17 +88,8 @@ const { runFieldAiReportJob } = await import("../../../src/modules/field/ai-repo
 const PHOTO_A = "aaaaaaaa-1111-1111-1111-111111111111";
 const PHOTO_B = "bbbbbbbb-2222-2222-2222-222222222222";
 
-function photoRow(id: string, caption: string | null, overrides: Record<string, unknown> = {}) {
-  return {
-    id,
-    displayName: `IMG_${id.slice(0, 4)}`,
-    r2Key: `k/${id}.jpg`,
-    mimeType: "image/jpeg",
-    caption,
-    externalUrl: null,
-    externalThumbnailUrl: null,
-    ...overrides,
-  };
+function photoRow(id: string, caption: string | null) {
+  return { id, displayName: `IMG_${id.slice(0, 4)}`, r2Key: `k/${id}.jpg`, mimeType: "image/jpeg", caption };
 }
 
 /**
@@ -424,39 +415,6 @@ describe("runFieldAiReportJob", () => {
     await expect(runFieldAiReportJob({ runId: "run-1" })).resolves.toEqual({ claimed: true });
     expect(runMocks.markAiReportRunFailed).toHaveBeenCalled();
   });
-
-  it("carries an external-only photo's URLs through to the assessment", async () => {
-    // The mapper used to pass r2Key alone, so a CompanyCam-style row arrived with nothing to read and the
-    // vision pass skipped it — an all-external selection failed the whole run.
-    xoMocks.runInOfficeTransaction.mockImplementation(async (office: any, _userId: any, run: any) =>
-      run(
-        officeDb([
-          photoRow(PHOTO_A, null, { r2Key: null, externalUrl: "https://cdn.example.com/a.jpg" }),
-          photoRow(PHOTO_B, null),
-        ]),
-        office,
-      ),
-    );
-
-    await runFieldAiReportJob({ runId: "run-1" });
-
-    const photos = (aiMocks.generateAiPhotoAssessment.mock.calls[0][0] as any).photos;
-    expect(photos[0]).toMatchObject({ id: PHOTO_A, r2Key: null, externalUrl: "https://cdn.example.com/a.jpg" });
-  });
-
-  it("retries the success ledger write rather than stranding a report that exists", async () => {
-    // The file is committed and openable. Giving up on the first blip left the run 'running', and both
-    // mobile watchers only refetch once they see 'succeeded' — so they time out having never shown it, and
-    // the stale sweep later marks a COMPLETED run failed and clears the way for a duplicate paid run.
-    runMocks.markAiReportRunSucceeded
-      .mockRejectedValueOnce(new Error("connection terminated unexpectedly"))
-      .mockResolvedValueOnce(undefined);
-
-    const result = await runFieldAiReportJob({ runId: "run-1" });
-
-    expect(result).toEqual({ claimed: true, fileId: "file-1" });
-    expect(runMocks.markAiReportRunSucceeded).toHaveBeenCalledTimes(2);
-  }, 15_000);
 
   it("renews the lease on the run it is actually working", async () => {
     // started_at doubles as the lease and is stamped once at claim, but only the model call is

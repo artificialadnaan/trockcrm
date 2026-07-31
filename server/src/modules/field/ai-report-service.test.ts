@@ -114,49 +114,6 @@ describe("ai-report-service", () => {
     expect(resolveTotalDeadlineMsForTest({})).toBeLessThanOrEqual(MAX_TOTAL_DEADLINE_MS);
   });
 
-  it("analyses an external-only photo instead of treating it as unreadable", async () => {
-    // CompanyCam-style rows carry a plain CDN URL and no r2Key. Every other surface serves those URLs, but
-    // the vision pass used to declare the photo unreadable and drop it — so an all-external selection failed
-    // the whole run with "None of the selected photos could be read". No loadPhotoBuffer is injected here,
-    // so this exercises the REAL default loader and its external fallback.
-    const external: AiReportPhotoInput = {
-      id: "x",
-      r2Key: null,
-      mimeType: "image/jpeg",
-      displayName: "IMG_x",
-      caption: null,
-      externalUrl: "https://93.184.216.34/x.jpg",
-      externalThumbnailUrl: null,
-    };
-    // The body is a STREAM: fetchBoundedExternalImage reads it chunk by chunk so it can stop at its cap
-    // rather than buffering an unbounded response first.
-    vi.stubGlobal("fetch", vi.fn(async () => {
-      let sent = false;
-      return {
-        ok: true,
-        status: 200,
-        url: "https://93.184.216.34/x.jpg",
-        headers: { get: (name: string) => (name.toLowerCase() === "content-type" ? "image/jpeg" : null) },
-        body: {
-          getReader: () => ({
-            read: async () => (sent ? { done: true, value: undefined } : ((sent = true), { done: false, value: new Uint8Array(TINY_JPEG) })),
-            cancel: async () => undefined,
-            releaseLock: () => undefined,
-          }),
-        },
-      } as unknown as Response;
-    }));
-
-    const result = await generateAiPhotoAssessment(
-      { projectName: "P", photos: [external] },
-      { fetchFn: stubFetch([FINDINGS_ANY, SUMMARY_OK]) as unknown as typeof fetch },
-    );
-
-    // Read and reviewed, not skipped.
-    expect(result.reviewedCount).toBe(1);
-    expect(result.findings.map((f) => f.photoId)).toEqual(["x"]);
-  });
-
   it("reports configuration from the API key", () => {
     expect(isAiReportConfigured({ ANTHROPIC_API_KEY: "k" } as NodeJS.ProcessEnv)).toBe(true);
     expect(isAiReportConfigured({} as NodeJS.ProcessEnv)).toBe(false);
