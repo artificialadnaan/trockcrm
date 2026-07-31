@@ -76,6 +76,21 @@ describe("isPrivateAddress", () => {
     }
   });
 
+  it("rejects the whole IPv4 special-use registry, not just the memorable ranges", () => {
+    // Enumerating "the private ones" by hand kept missing entries. 198.18.0.0/15 is the one that showed it:
+    // a benchmarking range, routed internally in plenty of environments, that sailed through a filter built
+    // from RFC1918 + loopback + link-local + CGNAT.
+    for (const ip of [
+      "198.18.0.1", "198.19.255.254", // benchmarking
+      "192.0.0.1",                     // IETF protocol assignments
+      "192.0.2.1", "198.51.100.1", "203.0.113.1", // TEST-NET 1/2/3
+      "192.88.99.1",                   // 6to4 relay anycast
+      "240.0.0.1", "255.255.255.255",  // reserved / broadcast
+    ]) {
+      expect(isPrivateAddress(ip), ip).toBe(true);
+    }
+  });
+
   it("lets ordinary public addresses through", () => {
     for (const ip of ["93.184.216.34", "8.8.8.8", "172.15.0.1", "172.32.0.1", "2606:2800:220:1::1"]) {
       expect(isPrivateAddress(ip), ip).toBe(false);
@@ -123,6 +138,40 @@ describe("fetchBoundedExternalImage", () => {
     expect(result.status).toBe("unusable");
     // The first hop was requested; the private target never was.
     expect(requested).toEqual([PUBLIC_HOST]);
+  });
+
+  it("spends ONE timeout budget across the whole redirect chain", async () => {
+    // A fresh timeout per hop let a CDN that stalls each redirect burn the full budget four times over —
+    // about a minute for a single photo. Photos are fetched sequentially and the synchronous path renders
+    // inside its office transaction, so that multiplies into minutes of held worker and held connection.
+    const fetchImpl = vi.fn(async () =>
+      streamingResponse([], { status: 302, location: "https://93.184.216.34/next.jpg" }).response,
+    );
+
+    // Each hop takes real time, which is the whole point: a shared budget SHRINKS across hops, a per-hop
+    // one does not. Without an actual delay both implementations hand out the same number and the test
+    // would prove nothing.
+    fetchImpl.mockImplementation(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      return streamingResponse([], { status: 302, location: "https://93.184.216.34/next.jpg" }).response;
+    });
+
+    // AbortSignal.timeout exposes no readable duration, so what each hop is GIVEN is recorded instead.
+    const realTimeout = AbortSignal.timeout.bind(AbortSignal);
+    const seen: number[] = [];
+    vi.spyOn(AbortSignal, "timeout").mockImplementation((ms: number) => {
+      seen.push(ms);
+      return realTimeout(60_000); // never actually fires during the test
+    });
+
+    await fetchBoundedExternalImage(PUBLIC_HOST, CAP, fetchImpl as never);
+
+    expect(seen.length).toBeGreaterThan(1);
+    // Each hop gets what is LEFT of one budget, so the allowance strictly shrinks. A fresh timeout per hop
+    // would hand out the same number every time.
+    for (let i = 1; i < seen.length; i += 1) expect(seen[i]).toBeLessThan(seen[i - 1]);
+    expect(seen[0]).toBeLessThanOrEqual(15_000);
+    vi.restoreAllMocks();
   });
 
   it("gives up on an endless redirect chain", async () => {
