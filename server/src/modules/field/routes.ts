@@ -992,8 +992,19 @@ fieldRoutes.post("/reports/ai-generate", requireFieldContractor, async (req, res
         "Project not found",
       );
     } catch (err) {
-      // The INSERT's own quota predicate refused it — atomic, so this is authoritative under concurrency.
+      // The INSERT's own quota predicate refused it — serialized by the advisory lock, so the count is
+      // authoritative rather than a snapshot.
       if (err instanceof AiReportQuotaExceededError) {
+        // ...but an identical double-tap can still arrive HERE rather than at the unique-violation branch
+        // below. The pre-flight duplicate check ran before the concurrent request committed, so with the
+        // user's other runs already at the limit, the first tap's commit takes them to the ceiling and the
+        // lock makes this one observe the full count — the quota refuses it before the in-flight index ever
+        // gets to. Resolve it as the duplicate it is instead of reporting a quota the user did not hit.
+        const duplicate = await getInFlightAiReportRun(projectId, req.fieldUser!.id);
+        if (duplicate && matchesRequest(duplicate, { photoIds, focusPrompt, reportTitle })) {
+          res.status(202).json({ runId: duplicate.id, status: duplicate.status });
+          return;
+        }
         throw new AppError(
           429,
           `You already have ${err.limit} AI reports being generated. Wait for one to finish before starting another.`,

@@ -5,7 +5,7 @@ import { deals, files, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { deleteObject, generateDownloadUrl, putObject } from "../../lib/r2-client.js";
-import { getFileById, getFileDownloadUrl } from "../files/service.js";
+import { buildFileDownloadUrlFromRecord, getFileById } from "../files/service.js";
 import { buildDealPhotoTimelineConditions } from "../files/photo-timeline-filters.js";
 import type { FieldAccessContext, FieldPhoto, FieldProject } from "./projects-service.js";
 import { assertActiveFieldProject, listFieldProjectPhotos } from "./projects-service.js";
@@ -481,7 +481,7 @@ export async function getFieldProjectReportDetail(
   // Gate and metadata come from ONE read. Calling getFieldProjectReportDownload and then re-fetching the
   // same row fetched it twice for a single poll.
   const file = await assertReadableFieldProjectReport(tenantDb, access, reportId);
-  const download = await getFileDownloadUrl(tenantDb, reportId);
+  const download = await buildFileDownloadUrlFromRecord(file);
   return {
     report: {
       id: file.id,
@@ -523,6 +523,9 @@ export async function getFieldProjectReportDownload(
   access: FieldAccessContext,
   reportId: string,
 ) {
-  await assertReadableFieldProjectReport(tenantDb, access, reportId);
-  return getFileDownloadUrl(tenantDb, reportId);
+  // The gate already read the row, so the URL is built FROM it rather than through getFileDownloadUrl,
+  // which would fetch the same file a second time. The builder's default disposition is "attachment" —
+  // the same one getFileDownloadUrl was passing through.
+  const file = await assertReadableFieldProjectReport(tenantDb, access, reportId);
+  return buildFileDownloadUrlFromRecord(file);
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { handleAiReportGeneration } from "../../src/jobs/ai-report-generation.js";
+import { handleAiReportGeneration, isCandidateMissing } from "../../src/jobs/ai-report-generation.js";
 
 /**
  * The worker job is a thin shim over the server orchestrator (server/src/modules/field/ai-report-job.ts),
@@ -19,6 +19,37 @@ describe("ai_report_generation shim", () => {
     await expect(handleAiReportGeneration(undefined)).rejects.toThrow(/missing runId/);
     await expect(handleAiReportGeneration({ runId: "   " })).rejects.toThrow(/missing runId/);
     await expect(handleAiReportGeneration({ runId: null })).rejects.toThrow(/missing runId/);
+  });
+
+  describe("isCandidateMissing", () => {
+    // The dist->src fallback exists so local `tsx` development can run against server/src while production
+    // resolves server/dist. It must fire ONLY when the candidate itself is absent: a candidate that loads
+    // and then fails — a missing env var, an absent transitive dependency — has to surface its own error,
+    // or the operator sees "cannot find module server/src/..." on a box where only dist was ever expected.
+    const CANDIDATE = "../../../server/dist/modules/field/ai-report-job.js";
+
+    it("skips a candidate that genuinely does not resolve", () => {
+      const error = Object.assign(
+        new Error("Cannot find module '/srv/app/server/dist/modules/field/ai-report-job.js' imported from /srv/app/worker/dist/jobs/x.js"),
+        { code: "ERR_MODULE_NOT_FOUND" },
+      );
+      expect(isCandidateMissing(error, CANDIDATE)).toBe(true);
+    });
+
+    it("does NOT skip a candidate whose own dependency is missing", () => {
+      // Same error CODE, different unresolved specifier — this one is a real problem inside a module that
+      // exists, and falling through to the next path would hide it.
+      const error = Object.assign(
+        new Error("Cannot find module '/srv/app/node_modules/sharp/lib/index.js' imported from /srv/app/server/dist/modules/field/ai-report-job.js"),
+        { code: "ERR_MODULE_NOT_FOUND" },
+      );
+      expect(isCandidateMissing(error, CANDIDATE)).toBe(false);
+    });
+
+    it("does NOT skip an initialisation failure", () => {
+      expect(isCandidateMissing(new TypeError("R2_ACCOUNT_ID is required"), CANDIDATE)).toBe(false);
+      expect(isCandidateMissing(null, CANDIDATE)).toBe(false);
+    });
   });
 
   it("does not reach the server module for an invalid payload", async () => {

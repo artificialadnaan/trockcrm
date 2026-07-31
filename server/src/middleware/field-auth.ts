@@ -3,6 +3,10 @@ import type { UserRole } from "@trock-crm/shared/types";
 import { getOfficeAccess, getUserById, verifyJwt } from "../modules/auth/service.js";
 import { getUserLocalAuthGate } from "../modules/auth/local-auth-service.js";
 import { AppError } from "./error-handler.js";
+// Its own dependency-free module: background work re-applies this same rule, and reading it from HERE would
+// drag this file's auth graph (jwt, the user service, the local-auth gate) into the worker. See
+// field-app-roles.ts.
+import { FIELD_APP_ALLOWED_ROLE_SET } from "../modules/field/field-app-roles.js";
 import { isTokenVersionStale } from "@trock-crm/shared/lib/userProvisioningGuards";
 
 type FieldUserRequest = {
@@ -15,18 +19,6 @@ type FieldUserRequest = {
   active: boolean;
 };
 
-/**
- * Who may use the field app at all. Exported because background work has to re-apply the same rule: a job
- * that was enqueued through this middleware can execute minutes later, by which time the account may have
- * been deactivated or its role revoked, and nothing downstream re-checks it.
- */
-export const FIELD_APP_ALLOWED_ROLE_SET = new Set<UserRole>([
-  "admin",
-  "director",
-  "rep",
-  "construction",
-  "field_contractor",
-]);
 
 declare global {
   namespace Express {

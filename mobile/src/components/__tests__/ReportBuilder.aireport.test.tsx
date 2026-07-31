@@ -250,6 +250,28 @@ describe("ReportBuilder AI report", () => {
     expect(props.onGenerated).not.toHaveBeenCalled();
   });
 
+  it("does not strand the progress text when the sheet is closed during the enqueue", async () => {
+    // close() runs reset(), which clears aiProgress and invalidates the token — but the stale continuation
+    // used to write "Reviewing …" back straight AFTER that, and the `finally` deliberately leaves stale
+    // state alone. The text then survived on the sheet with nothing actually polling behind it.
+    let release: (v: unknown) => void = () => {};
+    mockStartAiReport.mockImplementationOnce(
+      () => new Promise((resolve) => { release = resolve; }),
+    );
+
+    const { ui } = renderBuilder();
+    await openFocusStep(ui);
+    await pressGenerate(ui);
+    await waitFor(() => expect(mockStartAiReport).toHaveBeenCalled());
+
+    // Close while the ENQUEUE (not the poll) is still in flight.
+    await act(async () => { fireEvent.press(ui.getByText("Back")); });
+    await act(async () => { fireEvent.press(ui.getByText("Cancel")); });
+    await act(async () => { release({ runId: "run-1" }); });
+
+    expect(ui.queryByText(/Reviewing/)).toBeNull();
+  });
+
   it("a stale poll loop cannot resurrect itself once a new run has started", async () => {
     // With a shared boolean, a newly started report set the flag back to true while an OLD loop was still
     // resolving — the stale loop then resumed as current and could open the previous PDF, or clear the new

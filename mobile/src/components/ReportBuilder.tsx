@@ -194,11 +194,13 @@ export function ReportBuilder({
         photoIds: Array.from(selected),
         focusPrompt: focusPrompt.trim() || undefined,
       });
+      // Checked BEFORE the progress text is written, not after. reset() has already cleared aiProgress and
+      // invalidated this token, and the `finally` below deliberately leaves stale state alone — so setting
+      // it here first would strand "Reviewing …" on the sheet, still showing the next time it is opened.
+      if (!isCurrent()) return; // the sheet was closed (or another run started) during the enqueue
       setAiProgress(
         `Reviewing ${selected.size} photo${selected.size === 1 ? "" : "s"}… this usually takes about a minute.`,
       );
-
-      if (!isCurrent()) return; // the sheet was closed (or another run started) during the enqueue
       let consecutiveFailures = 0;
       while (isCurrent()) {
         await new Promise((resolve) => setTimeout(resolve, AI_POLL_INTERVAL_MS));

@@ -346,6 +346,53 @@ describe("POST /field/reports/ai-generate", () => {
     expect(runMocks.insertAiReportRunTx).not.toHaveBeenCalled();
   });
 
+  it("resolves an identical double-tap that reached the quota instead of the in-flight index", async () => {
+    // The pre-flight duplicate check ran BEFORE the concurrent request committed, so this one gets as far
+    // as the INSERT. With the user's other runs already at the ceiling, the winner's commit takes them to
+    // the limit and the advisory-lock-serialised count refuses this one before the in-flight index can —
+    // so the duplicate arrives at the quota branch. 429-ing it would report a limit the user did not hit
+    // and strip the client of the run id it needs to poll.
+    runMocks.getInFlightAiReportRun
+      .mockResolvedValueOnce(null as never) // pre-check: the winner has not committed yet
+      .mockResolvedValueOnce({              // after the refusal: it has
+        id: "run-winner",
+        status: "queued",
+        photoIds: [PHOTO_A],
+        focusPrompt: null,
+        reportTitle: null,
+      } as never);
+    runMocks.insertAiReportRunTx.mockRejectedValueOnce(new runMocks.AiReportQuotaExceededError(3) as never);
+
+    const res = await request(buildApp())
+      .post("/api/field/reports/ai-generate")
+      .send({ projectId: PROJECT, photoIds: [PHOTO_A] });
+
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({ runId: "run-winner", status: "queued" });
+  });
+
+  it("still reports the quota when the refused request is not a duplicate", async () => {
+    // The counterweight: the recovery above must not swallow a genuine quota rejection just because some
+    // other run happens to be in flight for this project.
+    runMocks.getInFlightAiReportRun
+      .mockResolvedValueOnce(null as never)
+      .mockResolvedValueOnce({
+        id: "run-other",
+        status: "running",
+        photoIds: [PHOTO_B], // a different selection — not the same request
+        focusPrompt: null,
+        reportTitle: null,
+      } as never);
+    runMocks.insertAiReportRunTx.mockRejectedValueOnce(new runMocks.AiReportQuotaExceededError(3) as never);
+
+    const res = await request(buildApp())
+      .post("/api/field/reports/ai-generate")
+      .send({ projectId: PROJECT, photoIds: [PHOTO_A] });
+
+    expect(res.status).toBe(429);
+    expect(res.body.error.message).toMatch(/already have 3 AI reports/i);
+  });
+
   it("treats a different report title as a different request", async () => {
     const conflict = Object.assign(new Error("duplicate key"), {
       code: "23505",

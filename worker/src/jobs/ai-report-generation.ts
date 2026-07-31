@@ -26,10 +26,25 @@ type AiReportJobModule = {
 /** Mirrors JobHandlerResult's deferral shape without importing the queue into this shim. */
 export type AiReportShimResult = void | { status: "pending"; error: string; runAfterSeconds: number };
 
-/** True only for "this specifier does not resolve", never for a module that exists and threw while loading. */
-function isModuleNotFound(error: unknown): boolean {
+/**
+ * True only for "THIS candidate does not exist" — never for a module that exists and failed to initialise.
+ *
+ * The error code alone is not enough: a candidate that IS present but imports something missing raises
+ * ERR_MODULE_NOT_FOUND too, and treating that as "try the next path" would bury a real dependency problem
+ * behind the fallback's own resolution failure. Node names the unresolved specifier in the message, so the
+ * candidate is only skipped when the thing that could not be found IS the candidate. Compared on the path
+ * tail because the message carries a resolved absolute path while the candidate is written relative.
+ */
+export function isCandidateMissing(error: unknown, candidate: string): boolean {
   const code = (error as { code?: unknown } | null)?.code;
-  return code === "ERR_MODULE_NOT_FOUND" || code === "MODULE_NOT_FOUND";
+  if (code !== "ERR_MODULE_NOT_FOUND" && code !== "MODULE_NOT_FOUND") return false;
+  const message = (error as { message?: unknown } | null)?.message;
+  if (typeof message !== "string") return false;
+  // "Cannot find module '<specifier>' imported from '<importer>'". Only the SPECIFIER half may be matched:
+  // when a candidate's own dependency is missing, the candidate appears as the IMPORTER, and matching the
+  // whole message would read that as "the candidate is absent" and fall through.
+  const [specifier] = message.split(" imported from ");
+  return specifier.includes(candidate.replace(/^(?:\.\.\/)+/, ""));
 }
 
 async function importFirstAvailable<T>(paths: readonly string[]): Promise<T> {
@@ -38,11 +53,11 @@ async function importFirstAvailable<T>(paths: readonly string[]): Promise<T> {
     try {
       return (await import(path)) as T;
     } catch (error) {
-      // Fall through ONLY when the candidate isn't there. If the module exists and its own initialisation
-      // threw — a missing env var, a bad top-level import — trying the next candidate buries the real cause
-      // behind whatever the fallback reports, which in production (where only `dist` exists) is a bare
-      // "cannot find module server/src/...". Propagate that immediately instead.
-      if (!isModuleNotFound(error)) throw error;
+      // Fall through ONLY when THIS candidate isn't there. If the module exists and its own initialisation
+      // threw — a missing env var, a bad top-level import, an absent transitive dependency — trying the next
+      // candidate buries the real cause behind whatever the fallback reports, which in production (where
+      // only `dist` exists) is a bare "cannot find module server/src/...". Propagate that immediately.
+      if (!isCandidateMissing(error, path)) throw error;
       lastError = error;
     }
   }

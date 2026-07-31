@@ -14,6 +14,10 @@ const r2Mocks = vi.hoisted(() => ({
 const filesMocks = vi.hoisted(() => ({
   getFileById: vi.fn(),
   getFileDownloadUrl: vi.fn(),
+  // The download path builds the URL from the record the access gate already read, rather than fetching the
+  // file a second time. Mirrored here because this mock REPLACES the module: a missing export is undefined
+  // at the call site, not a helpful error.
+  buildFileDownloadUrlFromRecord: vi.fn(async () => ({ url: "https://r2.test/report.pdf", filename: "report.pdf" })),
 }));
 
 const pdfMocks = vi.hoisted(() => ({
@@ -380,16 +384,27 @@ describe("photo reports service", () => {
 
   it("verifies project access before returning a report download", async () => {
     const db = createDb();
-    filesMocks.getFileById.mockResolvedValue({
+    const file = {
       id: "report-1",
       category: "other",
       tags: ["photo-report", "photo-report-exp:2099-05-20T12:00:00.000Z"],
       dealId: "deal-1",
-    });
+      r2Key: "office_dallas/report.pdf",
+      displayName: "Roof Repair Photo Report",
+      fileExtension: ".pdf",
+    };
+    filesMocks.getFileById.mockResolvedValue(file);
+    filesMocks.buildFileDownloadUrlFromRecord.mockResolvedValue({
+      url: "https://example.test/report.pdf",
+      filename: "Roof Repair Photo Report.pdf",
+    } as never);
 
     const result = await getFieldProjectReportDownload(db, access, "report-1");
     expect(projectMocks.assertActiveFieldProject).toHaveBeenCalledWith(db, access, "deal-1");
-    expect(filesMocks.getFileDownloadUrl).toHaveBeenCalledWith(db, "report-1");
+    // Built from the record the gate already read — the file is fetched ONCE, not once to authorise and
+    // again to presign.
+    expect(filesMocks.buildFileDownloadUrlFromRecord).toHaveBeenCalledWith(file);
+    expect(filesMocks.getFileById).toHaveBeenCalledTimes(1);
     expect(result.url).toBe("https://example.test/report.pdf");
   });
 

@@ -2,7 +2,7 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import { files } from "@trock-crm/shared/schema";
 import type { UserRole } from "@trock-crm/shared/types";
 import { pool } from "../../db.js";
-import { FIELD_APP_ALLOWED_ROLE_SET } from "../../middleware/field-auth.js";
+import { FIELD_APP_ALLOWED_ROLE_SET } from "./field-app-roles.js";
 import { deleteObject } from "../../lib/r2-client.js";
 import { buildDealPhotoTimelineConditions } from "../files/photo-timeline-filters.js";
 import { getFieldOfficeById, runInOfficeTransaction } from "./cross-office.js";
