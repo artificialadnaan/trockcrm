@@ -973,7 +973,7 @@ fieldRoutes.post("/reports/ai-generate", requireFieldContractor, async (req, res
             { userId: req.fieldUser!.id, userRole: req.fieldUser!.role },
             projectId,
           );
-          const created = await insertAiReportRunTx(db, {
+          const { run: created, replayed } = await insertAiReportRunTx(db, {
             dealId: project.id,
             officeId: office.id,
             officeSlug: office.slug,
@@ -982,12 +982,18 @@ fieldRoutes.post("/reports/ai-generate", requireFieldContractor, async (req, res
             reportTitle: reportTitle || null,
             focusPrompt: focusPrompt || null,
           });
-          // Same transaction as the run row: if this rolls back, the run row must go with it, or the phone
-          // polls a 'queued' row no worker will ever claim.
-          await db.execute(sql`
-            INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
-            VALUES (${AI_REPORT_JOB_TYPE}, ${JSON.stringify({ runId: created.id })}::jsonb, ${office.id}::uuid, 'pending', NOW())
-          `);
+          // A REPLAY gets no new delivery. The run it hands back is either still in flight (its original
+          // delivery is live) or already finished (nothing left to do), so enqueuing here would let repeated
+          // identical POSTs stack unbounded no-op jobs ahead of real reports — and the AI-report poller is
+          // dedicated and claims one at a time, so that queue is exactly where a legitimate run would wait.
+          if (!replayed) {
+            // Same transaction as the run row: if this rolls back, the run row must go with it, or the phone
+            // polls a 'queued' row no worker will ever claim.
+            await db.execute(sql`
+              INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
+              VALUES (${AI_REPORT_JOB_TYPE}, ${JSON.stringify({ runId: created.id })}::jsonb, ${office.id}::uuid, 'pending', NOW())
+            `);
+          }
           return created;
         },
         "Project not found",

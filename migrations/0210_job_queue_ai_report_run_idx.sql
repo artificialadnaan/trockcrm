@@ -1,4 +1,4 @@
--- Migration 0209: partial index on public.job_queue for the AI-report stale-run sweep.
+-- Migration 0210: partial index on public.job_queue for the AI-report stale-run sweep.
 --
 -- ROOT CAUSE: expireStaleAiReportRuns (server/src/modules/field/ai-report-runs.ts) runs on EVERY AI-report
 -- enqueue, and decides whether a QUEUED run is abandoned by asking whether a live delivery still exists:

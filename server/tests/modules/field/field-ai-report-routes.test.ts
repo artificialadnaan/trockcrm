@@ -39,7 +39,7 @@ vi.mock("../../../src/modules/field/ai-report-service.js", () => aiMocks);
 
 const runMocks = vi.hoisted(() => ({
   AI_REPORT_JOB_TYPE: "ai_report_generation",
-  insertAiReportRunTx: vi.fn(async () => ({ id: "run-1", status: "queued" })),
+  insertAiReportRunTx: vi.fn(async () => ({ run: { id: "run-1", status: "queued" }, replayed: false })),
   getAiReportRun: vi.fn(),
   getInFlightAiReportRun: vi.fn(),
   expireStaleAiReportRuns: vi.fn(async () => 0),
@@ -132,7 +132,7 @@ beforeEach(() => {
 
   aiMocks.isAiReportConfigured.mockReturnValue(true);
   runMocks.expireStaleAiReportRuns.mockResolvedValue(0 as any);
-  runMocks.insertAiReportRunTx.mockResolvedValue({ id: "run-1", status: "queued" } as any);
+  runMocks.insertAiReportRunTx.mockResolvedValue({ run: { id: "run-1", status: "queued" }, replayed: false } as any);
   // No identical run in flight by default — the route now checks this BEFORE the quota so a lost-202 retry
   // can resume its original run instead of being rejected.
   runMocks.getInFlightAiReportRun.mockResolvedValue(null as any);
@@ -223,6 +223,30 @@ describe("POST /field/reports/ai-generate", () => {
     const expireOrder = runMocks.expireStaleAiReportRuns.mock.invocationCallOrder[0];
     const insertOrder = runMocks.insertAiReportRunTx.mock.invocationCallOrder[0];
     expect(expireOrder).toBeLessThan(insertOrder);
+  });
+
+  it("enqueues no second delivery when the insert replays an existing run", async () => {
+    // A replayed run either already has a live delivery or has finished and needs none. Enqueuing anyway
+    // would let repeated identical POSTs stack unbounded no-op jobs — and the AI-report poller is dedicated
+    // and claims one at a time, so that queue is exactly where a legitimate report would be left waiting.
+    runMocks.insertAiReportRunTx.mockResolvedValue({
+      run: { id: "run-replayed", status: "succeeded" },
+      replayed: true,
+    } as any);
+
+    const response = await request(buildApp())
+      .post("/api/field/reports/ai-generate")
+      .send({ projectId: PROJECT, photoIds: [PHOTO_A] });
+
+    // The caller still gets the run, so a lost-response retry recovers rather than erroring.
+    expect(response.status).toBe(202);
+    expect(response.body.runId).toBe("run-replayed");
+    // ...but nothing was queued. Asserted on the SQL actually issued, since the enqueue and the run row
+    // share this handle and a call-count assertion could not tell them apart.
+    const enqueues = officeDb.execute.mock.calls.filter((call) =>
+      JSON.stringify(call[0] ?? "").includes("job_queue"),
+    );
+    expect(enqueues).toHaveLength(0);
   });
 
   it("hands a double-tap the run already in flight instead of buying a second Claude pass", async () => {

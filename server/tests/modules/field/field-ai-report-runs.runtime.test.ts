@@ -38,7 +38,7 @@ const { expireStaleAiReportRuns, insertAiReportRunTx, isInFlightRunConflict } = 
 // `server/` under `--workspace=server` (which is what CI's runtime pass uses), so a cwd-relative path loads
 // here and fails there — the file errors at import and its tests are silently skipped rather than failing
 // loudly. Same form every other server runtime test uses.
-const MIGRATION = fileURLToPath(new URL("../../../../migrations/0208_field_ai_report_runs.sql", import.meta.url));
+const MIGRATION = fileURLToPath(new URL("../../../../migrations/0209_field_ai_report_runs.sql", import.meta.url));
 
 let client: PGlite;
 let db: ReturnType<typeof drizzle>;
@@ -206,7 +206,7 @@ describe("field_ai_report_runs — real SQL", () => {
     // Run it inside an explicit transaction, the way the route does, so the lock can be OBSERVED while it is
     // still held. Asserting only after the fact would pass just as happily with no lock at all.
     const created = await db.transaction(async (tx) => {
-      const run = await insertAiReportRunTx(tx as unknown as Parameters<typeof insertAiReportRunTx>[0], {
+      const { run } = await insertAiReportRunTx(tx as unknown as Parameters<typeof insertAiReportRunTx>[0], {
         dealId: "aaaaaaaa-9999-9999-9999-999999999999",
         officeId,
         officeSlug: "dallas",
@@ -244,7 +244,7 @@ describe("field_ai_report_runs — real SQL", () => {
       await client.query<{ id: string }>(`INSERT INTO public.users (email) VALUES ('replay@t.co') RETURNING id`)
     ).rows[0].id;
     const deal = "aaaaaaaa-7777-7777-7777-777777777777";
-    const enqueue = () =>
+    const enqueue = (overrides: Partial<{ photoIds: string[]; reportTitle: string | null }> = {}) =>
       db.transaction(async (tx) =>
         insertAiReportRunTx(tx as unknown as Parameters<typeof insertAiReportRunTx>[0], {
           dealId: deal,
@@ -254,15 +254,19 @@ describe("field_ai_report_runs — real SQL", () => {
           photoIds: PHOTOS,
           reportTitle: "Title",
           focusPrompt: null,
+          ...overrides,
         }),
       );
 
     const first = await enqueue();
-    await client.query(`UPDATE public.field_ai_report_runs SET status = 'succeeded' WHERE id = $1`, [first.id]);
+    expect(first.replayed).toBe(false);
+    await client.query(`UPDATE public.field_ai_report_runs SET status = 'succeeded' WHERE id = $1`, [first.run.id]);
 
     const retry = await enqueue();
-    expect(retry.id).toBe(first.id);
-    expect(retry.status).toBe("succeeded");
+    expect(retry.run.id).toBe(first.run.id);
+    expect(retry.run.status).toBe("succeeded");
+    // The flag is what stops the route enqueuing a second, no-op job_queue delivery for this run.
+    expect(retry.replayed).toBe(true);
     const total = await client.query<{ n: number }>(
       `SELECT count(*)::int AS n FROM public.field_ai_report_runs WHERE requested_by = $1`,
       [replayUser],
@@ -270,19 +274,47 @@ describe("field_ai_report_runs — real SQL", () => {
     expect(total.rows[0].n).toBe(1);
 
     // ...but a DIFFERENT selection is a new request, not a retry, and must still start its own run.
-    const different = await db.transaction(async (tx) =>
-      insertAiReportRunTx(tx as unknown as Parameters<typeof insertAiReportRunTx>[0], {
-        dealId: deal,
-        officeId,
-        officeSlug: "dallas",
-        requestedBy: replayUser,
-        photoIds: [PHOTOS[0]],
-        reportTitle: "Title",
-        focusPrompt: null,
-      }),
-    );
-    expect(different.id).not.toBe(first.id);
-    expect(different.status).toBe("queued");
+    const different = await enqueue({ photoIds: [PHOTOS[0]] });
+    expect(different.run.id).not.toBe(first.run.id);
+    expect(different.run.status).toBe("queued");
+    expect(different.replayed).toBe(false);
+
+    // ...and so is the SAME selection under a different title. The title is printed on the cover, so
+    // replaying here would answer the request with the old PDF bearing the old title.
+    await client.query(`UPDATE public.field_ai_report_runs SET status = 'succeeded' WHERE status <> 'succeeded'`);
+    const retitled = await enqueue({ reportTitle: "A different title" });
+    expect(retitled.run.id).not.toBe(first.run.id);
+    expect(retitled.replayed).toBe(false);
+  });
+
+  it("never replays a FAILED run, so Generate again is a real retry rather than the same error", async () => {
+    // Replaying a failure would answer every retry with the original error until the window expired,
+    // turning a transient model/network fault into ten minutes of being stuck with no way out.
+    const retryUser = (
+      await client.query<{ id: string }>(`INSERT INTO public.users (email) VALUES ('retry@t.co') RETURNING id`)
+    ).rows[0].id;
+    const deal = "aaaaaaaa-6666-6666-6666-666666666666";
+    const enqueue = () =>
+      db.transaction(async (tx) =>
+        insertAiReportRunTx(tx as unknown as Parameters<typeof insertAiReportRunTx>[0], {
+          dealId: deal,
+          officeId,
+          officeSlug: "dallas",
+          requestedBy: retryUser,
+          photoIds: PHOTOS,
+          reportTitle: "Title",
+          focusPrompt: null,
+        }),
+      );
+
+    const first = await enqueue();
+    await client.query(`UPDATE public.field_ai_report_runs SET status = 'failed' WHERE id = $1`, [first.run.id]);
+
+    const retry = await enqueue();
+    expect(retry.run.id).not.toBe(first.run.id);
+    expect(retry.run.status).toBe("queued");
+    // A fresh row means the route also enqueues a fresh delivery — without which the retry would never run.
+    expect(retry.replayed).toBe(false);
   });
 
   it("does not expire a long-queued run that still has a live delivery, but does expire an orphaned one", async () => {

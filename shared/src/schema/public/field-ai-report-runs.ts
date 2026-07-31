@@ -21,7 +21,7 @@ import { users } from "./users.js";
  * across every tenant schema — same reasoning as public.bid_board_ingestion_inbox and public.job_queue.
  * dealId/fileId therefore carry NO foreign key: both live in office_<slug>.
  *
- * Kept byte-aligned with migration 0208 (field_ai_report_runs) — the raw SQL is the source of truth for prod;
+ * Kept byte-aligned with migration 0209 (field_ai_report_runs) — the raw SQL is the source of truth for prod;
  * this drizzle definition exists for drizzle-kit parity and typed reads (mirrors bid_board_ingestion_inbox).
  */
 export const fieldAiReportRuns = pgTable(
@@ -63,19 +63,19 @@ export const fieldAiReportRuns = pgTable(
   },
   (table) => [
     // One in-flight run per (project, requester) — the DB-enforced guard against a double-tap buying a
-    // second Claude pass. Partial, so completed runs never collide (migration 0208).
+    // second Claude pass. Partial, so completed runs never collide (migration 0209).
     uniqueIndex("field_ai_report_runs_inflight_uidx")
       .on(table.dealId, table.requestedBy)
       .where(sql`${table.status} IN ('queued', 'running')`),
     // Backs the rolling daily cap, which counts a requester's runs in the last 24 hours across EVERY status
-    // and so cannot use the partial index above. Declared here as well as in 0208 because drizzle.config.ts
+    // and so cannot use the partial index above. Declared here as well as in 0209 because drizzle.config.ts
     // treats this file as the DESIRED database definition: an index present only in the migration reads as
     // drift, and the generated diff would drop the one thing keeping that query bounded on a ledger that is
     // never pruned.
     index("field_ai_report_runs_requester_recent_idx").on(table.requestedBy, table.createdAt.desc()),
     // Bounds the per-report model spend at the DB, mirroring AI_REPORT_MAX_PHOTOS in the route.
     check("field_ai_report_runs_photo_ids_check", sql`cardinality(${table.photoIds}) BETWEEN 1 AND 60`),
-    // Mirror migration 0208's inline CHECK (status IN (...)). Named to match Postgres's auto-name for the
+    // Mirror migration 0209's inline CHECK (status IN (...)). Named to match Postgres's auto-name for the
     // column check so drizzle-kit sees parity instead of generating a drift migration that drops it.
     check(
       "field_ai_report_runs_status_check",

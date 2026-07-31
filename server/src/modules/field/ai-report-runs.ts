@@ -7,7 +7,7 @@ import { STALE_RUN_MINUTES } from "./ai-report-limits.js";
 
 /**
  * Reads/writes for public.field_ai_report_runs — the status row the phone polls while an AI report is being
- * authored (migration 0208).
+ * authored (migration 0209).
  *
  * Deliberately raw SQL on the shared pool rather than an office-scoped drizzle handle: the table is PUBLIC,
  * and the whole point of it living there is that the status endpoint can resolve a run id to its office
@@ -84,6 +84,15 @@ export type NewAiReportRun = {
 };
 
 /**
+ * The run, plus whether it is a REPLAY of one this requester already started rather than a new row.
+ *
+ * The caller needs the distinction because it enqueues the job_queue delivery: a replayed run either already
+ * has a live delivery or has finished and needs none, so enqueuing again would stack no-op jobs in front of
+ * real work on a poller that runs one at a time.
+ */
+export type InsertedAiReportRun = { run: AiReportRun; replayed: boolean };
+
+/**
  * Insert the run row on the CALLER'S transaction (an office-scoped connection; `public.` is qualified
  * explicitly so the office search_path is irrelevant).
  *
@@ -91,7 +100,10 @@ export type NewAiReportRun = {
  * same transaction, and the two must commit together. Split across connections, a rollback after the run
  * row landed would leave a 'queued' row no worker will ever pick up — the phone would poll it forever.
  */
-export async function insertAiReportRunTx(db: FieldTenantDb, input: NewAiReportRun): Promise<AiReportRun> {
+export async function insertAiReportRunTx(
+  db: FieldTenantDb,
+  input: NewAiReportRun,
+): Promise<InsertedAiReportRun> {
   // photoIds MUST go through sql.param(). A bare array interpolated into a drizzle template is expanded as
   // a value LIST — `($1, $2)::uuid[]` — which is not valid array syntax and fails EVERY insert with a
   // syntax error. sql.param binds the whole array as one parameter. Pinned by a real-SQL runtime test
@@ -129,12 +141,23 @@ export async function insertAiReportRunTx(db: FieldTenantDb, input: NewAiReportR
        AND deal_id = ${input.dealId}::uuid
        AND photo_ids = ${sql.param(input.photoIds)}::uuid[]
        AND focus_prompt IS NOT DISTINCT FROM ${input.focusPrompt}
+       -- The title is part of the request, not decoration: it is printed on the cover and the route already
+       -- treats a different title as a different request while a run is in flight. Without this, changing
+       -- only the title after a run completed handed back the OLD pdf bearing the OLD title.
+       AND report_title IS NOT DISTINCT FROM ${input.reportTitle}
+       -- A FAILED run is never a replay target. Nothing was delivered, so tapping Generate again is a
+       -- deliberate retry — and replaying the failure would answer it with the same error until the window
+       -- expired, turning a transient model or network fault into ten minutes of being stuck.
+       AND status <> 'failed'
        AND created_at > now() - ${`${DUPLICATE_REPLAY_WINDOW_MINUTES} minutes`}::interval
      ORDER BY created_at DESC
      LIMIT 1
   `);
   const replayed = (replay as unknown as { rows: RunRow[] }).rows[0];
-  if (replayed) return toRun(replayed);
+  // `replayed: true` tells the caller NOT to enqueue a delivery. A replayed run either already has a live
+  // one (queued/running) or needs none (succeeded); inserting another would let repeated identical POSTs
+  // pile up unbounded no-op jobs in front of real work, and the AI poller runs one at a time.
+  if (replayed) return { run: toRun(replayed), replayed: true };
 
   const result = await db.execute<RunRow>(sql`
     INSERT INTO public.field_ai_report_runs
@@ -165,7 +188,7 @@ export async function insertAiReportRunTx(db: FieldTenantDb, input: NewAiReportR
     RETURNING *
   `);
   const row = (result as unknown as { rows: RunRow[] }).rows[0];
-  if (row) return toRun(row);
+  if (row) return { run: toRun(row), replayed: false };
 
   // No row means one of the two predicates rejected it, and the caller needs to know WHICH — "wait for one
   // to finish" is useless advice to someone who has hit the daily cap. Read back under the same lock, so
