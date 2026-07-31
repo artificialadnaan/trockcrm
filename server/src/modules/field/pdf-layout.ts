@@ -36,7 +36,6 @@ const COVER_LOGO_FIT: [number, number] = [210, 210];
 const PHOTOS_PER_PAGE = 4;
 const CONTENT_WIDTH = PAGE_WIDTH - PAGE_MARGIN * 2;
 const PHOTO_ROWS_TOP = 72;
-const PHOTO_ROWS_BOTTOM = 742; // stay clear of the footer (drawn at PAGE_HEIGHT - 44)
 const PHOTO_ROW_PITCH = 172;
 /**
  * The photo sits in a FIXED grey tile and is letterboxed inside it, rather than being drawn at whatever

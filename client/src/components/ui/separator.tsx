@@ -12,7 +12,12 @@ function Separator({
       data-slot="separator"
       orientation={orientation}
       className={cn(
-        "shrink-0 bg-border data-[horizontal]:h-px data-[horizontal]:w-full data-[vertical]:w-px data-[vertical]:self-stretch",
+        // Base UI renders `data-orientation="horizontal"|"vertical"` — a VALUE, not the bare
+        // `data-horizontal`/`data-vertical` attributes the upstream classes targeted. Those selectors matched
+        // nothing, and since these four classes are the separator's ONLY sizing, every separator in the app
+        // rendered at zero height/width. Converting the v4 variant syntax alone did not fix it: the syntax
+        // became valid while still pointing at an attribute that does not exist.
+        "shrink-0 bg-border data-[orientation=horizontal]:h-px data-[orientation=horizontal]:w-full data-[orientation=vertical]:w-px data-[orientation=vertical]:self-stretch",
         className
       )}
       {...props}
