@@ -172,7 +172,29 @@ PHONE   ──CameraCapture ─────────────────�
 
 ---
 
-## Step 0 — CLEARED. Both checks PASS (2026-07-30, real hardware)
+## Step 0 — PROVISIONAL. Both checks PASS, but both checks are weaker than they look
+
+> ⚠️ **Read this before relying on the results below.** Code review (PR #1020, 2026-07-30)
+> found that neither rung verifies the thing it claims to measure. Both need re-running after
+> the fixes land. The PASS results are recorded as-is, with what each does and does not
+> establish stated plainly.
+>
+> **Rung 9 never confirms a frame arrived.** It waits 4s after `stream.start()` and reads the
+> route. If the DAT stream had stalled and delivered nothing, the HFP route would be trivially
+> undisturbed and the rung would still report PASS — for a stream that never ran. Our PASS is
+> *probably* genuine, because rung 6b showed frames flowing (504×896, first frame at 2.2–2.5s)
+> earlier in the same session, but rung 9 itself does not establish it.
+> **Fix:** require at least one delivered frame, with a failure timeout, before computing the
+> verdict.
+>
+> **Rung 10 never takes a photo.** It builds an `AVCapturePhotoOutput`, calls `startRunning()`,
+> and reads the route — but never calls `capturePhoto`. The shutter is precisely where a route
+> disturbance would most plausibly occur, and it is what the real feature does. So this
+> establishes *opening the camera is safe*, **not** *taking a still is safe*.
+> **Fix:** perform a real capture and measure the route through its completion.
+>
+> Until both are re-run: treat "video + audio simultaneously" as well-supported, and "phone
+> stills during a walk are safe" as **untested**.
 
 The two silent-failure modes that gated this design were measured on device via rungs 9 and 10.
 **Both passed. The design proceeds as written — no fallback, no spec change.**
