@@ -200,7 +200,11 @@ export function registerAllJobs() {
   // cross-office writes is not necessarily the office the request was made from.
   // Returns the handler result (does NOT discard it): a run still held by a live attempt comes back as a
   // deferral, which must reschedule the delivery rather than be recorded as completed.
-  registerJobHandler("ai_report_generation", (payload) => handleAiReportGeneration(payload));
+  // EVERY argument is forwarded, not just the payload. The shim needs the attempt context to reconcile the
+  // run when a throw dead-letters the final delivery; a wrapper that took only `payload` silently made that
+  // reconciliation unreachable while its unit tests — which call the shim directly — kept passing.
+  registerJobHandler("ai_report_generation", (payload, officeId, deps, ctx) =>
+    handleAiReportGeneration(payload, officeId, deps, ctx));
 
   registerJobHandler("ai_generate_intervention_policy_recommendations", async (payload) => {
     await runAiGenerateInterventionPolicyRecommendations(payload);

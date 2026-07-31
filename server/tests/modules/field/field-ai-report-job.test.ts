@@ -70,12 +70,12 @@ vi.mock("../../../src/modules/files/photo-timeline-filters.js", () => ({
 // Records the ORDER of interesting events so the phase split can be asserted rather than assumed.
 const timeline = vi.hoisted(() => ({ events: [] as string[] }));
 
-const xoMocks = vi.hoisted(() => ({ runInOfficeTransaction: vi.fn() }));
+const xoMocks = vi.hoisted(() => ({ runInOfficeTransaction: vi.fn(), getFieldOfficeById: vi.fn() }));
 vi.mock("../../../src/modules/field/cross-office.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../src/modules/field/cross-office.js")>();
   return {
     ...actual,
-    getFieldOfficeById: vi.fn(async (id: string) => ({ id, slug: "dallas" })),
+    getFieldOfficeById: xoMocks.getFieldOfficeById,
     runInOfficeTransaction: xoMocks.runInOfficeTransaction,
   };
 });
@@ -139,6 +139,7 @@ beforeEach(() => {
   // clearAllMocks wipes recorded calls but NOT implementations, so anything a test overrides below has to be
   // restored here or it silently leaks into the next one.
   authMocks.getOfficeAccess.mockResolvedValue({ hasAccess: true });
+  xoMocks.getFieldOfficeById.mockImplementation(async (id: string) => ({ id, slug: "dallas" }) as any);
   runMocks.markAiReportRunFailed.mockResolvedValue(undefined);
   runMocks.markAiReportRunSucceeded.mockResolvedValue(undefined);
   runMocks.touchAiReportRunLease.mockImplementation(async () => {
@@ -521,6 +522,29 @@ describe("runFieldAiReportJob", () => {
       expect.stringMatching(/unavailable/i),
       expect.anything(),
     );
+  });
+
+  it("discards the report when the office is deactivated during the render", async () => {
+    // Everything from Phase A on uses the office object cached before the render. Recording against a
+    // deactivated office would mark the run 'succeeded' while the status endpoint — which resolves the
+    // office through the same is_active-gated lookup — answers 404: a success the user can never open.
+    reportMocks.renderAndStoreFieldPhotoReportPdf.mockImplementation(async () => {
+      timeline.events.push("render+upload");
+      return { r2Key: "office_dallas/report.pdf" } as any;
+    });
+    let lookups = 0;
+    xoMocks.getFieldOfficeById.mockImplementation(async (id: string) => {
+      lookups += 1;
+      // Phase A resolves it; by the Phase E re-resolve the office is gone.
+      if (lookups > 1) throw new Error("Office not found or inactive");
+      return { id, slug: "dallas" } as any;
+    });
+
+    await runFieldAiReportJob({ runId: "run-1" });
+
+    expect(reportMocks.recordFieldPhotoReportFile).not.toHaveBeenCalled();
+    expect(r2Mocks.deleteObject).toHaveBeenCalledWith("office_dallas/report.pdf");
+    expect(runMocks.markAiReportRunFailed).toHaveBeenCalled();
   });
 
   it("keeps the uploaded PDF when Phase E succeeds", async () => {

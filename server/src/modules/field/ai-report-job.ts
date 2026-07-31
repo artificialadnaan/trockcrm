@@ -315,6 +315,14 @@ export async function runFieldAiReportJob(
     // ── Phase E: short transaction — record the file row ─────────────────────────────────────────
     let recorded: Awaited<ReturnType<typeof recordFieldPhotoReportFile>>;
     try {
+      // Re-resolve the OFFICE as well. Everything from Phase A on uses the office object cached before the
+      // render, and an office deactivated during those minutes would still be written to — leaving a run
+      // marked 'succeeded' whose report the status endpoint refuses to hand back, because it resolves the
+      // office through this same function and that requires is_active. Exactly the never-openable success
+      // the project re-check below exists to prevent. This narrows a minutes-long window to the gap between
+      // here and the commit; closing that last sliver would mean locking a public row inside an
+      // office-scoped transaction, which is not worth the coupling.
+      await getFieldOfficeById(run.officeId);
       recorded = await runInOfficeTransaction(office, requester.id, async (db) => {
         // Re-check the project. Phase D can run for minutes, and a project archived or moved to an excluded
         // stage in that window would otherwise be recorded against anyway — leaving a run marked 'succeeded'
