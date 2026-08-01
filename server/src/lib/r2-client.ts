@@ -259,12 +259,16 @@ export class ObjectTooLargeError extends Error {
 
 export async function getObjectBuffer(
   r2Key: string,
-  opts?: { maxBytes?: number }
+  opts?: { maxBytes?: number; signal?: AbortSignal }
 ): Promise<{ buffer: Buffer; contentType?: string; contentLength?: number }> {
   const client = getClient();
   const bucket = getBucket();
+  // The signal reaches BOTH halves of the read. Passing it only to send() bounds the request but not the
+  // body: R2 can return headers promptly and then stall mid-stream, which is the shape that hangs a caller
+  // indefinitely. The chunk loop below re-checks it, and the stream is destroyed rather than left open.
   const resp = await client.send(
-    new GetObjectCommand({ Bucket: bucket, Key: r2Key })
+    new GetObjectCommand({ Bucket: bucket, Key: r2Key }),
+    opts?.signal ? { abortSignal: opts.signal } : undefined
   );
   const max = opts?.maxBytes;
   const stream = resp.Body as (AsyncIterable<Uint8Array> & { destroy?: (err?: Error) => void }) | undefined;
@@ -279,6 +283,12 @@ export async function getObjectBuffer(
   const chunks: Uint8Array[] = [];
   let total = 0;
   for await (const chunk of stream) {
+    // Checked per chunk, so a body that stalls or trickles is bounded by the caller's deadline rather than
+    // running until the socket happens to time out.
+    if (opts?.signal?.aborted) {
+      stream.destroy?.();
+      throw new Error(`R2 read of ${r2Key} was aborted`);
+    }
     total += chunk.byteLength;
     // Abort BEFORE accumulating past the cap, defending against an absent/under-reported Content-Length.
     if (max != null && total > max) {

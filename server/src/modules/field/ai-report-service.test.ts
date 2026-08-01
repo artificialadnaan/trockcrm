@@ -437,6 +437,34 @@ describe("ai-report-service", () => {
     expect(slowLoad.mock.calls.length).toBeLessThan(4);
   });
 
+  it("aborts a stalled photo read rather than waiting past the deadline", async () => {
+    // The previous fix only checked the clock BETWEEN photographs, which a body that returns headers and
+    // then stalls walks straight past — the read never ends, so the next check never runs. The remaining
+    // budget is pushed into the loader now, and the loader is expected to honour it.
+    vi.stubEnv("AI_REPORT_TOTAL_DEADLINE_MS", "80");
+    const fetchFn = stubFetch([FINDINGS_ANY, SUMMARY_OK]);
+    let sawSignal: AbortSignal | undefined;
+    // Never resolves on its own. Only the signal can end it — exactly the shape that used to hang forever.
+    const stalledLoad = vi.fn(
+      (_photo: unknown, signal?: AbortSignal) =>
+        new Promise<{ buffer: Buffer; contentType?: string }>((_resolve, reject) => {
+          sawSignal = signal;
+          signal?.addEventListener("abort", () => reject(new Error("aborted")));
+        }),
+    );
+
+    await expect(
+      generateAiPhotoAssessment(
+        { projectName: "P", photos: [photo("a")] },
+        { fetchFn: fetchFn as unknown as typeof fetch, loadPhotoBuffer: stalledLoad as never },
+      ),
+    ).rejects.toThrow(/took too long/i);
+
+    // The loader was actually handed a signal — without one it could not have been interrupted at all.
+    expect(sawSignal).toBeDefined();
+    expect(sawSignal!.aborted).toBe(true);
+  });
+
   it("fences the findings digest so a hostile title cannot instruct the summary call", async () => {
     // The digest is built from per-photo TITLES, and a title falls back to the caption and then the file
     // name — both user-controlled. Interpolated bare, that prose arrived at the second model call sitting

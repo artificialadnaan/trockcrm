@@ -127,7 +127,10 @@ export type AiReportResult = {
 /** Injection seams so the service is testable without R2 or the network. */
 export type AiReportDeps = {
   fetchFn?: typeof fetch;
-  loadPhotoBuffer?: (photo: AiReportPhotoInput) => Promise<{ buffer: Buffer; contentType?: string }>;
+  loadPhotoBuffer?: (
+    photo: AiReportPhotoInput,
+    signal?: AbortSignal,
+  ) => Promise<{ buffer: Buffer; contentType?: string }>;
 };
 
 export class AiReportError extends Error {
@@ -515,14 +518,14 @@ async function callAnthropicTool(
 
 type PreparedImage = { photo: AiReportPhotoInput; base64: string; bytes: number };
 
-async function defaultLoadPhotoBuffer(photo: AiReportPhotoInput) {
+async function defaultLoadPhotoBuffer(photo: AiReportPhotoInput, signal?: AbortSignal) {
   // R2 originals only. An external-only import (CompanyCam and similar keep a CDN url with no r2Key) is
   // NOT analysed: reading it would mean the server issuing outbound requests to addresses it does not
   // choose, and that belongs behind its own review rather than riding along with this feature. Treated as
   // unreadable — non-retryable, so isUnreadableObjectError skips just this photo and the rest of the report
   // proceeds. Fetching them lives on feat/trockcam-external-photos.
   if (!photo.r2Key) throw new AiReportError(`Photo ${photo.displayName} has no stored original.`, false);
-  return getObjectBuffer(photo.r2Key, { maxBytes: MAX_SOURCE_BYTES });
+  return getObjectBuffer(photo.r2Key, { maxBytes: MAX_SOURCE_BYTES, signal });
 }
 
 /**
@@ -538,6 +541,23 @@ async function defaultLoadPhotoBuffer(photo: AiReportPhotoInput) {
  * Raised when the whole-assessment budget runs out. Shared by the model path and the preparation path so a
  * run that dies waiting on storage reports the same thing as one that dies waiting on the model.
  */
+/** Reject as soon as the assessment budget is gone, whatever the wrapped promise is still doing. */
+async function withDeadline<T>(work: Promise<T>, deadlineAt: number): Promise<T> {
+  const remainingMs = deadlineAt - Date.now();
+  if (remainingMs <= 0) throw assessmentDeadlineExceeded();
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(assessmentDeadlineExceeded()), remainingMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function assessmentDeadlineExceeded(): AiReportError {
   return new AiReportError("The assessment took too long and was stopped. Try again with fewer photos.", false);
 }
@@ -556,7 +576,16 @@ async function prepareImages(
     // would reap it as abandoned and queue a replacement, re-paying for every batch already assessed while
     // the original was still alive. Checked per photograph, so a slow set stops at the first one over the
     // line instead of after all sixty.
-    if (Date.now() >= deadlineAt) throw assessmentDeadlineExceeded();
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) throw assessmentDeadlineExceeded();
+    // The check above only catches a photo that STARTS late. Neither of the two awaits below ends on its
+    // own: an R2 body can return headers and then stall mid-stream, and a pathological raster can sit in
+    // sharp indefinitely. Either one holds the dedicated — and serial — AI-report poller past the run lease,
+    // which is what lets a later enqueue reap this run and bill a replacement. So the remaining budget is
+    // pushed INTO the read (a real abort, wired through to the request and the chunk loop) and raced against
+    // the transcode.
+    const abort = new AbortController();
+    const expiry = setTimeout(() => abort.abort(), remainingMs);
     // Skip a photo ONLY for a permanent, photo-specific reason — it is too big to read, or nothing can
     // decode it. Those legitimately exist (uploads accept 200MB and thumbnailing is best-effort), and one
     // of them must not cost the user a report over the other 59 photographs; such a photo still prints,
@@ -565,25 +594,37 @@ async function prepareImages(
     // A TRANSIENT storage failure is deliberately NOT skipped. Swallowing an R2 timeout or auth error would
     // quietly drop photographs from the analysis while the summary still told the owner the full set was
     // examined — a materially incomplete assessment presented as a complete one. That fails loudly instead.
-    let source: { buffer: Buffer; contentType?: string };
     try {
-      source = await load(photo);
-    } catch (error) {
-      if (!isUnreadableObjectError(error)) throw error;
-      logSkippedPhoto(photo, error);
-      continue;
-    }
+      let source: { buffer: Buffer; contentType?: string };
+      try {
+        source = await load(photo, abort.signal);
+      } catch (error) {
+        if (abort.signal.aborted) throw assessmentDeadlineExceeded();
+        if (!isUnreadableObjectError(error)) throw error;
+        logSkippedPhoto(photo, error);
+        continue;
+      }
 
-    try {
-      const jpeg = await generateEvidenceJpeg(source.buffer, photo.mimeType ?? source.contentType ?? null, {
-        maxEdge: VISION_MAX_EDGE,
-        quality: VISION_JPEG_QUALITY,
-      });
-      const base64 = jpeg.toString("base64");
-      prepared.push({ photo, base64, bytes: base64.length });
-    } catch (error) {
-      // A decode failure is always about THIS image — sharp/heic-convert refusing the bytes.
-      logSkippedPhoto(photo, error);
+      try {
+        // sharp cannot be cancelled once running, so this bounds the WAIT rather than the work: the run
+        // stops and the poller is freed, and the orphaned decode falls away with the process. Bounding the
+        // wait is the part that matters — an unbounded one is what outlives the lease.
+        const jpeg = await withDeadline(
+          generateEvidenceJpeg(source.buffer, photo.mimeType ?? source.contentType ?? null, {
+            maxEdge: VISION_MAX_EDGE,
+            quality: VISION_JPEG_QUALITY,
+          }),
+          deadlineAt,
+        );
+        const base64 = jpeg.toString("base64");
+        prepared.push({ photo, base64, bytes: base64.length });
+      } catch (error) {
+        if (error instanceof AiReportError && !error.retryable) throw error;
+        // A decode failure is always about THIS image — sharp/heic-convert refusing the bytes.
+        logSkippedPhoto(photo, error);
+      }
+    } finally {
+      clearTimeout(expiry);
     }
   }
   return prepared;

@@ -434,6 +434,36 @@ describe("runFieldAiReportJob", () => {
     expect(runMocks.markAiReportRunFailed).toHaveBeenCalledTimes(2);
   });
 
+  it("discards the report when the requester is deactivated during the render", async () => {
+    // Phase E re-checked the lease, the office, the project and the photographs — everything about the
+    // report's SUBJECT — but never the account it publishes AS. The files row is inserted as the requester,
+    // so an account deactivated during a multi-minute render still got a report written under its name.
+    let loads = 0;
+    poolMocks.query.mockImplementation(async () => {
+      loads += 1;
+      return {
+        rows: [{
+          id: "user-1",
+          role: "field_contractor",
+          display_name: "Sam",
+          first_name: null,
+          last_name: null,
+          email: "s@t.com",
+          // Active at Phase A, deactivated by the time Phase E re-resolves.
+          is_active: loads === 1,
+        }],
+      } as any;
+    });
+
+    await runFieldAiReportJob({ runId: "run-1" });
+
+    // The assessment ran (it was authorised when it started) but the report is NOT published, and the
+    // uploaded PDF is cleaned up rather than orphaned.
+    expect(aiMocks.generateAiPhotoAssessment).toHaveBeenCalled();
+    expect(runMocks.markAiReportRunSucceeded).not.toHaveBeenCalled();
+    expect(r2Mocks.deleteObject).toHaveBeenCalled();
+  });
+
   it("renews the lease on the run it is actually working", async () => {
     // started_at doubles as the lease and is stamped once at claim, but only the model call is
     // deadline-bounded — Phase D is deliberately unbounded. Without a renewal a slow-but-healthy run crosses

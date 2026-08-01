@@ -361,6 +361,17 @@ export async function runFieldAiReportJob(
       // here and the commit; closing that last sliver would mean locking a public row inside an
       // office-scoped transaction, which is not worth the coupling.
       await getFieldOfficeById(run.officeId);
+      // Re-resolve the REQUESTER too, on exactly the terms Phase A used. Everything from Phase A on runs as
+      // the account cached before the render, and the publish below inserts the `files` row AS that user —
+      // so an account deactivated, or a role moved outside the field-app set, during those minutes would
+      // still get a report written under its name. The lease, office, project and photo re-checks all
+      // guarded the report's SUBJECT; this guards its AUTHOR, which was the one input never revisited.
+      await loadRequester(run.requestedBy);
+      // ...and the office grant on the same terms as the enqueue: gated on the flag, so a cross-office run
+      // the enqueue accepted is not rejected here for a grant it never required.
+      if (!isFieldCrossOfficeWritesEnabled() && !(await getOfficeAccess(run.requestedBy, run.officeId)).hasAccess) {
+        throw new AiReportError("You no longer have access to the office this report belongs to.", false);
+      }
       recorded = await runInOfficeTransaction(office, requester.id, async (db) => {
         // Re-check the project. Phase D can run for minutes, and a project archived or moved to an excluded
         // stage in that window would otherwise be recorded against anyway — leaving a run marked 'succeeded'
