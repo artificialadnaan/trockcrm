@@ -69,7 +69,17 @@ beforeAll(async () => {
   userId = (await client.query<{ id: string }>(`INSERT INTO public.users (email) VALUES ('a@b.c') RETURNING id`)).rows[0].id;
 });
 
-/** The EXACT statement shape insertAiReportRunTx issues. */
+/**
+ * A plain VALUES insert for SETTING UP rows — deliberately NOT the production statement.
+ *
+ * It used to mirror insertAiReportRunTx exactly, and the comment still claimed so long after that stopped
+ * being true: production is now an INSERT ... SELECT carrying the in-flight quota, the rolling daily cap and
+ * the replay lookup. Keeping the claim would be worse than useless, since this file exists precisely because
+ * mocked tests cannot catch invalid SQL — a reader would think the quota-bearing form was covered here.
+ *
+ * It IS covered, just not by this helper: the lock, replay and failed-retry cases below call the real
+ * insertAiReportRunTx against PGlite.
+ */
 async function insertRun(dealId = DEAL, requestedBy?: string, photoIds = PHOTOS) {
   const result = await db.execute(sql`
     INSERT INTO public.field_ai_report_runs

@@ -73,6 +73,11 @@ export const fieldAiReportRuns = pgTable(
     // drift, and the generated diff would drop the one thing keeping that query bounded on a ledger that is
     // never pruned.
     index("field_ai_report_runs_requester_recent_idx").on(table.requestedBy, table.createdAt.desc()),
+    // Partial companion for the two in-flight predicates (concurrency check + stale sweep). Mirrored here
+    // for the same reason as the index above: drizzle.config.ts treats this file as the desired definition.
+    index("field_ai_report_runs_requester_inflight_idx")
+      .on(table.requestedBy)
+      .where(sql`${table.status} IN ('queued', 'running')`),
     // Bounds the per-report model spend at the DB, mirroring AI_REPORT_MAX_PHOTOS in the route.
     check("field_ai_report_runs_photo_ids_check", sql`cardinality(${table.photoIds}) BETWEEN 1 AND 60`),
     // Mirror migration 0209's inline CHECK (status IN (...)). Named to match Postgres's auto-name for the

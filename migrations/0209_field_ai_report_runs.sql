@@ -75,3 +75,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS field_ai_report_runs_inflight_uidx
 -- created_at DESC so the 24-hour window is a leading-edge range scan rather than a walk to the tail.
 CREATE INDEX IF NOT EXISTS field_ai_report_runs_requester_recent_idx
   ON public.field_ai_report_runs (requested_by, created_at DESC);
+
+-- The two IN-FLIGHT predicates — the concurrency check inside insertAiReportRunTx and the stale sweep in
+-- expireStaleAiReportRuns, which runs on EVERY enqueue — are keyed on requested_by + status, not on a date.
+-- The index above answers them, but only by scanning all of that requester's history and filtering: correct,
+-- and unbounded, on a ledger that is never pruned. Partial on the two live statuses, so it holds at most
+-- MAX_IN_FLIGHT_RUNS_PER_USER rows per user however long the install runs, and rows leave it the moment they
+-- reach a terminal state.
+CREATE INDEX IF NOT EXISTS field_ai_report_runs_requester_inflight_idx
+  ON public.field_ai_report_runs (requested_by)
+  WHERE status IN ('queued', 'running');
