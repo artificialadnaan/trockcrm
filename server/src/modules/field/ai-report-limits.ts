@@ -30,3 +30,16 @@ export const STALE_RUN_MINUTES = 20;
  * into rendering, where the lease is renewed and a fresh window begins.
  */
 export const MAX_TOTAL_DEADLINE_MS = (STALE_RUN_MINUTES - 5) * 60 * 1000;
+
+/**
+ * Ceiling on the PDF RENDER phase.
+ *
+ * Phase D re-reads and re-decodes every original, and it runs on the AI-report poller, which is dedicated
+ * and claims one delivery at a time. So an unbounded stall there is worse than one in the model phase: it
+ * does not merely outlive this run's lease, it wedges the poller, and no ledger sweep can free a handler
+ * that is still executing — every subsequent report stays pending behind it.
+ *
+ * The lease is renewed at the start of Phase D, so this is measured against a FRESH window and only has to
+ * stay clear of it. The margin covers the upload and the short Phase E transaction that follow.
+ */
+export const MAX_RENDER_DEADLINE_MS = (STALE_RUN_MINUTES - 6) * 60 * 1000;

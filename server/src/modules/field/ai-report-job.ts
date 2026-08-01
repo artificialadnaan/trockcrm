@@ -10,6 +10,7 @@ import { deleteObject } from "../../lib/r2-client.js";
 import { buildDealPhotoTimelineConditions } from "../files/photo-timeline-filters.js";
 import { getFieldOfficeById, isFieldCrossOfficeWritesEnabled, runInOfficeTransaction } from "./cross-office.js";
 import { assertActiveFieldProject } from "./projects-service.js";
+import { MAX_RENDER_DEADLINE_MS } from "./ai-report-limits.js";
 import {
   prepareFieldPhotoReport,
   recordFieldPhotoReportFile,
@@ -360,7 +361,22 @@ export async function runFieldAiReportJob(
     // Same reasoning as Phase B. Rendering a 60-page report downloads and decodes every original and then
     // uploads the result: minutes of work, and none of it touches the database. Doing it inside the
     // transaction above would hold a pooled client idle-in-transaction for that whole time.
-    const stored = await renderAndStoreFieldPhotoReportPdf(prepared, office.slug);
+    // Bounded, for the same reason the assessment is — and it matters more here. This poller is dedicated
+    // and single-in-flight, so a stalled object read or a decode that never settles does not just outlive
+    // this run's lease, it wedges every subsequent AI report behind a handler nothing can free.
+    const renderAbort = new AbortController();
+    const renderExpiry = setTimeout(() => renderAbort.abort(), MAX_RENDER_DEADLINE_MS);
+    let stored: Awaited<ReturnType<typeof renderAndStoreFieldPhotoReportPdf>>;
+    try {
+      stored = await renderAndStoreFieldPhotoReportPdf(prepared, office.slug, renderAbort.signal);
+    } catch (error) {
+      if (renderAbort.signal.aborted) {
+        throw new AiReportError("The report took too long to render and was stopped. Try again with fewer photos.", false);
+      }
+      throw error;
+    } finally {
+      clearTimeout(renderExpiry);
+    }
 
     // ── Phase E: short transaction — record the file row ─────────────────────────────────────────
     let recorded: Awaited<ReturnType<typeof recordFieldPhotoReportFile>>;

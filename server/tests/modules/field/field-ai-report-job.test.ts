@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { MAX_RENDER_DEADLINE_MS } from "../../../src/modules/field/ai-report-limits.js";
 
 /**
  * The orchestrator: claim → load → model → render → record. Its two load-bearing properties are the ones
@@ -482,6 +483,41 @@ describe("runFieldAiReportJob", () => {
     expect(aiMocks.generateAiPhotoAssessment).toHaveBeenCalled();
     expect(runMocks.markAiReportRunSucceeded).not.toHaveBeenCalled();
     expect(r2Mocks.deleteObject).toHaveBeenCalled();
+  });
+
+  it("bounds the PDF render with an abort signal, and reports a render that outruns it", async () => {
+    // Phase D re-reads and re-decodes every original. This poller is dedicated and claims one delivery at a
+    // time, so an unbounded stall here does not merely outlive this run's lease — it wedges every
+    // subsequent AI report behind a handler that no ledger sweep can free.
+    vi.useFakeTimers();
+    try {
+      let handed: AbortSignal | undefined;
+      reportMocks.renderAndStoreFieldPhotoReportPdf.mockImplementation(
+        (_prepared: unknown, _slug: unknown, signal?: AbortSignal) =>
+          new Promise((_resolve, reject) => {
+            handed = signal;
+            // Never settles on its own — only the signal can end it. Exactly the shape that used to wedge
+            // the poller indefinitely.
+            signal?.addEventListener("abort", () => reject(new Error("aborted")));
+          }),
+      );
+
+      const job = runFieldAiReportJob({ runId: "run-1" });
+      await vi.advanceTimersByTimeAsync(MAX_RENDER_DEADLINE_MS + 1_000);
+      await job;
+
+      // The renderer was actually handed a signal — without one it could not have been interrupted at all.
+      expect(handed).toBeInstanceOf(AbortSignal);
+      expect(handed!.aborted).toBe(true);
+      // ...and the run reaches a terminal state saying so, rather than hanging.
+      expect(runMocks.markAiReportRunFailed).toHaveBeenCalledWith(
+        "run-1",
+        expect.stringMatching(/took too long to render/i),
+        expect.anything(),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("renews the lease on the run it is actually working", async () => {

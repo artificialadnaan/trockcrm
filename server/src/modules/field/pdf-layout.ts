@@ -386,6 +386,12 @@ export function untranscodedFallback(buffer: Buffer, mime: string | null): Buffe
 async function loadPhotoBuffer(
   photo: ReportRenderablePhoto,
   /**
+   * Bounds the object read AND the transcode below. Phase D of the AI report re-reads and re-decodes every
+   * original, on a poller that is serial and single-in-flight — an unbounded stall here does not just
+   * outlive one run's lease, it wedges every subsequent report with nothing able to free it.
+   */
+  signal: AbortSignal | undefined,
+  /**
    * When true, a TRANSIENT storage failure is re-thrown instead of degrading to a placeholder. The AI
    * report uses this: silently emitting an "Image unavailable" panel — potentially beside findings derived
    * from that very photograph — and then marking the run succeeded is worse than failing and retrying.
@@ -397,7 +403,10 @@ async function loadPhotoBuffer(
     let buffer: Buffer;
     let contentType: string | undefined;
     try {
-      ({ buffer, contentType } = await getObjectBuffer(photo.r2Key, { maxBytes: MAX_RENDER_SOURCE_BYTES }));
+      ({ buffer, contentType } = await getObjectBuffer(photo.r2Key, {
+        maxBytes: MAX_RENDER_SOURCE_BYTES,
+        signal,
+      }));
     } catch (error) {
       // Permanent, photo-specific failures still degrade to a placeholder in BOTH modes — the photo is
       // genuinely unusable and no retry changes that.
@@ -411,8 +420,22 @@ async function loadPhotoBuffer(
       !mime || !PDFKIT_NATIVE_MIME.test(mime) || buffer.byteLength > RENDER_TRANSCODE_ABOVE_BYTES;
     if (!needsTranscode) return buffer;
     try {
-      return await generateEvidenceJpeg(buffer, mime, { maxEdge: RENDER_TRANSCODE_MAX_EDGE, quality: 82 });
-    } catch {
+      // Raced against the caller's budget as well as caught. sharp cannot be cancelled once running, so
+      // this bounds the WAIT rather than the work — but an unbounded wait here is what wedges the serial
+      // AI-report poller, since Phase D re-decodes every original and nothing else can free it.
+      const transcode = generateEvidenceJpeg(buffer, mime, { maxEdge: RENDER_TRANSCODE_MAX_EDGE, quality: 82 });
+      if (!signal) return await transcode;
+      return await Promise.race([
+        transcode,
+        new Promise<never>((_, reject) => {
+          if (signal.aborted) return reject(new Error("render aborted"));
+          signal.addEventListener("abort", () => reject(new Error("render aborted")), { once: true });
+        }),
+      ]);
+    } catch (error) {
+      // An abort is the caller giving up on the whole render — it must propagate, not silently degrade to
+      // an un-transcoded original and carry on rendering a report nobody is waiting for any more.
+      if (signal?.aborted) throw error;
       // sharp cannot read it — most often a native JPEG whose decoded raster is over its pixel limit.
       return untranscodedFallback(buffer, mime);
     }
@@ -617,6 +640,7 @@ async function drawPhotoEntry(
   left: number,
   top: number,
   coverProjectName: string,
+  signal: AbortSignal | undefined,
 ) {
   const boxWidth = IMAGE_BOX_WIDTH;
   const boxHeight = IMAGE_BOX_HEIGHT;
@@ -625,7 +649,7 @@ async function drawPhotoEntry(
   // identical footprint; the image is a guest inside it.
   doc.roundedRect(left, top, boxWidth, boxHeight, PHOTO_TILE_RADIUS).fillColor(PHOTO_TILE_FILL).fill();
 
-  const imageBuffer = await loadPhotoBuffer(photo);
+  const imageBuffer = await loadPhotoBuffer(photo, signal);
   // Only a FAILED LOAD is worth a line. A row with no key and no external URL had nothing to fetch in the
   // first place — that is the placeholder working as intended, not a fault — whereas a key that would not
   // resolve means R2 refused it or the object is gone, and nothing else raises so the placeholder would
@@ -794,6 +818,7 @@ async function drawFindingsPhotoPages(
   photo: ReportRenderSection["photos"][number],
   header: { reportTitle: string; dateLabel: string; projectName: string; footerLabel: string },
   pageMeta: PageMeta[],
+  signal: AbortSignal | undefined,
 ) {
   const startPage = () => {
     doc.addPage();
@@ -812,7 +837,7 @@ async function drawFindingsPhotoPages(
   // --- Photo, fit to the full content width and centred -------------------------------------------
   // strictStorage: this is the AI report. A placeholder panel sitting beside findings written about that
   // very photograph, in a document then marked succeeded, is a worse outcome than failing the run.
-  const imageBuffer = await loadPhotoBuffer(photo, true);
+  const imageBuffer = await loadPhotoBuffer(photo, signal, true);
   // Pass the photo through so a decode failure names itself in the log. It matters MORE on this layout than
   // on the grid: a placeholder here sits directly under findings written about that photograph.
   const opened = imageBuffer ? openImageForLayout(doc, imageBuffer, photo) : null;
@@ -957,6 +982,11 @@ export async function renderFieldPhotoReportPdf(input: {
   /** Optional free-form executive summary; rendered on its own page(s) right after the cover. */
   executiveSummary?: string | null;
   photoLayout?: ReportPhotoLayout;
+  /**
+   * Bounds every object read and transcode this render performs. The AI report's Phase D passes the run's
+   * remaining budget; the human path omits it and is unbounded exactly as before.
+   */
+  signal?: AbortSignal;
 }): Promise<Buffer> {
   const doc = new PDFDocument({
     autoFirstPage: true,
@@ -1070,6 +1100,7 @@ export async function renderFieldPhotoReportPdf(input: {
             footerLabel: `Section ${sectionIndex}`,
           },
           pageMeta,
+          input.signal,
         );
       }
       continue;
@@ -1106,6 +1137,7 @@ export async function renderFieldPhotoReportPdf(input: {
           PAGE_MARGIN + column * (COLUMN_WIDTH + COLUMN_GAP),
           PHOTO_ROWS_TOP + row * PHOTO_ROW_PITCH,
           input.cover.projectName,
+          input.signal,
         );
       }
     }

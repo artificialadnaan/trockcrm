@@ -338,13 +338,19 @@ export type PreparedFieldPhotoReport = Awaited<ReturnType<typeof prepareFieldPho
  * which is minutes of work; doing it while holding a pooled client leaves a connection idle-in-transaction
  * for the duration, and a worker pool is small. Returns everything the file row needs.
  */
-export async function renderAndStoreFieldPhotoReportPdf(prepared: PreparedFieldPhotoReport, officeSlug: string) {
+export async function renderAndStoreFieldPhotoReportPdf(
+  prepared: PreparedFieldPhotoReport,
+  officeSlug: string,
+  /** Bounds every object read and transcode the render performs. Omitted by the human path. */
+  signal?: AbortSignal,
+) {
   const { project, title, cover, renderSections, executiveSummary, photoLayout, now } = prepared;
   const pdfBuffer = await renderFieldPhotoReportPdf({
     cover,
     sections: renderSections,
     executiveSummary,
     photoLayout,
+    signal,
   });
   const bucketName = process.env.R2_BUCKET_NAME || "trock-crm-files";
   const fileExtension = ".pdf";
