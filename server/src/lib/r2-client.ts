@@ -339,7 +339,12 @@ export async function deleteObject(r2Key: string): Promise<void> {
 export async function putObject(
   r2Key: string,
   body: Buffer | Uint8Array,
-  mimeType: string
+  mimeType: string,
+  /**
+   * Bounds the upload. An accepted-then-stalled PUT hangs exactly as a stalled GET does, and callers that
+   * run on a single-in-flight poller cannot afford either.
+   */
+  opts?: { signal?: AbortSignal }
 ): Promise<void> {
   const client = getClient();
   const bucket = getBucket();
@@ -350,7 +355,8 @@ export async function putObject(
       Key: r2Key,
       Body: body,
       ContentType: mimeType,
-    })
+    }),
+    opts?.signal ? { abortSignal: opts.signal } : undefined
   );
 }
 

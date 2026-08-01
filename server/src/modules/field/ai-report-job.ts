@@ -279,7 +279,7 @@ export async function runFieldAiReportJob(
     // checks above plus assertActiveFieldProject, which runs at both ends of the job.
     //
     // Not retryable either way: a revocation does not undo itself.
-    if (!isFieldCrossOfficeWritesEnabled() && !(await getOfficeAccess(requester.id, run.officeId)).hasAccess) {
+    if (run.officeGrantRequired && !(await getOfficeAccess(requester.id, run.officeId)).hasAccess) {
       throw new AiReportError("You no longer have access to the office this report belongs to.", false);
     }
 
@@ -405,7 +405,7 @@ export async function runFieldAiReportJob(
       await loadRequester(run.requestedBy);
       // ...and the office grant on the same terms as the enqueue: gated on the flag, so a cross-office run
       // the enqueue accepted is not rejected here for a grant it never required.
-      if (!isFieldCrossOfficeWritesEnabled() && !(await getOfficeAccess(run.requestedBy, run.officeId)).hasAccess) {
+      if (run.officeGrantRequired && !(await getOfficeAccess(run.requestedBy, run.officeId)).hasAccess) {
         throw new AiReportError("You no longer have access to the office this report belongs to.", false);
       }
       recorded = await runInOfficeTransaction(office, requester.id, async (db) => {

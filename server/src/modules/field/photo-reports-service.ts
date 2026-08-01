@@ -359,7 +359,11 @@ export async function renderAndStoreFieldPhotoReportPdf(
   const r2Key = `office_${officeSlug}/deals/${project.dealNumber}/documents/photo-reports/${yearMonth}/${systemFilename}`;
   const expiresAt = new Date(now.getTime() + REPORT_RETENTION_MS).toISOString();
   const pdfUrl = await generateDownloadUrl(r2Key, REPORT_DOWNLOAD_EXPIRY_SECONDS, `${title}${fileExtension}`);
-  await putObject(r2Key, pdfBuffer, "application/pdf");
+  // The upload carries the SAME deadline as the render that produced it. Bounding the reads and transcodes
+  // but not the PUT just moves the stall one line down: an accepted-then-stalled upload leaves this function
+  // pending forever, and the AI-report poller is single-in-flight, so every later report queues behind it
+  // with nothing able to free the handler.
+  await putObject(r2Key, pdfBuffer, "application/pdf", { signal });
 
   return { r2Key, pdfUrl, expiresAt, systemFilename, yearMonth, bucketName, fileExtension, byteLength: pdfBuffer.byteLength };
 }

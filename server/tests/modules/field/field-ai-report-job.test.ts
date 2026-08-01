@@ -118,6 +118,8 @@ function officeDb(rows: unknown[], claimedRows: unknown[] = []) {
 
 function baseRun(overrides: Record<string, unknown> = {}) {
   return {
+    // Defaults to the conservative rule, matching the migration default and prod's flag-off state.
+    officeGrantRequired: true,
     id: "run-1",
     dealId: "deal-1",
     officeId: "office-1",
@@ -389,12 +391,18 @@ describe("runFieldAiReportJob", () => {
     );
   });
 
-  it("still runs a cross-office report when the writes flag is ON and no grant exists", async () => {
-    // With the flag ON the enqueue resolves the DEAL's owning office and never asks for a user_office_access
-    // grant — so demanding one here would fail runs that were deliberately accepted, and only after the user
-    // had already been told 202. The gate in that mode is the account checks plus assertActiveFieldProject.
+  it("still runs a cross-office report accepted without a grant, whatever the worker's flag now says", async () => {
+    // A run enqueued with cross-office writes ON resolves the DEAL's owning office and never asks for a
+    // user_office_access grant — so demanding one here would fail runs that were deliberately accepted, and
+    // only after the user had been told 202. The gate in that mode is the account checks plus
+    // assertActiveFieldProject.
+    //
+    // The rule comes from the RUN, not from the worker's environment. The API and worker are separate
+    // processes with their own copy of the flag and it can change while a run sits queued, so the flag is
+    // deliberately set to the OPPOSITE of the run's recorded decision here: the stored value must win.
     const previous = process.env.FIELD_CROSS_OFFICE_WRITES_ENABLED;
-    process.env.FIELD_CROSS_OFFICE_WRITES_ENABLED = "true";
+    process.env.FIELD_CROSS_OFFICE_WRITES_ENABLED = "false";
+    runMocks.getAiReportRun.mockResolvedValue(baseRun({ officeGrantRequired: false }) as any);
     authMocks.getOfficeAccess.mockResolvedValue({ hasAccess: false });
     try {
       const result = await runFieldAiReportJob({ runId: "run-1" });

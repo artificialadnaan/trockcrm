@@ -34,6 +34,8 @@ const {
   generateFieldPhotoReport,
   listFieldProjectReports,
   getFieldProjectReportDownload,
+  prepareFieldPhotoReport,
+  renderAndStoreFieldPhotoReportPdf,
 } = await import("../../../src/modules/field/photo-reports-service.js");
 
 const access = { userId: "user-1", userRole: "admin" } as const;
@@ -125,6 +127,37 @@ describe("photo reports service", () => {
     expect(projectMocks.assertActiveFieldProject).toHaveBeenCalledWith(db, access, "deal-1");
   });
 
+  it("carries the render deadline through to the PDF upload", async () => {
+    // Bounding the reads and transcodes but not the PUT just moves the stall one line down: an
+    // accepted-then-stalled upload leaves renderAndStoreFieldPhotoReportPdf pending forever, and the
+    // AI-report poller is single-in-flight, so every later report queues behind a handler nothing can free.
+    // Built from a literal rather than prepareFieldPhotoReport: this asserts the SIGNAL contract, and going
+    // through the full prepare path would only add database fixtures that have nothing to do with it.
+    const controller = new AbortController();
+    const prepared = {
+      project: { dealNumber: "D-1" },
+      title: "Report",
+      cover: { reportTitle: "Report", creatorName: "Sam", companyName: "TRock", reportDateLabel: "May 3, 2026", projectName: "Roof Repair", photoCount: 1 },
+      renderSections: [{ title: "Section 1", photos: [] }],
+      executiveSummary: null,
+      photoLayout: "grid",
+      now: new Date("2026-05-03T12:00:00.000Z"),
+    };
+
+    await renderAndStoreFieldPhotoReportPdf(prepared as never, "dallas", controller.signal);
+
+    // Both halves of the render carry it — the layout's object reads/transcodes AND the upload that follows.
+    expect(pdfMocks.renderFieldPhotoReportPdf).toHaveBeenCalledWith(
+      expect.objectContaining({ signal: controller.signal }),
+    );
+    expect(r2Mocks.putObject).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(Buffer),
+      "application/pdf",
+      { signal: controller.signal },
+    );
+  });
+
   it("stores generated reports as tagged file artifacts", async () => {
     const db = createDb();
     mockRenderPhotoQueries(db, [
@@ -170,7 +203,15 @@ describe("photo reports service", () => {
     });
 
     expect(pdfMocks.renderFieldPhotoReportPdf).toHaveBeenCalled();
-    expect(r2Mocks.putObject).toHaveBeenCalledWith(expect.stringContaining("photo-reports"), expect.any(Buffer), "application/pdf");
+    // The human path passes no signal, so the upload is unbounded exactly as it has always been — the
+    // fourth argument exists for the AI report, whose poller is single-in-flight and cannot afford a
+    // stalled PUT.
+    expect(r2Mocks.putObject).toHaveBeenCalledWith(
+      expect.stringContaining("photo-reports"),
+      expect.any(Buffer),
+      "application/pdf",
+      { signal: undefined },
+    );
     expect(db.insert).toHaveBeenCalled();
     const insertValues = db.insert.mock.results[0]?.value.values.mock.calls[0]?.[0];
     expect(insertValues.category).toBe("other");

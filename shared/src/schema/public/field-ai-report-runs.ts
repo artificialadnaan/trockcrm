@@ -5,6 +5,7 @@ import {
   integer,
   numeric,
   timestamp,
+  boolean,
   uniqueIndex,
   index,
   check,
@@ -46,6 +47,8 @@ export const fieldAiReportRuns = pgTable(
     // Optional free-text scope from the requester. Drives both the executive summary's subject and what the
     // per-photo findings are allowed to raise, so it is the main lever against an off-topic report.
     focusPrompt: text("focus_prompt"),
+    /** The office-authorisation rule this run was accepted under, captured at enqueue (migration 0209). */
+    officeGrantRequired: boolean("office_grant_required").default(true).notNull(),
     status: text("status").default("queued").notNull(),
     // office_<slug>.files.id of the rendered PDF — no .references() (per-office table).
     fileId: uuid("file_id"),

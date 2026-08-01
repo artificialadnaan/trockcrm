@@ -32,6 +32,8 @@ export type AiReportRun = {
   photoIds: string[];
   reportTitle: string | null;
   focusPrompt: string | null;
+  /** The office-authorisation rule this run was ACCEPTED under; see migration 0209. */
+  officeGrantRequired: boolean;
   status: AiReportRunStatus;
   fileId: string | null;
   error: string | null;
@@ -48,6 +50,7 @@ type RunRow = {
   photo_ids: string[];
   report_title: string | null;
   focus_prompt: string | null;
+  office_grant_required: boolean;
   status: AiReportRunStatus;
   file_id: string | null;
   error: string | null;
@@ -65,6 +68,7 @@ function toRun(row: RunRow): AiReportRun {
     photoIds: Array.isArray(row.photo_ids) ? row.photo_ids : [],
     reportTitle: row.report_title,
     focusPrompt: row.focus_prompt,
+    officeGrantRequired: row.office_grant_required,
     status: row.status,
     fileId: row.file_id,
     error: row.error,
@@ -81,6 +85,8 @@ export type NewAiReportRun = {
   photoIds: string[];
   reportTitle: string | null;
   focusPrompt: string | null;
+  /** Captured from the flag at ENQUEUE so the worker cannot re-judge the run under a different rule. */
+  officeGrantRequired: boolean;
 };
 
 /**
@@ -161,7 +167,7 @@ export async function insertAiReportRunTx(
 
   const result = await db.execute<RunRow>(sql`
     INSERT INTO public.field_ai_report_runs
-      (deal_id, office_id, office_slug, requested_by, photo_ids, report_title, focus_prompt, status)
+      (deal_id, office_id, office_slug, requested_by, photo_ids, report_title, focus_prompt, office_grant_required, status)
     SELECT
       ${input.dealId}::uuid,
       ${input.officeId}::uuid,
@@ -170,6 +176,7 @@ export async function insertAiReportRunTx(
       ${sql.param(input.photoIds)}::uuid[],
       ${input.reportTitle},
       ${input.focusPrompt},
+      ${input.officeGrantRequired},
       'queued'
     WHERE (
       SELECT count(*)

@@ -30,6 +30,15 @@ CREATE TABLE IF NOT EXISTS public.field_ai_report_runs (
   -- list"). Kept on the row rather than only in the job payload because it is the single biggest determinant
   -- of what the report says — when a report comes back off-topic this column is the evidence for why.
   focus_prompt  text,
+  -- The office-authorisation rule THIS run was accepted under, captured at enqueue.
+  --
+  -- The API and the worker are separate processes reading their own FIELD_CROSS_OFFICE_WRITES_ENABLED, and
+  -- the flag can change while a run sits queued. Re-reading it in the worker judges the run by a rule it was
+  -- never accepted under, in BOTH directions: a run enqueued while a grant was required could skip
+  -- revalidation and publish after that grant was revoked, and a cross-office run legitimately accepted
+  -- without one could be rejected after the model spend had already happened. Storing the decision makes the
+  -- two ends agree by construction. Defaults to true, the conservative rule.
+  office_grant_required boolean NOT NULL DEFAULT true,
   status        text NOT NULL DEFAULT 'queued'
                   CHECK (status IN ('queued', 'running', 'succeeded', 'failed')),
   file_id       uuid,                                           -- office_<slug>.files.id of the rendered PDF

@@ -224,6 +224,7 @@ describe("field_ai_report_runs — real SQL", () => {
         photoIds: PHOTOS,
         reportTitle: "Title",
         focusPrompt: null,
+        officeGrantRequired: true,
       });
       const held = await tx.execute<{ n: number }>(
         sql`SELECT count(*)::int AS n FROM pg_locks WHERE locktype = 'advisory'`,
@@ -264,6 +265,7 @@ describe("field_ai_report_runs — real SQL", () => {
           photoIds: PHOTOS,
           reportTitle: "Title",
           focusPrompt: null,
+          officeGrantRequired: true,
           ...overrides,
         }),
       );
@@ -314,6 +316,7 @@ describe("field_ai_report_runs — real SQL", () => {
           photoIds: PHOTOS,
           reportTitle: "Title",
           focusPrompt: null,
+          officeGrantRequired: true,
         }),
       );
 

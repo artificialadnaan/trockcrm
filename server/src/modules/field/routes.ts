@@ -981,6 +981,10 @@ fieldRoutes.post("/reports/ai-generate", requireFieldContractor, async (req, res
             photoIds,
             reportTitle: reportTitle || null,
             focusPrompt: focusPrompt || null,
+            // Captured HERE, not re-read in the worker. The two run in separate processes with their own
+            // copy of the flag, and it can change while a run sits queued — so the worker would otherwise
+            // judge this run by a rule it was never accepted under.
+            officeGrantRequired: !isFieldCrossOfficeWritesEnabled(),
           });
           // A REPLAY gets no new delivery. The run it hands back is either still in flight (its original
           // delivery is live) or already finished (nothing left to do), so enqueuing here would let repeated
