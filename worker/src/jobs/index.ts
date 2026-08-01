@@ -15,6 +15,7 @@ import { runAiIndexDocument } from "./ai-index-document.js";
 import { runAiBackfillDocuments } from "./ai-backfill-documents.js";
 import { runAiRefreshCopilot } from "./ai-refresh-copilot.js";
 import { runAiGenerateDealCopilot } from "./ai-generate-deal-copilot.js";
+import { handleAiReportGeneration } from "./ai-report-generation.js";
 import { runAiGenerateInterventionPolicyRecommendations } from "./ai-generate-intervention-policy-recommendations.js";
 import { runAiDisconnectDigest } from "./ai-disconnect-digest.js";
 import { runAiDisconnectEscalationScan } from "./ai-disconnect-escalation.js";
@@ -193,6 +194,17 @@ export function registerAllJobs() {
   registerJobHandler("ai_refresh_copilot", (payload, officeId) => runAiRefreshCopilot(payload, officeId));
 
   registerJobHandler("ai_generate_deal_copilot", (payload, officeId) => runAiGenerateDealCopilot(payload, officeId));
+
+  // T Rock Cam "AI Report". The office is carried on the run row (public.field_ai_report_runs), not taken
+  // from the job's office_id — the run must render into the office the DEAL lives in, which under
+  // cross-office writes is not necessarily the office the request was made from.
+  // Returns the handler result (does NOT discard it): a run still held by a live attempt comes back as a
+  // deferral, which must reschedule the delivery rather than be recorded as completed.
+  // EVERY argument is forwarded, not just the payload. The shim needs the attempt context to reconcile the
+  // run when a throw dead-letters the final delivery; a wrapper that took only `payload` silently made that
+  // reconciliation unreachable while its unit tests — which call the shim directly — kept passing.
+  registerJobHandler("ai_report_generation", (payload, officeId, deps, ctx) =>
+    handleAiReportGeneration(payload, officeId, deps, ctx));
 
   registerJobHandler("ai_generate_intervention_policy_recommendations", async (payload) => {
     await runAiGenerateInterventionPolicyRecommendations(payload);

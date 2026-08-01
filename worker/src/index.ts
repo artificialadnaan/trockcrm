@@ -3,7 +3,7 @@ dotenv.config();
 
 import http from "http";
 import { startListener } from "./listener.js";
-import { pollBidBoardIngestJobs, pollJobs, recoverStaleJobs } from "./queue.js";
+import { pollAiReportJobs, pollBidBoardIngestJobs, pollJobs, recoverStaleJobs } from "./queue.js";
 import { registerAllJobs } from "./jobs/index.js";
 import cron from "node-cron";
 import { runStaleDealScan } from "./jobs/stale-deals.js";
@@ -73,6 +73,17 @@ async function main() {
   setInterval(pollBidBoardIngestJobs, POLL_INTERVAL_MS);
   console.log(`[Worker] Polling bid_board_ingest queue every ${POLL_INTERVAL_MS}ms (dedicated)`);
 
+  // Same treatment for the AI photo report: a Claude vision pass over up to 60 photographs runs 30-90s
+  // (minutes on retries) and would otherwise hold the main poller's guard for its whole run.
+  setInterval(pollAiReportJobs, POLL_INTERVAL_MS);
+  console.log(`[Worker] Polling ai_report_generation queue every ${POLL_INTERVAL_MS}ms (dedicated)`);
+
+  // NOTE: recoverStaleJobs stays STARTUP-ONLY, deliberately. It requeues any row that has been 'processing'
+  // for five minutes, and nothing renews that timestamp while a handler runs, so on a timer it cannot tell a
+  // crashed delivery from a live one — it would reclaim long-running jobs mid-flight and hand a second worker
+  // the same work. An AI report alone may legitimately run 15 minutes (MAX_TOTAL_DEADLINE_MS), which would
+  // mean a second paid Claude vision pass over the same sixty photographs. Abandoned AI runs are already
+  // reaped by the queue-aware sweep in ai-report-runs.ts, so nothing here needs a timer.
   setInterval(async () => {
     try {
       const handled = await runRfpRequestDeadLetterSweep();

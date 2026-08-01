@@ -14,6 +14,10 @@ const r2Mocks = vi.hoisted(() => ({
 const filesMocks = vi.hoisted(() => ({
   getFileById: vi.fn(),
   getFileDownloadUrl: vi.fn(),
+  // The download path builds the URL from the record the access gate already read, rather than fetching the
+  // file a second time. Mirrored here because this mock REPLACES the module: a missing export is undefined
+  // at the call site, not a helpful error.
+  buildFileDownloadUrlFromRecord: vi.fn(async () => ({ url: "https://r2.test/report.pdf", filename: "report.pdf" })),
 }));
 
 const pdfMocks = vi.hoisted(() => ({
@@ -30,6 +34,8 @@ const {
   generateFieldPhotoReport,
   listFieldProjectReports,
   getFieldProjectReportDownload,
+  prepareFieldPhotoReport,
+  renderAndStoreFieldPhotoReportPdf,
 } = await import("../../../src/modules/field/photo-reports-service.js");
 
 const access = { userId: "user-1", userRole: "admin" } as const;
@@ -121,6 +127,37 @@ describe("photo reports service", () => {
     expect(projectMocks.assertActiveFieldProject).toHaveBeenCalledWith(db, access, "deal-1");
   });
 
+  it("carries the render deadline through to the PDF upload", async () => {
+    // Bounding the reads and transcodes but not the PUT just moves the stall one line down: an
+    // accepted-then-stalled upload leaves renderAndStoreFieldPhotoReportPdf pending forever, and the
+    // AI-report poller is single-in-flight, so every later report queues behind a handler nothing can free.
+    // Built from a literal rather than prepareFieldPhotoReport: this asserts the SIGNAL contract, and going
+    // through the full prepare path would only add database fixtures that have nothing to do with it.
+    const controller = new AbortController();
+    const prepared = {
+      project: { dealNumber: "D-1" },
+      title: "Report",
+      cover: { reportTitle: "Report", creatorName: "Sam", companyName: "TRock", reportDateLabel: "May 3, 2026", projectName: "Roof Repair", photoCount: 1 },
+      renderSections: [{ title: "Section 1", photos: [] }],
+      executiveSummary: null,
+      photoLayout: "grid",
+      now: new Date("2026-05-03T12:00:00.000Z"),
+    };
+
+    await renderAndStoreFieldPhotoReportPdf(prepared as never, "dallas", controller.signal);
+
+    // Both halves of the render carry it — the layout's object reads/transcodes AND the upload that follows.
+    expect(pdfMocks.renderFieldPhotoReportPdf).toHaveBeenCalledWith(
+      expect.objectContaining({ signal: controller.signal }),
+    );
+    expect(r2Mocks.putObject).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.any(Buffer),
+      "application/pdf",
+      { signal: controller.signal },
+    );
+  });
+
   it("stores generated reports as tagged file artifacts", async () => {
     const db = createDb();
     mockRenderPhotoQueries(db, [
@@ -166,7 +203,15 @@ describe("photo reports service", () => {
     });
 
     expect(pdfMocks.renderFieldPhotoReportPdf).toHaveBeenCalled();
-    expect(r2Mocks.putObject).toHaveBeenCalledWith(expect.stringContaining("photo-reports"), expect.any(Buffer), "application/pdf");
+    // The human path passes no signal, so the upload is unbounded exactly as it has always been — the
+    // fourth argument exists for the AI report, whose poller is single-in-flight and cannot afford a
+    // stalled PUT.
+    expect(r2Mocks.putObject).toHaveBeenCalledWith(
+      expect.stringContaining("photo-reports"),
+      expect.any(Buffer),
+      "application/pdf",
+      { signal: undefined },
+    );
     expect(db.insert).toHaveBeenCalled();
     const insertValues = db.insert.mock.results[0]?.value.values.mock.calls[0]?.[0];
     expect(insertValues.category).toBe("other");
@@ -380,16 +425,27 @@ describe("photo reports service", () => {
 
   it("verifies project access before returning a report download", async () => {
     const db = createDb();
-    filesMocks.getFileById.mockResolvedValue({
+    const file = {
       id: "report-1",
       category: "other",
       tags: ["photo-report", "photo-report-exp:2099-05-20T12:00:00.000Z"],
       dealId: "deal-1",
-    });
+      r2Key: "office_dallas/report.pdf",
+      displayName: "Roof Repair Photo Report",
+      fileExtension: ".pdf",
+    };
+    filesMocks.getFileById.mockResolvedValue(file);
+    filesMocks.buildFileDownloadUrlFromRecord.mockResolvedValue({
+      url: "https://example.test/report.pdf",
+      filename: "Roof Repair Photo Report.pdf",
+    } as never);
 
     const result = await getFieldProjectReportDownload(db, access, "report-1");
     expect(projectMocks.assertActiveFieldProject).toHaveBeenCalledWith(db, access, "deal-1");
-    expect(filesMocks.getFileDownloadUrl).toHaveBeenCalledWith(db, "report-1");
+    // Built from the record the gate already read — the file is fetched ONCE, not once to authorise and
+    // again to presign.
+    expect(filesMocks.buildFileDownloadUrlFromRecord).toHaveBeenCalledWith(file);
+    expect(filesMocks.getFileById).toHaveBeenCalledTimes(1);
     expect(result.url).toBe("https://example.test/report.pdf");
   });
 

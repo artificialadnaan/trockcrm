@@ -1,7 +1,8 @@
 import PDFDocument from "pdfkit";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { getObjectBuffer, isR2Configured } from "../../lib/r2-client.js";
+import { getObjectBuffer, isR2Configured, isR2ObjectNotFoundError, ObjectTooLargeError } from "../../lib/r2-client.js";
+import { generateEvidenceJpeg } from "../../lib/image-thumbnail.js";
 import { TROCK_LOGO_PNG_BASE64 } from "./pdf-logo.js";
 
 const PAGE_WIDTH = 612;
@@ -99,6 +100,27 @@ const SUMMARY_BODY_BOTTOM = 720; // stay clear of the footer (drawn at PAGE_HEIG
 const SUMMARY_BODY_FONT_SIZE = 11;
 const SUMMARY_LINE_GAP = 4;
 
+// --- Findings layout (AI condition assessment) ---------------------------------------------------
+// A SECOND per-photo layout, opt-in via `photoLayout: "findings"`. The default grid above packs three
+// photos per page beside a 174pt caption column clamped to ~320 chars — built for short human captions and
+// structurally unable to carry a multi-sentence, multi-bullet AI finding without ellipsising most of it.
+// This layout inverts the proportions to match a written condition assessment: ONE photo per page, image
+// across the full content width, a subject caption under it, then the findings as bullets. Bullets flow
+// onto continuation pages (image not repeated) so a long finding is never truncated — the grid layout's
+// `ellipsis: true` would silently drop exactly the evidence the report exists to communicate.
+const FINDINGS_IMAGE_TOP = 62;
+const FINDINGS_IMAGE_MAX_HEIGHT = 340;
+const FINDINGS_CAPTION_GAP = 14; // image bottom → caption baseline box
+const FINDINGS_CAPTION_FONT_SIZE = 10;
+const FINDINGS_BULLETS_GAP = 16; // caption bottom → first bullet
+const FINDINGS_BODY_BOTTOM = 736; // stay clear of the footer (drawn at PAGE_HEIGHT - 44 = 748)
+const FINDINGS_CONT_BODY_TOP = 58; // continuation pages start just under the header rule
+const FINDINGS_BULLET_FONT_SIZE = 10.5;
+const FINDINGS_BULLET_LINE_GAP = 2.5;
+const FINDINGS_BULLET_SPACING = 9; // vertical gap between consecutive bullets
+const FINDINGS_BULLET_INDENT = 18; // text inset from the margin; the glyph sits in the gutter
+const FINDINGS_BULLET_TEXT_WIDTH = CONTENT_WIDTH - FINDINGS_BULLET_INDENT;
+
 type ReportFontSet = {
   regular: string;
   bold: string;
@@ -116,6 +138,12 @@ export type ReportRenderablePhoto = {
   r2Key: string | null;
   externalUrl: string | null;
   externalThumbnailUrl: string | null;
+  /**
+   * Stored MIME type, used to decide whether the original needs transcoding before PDFKit can embed it
+   * (PDFKit accepts JPEG/PNG only). Optional so existing callers are unaffected; when absent the loader
+   * falls back to the type R2 reports, and transcodes anything it cannot confirm is native.
+   */
+  mimeType?: string | null;
 };
 
 export type ReportRenderSection = {
@@ -149,6 +177,29 @@ function clampText(value: string, maxLength: number): string {
   if (normalized.length <= maxLength) return normalized;
   return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
 }
+
+/**
+ * Bound a string's LENGTH while leaving its line structure intact.
+ *
+ * clampText above normalises whitespace, which is right for a single-line caption and wrong for anything
+ * parseFindingText reads: that function splits a title from its bullets on newlines, so collapsing them
+ * would silently turn a structured finding into one run-on paragraph.
+ */
+function clampLength(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+/**
+ * Ceiling on the text a single findings page will paginate.
+ *
+ * `files.description` is an unbounded `text` column and the generic metadata/import paths write it with no
+ * cap. Unlike the grid renderer — which clamps its caption to a fixed box — drawFindingsPhotoPages
+ * paginates the WHOLE value across as many continuation pages as it takes, so one pathological imported
+ * caption (or several long ones in a 60-photo selection) can buffer thousands of pages and exhaust the
+ * worker. Generous enough for a real multi-bullet finding, which runs to a few hundred characters.
+ */
+const MAX_FINDINGS_BODY_CHARS = 4_000;
 
 /**
  * Break a single word that is taller than the page budget into character slices that each fit. PDFKit
@@ -269,22 +320,131 @@ async function fetchExternalImageBuffer(url: string): Promise<Buffer | null> {
   try {
     const response = await fetch(url);
     if (!response.ok) return null;
-    const arrayBuffer = await response.arrayBuffer();
-    return Buffer.from(arrayBuffer);
+    return Buffer.from(await response.arrayBuffer());
   } catch {
     return null;
   }
 }
 
-async function loadPhotoBuffer(photo: ReportRenderablePhoto): Promise<Buffer | null> {
+/**
+ * Ceiling on an original read into memory to embed in the PDF.
+ *
+ * Uploads accept up to 200MB, and this ran uncapped — so a single oversized original could be buffered in
+ * full during rendering, and a report is a LOOP over photos. Matches the cap the AI vision pass already
+ * applies; past it the photo renders as the existing "Image unavailable" placeholder rather than risking
+ * the worker process (and every other job handler sharing it).
+ */
+const MAX_RENDER_SOURCE_BYTES = 40 * 1024 * 1024;
+
+/**
+ * PDFKit's image loader accepts JPEG and PNG only. Anything else — HEIC/HEIF straight off an iPhone, WebP,
+ * TIFF, AVIF — makes openImage throw, and the page prints "Image unavailable" for a photograph that is
+ * perfectly fine. Transcode those to JPEG first, using the same pipeline that already handles HEIC decode,
+ * EXIF rotation and transparency flattening elsewhere.
+ */
+const PDFKIT_NATIVE_MIME = /^image\/(jpeg|jpg|png)$/i;
+/** Generous enough to stay sharp at full page width, without re-encoding a 4000px original at full size. */
+const RENDER_TRANSCODE_MAX_EDGE = 2000;
+/**
+ * Above this, even a NATIVE JPEG/PNG is downscaled before being handed to PDFKit.
+ *
+ * PDFKit retains every embedded image for the life of the document, so a 60-photo report of full-resolution
+ * originals holds all of them at once and writes them all into the file. Bounding each one keeps both peak
+ * memory and the finished PDF proportional to the page count rather than to camera resolution. Small images
+ * skip the re-encode entirely, so the common case costs nothing.
+ */
+const RENDER_TRANSCODE_ABOVE_BYTES = 2 * 1024 * 1024;
+
+/**
+ * Ceiling on an original PDFKit may embed WITHOUT a successful transcode.
+ *
+ * sharp legitimately refuses some images it cannot bound — most often a native JPEG whose decoded raster is
+ * over its pixel limit. Handing the raw original back on that path re-opens the exact bound the transcode
+ * exists to enforce (PDFKit retains every embedded image for the life of the document), so a report full of
+ * rejected originals is unbounded again. A moderately-large native still embeds — better a real photograph
+ * than a placeholder — but past this it renders as "Image unavailable" instead.
+ */
+export const MAX_UNTRANSCODED_EMBED_BYTES = 8 * 1024 * 1024;
+
+/**
+ * What PDFKit gets when the bounded transcode fails.
+ *
+ * Only a native format could embed at all — anything else makes openImage throw and draws the placeholder —
+ * so a non-native buffer is dropped here rather than carried through the renderer just to be rejected. A
+ * native one passes through only while it stays inside the ceiling; past that the memory bound matters more
+ * than the photograph.
+ *
+ * Exported for test on purpose: this decision IS the bound, and exercising it through a full render would
+ * need a genuinely valid multi-megabyte JPEG that sharp also refuses — a fixture that would make the test
+ * slow and, if it were merely random bytes, pass whether or not the bound existed.
+ */
+export function untranscodedFallback(buffer: Buffer, mime: string | null): Buffer | null {
+  const native = mime ? PDFKIT_NATIVE_MIME.test(mime) : false;
+  return native && buffer.byteLength <= MAX_UNTRANSCODED_EMBED_BYTES ? buffer : null;
+}
+
+async function loadPhotoBuffer(
+  photo: ReportRenderablePhoto,
+  /**
+   * Bounds the object read AND the transcode below. Phase D of the AI report re-reads and re-decodes every
+   * original, on a poller that is serial and single-in-flight — an unbounded stall here does not just
+   * outlive one run's lease, it wedges every subsequent report with nothing able to free it.
+   */
+  signal: AbortSignal | undefined,
+  /**
+   * When true, a TRANSIENT storage failure is re-thrown instead of degrading to a placeholder. The AI
+   * report uses this: silently emitting an "Image unavailable" panel — potentially beside findings derived
+   * from that very photograph — and then marking the run succeeded is worse than failing and retrying.
+   * The human path leaves it false to keep its long-standing degrade-gracefully behaviour.
+   */
+  strictStorage = false,
+): Promise<Buffer | null> {
   if (photo.r2Key && isR2Configured()) {
+    let buffer: Buffer;
+    let contentType: string | undefined;
     try {
-      const { buffer } = await getObjectBuffer(photo.r2Key);
-      return buffer;
-    } catch {
+      ({ buffer, contentType } = await getObjectBuffer(photo.r2Key, {
+        maxBytes: MAX_RENDER_SOURCE_BYTES,
+        signal,
+      }));
+    } catch (error) {
+      // Permanent, photo-specific failures still degrade to a placeholder in BOTH modes — the photo is
+      // genuinely unusable and no retry changes that.
+      const permanent = error instanceof ObjectTooLargeError || isR2ObjectNotFoundError(error);
+      if (strictStorage && !permanent) throw error;
       return null;
     }
+
+    const mime = photo.mimeType ?? contentType ?? null;
+    const needsTranscode =
+      !mime || !PDFKIT_NATIVE_MIME.test(mime) || buffer.byteLength > RENDER_TRANSCODE_ABOVE_BYTES;
+    if (!needsTranscode) return buffer;
+    try {
+      // Raced against the caller's budget as well as caught. sharp cannot be cancelled once running, so
+      // this bounds the WAIT rather than the work — but an unbounded wait here is what wedges the serial
+      // AI-report poller, since Phase D re-decodes every original and nothing else can free it.
+      const transcode = generateEvidenceJpeg(buffer, mime, { maxEdge: RENDER_TRANSCODE_MAX_EDGE, quality: 82 });
+      if (!signal) return await transcode;
+      return await Promise.race([
+        transcode,
+        new Promise<never>((_, reject) => {
+          if (signal.aborted) return reject(new Error("render aborted"));
+          signal.addEventListener("abort", () => reject(new Error("render aborted")), { once: true });
+        }),
+      ]);
+    } catch (error) {
+      // An abort is the caller giving up on the whole render — it must propagate, not silently degrade to
+      // an un-transcoded original and carry on rendering a report nobody is waiting for any more.
+      if (signal?.aborted) throw error;
+      // sharp cannot read it — most often a native JPEG whose decoded raster is over its pixel limit.
+      return untranscodedFallback(buffer, mime);
+    }
   }
+  // No R2 copy — an external-only import (CompanyCam and similar keep a plain CDN URL with no stored
+  // original). Only INLINE data is readable here: reaching a CDN would mean the server issuing outbound
+  // requests to addresses it does not choose, which is deliberately not part of this feature. Such a photo
+  // draws the "Image unavailable" placeholder. Support for fetching them lives on
+  // feat/trockcam-external-photos, where the destination allow-listing gets its own review.
   if (photo.externalUrl?.startsWith("data:image/")) return fetchExternalImageBuffer(photo.externalUrl);
   if (photo.externalThumbnailUrl?.startsWith("data:image/")) return fetchExternalImageBuffer(photo.externalThumbnailUrl);
   return null;
@@ -465,6 +625,13 @@ function drawIndexBadge(doc: PDFKit.PDFDocument, fonts: ReportFontSet, x: number
   });
 }
 
+function drawImageUnavailable(doc: PDFKit.PDFDocument, fonts: ReportFontSet, x: number, y: number, w: number, h: number) {
+  doc.roundedRect(x, y, w, h, 6).fillColor("#F3F4F6").fill();
+  doc.fillColor(BRAND_MUTED).font(fonts.bold).fontSize(12).text("Image unavailable", x, y + h / 2 - 8, {
+    width: w,
+    align: "center",
+  });
+}
 
 async function drawPhotoEntry(
   doc: PDFKit.PDFDocument,
@@ -473,6 +640,7 @@ async function drawPhotoEntry(
   left: number,
   top: number,
   coverProjectName: string,
+  signal: AbortSignal | undefined,
 ) {
   const boxWidth = IMAGE_BOX_WIDTH;
   const boxHeight = IMAGE_BOX_HEIGHT;
@@ -481,7 +649,7 @@ async function drawPhotoEntry(
   // identical footprint; the image is a guest inside it.
   doc.roundedRect(left, top, boxWidth, boxHeight, PHOTO_TILE_RADIUS).fillColor(PHOTO_TILE_FILL).fill();
 
-  const imageBuffer = await loadPhotoBuffer(photo);
+  const imageBuffer = await loadPhotoBuffer(photo, signal);
   // Only a FAILED LOAD is worth a line. A row with no key and no external URL had nothing to fetch in the
   // first place — that is the placeholder working as intended, not a fault — whereas a key that would not
   // resolve means R2 refused it or the object is gone, and nothing else raises so the placeholder would
@@ -565,10 +733,11 @@ async function drawPhotoEntry(
     });
   });
 
-  // The crew's caption sits DIRECTLY above the metadata, as one bottom-anchored group. Pinning it to the
-  // top of the tile instead left ~100pt of dead air between the caption and the data describing that same
-  // photograph. Only drawn when there is one: an absent caption leaves clean space rather than the words
-  // "No description".
+  // The crew's caption (or the AI's finding) sits DIRECTLY above the metadata, as one bottom-anchored
+  // group. Pinning it to the top of the tile instead left ~100pt of dead air between the caption and the
+  // data it describes — the two belong together, and the whitespace then falls above the group where it
+  // reads as breathing room rather than a gap. Only drawn when there is one: an absent caption leaves clean
+  // space rather than the words "No description".
   const description = clampText(photo.descriptionOverride ?? photo.description ?? "", 200);
   if (description) {
     doc.fillColor(BRAND_BLACK).font(fonts.regular).fontSize(8);
@@ -581,6 +750,185 @@ async function drawPhotoEntry(
       height: descriptionHeight,
       ellipsis: true,
     });
+  }
+}
+
+export type ParsedFinding = {
+  /** Short subject/location label rendered under the photo, or null when the text is plain prose. */
+  title: string | null;
+  /** Findings bodies — bulleted when `bulleted`, otherwise plain paragraphs. */
+  bodies: string[];
+  bulleted: boolean;
+};
+
+/**
+ * Split a per-photo finding into its subject label and its finding bodies.
+ *
+ * The AI report serializes each finding into the EXISTING `photoOverrides[].description` string (so
+ * generateFieldPhotoReport's input contract is untouched) in the shape:
+ *
+ *     Northeast stair tower — third-floor landing
+ *     - Rust bleed below the cap flashing indicates water tracking down the post.
+ *     - Deck boards show gapping that reduces bearing under the unit pads.
+ *
+ * A human-written caption has no bullet markers, so it stays a plain paragraph with NO invented title —
+ * inferring a title from prose would silently promote the first sentence into a heading. Continuation
+ * lines (a wrapped bullet in the source text) are folded back into the bullet they belong to rather than
+ * becoming stray bullets of their own. Exported for unit testing.
+ */
+export function parseFindingText(raw: string): ParsedFinding {
+  const lines = raw.replace(/\r\n?/g, "\n").split("\n").map((line) => line.trim());
+  const isMarker = (line: string) => /^[-•*]\s+/.test(line);
+  const stripMarker = (line: string) => line.replace(/^[-•*]\s+/, "");
+  const bulleted = lines.some(isMarker);
+
+  if (!bulleted) {
+    const bodies = lines.filter(Boolean);
+    return { title: null, bodies, bulleted: false };
+  }
+
+  let title: string | null = null;
+  const bodies: string[] = [];
+  for (const line of lines) {
+    if (!line) continue;
+    if (isMarker(line)) {
+      bodies.push(stripMarker(line));
+      continue;
+    }
+    // A non-marker line BEFORE any bullet is the subject label; after one, it is a wrapped continuation.
+    // Anything else — prose sitting between the label and the first bullet — becomes its own body rather
+    // than being dropped, which silently deleted crew caption text from the PDF.
+    if (bodies.length === 0 && title === null) title = line;
+    else if (bodies.length > 0) bodies[bodies.length - 1] += ` ${line}`;
+    else bodies.push(line);
+  }
+  return { title, bodies, bulleted: true };
+}
+
+/**
+ * Render ONE photo as its own page (or pages) in the findings layout: full-width image, subject caption,
+ * then the findings as bullets. Bullets that don't fit continue on a fresh page WITHOUT repeating the
+ * image; a single bullet taller than a whole page is split by paginateTextByHeight, so no finding text is
+ * ever ellipsised away. One pageMeta entry is pushed per addPage, IN ORDER, so the footer pass — which
+ * indexes pageMeta by page — stays aligned.
+ */
+async function drawFindingsPhotoPages(
+  doc: PDFKit.PDFDocument,
+  fonts: ReportFontSet,
+  photo: ReportRenderSection["photos"][number],
+  header: { reportTitle: string; dateLabel: string; projectName: string; footerLabel: string },
+  pageMeta: PageMeta[],
+  signal: AbortSignal | undefined,
+) {
+  const startPage = () => {
+    doc.addPage();
+    pageMeta.push({
+      kind: "section",
+      footerLabel: header.footerLabel,
+      projectName: header.projectName,
+      reportTitle: header.reportTitle,
+      dateLabel: header.dateLabel,
+    });
+    drawSectionHeader(doc, fonts, header.reportTitle, header.dateLabel);
+  };
+
+  startPage();
+
+  // --- Photo, fit to the full content width and centred -------------------------------------------
+  // strictStorage: this is the AI report. A placeholder panel sitting beside findings written about that
+  // very photograph, in a document then marked succeeded, is a worse outcome than failing the run.
+  const imageBuffer = await loadPhotoBuffer(photo, signal, true);
+  // Pass the photo through so a decode failure names itself in the log. It matters MORE on this layout than
+  // on the grid: a placeholder here sits directly under findings written about that photograph.
+  const opened = imageBuffer ? openImageForLayout(doc, imageBuffer, photo) : null;
+  let imageBottom = FINDINGS_IMAGE_TOP + FINDINGS_IMAGE_MAX_HEIGHT;
+  let drawn = false;
+  if (opened) {
+    const scale = Math.min(CONTENT_WIDTH / opened.displayWidth, FINDINGS_IMAGE_MAX_HEIGHT / opened.displayHeight);
+    const drawWidth = opened.displayWidth * scale;
+    const drawHeight = opened.displayHeight * scale;
+    const left = PAGE_MARGIN + (CONTENT_WIDTH - drawWidth) / 2;
+    try {
+      doc.image(opened.image as unknown as Buffer, left, FINDINGS_IMAGE_TOP, { width: drawWidth, height: drawHeight });
+      doc.roundedRect(left, FINDINGS_IMAGE_TOP, drawWidth, drawHeight, 6).lineWidth(1).strokeColor(BRAND_BORDER).stroke();
+      drawIndexBadge(doc, fonts, left, FINDINGS_IMAGE_TOP, photo.reportIndex);
+      imageBottom = FINDINGS_IMAGE_TOP + drawHeight;
+      drawn = true;
+    } catch {
+      drawn = false;
+    }
+  }
+  if (!drawn) {
+    drawImageUnavailable(doc, fonts, PAGE_MARGIN, FINDINGS_IMAGE_TOP, CONTENT_WIDTH, FINDINGS_IMAGE_MAX_HEIGHT);
+    drawIndexBadge(doc, fonts, PAGE_MARGIN, FINDINGS_IMAGE_TOP, photo.reportIndex);
+  }
+
+  // Bounded before parsing. The override is model output and already shaped, but the fallback is the crew's
+  // own caption straight off files.description — and this is the one renderer that paginates a raw
+  // description rather than clamping it into a fixed box.
+  const parsed = parseFindingText(
+    clampLength(photo.descriptionOverride ?? photo.description ?? "", MAX_FINDINGS_BODY_CHARS),
+  );
+
+  // --- Subject caption ----------------------------------------------------------------------------
+  // Only drawn when there IS a subject label. A photo the assessment passed over carries either the crew's
+  // own caption (which renders as body text below) or nothing at all — inventing a "Photo 7" heading for it
+  // would be exactly the manufactured caption this report is designed not to produce. The index badge on
+  // the image already carries the number.
+  let cursor = imageBottom + FINDINGS_CAPTION_GAP;
+  const caption = parsed.title ? clampText(parsed.title, 160) : "";
+  if (caption) {
+    doc.fillColor(BRAND_BLACK).font(fonts.bold).fontSize(FINDINGS_CAPTION_FONT_SIZE);
+    const captionMaxHeight = 28;
+    const captionHeight = Math.min(
+      doc.heightOfString(caption, { width: CONTENT_WIDTH, lineGap: 1 }),
+      captionMaxHeight,
+    );
+    doc.text(caption, PAGE_MARGIN, cursor, {
+      width: CONTENT_WIDTH,
+      lineGap: 1,
+      height: captionMaxHeight,
+      ellipsis: true,
+    });
+    cursor += captionHeight + FINDINGS_BULLETS_GAP;
+  }
+
+  // --- Findings -----------------------------------------------------------------------------------
+  // Measure with the body font set INSIDE the measurer: drawSectionHeader (on every continuation page)
+  // mutates the current font, so a measurer that trusted ambient state would size against the header font.
+  // Width MUST match the draw call below (bulleted bodies are inset by the glyph gutter); measuring at a
+  // different width silently mis-sizes the fit check that keeps text off the footer.
+  const bodyWidth = parsed.bulleted ? FINDINGS_BULLET_TEXT_WIDTH : CONTENT_WIDTH;
+  const bodyLeft = PAGE_MARGIN + (parsed.bulleted ? FINDINGS_BULLET_INDENT : 0);
+  const measure = (chunk: string) => {
+    doc.font(fonts.regular).fontSize(FINDINGS_BULLET_FONT_SIZE);
+    return doc.heightOfString(chunk, { width: bodyWidth, lineGap: FINDINGS_BULLET_LINE_GAP });
+  };
+  const freshPageHeight = FINDINGS_BODY_BOTTOM - FINDINGS_CONT_BODY_TOP;
+
+  for (const body of parsed.bodies) {
+    if (!body.trim()) continue;
+    for (const [pieceIndex, piece] of paginateTextByHeight(body, freshPageHeight, measure).entries()) {
+      const pieceHeight = measure(piece);
+      if (cursor + pieceHeight > FINDINGS_BODY_BOTTOM) {
+        startPage();
+        cursor = FINDINGS_CONT_BODY_TOP;
+      }
+      if (parsed.bulleted && pieceIndex === 0) {
+        doc.fillColor(BRAND_RED).font(fonts.bold).fontSize(FINDINGS_BULLET_FONT_SIZE);
+        doc.text("•", PAGE_MARGIN + 4, cursor, { width: 10, lineBreak: false, height: 14 });
+      }
+      doc.fillColor(BRAND_BLACK).font(fonts.regular).fontSize(FINDINGS_BULLET_FONT_SIZE);
+      // Hard height cap so pdfkit can NEVER auto-create a page outside the pageMeta accounting (which
+      // would desync every following footer). The fit check above already guarantees it, so this is a
+      // backstop that truncates nothing in practice.
+      doc.text(piece, bodyLeft, cursor, {
+        width: bodyWidth,
+        lineGap: FINDINGS_BULLET_LINE_GAP,
+        height: FINDINGS_BODY_BOTTOM - cursor,
+      });
+      cursor += pieceHeight + FINDINGS_BULLET_SPACING;
+    }
   }
 }
 
@@ -620,11 +968,25 @@ function registerReportFonts(doc: PDFKit.PDFDocument): ReportFontSet {
   }
 }
 
+/**
+ * How per-photo entries are laid out.
+ * - `grid` (default): three photos per page with a compact side caption — the human photo-report look.
+ * - `findings`: one photo per page with a subject caption and bulleted findings below — the AI condition
+ *   assessment look. Callers that omit this keep byte-identical output to before the option existed.
+ */
+export type ReportPhotoLayout = "grid" | "findings";
+
 export async function renderFieldPhotoReportPdf(input: {
   cover: ReportCoverData;
   sections: ReportRenderSection[];
   /** Optional free-form executive summary; rendered on its own page(s) right after the cover. */
   executiveSummary?: string | null;
+  photoLayout?: ReportPhotoLayout;
+  /**
+   * Bounds every object read and transcode this render performs. The AI report's Phase D passes the run's
+   * remaining budget; the human path omits it and is unbounded exactly as before.
+   */
+  signal?: AbortSignal;
 }): Promise<Buffer> {
   const doc = new PDFDocument({
     autoFirstPage: true,
@@ -705,6 +1067,7 @@ export async function renderFieldPhotoReportPdf(input: {
   // A full-page section divider only earns its place when there's MORE THAN ONE section to separate; a
   // single-section report goes straight from the cover to the photos (no near-blank divider page).
   const useSectionDividers = input.sections.length > 1;
+  const photoLayout: ReportPhotoLayout = input.photoLayout ?? "grid";
   let sectionIndex = 0;
   for (const section of input.sections) {
     sectionIndex += 1;
@@ -719,6 +1082,28 @@ export async function renderFieldPhotoReportPdf(input: {
         dateLabel: input.cover.reportDateLabel,
       });
       drawSectionTitlePage(doc, reportFonts, input.cover.reportTitle, input.cover.reportDateLabel, section.title);
+    }
+
+    // The findings layout gives every photo its own page, so it drives its own page/pageMeta loop rather
+    // than the 3-per-page chunking. It also skips the compact section title: that band (y=50..63) would
+    // collide with the full-width image at y=62, and the executive summary already introduces the findings.
+    if (photoLayout === "findings") {
+      for (const photo of section.photos) {
+        await drawFindingsPhotoPages(
+          doc,
+          reportFonts,
+          photo,
+          {
+            reportTitle: input.cover.reportTitle,
+            dateLabel: input.cover.reportDateLabel,
+            projectName: input.cover.projectName,
+            footerLabel: `Section ${sectionIndex}`,
+          },
+          pageMeta,
+          input.signal,
+        );
+      }
+      continue;
     }
 
     // R1: a single-section report skips the full-page divider, so the user's custom section title would be
@@ -752,12 +1137,24 @@ export async function renderFieldPhotoReportPdf(input: {
           PAGE_MARGIN + column * (COLUMN_WIDTH + COLUMN_GAP),
           PHOTO_ROWS_TOP + row * PHOTO_ROW_PITCH,
           input.cover.projectName,
+          input.signal,
         );
       }
     }
   }
 
   const range = doc.bufferedPageRange();
+  // Page accounting invariant. Footers are drawn by indexing pageMeta BY PAGE, and a page with no entry is
+  // silently skipped — so a layout that calls addPage() without pushing its meta produces a document whose
+  // footers are missing or, worse, shifted onto the wrong pages from that point on. That is invisible to a
+  // page-count assertion, so it is checked here instead of hoped for. Logged rather than thrown: a footer
+  // problem must not cost the user their report, but it must never pass a test run unnoticed.
+  if (pageMeta.length !== range.count) {
+    console.error("[field-report-pdf] page accounting desync — footers will be wrong", {
+      pageMetaEntries: pageMeta.length,
+      pages: range.count,
+    });
+  }
   for (let pageIndex = 0; pageIndex < range.count; pageIndex += 1) {
     doc.switchToPage(pageIndex);
     const meta = pageMeta[pageIndex];

@@ -36,6 +36,7 @@ export {
 } from "./public/notification-recipient-groups.js";
 export { jobQueue, jobStatusEnum } from "./public/job-queue.js";
 export { bidBoardIngestionInbox } from "./public/bid-board-ingestion-inbox.js";
+export { fieldAiReportRuns } from "./public/field-ai-report-runs.js";
 export { geocodingCache } from "./public/geocoding-cache.js";
 export * from "../types/sales-workflow.js";
 export * from "../types/workflow.js";

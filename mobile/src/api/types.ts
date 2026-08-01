@@ -147,6 +147,17 @@ export type GeneratedReport = {
 };
 export type GenerateReportResponse = { report: GeneratedReport };
 
+// ── AI report (async: enqueue → poll) ────────────────────────────────────────
+export type AiReportRunStatus = "queued" | "running" | "succeeded" | "failed";
+export type AiReportStartResponse = { runId: string; status: AiReportRunStatus };
+/** `report` is present only once status === "succeeded"; `error` only once status === "failed". */
+export type AiReportStatusResponse = {
+  runId: string;
+  status: AiReportRunStatus;
+  report?: GeneratedReport;
+  error?: string;
+};
+
 export type FieldProjectReportSummary = {
   id: string;
   title: string;

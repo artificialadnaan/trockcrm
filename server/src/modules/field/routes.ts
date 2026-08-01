@@ -1,5 +1,17 @@
 import express, { Router } from "express";
+import { sql } from "drizzle-orm";
 import { requireFieldContractor } from "../../middleware/field-auth.js";
+import { isAiReportConfigured, MAX_FOCUS_PROMPT_LENGTH } from "./ai-report-service.js";
+import {
+  AI_REPORT_JOB_TYPE,
+  AiReportDailyQuotaExceededError,
+  AiReportQuotaExceededError,
+  expireStaleAiReportRuns,
+  getAiReportRun,
+  getInFlightAiReportRun,
+  insertAiReportRunTx,
+  isInFlightRunConflict,
+} from "./ai-report-runs.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { tenantMiddleware } from "../../middleware/tenant.js";
 import { toFieldUserResponse } from "../field-users/service.js";
@@ -23,6 +35,7 @@ import {
 } from "./photo-tags-service.js";
 import {
   generateFieldPhotoReport,
+  getFieldProjectReportDetail,
   getFieldProjectReportDownload,
   listFieldProjectReports,
   previewFieldPhotoReport,
@@ -868,6 +881,199 @@ fieldRoutes.post("/reports/generate", requireFieldContractor, async (req, res, n
       "Project not found",
     );
     res.status(201).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ─── AI report (async) ───────────────────────────────────────────────────────────────────────────
+// A 40-photo Claude vision pass runs 30-90s, so this cannot be a synchronous /reports/generate. The POST
+// creates a run row + a job_queue row IN ONE TRANSACTION and returns immediately; the phone polls
+// /reports/ai-status/:runId until the run reaches a terminal state.
+
+/** Bounds the per-report model spend (each photo is ~1.6k input tokens plus its findings output). */
+const AI_REPORT_MAX_PHOTOS = 60;
+
+/**
+ * Is an in-flight run the SAME request as the one being made now?
+ *
+ * Only an exact match may be handed back. The in-flight unique index keys on (deal, requester) alone, so a
+ * user who changes the focus, the selection or the title and taps again also collides — and returning the
+ * earlier run would open a PDF that answers a different question.
+ */
+function matchesRequest(
+  run: { photoIds: string[]; focusPrompt: string | null; reportTitle: string | null },
+  request: { photoIds: string[]; focusPrompt: string; reportTitle: string },
+): boolean {
+  return (
+    (run.focusPrompt ?? "") === request.focusPrompt &&
+    (run.reportTitle ?? "") === request.reportTitle &&
+    run.photoIds.length === request.photoIds.length &&
+    run.photoIds.every((id, index) => id === request.photoIds[index])
+  );
+}
+
+fieldRoutes.post("/reports/ai-generate", requireFieldContractor, async (req, res, next) => {
+  try {
+    if (!isAiReportConfigured()) {
+      throw new AppError(503, "AI reports are not available right now.");
+    }
+    // Normalised before anything reads through it. Under express 5, body-parser leaves req.body UNDEFINED
+    // when a request arrives without a JSON content-type, so reading a field off it directly turns a
+    // malformed request into a TypeError — a 500 — instead of reaching the 400s below.
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const projectId = String(body.projectId ?? "");
+    assertValidUuid(projectId, "projectId");
+    const rawPhotoIds: string[] = Array.isArray(body.photoIds)
+      ? body.photoIds.map((id: unknown) => String(id)).filter((id: string) => id.length > 0)
+      : [];
+    // De-duplicate but PRESERVE ORDER: this array is the report's print order and the order the model is
+    // shown the photographs in, so a Set round-trip that re-sorted it would mis-caption every page.
+    const photoIds = [...new Set(rawPhotoIds)];
+    if (photoIds.length === 0) {
+      throw new AppError(400, "Select at least one photo to build an AI report.");
+    }
+    if (photoIds.length > AI_REPORT_MAX_PHOTOS) {
+      throw new AppError(400, `An AI report can cover at most ${AI_REPORT_MAX_PHOTOS} photos at a time.`);
+    }
+    for (const photoId of photoIds) assertValidUuid(photoId, "photoId");
+    const reportTitle = typeof body.reportTitle === "string" ? body.reportTitle.trim().slice(0, 140) : "";
+    // Optional. Scopes both the executive summary's subject and what the per-photo findings may raise —
+    // blank means a general director's read of the whole set.
+    const focusPrompt =
+      typeof body.focusPrompt === "string" ? body.focusPrompt.trim().slice(0, MAX_FOCUS_PROMPT_LENGTH) : "";
+
+    // Release any slot held by an abandoned run (worker died mid-flight), across ALL of this user's
+    // projects. Without this the guards below would lock them out permanently.
+    const expired = await expireStaleAiReportRuns(req.fieldUser!.id);
+    if (expired > 0) {
+      console.warn("[field-ai-report] cleared abandoned run(s) before enqueue", {
+        userId: req.fieldUser!.id,
+        expired,
+      });
+    }
+
+    // Resolve an identical in-flight request BEFORE any quota is applied. A retry of the same request (a
+    // lost 202, a flaky connection) creates no new work and should simply resume polling the original run —
+    // rejecting it on quota would strip the client of the one run id it needs.
+    const alreadyRunning = await getInFlightAiReportRun(projectId, req.fieldUser!.id);
+    if (alreadyRunning && matchesRequest(alreadyRunning, { photoIds, focusPrompt, reportTitle })) {
+      res.status(202).json({ runId: alreadyRunning.id, status: alreadyRunning.status });
+      return;
+    }
+
+    let run;
+    try {
+      run = await runFieldDealWrite(
+        req,
+        { dealId: projectId },
+        async (db, office) => {
+          const project = await assertActiveFieldProject(
+            db,
+            { userId: req.fieldUser!.id, userRole: req.fieldUser!.role },
+            projectId,
+          );
+          const { run: created, replayed } = await insertAiReportRunTx(db, {
+            dealId: project.id,
+            officeId: office.id,
+            officeSlug: office.slug,
+            requestedBy: req.fieldUser!.id,
+            photoIds,
+            reportTitle: reportTitle || null,
+            focusPrompt: focusPrompt || null,
+            // Captured HERE, not re-read in the worker. The two run in separate processes with their own
+            // copy of the flag, and it can change while a run sits queued — so the worker would otherwise
+            // judge this run by a rule it was never accepted under.
+            officeGrantRequired: !isFieldCrossOfficeWritesEnabled(),
+          });
+          // A REPLAY gets no new delivery. The run it hands back is either still in flight (its original
+          // delivery is live) or already finished (nothing left to do), so enqueuing here would let repeated
+          // identical POSTs stack unbounded no-op jobs ahead of real reports — and the AI-report poller is
+          // dedicated and claims one at a time, so that queue is exactly where a legitimate run would wait.
+          if (!replayed) {
+            // Same transaction as the run row: if this rolls back, the run row must go with it, or the phone
+            // polls a 'queued' row no worker will ever claim.
+            await db.execute(sql`
+              INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
+              VALUES (${AI_REPORT_JOB_TYPE}, ${JSON.stringify({ runId: created.id })}::jsonb, ${office.id}::uuid, 'pending', NOW())
+            `);
+          }
+          return created;
+        },
+        "Project not found",
+      );
+    } catch (err) {
+      // The INSERT's own quota predicate refused it — serialized by the advisory lock, so the count is
+      // authoritative rather than a snapshot.
+      // The cumulative cap. Distinct from the concurrency one because "wait for one to finish" is useless
+      // advice to someone who has hit the daily limit — nothing they wait for will free it up.
+      if (err instanceof AiReportDailyQuotaExceededError) {
+        throw new AppError(
+          429,
+          `You have started ${err.limit} AI reports today, which is the daily limit. Try again tomorrow.`,
+        );
+      }
+      if (err instanceof AiReportQuotaExceededError) {
+        // ...but an identical double-tap can still arrive HERE rather than at the unique-violation branch
+        // below. The pre-flight duplicate check ran before the concurrent request committed, so with the
+        // user's other runs already at the limit, the first tap's commit takes them to the ceiling and the
+        // lock makes this one observe the full count — the quota refuses it before the in-flight index ever
+        // gets to. Resolve it as the duplicate it is instead of reporting a quota the user did not hit.
+        const duplicate = await getInFlightAiReportRun(projectId, req.fieldUser!.id);
+        if (duplicate && matchesRequest(duplicate, { photoIds, focusPrompt, reportTitle })) {
+          res.status(202).json({ runId: duplicate.id, status: duplicate.status });
+          return;
+        }
+        throw new AppError(
+          429,
+          `You already have ${err.limit} AI reports being generated. Wait for one to finish before starting another.`,
+        );
+      }
+      // Lost the race on field_ai_report_runs_inflight_uidx — a concurrent request for this same project
+      // committed first (the identical-request case was already handled before the quota, above).
+      if (!isInFlightRunConflict(err)) throw err;
+      const existing = await getInFlightAiReportRun(projectId, req.fieldUser!.id);
+      if (!existing) throw err; // it finished in the gap — let the original error surface
+      if (!matchesRequest(existing, { photoIds, focusPrompt, reportTitle })) {
+        throw new AppError(
+          409,
+          "A different AI report is still being generated for this project. Wait for it to finish, then try again.",
+        );
+      }
+      res.status(202).json({ runId: existing.id, status: existing.status });
+      return;
+    }
+
+    res.status(202).json({ runId: run.id, status: run.status });
+  } catch (err) {
+    next(err);
+  }
+});
+
+fieldRoutes.get("/reports/ai-status/:runId", requireFieldContractor, async (req, res, next) => {
+  try {
+    const runId = String(req.params.runId);
+    assertValidUuid(runId, "runId");
+    const run = await getAiReportRun(runId);
+    // 404 rather than 403 for someone else's run: the id is opaque, so confirming it exists would leak that
+    // a report is being generated for a project this user may not be able to see.
+    if (!run || run.requestedBy !== req.fieldUser!.id) {
+      throw new AppError(404, "Report run not found");
+    }
+
+    if (run.status !== "succeeded" || !run.fileId) {
+      res.json({ runId: run.id, status: run.status, error: run.error ?? undefined });
+      return;
+    }
+
+    // Mint the presigned URL through the SAME gate as /reports/:reportId/download (tag + expiry + project
+    // access checks), bound to the office the run recorded — not the caller's active office. The payload
+    // carries the same `report` shape POST /reports/generate returns so the client reuses one success path.
+    const office = await getFieldOfficeById(run.officeId);
+    const detail = await runInOffice(office, (officeDb) =>
+      getFieldProjectReportDetail(officeDb, { userId: req.fieldUser!.id, userRole: req.fieldUser!.role }, run.fileId!),
+    );
+    res.json({ runId: run.id, status: run.status, ...detail });
   } catch (err) {
     next(err);
   }
