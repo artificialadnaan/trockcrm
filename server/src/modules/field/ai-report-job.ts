@@ -28,6 +28,7 @@ import {
   getAiReportRun,
   markAiReportRunFailed,
   markAiReportRunRunning,
+  isSoleLiveDeliveryForRun,
   markAiReportRunSucceeded,
   touchAiReportRunLease,
 } from "./ai-report-runs.js";
@@ -215,7 +216,26 @@ export async function runFieldAiReportJob(
 
   const run = await getAiReportRun(runId);
   if (!run) throw new Error(`ai_report_generation run ${runId} not found`);
-  if (!(await markAiReportRunRunning(runId))) {
+  let claimed = await markAiReportRunRunning(runId);
+  if (!claimed && run.status !== "succeeded" && run.status !== "failed") {
+    // Reconcile a claim whose OUTCOME is uncertain rather than deferring blindly.
+    //
+    // The claim UPDATE can commit while its acknowledgement is lost, so the handler throws over work that
+    // actually landed. The queue redelivers, the run now reads 'running' with a lease stamped seconds ago,
+    // and the guard above correctly refuses it — so this delivery defers, and keeps deferring, until the
+    // lease goes stale twenty minutes later. Nothing generates in the meantime and the phone just waits out
+    // the whole window before the foreground poll gives up.
+    //
+    // A run is claimed by exactly one delivery, so if no OTHER live delivery exists the row that set
+    // 'running' can only have been this one. Re-read first: `run` was fetched before the claim attempt and
+    // its status is stale by definition here.
+    const current = await getAiReportRun(runId);
+    if (current?.status === "running" && (await isSoleLiveDeliveryForRun(runId))) {
+      console.warn("[field-ai-report] resuming a run this delivery had already claimed", { runId });
+      claimed = true;
+    }
+  }
+  if (!claimed) {
     // Not claimable. Two very different reasons, and conflating them strands runs:
     //   * already terminal  → the work is done; let the queue complete this delivery.
     //   * still 'running'   → another attempt holds it and is not yet stale. recoverStaleJobs requeues the

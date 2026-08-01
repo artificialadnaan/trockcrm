@@ -362,6 +362,30 @@ export async function getAiReportRun(runId: string): Promise<AiReportRun | null>
  * redelivery a permanent no-op, stranding the run until a human noticed. The staleness bound is what keeps
  * this from stealing a run that is merely slow.
  */
+/**
+ * True when THIS delivery is the only live job_queue row for `runId`.
+ *
+ * Resolves the one genuinely ambiguous claim outcome: the claim UPDATE commits but its acknowledgement is
+ * lost, so the handler throws over work that actually landed. The queue redelivers, the run now reads
+ * 'running' with a lease stamped seconds ago, and the re-claim guard correctly refuses it — so the delivery
+ * defers, and keeps deferring, until the lease goes stale twenty minutes later. Nothing generates in the
+ * meantime and the phone just waits.
+ *
+ * A run is claimed by exactly one delivery, so if no OTHER live delivery exists, the row that set 'running'
+ * can only have been this one. Same predicate and same partial index as the enqueue-time reaper.
+ */
+export async function isSoleLiveDeliveryForRun(runId: string): Promise<boolean> {
+  const result = await pool.query<{ n: number }>(
+    `SELECT count(*)::int AS n
+       FROM public.job_queue
+      WHERE job_type = $1
+        AND status IN ('pending', 'processing')
+        AND payload->>'runId' = $2`,
+    [AI_REPORT_JOB_TYPE, runId],
+  );
+  return (result.rows[0]?.n ?? 0) <= 1;
+}
+
 export async function markAiReportRunRunning(runId: string): Promise<boolean> {
   const result = await pool.query(
     `UPDATE public.field_ai_report_runs

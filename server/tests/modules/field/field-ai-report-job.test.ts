@@ -11,6 +11,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const runMocks = vi.hoisted(() => ({
   getAiReportRun: vi.fn(),
   markAiReportRunRunning: vi.fn(async () => true),
+  // Defaults to FALSE — "another delivery holds this run" — so the reconciliation path is opt-in per test
+  // and every existing defer case keeps deferring.
+  isSoleLiveDeliveryForRun: vi.fn(async () => false),
   markAiReportRunSucceeded: vi.fn(async () => undefined),
   markAiReportRunFailed: vi.fn(async () => undefined),
   touchAiReportRunLease: vi.fn(async () => true),
@@ -257,6 +260,23 @@ describe("runFieldAiReportJob", () => {
     expect(result.claimed).toBe(false);
     expect(result.retryAfterSeconds).toBeGreaterThan(0);
     expect(aiMocks.generateAiPhotoAssessment).not.toHaveBeenCalled();
+  });
+
+  it("resumes a run whose claim committed but whose acknowledgement was lost", async () => {
+    // The claim UPDATE can commit while its ack is lost, so the handler throws over work that landed. On
+    // redelivery the run reads 'running' with a lease stamped seconds ago and the guard correctly refuses
+    // it — so without reconciliation this delivery defers, and keeps deferring, for the full twenty-minute
+    // lease while nothing generates and the phone waits the window out.
+    runMocks.markAiReportRunRunning.mockResolvedValue(false);
+    runMocks.getAiReportRun.mockResolvedValue(baseRun({ status: "running" }) as any);
+    // No OTHER live delivery exists, so the row that set 'running' can only have been this one.
+    runMocks.isSoleLiveDeliveryForRun.mockResolvedValue(true as any);
+
+    const result = await runFieldAiReportJob({ runId: "run-1" });
+
+    // Proceeds immediately instead of parking the run for twenty minutes.
+    expect(aiMocks.generateAiPhotoAssessment).toHaveBeenCalled();
+    expect(result.claimed).toBe(true);
   });
 
   it("records a model failure on the run instead of throwing it back at the queue", async () => {
