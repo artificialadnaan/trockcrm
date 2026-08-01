@@ -27,45 +27,63 @@ const COVER_LOGO_X = 201;
 const COVER_LOGO_Y = 334;
 const COVER_LOGO_FIT: [number, number] = [210, 210];
 
-// --- Photo grid layout (image-forward) -----------------------------------------------------------
-// Photo reports are image-first: each row is ONE large, tightly framed photo with a compact caption
-// beside it. PHOTOS_PER_PAGE drives both the chunking and the per-row height — fewer per page means
-// taller rows and bigger images. The image is fit to its exact rendered rectangle (decoded via
-// openImage) and framed tightly, so off-aspect photos sit on clean page-white instead of an oversized
-// gray panel — that dead gray gutter was the bulk of the "small image + lots of white space" problem.
-const PHOTOS_PER_PAGE = 4;
+// --- Photo grid layout (contact sheet) -----------------------------------------------------------
+// The page is a grid of identical CELLS, each one a photo tile with its caption and metadata beside it.
+// PHOTO_COLUMNS x PHOTO_ROWS_PER_PAGE drives the chunking, the cell pitch and the tile size together, so
+// changing either re-flows the whole sheet consistently.
 const CONTENT_WIDTH = PAGE_WIDTH - PAGE_MARGIN * 2;
+/**
+ * TWO photo cells per row, four rows down: eight photographs a page rather than four.
+ *
+ * The one-up grid this replaces spent roughly half the page width on a caption column holding three short
+ * lines, so a 22-photo report ran to six pages of half-empty sheets — "long" was the first thing anyone said
+ * about it. Pairing the cells reclaims that gutter and halves the page count.
+ */
+const PHOTO_COLUMNS = 2;
+const PHOTO_ROWS_PER_PAGE = 4;
+const PHOTOS_PER_PAGE = PHOTO_COLUMNS * PHOTO_ROWS_PER_PAGE;
+const COLUMN_GAP = 20;
+const COLUMN_WIDTH = (CONTENT_WIDTH - COLUMN_GAP * (PHOTO_COLUMNS - 1)) / PHOTO_COLUMNS;
 const PHOTO_ROWS_TOP = 72;
-const PHOTO_ROW_PITCH = 172;
+const PHOTO_ROWS_BOTTOM = 740; // stay clear of the footer (drawn at PAGE_HEIGHT - 44)
+const PHOTO_ROW_GAP = 14;
+const PHOTO_ROW_PITCH = (PHOTO_ROWS_BOTTOM - PHOTO_ROWS_TOP + PHOTO_ROW_GAP) / PHOTO_ROWS_PER_PAGE;
 /**
  * The photo sits in a FIXED grey tile and is letterboxed inside it, rather than being drawn at whatever
  * size its aspect happens to produce.
  *
- * This is the whole difference between a report that reads as designed and one that reads as broken. Fitting
- * each image to its own rectangle on page-white meant a portrait, a landscape and a panorama all started and
- * ended in different places — 0 to 196pt of ragged dead space per row — and the captions, hung off the
+ * This is the difference between a report that reads as designed and one that reads as broken. Fitting each
+ * image to its own rectangle on page-white meant a portrait, a landscape and a panorama all started and
+ * ended in different places — 0 to 196pt of ragged dead space per row — and the metadata, hung off the
  * rendered image, drifted with them. A constant tile gives every photograph the same footprint whatever its
- * shape, and letterboxing onto grey reads as deliberate framing where letterboxing onto white just reads as
- * a mistake.
+ * shape, and letterboxing onto grey reads as deliberate framing where the identical letterbox on white just
+ * reads as a mistake.
  */
-const PHOTO_TILE_WIDTH = 270;
-const PHOTO_TILE_HEIGHT = 151;
+const PHOTO_TILE_HEIGHT = PHOTO_ROW_PITCH - PHOTO_ROW_GAP;
+/**
+ * A very slightly PORTRAIT tile, and deliberately not the full column width.
+ *
+ * At eight cells a page no photograph can be large, so the question is only whether the space each one gets
+ * is spent evenly. A wide tile flatters landscapes and ruins portraits: against the 19.5:9 frames the app
+ * currently captures, a full-width tile filled 82% for a landscape and 26% for a portrait — the portrait
+ * pages were the ones that read as broken. A near-square tile gives both orientations the same footprint,
+ * and when the capture fix lands and photographs arrive as 4:3/3:4 it fills roughly three quarters either
+ * way. The leftover column width is what the metadata gets.
+ */
+const PHOTO_TILE_WIDTH = 148;
 const PHOTO_TILE_RADIUS = 8;
 const PHOTO_TILE_FILL = "#F4F5F7";
 const PHOTO_ROW_HEIGHT = PHOTO_TILE_HEIGHT;
-// Metadata is drawn as three single-line, ellipsised rows (Project/Date/Creator). Each line is capped to
-// one line so a long deal/project name (the deal schema allows up to 500 chars) can never wrap and push the
-// block past the footer / page bottom — the exact blank-page/overlap regression the report layout avoids.
-const META_FONT_SIZE = 8.5;
-const META_LINE_PITCH = 11;
-const META_BLOCK_HEIGHT = META_LINE_PITCH * 3;
-// Caption + metadata sit to the RIGHT of the tile and are BOTTOM-aligned to it, so the last metadata line
-// always lands on the tile's bottom edge no matter how tall the photograph rendered.
-const CAPTION_LEFT = PAGE_MARGIN + PHOTO_TILE_WIDTH + 14;
-const CAPTION_WIDTH = CONTENT_WIDTH - PHOTO_TILE_WIDTH - 14;
-/** Metadata is a two-column label/value block: right-aligned labels, values on a common left edge. */
-const META_LABEL_WIDTH = 44;
-const META_VALUE_LEFT = CAPTION_LEFT + META_LABEL_WIDTH + 6;
+// Metadata is drawn as single-line, ellipsised rows. Each is capped to ONE line so a long deal/project name
+// (the deal schema allows up to 500 chars) can never wrap and push the block past the cell below it — the
+// blank-page/overlap regression the report layout exists to avoid. Smaller than the one-up grid's 8.5pt
+// because the cell column is now ~106pt rather than ~264pt.
+const META_FONT_SIZE = 7.5;
+const META_LINE_PITCH = 10;
+// Caption + metadata sit to the RIGHT of the tile inside the same cell, BOTTOM-aligned to it, so the last
+// line always lands on the tile's bottom edge no matter how tall the photograph rendered.
+const CAPTION_GAP = 10;
+const CAPTION_WIDTH = COLUMN_WIDTH - PHOTO_TILE_WIDTH - CAPTION_GAP;
 const IMAGE_BOX_WIDTH = PHOTO_TILE_WIDTH;
 const IMAGE_BOX_HEIGHT = PHOTO_TILE_HEIGHT;
 
@@ -274,6 +292,27 @@ function formatPhotoDate(value: string | null, fallback: string): string {
     hour: "numeric",
     minute: "2-digit",
   }).replace(/^/, ", ");
+}
+
+/**
+ * The photo-grid date. "Jul 31, 2026, 4:52 PM" — abbreviated month, but the YEAR IS KEPT.
+ *
+ * Only the month name is shortened. Dropping the year looked safe on the grounds that it appears on the
+ * cover, the page header and the footer — but that is the REPORT's year, not the photograph's. A report can
+ * carry historical photos or straddle a year boundary, and "Jul 31, 4:52 PM" then reads identically for a
+ * 2025 and a 2026 capture, which for an evidence document is a real loss.
+ *
+ * It fits: measured against Geist at META_FONT_SIZE, the long form is 74.7pt (82.4pt worst case) inside a
+ * ~106pt column. The width worry that prompted the short form came from the one-up grid's 8.5pt text and
+ * did not survive the move to 7.5pt.
+ */
+function formatPhotoDateCompact(value: string | null, fallback: string): string {
+  const date = new Date(value ?? fallback);
+  return `${date.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  })}, ${date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}`;
 }
 
 async function fetchExternalImageBuffer(url: string): Promise<Buffer | null> {
@@ -523,17 +562,34 @@ type OpenedImage = { width: number; height: number; orientation?: number };
 function openImageForLayout(
   doc: PDFKit.PDFDocument,
   buffer: Buffer,
+  photo: Pick<ReportRenderablePhoto, "id" | "displayName">,
 ): { image: OpenedImage; displayWidth: number; displayHeight: number } | null {
   try {
     const image = (doc as unknown as { openImage(src: Buffer): OpenedImage }).openImage(buffer);
-    if (!image || !(image.width > 0) || !(image.height > 0)) return null;
+    if (!image || !(image.width > 0) || !(image.height > 0)) {
+      // Decoded, but to nothing usable. Distinct from a throw and worth its own line: it is what a
+      // zero-byte or truncated upload looks like from here.
+      console.warn("[field-photo-report] a photo decoded to no usable dimensions; drawing the placeholder", {
+        photoId: photo.id,
+        displayName: photo.displayName,
+      });
+      return null;
+    }
     const rotated = (image.orientation ?? 1) > 4;
     return {
       image,
       displayWidth: rotated ? image.height : image.width,
       displayHeight: rotated ? image.width : image.height,
     };
-  } catch {
+  } catch (error) {
+    // THIS is where a corrupt file or a format pdfkit cannot read actually fails — before any draw is
+    // attempted. Swallowing it silently made a report missing evidence look identical to one whose
+    // photograph simply would not decode, with nothing naming which photograph was lost.
+    console.warn("[field-photo-report] could not decode a photo; drawing the placeholder", {
+      photoId: photo.id,
+      displayName: photo.displayName,
+      error: error instanceof Error ? error.message : String(error),
+    });
     return null;
   }
 }
@@ -558,17 +614,30 @@ async function drawPhotoEntry(
   doc: PDFKit.PDFDocument,
   fonts: ReportFontSet,
   photo: ReportRenderSection["photos"][number],
+  left: number,
   top: number,
+  coverProjectName: string,
 ) {
   const boxWidth = IMAGE_BOX_WIDTH;
   const boxHeight = IMAGE_BOX_HEIGHT;
 
-  // The tile is drawn FIRST and always, whether or not the photo loads. It is what gives every row an
+  // The tile is drawn FIRST and always, whether or not the photo loads. It is what gives every cell an
   // identical footprint; the image is a guest inside it.
-  doc.roundedRect(PAGE_MARGIN, top, boxWidth, boxHeight, PHOTO_TILE_RADIUS).fillColor(PHOTO_TILE_FILL).fill();
+  doc.roundedRect(left, top, boxWidth, boxHeight, PHOTO_TILE_RADIUS).fillColor(PHOTO_TILE_FILL).fill();
 
   const imageBuffer = await loadPhotoBuffer(photo);
-  const opened = imageBuffer ? openImageForLayout(doc, imageBuffer) : null;
+  // Only a FAILED LOAD is worth a line. A row with no key and no external URL had nothing to fetch in the
+  // first place — that is the placeholder working as intended, not a fault — whereas a key that would not
+  // resolve means R2 refused it or the object is gone, and nothing else raises so the placeholder would
+  // otherwise be the only trace.
+  if (!imageBuffer && (photo.r2Key || photo.externalUrl || photo.externalThumbnailUrl)) {
+    console.warn("[field-photo-report] could not load a photo's bytes; drawing the placeholder", {
+      photoId: photo.id,
+      displayName: photo.displayName,
+      r2Key: photo.r2Key,
+    });
+  }
+  const opened = imageBuffer ? openImageForLayout(doc, imageBuffer, photo) : null;
   let drew = false;
   if (opened) {
     // Contain, then centre. NOT cover: this is an evidence document, and filling the tile would silently
@@ -577,7 +646,7 @@ async function drawPhotoEntry(
     const scale = Math.min(boxWidth / opened.displayWidth, boxHeight / opened.displayHeight);
     const drawWidth = opened.displayWidth * scale;
     const drawHeight = opened.displayHeight * scale;
-    const drawLeft = PAGE_MARGIN + (boxWidth - drawWidth) / 2;
+    const drawLeft = left + (boxWidth - drawWidth) / 2;
     const drawTop = top + (boxHeight - drawHeight) / 2;
     // CLIPPED to the tile, not merely drawn on top of it. roundedRect().fill() paints a background and
     // establishes no clipping path, so a photograph whose aspect is close to the tile's — 16:9 lands at
@@ -588,13 +657,13 @@ async function drawPhotoEntry(
     // doc.image would otherwise leave the clip on the graphics stack and silently crop everything drawn
     // after it, on this page and every page that follows.
     doc.save();
-    doc.roundedRect(PAGE_MARGIN, top, boxWidth, boxHeight, PHOTO_TILE_RADIUS).clip();
+    doc.roundedRect(left, top, boxWidth, boxHeight, PHOTO_TILE_RADIUS).clip();
     try {
       doc.image(opened.image as unknown as Buffer, drawLeft, drawTop, { width: drawWidth, height: drawHeight });
       drew = true;
     } catch (error) {
-      // Named, not swallowed. This degrades to a placeholder in a document the user is about to send to an
-      // owner, and without the photo id there is nothing to work back from — the PDF looks merely incomplete.
+      // Log which photograph failed. Silently swapping in the placeholder makes a report that is missing
+      // evidence look identical to one whose photograph simply would not decode.
       console.warn("[field-photo-report] could not embed a photo; drawing the placeholder", {
         photoId: photo.id,
         displayName: photo.displayName,
@@ -606,34 +675,33 @@ async function drawPhotoEntry(
     }
   }
   if (!drew) {
-    doc.fillColor(BRAND_MUTED).font(fonts.bold).fontSize(11).text("Image unavailable", PAGE_MARGIN, top + boxHeight / 2 - 7, {
+    doc.fillColor(BRAND_MUTED).font(fonts.bold).fontSize(8).text("Image unavailable", left, top + boxHeight / 2 - 5, {
       width: boxWidth,
       align: "center",
     });
   }
-  // Badge on the TILE corner, not the image corner, so it sits in the same place on every row.
-  drawIndexBadge(doc, fonts, PAGE_MARGIN, top, photo.reportIndex);
+  // Badge on the TILE corner, not the image corner, so it sits in the same place in every cell.
+  drawIndexBadge(doc, fonts, left, top, photo.reportIndex);
 
   // --- Caption + metadata, to the right of the tile and BOTTOM-aligned to it ------------------------
-  // Bottom-aligned rather than top-aligned: the metadata is a fixed three-line block, so anchoring it to
-  // the tile's bottom edge lands it in exactly the same place on every row while leaving whatever room is
-  // left above for the description.
-  const metaTop = top + boxHeight - META_BLOCK_HEIGHT;
-  const metaRows: Array<[string, string]> = [
-    ["Project:", photo.projectName],
-    ["Date:", formatPhotoDate(photo.takenAt, photo.createdAt)],
-    ["Creator:", photo.uploaderName],
-  ];
-  metaRows.forEach(([label, value], index) => {
-    const y = metaTop + index * META_LINE_PITCH;
+  // Bottom-aligned rather than top-aligned, so the last line always lands on the tile's bottom edge.
+  //
+  // The "Project:"/"Date:"/"Creator:" labels are GONE. In a ~106pt cell column they would have eaten 40% of
+  // the width to restate what the values obviously are, and the project name they introduced is already the
+  // page header, the footer and the cover title. It is printed here ONLY when a photograph actually belongs
+  // to some other project than the report's — the case where it is information rather than furniture.
+  const captionLeft = left + PHOTO_TILE_WIDTH + CAPTION_GAP;
+  const metaLines = [formatPhotoDateCompact(photo.takenAt, photo.createdAt), photo.uploaderName];
+  if (photo.projectName.trim() && photo.projectName.trim() !== coverProjectName.trim()) {
+    metaLines.push(photo.projectName);
+  }
+  const metaTop = top + boxHeight - metaLines.length * META_LINE_PITCH;
+  metaLines.forEach((value, index) => {
     doc.fillColor(BRAND_MUTED).font(fonts.regular).fontSize(META_FONT_SIZE);
-    doc.text(label, CAPTION_LEFT, y, { width: META_LABEL_WIDTH, align: "left", lineBreak: false, height: META_LINE_PITCH });
-    // Values a shade darker than their labels, on a common left edge — that alignment is most of why the
-    // block reads as a table rather than three loose sentences. One line each, ellipsised, so a 500-char
-    // project name truncates instead of wrapping into the next row.
-    doc.fillColor(BRAND_BLACK).font(fonts.regular).fontSize(META_FONT_SIZE);
-    doc.text(value, META_VALUE_LEFT, y, {
-      width: CAPTION_WIDTH - META_LABEL_WIDTH - 6,
+    // One line each, ellipsised, so a 500-char project name truncates instead of wrapping into the cell
+    // below it.
+    doc.text(value, captionLeft, metaTop + index * META_LINE_PITCH, {
+      width: CAPTION_WIDTH,
       align: "left",
       lineBreak: false,
       height: META_LINE_PITCH,
@@ -648,13 +716,13 @@ async function drawPhotoEntry(
   // space rather than the words "No description".
   const description = clampText(photo.descriptionOverride ?? photo.description ?? "", 200);
   if (description) {
-    doc.fillColor(BRAND_BLACK).font(fonts.regular).fontSize(10.5);
-    const available = metaTop - top - 8;
-    const measured = doc.heightOfString(description, { width: CAPTION_WIDTH, lineGap: 2 });
+    doc.fillColor(BRAND_BLACK).font(fonts.regular).fontSize(8);
+    const available = metaTop - top - 6;
+    const measured = doc.heightOfString(description, { width: CAPTION_WIDTH, lineGap: 1.5 });
     const descriptionHeight = Math.min(measured, available);
-    doc.text(description, CAPTION_LEFT, metaTop - 8 - descriptionHeight, {
+    doc.text(description, captionLeft, metaTop - 6 - descriptionHeight, {
       width: CAPTION_WIDTH,
-      lineGap: 2,
+      lineGap: 1.5,
       height: descriptionHeight,
       ellipsis: true,
     });
@@ -745,7 +813,9 @@ async function drawFindingsPhotoPages(
   // strictStorage: this is the AI report. A placeholder panel sitting beside findings written about that
   // very photograph, in a document then marked succeeded, is a worse outcome than failing the run.
   const imageBuffer = await loadPhotoBuffer(photo, true);
-  const opened = imageBuffer ? openImageForLayout(doc, imageBuffer) : null;
+  // Pass the photo through so a decode failure names itself in the log. It matters MORE on this layout than
+  // on the grid: a placeholder here sits directly under findings written about that photograph.
+  const opened = imageBuffer ? openImageForLayout(doc, imageBuffer, photo) : null;
   let imageBottom = FINDINGS_IMAGE_TOP + FINDINGS_IMAGE_MAX_HEIGHT;
   let drawn = false;
   if (opened) {
@@ -1025,8 +1095,18 @@ export async function renderFieldPhotoReportPdf(input: {
       if (showCompactTitle && pageIndex === 0) {
         drawCompactSectionTitle(doc, reportFonts, compactTitle!);
       }
-      for (const [rowIndex, photo] of photos.entries()) {
-        await drawPhotoEntry(doc, reportFonts, photo, PHOTO_ROWS_TOP + rowIndex * PHOTO_ROW_PITCH);
+      // Cells fill left-to-right, then top-to-bottom, so the printed index order reads the way people scan.
+      for (const [cellIndex, photo] of photos.entries()) {
+        const column = cellIndex % PHOTO_COLUMNS;
+        const row = Math.floor(cellIndex / PHOTO_COLUMNS);
+        await drawPhotoEntry(
+          doc,
+          reportFonts,
+          photo,
+          PAGE_MARGIN + column * (COLUMN_WIDTH + COLUMN_GAP),
+          PHOTO_ROWS_TOP + row * PHOTO_ROW_PITCH,
+          input.cover.projectName,
+        );
       }
     }
   }

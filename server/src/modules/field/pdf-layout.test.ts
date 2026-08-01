@@ -255,15 +255,18 @@ describe("renderFieldPhotoReportPdf findings layout", () => {
     });
   }, 30_000);
 
-  it("gives each photo its own page, unlike the 4-per-page grid", async () => {
+  it("gives each photo its own page, where the grid packs many onto one", async () => {
     const sections = [findingsSection(6, SHORT_FINDING)];
     const findings = await renderFieldPhotoReportPdf({ cover, sections, photoLayout: "findings" });
     const grid = await renderFieldPhotoReportPdf({ cover, sections, photoLayout: "grid" });
 
-    // cover + one page per photo
+    // Cover + one page per photo. This one IS fixed: one-page-per-photo is the whole point of the layout.
     expect(countPdfPages(findings)).toBe(7);
-    // cover + ceil(6/4) grid pages.
-    expect(countPdfPages(grid)).toBe(3);
+    // The grid's density is deliberately NOT hard-coded here. It has already changed twice (3 -> 4 -> 8 per
+    // page) and each time this assertion broke while testing nothing about the findings layout it belongs
+    // to. What matters is the relationship: the grid packs photos together, findings does not.
+    expect(countPdfPages(grid)).toBeLessThan(countPdfPages(findings));
+    expect(countPdfPages(grid)).toBeGreaterThan(1); // still rendered something beyond the cover
   });
 
   it("defaults to the grid layout so existing callers are unaffected", async () => {

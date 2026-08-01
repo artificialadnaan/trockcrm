@@ -341,42 +341,63 @@ export default function CameraCapture({
             <View style={styles.fill}>
               <PinchGestureHandler onGestureEvent={handlePinchGesture} onHandlerStateChange={handlePinchStateChange}>
                 <View style={styles.fill}>
-                  <CameraView
-                    ref={cameraRef}
-                    style={StyleSheet.absoluteFill}
-                    facing="back"
-                    flash={flashEnabled ? "on" : "off"}
-                    zoom={zoom}
-                    onCameraReady={() => setReady(true)}
-                  />
+                  {/* The preview is LETTERBOXED to the sensor's 4:3 still frame rather than filling the
+                      screen, and that is load-bearing rather than cosmetic. expo-camera crops every capture
+                      to the preview layer's aspect ratio (CameraPhotoCapture.swift, unconditional), so a
+                      full-bleed preview on a ~19.5:9 screen threw away ~38% of each frame at the moment of
+                      capture — permanently, in an app whose whole purpose is evidence. Matching the frame
+                      makes that crop a no-op, and makes the viewfinder honest: what you see is what is
+                      saved, which a full-bleed preview never was. */}
+                  <View style={styles.cameraStage} pointerEvents="box-none">
+                    <View testID="camera-frame" style={styles.cameraFrame}>
+                      <CameraView
+                        ref={cameraRef}
+                        style={StyleSheet.absoluteFill}
+                        facing="back"
+                        flash={flashEnabled ? "on" : "off"}
+                        zoom={zoom}
+                        // Full sensor resolution. expo-camera defaults pictureSize to `high`, which on iOS is
+                        // the 1920x1080 VIDEO preset — every jobsite photo was landing at ~1.7MP instead of
+                        // the sensor's 12MP, and the upload path (MAX_DIMENSION 4032) was built expecting the
+                        // latter. "Photo" maps to AVCaptureSession.Preset.photo.
+                        //
+                        // Android reaches the same place by a different route, so this is safe cross-platform
+                        // and should not be "corrected" to a WxH string: its pictureSize parser requires
+                        // /\d+x\d+/, "Photo" fails that, and the null falls through to
+                        // ResolutionStrategy.HIGHEST_AVAILABLE_STRATEGY — which is exactly what we want.
+                        pictureSize="Photo"
+                        onCameraReady={() => setReady(true)}
+                      />
 
-                  {!pending ? (
-                    <Pressable
-                      testID="camera-focus-surface"
-                      style={StyleSheet.absoluteFill}
-                      onPress={(event) => void handleTapToFocus(event)}
-                      onLayout={handleFocusSurfaceLayout}
-                      disabled={cameraControlsDisabled}
-                      accessibilityRole="button"
-                      accessibilityLabel="Camera preview. Tap to focus"
-                      accessibilityHint="Focuses the camera and exposure at the tapped point"
-                      accessibilityState={{ disabled: cameraControlsDisabled }}
-                    >
-                      {focusPoint ? (
-                        <View
-                          testID="camera-focus-reticle"
-                          pointerEvents="none"
-                          style={[
-                            styles.focusReticle,
-                            {
-                              left: focusPoint.x - FOCUS_RETICLE_SIZE / 2,
-                              top: focusPoint.y - FOCUS_RETICLE_SIZE / 2,
-                            },
-                          ]}
-                        />
+                      {!pending ? (
+                        <Pressable
+                          testID="camera-focus-surface"
+                          style={StyleSheet.absoluteFill}
+                          onPress={(event) => void handleTapToFocus(event)}
+                          onLayout={handleFocusSurfaceLayout}
+                          disabled={cameraControlsDisabled}
+                          accessibilityRole="button"
+                          accessibilityLabel="Camera preview. Tap to focus"
+                          accessibilityHint="Focuses the camera and exposure at the tapped point"
+                          accessibilityState={{ disabled: cameraControlsDisabled }}
+                        >
+                          {focusPoint ? (
+                            <View
+                              testID="camera-focus-reticle"
+                              pointerEvents="none"
+                              style={[
+                                styles.focusReticle,
+                                {
+                                  left: focusPoint.x - FOCUS_RETICLE_SIZE / 2,
+                                  top: focusPoint.y - FOCUS_RETICLE_SIZE / 2,
+                                },
+                              ]}
+                            />
+                          ) : null}
+                        </Pressable>
                       ) : null}
-                    </Pressable>
-                  ) : null}
+                    </View>
+                  </View>
 
                 {/* Live capture controls — hidden while a shot is being annotated so the
                     shutter can't double-fire and "Done" can't skip the pending note. The
@@ -571,6 +592,12 @@ const styles = StyleSheet.create({
   fill: { flex: 1, backgroundColor: "#000" },
   center: { flex: 1, alignItems: "center", justifyContent: "center", backgroundColor: "#000" },
   overlay: { flex: 1 },
+  // Absolutely positioned and centred so the controls overlay, which is a sibling, still spans the whole
+  // screen — only the viewfinder is letterboxed, not the chrome around it.
+  cameraStage: { ...StyleSheet.absoluteFillObject, alignItems: "center", justifyContent: "center" },
+  // 3:4 = the sensor's 4:3 still frame held upright. This ratio is what makes expo-camera's capture-time
+  // crop a no-op; changing it silently starts discarding pixels again.
+  cameraFrame: { width: "100%", aspectRatio: 3 / 4 },
   topBar: {
     flexDirection: "row",
     alignItems: "center",
