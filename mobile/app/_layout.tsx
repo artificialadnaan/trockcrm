@@ -43,14 +43,37 @@ export default function RootLayout() {
   // the very first render and keeps hook order stable), so a cold return from Meta AI reaches
   // the SDK regardless of which route the app opens on.
   //
-  // Note: as of 2026-07-30 this is dead code in practice — registration was verified to
-  // complete without it, because the SDK persists its own state across the handoff. Kept for
-  // correctness on this one cold-start path, not because anything is currently blocked on it.
+  // A WARM return — the app stayed alive while Meta AI was in front — does NOT go through
+  // getInitialURL(); iOS delivers it as a live `url` event instead. The only listener that used
+  // to exist for that lived inside the __DEV__-only /dev-wearables screen, which is not mounted
+  // during the release pairing flow, so a warm return from Profile's "Pair glasses" button was
+  // silently dropped and registration never completed. Registering the listener here, alongside
+  // the cold-launch handler, covers both without duplicating a screen-scoped effect.
   useEffect(() => {
     if (!wearablesAvailable) return;
     void Linking.getInitialURL().then((url) => {
       if (url) void Wearables.handleUrl(url).catch(() => {});
     });
+    const sub = Linking.addEventListener("url", ({ url }) => {
+      void Wearables.handleUrl(url).catch(() => {});
+    });
+    return () => sub.remove();
+  }, []);
+
+  // The SDK must be `configure()`d before anything can select a device. The only production call
+  // site used to be the Profile tab's PairingRow — but a user can go straight from a project to
+  // Capture and start an AI walk without ever visiting Profile, in which case `AutoDeviceSelector`
+  // runs against an unconfigured SDK, no device is ever selected, and the walk fails after 8s with
+  // `walk_no_device`, blaming the glasses for a step the app itself skipped. Configuring here, once
+  // at startup, closes that gap regardless of which screen the user visits first.
+  //
+  // `Wearables.configure()` is idempotent-safe on the native side (guarded on a static `configured`
+  // flag, resolving `alreadyConfigured: true`), so this does not conflict with Profile configuring
+  // again later. Failures are swallowed — a configure error must never block app launch; the
+  // walk's own error path surfaces it if it still matters by the time a walk is attempted.
+  useEffect(() => {
+    if (!wearablesAvailable) return;
+    void Wearables.configure().catch(() => {});
   }, []);
 
   if (!fontsLoaded) return null;

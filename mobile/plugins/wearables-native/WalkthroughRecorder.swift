@@ -410,6 +410,9 @@ private final class WalkVideoWriter: @unchecked Sendable {
 
   private var sessionStarted = false
   private var failed = false
+  /// Set alongside `failed`, by the same `fail(reason:)` call, so `finalize()` can report WHY
+  /// the latch tripped rather than just that it did.
+  private var failureReason: String?
 
   /// Last presentation timestamp handed to each input. AVAssetWriterInput requires STRICTLY
   /// increasing timestamps per track; a sample that goes backwards stalls the encoder, its queue
@@ -443,6 +446,11 @@ private final class WalkVideoWriter: @unchecked Sendable {
   enum WalkVideoError: LocalizedError {
     case noSessionStarted
     case notCompleted(AVAssetWriter.Status)
+    /// `fail(reason:)` latched — e.g. 60 consecutive dropped frames, a failed retime, or an
+    /// append() failure — while `AVAssetWriter.status` was still `.writing`. The status alone
+    /// would have let `finalize()` sail through to `.completed` with a recording we already know
+    /// is truncated; this case is what stops that regardless of what the writer's own status says.
+    case latchedFailure(reason: String)
 
     var errorDescription: String? {
       switch self {
@@ -450,6 +458,8 @@ private final class WalkVideoWriter: @unchecked Sendable {
         return "No video frames or audio were ever appended to walk.mp4"
       case .notCompleted(let status):
         return "AVAssetWriter finished in state \(status.rawValue), not .completed"
+      case .latchedFailure(let reason):
+        return "Recording was already known to have failed before finishing: \(reason)"
       }
     }
   }
@@ -600,6 +610,7 @@ private final class WalkVideoWriter: @unchecked Sendable {
   private func fail(reason: String) {
     guard !failed else { return }
     failed = true
+    failureReason = reason
     onFailure(reason)
   }
 
@@ -685,6 +696,20 @@ private final class WalkVideoWriter: @unchecked Sendable {
           // reported through `fail(reason:)`) or already cancelled/completed some other way.
           self.writer.cancelWriting()
           continuation.resume(returning: .failure(WalkVideoError.notCompleted(self.writer.status)))
+          return
+        }
+        guard !self.failed else {
+          // `fail(reason:)` only sets this latch and emits the JS event — it never touches
+          // `writer.status`, so the check above is not enough on its own. 60 consecutive dropped
+          // video frames (or a retiming/append failure) can leave the writer sitting at
+          // `.writing` even though the recording is already known to be truncated: without this
+          // guard, `finishWriting` would complete "successfully" and hand back a videoUri for a
+          // walk we already know is bad, which the upload queue would then ship as if it were
+          // fine. Carry the latched reason through so the rejection actually says why, the same
+          // way `.notCompleted` above carries the writer's status.
+          self.writer.cancelWriting()
+          continuation.resume(
+            returning: .failure(WalkVideoError.latchedFailure(reason: self.failureReason ?? "unknown")))
           return
         }
         self.videoInput.markAsFinished()
