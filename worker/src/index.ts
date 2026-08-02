@@ -3,7 +3,7 @@ dotenv.config();
 
 import http from "http";
 import { startListener } from "./listener.js";
-import { pollAiReportJobs, pollBidBoardIngestJobs, pollJobs, recoverStaleJobs } from "./queue.js";
+import { pollAiReportJobs, pollBidBoardIngestJobs, pollGlassesWalkthroughForwardJobs, pollJobs, recoverStaleJobs } from "./queue.js";
 import { registerAllJobs } from "./jobs/index.js";
 import cron from "node-cron";
 import { runStaleDealScan } from "./jobs/stale-deals.js";
@@ -78,6 +78,13 @@ async function main() {
   // (minutes on retries) and would otherwise hold the main poller's guard for its whole run.
   setInterval(pollAiReportJobs, POLL_INTERVAL_MS);
   console.log(`[Worker] Polling ai_report_generation queue every ${POLL_INTERVAL_MS}ms (dedicated)`);
+
+  // Same treatment for the glasses-walkthrough forward: relaying a walk's clips (potentially gigabytes) to
+  // TROCK Scope over ranged R2 reads can hold this loop for minutes; on the main poller that would stall
+  // email/domain-event/delivery jobs behind a video upload. pollJobs excludes glasses_walkthrough_forward;
+  // this poller claims only that type (one at a time).
+  setInterval(pollGlassesWalkthroughForwardJobs, POLL_INTERVAL_MS);
+  console.log(`[Worker] Polling glasses_walkthrough_forward queue every ${POLL_INTERVAL_MS}ms (dedicated)`);
 
   // NOTE: recoverStaleJobs stays STARTUP-ONLY, deliberately. It requeues any row that has been 'processing'
   // for five minutes, and nothing renews that timestamp while a handler runs, so on a timer it cannot tell a

@@ -220,11 +220,17 @@ async function completeClip(
   const { status, json } = await scopeRequest(deps, "POST", `/api/walkthroughs/${walkthroughId}/clips/${clipId}/complete`, {
     parts,
   });
-  // 409 duplicate_bytes is documented by TROCK Scope as "the request was understood and refused" — a
-  // terminal, non-fatal outcome (see completeClipUpload's own comment in trock-scope), most often this
-  // exact clip's bytes having already landed under this walkthrough on a prior attempt of this job.
-  if (status === 200 || status === 409) {
-    return { outcome: json.outcome === "duplicate_bytes" ? "duplicate_bytes" : "uploaded" };
+  if (status === 200) {
+    return { outcome: "uploaded" };
+  }
+  // 409 is ONLY a non-fatal terminal outcome when TROCK Scope reports duplicate_bytes — "the request was
+  // understood and refused" because this exact clip's bytes already landed under this walkthrough on a
+  // prior attempt of this job (see completeClipUpload's own comment in trock-scope). Any OTHER 409 (a
+  // different conflict, a malformed-parts rejection, etc.) is a real failure: falling through to "uploaded"
+  // would let the artifact loop move on, the job complete successfully, and the clip silently never land in
+  // TROCK Scope with no retry. So every non-duplicate_bytes 409 — and every other status — throws.
+  if (status === 409 && json.outcome === "duplicate_bytes") {
+    return { outcome: "duplicate_bytes" };
   }
   throw new Error(`TROCK Scope complete-clip failed for clip ${clipId}: ${status} ${JSON.stringify(json)}`);
 }

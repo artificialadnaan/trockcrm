@@ -11,7 +11,18 @@ vi.mock("../src/db.js", () => ({
   },
 }));
 
-const { deadJob, deferJob, pollJobs, pollBidBoardIngestJobs, pollAiReportJobs, registerJobHandler, recoverStaleJobs, __resetQueueStateForTest, __setQueueQueryTimeoutForTest } = await import("../src/queue.js");
+const {
+  deadJob,
+  deferJob,
+  pollJobs,
+  pollBidBoardIngestJobs,
+  pollAiReportJobs,
+  pollGlassesWalkthroughForwardJobs,
+  registerJobHandler,
+  recoverStaleJobs,
+  __resetQueueStateForTest,
+  __setQueueQueryTimeoutForTest,
+} = await import("../src/queue.js");
 
 // ── Pool harness ────────────────────────────────────────────────────────────────────────────────
 // Both the CLAIM path and the OUTCOME-WRITE path check out an explicit client via pool.connect() (the
@@ -480,6 +491,9 @@ describe("worker queue", () => {
     expect(claim![0]).toContain("bid_board_ingest");
     // ai_report_generation is a Claude vision pass over up to 60 photographs — same starvation risk.
     expect(claim![0]).toContain("ai_report_generation");
+    // glasses_walkthrough_forward relays a walk's clips (potentially gigabytes) via ranged R2 reads — same
+    // starvation risk, so it must also be excluded from the main poller's claim.
+    expect(claim![0]).toContain("glasses_walkthrough_forward");
     expect(claim![0]).toContain("NOT IN");
   });
 
@@ -526,5 +540,19 @@ describe("worker queue", () => {
     expect(pendingWrite![0]).toContain("attempts = attempts - 1"); // attempt not consumed
     expect(pendingWrite![1]).toEqual(["inbox lease held by a live handler", 182, 51, 1]);
     expect(queries.some(([sql]) => sql.includes("SET status = 'completed'"))).toBe(false);
+  });
+
+  it("pollGlassesWalkthroughForwardJobs claims ONLY glasses_walkthrough_forward, one at a time (LIMIT 1)", async () => {
+    // A walkthrough forward relays multiple clips — potentially gigabytes — through ranged R2 reads. It gets
+    // the same dedicated-poller treatment as bid_board_ingest / ai_report_generation so it can't starve the
+    // main poller's email/domain-event/delivery jobs behind a video upload.
+    const { queries } = installPool(claimRouter(() => []));
+
+    await pollGlassesWalkthroughForwardJobs();
+
+    const claim = queries.find(([sql]) => sql.includes("SELECT * FROM public.job_queue"));
+    expect(claim![0]).toContain("job_type = 'glasses_walkthrough_forward'");
+    expect(claim![0]).not.toContain("NOT IN"); // only-this-type, not exclude-these-types
+    expect(claim![1]).toEqual([1]); // GLASSES_WALKTHROUGH_FORWARD_CONCURRENCY — one forward at a time
   });
 });

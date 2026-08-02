@@ -237,9 +237,14 @@ async function flushPendingRecoveries(): Promise<void> {
 //   • ai_report_generation — a Claude vision pass over up to 60 photographs; 30-90s typically and minutes in
 //     the worst case (3 retries x a 10-minute per-attempt timeout), so it belongs here for exactly the same
 //     reason (pollAiReportJobs)
-const MAIN_POLL_JOB_TYPE_SQL = "AND job_type NOT IN ('bid_board_ingest', 'ai_report_generation')";
+//   • glasses_walkthrough_forward — relays a glasses walkthrough's clips (video/audio/photo, potentially
+//     GIGABYTES) to TROCK Scope via ranged R2 reads + multipart upload; one can hold the guard for minutes,
+//     so it gets the same dedicated treatment (pollGlassesWalkthroughForwardJobs)
+const MAIN_POLL_JOB_TYPE_SQL =
+  "AND job_type NOT IN ('bid_board_ingest', 'ai_report_generation', 'glasses_walkthrough_forward')";
 const BID_BOARD_INGEST_JOB_TYPE_SQL = "AND job_type = 'bid_board_ingest'";
 const AI_REPORT_JOB_TYPE_SQL = "AND job_type = 'ai_report_generation'";
+const GLASSES_WALKTHROUGH_FORWARD_JOB_TYPE_SQL = "AND job_type = 'glasses_walkthrough_forward'";
 // One import at a time on the dedicated poller: imports are already per-office-serialized by an advisory lock,
 // and each holds a lock connection + the importer's queries, so a single in-flight import keeps this poller
 // well under the DB pool max even while the main poller runs its own RUN_CONCURRENCY batch.
@@ -248,6 +253,11 @@ const BID_BOARD_INGEST_CONCURRENCY = 1;
 // running several concurrently is the straightforward way to OOM the worker. Reports are not latency-critical
 // (the phone polls and shows progress), so serializing them is the right trade.
 const AI_REPORT_CONCURRENCY = 1;
+// One forward at a time, same "one long-running unit at a time" posture as the two pollers above: each run
+// relays every clip of a walk (potentially gigabytes) over the estimator's real-world network conditions, so
+// running several concurrently would let one dedicated poller tick spend minutes of bandwidth/wall-clock on
+// several multi-GB uploads at once for no latency benefit — nothing here is interactive.
+const GLASSES_WALKTHROUGH_FORWARD_CONCURRENCY = 1;
 
 // Claim up to `limit` matching 'pending' rows in one short transaction, release the claim connection, then run
 // the claimed handlers. Shared by the main poller and the dedicated bid_board_ingest poller (each passes its
@@ -408,6 +418,20 @@ export async function pollAiReportJobs() {
     await claimAndRunJobs(AI_REPORT_JOB_TYPE_SQL, AI_REPORT_CONCURRENCY);
   } finally {
     pollingAiReport = false;
+  }
+}
+
+// Dedicated poller for the glasses-walkthrough forward, for the same reason as the two above: relaying a
+// walk's clips to TROCK Scope over ranged R2 reads can hold this loop for minutes, and it must not be the
+// main loop (which would otherwise stall email/domain-event/delivery jobs behind a multi-GB video).
+let pollingGlassesWalkthroughForward = false;
+export async function pollGlassesWalkthroughForwardJobs() {
+  if (pollingGlassesWalkthroughForward) return;
+  pollingGlassesWalkthroughForward = true;
+  try {
+    await claimAndRunJobs(GLASSES_WALKTHROUGH_FORWARD_JOB_TYPE_SQL, GLASSES_WALKTHROUGH_FORWARD_CONCURRENCY);
+  } finally {
+    pollingGlassesWalkthroughForward = false;
   }
 }
 

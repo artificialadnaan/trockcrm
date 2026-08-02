@@ -276,4 +276,53 @@ describe("ingestGlassesWalkthrough", () => {
     const [row] = await tenantDb.select().from(files).where(eq(files.clientUploadId, "artifact-1"));
     expect(row.tags).toContain(WALK);
   });
+
+  it("stamps takenAt from capturedAt + capturedAtMs, not the moment the row was inserted", async () => {
+    // The site visit happened at capturedAt; capturedAtMs is this artifact's offset from the walk's start.
+    // An offline/background-delayed walk can file its rows minutes or days later — takenAt must reflect the
+    // site visit, not createdAt (which the field gallery and its date filters fall back to when takenAt is
+    // null), or glasses stills get grouped/sorted/reported under the day they uploaded instead of the day
+    // they were shot.
+    const input = baseInput({
+      capturedAt: "2026-07-29T14:00:00.000Z",
+      artifacts: [
+        {
+          idempotencyKey: "photo-1",
+          kind: "photo",
+          originalFilename: "frame.jpg",
+          mimeType: "image/jpeg",
+          fileSizeBytes: 2048,
+          capturedAtMs: 5 * 60 * 1000, // 5 minutes into the walk
+        },
+      ],
+    });
+    await ingestGlassesWalkthrough(tenantDb, input, {
+      artifactStore: healthyStore({ head: async () => ({ contentType: "image/jpeg", contentLength: 2048 }) }),
+    });
+
+    const [row] = await tenantDb.select().from(files).where(eq(files.clientUploadId, "photo-1"));
+    expect(new Date(row.takenAt).toISOString()).toBe("2026-07-29T14:05:00.000Z");
+  });
+
+  it("stamps takenAt at the walk's capturedAt when an artifact has no capturedAtMs offset", async () => {
+    const input = baseInput({
+      capturedAt: "2026-07-29T14:00:00.000Z",
+      artifacts: [
+        {
+          idempotencyKey: "photo-2",
+          kind: "photo",
+          originalFilename: "frame2.jpg",
+          mimeType: "image/jpeg",
+          fileSizeBytes: 2048,
+          capturedAtMs: null,
+        },
+      ],
+    });
+    await ingestGlassesWalkthrough(tenantDb, input, {
+      artifactStore: healthyStore({ head: async () => ({ contentType: "image/jpeg", contentLength: 2048 }) }),
+    });
+
+    const [row] = await tenantDb.select().from(files).where(eq(files.clientUploadId, "photo-2"));
+    expect(new Date(row.takenAt).toISOString()).toBe("2026-07-29T14:00:00.000Z");
+  });
 });

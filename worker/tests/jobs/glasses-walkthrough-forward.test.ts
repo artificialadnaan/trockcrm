@@ -205,6 +205,47 @@ describe("handleGlassesWalkthroughForward", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("throws (so job_queue retries) on a 409 that is NOT duplicate_bytes, instead of reporting success", async () => {
+    // A 409 is only a non-fatal terminal outcome when TROCK Scope reports duplicate_bytes (the idempotency
+    // case). Any other 409 body must throw so the job retries — treating it as success would let the
+    // artifact loop move on, complete the job, and silently never land this clip in TROCK Scope.
+    const db = makeDb();
+    const { fetchImpl } = makeScopeFetch({
+      completeStatus: 409,
+      completeBody: { outcome: "conflict", clipId: "clip-1", reason: "some other conflict" },
+    });
+    const downloadRange = vi.fn(async () => Buffer.from("x"));
+
+    await expect(
+      handleGlassesWalkthroughForward(makePayload(), "office-1", {
+        db,
+        fetchImpl: fetchImpl as any,
+        baseUrl: "https://scope.example.com",
+        token: "t",
+        downloadRange,
+      })
+    ).rejects.toThrow(/complete-clip failed/);
+  });
+
+  it("throws (so job_queue retries) on a 409 with no outcome field at all", async () => {
+    const db = makeDb();
+    const { fetchImpl } = makeScopeFetch({
+      completeStatus: 409,
+      completeBody: { clipId: "clip-1" },
+    });
+    const downloadRange = vi.fn(async () => Buffer.from("x"));
+
+    await expect(
+      handleGlassesWalkthroughForward(makePayload(), "office-1", {
+        db,
+        fetchImpl: fetchImpl as any,
+        baseUrl: "https://scope.example.com",
+        token: "t",
+        downloadRange,
+      })
+    ).rejects.toThrow(/complete-clip failed/);
+  });
+
   it("throws (so job_queue retries) when the walkthrough create call fails", async () => {
     const db = makeDb();
     const { fetchImpl } = makeScopeFetch({ createStatus: 500, createBody: { error: "boom" } });

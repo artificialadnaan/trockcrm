@@ -412,6 +412,9 @@ export async function ingestGlassesWalkthrough(
 ): Promise<IngestGlassesWalkthroughResult> {
   const bucket = getGlassesWalkthroughFileBucket();
   const fileResults: GlassesWalkthroughFileResult[] = [];
+  // `input.capturedAt` is validated ISO-8601 by validateGlassesWalkthroughCompleteInput, so this is a
+  // real epoch millis value, not NaN.
+  const capturedAtBaseMs = new Date(input.capturedAt).getTime();
 
   for (const artifact of input.artifacts) {
     // Re-validated here (not just trusted from the route's earlier validation) — this module does not
@@ -485,6 +488,15 @@ export async function ingestGlassesWalkthrough(
         description: input.siteLabel ? `Glasses walkthrough — ${input.siteLabel}` : "Glasses walkthrough",
         uploadedBy: input.userId,
         clientUploadId: artifact.idempotencyKey,
+        // WHEN this artifact was actually captured on site, not when this request happened to file it —
+        // same reasoning as createWalkthroughContactSheetFile (walkthrough-ingress-service.ts): everything
+        // that orders/filters files chronologically (field gallery, photo-timeline-filters.ts,
+        // files/feed-service.ts) does it on COALESCE(taken_at, created_at). Leaving this null for an
+        // offline/background-delayed walk would group and sort glasses stills under the day they finally
+        // uploaded rather than the day of the site visit. capturedAtMs is the artifact's offset from the
+        // walk's own start (capturedAt); default to 0 when absent so a walk that never reported a per-clip
+        // offset still lands on the walk's captured day instead of falling back to createdAt.
+        takenAt: new Date(capturedAtBaseMs + (artifact.capturedAtMs ?? 0)),
       })
       // Mirrors confirmUpload (files/service.ts): a concurrent retry for the same idempotency key can
       // race past this insert too — let the partial unique index arbitrate rather than throw a 23505
