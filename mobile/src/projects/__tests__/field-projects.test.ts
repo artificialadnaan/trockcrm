@@ -300,9 +300,21 @@ describe("filter crash-proofing", () => {
   });
 
   it("toDayString tolerates null / invalid values without throwing", () => {
-    expect(toDayString("2026-07-22T03:00:00.000Z")).toBe("2026-07-22");
     expect(toDayString(null)).toBe("");
     expect(toDayString("not-a-date")).toBe("");
+  });
+
+  // Built from local components and asserted in local terms, so it holds in any CI timezone.
+  // A UTC-based implementation fails this wherever the offset is negative.
+  it("toDayString returns the LOCAL day, so grouping matches the heading beside it", () => {
+    // 9pm on the 31st in Dallas is 02:00 UTC on the 1st. Keying on the UTC day split one
+    // evening's photos into a second group rendering the same "Friday, July 31st" heading,
+    // and dropped them out of a "31st" date filter.
+    const evening = new Date(2026, 6, 31, 21, 0, 0);
+    expect(toDayString(evening.toISOString())).toBe("2026-07-31");
+
+    const morning = new Date(2026, 6, 31, 9, 0, 0);
+    expect(toDayString(morning.toISOString())).toBe(toDayString(evening.toISOString()));
   });
 });
 

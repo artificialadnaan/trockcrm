@@ -251,7 +251,21 @@ export function photoTime(photo: FieldPhoto) {
 export function toDayString(value: string | null | undefined): string {
   if (!value) return "";
   const t = Date.parse(value);
-  return Number.isNaN(t) ? "" : new Date(t).toISOString().slice(0, 10);
+  if (Number.isNaN(t)) return "";
+  // LOCAL day, deliberately — not toISOString(), which is UTC.
+  //
+  // This value is the grouping key, while the heading beside it comes from `dateHeading`, which
+  // formats in local time. When those disagreed, one evening's photos split into two groups
+  // rendering the SAME heading: in Dallas everything shot after 7pm rolls into the next UTC day.
+  // That produced duplicate React keys and, worse, a gallery showing "Friday, July 31st" twice
+  // with the day's work divided between them.
+  //
+  // It is also the value compared against the date-range filter, whose bounds a crew picks in
+  // local terms — so a 9pm photo on the 31st was being excluded from a "31st" filter.
+  const d = new Date(t);
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${month}-${day}`;
 }
 
 export function groupPhotos(photos: FieldPhoto[], grouping: PhotoGrouping) {

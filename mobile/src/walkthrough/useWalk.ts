@@ -110,6 +110,10 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
     dispatch({ type: "ended", at: Date.now() });
     try {
       const result = await Recorder.endWalk();
+      // Diagnostic, deliberately unconditional while the video track is still cutting short.
+      // A finished .mp4 cannot say whether frames stopped arriving or the writer refused them,
+      // and that distinction decides whether the bug is ours or the glasses'.
+      console.log("[walk census]", JSON.stringify(result.census ?? "none"));
       // audioUri is null by design: audio is a track inside the .mp4, not a separate artifact.
       // videoUri comes from here rather than from `started` because native only resolves once
       // AVAssetWriter reports .completed — so this path, unlike that one, is a finalised file.

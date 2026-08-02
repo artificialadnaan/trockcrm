@@ -46,6 +46,21 @@ export type StillEvent = {
 export type WalkEnded = {
   videoUri: string;
   stills: number;
+  /**
+   * What the writer actually did. `secondsSinceLastFrameArrived` is the one that matters: near
+   * zero means frames were still arriving and the writer refused them; large means the glasses
+   * stopped sending. A finished file cannot distinguish those, which is why this exists.
+   */
+  census?: {
+    videoFramesReceived: number;
+    videoFramesAppended: number;
+    videoFramesDropped: number;
+    audioBuffersAppended: number;
+    secondsSinceLastFrameArrived: number;
+    writerStatus: number;
+    writerError: string;
+    failedLatched: boolean;
+  };
 };
 
 type WalkthroughNativeModule = {

@@ -137,9 +137,13 @@ export default function ProjectDetailScreen() {
   const tileSize = usePhotoTileSize();
   const galleryItems = useMemo(() => {
     const items: GalleryItem[] = [];
-    for (const group of groups) {
+    for (const [index, group] of groups.entries()) {
       if (group.photos.length === 0) continue;
-      items.push({ kind: "label", key: `label:${group.label}`, label: group.label });
+      // Indexed, not keyed on the label text. Two groups sharing a label should not happen now
+      // that grouping and headings both use the local day, but a duplicate key here does not
+      // warn harmlessly — React may drop or duplicate rows, so the gallery would quietly lose
+      // photos. The index costs nothing and makes that impossible regardless.
+      items.push({ kind: "label", key: `label:${index}:${group.label}`, label: group.label });
       for (let i = 0; i < group.photos.length; i += PHOTO_GRID_COLUMNS) {
         const rowPhotos = group.photos.slice(i, i + PHOTO_GRID_COLUMNS);
         items.push({ kind: "row", key: `row:${group.label}:${rowPhotos[0].id}`, photos: rowPhotos });
