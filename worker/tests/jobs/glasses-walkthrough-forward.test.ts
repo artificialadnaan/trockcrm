@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { GLASSES_WALKTHROUGH_FORWARD_JOB, handleGlassesWalkthroughForward } from "../../src/jobs/glasses-walkthrough-forward.js";
+import {
+  GLASSES_WALKTHROUGH_FORWARD_JOB,
+  deriveScopeWalkthroughExternalRef,
+  handleGlassesWalkthroughForward,
+} from "../../src/jobs/glasses-walkthrough-forward.js";
 import { R2_RANGE_READ_TIMEOUT_MS } from "../../src/lib/r2-client.js";
 
 /**
@@ -192,7 +196,7 @@ describe("handleGlassesWalkthroughForward", () => {
       dealUuid: "deal-1",
       officeSlug: "dallas",
       capturedBy: "user-1",
-      externalRef: "trockcrm:glasses-walkthrough:walk-1",
+      externalRef: "trockcrm:glasses-walkthrough:walk-1:deal:deal-1",
     });
 
     // Checkpointed the remote walkthrough id back into THIS job row via jsonb_set, keyed on walkId. Match
@@ -617,7 +621,7 @@ describe("handleGlassesWalkthroughForward", () => {
         })
       ).rejects.toThrow(/did not answer within/);
 
-      expect(db.storedPayload().scopeCreatePendingRef).toBe("trockcrm:glasses-walkthrough:walk-1");
+      expect(db.storedPayload().scopeCreatePendingRef).toBe("trockcrm:glasses-walkthrough:walk-1:deal:deal-1");
       // …and the next attempt reconciles rather than creating a second walkthrough.
       const retry = makeScopeFetch();
       const result = await handleGlassesWalkthroughForward(db.storedPayload(), "office-1", {
@@ -1013,7 +1017,7 @@ describe("handleGlassesWalkthroughForward", () => {
       await expect(
         handleGlassesWalkthroughForward(db.storedPayload(), "office-1", deps(db, gateway.fetchImpl))
       ).rejects.toThrow(/does not prove whether a walkthrough was created/);
-      expect(db.storedPayload().scopeCreatePendingRef).toBe("trockcrm:glasses-walkthrough:walk-1");
+      expect(db.storedPayload().scopeCreatePendingRef).toBe("trockcrm:glasses-walkthrough:walk-1:deal:deal-1");
     });
 
     it("clears the pending-create marker when the connection was never established (TROCK Scope not deployed)", async () => {
@@ -1042,7 +1046,7 @@ describe("handleGlassesWalkthroughForward", () => {
       await expect(
         handleGlassesWalkthroughForward(db.storedPayload(), "office-1", deps(db, fetchImpl))
       ).rejects.toThrow();
-      expect(db.storedPayload().scopeCreatePendingRef).toBe("trockcrm:glasses-walkthrough:walk-1");
+      expect(db.storedPayload().scopeCreatePendingRef).toBe("trockcrm:glasses-walkthrough:walk-1:deal:deal-1");
 
       const retry = makeScopeFetch();
       const result = await handleGlassesWalkthroughForward(
@@ -1063,23 +1067,85 @@ describe("handleGlassesWalkthroughForward", () => {
       await expect(
         handleGlassesWalkthroughForward(db.storedPayload(), "office-1", deps(db, fetchImpl))
       ).rejects.toThrow(/no usable walkthrough id/);
-      expect(db.storedPayload().scopeCreatePendingRef).toBe("trockcrm:glasses-walkthrough:walk-1");
+      expect(db.storedPayload().scopeCreatePendingRef).toBe("trockcrm:glasses-walkthrough:walk-1:deal:deal-1");
     });
 
-    it("sends a deterministic externalRef with the create so TROCK Scope can dedupe on it once it grows a key", async () => {
+    it("sends a deterministic externalRef with the create, identical on every attempt of the same delivery", async () => {
       const db = makeJobQueueDb(makePayload());
       const { fetchImpl, calls } = makeScopeFetch();
       await handleGlassesWalkthroughForward(db.storedPayload(), "office-1", deps(db, fetchImpl));
 
       const createBody = JSON.parse(calls.find((c) => c.url === CREATE_URL)!.init.body);
-      expect(createBody.externalRef).toBe("trockcrm:glasses-walkthrough:walk-1");
-      // Same walk ⇒ same ref on every attempt: that is what makes it usable as a dedupe key at all.
+      expect(createBody.externalRef).toBe("trockcrm:glasses-walkthrough:walk-1:deal:deal-1");
+      // Same walk on the same deal ⇒ same ref on every attempt. TROCK Scope's unique index on this column
+      // makes a repeat create return the EXISTING walkthrough, so a ref that drifted between attempts would
+      // buy a second walkthrough and a second billed extraction.
       const db2 = makeJobQueueDb(makePayload());
       const again = makeScopeFetch();
       await handleGlassesWalkthroughForward(db2.storedPayload(), "office-1", deps(db2, again.fetchImpl));
       expect(JSON.parse(again.calls.find((c) => c.url === CREATE_URL)!.init.body).externalRef).toBe(
         createBody.externalRef
       );
+    });
+
+    it("scopes the externalRef to the DEAL, so one physical walk re-filed against a second deal is two remote walkthroughs", async () => {
+      // The correction/reuse flow re-files ONE walk against a SECOND deal, and walkId is minted on the
+      // phone — so a ref derived from walkId alone is the same string on both deliveries. TROCK Scope now
+      // persists externalRef under a UNIQUE constraint and answers a repeat create with the EXISTING
+      // walkthrough (201 + deduplicated), which turns that shared string into deal B's clips uploading into
+      // deal A's walkthrough — a walkthrough whose dealUuid still names A. trockcrm files B correctly and
+      // the extracted scope comes back attached to the wrong project, silently.
+      const dbA = makeJobQueueDb(makePayload());
+      const a = makeScopeFetch();
+      await handleGlassesWalkthroughForward(dbA.storedPayload(), "office-1", deps(dbA, a.fetchImpl));
+
+      const dbB = makeJobQueueDb(makePayload({ dealId: "deal-2" }));
+      const b = makeScopeFetch();
+      await handleGlassesWalkthroughForward(dbB.storedPayload(), "office-1", deps(dbB, b.fetchImpl));
+
+      const refA = JSON.parse(a.calls.find((c) => c.url === CREATE_URL)!.init.body).externalRef;
+      const refB = JSON.parse(b.calls.find((c) => c.url === CREATE_URL)!.init.body).externalRef;
+      expect(refA).not.toBe(refB);
+      expect(refA).toContain("deal-1");
+      expect(refB).toContain("deal-2");
+      // Both creates still name their own deal, which is what makes the two remote walkthroughs correct
+      // rather than merely distinct.
+      expect(JSON.parse(a.calls.find((c) => c.url === CREATE_URL)!.init.body).dealUuid).toBe("deal-1");
+      expect(JSON.parse(b.calls.find((c) => c.url === CREATE_URL)!.init.body).dealUuid).toBe("deal-2");
+    });
+
+    it("GUARD: no two (walk, deal) pairs can produce one ref, even when a component spells the separator", async () => {
+      // Deal-scoping is only worth anything if the two components are recoverable from the joined string.
+      // The pair below joins to the identical raw text, and a raw join would therefore give both deliveries
+      // one ref — the exact cross-deal aliasing the scoping exists to end, but reachable from a payload
+      // field rather than from a coincidence. Unreachable today (dealId is written to a uuid column before
+      // it can reach this payload, so it can never contain the separator), which is what makes this a guard
+      // rather than a live bug — and exactly why it is asserted here instead of assumed from a column type
+      // in another service.
+      expect(deriveScopeWalkthroughExternalRef("walk-1:deal:deal-2", "deal-1")).not.toBe(
+        deriveScopeWalkthroughExternalRef("walk-1", "deal-2:deal:deal-1")
+      );
+      // …and the readable shape is untouched for every id either side actually mints (encodeURIComponent is
+      // the identity over UUIDs), because this string's other job is to be typed into TROCK Scope by hand.
+      expect(
+        deriveScopeWalkthroughExternalRef("walk-1", "00000000-0000-0000-0000-0000000000d1")
+      ).toBe("trockcrm:glasses-walkthrough:walk-1:deal:00000000-0000-0000-0000-0000000000d1");
+    });
+
+    it("GUARD: dead-letters on the ref the earlier attempt actually SENT, never a freshly derived one", async () => {
+      // The marker is not just a flag — its value is the one string a human can search TROCK Scope by, and
+      // the dead letter is where they read it. A payload written before the ref's shape changed must still
+      // dead-letter naming the ref that really went out on the wire, so re-deriving here (rather than
+      // echoing what the row stored) would print a ref no remote walkthrough has ever carried and send the
+      // reconciler looking for something that does not exist.
+      const db = makeJobQueueDb(makePayload({ scopeCreatePendingRef: "trockcrm:glasses-walkthrough:walk-1" }));
+      const { fetchImpl, calls } = makeScopeFetch();
+
+      const result = await handleGlassesWalkthroughForward(db.storedPayload(), "office-1", deps(db, fetchImpl));
+
+      expect(calls).toHaveLength(0);
+      expect(result).toEqual({ status: "dead", error: expect.stringContaining("trockcrm:glasses-walkthrough:walk-1") });
+      expect((result as any).error).not.toContain(":deal:");
     });
 
     it("clears the pending-create marker in the same statement that checkpoints the id", async () => {

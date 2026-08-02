@@ -86,12 +86,14 @@ async function main() {
   setInterval(pollGlassesWalkthroughForwardJobs, POLL_INTERVAL_MS);
   console.log(`[Worker] Polling glasses_walkthrough_forward queue every ${POLL_INTERVAL_MS}ms (dedicated)`);
 
-  // NOTE: recoverStaleJobs stays STARTUP-ONLY, deliberately. It requeues any row that has been 'processing'
-  // for five minutes, and nothing renews that timestamp while a handler runs, so on a timer it cannot tell a
-  // crashed delivery from a live one — it would reclaim long-running jobs mid-flight and hand a second worker
-  // the same work. An AI report alone may legitimately run 15 minutes (MAX_TOTAL_DEADLINE_MS), which would
-  // mean a second paid Claude vision pass over the same sixty photographs. Abandoned AI runs are already
-  // reaped by the queue-aware sweep in ai-report-runs.ts, so nothing here needs a timer.
+  // NOTE: the recoverStaleJobs call above is no longer the ONLY one. It now also runs periodically, from
+  // inside pollJobs (sweepExpiredJobLeasesIfDue) — deliberately there rather than on a timer of its own, so
+  // every poller shares one sweeper, the same way they share one flushPendingRecoveries. Startup-only was
+  // never a complete answer: it requeues rows already five minutes stale, so a worker that crashed thirty
+  // seconds into a delivery and restarted left that row 'processing' forever, and nothing selects that
+  // status. What makes the periodic run safe is that a claim is now a renewed LEASE (queue.ts): a live
+  // handler re-stamps started_processing_at while it works, so the fifteen-minute AI report and the
+  // multi-GB glasses forward are never mistaken for a dead worker's leftovers.
   setInterval(async () => {
     try {
       const handled = await runRfpRequestDeadLetterSweep();

@@ -22,6 +22,7 @@ const {
   recoverStaleJobs,
   __resetQueueStateForTest,
   __setQueueQueryTimeoutForTest,
+  __setJobLeaseRenewIntervalForTest,
 } = await import("../src/queue.js");
 
 // ── Pool harness ────────────────────────────────────────────────────────────────────────────────
@@ -72,6 +73,9 @@ function claimRouter(rows: () => any[]) {
       return { rows: rows() };
     }
     if (sql.includes("UPDATE public.job_queue SET status = 'processing'")) return { rows: [] };
+    // Lease renewals: part of the ordinary claim lifecycle, not an outcome — a claimed row is re-stamped
+    // for as long as its handler runs so an expiry sweep can tell a live delivery from a dead worker's.
+    if (sql.includes("SET started_processing_at = NOW() WHERE")) return { rows: [] };
     // Outcome writes (guarded terminal updates) succeed by default.
     if (sql.includes("public.job_queue SET status =")) return { rows: [] };
     throw new Error(`Unexpected SQL: ${sql}`);
@@ -414,6 +418,96 @@ describe("worker queue", () => {
     const sql = String(call![0]);
     expect(sql).toMatch(/SET status = 'pending'/);
     expect(sql).not.toMatch(/THEN 'dead'/); // must NOT dead-letter a possibly-never-run final attempt
+  });
+
+  // ── The claim is a LEASE ──────────────────────────────────────────────────────────────────────────
+  //
+  // A claim marks a row 'processing' and nothing else ever selects that status, so an unrenewed claim whose
+  // owner died is not a delayed job, it is a job that stopped existing as work: the dedicated pollers take
+  // only 'pending' rows, and startup recovery only sees rows already five minutes old — a worker that
+  // crashes and restarts inside that window leaves the row behind forever, with no dead letter and no
+  // alert. The renewal below is what lets the sweep run on a timer instead of once at boot without
+  // reclaiming a live multi-GB forward out from under the worker still uploading it.
+  it("renews a claimed row's lease for as long as its handler runs, bound to the attempt it claimed", async () => {
+    // Shrunk so the case exercises real renewals in milliseconds instead of waiting out a production minute.
+    __setJobLeaseRenewIntervalForTest(5);
+    try {
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      registerJobHandler("glasses_walkthrough_forward", async () => {
+        await held; // stands in for a forward that is still moving bytes
+      });
+      const { queries } = installPool(
+        claimRouter(() => [
+          {
+            id: 61,
+            job_type: "glasses_walkthrough_forward",
+            office_id: "office-1",
+            payload: {},
+            attempts: 2,
+            max_attempts: 10,
+          },
+        ])
+      );
+      const renewals = () =>
+        queries.filter(([sql]) => sql.startsWith("UPDATE public.job_queue SET started_processing_at"));
+
+      const inFlight = pollGlassesWalkthroughForwardJobs();
+      await new Promise((resolve) => setTimeout(resolve, 40));
+
+      expect(renewals().length).toBeGreaterThan(0);
+      // Bound to the CLAIMED attempt (pre-claim 2 → 3), exactly like every outcome write. A renewal that is
+      // not attempt-bound is worse than none: a handler whose lease already lapsed and whose row another
+      // worker re-claimed would keep pushing the timestamp forward under the NEW owner, so that owner's
+      // lease could never expire either — one dead worker would make a row permanently unreclaimable.
+      expect(renewals()[0][0]).toBe(
+        "UPDATE public.job_queue SET started_processing_at = NOW() WHERE id = $1 AND status = 'processing' AND attempts = $2"
+      );
+      expect(renewals()[0][1]).toEqual([61, 3]);
+
+      release();
+      await inFlight;
+      // …and renewals STOP when the handler lets go of the row. A lease that outlives its owner is a row
+      // no sweep can ever reclaim.
+      const afterFinish = renewals().length;
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(renewals().length).toBe(afterFinish);
+    } finally {
+      __setJobLeaseRenewIntervalForTest(60_000);
+    }
+  });
+
+  it("sweeps expired leases on ordinary poll ticks, not only at startup", async () => {
+    // The startup-only sweep is exactly what strands a crashed forward: it requeues rows already five
+    // minutes stale, so a worker that dies 30 seconds into a walk and restarts leaves that row 'processing'
+    // with nothing that will ever look at it again. The sweep rides the main poller for the same reason
+    // flushPendingRecoveries does — one place, for every poller, rather than a private timer per job type.
+    queryMock.mockResolvedValue({ rows: [] });
+    installPool(claimRouter(() => []));
+    const sweeps = () => queryMock.mock.calls.filter((c) => String(c[0]).includes("started_processing_at <"));
+
+    await pollJobs();
+    expect(sweeps()).toHaveLength(1);
+
+    // Throttled to its own cadence rather than the poll interval: at POLL_INTERVAL_MS this would otherwise
+    // be a full-table UPDATE several times a minute to reclaim rows that appear only when a worker dies.
+    await pollJobs();
+    expect(sweeps()).toHaveLength(1);
+  });
+
+  it("GUARD: a failing lease sweep cannot reject a poll tick", async () => {
+    // pollJobs runs under a bare setInterval (index.ts), so a rejection is an unhandled rejection that
+    // takes the worker down — and the sweep's own statement is exactly what fails when the pool is
+    // exhausted, i.e. when the worker is already having a bad minute. The tick must skip, not die.
+    queryMock.mockRejectedValue(new Error("timeout exceeded when trying to connect"));
+    try {
+      installPool(claimRouter(() => []));
+      await expect(pollJobs()).resolves.toBeUndefined();
+    } finally {
+      queryMock.mockResolvedValue({ rows: [] });
+    }
   });
 
   it("does NOT hang on a silently-dead socket — times out the claim query and DESTROYS the connection", async () => {

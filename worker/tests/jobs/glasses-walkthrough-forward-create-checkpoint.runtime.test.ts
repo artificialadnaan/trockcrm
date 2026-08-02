@@ -14,6 +14,10 @@ const CREATE_URL = `${SCOPE_BASE_URL}/api/walkthroughs`;
 
 const DEAL_A = "00000000-0000-0000-0000-0000000000d1";
 const DEAL_B = "00000000-0000-0000-0000-0000000000d2";
+/** Spelled out rather than imported from the job, so a change to the derivation has to be restated here —
+ *  this value is what a human reconciling by hand types into TROCK Scope, and a test that derives it the
+ *  same way the code does would agree with any shape at all, including one that drops the deal again. */
+const EXTERNAL_REF_DEAL_A = `trockcrm:glasses-walkthrough:walk-1:deal:${DEAL_A}`;
 
 function payloadJson(dealId: string = DEAL_A) {
   return JSON.stringify({
@@ -42,9 +46,9 @@ function payloadJson(dealId: string = DEAL_A) {
 
 /** Answers the create plus TROCK Scope's clip-upload sequence and the raw R2 part PUT. */
 function makeScopeFetch(overrides: { createStatus?: number; createBody?: Record<string, any> } = {}) {
-  const calls: Array<{ url: string }> = [];
+  const calls: Array<{ url: string; body: any }> = [];
   const fetchImpl = vi.fn(async (url: string, init: any) => {
-    calls.push({ url });
+    calls.push({ url, body: typeof init?.body === "string" ? JSON.parse(init.body) : undefined });
     if (url === CREATE_URL) {
       return new Response(
         JSON.stringify(overrides.createBody ?? { walkthrough: { id: "8f1c0a6e-1111-4222-8333-444455556666" } }),
@@ -171,6 +175,33 @@ describe("glasses_walkthrough_forward create checkpoint (real SQL)", () => {
     expect("scopeCreatePendingRef" in dealB).toBe(false);
   });
 
+  it("sends a DIFFERENT externalRef for each deal the same physical walk is filed against", async () => {
+    // The other half of the (walkId, dealId) scoping, on the wire rather than in the payload. TROCK Scope
+    // persists externalRef under a UNIQUE constraint and answers a repeat create with the EXISTING
+    // walkthrough, so two rows that legitimately describe the same walk against two deals must not agree
+    // on this string — if they do, deal B's clips are uploaded into deal A's remote walkthrough (whose
+    // dealUuid still names A) and the extracted scope is filed against a job it does not describe.
+    // Driven off the REAL rows: both payloads are read back from job_queue exactly as the queue would
+    // deliver them, so the refs are derived from what is actually stored, not from a hand-built object.
+    const db = await seed();
+    await db.query(
+      `INSERT INTO public.job_queue (job_type, payload, status)
+       VALUES ('glasses_walkthrough_forward', $1::jsonb, 'pending')`,
+      [payloadJson(DEAL_B)],
+    );
+
+    const a = makeScopeFetch();
+    await handleGlassesWalkthroughForward(await storedPayload(db, 1), null, deps(makeClient(db), a.fetchImpl));
+    const b = makeScopeFetch();
+    await handleGlassesWalkthroughForward(await storedPayload(db, 2), null, deps(makeClient(db), b.fetchImpl));
+
+    const refA = a.calls.find((c) => c.url === CREATE_URL)!.body.externalRef;
+    const refB = b.calls.find((c) => c.url === CREATE_URL)!.body.externalRef;
+    expect(refA).toBe(EXTERNAL_REF_DEAL_A);
+    expect(refB).toBe(`trockcrm:glasses-walkthrough:walk-1:deal:${DEAL_B}`);
+    expect(refA).not.toBe(refB);
+  });
+
   it("refuses to create when the marker UPDATE really does match no row", async () => {
     // The unit suite can only assert that the handler believes a fake's row count. This runs the actual
     // `UPDATE … RETURNING id` against Postgres with a walkId no row carries — the shape of a payload
@@ -206,14 +237,14 @@ describe("glasses_walkthrough_forward create checkpoint (real SQL)", () => {
 
     // The row itself now carries the evidence — this is the state a redelivery actually reads.
     const afterCrash = await storedPayload(db);
-    expect(afterCrash.scopeCreatePendingRef).toBe("trockcrm:glasses-walkthrough:walk-1");
+    expect(afterCrash.scopeCreatePendingRef).toBe(EXTERNAL_REF_DEAL_A);
     expect(afterCrash.scopeWalkthroughId).toBeUndefined();
 
     // Attempt 2: redelivered verbatim from the table. No second create; a dead letter a human can act on.
     const second = makeScopeFetch();
     const result = await handleGlassesWalkthroughForward(afterCrash, null, deps(makeClient(db), second.fetchImpl));
     expect(second.calls.filter((c) => c.url === CREATE_URL)).toHaveLength(0);
-    expect(result).toEqual({ status: "dead", error: expect.stringContaining("trockcrm:glasses-walkthrough:walk-1") });
+    expect(result).toEqual({ status: "dead", error: expect.stringContaining(EXTERNAL_REF_DEAL_A) });
   });
 
   it("removes the pending marker from the real row when TROCK Scope answered and refused", async () => {
@@ -244,7 +275,7 @@ describe("glasses_walkthrough_forward create checkpoint (real SQL)", () => {
     ).rejects.toThrow(/does not prove whether a walkthrough was created/);
 
     const payload = await storedPayload(db);
-    expect(payload.scopeCreatePendingRef).toBe("trockcrm:glasses-walkthrough:walk-1");
+    expect(payload.scopeCreatePendingRef).toBe(EXTERNAL_REF_DEAL_A);
   });
 
   it("dead-letters rather than re-creating after an ambiguous 503", async () => {
@@ -263,6 +294,6 @@ describe("glasses_walkthrough_forward create checkpoint (real SQL)", () => {
       deps(makeClient(db), retry.fetchImpl),
     );
     expect(retry.calls.filter((c) => c.url === CREATE_URL)).toHaveLength(0);
-    expect(result).toEqual({ status: "dead", error: expect.stringContaining("trockcrm:glasses-walkthrough:walk-1") });
+    expect(result).toEqual({ status: "dead", error: expect.stringContaining(EXTERNAL_REF_DEAL_A) });
   });
 });

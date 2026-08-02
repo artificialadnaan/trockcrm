@@ -38,11 +38,22 @@
 //      duplicate, and the walk itself is durably filed in the project folder either way, so nothing the
 //      crew can see is ever at risk.
 //
-// A deterministic `externalRef` ("trockcrm:glasses-walkthrough:<walkId>") is sent with every create so the
-// dedupe can eventually move to where it belongs — TROCK Scope's own insert. It is inert today: that route
-// reads a fixed set of body fields off `req.body` and silently drops the rest, so sending it costs nothing
-// and breaks nothing, and step 4 collapses into "TROCK Scope just returns the existing row" the day a
-// unique index on that ref lands (see the REQUIRED trock-scope follow-up on `scopeRequest`).
+// A deterministic `externalRef` (`deriveScopeWalkthroughExternalRef`) is sent with every create, and TROCK
+// Scope now HONOURS it: the column carries a unique index, and a repeat create answers 201 with the
+// EXISTING walkthrough (`deduplicated: true`) instead of inserting a second one. It was inert when the
+// scheme above was written — that route copied a fixed set of body fields and dropped the rest — so two
+// things that used to be free no longer are:
+//   • the ref is a function of the (walk, DEAL) pair, never the walk alone. A ref two deals share is no
+//     longer a wasted field, it is deal B's clips uploading into deal A's remote walkthrough. Read the doc
+//     on `deriveScopeWalkthroughExternalRef` before changing its shape.
+//   • a 201 is no longer proof that THIS attempt inserted the row, and nothing below assumes it is: the
+//     deduplicated answer names the walkthrough this delivery already owns, which is exactly what the
+//     checkpoint wants to store either way. What this DOES depend on is the dedupe answering 201 and not
+//     409 — `createScopeWalkthrough` reads a 4xx as "refused before it created anything", so a ref
+//     conflict reported as 409 would clear the marker and retry forever against a row that already exists.
+// Step 4's dead letter also stops being a guess: the ref it prints is stored on the remote row, so "did my
+// create land?" is now answerable. It is still a dead letter rather than an automatic re-create — see
+// `buildUnconfirmedCreateDeadLetterMessage` for why that is deliberate.
 //
 // Per-CLIP retries are simpler: TROCK Scope's own checksum uniqueness constraint
 // (clips_walkthrough_checksum_key) rejects a second copy of identical bytes inside one walkthrough as
@@ -140,14 +151,39 @@ interface JobPayload {
 }
 
 /**
- * The one stable, client-supplied handle for this walk, identical on every attempt of every delivery. It
- * is a pure function of `walkId` — the same identity the deterministic R2 keys and the service's own
- * enqueue-dedupe already treat as "this walk" — so two attempts can never disagree about it, which is the
- * only property that makes it usable as a dedupe key at all. Namespaced because TROCK Scope will
- * eventually take refs from more than one upstream.
+ * The one stable, client-supplied handle for this delivery, identical on every attempt of it. Namespaced
+ * because TROCK Scope takes refs from more than one upstream.
+ *
+ * A pure function of (walkId, dealId), never walkId alone — the same pair the R2 keys, the payload
+ * checkpoint writes and the ingress enqueue-dedupe are all scoped by, and for the same reason: walkId is
+ * minted on the PHONE and identifies a physical walk, not a piece of work. The supported correction/reuse
+ * flows re-file ONE walk against a SECOND deal (a mis-tagged walk moved to the right job; a recovered
+ * orphan whose deal a human supplies at recovery time), which is two deliveries and must be two remote
+ * walkthroughs. Derived from walkId alone it is ONE string, and now that TROCK Scope persists this column
+ * under a unique index and answers a repeat create with the EXISTING walkthrough, that one string means
+ * deal B's clips upload into deal A's walkthrough — a walkthrough whose `dealUuid` still names A. Nothing
+ * fails: trockcrm files B correctly and the extracted scope comes back attached to a job it does not
+ * describe, for an estimator to read as if it did.
+ *
+ * COMPOSED, not digested, unlike the analogous deal-scoping on the CRM side
+ * (`deriveGlassesWalkthroughClientUploadId`, glasses-walkthrough-service.ts). That one digests because its
+ * destination is `files.client_upload_id`, a varchar(64) that a dealId + a key cannot fit; here the
+ * destination is a text column with no width to fight, and the ref's readability is load-bearing — it is
+ * what `buildUnconfirmedCreateDeadLetterMessage` prints and what a human reconciling an unresolved create
+ * types into TROCK Scope. A digest would make that message unusable to buy nothing.
+ *
+ * Both components are percent-encoded so the PAIR is recoverable from the joined string, i.e. so no two
+ * pairs can produce one ref. That cannot happen today — walkId is free-form caller text (up to 100 chars,
+ * no charset rule) but dealId reaches this payload only after being written to `files.deal_id`, a uuid
+ * column, so the last `:deal:` in a raw join is always the separator. Encoded anyway, and for the reason
+ * `deriveGlassesWalkthroughArtifactR2Key` gives for encoding its server-supplied components: a uniqueness
+ * property that holds because of a column type three modules away is not one this function's next caller
+ * can see, and the failure it protects against is silent cross-deal aliasing, which is precisely what this
+ * derivation exists to end. encodeURIComponent is the identity over UUIDs and over every walkId mobile
+ * mints, so nothing about the readable shape changes.
  */
-export function deriveScopeWalkthroughExternalRef(walkId: string): string {
-  return `trockcrm:glasses-walkthrough:${walkId}`;
+export function deriveScopeWalkthroughExternalRef(walkId: string, dealId: string): string {
+  return `trockcrm:glasses-walkthrough:${encodeURIComponent(walkId)}:deal:${encodeURIComponent(dealId)}`;
 }
 
 function assertPayload(payload: unknown): JobPayload {
@@ -213,12 +249,13 @@ class ScopeRequestTimeoutError extends Error {
  *      trock-scope user. This client already sends the estimator's trockcrm user id as `capturedBy` in
  *      the walkthrough-create body in anticipation of whichever shape is chosen; today TROCK Scope
  *      ignores it and would 401 the request outright with no machine-auth middleware in place.
- *   3. dedupe `POST /walkthroughs` on the `externalRef` this client already sends (a unique index on the
- *      column, and return the existing row rather than 409 on a repeat). Until that lands, the ONLY thing
- *      preventing a duplicate walkthrough after a mid-forward crash is this job's own pre-create marker,
- *      whose unresolvable case dead-letters and costs a human a manual reconciliation — see the
- *      IDEMPOTENCY block at the top of this file. `externalRef` is dropped on the floor today (the route
- *      copies a fixed set of body fields), so sending it is free and safe in the meantime.
+ *   3. LANDED — no longer a follow-up. `POST /walkthroughs` persists `externalRef` under a unique index and
+ *      answers a repeat create with the EXISTING walkthrough (201, `deduplicated: true`) rather than a
+ *      second row or a 409. The duplicate-walkthrough hazard this job's pre-create marker was carrying
+ *      alone is therefore now caught on both sides. Kept in this list because the shape of what landed is
+ *      what the ref's derivation has to keep faith with: it deduplicates on the ref ALONE, so the ref — not
+ *      `dealUuid`, which that route only stores — is the whole of the identity, which is why
+ *      `deriveScopeWalkthroughExternalRef` must scope it to the deal.
  *   4. dedupe `POST /walkthroughs/:id/clips` the same way, on a per-artifact ref (this job already has a
  *      stable one per artifact — `idempotencyKey`). This is the CHEAP fix for re-uploads on a partial
  *      failure: today a retry of a walk whose LAST clip failed re-sends every earlier clip in full, and
@@ -343,9 +380,9 @@ async function createScopeWalkthrough(
       dealUuid: payload.dealId,
       officeSlug: payload.officeSlug,
       capturedBy: payload.capturedByUserId,
-      // Inert today (TROCK Scope copies a fixed set of body fields and drops the rest) and deliberately so:
-      // it degrades to a no-op rather than a 400, and becomes the real dedupe key the moment that side
-      // grows a unique index on it. See follow-up item 3 on `scopeRequest`.
+      // The dedupe key TROCK Scope actually deduplicates on — not a hint. A repeat create under this ref
+      // returns the walkthrough it already has, `dealUuid` and all, so this field decides which remote
+      // walkthrough this delivery's clips land in. `dealUuid` above does NOT: it is stored, never matched.
       externalRef,
     }));
   } catch (err) {
@@ -723,21 +760,35 @@ async function checkpointScopeWalkthroughId(
 /**
  * The dead letter for an unresolvable create. It is read by a human — via `last_error` and the alert email
  * built below — so it states what is unknown, why the job refuses to guess, and the two concrete moves that
- * resolve it either way. TOKEN SAFETY: built entirely from the job's own payload; it never reads
- * TROCK_SCOPE_SERVICE_TOKEN, which is what guarantees it cannot leak it.
+ * resolve it either way.
+ *
+ * `externalRef` is the marker's STORED value, passed in by the caller, never re-derived here. That is the
+ * whole point of the marker being a value rather than a flag: it is the ref that actually went out on the
+ * wire, so it is the ref TROCK Scope stored if the create landed. Re-deriving would print today's shape for
+ * a create sent under yesterday's and send the reader looking for a row that was never written that way.
+ *
+ * NOT resolved automatically, though it now could be. TROCK Scope deduplicates on this ref, so re-sending
+ * the create would answer with the existing walkthrough if one landed and insert if none did — no
+ * duplicate either way. It is left as a dead letter because that automation is a behaviour change with its
+ * own failure modes (it must re-send the STORED ref, never a fresh one, and it silently un-does the one
+ * place this seam deliberately stops and asks a human), and it belongs in a change of its own. What the
+ * ref's new durability buys today is the instruction below: a lookup, not a hunt by deal and title.
+ *
+ * TOKEN SAFETY: built entirely from the job's own payload; it never reads TROCK_SCOPE_SERVICE_TOKEN, which
+ * is what guarantees it cannot leak it.
  */
 function buildUnconfirmedCreateDeadLetterMessage(payload: JobPayload, externalRef: string): string {
   return (
     `A TROCK Scope walkthrough create was already sent for walk ${payload.walkId} (external ref ` +
     `${externalRef}) and this job never learned whether it succeeded — the worker died, or its checkpoint ` +
-    `write failed, inside that window. TROCK Scope exposes no way to look a walkthrough up by external ` +
-    `ref, so this job cannot tell "it was created" from "it was not", and retrying blind would risk a ` +
-    `SECOND walkthrough plus a second (billed) transcription and scope extraction. It stopped instead. ` +
-    `TO RESOLVE: look in TROCK Scope for a walkthrough on deal ${payload.dealId} titled "${payload.title}". ` +
-    `If one exists, set this job_queue row's payload.scopeWalkthroughId to its id; if none exists, remove ` +
-    `payload.scopeCreatePendingRef. Then set status = 'pending' — the forward resumes safely either way ` +
-    `(TROCK Scope's own checksum constraint already rejects duplicate clip bytes). The walk itself is ` +
-    `durably filed in the project folder and the crew can already see it.`
+    `write failed, inside that window. Retrying blind is what this job refuses to do on its own: it cannot ` +
+    `tell "it was created" from "it was not", and the wrong guess is a SECOND walkthrough plus a second ` +
+    `(billed) transcription and scope extraction. It stopped instead. TO RESOLVE: TROCK Scope stores that ` +
+    `external ref on the walkthrough, so look for one carrying it (it belongs to deal ${payload.dealId}, ` +
+    `titled "${payload.title}"). If one exists, set this job_queue row's payload.scopeWalkthroughId to its ` +
+    `id; if none exists, remove payload.scopeCreatePendingRef. Then set status = 'pending' — the forward ` +
+    `resumes safely either way (TROCK Scope's own checksum constraint already rejects duplicate clip ` +
+    `bytes). The walk itself is durably filed in the project folder and the crew can already see it.`
   );
 }
 
@@ -790,7 +841,7 @@ export async function handleGlassesWalkthroughForward(
       return deadJob(buildUnconfirmedCreateDeadLetterMessage(p, p.scopeCreatePendingRef));
     }
 
-    const externalRef = deriveScopeWalkthroughExternalRef(p.walkId);
+    const externalRef = deriveScopeWalkthroughExternalRef(p.walkId, p.dealId);
     // Intent BEFORE action. Everything after this line is covered: if the process dies at ANY point up to
     // the checkpoint below, the redelivered payload carries the marker and the branch above takes over.
     await markScopeCreatePending(db, p.walkId, p.dealId, externalRef);

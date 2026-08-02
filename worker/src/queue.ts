@@ -5,8 +5,9 @@ import { pool } from "./db.js";
 // (we claim exactly this many and run them all at once), so it doubles as the run-phase cap. Handlers
 // open nested pooled connections, so this must stay comfortably under the DB pool max (db.ts: max 10) —
 // at ~3 connections per create_project handler, 3 keeps a batch within the pool. Claiming only what we
-// immediately run avoids marking extra rows 'processing' that then sit un-started behind a slow handler
-// (recoverStaleJobs is startup-only, so those would be invisible to other pollers until a restart).
+// immediately run avoids marking extra rows 'processing' that then sit un-started behind a slow handler —
+// those carry no lease renewal (nothing is running them), so they would be invisible to every poller until
+// the expiry sweep noticed them a lease later.
 const RUN_CONCURRENCY = 3;
 
 export type JobHandlerResult =
@@ -96,10 +97,51 @@ type Outcome =
 type RecoveryIntent = { attempts: number; outcome: Outcome };
 
 // Outcomes whose write failed (pool still exhausted). Kept here and retried at the start of each poll tick
-// so the worker SELF-HEALS once the pool recovers — recoverStaleJobs is startup-only (a periodic time-based
-// sweep would reclaim LIVE long-running jobs mid-flight), so without this a stranded 'processing' row would
-// wait for a restart. Keyed by job id → the exact intent to replay.
+// so the worker SELF-HEALS once the pool recovers. Not made redundant by the lease sweep below: the sweep
+// requeues, which RE-RUNS the handler, whereas these intents replay the outcome the handler already
+// earned — a succeeded job recovered as 'completed' rather than run a second time — and they do it on the
+// next tick rather than after a lease's worth of waiting. Keyed by job id → the exact intent to replay.
 const pendingRecoveries = new Map<number, RecoveryIntent>();
+
+// ── The claim is a LEASE ────────────────────────────────────────────────────────────────────────────
+//
+// A claim marks a row 'processing', and NOTHING selects that status: every poller takes 'pending' rows
+// only. So a claim whose owner dies is not a delayed job, it is a job that stops existing as work — no
+// dead letter, no alert, no retry. Startup recovery is not a general answer to that, because it runs once
+// and only sees rows already five minutes stale: a worker that crashes 30 seconds into a forward and
+// restarts leaves that row behind permanently.
+//
+// The fix that does NOT work is running the same age-based sweep on a timer. `started_processing_at` alone
+// means "when this delivery began", so age cannot separate a worker that died two minutes ago from a
+// forward three minutes into a legitimate multi-GB upload — and reclaiming the latter hands one walk to two
+// workers, which is the duplicate (billed) transcription + scope extraction the glasses seam is built
+// around avoiding. So the timestamp is turned into a LEASE: the claim stamps it, and `renewJobLease` below
+// re-stamps it for as long as the handler is running. Age then means "how long since this row's owner last
+// proved it was alive", which only a dead owner's rows accumulate.
+//
+// This is the same shape as the inbox lease this codebase already runs one layer down
+// (INBOX_LEASE_RENEW_MS / INBOX_LEASE_TTL_SECONDS, server/src/modules/bid-board-sync/inbox.ts), and the
+// margin is deliberately as generous: five missed renewals before a lease expires, so a GC pause, a slow
+// tick, or a couple of failed writes cannot falsely expire a live one. That module also carries a
+// bid_board_ingest-ONLY version of the sweep below (step (0) of runBidBoardIngestInboxRecovery, whose own
+// comment names the gap: "recoverStaleJobs() only runs at worker startup; this periodic sweep covers a
+// crash-without-restart window"), lease-aware only because it can consult the INBOX's lease. Every other
+// job type had no such second mechanism, and none should need one — which is why this belongs here rather
+// than being written a third time for glasses walkthroughs.
+const JOB_LEASE_EXPIRY_SECONDS = 300;
+let JOB_LEASE_RENEW_MS = 60_000;
+
+/** Test-only: shrink the renewal interval so lease behaviour can be exercised in milliseconds. */
+export function __setJobLeaseRenewIntervalForTest(ms: number) {
+  JOB_LEASE_RENEW_MS = ms;
+}
+
+// How often the expired-lease sweep runs. Its own cadence, not the poll interval: it is a predicate over
+// the whole table and the rows it exists for appear only when a worker dies, so running it on every tick
+// would be several full-table UPDATEs a minute to find nothing. Recovery latency is bounded by the lease
+// expiry regardless, so a faster sweep buys nothing.
+const JOB_LEASE_SWEEP_INTERVAL_MS = 60_000;
+let lastJobLeaseSweepAt = 0;
 
 /**
  * Test-only: reset module singleton state between cases.
@@ -115,6 +157,9 @@ const pendingRecoveries = new Map<number, RecoveryIntent>();
  */
 export function __resetQueueStateForTest() {
   pendingRecoveries.clear();
+  // Without this every case after the first would find the sweep already throttled and silently exercise a
+  // poll tick that skips it — the failure mode the guards below exist to catch.
+  lastJobLeaseSweepAt = 0;
   polling = false;
   pollingBidBoardIngest = false;
   pollingAiReport = false;
@@ -216,6 +261,52 @@ async function timedOutcomeQuery(sql: string, params: any[], label: string): Pro
   }
 }
 
+/**
+ * Re-stamp one claimed row's lease. Guarded exactly like buildOutcomeUpdate — status='processing' AND the
+ * attempts value THIS delivery claimed — because a renewal that addresses the row rather than the claim is
+ * worse than no renewal at all: a handler whose lease already lapsed, and whose row a sweep requeued and
+ * another worker re-claimed, would go on pushing the timestamp forward under the NEW owner. That row's
+ * lease could then never expire, so the one dead worker would make it permanently unreclaimable — the
+ * original bug, made unrecoverable.
+ */
+async function renewJobLease(jobId: number, attempts: number): Promise<void> {
+  await timedOutcomeQuery(
+    `UPDATE public.job_queue SET started_processing_at = NOW() WHERE id = $1 AND status = 'processing' AND attempts = $2`,
+    [jobId, attempts],
+    `job ${jobId} lease renewal`
+  );
+}
+
+/**
+ * Hold the lease for the life of one handler invocation; the returned function drops it. Stopping is not
+ * optional bookkeeping — a timer that outlives its handler keeps a finished row's lease fresh forever, and
+ * no sweep can reclaim a row whose owner is still (uselessly) insisting it is alive.
+ *
+ * A failed renewal is logged and otherwise ignored. Failing the JOB over it would turn one blip in the pool
+ * into a lost delivery, and letting the lease lapse is the recoverable direction: the sweep requeues the
+ * row, and every write this attempt can still make is attempt-bound, so it cannot stomp the re-claim.
+ */
+function startJobLeaseHeartbeat(jobId: number, attempts: number): () => void {
+  let renewing = false;
+  const timer = setInterval(() => {
+    // One renewal in flight at a time. On a dead socket timedOutcomeQuery waits out QUEUE_QUERY_TIMEOUT_MS,
+    // which is longer than the renewal interval, so overlapping beats would each check out a connection and
+    // pile up at exactly the moment the pool is already the thing in trouble.
+    if (renewing) return;
+    renewing = true;
+    void renewJobLease(jobId, attempts)
+      .catch((err) => {
+        console.warn(`[Worker] Job ${jobId} lease renewal failed; the lease will lapse if this persists:`, err);
+      })
+      .finally(() => {
+        renewing = false;
+      });
+  }, JOB_LEASE_RENEW_MS);
+  // unref so a renewal timer is never the reason the process stays alive (mirrors the inbox heartbeat).
+  (timer as { unref?: () => void }).unref?.();
+  return () => clearInterval(timer);
+}
+
 /** Persist a job's outcome (its normal terminal write). On failure, keep the full intent for a later tick. */
 async function attemptRecovery(jobId: number, attempts: number, outcome: Outcome): Promise<void> {
   const { sql, params } = buildOutcomeUpdate(jobId, attempts, outcome);
@@ -229,6 +320,31 @@ async function attemptRecovery(jobId: number, attempts: number, outcome: Outcome
   } catch (err) {
     pendingRecoveries.set(jobId, { attempts, outcome });
     console.error(`[Worker] Job ${jobId} outcome write ('${outcome.status}') failed; will retry next tick:`, err);
+  }
+}
+
+/**
+ * Requeue rows whose lease has expired, at most once per JOB_LEASE_SWEEP_INTERVAL_MS.
+ *
+ * Rides the main poller rather than its own timer in index.ts, for the reason flushPendingRecoveries does:
+ * this is shared self-healing for EVERY poller — the dedicated ones (bid_board_ingest, ai_report_generation,
+ * glasses_walkthrough_forward) strand rows in exactly the same way and cannot sweep for themselves, since
+ * their claim predicates see only their own type and only 'pending'. One sweeper for all of them beats
+ * three loops racing the same rows.
+ */
+async function sweepExpiredJobLeasesIfDue(): Promise<void> {
+  const now = Date.now();
+  if (now - lastJobLeaseSweepAt < JOB_LEASE_SWEEP_INTERVAL_MS) return;
+  // Stamped BEFORE the await, not after it: on a slow or hanging statement, every tick that lands meanwhile
+  // would otherwise start another sweep of the same rows.
+  lastJobLeaseSweepAt = now;
+  try {
+    await recoverStaleJobs();
+  } catch (err) {
+    // Swallowed like every other per-tick failure here: pollJobs runs under a bare setInterval, so a
+    // rejection is an unhandled rejection that takes the worker down — and this statement is exactly what
+    // fails when the pool is exhausted, i.e. when the worker is already having a bad minute.
+    console.error("[Worker] Expired-lease sweep failed; retrying on a later tick:", err);
   }
 }
 
@@ -404,6 +520,9 @@ export async function pollJobs() {
     // writes also land in the shared pendingRecoveries map and are replayed here (a single flusher avoids two
     // loops racing the same intents).
     await flushPendingRecoveries();
+    // Requeue rows whose owner died mid-delivery. Here rather than at startup only, and safe there only
+    // because a live delivery renews its lease — see the LEASE block above.
+    await sweepExpiredJobLeasesIfDue();
     await claimAndRunJobs(MAIN_POLL_JOB_TYPE_SQL, RUN_CONCURRENCY);
   } finally {
     polling = false;
@@ -460,6 +579,10 @@ async function processJob(job: any): Promise<void> {
   // later as the SAME outcome, a succeeded handler is recovered as 'completed' (never re-run), and the
   // attempts guard stops a late retry from stomping a re-claim of the row.
   const claimedAttempt = job.attempts + 1;
+  // The claim stamped this row's lease; hold it for exactly as long as the handler owns the row. Dropped in
+  // the finally below — including on a throw — so a genuinely dead delivery's lease can lapse and the sweep
+  // can reclaim it, which is the whole point of renewing it in the first place.
+  const releaseJobLease = startJobLeaseHeartbeat(job.id, claimedAttempt);
   let outcome: Outcome;
   try {
     const result = await handler(job.payload, job.office_id, undefined, {
@@ -497,14 +620,26 @@ async function processJob(job: any): Promise<void> {
       outcome = { status: "pending", error: errorMsg, runAfterSeconds: backoffSeconds };
       console.warn(`[Worker] Job ${job.id} (${job.job_type}) failed, retrying in ${backoffSeconds}s: ${errorMsg}`);
     }
+  } finally {
+    releaseJobLease();
   }
+  // Deliberately AFTER the lease is dropped, not inside it: the outcome write is attempt-bound, so if it
+  // fails and the row is later reclaimed, the replay simply matches nothing. Holding the lease until the
+  // write lands would instead need the pool to stay broken for a full lease to matter — and the sweep's own
+  // statement fails in exactly that case too, so nothing would run anyway.
   await attemptRecovery(job.id, claimedAttempt, outcome);
 }
 
 /**
- * Reset stale "processing" jobs back to pending.
- * Uses started_processing_at (not created_at) to detect truly stuck jobs.
- * Called on worker startup to recover from crashes.
+ * Requeue every row whose claim LEASE has expired — a delivery whose owner has not re-stamped
+ * `started_processing_at` for JOB_LEASE_EXPIRY_SECONDS, i.e. one whose worker is gone.
+ *
+ * Runs at startup AND on the main poller's throttled tick (sweepExpiredJobLeasesIfDue). Startup alone was
+ * never enough: it only sees rows already expired at boot, so a worker that crashed inside the expiry
+ * window and came back left its row 'processing' forever, invisible to every poller. What makes the
+ * periodic run safe is the renewal — see the LEASE block at the top of this file. Read `started_processing_at`
+ * here as "last proof of life", never as "start time"; a live 20-minute forward is as fresh as one that
+ * began a second ago.
  *
  * Deliberately REQUEUES even when attempts >= max_attempts (does NOT dead-letter here). `attempts` is
  * incremented at CLAIM time, so a crash between the claim and the handler actually running leaves a
@@ -520,10 +655,11 @@ async function processJob(job: any): Promise<void> {
 export async function recoverStaleJobs() {
   const result = await pool.query(
     `UPDATE public.job_queue
-     SET status = 'pending', last_error = 'Recovered from stale processing state'
+     SET status = 'pending', last_error = 'Recovered from an expired claim lease (its worker stopped renewing it)'
      WHERE status = 'processing'
-       AND started_processing_at < NOW() - interval '5 minutes'
-     RETURNING id, job_type`
+       AND started_processing_at < NOW() - make_interval(secs => $1)
+     RETURNING id, job_type`,
+    [JOB_LEASE_EXPIRY_SECONDS]
   );
   if (result.rows.length > 0) {
     console.log(`[Worker] Recovered ${result.rows.length} stale jobs:`,
