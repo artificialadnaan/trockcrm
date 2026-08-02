@@ -8,6 +8,7 @@ import { AppError } from "../../middleware/error-handler.js";
 import {
   deriveGlassesWalkthroughArtifactR2Key,
   GLASSES_WALKTHROUGH_ACCEPTED_MEDIA,
+  GLASSES_WALKTHROUGH_PRESIGN_EXPIRY_SECONDS,
   looksLikeUuid,
   MAX_GLASSES_WALKTHROUGH_ARTIFACT_BYTES,
   MAX_GLASSES_WALKTHROUGH_ARTIFACTS_PER_WALK,
@@ -278,7 +279,13 @@ describe("requestGlassesWalkthroughArtifactUploadUrl", () => {
     return {
       isConfigured: () => true,
       head: async () => ({}),
-      presignUpload: async () => ({ uploadUrl: "https://r2.example.com/put", expiresIn: 1800 }),
+      // ECHOES the expiry it was asked for, the way the real store does (generateUploadUrl now returns the
+      // value it actually signed). A fake that answers with a fixed 1800 is not a simplification, it is a
+      // store that ignores its own port — which the service is now entitled to reject.
+      presignUpload: async (_r2Key, _mimeType, _fileSizeBytes, expiresInSeconds) => ({
+        uploadUrl: "https://r2.example.com/put",
+        expiresIn: expiresInSeconds,
+      }),
       ...overrides,
     };
   }
@@ -323,9 +330,9 @@ describe("requestGlassesWalkthroughArtifactUploadUrl", () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       input: uploadUrlInput() as any,
       artifactStore: fakeStore({
-        presignUpload: async (r2Key) => {
+        presignUpload: async (r2Key, _mimeType, _fileSizeBytes, expiresInSeconds) => {
           seen.push(r2Key);
-          return { uploadUrl: "https://r2.example.com/put", expiresIn: 1800 };
+          return { uploadUrl: "https://r2.example.com/put", expiresIn: expiresInSeconds };
         },
       }),
     });
@@ -362,6 +369,89 @@ describe("requestGlassesWalkthroughArtifactUploadUrl", () => {
         artifactStore: fakeStore(),
       })
     ).rejects.toMatchObject({ statusCode: 400 });
+  });
+
+  // ── The lifetime of the capability this endpoint mints ──────────────────────────────────────────
+  //
+  // The already-filed refusal above is a check at MINT time, and a mint-time check cannot bind a
+  // capability that outlives the mint. Presign artifact A, let the walk complete and freeze, then PUT to
+  // the URL you were legitimately given beforehand: the bytes behind an immutable `files` row are
+  // replaced, and nothing revokes a signature that is already in the client's hands. These pin the one
+  // dimension the server still controls — how long that outliving lasts.
+
+  /** Captures what the service ASKS the store for, and echoes it back the way `generateUploadUrl` does.
+   *  Rest-typed so the same fake compiles against the port both before and after it grew the argument. */
+  function recordingStore(seen: unknown[][]): GlassesWalkthroughArtifactStore {
+    return {
+      isConfigured: () => true,
+      head: async () => ({}),
+      presignUpload: (async (...args: unknown[]) => {
+        seen.push(args);
+        return { uploadUrl: "https://r2.example.com/put", expiresIn: (args[3] as number | undefined) ?? 1800 };
+      }) as GlassesWalkthroughArtifactStore["presignUpload"],
+    };
+  }
+
+  it("REGRESSION: mints a capability measured in minutes, not the shared 30-minute upload default", async () => {
+    // 1800s is `PRESIGNED_URL_EXPIRY_SECONDS`, sized for a browser picking a file out of a dialog. Here it
+    // is the exact width of the window in which filed bytes can still be swapped, and this client does not
+    // need it: `putArtifactBytes` (mobile/src/walkthrough/upload.ts) awaits the presign and PUTs on the very
+    // next line, never persisting the URL. The window has to cover a handoff, not a browsing session.
+    const seen: unknown[][] = [];
+    const result = await requestGlassesWalkthroughArtifactUploadUrl({
+      tenantDb: emptyDb,
+      officeSlug: "dallas",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      input: uploadUrlInput() as any,
+      artifactStore: recordingStore(seen),
+    });
+    expect(seen[0]![3]).toBe(300);
+    expect(result.expiresIn).toBe(300);
+  });
+
+  it("REGRESSION: reports the same short lifetime on the dev/CI mock branch", async () => {
+    // The unconfigured branch used to hardcode 1800 next to a real branch that no longer says 1800. Nobody
+    // can PUT to a `mock://` URL, so this is not a security hole — it is the reproduction environment
+    // quietly disagreeing with production about the contract, which is where a wrong belief about the
+    // window gets formed and then carried into a real incident.
+    const result = await requestGlassesWalkthroughArtifactUploadUrl({
+      tenantDb: emptyDb,
+      officeSlug: "dallas",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      input: uploadUrlInput() as any,
+      artifactStore: { ...recordingStore([]), isConfigured: () => false },
+    });
+    expect(result.expiresIn).toBe(300);
+  });
+
+  it("REGRESSION: refuses to hand back a URL the store minted for LONGER than it was asked for", async () => {
+    // The ceiling is only worth the paper it is written on if the port is obeyed. A store wired to the
+    // shared `generateUploadUrl` and silently dropping the argument — the exact shape of this seam's
+    // existing `fileSizeBytes`/`_maxSizeBytes` mismatch, which IS dropped on purpose — would report a
+    // bounded number here and hand the client a 30-minute signature. There is no way to shorten a URL
+    // after it is signed, so the only correct move is to refuse to pass it on.
+    await expect(
+      requestGlassesWalkthroughArtifactUploadUrl({
+        tenantDb: emptyDb,
+        officeSlug: "dallas",
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        input: uploadUrlInput() as any,
+        artifactStore: {
+          isConfigured: () => true,
+          head: async () => ({}),
+          presignUpload: async () => ({ uploadUrl: "https://r2.example.com/put", expiresIn: 1800 }),
+        },
+      })
+    ).rejects.toBeInstanceOf(AppError);
+  });
+
+  it("GUARD: the glasses ceiling stays strictly under the shared upload default", async () => {
+    // Not a tautology against the number above: it pins the RELATIONSHIP to a constant this module does not
+    // own. `PRESIGNED_URL_EXPIRY_SECONDS` is tuned for browser upload dialogs by people with no reason to
+    // think about walk artifacts, and the one edit that silently reopens this window to its full width is
+    // someone raising that default and this module inheriting it. Green both before and after the fix.
+    const { PRESIGNED_URL_EXPIRY_SECONDS } = await import("../files/file-constants.js");
+    expect(GLASSES_WALKTHROUGH_PRESIGN_EXPIRY_SECONDS).toBeLessThan(PRESIGNED_URL_EXPIRY_SECONDS);
   });
 });
 

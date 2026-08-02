@@ -76,6 +76,40 @@ describe("R2 Client", () => {
       );
       expect(PRESIGNED_URL_EXPIRY_SECONDS).toBe(30 * 60);
     });
+
+    /** The safety proof for `generateUploadUrl`'s added parameter. It is only a safe change to a function
+     *  ~40 call sites reach if omitting it is byte-identical to the behavior they had — so that is
+     *  asserted, not assumed. GUARD: green before the parameter existed and after. */
+    it("GUARD: a caller that omits expiresInSeconds still signs for the shared 30-minute default", async () => {
+      process.env.R2_ACCOUNT_ID = "acct";
+      process.env.R2_ACCESS_KEY_ID = "key";
+      process.env.R2_SECRET_ACCESS_KEY = "secret";
+      const { getSignedUrl } = await import("@aws-sdk/s3-request-presigner");
+      const { generateUploadUrl } = await import("../../src/lib/r2-client.js");
+
+      const result = await generateUploadUrl("photos/a.jpg", "image/jpeg", 123);
+
+      expect(result.expiresIn).toBe(30 * 60);
+      expect(getSignedUrl).toHaveBeenCalledWith(expect.anything(), expect.anything(), { expiresIn: 30 * 60 });
+    });
+
+    it("REGRESSION: signs for — and reports — a shorter lifetime when one is requested", async () => {
+      // Both halves matter. Signing the short window without reporting it leaves the caller computing a
+      // deadline from a number the signature disagrees with; reporting it without signing it is a ceiling
+      // that exists only in the response body. The glasses-walkthrough presign depends on both being true
+      // (GLASSES_WALKTHROUGH_PRESIGN_EXPIRY_SECONDS): its refusal to re-presign filed bytes is a mint-time
+      // check, so this expiry is the whole bound on how long an already-issued URL can undo it.
+      process.env.R2_ACCOUNT_ID = "acct";
+      process.env.R2_ACCESS_KEY_ID = "key";
+      process.env.R2_SECRET_ACCESS_KEY = "secret";
+      const { getSignedUrl } = await import("@aws-sdk/s3-request-presigner");
+      const { generateUploadUrl } = await import("../../src/lib/r2-client.js");
+
+      const result = await generateUploadUrl("photos/a.jpg", "image/jpeg", 123, 300);
+
+      expect(result.expiresIn).toBe(300);
+      expect(getSignedUrl).toHaveBeenCalledWith(expect.anything(), expect.anything(), { expiresIn: 300 });
+    });
   });
 
   describe("R2 CORS origins", () => {

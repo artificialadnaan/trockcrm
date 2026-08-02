@@ -75,7 +75,12 @@ function healthyStore(overrides: Partial<GlassesWalkthroughArtifactStore> = {}):
   return {
     isConfigured: () => true,
     head: async () => ({ contentType: "video/mp4", contentLength: 1024 }),
-    presignUpload: async () => ({ uploadUrl: "https://example.com/put", expiresIn: 1800 }),
+    // Echoes the expiry it was asked for, as the real store does — see the unit suite's `fakeStore` for
+    // why a hardcoded 1800 here is a store that ignores its port, not a harmless stub.
+    presignUpload: async (_r2Key, _mimeType, _fileSizeBytes, expiresInSeconds) => ({
+      uploadUrl: "https://example.com/put",
+      expiresIn: expiresInSeconds,
+    }),
     ...overrides,
   };
 }

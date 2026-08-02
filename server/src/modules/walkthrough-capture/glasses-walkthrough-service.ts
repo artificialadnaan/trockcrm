@@ -121,6 +121,52 @@ export const MAX_GLASSES_WALKTHROUGH_ARTIFACTS_PER_WALK = 200;
  */
 export const GLASSES_WALKTHROUGH_VERIFY_CONCURRENCY = 8;
 export const GLASSES_WALKTHROUGH_VERIFY_TIMEOUT_MS = 20_000;
+
+/**
+ * How long a presigned PUT for one artifact stays usable — five minutes, against the shared
+ * `PRESIGNED_URL_EXPIRY_SECONDS` default of thirty.
+ *
+ * This is not a tuning knob. It is the ONLY dimension of the already-filed refusal in
+ * `requestGlassesWalkthroughArtifactUploadUrl` that the server still controls after the response is sent.
+ * That refusal is a `files` lookup at MINT time, and a mint-time check binds nothing that outlives the
+ * mint: a client may legitimately presign artifact A, upload it, complete the walk — freezing A's row, its
+ * declared size, the HEAD that was checked against it and the scope TROCK Scope extracted from it — and
+ * then PUT to the URL it was correctly given beforehand. The bytes change; nothing on the row does. No
+ * database rule can revoke a signature, so the exposure is exactly however long the signature lives.
+ *
+ * It cannot be driven to zero without paying somewhere else, and every "somewhere else" is worse:
+ *   - a per-presign nonce in the key does not help. Stale mints would address dead keys, but the LAST mint
+ *     is by construction the one the completion verifies and files, and its URL is the live one. It also
+ *     costs the retry story — the key would have to be recorded and looked up rather than re-derived, and
+ *     `deriveGlassesWalkthroughArtifactR2Key`'s determinism is what makes a dropped upload retryable at
+ *     all.
+ *   - moving the object after completion closes it, and costs a full byte copy of every artifact (up to
+ *     2 GiB each, 200 per walk). Done inline it violates this module's own phase rule — the write phase
+ *     holds a pinned pool connection and must contain no object-storage await (see
+ *     GLASSES_WALKTHROUGH_VERIFY_CONCURRENCY). Done from the queue it does not close anything, it merely
+ *     renames the window to "queue latency", which is unbounded and strictly worse than a fixed five
+ *     minutes.
+ *   - a conditional PUT (`If-None-Match: *`) is the one mechanism that would close it at the storage
+ *     layer, and R2 does support it. But a condition on a presigned URL is a SIGNED HEADER, so the client
+ *     must send it or every upload fails SignatureDoesNotMatch — the identical trap `Content-Length`
+ *     already sprang on this seam (glasses-walkthrough-store.ts). It needs a mobile change to be safe, and
+ *     it would ALSO break the dropped-upload retry unless presign first deleted the stale object, since a
+ *     PUT whose 200 the client never saw leaves bytes that the retry must be allowed to overwrite.
+ *
+ * Five minutes rather than five seconds because the failure mode of too-short is real: an expired URL is a
+ * 403 the client reads as a failed PUT, which burns one of `MAX_WALK_UPLOAD_ATTEMPTS` (5). The margin
+ * covers clock skew between this host and R2's validators plus an app suspended between the presign
+ * response and the PUT. It does not need to cover the upload itself — R2 authenticates the PUT when the
+ * request arrives, not when its body ends, which is also why the 30-minute default was never covering a
+ * 2 GiB transfer either. And the client asks for a URL on the line immediately before it uses it
+ * (`putArtifactBytes`, mobile/src/walkthrough/upload.ts), never persisting it across a drain, so the happy
+ * path needs milliseconds of this.
+ *
+ * RESIDUAL, stated plainly so nobody reads this as closed: for up to five minutes after a presign, a
+ * caller holding that URL can still replace the bytes behind a `files` row the completion has since
+ * frozen. Narrowed 6x, not eliminated.
+ */
+export const GLASSES_WALKTHROUGH_PRESIGN_EXPIRY_SECONDS = 300;
 const MAX_TITLE_CHARS = 300;
 const MAX_SITE_LABEL_CHARS = 300;
 const MAX_FILENAME_CHARS = 500; // files.original_filename / files.display_name are varchar(500)
@@ -142,10 +188,21 @@ export interface GlassesWalkthroughArtifactStore {
    *  we could not check (network/auth/outage) and must not be read as "absent" — callers map it to a
    *  retryable 503, never a 400. */
   head: (r2Key: string) => Promise<{ contentType?: string; contentLength?: number } | null>;
+  /**
+   * `generateUploadUrl(r2Key, mimeType, fileSizeBytes, expiresInSeconds)`.
+   *
+   * `expiresInSeconds` is passed DOWN rather than left to the adapter on purpose: the lifetime of this
+   * capability is a record-integrity rule (see GLASSES_WALKTHROUGH_PRESIGN_EXPIRY_SECONDS), and a rule
+   * that lives in the production wiring is a rule the service cannot state, cannot test and cannot
+   * enforce. The caller checks the answer, because this seam already has one argument the adapter
+   * deliberately ignores (`fileSizeBytes`) and a second silently-ignored one would be indistinguishable
+   * from a working ceiling.
+   */
   presignUpload: (
     r2Key: string,
     mimeType: string,
-    fileSizeBytes: number
+    fileSizeBytes: number,
+    expiresInSeconds: number
   ) => Promise<{ uploadUrl: string; expiresIn: number }>;
 }
 
@@ -368,6 +425,13 @@ export async function requestGlassesWalkthroughArtifactUploadUrl(args: {
   // nothing on the row changes to say so. There is no later check that catches it either — verification
   // runs at completion, which for this artifact has already happened. So the refusal has to be here.
   //
+  // Necessary, NOT sufficient, and the gap is worth being precise about rather than trusting this block to
+  // have closed it. This runs when the URL is MINTED; the URL outlives it. A client that presigns before
+  // completing — the ordinary, correct order — is holding a writable capability for this exact key at the
+  // moment the completion freezes the record, and no query here can recall it. What bounds that is
+  // GLASSES_WALKTHROUGH_PRESIGN_EXPIRY_SECONDS, which is why that constant is part of this rule and not a
+  // performance setting. Read the two together: this refuses NEW capabilities, that expires OLD ones.
+  //
   // Keyed on the DEAL-SCOPED stored id, never the raw client key: mobile derives its key from the walk
   // alone, so refusing on the raw key would also refuse the legitimate re-file of one physical walk against
   // a second deal — a different R2 key and a different row (see deriveGlassesWalkthroughClientUploadId, and
@@ -412,10 +476,35 @@ export async function requestGlassesWalkthroughArtifactUploadUrl(args: {
     // Dev/CI fallback, same posture as `generateMockUploadUrl` in r2-client.ts: a fake URL the caller
     // will never actually PUT bytes to, but a deterministic key so the completion endpoint's flow can
     // still be exercised end-to-end when R2 is not configured.
-    return { uploadUrl: `mock://glasses-walkthrough/${r2Key}`, r2Key, expiresIn: 1800 };
+    // Reports the SAME lifetime the configured branch does, not the shared 30-minute default it used to
+    // hardcode. Nobody can PUT to a `mock://` URL, so the number is inert here — which is exactly why it
+    // has to be right: this is the environment someone reads to learn what the contract is.
+    return {
+      uploadUrl: `mock://glasses-walkthrough/${r2Key}`,
+      r2Key,
+      expiresIn: GLASSES_WALKTHROUGH_PRESIGN_EXPIRY_SECONDS,
+    };
   }
 
-  const { uploadUrl, expiresIn } = await args.artifactStore.presignUpload(r2Key, args.input.mimeType, args.input.fileSizeBytes);
+  const { uploadUrl, expiresIn } = await args.artifactStore.presignUpload(
+    r2Key,
+    args.input.mimeType,
+    args.input.fileSizeBytes,
+    GLASSES_WALKTHROUGH_PRESIGN_EXPIRY_SECONDS
+  );
+  // The ceiling is enforced on the way OUT, not merely requested on the way in. A store that drops the
+  // argument returns a longer-lived signature while reporting whatever it likes, and by this point the URL
+  // is already signed — there is no shortening it, only declining to pass it on. 500 rather than a 4xx
+  // because a store disagreeing with its own port is a wiring defect, not something the caller did; the
+  // client's retry then re-presigns, which is the right outcome once the wiring is fixed and no worse
+  // than a refusal in the meantime.
+  if (expiresIn > GLASSES_WALKTHROUGH_PRESIGN_EXPIRY_SECONDS) {
+    throw new AppError(
+      500,
+      `Refusing to issue an upload URL valid for ${expiresIn}s; glasses-walkthrough uploads are capped at ` +
+        `${GLASSES_WALKTHROUGH_PRESIGN_EXPIRY_SECONDS}s because filed bytes must not stay replaceable.`
+    );
+  }
   return { uploadUrl, r2Key, expiresIn };
 }
 

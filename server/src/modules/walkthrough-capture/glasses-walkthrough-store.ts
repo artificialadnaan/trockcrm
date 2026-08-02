@@ -40,6 +40,13 @@ export function createGlassesWalkthroughArtifactStore(): GlassesWalkthroughArtif
     // differs from what was declared is never filed into the project folder and never forwarded to TROCK
     // Scope. What that leaves is bytes transiently sitting in R2 for a walk that was refused — a storage
     // question (bucket lifecycle expiry for unreferenced glasses-walkthrough keys), not an ingress one.
-    presignUpload: (r2Key, mimeType, fileSizeBytes) => generateUploadUrl(r2Key, mimeType, fileSizeBytes),
+    //
+    // `expiresInSeconds` is the opposite case and must NOT be treated like `fileSizeBytes`: it is passed
+    // through, and the service re-checks the answer. The caller shortens this window deliberately (see
+    // GLASSES_WALKTHROUGH_PRESIGN_EXPIRY_SECONDS) because it is how long filed bytes stay replaceable by an
+    // already-issued signature; an adapter that quietly fell back to the shared 30-minute default would
+    // reopen that to its full width while every test above it still read as green.
+    presignUpload: (r2Key, mimeType, fileSizeBytes, expiresInSeconds) =>
+      generateUploadUrl(r2Key, mimeType, fileSizeBytes, expiresInSeconds),
   };
 }
