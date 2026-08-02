@@ -38,7 +38,10 @@ describe("api endpoints", () => {
 
   // dealId must land on the URL path (never the request body) — see the route's comment on why: a body
   // field could be forged to presign/file a walk under a deal the caller has no write access to.
-  it("presigns a glasses-walkthrough artifact upload under the deal's URL path, not the body", async () => {
+  // /field, not /deals: this app authenticates via `/auth/field-login`, whose `surface: "field"` token the
+  // server rejects on every CRM route by design. Addressed at /deals these 401'd on every walk, and the
+  // app read that as a dead session and signed the user out — one stuck walk locked the crew out entirely.
+  it("presigns a glasses-walkthrough artifact upload under the FIELD project path, not the body", async () => {
     const calls: Array<{ path: string; opts: Parameters<Fetcher>[1] }> = [];
     const fetcher: Fetcher = async (path, opts) => {
       calls.push({ path, opts });
@@ -54,7 +57,7 @@ describe("api endpoints", () => {
     });
 
     expect(calls).toEqual([{
-      path: "/deals/deal-42/glasses-walkthroughs/artifacts/upload-url",
+      path: "/field/projects/deal-42/glasses-walkthroughs/artifacts/upload-url",
       opts: {
         method: "POST",
         body: {
@@ -68,7 +71,7 @@ describe("api endpoints", () => {
     }]);
   });
 
-  it("submits a completed glasses walkthrough under the deal's URL path, not the body", async () => {
+  it("submits a completed glasses walkthrough under the FIELD project path, not the body", async () => {
     const calls: Array<{ path: string; opts: Parameters<Fetcher>[1] }> = [];
     const fetcher: Fetcher = async (path, opts) => {
       calls.push({ path, opts });
@@ -85,7 +88,7 @@ describe("api endpoints", () => {
     });
 
     expect(calls).toEqual([{
-      path: "/deals/deal-42/glasses-walkthroughs",
+      path: "/field/projects/deal-42/glasses-walkthroughs",
       opts: {
         method: "POST",
         body: {

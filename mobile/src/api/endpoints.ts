@@ -333,16 +333,26 @@ export const getFieldResponders = (f: Fetcher, dealId: string) =>
 // WalkthroughUploadClient the upload queue is written against. `/deals/...` (not `/field/...`): these
 // routes live on the deal itself (server/src/modules/deals/routes.ts), not the field surface.
 //
+// Both calls are under /field, NOT /deals. This app signs in through `/auth/field-login`, which mints a
+// `surface: "field"` token, and the server rejects those on every CRM route by design (#722) — a field
+// token must never be replayable against CRM/admin. Addressed at /deals these returned 401 "This session
+// is not valid for CRM access" on every walk, and the app read that as a dead session and signed the user
+// out, so one undeliverable walk locked the crew out of the app. Caught on a device, not in review.
+//
 // Step 1 (per artifact): presign an R2 PUT. dealId is a URL path segment on both calls, never a body
-// field — the server derives it from the URL so a caller can never presign/file a walk under a deal it
-// doesn't have write access to (see routes.ts's comment on both routes).
+// field — the server derives it from the URL so a caller can never presign/file a walk under a project it
+// cannot reach (see the field routes' comments on both handlers).
 export const requestGlassesWalkthroughArtifactUploadUrl = (
   f: Fetcher,
   dealId: string,
   body: WalkArtifactUploadUrlRequest,
-) => f<WalkArtifactUploadUrlResponse>(`/deals/${dealId}/glasses-walkthroughs/artifacts/upload-url`, { method: "POST", body });
+) =>
+  f<WalkArtifactUploadUrlResponse>(`/field/projects/${dealId}/glasses-walkthroughs/artifacts/upload-url`, {
+    method: "POST",
+    body,
+  });
 
 // Step 2 (once per walk, after every artifact from step 1 is PUT): files the walk into the deal's
 // project folder and hands forwarding to TROCK Scope off to the job queue.
 export const submitGlassesWalkthrough = (f: Fetcher, dealId: string, body: WalkCompletionRequest) =>
-  f<WalkCompletionResponse>(`/deals/${dealId}/glasses-walkthroughs`, { method: "POST", body });
+  f<WalkCompletionResponse>(`/field/projects/${dealId}/glasses-walkthroughs`, { method: "POST", body });

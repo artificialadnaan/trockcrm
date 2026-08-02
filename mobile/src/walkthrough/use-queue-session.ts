@@ -14,15 +14,29 @@
  *    namespace no walk was ever written into — it finds nothing, reports nothing wrong, and the
  *    real queue sits untouched.
  *
- * 2. SIGN-OUT AUTHORITY is scoped to the session generation that started the drain. A drain
- *    deliberately outlives the screen that started it: abandoning a multi-gigabyte upload at
- *    sign-out is the failure the shell's resume effect exists to prevent, so the drain keeps
- *    running with the fetcher it was handed. That fetcher holds THIS token and THIS signOut. Once
- *    a different user signs in, both are obsolete — the old token is revoked, so the abandoned
- *    drain's next API call 401s, and an unguarded `onUnauthorized` would clear the in-memory auth
- *    state and the persisted session, signing out the user who just signed IN. `retired` draws the
- *    line: a 401 on a live session still ends it (that token really is dead), a 401 on a superseded
- *    one is only ever news about a token nobody is using anymore.
+ * 2. THE DRAIN HAS NO SIGN-OUT AUTHORITY AT ALL. This is the important one, and it is deliberate.
+ *
+ *    A 401 on a background upload is NOT evidence the user's session is dead. It is evidence that
+ *    one request was not authorised, which has several causes that have nothing to do with the
+ *    session: the endpoint does not exist on the deployed server (an app newer than the API), the
+ *    endpoint exists but rejects this CLASS of session, or the route simply moved. Every one of
+ *    those is a server-shape problem, and the user is meanwhile perfectly authenticated for
+ *    everything they can actually see.
+ *
+ *    Getting this wrong is not a small bug — it is a total lockout, and it was observed on real
+ *    hardware: the shell drains the queue the moment the authenticated tree mounts, so a single
+ *    undeliverable walk produced sign in -> drain -> 401 -> signed out -> sign in, forever, with no
+ *    way out of the loop from inside the app. One stuck recording made the app unusable.
+ *
+ *    So the queue's fetcher passes NO `onUnauthorized`. A 401 surfaces to the drain as an ordinary
+ *    request failure, which the queue already models: the attempt is counted, the walk is retried,
+ *    and after enough attempts it lands on the failed-walk card the user can see and act on. That
+ *    is the honest report — "this walk could not be sent" — rather than a wrong inference about
+ *    the session.
+ *
+ *    A genuinely dead token still ends the session promptly, just not from here: every INTERACTIVE
+ *    screen uses the auth context's own fetcher, and the first real call the user makes signs them
+ *    out through the normal path. Sign-out authority belongs to requests the user is waiting on.
  */
 import React from "react";
 import { useAuth } from "../auth/AuthContext";
@@ -35,32 +49,21 @@ export type WalkQueueSession = {
   ownerKey: string | null;
   /** Office the queue's API calls are scoped to — exposed for callers that pass it on separately. */
   resolvedOfficeId: string | null;
-  /** Authenticated fetcher whose 401 handling is bound to the session that created it. */
+  /** Authenticated fetcher for background queue work. Deliberately cannot end the session — see 2 above. */
   queueFetcher: Fetcher;
 };
 
 export function useWalkQueueSession(): WalkQueueSession {
-  const { user, activeOfficeId, token, signOut } = useAuth();
+  const { user, activeOfficeId, token } = useAuth();
   const resolvedOfficeId = activeOfficeId ?? user?.tenantId ?? null;
   const ownerKey = walkOwnerKey(user?.id, resolvedOfficeId);
 
-  // ONE object whose identity changes whenever the session does, so the effect below has something
-  // stable to retire. Holding token/signOut in a ref-like object rather than closing over them
-  // directly is what lets an already-dispatched drain keep using its own generation's values while
-  // this hook moves on to the next.
+  // Captured per session generation so a drain that outlives this hook keeps using the token it was
+  // dispatched with, rather than reading a newer one it was never authorised under.
   const session = React.useMemo(
-    () => ({ token, officeId: resolvedOfficeId, signOut, retired: false }),
-    [token, resolvedOfficeId, signOut],
+    () => ({ token, officeId: resolvedOfficeId }),
+    [token, resolvedOfficeId],
   );
-
-  React.useEffect(() => {
-    // Re-arm rather than assume: StrictMode and Fast Refresh run cleanup-then-effect against the
-    // SAME object, and a session left retired by that would silently stop honouring real 401s.
-    session.retired = false;
-    return () => {
-      session.retired = true;
-    };
-  }, [session]);
 
   const queueFetcher = React.useCallback<Fetcher>(
     (path, opts) =>
@@ -68,9 +71,9 @@ export function useWalkQueueSession(): WalkQueueSession {
         ...opts,
         token: session.token ?? undefined,
         officeId: session.officeId,
-        onUnauthorized: () => {
-          if (!session.retired) void session.signOut();
-        },
+        // No onUnauthorized, deliberately. A 401 here becomes an ordinary failed attempt the queue
+        // already knows how to count and surface. See rule 2 in this module's header for why giving
+        // background work the power to end a session produced an unbreakable sign-in loop.
       }),
     [session],
   );

@@ -99,6 +99,13 @@ import {
   assertScorecardEvidenceUploadAccess,
   discardScorecardEditEvidence,
 } from "./scorecard-evidence-upload.js";
+import {
+  ingestGlassesWalkthrough,
+  requestGlassesWalkthroughArtifactUploadUrl,
+  validateGlassesWalkthroughArtifactUploadUrlInput,
+  validateGlassesWalkthroughCompleteInput,
+} from "../walkthrough-capture/glasses-walkthrough-service.js";
+import { createGlassesWalkthroughArtifactStore } from "../walkthrough-capture/glasses-walkthrough-store.js";
 import { registerCorrectiveActionRoutes } from "./corrective-action-routes.js";
 
 // Default capture-target picker page size (mirrors searchPhotoUploadTargets' internal default), used as
@@ -713,6 +720,102 @@ fieldRoutes.delete("/photos/:photoId/tags/:tag", requireFieldContractor, async (
       }),
     );
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * GLASSES WALKTHROUGH, step 1 of 2: presign one artifact's upload.
+ *
+ * These two routes live on the FIELD router, not the CRM deals router, because TrockCam — their only
+ * caller — signs in through `/auth/field-login` and carries a `surface: "field"` token. `authMiddleware`
+ * rejects those on every CRM route by design (#722: a field token must never be replayable against
+ * CRM/admin). Built on the CRM router, the feature could not work at all: every upload came back 401
+ * "This session is not valid for CRM access", and because the app read that as a dead session it signed
+ * the user out — so one undeliverable walk locked the crew out of the app entirely. Found on hardware,
+ * not in review.
+ *
+ * The office is resolved from the DEAL, never from the client, and the presigned key is scoped to that
+ * office's prefix — same rule the photo upload path follows.
+ */
+fieldRoutes.post(
+  "/projects/:dealId/glasses-walkthroughs/artifacts/upload-url",
+  requireFieldContractor,
+  async (req, res, next) => {
+    try {
+      const dealId = String(req.params.dealId);
+      // Format before resolution: a non-uuid would otherwise reach the resolver's per-office `::uuid`
+      // cast, fail in every office, and surface as a misleading 503 instead of a 400.
+      assertValidUuid(dealId, "dealId");
+      const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
+
+      const result = await runFieldDealWrite(
+        req,
+        { dealId },
+        async (officeDb, office) => {
+          // Access is asserted BEFORE a presigned URL is minted — getFieldProject throws unless this
+          // field user can actually see this project, so a URL scoped to the deal's R2 prefix is never
+          // handed to someone who cannot reach the deal.
+          await getFieldProject(officeDb, access, dealId);
+          return requestGlassesWalkthroughArtifactUploadUrl({
+            officeSlug: office.slug,
+            // dealId comes from the PATH, never the body — otherwise a caller could presign an upload
+            // key under a deal it cannot see.
+            input: validateGlassesWalkthroughArtifactUploadUrlInput({
+              ...(req.body as Record<string, unknown> | undefined),
+              dealId,
+            }),
+            artifactStore: createGlassesWalkthroughArtifactStore(),
+          });
+        },
+        "Project not found",
+      );
+
+      res.status(200).json(result);
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+/**
+ * GLASSES WALKTHROUGH, step 2 of 2: the completed walk.
+ *
+ * Every artifact named here MUST already be uploaded to the key this route re-derives server-side — the
+ * body never carries a key. Files the walk into the project folder and hands the TROCK Scope forward to
+ * the job queue; see `ingestGlassesWalkthrough` for how those two destinations are decoupled and how
+ * per-artifact / per-walk idempotency works.
+ *
+ * dealId comes from the path and the identity from the session, never the body, for the same reason as
+ * every other write here: the body cannot forge who recorded this or which project it lands on.
+ */
+fieldRoutes.post("/projects/:dealId/glasses-walkthroughs", requireFieldContractor, async (req, res, next) => {
+  try {
+    const dealId = String(req.params.dealId);
+    assertValidUuid(dealId, "dealId");
+    const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
+
+    const result = await runFieldDealWrite(
+      req,
+      { dealId },
+      async (officeDb, office) => {
+        await getFieldProject(officeDb, access, dealId);
+        const input = validateGlassesWalkthroughCompleteInput({
+          ...(req.body as Record<string, unknown> | undefined),
+          dealId,
+          userId: req.fieldUser!.id,
+          officeSlug: office.slug,
+          officeId: office.id,
+        });
+        return ingestGlassesWalkthrough(officeDb as never, input, {
+          artifactStore: createGlassesWalkthroughArtifactStore(),
+        });
+      },
+      "Project not found",
+    );
+
+    res.status(201).json(result);
   } catch (err) {
     next(err);
   }

@@ -68,8 +68,14 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       // below) — declaring it here too is dead config (the plugin value wins).
       NSLocationWhenInUseUsageDescription:
         "T-Rock Cam tags jobsite photos with their capture location.",
+      // Covers BOTH microphone uses, because iOS shows this string once and then never again: the
+      // original short voice notes on a photo, and an AI walk, where the phone's mic records the
+      // entire narration for the length of the walk. A consent string that only mentions "short
+      // voice notes" is asking for the wrong thing — someone granting it has not been told the app
+      // may record them continuously for twenty minutes.
       NSMicrophoneUsageDescription:
-        "T-Rock Cam records short voice notes to transcribe photo descriptions.",
+        "T-Rock Cam records your voice — short notes on a photo, and the full narration during an " +
+        "AI walk, which is what the scope is written from.",
     },
   },
   plugins: [

@@ -203,16 +203,23 @@ describe("a drain that outlives its shell", () => {
     expect(mockAuth.signOut).not.toHaveBeenCalled();
   });
 
-  it("still signs out on a 401 while its own session is the live one", async () => {
+  it("does NOT sign out when its own mount-time drain 401s — the lockout this caused was total", async () => {
     mockGetSchedulableWalkCount.mockResolvedValue(1);
     await renderShell();
     const [, fetcher] = mockDrainWalkQueue.mock.calls[0] as unknown as [string, Fetcher];
 
-    // Same 401, same drain, but nothing has torn this shell down: the token really is dead and the
-    // session really should end. Suppressing this would be the opposite bug.
+    // The reversal of an earlier assertion here, forced by real hardware. This shell drains the
+    // queue on mount, so a walk the server will not accept produced an unbreakable cycle: sign in ->
+    // mount -> drain -> 401 -> signed out -> sign-in screen. The user could not get into the app at
+    // all, and nothing inside the app could clear the walk causing it.
+    //
+    // The 401 that started it was not a dead token; it was an endpoint that rejected this class of
+    // session. A background upload is in no position to tell those apart, so it no longer tries —
+    // the attempt is counted and surfaced on the failed-walk card instead. A genuinely dead token
+    // still ends the session through the first interactive request the user makes.
     await fire401(fetcher);
 
-    expect(mockAuth.signOut).toHaveBeenCalledTimes(1);
+    expect(mockAuth.signOut).not.toHaveBeenCalled();
   });
 
   it("forgets the startup scan when the shell tears down, so the next sign-in rescans", async () => {

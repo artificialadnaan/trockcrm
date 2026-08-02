@@ -19,7 +19,7 @@ describe("walkthroughUploadClient", () => {
       fileSizeBytes: 1024,
     });
 
-    expect(calls[0]!.path).toBe("/deals/deal-42/glasses-walkthroughs/artifacts/upload-url");
+    expect(calls[0]!.path).toBe("/field/projects/deal-42/glasses-walkthroughs/artifacts/upload-url");
     expect(calls[0]!.opts).toMatchObject({ method: "POST" });
     expect(result).toEqual({ uploadUrl: "https://r2.test/x", r2Key: "office/deal/walk/video", expiresIn: 900 });
   });
@@ -40,7 +40,7 @@ describe("walkthroughUploadClient", () => {
       artifacts: [],
     });
 
-    expect(calls[0]!.path).toBe("/deals/deal-42/glasses-walkthroughs");
+    expect(calls[0]!.path).toBe("/field/projects/deal-42/glasses-walkthroughs");
     expect(calls[0]!.opts).toMatchObject({ method: "POST" });
     expect(result.walkId).toBe("walk-1");
   });

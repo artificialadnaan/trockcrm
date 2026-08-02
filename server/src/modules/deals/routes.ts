@@ -160,13 +160,6 @@ import {
   validateWalkthroughIngressPayload,
 } from "../estimating/walkthrough-ingress-service.js";
 import { createWalkthroughContactSheetStore } from "../estimating/walkthrough-contact-sheet-store.js";
-import {
-  ingestGlassesWalkthrough,
-  requestGlassesWalkthroughArtifactUploadUrl,
-  validateGlassesWalkthroughArtifactUploadUrlInput,
-  validateGlassesWalkthroughCompleteInput,
-} from "../walkthrough-capture/glasses-walkthrough-service.js";
-import { createGlassesWalkthroughArtifactStore } from "../walkthrough-capture/glasses-walkthrough-store.js";
 
 function buildRouteAuditContext(req: { user?: any; headers: Record<string, unknown>; ip?: string | undefined }) {
   const actor = buildAuditActorFromUser({
@@ -3504,74 +3497,17 @@ router.post("/:id/estimating/walkthrough-extractions", async (req, res, next) =>
   }
 });
 
-/**
- * Step 1 of the glasses-walkthrough INBOUND path (mobile app -> trockcrm -> TROCK Scope). See
- * `glasses-walkthrough-service.ts` for the full rationale; short version: this codebase never proxies
- * large binary uploads through the API process, so the mobile app presigns each artifact's upload here,
- * PUTs bytes straight to R2, then calls the completion route below once every artifact has landed.
+/*
+ * The glasses-walkthrough routes used to live here. They are now on the FIELD router
+ * (`/api/field/projects/:dealId/glasses-walkthroughs...`, server/src/modules/field/routes.ts).
  *
- * Deal access is asserted BEFORE the body is even parsed into a validated shape (same order as the
- * walkthrough-extractions route above), and the same `getDealById` WRITE gate: a rep who does not own
- * this deal gets a 403 before a presigned URL — scoped to THIS deal's R2 prefix — is ever minted.
+ * They had to move: TrockCam is their only caller and it authenticates through `/auth/field-login`,
+ * which mints a `surface: "field"` token that authMiddleware rejects on every CRM route by design.
+ * Mounted here, every upload returned 401 "This session is not valid for CRM access" — and the app,
+ * reading that as a dead session, signed the user out. A single undeliverable walk therefore locked
+ * the crew out of the app. Deliberately NOT left behind as a second CRM-side copy: one auth boundary
+ * for this path is the point.
  */
-router.post("/:id/glasses-walkthroughs/artifacts/upload-url", async (req, res, next) => {
-  try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
-
-    const input = validateGlassesWalkthroughArtifactUploadUrlInput({
-      ...(req.body as Record<string, unknown> | undefined),
-      // From the URL, never the body — otherwise a caller could presign an upload key under a deal it
-      // cannot see.
-      dealId: req.params.id,
-    });
-
-    const result = await requestGlassesWalkthroughArtifactUploadUrl({
-      officeSlug: req.officeSlug!,
-      input,
-      artifactStore: createGlassesWalkthroughArtifactStore(),
-    });
-
-    await req.commitTransaction!();
-    res.status(200).json(result);
-  } catch (err) {
-    next(err);
-  }
-});
-
-/**
- * Step 2: the completed walk. Every artifact named here MUST already be uploaded (step 1) to the key
- * this route re-derives server-side — the body never carries a key, same confused-deputy reasoning as
- * the walkthrough-extractions route above. Files the walk into the project folder and hands forwarding
- * to TROCK Scope off to the job queue; see `ingestGlassesWalkthrough` for exactly how the two destinations
- * are decoupled and how per-artifact / per-walk idempotency works.
- *
- * dealId/userId/officeSlug/officeId are taken from the URL and the session, never the body, for the same
- * reason as every other route here: the body cannot forge who uploaded this or which deal it lands on.
- */
-router.post("/:id/glasses-walkthroughs", async (req, res, next) => {
-  try {
-    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
-    if (!deal) throw new AppError(404, "Deal not found");
-
-    const input = validateGlassesWalkthroughCompleteInput({
-      ...(req.body as Record<string, unknown> | undefined),
-      dealId: req.params.id,
-      userId: req.user!.id,
-      officeSlug: req.officeSlug!,
-      officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
-    });
-
-    const result = await ingestGlassesWalkthrough(req.tenantDb!, input, {
-      artifactStore: createGlassesWalkthroughArtifactStore(),
-    });
-
-    await req.commitTransaction!();
-    res.status(201).json(result);
-  } catch (err) {
-    next(err);
-  }
-});
 
 router.get("/:id/estimating", async (req, res, next) => {
   try {

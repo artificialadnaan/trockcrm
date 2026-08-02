@@ -77,19 +77,42 @@ describe("useWalkQueueSession", () => {
     expect(captured!.ownerKey).toBe("user-1:office-primary");
   });
 
-  it("signs out on a 401 while its session is still the live one", async () => {
-    // Positive control. The guard must not be so eager that a genuinely dead token stops ending
-    // the session — that would strand a user in a signed-in shell whose every request fails.
+  it("NEVER signs out on a 401, even while its own session is the live one", async () => {
+    // This assertion is deliberately the reverse of what it once was, and the reversal came from
+    // hardware. A 401 on a background upload is not evidence the session died — it is evidence one
+    // request was not authorised, which on a real device turned out to mean "this endpoint rejects
+    // this CLASS of session". The shell drains the queue the moment the authenticated tree mounts,
+    // so signing out there produced: sign in -> drain -> 401 -> signed out -> sign in, forever. One
+    // undeliverable walk made the app impossible to enter.
+    //
+    // A genuinely dead token still ends the session promptly — through whatever INTERACTIVE screen
+    // the user touches next, which is a request they are actually waiting on.
     render(<Probe />);
     await act(async () => {
       await fire401(captured!.queueFetcher);
     });
-    expect(signOut).toHaveBeenCalledTimes(1);
+    expect(signOut).not.toHaveBeenCalled();
   });
 
-  it("can no longer sign anyone out once its session has been superseded", async () => {
-    // THE regression. Take the fetcher the way a drain does, unmount the shell that made it (what
-    // sign-out does), then let the still-running drain 401 against its revoked token.
+  it("still never signs out after an unmount and remount", async () => {
+    // The old implementation carried a `retired` flag that had to be re-armed on remount, and this
+    // test guarded against it coming back permanently deaf. There is no flag any more — the fetcher
+    // simply has no sign-out authority in any generation — so this now pins that the property holds
+    // across a mount boundary rather than that a flag was reset correctly.
+    const first = render(<Probe />);
+    first.unmount();
+
+    render(<Probe />);
+    await act(async () => {
+      await fire401(captured!.queueFetcher);
+    });
+    expect(signOut).not.toHaveBeenCalled();
+  });
+
+  it("a drain that outlives its shell cannot sign out the next user either", async () => {
+    // The original regression, still worth pinning: an abandoned multi-gigabyte drain keeps running
+    // with the token it was dispatched under. It could never end anyone's session now, but this
+    // states the guarantee at the boundary that motivated the whole module.
     const view = render(<Probe />);
     const abandoned = captured!.queueFetcher;
     view.unmount();
@@ -98,25 +121,5 @@ describe("useWalkQueueSession", () => {
       await fire401(abandoned);
     });
     expect(signOut).not.toHaveBeenCalled();
-  });
-
-  it("keeps honouring 401s after a remount, rather than staying retired", async () => {
-    // StrictMode and Fast Refresh both run cleanup-then-effect against the same session object. A
-    // hook that only ever SET `retired` and never cleared it would come back permanently deaf to
-    // real 401s — signed in, every request failing, and nothing able to end the session.
-    //
-    // A `rerender` would NOT prove this: it never runs the cleanup, so the flag is never set in the
-    // first place and the test passes with or without the re-arm. Only an unmount followed by a
-    // fresh mount forces the sequence that matters. `signOut` is stable across both mounts (same
-    // fixture), so the session object's identity is unchanged too — which is precisely the case
-    // that could come back retired.
-    const first = render(<Probe />);
-    first.unmount();
-
-    render(<Probe />);
-    await act(async () => {
-      await fire401(captured!.queueFetcher);
-    });
-    expect(signOut).toHaveBeenCalledTimes(1);
   });
 });
