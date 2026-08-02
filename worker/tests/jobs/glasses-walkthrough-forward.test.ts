@@ -1,10 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { GLASSES_WALKTHROUGH_FORWARD_JOB, handleGlassesWalkthroughForward } from "../../src/jobs/glasses-walkthrough-forward.js";
 
-function makeDb() {
+/**
+ * `markerRows` is what the pre-create marker UPDATE answers with. It defaults to one row because that is
+ * what a real `UPDATE … RETURNING id` does when it matches this job's row, and the handler now refuses to
+ * send the create unless it does. A blanket `{ rows: [] }` — what this fake used to return for every
+ * statement — would model an UPDATE that silently matched NOTHING, which is the case the empty override
+ * exists to exercise deliberately rather than by accident.
+ */
+function makeDb(opts: { markerRows?: any[] } = {}) {
   const calls: Array<{ sql: string; params?: unknown[] }> = [];
   const query = vi.fn(async (sql: string, params?: unknown[]) => {
     calls.push({ sql, params });
+    if (/\{scopeCreatePendingRef\}/.test(sql)) return { rows: opts.markerRows ?? [{ id: 1 }] };
     return { rows: [] };
   });
   return { query, calls };
@@ -29,8 +37,12 @@ function makeJobQueueDb(initialPayload: Record<string, unknown>, opts: { failOn?
     if (/\{scopeWalkthroughId\}/.test(sql)) {
       const { scopeCreatePendingRef: _dropped, ...rest } = stored;
       stored = { ...rest, scopeWalkthroughId: params![0] };
+      return { rows: [{ id: 1 }] };
     } else if (/\{scopeCreatePendingRef\}/.test(sql)) {
       stored = { ...stored, scopeCreatePendingRef: params![0] };
+      // The marker UPDATE returns the row it matched — the handler treats "no rows" as "the marker was
+      // never persisted" and refuses to create at all, so answering [] here would model a lost row.
+      return { rows: [{ id: 1 }] };
     } else if (/payload - 'scopeCreatePendingRef'/.test(sql)) {
       const { scopeCreatePendingRef: _dropped, ...rest } = stored;
       stored = rest;
@@ -186,7 +198,14 @@ describe("handleGlassesWalkthroughForward", () => {
     // the scopeWalkthroughId statement specifically: the pre-create marker is a jsonb_set write too.
     const checkpoint = db.calls.find((c) => /\{scopeWalkthroughId\}/.test(c.sql));
     expect(checkpoint).toBeDefined();
-    expect(checkpoint!.params).toEqual(["scope-walkthrough-1", GLASSES_WALKTHROUGH_FORWARD_JOB, "walk-1"]);
+    // Scoped to the (walkId, dealId) PAIR: a phone-minted walkId is not unique across deals, so keying on
+    // it alone would write this walkthrough's id into the other deal's job row as well.
+    expect(checkpoint!.params).toEqual([
+      "scope-walkthrough-1",
+      GLASSES_WALKTHROUGH_FORWARD_JOB,
+      "walk-1",
+      "deal-1",
+    ]);
 
     // Downloaded exactly the one part's byte range from OUR OWN R2 key.
     expect(downloadRange).toHaveBeenCalledWith(
@@ -339,6 +358,195 @@ describe("handleGlassesWalkthroughForward", () => {
     ).rejects.toThrow(/no ETag/);
   });
 
+  // ── Upload-plan integrity ────────────────────────────────────────────────────────────────────────
+  //
+  // Every byte range this job reads out of R2 is computed from numbers TROCK Scope handed back, and the
+  // multipart upload is declared finished by a `/complete` built from the same plan. Taking that plan on
+  // faith fails SILENTLY in both directions: an absent partCount collapses the part loop to zero
+  // iterations and completes a clip that never received a byte, and a non-string clipId is spliced into
+  // the URL path where it becomes some other clip's problem. Neither surfaces as an error — the job
+  // reports SUCCESS — so the plan is checked where it arrives.
+  describe("upload-plan integrity", () => {
+    it("rejects a plan with no usable part count instead of completing a clip that received no bytes", async () => {
+      const db = makeDb();
+      const { fetchImpl, calls } = makeScopeFetch({
+        // partCount absent: `Array.from({ length: undefined })` is an EMPTY array, so the part loop runs
+        // zero times and `/complete` goes out with `parts: []` — a finished, empty clip.
+        beginBody: { clipId: "clip-1", uploadId: "upload-1", sequence: 1, partSize: 1024 },
+      });
+
+      await expect(
+        handleGlassesWalkthroughForward(makePayload({ scopeWalkthroughId: "already-created" }), "office-1", {
+          db,
+          fetchImpl: fetchImpl as any,
+          baseUrl: SCOPE_BASE_URL,
+          token: "t",
+          downloadRange: makeDownloadRange(),
+        })
+      ).rejects.toThrow(/unusable upload plan/);
+
+      expect(calls.some((c) => /\/complete$/.test(c.url))).toBe(false);
+    });
+
+    it("rejects a plan whose clipId is not a string, rather than splicing it into the clip URL", async () => {
+      const db = makeDb();
+      const { fetchImpl, calls } = makeScopeFetch({
+        beginBody: { clipId: null, uploadId: 7, sequence: 1, partSize: 1024, partCount: 1 },
+      });
+
+      await expect(
+        handleGlassesWalkthroughForward(makePayload({ scopeWalkthroughId: "already-created" }), "office-1", {
+          db,
+          fetchImpl: fetchImpl as any,
+          baseUrl: SCOPE_BASE_URL,
+          token: "t",
+          downloadRange: makeDownloadRange(),
+        })
+      ).rejects.toThrow(/unusable upload plan/);
+
+      expect(calls.some((c) => /\/parts$/.test(c.url))).toBe(false);
+    });
+
+    it("rejects a sign-parts response that omits a requested part, rather than completing a short clip", async () => {
+      // A missing signed part is invisible here: the loop simply uploads the parts it WAS given and
+      // `/complete` declares the multipart finished from those. S3 assembles whatever it was handed, so
+      // the clip lands truncated and the job reports success. Surfacing it at the sign call — naming the
+      // part — beats an unexplained upload failure minutes and gigabytes later.
+      const PART_SIZE = 64;
+      const db = makeDb();
+      const { fetchImpl, calls } = makeScopeFetch({
+        beginBody: { clipId: "clip-1", uploadId: "u", sequence: 1, partSize: PART_SIZE, partCount: 3 },
+        signBody: {
+          parts: [
+            { partNumber: 1, url: "https://r2.example.com/part-1" },
+            { partNumber: 3, url: "https://r2.example.com/part-3" },
+          ],
+        },
+      });
+
+      await expect(
+        handleGlassesWalkthroughForward(
+          makePayload({
+            scopeWalkthroughId: "already-created",
+            artifacts: [{ ...makePayload().artifacts[0], fileSizeBytes: 3 * PART_SIZE }],
+          }),
+          "office-1",
+          { db, fetchImpl: fetchImpl as any, baseUrl: SCOPE_BASE_URL, token: "t", downloadRange: makeDownloadRange() }
+        )
+      ).rejects.toThrow(/did not sign part 2/);
+
+      expect(calls.some((c) => /\/complete$/.test(c.url))).toBe(false);
+    });
+  });
+
+  // ── Stall protection ─────────────────────────────────────────────────────────────────────────────
+  //
+  // This job runs on its OWN dedicated poller with a reentrancy guard (queue.ts,
+  // pollGlassesWalkthroughForwardJobs) and a concurrency of 1. A call that never answers therefore does
+  // not just lose one walk — it holds that guard forever, and EVERY later walkthrough forward goes
+  // unclaimed until the process is restarted. `fetch` has no default timeout, so a TROCK Scope (or R2)
+  // that accepts the connection and then goes quiet is exactly that.
+  describe("stall protection", () => {
+    /** A server that completes the TCP handshake and then never answers. Honors `signal` the way undici
+     *  does — rejecting with the signal's reason — so a missing signal reproduces the real defect: the
+     *  promise never settles at all. */
+    function hangingFetch(shouldHang: (url: string) => boolean, answered: (url: string, init: any) => Response) {
+      const calls: Array<{ url: string; init: any }> = [];
+      const fetchImpl = vi.fn((url: string, init: any) => {
+        calls.push({ url, init });
+        if (!shouldHang(url)) return Promise.resolve(answered(url, init));
+        return new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal as AbortSignal | undefined;
+          if (!signal) return; // no timeout wired ⇒ never settles ⇒ the poller is wedged
+          signal.addEventListener("abort", () => reject(signal.reason));
+        });
+      });
+      return { fetchImpl, calls };
+    }
+
+    it("gives up on a TROCK Scope call that never answers instead of holding the poller forever", async () => {
+      const db = makeJobQueueDb(makePayload());
+      const { fetchImpl } = hangingFetch(
+        () => true,
+        () => new Response(null, { status: 200 })
+      );
+
+      await expect(
+        handleGlassesWalkthroughForward(db.storedPayload(), "office-1", {
+          db,
+          fetchImpl: fetchImpl as any,
+          baseUrl: SCOPE_BASE_URL,
+          token: "t",
+          downloadRange: makeDownloadRange(),
+          timeouts: { requestMs: 25 },
+        })
+      ).rejects.toThrow(/did not answer within/);
+    }, 3_000);
+
+    it("KEEPS the pending-create marker when the create TIMES OUT — a timeout proves nothing", async () => {
+      // The one thing this must not do is look like the ECONNREFUSED case. A request that timed out was
+      // fully delivered as far as anyone here can tell; TROCK Scope may have inserted the row and simply
+      // never got the response back. Clearing the marker on that hands the next attempt a clean slate to
+      // create a duplicate walkthrough and a second billed extraction.
+      const db = makeJobQueueDb(makePayload());
+      const { fetchImpl } = hangingFetch(
+        () => true,
+        () => new Response(null, { status: 200 })
+      );
+
+      await expect(
+        handleGlassesWalkthroughForward(db.storedPayload(), "office-1", {
+          db,
+          fetchImpl: fetchImpl as any,
+          baseUrl: SCOPE_BASE_URL,
+          token: "t",
+          downloadRange: makeDownloadRange(),
+          timeouts: { requestMs: 25 },
+        })
+      ).rejects.toThrow(/did not answer within/);
+
+      expect(db.storedPayload().scopeCreatePendingRef).toBe("trockcrm:glasses-walkthrough:walk-1");
+      // …and the next attempt reconciles rather than creating a second walkthrough.
+      const retry = makeScopeFetch();
+      const result = await handleGlassesWalkthroughForward(db.storedPayload(), "office-1", {
+        db,
+        fetchImpl: retry.fetchImpl as any,
+        baseUrl: SCOPE_BASE_URL,
+        token: "t",
+        downloadRange: makeDownloadRange(),
+      });
+      expect(retry.calls.filter((c) => c.url === CREATE_URL)).toHaveLength(0);
+      expect(result).toEqual({ status: "dead", error: expect.any(String) });
+    }, 3_000);
+
+    it("bounds the presigned part PUT too — a stalled R2 upload wedges the poller identically", async () => {
+      // TROCK Scope's own calls answer normally; only the raw R2 part PUT goes quiet. That is the
+      // longest-lived request of the whole forward (a 32MiB part), and the one most likely to stall.
+      const db = makeDb();
+      const scope = makeScopeFetch();
+      const { fetchImpl } = hangingFetch(
+        (url) => url.startsWith("https://r2.example.com/part-"),
+        () => new Response(null, { status: 200 })
+      );
+      const routed = vi.fn((url: string, init: any) =>
+        url.startsWith("https://r2.example.com/part-")
+          ? (fetchImpl as any)(url, init)
+          : (scope.fetchImpl as any)(url, init)
+      );
+
+      await expect(
+        handleGlassesWalkthroughForward(makePayload({ scopeWalkthroughId: "already-created" }), "office-1", {
+          db,
+          fetchImpl: routed as any,
+          baseUrl: SCOPE_BASE_URL,
+          token: "t",
+          downloadRange: makeDownloadRange(),
+          timeouts: { partPutMs: 25 },
+        })
+      ).rejects.toThrow(/did not answer within/);
+    }, 3_000);
+  });
+
   // ── Part integrity ───────────────────────────────────────────────────────────────────────────────
   //
   // `downloadRange` is an injection seam whose production default is a network read. Nothing downstream
@@ -481,6 +689,89 @@ describe("handleGlassesWalkthroughForward", () => {
     expect(beginCalls).toHaveLength(2);
   });
 
+  it("resumes a walk whose SECOND clip failed, re-uploading the first as duplicate_bytes under the same walkthrough", async () => {
+    // GUARD (passes before and after this round's fixes) for the property that makes a per-artifact
+    // checkpoint unnecessary: the artifact loop has no memory, so a retry re-uploads every clip — and
+    // that is SAFE because TROCK Scope's clips_walkthrough_checksum_key rejects a second copy of
+    // identical bytes with 409 duplicate_bytes, which completeClip treats as a terminal success. The
+    // failure mode this rules out is the expensive-looking one being also WRONG: a second copy of clip 1
+    // landing as real scope data, or the retry aborting on clip 1's 409 and never reaching clip 2.
+    const db = makeJobQueueDb(
+      makePayload({
+        artifacts: [
+          { fileId: "f1", idempotencyKey: "a1", kind: "video", r2Key: "k1", mimeType: "video/mp4", originalFilename: "a.mp4", fileSizeBytes: 10, capturedAtMs: 0 },
+          { fileId: "f2", idempotencyKey: "a2", kind: "photo", r2Key: "k2", mimeType: "image/jpeg", originalFilename: "b.jpg", fileSizeBytes: 10, capturedAtMs: 500 },
+        ],
+      })
+    );
+
+    /** TROCK Scope with a memory: one clip id per begin call, and per-clip `/complete` outcomes that
+     *  change between deliveries the way the real service's checksum constraint makes them. */
+    function makeResumableScope(completeStatuses: Record<string, { status: number; body: any }>) {
+      const calls: Array<{ url: string; init: any }> = [];
+      let clipSeq = 0;
+      const fetchImpl = vi.fn(async (url: string, init: any) => {
+        calls.push({ url, init });
+        if (url === CREATE_URL) {
+          return new Response(JSON.stringify({ walkthrough: { id: "scope-walkthrough-1" } }), { status: 201 });
+        }
+        if (/\/clips$/.test(url)) {
+          clipSeq += 1;
+          return new Response(
+            JSON.stringify({ clipId: `clip-${clipSeq}`, uploadId: `u-${clipSeq}`, sequence: clipSeq, partSize: 1024, partCount: 1 }),
+            { status: 201 }
+          );
+        }
+        if (/\/parts$/.test(url)) {
+          const partNumbers = JSON.parse(init.body).partNumbers as number[];
+          return new Response(
+            JSON.stringify({ parts: partNumbers.map((n) => ({ partNumber: n, url: `https://r2.example.com/part-${n}` })) }),
+            { status: 200 }
+          );
+        }
+        if (/\/complete$/.test(url)) {
+          const clipId = url.split("/clips/")[1]!.replace("/complete", "");
+          const outcome = completeStatuses[clipId] ?? { status: 200, body: { outcome: "uploaded" } };
+          return new Response(JSON.stringify(outcome.body), { status: outcome.status });
+        }
+        if (url.startsWith("https://r2.example.com/part-")) {
+          return new Response(null, { status: 200, headers: new Headers({ etag: '"etag-1"' }) });
+        }
+        throw new Error(`Unexpected fetch to ${url}`);
+      });
+      return { fetchImpl, calls };
+    }
+
+    const forwardDeps = (fetchImpl: any) => ({
+      db,
+      fetchImpl: fetchImpl as any,
+      baseUrl: SCOPE_BASE_URL,
+      token: "t",
+      downloadRange: makeDownloadRange(),
+    });
+
+    // Delivery 1: clip 1 lands; clip 2's /complete fails, so the job throws and job_queue retries it.
+    const first = makeResumableScope({ "clip-2": { status: 500, body: { error: "boom" } } });
+    await expect(
+      handleGlassesWalkthroughForward(db.storedPayload(), "office-1", forwardDeps(first.fetchImpl))
+    ).rejects.toThrow(/complete-clip failed/);
+    expect(first.calls.filter((c) => c.url === CREATE_URL)).toHaveLength(1);
+    expect(db.storedPayload().scopeWalkthroughId).toBe("scope-walkthrough-1");
+
+    // Delivery 2: the SAME payload as job_queue now holds it. Clip 1's bytes already landed, so its
+    // re-upload comes back 409 duplicate_bytes — which must not stop the loop reaching clip 2.
+    const second = makeResumableScope({ "clip-1": { status: 409, body: { outcome: "duplicate_bytes", duplicateOfClipId: "clip-0" } } });
+    await expect(
+      handleGlassesWalkthroughForward(db.storedPayload(), "office-1", forwardDeps(second.fetchImpl))
+    ).resolves.toBeUndefined();
+
+    // No second walkthrough, and BOTH clips finished under the one that already existed.
+    expect(second.calls.filter((c) => c.url === CREATE_URL)).toHaveLength(0);
+    const completes = second.calls.filter((c) => /\/complete$/.test(c.url));
+    expect(completes).toHaveLength(2);
+    expect(completes.every((c) => c.url.includes("/walkthroughs/scope-walkthrough-1/"))).toBe(true);
+  });
+
   // ── Retry-safety of the remote create ────────────────────────────────────────────────────────────
   //
   // TROCK Scope's POST /walkthroughs has no idempotency key and no way to look a walkthrough up by
@@ -539,6 +830,21 @@ describe("handleGlassesWalkthroughForward", () => {
       await expect(
         handleGlassesWalkthroughForward(db.storedPayload(), "office-1", deps(db, fetchImpl))
       ).rejects.toThrow(/Connection terminated/);
+      expect(calls).toHaveLength(0);
+    });
+
+    it("refuses to create when the marker UPDATE matched NO row — a write that lands nowhere is not a marker", async () => {
+      // The write can succeed and still change nothing: a payload whose walkId no longer matches (a
+      // hand-edited row during a reconciliation, a row deleted by a cleanup) leaves the UPDATE matching
+      // zero rows and returning no error at all. Without checking, the create then goes out with NOTHING
+      // recorded anywhere — the precise state the whole two-phase marker exists to make impossible, and
+      // silently so. Losing this attempt is recoverable; an untracked remote walkthrough is not.
+      const db = makeDb({ markerRows: [] });
+      const { fetchImpl, calls } = makeScopeFetch();
+
+      await expect(
+        handleGlassesWalkthroughForward(makePayload(), "office-1", deps(db, fetchImpl))
+      ).rejects.toThrow(/matched no job_queue row/);
       expect(calls).toHaveLength(0);
     });
 

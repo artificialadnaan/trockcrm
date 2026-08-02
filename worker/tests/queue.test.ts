@@ -555,4 +555,45 @@ describe("worker queue", () => {
     expect(claim![0]).not.toContain("NOT IN"); // only-this-type, not exclude-these-types
     expect(claim![1]).toEqual([1]); // GLASSES_WALKTHROUGH_FORWARD_CONCURRENCY — one forward at a time
   });
+
+  it("pollGlassesWalkthroughForwardJobs skips a tick that lands while a forward is still in flight", async () => {
+    // GUARD on the reentrancy guard. This poller is on the same interval as every other one, and a single
+    // forward routinely outlives many ticks — it relays a walk's clips (gigabytes) through ranged R2 reads
+    // and multipart PUTs. Without the guard each tick would open its own claim transaction, and because
+    // the claim marks rows 'processing' rather than locking them for the run, the concurrency-of-1 that
+    // keeps several multi-GB uploads from running at once would be a comment rather than a fact.
+    let releaseClaim!: () => void;
+    let announceClaimEntered!: () => void;
+    const claimHeld = new Promise<void>((resolve) => {
+      releaseClaim = resolve;
+    });
+    // Awaited before the second tick fires, so this pins the guard rather than the scheduler: without it
+    // the second call could win purely by getting there first, and the case would pass on a poller that
+    // has no guard at all.
+    const claimEntered = new Promise<void>((resolve) => {
+      announceClaimEntered = resolve;
+    });
+    const { queries } = installPool(async (sql: string) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+      if (sql.includes("SELECT * FROM public.job_queue")) {
+        announceClaimEntered();
+        await claimHeld; // hold the first tick inside its claim transaction
+        return { rows: [] };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+
+    const inFlight = pollGlassesWalkthroughForwardJobs();
+    await claimEntered;
+    // The second tick must return without touching the DB at all — not queue behind the first.
+    await pollGlassesWalkthroughForwardJobs();
+    expect(queries.filter(([sql]) => sql.includes("SELECT * FROM public.job_queue"))).toHaveLength(1);
+
+    releaseClaim();
+    await inFlight;
+
+    // …and the guard is released afterwards, so the NEXT interval tick claims normally.
+    await pollGlassesWalkthroughForwardJobs();
+    expect(queries.filter(([sql]) => sql.includes("SELECT * FROM public.job_queue"))).toHaveLength(2);
+  });
 });

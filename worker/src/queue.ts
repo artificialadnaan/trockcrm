@@ -101,9 +101,24 @@ type RecoveryIntent = { attempts: number; outcome: Outcome };
 // wait for a restart. Keyed by job id → the exact intent to replay.
 const pendingRecoveries = new Map<number, RecoveryIntent>();
 
-/** Test-only: reset module singleton state between cases. */
+/**
+ * Test-only: reset module singleton state between cases.
+ *
+ * The reentrancy guards belong here as much as pendingRecoveries does, and are declared further down —
+ * hence the forward references. A guard is set for the whole of a poll and cleared in a `finally`, so it
+ * only survives a case that DIDN'T let the poll finish: a vitest timeout, a fake that never settles, an
+ * assertion thrown from inside a router. When that happens the guard is stuck `true` for the rest of the
+ * FILE, and every later call to that poller returns immediately having done nothing — so the next case
+ * fails on an empty `queries` array with no hint that its own poll never ran. All four are reset, not
+ * just the one that has an in-flight test today: the failure mode is identical for each, and it presents
+ * as a bug in whichever unlucky test runs next.
+ */
 export function __resetQueueStateForTest() {
   pendingRecoveries.clear();
+  polling = false;
+  pollingBidBoardIngest = false;
+  pollingAiReport = false;
+  pollingGlassesWalkthroughForward = false;
 }
 
 function buildOutcomeUpdate(jobId: number, attempts: number, outcome: Outcome): { sql: string; params: any[] } {

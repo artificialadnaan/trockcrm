@@ -94,6 +94,19 @@ describe("worker r2-client getObjectRangeBuffer", () => {
     await expect(getObjectRangeBuffer(KEY, 0, 9)).rejects.toThrow(/4 bytes/);
   });
 
+  it("throws when the range comes back LONGER than the bytes it asked for", async () => {
+    // The other direction, and the more dangerous one because nothing about it looks like a failure. S3
+    // answers a Range header it cannot PARSE by ignoring it and returning the WHOLE object — so a caller
+    // that only checks for a short read hands a multi-GB buffer to a PUT sized for one 32MiB part, and
+    // the part that lands is neither the range asked for nor the object. A byte count that is wrong in
+    // either direction means the read did not do what was asked.
+    configureR2();
+    sendMock.mockResolvedValue({ Body: bodyOf(new Uint8Array(4096)) });
+    const { getObjectRangeBuffer } = await import("../../src/lib/r2-client.js");
+
+    await expect(getObjectRangeBuffer(KEY, 0, 9)).rejects.toThrow(/4096 bytes/);
+  });
+
   it("returns the bytes, reassembled across stream chunks, when the range is fully satisfied", async () => {
     // The other half of the contract: strictness must not reject a correct multi-chunk read, which is
     // what every real multi-MiB part looks like coming off the socket.

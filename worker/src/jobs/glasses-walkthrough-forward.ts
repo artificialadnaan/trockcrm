@@ -62,12 +62,43 @@ export const GLASSES_WALKTHROUGH_FORWARD_JOB = "glasses_walkthrough_forward";
  *  MAX_PARTS_PER_SIGN_REQUEST) — batch our part-number requests to respect it. */
 const MAX_PARTS_PER_SIGN_REQUEST = 100;
 
+/**
+ * Wall-clock ceilings on every outbound request. `fetch` has NO default timeout, and this job runs on a
+ * dedicated poller with a reentrancy guard and a concurrency of 1 (queue.ts,
+ * pollGlassesWalkthroughForwardJobs) — so one TROCK Scope (or R2) socket that is accepted and then goes
+ * quiet does not merely lose this walk, it holds that guard for the life of the process and every LATER
+ * walkthrough forward goes unclaimed until someone restarts the worker. The values are deliberately
+ * generous: they exist to bound a hang, not to police latency, and a premature abort is expensive
+ * (see the marker handling in createScopeWalkthrough — a timeout is an UNKNOWN create outcome).
+ */
+export interface ScopeTimeouts {
+  /** Control-plane JSON calls (create / begin-clip / sign-parts): a row insert and some presigning. */
+  requestMs: number;
+  /** `/complete` is not a row lookup — TROCK Scope finalizes the R2 multipart upload and then checksums
+   *  the ASSEMBLED object (upload-service.ts, completeClipUpload), which scales with the clip, not the
+   *  request. A multi-GB video legitimately keeps this one open for many minutes. */
+  completeMs: number;
+  /** One presigned part PUT — at most TROCK Scope's 32MiB PART_SIZE_BYTES, over the worker's own link. */
+  partPutMs: number;
+}
+
+const DEFAULT_SCOPE_TIMEOUTS: ScopeTimeouts = {
+  requestMs: 60_000,
+  completeMs: 15 * 60_000,
+  partPutMs: 10 * 60_000,
+};
+
 type Queryable = {
   query: (sql: string, params?: unknown[]) => Promise<{ rows: any[] }>;
 };
 
+/** `connect` is REQUIRED, not optional. The dead-letter sweep runs BEGIN / claim UPDATE / send / COMMIT
+ *  as one transaction, which is only a transaction at all if every statement rides the SAME connection —
+ *  and a bare `query` on a pool gives no such guarantee (pg hands out whichever connection is free, so a
+ *  ROLLBACK can land on a connection that never saw the BEGIN). Falling back to `db.query` therefore did
+ *  not degrade gracefully; it ran a transaction-shaped sequence with none of a transaction's properties. */
 type PoolLike = Queryable & {
-  connect?: () => Promise<Queryable & { release: () => void }>;
+  connect: () => Promise<Queryable & { release: () => void }>;
 };
 
 interface JobArtifact {
@@ -143,6 +174,21 @@ interface ScopeDeps {
   baseUrl: string;
   token: string;
   fetchImpl: typeof fetch;
+  timeouts: ScopeTimeouts;
+}
+
+/**
+ * Our OWN abort fired. Kept as its own type because the one thing that must never happen is for it to be
+ * mistaken for the connect-phase failures below: those PROVE the request was never processed, whereas a
+ * timeout says only that we stopped waiting. Carries no `cause` on purpose — the underlying rejection is
+ * the only object in this file with a reference to the request (and therefore to the Authorization
+ * header), so dropping it is what keeps TROCK_SCOPE_SERVICE_TOKEN out of `last_error`.
+ */
+class ScopeRequestTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ScopeRequestTimeoutError";
+  }
 }
 
 /**
@@ -165,31 +211,58 @@ interface ScopeDeps {
  *      whose unresolvable case dead-letters and costs a human a manual reconciliation — see the
  *      IDEMPOTENCY block at the top of this file. `externalRef` is dropped on the floor today (the route
  *      copies a fixed set of body fields), so sending it is free and safe in the meantime.
+ *   4. dedupe `POST /walkthroughs/:id/clips` the same way, on a per-artifact ref (this job already has a
+ *      stable one per artifact — `idempotencyKey`). This is the CHEAP fix for re-uploads on a partial
+ *      failure: today a retry of a walk whose LAST clip failed re-sends every earlier clip in full, and
+ *      only learns they were duplicates after the bytes have all moved — completeClipUpload computes the
+ *      checksum from the ASSEMBLED object, so `duplicate_bytes` arrives at `/complete`, not before. That
+ *      is correct but not free. Answering "already have this clip" at begin-clip would cost zero bytes,
+ *      and — unlike a per-artifact checkpoint in this job's payload — it would still hold if the queue
+ *      row were rebuilt or the walk re-enqueued. Deliberately NOT worked around locally: a second
+ *      payload-marker scheme would double the crash-window surface this file already reasons about, to
+ *      save bandwidth on a retry path, on a service that has never once accepted a request.
  */
 async function scopeRequest(
   deps: ScopeDeps,
   method: "GET" | "POST",
   path: string,
-  body?: unknown
+  body?: unknown,
+  timeoutMs: number = deps.timeouts.requestMs
 ): Promise<{ status: number; json: Record<string, any> }> {
-  const response = await deps.fetchImpl(`${deps.baseUrl}${path}`, {
-    method,
-    headers: {
-      "content-type": "application/json",
-      authorization: `Bearer ${deps.token}`,
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  const text = await response.text();
-  let json: Record<string, any> = {};
-  if (text) {
-    try {
-      json = JSON.parse(text);
-    } catch {
-      json = { raw: text };
+  // The signal covers the BODY read as well as the headers: `fetch` resolves the moment response headers
+  // arrive, so bounding only the call would still leave a stalled `response.text()` hanging the poller.
+  const signal = AbortSignal.timeout(timeoutMs);
+  try {
+    const response = await deps.fetchImpl(`${deps.baseUrl}${path}`, {
+      method,
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${deps.token}`,
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal,
+    });
+    const text = await response.text();
+    let json: Record<string, any> = {};
+    if (text) {
+      try {
+        json = JSON.parse(text);
+      } catch {
+        json = { raw: text };
+      }
     }
+    return { status: response.status, json };
+  } catch (err) {
+    // Re-shaped ONLY when our own signal fired. Anything else (a connect refusal, a socket reset) has to
+    // reach the caller unchanged, because its error CODE is what the created/not-created classification
+    // reads. Method + path only in the message — never the headers, never the body.
+    if (signal.aborted) {
+      throw new ScopeRequestTimeoutError(
+        `TROCK Scope did not answer within ${timeoutMs}ms for ${method} ${path}, so the request was abandoned.`
+      );
+    }
+    throw err;
   }
-  return { status: response.status, json };
 }
 
 /**
@@ -238,6 +311,12 @@ function collectNetworkErrorCodes(err: unknown, depth = 0): string[] {
  *  a mixed AggregateError where one address refused and another died mid-flight is still ambiguous, and
  *  ambiguity has to fall on the "we don't know" side. An error carrying no code at all is also unknown. */
 function isNeverDeliveredNetworkFailure(err: unknown): boolean {
+  // A timeout WE imposed is the ambiguous case by definition: the connection was established, the request
+  // was written, and all we know is that no answer came back before we stopped waiting — TROCK Scope may
+  // well have committed the insert and lost the response. Checked explicitly rather than left to fall out
+  // of "carries no error code", so that hanging a `cause` off ScopeRequestTimeoutError later cannot
+  // quietly reclassify a timed-out create as "nothing was created" and unblock a duplicate.
+  if (err instanceof ScopeRequestTimeoutError) return false;
   const codes = collectNetworkErrorCodes(err);
   return codes.length > 0 && codes.every((code) => NEVER_DELIVERED_ERROR_CODES.has(code));
 }
@@ -330,12 +409,34 @@ async function beginClip(deps: ScopeDeps, walkthroughId: string, artifact: JobAr
   if (status !== 201) {
     throw new Error(`TROCK Scope begin-clip failed for artifact ${artifact.idempotencyKey}: ${status} ${JSON.stringify(json)}`);
   }
-  return {
-    clipId: json.clipId,
-    uploadId: json.uploadId,
-    partSize: json.partSize,
-    partCount: json.partCount,
-  };
+  // A 201 is not the same claim as "a usable plan". Every field below is load-bearing arithmetic for the
+  // rest of this upload, and each one fails SILENTLY rather than loudly if it is taken on faith:
+  //   • partCount absent  → `Array.from({ length: undefined })` is EMPTY, so the part loop runs zero
+  //     times and `/complete` goes out with `parts: []` — a finished clip that received no bytes, and a
+  //     job that reports success.
+  //   • partSize absent   → every byte range is NaN, `expectedBytes <= 0` is false for NaN, and the R2
+  //     read is asked for `bytes=NaN-NaN`.
+  //   • clipId/uploadId not strings → spliced straight into the clip URL path, where "null" or "7"
+  //     addresses some other clip (or nothing) instead of failing here.
+  // The plan is TROCK Scope's own output, so this should never fire — which is exactly why it must not be
+  // the thing standing between a truncated upload and a green job.
+  const { clipId, uploadId, partSize, partCount } = json ?? {};
+  if (
+    typeof clipId !== "string" ||
+    !clipId ||
+    typeof uploadId !== "string" ||
+    !uploadId ||
+    !Number.isInteger(partSize) ||
+    partSize <= 0 ||
+    !Number.isInteger(partCount) ||
+    partCount <= 0
+  ) {
+    throw new Error(
+      `TROCK Scope begin-clip returned an unusable upload plan for artifact ${artifact.idempotencyKey}: ` +
+        `${JSON.stringify(json)}`
+    );
+  }
+  return { clipId, uploadId, partSize, partCount };
 }
 
 async function signParts(
@@ -353,7 +454,31 @@ async function signParts(
     if (status !== 200 || !Array.isArray(json.parts)) {
       throw new Error(`TROCK Scope sign-parts failed for clip ${clipId}: ${status} ${JSON.stringify(json)}`);
     }
-    signed.push(...json.parts);
+    // A part this batch asked for and did not get back is NOT visible downstream: the caller uploads the
+    // parts it was handed and `/complete` declares the multipart finished from exactly those, so S3
+    // assembles a clip missing its middle and the job reports success. Reconciling the response against
+    // the REQUEST here names the offending part number while the batch is still in hand — the alternative
+    // is a "part N failed" style error minutes and gigabytes later, or no error at all.
+    const urlByPartNumber = new Map<number, string>();
+    for (const entry of json.parts) {
+      if (!entry || typeof entry !== "object") continue;
+      const { partNumber, url } = entry as { partNumber?: unknown; url?: unknown };
+      if (typeof partNumber === "number" && typeof url === "string" && url) {
+        urlByPartNumber.set(partNumber, url);
+      }
+    }
+    const missing = batch.filter((partNumber) => !urlByPartNumber.has(partNumber));
+    if (missing.length > 0) {
+      throw new Error(
+        `TROCK Scope did not sign part${missing.length === 1 ? "" : "s"} ${missing.join(", ")} of clip ` +
+          `${clipId} (asked for ${batch.length} part${batch.length === 1 ? "" : "s"} starting at ${batch[0]}).`
+      );
+    }
+    // Pushed in REQUEST order, and only the parts requested: response order is not guaranteed, and an
+    // unsolicited extra part number would address a byte range outside the plan we sized the reads from.
+    for (const partNumber of batch) {
+      signed.push({ partNumber, url: urlByPartNumber.get(partNumber)! });
+    }
   }
   return signed;
 }
@@ -364,9 +489,16 @@ async function completeClip(
   clipId: string,
   parts: Array<{ partNumber: number; etag: string }>
 ): Promise<{ outcome: "uploaded" | "duplicate_bytes" }> {
-  const { status, json } = await scopeRequest(deps, "POST", `/api/walkthroughs/${walkthroughId}/clips/${clipId}/complete`, {
-    parts,
-  });
+  const { status, json } = await scopeRequest(
+    deps,
+    "POST",
+    `/api/walkthroughs/${walkthroughId}/clips/${clipId}/complete`,
+    { parts },
+    // Its own, much larger budget: this call is where TROCK Scope assembles the multipart object at R2 and
+    // checksums it end to end, so its duration tracks the clip's size. The control-plane ceiling would
+    // abort a perfectly healthy finalize of a multi-GB video.
+    deps.timeouts.completeMs
+  );
   if (status === 200) {
     return { outcome: "uploaded" };
   }
@@ -430,7 +562,27 @@ async function uploadClip(
     // and both `Buffer` and a fresh `Uint8Array` are typed `<ArrayBufferLike>` here, so neither satisfies
     // it structurally even though a Buffer is exactly what Node's fetch accepts (and sends) at runtime.
     // The cast is a type-level workaround only; no behavioral change.
-    const putResponse = await deps.fetchImpl(part.url, { method: "PUT", body: chunk as unknown as BodyInit });
+    // Bounded like every TROCK Scope call, and for the same reason — this is the longest-lived request of
+    // the whole forward and the likeliest to stall, and a hang here holds the dedicated poller's guard
+    // just as effectively. The URL is presigned, so it is deliberately NOT in the error text: it embeds a
+    // signature and carries no useful information a part number does not.
+    const putSignal = AbortSignal.timeout(deps.timeouts.partPutMs);
+    let putResponse: Response;
+    try {
+      putResponse = await deps.fetchImpl(part.url, {
+        method: "PUT",
+        body: chunk as unknown as BodyInit,
+        signal: putSignal,
+      });
+    } catch (err) {
+      if (putSignal.aborted) {
+        throw new ScopeRequestTimeoutError(
+          `R2 did not answer within ${deps.timeouts.partPutMs}ms for part ${part.partNumber} of clip ` +
+            `${begin.clipId} (artifact ${artifact.idempotencyKey}), so the upload was abandoned.`
+        );
+      }
+      throw err;
+    }
     if (!putResponse.ok) {
       throw new Error(
         `Uploading part ${part.partNumber} of clip ${begin.clipId} (artifact ${artifact.idempotencyKey}) failed: ${putResponse.status}`
@@ -451,39 +603,74 @@ async function uploadClip(
  * is a hard failure of the whole handler on purpose — if this write cannot land, the create must not
  * happen, because an unrecorded create is precisely the state this whole mechanism exists to prevent.
  * Losing an attempt is recoverable (the queue retries); an untracked remote walkthrough is not.
+ *
+ * "Cannot land" includes the quiet case: an UPDATE that matches zero rows SUCCEEDS. If the row this
+ * payload was delivered from no longer answers to the key below — hand-edited during a reconciliation,
+ * cleaned up, or delivered from anywhere but that row — the write returns without error and the marker
+ * exists nowhere, so the create would go out with the entire duplicate-prevention scheme silently
+ * disarmed. RETURNING turns that into the same hard failure as a broken connection.
+ *
+ * KEYED ON (walkId, dealId), never walkId alone. walkId is minted on the PHONE and nothing makes it
+ * unique across deals — the ingress side already had to be corrected for exactly this
+ * (findGlassesWalkthroughForwardJobState, and migration 0211's index on the pair). Keyed on walkId only,
+ * the same walk completed against two deals makes all three statements below hit BOTH job rows: the
+ * checkpoint hands deal B deal A's remote walkthrough id, so B's clips upload into A's walkthrough and
+ * the scope comes back attached to the wrong job; the marker writes make B dead-letter over a create it
+ * never sent, or clear B's marker under it and reopen the duplicate window.
  */
-async function markScopeCreatePending(db: Queryable, walkId: string, externalRef: string): Promise<void> {
-  await db.query(
+async function markScopeCreatePending(
+  db: Queryable,
+  walkId: string,
+  dealId: string,
+  externalRef: string
+): Promise<void> {
+  const result = await db.query(
     `UPDATE public.job_queue
         SET payload = jsonb_set(payload, '{scopeCreatePendingRef}', to_jsonb($1::text), true)
       WHERE job_type = $2
-        AND payload ->> 'walkId' = $3`,
-    [externalRef, GLASSES_WALKTHROUGH_FORWARD_JOB, walkId]
+        AND payload ->> 'walkId' = $3
+        AND payload ->> 'dealId' = $4
+      RETURNING id`,
+    [externalRef, GLASSES_WALKTHROUGH_FORWARD_JOB, walkId, dealId]
   );
+  if (!result?.rows?.length) {
+    throw new Error(
+      `Refusing to create a TROCK Scope walkthrough for walk ${walkId} on deal ${dealId}: the pending-create ` +
+        `marker UPDATE matched no job_queue row (job_type = ${GLASSES_WALKTHROUGH_FORWARD_JOB}), so the create ` +
+        `could not be recorded anywhere and a crash after it would be indistinguishable from one that never ran.`
+    );
+  }
 }
 
 /** Retract the intent marker once we have positive evidence no remote walkthrough was created, putting the
  *  row back in its "nothing has happened remotely yet" state so the queue's ordinary backoff applies. */
-async function clearScopeCreatePending(db: Queryable, walkId: string): Promise<void> {
+async function clearScopeCreatePending(db: Queryable, walkId: string, dealId: string): Promise<void> {
   await db.query(
     `UPDATE public.job_queue
         SET payload = payload - 'scopeCreatePendingRef'
       WHERE job_type = $1
-        AND payload ->> 'walkId' = $2`,
-    [GLASSES_WALKTHROUGH_FORWARD_JOB, walkId]
+        AND payload ->> 'walkId' = $2
+        AND payload ->> 'dealId' = $3`,
+    [GLASSES_WALKTHROUGH_FORWARD_JOB, walkId, dealId]
   );
 }
 
 /** Phase 2: the id lands and the intent marker is dropped in the SAME statement. Two statements would
  *  leave a window in which the payload carries both, and a reader — the next attempt, or a human reading
  *  the row after a dead letter — could not tell a settled create from an unresolved one. */
-async function checkpointScopeWalkthroughId(db: Queryable, walkId: string, scopeWalkthroughId: string): Promise<void> {
+async function checkpointScopeWalkthroughId(
+  db: Queryable,
+  walkId: string,
+  dealId: string,
+  scopeWalkthroughId: string
+): Promise<void> {
   await db.query(
     `UPDATE public.job_queue
         SET payload = jsonb_set(payload, '{scopeWalkthroughId}', to_jsonb($1::text), true) - 'scopeCreatePendingRef'
       WHERE job_type = $2
-        AND payload ->> 'walkId' = $3`,
-    [scopeWalkthroughId, GLASSES_WALKTHROUGH_FORWARD_JOB, walkId]
+        AND payload ->> 'walkId' = $3
+        AND payload ->> 'dealId' = $4`,
+    [scopeWalkthroughId, GLASSES_WALKTHROUGH_FORWARD_JOB, walkId, dealId]
   );
 }
 
@@ -517,6 +704,9 @@ export async function handleGlassesWalkthroughForward(
     baseUrl?: string;
     token?: string;
     downloadRange?: (r2Key: string, start: number, end: number) => Promise<Buffer>;
+    /** Injection seam for the request ceilings, so a test can exercise the abort path in milliseconds
+     *  rather than waiting out a production-sized budget. The queue never passes it. */
+    timeouts?: Partial<ScopeTimeouts>;
   } = {}
 ): Promise<JobHandlerResult> {
   const p = assertPayload(payload);
@@ -535,7 +725,12 @@ export async function handleGlassesWalkthroughForward(
     return deadJob("TROCK_SCOPE_SERVICE_TOKEN is not configured for glasses_walkthrough_forward.");
   }
 
-  const scopeDeps: ScopeDeps = { baseUrl: baseUrl.replace(/\/+$/, ""), token, fetchImpl };
+  const scopeDeps: ScopeDeps = {
+    baseUrl: baseUrl.replace(/\/+$/, ""),
+    token,
+    fetchImpl,
+    timeouts: { ...DEFAULT_SCOPE_TIMEOUTS, ...deps.timeouts },
+  };
   const downloadRange = deps.downloadRange ?? getObjectRangeBuffer;
 
   let scopeWalkthroughId = p.scopeWalkthroughId;
@@ -552,7 +747,7 @@ export async function handleGlassesWalkthroughForward(
     const externalRef = deriveScopeWalkthroughExternalRef(p.walkId);
     // Intent BEFORE action. Everything after this line is covered: if the process dies at ANY point up to
     // the checkpoint below, the redelivered payload carries the marker and the branch above takes over.
-    await markScopeCreatePending(db, p.walkId, externalRef);
+    await markScopeCreatePending(db, p.walkId, p.dealId, externalRef);
 
     let created: { id: string };
     try {
@@ -563,7 +758,7 @@ export async function handleGlassesWalkthroughForward(
         // letter. Best-effort by necessity: if THIS write also fails the marker survives, and the next
         // attempt dead-letters on a create that never happened. That is the fail-CLOSED direction — a
         // spurious dead letter costs a human one minute; a missed one costs a duplicate scope extraction.
-        await clearScopeCreatePending(db, p.walkId).catch((clearErr) => {
+        await clearScopeCreatePending(db, p.walkId, p.dealId).catch((clearErr) => {
           console.warn(
             `[Worker:glasses_walkthrough_forward] Could not retract the pending-create marker for walk ${p.walkId}; ` +
               `the next attempt will dead-letter for manual reconciliation`,
@@ -575,7 +770,7 @@ export async function handleGlassesWalkthroughForward(
     }
 
     scopeWalkthroughId = created.id;
-    await checkpointScopeWalkthroughId(db, p.walkId, scopeWalkthroughId);
+    await checkpointScopeWalkthroughId(db, p.walkId, p.dealId, scopeWalkthroughId);
   }
 
   for (const artifact of p.artifacts) {
@@ -718,9 +913,14 @@ export function buildGlassesWalkthroughForwardAlertEmail(input: GlassesWalkthrou
   const dealDisplay = input.dealLabel ?? `Deal ${input.dealId}`;
   const capturedAtText = formatCapturedAtForAlert(input.capturedAt);
   const immediateFailure = input.attempts < input.maxAttempts;
+  // The REAL attempt, not a hardcoded 1. Stopping before the budget is spent does not imply stopping on
+  // the first delivery: an unconfirmed-create dead letter (see buildUnconfirmedCreateDeadLetterMessage)
+  // lands here on whatever attempt first read the marker back, and the config-error paths land here on
+  // the first attempt AFTER a redeploy changed the environment. Printing "attempt 1" told the reader the
+  // one thing that made those two impossible to tell apart from job_queue's own numbers.
   const attemptsText = immediateFailure
-    ? `Failed immediately, without retrying (attempt 1 of ${input.maxAttempts}) — this is almost always a ` +
-      `deploy-config problem (TROCK Scope's URL or service token), not a transient outage.`
+    ? `Failed immediately, without retrying (attempt ${input.attempts} of ${input.maxAttempts}) — this is ` +
+      `almost always a deploy-config problem (TROCK Scope's URL or service token), not a transient outage.`
     : `Exhausted all ${input.attempts} of ${input.maxAttempts} retry attempts.`;
   const errorText = normalizeText(input.lastError) ?? "(no error message captured)";
   const artifactsText = `${input.artifactCount} artifact${input.artifactCount === 1 ? "" : "s"} filed`;
@@ -839,7 +1039,21 @@ export async function runGlassesWalkthroughForwardDeadLetterSweep(
   const logger = deps.logger ?? console;
   const limit = deps.limit ?? 25;
   const sendEmail = deps.sendEmail ?? sendSystemEmailWithMetadata;
-  const client: Queryable & { release?: () => void } = db.connect ? await db.connect() : db;
+  // Fail fast rather than degrade. The per-row work below is a transaction (BEGIN / claim UPDATE / send /
+  // COMMIT-or-ROLLBACK) whose entire safety argument — a throw anywhere rolls the 'claimed' marker back
+  // with it, so no row is ever stranded mid-claim — holds only if all four statements ride ONE connection.
+  // The old `db.connect ? … : db` fallback ran them through the pool's convenience `query`, which is free
+  // to pick a different connection per statement: the BEGIN opens a transaction on a connection nothing
+  // else touches, the COMMIT/ROLLBACK lands somewhere else entirely, and the claim is neither atomic with
+  // the send nor undone by its failure. An adapter that cannot check out a connection cannot run this
+  // sweep at all, and saying so beats silently running it wrong.
+  if (typeof db.connect !== "function") {
+    throw new Error(
+      "runGlassesWalkthroughForwardDeadLetterSweep needs a pool that can check out a single connection " +
+        "(db.connect): its per-row claim and send are one transaction, which arbitrary pooled connections cannot honour."
+    );
+  }
+  const client = await db.connect();
   let handled = 0;
 
   try {
@@ -959,8 +1173,6 @@ export async function runGlassesWalkthroughForwardDeadLetterSweep(
 
     return handled;
   } finally {
-    if ("release" in client && typeof client.release === "function") {
-      client.release();
-    }
+    client.release();
   }
 }

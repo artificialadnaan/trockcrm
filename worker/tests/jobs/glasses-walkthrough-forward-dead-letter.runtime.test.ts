@@ -60,6 +60,16 @@ describe("buildGlassesWalkthroughForwardAlertEmail", () => {
     expect(exhausted.text).toContain("Exhausted all 10 of 10 retry attempts");
   });
 
+  it("names the attempt the job stopped on — stopping early is not the same as stopping first", () => {
+    // "Attempt < max" covers two different stories: a config error that never got off the ground, and a
+    // deadJob(...) returned mid-life (the unconfirmed-create stop, which lands on whichever attempt first
+    // read the pending marker back). A fixed "attempt 1" reports the second as the first and quietly
+    // disagrees with the job_queue row the reader is looking at.
+    const stoppedLate = buildGlassesWalkthroughForwardAlertEmail(baseEmailInput({ attempts: 4, maxAttempts: 10 }));
+    expect(stoppedLate.text).toContain("(attempt 4 of 10)");
+    expect(stoppedLate.text).not.toContain("attempt 1 of 10");
+  });
+
   it("never mentions or embeds the TROCK Scope service token value, even when it is set in the environment", () => {
     // The builder takes no env/token input at all — this asserts the guarantee structurally by construction
     // (there is no code path that could interpolate a token this function was never given), and pins the
@@ -171,8 +181,16 @@ describe("runGlassesWalkthroughForwardDeadLetterSweep (real SQL)", () => {
     return db;
   }
 
+  /**
+   * PGlite is a single embedded connection, so `connect` hands back the same query surface — but it must
+   * BE there: the sweep now refuses to run without it rather than falling back to `db.query`, because the
+   * per-row BEGIN / claim / send / COMMIT is only a transaction if one connection carries all four. Every
+   * case in this file used to take that fallback, which meant none of them were exercising the sweep's
+   * real connection contract.
+   */
   function makeClient(db: PGlite) {
-    return { query: (sql: string, params?: unknown[]) => db.query(sql, params as never[]) as any };
+    const queryable = { query: (sql: string, params?: unknown[]) => db.query(sql, params as never[]) as any };
+    return { ...queryable, connect: async () => ({ ...queryable, release: () => {} }) };
   }
 
   it("alerts exactly once per dead-lettered job, covering both the config-error and exhausted-retries paths", async () => {
@@ -255,6 +273,83 @@ describe("runGlassesWalkthroughForwardDeadLetterSweep (real SQL)", () => {
     const jobs = (await db.query(`SELECT payload->>'alertSent' AS alerted FROM public.job_queue ORDER BY id`))
       .rows as any[];
     expect(jobs.map((j) => j.alerted)).toEqual([null, null]);
+  });
+
+  it("refuses to run at all against an adapter that cannot check out a connection", async () => {
+    // The sweep's claim marker is only safe because a throw between BEGIN and COMMIT rolls it back with
+    // everything else. Handed a bare `query`, the pool is free to route each statement to a different
+    // connection — the BEGIN opens a transaction nothing else joins, the ROLLBACK undoes nothing, and the
+    // claim survives a failed send as a permanently stranded 'claimed'. Silently doing that is worse than
+    // not running: it looks like it worked.
+    const db = await seed();
+    const bareQueryOnly = { query: (sql: string, params?: unknown[]) => db.query(sql, params as never[]) as any };
+    const sendEmail = vi.fn(async () => ({ success: true, messageId: "m1" }));
+
+    await expect(
+      runGlassesWalkthroughForwardDeadLetterSweep({
+        db: bareQueryOnly as any,
+        sendEmail,
+        env: { GLASSES_WALKTHROUGH_FORWARD_EMAIL_RECIPIENTS: "ops@x.com" } as any,
+      }),
+    ).rejects.toThrow(/single connection/);
+
+    expect(sendEmail).not.toHaveBeenCalled();
+  });
+
+  it("recovers a row a crash left stranded at alertSent='claimed' instead of never alerting on it", async () => {
+    // GUARD on the tri-state marker's reason for existing. 'claimed' is written INSIDE the transaction, so
+    // an ordinary failure rolls it back — but a worker killed between COMMIT of the claim and the send
+    // (SIGKILL, an OOM, a Railway redeploy mid-sweep) can leave it committed with no email ever sent. If
+    // the candidate query treated 'claimed' as "someone else has this", that walk's alert would be lost
+    // permanently and the only sign would be silence.
+    const db = await seed();
+    await db.query(
+      `UPDATE public.job_queue SET payload = jsonb_set(payload, '{alertSent}', '"claimed"'::jsonb, true) WHERE id = 1`,
+    );
+    const client = makeClient(db);
+    const sendEmail = vi.fn(async () => ({ success: true, messageId: "m1" }));
+
+    const handled = await runGlassesWalkthroughForwardDeadLetterSweep({
+      db: client as any,
+      sendEmail,
+      env: { GLASSES_WALKTHROUGH_FORWARD_EMAIL_RECIPIENTS: "ops@x.com" } as any,
+    });
+
+    expect(handled).toBe(2); // the stranded row AND the untouched one
+    expect(sendEmail).toHaveBeenCalledTimes(2);
+    const jobs = (await db.query(`SELECT payload->>'alertSent' AS alerted FROM public.job_queue ORDER BY id`))
+      .rows as any[];
+    expect(jobs.map((j) => j.alerted)).toEqual(["true", "true"]);
+  });
+
+  it("reports the attempt the job actually STOPPED on, not a hardcoded first attempt", async () => {
+    // An unconfirmed-create dead letter is returned by deadJob(...) on whichever attempt first read the
+    // pending marker back — attempts < max_attempts, exactly like a config error, but emphatically not
+    // attempt 1. Printing "attempt 1 of 10" over a row whose attempts column says 4 makes the email
+    // contradict the queue, and it is precisely the case where a reader needs to know how much of the
+    // retry budget went by before the job gave up.
+    const db = await seed();
+    await db.query(
+      `INSERT INTO public.job_queue (job_type, payload, office_id, status, last_error, attempts, max_attempts)
+       VALUES ('glasses_walkthrough_forward', $1::jsonb, $2, 'dead', $3, 4, 10)`,
+      [
+        `{"walkId":"walk-4","dealId":"${DEAL_CONFIG_ERROR}","title":"Unconfirmed create walk","officeSlug":"test","artifacts":${artifactsJson(1)}}`,
+        OFFICE,
+        "A TROCK Scope walkthrough create was already sent for walk walk-4 and this job never learned whether it succeeded.",
+      ],
+    );
+    const sendEmail = vi.fn(async () => ({ success: true, messageId: "m1" }));
+
+    await runGlassesWalkthroughForwardDeadLetterSweep({
+      db: makeClient(db) as any,
+      sendEmail,
+      env: { GLASSES_WALKTHROUGH_FORWARD_EMAIL_RECIPIENTS: "ops@x.com" } as any,
+    });
+
+    const call = sendEmail.mock.calls.find((c) => String(c[1]).includes("Unconfirmed create walk"));
+    expect(call).toBeDefined();
+    expect(String(call![2])).toContain("(attempt 4 of 10)");
+    expect(String(call![2])).not.toContain("attempt 1 of 10");
   });
 
   it("never lets a mail-provider failure escape the sweep, and leaves that job retryable for the next tick", async () => {

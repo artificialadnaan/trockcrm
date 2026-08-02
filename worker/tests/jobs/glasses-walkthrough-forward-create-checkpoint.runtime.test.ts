@@ -12,10 +12,13 @@ import { handleGlassesWalkthroughForward } from "../../src/jobs/glasses-walkthro
 const SCOPE_BASE_URL = "https://scope.example.com";
 const CREATE_URL = `${SCOPE_BASE_URL}/api/walkthroughs`;
 
-function payloadJson() {
+const DEAL_A = "00000000-0000-0000-0000-0000000000d1";
+const DEAL_B = "00000000-0000-0000-0000-0000000000d2";
+
+function payloadJson(dealId: string = DEAL_A) {
   return JSON.stringify({
     walkId: "walk-1",
-    dealId: "00000000-0000-0000-0000-0000000000d1",
+    dealId,
     projectId: null,
     title: "North wing walkthrough",
     siteLabel: "Building A",
@@ -82,15 +85,22 @@ describe("glasses_walkthrough_forward create checkpoint (real SQL)", () => {
   async function seed() {
     const db = new PGlite();
     pg = db;
+    // DDL and seed row are separate statements so the payload can be BOUND rather than interpolated.
+    // Splicing JSON into SQL text puts every quote and backslash in the fixture one edit away from either
+    // a syntax error or a silently different row — and a seed that lies is worse than no seed at all in a
+    // suite whose entire purpose is asserting on what really landed in the column.
     await db.exec(`
       CREATE TABLE public.job_queue (
         id bigserial PRIMARY KEY, job_type text NOT NULL, payload jsonb NOT NULL, office_id uuid,
         status text NOT NULL, last_error text, attempts integer NOT NULL DEFAULT 0,
         max_attempts integer NOT NULL DEFAULT 10, created_at timestamptz NOT NULL DEFAULT now()
       );
-      INSERT INTO public.job_queue (job_type, payload, status)
-      VALUES ('glasses_walkthrough_forward', '${payloadJson()}'::jsonb, 'processing');
     `);
+    await db.query(
+      `INSERT INTO public.job_queue (job_type, payload, status)
+       VALUES ('glasses_walkthrough_forward', $1::jsonb, 'processing')`,
+      [payloadJson()],
+    );
     return db;
   }
 
@@ -105,8 +115,8 @@ describe("glasses_walkthrough_forward create checkpoint (real SQL)", () => {
     };
   }
 
-  async function storedPayload(db: PGlite): Promise<Record<string, any>> {
-    const result = (await db.query("SELECT payload FROM public.job_queue WHERE id = 1")) as any;
+  async function storedPayload(db: PGlite, id = 1): Promise<Record<string, any>> {
+    const result = (await db.query("SELECT payload FROM public.job_queue WHERE id = $1", [id])) as any;
     return result.rows[0].payload;
   }
 
@@ -131,6 +141,53 @@ describe("glasses_walkthrough_forward create checkpoint (real SQL)", () => {
     // The rest of the payload has to survive the jsonb_set/`-` composition untouched.
     expect(payload.walkId).toBe("walk-1");
     expect(payload.artifacts).toHaveLength(1);
+  });
+
+  it("keys every payload write on (walkId, dealId) — a walkId alone belongs to no single walk", async () => {
+    // walkId is minted on the PHONE and nothing makes it unique across deals, which the ingress side
+    // already had to fix (migration 0211 indexes the pair, and findGlassesWalkthroughForwardJobState
+    // matches on it). These three statements are the other half of that: keyed on walkId alone, the same
+    // walk completed against two deals makes each of these UPDATEs hit BOTH rows. The id checkpoint is the
+    // one that costs money — deal B's payload inherits deal A's remote walkthrough id, so B's clips upload
+    // into A's walkthrough and A's scope comes back carrying B's site. The marker writes are only slightly
+    // kinder: B dead-letters on a create it never sent, or has its own marker cleared under it.
+    const db = await seed();
+    await db.query(
+      `INSERT INTO public.job_queue (job_type, payload, status)
+       VALUES ('glasses_walkthrough_forward', $1::jsonb, 'pending')`,
+      [payloadJson(DEAL_B)],
+    );
+
+    const { fetchImpl } = makeScopeFetch();
+    await handleGlassesWalkthroughForward(await storedPayload(db), null, deps(makeClient(db), fetchImpl));
+
+    // Deal A settled…
+    const dealA = await storedPayload(db, 1);
+    expect(dealA.scopeWalkthroughId).toBe("8f1c0a6e-1111-4222-8333-444455556666");
+    // …and deal B's row, which shares only a walkId, is untouched.
+    const dealB = await storedPayload(db, 2);
+    expect(dealB.dealId).toBe(DEAL_B);
+    expect(dealB.scopeWalkthroughId).toBeUndefined();
+    expect("scopeCreatePendingRef" in dealB).toBe(false);
+  });
+
+  it("refuses to create when the marker UPDATE really does match no row", async () => {
+    // The unit suite can only assert that the handler believes a fake's row count. This runs the actual
+    // `UPDATE … RETURNING id` against Postgres with a walkId no row carries — the shape of a payload
+    // delivered from somewhere other than the row it names (hand-edited mid-reconciliation, or a row a
+    // cleanup removed). Postgres reports SUCCESS and zero rows, which is why RETURNING is the only thing
+    // that can tell the two apart.
+    const db = await seed();
+    const { fetchImpl, calls } = makeScopeFetch();
+    const payload = { ...(await storedPayload(db)), walkId: "walk-that-no-row-carries" };
+
+    await expect(
+      handleGlassesWalkthroughForward(payload, null, deps(makeClient(db), fetchImpl)),
+    ).rejects.toThrow(/matched no job_queue row/);
+
+    expect(calls).toHaveLength(0);
+    // And the real row is untouched — no marker was written to some other walk's payload.
+    expect("scopeCreatePendingRef" in (await storedPayload(db))).toBe(false);
   });
 
   it("survives a crash between the create and the checkpoint without creating a second walkthrough", async () => {
