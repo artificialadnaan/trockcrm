@@ -19,6 +19,7 @@ import {
   needsCompletion,
   outstandingArtifacts,
   removeQueuedWalk,
+  resetTerminalWalkForRetry,
   sanitizeWalkOwnerKey,
   toQueuedWalk,
   upsertQueuedWalk,
@@ -396,6 +397,58 @@ describe("isWalkDrainable / isWalkTerminal", () => {
     const walk = queuedWalk({ artifacts: [] });
     expect(isWalkDrainable(walk)).toBe(false);
     expect(isWalkTerminal(walk)).toBe(false);
+  });
+});
+
+// ── resetTerminalWalkForRetry (the Fix 2 retry escape hatch) ───────────────────────────────────────
+
+describe("resetTerminalWalkForRetry", () => {
+  it("is a no-op for a walk that isn't terminal — returns the SAME reference", () => {
+    const walk = queuedWalk({ artifacts: [artifact({ attempts: 1 })] });
+    expect(isWalkTerminal(walk)).toBe(false);
+    expect(resetTerminalWalkForRetry(walk)).toBe(walk);
+  });
+
+  it("resets a permanently-failed artifact's attempts to 0, making the walk drainable again", () => {
+    const walk = queuedWalk({
+      artifacts: [
+        artifact({ idempotencyKey: "video", kind: "video", order: 0, putAt: 111 }),
+        artifact({
+          idempotencyKey: "photo-0",
+          kind: "photo",
+          order: 1,
+          attempts: MAX_WALK_UPLOAD_ATTEMPTS,
+        }),
+      ],
+    });
+    expect(isWalkTerminal(walk)).toBe(true);
+
+    const reset = resetTerminalWalkForRetry(walk);
+    expect(isWalkTerminal(reset)).toBe(false);
+    expect(isWalkDrainable(reset)).toBe(true);
+    // The already-confirmed video artifact is untouched — never re-uploaded.
+    expect(reset.artifacts[0]).toMatchObject({ idempotencyKey: "video", putAt: 111 });
+    expect(reset.artifacts[1]).toMatchObject({ idempotencyKey: "photo-0", attempts: 0 });
+    expect(reset.artifacts[1]!.putAt).toBeUndefined();
+  });
+
+  it("resets a permanently-failed completion call's attempt counter, leaving artifacts (already all put) untouched", () => {
+    const walk = queuedWalk({
+      artifacts: [artifact({ putAt: 1, sizeBytes: 4096 })],
+      completionAttempts: MAX_WALK_COMPLETION_ATTEMPTS,
+    });
+    expect(isWalkTerminal(walk)).toBe(true);
+
+    const reset = resetTerminalWalkForRetry(walk);
+    expect(isWalkTerminal(reset)).toBe(false);
+    expect(needsCompletion(reset)).toBe(true);
+    expect(reset.completionAttempts).toBe(0);
+    expect(reset.artifacts[0]).toMatchObject({ putAt: 1, sizeBytes: 4096 });
+  });
+
+  it("never touches a walk that's actually completed (not terminal by definition)", () => {
+    const walk = queuedWalk({ artifacts: [artifact({ putAt: 1 })], completedAt: 999 });
+    expect(resetTerminalWalkForRetry(walk)).toBe(walk);
   });
 });
 

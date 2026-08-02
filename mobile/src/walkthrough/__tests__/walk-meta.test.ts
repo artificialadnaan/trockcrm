@@ -43,4 +43,14 @@ describe("deriveWalkSiteLabel", () => {
   it("treats a whitespace-only address as unknown", () => {
     expect(deriveWalkSiteLabel("   ")).toBe("");
   });
+
+  // property_address is unrestricted free text (not validated at deal-creation), so an imported
+  // record can exceed the server's cap even though a normal address never gets close. Without this
+  // clamp, a long address would strand an otherwise fully-uploaded walk: the completion call would
+  // permanently 400 on siteLabel after every artifact already made it to R2.
+  it("clamps an unreasonably long address so the server's siteLabel cap can never be exceeded", () => {
+    const longAddress = "1 Some Very Long Rd, ".repeat(30);
+    const label = deriveWalkSiteLabel(longAddress);
+    expect(label.length).toBeLessThanOrEqual(300);
+  });
 });

@@ -66,6 +66,7 @@ import {
   getFailedWalkCount,
   getQueuedWalks,
   getSchedulableWalkCount,
+  retryFailedWalks,
   type WalkArtifactUploadUrlResponse,
   type WalkCompletionResponse,
   type WalkQueueMeta,
@@ -395,5 +396,50 @@ describe("getSchedulableWalkCount / getFailedWalkCount", () => {
     await enqueueWalk(OWNER, "walk-1", completedWalk(), META, 1000);
     expect(await getSchedulableWalkCount(OWNER)).toBe(1);
     expect(await getFailedWalkCount(OWNER)).toBe(0);
+  });
+});
+
+describe("retryFailedWalks", () => {
+  // The end-to-end Fix 2 path: a walk goes terminal (excluded from getSchedulableWalkCount, so
+  // the background task will never touch it again — this is the exact bug getFailedWalkCount had
+  // no call site to surface), retryFailedWalks resets it, and the NEXT drain actually ships it.
+  it("resets a terminal walk so a subsequent drain picks it back up and completes it", async () => {
+    const walk = completedWalk();
+    seedFiles([VIDEO_URI, PHOTO_URI]);
+    await enqueueWalk(OWNER, "walk-1", walk, META, 1000);
+    uploadAsyncMock.mockResolvedValue({ status: 200 });
+    const failingClient = stubClient({
+      completeWalk: jest.fn(async () => {
+        throw new Error("500");
+      }),
+    });
+
+    for (let i = 0; i < 5; i++) {
+      await drainWalkQueue(OWNER, fetcher, failingClient);
+    }
+    expect(await getFailedWalkCount(OWNER)).toBe(1);
+    expect(await getSchedulableWalkCount(OWNER)).toBe(0);
+
+    const resetCount = await retryFailedWalks(OWNER);
+    expect(resetCount).toBe(1);
+    // The walk is drainable again, and files already PUT were never re-uploaded (putAt survives).
+    expect(await getFailedWalkCount(OWNER)).toBe(0);
+    expect(await getSchedulableWalkCount(OWNER)).toBe(1);
+
+    const workingClient = stubClient(); // completion succeeds this time
+    const requestCallsBeforeRetry = (workingClient.requestUploadUrl as jest.Mock).mock.calls.length;
+    const summary = await drainWalkQueue(OWNER, fetcher, workingClient);
+
+    expect(summary.completed).toBe(1);
+    expect(summary.remainingWalks).toBe(0);
+    // Neither artifact was re-PUT — both were already confirmed in R2 before the retry.
+    expect((workingClient.requestUploadUrl as jest.Mock).mock.calls.length).toBe(requestCallsBeforeRetry);
+    expect(fs.__store.has(VIDEO_URI)).toBe(false);
+    expect(fs.__store.has(PHOTO_URI)).toBe(false);
+  });
+
+  it("is a no-op when nothing is terminal", async () => {
+    await enqueueWalk(OWNER, "walk-1", completedWalk(), META, 1000);
+    expect(await retryFailedWalks(OWNER)).toBe(0);
   });
 });

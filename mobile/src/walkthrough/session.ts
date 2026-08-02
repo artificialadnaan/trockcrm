@@ -54,7 +54,18 @@ export type WalkEvent =
    * still needs somewhere for a future audio-only fallback to land.
    */
   | { type: "finalized"; audioUri: string | null; videoUri?: string | null }
-  | { type: "failed"; reason: string };
+  | { type: "failed"; reason: string }
+  /**
+   * Snaps the walk back to a fresh `idle` for (dealId, projectId), discarding whatever walk —
+   * complete, failed, or otherwise — was here before. The one event allowed to escape TERMINAL
+   * absorption: walk.tsx is a hidden `Tabs.Screen` that never unmounts on navigation, so without
+   * this a walk that finished would sit here forever, its terminal state absorbing every future
+   * "starting" event. Unlike every other event, this is not something native reports — it is
+   * dispatched by useWalk.ts when the target a walk would attach to changes (or the screen wants a
+   * clean slate), so there is no "spurious/duplicated" case to guard against the way there is for a
+   * native callback.
+   */
+  | { type: "reset"; dealId: string; projectId: string | null };
 
 export function initialWalk(dealId: string, projectId: string | null): Walk {
   return {
@@ -71,19 +82,60 @@ export function initialWalk(dealId: string, projectId: string | null): Walk {
   };
 }
 
-/** Stills are only meaningful while the walk is actually running. */
+/** Stills are only meaningful while the walk is actually running. Gates whether a NEW capture may
+ *  be REQUESTED — see `canAcceptStill` for whether an already-in-flight one may still land. */
 export function canCapture(walk: Walk): boolean {
   return walk.state === "recording";
+}
+
+/**
+ * Whether a still EVENT may still attach to this walk. Wider than `canCapture` on purpose: a still
+ * requested just before "end walk" is asynchronous (`capturePhoto` on the glasses, `onStill` here),
+ * so it can resolve after the reducer has already moved to "finalizing". Native keeps its photo
+ * listener alive through finalization and writes the JPEG to disk either way — refusing the event
+ * here would not stop the capture, it would only orphan the file (present on disk, absent from the
+ * manifest). Excludes the terminal states deliberately: a still arriving after "complete"/"failed"
+ * has genuinely nowhere to go — the walk has already been handed to the uploader.
+ */
+export function canAcceptStill(walk: Walk): boolean {
+  return walk.state === "recording" || walk.state === "finalizing";
 }
 
 export function artifactCount(walk: Walk): number {
   return walk.stills.length;
 }
 
-/** Terminal states absorb every further event, so a late native callback cannot revive a walk. */
+/**
+ * Hard cap the server enforces on a completed walk's total artifact count
+ * (glasses-walkthrough-service.ts's `MAX_GLASSES_WALKTHROUGH_ARTIFACTS_PER_WALK`). Mirrored here
+ * rather than imported — the mobile app has no shared package with the server — so if the server's
+ * cap ever moves, this needs updating with it. Every walk that reaches "recording" always carries a
+ * video artifact, so in practice this caps how many STILLS can be captured, not the raw number.
+ */
+export const MAX_WALK_ARTIFACTS = 200;
+
+/**
+ * Whether ONE MORE still could be captured right now without the walk's eventual completion
+ * payload — video, plus audio if that dead-but-modeled path is ever revived, plus every still —
+ * exceeding MAX_WALK_ARTIFACTS. Layered on top of `canCapture` (the state gate): this is the COUNT
+ * gate, and it is what the capture control itself should check before requesting a new still, so
+ * the walk never accumulates more than the server will accept at completion.
+ */
+export function canCaptureMore(walk: Walk): boolean {
+  if (!canCapture(walk)) return false;
+  const projected =
+    walk.stills.length + 1 /* the still being requested */ +
+    (walk.videoUri ? 1 : 0) +
+    (walk.audioUri ? 1 : 0);
+  return projected <= MAX_WALK_ARTIFACTS;
+}
+
+/** Terminal states absorb every further event, so a late native callback cannot revive a walk.
+ *  A "reset" event is the sole exception — see WalkEvent's `reset` case. */
 const TERMINAL: ReadonlySet<WalkState> = new Set<WalkState>(["complete", "failed"]);
 
 export function reduceWalk(walk: Walk, event: WalkEvent): Walk {
+  if (event.type === "reset") return initialWalk(event.dealId, event.projectId);
   if (TERMINAL.has(walk.state)) return walk;
 
   switch (event.type) {
@@ -100,9 +152,9 @@ export function reduceWalk(walk: Walk, event: WalkEvent): Walk {
 
     case "still":
       // Guarded rather than trusted: the native photo publisher is asynchronous, so a still
-      // requested just before "end walk" can land after it. Attaching it to a walk already
-      // handed to the uploader would be evidence in a place nothing will look.
-      return canCapture(walk)
+      // requested just before "end walk" can land after it. canAcceptStill (not canCapture) is
+      // deliberate here — see its doc comment for why "finalizing" still accepts one.
+      return canAcceptStill(walk)
         ? {
             ...walk,
             stills: [...walk.stills, { uri: event.uri, at: event.at, source: event.source }],

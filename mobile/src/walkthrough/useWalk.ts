@@ -7,7 +7,7 @@
  * No JSX here on purpose: this file should be testable without mounting anything visual.
  */
 import { useCallback, useEffect, useReducer, useState } from "react";
-import { artifactCount, canCapture, initialWalk, reduceWalk, type Walk } from "./session";
+import { artifactCount, canCapture, canCaptureMore, initialWalk, reduceWalk, type Walk } from "./session";
 import { isAvailable, onRecorderError, onStill, Recorder } from "./native";
 
 /**
@@ -40,14 +40,52 @@ export type UseWalkResult = {
   start: () => Promise<void>;
   capture: () => Promise<void>;
   end: () => Promise<void>;
+  /**
+   * Snap the walk back to a fresh `idle` for the CURRENT (dealId, projectId), discarding whatever
+   * walk — complete, failed, or otherwise — was held before. See WalkEvent's `reset` case for why
+   * this exists at all: walk.tsx is a hidden `Tabs.Screen` that never unmounts, so nothing else
+   * would ever get this hook out of a terminal state. Callers should only invoke this when
+   * `walk.state` is already terminal (complete/failed) — resetting an active walk would silently
+   * discard an in-progress site visit.
+   */
+  reset: () => void;
   stillCount: number;
   bridgeAvailable: boolean;
+  /** Whether `capture()` will actually request a still right now — false while not recording AND
+   *  once the walk is already at MAX_WALK_ARTIFACTS (session.ts's canCaptureMore). Drives the
+   *  CAPTURE control's disabled state. */
+  captureEnabled: boolean;
+  /** True exactly when the walk IS recording but capturing again would exceed the server's
+   *  artifact cap — distinct from merely "not recording," so the screen can explain WHY the
+   *  (still-recording) control just went dark instead of leaving a silently disabled button. */
+  atCaptureLimit: boolean;
 };
 
 export function useWalk(dealId: string, projectId: string | null): UseWalkResult {
   const [walk, dispatch] = useReducer(reduceWalk, undefined, () => initialWalk(dealId, projectId));
   const [error, setError] = useState<string | null>(null);
   const [walkId, setWalkId] = useState<string | null>(null);
+
+  const reset = useCallback(() => {
+    dispatch({ type: "reset", dealId, projectId });
+    setError(null);
+    setWalkId(null);
+  }, [dealId, projectId]);
+
+  // Auto-reset whenever the TARGET a walk would attach to changes — belt-and-suspenders alongside
+  // walk.tsx's own focus-triggered reset() call: a caller that re-renders this hook against a
+  // DIFFERENT deal must never keep the previous deal's dealId/videoUri/stills sitting in `walk`,
+  // even if a focus transition never fires. Done during render (React's documented "adjusting
+  // state when a prop changes" pattern), not in a useEffect, so a changed identity is never shown
+  // — even for one frame — with the OLD walk's state.
+  const identity = `${dealId}:${projectId ?? ""}`;
+  const [resetIdentity, setResetIdentity] = useState(identity);
+  if (resetIdentity !== identity) {
+    setResetIdentity(identity);
+    dispatch({ type: "reset", dealId, projectId });
+    setError(null);
+    setWalkId(null);
+  }
 
   useEffect(() => {
     const offStill = onStill((still) => {
@@ -90,7 +128,10 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
   }, []);
 
   const capture = useCallback(async () => {
-    if (!canCapture(walk)) return;
+    // canCaptureMore, not canCapture: also refuses once capturing would push the walk past the
+    // server's artifact cap. The screen disables the control at that point too — this is the
+    // defensive backstop, not the primary UX (see walk.tsx's captureEnabled/atCaptureLimit).
+    if (!canCaptureMore(walk)) return;
     try {
       const { requested } = await Recorder.captureStill();
       if (!requested) {
@@ -132,7 +173,10 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
     start,
     capture,
     end,
+    reset,
     stillCount: artifactCount(walk),
     bridgeAvailable: isAvailable,
+    captureEnabled: canCaptureMore(walk),
+    atCaptureLimit: canCapture(walk) && !canCaptureMore(walk),
   };
 }

@@ -7,6 +7,7 @@ const ready: PairingInput = {
   deviceCount: 1,
   deviceName: "RB Meta 014K",
   linkState: "connected",
+  cameraPermission: "granted",
 };
 
 describe("describePairing", () => {
@@ -51,5 +52,31 @@ describe("describePairing", () => {
     const p = describePairing({ ...ready, configured: false });
     expect(p.status).toBe("unconfigured");
     expect(p.canStartWalk).toBe(false);
+  });
+
+  // A registered, connected device is still not enough: Meta's camera authorization is a SEPARATE
+  // grant from pairing, and the recorder cannot start a stream without it. A release build with no
+  // dev diagnostic screen has no other way to discover this — it must show up here.
+  it("blocks a walk on a fully-paired device when camera access was denied", () => {
+    const p = describePairing({ ...ready, cameraPermission: "denied" });
+    expect(p.status).toBe("cameraBlocked");
+    expect(p.canStartWalk).toBe(false);
+    expect(p.detail).toContain("RB Meta 014K");
+  });
+
+  // Never default-assume access: a null (unread) or unexpected value must be treated the same as
+  // an explicit denial, not waved through to "ready".
+  it("treats an unread or unrecognized camera permission value as not granted", () => {
+    expect(describePairing({ ...ready, cameraPermission: null }).status).toBe("cameraBlocked");
+    expect(describePairing({ ...ready, cameraPermission: "error: timed out" }).status).toBe(
+      "cameraBlocked",
+    );
+  });
+
+  // Order matters: an unpaired/disconnected device should never be reported as a camera-permission
+  // problem — that would send the user down the wrong fix entirely.
+  it("checks link state before camera permission, not after", () => {
+    const p = describePairing({ ...ready, linkState: "disconnected", cameraPermission: "denied" });
+    expect(p.status).toBe("disconnected");
   });
 });

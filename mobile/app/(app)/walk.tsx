@@ -11,13 +11,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useLocalSearchParams, useRouter } from "expo-router";
+import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import { theme } from "../../src/theme/theme";
 import { apiFetch } from "../../src/api/client";
 import type { Fetcher } from "../../src/api/endpoints";
 import { useAuth } from "../../src/auth/AuthContext";
-import { canCapture } from "../../src/walkthrough/session";
 import { useWalk } from "../../src/walkthrough/useWalk";
 import { deriveWalkSiteLabel, deriveWalkTitle } from "../../src/walkthrough/walk-meta";
 import { walkOwnerKey } from "../../src/walkthrough/owner-key";
@@ -54,7 +53,19 @@ export default function WalkScreen() {
   const targetName = typeof params.targetName === "string" && params.targetName ? params.targetName : "this project";
   const propertyAddress = typeof params.propertyAddress === "string" ? params.propertyAddress : null;
 
-  const { walk, error, walkId, start, capture, end, stillCount, bridgeAvailable } = useWalk(dealId, projectId);
+  const {
+    walk,
+    error,
+    walkId,
+    start,
+    capture,
+    end,
+    reset,
+    stillCount,
+    bridgeAvailable,
+    captureEnabled,
+    atCaptureLimit,
+  } = useWalk(dealId, projectId);
 
   // Identity for the upload queue: user + ACTIVE OFFICE, same resolution rule (activeOfficeId ??
   // primary office) as capture.tsx's own queue — and the SAME rule the background drain task uses,
@@ -86,6 +97,26 @@ export default function WalkScreen() {
   // re-renders (enqueueWalk itself is also idempotent per walkId, so this is a belt-and-suspenders
   // cheap-write avoidance, not a correctness requirement).
   const enqueuedWalkIdRef = useRef<string | null>(null);
+
+  // This screen is a hidden `Tabs.Screen` — expo-router never unmounts it on navigation, only
+  // blurs it — so returning here after a walk finished (for THIS deal or a different one) would
+  // otherwise find `walk` stuck in "complete"/"failed" forever: session.ts's TERMINAL guard
+  // absorbs every further event on purpose, but that's for a late native callback, not for the
+  // estimator trying to start a genuinely new walk. Only reset a TERMINAL walk — resetting one
+  // that's actually recording would silently discard an in-progress site visit if focus is lost
+  // and regained mid-walk (e.g. a brief detour to another screen). enqueuedWalkIdRef is cleared in
+  // lockstep: a stale value here wouldn't, by itself, block the NEXT walk (every walkId is freshly
+  // random — see newWalkId() in useWalk.ts), but leaving a previous walk's id sitting in a guard
+  // meant for THIS walk is exactly the kind of partial reset that invites a future bug.
+  useFocusEffect(
+    useCallback(() => {
+      if (walk.state === "complete" || walk.state === "failed") {
+        reset();
+        enqueuedWalkIdRef.current = null;
+      }
+    }, [walk.state, reset]),
+  );
+
   useEffect(() => {
     if (walk.state !== "complete" && walk.state !== "failed") return;
     if (!walkId || !ownerKey) return;
@@ -169,7 +200,6 @@ export default function WalkScreen() {
     );
   }
 
-  const captureEnabled = canCapture(walk);
   const elapsedMs = walk.startedAt !== null ? Math.max(0, now - walk.startedAt) : 0;
 
   return (
@@ -219,10 +249,19 @@ export default function WalkScreen() {
             <Text style={styles.stillCount}>
               {stillCount} still{stillCount === 1 ? "" : "s"} captured
             </Text>
+            {/* CAPTURE goes dark not just while not-recording but also at the server's per-walk
+                artifact cap (session.ts's canCaptureMore) — say so explicitly, so a disabled
+                button this far into a walk reads as "you're at the limit," not as broken. */}
+            {atCaptureLimit ? (
+              <Text style={styles.captureLimitNotice}>
+                Maximum captures reached for this walk — end walk to upload what you have.
+              </Text>
+            ) : null}
 
             {/* The one control this screen is built around: huge, centered, impossible to miss
                 even gloved and one-handed. Disabled — not merely unresponsive — the moment
-                canCapture(walk) goes false, so a tap can never be silently swallowed. */}
+                captureEnabled goes false (not recording, OR the artifact cap above), so a tap can
+                never be silently swallowed. */}
             <View style={styles.captureWrap}>
               <Pressable
                 onPress={() => void capture()}
@@ -424,6 +463,14 @@ const styles = StyleSheet.create({
     color: theme.color.border,
     fontSize: 16,
     fontFamily: theme.font.medium,
+  },
+  captureLimitNotice: {
+    color: theme.color.warning,
+    fontSize: 13,
+    fontFamily: theme.font.medium,
+    textAlign: "center",
+    marginTop: theme.space.xs,
+    paddingHorizontal: theme.space.lg,
   },
 
   // The dominant control on the whole screen: large enough to hit reliably one-handed, gloved,

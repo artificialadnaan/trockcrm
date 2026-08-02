@@ -1,6 +1,6 @@
 import React from "react";
 import { ActivityIndicator, AppState, Linking, Pressable, ScrollView, StyleSheet, Switch, Text, View } from "react-native";
-import { router } from "expo-router";
+import { router, useFocusEffect } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useAuth } from "../../src/auth/AuthContext";
@@ -10,6 +10,11 @@ import { ScreenHeader } from "../../src/components/ScreenHeader";
 import { getSaveToCameraRoll, setSaveToCameraRoll } from "../../src/settings/camera-roll-setting";
 import { Wearables, isAvailable as wearablesBridgeAvailable } from "../../src/wearables/native";
 import { describePairing, type Pairing, type PairingStatus } from "../../src/walkthrough/pairing";
+import { apiFetch } from "../../src/api/client";
+import type { Fetcher } from "../../src/api/endpoints";
+import { walkOwnerKey } from "../../src/walkthrough/owner-key";
+import { drainWalkQueue, getFailedWalkCount, retryFailedWalks } from "../../src/walkthrough/upload";
+import { walkthroughUploadClient } from "../../src/walkthrough/upload-client";
 
 const SUPPORT_HUB_URL = "https://support-hub-production.up.railway.app/";
 
@@ -38,6 +43,8 @@ function PairingRow() {
   const [checking, setChecking] = React.useState(false);
   const [starting, setStarting] = React.useState(false);
   const [pairError, setPairError] = React.useState<string | null>(null);
+  const [requestingCamera, setRequestingCamera] = React.useState(false);
+  const [cameraError, setCameraError] = React.useState<string | null>(null);
   const mountedRef = React.useRef(true);
 
   React.useEffect(() => {
@@ -61,6 +68,7 @@ function PairingRow() {
             deviceCount: 0,
             deviceName: null,
             linkState: null,
+            cameraPermission: null,
           }),
         );
         setCheckError(null);
@@ -71,6 +79,9 @@ function PairingRow() {
     try {
       const configureResult = await Wearables.configure();
       const status = await Wearables.status();
+      // diagnose()'s cameraPermission was previously read and discarded here — a registered,
+      // connected device was labelled "Ready" even with no camera authorization, and the recorder
+      // cannot start a stream without it. Threading it into describePairing is what closes that.
       const diagnosis = await Wearables.diagnose();
       const device = diagnosis.devices[0];
       const next = describePairing({
@@ -80,6 +91,7 @@ function PairingRow() {
         deviceCount: status.deviceCount,
         deviceName: device?.name ?? null,
         linkState: device?.linkState ?? null,
+        cameraPermission: diagnosis.cameraPermission,
       });
       if (mountedRef.current) {
         setPairing(next);
@@ -116,6 +128,27 @@ function PairingRow() {
       if (mountedRef.current) setStarting(false);
     }
   }, []);
+
+  // Wearables.requestCameraPermission() was previously reachable only from the __DEV__ diagnostic
+  // screen — a release user who had never granted Meta's camera permission had NO way to grant it,
+  // and the recorder cannot start a stream without it. This is that path, offered right where
+  // describePairing now reports the problem (status "cameraBlocked"). Unlike startRegistration(),
+  // this resolves in-process rather than handing off to another app, so re-checking right after is
+  // enough — no AppState round trip needed.
+  const requestCamera = React.useCallback(async () => {
+    setRequestingCamera(true);
+    setCameraError(null);
+    try {
+      await Wearables.requestCameraPermission();
+    } catch (error) {
+      if (mountedRef.current) setCameraError(String(error));
+    } finally {
+      if (mountedRef.current) setRequestingCamera(false);
+    }
+    // Re-check regardless of outcome, so the row reflects whatever the SDK actually did (granted,
+    // or still denied) rather than assuming the request succeeded.
+    void check();
+  }, [check]);
 
   const title = pairing ? pairing.label : checkError ? "Couldn't check glasses" : "Checking glasses…";
   const detail = pairing ? pairing.detail : checkError ? checkError : "Reading pairing status…";
@@ -158,6 +191,123 @@ function PairingRow() {
         />
       ) : null}
       {pairError ? <Text style={styles.pairingStale}>{pairError}</Text> : null}
+
+      {pairing?.status === "cameraBlocked" ? (
+        <Button
+          title="Grant camera access"
+          variant="ghost"
+          loading={requestingCamera}
+          onPress={() => void requestCamera()}
+          icon={<Ionicons name="camera-outline" size={18} color={theme.color.textPrimary} />}
+        />
+      ) : null}
+      {cameraError ? <Text style={styles.pairingStale}>{cameraError}</Text> : null}
+    </Card>
+  );
+}
+
+/**
+ * Surfaces walks that exhausted every upload retry (upload-core.ts's MAX_WALK_UPLOAD_ATTEMPTS /
+ * MAX_WALK_COMPLETION_ATTEMPTS) and gives a way back in.
+ *
+ * Before this, getFailedWalkCount had NO call site anywhere in the app: a walk that went terminal
+ * was excluded from getSchedulableWalkCount (so the background task would never touch it again),
+ * and walk.tsx's own foreground drain discards its result entirely. The recording just sat on the
+ * phone, unrecoverable, with nothing telling the estimator a site visit had silently failed to
+ * ship. This card is that "something."
+ *
+ * It lives on Profile rather than the walk screen because Profile is a real, always-present tab
+ * the estimator returns to regularly, independent of which specific deal they were last walking —
+ * walk.tsx, by contrast, is only ever open for ONE deal at a time and is easy to never revisit.
+ * Renders nothing when there is nothing failed, so a healthy queue adds no clutter.
+ */
+function FailedWalksCard() {
+  const { user, activeOfficeId, token, signOut } = useAuth();
+  // Same resolution rule as walk.tsx and the background drain task (activeOfficeId ?? primary
+  // office) — this MUST match theirs, or this card would count/retry a manifest namespace neither
+  // of them ever actually wrote walks into.
+  const resolvedOfficeId = activeOfficeId ?? user?.tenantId ?? null;
+  const ownerKey = walkOwnerKey(user?.id, resolvedOfficeId);
+  const queueFetcher = React.useCallback<Fetcher>(
+    (path, opts) =>
+      apiFetch(path, { ...opts, token: token ?? undefined, officeId: resolvedOfficeId, onUnauthorized: () => void signOut() }),
+    [token, resolvedOfficeId, signOut],
+  );
+
+  const [failedCount, setFailedCount] = React.useState(0);
+  const [retrying, setRetrying] = React.useState(false);
+  const [retryError, setRetryError] = React.useState<string | null>(null);
+  const mountedRef = React.useRef(true);
+  React.useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const refresh = React.useCallback(async () => {
+    if (!ownerKey) {
+      if (mountedRef.current) setFailedCount(0);
+      return;
+    }
+    try {
+      const count = await getFailedWalkCount(ownerKey);
+      if (mountedRef.current) setFailedCount(count);
+    } catch {
+      // Best-effort — a failed manifest read here shows the last-known count rather than crashing
+      // the profile screen.
+    }
+  }, [ownerKey]);
+
+  // Profile is a REAL (visible) tab, unlike walk.tsx — a plain focus effect is enough to re-check
+  // whenever the estimator lands back here, no AppState round trip needed.
+  useFocusEffect(
+    React.useCallback(() => {
+      void refresh();
+    }, [refresh]),
+  );
+
+  const retry = React.useCallback(async () => {
+    if (!ownerKey) return;
+    setRetrying(true);
+    setRetryError(null);
+    try {
+      // Reset every terminal walk's retry counters, THEN drain — retryFailedWalks alone doesn't
+      // upload anything, it only makes those walks drainable again (see upload.ts).
+      await retryFailedWalks(ownerKey);
+      await drainWalkQueue(ownerKey, queueFetcher, walkthroughUploadClient);
+    } catch (error) {
+      if (mountedRef.current) setRetryError(String(error));
+    } finally {
+      if (mountedRef.current) setRetrying(false);
+      await refresh();
+    }
+  }, [ownerKey, queueFetcher, refresh]);
+
+  if (failedCount === 0) return null;
+
+  return (
+    <Card style={styles.card}>
+      <View style={styles.settingRow}>
+        <View style={[styles.pairingDot, { backgroundColor: theme.color.danger }]} />
+        <View style={styles.settingText}>
+          <Text style={styles.settingTitle}>
+            {failedCount} walk{failedCount === 1 ? "" : "s"} failed to upload
+          </Text>
+          <Text style={styles.settingHint}>
+            Recorded on this device but couldn't be sent after several tries. Nothing is lost —
+            tap retry to try again.
+          </Text>
+          {retryError ? <Text style={styles.pairingStale}>{retryError}</Text> : null}
+        </View>
+      </View>
+      <Button
+        title="Retry upload"
+        variant="ghost"
+        loading={retrying}
+        onPress={() => void retry()}
+        icon={<Ionicons name="cloud-upload-outline" size={18} color={theme.color.textPrimary} />}
+      />
     </Card>
   );
 }
@@ -235,6 +385,7 @@ export default function ProfileScreen() {
         </Card>
 
         <PairingRow />
+        <FailedWalksCard />
 
         <Button
           title="Create Support Ticket"

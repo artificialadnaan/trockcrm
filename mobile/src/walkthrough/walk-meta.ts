@@ -14,6 +14,13 @@
  *  retrying a completion call that can never succeed. */
 const MAX_TITLE_CHARS = 300;
 
+/** The server 400s a `siteLabel` over this too (glasses-walkthrough-service.ts's
+ *  MAX_SITE_LABEL_CHARS) — same failure mode as MAX_TITLE_CHARS above, but for `siteLabel`:
+ *  `deals.property_address` is unrestricted free text, and an imported record can carry an
+ *  unusually long one. Without a clamp here, a long address would strand an otherwise fully
+ *  uploaded walk in the terminal queue when the completion call permanently rejects it. */
+const MAX_SITE_LABEL_CHARS = 300;
+
 /** "30 Jul 2026, 9:15 PM" — day-month-year (unambiguous across locales, unlike MM/DD) plus a
  *  12-hour clock time, both read in the DEVICE's own timezone: `atMs` is the instant the walk
  *  actually happened, and the estimator's local wall-clock time is what makes that instant
@@ -42,7 +49,10 @@ export function deriveWalkTitle(targetName: string, atMs: number): string {
 
 /** The deal's property address when known, else "" (never undefined/null — the wire type is a
  *  plain `string`; the server treats "" the same as absent). Trimmed so a whitespace-only address
- *  from an incomplete deal record reads as "unknown" rather than a blank-looking label. */
+ *  from an incomplete deal record reads as "unknown" rather than a blank-looking label. Clamped
+ *  the same way deriveWalkTitle clamps `title` — property_address is unrestricted text, so an
+ *  imported record can exceed the server's cap even though a normal address never gets close. */
 export function deriveWalkSiteLabel(propertyAddress: string | null | undefined): string {
-  return propertyAddress?.trim() ?? "";
+  const trimmed = propertyAddress?.trim() ?? "";
+  return trimmed.length <= MAX_SITE_LABEL_CHARS ? trimmed : trimmed.slice(0, MAX_SITE_LABEL_CHARS);
 }

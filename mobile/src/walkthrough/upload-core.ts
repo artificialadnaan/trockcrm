@@ -304,6 +304,27 @@ export function isWalkTerminal(walk: QueuedWalk): boolean {
 }
 
 /**
+ * The retry escape hatch for a TERMINAL walk: resets only the retry COUNTERS that made it
+ * terminal, so the next drain treats it as fresh again. Never touches `putAt`/`sizeBytes`
+ * (already-confirmed bytes in R2 must never be re-uploaded) or `completedAt` (a walk that's
+ * actually done is not terminal in the first place — see isWalkTerminal). A no-op (returns the
+ * SAME walk reference) for a walk that isn't terminal, so a caller can map this over an entire
+ * manifest unconditionally without first filtering.
+ *
+ * This is what makes getFailedWalkCount's count actionable: without it, a terminal walk would sit
+ * in the manifest forever (isWalkDrainable excludes it, by design — see that function's header) with
+ * no way back in.
+ */
+export function resetTerminalWalkForRetry(walk: QueuedWalk): QueuedWalk {
+  if (!isWalkTerminal(walk)) return walk;
+  return {
+    ...walk,
+    artifacts: walk.artifacts.map((a) => (isArtifactTerminal(a) ? { ...a, attempts: 0 } : a)),
+    completionAttempts: isCompletionTerminal(walk) ? 0 : walk.completionAttempts,
+  };
+}
+
+/**
  * Add a completed walk to a persisted list. Idempotent like the photo queue's dedupeQueue: if a walk
  * with this walkId is already queued, the existing entry — and any upload progress (attempts, putAt,
  * completedAt) it has already made — is kept, never clobbered by a freshly-derived (all-zero) entry.

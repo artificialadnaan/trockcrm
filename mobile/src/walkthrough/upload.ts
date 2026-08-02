@@ -37,6 +37,7 @@ import {
   markWalkCompleted,
   needsCompletion,
   removeQueuedWalk,
+  resetTerminalWalkForRetry,
   sanitizeWalkOwnerKey,
   toQueuedWalk,
   upsertQueuedWalk,
@@ -61,6 +62,7 @@ export {
   isWalkTerminal,
   needsCompletion,
   outstandingArtifacts,
+  resetTerminalWalkForRetry,
   toQueuedWalk,
   walkArtifactIdempotencyKey,
   type QueuedWalk,
@@ -251,6 +253,26 @@ export async function getSchedulableWalkCount(ownerKey: string): Promise<number>
 /** Count of walks that exhausted every retry available to them — drives a "failed" banner. */
 export async function getFailedWalkCount(ownerKey: string): Promise<number> {
   return (await readManifest(ownerKey)).filter(isWalkTerminal).length;
+}
+
+/**
+ * The retry path for whatever getFailedWalkCount is counting: resets every currently-TERMINAL
+ * walk's retry counters (see resetTerminalWalkForRetry — never touches bytes already confirmed in
+ * R2, never touches an actually-completed walk) so the NEXT drainWalkQueue call picks them back up
+ * from wherever they left off. Does not itself drain — a caller (the retry UI) is expected to call
+ * drainWalkQueue right after, same as enqueueWalk's caller does. Returns the number of walks reset,
+ * so the UI can confirm something actually happened.
+ */
+export async function retryFailedWalks(ownerKey: string): Promise<number> {
+  let resetCount = 0;
+  await mutateManifest(ownerKey, (walks) =>
+    walks.map((w) => {
+      if (!isWalkTerminal(w)) return w;
+      resetCount++;
+      return resetTerminalWalkForRetry(w);
+    }),
+  );
+  return resetCount;
 }
 
 // ── Enqueue ──────────────────────────────────────────────────────────────────────────────────────
