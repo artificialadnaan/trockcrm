@@ -903,6 +903,41 @@ describe("useWalk unmount while recording", () => {
     hangingEnd.release({ videoUri: "file:///docs/walkthroughs/w1/walk.mp4", stills: 0 });
   });
 
+  // The narrower half of the same hazard, and the one the state check above cannot see. `end()`
+  // assigns endInFlightRef and dispatches "ended" in ONE tick; React commits "finalizing" on a
+  // LATER one. A sign-out landing between those two — the estimator taps "Yes, end walk", then
+  // immediately opens Profile and signs out — finds walkStateRef still reading "recording", so the
+  // cleanup's state check waves it through and issues a second endWalk against a walk that is
+  // already inside AVAssetWriter.finishWriting(). Two Tasks then remove the same audio tap and
+  // finalise the same writer.
+  //
+  // The unmount is deliberately in the SAME act() as end() and after it with no await between: that
+  // is the only shape the bug has, and it is the shape a real sign-out produces. The mid-act
+  // assertion is not decoration — it pins the precondition, so if React ever starts committing that
+  // dispatch earlier this test fails loudly instead of quietly passing for the wrong reason.
+  it("does not issue a SECOND endWalk when the tree unmounts before React commits finalizing", async () => {
+    mockStartWalk.mockResolvedValue(STARTED);
+    const hangingEnd = pending();
+    mockEndWalk.mockImplementation(() => hangingEnd.promise);
+    const { result, unmount } = renderHook(() => useWalk("deal-1", null));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    expect(result.current.walk.state).toBe("recording");
+
+    await act(async () => {
+      void result.current.end();
+      // Still the last COMMITTED state — "finalizing" has been dispatched but not rendered, which
+      // is exactly the window the unmount below lands in.
+      expect(result.current.walk.state).toBe("recording");
+      unmount();
+    });
+
+    expect(mockEndWalk).toHaveBeenCalledTimes(1);
+    hangingEnd.release({ videoUri: "file:///docs/walkthroughs/w1/walk.mp4", stills: 0 });
+  });
+
   // Sign-out landing in the ~1s "Starting…" window. Native has no writer yet, so an endWalk issued
   // right now finalises nothing and tears down nothing — and the start it raced then goes on to
   // open the stream and the microphone with no JS left to ever close them.

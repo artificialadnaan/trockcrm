@@ -7,14 +7,22 @@
  * other control (especially End walk) is deliberately smaller and harder to hit. This file holds
  * NO lifecycle logic — it renders `walk.state` from `useWalk` and calls `start` / `capture` /
  * `end`. All the rules about when those are legal live in useWalk.ts and session.ts.
+ *
+ * READINESS is the one thing that does live here, and it is a different question from lifecycle:
+ * whether to draw a Start button at all. Three preconditions answer it — no recorder in this build,
+ * no deal to file the walk against, and no Meta camera authorization — and each is a refusal the
+ * ESTIMATOR has to act on, so each states what is wrong in this screen's own words rather than
+ * letting a tap fail somewhere they cannot see.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { AppState, Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import { theme } from "../../src/theme/theme";
 import { useWalk } from "../../src/walkthrough/useWalk";
+import { Wearables, isAvailable as wearablesBridgeAvailable } from "../../src/wearables/native";
+import { describePairing, type Pairing } from "../../src/walkthrough/pairing";
 import { isAudioTruncated, isVideoTruncated, isWalkActive } from "../../src/walkthrough/session";
 import { deriveWalkSiteLabel, deriveWalkTitle } from "../../src/walkthrough/walk-meta";
 import { useWalkQueueSession } from "../../src/walkthrough/use-queue-session";
@@ -31,6 +39,131 @@ function formatElapsed(ms: number): string {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
+
+/**
+ * Meta's camera authorization for THIS app — read as a `describePairing` verdict, plus the one
+ * action that fixes it.
+ *
+ * It is a third permission, independent of Bluetooth pairing and of the phone's own camera and
+ * microphone grants, and until now the only place that ever requested it was Profile's pairing row.
+ * Nothing on the route an estimator actually walks — project → Capture → walk — goes through
+ * Profile, so a fresh install with registered glasses reached this screen fully "paired" and still
+ * could not open a DAT stream. `Recorder.startWalk` does not ask for it either (it asks for the
+ * microphone and stops there), so the walk died at session/stream creation with a message about the
+ * SDK that this screen had no way to translate.
+ *
+ * Reads `describePairing`'s verdict rather than `diagnosis.cameraPermission` directly, deliberately:
+ * that function already decides what a raw permission string means, in what order, and it already
+ * says the sentence Profile shows for the same problem. A second interpretation here is how the two
+ * screens end up disagreeing about the same device.
+ *
+ * Two rules the rest of this file depends on:
+ *
+ *   - A check that never completed produces NO verdict, not a blocking one. `pairing` stays null
+ *     and Start is offered exactly as before. Refusing a site visit because a diagnostic call threw
+ *     would cost the estimator the walk over our own plumbing — native still has its own guards at
+ *     the far end.
+ *   - A check that FAILS after one succeeded keeps the earlier verdict rather than blanking it, the
+ *     same way Profile's row never blanks on a refresh error. The grant control below stays on
+ *     screen either way, so a stale "blocked" is never a dead end.
+ */
+function useCameraAuthorization(): {
+  /** The `cameraBlocked` verdict, or null for every other status AND for "not known yet". */
+  blocked: Pairing | null;
+  requesting: boolean;
+  /** What Meta said when a grant did not take. Verbatim — see the setter. */
+  requestNotice: string | null;
+  request: () => Promise<void>;
+} {
+  const [pairing, setPairing] = useState<Pairing | null>(null);
+  const [requesting, setRequesting] = useState(false);
+  const [requestNotice, setRequestNotice] = useState<string | null>(null);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  const check = useCallback(async () => {
+    // Not the same bridge as `useWalk`'s: WearablesBridge is the SDK, WalkthroughRecorder is the
+    // recorder. A build can have one and not the other, and with no SDK bridge there is nothing to
+    // ask — describePairing would only ever answer "unavailable", which is the recorder's own
+    // full-screen refusal below to make, not this gate's.
+    if (!wearablesBridgeAvailable) return;
+    try {
+      const configureResult = await Wearables.configure();
+      const status = await Wearables.status();
+      const diagnosis = await Wearables.diagnose();
+      const device = diagnosis.devices[0];
+      const next = describePairing({
+        bridgeAvailable: true,
+        configured: configureResult.configured,
+        registrationState: status.registrationState,
+        deviceCount: status.deviceCount,
+        deviceName: device?.name ?? null,
+        linkState: device?.linkState ?? null,
+        cameraPermission: diagnosis.cameraPermission,
+      });
+      if (mountedRef.current) setPairing(next);
+    } catch {
+      // Swallowed on purpose, and the previous verdict is left standing — see the doc above. There
+      // is nowhere to report this to that would help: the estimator cannot act on "diagnose threw",
+      // and the only thing that turns on this value is whether Start is offered.
+    }
+  }, []);
+
+  useEffect(() => {
+    void check();
+    // Foreground, not focus. Whatever `requestPermission(.camera)` does — WearablesBridge.swift's
+    // own comment says it bounces through the Meta AI app, Profile's says it resolves in process —
+    // this listener is what makes a grant made ANYWHERE else (the Meta AI app, iOS Settings) show
+    // up here without the estimator having to know to refresh. This screen is a hidden Tabs.Screen
+    // that never unmounts on navigation, so a focus effect would miss the round trip entirely.
+    const sub = AppState.addEventListener("change", (next) => {
+      if (next === "active") void check();
+    });
+    return () => sub.remove();
+  }, [check]);
+
+  const request = useCallback(async () => {
+    setRequesting(true);
+    setRequestNotice(null);
+    try {
+      const { status } = await Wearables.requestCameraPermission();
+      // A request that resolves NOT-granted is the silent dead end: nothing threw, so there is no
+      // error to show, and the re-check below simply reproduces the same gate. Meta's own answer is
+      // the only information anyone has about why, so it is repeated verbatim — the same rule the
+      // error banner at the top of this screen follows for native's rejection text.
+      if (status !== "granted" && mountedRef.current) {
+        setRequestNotice(
+          `Meta answered "${status}" — camera access still isn't granted. Try again, or grant it ` +
+            `for T-Rock Cam in the Meta AI app.`,
+        );
+      }
+    } catch (error) {
+      if (mountedRef.current) setRequestNotice(String(error));
+    } finally {
+      if (mountedRef.current) setRequesting(false);
+    }
+    // Re-read regardless of outcome, so the gate reflects what the SDK actually did rather than
+    // assuming the request took. Same reasoning as Profile's own grant handler.
+    await check();
+  }, [check]);
+
+  return {
+    // Only ever the one status. Every other verdict — unpaired, disconnected, unconfigured — is a
+    // problem native reports at startWalk with text this screen shows verbatim, and gating on those
+    // too would turn a transient reading (glasses asleep in a pocket for a second) into a refusal to
+    // record a site visit. `cameraBlocked` is different: it cannot resolve itself, it cannot be
+    // fixed by native, and the fix is one tap away right here.
+    blocked: pairing?.status === "cameraBlocked" ? pairing : null,
+    requesting,
+    requestNotice,
+    request,
+  };
 }
 
 export default function WalkScreen() {
@@ -64,6 +197,13 @@ export default function WalkScreen() {
     captureEnabled,
     atCaptureLimit,
   } = useWalk(dealId, projectId);
+
+  const {
+    blocked: cameraBlocked,
+    requesting: requestingCamera,
+    requestNotice: cameraRequestNotice,
+    request: requestCameraAccess,
+  } = useCameraAuthorization();
 
   // Identity for the upload queue: user + ACTIVE OFFICE, same resolution rule (activeOfficeId ??
   // primary office) as capture.tsx's own queue — and the SAME rule the background drain task uses,
@@ -331,22 +471,62 @@ export default function WalkScreen() {
             <Text style={styles.aboutToTarget} numberOfLines={2}>
               {targetName}
             </Text>
-            <Pressable
-              onPress={() => void start()}
-              disabled={walk.state === "starting"}
-              accessibilityRole="button"
-              accessibilityLabel="Start walk"
-              accessibilityState={{ disabled: walk.state === "starting" }}
-              style={({ pressed }) => [
-                styles.startButton,
-                walk.state === "starting" && styles.startButtonBusy,
-                pressed && walk.state !== "starting" && styles.pressed,
-              ]}
-            >
-              <Text style={styles.startButtonText}>
-                {walk.state === "starting" ? "Starting…" : "Start walk"}
-              </Text>
-            </Pressable>
+            {/* Only while IDLE. Once a walk is "starting" native owns the sequence and this gate has
+                no say left — swapping the "Starting…" button out from under a start already in
+                flight would say the walk was refused when it was not. Deliberately NOT one of the
+                full-screen early returns above (bridge, no deal): those are known at first render,
+                this arrives from an async read that can land at any moment, and blanking the screen
+                out from under a live recording is the one thing this file must never do. */}
+            {walk.state === "idle" && cameraBlocked ? (
+              /* describePairing's own label and detail, verbatim — the estimator reads the same
+                 sentence here as on Profile, about the same device and the same permission. No
+                 Start button at all rather than a disabled one, matching the two refusals above:
+                 a control that cannot work invites exactly the silent-tap confusion this screen
+                 spends its whole layout avoiding. */
+              <>
+                <Text style={styles.missingTitle}>{cameraBlocked.label}</Text>
+                <Text style={styles.missingBody}>{cameraBlocked.detail}</Text>
+                {/* The fix, on the screen where the problem is stated. The estimator is standing on
+                    the job site: sending them to Profile to find the same button would be telling
+                    them no and leaving them to work out where yes lives. */}
+                <Pressable
+                  onPress={() => void requestCameraAccess()}
+                  disabled={requestingCamera}
+                  accessibilityRole="button"
+                  accessibilityLabel="Grant camera access"
+                  accessibilityState={{ disabled: requestingCamera, busy: requestingCamera }}
+                  style={({ pressed }) => [
+                    styles.grantButton,
+                    requestingCamera && styles.startButtonBusy,
+                    pressed && !requestingCamera && styles.pressed,
+                  ]}
+                >
+                  <Text style={styles.grantButtonText}>
+                    {requestingCamera ? "Asking Meta…" : "Grant camera access"}
+                  </Text>
+                </Pressable>
+                {cameraRequestNotice ? (
+                  <Text style={styles.grantNotice}>{cameraRequestNotice}</Text>
+                ) : null}
+              </>
+            ) : (
+              <Pressable
+                onPress={() => void start()}
+                disabled={walk.state === "starting"}
+                accessibilityRole="button"
+                accessibilityLabel="Start walk"
+                accessibilityState={{ disabled: walk.state === "starting" }}
+                style={({ pressed }) => [
+                  styles.startButton,
+                  walk.state === "starting" && styles.startButtonBusy,
+                  pressed && walk.state !== "starting" && styles.pressed,
+                ]}
+              >
+                <Text style={styles.startButtonText}>
+                  {walk.state === "starting" ? "Starting…" : "Start walk"}
+                </Text>
+              </Pressable>
+            )}
           </View>
         ) : null}
 
@@ -585,6 +765,33 @@ const styles = StyleSheet.create({
     color: theme.color.textInverse,
     fontSize: 22,
     fontFamily: theme.font.bold,
+  },
+
+  // Deliberately smaller than startButton: this is the thing standing BETWEEN the estimator and the
+  // walk, not the walk itself, and sizing it like Start would train the same reach for two different
+  // outcomes. Its own styles rather than borrowing doneButton's — that one belongs to the completion
+  // screen, and a future restyle there must not silently move this.
+  grantButton: {
+    marginTop: theme.space.lg,
+    backgroundColor: theme.color.brandRed,
+    borderRadius: theme.radius.pill,
+    paddingVertical: theme.space.lg,
+    paddingHorizontal: theme.space.xxl,
+    alignItems: "center",
+  },
+  grantButtonText: {
+    color: theme.color.textInverse,
+    fontSize: 18,
+    fontFamily: theme.font.bold,
+  },
+  grantNotice: {
+    color: theme.color.warning,
+    fontSize: 13,
+    lineHeight: 19,
+    fontFamily: theme.font.medium,
+    textAlign: "center",
+    marginTop: theme.space.md,
+    maxWidth: 340,
   },
 
   recordingLayout: {

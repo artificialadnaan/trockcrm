@@ -223,12 +223,24 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
   // designed handoff, not a leak.
   useEffect(() => {
     return () => {
+      // Two checks for one fact — "an end is already under way" — because neither covers the whole
+      // of it, and the gap between them is where a sign-out lands.
+      //
+      // The REF is the only thing that can see an end issued in the tick this unmount happens in:
+      // `end()` assigns it and dispatches "ended" synchronously, but React commits "finalizing" on a
+      // later tick, so walkStateRef below still reads "recording" and would wave the teardown
+      // through — two Tasks then removing the same audio tap and finalising the same AVAssetWriter,
+      // at the one moment in the walk when the file is not yet closed.
+      //
+      // The STATE check is still load-bearing on the other side of the call: `end()`'s finally
+      // clears the ref before React commits "complete"/"failed", so a walk that is genuinely still
+      // "finalizing" as far as any render is concerned has a null ref for that window.
+      //
+      // Both mean the same thing here: do nothing. The in-flight endWalk is unaffected by this
+      // unmount and native's own teardown runs to completion regardless.
+      if (endInFlightRef.current) return;
       const state = walkStateRef.current;
       if (!isWalkActive(state)) return;
-      // "finalizing" is excluded even though isWalkActive covers it: `end()` has already issued
-      // endWalk() and native is inside AVAssetWriter.finishWriting(). A second endWalk would race
-      // two finalisations against one writer — and it would buy nothing, because the in-flight
-      // promise is unaffected by this unmount and native's own teardown still runs to completion.
       if (state === "finalizing") return;
       const pendingStart = startInFlightRef.current;
       void (async () => {

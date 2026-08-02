@@ -10,7 +10,7 @@
  * faithfully reproduce the focus gotcha the first group depends on rather than to simplify it.
  */
 import React from "react";
-import { act, render } from "@testing-library/react-native";
+import { act, fireEvent, render } from "@testing-library/react-native";
 import type { UseWalkResult } from "../useWalk";
 import type { Walk, WalkState } from "../session";
 
@@ -85,6 +85,27 @@ jest.mock("../upload-background-task", () => ({
   registerWalkUploadBackgroundTask: (...args: unknown[]) => mockRegisterBackgroundTask(...args),
 }));
 
+// The Meta bridge, OFF by default — `isAvailable` is a getter rather than a literal so a single
+// test can turn it on without every other case in this file suddenly firing three native calls it
+// never asked for. With it false the screen's readiness check short-circuits before touching any of
+// the mocks below, which is exactly the behaviour every pre-existing case here was written against.
+const mockWearablesConfigure = jest.fn();
+const mockWearablesStatus = jest.fn();
+const mockWearablesDiagnose = jest.fn();
+const mockRequestCameraPermission = jest.fn();
+let mockWearablesBridgeAvailable = false;
+jest.mock("../../wearables/native", () => ({
+  get isAvailable() {
+    return mockWearablesBridgeAvailable;
+  },
+  Wearables: {
+    configure: () => mockWearablesConfigure(),
+    status: () => mockWearablesStatus(),
+    diagnose: () => mockWearablesDiagnose(),
+    requestCameraPermission: () => mockRequestCameraPermission(),
+  },
+}));
+
 const mockReset = jest.fn();
 let mockResult: UseWalkResult;
 
@@ -149,6 +170,11 @@ beforeEach(() => {
   // WHEN activation resolves, and a leftover one would silently change the next test's timing.
   mockActivateKeepAwake.mockReset().mockResolvedValue(undefined);
   mockDeactivateKeepAwake.mockReset().mockResolvedValue(undefined);
+  mockWearablesBridgeAvailable = false;
+  mockWearablesConfigure.mockReset();
+  mockWearablesStatus.mockReset();
+  mockWearablesDiagnose.mockReset();
+  mockRequestCameraPermission.mockReset();
 });
 
 describe("WalkScreen focus-driven reset", () => {
@@ -482,5 +508,120 @@ describe("WalkScreen keep-awake lock", () => {
     });
 
     expect(mockDeactivateKeepAwake).not.toHaveBeenCalled();
+  });
+});
+
+// ── Round-7 FINDING 2 (P1): a Start button that can only fail is worse than no Start button ───────
+//
+// Meta's camera authorization is a THIRD permission, separate from Bluetooth pairing and from the
+// phone's own camera/microphone grants, and until now the only place in the app that ever requested
+// it was Profile's pairing row. Nothing on the path an estimator actually walks — project → Capture
+// → walk — passes through Profile, so on a fresh install with the glasses registered this screen
+// offered a fully working Start button for a walk that cannot produce video, and the estimator found
+// out at the far end of a site visit, from a message about stream creation that this screen never
+// showed and could not have explained.
+//
+// The verdict is describePairing's, not a second opinion invented here: `cameraBlocked` is the exact
+// status Profile already renders and already offers a grant button for. What is new is only WHERE it
+// is enforced.
+describe("WalkScreen glasses camera authorization", () => {
+  function diagnosisWith(cameraPermission: string) {
+    return {
+      deviceCount: 1,
+      devices: [{ name: "RB Meta 014K", linkState: "connected" }],
+      cameraPermission,
+      activeDeviceImmediate: "device-1",
+      activeDeviceAfterWait: "device-1",
+      verdict: "eligible immediately",
+    };
+  }
+
+  beforeEach(() => {
+    mockWearablesBridgeAvailable = true;
+    mockWearablesConfigure.mockResolvedValue({ configured: true, alreadyConfigured: false });
+    mockWearablesStatus.mockResolvedValue({
+      registrationState: "registered",
+      deviceCount: 1,
+      devices: ["RB Meta 014K"],
+    });
+    // The fresh-install shape: registered, connected, and never authorized. MWDATCore reports
+    // `denied` here before the permission has ever been requested — there is no "undetermined".
+    mockWearablesDiagnose.mockResolvedValue(diagnosisWith("denied"));
+    mockRequestCameraPermission.mockResolvedValue({ status: "granted" });
+  });
+
+  it("does not offer Start when Meta's camera authorization is missing", async () => {
+    mockResult = resultFor(makeWalk("idle"));
+    const { queryByText, findByText } = render(<WalkScreen />);
+
+    // describePairing's own label and detail, verbatim — the estimator reads the same sentence here
+    // as on Profile, about the same thing.
+    expect(await findByText("Camera access needed")).toBeTruthy();
+    expect(queryByText("Start walk")).toBeNull();
+  });
+
+  // The other half, and the one that decides whether this is a fix or just a refusal: the estimator
+  // is standing on the site. Being told the walk cannot start is only useful if the thing that makes
+  // it startable is on the same screen, one tap away.
+  it("grants the permission from this screen and puts Start back", async () => {
+    mockWearablesDiagnose
+      .mockResolvedValueOnce(diagnosisWith("denied"))
+      .mockResolvedValue(diagnosisWith("granted"));
+    mockResult = resultFor(makeWalk("idle"));
+    const { findByText } = render(<WalkScreen />);
+
+    fireEvent.press(await findByText("Grant camera access"));
+
+    expect(await findByText("Start walk")).toBeTruthy();
+    expect(mockRequestCameraPermission).toHaveBeenCalledTimes(1);
+  });
+
+  // A request that resolves NOT-granted is the dead end this screen must not be silent about:
+  // nothing threw, so there is no error to show, and re-checking simply reproduces the same gate.
+  // Meta's own answer is the only information anyone has, so it is repeated verbatim — the same rule
+  // the error banner at the top of this screen follows.
+  it("says what Meta answered when the grant does not take", async () => {
+    mockRequestCameraPermission.mockResolvedValue({ status: "denied" });
+    mockResult = resultFor(makeWalk("idle"));
+    const { findByText } = render(<WalkScreen />);
+
+    fireEvent.press(await findByText("Grant camera access"));
+
+    expect(await findByText(/Meta answered "denied"/)).toBeTruthy();
+  });
+
+  // GUARD (passes before the fix too): the gate must fire on a VERDICT, never on the absence of one.
+  // A readiness check that could not complete knows nothing about the permission, and a screen that
+  // refuses to start a walk because a diagnostic call failed has taken the site visit away over its
+  // own plumbing. Unknown stays startable — native still has its own guards at the far end.
+  it("still offers Start when the readiness check itself fails", async () => {
+    mockWearablesDiagnose.mockRejectedValue(new Error("wearables_diagnose_failed"));
+    mockResult = resultFor(makeWalk("idle"));
+    const { findByText, queryByText } = render(<WalkScreen />);
+
+    expect(await findByText("Start walk")).toBeTruthy();
+    expect(queryByText("Camera access needed")).toBeNull();
+  });
+
+  // GUARD (passes before the fix too): a granted device is offered the walk exactly as before, so
+  // the gate cannot quietly become a gate on everyone.
+  it("offers Start normally once the authorization is in place", async () => {
+    mockWearablesDiagnose.mockResolvedValue(diagnosisWith("granted"));
+    mockResult = resultFor(makeWalk("idle"));
+    const { findByText, queryByText } = render(<WalkScreen />);
+
+    expect(await findByText("Start walk")).toBeTruthy();
+    expect(queryByText("Camera access needed")).toBeNull();
+  });
+
+  // GUARD (passes before the fix too): the gate lives inside the pre-walk branch and nowhere else.
+  // A late/flapping verdict landing mid-recording must never replace the CAPTURE control — that
+  // would take the one button this screen exists for away from a walk already in progress.
+  it("never disturbs a walk that is already recording", async () => {
+    mockResult = resultFor(makeWalk("recording"));
+    const { findByText, queryByText } = render(<WalkScreen />);
+
+    expect(await findByText("CAPTURE")).toBeTruthy();
+    expect(queryByText("Camera access needed")).toBeNull();
   });
 });
