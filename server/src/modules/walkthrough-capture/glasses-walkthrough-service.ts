@@ -30,8 +30,8 @@ import { createHash } from "node:crypto";
 import { and, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import { files, jobQueue } from "@trock-crm/shared/schema";
-import type { FileCategory } from "@trock-crm/shared/types";
+import { files, jobQueue, photoAuditLog } from "@trock-crm/shared/schema";
+import { DOMAIN_EVENTS, type FileCategory } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -869,6 +869,103 @@ async function findGlassesWalkthroughForwardJobState(
   };
 }
 
+/**
+ * Puts this call's newly-filed STILLS through the post-upload fan-out every other photo in the CRM goes
+ * through, and does it in two statements no matter how many stills the walk carried.
+ *
+ * WHAT THE EVENT ACTUALLY DRIVES, because "emit the event" is not self-justifying. `file.uploaded` has one
+ * registered handler (worker/src/jobs/index.ts), whose whole body is inside `if (category === 'photo')`:
+ *   - `extractExif` — downloads the object, reads its EXIF, and backfills `taken_at`, `geo_lat`, `geo_lng`.
+ *     It also re-buckets `folder_path` by rewriting a trailing `YYYY-MM`, which is inert here: this
+ *     module's folder is GLASSES_WALKTHROUGH_FOLDER_PATH, which has no date suffix to rewrite, so the
+ *     walk's grouping convention is not disturbed. `taken_at` IS overwritten when the still carries a
+ *     DateTimeOriginal — deliberately accepted: the glasses' own capture stamp is at least as good as the
+ *     phone's `Date.now()` this module writes, and it is exactly what happens to every field photo.
+ *   - a `procore_photo_sync` enqueue, on a deal that is Procore-linked with a photo album, so the still
+ *     lands in the project's album alongside the crew's ordinary photos.
+ * No thumbnailing, no notification, no feed write — the feed reads `files` directly. Nothing in that list
+ * is undesirable for a jobsite still, and nothing else can reach it: without this event a glasses photo is
+ * a row that looks right in the table and is invisible to every process that acts when a photo arrives.
+ *
+ * PHOTOS ONLY, and the clips are not being slighted. A walk's video/audio are `category: 'other'`, so the
+ * handler dequeues them, logs, and does nothing — a durable job whose success condition is that it had no
+ * effect. Those artifacts already HAVE a durable consumer: `glasses_walkthrough_forward`, the job this
+ * module exists to schedule. And the shape of the work a `file.uploaded` consumer does is "fetch the object
+ * and read it" (extractExif downloads it; the Procore push downloads it again) — inviting that for objects
+ * up to MAX_GLASSES_WALKTHROUGH_ARTIFACT_BYTES buys nothing today and costs a multi-gigabyte pull the day
+ * someone widens that gate. Registering a non-photo consumer makes dropping this filter a one-line change.
+ *
+ * CREATED ROWS ONLY. `created` is the rows the batched insert's `RETURNING` actually produced, so a retry
+ * that conflicted on every artifact emits nothing at all. Driving this off the REQUEST instead would re-run
+ * EXIF over bytes that have not changed and push the same photo into Procore again on every mobile retry —
+ * and mobile retries a whole walk, not the missing part of one.
+ *
+ * TWO STATEMENTS, NOT TWO PER PHOTO. The ordinary path's `recordUploadedFileSideEffects` (files/
+ * upload-workflow.ts) is per file: an audit insert plus a queue insert. Called in a loop here that is 400
+ * round trips at the 200-artifact ceiling, inside the transaction `tenantMiddleware` already pinned a
+ * pooled connection for — precisely the cost the batched `files` write above exists to avoid, re-added for
+ * the one artifact class a walk carries in bulk. So the two writes are rebuilt as multi-row inserts rather
+ * than delegated. That duplicates a payload shape this module does not own; the runtime suite pins it by
+ * running the real shared producer over a row this one filed and comparing what each enqueued.
+ *
+ * Errors are NOT swallowed, unlike `logPhotoEvent`'s own try/catch. This runs inside the request's
+ * transaction, and a failed statement leaves Postgres refusing every later one in it — "continue anyway"
+ * is not on the menu, only "fail this completion". That is the right outcome: completion is retryable and
+ * idempotent, so the walk lands on the next attempt with its audit trail intact.
+ */
+async function recordCreatedGlassesWalkthroughStills(
+  tenantDb: TenantDb,
+  args: { created: (typeof files.$inferSelect)[]; userId: string; officeId: string | null }
+): Promise<void> {
+  const stills = args.created.filter((row) => row.category === "photo");
+  if (stills.length === 0) return;
+
+  // Read off the ROW rather than hardcoded nulls: these columns are all null for a glasses still today,
+  // and writing `null` here would silently stop being true the moment the insert above starts stamping a
+  // GPS fix or a photo category onto them.
+  await tenantDb.insert(photoAuditLog).values(
+    stills.map((row) => ({
+      photoId: row.id,
+      eventType: "uploaded" as const,
+      userId: args.userId,
+      ipAddress: null,
+      userAgent: null,
+      metadata: {
+        addressSource: row.addressSource ?? null,
+        hasGpsCoordinates: Boolean(row.latitude && row.longitude),
+        category: row.photoCategory ?? null,
+        sizeBytes: row.fileSizeBytes ?? null,
+      },
+    }))
+  );
+
+  await tenantDb.insert(jobQueue).values(
+    stills.map((row) => ({
+      jobType: "domain_event",
+      payload: {
+        eventName: DOMAIN_EVENTS.FILE_UPLOADED,
+        fileId: row.id,
+        r2Key: row.r2Key,
+        mimeType: row.mimeType,
+        dealId: row.dealId,
+        leadId: row.leadId,
+        contactId: row.contactId,
+        category: row.category,
+        uploadedBy: args.userId,
+      },
+      // Carried the same way the forward enqueue below carries it — the worker resolves which tenant
+      // schema the file lives in from this column, and the payload deliberately does not repeat it.
+      officeId: args.officeId,
+      status: "pending" as const,
+      runAfter: new Date(),
+    }))
+  );
+  // No `eventBus.emitLocal` counterpart to `emitUploadedFileEvent` (files/routes.ts). Nothing subscribes to
+  // FILE_UPLOADED in-process, and that call is made AFTER the request commits for a reason — this module
+  // never owns the transaction it runs in (`runInOfficeTransaction`, field/routes.ts), so an in-process
+  // emit from here would announce a walk a rollback can still erase.
+}
+
 export interface IngestGlassesWalkthroughResult {
   walkId: string;
   files: GlassesWalkthroughFileResult[];
@@ -1038,6 +1135,20 @@ export async function ingestGlassesWalkthrough(
       displayName: fileRow.displayName,
       created: createdClientUploadIds.has(clientUploadId),
     };
+  });
+
+  // The stills join the ordinary photo pipeline HERE, and the position is load-bearing on both sides.
+  //
+  // AFTER `fileResults`, so a walk about to be refused with a 409 announces nothing it is not going to
+  // keep. BEFORE the forward-job dedupe below, because that branch RETURNS EARLY: a retry of a walk whose
+  // forward is already queued can still have created new `files` rows on this very call (the partial-
+  // landing case the `created` flag exists for), and an emit written past the early return would file
+  // those stills and tell nobody — the exact defect being fixed, reintroduced on the retry path only,
+  // where it is hardest to notice.
+  await recordCreatedGlassesWalkthroughStills(tenantDb, {
+    created: inserted,
+    userId: input.userId,
+    officeId: input.officeId,
   });
 
   const knownJobState = await findGlassesWalkthroughForwardJobState(tenantDb, input.walkId, input.dealId);

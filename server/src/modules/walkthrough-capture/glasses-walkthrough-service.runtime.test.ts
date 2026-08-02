@@ -7,10 +7,11 @@ import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { and, eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { files, jobQueue } from "@trock-crm/shared/schema";
+import { files, jobQueue, photoAuditLog } from "@trock-crm/shared/schema";
 import { migrationSql } from "../../../tests/helpers/migration-sql.js";
 import { tenantSchemaSql } from "../../../tests/helpers/tenant-schema-from-drizzle.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { recordUploadedFileSideEffects } from "../files/upload-workflow.js";
 import {
   GLASSES_WALKTHROUGH_FORWARD_JOB,
   GLASSES_WALKTHROUGH_VERIFY_CONCURRENCY,
@@ -38,7 +39,10 @@ let tenantDb: any;
 
 beforeAll(async () => {
   pg = new PGlite();
-  await pg.exec(tenantSchemaSql("public", [files, jobQueue]));
+  // `photo_audit_log` is here because a filed STILL is an ordinary photo as far as the rest of the app is
+  // concerned: the ingress writes the same "uploaded" audit row the field-photo path writes, and an
+  // island table (no FKs — see tenantSchemaSql's docblock) is enough to prove it.
+  await pg.exec(tenantSchemaSql("public", [files, jobQueue, photoAuditLog]));
   // `tenantSchemaSql` deliberately omits indexes/unique constraints (see its own docblock) — but
   // `ingestGlassesWalkthrough`'s idempotency relies on the REAL partial unique index migration 0170
   // creates (`files_client_upload_id_key`), so it has to be added by hand here for the
@@ -66,6 +70,7 @@ afterAll(async () => {
 beforeEach(async () => {
   await pg.exec("DELETE FROM files");
   await pg.exec("DELETE FROM job_queue");
+  await pg.exec("DELETE FROM photo_audit_log");
 });
 
 /** A healthy store that agrees with whatever the payload declares — every happy-path test runs THROUGH
@@ -606,6 +611,193 @@ describe("ingestGlassesWalkthrough", () => {
 
     const [row] = await tenantDb.select().from(files).where(eq(files.clientUploadId, storedId("photo-2")));
     expect(new Date(row.takenAt).toISOString()).toBe("2026-07-29T14:00:00.000Z");
+  });
+});
+
+// ── A walk's stills are ordinary photos to everything downstream ───────────────────────────────────
+//
+// Filing a `files` row with `category: 'photo'` is only half of what the rest of this codebase means by
+// "a photo arrived". The other half is the durable `file.uploaded` domain event, which is the ONLY thing
+// that starts the photo pipeline: the worker's handler (worker/src/jobs/index.ts) runs `extractExif` —
+// which reads the object's own EXIF and backfills `taken_at` / `geo_lat` / `geo_lng` — and, on a
+// Procore-linked deal, enqueues `procore_photo_sync` so the still lands in the project's photo album.
+// Neither is reachable any other way. Without the event a glasses still is a row that LOOKS right in the
+// table and is invisible to every process that acts when a photo arrives.
+//
+// These live in the real-SQL lane because the property under test is "which rows did the batched
+// `ON CONFLICT DO NOTHING ... RETURNING` actually create" — a fact only the unique index produces.
+
+/** The office the completion route always supplies (`officeId: office.id`); only the older fixtures above
+ *  leave it null. `job_queue.office_id` is what the worker resolves the tenant schema from, so an event
+ *  emitted without it reaches the handler and can do nothing there. */
+const OFFICE = U("44444");
+
+/** A walk of `count` stills and nothing else. `head` returns neither contentType nor contentLength, so
+ *  neither mismatch check fires — these tests are about what is emitted, not about verification. */
+const stillsWalk = (count: number, overrides: Partial<IngestGlassesWalkthroughInput> = {}) =>
+  baseInput({ officeId: OFFICE, artifacts: photoArtifacts(count), ...overrides });
+const blindStore = () => healthyStore({ head: async () => ({}) });
+
+const domainEvents = () =>
+  tenantDb.select().from(jobQueue).where(eq(jobQueue.jobType, "domain_event"));
+
+describe("ingestGlassesWalkthrough — the stills enter the photo pipeline", () => {
+  it("REGRESSION: enqueues a file.uploaded domain event for each still it files", async () => {
+    // Without this the walk's photos never get EXIF backfill and never reach the deal's Procore photo
+    // album, while every photo the crew shoots through the ordinary field camera does — the same bytes,
+    // the same deal, the same `category: 'photo'` row, two different amounts of system behaviour.
+    const result = await ingestGlassesWalkthrough(tenantDb, stillsWalk(2), { artifactStore: blindStore() });
+
+    const events = await domainEvents();
+    expect(events).toHaveLength(2);
+    expect(events.map((e: { payload: { fileId: string } }) => e.payload.fileId).sort()).toEqual(
+      result.files.map((f) => f.fileId).sort()
+    );
+    // The handler dispatches on `eventName` and then gates its entire body on `category === 'photo'`;
+    // `officeId` on the ROW is how the worker resolves which tenant schema the file lives in. An event
+    // missing any of the three is dequeued, logged and discarded.
+    expect(events[0]!.payload.eventName).toBe("file.uploaded");
+    expect(events[0]!.payload.category).toBe("photo");
+    expect(events[0]!.officeId).toBe(OFFICE);
+    expect(events[0]!.status).toBe("pending");
+  });
+
+  it("REGRESSION: emits the event body field-for-field identical to the shared producer's", async () => {
+    // The batching constraint (see the service) rules out calling `recordUploadedFileSideEffects` per row,
+    // so this module builds the payload itself — which means the two can DRIFT, and a payload missing a
+    // key the worker later starts reading fails silently on exactly one producer. Rather than restate the
+    // expected shape here (a copy drifts in lockstep with the copy it is checking), run the REAL shared
+    // producer over the very row this module just filed and compare what each one enqueued.
+    const result = await ingestGlassesWalkthrough(tenantDb, stillsWalk(1), { artifactStore: blindStore() });
+    const [emitted] = await domainEvents();
+
+    const [row] = await tenantDb.select().from(files).where(eq(files.id, result.files[0]!.fileId));
+    await recordUploadedFileSideEffects(tenantDb, { file: row, userId: USER, officeId: OFFICE });
+    const reference = (await domainEvents()).find((e: { id: number }) => e.id !== emitted.id);
+
+    expect(emitted.payload).toEqual(reference.payload);
+  });
+
+  it("REGRESSION: writes the 'uploaded' photo_audit_log row the ordinary photo path writes", async () => {
+    // The photo audit trail is a per-photo chain of custody the admin audit screen reads
+    // (files/audit-log-service.ts). A still with no `uploaded` row is a photo that appears in the audit
+    // view with no beginning — indistinguishable from one inserted directly into the database.
+    const result = await ingestGlassesWalkthrough(tenantDb, stillsWalk(2), { artifactStore: blindStore() });
+
+    const audit = await tenantDb.select().from(photoAuditLog);
+    expect(audit).toHaveLength(2);
+    expect(audit.map((a: { photoId: string }) => a.photoId).sort()).toEqual(result.files.map((f) => f.fileId).sort());
+    expect(audit[0]!.eventType).toBe("uploaded");
+    expect(audit[0]!.userId).toBe(USER);
+  });
+
+  it("GUARD: emits NOTHING for the walk's video and audio", async () => {
+    // Deliberate, not an oversight. Those rows are `category: 'other'`, and the handler's entire body sits
+    // inside `if (payload.category === 'photo')` — so an event for a clip is a durable queue row whose
+    // successful outcome is a log line. They are not second-class either: the clips already have a
+    // dedicated durable consumer in `glasses_walkthrough_forward`, which is what this whole module exists
+    // to schedule. And the shape of the work a `file.uploaded` consumer does with a file is "fetch the
+    // object and read it" (extractExif downloads it; the Procore push downloads it again) — inviting that
+    // for objects up to MAX_GLASSES_WALKTHROUGH_ARTIFACT_BYTES (2 GiB) buys a consumer nothing today and
+    // costs the worker a multi-gigabyte pull the day someone widens the gate. If a non-photo consumer is
+    // ever registered, dropping the category filter is a one-line change.
+    const input = baseInput({
+      officeId: OFFICE,
+      artifacts: [
+        {
+          idempotencyKey: "video-1",
+          kind: "video",
+          originalFilename: "clip.mp4",
+          mimeType: "video/mp4",
+          fileSizeBytes: 4096,
+          capturedAtMs: 0,
+        },
+        {
+          idempotencyKey: "audio-1",
+          kind: "audio",
+          originalFilename: "narration.m4a",
+          mimeType: "audio/mp4",
+          fileSizeBytes: 2048,
+          capturedAtMs: 500,
+        },
+      ],
+    });
+    await ingestGlassesWalkthrough(tenantDb, input, { artifactStore: blindStore() });
+
+    expect(await domainEvents()).toHaveLength(0);
+    expect(await tenantDb.select().from(photoAuditLog)).toHaveLength(0);
+    // ...and the clips are still forwarded, which is the consumer they DO have.
+    const forwards = await tenantDb.select().from(jobQueue).where(eq(jobQueue.jobType, GLASSES_WALKTHROUGH_FORWARD_JOB));
+    expect(forwards).toHaveLength(1);
+  });
+
+  it("REGRESSION: a partial retry emits for the still it CREATED and for none of the ones it skipped", async () => {
+    // Completion is retryable by design and the mobile queue re-sends the whole walk, so the emit set has
+    // to be the rows the INSERT actually created — not the rows named in the request. Driving it off the
+    // request would re-emit for every previously-filed still on every retry: a re-run of EXIF over bytes
+    // that have not changed, and a second push of the same photo into the deal's Procore album.
+    //
+    // This also pins WHERE the emit sits. The second call finds a live forward job and returns early from
+    // the dedupe branch below; an emit written after that branch would file this still and tell nobody.
+    await ingestGlassesWalkthrough(tenantDb, stillsWalk(2), { artifactStore: blindStore() });
+    expect(await domainEvents()).toHaveLength(2);
+
+    const second = await ingestGlassesWalkthrough(tenantDb, stillsWalk(3), { artifactStore: blindStore() });
+    expect(second.forwarding.status).toBe("already_queued"); // the early return this emit must precede
+
+    const events = await domainEvents();
+    expect(events).toHaveLength(3); // NOT 5 — the two already-filed stills emit nothing a second time
+    const created = second.files.find((f) => f.created)!;
+    expect(events.filter((e: { payload: { fileId: string } }) => e.payload.fileId === created.fileId)).toHaveLength(1);
+    expect(await tenantDb.select().from(photoAuditLog)).toHaveLength(3);
+  });
+
+  it("REGRESSION: a full retry of an already-filed walk leaves the event count where it was", async () => {
+    // Red before the fix on the FIRST half (there were no events to count) and load-bearing on the second:
+    // re-filing a walk that is already wholly filed must not multiply the downstream work by however many
+    // retries a flaky cellular link produced. Two identical completions, two events, not four.
+    await ingestGlassesWalkthrough(tenantDb, stillsWalk(2), { artifactStore: blindStore() });
+    await ingestGlassesWalkthrough(tenantDb, stillsWalk(2), { artifactStore: blindStore() });
+
+    expect(await domainEvents()).toHaveLength(2);
+    expect(await tenantDb.select().from(photoAuditLog)).toHaveLength(2);
+  });
+
+  it("GUARD: the write phase costs the same number of statements for a 40-still walk as for a 2-still walk", async () => {
+    // The reason the `files` write is one multi-row insert rather than a loop: `tenantMiddleware` has
+    // pinned a pooled connection and opened a transaction before this handler runs, so every statement is
+    // pool-slot occupancy. Emitting the events by calling `recordUploadedFileSideEffects` per still would
+    // have put TWO round trips per photo straight back in — 400 of them at the 200-artifact ceiling, for
+    // the one artifact class a walk carries in bulk. Counting STATEMENTS rather than asserting a
+    // particular number keeps this true as the write phase gains or loses steps.
+    const statementsFor = async (stills: number): Promise<number> => {
+      await pg.exec("DELETE FROM files");
+      await pg.exec("DELETE FROM job_queue");
+      await pg.exec("DELETE FROM photo_audit_log");
+      const issued: string[] = [];
+      const original = pg.query.bind(pg);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (pg as any).query = (text: string, ...rest: unknown[]) => {
+        issued.push(text);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return (original as any)(text, ...rest);
+      };
+      try {
+        await ingestGlassesWalkthrough(tenantDb, stillsWalk(stills), { artifactStore: blindStore() });
+      } finally {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (pg as any).query = original;
+      }
+      return issued.length;
+    };
+
+    // Six statements either way, today: the `files` insert, the re-select, the audit insert, the event
+    // insert, the forward-state lookup and the forward enqueue. Nonzero on both sides is itself part of
+    // the assertion — a counter that silently stopped intercepting would otherwise report 0 === 0.
+    const wide = await statementsFor(40);
+    const narrow = await statementsFor(2);
+    expect(narrow).toBeGreaterThan(0);
+    expect(wide).toBe(narrow);
   });
 });
 
