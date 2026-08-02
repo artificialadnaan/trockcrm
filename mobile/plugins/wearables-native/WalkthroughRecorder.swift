@@ -54,6 +54,20 @@ final class WalkthroughRecorder: RCTEventEmitter {
   private var walkDirectory: URL?
   private var stillIndex = 0
 
+  /// Stills that `capturePhoto` ACCEPTED but whose image has not come back on `photoDataPublisher`
+  /// yet. `endWalk` waits on this before teardown: tapping Capture and immediately confirming End
+  /// walk is a completely ordinary sequence, and without the wait the photo the UI already told the
+  /// estimator it took is thrown away when `photoToken` goes nil — silently, since nothing on
+  /// either side is expecting a still that never arrives.
+  ///
+  /// Guarded by its own serial queue rather than left bare like `stillIndex`, because unlike that
+  /// counter this one is genuinely read and written from three places on different threads: the RN
+  /// method queue (`captureStill`), the SDK's publisher thread (`deliverStill`), and the `endWalk`
+  /// Task. `DispatchQueue.sync` and not `NSLock`, because `lock()`/`unlock()` are unavailable from
+  /// the async context `endWalk` polls this from under Swift 6.
+  private let stillFlightQueue = DispatchQueue(label: "com.trockcam.walkthrough.stillFlight")
+  private var stillsInFlightStorage = 0
+
   /// `.high` per Meta: 720x1280 at 30fps. Read once from here for both the `addStream()` config
   /// below and the video track's `outputSettings`, so the two can never drift apart.
   private static let streamResolution: StreamingResolution = .high
@@ -167,6 +181,9 @@ final class WalkthroughRecorder: RCTEventEmitter {
         let dir = try Self.makeWalkDirectory(walkId)
         walkDirectory = dir
         stillIndex = 0
+        // A previous walk that ended while a still was genuinely lost leaves this non-zero; without
+        // the reset the NEXT walk's endWalk would wait out its whole deadline for that dead request.
+        adjustStillsInFlight(-stillsInFlight)
 
         let sdk = Wearables.shared
         let selector = AutoDeviceSelector(wearables: sdk)
@@ -357,10 +374,49 @@ final class WalkthroughRecorder: RCTEventEmitter {
     }
     // Fire-and-forget by design: capturePhoto only reports that the request was ACCEPTED. The
     // image arrives later on photoDataPublisher and is emitted as a walkthrough:still event.
-    resolve(["requested": stream.capturePhoto(format: .jpeg)])
+    let requested = stream.capturePhoto(format: .jpeg)
+    // Counted only when the SDK actually took the request. A refused capture never produces a
+    // publisher event, so counting it would leave endWalk waiting out its whole deadline for an
+    // image that was never coming.
+    if requested { adjustStillsInFlight(+1) }
+    resolve(["requested": requested])
+  }
+
+  @discardableResult
+  private func adjustStillsInFlight(_ delta: Int) -> Int {
+    stillFlightQueue.sync {
+      stillsInFlightStorage = max(0, stillsInFlightStorage + delta)
+      return stillsInFlightStorage
+    }
+  }
+
+  private var stillsInFlight: Int { stillFlightQueue.sync { stillsInFlightStorage } }
+
+  /// Give every accepted-but-undelivered still a bounded chance to land before the publisher that
+  /// would deliver it is torn down.
+  ///
+  /// Five seconds: a Ray-Ban Meta JPEG round trip measures in the low seconds over the link, so
+  /// this clears immediately in the normal case and only ever elapses in full when an image is
+  /// genuinely never coming. Waiting is the right trade even so — the estimator has already been
+  /// told the photo was taken, and a site visit missing a photo it believes it has is worse than an
+  /// end-of-walk pause. Bounded rather than unbounded because a lost capture must not strand the
+  /// walk: the video is finalized by this point, so the walk completes either way.
+  private func awaitPendingStills(timeout: TimeInterval = 5.0) async {
+    guard stillsInFlight > 0 else { return }
+    let deadline = Date().addingTimeInterval(timeout)
+    while stillsInFlight > 0, Date() < deadline {
+      // 50ms: short enough that the common case (image already in flight, arriving imminently) adds
+      // no perceptible delay, long enough not to spin a cooperative thread on a sync-queue read.
+      try? await Task.sleep(nanoseconds: 50_000_000)
+    }
   }
 
   private func deliverStill(_ photo: PhotoData) {
+    // Released FIRST, and on every path out of this function including the guard and the write
+    // failure below: this request has resolved either way, and a decrement that only ran on the
+    // happy path would leave endWalk waiting out its full deadline after a photo that failed to
+    // save — the one case where the estimator is already going to be told something went wrong.
+    adjustStillsInFlight(-1)
     guard let dir = walkDirectory else { return }
     stillIndex += 1
     let url = dir.appendingPathComponent(String(format: "still-%03d.jpg", stillIndex))
@@ -394,7 +450,6 @@ final class WalkthroughRecorder: RCTEventEmitter {
   func endWalk(_ resolve: @escaping RCTPromiseResolveBlock,
                rejecter reject: @escaping RCTPromiseRejectBlock) {
     Task {
-      let stills = stillIndex
       // Stop production before finalizing: no more frames or audio buffers should reach
       // `videoWriter` once finalize() starts, or markAsFinished()/finishWriting() could race a
       // still-arriving append.
@@ -411,6 +466,19 @@ final class WalkthroughRecorder: RCTEventEmitter {
       let census = videoWriter?.census() ?? [:]
 
       let result = await videoWriter?.finalize()
+
+      // Placed AFTER finalize and BEFORE teardown, deliberately. A still that lands here costs
+      // nothing — deliverStill only writes a JPEG and emits an event, it never touches the writer —
+      // so waiting before finalize would only delay the video for no benefit. Teardown is the hard
+      // edge: it nils photoToken and stops the stream, and any image still in transit at that
+      // moment is gone. The JS reducer already accepts stills while "finalizing" (session.ts's
+      // canAcceptStill), so an event emitted during this window still reaches the walk.
+      await awaitPendingStills()
+
+      // Read after the wait, not before it: a still that lands during the window above is part of
+      // this walk, and reporting the pre-wait count would undercount exactly the photo this wait
+      // exists to save.
+      let stills = stillIndex
       await teardown()
 
       switch result {

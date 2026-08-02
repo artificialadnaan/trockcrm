@@ -309,6 +309,8 @@ describe("handleGlassesWalkthroughForward", () => {
 
   it("throws (so job_queue retries) when the walkthrough create call fails", async () => {
     const db = makeDb();
+    // 500 is deliberately the AMBIGUOUS class now — see the retry-safety block below — so this
+    // asserts only that the job still throws and retries, not which of the two messages it carries.
     const { fetchImpl } = makeScopeFetch({ createStatus: 500, createBody: { error: "boom" } });
 
     await expect(
@@ -319,7 +321,7 @@ describe("handleGlassesWalkthroughForward", () => {
         token: "t",
         downloadRange: makeDownloadRange(),
       })
-    ).rejects.toThrow(/walkthrough create failed/);
+    ).rejects.toThrow(/walkthrough create/);
   });
 
   it("throws when R2 returns no ETag for an uploaded part", async () => {
@@ -541,15 +543,15 @@ describe("handleGlassesWalkthroughForward", () => {
     });
 
     it("clears the pending-create marker when TROCK Scope ANSWERED and refused, so the job stays retryable", async () => {
-      // A completed non-2xx response is positive evidence no walkthrough row exists (the create route
-      // inserts and then answers 201; an error response comes from the error path instead). This is
+      // A completed 4xx is positive evidence no walkthrough row exists: the create route inserts and
+      // THEN answers 201, so a 4xx came off its validation/auth path before any insert. This is
       // today's most likely failure by far — TROCK Scope has no machine-auth middleware yet and 401s
       // every one of these calls — and it must NOT burn the job on a phantom duplicate hunt.
       const db = makeJobQueueDb(makePayload());
       const refused = makeScopeFetch({ createStatus: 401, createBody: { error: "unauthorized" } });
       await expect(
         handleGlassesWalkthroughForward(db.storedPayload(), "office-1", deps(db, refused.fetchImpl))
-      ).rejects.toThrow(/walkthrough create failed/);
+      ).rejects.toThrow(/refused before it created anything/);
       expect(db.storedPayload().scopeCreatePendingRef).toBeUndefined();
 
       // …and the next attempt proceeds normally rather than dead-lettering.
@@ -559,6 +561,20 @@ describe("handleGlassesWalkthroughForward", () => {
       ).resolves.toBeUndefined();
       expect(retry.calls.filter((c) => c.url === CREATE_URL)).toHaveLength(1);
       expect(db.storedPayload().scopeWalkthroughId).toBe("scope-walkthrough-1");
+    });
+
+    it("KEEPS the marker when a GATEWAY answers 5xx, which proves nothing either way", async () => {
+      // The line between the two classes. A 4xx is TROCK Scope's own error path answering before it
+      // inserted. A 5xx is frequently not TROCK Scope answering at all — it is a proxy inventing a
+      // status because the app behind it went quiet, which happens just as readily AFTER a committed
+      // INSERT (response lost, gateway timed out mid-reply) as before one. Clearing on that hands the
+      // next attempt a clean slate to create a duplicate walkthrough and a second billed extraction.
+      const db = makeJobQueueDb(makePayload());
+      const gateway = makeScopeFetch({ createStatus: 502, createBody: { error: "bad gateway" } });
+      await expect(
+        handleGlassesWalkthroughForward(db.storedPayload(), "office-1", deps(db, gateway.fetchImpl))
+      ).rejects.toThrow(/does not prove whether a walkthrough was created/);
+      expect(db.storedPayload().scopeCreatePendingRef).toBe("trockcrm:glasses-walkthrough:walk-1");
     });
 
     it("clears the pending-create marker when the connection was never established (TROCK Scope not deployed)", async () => {

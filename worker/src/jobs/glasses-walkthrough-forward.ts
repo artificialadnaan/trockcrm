@@ -287,11 +287,25 @@ async function createScopeWalkthrough(
       `TROCK Scope walkthrough create returned ${status} with no usable walkthrough id: ${JSON.stringify(json)}`
     );
   }
-  // TROCK Scope answered and refused. Its create route inserts and THEN replies 201, so a 4xx/5xx came off
-  // the error path with no row behind it — safe to retry, and it must be, because a 401 is exactly what
-  // every one of these calls gets until machine auth lands on that side.
-  throw new ScopeWalkthroughNotCreatedError(
-    `TROCK Scope walkthrough create failed: ${status} ${JSON.stringify(json)}`
+  // TROCK Scope answered and refused BEFORE inserting anything. Its create route inserts and THEN replies
+  // 201, so a 4xx came off the validation/auth path with no row behind it — safe to retry, and it must be,
+  // because a 401 is exactly what every one of these calls gets until machine auth lands on that side.
+  //
+  // 4xx only, deliberately. A 5xx is NOT the same claim: 502/503/504 are the statuses a reverse proxy
+  // invents when the app behind it never answered, which happens just as readily AFTER a successful INSERT
+  // (response lost, gateway timed out mid-reply) as before one. Reading those as "nothing was created"
+  // clears the marker and hands the next attempt a clean slate to create a duplicate walkthrough and a
+  // second billed extraction — precisely the outcome this checkpoint exists to prevent. Everything at 5xx
+  // and above is therefore reported as UNKNOWN (plain Error), which keeps the marker and routes the retry
+  // into reconciliation instead.
+  if (status >= 400 && status < 500) {
+    throw new ScopeWalkthroughNotCreatedError(
+      `TROCK Scope walkthrough create was refused before it created anything: ${status} ${JSON.stringify(json)}`
+    );
+  }
+  throw new Error(
+    `TROCK Scope walkthrough create failed with ${status}, which does not prove whether a walkthrough was ` +
+      `created (a gateway can emit this after the insert committed): ${JSON.stringify(json)}`
   );
 }
 

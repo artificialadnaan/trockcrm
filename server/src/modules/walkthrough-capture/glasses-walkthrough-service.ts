@@ -528,7 +528,17 @@ async function verifyGlassesWalkthroughArtifacts(
         Array.from({ length: Math.min(GLASSES_WALKTHROUGH_VERIFY_CONCURRENCY, prepared.length) }, () => worker())
       ).then(() => false),
       new Promise<true>((resolve) => {
-        timer = setTimeout(() => resolve(true), timeoutMs);
+        timer = setTimeout(() => {
+          // Stop DISPATCHING as well as stop waiting. The already-issued HEADs cannot be aborted (no
+          // AbortSignal is threaded through the store interface), but the workers are still sitting in
+          // their `while` loops, and each one that settles after this point would otherwise pick up the
+          // next index and fire another request into a store that has already proven it is not answering.
+          // For a 200-artifact walk that is ~192 further HEADs issued AFTER the caller got its 503 — and
+          // since a 503 is retryable, the client's next attempt stacks another round on top, multiplying
+          // load during exactly the slowdown this deadline exists to contain.
+          stopDispatchingAt = 0;
+          resolve(true);
+        }, timeoutMs);
         // Never keep the process alive for a verification nobody is waiting on any more.
         timer.unref?.();
       }),

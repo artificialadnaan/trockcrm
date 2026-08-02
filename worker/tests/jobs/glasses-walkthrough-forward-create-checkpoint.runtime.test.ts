@@ -165,10 +165,47 @@ describe("glasses_walkthrough_forward create checkpoint (real SQL)", () => {
 
     await expect(
       handleGlassesWalkthroughForward(await storedPayload(db), null, deps(makeClient(db), fetchImpl)),
-    ).rejects.toThrow(/walkthrough create failed/);
+    ).rejects.toThrow(/refused before it created anything/);
 
     const payload = await storedPayload(db);
     expect("scopeCreatePendingRef" in payload).toBe(false);
     expect(payload.walkId).toBe("walk-1"); // `payload - 'key'` must not disturb anything else
+  });
+
+  it("KEEPS the pending marker when a gateway answers 502, which does not prove anything", async () => {
+    // The distinction that matters: a 4xx is TROCK Scope's own validation/auth path answering before
+    // it inserted anything. A 5xx is very often not TROCK Scope answering at all — it is a proxy
+    // inventing a status because the app behind it went quiet, which happens just as readily AFTER a
+    // committed INSERT (response lost, gateway timed out mid-reply) as before one. Clearing the
+    // marker on that hands the next attempt a clean slate to create a duplicate walkthrough and a
+    // second billed extraction.
+    const db = await seed();
+    const { fetchImpl } = makeScopeFetch({ createStatus: 502, createBody: { error: "bad gateway" } });
+
+    await expect(
+      handleGlassesWalkthroughForward(await storedPayload(db), null, deps(makeClient(db), fetchImpl)),
+    ).rejects.toThrow(/does not prove whether a walkthrough was created/);
+
+    const payload = await storedPayload(db);
+    expect(payload.scopeCreatePendingRef).toBe("trockcrm:glasses-walkthrough:walk-1");
+  });
+
+  it("dead-letters rather than re-creating after an ambiguous 503", async () => {
+    // The marker is only worth keeping if something downstream acts on it. End to end: a 503 leaves
+    // it set, and the redelivered payload must refuse to create a second time.
+    const db = await seed();
+    const gateway = makeScopeFetch({ createStatus: 503, createBody: { error: "unavailable" } });
+    await expect(
+      handleGlassesWalkthroughForward(await storedPayload(db), null, deps(makeClient(db), gateway.fetchImpl)),
+    ).rejects.toThrow();
+
+    const retry = makeScopeFetch();
+    const result = await handleGlassesWalkthroughForward(
+      await storedPayload(db),
+      null,
+      deps(makeClient(db), retry.fetchImpl),
+    );
+    expect(retry.calls.filter((c) => c.url === CREATE_URL)).toHaveLength(0);
+    expect(result).toEqual({ status: "dead", error: expect.stringContaining("trockcrm:glasses-walkthrough:walk-1") });
   });
 });

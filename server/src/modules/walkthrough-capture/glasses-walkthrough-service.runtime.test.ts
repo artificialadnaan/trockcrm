@@ -12,6 +12,7 @@ import { tenantSchemaSql } from "../../../tests/helpers/tenant-schema-from-drizz
 import { AppError } from "../../middleware/error-handler.js";
 import {
   GLASSES_WALKTHROUGH_FORWARD_JOB,
+  GLASSES_WALKTHROUGH_VERIFY_CONCURRENCY,
   type GlassesWalkthroughArtifactStore,
   type IngestGlassesWalkthroughInput,
   ingestGlassesWalkthrough,
@@ -538,5 +539,35 @@ describe("ingestGlassesWalkthrough — bounded object verification", () => {
 
     const rows = await tenantDb.select().from(files);
     expect(rows).toHaveLength(0);
+  });
+
+  it("stops DISPATCHING once the deadline fires, not just waiting", async () => {
+    // The deadline used to end the wait without ending the dispatch. Each of the 8 workers was still
+    // parked in its `while` loop, so every HEAD that settled after the timeout picked up the next
+    // index and issued another request — into a store that had just proven it was not answering. For
+    // a 200-artifact walk that is ~192 further requests fired AFTER the caller already had its 503,
+    // and because a 503 is retryable the client's next attempt stacks another round on top: the
+    // deadline was multiplying load during precisely the slowdown it exists to contain.
+    let issued = 0;
+    const store = healthyStore({
+      head: async () => {
+        issued += 1;
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        return { contentType: "image/jpeg", contentLength: 1024 };
+      },
+    });
+
+    await expect(
+      ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(60) }), {
+        artifactStore: store,
+        objectVerificationTimeoutMs: 60,
+      })
+    ).rejects.toMatchObject({ statusCode: 503 });
+
+    const atDeadline = issued;
+    // Several more 40ms rounds' worth of time. Only the requests already in flight when the deadline
+    // fired may still settle — at most one per worker, hence the concurrency allowance.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(issued).toBeLessThanOrEqual(atDeadline + GLASSES_WALKTHROUGH_VERIFY_CONCURRENCY);
   });
 });
