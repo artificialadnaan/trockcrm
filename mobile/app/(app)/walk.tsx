@@ -618,7 +618,7 @@ const styles = StyleSheet.create({
     fontSize: 16,
     lineHeight: 22,
     textAlign: "center",
-    fontFamily: "Menlo",
+    fontFamily: theme.font.body,
   },
 
   pressed: { opacity: 0.8 },
