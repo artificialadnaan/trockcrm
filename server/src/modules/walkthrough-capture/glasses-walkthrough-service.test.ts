@@ -12,8 +12,10 @@ import {
   MAX_GLASSES_WALKTHROUGH_ARTIFACT_BYTES,
   MAX_GLASSES_WALKTHROUGH_ARTIFACTS_PER_WALK,
   MAX_GLASSES_WALKTHROUGH_IDEMPOTENCY_KEY_CHARS,
+  requestGlassesWalkthroughArtifactUploadUrl,
   validateGlassesWalkthroughArtifactUploadUrlInput,
   validateGlassesWalkthroughCompleteInput,
+  type GlassesWalkthroughArtifactStore,
 } from "./glasses-walkthrough-service.js";
 
 const DEAL = "11111111-1111-4111-8111-111111111111";
@@ -63,6 +65,23 @@ describe("deriveGlassesWalkthroughArtifactR2Key", () => {
   it("percent-encodes the walk id and idempotency key into the key path", () => {
     const key = deriveGlassesWalkthroughArtifactR2Key("dallas", DEAL, "walk/weird id", "artifact#1", "jpg");
     expect(key).toBe(`dallas/deals/${DEAL}/glasses-walkthroughs/walk%2Fweird%20id/artifact%231.jpg`);
+  });
+
+  it("percent-encodes the office slug and deal id too, so no component can inject a path segment", () => {
+    // walkId/idempotencyKey were encoded from the start; officeSlug/dealId were not. Both are
+    // server-supplied today (`req.officeSlug`, `req.params.id`) so this is defence in depth rather than a
+    // live escape — but a key derivation where SOME components are escaped and others are not is a trap
+    // for the next caller, who has no way to tell which half they are in. Encode all four or none.
+    const key = deriveGlassesWalkthroughArtifactR2Key("dallas/evil", "deal id/../..", WALK, "artifact-1", "jpg");
+    expect(key).toBe(`dallas%2Fevil/deals/deal%20id%2F..%2F../glasses-walkthroughs/${WALK}/artifact-1.jpg`);
+  });
+
+  it("GUARD: leaves the real-world office slug and UUID deal id byte-identical (encoding orphans no stored object)", () => {
+    // encodeURIComponent is the identity function over [A-Za-z0-9-_.!~*'()], which covers every slug and
+    // every UUID this path has ever produced. That is what makes adding the encoding safe to land on an
+    // already-deployed key space — the keys it derives do not move.
+    const key = deriveGlassesWalkthroughArtifactR2Key("dallas", DEAL, WALK, "artifact-1", "jpg");
+    expect(key).toBe(`dallas/deals/${DEAL}/glasses-walkthroughs/${WALK}/artifact-1.jpg`);
   });
 
   it("scopes the key under the deal id, not just the office", () => {
@@ -224,6 +243,23 @@ describe("validateGlassesWalkthroughCompleteInput", () => {
     );
   });
 
+  it("rejects a capturedAtMs past the maximum representable Date, which would otherwise poison takenAt", () => {
+    // 8.64e15 is the ECMAScript maximum time value; `new Date` of anything beyond it is an Invalid Date,
+    // and `files.takenAt` is written straight from this number. An Invalid Date does not throw here — it
+    // fails at the INSERT (or, worse on a driver that coerces, lands a null/garbage taken_at), and
+    // taken_at is what every chronological read in the app orders on via COALESCE(taken_at, created_at):
+    // the field gallery, photo-timeline-filters.ts, files/feed-service.ts. A finite-and-non-negative
+    // check alone does not catch it — 1e300 is perfectly finite.
+    const artifacts = [baseArtifact({ capturedAtMs: 8_640_000_000_000_001 })];
+    expect(() => validateGlassesWalkthroughCompleteInput(baseCompleteInput({ artifacts }))).toThrow(AppError);
+  });
+
+  it("accepts a capturedAtMs exactly AT the maximum representable Date (the boundary is inclusive)", () => {
+    const artifacts = [baseArtifact({ capturedAtMs: 8_640_000_000_000_000 })];
+    const result = validateGlassesWalkthroughCompleteInput(baseCompleteInput({ artifacts }));
+    expect(Number.isNaN(new Date(result.artifacts[0]!.capturedAtMs!).getTime())).toBe(false);
+  });
+
   it("defaults a missing capturedAtMs to null rather than 0 (0 — the Unix epoch — is a real, meaningful timestamp)", () => {
     const artifacts = [baseArtifact({ capturedAtMs: undefined })];
     const result = validateGlassesWalkthroughCompleteInput(baseCompleteInput({ artifacts }));
@@ -234,6 +270,75 @@ describe("validateGlassesWalkthroughCompleteInput", () => {
     const artifacts = [baseArtifact({ mimeType: "IMAGE/JPEG" })];
     const result = validateGlassesWalkthroughCompleteInput(baseCompleteInput({ artifacts }));
     expect(result.artifacts[0]!.mimeType).toBe("image/jpeg");
+  });
+});
+
+describe("requestGlassesWalkthroughArtifactUploadUrl", () => {
+  function fakeStore(overrides: Partial<GlassesWalkthroughArtifactStore> = {}): GlassesWalkthroughArtifactStore {
+    return {
+      isConfigured: () => true,
+      head: async () => ({}),
+      presignUpload: async () => ({ uploadUrl: "https://r2.example.com/put", expiresIn: 1800 }),
+      ...overrides,
+    };
+  }
+
+  function uploadUrlInput(overrides: Record<string, unknown> = {}) {
+    return {
+      dealId: DEAL,
+      walkId: WALK,
+      idempotencyKey: "artifact-1",
+      kind: "video" as const,
+      mimeType: "video/mp4",
+      fileSizeBytes: 1024,
+      ...overrides,
+    };
+  }
+
+  it("presigns against the server-derived key, never a caller-supplied one", async () => {
+    const seen: string[] = [];
+    const result = await requestGlassesWalkthroughArtifactUploadUrl({
+      officeSlug: "dallas",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      input: uploadUrlInput() as any,
+      artifactStore: fakeStore({
+        presignUpload: async (r2Key) => {
+          seen.push(r2Key);
+          return { uploadUrl: "https://r2.example.com/put", expiresIn: 1800 };
+        },
+      }),
+    });
+    expect(result.r2Key).toBe(deriveGlassesWalkthroughArtifactR2Key("dallas", DEAL, WALK, "artifact-1", "mp4"));
+    expect(seen).toEqual([result.r2Key]);
+  });
+
+  it("400s on an unsupported mimeType instead of crashing on the undefined media lookup", async () => {
+    // This function is EXPORTED and re-reads GLASSES_WALKTHROUGH_ACCEPTED_MEDIA itself rather than
+    // trusting the validated input it is handed — exactly as prepareGlassesWalkthroughArtifacts does. But
+    // unlike that function it did not guard the lookup, so an unaccepted mimeType reached
+    // `media.extension` on `undefined`: a TypeError, which the error handler surfaces as a 500. A caller
+    // that sent a bad media type deserves the same 400 the validator would have given it, not an alert.
+    await expect(
+      requestGlassesWalkthroughArtifactUploadUrl({
+        officeSlug: "dallas",
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        input: uploadUrlInput({ mimeType: "application/pdf", kind: "video" }) as any,
+        artifactStore: fakeStore(),
+      })
+    ).rejects.toMatchObject({ statusCode: 400 });
+  });
+
+  it("400s rather than crashing when the mimeType is cased differently than the allowlist's own keys", async () => {
+    // The allowlist is keyed by LOWERCASE mime type and the validator lowercases before handing over, but
+    // a direct caller need not have — and an unguarded lookup turns that ordinary mistake into a 500.
+    await expect(
+      requestGlassesWalkthroughArtifactUploadUrl({
+        officeSlug: "dallas",
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        input: uploadUrlInput({ mimeType: "VIDEO/MP4" }) as any,
+        artifactStore: fakeStore(),
+      })
+    ).rejects.toMatchObject({ statusCode: 400 });
   });
 });
 

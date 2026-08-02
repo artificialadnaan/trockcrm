@@ -26,7 +26,7 @@
 //     evidence) do not prefix theirs either, and a client-generated key colliding by ACCIDENT across
 //     producers is cryptographically negligible when the client follows the same convention (a fresh
 //     UUID per artifact) documented in this module's report to the mobile team.
-import { and, desc, eq, isNotNull, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { files, jobQueue } from "@trock-crm/shared/schema";
@@ -88,6 +88,13 @@ export const MAX_GLASSES_WALKTHROUGH_ARTIFACT_BYTES = 2 * 1024 * 1024 * 1024; //
 
 /** `files.client_upload_id` is `varchar(64)` (migration 0170) — the idempotency key's hard ceiling. */
 export const MAX_GLASSES_WALKTHROUGH_IDEMPOTENCY_KEY_CHARS = 64;
+
+/**
+ * The ECMAScript maximum time value (±8.64e15 ms, ~±273,790 years around the epoch). `new Date` of
+ * anything beyond it is an Invalid Date, which is why `capturedAtMs` needs a ceiling and not just a
+ * finite/non-negative check — see where it is validated for what an Invalid Date does to `files.takenAt`.
+ */
+export const MAX_GLASSES_WALKTHROUGH_CAPTURED_AT_MS = 8_640_000_000_000_000;
 export const MAX_GLASSES_WALKTHROUGH_ARTIFACTS_PER_WALK = 200;
 
 /**
@@ -210,6 +217,14 @@ function resolveMedia(mimeType: unknown, kind: unknown, field: string): Accepted
  * a retried upload-url request idempotent: the same artifact always presigns the same destination, so a
  * retry after a lost response overwrites its own not-yet-confirmed object rather than orphaning a first
  * attempt at a different key.
+ *
+ * ALL FOUR variable components are percent-encoded, not just the two that arrive from the client body.
+ * officeSlug and dealId are server-supplied today (`req.officeSlug`, `req.params.id`), so encoding them is
+ * defence in depth rather than a live escape — but a derivation that escapes some components and not
+ * others is a trap for the next caller, who cannot tell from the signature which half they are in, and
+ * `/` in an unescaped component silently reshapes the key's directory structure. Safe to add after the
+ * fact because encodeURIComponent is the identity function over slugs and UUIDs: no key this has ever
+ * produced moves, so nothing already in R2 is orphaned.
  */
 export function deriveGlassesWalkthroughArtifactR2Key(
   officeSlug: string,
@@ -218,9 +233,11 @@ export function deriveGlassesWalkthroughArtifactR2Key(
   idempotencyKey: string,
   extension: string
 ): string {
-  const safeIdempotencyKey = encodeURIComponent(idempotencyKey);
+  const safeOfficeSlug = encodeURIComponent(officeSlug);
+  const safeDealId = encodeURIComponent(dealId);
   const safeWalkId = encodeURIComponent(walkId);
-  return `${officeSlug}/deals/${dealId}/glasses-walkthroughs/${safeWalkId}/${safeIdempotencyKey}.${extension}`;
+  const safeIdempotencyKey = encodeURIComponent(idempotencyKey);
+  return `${safeOfficeSlug}/deals/${safeDealId}/glasses-walkthroughs/${safeWalkId}/${safeIdempotencyKey}.${extension}`;
 }
 
 // ── Endpoint A: request a presigned upload URL for one artifact ────────────────────────────────────
@@ -268,7 +285,18 @@ export async function requestGlassesWalkthroughArtifactUploadUrl(args: {
   input: GlassesWalkthroughArtifactUploadUrlInput;
   artifactStore: GlassesWalkthroughArtifactStore;
 }): Promise<GlassesWalkthroughArtifactUploadUrlResult> {
+  // Guarded, not assumed — same reasoning as `prepareGlassesWalkthroughArtifacts`, which re-validates this
+  // identical lookup rather than trusting the validated input it is handed. This function is EXPORTED, so
+  // "the route always validates first" is a property of one caller, not of the function. Unguarded, an
+  // unaccepted (or merely differently-cased) mimeType read `.extension` off `undefined` — a TypeError the
+  // error handler surfaces as a 500 and an alert, where the caller had earned an ordinary 400.
   const media = GLASSES_WALKTHROUGH_ACCEPTED_MEDIA[args.input.mimeType];
+  if (!media || media.kind !== args.input.kind) {
+    throw new AppError(
+      400,
+      `artifact.mimeType "${args.input.mimeType}" is not an accepted glasses-walkthrough media type for kind "${args.input.kind}".`
+    );
+  }
   const r2Key = deriveGlassesWalkthroughArtifactR2Key(
     args.officeSlug,
     args.input.dealId,
@@ -362,6 +390,18 @@ export function validateGlassesWalkthroughCompleteInput(raw: Record<string, unkn
     if (a.capturedAtMs !== undefined && a.capturedAtMs !== null) {
       if (typeof a.capturedAtMs !== "number" || !Number.isFinite(a.capturedAtMs) || a.capturedAtMs < 0) {
         throw new AppError(400, `artifacts[${index}].capturedAtMs must be a non-negative number.`);
+      }
+      // Bounded ABOVE as well, because finite is not the same as representable: 1e300 passes every check
+      // on the line above and `new Date(1e300)` is an Invalid Date. This value is written straight to
+      // `files.takenAt`, and takenAt is the column every chronological read in the app orders on via
+      // COALESCE(taken_at, created_at) — the field gallery, photo-timeline-filters.ts,
+      // files/feed-service.ts. An Invalid Date does not fail here; it fails at the INSERT, turning a
+      // client's bad number into a 500 on a walk that is otherwise perfectly filable.
+      if (a.capturedAtMs > MAX_GLASSES_WALKTHROUGH_CAPTURED_AT_MS) {
+        throw new AppError(
+          400,
+          `artifacts[${index}].capturedAtMs must be at most ${MAX_GLASSES_WALKTHROUGH_CAPTURED_AT_MS} (the maximum representable timestamp).`
+        );
       }
       capturedAtMs = a.capturedAtMs;
     }
@@ -558,11 +598,21 @@ async function verifyGlassesWalkthroughArtifacts(
 }
 
 /**
- * What the queue already knows about forwarding THIS walk, in one scan.
+ * What the queue already knows about forwarding THIS walk FOR THIS DEAL, in one scan.
+ *
+ * Scoped by (walkId, dealId), never walkId alone. walkId is minted on the phone and nothing makes it
+ * unique across deals — the same physical walk legitimately gets completed against two deals (a mis-tagged
+ * walk corrected and re-sent, two deals sharing one site visit), and a colliding client walkId is not
+ * exotic. Keyed on walkId alone, the second deal's completion matches the FIRST deal's job, short-circuits
+ * to `already_queued`, and that deal never gets a scope: a 201, a full project folder, and a forward that
+ * silently never happened. The same unscoped read also hands deal B a checkpoint (`scopeWalkthroughId`)
+ * naming deal A's remote walkthrough, so B's clips would upload into A's walkthrough and B's scope rows
+ * would come back attached to the wrong deal.
  *
  * Deliberately one query, not two: the live-row dedupe check and the dead-row checkpoint lookup have the
- * same (job_type, payload->>'walkId') shape and neither is indexed, so asking twice would double the cost
- * of the common first-completion path — the very path where the second question always comes back empty.
+ * same (job_type, payload->>'walkId', payload->>'dealId') shape, so asking twice would double the cost of
+ * the common first-completion path — the very path where the second question always comes back empty.
+ * Migration 0211 indexes exactly this predicate.
  * The ORDER BY carries the whole precedence instead:
  *   1. a LIVE row wins outright — forwarding is already scheduled and nothing else matters;
  *   2. otherwise prefer a dead row that carries a SETTLED `scopeWalkthroughId` over one that only carries
@@ -584,7 +634,8 @@ interface GlassesWalkthroughForwardJobState {
 
 async function findGlassesWalkthroughForwardJobState(
   tenantDb: TenantDb,
-  walkId: string
+  walkId: string,
+  dealId: string
 ): Promise<GlassesWalkthroughForwardJobState | null> {
   const rows = await tenantDb
     .select({
@@ -598,6 +649,7 @@ async function findGlassesWalkthroughForwardJobState(
       and(
         eq(jobQueue.jobType, GLASSES_WALKTHROUGH_FORWARD_JOB),
         sql`${jobQueue.payload} ->> 'walkId' = ${walkId}`,
+        sql`${jobQueue.payload} ->> 'dealId' = ${dealId}`,
         sql`(${jobQueue.status} <> 'dead'
              OR ${jobQueue.payload} ->> 'scopeWalkthroughId' IS NOT NULL
              OR ${jobQueue.payload} ->> 'scopeCreatePendingRef' IS NOT NULL)`
@@ -637,8 +689,10 @@ export interface IngestGlassesWalkthroughResult {
  *   - PER WALK: retrying the WHOLE completion call (e.g. the mobile app never saw the first response)
  *     must not enqueue a SECOND forward job — TROCK Scope's `POST /walkthroughs` has no idempotency key
  *     of its own (see the report's TROCK Scope follow-up), so two jobs for one walk would create two
- *     walkthroughs there. Guarded by looking for a live (non-dead) `job_queue` row for this `walkId`
- *     before inserting a new one. This is a best-effort, non-transactional check (a concurrent duplicate
+ *     walkthroughs there. Guarded by looking for a live (non-dead) `job_queue` row for this (`walkId`,
+ *     `dealId`) pair before inserting a new one — the pair, never `walkId` alone, because a phone-minted
+ *     walkId is not unique across deals and deduping on it would silently drop the second deal's forward
+ *     entirely (see `findGlassesWalkthroughForwardJobState`). This is a best-effort, non-transactional check (a concurrent duplicate
  *     completion call can race past it) — the same class of accepted residual as
  *     `rfp-bidboard-create.ts`'s own dealId-scoped dedupe reasoning: a rare duplicate FORWARD ATTEMPT is
  *     a wasted retry the worker's own per-walkthrough checkpoint (see the worker job) mostly absorbs, not
@@ -669,7 +723,6 @@ export async function ingestGlassesWalkthrough(
   deps: { artifactStore: GlassesWalkthroughArtifactStore; objectVerificationTimeoutMs?: number }
 ): Promise<IngestGlassesWalkthroughResult> {
   const bucket = getGlassesWalkthroughFileBucket();
-  const fileResults: GlassesWalkthroughFileResult[] = [];
   // `input.capturedAt` is validated ISO-8601 by validateGlassesWalkthroughCompleteInput, so this is a
   // real epoch millis value, not NaN.
   const capturedAtBaseMs = new Date(input.capturedAt).getTime();
@@ -681,84 +734,100 @@ export async function ingestGlassesWalkthrough(
     deps.objectVerificationTimeoutMs ?? GLASSES_WALKTHROUGH_VERIFY_TIMEOUT_MS
   );
 
-  for (const { artifact, media, r2Key } of prepared) {
-    const category: FileCategory = media.kind === "photo" ? "photo" : "other";
-    const fileExtension = `.${media.extension}`;
+  // ONE multi-row insert for the whole walk, not one statement per artifact.
+  //
+  // Same concern the verification phase is shaped around, on the other side of the phase boundary:
+  // `tenantMiddleware` has pinned a pooled connection and opened a transaction before this handler ran, so
+  // every round trip here is pool-slot occupancy. At the 200-artifact ceiling the per-artifact loop was up
+  // to 200 sequential INSERTs plus, on a retry, up to 200 more SELECTs — 400 serial round trips inside one
+  // held transaction, to write a bounded, fully-known set of rows. Batched it is exactly two statements
+  // regardless of walk size.
+  //
+  // Row order is NOT relied on anywhere below: `returning()` on a conflicting multi-row insert yields only
+  // the rows that actually inserted, in no promised order, so results are matched back by
+  // `client_upload_id` and the per-artifact bookkeeping is driven by iterating `prepared`.
+  const insertValues = prepared.map(({ artifact, media, r2Key }) => ({
+    category: (media.kind === "photo" ? "photo" : "other") as FileCategory,
+    subcategory: GLASSES_WALKTHROUGH_SUBCATEGORY,
+    folderPath: GLASSES_WALKTHROUGH_FOLDER_PATH,
+    tags: [GLASSES_WALKTHROUGH_TAG, input.walkId],
+    displayName: artifact.originalFilename,
+    systemFilename: `glasses-walk-${artifact.idempotencyKey}.${media.extension}`,
+    originalFilename: artifact.originalFilename,
+    mimeType: artifact.mimeType,
+    fileSizeBytes: artifact.fileSizeBytes,
+    fileExtension: `.${media.extension}`,
+    r2Key,
+    r2Bucket: bucket,
+    dealId: input.dealId,
+    description: input.siteLabel ? `Glasses walkthrough — ${input.siteLabel}` : "Glasses walkthrough",
+    uploadedBy: input.userId,
+    clientUploadId: artifact.idempotencyKey,
+    // WHEN this artifact was actually captured on site, not when this request happened to file it —
+    // same reasoning as createWalkthroughContactSheetFile (walkthrough-ingress-service.ts): everything
+    // that orders/filters files chronologically (field gallery, photo-timeline-filters.ts,
+    // files/feed-service.ts) does it on COALESCE(taken_at, created_at). Leaving this null for an
+    // offline/background-delayed walk would group and sort glasses stills under the day they finally
+    // uploaded rather than the day of the site visit.
+    //
+    // capturedAtMs is ALREADY an absolute epoch-ms timestamp (mobile's `Date.now()` at capture time —
+    // see the type doc above), NOT an offset from the walk's start despite the field name. Use it
+    // directly rather than adding it to capturedAtBaseMs: that used to add two absolute epoch values
+    // together, roughly doubling the timestamp and filing every real walkthrough photo decades in the
+    // future. Fall back to the walk's own capturedAt (capturedAtBaseMs) only when an artifact never
+    // reported its own capture time.
+    takenAt: new Date(artifact.capturedAtMs ?? capturedAtBaseMs),
+  }));
 
-    const inserted = await tenantDb
-      .insert(files)
-      .values({
-        category,
-        subcategory: GLASSES_WALKTHROUGH_SUBCATEGORY,
-        folderPath: GLASSES_WALKTHROUGH_FOLDER_PATH,
-        tags: [GLASSES_WALKTHROUGH_TAG, input.walkId],
-        displayName: artifact.originalFilename,
-        systemFilename: `glasses-walk-${artifact.idempotencyKey}${fileExtension}`,
-        originalFilename: artifact.originalFilename,
-        mimeType: artifact.mimeType,
-        fileSizeBytes: artifact.fileSizeBytes,
-        fileExtension,
-        r2Key,
-        r2Bucket: bucket,
-        dealId: input.dealId,
-        description: input.siteLabel ? `Glasses walkthrough — ${input.siteLabel}` : "Glasses walkthrough",
-        uploadedBy: input.userId,
-        clientUploadId: artifact.idempotencyKey,
-        // WHEN this artifact was actually captured on site, not when this request happened to file it —
-        // same reasoning as createWalkthroughContactSheetFile (walkthrough-ingress-service.ts): everything
-        // that orders/filters files chronologically (field gallery, photo-timeline-filters.ts,
-        // files/feed-service.ts) does it on COALESCE(taken_at, created_at). Leaving this null for an
-        // offline/background-delayed walk would group and sort glasses stills under the day they finally
-        // uploaded rather than the day of the site visit.
-        //
-        // capturedAtMs is ALREADY an absolute epoch-ms timestamp (mobile's `Date.now()` at capture time —
-        // see the type doc above), NOT an offset from the walk's start despite the field name. Use it
-        // directly rather than adding it to capturedAtBaseMs: that used to add two absolute epoch values
-        // together, roughly doubling the timestamp and filing every real walkthrough photo decades in the
-        // future. Fall back to the walk's own capturedAt (capturedAtBaseMs) only when an artifact never
-        // reported its own capture time.
-        takenAt: new Date(artifact.capturedAtMs ?? capturedAtBaseMs),
-      })
-      // Mirrors confirmUpload (files/service.ts): a concurrent retry for the same idempotency key can
-      // race past this insert too — let the partial unique index arbitrate rather than throw a 23505
-      // into this request's transaction.
-      .onConflictDoNothing({ target: files.clientUploadId, where: isNotNull(files.clientUploadId) })
-      .returning();
+  const inserted = await tenantDb
+    .insert(files)
+    .values(insertValues)
+    // Mirrors confirmUpload (files/service.ts): a concurrent retry for the same idempotency key can
+    // race past this insert too — let the partial unique index arbitrate rather than throw a 23505
+    // into this request's transaction.
+    .onConflictDoNothing({ target: files.clientUploadId, where: isNotNull(files.clientUploadId) })
+    .returning();
 
-    let fileRow = inserted[0];
-    let created = true;
+  // Which keys THIS call created, as opposed to which already existed — `created` is per artifact and a
+  // partly-landed walk being retried legitimately reports a mix. Deriving it from "did the statement
+  // insert anything" would collapse that.
+  const createdKeys = new Set(inserted.map((row) => row.clientUploadId));
+
+  const artifactKeys = prepared.map(({ artifact }) => artifact.idempotencyKey);
+  // One re-select covering the whole walk, conflicts and inserts alike, so the retry path costs the same
+  // single round trip as the first-completion path.
+  const rowsByKey = new Map(
+    (await tenantDb.select().from(files).where(inArray(files.clientUploadId, artifactKeys))).map((row) => [
+      row.clientUploadId,
+      row,
+    ])
+  );
+
+  const fileResults: GlassesWalkthroughFileResult[] = prepared.map(({ artifact, media }) => {
+    const fileRow = rowsByKey.get(artifact.idempotencyKey);
     if (!fileRow) {
-      created = false;
-      const existing = await tenantDb
-        .select()
-        .from(files)
-        .where(eq(files.clientUploadId, artifact.idempotencyKey))
-        .limit(1);
-      fileRow = existing[0];
-      if (!fileRow) {
-        throw new AppError(409, `Artifact ${artifact.idempotencyKey} could not be filed. Please retry.`);
-      }
-      // A reused idempotency key pointed at a DIFFERENT deal is not a legitimate retry — refuse rather
-      // than silently associating this walk's artifact list with someone else's file.
-      if (fileRow.dealId !== input.dealId) {
-        throw new AppError(
-          409,
-          `Artifact idempotency key ${artifact.idempotencyKey} is already associated with a different deal.`
-        );
-      }
+      throw new AppError(409, `Artifact ${artifact.idempotencyKey} could not be filed. Please retry.`);
     }
-
-    fileResults.push({
+    // A reused idempotency key pointed at a DIFFERENT deal is not a legitimate retry — refuse rather
+    // than silently associating this walk's artifact list with someone else's file. Checked against the
+    // row that is actually in the table, so it catches the pre-existing row the conflict skipped over.
+    if (fileRow.dealId !== input.dealId) {
+      throw new AppError(
+        409,
+        `Artifact idempotency key ${artifact.idempotencyKey} is already associated with a different deal.`
+      );
+    }
+    return {
       fileId: fileRow.id,
       idempotencyKey: artifact.idempotencyKey,
       kind: media.kind,
       r2Key: fileRow.r2Key,
       displayName: fileRow.displayName,
-      created,
-    });
-  }
+      created: createdKeys.has(artifact.idempotencyKey),
+    };
+  });
 
-  const knownJobState = await findGlassesWalkthroughForwardJobState(tenantDb, input.walkId);
+  const knownJobState = await findGlassesWalkthroughForwardJobState(tenantDb, input.walkId, input.dealId);
 
   if (knownJobState?.isLive) {
     return {
@@ -767,6 +836,13 @@ export async function ingestGlassesWalkthrough(
       forwarding: { status: "already_queued", jobId: knownJobState.jobId },
     };
   }
+
+  // Keyed by idempotency key, never by array position. `fileResults` and `input.artifacts` line up today
+  // only because one loop happens to preserve order; positional lookup silently forwards every artifact
+  // under a NEIGHBOUR's mimeType and filename the moment that stops being true, and TROCK Scope has no way
+  // to notice — it would transcode a jpeg as audio and blame the bytes. The keys are already unique per
+  // walk (the validator rejects duplicates within a request), so they are the correct join.
+  const artifactsByKey = new Map(input.artifacts.map((artifact) => [artifact.idempotencyKey, artifact]));
 
   const jobPayload: Record<string, unknown> = {
     walkId: input.walkId,
@@ -777,16 +853,19 @@ export async function ingestGlassesWalkthrough(
     capturedAt: input.capturedAt,
     capturedByUserId: input.userId,
     officeSlug: input.officeSlug,
-    artifacts: fileResults.map((fileResult, index) => ({
-      fileId: fileResult.fileId,
-      idempotencyKey: fileResult.idempotencyKey,
-      kind: fileResult.kind,
-      r2Key: fileResult.r2Key,
-      mimeType: input.artifacts[index]!.mimeType,
-      originalFilename: input.artifacts[index]!.originalFilename,
-      fileSizeBytes: input.artifacts[index]!.fileSizeBytes,
-      capturedAtMs: input.artifacts[index]!.capturedAtMs,
-    })),
+    artifacts: fileResults.map((fileResult) => {
+      const artifact = artifactsByKey.get(fileResult.idempotencyKey)!;
+      return {
+        fileId: fileResult.fileId,
+        idempotencyKey: fileResult.idempotencyKey,
+        kind: fileResult.kind,
+        r2Key: fileResult.r2Key,
+        mimeType: artifact.mimeType,
+        originalFilename: artifact.originalFilename,
+        fileSizeBytes: artifact.fileSizeBytes,
+        capturedAtMs: artifact.capturedAtMs,
+      };
+    }),
   };
 
   // Exactly one of the two markers is carried forward, never both — the worker reads `scopeWalkthroughId`

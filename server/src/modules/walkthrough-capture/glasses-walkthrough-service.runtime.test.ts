@@ -169,6 +169,68 @@ describe("ingestGlassesWalkthrough", () => {
     expect(jobs).toHaveLength(1); // NOT two trock-scope walkthroughs' worth of forwarding
   });
 
+  it("scopes the per-walk dedupe to the DEAL: one walkId completed against two deals forwards BOTH", async () => {
+    // walkId is generated on the phone, and nothing makes it unique across deals — the same physical walk
+    // can legitimately be completed against two deals (a mis-tagged walk corrected and re-sent; two deals
+    // sharing one site visit), and a client that reuses or collides on a walkId is not exotic.
+    //
+    // Deduping on walkId ALONE collapses those into one forward job. The first deal's job is enqueued, the
+    // second deal's completion finds it "already queued", and the second deal NEVER gets its scope — the
+    // walk files into its project folder and then silently never reaches TROCK Scope. That is the worst
+    // shape of failure available here: a success response, a full project folder, and no scope, with
+    // nothing anywhere recording that a forward was skipped.
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ dealId: DEAL }), {
+      artifactStore: healthyStore(),
+    });
+    const second = await ingestGlassesWalkthrough(
+      tenantDb,
+      // Distinct artifact keys: files.client_upload_id is globally unique, so reusing the SAME key across
+      // deals is a different defect entirely (the cross-deal 409 above) and would mask this one.
+      baseInput({ dealId: OTHER_DEAL, artifacts: [{ ...baseInput().artifacts[0]!, idempotencyKey: "artifact-2" }] }),
+      { artifactStore: healthyStore() }
+    );
+
+    expect(first.forwarding.status).toBe("queued");
+    expect(second.forwarding.status).toBe("queued"); // NOT already_queued
+    expect(second.forwarding.jobId).not.toBe(first.forwarding.jobId);
+
+    const jobs = await tenantDb.select().from(jobQueue).where(eq(jobQueue.jobType, GLASSES_WALKTHROUGH_FORWARD_JOB));
+    expect(jobs).toHaveLength(2);
+    expect(jobs.map((j: { payload: { dealId: string } }) => j.payload.dealId).sort()).toEqual([DEAL, OTHER_DEAL].sort());
+  });
+
+  it("GUARD: the per-walk dedupe still holds WITHIN one deal (the dealId predicate did not disable it)", async () => {
+    // The obvious wrong way to fix the above is to widen the lookup until it stops matching anything —
+    // which would re-open the duplicate-forward defect the dedupe exists for, at real money per forward.
+    const input = baseInput({ dealId: DEAL });
+    const first = await ingestGlassesWalkthrough(tenantDb, input, { artifactStore: healthyStore() });
+    const second = await ingestGlassesWalkthrough(tenantDb, input, { artifactStore: healthyStore() });
+    expect(second.forwarding).toEqual({ status: "already_queued", jobId: first.forwarding.jobId });
+  });
+
+  it("does not inherit ANOTHER deal's TROCK Scope checkpoint onto this deal's forward job", async () => {
+    // The checkpoint-inheritance read runs through the same lookup. Unscoped, a dead row from deal A hands
+    // deal B a `scopeWalkthroughId` naming A's remote walkthrough — so B's clips would be uploaded into
+    // A's walkthrough and B's scope rows would come back attached to the wrong deal. Silent, and a
+    // cross-tenant-shaped data mix inside one office.
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ dealId: DEAL }), {
+      artifactStore: healthyStore(),
+    });
+    await killJobWithPayload(
+      first.forwarding.jobId,
+      sql`jsonb_set(${jobQueue.payload}, '{scopeWalkthroughId}', '"scope-wt-DEAL-A"'::jsonb, true)`
+    );
+
+    const second = await ingestGlassesWalkthrough(
+      tenantDb,
+      baseInput({ dealId: OTHER_DEAL, artifacts: [{ ...baseInput().artifacts[0]!, idempotencyKey: "artifact-2" }] }),
+      { artifactStore: healthyStore() }
+    );
+    const [replacement] = await tenantDb.select().from(jobQueue).where(eq(jobQueue.id, second.forwarding.jobId));
+    expect(replacement.payload.scopeWalkthroughId).toBeUndefined();
+    expect(replacement.payload.scopeCreatePendingRef).toBeUndefined();
+  });
+
   it("enqueues a NEW forward job once the prior one has dead-lettered (a walk is not stuck forever)", async () => {
     const first = await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
     await tenantDb.update(jobQueue).set({ status: "dead" }).where(eq(jobQueue.id, first.forwarding.jobId));
@@ -270,6 +332,99 @@ describe("ingestGlassesWalkthrough", () => {
 
     const jobs = await tenantDb.select().from(jobQueue).where(eq(jobQueue.jobType, GLASSES_WALKTHROUGH_FORWARD_JOB));
     expect(jobs[0]!.payload.artifacts).toHaveLength(3);
+  });
+
+  it("GUARD: pairs each forward-job artifact with its OWN metadata, resolved by idempotency key not by position", async () => {
+    // The payload used to index back into `input.artifacts` by array position, which is only correct while
+    // fileResults happens to be built in input order. Nothing enforced that — it was an invariant held by
+    // one `for` loop, and the batched write below rewrites exactly that loop. Get it wrong and every
+    // artifact is forwarded under a NEIGHBOUR's mimeType and filename: TROCK Scope transcodes a jpeg as
+    // audio, and the mismatch is invisible from this side.
+    //
+    // Every field below is distinct per artifact, so any position/key confusion misaligns visibly.
+    const input = baseInput({
+      artifacts: [
+        {
+          idempotencyKey: "zzz-last-alphabetically",
+          kind: "video",
+          originalFilename: "clip.mp4",
+          mimeType: "video/mp4",
+          fileSizeBytes: 4096,
+          capturedAtMs: 1_700_000_000_000,
+        },
+        {
+          idempotencyKey: "aaa-first-alphabetically",
+          kind: "photo",
+          originalFilename: "frame.jpg",
+          mimeType: "image/jpeg",
+          fileSizeBytes: 1024,
+          capturedAtMs: 1_700_000_005_000,
+        },
+        {
+          idempotencyKey: "mmm-middle",
+          kind: "audio",
+          originalFilename: "narration.m4a",
+          mimeType: "audio/mp4",
+          fileSizeBytes: 2048,
+          capturedAtMs: 1_700_000_009_000,
+        },
+      ],
+    });
+    await ingestGlassesWalkthrough(tenantDb, input, { artifactStore: healthyStore({ head: async () => ({}) }) });
+
+    const [job] = await tenantDb.select().from(jobQueue).where(eq(jobQueue.jobType, GLASSES_WALKTHROUGH_FORWARD_JOB));
+    const byKey = new Map(
+      (job.payload.artifacts as { idempotencyKey: string }[]).map((a) => [a.idempotencyKey, a])
+    );
+    expect(byKey.size).toBe(3);
+    for (const artifact of input.artifacts) {
+      expect(byKey.get(artifact.idempotencyKey)).toMatchObject({
+        kind: artifact.kind,
+        mimeType: artifact.mimeType,
+        originalFilename: artifact.originalFilename,
+        fileSizeBytes: artifact.fileSizeBytes,
+        capturedAtMs: artifact.capturedAtMs,
+      });
+    }
+  });
+
+  it("GUARD: reports `created` per artifact when a retry re-sends a walk that only PARTLY landed", async () => {
+    // The mobile queue can complete a walk, lose the response, add nothing, and retry — but it can also
+    // retry a walk whose earlier attempt filed only some artifacts. `created` is per-artifact and drives
+    // what the caller reports; a batched write that derives it from "did the whole statement insert
+    // anything" collapses that distinction. Two already-filed and one new is the mixed case.
+    const firstTwo = baseInput({ artifacts: photoArtifacts(2) });
+    await ingestGlassesWalkthrough(tenantDb, firstTwo, { artifactStore: healthyStore({ head: async () => ({}) }) });
+
+    const allThree = baseInput({ artifacts: photoArtifacts(3) });
+    const result = await ingestGlassesWalkthrough(tenantDb, allThree, {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+
+    expect(result.files.map((f) => [f.idempotencyKey, f.created])).toEqual([
+      ["artifact-1", false],
+      ["artifact-2", false],
+      ["artifact-3", true],
+    ]);
+    const rows = await tenantDb.select().from(files).where(eq(files.dealId, DEAL));
+    expect(rows).toHaveLength(3); // three rows total, not five
+  });
+
+  it("GUARD: refuses an object FAR larger than the size the client declared, so a mis-declared upload is never filed or forwarded", async () => {
+    // The presigned PUT cannot enforce the declared size at the R2 boundary (see
+    // glasses-walkthrough-store.ts for why signing Content-Length would break every mobile upload), so the
+    // completion-time HEAD is the enforcement point. A 1 KiB declaration backed by a 2 GiB object must
+    // never become a files row or a forward job.
+    await expect(
+      ingestGlassesWalkthrough(tenantDb, baseInput(), {
+        artifactStore: healthyStore({
+          head: async () => ({ contentType: "video/mp4", contentLength: 2 * 1024 * 1024 * 1024 }),
+        }),
+      })
+    ).rejects.toMatchObject({ statusCode: 400 });
+
+    expect(await tenantDb.select().from(files)).toHaveLength(0);
+    expect(await tenantDb.select().from(jobQueue)).toHaveLength(0);
   });
 
   it("tags every artifact of a walk with the same walkId so the project folder can group them", async () => {
@@ -506,7 +661,11 @@ describe("ingestGlassesWalkthrough — bounded object verification", () => {
   it("issues the HEADs with bounded concurrency rather than one blocking round trip at a time", async () => {
     let inFlight = 0;
     let maxInFlight = 0;
-    const input = baseInput({ artifacts: photoArtifacts(6) });
+    // MORE artifacts than the concurrency limit, deliberately. With 6 artifacts and a limit of 8 the
+    // ceiling is unobservable — the artifact count caps the fan-out, so an implementation that dispatched
+    // ALL of them at once (unbounded `Promise.all`, the thing this limit exists to prevent) passes
+    // identically. The bound only becomes testable once there is more work than slots.
+    const input = baseInput({ artifacts: photoArtifacts(GLASSES_WALKTHROUGH_VERIFY_CONCURRENCY + 6) });
 
     await ingestGlassesWalkthrough(tenantDb, input, {
       artifactStore: healthyStore({
@@ -523,6 +682,10 @@ describe("ingestGlassesWalkthrough — bounded object verification", () => {
     // Strictly sequential verification pins the tenant connection for artifacts × round-trip; at the 200
     // artifact ceiling that is two orders of magnitude of pool-slot occupancy for zero database work.
     expect(maxInFlight).toBeGreaterThan(1);
+    // ...and the CEILING, which is the half that protects the other side. Unbounded fan-out on a
+    // 200-artifact walk is 200 simultaneous R2 connections from one request; the limit is what keeps this
+    // endpoint from becoming its own thundering herd. Asserting only the floor lets that regress silently.
+    expect(maxInFlight).toBeLessThanOrEqual(GLASSES_WALKTHROUGH_VERIFY_CONCURRENCY);
   });
 
   it("gives up the connection with a retryable 503 when object storage stops answering, instead of holding it indefinitely", async () => {

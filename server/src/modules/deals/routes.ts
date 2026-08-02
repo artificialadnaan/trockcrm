@@ -3562,7 +3562,7 @@ router.post("/:id/glasses-walkthroughs", async (req, res, next) => {
       officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
     });
 
-    const result = await ingestGlassesWalkthrough(req.tenantDb! as any, input, {
+    const result = await ingestGlassesWalkthrough(req.tenantDb!, input, {
       artifactStore: createGlassesWalkthroughArtifactStore(),
     });
 
