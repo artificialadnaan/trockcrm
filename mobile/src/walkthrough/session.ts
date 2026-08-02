@@ -23,6 +23,42 @@ export type WalkStill = {
   source: StillSource;
 };
 
+/**
+ * How much of the walk the finished video actually holds, derived from the census `endWalk` returns.
+ *
+ * Exists because the ONE failure this recorder cannot survive is also the one that leaves no trace.
+ * When the glasses disconnect — or their publisher simply goes quiet — while the phone microphone
+ * keeps feeding the writer, nothing fails: no append is attempted, so the writer-failure latch never
+ * trips, and `AVAssetWriter` finishes `.completed` with a valid `walk.mp4` holding five seconds of
+ * picture against a twenty-minute site visit. Afterwards the file cannot tell that apart from a walk
+ * that genuinely lasted five seconds. This is the record of the difference, computed at the only
+ * moment it is knowable.
+ */
+export type WalkVideoCoverage = {
+  /** Wall-clock ms the walk itself ran (startedAt → endedAt). */
+  walkMs: number;
+  /** Estimated ms of that wall clock the video track actually holds. */
+  videoMs: number;
+  /** `walkMs - videoMs`: how much of the site visit has no picture. Never negative. */
+  shortfallMs: number;
+};
+
+/** The slice of native's `endWalk` census this module reasons about. Deliberately a subset — the
+ *  other counters (received/dropped/writerStatus) are diagnostics for a human reading a log, not
+ *  inputs to a verdict, and depending on them here would couple the reducer to native's full shape. */
+export type WalkVideoCensus = {
+  /**
+   * Native's `secondsSinceLastFrameArrived` VERBATIM, sentinel included. `WalkVideoWriter.census()`
+   * reports `-1` when `lastFrameArrivedAt` was never valid — i.e. not one frame ever arrived. Kept
+   * raw rather than pre-normalised at the bridge so the sentinel is handled in exactly one place,
+   * with a test on it (`assessVideoCoverage`), instead of being quietly lost in a conversion.
+   */
+  secondsSinceLastFrameArrived: number;
+  /** Frames actually written to the video track. Zero means an empty track no matter what the
+   *  quiet-tail number says. */
+  videoFramesAppended: number;
+};
+
 export type Walk = {
   state: WalkState;
   /** A walk always belongs to a deal. The project is optional — not every deal has one yet. */
@@ -33,6 +69,17 @@ export type Walk = {
   durationMs: number | null;
   videoUri: string | null;
   audioUri: string | null;
+  /**
+   * Set once, on "finalized", when native reported a census — null otherwise, which means UNKNOWN
+   * rather than "fine": a dev client older than the census cannot be interrogated, and a walk nobody
+   * could measure must not be presented as a short one (see `isVideoTruncated`).
+   *
+   * Deliberately NOT a state: a short walk is still `complete`. Downgrading it to `failed` would
+   * discard the very evidence it is warning about — upload-core.ts's `toQueuedWalk` queues a video
+   * only for a COMPLETE walk — and would also be a lie about the stills, which are unaffected by
+   * whatever the video transport did.
+   */
+  videoCoverage: WalkVideoCoverage | null;
   stills: WalkStill[];
   error: string | null;
 };
@@ -52,8 +99,19 @@ export type WalkEvent =
    * `audioUri` is now always null: audio is muxed into the video track, so there is no separate
    * audio artifact. The field stays because a walk that fails before the writer produces a video
    * still needs somewhere for a future audio-only fallback to land.
+   *
+   * `videoCensus` is what native measured while the writer was still live. Passed in raw and turned
+   * into `Walk.videoCoverage` here, rather than assessed at the bridge, because the verdict needs
+   * `startedAt`/`endedAt` — which only this reducer holds — and because keeping the arithmetic pure
+   * is what makes the sentinel handling in `assessVideoCoverage` testable without a device. Omitted
+   * or null means the walk could not be measured (a dev client older than the census).
    */
-  | { type: "finalized"; audioUri: string | null; videoUri?: string | null }
+  | {
+      type: "finalized";
+      audioUri: string | null;
+      videoUri?: string | null;
+      videoCensus?: WalkVideoCensus | null;
+    }
   | { type: "failed"; reason: string }
   /**
    * Snaps the walk back to a fresh `idle` for (dealId, projectId), discarding whatever walk —
@@ -82,9 +140,66 @@ export function initialWalk(dealId: string, projectId: string | null): Walk {
     durationMs: null,
     videoUri: null,
     audioUri: null,
+    videoCoverage: null,
     stills: [],
     error: null,
   };
+}
+
+/**
+ * How far the video may legitimately trail the end of the walk before the walk counts as truncated.
+ *
+ * Five seconds, and the number is about hardware latency, not about walks. A healthy stream is
+ * `.high` = 720x1280 at 30fps, so the last frame lands ~33ms before the estimator's tap; on top of
+ * that sits the glasses' own transport jitter, the RN bridge hop, and the moment native takes to
+ * snapshot the census — all sub-second. The writer's own stall detector already gives up at 60
+ * consecutive dropped frames (~2s at 30fps), so any walk the writer still believes is alive is by
+ * construction under about two seconds of quiet. Five doubles that, leaving room for a Wi-Fi/BT
+ * hiccup, and still sits an order of magnitude below the real failure: the measured HFP regression
+ * produced 3-8 SECONDS of video on walks of 35-60 seconds, i.e. tens of seconds of shortfall.
+ *
+ * Absolute rather than a percentage on purpose. What is being measured is end-of-walk latency,
+ * which does not scale with walk length — a proportional rule would let a twenty-minute walk lose
+ * two full minutes in silence while nagging about a four-second hiccup on a thirty-second one.
+ */
+export const WALK_VIDEO_SHORTFALL_TOLERANCE_MS = 5_000;
+
+/**
+ * Turn one census into a coverage estimate against the walk's own wall clock.
+ *
+ * The estimate is `walkMs` minus the quiet tail, because frames start arriving at the top of the
+ * walk and stop when the source dies — so the seconds since the LAST frame arrived are exactly the
+ * seconds with no picture. Two inputs are traps rather than measurements and are handled first:
+ *
+ *   - `secondsSinceLastFrameArrived === -1` is native's sentinel for "no frame ever arrived", not a
+ *     duration. Compared naively it is the healthiest number in the whole range, so the obvious
+ *     `quiet > tolerance` check would wave through a video track with nothing in it at all.
+ *   - `videoFramesAppended === 0` says the track is empty regardless of what the tail says. In
+ *     practice the writer latches and `endWalk` rejects long before this, but a census that claims
+ *     frames were still arriving into an empty track must not read as a covered walk.
+ *
+ * The census is snapshotted a bridge hop AFTER `endedAt` is stamped in JS, so the tail can measure
+ * marginally longer than the walk; the shortfall is clamped to `walkMs` so coverage never goes
+ * negative and the screen never reports more missing video than there was walk.
+ */
+export function assessVideoCoverage(walkMs: number, census: WalkVideoCensus): WalkVideoCoverage {
+  const walk = Math.max(0, walkMs);
+  const noVideoAtAll = census.videoFramesAppended <= 0 || census.secondsSinceLastFrameArrived < 0;
+  const quietMs = noVideoAtAll ? walk : census.secondsSinceLastFrameArrived * 1000;
+  const shortfallMs = Math.min(walk, Math.max(0, Math.round(quietMs)));
+  return { walkMs: walk, videoMs: walk - shortfallMs, shortfallMs };
+}
+
+/**
+ * Whether this walk's video came up short enough to be worth telling the estimator about. The one
+ * place `WALK_VIDEO_SHORTFALL_TOLERANCE_MS` is compared against, so the screen and the upload
+ * metadata can never disagree with each other about what "short" means.
+ *
+ * `null` (never measured) is FALSE, not true: an unverifiable walk is not a short walk, and warning
+ * on every walk recorded by a build that cannot report is how a real warning gets ignored.
+ */
+export function isVideoTruncated(coverage: WalkVideoCoverage | null): boolean {
+  return coverage !== null && coverage.shortfallMs > WALK_VIDEO_SHORTFALL_TOLERANCE_MS;
 }
 
 /** Stills are only meaningful while the walk is actually running. Gates whether a NEW capture may
@@ -197,21 +312,28 @@ export function reduceWalk(walk: Walk, event: WalkEvent): Walk {
         ? { ...walk, state: "finalizing", endedAt: event.at }
         : walk;
 
-    case "finalized":
-      return walk.state === "finalizing"
-        ? {
-            ...walk,
-            state: "complete",
-            audioUri: event.audioUri,
-            // Only overwrite when the event actually carries one, so a caller that omits it
-            // keeps whatever `started` recorded rather than having it silently nulled.
-            videoUri: event.videoUri !== undefined ? event.videoUri : walk.videoUri,
-            durationMs:
-              walk.startedAt !== null && walk.endedAt !== null
-                ? walk.endedAt - walk.startedAt
-                : null,
-          }
-        : walk;
+    case "finalized": {
+      if (walk.state !== "finalizing") return walk;
+      const durationMs =
+        walk.startedAt !== null && walk.endedAt !== null ? walk.endedAt - walk.startedAt : null;
+      return {
+        ...walk,
+        state: "complete",
+        audioUri: event.audioUri,
+        // Only overwrite when the event actually carries one, so a caller that omits it
+        // keeps whatever `started` recorded rather than having it silently nulled.
+        videoUri: event.videoUri !== undefined ? event.videoUri : walk.videoUri,
+        durationMs,
+        // Still "complete" whatever this says — see Walk.videoCoverage for why a short walk is
+        // annotated rather than failed. A walk with no wall clock to compare against (no
+        // startedAt/endedAt, which "finalizing" makes impossible in practice) is left unmeasured
+        // rather than assessed against a fabricated duration.
+        videoCoverage:
+          durationMs !== null && event.videoCensus
+            ? assessVideoCoverage(durationMs, event.videoCensus)
+            : null,
+      };
+    }
 
     case "failed":
       // Everything captured so far is kept. A walk is a site visit that physically happened;

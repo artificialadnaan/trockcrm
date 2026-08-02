@@ -28,7 +28,7 @@ jest.mock("../native", () => ({
 }));
 
 import { useWalk } from "../useWalk";
-import { MAX_WALK_ARTIFACTS } from "../session";
+import { isVideoTruncated, MAX_WALK_ARTIFACTS } from "../session";
 
 beforeEach(() => {
   mockStartWalk.mockReset();
@@ -601,5 +601,300 @@ describe("useWalk", () => {
       expect(result.current.stillCount).toBe(MAX_WALK_ARTIFACTS - 2); // never delivered
       expect(result.current.captureEnabled).toBe(true); // but the slot is free again
     });
+  });
+});
+
+// ── FINDING 1 (P1): a walk whose VIDEO source stopped early must not upload as a complete one ─────
+//
+// The failure these cover is silent by construction: when the glasses disconnect (or their
+// publisher just goes quiet) while the phone microphone keeps feeding the writer, nothing ever
+// fails. No append is attempted, so the writer-failure latch never trips, and AVAssetWriter
+// finishes .completed with a perfectly valid walk.mp4 that happens to hold five seconds of picture
+// against a twenty-minute site visit. `endWalk`'s census is the ONLY place that difference is
+// visible, and it is visible only at this seam — after the file is closed, a frame that never
+// arrived and a walk that genuinely lasted five seconds are indistinguishable.
+describe("useWalk video-coverage check", () => {
+  const STARTED = {
+    walkId: "w1",
+    directory: "d",
+    videoUri: "file:///docs/walkthroughs/w1/PARTIAL.mp4",
+    inputPortName: "RB Meta 014K",
+    negotiatedSampleRate: 48000,
+  };
+
+  /** Drives Date.now() so the walk's wall-clock duration is exact rather than test-machine timing. */
+  function withClock(): { advance: (ms: number) => void; restore: () => void } {
+    let now = 1_700_000_000_000;
+    const spy = jest.spyOn(Date, "now").mockImplementation(() => now);
+    return {
+      advance: (ms: number) => {
+        now += ms;
+      },
+      restore: () => spy.mockRestore(),
+    };
+  }
+
+  it("flags a 20-minute walk whose glasses stopped after 5 seconds — without failing it or dropping the video", async () => {
+    const clock = withClock();
+    mockStartWalk.mockResolvedValue(STARTED);
+    mockEndWalk.mockResolvedValue({
+      videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
+      stills: 0,
+      // Frames arrived for the first 5s and then stopped; the writer kept taking audio the whole
+      // time, so it finished .completed with nothing latched.
+      census: {
+        videoFramesReceived: 150,
+        videoFramesAppended: 150,
+        videoFramesDropped: 0,
+        audioBuffersAppended: 56_250,
+        secondsSinceLastFrameArrived: 1_195,
+        writerStatus: 2,
+        writerError: "none",
+        failedLatched: false,
+      },
+    });
+    const { result } = renderHook(() => useWalk("deal-1", null));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    clock.advance(20 * 60 * 1000);
+    await act(async () => {
+      await result.current.end();
+    });
+
+    // Evidence is NEVER discarded: five seconds of a job site is still five seconds of a job site,
+    // and the stills are untouched by whatever the video transport did. So this stays "complete"
+    // with its finalised video — marking it "failed" would drop the video entirely (upload-core's
+    // toQueuedWalk only queues a video for a COMPLETE walk).
+    expect(result.current.walk.state).toBe("complete");
+    expect(result.current.walk.videoUri).toBe("file:///docs/walkthroughs/w1/walk.mp4");
+    expect(result.current.walk.durationMs).toBe(20 * 60 * 1000);
+
+    const coverage = result.current.walk.videoCoverage;
+    expect(coverage).not.toBeNull();
+    expect(coverage!.walkMs).toBe(20 * 60 * 1000);
+    expect(coverage!.videoMs).toBe(5_000);
+    expect(coverage!.shortfallMs).toBe(1_195_000);
+    expect(isVideoTruncated(coverage)).toBe(true);
+    clock.restore();
+  });
+
+  it("leaves a healthy walk unflagged — the last frame always lands a moment before the walk ends", async () => {
+    const clock = withClock();
+    mockStartWalk.mockResolvedValue(STARTED);
+    mockEndWalk.mockResolvedValue({
+      videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
+      stills: 0,
+      // ~1.2 frame intervals at 30fps plus the bridge hop — the normal end-of-walk picture.
+      census: {
+        videoFramesReceived: 36_000,
+        videoFramesAppended: 36_000,
+        videoFramesDropped: 0,
+        audioBuffersAppended: 56_250,
+        secondsSinceLastFrameArrived: 0.04,
+        writerStatus: 2,
+        writerError: "none",
+        failedLatched: false,
+      },
+    });
+    const { result } = renderHook(() => useWalk("deal-1", null));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    clock.advance(20 * 60 * 1000);
+    await act(async () => {
+      await result.current.end();
+    });
+
+    expect(result.current.walk.state).toBe("complete");
+    expect(isVideoTruncated(result.current.walk.videoCoverage)).toBe(false);
+    clock.restore();
+  });
+
+  // The trap: native reports -1, not 0, when NO frame ever arrived (`lastFrameArrivedAt.isValid`
+  // is false — WalkVideoWriter.census()). Read as a duration, -1 second of quiet is the healthiest
+  // number in the whole range, so the obvious `quiet > tolerance` comparison would wave through the
+  // single worst walk this recorder can produce: a video track with nothing in it at all.
+  it("treats native's -1 'no frame ever arrived' sentinel as ZERO coverage, not as a healthy walk", async () => {
+    const clock = withClock();
+    mockStartWalk.mockResolvedValue(STARTED);
+    mockEndWalk.mockResolvedValue({
+      videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
+      stills: 2,
+      census: {
+        videoFramesReceived: 0,
+        videoFramesAppended: 0,
+        videoFramesDropped: 0,
+        audioBuffersAppended: 28_125,
+        secondsSinceLastFrameArrived: -1,
+        writerStatus: 2,
+        writerError: "none",
+        failedLatched: false,
+      },
+    });
+    const { result } = renderHook(() => useWalk("deal-1", null));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    clock.advance(10 * 60 * 1000);
+    await act(async () => {
+      await result.current.end();
+    });
+
+    expect(result.current.walk.state).toBe("complete");
+    const coverage = result.current.walk.videoCoverage;
+    expect(coverage!.videoMs).toBe(0);
+    expect(coverage!.shortfallMs).toBe(10 * 60 * 1000);
+    expect(isVideoTruncated(coverage)).toBe(true);
+    clock.restore();
+  });
+
+  // An older dev client's endWalk resolves without a census at all. "Unknown" must not read as
+  // "truncated" — an unverifiable walk is not a short one, and flagging every walk on a build that
+  // cannot report would train the estimator to ignore the notice.
+  it("leaves coverage unknown (null), not truncated, when native reports no census", async () => {
+    mockStartWalk.mockResolvedValue(STARTED);
+    mockEndWalk.mockResolvedValue({ videoUri: "file:///docs/walkthroughs/w1/walk.mp4", stills: 0 });
+    const { result } = renderHook(() => useWalk("deal-1", null));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    await act(async () => {
+      await result.current.end();
+    });
+
+    expect(result.current.walk.state).toBe("complete");
+    expect(result.current.walk.videoCoverage).toBeNull();
+    expect(isVideoTruncated(result.current.walk.videoCoverage)).toBe(false);
+  });
+});
+
+// ── FINDING 2 (P1): unmounting mid-recording must stop the native recorder ─────────────────────────
+//
+// The estimator opens Profile mid-walk and signs out. `app/(app)/_layout.tsx`'s authenticated tab
+// tree unmounts, taking this hook with it — but native is a singleton with its own lifetime: the
+// DAT video stream, the phone microphone, and AVAssetWriter all keep running with nothing left in
+// JS that knows the walkId. Enqueueing on the way out is not an option (ownerKey is already gone at
+// sign-out), so the correct outcome is that native FINALISES to disk: `Documents/walkthroughs/
+// <walkId>/walk.mp4` + `still-NNN.jpg` are exactly what upload.ts's findRecoverableWalks scans for
+// at the next login.
+describe("useWalk unmount while recording", () => {
+  const STARTED = {
+    walkId: "w1",
+    directory: "d",
+    videoUri: "file:///docs/walkthroughs/w1/PARTIAL.mp4",
+    inputPortName: "RB Meta 014K",
+    negotiatedSampleRate: 48000,
+  };
+
+  /** A native call left hanging on purpose, so a test can unmount while it is still in flight. */
+  function pending(): { promise: Promise<unknown>; release: (value: unknown) => void } {
+    let release!: (value: unknown) => void;
+    const promise = new Promise<unknown>((resolve) => {
+      release = resolve;
+    });
+    return { promise, release };
+  }
+
+  it("stops the native recorder when the hook unmounts with a walk still recording", async () => {
+    mockStartWalk.mockResolvedValue(STARTED);
+    mockEndWalk.mockResolvedValue({ videoUri: "file:///docs/walkthroughs/w1/walk.mp4", stills: 0 });
+    const { result, unmount } = renderHook(() => useWalk("deal-1", null));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    expect(result.current.walk.state).toBe("recording");
+    expect(mockEndWalk).not.toHaveBeenCalled();
+
+    await act(async () => {
+      unmount();
+    });
+
+    expect(mockEndWalk).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not touch native when the hook unmounts with no walk in flight", async () => {
+    const { unmount } = renderHook(() => useWalk("deal-1", null));
+    await act(async () => {
+      unmount();
+    });
+    expect(mockEndWalk).not.toHaveBeenCalled();
+  });
+
+  it("does not touch native when the hook unmounts after the walk already completed", async () => {
+    mockStartWalk.mockResolvedValue(STARTED);
+    mockEndWalk.mockResolvedValue({ videoUri: "file:///docs/walkthroughs/w1/walk.mp4", stills: 0 });
+    const { result, unmount } = renderHook(() => useWalk("deal-1", null));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    await act(async () => {
+      await result.current.end();
+    });
+    expect(mockEndWalk).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      unmount();
+    });
+
+    expect(mockEndWalk).toHaveBeenCalledTimes(1); // the end() call, and nothing more
+  });
+
+  // A second endWalk while the first is still inside AVAssetWriter.finishWriting() would race two
+  // finalisations against one writer. Unmounting during "finalizing" needs no help anyway: the
+  // in-flight promise is unaffected by the unmount, and native's own teardown still runs.
+  it("does not issue a SECOND endWalk when the hook unmounts while the first is still finalizing", async () => {
+    mockStartWalk.mockResolvedValue(STARTED);
+    const hangingEnd = pending();
+    mockEndWalk.mockImplementation(() => hangingEnd.promise);
+    const { result, unmount } = renderHook(() => useWalk("deal-1", null));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    await act(async () => {
+      void result.current.end();
+    });
+    expect(result.current.walk.state).toBe("finalizing");
+    expect(mockEndWalk).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      unmount();
+    });
+
+    expect(mockEndWalk).toHaveBeenCalledTimes(1);
+    hangingEnd.release({ videoUri: "file:///docs/walkthroughs/w1/walk.mp4", stills: 0 });
+  });
+
+  // Sign-out landing in the ~1s "Starting…" window. Native has no writer yet, so an endWalk issued
+  // right now finalises nothing and tears down nothing — and the start it raced then goes on to
+  // open the stream and the microphone with no JS left to ever close them.
+  it("waits for an in-flight startWalk to settle before stopping, so the stop is not a no-op", async () => {
+    const hangingStart = pending();
+    mockStartWalk.mockImplementation(() => hangingStart.promise);
+    mockEndWalk.mockResolvedValue({ videoUri: "file:///docs/walkthroughs/w1/walk.mp4", stills: 0 });
+    const { result, unmount } = renderHook(() => useWalk("deal-1", null));
+
+    act(() => {
+      void result.current.start();
+    });
+    expect(result.current.walk.state).toBe("starting");
+
+    act(() => {
+      unmount();
+    });
+    expect(mockEndWalk).not.toHaveBeenCalled();
+
+    await act(async () => {
+      hangingStart.release(STARTED);
+    });
+
+    expect(mockEndWalk).toHaveBeenCalledTimes(1);
   });
 });

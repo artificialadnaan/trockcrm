@@ -1,5 +1,7 @@
 import {
+  assessVideoCoverage,
   initialWalk,
+  isVideoTruncated,
   reduceWalk,
   canCapture,
   canAcceptStill,
@@ -7,6 +9,7 @@ import {
   isWalkActive,
   artifactCount,
   MAX_WALK_ARTIFACTS,
+  WALK_VIDEO_SHORTFALL_TOLERANCE_MS,
   type Walk,
 } from "../session";
 
@@ -325,5 +328,106 @@ describe("canCaptureMore", () => {
     // video(1) === MAX_WALK_ARTIFACTS + 1 — over the cap, even though NOT ONE of those two
     // in-flight requests has actually landed in `walk.stills` yet.
     expect(canCaptureMore(walk, 2)).toBe(false);
+  });
+});
+
+// ── Video coverage (FINDING 1) ────────────────────────────────────────────────────────────────────
+//
+// The arithmetic lives here rather than in useWalk so it is testable without a bridge, and so the
+// one number the whole judgement turns on — WALK_VIDEO_SHORTFALL_TOLERANCE_MS — has exactly one
+// definition that both the reducer and the screen read.
+describe("assessVideoCoverage", () => {
+  const healthy = { secondsSinceLastFrameArrived: 0.033, videoFramesAppended: 36_000 };
+
+  it("reads the quiet tail as the part of the walk with no video", () => {
+    const coverage = assessVideoCoverage(20 * 60 * 1000, {
+      secondsSinceLastFrameArrived: 1_195,
+      videoFramesAppended: 150,
+    });
+    expect(coverage.walkMs).toBe(20 * 60 * 1000);
+    expect(coverage.videoMs).toBe(5_000);
+    expect(coverage.shortfallMs).toBe(1_195_000);
+  });
+
+  it("reports a healthy walk as fully covered, give or take a frame interval", () => {
+    const coverage = assessVideoCoverage(20 * 60 * 1000, healthy);
+    expect(coverage.shortfallMs).toBe(33);
+    expect(isVideoTruncated(coverage)).toBe(false);
+  });
+
+  // native's `-1` means `lastFrameArrivedAt` was never valid — NO frame ever arrived. Arithmetic
+  // that treats it as a duration turns the worst possible walk into the best-looking one.
+  it("treats the -1 'no frame ever arrived' sentinel as zero coverage", () => {
+    const coverage = assessVideoCoverage(600_000, {
+      secondsSinceLastFrameArrived: -1,
+      videoFramesAppended: 0,
+    });
+    expect(coverage.videoMs).toBe(0);
+    expect(coverage.shortfallMs).toBe(600_000);
+  });
+
+  // Belt-and-suspenders against a census that says frames were still arriving while the video
+  // track holds nothing: the quiet tail alone would call that walk healthy.
+  it("treats zero appended frames as zero coverage even when frames were still arriving", () => {
+    const coverage = assessVideoCoverage(600_000, {
+      secondsSinceLastFrameArrived: 0.02,
+      videoFramesAppended: 0,
+    });
+    expect(coverage.videoMs).toBe(0);
+    expect(isVideoTruncated(coverage)).toBe(true);
+  });
+
+  // The census is snapshotted a bridge hop AFTER `endedAt` is stamped in JS, so the quiet tail can
+  // measure very slightly longer than the walk itself. Coverage must never go negative.
+  it("never reports more missing video than there was walk", () => {
+    const coverage = assessVideoCoverage(4_000, {
+      secondsSinceLastFrameArrived: 4.2,
+      videoFramesAppended: 120,
+    });
+    expect(coverage.shortfallMs).toBe(4_000);
+    expect(coverage.videoMs).toBe(0);
+  });
+});
+
+describe("isVideoTruncated", () => {
+  it("is false when coverage was never measured", () => {
+    expect(isVideoTruncated(null)).toBe(false);
+  });
+
+  it("sits exactly at the tolerance boundary", () => {
+    const walkMs = 60_000;
+    const at = (shortfallMs: number) => ({
+      walkMs,
+      videoMs: walkMs - shortfallMs,
+      shortfallMs,
+    });
+    expect(isVideoTruncated(at(WALK_VIDEO_SHORTFALL_TOLERANCE_MS))).toBe(false);
+    expect(isVideoTruncated(at(WALK_VIDEO_SHORTFALL_TOLERANCE_MS + 1))).toBe(true);
+  });
+});
+
+describe("reduceWalk video coverage", () => {
+  const ended = reduceWalk(started, { type: "ended", at: 1000 + 20 * 60 * 1000 });
+
+  it("records coverage on the walk when finalized carries a census", () => {
+    const done = reduceWalk(ended, {
+      type: "finalized",
+      audioUri: null,
+      videoUri: "file:///docs/walk/walk.mp4",
+      videoCensus: { secondsSinceLastFrameArrived: 1_195, videoFramesAppended: 150 },
+    });
+    // Still COMPLETE, still holding its video: the walk is short, not failed. A "failed" walk does
+    // not queue its video at all (upload-core.ts's toQueuedWalk), which would throw away the only
+    // footage there is — and the stills were never in question.
+    expect(done.state).toBe("complete");
+    expect(done.videoUri).toBe("file:///docs/walk/walk.mp4");
+    expect(isVideoTruncated(done.videoCoverage)).toBe(true);
+    expect(done.videoCoverage!.videoMs).toBe(5_000);
+  });
+
+  it("leaves coverage null when finalized carries no census", () => {
+    const done = reduceWalk(ended, { type: "finalized", audioUri: null });
+    expect(done.state).toBe("complete");
+    expect(done.videoCoverage).toBeNull();
   });
 });

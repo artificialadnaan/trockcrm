@@ -18,6 +18,7 @@ import { apiFetch } from "../../src/api/client";
 import type { Fetcher } from "../../src/api/endpoints";
 import { useAuth } from "../../src/auth/AuthContext";
 import { useWalk } from "../../src/walkthrough/useWalk";
+import { isVideoTruncated, isWalkActive } from "../../src/walkthrough/session";
 import { deriveWalkSiteLabel, deriveWalkTitle } from "../../src/walkthrough/walk-meta";
 import { walkOwnerKey } from "../../src/walkthrough/owner-key";
 import { drainWalkQueue, enqueueWalk, type WalkQueueMeta } from "../../src/walkthrough/upload";
@@ -98,6 +99,31 @@ export default function WalkScreen() {
   // cheap-write avoidance, not a correctness requirement).
   const enqueuedWalkIdRef = useRef<string | null>(null);
 
+  // The target the ACTIVE walk was started against, frozen at the moment it started.
+  //
+  // useWalk preserves an in-flight walk (and its dealId) when the route params change mid-recording
+  // — session.ts's reset guard refuses to discard a live site visit. But `targetName` and
+  // `propertyAddress` are pure route params with no reducer holding them, so reading them at
+  // enqueue time filed the preserved walk against the ORIGINAL deal while labelling it with the
+  // NEWLY selected deal's name and address. Half-wrong metadata is worse than wholly wrong: the
+  // record looks internally consistent and confidently names the wrong job site.
+  //
+  // Keyed by walkId and only trusted on a match, so it is self-invalidating — the next walk mints a
+  // fresh id (useWalk's newWalkId) and this is simply overwritten. Nothing has to remember to clear
+  // it, which is the failure mode the enqueuedWalkIdRef comment above warns about.
+  const startedTargetRef = useRef<{
+    walkId: string;
+    targetName: string;
+    propertyAddress: string | null;
+  } | null>(null);
+  useEffect(() => {
+    if (!walkId || !isWalkActive(walk.state)) return;
+    // First active render for THIS walk wins. Later renders re-run this effect (targetName is a
+    // dep), and the id match is what stops a mid-walk param change from overwriting the snapshot.
+    if (startedTargetRef.current?.walkId === walkId) return;
+    startedTargetRef.current = { walkId, targetName, propertyAddress };
+  }, [walk.state, walkId, targetName, propertyAddress]);
+
   // This screen is a hidden `Tabs.Screen` — expo-router never unmounts it on navigation, only
   // blurs it — so returning here after a walk finished (for THIS deal or a different one) would
   // otherwise find `walk` stuck in "complete"/"failed" forever: session.ts's TERMINAL guard
@@ -141,9 +167,24 @@ export default function WalkScreen() {
     if (!walkId || !ownerKey) return;
     if (enqueuedWalkIdRef.current === walkId) return;
     enqueuedWalkIdRef.current = walkId;
+    // The snapshot for THIS walk, or the live params when there is none — a walk that somehow
+    // reached a terminal state without ever being active has no earlier truth to prefer.
+    const startedTarget =
+      startedTargetRef.current?.walkId === walkId ? startedTargetRef.current : null;
+    const walkTargetName = startedTarget?.targetName ?? targetName;
+    const walkPropertyAddress = startedTarget ? startedTarget.propertyAddress : propertyAddress;
+    // The marker goes INTO deriveWalkTitle's target name rather than onto its result: that function
+    // clamps the finished title to the server's MAX_TITLE_CHARS, so appending afterwards would push
+    // an already-maximal title past the limit and 400 the completion call — after every artifact is
+    // in R2. Carried at all because the office is the other party that needs to know: a walk filed
+    // as a normal 20-minute visit that turns out to hold five seconds of footage is exactly the
+    // surprise the completion screen's notice exists to prevent, and the screen is gone by then.
+    const titleTarget = isVideoTruncated(walk.videoCoverage)
+      ? `${walkTargetName} (video cut short)`
+      : walkTargetName;
     const meta: WalkQueueMeta = {
-      title: deriveWalkTitle(targetName, walk.startedAt ?? walk.endedAt ?? Date.now()),
-      siteLabel: deriveWalkSiteLabel(propertyAddress),
+      title: deriveWalkTitle(titleTarget, walk.startedAt ?? walk.endedAt ?? Date.now()),
+      siteLabel: deriveWalkSiteLabel(walkPropertyAddress),
     };
     void enqueueWalk(ownerKey, walkId, walk, meta)
       .then((queued) => {
@@ -220,6 +261,9 @@ export default function WalkScreen() {
   }
 
   const elapsedMs = walk.startedAt !== null ? Math.max(0, now - walk.startedAt) : 0;
+  // Non-null exactly when there is something to warn about, so the summary below reads the numbers
+  // without re-testing the threshold (session.ts's isVideoTruncated owns it) or asserting past null.
+  const shortVideo = isVideoTruncated(walk.videoCoverage) ? walk.videoCoverage : null;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
@@ -355,6 +399,25 @@ export default function WalkScreen() {
               <Text style={styles.summaryValue}>{stillCount}</Text>
               <Text style={styles.summaryCaption}>still{stillCount === 1 ? "" : "s"} captured</Text>
             </View>
+            {/* The whole point of measuring coverage. A walk whose glasses went quiet finalizes as
+                a perfectly valid file, so without this the estimator walks away from the site
+                believing they have twenty minutes of footage — and finds out weeks later, from a
+                scope they can no longer re-walk. Said in minutes:seconds, not percentages, because
+                the only question worth answering here is "do I need to walk it again?". Never a
+                failure screen: the walk really did complete, the stills are fine, and the footage
+                that does exist is still uploading. */}
+            {shortVideo ? (
+              <View style={styles.shortVideoNotice}>
+                <Text style={styles.shortVideoTitle}>Video is short</Text>
+                <Text style={styles.shortVideoBody}>
+                  Only about {formatElapsed(shortVideo.videoMs)} of this{" "}
+                  {formatElapsed(shortVideo.walkMs)} walk has video — roughly{" "}
+                  {formatElapsed(shortVideo.shortfallMs)} is missing because the glasses stopped
+                  sending. Your stills and the audio are unaffected, and everything captured is
+                  still uploading.
+                </Text>
+              </View>
+            ) : null}
             <Pressable
               onPress={() => router.back()}
               accessibilityRole="button"
@@ -593,6 +656,31 @@ const styles = StyleSheet.create({
     color: theme.color.border,
     fontSize: 14,
     fontFamily: theme.font.medium,
+  },
+  // Warning, not danger: nothing failed, and dressing this in the red the "Walk failed" screen uses
+  // would tell the estimator to redo a walk whose stills and audio are perfectly good.
+  shortVideoNotice: {
+    borderWidth: 1,
+    borderColor: theme.color.warning,
+    borderRadius: theme.radius.md,
+    paddingVertical: theme.space.md,
+    paddingHorizontal: theme.space.lg,
+    marginTop: theme.space.sm,
+    maxWidth: 380,
+  },
+  shortVideoTitle: {
+    color: theme.color.warning,
+    fontSize: 16,
+    fontFamily: theme.font.bold,
+    marginBottom: theme.space.xs,
+    textAlign: "center",
+  },
+  shortVideoBody: {
+    color: theme.color.textInverse,
+    fontSize: 14,
+    lineHeight: 20,
+    textAlign: "center",
+    fontFamily: theme.font.body,
   },
   doneButton: {
     marginTop: theme.space.xl,

@@ -93,6 +93,18 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
     setInFlightCount(inFlightRef.current);
   }, []);
 
+  // Read ONLY by the unmount cleanup below, which fires after the last render and therefore cannot
+  // close over `walk` — an effect with `walk` in its deps would tear the recorder down on every
+  // state change instead of on unmount, which is the opposite of the fix.
+  const walkStateRef = useRef(walk.state);
+  walkStateRef.current = walk.state;
+
+  // The in-flight `Recorder.startWalk()` promise, or null. Also only for the unmount cleanup: a walk
+  // still in "starting" has no writer yet, so an endWalk() issued right now finalises nothing and
+  // tears down nothing — and then the start it raced goes on to open the DAT stream and the
+  // microphone with no JS left alive to ever close them.
+  const startInFlightRef = useRef<Promise<unknown> | null>(null);
+
   const reset = useCallback(() => {
     // Mirrors reduceWalk's own guard (session.ts's isWalkActive): callers are documented to only
     // invoke this once walk.state is terminal, but refusing here too — rather than trusting every
@@ -160,6 +172,53 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
     };
   }, [adjustInFlight]);
 
+  // Stop the NATIVE recorder if this hook goes away mid-walk. Removing the JS listeners above is
+  // not enough and never was: native is a singleton with its own lifetime, so an unmount that only
+  // unsubscribes leaves the DAT video stream, the phone microphone, and AVAssetWriter all running
+  // with nothing left in JS that knows the walkId. The real path is Profile → sign out during a
+  // recording: `app/(app)/_layout.tsx`'s authenticated tab tree unmounts, this hook's reducer state
+  // and walk identity are lost, the microphone stays held away from every other app, and the next
+  // login can start a SECOND walk against the same singleton — which tears down the first with
+  // nothing to show for it.
+  //
+  // Empty deps so this fires on unmount ONLY; both facts it needs are read through refs for that
+  // reason. State is read at teardown time, not captured at mount.
+  //
+  // Deliberately NOT enqueuing on the way out. At sign-out `ownerKey` is already gone, so there is
+  // no manifest to write into — and no need. Finalising is enough: native leaves
+  // `Documents/walkthroughs/<walkId>/walk.mp4` and `still-NNN.jpg` on disk, which is exactly what
+  // upload.ts's `findRecoverableWalks` (via classifyWalkDirFileNames) scans for at the next login,
+  // and it surfaces them on Profile for a human to attach a dealId to. Leaving the files is the
+  // designed handoff, not a leak.
+  useEffect(() => {
+    return () => {
+      const state = walkStateRef.current;
+      if (!isWalkActive(state)) return;
+      // "finalizing" is excluded even though isWalkActive covers it: `end()` has already issued
+      // endWalk() and native is inside AVAssetWriter.finishWriting(). A second endWalk would race
+      // two finalisations against one writer — and it would buy nothing, because the in-flight
+      // promise is unaffected by this unmount and native's own teardown still runs to completion.
+      if (state === "finalizing") return;
+      const pendingStart = startInFlightRef.current;
+      void (async () => {
+        try {
+          // Wait out a start that hasn't landed yet (see startInFlightRef). A rejected start has
+          // already torn itself down natively, so falling through to endWalk() is harmless there.
+          if (pendingStart) await pendingStart;
+        } catch {
+          // Deliberately swallowed — see above.
+        }
+        try {
+          await Recorder.endWalk();
+        } catch {
+          // Nowhere to report to: this hook, its error state, and the screen rendering it are all
+          // gone. The point of the call is the native-side release, and a rejection here means
+          // native had nothing left to release anyway.
+        }
+      })();
+    };
+  }, []);
+
   const start = useCallback(async () => {
     dispatch({ type: "starting" });
     const id = newWalkId();
@@ -167,8 +226,10 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
     // what was passed to native, which may already have created the directory) — and a caller that
     // reads walkId off a "failed" state relies on it being populated by the time that state lands.
     setWalkId(id);
+    const pending = Recorder.startWalk(id);
+    startInFlightRef.current = pending;
     try {
-      const started = await Recorder.startWalk(id);
+      const started = await pending;
       // Record the path native reports rather than null. It is not playable yet — the writer
       // finalises in endWalk — but holding it means a walk that FAILS mid-recording still knows
       // where its partial file is, and a partial walk is still a site visit that happened.
@@ -181,6 +242,11 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
       const message = errorMessage(err);
       setError(message);
       dispatch({ type: "failed", reason: message });
+    } finally {
+      // Only clear OUR promise: a hypothetical second start racing this one would have already
+      // replaced the ref, and blanking it here would leave the unmount cleanup below with nothing
+      // to wait on for the start that's actually in flight.
+      if (startInFlightRef.current === pending) startInFlightRef.current = null;
     }
   }, []);
 
@@ -235,7 +301,26 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
       // audioUri is null by design: audio is a track inside the .mp4, not a separate artifact.
       // videoUri comes from here rather than from `started` because native only resolves once
       // AVAssetWriter reports .completed — so this path, unlike that one, is a finalised file.
-      dispatch({ type: "finalized", audioUri: null, videoUri: result.videoUri });
+      //
+      // The census is FORWARDED, not merely logged. A walk whose glasses died ten minutes in
+      // reaches here indistinguishable from a healthy one: no append was attempted after the
+      // stream went quiet, so the writer-failure latch never tripped and AVAssetWriter finished
+      // .completed with a valid file. Logging that and dispatching "finalized" regardless — which
+      // is what this did — is what let a five-second recording upload as a twenty-minute site
+      // visit. session.ts's reducer owns the verdict (it is the only place the wall clock lives)
+      // and records it as `walk.videoCoverage`; the walk still completes, because a short video is
+      // still evidence and the stills were never in question.
+      dispatch({
+        type: "finalized",
+        audioUri: null,
+        videoUri: result.videoUri,
+        videoCensus: result.census
+          ? {
+              secondsSinceLastFrameArrived: result.census.secondsSinceLastFrameArrived,
+              videoFramesAppended: result.census.videoFramesAppended,
+            }
+          : null,
+      });
     } catch (err) {
       const message = errorMessage(err);
       setError(message);

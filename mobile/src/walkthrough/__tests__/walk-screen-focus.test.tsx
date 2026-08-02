@@ -108,6 +108,7 @@ function makeWalk(state: WalkState, overrides: Partial<Walk> = {}): Walk {
     durationMs: state === "complete" ? 4000 : null,
     videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
     audioUri: null,
+    videoCoverage: null,
     stills: [],
     error: state === "failed" ? "glasses disconnected" : null,
     ...overrides,
@@ -191,5 +192,110 @@ describe("WalkScreen focus-driven reset", () => {
     render(<WalkScreen />);
 
     expect(mockReset).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── FINDING 3 (P2): a preserved walk must be FILED under the target it started against ────────────
+//
+// useWalk already refuses to reset an ACTIVE walk, so a route-param change mid-recording leaves
+// `walk.dealId` pointing at the original deal. The enqueue effect, though, read `targetName` /
+// `propertyAddress` straight off the CURRENT params — so the walk was filed against deal A while
+// carrying deal B's name and address. That is worse than either half being wrong on its own: the
+// record looks internally consistent and names the wrong job site.
+describe("WalkScreen enqueue metadata for a preserved walk", () => {
+  function paramsFor(dealId: string, targetName: string, propertyAddress: string) {
+    return { dealId, targetName, projectId: undefined, propertyAddress };
+  }
+
+  it("uses the target the walk STARTED against, not the params current when it ends", () => {
+    mockParams = paramsFor("deal-1", "Riverside Plaza", "12 River Rd, Dallas TX");
+    mockResult = resultFor(makeWalk("recording"));
+    const { rerender } = render(<WalkScreen />);
+
+    // The estimator picks a different deal in the app while the walk is still running. useWalk
+    // preserves the walk (it is active), so the recording keeps belonging to deal-1.
+    mockParams = paramsFor("deal-2", "Northgate Depot", "900 North Ave, Plano TX");
+    act(() => {
+      rerender(<WalkScreen />);
+    });
+
+    mockResult = resultFor(makeWalk("complete"));
+    act(() => {
+      rerender(<WalkScreen />);
+    });
+
+    expect(mockEnqueueWalk).toHaveBeenCalledTimes(1);
+    const meta = mockEnqueueWalk.mock.calls[0]![3] as { title: string; siteLabel: string };
+    const queuedWalk = mockEnqueueWalk.mock.calls[0]![2] as Walk;
+    // Deal, title and site label all describe ONE project.
+    expect(queuedWalk.dealId).toBe("deal-1");
+    expect(meta.title).toContain("Riverside Plaza");
+    expect(meta.title).not.toContain("Northgate Depot");
+    expect(meta.siteLabel).toBe("12 River Rd, Dallas TX");
+  });
+
+  it("still uses the live params for a walk that started under them", () => {
+    mockParams = paramsFor("deal-2", "Northgate Depot", "900 North Ave, Plano TX");
+    mockResult = resultFor(makeWalk("recording", { dealId: "deal-2" }));
+    const { rerender } = render(<WalkScreen />);
+
+    mockResult = resultFor(makeWalk("complete", { dealId: "deal-2" }));
+    act(() => {
+      rerender(<WalkScreen />);
+    });
+
+    const meta = mockEnqueueWalk.mock.calls[0]![3] as { title: string; siteLabel: string };
+    expect(meta.title).toContain("Northgate Depot");
+    expect(meta.siteLabel).toBe("900 North Ave, Plano TX");
+  });
+});
+
+// ── FINDING 1 (P1), screen half: the estimator has to be TOLD the video came up short ─────────────
+describe("WalkScreen short-video notice", () => {
+  const shortCoverage = { walkMs: 20 * 60 * 1000, videoMs: 5_000, shortfallMs: 1_195_000 };
+
+  it("says plainly on the completion screen that the video is short, and by roughly how much", () => {
+    mockResult = resultFor(
+      makeWalk("complete", { durationMs: 20 * 60 * 1000, videoCoverage: shortCoverage }),
+    );
+    const { getByText } = render(<WalkScreen />);
+
+    expect(getByText("Video is short")).toBeTruthy();
+    // The numbers that make it actionable, in context: how much video there is, how long the walk
+    // was, and how much is gone. Matched against the notice's own sentence rather than the bare
+    // "20:00" — the duration row on this same screen reads 20:00 too.
+    expect(
+      getByText(/Only about 0:05 of this 20:00 walk has video — roughly 19:55 is missing/),
+    ).toBeTruthy();
+  });
+
+  it("shows nothing extra for a walk whose video covered it", () => {
+    mockResult = resultFor(
+      makeWalk("complete", {
+        durationMs: 20 * 60 * 1000,
+        videoCoverage: { walkMs: 20 * 60 * 1000, videoMs: 20 * 60 * 1000 - 33, shortfallMs: 33 },
+      }),
+    );
+    const { queryByText } = render(<WalkScreen />);
+    expect(queryByText("Video is short")).toBeNull();
+  });
+
+  // The office needs it too — a walk that files as a normal 20-minute visit and turns out to hold
+  // five seconds of footage is exactly the surprise this whole finding is about.
+  it("marks the queued title so the truncation survives past this screen", () => {
+    mockResult = resultFor(
+      makeWalk("recording", { durationMs: null, videoCoverage: null }),
+    );
+    const { rerender } = render(<WalkScreen />);
+
+    mockResult = resultFor(
+      makeWalk("complete", { durationMs: 20 * 60 * 1000, videoCoverage: shortCoverage }),
+    );
+    act(() => {
+      rerender(<WalkScreen />);
+    });
+
+    const meta = mockEnqueueWalk.mock.calls[0]![3] as { title: string };
+    expect(meta.title).toContain("video cut short");
   });
 });
