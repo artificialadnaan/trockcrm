@@ -228,22 +228,34 @@ export default function WalkScreen() {
   // stops, for any reason (ended, or a native failure), so nothing holds the lock past its use.
   const keptAwakeRef = useRef(false);
   useEffect(() => {
-    if (walk.state === "recording") {
-      activateKeepAwakeAsync(KEEP_AWAKE_TAG)
-        .then(() => {
-          keptAwakeRef.current = true;
-        })
-        .catch(() => {
-          // Best-effort, same as upload-queue's drain lock — a walk still records without it.
-        });
-      return () => {
-        if (keptAwakeRef.current) {
-          keptAwakeRef.current = false;
+    if (walk.state !== "recording") return undefined;
+    // `activateKeepAwakeAsync` is async, and a walk can leave "recording" before it answers — a walk
+    // ended after a few seconds, or one that failed the instant it started. The cleanup then ran
+    // while keptAwakeRef was still false, found nothing to release, and the late fulfilment set the
+    // ref true afterwards with its only cleanup already gone. Nothing was left holding a reference
+    // to that lock, so the screen stayed awake until the app was killed — on a phone that has by
+    // then gone into a pocket. This flag is what lets the LATE arrival do the release the cleanup
+    // could not: it is the same lock either way, just acquired after the moment it was wanted.
+    let cancelled = false;
+    activateKeepAwakeAsync(KEEP_AWAKE_TAG)
+      .then(() => {
+        if (cancelled) {
           void deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => undefined);
+          return;
         }
-      };
-    }
-    return undefined;
+        keptAwakeRef.current = true;
+      })
+      .catch(() => {
+        // Best-effort, same as upload-queue's drain lock — a walk still records without it. The ref
+        // stays false on purpose: nothing was acquired, so nothing must be released.
+      });
+    return () => {
+      cancelled = true;
+      if (keptAwakeRef.current) {
+        keptAwakeRef.current = false;
+        void deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => undefined);
+      }
+    };
   }, [walk.state]);
 
   // The build predates the native recorder. No Start button can work, so none is shown — a
@@ -256,6 +268,40 @@ export default function WalkScreen() {
           <Text style={styles.missingBody}>
             This build predates the AI walk recorder. Rebuild the dev client to enable it.
           </Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  // No deal, no walk — and the refusal has to happen HERE, before any control that starts a
+  // recording is drawn.
+  //
+  // This is a hidden route: it is reachable by opening it directly, or by a link whose dealId got
+  // dropped, and `dealId` is normalised to "" in both cases. The screen still rendered a working
+  // Start button, so the estimator could walk a whole site — video, narration, stills, all written
+  // to disk — before anything noticed. The failure surfaced only in the upload queue, where the
+  // dealId is a PATH SEGMENT (`/field/projects/<dealId>/glasses-walkthroughs`): an empty one
+  // collapses the path, every attempt fails, and the walk goes terminal on the failed-walk card
+  // with no deal anyone can attach it to afterwards. Refusing costs one tap; allowing it costs the
+  // site visit. Deliberately below the bridge check — a build with no recorder cannot record for
+  // ANY deal, which is the more fundamental thing to say.
+  if (!dealId) {
+    return (
+      <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
+        <View style={styles.centered}>
+          <Text style={styles.missingTitle}>No project selected</Text>
+          <Text style={styles.missingBody}>
+            A walk is filed against a project, and this screen was opened without one. Go back and
+            start the walk from the project you are visiting.
+          </Text>
+          <Pressable
+            onPress={() => router.back()}
+            accessibilityRole="button"
+            accessibilityLabel="Go back"
+            style={({ pressed }) => [styles.doneButton, pressed && styles.pressed]}
+          >
+            <Text style={styles.doneButtonText}>Go back</Text>
+          </Pressable>
         </View>
       </SafeAreaView>
     );

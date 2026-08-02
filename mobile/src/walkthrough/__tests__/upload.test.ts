@@ -67,12 +67,28 @@ jest.mock("expo-file-system/legacy", () => {
     writeAsStringAsync: async (p: string, data: string) => {
       store.set(p, data);
     },
+    // Recursive for a DIRECTORY path, like the real one: `deleteAsync` on a directory removes it
+    // and everything beneath it in a single call. Modelled here because the cleanup path now
+    // deletes the walk DIRECTORY, not just the artifact uris the manifest happens to list, and a
+    // mock that only removed the exact key would let a test pass while the real leak survived.
+    // The failure injection is recursive for the same reason it is on-device: a directory whose
+    // child cannot be removed cannot itself be removed either, so a `failDeletes` entry rejects
+    // both its own delete and its parent's.
     deleteAsync: async (p: string) => {
       if (failDeletes.has(p)) throw new Error(`EBUSY ${p}`);
+      const prefix = `${norm(p)}/`;
+      for (const f of failDeletes) if (f.startsWith(prefix)) throw new Error(`EBUSY ${f}`);
       store.delete(p);
       sizes.delete(p);
       dirs.delete(p);
       dirs.delete(norm(p));
+      for (const key of [...store.keys()]) {
+        if (key.startsWith(prefix)) {
+          store.delete(key);
+          sizes.delete(key);
+        }
+      }
+      for (const d of [...dirs]) if (norm(d).startsWith(prefix)) dirs.delete(d);
     },
     moveAsync: async ({ from, to }: { from: string; to: string }) => {
       store.set(to, store.get(from) ?? "");
@@ -702,6 +718,70 @@ describe("stranded completed-but-uncleaned walks (Fix 2)", () => {
     expect(summary.completed).toBe(1);
     expect(fs.__store.has(VIDEO_URI)).toBe(false); // still gone — deleteAsync(idempotent) never errors on this
     expect(fs.__store.has(PHOTO_URI)).toBe(false); // now gone too
+    expect(await getQueuedWalks(OWNER)).toEqual([]);
+  });
+});
+
+// A walk whose FINALIZATION failed after stills were already captured. toQueuedWalk deliberately
+// queues only the stills and excludes the provisional walk.mp4 (a "failed" walk's videoUri is never
+// a finalised file), so the manifest's artifact list is a STRICT SUBSET of what native left on
+// disk — the one shape where "delete the artifacts" and "delete the recording" are different
+// instructions.
+describe("cleanup of a walk whose manifest lists fewer files than are on disk", () => {
+  // The exact name native writes (WalkthroughRecorder.swift's `dir.appendingPathComponent`), not
+  // the `video.mp4` the rest of this file uses: classifyWalkDirFileNames only recognises `walk.mp4`,
+  // and the whole point here is what the NEXT startup scan sees.
+  const PARTIAL_VIDEO_URI = `${DOC}walkthroughs/walk-1/walk.mp4`;
+
+  function failedAfterStillWalk(): Walk {
+    const started = reduceWalk(reduceWalk(initialWalk("deal-1", "proj-7"), { type: "starting" }), {
+      type: "started",
+      at: 1000,
+      videoUri: PARTIAL_VIDEO_URI,
+    });
+    const withStill = reduceWalk(started, {
+      type: "still",
+      uri: PHOTO_URI,
+      at: 2000,
+      source: "glasses",
+    });
+    const ended = reduceWalk(withStill, { type: "ended", at: 5000 });
+    return reduceWalk(ended, { type: "failed", reason: "finishWriting failed" });
+  }
+
+  it("removes the whole walk directory, so the abandoned walk.mp4 is not rediscovered as a recoverable recording at the next startup", async () => {
+    seedFiles([PHOTO_URI, PARTIAL_VIDEO_URI]);
+    await enqueueWalk(OWNER, "walk-1", failedAfterStillWalk(), META, 1000);
+    // Precondition, not decoration: the mp4 really is absent from the manifest, which is what makes
+    // an artifact-list-driven cleanup leave it behind.
+    expect((await getQueuedWalks(OWNER))[0]!.artifacts.map((a) => a.kind)).toEqual(["photo"]);
+
+    const summary = await drainWalkQueue(OWNER, fetcher, stubClient());
+    expect(summary.completed).toBe(1);
+    expect(await getQueuedWalks(OWNER)).toEqual([]);
+
+    // The leak: with the entry gone, nothing in the manifest can ever account for this file again,
+    // and the startup scan reports its directory as a NEW unqueued recording on every launch,
+    // forever — a walk the server has in fact already accepted.
+    expect(fs.__store.has(PARTIAL_VIDEO_URI)).toBe(false);
+    expect(await findRecoverableWalks(OWNER)).toEqual([]);
+  });
+
+  // The directory delete must obey the same rule as the artifact deletes: a rejection means media is
+  // still on the phone, so the entry stays and a later drain tries again.
+  it("keeps the entry when the directory itself cannot be removed", async () => {
+    seedFiles([PHOTO_URI, PARTIAL_VIDEO_URI]);
+    await enqueueWalk(OWNER, "walk-1", failedAfterStillWalk(), META, 1000);
+    fs.__failDeletes.add(PARTIAL_VIDEO_URI); // the undeletable file is one the manifest never lists
+
+    const first = await drainWalkQueue(OWNER, fetcher, stubClient());
+    expect(first.completed).toBe(0);
+    expect((await getQueuedWalks(OWNER))[0]!.completedAt).toBeDefined(); // never re-completed
+
+    fs.__failDeletes.delete(PARTIAL_VIDEO_URI);
+    const second = await drainWalkQueue(OWNER, fetcher, stubClient());
+    expect(second.completed).toBe(1);
+    expect(fs.__store.has(PARTIAL_VIDEO_URI)).toBe(false);
     expect(await getQueuedWalks(OWNER)).toEqual([]);
   });
 });

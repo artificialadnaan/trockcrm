@@ -17,6 +17,7 @@ import {
   getRecoverableWalksFromStartup,
   retryFailedWalks,
   subscribeRecoverableWalksFromStartup,
+  subscribeWalkQueue,
 } from "../../src/walkthrough/upload";
 import { walkthroughUploadClient } from "../../src/walkthrough/upload-client";
 
@@ -263,6 +264,18 @@ function FailedWalksCard() {
       void refresh();
     }, [refresh]),
   );
+
+  // ...and SUBSCRIBED on top of that, for the same reason RecoverableWalksCard below subscribes
+  // rather than just reading. Focus answers "what was true when I arrived"; the interesting moment is
+  // a walk exhausting its last retry, and that happens inside a drain running detached from every
+  // screen (kicked off by the walk screen, the shell, the background task, or this card's own retry
+  // button, all of which outlive their caller). With only the focus read, a walk going terminal while
+  // the estimator was ALREADY sitting on Profile published nothing, and the card stayed hidden until
+  // they navigated away and back — a step nobody takes about a card they cannot see. The count is an
+  // async manifest read rather than a synchronous snapshot, so this is a subscribe-and-re-read rather
+  // than useSyncExternalStore; a redundant re-read (another owner's mutation, or a mid-drain PUT that
+  // changed nothing this card shows) costs one small JSON parse and renders the same value.
+  React.useEffect(() => subscribeWalkQueue(() => void refresh()), [refresh]);
 
   const retry = React.useCallback(async () => {
     if (!ownerKey) return;

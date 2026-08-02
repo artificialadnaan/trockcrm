@@ -1,12 +1,13 @@
 /**
- * Covers the P2 fix on app/(app)/walk.tsx: the focus effect that resets a terminal walk must
- * fire on a genuine focus TRANSITION, not merely because `useFocusEffect`'s callback got a new
- * identity while the route was already focused.
+ * Screen-level behaviour of app/(app)/walk.tsx — everything that is the SCREEN's responsibility
+ * rather than the walk lifecycle's (which lives in useWalk.ts / session.ts and is covered there):
+ * the focus effect that resets a terminal walk, the metadata a finished walk is enqueued with,
+ * the truncation notices, the refusal to record without a target, and the keep-awake lock.
  *
- * The screen itself has a lot of surrounding wiring (auth, the upload queue, background task
- * registration, keep-awake) that is irrelevant to this bug, so all of it is stubbed out here —
- * only `useWalk` (fully controlled by the test) and `expo-router` (mocked to faithfully
- * reproduce the specific gotcha this bug depends on) actually matter.
+ * `useWalk` is fully controlled by the test rather than mocked loosely, so each case states the
+ * exact walk state the screen is asked to render. Everything else the screen touches (auth, the
+ * upload queue, background task registration) is stubbed out; `expo-router` is mocked to
+ * faithfully reproduce the focus gotcha the first group depends on rather than to simplify it.
  */
 import React from "react";
 import { act, render } from "@testing-library/react-native";
@@ -144,6 +145,10 @@ beforeEach(() => {
   mockRouterBack.mockClear();
   mockEnqueueWalk.mockClear();
   mockDrainWalkQueue.mockClear();
+  // Reset, not just clear: the keep-awake cases below install one-shot implementations to control
+  // WHEN activation resolves, and a leftover one would silently change the next test's timing.
+  mockActivateKeepAwake.mockReset().mockResolvedValue(undefined);
+  mockDeactivateKeepAwake.mockReset().mockResolvedValue(undefined);
 });
 
 describe("WalkScreen focus-driven reset", () => {
@@ -367,5 +372,115 @@ describe("WalkScreen short-audio notice", () => {
 
     const meta = mockEnqueueWalk.mock.calls[0]![3] as { title: string };
     expect(meta.title).toContain("video and audio cut short");
+  });
+});
+
+// ── Round-6 FINDING 5 (P2): a walk with no deal has nowhere to be filed ───────────────────────────
+//
+// This is a hidden route. Opening it directly, or following a link whose dealId got dropped,
+// normalised the target to "" and still rendered a working Start button. The estimator could then
+// record an entire site visit — video, narration, stills, all on disk — and the failure would only
+// surface later, in the upload queue, as a POST to `/field/projects//glasses-walkthroughs` that goes
+// terminal. Refusing at the screen costs one tap; allowing it costs the walk.
+describe("WalkScreen with no target deal", () => {
+  it("refuses to offer a recording that could never be filed", () => {
+    mockParams = { dealId: undefined, targetName: "Riverside Plaza", projectId: undefined, propertyAddress: undefined };
+    mockResult = resultFor(makeWalk("idle"));
+    const { queryByText, getByText } = render(<WalkScreen />);
+
+    expect(queryByText("Start walk")).toBeNull();
+    expect(getByText("No project selected")).toBeTruthy();
+  });
+
+  // A malformed link, rather than no link at all — same outcome, since `dealId` is normalised to ""
+  // either way and "" is what would be spliced into the endpoint path.
+  it("refuses an empty-string dealId too", () => {
+    mockParams = { dealId: "", targetName: "Riverside Plaza", projectId: undefined, propertyAddress: undefined };
+    mockResult = resultFor(makeWalk("idle"));
+    const { queryByText } = render(<WalkScreen />);
+
+    expect(queryByText("Start walk")).toBeNull();
+  });
+
+  // The refusal must be about the MISSING deal and nothing else. (Guard: this held before the fix
+  // too — it is here so a future over-broad guard cannot quietly disable the normal path.)
+  it("offers the walk normally when a dealId is present", () => {
+    mockResult = resultFor(makeWalk("idle"));
+    const { getByText } = render(<WalkScreen />);
+    expect(getByText("Start walk")).toBeTruthy();
+  });
+});
+
+// ── Round-6 FINDING 6 (P2): the keep-awake lock must not outlive the recording ────────────────────
+//
+// `activateKeepAwakeAsync` is async, and a walk can leave "recording" before it resolves — a walk
+// ended within a second or two, or one that failed the moment it started. The cleanup then ran while
+// `keptAwakeRef` was still false and did nothing, and the late fulfilment set the ref true after its
+// only cleanup had already gone. Nothing was left holding a reference to that lock, so the screen
+// stayed awake until the app was killed — on a phone that has just been put in a pocket.
+describe("WalkScreen keep-awake lock", () => {
+  const TAG = "trockcam-walk";
+
+  it("releases a lock whose activation lands after the walk already stopped recording", async () => {
+    let settleActivation!: () => void;
+    mockActivateKeepAwake.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          settleActivation = () => resolve();
+        }),
+    );
+    mockResult = resultFor(makeWalk("recording"));
+    const { rerender } = render(<WalkScreen />);
+    expect(mockActivateKeepAwake).toHaveBeenCalledWith(TAG);
+
+    // The walk ends before iOS answers.
+    mockResult = resultFor(makeWalk("complete"));
+    act(() => {
+      rerender(<WalkScreen />);
+    });
+    expect(mockDeactivateKeepAwake).not.toHaveBeenCalled(); // nothing acquired yet, nothing to release
+
+    await act(async () => {
+      settleActivation();
+      await Promise.resolve();
+    });
+
+    expect(mockDeactivateKeepAwake).toHaveBeenCalledWith(TAG);
+  });
+
+  // The ordinary path, unchanged: activation lands while the walk is still recording, and the lock
+  // is released exactly once when recording stops. (Guard, not a regression.)
+  it("releases the lock once when recording stops normally", async () => {
+    mockResult = resultFor(makeWalk("recording"));
+    const { rerender } = render(<WalkScreen />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    mockResult = resultFor(makeWalk("complete"));
+    await act(async () => {
+      rerender(<WalkScreen />);
+    });
+
+    expect(mockDeactivateKeepAwake).toHaveBeenCalledTimes(1);
+    expect(mockDeactivateKeepAwake).toHaveBeenCalledWith(TAG);
+  });
+
+  // A refused activation must not be "released" — deactivating a tag that was never acquired is a
+  // call about a lock this screen does not hold.
+  it("does not release a lock it never acquired", async () => {
+    mockActivateKeepAwake.mockRejectedValueOnce(new Error("keep-awake unavailable"));
+    mockResult = resultFor(makeWalk("recording"));
+    const { rerender } = render(<WalkScreen />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    mockResult = resultFor(makeWalk("complete"));
+    await act(async () => {
+      rerender(<WalkScreen />);
+    });
+
+    expect(mockDeactivateKeepAwake).not.toHaveBeenCalled();
   });
 });

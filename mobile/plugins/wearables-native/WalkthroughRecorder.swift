@@ -119,18 +119,6 @@ final class WalkthroughRecorder: RCTEventEmitter {
     }
   }
 
-  /// Whether iOS has ALREADY recorded a refusal. Read before requesting, never after — once the
-  /// request returns false the two cases are indistinguishable, and they need opposite
-  /// instructions: a fresh "Don't Allow" is undone by tapping Start again, an older one can only be
-  /// undone in Settings. Telling an estimator standing on a job site to look in the wrong place is
-  /// the difference between a ten-second fix and a wasted visit.
-  private static var recordPermissionAlreadyDenied: Bool {
-    if #available(iOS 17.0, *) {
-      return AVAudioApplication.shared.recordPermission == .denied
-    }
-    return AVAudioSession.sharedInstance().recordPermission == .denied
-  }
-
   /// Artifacts live in the DOCUMENTS directory, never tmp. iOS purges tmp, and a walk whose
   /// stills vanish before the upload queue drains is a site visit that has to be repeated.
   private static func makeWalkDirectory(_ walkId: String) throws -> URL {
@@ -248,18 +236,23 @@ final class WalkthroughRecorder: RCTEventEmitter {
       // nothing. The claim above is the one thing that does exist by now, which is why this refusal
       // still goes through teardown() — on this path teardown finds nothing to stop and no
       // directory to delete, and does nothing but hand the recorder back.
-      let alreadyDenied = Self.recordPermissionAlreadyDenied
+      //
+      // ONE message, and it always points at Settings. This used to branch on whether iOS had
+      // already recorded a denial BEFORE we asked, on the theory that a refusal the estimator had
+      // just made could be undone by tapping Start again. It cannot: iOS presents the microphone
+      // prompt exactly once per install, and after ANY denial — including the very first "Don't
+      // Allow" — `requestRecordPermission` returns false immediately without showing anything.
+      // Confirmed on device. So the fresh-denial wording sent whoever needed it most into a loop of
+      // tapping a button that could never produce a prompt, while the one place that actually fixes
+      // it went unmentioned. The reason stays in the text because it is what makes a trip into
+      // Settings worth making mid-walk: without narration there is no scope to extract.
       guard await Self.requestRecordPermission() else {
         await teardown(.discard)
         reject(
           "walk_mic_denied",
-          alreadyDenied
-            ? "Microphone access for T-Rock Cam is off, so this walk would record video with no "
-              + "narration — and the scope is written from what you say. Turn it on in Settings > "
-              + "T-Rock Cam > Microphone, then start the walk again."
-            : "Microphone access is required: the scope is written from your narration, so a walk "
-              + "without it is a site visit that has to be repeated. Tap Start walk again and "
-              + "choose Allow.",
+          "Microphone access for T-Rock Cam is off, so this walk would record video with no "
+            + "narration — and the scope is written from what you say. Turn it on in Settings > "
+            + "T-Rock Cam > Microphone, then start the walk again.",
           nil
         )
         return

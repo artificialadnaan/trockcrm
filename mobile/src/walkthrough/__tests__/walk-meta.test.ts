@@ -1,15 +1,23 @@
-// Date/time formatting reads the process's local timezone (deliberately — see walk-meta.ts's header:
-// the estimator's own wall-clock time is the point). Pin TZ so the formatted strings asserted below are
-// reproducible on any machine/CI runner, not just one that happens to be on US Central time. Node reads
-// process.env.TZ per Date call (not cached at startup), so setting it here — before any Date is
-// constructed — is sufficient; nothing else in the suite depends on the host timezone.
-process.env.TZ = "America/Chicago";
-
+// Every instant below is built with the LOCAL-time Date constructor, never Date.UTC, and that is the
+// whole trick that makes these assertions honest.
+//
+// The formatting under test reads the DEVICE's timezone on purpose (see walk-meta.ts's header: the
+// estimator's own wall-clock time is what makes an instant recognizable later). Pinning a zone from
+// inside the test file used to stand in for that — `process.env.TZ = "America/Chicago"` — and it does
+// not work: under Jest, `process` is the sandboxed copy the test environment installs, so assigning
+// TZ on it never reaches the tzset()/ICU invalidation Node does for the real one. On a UTC runner the
+// suite formatted UTC and failed, asserting Central; it only ever passed because this machine happens
+// to be on Central. Setting TZ for real would mean changing how Jest is LAUNCHED, which is a worse
+// trade: it makes one suite's assertions a property of the test command.
+//
+// So the zone is removed from the question instead. `new Date(y, m, d, h, min)` names a WALL CLOCK,
+// and formatting it back reproduces that same wall clock in every zone — which is exactly the
+// behaviour being asserted, stated in the form that is true everywhere.
 import { deriveWalkSiteLabel, deriveWalkTitle } from "../walk-meta";
 
-// 2026-07-31T02:15:00Z is 2026-07-30, 9:15 PM in America/Chicago (CDT, UTC-5) — the exact example from
-// the design doc's owner decision on auto-derived titles.
-const AT_MS = Date.UTC(2026, 6, 31, 2, 15, 0);
+/** 30 Jul 2026, 9:15 PM local — the exact example from the design doc's owner decision on
+ *  auto-derived titles. */
+const AT_MS = new Date(2026, 6, 30, 21, 15, 0).getTime();
 
 describe("deriveWalkTitle", () => {
   it("appends a day-month-year date and 12-hour time to the target name", () => {
@@ -19,8 +27,19 @@ describe("deriveWalkTitle", () => {
   });
 
   it("pads single-digit minutes and uses the target name verbatim", () => {
-    const at = Date.UTC(2026, 0, 5, 15, 5, 0); // 2026-01-05T15:05:00Z -> 9:05 AM Central
+    const at = new Date(2026, 0, 5, 9, 5, 0).getTime(); // 5 Jan 2026, 9:05 AM local
     expect(deriveWalkTitle("123 Main St", at)).toBe("123 Main St — 5 Jan 2026, 9:05 AM");
+  });
+
+  // The one property the wall-clock construction above cannot state on its own: the formatted time
+  // is the DEVICE's reading of the instant, not UTC's. Skipped on a runner that is itself on UTC,
+  // where the two are the same string and there is nothing to tell apart.
+  it("formats the instant in the device's own timezone, not UTC", () => {
+    const at = new Date(2026, 6, 30, 21, 15, 0);
+    if (at.getTimezoneOffset() === 0) return;
+    expect(deriveWalkTitle("Riverside Plaza", at.getTime())).not.toContain(
+      at.toISOString().slice(11, 16),
+    );
   });
 
   it("clamps an unreasonably long target name so the server's title cap can never be exceeded", () => {

@@ -1161,3 +1161,226 @@ describe("useWalk double-start guard", () => {
     expect(result.current.walk.state).toBe("recording");
   });
 });
+
+// ── Round-6 FINDING 3 (P1): End walk is a second control that native cannot serve twice ───────────
+//
+// `start()` has had a synchronous in-flight guard since the double-start fix; `end()` had none, so
+// two taps landing before React commits "finalizing" both reached Recorder.endWalk(). Native
+// launches an INDEPENDENT Task per call: they race to remove the same audio tap, finalise the same
+// AVAssetWriter, and tear down the same singleton. The reducer cannot help — its "ended" guard only
+// sees state that has already been committed, which is exactly what has not happened yet.
+describe("useWalk double-end guard", () => {
+  const STARTED = {
+    walkId: "w1",
+    directory: "d",
+    videoUri: "file:///docs/walkthroughs/w1/PARTIAL.mp4",
+    inputPortName: "iPhone Microphone",
+    negotiatedSampleRate: 48000,
+  };
+  const FINALIZED = { videoUri: "file:///docs/walkthroughs/w1/walk.mp4", stills: 0 };
+
+  it("refuses a second end() issued before the first has resolved", async () => {
+    mockStartWalk.mockResolvedValue(STARTED);
+    let release!: (value: unknown) => void;
+    mockEndWalk.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const { result } = renderHook(() => useWalk("deal-1", null));
+    await act(async () => {
+      await result.current.start();
+    });
+
+    // Both calls in ONE act() with no await between them — a double tap inside a single tick, the
+    // only shape the bug has. Awaiting the first would let React commit "finalizing" and the
+    // reducer would absorb the second on its own.
+    await act(async () => {
+      void result.current.end();
+      void result.current.end();
+      release(FINALIZED);
+    });
+
+    expect(mockEndWalk).toHaveBeenCalledTimes(1);
+    expect(result.current.walk.state).toBe("complete");
+  });
+
+  // The guard must not be a one-way door: it is cleared when the call it covers settles, so the
+  // NEXT walk on this same mounted screen can still be ended. (Passes before the fix too — it is a
+  // guard against the fix over-reaching, not a reproduction of the bug.)
+  it("still ends the NEXT walk after a previous end() resolved", async () => {
+    mockStartWalk.mockResolvedValue(STARTED);
+    mockEndWalk.mockResolvedValue(FINALIZED);
+    const { result } = renderHook(() => useWalk("deal-1", null));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    await act(async () => {
+      await result.current.end();
+    });
+    expect(result.current.walk.state).toBe("complete");
+
+    act(() => {
+      result.current.reset();
+    });
+    await act(async () => {
+      await result.current.start();
+    });
+    await act(async () => {
+      await result.current.end();
+    });
+
+    expect(mockEndWalk).toHaveBeenCalledTimes(2);
+    expect(result.current.walk.state).toBe("complete");
+  });
+
+  // A rejected endWalk must release the guard too, or a walk that failed to finalise could never be
+  // ended again — and the walk is terminal-failed at that point, so the next attempt is a NEW walk.
+  it("releases the guard when endWalk rejects", async () => {
+    mockStartWalk.mockResolvedValue(STARTED);
+    mockEndWalk.mockRejectedValueOnce(new Error("finishWriting failed")).mockResolvedValue(FINALIZED);
+    const { result } = renderHook(() => useWalk("deal-1", null));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    await act(async () => {
+      await result.current.end();
+    });
+    expect(result.current.walk.state).toBe("failed");
+
+    act(() => {
+      result.current.reset();
+    });
+    await act(async () => {
+      await result.current.start();
+    });
+    await act(async () => {
+      await result.current.end();
+    });
+    expect(result.current.walk.state).toBe("complete");
+  });
+});
+
+// ── Round-6 FINDING 4 (P1): a reservation belongs to a WALK, not to the hook ──────────────────────
+//
+// A capture request native accepts but never resolves — no `walkthrough:still`, no
+// `walkthrough:error` — leaves its JS reservation held for good; nothing correlates a request to an
+// outcome, so there is no timeout that could safely release it mid-walk. That is survivable within
+// one walk. What is not is carrying it into the NEXT one: reset() cleared the reducer state and the
+// walkId but not the in-flight count, so every later walk on the same mounted screen started one
+// slot short of the server's artifact cap, permanently, and the CAPTURE button went dark early with
+// nothing on screen able to explain why.
+describe("useWalk in-flight reservations across walks", () => {
+  const STARTED = {
+    walkId: "w1",
+    directory: "d",
+    videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
+    inputPortName: "iPhone Microphone",
+    negotiatedSampleRate: 48000,
+  };
+
+  /**
+   * How many capture requests this walk will actually let through, measured rather than asserted
+   * about indirectly.
+   *
+   * Deliberately NOT measured by delivering stills up to the cap: a delivered still releases a
+   * reservation generically (native carries no id, so useWalk releases the oldest outstanding one),
+   * which means the very first delivery would ABSORB the ghost and hide the bug. Only requests that
+   * stay outstanding accumulate against the cap, so only requests can reveal a stale one.
+   */
+  async function countAcceptedCaptures(capture: () => Promise<void>): Promise<number> {
+    mockCaptureStill.mockClear();
+    await act(async () => {
+      for (let i = 0; i < MAX_WALK_ARTIFACTS + 1; i++) await capture();
+    });
+    return mockCaptureStill.mock.calls.length;
+  }
+
+  /** Every slot but the one the walk's own video occupies. */
+  const FULL_ALLOWANCE = MAX_WALK_ARTIFACTS - 1;
+
+  it("does not carry a never-resolved reservation from a finished walk into the next one", async () => {
+    mockStartWalk.mockResolvedValue(STARTED);
+    mockEndWalk.mockResolvedValue({ videoUri: "file:///docs/walkthroughs/w1/walk.mp4", stills: 0 });
+    mockCaptureStill.mockResolvedValue({ requested: true });
+    const { result } = renderHook(() => useWalk("deal-1", null));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    // Accepted by native, and then nothing — the photo never arrives and native never reports a
+    // failure for it either. Held for the rest of THIS walk, which is correct.
+    await act(async () => {
+      await result.current.capture();
+    });
+    await act(async () => {
+      await result.current.end();
+    });
+    act(() => {
+      result.current.reset();
+    });
+
+    await act(async () => {
+      await result.current.start();
+    });
+
+    expect(await countAcceptedCaptures(() => result.current.capture())).toBe(FULL_ALLOWANCE);
+  });
+
+  // The same leak reached via the OTHER reset path — a re-render against a different deal, which
+  // walk.tsx can produce without any focus transition (it is a hidden Tabs.Screen).
+  it("clears reservations when the walk is auto-reset by a change of target deal", async () => {
+    mockStartWalk.mockResolvedValue(STARTED);
+    mockEndWalk.mockResolvedValue({ videoUri: "file:///docs/walkthroughs/w1/walk.mp4", stills: 0 });
+    mockCaptureStill.mockResolvedValue({ requested: true });
+    const { result, rerender } = renderHook(
+      ({ dealId }: { dealId: string }) => useWalk(dealId, null),
+      { initialProps: { dealId: "deal-1" } },
+    );
+
+    await act(async () => {
+      await result.current.start();
+    });
+    await act(async () => {
+      await result.current.capture();
+    });
+    await act(async () => {
+      await result.current.end();
+    });
+    act(() => {
+      rerender({ dealId: "deal-2" });
+    });
+    expect(result.current.walk.state).toBe("idle");
+
+    await act(async () => {
+      await result.current.start();
+    });
+
+    expect(await countAcceptedCaptures(() => result.current.capture())).toBe(FULL_ALLOWANCE);
+  });
+
+  // Within ONE walk the reservation must still be honoured — the fix must not turn the cap gate
+  // into a no-op. (Guard, not a regression: this held before the fix too.)
+  it("still holds a reservation for the walk that made it", async () => {
+    mockStartWalk.mockResolvedValue(STARTED);
+    mockCaptureStill.mockResolvedValue({ requested: true });
+    const { result } = renderHook(() => useWalk("deal-1", null));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    act(() => {
+      for (let i = 0; i < MAX_WALK_ARTIFACTS - 2; i++) {
+        stillListener!({ uri: `file:///s${i}.jpg`, bytes: 1, source: "phone" });
+      }
+    });
+    await act(async () => {
+      await result.current.capture();
+    });
+
+    expect(result.current.captureEnabled).toBe(false);
+  });
+});

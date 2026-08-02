@@ -246,16 +246,54 @@ function createMutex(): <T>(task: () => Promise<T>) => Promise<T> {
 }
 const withLock = createMutex();
 
+/**
+ * Notified after every manifest WRITE — the "something in the queue changed" signal.
+ *
+ * Load-bearing for the same reason startupScanListeners is, one screen over. Everything derived from
+ * the manifest (getFailedWalkCount, getSchedulableWalkCount, getQueuedWalks) is an async READ of a
+ * file this module owns; nothing about calling one of them tells React to call it again. A drain runs
+ * detached from any screen — it is kicked off by the walk screen, the shell, the background task, or
+ * Profile's own retry, and it outlives all of them — so the moment a walk exhausts its last retry is
+ * a moment no component is in a position to notice. Profile's failed-walk card read the count once
+ * per focus and then stayed however it was, which meant a walk going terminal while the estimator was
+ * ALREADY sitting on Profile produced no card at all until they navigated away and back.
+ *
+ * Deliberately carries NO payload and NO owner: a subscriber re-reads whatever it actually cares
+ * about, for whatever owner it is signed in as. A mutation for a DIFFERENT owner therefore costs a
+ * subscriber one redundant manifest read, which is the right trade against the alternative of
+ * routing owner identity through every mutation site.
+ */
+const walkQueueListeners = new Set<() => void>();
+
+/** Subscribe to any manifest write; returns its own unsubscribe. See walkQueueListeners. */
+export function subscribeWalkQueue(listener: () => void): () => void {
+  walkQueueListeners.add(listener);
+  return () => {
+    walkQueueListeners.delete(listener);
+  };
+}
+
+function notifyWalkQueueListeners(): void {
+  // Iterate a copy — a React unsubscribe fired from within a listener would otherwise mutate the Set
+  // mid-iteration (same reason as notifyStartupScanListeners).
+  for (const listener of [...walkQueueListeners]) listener();
+}
+
 async function mutateManifest(
   ownerKey: string,
   fn: (walks: QueuedWalk[]) => QueuedWalk[],
 ): Promise<QueuedWalk[]> {
-  return withLock(async () => {
+  const next = await withLock(async () => {
     const current = await readManifest(ownerKey);
-    const next = fn(current);
-    await writeManifest(ownerKey, next);
-    return next;
+    const updated = fn(current);
+    await writeManifest(ownerKey, updated);
+    return updated;
   });
+  // Strictly OUTSIDE the lock. A listener is free to read the manifest (that is the whole point of
+  // being told), and `withLock` is not reentrant — notifying from inside it would deadlock the queue
+  // on the first subscriber that did the obvious thing.
+  notifyWalkQueueListeners();
+  return next;
 }
 
 // ── Public read API ──────────────────────────────────────────────────────────────────────────────
@@ -618,13 +656,26 @@ async function callCompletion(
 }
 
 /**
- * Delete every one of `walk`'s local artifact files, then remove its manifest entry — the ONLY two
- * steps that may run once completedAt is set (see the module header / needsCleanup's doc comment in
- * upload-core.ts). Idempotent in both halves: deleteAsync({idempotent:true}) tolerates a file a
- * partially-finished PRIOR cleanup attempt already removed, and removeQueuedWalk no-ops if the entry
- * is somehow already gone. Shared by drainWalkQueue's normal post-completion cleanup and its Fix 2
- * cleanup-only branch (a walk found already completedAt-stamped on entry) so both paths behave
- * identically.
+ * Delete `walk`'s local media, then remove its manifest entry — the ONLY two steps that may run once
+ * completedAt is set (see the module header / needsCleanup's doc comment in upload-core.ts).
+ * Idempotent in both halves: deleteAsync({idempotent:true}) tolerates a file a partially-finished
+ * PRIOR cleanup attempt already removed, and removeQueuedWalk no-ops if the entry is somehow already
+ * gone. Shared by drainWalkQueue's normal post-completion cleanup and its Fix 2 cleanup-only branch
+ * (a walk found already completedAt-stamped on entry) so both paths behave identically.
+ *
+ * "Local media" is the walk's whole DIRECTORY, not just the uris its manifest entry happens to list,
+ * and the difference is a real leak rather than tidiness. `toQueuedWalk` deliberately excludes a
+ * FAILED walk's provisional walk.mp4 — finalization never completed, so that file is not a video
+ * anyone should upload — while still queuing every still that was captured before the failure. The
+ * manifest's artifact list is then a strict subset of what native wrote, and an artifact-driven
+ * cleanup leaves the partial mp4 sitting in `Documents/walkthroughs/<walkId>/` with its manifest
+ * entry now deleted. Nothing can ever account for it again: findRecoverableWalks reports exactly
+ * "directory with no manifest entry," so that abandoned file resurfaces on Profile as a NEW
+ * unqueued recording at every launch, forever, for a walk the server already accepted.
+ *
+ * The directory delete is held to the same standard as the file deletes for the same reason: on-device
+ * a directory whose contents cannot be removed cannot be removed either, so a rejection here means
+ * media is still on the phone and the entry must stay for a later drain to retry.
  *
  * Returns whether the cleanup actually FINISHED, and deliberately keeps the manifest entry when it
  * did not. `idempotent: true` already resolves for a path that isn't there, so a rejection here is
@@ -639,9 +690,18 @@ async function callCompletion(
  * bytes the server already has is worth retrying indefinitely, and every retry is idempotent.
  */
 async function finishWalkCleanup(ownerKey: string, walk: QueuedWalk): Promise<boolean> {
-  const deletions = await Promise.allSettled(
+  // Artifacts first, then the directory — not concurrently. An artifact uri is not guaranteed to sit
+  // under this walk's directory (rebaseWalkUris rewrites container UUIDs, and a recovered walk is
+  // enqueued from paths the caller supplied), so the per-uri deletes are what actually guarantees
+  // every file the manifest promised to remove is gone; the directory sweep is what catches the
+  // files the manifest never knew about.
+  const fileDeletions = await Promise.allSettled(
     walk.artifacts.map((a) => FileSystem.deleteAsync(a.uri, { idempotent: true })),
   );
+  const dirDeletion = await Promise.allSettled([
+    FileSystem.deleteAsync(walkDirUri(walk.walkId), { idempotent: true }),
+  ]);
+  const deletions = [...fileDeletions, ...dirDeletion];
   if (deletions.some((d) => d.status === "rejected")) return false;
   await mutateManifest(ownerKey, (current) => removeQueuedWalk(current, walk.walkId));
   return true;

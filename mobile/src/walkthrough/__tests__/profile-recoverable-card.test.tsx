@@ -1,6 +1,10 @@
 /**
- * Covers the P2 fix on app/(app)/profile.tsx: RecoverableWalksCard must appear when the STARTUP SCAN
- * resolves, not when something unrelated happens to rerender the Profile screen.
+ * Covers the two Profile cards that report on walks the estimator cannot otherwise see, and the one
+ * defect both had: the card renders from a value the SCREEN cannot know has changed, so unless the
+ * module publishes the change, real recordings stay invisible behind a card that never appears.
+ *
+ * Part one — RecoverableWalksCard must appear when the STARTUP SCAN resolves, not when something
+ * unrelated happens to rerender the Profile screen.
  *
  * The bug this pins down is a cold launch that lands straight on Profile (the tab the app restores
  * to, or a deep link into it). The scan is kicked off by the authenticated shell's mount effect and
@@ -103,7 +107,13 @@ jest.mock("../upload-client", () => ({ walkthroughUploadClient: {} }));
 
 import * as FileSystem from "expo-file-system/legacy";
 import { act, render } from "@testing-library/react-native";
-import { forgetRecoverableWalksAtStartup, scanRecoverableWalksAtStartup } from "../upload";
+import {
+  MAX_WALK_UPLOAD_ATTEMPTS,
+  drainWalkQueue,
+  forgetRecoverableWalksAtStartup,
+  scanRecoverableWalksAtStartup,
+  type WalkthroughUploadClient,
+} from "../upload";
 // eslint-disable-next-line import/first
 import ProfileScreen from "../../../app/(app)/profile";
 
@@ -155,5 +165,84 @@ describe("Profile's recoverable-walks card", () => {
       await scanRecoverableWalksAtStartup(OWNER);
     });
     expect(queryByText(/unfinished walk/)).toBeNull();
+  });
+});
+
+// ── Round-6 FINDING 8 (P2): the failed-walk count is not a once-per-focus reading ─────────────────
+//
+// Part two, the same shape as the card above. `getFailedWalkCount` was read on focus and never
+// again, so a drain that exhausts a walk's last retry WHILE Profile is already the focused tab
+// publishes nothing — and Profile is exactly where the estimator sits waiting to find out. The card
+// stayed hidden until they navigated away and back, which is not a step anyone knows to take about
+// a card they cannot see. A drain is the ONLY thing that can make a walk terminal, and every step of
+// one is a manifest mutation, so the manifest is the right thing to subscribe to.
+describe("Profile's failed-walks card", () => {
+  const MANIFEST_PATH = `${DOC}walkthrough-uploads/user-1_office-a/index.json`;
+  // The artifact file is deliberately NOT seeded: putArtifactBytes rejects on a missing file before
+  // it ever reaches the client, which is the cheapest honest way to make a drain fail. One attempt
+  // short of the cap, so exactly one drain pass tips this walk over.
+  const ONE_ATTEMPT_FROM_TERMINAL = [
+    {
+      walkId: "walk-1",
+      dealId: "deal-1",
+      projectId: null,
+      title: "Riverside Plaza",
+      siteLabel: "12 River Rd",
+      startedAt: 1000,
+      endedAt: 5000,
+      durationMs: 4000,
+      enqueuedAt: 1000,
+      completionAttempts: 0,
+      artifacts: [
+        {
+          idempotencyKey: "walk-1:video",
+          kind: "video",
+          uri: `${DOC}walkthroughs/walk-1/walk.mp4`,
+          at: 1000,
+          order: 0,
+          attempts: MAX_WALK_UPLOAD_ATTEMPTS - 1,
+        },
+      ],
+    },
+  ];
+  const client = {} as WalkthroughUploadClient; // never reached — the file is missing first
+  const fetcher = jest.fn() as never;
+
+  it("appears when a drain exhausts a walk's last retry while Profile is ALREADY focused", async () => {
+    fs.__store.set(MANIFEST_PATH, JSON.stringify(ONE_ATTEMPT_FROM_TERMINAL));
+
+    const { queryByText } = render(<ProfileScreen />);
+    // Let the focus read — and every other async effect on this screen — settle first, so anything
+    // that appears below did so because the queue published, not on someone else's setState.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(queryByText(/failed to upload/)).toBeNull(); // retries remain; nothing to report yet
+
+    await act(async () => {
+      await drainWalkQueue(OWNER, fetcher, client);
+    });
+
+    expect(queryByText(/1 walk failed to upload/)).not.toBeNull();
+  });
+
+  it("stays hidden while a walk still has retries left", async () => {
+    fs.__store.set(
+      MANIFEST_PATH,
+      JSON.stringify([
+        {
+          ...ONE_ATTEMPT_FROM_TERMINAL[0],
+          artifacts: [{ ...ONE_ATTEMPT_FROM_TERMINAL[0]!.artifacts[0]!, attempts: 0 }],
+        },
+      ]),
+    );
+
+    const { queryByText } = render(<ProfileScreen />);
+    await act(async () => {
+      await drainWalkQueue(OWNER, fetcher, client);
+    });
+
+    expect(queryByText(/failed to upload/)).toBeNull();
   });
 });

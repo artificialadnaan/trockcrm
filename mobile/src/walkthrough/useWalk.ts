@@ -92,6 +92,22 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
     inFlightRef.current = Math.max(0, inFlightRef.current + delta);
     setInFlightCount(inFlightRef.current);
   }, []);
+  // Return the count to zero, unconditionally — a reservation belongs to a WALK, not to this hook.
+  //
+  // A request native accepts but never resolves (no `walkthrough:still`, no `walkthrough:error`)
+  // holds its reservation for good: nothing correlates a request to an outcome, so there is no
+  // release this hook could safely make on its own while the walk is still running. Surviving that
+  // within one walk is the accepted cost of the cap being correct. Carrying it into the NEXT walk is
+  // not: reset() cleared the reducer state and the walkId but left this count alone, so every later
+  // walk on the same mounted screen started one slot short of the server's artifact cap — and each
+  // stalled request compounded it, until CAPTURE went dark early with nothing on screen able to
+  // explain why. Called from BOTH reset paths and from start(), which is exactly where native zeroes
+  // its own `stillsInFlightStorage` (WalkthroughRecorder.swift's claimWalkSlot) — the two counters
+  // are halves of one fact and must not be reset on different schedules.
+  const clearInFlight = useCallback(() => {
+    inFlightRef.current = 0;
+    setInFlightCount(0);
+  }, []);
 
   // Read ONLY by the unmount cleanup below, which fires after the last render and therefore cannot
   // close over `walk` — an effect with `walk` in its deps would tear the recorder down on every
@@ -111,6 +127,13 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
   //     in the same tick as the native call is the only thing the second tap can observe in time.
   const startInFlightRef = useRef<Promise<unknown> | null>(null);
 
+  // The in-flight `Recorder.endWalk()` promise, or null — `end()`'s synchronous admission guard, the
+  // exact counterpart of startInFlightRef above. Deliberately a SEPARATE ref rather than one shared
+  // "native is busy" flag: the unmount cleanup below has to distinguish the two (it waits out a
+  // pending START and then ends the walk, but must never issue a second end while one is already
+  // finalising), and a single flag would collapse two different obligations into one.
+  const endInFlightRef = useRef<Promise<unknown> | null>(null);
+
   const reset = useCallback(() => {
     // Mirrors reduceWalk's own guard (session.ts's isWalkActive): callers are documented to only
     // invoke this once walk.state is terminal, but refusing here too — rather than trusting every
@@ -122,7 +145,8 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
     dispatch({ type: "reset", dealId, projectId });
     setError(null);
     setWalkId(null);
-  }, [dealId, projectId, walk.state]);
+    clearInFlight();
+  }, [dealId, projectId, walk.state, clearInFlight]);
 
   // Auto-reset whenever the TARGET a walk would attach to changes — belt-and-suspenders alongside
   // walk.tsx's own focus-triggered reset() call: a caller that re-renders this hook against a
@@ -150,7 +174,8 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
     dispatch({ type: "reset", dealId, projectId });
     setError(null);
     setWalkId(null);
-  }, [walk, dealId, projectId]);
+    clearInFlight();
+  }, [walk, dealId, projectId, clearInFlight]);
 
   useEffect(() => {
     const offStill = onStill((still) => {
@@ -242,6 +267,11 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
     //     `walk.state`, so this callback keeps its empty dependency list and stable identity.
     if (startInFlightRef.current) return;
     if (isWalkActive(walkStateRef.current)) return;
+    // Past the guards, no walk owns the recorder, so nothing can legitimately be outstanding —
+    // anything still counted here is a previous walk's ghost that no reset happened to clear (a
+    // terminal walk can be started over without one: `isWalkActive` is false for complete/failed).
+    // Zeroed at the same instant native does it, for the same reason. See clearInFlight.
+    clearInFlight();
     dispatch({ type: "starting" });
     const id = newWalkId();
     // Set BEFORE the native call resolves: even a walk that fails at startWalk() is "that" id (it's
@@ -280,7 +310,7 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
       // not be allowed to match a ref that a racing start legitimately left at null.
       if (pending !== null && startInFlightRef.current === pending) startInFlightRef.current = null;
     }
-  }, []);
+  }, [clearInFlight]);
 
   const capture = useCallback(async () => {
     // canCaptureMore, not canCapture: also refuses once capturing would push the walk past the
@@ -323,9 +353,27 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
   }, [walk, adjustInFlight]);
 
   const end = useCallback(async () => {
+    // The same synchronous admission guard `start()` has, for the same reason and against the same
+    // control surface: two taps inside one tick. `walk.state` cannot serve — the "ended" dispatch
+    // below is committed by React on a later tick, so the second tap reads "recording" and the
+    // reducer's own recording-only guard never sees the first one.
+    //
+    // What the second call reaches is not a queue. Native launches an INDEPENDENT Task per
+    // `endWalk()` (WalkthroughRecorder.swift), so two of them concurrently remove the same audio
+    // tap, call finishWriting() on the same AVAssetWriter, and tear down the same singleton — at
+    // the one moment in the walk when the file is not yet closed and every still is already on
+    // disk. A ref assigned in the same tick as the native call is the only thing the second tap can
+    // observe in time.
+    if (endInFlightRef.current) return;
     dispatch({ type: "ended", at: Date.now() });
+    // Kept for the finally below rather than read back off the ref, on the same rule start() uses:
+    // only ever clear OUR OWN promise, and never mistake a synchronous throw (nothing assigned) for
+    // a ref some other call legitimately left null.
+    let pending: ReturnType<typeof Recorder.endWalk> | null = null;
     try {
-      const result = await Recorder.endWalk();
+      pending = Recorder.endWalk();
+      endInFlightRef.current = pending;
+      const result = await pending;
       // Diagnostic, deliberately unconditional while the video track is still cutting short.
       // A finished .mp4 cannot say whether frames stopped arriving or the writer refused them,
       // and that distinction decides whether the bug is ours or the glasses'.
@@ -372,6 +420,12 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
       const message = errorMessage(err);
       setError(message);
       dispatch({ type: "failed", reason: message });
+    } finally {
+      // Released whichever way the call settled. A rejected endWalk leaves the walk terminal-failed,
+      // and the estimator's next action is a NEW walk on this same mounted screen — a guard left
+      // latched here would refuse to end that one too, which is the failure this guard exists to
+      // prevent, one walk later.
+      if (pending !== null && endInFlightRef.current === pending) endInFlightRef.current = null;
     }
   }, []);
 
