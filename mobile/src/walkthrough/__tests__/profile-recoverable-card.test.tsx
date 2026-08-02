@@ -31,7 +31,14 @@ jest.mock("expo-file-system/legacy", () => {
     __mtimes: mtimes,
     documentDirectory: "file:///var/mobile/Containers/Data/Application/CURRENT-UUID/Documents/",
     FileSystemUploadType: { BINARY_CONTENT: 0 },
-    getInfoAsync: async (p: string) => ({ exists: store.has(p), modificationTime: mtimes.get(p) }),
+    // `size` is the stored string's own length, and `readAsStringAsync` slices it byte-per-char:
+    // together those let the walk.mp4 fixtures below be real container bytes, which is what decides
+    // whether the recovery scan will stand behind a video at all.
+    getInfoAsync: async (p: string) => ({
+      exists: store.has(p),
+      size: store.get(p)?.length,
+      modificationTime: mtimes.get(p),
+    }),
     readDirectoryAsync: async (dirUri: string) => {
       const prefix = dirUri.endsWith("/") ? dirUri : `${dirUri}/`;
       const names = new Set<string>();
@@ -40,9 +47,16 @@ jest.mock("expo-file-system/legacy", () => {
       }
       return [...names];
     },
-    readAsStringAsync: async (p: string) => {
+    readAsStringAsync: async (
+      p: string,
+      options?: { encoding?: string; position?: number; length?: number },
+    ) => {
       if (!store.has(p)) throw new Error(`ENOENT ${p}`);
-      return store.get(p)!;
+      const raw = store.get(p)!;
+      if (options?.encoding !== "base64") return raw;
+      const from = options.position ?? 0;
+      const to = options.length === undefined ? undefined : from + options.length;
+      return Buffer.from(raw.slice(from, to), "binary").toString("base64");
     },
     writeAsStringAsync: async (p: string, data: string) => {
       store.set(p, data);
@@ -149,6 +163,18 @@ const fs = FileSystem as unknown as { __store: Map<string, string>; __mtimes: Ma
 // Matches walkOwnerKey(user.id, activeOfficeId) for the mocked auth above.
 const OWNER = "user-1:office-a";
 
+/** One top-level MP4 box: 32-bit size, 4-char type, zero-filled payload. */
+function mp4Box(type: string, payloadBytes: number): string {
+  const size = 8 + payloadBytes;
+  const header = String.fromCharCode((size >>> 24) & 0xff, (size >>> 16) & 0xff, (size >>> 8) & 0xff, size & 0xff);
+  return `${header}${type}${"\0".repeat(payloadBytes)}`;
+}
+/** walk.mp4 as `endWalk` leaves one it finished — the moov AVAssetWriter only writes in
+ *  finishWriting is present, so this really is a playable recording. */
+const FINALIZED_MP4 = mp4Box("ftyp", 24) + mp4Box("mdat", 4096) + mp4Box("moov", 512);
+/** walk.mp4 as an app kill mid-recording leaves one: same filename, no moov, nothing can open it. */
+const UNFINALIZED_MP4 = mp4Box("ftyp", 24) + mp4Box("mdat", 4096);
+
 beforeEach(() => {
   fs.__store.clear();
   fs.__mtimes.clear();
@@ -161,7 +187,7 @@ describe("Profile's recoverable-walks card", () => {
   it("appears when the startup scan resolves, with nothing else rerendering the screen", async () => {
     // A walk directory native wrote but nothing ever queued — the app was killed before the enqueue
     // effect ran.
-    fs.__store.set(`${DOC}walkthroughs/walk-orphan/walk.mp4`, "video-bytes");
+    fs.__store.set(`${DOC}walkthroughs/walk-orphan/walk.mp4`, FINALIZED_MP4);
 
     const { queryByText } = render(<ProfileScreen />);
 
@@ -231,7 +257,7 @@ describe("filing a recovered walk against a project the estimator picks", () => 
 
   /** Render Profile with one orphaned walk already discovered by the shell's startup scan. */
   async function renderWithOrphan() {
-    fs.__store.set(`${ORPHAN_DIR}walk.mp4`, "video-bytes");
+    fs.__store.set(`${ORPHAN_DIR}walk.mp4`, FINALIZED_MP4);
     fs.__mtimes.set(`${ORPHAN_DIR}walk.mp4`, 1_700_000_720); // epoch SECONDS
     fs.__store.set(`${ORPHAN_DIR}still-001.jpg`, "a");
     fs.__mtimes.set(`${ORPHAN_DIR}still-001.jpg`, 1_700_000_000);
@@ -272,6 +298,58 @@ describe("filing a recovered walk against a project the estimator picks", () => 
     // recovered so the office knows the timeline was reconstructed rather than captured live.
     expect(queued[0]!.title).toContain("121 Preston Oaks");
     expect(queued[0]!.title).toContain("(recovered)");
+  });
+
+  // ── Round-8 FINDING 3 (P2): "Time unknown" must not become today on the way to the office ───────
+  //
+  // The card is honest about a timestamp iOS could not report. Filing then stamped Date.now() into
+  // the title — and a recovered walk carries startedAt: null, so the completion call's capturedAt
+  // falls back to the drain moment too. The title is therefore the only record of when the visit
+  // happened, and an unknown time arrived at the office wearing today's date with exactly the
+  // confidence of a real reading.
+  it("carries an unknown recording time through to the title instead of dating the walk today", async () => {
+    // No mtimes at all — the platform reported nothing, which is the whole premise here.
+    fs.__store.set(`${ORPHAN_DIR}walk.mp4`, FINALIZED_MP4);
+    const screen = render(<ProfileScreen />);
+    await act(async () => {
+      await scanRecoverableWalksAtStartup(OWNER);
+    });
+    expect(screen.queryByText(/Time unknown/)).not.toBeNull();
+
+    await fileAgainstDeal(screen);
+
+    const [queued] = await getQueuedWalks(OWNER);
+    expect(queued!.title).toContain("Time unknown");
+    // The specific harm: nothing downstream carries a truthful instant, so a fabricated one here is
+    // the only date anyone will ever read for this visit.
+    expect(queued!.title).not.toContain(String(new Date().getFullYear()));
+    // Still inside the cap the completion call enforces after every artifact is already in R2.
+    expect(queued!.title.length).toBeLessThanOrEqual(300);
+  });
+
+  // ── Round-8 FINDING 1 (P1): the card cannot promise a recording it cannot open ──────────────────
+  it("does not offer a video the writer never finalized, and files the photos beside it anyway", async () => {
+    fs.__store.set(`${ORPHAN_DIR}walk.mp4`, UNFINALIZED_MP4); // the app died mid-recording
+    fs.__mtimes.set(`${ORPHAN_DIR}walk.mp4`, 1_700_000_720);
+    fs.__store.set(`${ORPHAN_DIR}still-001.jpg`, "a");
+    fs.__mtimes.set(`${ORPHAN_DIR}still-001.jpg`, 1_700_000_000);
+    const screen = render(<ProfileScreen />);
+    await act(async () => {
+      await scanRecoverableWalksAtStartup(OWNER);
+    });
+
+    // "1 recording" here would be a promise the device cannot keep — and "no video" would be a
+    // different falsehood to someone who remembers recording one.
+    expect(screen.queryByText(/1 recording/)).toBeNull();
+    expect(screen.queryByText(/video unusable/)).not.toBeNull();
+    expect(screen.queryByText(/1 photo/)).not.toBeNull();
+
+    await fileAgainstDeal(screen);
+
+    const [queued] = await getQueuedWalks(OWNER);
+    // The photo is real evidence of a visit nobody can repeat; the unplayable video is not evidence
+    // of anything, and filing it would reach the office as a successful walk that will not open.
+    expect(queued!.artifacts.map((a) => a.kind)).toEqual(["photo"]);
   });
 
   it("retires the row once it is filed, so the same walk cannot be re-filed against a second project", async () => {

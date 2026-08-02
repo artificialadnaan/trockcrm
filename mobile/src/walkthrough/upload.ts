@@ -31,6 +31,8 @@ import { ApiError } from "../api/client";
 import { rebaseDocumentDirectoryUri } from "../capture/doc-dir-uri";
 import type { Walk } from "./session";
 import {
+  MIN_FINALIZED_MP4_BYTES,
+  MP4_BOX_HEADER_BYTES,
   bumpArtifactAttempts,
   bumpCompletionAttempts,
   classifyWalkDirFileNames,
@@ -41,6 +43,7 @@ import {
   markWalkCompleted,
   needsCleanup,
   needsCompletion,
+  readMp4BoxHeader,
   removeQueuedWalk,
   resetTerminalWalkForRetry,
   sanitizeWalkOwnerKey,
@@ -89,8 +92,9 @@ const KEEP_AWAKE_TAG = "trockcam-walkthrough-upload-queue";
 
 /** Where native actually writes walk artifacts (WalkthroughRecorder.swift's `makeWalkDirectory`) —
  *  NOT owner-scoped, unlike ROOT_DIR above: native has no concept of the signed-in-user+office
- *  identity this queue namespaces by. See findRecoverableWalks for what that asymmetry means for
- *  Fix-3 recovery. */
+ *  identity this queue namespaces by. That asymmetry is permanent (native has no session to scope
+ *  by), so recovery reconciles it explicitly rather than assuming a directory belongs to whoever
+ *  happens to be signed in — see claimedWalkIds. */
 const WALKTHROUGHS_DIR = `${FileSystem.documentDirectory ?? ""}walkthroughs/`;
 
 function ownerDir(ownerKey: string): string {
@@ -369,9 +373,27 @@ export async function enqueueWalk(
 
 export type RecoveredWalk = {
   walkId: string;
+  /**
+   * The walk's video — non-null ONLY when the container on disk is one AVAssetWriter actually
+   * finished (see isFinalizedMp4). A `walk.mp4` the writer never closed is reported as no video at
+   * all, because that is what it is: an unplayable file that would reach the office as a successful
+   * site visit. This is the same judgement toQueuedWalk makes on the normal path.
+   *
+   * Stable for the life of a snapshot, which is why enqueueRecoveredWalk trusts it rather than
+   * re-checking: native only ever writes into a walk directory while that walk is recording, and a
+   * recording walk gets a fresh walkId, so nothing can turn an orphan's bytes back into a valid
+   * container after the scan ran.
+   */
   videoUri: string | null;
   /** In capture order. */
   stillUris: string[];
+  /**
+   * A `walk.mp4` was on disk and was REJECTED — the writer never finalized it. Distinct from
+   * `videoUri === null` alone, which the caller cannot otherwise tell apart from a walk that only
+   * ever took photos. The card needs the difference: "no video" to someone who remembers recording
+   * one is its own falsehood, and every part of this surface is built to omit rather than misstate.
+   */
+  unfinishedVideo: boolean;
   /**
    * The LATEST file write across the directory, epoch ms — for the kill this recovery exists to
    * survive, that is the moment capture stopped. Null when the platform reports no timestamp at all.
@@ -397,13 +419,10 @@ export type RecoveredWalk = {
  * will ever look for. Read-only: never deletes, never mutates the manifest, never uploads anything.
  * Best-effort — a directory that fails to list is skipped rather than failing the whole scan.
  *
- * NOT owner-scoped the way the manifest is: Documents/walkthroughs/ is written directly by native,
- * which has no concept of the signed-in-user+office identity `ownerKey` namespaces by (unlike
- * walkthrough-uploads/, which this module itself lays out per-owner). So a walk recorded under a
- * different signed-in user on this device could theoretically surface here too. That is an acceptable
- * over-approximation for what this function is for: surfacing something a caller can't actually place
- * (or that turns out to already be tracked) costs a wasted lookup; under-approximating is exactly the
- * silent leak Fix 3 exists to close.
+ * Compared against EVERY manifest on this device, not just `ownerKey`'s — see claimedWalkIds. The
+ * directory tree native writes is owner-blind while this queue is owner-scoped, and reconciling only
+ * against the current owner meant an account or active-office switch turned the previous identity's
+ * queued (even mid-drain) walks into "recoverable" ones for the new identity.
  *
  * ONLY safe to call when no walk could legitimately be recording right now in this process (e.g. app
  * cold start, before useWalk.ts mounts). A directory for a walk that's ACTIVELY being recorded has no
@@ -411,7 +430,7 @@ export type RecoveredWalk = {
  * mid-recording would false-positive the live walk as "recoverable."
  */
 export async function findRecoverableWalks(ownerKey: string): Promise<RecoveredWalk[]> {
-  const knownWalkIds = (await readManifest(ownerKey)).map((w) => w.walkId);
+  const knownWalkIds = await claimedWalkIds(ownerKey);
   let dirNames: string[];
   try {
     dirNames = await FileSystem.readDirectoryAsync(WALKTHROUGHS_DIR);
@@ -431,13 +450,25 @@ export async function findRecoverableWalks(ownerKey: string): Promise<RecoveredW
     if (!videoFileName && stillFileNames.length === 0) continue; // e.g. an empty dir from a walk
     // that failed before native ever produced anything — nothing to recover, not a leak.
     const dir = walkDirUri(walkId);
-    const videoUri = videoFileName ? `${dir}${videoFileName}` : null;
+    const videoOnDisk = videoFileName ? `${dir}${videoFileName}` : null;
     const stillUris = stillFileNames.map((name) => `${dir}${name}`);
+    // The file being THERE is not the file being a recording — see upload-core.ts's note above
+    // readMp4BoxHeader. A kill during recording leaves a walk.mp4 with no moov atom, and offering it
+    // as a video hands the office something that will not open, filed as a successful site visit.
+    const videoUri = videoOnDisk !== null && (await isFinalizedMp4(videoOnDisk)) ? videoOnDisk : null;
+    // Only the video was unusable, so there is nothing left to file. Same rule as a directory that
+    // classifies to nothing: a row here could only lead the estimator through a project picker to an
+    // empty upload. The bytes stay on disk untouched — this function never deletes.
+    if (videoUri === null && stillUris.length === 0) continue;
     // One extra stat per artifact, paid only for directories that ARE orphans (normally none), so a
     // caller can tell the estimator when this walk happened. It is deliberately NOT reused as the
     // artifacts' capturedAt: enqueueRecoveredWalk re-stats at enqueue time, which is both fresher
     // and per-file, whereas these two are a display summary of the walk as a whole.
-    const times = (await Promise.all([videoUri, ...stillUris].map(fileTimestampMsOrNull))).filter(
+    //
+    // A REJECTED video still contributes its timestamp. Declining to upload the file is not a reason
+    // to forget when it was written, and for a killed recording that last write IS the moment capture
+    // stopped — the single strongest clue the estimator has to which job this was.
+    const times = (await Promise.all([videoOnDisk, ...stillUris].map(fileTimestampMsOrNull))).filter(
       (t): t is number => t !== null,
     );
     const span = times.length > 1 ? Math.max(...times) - Math.min(...times) : 0;
@@ -445,11 +476,141 @@ export async function findRecoverableWalks(ownerKey: string): Promise<RecoveredW
       walkId,
       videoUri,
       stillUris,
+      unfinishedVideo: videoOnDisk !== null && videoUri === null,
       recordedAtMs: times.length > 0 ? Math.max(...times) : null,
       captureSpanMs: span > 0 ? span : null,
     });
   }
   return recovered;
+}
+
+/**
+ * Every walkId ANY manifest on this device claims, not just `ownerKey`'s.
+ *
+ * The asymmetry this exists to reconcile is structural, not an oversight to be tidied away: native
+ * writes Documents/walkthroughs/<walkId>/ with no notion of who is signed in (it has no user, no
+ * office, no session), while this queue namespaces manifests per owner precisely so one identity's
+ * uploads can never be moved by another's. Neither side can adopt the other's model — so the two
+ * facts are reconciled here, at the one place that has to compare them.
+ *
+ * Reconciled in this direction because of what the two mistakes cost. Under-claiming reports a
+ * directory the PREVIOUS owner still has queued as recoverable to the new one; filing it then writes
+ * the same on-disk uris into a second manifest, and the first drain to finish deletes the walk
+ * directory (cleanup removes the directory, not just the artifacts it listed) out from under the
+ * other — whose completion call then points at bytes that no longer exist anywhere, on the one device
+ * that had them. Over-claiming, by contrast, costs a walk that stays invisible in someone else's
+ * queue and drains from there anyway.
+ *
+ * It does NOT close the window recovery exists for: a walk orphaned by sign-out or an app kill has no
+ * manifest entry under ANY owner — the enqueue effect died with the shell before it ever ran — so
+ * nobody claims it and the same user still finds it at their next login.
+ *
+ * Other owners' manifests are read RAW: only walkIds are wanted, and a walkId is not a path, so none
+ * of readManifest's container-UUID rebasing applies. Each is read through the same tmp → primary →
+ * bak preference as its owner's own reader, or a manifest caught mid-write would read as empty and
+ * un-claim every walk in it. Best-effort throughout: a directory that cannot be listed leaves this
+ * owner's own manifest as the answer, which is where it started.
+ */
+async function claimedWalkIds(ownerKey: string): Promise<string[]> {
+  const ids = (await readManifest(ownerKey)).map((w) => w.walkId);
+  let ownerDirNames: string[];
+  try {
+    ownerDirNames = await FileSystem.readDirectoryAsync(ROOT_DIR);
+  } catch {
+    return ids; // nothing has ever been queued on this device beyond (possibly) this owner
+  }
+  const ownDirName = sanitizeWalkOwnerKey(ownerKey);
+  for (const dirName of ownerDirNames) {
+    if (dirName === ownDirName) continue; // already read above, through the rebasing reader
+    const file = `${ROOT_DIR}${dirName}/index.json`;
+    const walks =
+      (await readManifestFile(`${file}.tmp`)) ??
+      (await readManifestFile(file)) ??
+      (await readManifestFile(`${file}.bak`)) ??
+      [];
+    // Shape-checked because this is the one place the module reads a file it did not write in this
+    // owner's namespace: readManifestFile only guarantees an array, and a corrupt entry must cost a
+    // skipped claim rather than an undefined swept into the exclusion set (where it would match
+    // nothing and read as a scan failure).
+    for (const walk of walks) if (typeof walk?.walkId === "string") ids.push(walk.walkId);
+  }
+  return ids;
+}
+
+/** Ceiling on how many top-level boxes the scan will follow, so a corrupt file with an eight-byte
+ *  box repeated forever cannot spin the startup scan. A real finalized walk has a handful. */
+const MAX_MP4_BOX_SCAN = 32;
+
+/**
+ * Whether `uri` is an MP4 whose writer actually FINISHED it — i.e. whether the `moov` atom
+ * `AVAssetWriter.finishWriting` appends is present. See upload-core.ts's note above readMp4BoxHeader
+ * for why the file merely existing proves nothing.
+ *
+ * Walks the top-level box chain instead of reading the file: a walk video is hundreds of megabytes
+ * and the answer lives in a handful of 16-byte headers (`ftyp`, `mdat`, then `moov`), so this is a
+ * few ranged reads regardless of how long the recording is. `mdat` is skipped by its declared length,
+ * never scanned. Any read failure, malformed header, or length that runs past the end of the file
+ * ends the walk as "not finalized" — every one of those means the chain cannot be followed to a moov,
+ * which is the same thing.
+ */
+async function isFinalizedMp4(uri: string): Promise<boolean> {
+  let fileSize: number;
+  try {
+    const info = await FileSystem.getInfoAsync(uri);
+    if (!info.exists) return false;
+    fileSize = typeof info.size === "number" ? info.size : 0;
+  } catch {
+    return false;
+  }
+  // The decisive size case, and the only one: the writer created the file and never wrote a sample.
+  if (fileSize < MIN_FINALIZED_MP4_BYTES) return false;
+
+  let offset = 0;
+  for (let box = 0; box < MAX_MP4_BOX_SCAN; box++) {
+    if (offset + 8 > fileSize) return false; // ran off the end without ever reaching a moov
+    let header: Uint8Array;
+    try {
+      header = decodeBase64Bytes(
+        await FileSystem.readAsStringAsync(uri, {
+          encoding: "base64",
+          position: offset,
+          length: MP4_BOX_HEADER_BYTES,
+        }),
+      );
+    } catch {
+      return false;
+    }
+    const parsed = readMp4BoxHeader(header);
+    if (parsed === null) return false;
+    if (parsed.type === "moov") return true;
+    offset += parsed.size;
+  }
+  return false;
+}
+
+const B64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/** Self-contained base64 → bytes, the same reason ../auth/session.ts carries its own: no atob in
+ *  Hermes to depend on, and behaviour identical across Hermes, jest and tsc. Only ever fed the
+ *  16-byte box headers above, so it is not a general-purpose decoder — anything outside the alphabet
+ *  is skipped rather than raising (expo encodes with `.endLineWithLineFeed`, so a longer read would
+ *  carry newlines), and the caller reads a short result as "not finalized". */
+function decodeBase64Bytes(b64: string): Uint8Array {
+  const out: number[] = [];
+  let bits = 0;
+  let value = 0;
+  for (const ch of b64) {
+    if (ch === "=") break;
+    const idx = B64_ALPHABET.indexOf(ch);
+    if (idx === -1) continue;
+    value = (value << 6) | idx;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out.push((value >> bits) & 0xff);
+    }
+  }
+  return Uint8Array.from(out);
 }
 
 /** Convenience count for a caller that only needs to drive a badge/banner — see findRecoverableWalks

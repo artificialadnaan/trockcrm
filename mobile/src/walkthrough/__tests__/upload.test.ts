@@ -60,9 +60,21 @@ jest.mock("expo-file-system/legacy", () => {
       dirs.add(d);
       dirs.add(norm(d));
     },
-    readAsStringAsync: async (p: string) => {
+    // Ranged base64 reads are real API surface here, not decoration: upload.ts walks an mp4's
+    // top-level box chain 16 bytes at a time to decide whether AVAssetWriter ever finalized the
+    // container, and it must never pull a multi-GB video into memory to answer that. Modelled
+    // byte-per-char — every fixture that goes through this path is built with String.fromCharCode,
+    // so slicing chars IS slicing bytes.
+    readAsStringAsync: async (
+      p: string,
+      options?: { encoding?: string; position?: number; length?: number },
+    ) => {
       if (!store.has(p)) throw new Error(`ENOENT ${p}`);
-      return store.get(p)!;
+      const raw = store.get(p)!;
+      if (options?.encoding !== "base64") return raw;
+      const from = options.position ?? 0;
+      const to = options.length === undefined ? undefined : from + options.length;
+      return Buffer.from(raw.slice(from, to), "binary").toString("base64");
     },
     writeAsStringAsync: async (p: string, data: string) => {
       store.set(p, data);
@@ -187,6 +199,40 @@ function seedFiles(uris: string[]): void {
     fs.__store.set(uri, "bytes");
     fs.__sizes.set(uri, 1024);
   }
+}
+
+// ── walk.mp4 fixtures: a container the writer FINISHED, and one it did not ─────────────────────────
+//
+// The difference is one box. AVAssetWriter creates walk.mp4 at startWriting and appends samples into
+// `mdat` as they arrive; the `moov` index — without which nothing can play the file — is written only
+// by finishWriting. So a walk killed mid-recording leaves a file that EXISTS, is large, and has no
+// moov. "There is a walk.mp4 on disk" and "there is a recording" are therefore different facts, and
+// these fixtures are what lets the suite state them apart.
+
+/** One top-level box: 32-bit size, 4-char type, zero-filled payload. */
+function mp4Box(type: string, payloadBytes: number): string {
+  const size = 8 + payloadBytes;
+  const header = String.fromCharCode((size >>> 24) & 0xff, (size >>> 16) & 0xff, (size >>> 8) & 0xff, size & 0xff);
+  return `${header}${type}${"\0".repeat(payloadBytes)}`;
+}
+
+/** The 64-bit form (`size` field == 1, real length in the 8 bytes after the type) — what a real
+ *  walk's `mdat` uses once the media outgrows 4 GiB, and a shape the box walk has to understand or
+ *  it would reject every long recording as unfinalized. */
+function mp4Box64(type: string, payloadBytes: number): string {
+  const size = 16 + payloadBytes;
+  return `${String.fromCharCode(0, 0, 0, 1)}${type}${String.fromCharCode(0, 0, 0, 0, (size >>> 24) & 0xff, (size >>> 16) & 0xff, (size >>> 8) & 0xff, size & 0xff)}${"\0".repeat(payloadBytes)}`;
+}
+
+/** walk.mp4 as `endWalk` leaves one it finished: the moov is there, after the media. */
+const FINALIZED_MP4 = mp4Box("ftyp", 24) + mp4Box("mdat", 4096) + mp4Box("moov", 512);
+/** walk.mp4 as an app kill leaves one: header and media, and no moov anywhere. */
+const UNFINALIZED_MP4 = mp4Box("ftyp", 24) + mp4Box("mdat", 4096);
+
+/** Seed one walk directory's `walk.mp4` with real container bytes, sized from those bytes. */
+function seedVideoFile(uri: string, bytes: string = FINALIZED_MP4): void {
+  fs.__store.set(uri, bytes);
+  fs.__sizes.set(uri, bytes.length);
 }
 
 let urlCounter = 0;
@@ -836,7 +882,7 @@ describe("findRecoverableWalks / getRecoverableWalkCount", () => {
 
   it("surfaces a directory with real files but no manifest entry, classifying video vs. stills in capture order", async () => {
     const orphanDir = `${DOC}walkthroughs/walk-orphan/`;
-    fs.__store.set(`${orphanDir}walk.mp4`, "video-bytes");
+    seedVideoFile(`${orphanDir}walk.mp4`);
     fs.__store.set(`${orphanDir}still-002.jpg`, "b");
     fs.__store.set(`${orphanDir}still-001.jpg`, "a");
 
@@ -846,6 +892,7 @@ describe("findRecoverableWalks / getRecoverableWalkCount", () => {
         walkId: "walk-orphan",
         videoUri: `${orphanDir}walk.mp4`,
         stillUris: [`${orphanDir}still-001.jpg`, `${orphanDir}still-002.jpg`],
+        unfinishedVideo: false,
         // Unknown here, and reported as unknown: this mock stores no mtimes for these files.
         recordedAtMs: null,
         captureSpanMs: null,
@@ -860,7 +907,7 @@ describe("findRecoverableWalks / getRecoverableWalkCount", () => {
   // until a scope comes back describing the wrong building.
   it("reports the walk's own recorded time and capture span, read from the files' timestamps", async () => {
     const orphanDir = `${DOC}walkthroughs/walk-orphan/`;
-    fs.__store.set(`${orphanDir}walk.mp4`, "video-bytes");
+    seedVideoFile(`${orphanDir}walk.mp4`);
     fs.__mtimes.set(`${orphanDir}walk.mp4`, 1_700_000_720); // epoch SECONDS, as expo-file-system reports
     fs.__store.set(`${orphanDir}still-001.jpg`, "a");
     fs.__mtimes.set(`${orphanDir}still-001.jpg`, 1_700_000_000);
@@ -873,7 +920,7 @@ describe("findRecoverableWalks / getRecoverableWalkCount", () => {
   });
 
   it("reports both as unknown rather than substituting `now` when the platform has no timestamps", async () => {
-    fs.__store.set(`${DOC}walkthroughs/walk-orphan/walk.mp4`, "video-bytes");
+    seedVideoFile(`${DOC}walkthroughs/walk-orphan/walk.mp4`);
     const [recovered] = await findRecoverableWalks(OWNER);
     // "Recorded just now" for a walk that happened two days ago would send the estimator to the
     // wrong job — the same class of harm as guessing the deal outright.
@@ -883,7 +930,7 @@ describe("findRecoverableWalks / getRecoverableWalkCount", () => {
 
   it("reports no span when a single file carries the only timestamp — one instant is not a duration", async () => {
     const orphanDir = `${DOC}walkthroughs/walk-orphan/`;
-    fs.__store.set(`${orphanDir}walk.mp4`, "video-bytes");
+    seedVideoFile(`${orphanDir}walk.mp4`);
     fs.__mtimes.set(`${orphanDir}walk.mp4`, 1_700_000_720);
 
     const [recovered] = await findRecoverableWalks(OWNER);
@@ -895,10 +942,60 @@ describe("findRecoverableWalks / getRecoverableWalkCount", () => {
     const walk = completedWalk();
     seedFiles([VIDEO_URI, PHOTO_URI]); // walk-1's directory has real files too
     await enqueueWalk(OWNER, "walk-1", walk, META, 1000);
-    fs.__store.set(`${DOC}walkthroughs/walk-orphan/walk.mp4`, "video-bytes");
+    seedVideoFile(`${DOC}walkthroughs/walk-orphan/walk.mp4`);
 
     const recovered = await findRecoverableWalks(OWNER);
     expect(recovered.map((r) => r.walkId)).toEqual(["walk-orphan"]); // walk-1 excluded; it's already tracked
+  });
+
+  // ── Round-8 FINDING 2 (P1): an orphan for one owner can be another owner's live upload ─────────
+  //
+  // Documents/walkthroughs/ is written by native, which has no concept of the signed-in user+office
+  // this queue namespaces manifests by. The scan compared it against the CURRENT owner's manifest
+  // only, so after an account or active-office switch every walk the previous identity had queued —
+  // including one mid-drain — read as recoverable to the new one. Filing it then enqueued the same
+  // on-disk uris under a SECOND manifest, and whichever drain finished first deleted the walk
+  // directory out from under the other: one owner's completion call left pointing at bytes that are
+  // gone, on a phone where those bytes were the only copy.
+  //
+  // The asymmetry is structural and cannot be wished away, so the reconciliation runs the other
+  // direction: a directory is an orphan only when NO manifest on this device claims it.
+  it("does not report a walk another signed-in owner already has queued", async () => {
+    const dir = `${DOC}walkthroughs/walk-1/`;
+    seedVideoFile(`${dir}walk.mp4`);
+    await enqueueWalk(OWNER, "walk-1", completedWalk({ video: `${dir}walk.mp4`, photo: PHOTO_URI }), META, 1000);
+
+    // The new identity's own manifest is empty, which is exactly why the directory looked orphaned.
+    expect(await getQueuedWalks(OWNER_2)).toEqual([]);
+    expect(await findRecoverableWalks(OWNER_2)).toEqual([]);
+    expect(await getRecoverableWalkCount(OWNER_2)).toBe(0);
+  });
+
+  it("does not let a second owner file a walk the first owner is still draining", async () => {
+    const dir = `${DOC}walkthroughs/walk-1/`;
+    seedVideoFile(`${dir}walk.mp4`);
+    fs.__store.set(`${dir}still-001.jpg`, "a");
+    fs.__sizes.set(`${dir}still-001.jpg`, 512);
+    await enqueueWalk(OWNER, "walk-1", completedWalk({ video: `${dir}walk.mp4`, photo: `${dir}still-001.jpg` }), META, 1000);
+    // Owner 1's drain gets its bytes up but not its completion, so the walk stays queued with real
+    // progress on it — the window where a second owner filing the same files does the most damage.
+    await drainWalkQueue(OWNER, fetcher, stubClient({ completeWalk: jest.fn(async () => { throw new Error("500"); }) }));
+
+    expect(await findRecoverableWalks(OWNER_2)).toEqual([]);
+    // Owner 1 still owns it, alone, with its upload progress intact.
+    expect(await getQueuedWalks(OWNER_2)).toEqual([]);
+    expect((await getQueuedWalks(OWNER))[0]!.artifacts.every((a) => a.putAt !== undefined)).toBe(true);
+  });
+
+  // The case recovery EXISTS for, and the one a cross-owner exclusion must not swallow: sign-out
+  // leaves a finalized walk with no manifest entry under ANY owner, because the enqueue effect died
+  // with the shell before it ever ran. Nobody claims it, so it is still the same user's to recover.
+  it("still recovers a walk that sign-out orphaned, for the same user signing back in", async () => {
+    seedVideoFile(`${DOC}walkthroughs/walk-at-signout/walk.mp4`);
+    await enqueueWalk(OWNER, "walk-earlier", completedWalk(), META, 1000); // an unrelated, claimed walk
+
+    const recovered = await findRecoverableWalks(OWNER);
+    expect(recovered.map((r) => r.walkId)).toEqual(["walk-at-signout"]);
   });
 
   it("skips an orphan directory that classifies to nothing (e.g. a walk that failed before native wrote anything)", async () => {
@@ -910,6 +1007,111 @@ describe("findRecoverableWalks / getRecoverableWalkCount", () => {
     fs.__store.set(`${DOC}walkthroughs/walk-orphan/still-001.jpg`, "a");
     await findRecoverableWalks(OWNER);
     expect(await getQueuedWalks(OWNER)).toEqual([]);
+  });
+
+  // ── Round-8 FINDING 1 (P1): a walk.mp4 that exists is not a walk.mp4 that plays ─────────────────
+  //
+  // AVAssetWriter creates the file at startWriting, so the crash this whole path exists to survive —
+  // an app kill DURING recording — leaves a walk.mp4 that is present, large, and missing the moov
+  // atom finishWriting would have appended. toQueuedWalk is strict about exactly this (a video
+  // artifact is only ever built from `walk.state === "complete"`, the one state native reaches by
+  // confirming the writer hit .completed), and the recovery scan bypassed that judgement entirely:
+  // presence of the filename WAS the test. So recovery could hand the office a file that will not
+  // open, arriving as a successfully-filed site visit — the exact outcome WalkthroughRecorder's
+  // finalize path rejects rather than resolves for, and the reason it rejects.
+  describe("a walk.mp4 the writer never finalized", () => {
+    const orphanDir = `${DOC}walkthroughs/walk-orphan/`;
+
+    it("is not offered as a recording, while the stills beside it are still recovered in full", async () => {
+      seedVideoFile(`${orphanDir}walk.mp4`, UNFINALIZED_MP4);
+      fs.__store.set(`${orphanDir}still-001.jpg`, "a");
+      fs.__store.set(`${orphanDir}still-002.jpg`, "b");
+
+      const [recovered] = await findRecoverableWalks(OWNER);
+
+      expect(recovered!.videoUri).toBeNull();
+      // Reported, not merely dropped: the card has to be able to say the video is unusable rather
+      // than claim there was never one, which is a different (and false) statement about a walk the
+      // estimator remembers recording.
+      expect(recovered!.unfinishedVideo).toBe(true);
+      // The photos are the load-bearing half. A site visit cannot be re-taken from a desk, so
+      // discarding real evidence along with the bad video would turn one loss into two.
+      expect(recovered!.stillUris).toEqual([`${orphanDir}still-001.jpg`, `${orphanDir}still-002.jpg`]);
+    });
+
+    it("still dates the walk from the unusable file's own timestamp — the kill moment is evidence", async () => {
+      seedVideoFile(`${orphanDir}walk.mp4`, UNFINALIZED_MP4);
+      fs.__mtimes.set(`${orphanDir}walk.mp4`, 1_700_000_720); // epoch SECONDS
+      fs.__store.set(`${orphanDir}still-001.jpg`, "a");
+      fs.__mtimes.set(`${orphanDir}still-001.jpg`, 1_700_000_000);
+
+      const [recovered] = await findRecoverableWalks(OWNER);
+      // The last byte written to a killed recording IS when capture stopped, and it is the only clue
+      // on disk to WHICH job this was. Refusing to upload the file is not a reason to forget when it
+      // was written.
+      expect(recovered!.recordedAtMs).toBe(1_700_000_720_000);
+      expect(recovered!.captureSpanMs).toBe(720_000);
+    });
+
+    it("is not offered at all when it is the only thing in the directory", async () => {
+      seedVideoFile(`${orphanDir}walk.mp4`, UNFINALIZED_MP4);
+      // Nothing here can be filed, so a row for it could only ever offer the estimator a project
+      // picker that ends in an empty upload. Same rule as a directory that classifies to nothing.
+      expect(await findRecoverableWalks(OWNER)).toEqual([]);
+      expect(await getRecoverableWalkCount(OWNER)).toBe(0);
+    });
+
+    it("is not offered when the writer created the file and never wrote a sample into it", async () => {
+      seedVideoFile(`${orphanDir}walk.mp4`, "");
+      fs.__store.set(`${orphanDir}still-001.jpg`, "a");
+
+      const [recovered] = await findRecoverableWalks(OWNER);
+      // Size is a weak signal in general — a killed ten-minute recording is enormous and still
+      // unplayable — but an empty file is decided by size alone and never needs a read.
+      expect(recovered!.videoUri).toBeNull();
+      expect(recovered!.unfinishedVideo).toBe(true);
+    });
+
+    it("does not mistake a long recording's 64-bit mdat for a truncated container", async () => {
+      // Once the media outgrows what a 32-bit box length can address, `mdat` switches to the
+      // largesize form. A box walk that could not read that would reject every long walk on the
+      // phone — the ones that matter most — as unfinalized.
+      seedVideoFile(`${orphanDir}walk.mp4`, mp4Box("ftyp", 24) + mp4Box64("mdat", 4096) + mp4Box("moov", 512));
+
+      const [recovered] = await findRecoverableWalks(OWNER);
+      expect(recovered!.videoUri).toBe(`${orphanDir}walk.mp4`);
+      expect(recovered!.unfinishedVideo).toBe(false);
+    });
+
+    it("is not offered when the media box claims more bytes than the file actually holds", async () => {
+      // The shape a kill leaves most often: the writer had already stamped an mdat length it never
+      // got to fill. Following it walks straight past the end of the file, which is precisely the
+      // proof that nothing follows the media — no moov, no playable video.
+      seedVideoFile(`${orphanDir}walk.mp4`, (mp4Box("ftyp", 24) + mp4Box("mdat", 4096)).slice(0, 1000));
+      fs.__store.set(`${orphanDir}still-001.jpg`, "a");
+
+      const [recovered] = await findRecoverableWalks(OWNER);
+      expect(recovered!.videoUri).toBeNull();
+      expect(recovered!.unfinishedVideo).toBe(true);
+    });
+
+    it("files only the stills when the estimator picks a project for it", async () => {
+      seedVideoFile(`${orphanDir}walk.mp4`, UNFINALIZED_MP4);
+      fs.__store.set(`${orphanDir}still-001.jpg`, "a");
+      fs.__sizes.set(`${orphanDir}still-001.jpg`, 512);
+
+      const [recovered] = await findRecoverableWalks(OWNER);
+      const queued = await enqueueRecoveredWalk(OWNER, recovered!, "deal-99", null, META, 5000);
+
+      // The whole harm in one assertion: an unplayable file must never reach the completion call,
+      // where it becomes a `files` row the office opens expecting a site walk.
+      expect(queued!.artifacts.map((a) => a.kind)).toEqual(["photo"]);
+      const summary = await drainWalkQueue(OWNER, fetcher, stubClient());
+      expect(summary.completed).toBe(1);
+      // Cleanup still takes the whole directory, so the unusable file does not resurface as a fresh
+      // orphan on every launch for the rest of the phone's life.
+      expect(fs.__store.has(`${orphanDir}walk.mp4`)).toBe(false);
+    });
   });
 });
 
@@ -932,41 +1134,41 @@ describe("scanRecoverableWalksAtStartup across shell lifecycles", () => {
     // Sign-out. useWalk's unmount stops native, which finalizes the in-progress recording into
     // Documents/walkthroughs/<walkId>/ — files with no manifest entry, i.e. exactly what the next
     // login's scan exists to find.
-    fs.__store.set(`${DOC}walkthroughs/walk-at-signout/walk.mp4`, "video-bytes");
+    seedVideoFile(`${DOC}walkthroughs/walk-at-signout/walk.mp4`);
     forgetRecoverableWalksAtStartup();
 
     await scanRecoverableWalksAtStartup(OWNER);
     expect(getRecoverableWalksFromStartup().map((w) => w.walkId)).toEqual(["walk-at-signout"]);
   });
 
-  it("rescans for a different owner — a snapshot taken against another identity's manifest is not an answer for this one", async () => {
-    const dir = `${DOC}walkthroughs/walk-1/`;
-    fs.__store.set(`${dir}walk.mp4`, "video-bytes");
-    // Tracked by owner 1 (so: not an orphan for them), unknown to owner 2 (so: an orphan for them).
-    await enqueueWalk(OWNER, "walk-1", completedWalk({ video: `${dir}walk.mp4`, photo: PHOTO_URI }), META, 1000);
-
+  it("rescans for a different owner — a snapshot taken under another identity is not an answer for this one", async () => {
     await scanRecoverableWalksAtStartup(OWNER);
     expect(getRecoverableWalksFromStartup()).toEqual([]);
 
+    // An account switch, with an orphan on disk that the first owner's scan predates. Serving the
+    // cached answer would hide it from the person now signed in — and each owner's manifest is a
+    // different namespace, so the previous scan is not an answer that transfers.
+    seedVideoFile(`${DOC}walkthroughs/walk-orphan/walk.mp4`);
+
     await scanRecoverableWalksAtStartup(OWNER_2);
-    expect(getRecoverableWalksFromStartup().map((w) => w.walkId)).toEqual(["walk-1"]);
+    expect(getRecoverableWalksFromStartup().map((w) => w.walkId)).toEqual(["walk-orphan"]);
   });
 
   it("keeps the snapshot for repeat calls within one lifecycle — the scan stays a once-per-shell cost", async () => {
-    fs.__store.set(`${DOC}walkthroughs/walk-orphan/walk.mp4`, "video-bytes");
+    seedVideoFile(`${DOC}walkthroughs/walk-orphan/walk.mp4`);
     await scanRecoverableWalksAtStartup(OWNER);
     const first = getRecoverableWalksFromStartup();
 
     // A second call for the SAME owner must not re-walk the filesystem: the answer is only
     // trustworthy as of shell entry, and re-taking it later is how a LIVE recording gets reported
     // as an orphan (it has no manifest entry either until it goes terminal).
-    fs.__store.set(`${DOC}walkthroughs/walk-recording-now/walk.mp4`, "video-bytes");
+    seedVideoFile(`${DOC}walkthroughs/walk-recording-now/walk.mp4`, UNFINALIZED_MP4);
     await scanRecoverableWalksAtStartup(OWNER);
     expect(getRecoverableWalksFromStartup()).toBe(first); // identity: nothing re-scanned, nothing republished
   });
 
   it("drops the snapshot when the shell tears down, so nothing renders an answer the module no longer holds", async () => {
-    fs.__store.set(`${DOC}walkthroughs/walk-orphan/walk.mp4`, "video-bytes");
+    seedVideoFile(`${DOC}walkthroughs/walk-orphan/walk.mp4`);
     await scanRecoverableWalksAtStartup(OWNER);
     expect(getRecoverableWalksFromStartup()).toHaveLength(1);
 
@@ -979,8 +1181,7 @@ describe("enqueueRecoveredWalk", () => {
   const orphanDir = `${DOC}walkthroughs/walk-orphan/`;
 
   it("files a recovered walk under the caller-supplied deal, and it then drains exactly like any other walk", async () => {
-    fs.__store.set(`${orphanDir}walk.mp4`, "video-bytes");
-    fs.__sizes.set(`${orphanDir}walk.mp4`, 2048);
+    seedVideoFile(`${orphanDir}walk.mp4`);
     fs.__store.set(`${orphanDir}still-001.jpg`, "a");
     fs.__sizes.set(`${orphanDir}still-001.jpg`, 512);
 
@@ -1004,8 +1205,7 @@ describe("enqueueRecoveredWalk", () => {
   });
 
   it("uses each file's own last-modified time when the platform reports one, not the recovery moment", async () => {
-    fs.__store.set(`${orphanDir}walk.mp4`, "video-bytes");
-    fs.__sizes.set(`${orphanDir}walk.mp4`, 2048);
+    seedVideoFile(`${orphanDir}walk.mp4`);
     fs.__mtimes.set(`${orphanDir}walk.mp4`, 1_700_000_000); // epoch SECONDS, as expo-file-system reports it
     fs.__store.set(`${orphanDir}still-001.jpg`, "a");
     fs.__sizes.set(`${orphanDir}still-001.jpg`, 512);
@@ -1053,8 +1253,8 @@ describe("forgetRecoveredWalk", () => {
   });
 
   it("retires one filed walk from the snapshot and publishes, leaving the others alone", async () => {
-    fs.__store.set(`${DOC}walkthroughs/walk-a/walk.mp4`, "video-bytes");
-    fs.__store.set(`${DOC}walkthroughs/walk-b/walk.mp4`, "video-bytes");
+    seedVideoFile(`${DOC}walkthroughs/walk-a/walk.mp4`);
+    seedVideoFile(`${DOC}walkthroughs/walk-b/walk.mp4`);
     await scanRecoverableWalksAtStartup(OWNER);
     const notified = jest.fn();
     const unsubscribe = subscribeRecoverableWalksFromStartup(notified);
@@ -1068,11 +1268,11 @@ describe("forgetRecoveredWalk", () => {
   });
 
   it("never re-scans — a walk recording RIGHT NOW must not be swept into the snapshot", async () => {
-    fs.__store.set(`${DOC}walkthroughs/walk-a/walk.mp4`, "video-bytes");
+    seedVideoFile(`${DOC}walkthroughs/walk-a/walk.mp4`);
     await scanRecoverableWalksAtStartup(OWNER);
     // Started after the snapshot was taken: it has no manifest entry either, so a re-scan would
     // report the live walk as recoverable and offer to file a recording still being written.
-    fs.__store.set(`${DOC}walkthroughs/walk-recording-now/walk.mp4`, "partial");
+    seedVideoFile(`${DOC}walkthroughs/walk-recording-now/walk.mp4`, UNFINALIZED_MP4);
 
     forgetRecoveredWalk(OWNER, "walk-a");
 
@@ -1080,7 +1280,7 @@ describe("forgetRecoveredWalk", () => {
   });
 
   it("is a no-op for an owner the snapshot was not taken against", async () => {
-    fs.__store.set(`${DOC}walkthroughs/walk-a/walk.mp4`, "video-bytes");
+    seedVideoFile(`${DOC}walkthroughs/walk-a/walk.mp4`);
     await scanRecoverableWalksAtStartup(OWNER);
     const notified = jest.fn();
     const unsubscribe = subscribeRecoverableWalksFromStartup(notified);
@@ -1094,7 +1294,7 @@ describe("forgetRecoveredWalk", () => {
   });
 
   it("does not publish for a walkId the snapshot never held", async () => {
-    fs.__store.set(`${DOC}walkthroughs/walk-a/walk.mp4`, "video-bytes");
+    seedVideoFile(`${DOC}walkthroughs/walk-a/walk.mp4`);
     await scanRecoverableWalksAtStartup(OWNER);
     const notified = jest.fn();
     const unsubscribe = subscribeRecoverableWalksFromStartup(notified);

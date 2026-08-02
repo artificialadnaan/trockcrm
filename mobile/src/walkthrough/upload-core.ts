@@ -484,14 +484,71 @@ export function classifyWalkDirFileNames(fileNames: string[]): ClassifiedWalkDir
 }
 
 /**
- * Directory names under Documents/walkthroughs/ with no corresponding entry in the CURRENT manifest.
- * `knownWalkIds` should be every walkId currently in the manifest, in ANY state (queued, mid-drain,
- * terminal, even completed-awaiting-cleanup — see needsCleanup) — every one of those already has an
- * owner and a dealId; only a directory with NO manifest entry at all is a Fix-3 orphan.
+ * Directory names under Documents/walkthroughs/ that no manifest accounts for.
+ *
+ * `knownWalkIds` must be every walkId in EVERY manifest on the device, in ANY state (queued,
+ * mid-drain, terminal, even completed-awaiting-cleanup — see needsCleanup): each of those already has
+ * an owner and a dealId, and only a directory with no manifest entry at all is a Fix-3 orphan. Every
+ * manifest and not just the caller's, because Documents/walkthroughs/ is written by native, which has
+ * no signed-in identity to scope by — passing one owner's walkIds here reports the OTHER owner's
+ * live uploads as orphans. See ./upload.ts's claimedWalkIds for the full asymmetry.
  */
 export function selectOrphanedWalkDirs(dirNames: string[], knownWalkIds: Iterable<string>): string[] {
   const known = new Set(knownWalkIds);
   return dirNames.filter((name) => !known.has(name));
+}
+
+// ── Is the walk.mp4 on disk a RECORDING, or just a file with that name? ───────────────────────────
+//
+// These are different questions, and the recovery scan used to conflate them. AVAssetWriter creates
+// walk.mp4 at `startWriting` and appends samples into `mdat` as they arrive; the `moov` atom — the
+// index without which no player can open the file — is written only by `finishWriting`. So the crash
+// this whole recovery path exists to survive, an app kill DURING recording, leaves a walk.mp4 that
+// exists, is large, and cannot be played.
+//
+// toQueuedWalk already refuses that file on the normal path, and for exactly this reason: it builds a
+// video artifact only from `walk.state === "complete"`, the one state the reducer reaches via a
+// `finalized` event, i.e. a writer native itself confirmed hit `.completed`. Recovery has no reducer
+// state to consult, so it has to ask the container the same question directly. Presence of the moov
+// atom IS that question — it is the byte-level record of `finishWriting` having run.
+//
+// WalkthroughRecorder.swift's finalize path rejects rather than resolves for a truncated walk.mp4,
+// with the note that shipping one "is worse than a failure here — it looks like success." Recovery
+// is the one path that could still do it.
+
+/** Bytes to read at a box offset: 8 for the 32-bit header, 16 when `size == 1` puts a 64-bit length
+ *  in the next 8. Reading a fixed 16 keeps the scan to one read per box either way. */
+export const MP4_BOX_HEADER_BYTES = 16;
+
+/** Below this a file cannot hold even one box header, so it cannot hold a moov — the AVAssetWriter
+ *  created it and nothing was ever written. That is the ONLY size judgement made here: a byte
+ *  threshold in kilobytes would be a guess in both directions, discarding a short but perfectly
+ *  finalized walk while still passing a killed ten-minute recording, which is enormous and unplayable. */
+export const MIN_FINALIZED_MP4_BYTES = MP4_BOX_HEADER_BYTES;
+
+/**
+ * Read one top-level MP4 box header. `size` is the WHOLE box including its header — what a caller
+ * adds to the current offset to reach the next box.
+ *
+ * Returns null wherever the chain cannot be followed any further, which the caller must read as "no
+ * moov": a short buffer, a `size` under the header it claims to include, or the `size == 0` form
+ * (meaning "this box runs to end of file" — nothing can follow it, so a moov cannot). Guessing past
+ * any of those would mean guessing whether an unplayable file is playable.
+ */
+export function readMp4BoxHeader(bytes: Uint8Array): { type: string; size: number } | null {
+  if (bytes.length < 8) return null;
+  const type = String.fromCharCode(bytes[4]!, bytes[5]!, bytes[6]!, bytes[7]!);
+  const size32 = readUint32BE(bytes, 0);
+  if (size32 !== 1) return size32 >= 8 ? { type, size: size32 } : null;
+  // The 64-bit form, which every walk long enough to matter uses for its `mdat`. Composed from two
+  // 32-bit halves because a single `<<` in JS is a 32-bit operation and would silently wrap.
+  if (bytes.length < 16) return null;
+  const size = readUint32BE(bytes, 8) * 0x1_0000_0000 + readUint32BE(bytes, 12);
+  return size >= 16 && Number.isSafeInteger(size) ? { type, size } : null;
+}
+
+function readUint32BE(bytes: Uint8Array, at: number): number {
+  return ((bytes[at]! << 24) | (bytes[at + 1]! << 16) | (bytes[at + 2]! << 8) | bytes[at + 3]!) >>> 0;
 }
 
 export type RecoveredWalkArtifactFiles = {

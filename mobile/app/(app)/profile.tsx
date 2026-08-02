@@ -22,7 +22,12 @@ import {
   subscribeWalkQueue,
   type RecoveredWalk,
 } from "../../src/walkthrough/upload";
-import { deriveWalkSiteLabel, deriveWalkTitle, formatWalkDateTime } from "../../src/walkthrough/walk-meta";
+import {
+  UNKNOWN_WALK_TIME,
+  deriveRecoveredWalkTitle,
+  deriveWalkSiteLabel,
+  formatWalkDateTime,
+} from "../../src/walkthrough/walk-meta";
 import { walkthroughUploadClient } from "../../src/walkthrough/upload-client";
 import { TargetPicker } from "../../src/components/TargetPicker";
 import type { FieldCaptureTarget } from "../../src/api/types";
@@ -340,16 +345,22 @@ function FailedWalksCard() {
  *
  * The span is labelled "at least" on purpose. It is first-write to last-write, and recording began
  * before the first byte landed, so it is a lower bound on the walk's length — not its duration.
+ *
+ * The video has THREE states here, not two, and collapsing them would misinform in both directions.
+ * A walk.mp4 the writer never closed (an app kill mid-recording) is unplayable, so "1 recording"
+ * would promise the office a file that will not open — but "no photos"-style silence is no better,
+ * because someone who remembers recording a video needs to know what became of it rather than
+ * quietly concluding this is a different walk. So it is named for what it is.
  */
 function describeRecoveredWalk(walk: RecoveredWalk): string {
   const stills = walk.stillUris.length;
   const contents = [
-    walk.videoUri ? "1 recording" : "no video",
+    walk.videoUri ? "1 recording" : walk.unfinishedVideo ? "video unusable (not uploaded)" : "no video",
     stills === 0 ? "no photos" : stills === 1 ? "1 photo" : `${stills} photos`,
   ].join(", ");
   const spanMinutes = walk.captureSpanMs === null ? null : Math.round(walk.captureSpanMs / 60_000);
   return [
-    walk.recordedAtMs === null ? "Time unknown" : formatWalkDateTime(walk.recordedAtMs),
+    walk.recordedAtMs === null ? UNKNOWN_WALK_TIME : formatWalkDateTime(walk.recordedAtMs),
     contents,
     spanMinutes === null ? null : spanMinutes < 1 ? "under a minute" : `at least ${spanMinutes} min`,
   ]
@@ -427,16 +438,17 @@ function RecoverableWalksCard() {
       setFilingWalkId(walk.walkId);
       setFileError(null);
       try {
-        // The walk's own recorded time, not now(): a recovered walk has no reducer history, so
+        // The walk's own recorded time, NULL AND ALL: a recovered walk has no reducer history, so
         // toRecoveredQueuedWalk leaves startedAt null and the completion call's capturedAt falls
         // back to the DRAIN moment. The title is therefore the only place the office learns when
         // this visit actually happened — and "(recovered)" is how they learn that the timeline was
-        // reconstructed from the files rather than recorded live. It goes INSIDE the target name for
-        // the reason walk.tsx documents: deriveWalkTitle clamps to the server's MAX_TITLE_CHARS, so
-        // appending afterwards could push a maximal title past the limit and 400 the completion call
-        // once every artifact is already in R2.
+        // reconstructed from the files rather than recorded live. Passing `Date.now()` where the
+        // platform reported no timestamp does not soften the claim, it dates a week-old site visit
+        // to today with exactly the confidence of a real reading, and undoes the honesty the row
+        // above it was written for. deriveRecoveredWalkTitle carries the unknown through and does
+        // its own MAX_TITLE_CHARS clamping with the marker already composed in.
         const meta = {
-          title: deriveWalkTitle(`${target.name} (recovered)`, walk.recordedAtMs ?? Date.now()),
+          title: deriveRecoveredWalkTitle(target.name, walk.recordedAtMs),
           // Genuinely unknown here: the picker's target carries no property address, and inventing
           // one from the company or project name would put a non-address in the field the office
           // reads as the site. "" is how the wire type says "absent".
@@ -480,9 +492,13 @@ function RecoverableWalksCard() {
           <Text style={styles.settingTitle}>
             {recoverable.length} unfinished walk{recoverable.length === 1 ? "" : "s"} on this device
           </Text>
+          {/* No "nothing is lost" here. It is the reassurance the card wants to give and the one it
+              cannot always support: a walk killed mid-recording can leave a video nothing can open,
+              and a row that says so under a headline promising otherwise is the card arguing with
+              itself. Each row states what it actually has; this says what to do about it. */}
           <Text style={styles.settingHint}>
             Captured here but never attached to a project — the app closed before the walk finished.
-            Nothing is lost. Pick the project you were walking and it uploads like any other walk.
+            Pick the project you were walking and everything usable uploads like any other walk.
           </Text>
           {fileError ? <Text style={styles.pairingStale}>{fileError}</Text> : null}
         </View>

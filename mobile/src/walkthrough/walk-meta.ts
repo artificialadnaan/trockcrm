@@ -53,6 +53,36 @@ export function deriveWalkTitle(targetName: string, atMs: number): string {
   return title.length <= MAX_TITLE_CHARS ? title : title.slice(0, MAX_TITLE_CHARS);
 }
 
+/** What the office reads where a date would be, when nobody can say. Shared verbatim with the
+ *  recovery card for the same reason formatWalkDateTime is: one recording, described one way, in the
+ *  place the estimator saw it and in the place the office later reads it. */
+export const UNKNOWN_WALK_TIME = "Time unknown";
+
+/**
+ * The title for a walk reconstructed from files on disk, with no reducer history behind it — see
+ * upload-core.ts's toRecoveredQueuedWalk, which leaves startedAt null because there is no truthful
+ * value for it.
+ *
+ * Separate from deriveWalkTitle because `atMs` here is genuinely NULLABLE, and that is the whole
+ * point. A recovered walk's completion call falls back to the drain moment for capturedAt, so THIS
+ * STRING is the only place the office ever learns when the visit actually happened. Passing
+ * `Date.now()` in place of a timestamp iOS could not report does not produce a slightly-vaguer
+ * title; it produces a confident, wrong one, dating a site visit from last week to today — and the
+ * recovery card is deliberately built to omit rather than guess (it labels a span "at least N min"
+ * and drops it entirely when one instant is all it has). An unknown time has to survive the whole
+ * way through, or the card's honesty stops at the screen.
+ *
+ * "(recovered)" and the time are composed BEFORE the clamp, never appended after one. deriveWalkTitle
+ * clamps to the server's MAX_TITLE_CHARS, and anything added past that clamp pushes a maximal title
+ * one character over — a permanent 400 on the completion call, hit only after every artifact is
+ * already in R2, which is exactly when the walk can no longer be saved by retrying.
+ */
+export function deriveRecoveredWalkTitle(targetName: string, atMs: number | null): string {
+  const when = atMs === null ? UNKNOWN_WALK_TIME : formatWalkDateTime(atMs);
+  const title = `${targetName} (recovered) — ${when}`;
+  return title.length <= MAX_TITLE_CHARS ? title : title.slice(0, MAX_TITLE_CHARS);
+}
+
 /** The deal's property address when known, else "" (never undefined/null — the wire type is a
  *  plain `string`; the server treats "" the same as absent). Trimmed so a whitespace-only address
  *  from an incomplete deal record reads as "unknown" rather than a blank-looking label. Clamped

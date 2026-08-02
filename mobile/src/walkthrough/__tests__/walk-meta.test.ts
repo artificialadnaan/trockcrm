@@ -13,7 +13,12 @@
 // So the zone is removed from the question instead. `new Date(y, m, d, h, min)` names a WALL CLOCK,
 // and formatting it back reproduces that same wall clock in every zone — which is exactly the
 // behaviour being asserted, stated in the form that is true everywhere.
-import { deriveWalkSiteLabel, deriveWalkTitle } from "../walk-meta";
+import {
+  UNKNOWN_WALK_TIME,
+  deriveRecoveredWalkTitle,
+  deriveWalkSiteLabel,
+  deriveWalkTitle,
+} from "../walk-meta";
 
 /** 30 Jul 2026, 9:15 PM local — the exact example from the design doc's owner decision on
  *  auto-derived titles. */
@@ -46,6 +51,36 @@ describe("deriveWalkTitle", () => {
     const longName = "X".repeat(400);
     const title = deriveWalkTitle(longName, AT_MS);
     expect(title.length).toBeLessThanOrEqual(300);
+  });
+});
+
+// A recovered walk carries startedAt: null (upload-core's toRecoveredQueuedWalk — there is no
+// reducer history to derive one from), and the completion call's capturedAt then falls back to the
+// drain moment. So this title is the ONLY place the office learns when the visit happened. When the
+// platform reported no file timestamp either, the honest answer is that nobody knows — and stamping
+// `now` in its place dates an old site visit to today, with exactly the confidence of a real reading.
+describe("deriveRecoveredWalkTitle", () => {
+  it("marks the walk as recovered and dates it from the walk's own recorded time", () => {
+    expect(deriveRecoveredWalkTitle("121 Preston Oaks", AT_MS)).toBe(
+      "121 Preston Oaks (recovered) — 30 Jul 2026, 9:15 PM",
+    );
+  });
+
+  it("says the time is unknown rather than substituting today", () => {
+    const title = deriveRecoveredWalkTitle("121 Preston Oaks", null);
+    expect(title).toBe(`121 Preston Oaks (recovered) — ${UNKNOWN_WALK_TIME}`);
+    // The specific harm, stated directly: a walk recorded days ago must not arrive at the office
+    // wearing today's date. Nothing downstream carries a truthful instant to correct it with.
+    expect(title).not.toContain(String(new Date().getFullYear()));
+  });
+
+  // The marker and the unknown-time label are both composed BEFORE the clamp, never appended after
+  // it. Appending afterwards is how a maximal title goes one character over MAX_TITLE_CHARS and 400s
+  // the completion call — after every artifact is already in R2, i.e. at the one point where the
+  // failure costs the whole upload and cannot be retried into success.
+  it("clamps to the server's title cap with the recovered marker and an unknown time in place", () => {
+    expect(deriveRecoveredWalkTitle("X".repeat(400), null).length).toBeLessThanOrEqual(300);
+    expect(deriveRecoveredWalkTitle("X".repeat(400), AT_MS).length).toBeLessThanOrEqual(300);
   });
 });
 
