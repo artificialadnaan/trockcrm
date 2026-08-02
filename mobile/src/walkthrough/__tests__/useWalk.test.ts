@@ -88,6 +88,37 @@ describe("useWalk", () => {
   // The exact defect called out in the plan: captureStill() resolving with `requested: false`
   // means no still event will ever follow. A hook that awaits and does nothing here would leave
   // the caller believing a still was taken.
+  // A bridge method can throw SYNCHRONOUSLY — a missing native module, or an argument the bridge
+  // rejects before it ever returns a promise. With the native call outside the try, that exception
+  // escaped start() entirely: no "failed" dispatch, the walk stuck in "starting" forever, and
+  // startInFlightRef left set so every later start was refused too. One synchronous throw wedged
+  // the feature permanently.
+  it("fails the walk (and stays startable) when the bridge throws synchronously", async () => {
+    mockStartWalk
+      .mockImplementationOnce(() => {
+        throw new Error("walk_module_missing");
+      })
+      // The SECOND start must behave normally — the point of the test is that the synchronous throw
+      // did not leave startInFlightRef holding a lock nobody can release.
+      .mockResolvedValue({ videoUri: "file:///walkthroughs/walk-1/walk.mp4" });
+    const { result } = renderHook(() => useWalk("deal-1", null));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    expect(result.current.walk.state).toBe("failed");
+    expect(result.current.error).toContain("walk_module_missing");
+
+    // The wedge check: a second start must still be accepted after the reset.
+    await act(async () => {
+      result.current.reset();
+    });
+    await act(async () => {
+      await result.current.start();
+    });
+    expect(result.current.walk.state).toBe("recording");
+  });
+
   it("surfaces an error when captureStill reports requested: false, without failing the walk", async () => {
     mockStartWalk.mockResolvedValue({
       walkId: "w1",

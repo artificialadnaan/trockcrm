@@ -241,7 +241,15 @@ export const WALK_VIDEO_SHORTFALL_TOLERANCE_MS = 5_000;
  */
 export function assessVideoCoverage(walkMs: number, census: WalkVideoCensus): WalkVideoCoverage {
   const walk = Math.max(0, walkMs);
-  const noVideoAtAll = census.videoFramesAppended <= 0 || census.secondsSinceLastFrameArrived < 0;
+  // A non-finite tail counts as NO video, matching assessAudioCoverage's own guard. Without it the
+  // failure is silent rather than loud: `< 0` is FALSE for NaN, so a NaN tail slips past the
+  // sentinel check, `NaN * 1000` propagates through every clamp, and `isVideoTruncated` compares
+  // NaN against the tolerance — which is false. The warning would vanish on exactly the walk that
+  // could not be measured, instead of misfiring where someone would notice.
+  const noVideoAtAll =
+    !Number.isFinite(census.secondsSinceLastFrameArrived) ||
+    census.videoFramesAppended <= 0 ||
+    census.secondsSinceLastFrameArrived < 0;
   const quietMs = noVideoAtAll ? walk : census.secondsSinceLastFrameArrived * 1000;
   const shortfallMs = Math.min(walk, Math.max(0, Math.round(quietMs)));
   return { walkMs: walk, videoMs: walk - shortfallMs, shortfallMs };

@@ -248,9 +248,15 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
     // what was passed to native, which may already have created the directory) — and a caller that
     // reads walkId off a "failed" state relies on it being populated by the time that state lands.
     setWalkId(id);
-    const pending = Recorder.startWalk(id);
-    startInFlightRef.current = pending;
+    // The native call lives INSIDE the try, not above it. A bridge method that throws SYNCHRONOUSLY
+    // — a missing native module, an argument the bridge rejects before returning a promise — would
+    // otherwise escape past the catch entirely: `failed` would never be dispatched, the walk would
+    // sit in "starting" forever, and because the finally never ran either, startInFlightRef would
+    // stay set and refuse every subsequent start. A permanent wedge from one synchronous throw.
+    let pending: Promise<{ videoUri: string | null }> | null = null;
     try {
+      pending = Recorder.startWalk(id);
+      startInFlightRef.current = pending;
       const started = await pending;
       // Record the path native reports rather than null. It is not playable yet — the writer
       // finalises in endWalk — but holding it means a walk that FAILS mid-recording still knows
@@ -268,7 +274,11 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
       // Only clear OUR promise: a hypothetical second start racing this one would have already
       // replaced the ref, and blanking it here would leave the unmount cleanup below with nothing
       // to wait on for the start that's actually in flight.
-      if (startInFlightRef.current === pending) startInFlightRef.current = null;
+      //
+      // `pending` is null when startWalk threw synchronously — nothing was ever assigned to the ref
+      // on that path, so there is nothing of ours to clear, and the `=== pending` comparison must
+      // not be allowed to match a ref that a racing start legitimately left at null.
+      if (pending !== null && startInFlightRef.current === pending) startInFlightRef.current = null;
     }
   }, []);
 

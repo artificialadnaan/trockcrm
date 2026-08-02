@@ -15,7 +15,7 @@
 ## Constraints carried in from Step 0
 
 - **Phone stills during a walk are safe ONLY with a photo-output-only capture session that has no audio input.** That is the exact configuration rung 10 measured. Any phone-camera code added here that attaches an audio input invalidates the result and will silently kill glasses audio mid-walk.
-- **The walk refuses to start without the glasses on HFP.** Native rejects with `walk_no_hfp`. The UI must surface that as a clear, actionable message, never as a generic failure — a walk that records the phone's microphone is a wasted site visit nobody discovers until the scope comes back empty.
+- **The walk records glasses VIDEO and PHONE audio, and refuses to run audio over Bluetooth HFP.** This inverts what this plan originally assumed. Measured on hardware 2026-08-01 across four real walks and three diagnostic rungs: requesting HFP forces the glasses radio into hands-free mode and starves the DAT video transport — video dies after 3-8 seconds, every time, while the writer was accepting every frame it was handed (239 received, 239 appended, 0 dropped). The glasses simply stop sending. So native rejects with `walk_route_is_glasses` when the audio route resolves to Bluetooth HFP, and records the phone microphone at 48 kHz instead — better fidelity than the 16 kHz HFP path this plan was written around. The UI must surface that rejection as a clear, actionable message, never as a generic failure.
 - Registration **persists** across app relaunches (verified 2026-07-30), so the Profile row is normally a status display, not an action.
 
 ---
@@ -265,7 +265,7 @@ export function useWalk(dealId: string, projectId: string | null) {
       dispatch({ type: "started", at: Date.now(), videoUri: null });
       return started;
     } catch (e) {
-      // Surfaced verbatim. Native's `walk_no_hfp` message names the input it would have
+      // Surfaced verbatim. Native's `walk_route_is_glasses` message names the input it would have
       // recorded from, which is the difference between "fix your Bluetooth" and "who knows".
       const message = e instanceof Error ? e.message : String(e);
       setError(message);
@@ -287,7 +287,11 @@ export function useWalk(dealId: string, projectId: string | null) {
     dispatch({ type: "ended", at: Date.now() });
     try {
       const result = await Recorder.endWalk();
-      dispatch({ type: "finalized", audioUri: result.audioUri });
+      // `endWalk` resolves `videoUri` — audio is MUXED INTO walk.mp4, not written separately (see the
+      // constraint above). An earlier draft of this plan destructured `audioUri` here, which typechecked
+      // only because the Jest mocks are not checked against the real bridge, and would have silently
+      // dropped both tracks from every walk.
+      dispatch({ type: "finalized", audioUri: null, videoUri: result.videoUri, videoCensus: result.census });
       return result;
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
@@ -334,7 +338,7 @@ Requirements — implement with your own judgement on layout, but all of these m
 - **Before starting:** shows what will be recorded and a single large Start button
 - **While recording:** an elapsed timer counting up from `walk.startedAt`, a large CAPTURE button (glasses still), a still counter, and End walk
 - **CAPTURE is disabled unless `canCapture(walk)`** — never let a tap silently do nothing
-- **Errors render prominently and verbatim.** A `walk_no_hfp` rejection carries the input it would otherwise have recorded from; that text is the whole value of the message and must not be replaced with "Could not start walk"
+- **Errors render prominently and verbatim.** A `walk_route_is_glasses` rejection carries the input it would otherwise have recorded from; that text is the whole value of the message and must not be replaced with "Could not start walk"
 - **On complete:** shows a summary — duration, still count — and a Done button that navigates back
 - The screen holds no lifecycle rules; it renders `walk.state` and calls `start`/`capture`/`end`
 
@@ -377,7 +381,7 @@ The existing `__DEV__`-gated "Wearables diagnostic" button stays. This adds a ro
 - [ ] All new unit tests pass; full suite green
 - [ ] Typecheck clean for every touched file
 - [ ] A walk can be started, capture stills, and be ended entirely from the UI
-- [ ] `walk_no_hfp` renders its native message verbatim
+- [ ] `walk_route_is_glasses` renders its native message verbatim
 
 ## Hardware verification (Adnaan, with glasses)
 

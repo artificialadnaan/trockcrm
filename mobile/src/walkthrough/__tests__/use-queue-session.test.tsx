@@ -102,10 +102,18 @@ describe("useWalkQueueSession", () => {
 
   it("keeps honouring 401s after a remount, rather than staying retired", async () => {
     // StrictMode and Fast Refresh both run cleanup-then-effect against the same session object. A
-    // hook that only ever set `retired` would come back permanently deaf to real 401s.
-    const view = render(<Probe />);
-    view.rerender(<Probe />);
+    // hook that only ever SET `retired` and never cleared it would come back permanently deaf to
+    // real 401s — signed in, every request failing, and nothing able to end the session.
+    //
+    // A `rerender` would NOT prove this: it never runs the cleanup, so the flag is never set in the
+    // first place and the test passes with or without the re-arm. Only an unmount followed by a
+    // fresh mount forces the sequence that matters. `signOut` is stable across both mounts (same
+    // fixture), so the session object's identity is unchanged too — which is precisely the case
+    // that could come back retired.
+    const first = render(<Probe />);
+    first.unmount();
 
+    render(<Probe />);
     await act(async () => {
       await fire401(captured!.queueFetcher);
     });

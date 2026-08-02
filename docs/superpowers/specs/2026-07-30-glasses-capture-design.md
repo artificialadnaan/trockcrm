@@ -1,8 +1,10 @@
 # Glasses capture for TrockCam — design
 
 **Date:** 2026-07-30
-**Status:** approved, not yet implemented
-**Branch:** `feat/mobile-wearables-dat`
+**Status:** implemented and under review on PR #1025. Step 0's rungs ran on hardware 2026-08-01 and
+overturned this document's central audio assumption — see the Owner decisions section: the walk records
+glasses video with PHONE audio at 48 kHz, because HFP starves the video transport.
+**Branch:** `feat/mobile-glasses-capture` (was `feat/mobile-wearables-dat`)
 
 An estimator wearing Ray-Ban Meta glasses walks a job site talking about what they see.
 TrockCam records it, drops the walk into the project folder, and feeds the TROCK Scope

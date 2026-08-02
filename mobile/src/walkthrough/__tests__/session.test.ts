@@ -360,6 +360,20 @@ describe("assessVideoCoverage", () => {
 
   // native's `-1` means `lastFrameArrivedAt` was never valid — NO frame ever arrived. Arithmetic
   // that treats it as a duration turns the worst possible walk into the best-looking one.
+  // A NaN tail is the QUIET failure, not the loud one: `< 0` is false for NaN, so it slips past the
+  // sentinel check, propagates through every clamp, and makes isVideoTruncated compare NaN against
+  // the tolerance — which is false. The warning would disappear on exactly the walk nobody could
+  // measure. assessAudioCoverage already guards its own counter the same way.
+  it("treats a non-finite tail as zero coverage rather than letting NaN silence the warning", () => {
+    const coverage = assessVideoCoverage(600_000, {
+      secondsSinceLastFrameArrived: Number.NaN,
+      videoFramesAppended: 900,
+    });
+    expect(coverage.videoMs).toBe(0);
+    expect(coverage.shortfallMs).toBe(600_000);
+    expect(isVideoTruncated(coverage)).toBe(true);
+  });
+
   it("treats the -1 'no frame ever arrived' sentinel as zero coverage", () => {
     const coverage = assessVideoCoverage(600_000, {
       secondsSinceLastFrameArrived: -1,
