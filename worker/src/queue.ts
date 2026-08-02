@@ -23,7 +23,31 @@ export type JobHandlerResult =
       runAfterSeconds: number;
     };
 
-type JobHandler = (payload: any, officeId: string | null) => Promise<JobHandlerResult>;
+/**
+ * What the queue can tell a handler about THIS delivery.
+ *
+ * Optional third argument, so the 40-odd existing handlers are unaffected. It exists for handlers that own
+ * state outside job_queue: when a throw dead-letters the final attempt, the queue row is resolved but that
+ * external state is not, and only the handler knows how to reconcile it.
+ */
+export type JobAttemptContext = {
+  /** 1-based attempt number for this delivery. */
+  attempt: number;
+  maxAttempts: number;
+  /** True when a throw from this delivery will dead-letter the row rather than schedule another retry. */
+  isFinalAttempt: boolean;
+};
+
+type JobHandler = (
+  payload: any,
+  officeId: string | null,
+  /**
+   * Test-only dependency-injection slot that a dozen handlers already declare. The queue never supplies it,
+   * but it occupies the third position, which is why the attempt context comes fourth.
+   */
+  deps?: any,
+  ctx?: JobAttemptContext,
+) => Promise<JobHandlerResult>;
 
 const jobHandlers = new Map<string, JobHandler>();
 
@@ -206,15 +230,24 @@ async function flushPendingRecoveries(): Promise<void> {
   }
 }
 
-// The main poller EXCLUDES bid_board_ingest; that job type runs for MINUTES and gets its own dedicated poller
-// (pollBidBoardIngestJobs) so a long import can't hold a shared reentrancy guard across its run phase and
-// starve the email / domain-event / delivery jobs the main poller would otherwise claim on later ticks.
-const MAIN_POLL_JOB_TYPE_SQL = "AND job_type <> 'bid_board_ingest'";
+// The main poller EXCLUDES the long-running job types; each gets its own dedicated poller so a multi-minute
+// run can't hold a shared reentrancy guard across its run phase and starve the email / domain-event /
+// delivery jobs the main poller would otherwise claim on later ticks.
+//   • bid_board_ingest    — a Procore import, runs for MINUTES (pollBidBoardIngestJobs)
+//   • ai_report_generation — a Claude vision pass over up to 60 photographs; 30-90s typically and minutes in
+//     the worst case (3 retries x a 10-minute per-attempt timeout), so it belongs here for exactly the same
+//     reason (pollAiReportJobs)
+const MAIN_POLL_JOB_TYPE_SQL = "AND job_type NOT IN ('bid_board_ingest', 'ai_report_generation')";
 const BID_BOARD_INGEST_JOB_TYPE_SQL = "AND job_type = 'bid_board_ingest'";
+const AI_REPORT_JOB_TYPE_SQL = "AND job_type = 'ai_report_generation'";
 // One import at a time on the dedicated poller: imports are already per-office-serialized by an advisory lock,
 // and each holds a lock connection + the importer's queries, so a single in-flight import keeps this poller
 // well under the DB pool max even while the main poller runs its own RUN_CONCURRENCY batch.
 const BID_BOARD_INGEST_CONCURRENCY = 1;
+// One report at a time: each run holds tens of MB of decoded image data plus its own short transactions, so
+// running several concurrently is the straightforward way to OOM the worker. Reports are not latency-critical
+// (the phone polls and shows progress), so serializing them is the right trade.
+const AI_REPORT_CONCURRENCY = 1;
 
 // Claim up to `limit` matching 'pending' rows in one short transaction, release the claim connection, then run
 // the claimed handlers. Shared by the main poller and the dedicated bid_board_ingest poller (each passes its
@@ -365,6 +398,19 @@ export async function pollBidBoardIngestJobs() {
   }
 }
 
+// Dedicated poller for the AI photo report, for the same reason as bid_board_ingest: a Claude vision pass
+// over 60 photographs holds this loop for its whole run, and it must not be the main loop.
+let pollingAiReport = false;
+export async function pollAiReportJobs() {
+  if (pollingAiReport) return;
+  pollingAiReport = true;
+  try {
+    await claimAndRunJobs(AI_REPORT_JOB_TYPE_SQL, AI_REPORT_CONCURRENCY);
+  } finally {
+    pollingAiReport = false;
+  }
+}
+
 async function processJob(job: any): Promise<void> {
   const handler = jobHandlers.get(job.job_type);
   if (!handler) return; // Already marked dead above
@@ -377,7 +423,11 @@ async function processJob(job: any): Promise<void> {
   const claimedAttempt = job.attempts + 1;
   let outcome: Outcome;
   try {
-    const result = await handler(job.payload, job.office_id);
+    const result = await handler(job.payload, job.office_id, undefined, {
+      attempt: claimedAttempt,
+      maxAttempts: job.max_attempts,
+      isFinalAttempt: claimedAttempt >= job.max_attempts,
+    });
     if (result && result.status === "dead") {
       outcome = { status: "dead", error: result.error };
       console.error(`[Worker] Job ${job.id} (${job.job_type}) rejected without retry: ${result.error}`);

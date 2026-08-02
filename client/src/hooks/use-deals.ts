@@ -351,6 +351,12 @@ export interface DealDetail extends Deal {
 export interface DealChangeOrder {
   id: string;
   dealId: string;
+  /**
+   * The CO child DEAL's id, or null for a legacy `deal_change_orders` row that has no deal behind it.
+   * The server has always sent this; declaring it lets callers tell a real cascading child from a legacy
+   * record — which archive eligibility depends on.
+   */
+  childDealId?: string | null;
   signedDate: string;
   amount: string;
   description: string | null;

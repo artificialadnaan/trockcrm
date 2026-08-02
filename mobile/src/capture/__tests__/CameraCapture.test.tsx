@@ -129,6 +129,22 @@ describe("CameraCapture camera controls", () => {
     expect(screen.getByTestId("pinch-handler")).toBeTruthy();
   });
 
+  it("captures at full sensor resolution, in a viewfinder matching the frame that gets saved", () => {
+    // Both halves of this are required and they multiply. expo-camera defaults pictureSize to `high`, which
+    // on iOS is the 1920x1080 VIDEO preset — captures were landing at ~1.7MP, not the sensor's 12MP. And it
+    // crops every capture to the preview layer's aspect ratio, so a full-bleed preview on a ~19.5:9 screen
+    // then discarded ~38% of what was left. Fixing only the preset would still have yielded ~7.5MP.
+    const screen = renderCamera();
+
+    // "Photo" is expo-camera's PictureSize enum value that maps to AVCaptureSession.Preset.photo.
+    expect(lastCameraProps().pictureSize).toBe("Photo");
+
+    // 3:4 = the sensor's 4:3 still frame held upright. This is what makes the capture-time crop a no-op;
+    // any other ratio silently starts throwing pixels away again at the moment of capture.
+    const frame = StyleSheet.flatten(screen.getByTestId("camera-frame").props.style);
+    expect(frame.aspectRatio).toBeCloseTo(3 / 4);
+  });
+
   it("starts unzoomed and updates CameraView zoom from the visible controls", () => {
     const screen = renderCamera();
 

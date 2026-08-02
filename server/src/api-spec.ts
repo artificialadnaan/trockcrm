@@ -1081,7 +1081,7 @@ export const apiSpec = {
         tags: ["Deals"],
         summary: "Archive (soft-delete) a deal",
         description:
-          "Archives the deal (is_active=false) and prepends the reason to the deal description. The assigned rep or an admin may archive; non-admins may only archive opportunity-stage deals. A non-empty reason is required.",
+          "Archives the deal (is_active=false) and prepends the reason to the deal description. The assigned rep may archive their own deal at ANY stage, and an admin may archive any deal. TWO admin-only exceptions, both because they void change-order commissions: a non-admin may not archive a change order itself, and may not archive a PARENT that still has active change-order children (archiving the parent cascades — every child is voided and its earned commission removed). A non-empty reason is required. Archiving a Won deal removes it from Won rollups and from the revenue its commission rows were computed against.",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
         requestBody: {
           required: true,
@@ -1100,7 +1100,7 @@ export const apiSpec = {
         responses: {
           204: { description: "Deal archived." },
           400: { description: "A reason is required to archive a deal (DEAL_ARCHIVE_REASON_REQUIRED)." },
-          403: { description: "Not the assigned rep or an admin; a non-admin archiving a non-opportunity deal (DEAL_ARCHIVE_STAGE_FORBIDDEN); or a non-admin deleting a change order (CHANGE_ORDER_ADMIN_ONLY)." },
+          403: { description: "Not the assigned rep or an admin; or a non-admin archiving EITHER a change order OR a parent that still has active change-order children (CHANGE_ORDER_ADMIN_ONLY, both cases). An owner may otherwise archive their own deal at any stage." },
           404: { description: "Deal not found." },
         },
       },

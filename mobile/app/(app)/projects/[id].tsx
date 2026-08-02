@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { FlatList, Linking, Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
@@ -6,7 +6,7 @@ import { theme } from "../../../src/theme/theme";
 import { useQuery } from "@tanstack/react-query";
 import { useProjectPhotos, useProjectReports, useProjectScorecards } from "../../../src/query/hooks";
 import { useAuth } from "../../../src/auth/AuthContext";
-import { getReportDownload, getTranscriptionConfig } from "../../../src/api/endpoints";
+import { getAiReportStatus, getReportDownload, getTranscriptionConfig } from "../../../src/api/endpoints";
 import {
   categoryLabel,
   correctiveAffordance,
@@ -41,6 +41,30 @@ const GROUPINGS: { value: PhotoGrouping; label: string }[] = [
   { value: "uploader", label: "Uploader" },
   { value: "none", label: "None" },
 ];
+
+/**
+ * How the screen follows a run the builder stopped watching.
+ *
+ * The interval is slow on purpose — this is a background courtesy, not the foreground poll. The window
+ * comfortably outlasts the server's own total deadline, so a run that is going to file at all has filed by
+ * the time it closes.
+ */
+const AWAIT_REPORT_POLL_MS = 10_000;
+/**
+ * Sized from the SERVER's lifecycle rather than picked to feel long enough — but deliberately NOT sized for
+ * its absolute worst case.
+ *
+ * It covers a normal run comfortably: the model phase runs to a 12-minute default with a 15-minute
+ * configurable ceiling (server ai-report-limits.ts), plus the render and upload that follow. A ten-minute
+ * watch gave up well inside that and left healthy runs' reports to be found by hand.
+ *
+ * It does NOT cover every path, and that is a choice. A run queued behind others on the serial poller, or
+ * one reclaimed after a worker died (STALE_RUN_MINUTES, then the queue's own reclaim deferral, then a fresh
+ * attempt), can outlast this. Sizing for that would mean polling a phone every ten seconds for the better
+ * part of an hour, which costs the user more than it returns — the report still lands, and still shows on
+ * the next visit or pull-to-refresh. What this window guarantees is that the watcher always terminates.
+ */
+const AWAIT_REPORT_WINDOW_MS = 30 * 60_000;
 
 function toStr(v: string | string[] | undefined): string {
   return Array.isArray(v) ? v[0] ?? "" : v ?? "";
@@ -94,6 +118,8 @@ export default function ProjectDetailScreen() {
   // filter change can never desync the viewer onto a different photo.
   const [viewer, setViewer] = useState<{ photos: FieldPhoto[]; index: number } | null>(null);
   const [reportOpen, setReportOpen] = useState(false);
+  // The run id the builder handed back when it stopped waiting on a generation — see the effect below.
+  const [backgroundRunId, setBackgroundRunId] = useState<string | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
   const [notice, setNotice] = useState<{ message: string; tone: "success" | "error" } | null>(null);
 
@@ -151,6 +177,58 @@ export default function ProjectDetailScreen() {
     }
     return items;
   }, [groups]);
+
+  // A generation the builder stopped waiting on — the sheet was closed, or its foreground poll timed out —
+  // still finishes server-side and files its report. Nothing here would ever notice: useProjectReports has
+  // no polling interval and refreshes only from onGenerated or a manual pull, so "the report will appear in
+  // this project's reports when it finishes" held only if the user happened to pull to refresh.
+  //
+  // The RUN is followed, not the report count. A count only says "some report arrived", so an unrelated
+  // report filed against this project in the meantime would end the watch on the wrong event — and the
+  // refetch that ended it would not yet contain the AI report. Only the run says whether THIS one landed.
+  // Bounded by a window so an abandoned run cannot leave a timer going indefinitely.
+  // reportsQuery/fetcher are deliberately not dependencies: they change identity on every fetch and would
+  // restart the poll each time.
+  useEffect(() => {
+    if (!backgroundRunId) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const startedAt = Date.now();
+
+    const check = async () => {
+      if (cancelled) return;
+      try {
+        const status = await getAiReportStatus(fetcher, backgroundRunId);
+        if (cancelled) return;
+        if (status.status === "succeeded") {
+          setBackgroundRunId(null);
+          void reportsQuery.refetch();
+          setNotice({ message: "Your AI report is ready.", tone: "success" });
+          return;
+        }
+        if (status.status === "failed") {
+          setBackgroundRunId(null);
+          setNotice({ message: status.error || "The AI report could not be generated.", tone: "error" });
+          return;
+        }
+      } catch {
+        // A dropped poll on jobsite LTE is not a verdict — keep waiting until the window closes.
+      }
+      if (cancelled) return;
+      if (Date.now() - startedAt > AWAIT_REPORT_WINDOW_MS) {
+        setBackgroundRunId(null);
+        return;
+      }
+      timer = setTimeout(check, AWAIT_REPORT_POLL_MS);
+    };
+
+    timer = setTimeout(check, AWAIT_REPORT_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [backgroundRunId]);
 
   const refreshing = photosQuery.isRefetching || reportsQuery.isRefetching || scorecardsQuery.isRefetching;
 
@@ -500,6 +578,9 @@ export default function ProjectDetailScreen() {
           void reportsQuery.refetch();
           if (report.pdfUrl) void Linking.openURL(report.pdfUrl);
         }}
+        onLeftRunning={(runId) => setBackgroundRunId(runId)}
+        // The watcher owns the lock: it is the only thing that learns when the run reaches a terminal state.
+        backgroundRunActive={backgroundRunId !== null}
       />
 
       <PhotoShareModal

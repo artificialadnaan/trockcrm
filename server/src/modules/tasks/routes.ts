@@ -10,6 +10,7 @@ import {
   getTasks,
   getTaskCounts,
   getTaskById,
+  getTaskRowById,
   createTask,
   queueTaskCreateSideEffects,
   updateTask,
@@ -24,6 +25,7 @@ import {
 import {
   prepareTaskAssignmentEmail,
   sendPreparedTaskAssignmentEmail,
+  TaskTransactionUnusableError,
   type PreparedTaskAssignmentEmail,
 } from "./notifications.js";
 
@@ -79,6 +81,7 @@ async function prepareTaskAssignmentEmailBestEffort(
     title: string;
     description?: string | null;
     dueDate?: string | Date | null;
+    dealId?: string | null;
   },
   assigneeId: string
 ) {
@@ -95,6 +98,10 @@ async function prepareTaskAssignmentEmailBestEffort(
       },
     });
   } catch (err) {
+    // Preparing the email is best-effort — EXCEPT when the failure means the task transaction can
+    // no longer be committed safely. Swallowing that would let the COMMIT below degrade to a silent
+    // ROLLBACK while we returned success for a task that was never written.
+    if (err instanceof TaskTransactionUnusableError) throw err;
     console.error("[Tasks] Failed to prepare task assignment email:", err);
     return null;
   }
@@ -262,8 +269,9 @@ router.patch("/:id", async (req, res, next) => {
       await assertAssignableUser(req, body.assignedTo);
     }
 
+    // Only the previous assignee is read here, so the lean row is enough.
     const existingTask = body.assignedTo !== undefined
-      ? await getTaskById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id)
+      ? await getTaskRowById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id)
       : null;
     if (body.assignedTo !== undefined && !existingTask) {
       throw new AppError(404, "Task not found");

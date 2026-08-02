@@ -11,7 +11,7 @@ vi.mock("../src/db.js", () => ({
   },
 }));
 
-const { deadJob, deferJob, pollJobs, pollBidBoardIngestJobs, registerJobHandler, recoverStaleJobs, __resetQueueStateForTest, __setQueueQueryTimeoutForTest } = await import("../src/queue.js");
+const { deadJob, deferJob, pollJobs, pollBidBoardIngestJobs, pollAiReportJobs, registerJobHandler, recoverStaleJobs, __resetQueueStateForTest, __setQueueQueryTimeoutForTest } = await import("../src/queue.js");
 
 // ── Pool harness ────────────────────────────────────────────────────────────────────────────────
 // Both the CLAIM path and the OUTCOME-WRITE path check out an explicit client via pool.connect() (the
@@ -469,15 +469,31 @@ describe("worker queue", () => {
     }
   });
 
-  it("main pollJobs EXCLUDES bid_board_ingest from its claim (that type runs on a dedicated poller)", async () => {
-    // A multi-minute bid_board_ingest must not hold the main `polling` guard across its run phase and starve
-    // every other job type — so the main claim predicate excludes it.
+  it("main pollJobs EXCLUDES every long-running type from its claim (those run on dedicated pollers)", async () => {
+    // A multi-minute job must not hold the main `polling` guard across its run phase and starve every other
+    // job type — so the main claim predicate excludes each one that has its own poller.
     const { queries } = installPool(claimRouter(() => []));
 
     await pollJobs();
 
     const claim = queries.find(([sql]) => sql.includes("SELECT * FROM public.job_queue"));
-    expect(claim![0]).toContain("job_type <> 'bid_board_ingest'");
+    expect(claim![0]).toContain("bid_board_ingest");
+    // ai_report_generation is a Claude vision pass over up to 60 photographs — same starvation risk.
+    expect(claim![0]).toContain("ai_report_generation");
+    expect(claim![0]).toContain("NOT IN");
+  });
+
+  it("pollAiReportJobs claims ONLY ai_report_generation, one at a time (LIMIT 1)", async () => {
+    // Serialized on purpose: each run holds tens of MB of decoded image data, so concurrent reports are the
+    // straightforward way to OOM the worker.
+    const { queries } = installPool(claimRouter(() => []));
+
+    await pollAiReportJobs();
+
+    const claim = queries.find(([sql]) => sql.includes("SELECT * FROM public.job_queue"));
+    expect(claim![0]).toContain("job_type = 'ai_report_generation'");
+    expect(claim![0]).not.toContain("NOT IN"); // only-this-type, not exclude-these-types
+    expect(claim![1]).toEqual([1]); // AI_REPORT_CONCURRENCY — one report at a time
   });
 
   it("pollBidBoardIngestJobs claims ONLY bid_board_ingest, one at a time (LIMIT 1)", async () => {
