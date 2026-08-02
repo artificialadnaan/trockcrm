@@ -54,5 +54,17 @@ export const jobQueue = pgTable(
     index("job_queue_ai_report_run_idx")
       .on(sql`(payload->>'runId')`)
       .where(sql`job_type = 'ai_report_generation' AND status IN ('pending', 'processing')`),
+    // Backs findGlassesWalkthroughForwardJobState (server/src/modules/walkthrough-capture/
+    // glasses-walkthrough-service.ts), which runs on every walk-completion call — including every mobile
+    // background retry of one — and answers both "is a forward already scheduled for this walk on this
+    // deal?" and "did a dead row learn a TROCK Scope checkpoint we must inherit?" in a single scan.
+    // Keyed on the PAIR because a phone-minted walkId is not unique across deals.
+    //
+    // Deliberately NOT partial on status, unlike the two above: this lookup must read DEAD rows, because
+    // the dead row is where the inherited checkpoint lives — and every forward costs a real transcription
+    // plus a real scope extraction, so missing that checkpoint bills twice. Mirrors migration 0211.
+    index("job_queue_glasses_walkthrough_forward_idx")
+      .on(sql`(payload->>'walkId')`, sql`(payload->>'dealId')`)
+      .where(sql`job_type = 'glasses_walkthrough_forward'`),
   ]
 );
