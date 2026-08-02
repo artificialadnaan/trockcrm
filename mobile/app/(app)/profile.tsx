@@ -13,7 +13,12 @@ import { describePairing, type Pairing, type PairingStatus } from "../../src/wal
 import { apiFetch } from "../../src/api/client";
 import type { Fetcher } from "../../src/api/endpoints";
 import { walkOwnerKey } from "../../src/walkthrough/owner-key";
-import { drainWalkQueue, getFailedWalkCount, retryFailedWalks } from "../../src/walkthrough/upload";
+import {
+  drainWalkQueue,
+  getFailedWalkCount,
+  getRecoverableWalksFromStartup,
+  retryFailedWalks,
+} from "../../src/walkthrough/upload";
 import { walkthroughUploadClient } from "../../src/walkthrough/upload-client";
 
 const SUPPORT_HUB_URL = "https://support-hub-production.up.railway.app/";
@@ -312,6 +317,48 @@ function FailedWalksCard() {
   );
 }
 
+/**
+ * Surfaces walk recordings found on disk with no queue entry — an app kill mid-recording, or after
+ * native finalised but before the enqueue effect ran.
+ *
+ * Deliberately has no "upload" action, and that is the honest shape rather than a missing feature.
+ * The server requires a `dealId` on both endpoints, and nothing on disk says which deal an orphaned
+ * walk belongs to — `findRecoverableWalks` documents exactly this. A button that appeared to file
+ * these would either guess a deal (filing a site visit against the wrong project, which nobody
+ * would catch until a scope came back wrong) or fail. Telling someone the media exists and is safe
+ * is the whole of what can be truthfully offered until a deal can be chosen.
+ *
+ * Reads the snapshot taken by `(app)/_layout.tsx` at shell mount rather than scanning here: an
+ * ACTIVE walk has no manifest entry either, so a scan run while recording would report the live
+ * walk as orphaned.
+ */
+function RecoverableWalksCard() {
+  const recoverable = getRecoverableWalksFromStartup();
+  if (recoverable.length === 0) return null;
+
+  const stills = recoverable.reduce((sum, w) => sum + w.stillUris.length, 0);
+  const videos = recoverable.filter((w) => w.videoUri).length;
+
+  return (
+    <Card style={styles.card}>
+      <View style={styles.settingRow}>
+        <View style={[styles.pairingDot, { backgroundColor: theme.color.warning }]} />
+        <View style={styles.settingText}>
+          <Text style={styles.settingTitle}>
+            {recoverable.length} unfinished walk{recoverable.length === 1 ? "" : "s"} on this device
+          </Text>
+          <Text style={styles.settingHint}>
+            {videos > 0 ? `${videos} recording${videos === 1 ? "" : "s"}` : "No video"}
+            {stills > 0 ? ` and ${stills} photo${stills === 1 ? "" : "s"}` : ""} were captured but
+            never sent — the app closed before the walk finished. Nothing is lost, but they aren't
+            attached to a project yet. Mention this to support so they can be filed.
+          </Text>
+        </View>
+      </View>
+    </Card>
+  );
+}
+
 const ROLE_LABEL: Record<string, string> = {
   admin: "Admin",
   director: "Director",
@@ -386,6 +433,7 @@ export default function ProfileScreen() {
 
         <PairingRow />
         <FailedWalksCard />
+        <RecoverableWalksCard />
 
         <Button
           title="Create Support Ticket"

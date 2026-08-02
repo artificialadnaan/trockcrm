@@ -383,6 +383,43 @@ export async function getRecoverableWalkCount(ownerKey: string): Promise<number>
   return (await findRecoverableWalks(ownerKey)).length;
 }
 
+/**
+ * The cold-start scan, taken once and remembered.
+ *
+ * `findRecoverableWalks` is only meaningful before any walk could be recording — an ACTIVE walk has
+ * no manifest entry either (it is not enqueued until terminal), so scanning mid-recording reports
+ * the live walk as orphaned. `walk.tsx` is a hidden `Tabs.Screen` that never unmounts, so a screen
+ * that scanned on focus would hit exactly that case the moment someone opened Profile mid-walk.
+ *
+ * Running once at app launch, before anything can be recording, is the only window where the answer
+ * is trustworthy. Everything after that reads this snapshot.
+ */
+let recoverableAtStartup: RecoveredWalk[] | null = null;
+
+/** Called once from the root layout's startup effect. Best-effort; never throws. */
+export async function scanRecoverableWalksAtStartup(ownerKey: string): Promise<void> {
+  if (recoverableAtStartup !== null) return;
+  try {
+    recoverableAtStartup = await findRecoverableWalks(ownerKey);
+  } catch {
+    // A failed scan must never block launch. Left null so a later launch can retry rather than
+    // caching an empty result that would hide real orphans for the rest of the session.
+  }
+}
+
+/**
+ * What the startup scan found, or an empty list if it never ran or failed. Safe to call at any time
+ * — it reads the snapshot rather than re-scanning, so it cannot mistake a live walk for an orphan.
+ */
+export function getRecoverableWalksFromStartup(): RecoveredWalk[] {
+  return recoverableAtStartup ?? [];
+}
+
+/** Test seam: forget the snapshot so the next `scanRecoverableWalksAtStartup` actually scans. */
+export function __resetRecoverableStartupScanForTests(): void {
+  recoverableAtStartup = null;
+}
+
 /** A file's own last-modified time in epoch ms, or `fallback` if it can't be read — see
  *  toRecoveredQueuedWalk's doc comment (upload-core.ts) for why a recovered artifact's captured-at
  *  should be the file's own timestamp, not the moment recovery happened, whenever the platform can

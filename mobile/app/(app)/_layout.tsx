@@ -5,6 +5,8 @@ import { Ionicons } from "@expo/vector-icons";
 import { useAuth } from "../../src/auth/AuthContext";
 import { buildLoginReturnTo } from "../../src/navigation/return-to";
 import { theme } from "../../src/theme/theme";
+import { walkOwnerKey } from "../../src/walkthrough/owner-key";
+import { scanRecoverableWalksAtStartup } from "../../src/walkthrough/upload";
 
 // Monochrome vector icons so the active tab icon inherits tabBarActiveTintColor
 // (brand red) in lockstep with its label — the emoji glyphs never picked up the tint.
@@ -15,7 +17,24 @@ function TabIcon({ name, color }: { name: IoniconName; color: string }) {
 
 /** Authenticated tab shell (Projects / Capture / Profile) — replaces FieldLayout. */
 export default function AppLayout() {
-  const { ready, token } = useAuth();
+  const { ready, token, user, activeOfficeId } = useAuth();
+
+  // Scan once for walk recordings that were interrupted before they could be queued — an app kill
+  // mid-recording, or after native finalised but before the enqueue effect ran, leaves files under
+  // Documents/walkthroughs/ that nothing else would ever look for.
+  //
+  // It runs HERE rather than on Profile because the scan is only trustworthy before anything could
+  // be recording: an active walk has no manifest entry either (it is not enqueued until terminal),
+  // so scanning mid-walk would report the live recording as orphaned. This layout mounts on entry
+  // to the authenticated shell, before any walk screen can exist; Profile then reads the snapshot
+  // rather than re-scanning.
+  React.useEffect(() => {
+    if (!token) return;
+    const ownerKey = walkOwnerKey(user?.id, activeOfficeId ?? user?.tenantId ?? null);
+    if (!ownerKey) return;
+    void scanRecoverableWalksAtStartup(ownerKey);
+  }, [token, user?.id, user?.tenantId, activeOfficeId]);
+
   // Capture where the user was headed (e.g. the corrective-action deep link) so a required login can return
   // them there. This is the single chokepoint for BOTH a cold-start deep link (app not running → OS opens
   // the link → this layout mounts with no token) and a warm one (session expired mid-session). usePathname
