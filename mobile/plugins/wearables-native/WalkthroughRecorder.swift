@@ -1,19 +1,31 @@
 /*
- * Records a walkthrough: glasses video muxed with HFP audio into one walk.mp4, plus stills on
- * demand.
+ * Records a walkthrough: glasses video muxed with PHONE-microphone audio into one walk.mp4,
+ * plus stills on demand.
  *
  * Separate from WearablesBridge deliberately. That file owns the diagnostic ladder and is
  * already large; this owns a session with a lifetime, and mixing the two would put a
  * long-running recording next to one-shot measurements in the same object.
  *
- * The start sequence is Meta's documented order and is NOT rearrangeable: the stream is created
- * but not started, HFP is brought up and allowed to settle, and only then does the stream start.
- * Starting the stream first makes the audio route fail silently. Everything this file adds for
- * video+audio muxing slots into that sequence at the same point AVAudioRecorder used to sit —
- * after HFP has settled, before stream.start() — and does not change the sequence itself.
+ * WHY THE PHONE'S MICROPHONE AND NOT THE GLASSES'. Measured 2026-08-01, four real walks and
+ * three diagnostic rungs:
+ *
+ *   HFP audio + DAT video   video dies after 3-8s, every walk. The writer was accepting every
+ *                           frame it was handed (239 received, 239 appended, 0 dropped) — the
+ *                           glasses stopped sending.
+ *   video, no audio at all  a steady 30fps for a full 60s.
+ *   video + phone mic       a steady 30fps for a full 60s, recording at 48 kHz.
+ *
+ * So the conflict is the Bluetooth PROFILE SWITCH, not recording. Asking for HFP forces the
+ * glasses' radio into hands-free mode and starves the video transport. It is also an upgrade
+ * rather than a compromise: HFP caps at 16 kHz mono against the phone's 48 kHz. The remaining
+ * tradeoff is physical — a phone in hand is excellent, a phone in a pocket is muffled.
+ *
+ * Meta's documented ordering constraint (stream created but not started, audio configured and
+ * settled, only then stream.start()) is still honoured. It was written for HFP, and this no
+ * longer uses HFP, but the sequence costs nothing and the failure it prevents is silent.
  *
  * THE MUXING PROBLEM: the DAT stream carries video only (its `videoFramePublisher` delivers
- * `VideoFrame`s wrapping a `CMSampleBuffer`); HFP audio arrives entirely separately, from
+ * `VideoFrame`s wrapping a `CMSampleBuffer`); audio arrives entirely separately, from
  * `AVAudioEngine`'s input node tap. These are two independent pipelines — one from the glasses'
  * own transport via Meta's SDK, one from CoreAudio — and nothing here can prove they share a
  * clock domain. Trusting each source's own embedded timestamp would let them silently drift, or
@@ -118,30 +130,49 @@ final class WalkthroughRecorder: RCTEventEmitter {
           self?.deliverStill(photo)
         }
 
-        // Meta step: HFP up and settled while the stream is still stopped.
-        try audio.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothHFP])
+        // Audio comes from the PHONE, and the absent option is the point.
+        //
+        // Measured on hardware 2026-08-01, across four real walks and three diagnostic rungs:
+        //   - HFP audio + DAT video: video dies after 3-8 seconds, every time. The writer was
+        //     accepting every frame it was handed (239 received, 239 appended, 0 dropped) — the
+        //     glasses simply stopped sending.
+        //   - Video with no audio session at all: a steady 30fps for a full 60 seconds.
+        //   - Video with the PHONE's microphone recording: also a steady 30fps for 60 seconds,
+        //     at 48 kHz.
+        //
+        // So the conflict is the Bluetooth PROFILE SWITCH, not recording. Requesting HFP forces
+        // the glasses' radio into hands-free mode and starves the video transport. Leaving
+        // `.allowBluetoothHFP` out keeps the glasses doing nothing but video.
+        //
+        // This is an UPGRADE, not a compromise: HFP caps at 16 kHz mono, the phone records at
+        // 48 kHz. The tradeoff is physical rather than technical — a phone in hand is excellent,
+        // a phone in a pocket is muffled and full of clothing noise.
+        try audio.setCategory(.playAndRecord, mode: .default, options: [])
         try audio.setActive(true)
-        let routeDeadline = Date().addingTimeInterval(3)
-        while !audio.currentRoute.inputs.contains(where: { $0.portType == .bluetoothHFP }),
-              Date() < routeDeadline {
-          try? await Task.sleep(nanoseconds: 100_000_000)
-        }
+        // A moment to settle. There is no specific port to wait FOR here — unlike HFP, the
+        // built-in microphone is already the default — but the route still switches when the
+        // category changes, and reading it mid-switch reports the old one.
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
         let input = audio.currentRoute.inputs.first
-        guard input?.portType == .bluetoothHFP else {
-          // Refuse rather than record silently. A walk with no glasses audio is a wasted site
-          // visit, and the estimator will not discover it until the scope comes back empty.
+        // The guard is INVERTED from what it used to be. It once refused unless the route was the
+        // glasses; the glasses are now exactly what must not be selected, because HFP is what
+        // kills the video. If they are somehow chosen anyway, a walk would record 3 seconds of
+        // video and nobody would find out until the file was inspected.
+        guard input?.portType != .bluetoothHFP else {
           await teardown()
           reject(
-            "walk_no_hfp",
-            "Audio would record from \(input?.portName ?? "an unknown input"), not the glasses. "
-              + "Connect them over Bluetooth and start again.",
+            "walk_route_is_glasses",
+            "Audio would record from the glasses over Bluetooth HFP, which stops the video stream "
+              + "after a few seconds. Disconnect the glasses as an audio device (they stay "
+              + "connected for video) and start again.",
             nil
           )
           return
         }
 
         // The writer and both its inputs are built only now: video's dimensions were known all
-        // along, but audio's format is only known once HFP has settled, and AVAssetWriter
+        // along, but audio's format is only known once the route has settled, and AVAssetWriter
         // requires every input to be added before startWriting() — so there is no point building
         // either input before this moment.
         let videoUrl = dir.appendingPathComponent("walk.mp4")
@@ -161,7 +192,7 @@ final class WalkthroughRecorder: RCTEventEmitter {
         }
         writer.add(vInput)
 
-        // AVAudioEngine's input node is configured only now, against the HFP route that just
+        // AVAudioEngine's input node is configured only now, against the route that just
         // settled above. Building it any earlier would ask the engine to describe a route that
         // has not switched over yet — the same "asked too early" mistake Meta's ordering
         // constraint exists to prevent, one layer further down.
@@ -170,7 +201,8 @@ final class WalkthroughRecorder: RCTEventEmitter {
         let recordingFormat = inputNode.outputFormat(forBus: 0)
         let aInput = AVAssetWriterInput(mediaType: .audio, outputSettings: [
           AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
-          // Whatever HFP actually negotiated — 16 kHz mono is expected, but this reads the
+          // Whatever the route actually negotiated — 48 kHz mono is expected from the phone's
+          // microphone, but this reads the
           // format the hardware reports rather than assuming it.
           AVSampleRateKey: recordingFormat.sampleRate,
           AVNumberOfChannelsKey: Int(recordingFormat.channelCount),
@@ -322,8 +354,9 @@ final class WalkthroughRecorder: RCTEventEmitter {
     }
   }
 
-  /// Stop everything and hand the glasses back. HFP and A2DP are mutually exclusive, so an audio
-  /// session left active pins the glasses in HFP and every other app's playback through them
+  /// Stop everything and release the audio session. This no longer requests HFP, so the glasses
+  /// are not pinned into hands-free mode — but an active session still holds the microphone away
+  /// from every other app, and releasing it
   /// stays 8 kHz mono.
   ///
   /// Always cancels the video writer rather than finishing it. `endWalk` finalizes the writer
