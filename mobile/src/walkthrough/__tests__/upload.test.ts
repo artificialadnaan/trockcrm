@@ -141,6 +141,7 @@ import {
   type WalkQueueMeta,
   type WalkthroughUploadClient,
 } from "../upload";
+import { noteWalkTeardown } from "../walk-teardown";
 
 const fs = FileSystem as unknown as {
   __store: Map<string, string>;
@@ -1095,6 +1096,19 @@ describe("findRecoverableWalks / getRecoverableWalkCount", () => {
       expect(recovered!.unfinishedVideo).toBe(true);
     });
 
+    it("is not offered when the moov box claims more bytes than the file actually holds", async () => {
+      // The exact window this whole check exists for. AVAssetWriter writes a box's HEADER before its
+      // body, so a kill DURING finishWriting leaves a moov that announces itself and then stops —
+      // and a scan that answered on the header alone would call that file finalized and hand the
+      // office a video that opens to nothing, which is worse than reporting no video at all.
+      seedVideoFile(`${orphanDir}walk.mp4`, FINALIZED_MP4.slice(0, FINALIZED_MP4.length - 400));
+      fs.__store.set(`${orphanDir}still-001.jpg`, "a");
+
+      const [recovered] = await findRecoverableWalks(OWNER);
+      expect(recovered!.videoUri).toBeNull();
+      expect(recovered!.unfinishedVideo).toBe(true);
+    });
+
     it("files only the stills when the estimator picks a project for it", async () => {
       seedVideoFile(`${orphanDir}walk.mp4`, UNFINALIZED_MP4);
       fs.__store.set(`${orphanDir}still-001.jpg`, "a");
@@ -1111,6 +1125,70 @@ describe("findRecoverableWalks / getRecoverableWalkCount", () => {
       // Cleanup still takes the whole directory, so the unusable file does not resurface as a fresh
       // orphan on every launch for the rest of the phone's life.
       expect(fs.__store.has(`${orphanDir}walk.mp4`)).toBe(false);
+    });
+  });
+
+  // ── Round-9 FINDING 2 (P1): the scan races a teardown this same process is still running ───────
+  //
+  // Every other case here is a directory nobody is touching — an app kill writes nothing more, so
+  // reading it once and freezing the verdict is honest. Sign-out is the one interruption that leaves
+  // this process alive: useWalk's unmount fires Recorder.endWalk() DETACHED (the hook and its screen
+  // are already gone, so there is nothing left to await it), and native finalizes on a background
+  // Task afterwards. Sign back in before that lands — seconds, on the same device — and the new
+  // shell's scan reads walk.mp4 before its moov exists and records "unfinished" for a recording that
+  // was about to be perfectly valid. The snapshot is deliberately taken once per shell lifecycle, so
+  // that wrong answer is the answer for the whole session.
+  describe("a walk whose native teardown is still running", () => {
+    it("waits it out rather than freezing a verdict on a file mid-finishWriting", async () => {
+      const dir = `${DOC}walkthroughs/walk-signout/`;
+      seedVideoFile(`${dir}walk.mp4`, UNFINALIZED_MP4); // the moov has not been appended yet
+      fs.__store.set(`${dir}still-001.jpg`, "a");
+
+      let finishWriting!: () => void;
+      const teardown = new Promise<void>((resolve) => {
+        finishWriting = () => {
+          seedVideoFile(`${dir}walk.mp4`, FINALIZED_MP4); // what native was in the middle of doing
+          resolve();
+        };
+      });
+      noteWalkTeardown("walk-signout", teardown);
+
+      const scan = findRecoverableWalks(OWNER);
+      // Late enough that a scan which did not wait has already read the file and answered.
+      const landing = setTimeout(finishWriting, 20);
+      const [recovered] = await scan;
+      clearTimeout(landing);
+
+      expect(recovered!.videoUri).toBe(`${dir}walk.mp4`);
+      expect(recovered!.unfinishedVideo).toBe(false);
+    });
+
+    it("leaves a directory out of the answer entirely when the teardown never finishes", async () => {
+      // The bounded wait has to end somewhere, and what it must NOT do at the end is guess. Both
+      // halves of this directory are still unsettled — native's awaitPendingStills can drop another
+      // still-NNN.jpg into it seconds after the last video byte — so there is no field the scan
+      // could fill in honestly. Omitting it costs one session's visibility; the files are untouched
+      // and the next launch, with nothing in flight, classifies them correctly.
+      jest.useFakeTimers();
+      const dir = `${DOC}walkthroughs/walk-wedged/`;
+      seedVideoFile(`${dir}walk.mp4`, UNFINALIZED_MP4);
+      fs.__store.set(`${dir}still-001.jpg`, "a");
+      let release!: () => void;
+      noteWalkTeardown(
+        "walk-wedged",
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+      );
+      try {
+        const scan = findRecoverableWalks(OWNER);
+        await jest.advanceTimersByTimeAsync(120_000);
+        expect(await scan).toEqual([]);
+      } finally {
+        release(); // never leave a pending claim behind for the rest of the file
+        jest.useRealTimers();
+        await Promise.resolve();
+      }
     });
   });
 });

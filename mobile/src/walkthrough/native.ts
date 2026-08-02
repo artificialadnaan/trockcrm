@@ -7,6 +7,7 @@
  */
 import { NativeEventEmitter, NativeModules, Platform } from "react-native";
 import type { StillSource } from "./session";
+import { noteWalkTeardown } from "./walk-teardown";
 
 const native = NativeModules.WalkthroughRecorder as WalkthroughNativeModule | undefined;
 
@@ -99,10 +100,34 @@ function require_(): WalkthroughNativeModule {
   return native;
 }
 
+/**
+ * The walkId the next `endWalk()` is tearing down — the only state this module keeps, and not a
+ * lifecycle: native's recorder is a singleton holding ONE walk slot (claimWalkSlot/teardown in
+ * WalkthroughRecorder.swift), so "the last walk started" is not an inference, it is the walk.
+ *
+ * Kept so `endWalk` can name the directory it is still writing. See ./walk-teardown.ts for who asks
+ * and why the answer cannot be read off the files instead.
+ */
+let startedWalkId: string | null = null;
+
 export const Recorder = {
-  startWalk: (walkId: string) => require_().startWalk(walkId),
+  startWalk: (walkId: string) => {
+    // Before the call, not after it resolves: native creates walkthroughs/<walkId>/ during
+    // startWalk, so from this line on the directory is this process's to account for.
+    startedWalkId = walkId;
+    return require_().startWalk(walkId);
+  },
   captureStill: () => require_().captureStill(),
-  endWalk: () => require_().endWalk(),
+  endWalk: () => {
+    const teardown = require_().endWalk();
+    // Registered at the WRAPPER rather than by the two callers in useWalk that issue teardowns —
+    // the detached unmount one and an end() tapped just before sign-out are both races, and a
+    // registration a caller can forget fails silently as a walk mislabelled unplayable months later.
+    // Nothing to register before a walk has ever started in this process; a stray endWalk there
+    // tears down nothing.
+    if (startedWalkId !== null) noteWalkTeardown(startedWalkId, teardown);
+    return teardown;
+  },
 };
 
 /**

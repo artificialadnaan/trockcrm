@@ -49,8 +49,30 @@ export function formatWalkDateTime(atMs: number): string {
  * is set), so callers only need a defensive fallback for the type, not the real-world case.
  */
 export function deriveWalkTitle(targetName: string, atMs: number): string {
-  const title = `${targetName} — ${formatWalkDateTime(atMs)}`;
-  return title.length <= MAX_TITLE_CHARS ? title : title.slice(0, MAX_TITLE_CHARS);
+  return clampedTitle(targetName, ` — ${formatWalkDateTime(atMs)}`);
+}
+
+/**
+ * `name + suffix` within MAX_TITLE_CHARS, taking the overflow out of the NAME.
+ *
+ * Slicing the composed string is the obvious way and it removes the wrong end. Everything these
+ * titles append — the timestamp, and "(recovered)" — sits at the tail, so exactly the case
+ * MAX_TITLE_CHARS exists for (a name long enough to need clamping at all) silently deleted the one
+ * part of the title that is not recoverable from anywhere else. The target name IS recoverable: it
+ * sits in full on the deal the walk files against, while the office reads this line to learn WHEN
+ * the visit happened and whether it was reconstructed. So the name is what gets cut, and the suffix
+ * survives intact rather than half-formed.
+ *
+ * `trimEnd` so a cut landing mid-word does not leave "Building  — 30 Jul 2026" with the name's own
+ * trailing space doubling the separator. The degenerate `budget <= 0` branch is unreachable with any
+ * suffix this module composes (the longest is a few dozen characters) and exists only so a future
+ * caller with a pathological suffix gets a clamped string rather than one over the server's cap —
+ * which is the failure this whole clamp is here to prevent.
+ */
+function clampedTitle(name: string, suffix: string): string {
+  const budget = MAX_TITLE_CHARS - suffix.length;
+  if (budget <= 0) return `${name}${suffix}`.slice(0, MAX_TITLE_CHARS);
+  return name.length <= budget ? `${name}${suffix}` : `${name.slice(0, budget).trimEnd()}${suffix}`;
 }
 
 /** What the office reads where a date would be, when nobody can say. Shared verbatim with the
@@ -72,15 +94,17 @@ export const UNKNOWN_WALK_TIME = "Time unknown";
  * and drops it entirely when one instant is all it has). An unknown time has to survive the whole
  * way through, or the card's honesty stops at the screen.
  *
- * "(recovered)" and the time are composed BEFORE the clamp, never appended after one. deriveWalkTitle
- * clamps to the server's MAX_TITLE_CHARS, and anything added past that clamp pushes a maximal title
- * one character over — a permanent 400 on the completion call, hit only after every artifact is
- * already in R2, which is exactly when the walk can no longer be saved by retrying.
+ * "(recovered)" and the time are composed BEFORE the clamp, never appended after one, and the clamp
+ * itself (clampedTitle) takes its bytes out of `targetName` so both survive whatever the name is.
+ * Either half alone loses the property: appending after the clamp pushes a maximal title one
+ * character over MAX_TITLE_CHARS — a permanent 400 on the completion call, hit only after every
+ * artifact is already in R2, which is exactly when the walk can no longer be saved by retrying —
+ * while clamping the composed string throws away the marker and the time, i.e. everything this
+ * function exists to say, on a walk whose project happens to have a long name.
  */
 export function deriveRecoveredWalkTitle(targetName: string, atMs: number | null): string {
   const when = atMs === null ? UNKNOWN_WALK_TIME : formatWalkDateTime(atMs);
-  const title = `${targetName} (recovered) — ${when}`;
-  return title.length <= MAX_TITLE_CHARS ? title : title.slice(0, MAX_TITLE_CHARS);
+  return clampedTitle(targetName, ` (recovered) — ${when}`);
 }
 
 /** The deal's property address when known, else "" (never undefined/null — the wire type is a

@@ -47,10 +47,13 @@ describe("deriveWalkTitle", () => {
     );
   });
 
-  it("clamps an unreasonably long target name so the server's title cap can never be exceeded", () => {
-    const longName = "X".repeat(400);
-    const title = deriveWalkTitle(longName, AT_MS);
+  // Length alone is not the property. A whole-string slice keeps the cap and eats the timestamp off
+  // the end — which is the only part of this title the office cannot reconstruct from anywhere else,
+  // and the part the estimator's own name for the job is the least useful substitute for.
+  it("clamps the target NAME, so the date survives however long the name is", () => {
+    const title = deriveWalkTitle("X".repeat(400), AT_MS);
     expect(title.length).toBeLessThanOrEqual(300);
+    expect(title.endsWith(" — 30 Jul 2026, 9:15 PM")).toBe(true);
   });
 });
 
@@ -78,9 +81,19 @@ describe("deriveRecoveredWalkTitle", () => {
   // it. Appending afterwards is how a maximal title goes one character over MAX_TITLE_CHARS and 400s
   // the completion call — after every artifact is already in R2, i.e. at the one point where the
   // failure costs the whole upload and cannot be retried into success.
-  it("clamps to the server's title cap with the recovered marker and an unknown time in place", () => {
-    expect(deriveRecoveredWalkTitle("X".repeat(400), null).length).toBeLessThanOrEqual(300);
-    expect(deriveRecoveredWalkTitle("X".repeat(400), AT_MS).length).toBeLessThanOrEqual(300);
+  //
+  // Composing first is only half of it. Slicing the composed string then removes the marker and the
+  // time from the END, which is the same loss by a different route — and a 300-character project
+  // name is not exotic enough to spend the one property this function exists for on. So the clamp
+  // takes the NAME, and the two things nothing downstream can reconstruct are what survive it.
+  it("clamps the target name, keeping the recovered marker and the unknown time intact", () => {
+    const unknown = deriveRecoveredWalkTitle("X".repeat(400), null);
+    expect(unknown.length).toBeLessThanOrEqual(300);
+    expect(unknown.endsWith(` (recovered) — ${UNKNOWN_WALK_TIME}`)).toBe(true);
+
+    const dated = deriveRecoveredWalkTitle("X".repeat(400), AT_MS);
+    expect(dated.length).toBeLessThanOrEqual(300);
+    expect(dated.endsWith(" (recovered) — 30 Jul 2026, 9:15 PM")).toBe(true);
   });
 });
 

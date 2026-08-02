@@ -56,6 +56,7 @@ import {
   type WalkArtifactKind,
   type WalkQueueMeta,
 } from "./upload-core";
+import { settleWalkTeardowns, walkTeardownsInFlight } from "./walk-teardown";
 
 export {
   MAX_IDEMPOTENCY_KEY_LENGTH,
@@ -412,6 +413,13 @@ export type RecoveredWalk = {
   captureSpanMs: number | null;
 };
 
+/** How long the scan will wait on a native teardown this process still has running before giving up
+ *  on it (see ./walk-teardown.ts). Sized against what endWalk actually does: finalize the writer,
+ *  plus awaitPendingStills' own 5-second ceiling on a photo still in transit. Fifteen seconds is
+ *  several times the realistic worst case and still short enough that a wedged native call cannot
+ *  keep the recovery card — the only surface these files can be saved from — off the screen. */
+const WALK_TEARDOWN_SETTLE_MS = 15_000;
+
 /**
  * Scan Documents/walkthroughs/ for artifact directories with no entry in `ownerKey`'s manifest — the
  * crash window Fix 3 closes: an app kill during recording, or after native finalizes but before
@@ -428,8 +436,21 @@ export type RecoveredWalk = {
  * cold start, before useWalk.ts mounts). A directory for a walk that's ACTIVELY being recorded has no
  * manifest entry yet EITHER — it isn't enqueued until it reaches a terminal state — so calling this
  * mid-recording would false-positive the live walk as "recoverable."
+ *
+ * "Nothing is recording" is NOT "nothing is being written", and the gap between them is a sign-out.
+ * useWalk's unmount fires Recorder.endWalk() detached, so signing out mid-walk and back in seconds
+ * later puts a new shell's scan against a directory native has not finished with — walk.mp4 with no
+ * moov yet, and awaitPendingStills still able to add a still-NNN.jpg. Reading it then and freezing
+ * "unfinished video" into the session's snapshot mislabels a recording that was about to be valid,
+ * which on this path is unrecoverable in the only sense that matters: nobody re-walks a site because
+ * an app said the video was broken. So the teardown is waited out first, and any walk still being
+ * torn down when the budget runs out is left OUT of the answer rather than described wrongly.
  */
 export async function findRecoverableWalks(ownerKey: string): Promise<RecoveredWalk[]> {
+  await settleWalkTeardowns(WALK_TEARDOWN_SETTLE_MS);
+  // Read after the wait: whatever is still here outlasted the budget, and its directory is the one
+  // thing on disk this function cannot make a truthful statement about.
+  const stillTearingDown = new Set(walkTeardownsInFlight());
   const knownWalkIds = await claimedWalkIds(ownerKey);
   let dirNames: string[];
   try {
@@ -440,6 +461,11 @@ export async function findRecoverableWalks(ownerKey: string): Promise<RecoveredW
 
   const recovered: RecoveredWalk[] = [];
   for (const walkId of selectOrphanedWalkDirs(dirNames, knownWalkIds)) {
+    // Declining to classify, not hiding it. Every field this function would fill — the video's
+    // verdict, the still list, the recorded time — is still moving, so a row for it would be a
+    // guess dressed as a reading, cached for the whole shell lifecycle. The bytes are untouched and
+    // unclaimed, so the next launch (where nothing is in flight) describes them correctly.
+    if (stillTearingDown.has(walkId)) continue;
     let fileNames: string[];
     try {
       fileNames = await FileSystem.readDirectoryAsync(walkDirUri(walkId));
@@ -551,7 +577,9 @@ const MAX_MP4_BOX_SCAN = 32;
  * few ranged reads regardless of how long the recording is. `mdat` is skipped by its declared length,
  * never scanned. Any read failure, malformed header, or length that runs past the end of the file
  * ends the walk as "not finalized" — every one of those means the chain cannot be followed to a moov,
- * which is the same thing.
+ * which is the same thing. A moov the file does not actually CONTAIN is the same thing too; see the
+ * fit check inside the loop, which is what makes the answer a statement about the file rather than
+ * about one header in it.
  */
 async function isFinalizedMp4(uri: string): Promise<boolean> {
   let fileSize: number;
@@ -582,6 +610,18 @@ async function isFinalizedMp4(uri: string): Promise<boolean> {
     }
     const parsed = readMp4BoxHeader(header);
     if (parsed === null) return false;
+    // A declared box has to FIT INSIDE the file, and that is checked before the type is trusted for
+    // anything — most of all for the moov. AVAssetWriter writes a box's header before its body, so a
+    // kill during finishWriting — the precise window this function exists to detect — leaves a moov
+    // that announces a size the file never received. Answering on the header alone declared that file
+    // finalized and offered the office a video that opens to nothing, which is the one outcome worse
+    // than reporting no video at all: it arrives looking like a successful site visit.
+    //
+    // Applied to every box rather than just the moov, because a chain that does not fit inside its own
+    // file is not a container anyone can follow. An `mdat` whose length was stamped before the samples
+    // arrived walks the offset past EOF; the loop's own guard caught that one iteration later, but only
+    // by accident of the next read, and "the box before it lied about its size" is the same verdict.
+    if (offset + parsed.size > fileSize) return false;
     if (parsed.type === "moov") return true;
     offset += parsed.size;
   }
@@ -629,6 +669,10 @@ export async function getRecoverableWalkCount(ownerKey: string): Promise<number>
  * Entering the authenticated shell — which every walk screen mounts UNDER, and therefore after — is
  * the window where the answer is trustworthy. Everything until that shell goes away reads this
  * snapshot rather than re-scanning.
+ *
+ * "After the walk screen unmounted" is not the same as "after native stopped writing", and on a
+ * sign-out/sign-in it is seconds short of it — findRecoverableWalks closes that half itself rather
+ * than the shell trying to time its mount, since the shell has no way to know.
  *
  * Once per shell, NOT once per process, and the difference is the whole point of `scannedOwnerKey`
  * and `forgetRecoverableWalksAtStartup` below. A module variable outlives sign-out: the process is

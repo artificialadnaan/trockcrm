@@ -577,14 +577,27 @@ final class WalkthroughRecorder: RCTEventEmitter {
       // this walk, and reporting the pre-wait count would undercount exactly the photo this wait
       // exists to save.
       let stills = stillIndex
+      let finalized: Bool
+      if case .success = result { finalized = true } else { finalized = false }
       // `.keep`, and this is the one call site where that is true. Everything in
       // `walkthroughs/<walkId>/` by now is the site visit itself — the finalized walk.mp4 and every
       // still — and none of it has been uploaded: the JS queue reads these files off disk AFTER
       // this resolves. `.discard` here would delete the recording on the way to reporting success.
-      // Kept on the finalize-FAILURE path too: a truncated walk.mp4 and the stills beside it are
-      // still the only record of a walk nobody can repeat, and upload.ts's recovery scan is exactly
-      // the mechanism that gets them back.
-      await teardown(.keep)
+      // Kept on the finalize-FAILURE path too whenever a still made it to disk: a truncated walk.mp4
+      // and the photos beside it are still the only record of a walk nobody can repeat, and
+      // upload.ts's recovery scan is exactly the mechanism that gets them back.
+      //
+      // A failed finalize with ZERO stills is the one case where that reasoning runs out, and the
+      // difference is not tidiness — it is that NOTHING can ever open the directory again. JS never
+      // queues a walk whose endWalk rejected (no videoUri to enqueue), and the recovery scan now
+      // reads the container itself: an unfinalized walk.mp4 is refused, and a directory holding
+      // nothing but a refused video is skipped rather than offered. So keeping it leaves bytes that
+      // every path on the phone agrees to ignore, accumulating for the life of the install on a
+      // device whose storage is the reason walks get deleted after upload in the first place.
+      // Discarding a recording is the graver mistake, so this asks for a still — one photo of the
+      // site is a reason to keep everything — and only discards when the walk produced neither a
+      // finished video nor a single frame anyone could look at.
+      await teardown(finalized || stills > 0 ? .keep : .discard)
 
       switch result {
       case .success(let url):
@@ -608,13 +621,14 @@ final class WalkthroughRecorder: RCTEventEmitter {
   /// than given a default, because the two cases are one word apart and picking the wrong one
   /// deletes a finished site visit.
   private enum WalkDirectoryDisposition {
-    /// A `startWalk` that failed. Nothing in the directory is a recording — at most a `walk.mp4`
-    /// the writer never appended a single sample to — and leaving it is not merely untidy. At
-    /// login, `upload.ts`'s `findRecoverableWalks` scans `Documents/walkthroughs/` for directories
-    /// with no manifest entry and offers them to the estimator as recoverable recordings. A
-    /// directory abandoned by a failed start has exactly that shape, so leaving one behind
-    /// manufactures a phantom "recoverable" walk holding nothing the user can act on — and does it
-    /// on the one path where the app has ALREADY told them the walk could not start.
+    /// A walk that produced nothing anyone can look at: a `startWalk` that failed, or an `endWalk`
+    /// whose finalize failed without a single still on disk. Nothing in the directory is a
+    /// recording — at most a `walk.mp4` the writer never finished — and leaving it is not merely
+    /// untidy. At login, `upload.ts`'s `findRecoverableWalks` scans `Documents/walkthroughs/` for
+    /// directories with no manifest entry; it refuses an unfinalized `walk.mp4` and skips a
+    /// directory left holding only that, so nothing on the phone will ever open one of these again.
+    /// A failed start additionally reaches this on the one path where the app has ALREADY told the
+    /// user the walk could not start, where a phantom "recoverable" walk contradicts it outright.
     case discard
     /// An `endWalk` that ran. The directory holds the walk this whole file exists to produce, and
     /// the upload queue reads those files off disk afterwards.
