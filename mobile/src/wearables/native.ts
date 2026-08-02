@@ -117,6 +117,29 @@ export type StreamEnduranceMeasurement = {
   audioSessionUsed: false;
 };
 
+/**
+ * Glasses video with the PHONE's microphone instead of the glasses'.
+ *
+ * Rung 11 showed video sustains a full minute alone and dies at 3-8s under HFP, so the conflict
+ * is the Bluetooth profile switch rather than audio recording. Recording on the phone never puts
+ * the glasses into hands-free mode — and at 48 kHz it is better audio than HFP's 16 kHz ceiling,
+ * provided the phone is in hand rather than a pocket.
+ *
+ * `inputPortType` is load-bearing: if the route picked the glasses anyway this re-measured HFP
+ * and the result means nothing, so native refuses rather than reporting it.
+ */
+export type PhoneAudioStreamMeasurement = {
+  secondsObserved: number;
+  framesPerSecond: number[];
+  totalFrames: number;
+  secondsToLastFrame: number;
+  inputPortName: string;
+  inputPortType: string;
+  negotiatedSampleRate: number;
+  audioBytes: number;
+  audioFileUri: string;
+};
+
 type WearablesNativeModule = {
   configure(): Promise<ConfigureResult>;
   capabilities(): Promise<Capabilities>;
@@ -124,6 +147,7 @@ type WearablesNativeModule = {
   diagnose(): Promise<Diagnosis>;
   checkHfpWithStream(): Promise<HfpStreamCheck>;
   measureStreamWithoutAudio(seconds: number): Promise<StreamEnduranceMeasurement>;
+  measureStreamWithPhoneAudio(seconds: number): Promise<PhoneAudioStreamMeasurement>;
   checkPhoneCameraDuringHfp(): Promise<PhoneCameraCheck>;
   startRegistration(): Promise<{ started: boolean }>;
   handleUrl(url: string): Promise<{ handled: boolean }>;
@@ -153,6 +177,7 @@ export const Wearables = {
   diagnose: () => require_().diagnose(),
   checkHfpWithStream: () => require_().checkHfpWithStream(),
   measureStreamWithoutAudio: (seconds: number) => require_().measureStreamWithoutAudio(seconds),
+  measureStreamWithPhoneAudio: (seconds: number) => require_().measureStreamWithPhoneAudio(seconds),
   checkPhoneCameraDuringHfp: () => require_().checkPhoneCameraDuringHfp(),
   startRegistration: () => require_().startRegistration(),
   handleUrl: (url: string) => require_().handleUrl(url),

@@ -1046,6 +1046,143 @@ final class WearablesBridge: RCTEventEmitter {
   }
 }
 
+extension WearablesBridge {
+  // MARK: - 12. Glasses video + PHONE microphone
+
+  /// The question rung 11's answer raises.
+  ///
+  /// Rung 11 established that video sustains a full minute alone and dies at 3-8 seconds once HFP
+  /// is active — so the conflict is the Bluetooth PROFILE SWITCH, not audio recording as such.
+  /// HFP forces the glasses' radio into hands-free mode, and that is what starves the video
+  /// transport.
+  ///
+  /// Recording from the PHONE's microphone never touches the glasses' radio: no
+  /// `.allowBluetoothHFP`, no profile switch, the glasses doing nothing but video. If frames
+  /// still sustain here, a walkthrough can have both — and at BETTER audio than HFP, since the
+  /// phone's microphone runs at 48 kHz against HFP's 16 kHz ceiling, provided the phone is in
+  /// hand rather than a pocket.
+  ///
+  /// Reports the input actually used, because the whole result is void if the route silently
+  /// picked the glasses anyway.
+  @objc(measureStreamWithPhoneAudio:resolver:rejecter:)
+  func measureStreamWithPhoneAudio(_ seconds: NSNumber,
+                                   resolver resolve: @escaping RCTPromiseResolveBlock,
+                                   rejecter reject: @escaping RCTPromiseRejectBlock) {
+    guard Self.configured else {
+      reject("wearables_not_configured", "Call configure() first", nil)
+      return
+    }
+    teardown()
+
+    Task {
+      let audio = AVAudioSession.sharedInstance()
+      do {
+        let sdk = Wearables.shared
+        let selector = AutoDeviceSelector(wearables: sdk)
+        var deadline = Date().addingTimeInterval(8)
+        while selector.activeDevice == nil, Date() < deadline {
+          try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        guard selector.activeDevice != nil else {
+          reject("wearables_no_active_device", "No active device after 8s. Run rung 4b.", nil)
+          return
+        }
+
+        let created = try sdk.createSession(deviceSelector: selector)
+        session = created
+        try created.start()
+        deadline = Date().addingTimeInterval(10)
+        while created.state != .started, Date() < deadline {
+          try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        guard created.state == .started else {
+          let stalled = created.state.description
+          teardown()
+          reject("wearables_session_not_started", "Stalled in \(stalled) after 10s", nil)
+          return
+        }
+
+        guard let newStream = try created.addStream(
+          config: StreamConfiguration(videoCodec: .raw, resolution: .high, frameRate: 30)
+        ) else {
+          teardown()
+          reject("wearables_stream_nil", "addStream() returned nil", nil)
+          return
+        }
+        stream = newStream
+
+        // NOTE the absent option: `.playAndRecord` WITHOUT `.allowBluetoothHFP`. That single
+        // omission is the experiment — it is what keeps the glasses out of hands-free mode.
+        try audio.setCategory(.playAndRecord, mode: .default, options: [])
+        try audio.setActive(true)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+
+        let input = audio.currentRoute.inputs.first
+        // If the route picked the glasses anyway, this measures HFP again and the answer is void.
+        guard input?.portType != .bluetoothHFP else {
+          teardown()
+          try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+          reject("wearables_route_is_glasses",
+                 "The audio route selected the glasses (\(input?.portName ?? "unknown")) despite "
+                   + "not requesting HFP, so this would re-measure HFP rather than the phone mic.",
+                 nil)
+          return
+        }
+
+        let url = FileManager.default.temporaryDirectory
+          .appendingPathComponent("phone-audio-\(Int(Date().timeIntervalSince1970)).m4a")
+        let recorder = try AVAudioRecorder(url: url, settings: [
+          AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+          AVSampleRateKey: 48_000.0,
+          AVNumberOfChannelsKey: 1,
+        ])
+        guard recorder.record() else {
+          teardown()
+          try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+          reject("wearables_recorder_not_started", "AVAudioRecorder.record() returned false", nil)
+          return
+        }
+
+        let counter = FrameArrivalCounter()
+        frameToken = newStream.videoFramePublisher.listen { _ in counter.tick() }
+
+        newStream.start()
+        let startedAt = Date()
+
+        var perSecond: [Int] = []
+        let total = max(1, min(seconds.intValue, 180))
+        for _ in 0..<total {
+          try? await Task.sleep(nanoseconds: 1_000_000_000)
+          perSecond.append(counter.drainCount())
+        }
+        let lastArrival = counter.lastTick()
+
+        recorder.stop()
+        let bytes = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int
+        teardown()
+        try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+
+        resolve([
+          "secondsObserved": total,
+          "framesPerSecond": perSecond,
+          "totalFrames": perSecond.reduce(0, +),
+          "secondsToLastFrame": lastArrival.map { $0.timeIntervalSince(startedAt) } ?? -1,
+          "inputPortName": input?.portName ?? "none",
+          "inputPortType": input?.portType.rawValue ?? "none",
+          "negotiatedSampleRate": audio.sampleRate,
+          "audioBytes": bytes ?? 0,
+          "audioFileUri": url.absoluteString,
+        ])
+      } catch {
+        teardown()
+        try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+        reject("wearables_phone_audio_measure_failed",
+               "measureStreamWithPhoneAudio failed: \(Self.describe(error))", error)
+      }
+    }
+  }
+}
+
 /// Counts frame arrivals off the SDK's delivery thread.
 ///
 /// Locking happens only inside these synchronous methods — never in an `async` body, where

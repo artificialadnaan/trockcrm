@@ -154,6 +154,25 @@ function Diagnostic() {
       measurement: true,
     },
     {
+      key: "phoneAudioStream",
+      label: "12 Glasses video + PHONE mic — 60s",
+      run: async () => {
+        const m = await Wearables.measureStreamWithPhoneAudio(60);
+        const sustained = m.secondsToLastFrame >= m.secondsObserved - 3;
+        const verdict =
+          m.totalFrames === 0
+            ? "NO FRAMES — the stream never delivered; says nothing about the pairing"
+            : sustained
+              ? `SUSTAINED ${m.secondsObserved}s on ${m.inputPortName} at `
+                + `${m.negotiatedSampleRate} Hz — video AND audio are both viable, with better `
+                + `audio than HFP's 16 kHz. Keep the video track.`
+              : `STOPPED at ${m.secondsToLastFrame.toFixed(1)}s — the phone mic disturbs the `
+                + `stream too, so video cannot coexist with any recording. Audio + stills.`;
+        return { verdict, ...m };
+      },
+      measurement: true,
+    },
+    {
       key: "phoneCamera",
       label: "10 Step 0 — phone camera during HFP",
       run: async () => {
