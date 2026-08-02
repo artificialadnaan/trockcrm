@@ -296,17 +296,25 @@ final class WalkthroughRecorder: RCTEventEmitter {
       }
       audioEngine = nil
 
+      // Taken BEFORE finalize(), while the writer still holds its live state — afterwards
+      // `writer.status` reports the outcome of finishWriting rather than what happened during
+      // the walk, which is the part in question.
+      let census = videoWriter?.census() ?? [:]
+
       let result = await videoWriter?.finalize()
       await teardown()
 
       switch result {
       case .success(let url):
-        resolve(["videoUri": url.absoluteString, "stills": stills])
+        resolve(["videoUri": url.absoluteString, "stills": stills, "census": census])
       case .failure(let error):
         // A truncated walk.mp4 that the upload queue then ships is worse than a failure here —
         // it looks like success. Reject rather than resolve with a URI nobody finalized.
+        // The census rides along in the message: a walk that failed to finalize is exactly when
+        // knowing how many frames arrived versus were refused matters most.
         reject("walk_video_finalize_failed",
-               "endWalk failed to finalize walk.mp4: \(Self.describe(error))", error)
+               "endWalk failed to finalize walk.mp4: \(Self.describe(error)) — census: \(census)",
+               error)
       case nil:
         reject("walk_video_finalize_failed",
                "endWalk failed to finalize walk.mp4: no writer was ever created", nil)
@@ -384,6 +392,21 @@ private final class WalkVideoWriter: @unchecked Sendable {
   /// instead of producing a short video nobody notices until the file is inspected.
   private var consecutiveVideoDrops = 0
 
+  /// Census of what actually happened, reported by `endWalk`.
+  ///
+  /// Two walks produced ~4s of video against 35-47s of audio, and the file alone cannot say why:
+  /// a frame that never arrived and a frame the writer refused look identical afterwards. These
+  /// counters separate them. Cheap, and worth keeping — a walk that silently records four seconds
+  /// of a forty-second site visit is the single most expensive failure this recorder can have.
+  private(set) var videoFramesReceived = 0
+  private(set) var videoFramesAppended = 0
+  private(set) var videoFramesDropped = 0
+  private(set) var audioBuffersAppended = 0
+  /// Wall-clock seconds from the writer starting to the most recent frame ARRIVING (not appended),
+  /// so "frames stopped coming" is distinguishable from "frames kept coming and were refused".
+  private(set) var lastFrameArrivedAt: CMTime = .invalid
+  private let startedAt = CMClockGetTime(CMClockGetHostTimeClock())
+
   enum WalkVideoError: LocalizedError {
     case noSessionStarted
     case notCompleted(AVAssetWriter.Status)
@@ -420,6 +443,8 @@ private final class WalkVideoWriter: @unchecked Sendable {
   func appendVideoFrame(_ frame: VideoFrame) {
     let sampleBuffer = frame.sampleBuffer
     mediaQueue.sync {
+      self.videoFramesReceived += 1
+      self.lastFrameArrivedAt = CMClockGetTime(self.mediaClock)
       // Read the clock HERE, on the serial queue, not on the delivery thread. Stamping before
       // `mediaQueue.sync` meant two delivery threads could stamp in one order and arrive in the
       // other, handing the writer timestamps that went backwards. That stalls the H.264 encoder
@@ -492,6 +517,7 @@ private final class WalkVideoWriter: @unchecked Sendable {
     // Roughly two seconds of 30fps footage is long enough to rule out ordinary backpressure.
     guard input.isReadyForMoreMediaData else {
       if track == "video" {
+        videoFramesDropped += 1
         consecutiveVideoDrops += 1
         if consecutiveVideoDrops == 60 {
           fail(reason: "video track: the writer stopped accepting frames and has not recovered "
@@ -509,6 +535,28 @@ private final class WalkVideoWriter: @unchecked Sendable {
       fail(reason: "\(track) append() returned false — "
         + "\(writer.error?.localizedDescription ?? "no error reported")")
       return
+    }
+    if track == "video" { videoFramesAppended += 1 } else { audioBuffersAppended += 1 }
+  }
+
+  /// What actually happened, read on `mediaQueue` so the counters are consistent with each other.
+  /// `secondsSinceLastFrame` is the discriminator: near zero means frames were still arriving and
+  /// the writer was refusing them; large means the glasses stopped sending.
+  func census() -> [String: Any] {
+    mediaQueue.sync {
+      let quiet: Double = lastFrameArrivedAt.isValid
+        ? CMTimeGetSeconds(CMTimeSubtract(CMClockGetTime(mediaClock), lastFrameArrivedAt))
+        : -1
+      return [
+        "videoFramesReceived": videoFramesReceived,
+        "videoFramesAppended": videoFramesAppended,
+        "videoFramesDropped": videoFramesDropped,
+        "audioBuffersAppended": audioBuffersAppended,
+        "secondsSinceLastFrameArrived": quiet,
+        "writerStatus": writer.status.rawValue,
+        "writerError": writer.error?.localizedDescription ?? "none",
+        "failedLatched": failed,
+      ]
     }
   }
 
