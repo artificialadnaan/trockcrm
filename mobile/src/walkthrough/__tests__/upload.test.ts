@@ -11,21 +11,44 @@ jest.mock("expo-file-system/legacy", () => {
   const store = new Map<string, string>();
   const dirs = new Set<string>();
   const sizes = new Map<string, number>();
+  const mtimes = new Map<string, number>();
   const norm = (p: string) => p.replace(/\/$/, "");
   return {
     __store: store,
     __sizes: sizes,
+    __mtimes: mtimes,
     __reset: () => {
       store.clear();
       dirs.clear();
       sizes.clear();
+      mtimes.clear();
     },
     documentDirectory: "file:///var/mobile/Containers/Data/Application/CURRENT-UUID/Documents/",
     FileSystemUploadType: { BINARY_CONTENT: 0 },
     getInfoAsync: async (p: string) => ({
       exists: store.has(p) || dirs.has(p) || dirs.has(norm(p)),
       size: sizes.get(p),
+      modificationTime: mtimes.get(p),
     }),
+    // Lists the immediate children (files OR sub-"directories", derived from store keys sharing the
+    // prefix — this mock has no real directory concept beyond the `dirs` set makeDirectoryAsync
+    // populates) of `dirUri`. Never throws — an unknown/empty prefix just yields []; every caller in
+    // this module already treats "[]" and "doesn't exist" identically, so the mock doesn't need to
+    // distinguish them.
+    readDirectoryAsync: async (dirUri: string) => {
+      const prefix = dirUri.endsWith("/") ? dirUri : `${dirUri}/`;
+      const names = new Set<string>();
+      for (const p of store.keys()) {
+        if (p.startsWith(prefix)) names.add(p.slice(prefix.length).split("/")[0]!);
+      }
+      for (const d of dirs) {
+        const normed = norm(d);
+        if (normed.startsWith(prefix) && normed !== norm(prefix)) {
+          names.add(normed.slice(prefix.length).split("/")[0]!);
+        }
+      }
+      return [...names];
+    },
     makeDirectoryAsync: async (d: string) => {
       dirs.add(d);
       dirs.add(norm(d));
@@ -62,9 +85,12 @@ import * as FileSystem from "expo-file-system/legacy";
 import { initialWalk, reduceWalk, type Walk } from "../session";
 import {
   drainWalkQueue,
+  enqueueRecoveredWalk,
   enqueueWalk,
+  findRecoverableWalks,
   getFailedWalkCount,
   getQueuedWalks,
+  getRecoverableWalkCount,
   getSchedulableWalkCount,
   retryFailedWalks,
   type WalkArtifactUploadUrlResponse,
@@ -76,6 +102,7 @@ import {
 const fs = FileSystem as unknown as {
   __store: Map<string, string>;
   __sizes: Map<string, number>;
+  __mtimes: Map<string, number>;
   __reset: () => void;
 };
 const uploadAsyncMock = FileSystem.uploadAsync as jest.Mock;
@@ -388,6 +415,184 @@ describe("drainWalkQueue", () => {
     expect(summary).toEqual({ puts: 0, putFailures: 0, completed: 0, completionFailures: 0, remainingWalks: 0 });
     expect(client.requestUploadUrl).not.toHaveBeenCalled();
     expect(client.completeWalk).not.toHaveBeenCalled();
+  });
+});
+
+// A walk stranded between markWalkCompleted persisting and the cleanup (file deletes + manifest
+// removal) that's supposed to follow it never finishing — the app suspended/killed in that exact
+// window. Simulated by writing the manifest directly (as the "rebases a stored artifact's uri" test
+// above does for a stale container UUID) rather than driving it through a real crash, since nothing
+// in this test harness can literally kill the process mid-drain.
+const MANIFEST_PATH = `${DOC}walkthrough-uploads/user-1_office-a/index.json`;
+function strandedCompletedWalk(overrides: { artifacts?: unknown[] } = {}) {
+  return {
+    walkId: "walk-1",
+    dealId: "deal-1",
+    projectId: "proj-7",
+    title: META.title,
+    siteLabel: META.siteLabel,
+    startedAt: 1000,
+    endedAt: 5000,
+    durationMs: 4000,
+    enqueuedAt: 1000,
+    completionAttempts: 0,
+    completedAt: 4000, // the server ALREADY accepted this walk in a prior, interrupted drain
+    artifacts: overrides.artifacts ?? [
+      { idempotencyKey: "walk-1:video", kind: "video", uri: VIDEO_URI, at: 1000, order: 0, attempts: 0, putAt: 3000, sizeBytes: 1024 },
+      { idempotencyKey: "walk-1:photo:0", kind: "photo", uri: PHOTO_URI, at: 2000, order: 1, attempts: 0, putAt: 3000, sizeBytes: 1024 },
+    ],
+  };
+}
+
+describe("stranded completed-but-uncleaned walks (Fix 2)", () => {
+  it("getSchedulableWalkCount counts a stranded walk (the exact bug: it used to be excluded, so nothing would ever schedule a drain to clean it up)", async () => {
+    seedFiles([VIDEO_URI, PHOTO_URI]);
+    fs.__store.set(MANIFEST_PATH, JSON.stringify([strandedCompletedWalk()]));
+    expect(await getSchedulableWalkCount(OWNER)).toBe(1);
+  });
+
+  it("a drain finishes the cleanup a prior crash left undone — no PUT, no completion call, files gone, manifest entry gone", async () => {
+    seedFiles([VIDEO_URI, PHOTO_URI]); // local files a half-finished cleanup would have left behind
+    fs.__store.set(MANIFEST_PATH, JSON.stringify([strandedCompletedWalk()]));
+
+    const client = stubClient();
+    const summary = await drainWalkQueue(OWNER, fetcher, client);
+
+    // Both already happened in the (simulated) prior drain — this one must not repeat either.
+    expect(client.requestUploadUrl).not.toHaveBeenCalled();
+    expect(client.completeWalk).not.toHaveBeenCalled();
+    expect(summary.completed).toBe(1);
+    expect(summary.remainingWalks).toBe(0);
+    // The load-bearing assertions: real filesystem + manifest state, not call counts.
+    expect(fs.__store.has(VIDEO_URI)).toBe(false);
+    expect(fs.__store.has(PHOTO_URI)).toBe(false);
+    expect(await getQueuedWalks(OWNER)).toEqual([]);
+  });
+
+  it("is idempotent when an EARLIER cleanup attempt already deleted some (not all) of the files before dying again", async () => {
+    seedFiles([PHOTO_URI]); // VIDEO_URI already gone — a partially-finished prior cleanup's work
+    fs.__store.set(MANIFEST_PATH, JSON.stringify([strandedCompletedWalk()]));
+
+    const summary = await drainWalkQueue(OWNER, fetcher, stubClient());
+
+    expect(summary.completed).toBe(1);
+    expect(fs.__store.has(VIDEO_URI)).toBe(false); // still gone — deleteAsync(idempotent) never errors on this
+    expect(fs.__store.has(PHOTO_URI)).toBe(false); // now gone too
+    expect(await getQueuedWalks(OWNER)).toEqual([]);
+  });
+});
+
+// ── Fix 3: recovering Documents/walkthroughs/<walkId>/ directories with no manifest entry ──────────
+
+describe("findRecoverableWalks / getRecoverableWalkCount", () => {
+  it("returns nothing when the walkthroughs directory has never been written to", async () => {
+    expect(await findRecoverableWalks(OWNER)).toEqual([]);
+    expect(await getRecoverableWalkCount(OWNER)).toBe(0);
+  });
+
+  it("surfaces a directory with real files but no manifest entry, classifying video vs. stills in capture order", async () => {
+    const orphanDir = `${DOC}walkthroughs/walk-orphan/`;
+    fs.__store.set(`${orphanDir}walk.mp4`, "video-bytes");
+    fs.__store.set(`${orphanDir}still-002.jpg`, "b");
+    fs.__store.set(`${orphanDir}still-001.jpg`, "a");
+
+    const recovered = await findRecoverableWalks(OWNER);
+    expect(recovered).toEqual([
+      {
+        walkId: "walk-orphan",
+        videoUri: `${orphanDir}walk.mp4`,
+        stillUris: [`${orphanDir}still-001.jpg`, `${orphanDir}still-002.jpg`],
+      },
+    ]);
+    expect(await getRecoverableWalkCount(OWNER)).toBe(1);
+  });
+
+  it("excludes a directory whose walkId is already tracked in the manifest, even though its files are still on disk", async () => {
+    const walk = completedWalk();
+    seedFiles([VIDEO_URI, PHOTO_URI]); // walk-1's directory has real files too
+    await enqueueWalk(OWNER, "walk-1", walk, META, 1000);
+    fs.__store.set(`${DOC}walkthroughs/walk-orphan/walk.mp4`, "video-bytes");
+
+    const recovered = await findRecoverableWalks(OWNER);
+    expect(recovered.map((r) => r.walkId)).toEqual(["walk-orphan"]); // walk-1 excluded; it's already tracked
+  });
+
+  it("skips an orphan directory that classifies to nothing (e.g. a walk that failed before native wrote anything)", async () => {
+    fs.__store.set(`${DOC}walkthroughs/walk-empty/.keep`, ""); // a directory-ish entry, no real artifact
+    expect(await findRecoverableWalks(OWNER)).toEqual([]);
+  });
+
+  it("scanning never mutates the manifest — findRecoverableWalks is read-only", async () => {
+    fs.__store.set(`${DOC}walkthroughs/walk-orphan/still-001.jpg`, "a");
+    await findRecoverableWalks(OWNER);
+    expect(await getQueuedWalks(OWNER)).toEqual([]);
+  });
+});
+
+describe("enqueueRecoveredWalk", () => {
+  const orphanDir = `${DOC}walkthroughs/walk-orphan/`;
+
+  it("files a recovered walk under the caller-supplied deal, and it then drains exactly like any other walk", async () => {
+    fs.__store.set(`${orphanDir}walk.mp4`, "video-bytes");
+    fs.__sizes.set(`${orphanDir}walk.mp4`, 2048);
+    fs.__store.set(`${orphanDir}still-001.jpg`, "a");
+    fs.__sizes.set(`${orphanDir}still-001.jpg`, 512);
+
+    const [recovered] = await findRecoverableWalks(OWNER);
+    const queued = await enqueueRecoveredWalk(OWNER, recovered!, "deal-99", null, META, 5000);
+    expect(queued).not.toBeNull();
+    expect(queued!.dealId).toBe("deal-99");
+    expect(queued!.walkId).toBe("walk-orphan");
+    // Never invented: a recovered walk has no reducer history for these.
+    expect(queued!.startedAt).toBeNull();
+
+    const client = stubClient();
+    const summary = await drainWalkQueue(OWNER, fetcher, client);
+
+    expect(summary.completed).toBe(1);
+    const [, dealId] = (client.completeWalk as jest.Mock).mock.calls[0];
+    expect(dealId).toBe("deal-99"); // the CALLER's deal, never invented by this module
+    expect(fs.__store.has(`${orphanDir}walk.mp4`)).toBe(false);
+    expect(fs.__store.has(`${orphanDir}still-001.jpg`)).toBe(false);
+    expect(await getQueuedWalks(OWNER)).toEqual([]);
+  });
+
+  it("uses each file's own last-modified time when the platform reports one, not the recovery moment", async () => {
+    fs.__store.set(`${orphanDir}walk.mp4`, "video-bytes");
+    fs.__sizes.set(`${orphanDir}walk.mp4`, 2048);
+    fs.__mtimes.set(`${orphanDir}walk.mp4`, 1_700_000_000); // epoch SECONDS, as expo-file-system reports it
+    fs.__store.set(`${orphanDir}still-001.jpg`, "a");
+    fs.__sizes.set(`${orphanDir}still-001.jpg`, 512);
+    fs.__mtimes.set(`${orphanDir}still-001.jpg`, 1_700_000_050);
+
+    const [recovered] = await findRecoverableWalks(OWNER);
+    // `now` is deliberately far from the real mtimes, so a bug that ignores them is unmistakable.
+    const queued = await enqueueRecoveredWalk(OWNER, recovered!, "deal-99", null, META, 999_999_999_999);
+
+    const video = queued!.artifacts.find((a) => a.kind === "video")!;
+    const photo = queued!.artifacts.find((a) => a.kind === "photo")!;
+    expect(video.at).toBe(1_700_000_000_000); // seconds → ms
+    expect(photo.at).toBe(1_700_000_050_000);
+  });
+
+  it("is idempotent: calling it twice for the same recovered walkId keeps the first attempt's progress", async () => {
+    fs.__store.set(`${orphanDir}still-001.jpg`, "a");
+    fs.__sizes.set(`${orphanDir}still-001.jpg`, 512);
+    const [recovered] = await findRecoverableWalks(OWNER);
+
+    await enqueueRecoveredWalk(OWNER, recovered!, "deal-99", null, META, 1000);
+    uploadAsyncMock.mockResolvedValue({ status: 200 });
+    // PUT succeeds but completion fails, so the walk stays queued with putAt set — exactly the
+    // in-flight progress a clobbering re-enqueue would destroy.
+    const failingClient = stubClient({ completeWalk: jest.fn(async () => { throw new Error("500"); }) });
+    await drainWalkQueue(OWNER, fetcher, failingClient);
+
+    // A second attempt to enqueue the SAME recovered walk (e.g. a caller re-scanning) must not
+    // clobber the upload progress already made.
+    await enqueueRecoveredWalk(OWNER, recovered!, "deal-99", null, META, 2000);
+    const [stillQueued] = await getQueuedWalks(OWNER);
+    expect(stillQueued!.artifacts[0]!.putAt).toBeDefined();
+    expect(stillQueued!.completedAt).toBeUndefined();
   });
 });
 

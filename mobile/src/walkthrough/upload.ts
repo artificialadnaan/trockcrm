@@ -30,16 +30,20 @@ import type { Walk } from "./session";
 import {
   bumpArtifactAttempts,
   bumpCompletionAttempts,
+  classifyWalkDirFileNames,
   drainableArtifacts,
   isWalkDrainable,
   isWalkTerminal,
   markArtifactPut,
   markWalkCompleted,
+  needsCleanup,
   needsCompletion,
   removeQueuedWalk,
   resetTerminalWalkForRetry,
   sanitizeWalkOwnerKey,
+  selectOrphanedWalkDirs,
   toQueuedWalk,
+  toRecoveredQueuedWalk,
   upsertQueuedWalk,
   type QueuedWalk,
   type QueuedWalkArtifact,
@@ -51,6 +55,7 @@ export {
   MAX_IDEMPOTENCY_KEY_LENGTH,
   MAX_WALK_COMPLETION_ATTEMPTS,
   MAX_WALK_UPLOAD_ATTEMPTS,
+  classifyWalkDirFileNames,
   drainableArtifacts,
   isArtifactDrainable,
   isArtifactPut,
@@ -60,13 +65,18 @@ export {
   isWalkDrainable,
   isWalkFullyPut,
   isWalkTerminal,
+  needsCleanup,
   needsCompletion,
   outstandingArtifacts,
   resetTerminalWalkForRetry,
+  selectOrphanedWalkDirs,
   toQueuedWalk,
+  toRecoveredQueuedWalk,
   walkArtifactIdempotencyKey,
+  type ClassifiedWalkDirFiles,
   type QueuedWalk,
   type QueuedWalkArtifact,
+  type RecoveredWalkArtifactFiles,
   type WalkArtifactKind,
   type WalkQueueMeta,
 } from "./upload-core";
@@ -74,11 +84,20 @@ export {
 const ROOT_DIR = `${FileSystem.documentDirectory ?? ""}walkthrough-uploads/`;
 const KEEP_AWAKE_TAG = "trockcam-walkthrough-upload-queue";
 
+/** Where native actually writes walk artifacts (WalkthroughRecorder.swift's `makeWalkDirectory`) —
+ *  NOT owner-scoped, unlike ROOT_DIR above: native has no concept of the signed-in-user+office
+ *  identity this queue namespaces by. See findRecoverableWalks for what that asymmetry means for
+ *  Fix-3 recovery. */
+const WALKTHROUGHS_DIR = `${FileSystem.documentDirectory ?? ""}walkthroughs/`;
+
 function ownerDir(ownerKey: string): string {
   return `${ROOT_DIR}${sanitizeWalkOwnerKey(ownerKey)}/`;
 }
 function manifestFile(ownerKey: string): string {
   return `${ownerDir(ownerKey)}index.json`;
+}
+function walkDirUri(walkId: string): string {
+  return `${WALKTHROUGHS_DIR}${walkId}/`;
 }
 
 // ── SERVER CONTRACT SEAM ──────────────────────────────────────────────────────────────────────────
@@ -295,6 +314,124 @@ export async function enqueueWalk(
   return queued;
 }
 
+// ── Recovery (Fix 3): Documents/walkthroughs/ directories with no manifest entry ───────────────────
+//
+// See upload-core.ts's module note above classifyWalkDirFileNames for why this can only ever
+// DISCOVER orphaned files, never queue them on its own: the server requires a dealId, and nothing on
+// disk says which deal a recovered walk belongs to.
+
+export type RecoveredWalk = {
+  walkId: string;
+  videoUri: string | null;
+  /** In capture order. */
+  stillUris: string[];
+};
+
+/**
+ * Scan Documents/walkthroughs/ for artifact directories with no entry in `ownerKey`'s manifest — the
+ * crash window Fix 3 closes: an app kill during recording, or after native finalizes but before
+ * useWalk.ts's terminal-enqueue effect ever calls enqueueWalk, leaves files on disk that nothing else
+ * will ever look for. Read-only: never deletes, never mutates the manifest, never uploads anything.
+ * Best-effort — a directory that fails to list is skipped rather than failing the whole scan.
+ *
+ * NOT owner-scoped the way the manifest is: Documents/walkthroughs/ is written directly by native,
+ * which has no concept of the signed-in-user+office identity `ownerKey` namespaces by (unlike
+ * walkthrough-uploads/, which this module itself lays out per-owner). So a walk recorded under a
+ * different signed-in user on this device could theoretically surface here too. That is an acceptable
+ * over-approximation for what this function is for: surfacing something a caller can't actually place
+ * (or that turns out to already be tracked) costs a wasted lookup; under-approximating is exactly the
+ * silent leak Fix 3 exists to close.
+ *
+ * ONLY safe to call when no walk could legitimately be recording right now in this process (e.g. app
+ * cold start, before useWalk.ts mounts). A directory for a walk that's ACTIVELY being recorded has no
+ * manifest entry yet EITHER — it isn't enqueued until it reaches a terminal state — so calling this
+ * mid-recording would false-positive the live walk as "recoverable."
+ */
+export async function findRecoverableWalks(ownerKey: string): Promise<RecoveredWalk[]> {
+  const knownWalkIds = (await readManifest(ownerKey)).map((w) => w.walkId);
+  let dirNames: string[];
+  try {
+    dirNames = await FileSystem.readDirectoryAsync(WALKTHROUGHS_DIR);
+  } catch {
+    return []; // no walkthroughs directory at all — nothing has ever been recorded on this device
+  }
+
+  const recovered: RecoveredWalk[] = [];
+  for (const walkId of selectOrphanedWalkDirs(dirNames, knownWalkIds)) {
+    let fileNames: string[];
+    try {
+      fileNames = await FileSystem.readDirectoryAsync(walkDirUri(walkId));
+    } catch {
+      continue; // not actually a directory, or unreadable — skip rather than abort the whole scan
+    }
+    const { videoFileName, stillFileNames } = classifyWalkDirFileNames(fileNames);
+    if (!videoFileName && stillFileNames.length === 0) continue; // e.g. an empty dir from a walk
+    // that failed before native ever produced anything — nothing to recover, not a leak.
+    const dir = walkDirUri(walkId);
+    recovered.push({
+      walkId,
+      videoUri: videoFileName ? `${dir}${videoFileName}` : null,
+      stillUris: stillFileNames.map((name) => `${dir}${name}`),
+    });
+  }
+  return recovered;
+}
+
+/** Convenience count for a caller that only needs to drive a badge/banner — see findRecoverableWalks
+ *  for what it's counting and its cold-start-only caveat. */
+export async function getRecoverableWalkCount(ownerKey: string): Promise<number> {
+  return (await findRecoverableWalks(ownerKey)).length;
+}
+
+/** A file's own last-modified time in epoch ms, or `fallback` if it can't be read — see
+ *  toRecoveredQueuedWalk's doc comment (upload-core.ts) for why a recovered artifact's captured-at
+ *  should be the file's own timestamp, not the moment recovery happened, whenever the platform can
+ *  report one. expo-file-system reports `modificationTime` in seconds, not ms. */
+async function fileTimestampMs(uri: string, fallback: number): Promise<number> {
+  try {
+    const info = await FileSystem.getInfoAsync(uri);
+    return info.exists && typeof info.modificationTime === "number"
+      ? Math.round(info.modificationTime * 1000)
+      : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * File a recovered walk under a deal the CALLER resolved out-of-band — this module never guesses one
+ * (see findRecoverableWalks / upload-core.ts's module note). Idempotent the same way enqueueWalk is
+ * (upsertQueuedWalk): calling this twice for the same walkId leaves the first call's progress
+ * untouched. Once enqueued, a recovered walk drains exactly like any other QueuedWalk — nothing
+ * downstream of the manifest needs to know it was recovered rather than freshly captured. Returns
+ * null if the directory turned out to have neither a video nor any stills by the time this ran (e.g.
+ * it raced a concurrent cleanup).
+ */
+export async function enqueueRecoveredWalk(
+  ownerKey: string,
+  recovered: RecoveredWalk,
+  dealId: string,
+  projectId: string | null,
+  meta: WalkQueueMeta,
+  now: number = Date.now(),
+): Promise<QueuedWalk | null> {
+  const [videoAt, stills] = await Promise.all([
+    recovered.videoUri ? fileTimestampMs(recovered.videoUri, now) : Promise.resolve(undefined),
+    Promise.all(recovered.stillUris.map(async (uri) => ({ uri, at: await fileTimestampMs(uri, now) }))),
+  ]);
+  const queued = toRecoveredQueuedWalk(
+    recovered.walkId,
+    dealId,
+    projectId,
+    { videoUri: recovered.videoUri, videoAt, stills },
+    meta,
+    now,
+  );
+  if (!queued) return null;
+  await mutateManifest(ownerKey, (walks) => upsertQueuedWalk(walks, queued));
+  return queued;
+}
+
 // ── Drain ────────────────────────────────────────────────────────────────────────────────────────
 
 function contentTypeForArtifact(kind: WalkArtifactKind, uri: string): string {
@@ -370,11 +507,30 @@ async function callCompletion(
   });
 }
 
+/**
+ * Delete every one of `walk`'s local artifact files, then remove its manifest entry — the ONLY two
+ * steps that may run once completedAt is set (see the module header / needsCleanup's doc comment in
+ * upload-core.ts). Idempotent in both halves: deleteAsync({idempotent:true}) tolerates a file a
+ * partially-finished PRIOR cleanup attempt already removed, and removeQueuedWalk no-ops if the entry
+ * is somehow already gone. Shared by drainWalkQueue's normal post-completion cleanup and its Fix 2
+ * cleanup-only branch (a walk found already completedAt-stamped on entry) so both paths behave
+ * identically.
+ */
+async function finishWalkCleanup(ownerKey: string, walk: QueuedWalk): Promise<void> {
+  await Promise.all(
+    walk.artifacts.map((a) => FileSystem.deleteAsync(a.uri, { idempotent: true }).catch(() => undefined)),
+  );
+  await mutateManifest(ownerKey, (current) => removeQueuedWalk(current, walk.walkId));
+}
+
 export type WalkDrainSummary = {
   /** Artifacts whose bytes were successfully PUT to R2 this drain. */
   puts: number;
   putFailures: number;
-  /** Walks whose completion call succeeded this drain (server accepted, local files deleted). */
+  /** Walks removed from the queue this drain because the server has accepted them and local cleanup
+   *  (file deletes + manifest removal) finished — either the completion call succeeded THIS drain, or
+   *  (Fix 2) the walk was already completedAt-stamped on entry and this drain only finished the
+   *  cleanup an earlier, interrupted run left undone. */
   completed: number;
   completionFailures: number;
   remainingWalks: number;
@@ -394,8 +550,11 @@ let draining = false;
  * interrupted drain (app suspended, a short background window, or an outright crash) resumes at
  * worst the single PUT or completion call that was mid-flight; the resumed drain never re-attempts a
  * PUT already recorded as putAt, and it always re-attempts completion if completedAt was never
- * recorded — see upload-core.ts's module header for why that asymmetry is deliberate. Never throws —
- * returns a summary.
+ * recorded — see upload-core.ts's module header for why that asymmetry is deliberate. Symmetrically
+ * (Fix 2): if completedAt WAS recorded but the walk is still here, that means only the cleanup that's
+ * supposed to follow it (deleting local files, then removing the manifest entry) never finished — the
+ * resumed drain finishes exactly that, and never re-attempts completion itself. See needsCleanup /
+ * isWalkDrainable in upload-core.ts. Never throws — returns a summary.
  */
 export async function drainWalkQueue(
   ownerKey: string,
@@ -434,6 +593,21 @@ export async function drainWalkQueue(
     let completionFailures = 0;
 
     for (const walk of ordered) {
+      // A walk that reaches here with needsCleanup(walk) true is stranded mid-cleanup: the server
+      // already accepted it (a prior, interrupted drain got as far as markWalkCompleted below) but
+      // the deletes + manifest removal that are supposed to follow never finished — most likely the
+      // app was suspended or killed in that exact window. There is no PUT or completion work left to
+      // do (both already succeeded); finish exactly the cleanup, idempotently, and move on. Before
+      // Fix 2, isWalkDrainable excluded every completed walk, so `ordered` would never have
+      // contained this walk at all — it would sit here, files and all, forever.
+      if (needsCleanup(walk)) {
+        await finishWalkCleanup(ownerKey, walk);
+        // Same observable outcome as a completion that succeeds THIS drain (files gone, walk off
+        // the manifest) — just finishing what an earlier, interrupted drain started.
+        completed++;
+        continue;
+      }
+
       // Phase 1: PUT every currently-drainable artifact's bytes.
       for (const artifact of drainableArtifacts(walk)) {
         try {
@@ -463,18 +637,19 @@ export async function drainWalkQueue(
       if (fresh && needsCompletion(fresh)) {
         try {
           await callCompletion(client, fetcher, fresh);
-          // Persist completedAt BEFORE deleting anything: a crash between these two steps leaves at
-          // worst a walk with local files still on disk that a future drain would try to re-complete
-          // (harmless — the server dedupes on idempotencyKey) — never a walk whose files are gone
-          // with no server record, which is the failure mode this ordering exists to prevent.
+          // Persist completedAt BEFORE deleting anything: a crash between these two steps leaves a
+          // walk stranded with completedAt set and its local files still on disk — needsCleanup
+          // recognizes exactly that state, and isWalkDrainable (Fix 2) guarantees a FUTURE drain
+          // revisits it and runs the cleanup-only branch above. (An earlier version of this comment
+          // claimed "a future drain would try to re-complete" it — that was never true: completion
+          // already succeeded, isWalkDrainable used to EXCLUDE completed walks entirely, and nothing
+          // else ever scanned for them, so a walk stranded here stayed stranded — local files and
+          // all — forever.) The one failure mode this ordering still exists to prevent is the
+          // opposite: files deleted with no server record of them ever having existed.
           await mutateManifest(ownerKey, (current) =>
             current.map((w) => (w.walkId === walk.walkId ? markWalkCompleted(w, Date.now()) : w)),
           );
-          await Promise.all(
-            fresh.artifacts.map((a) => FileSystem.deleteAsync(a.uri, { idempotent: true }).catch(() => undefined)),
-          );
-          // Every file is gone and the server has the walk — nothing left to track.
-          await mutateManifest(ownerKey, (current) => removeQueuedWalk(current, walk.walkId));
+          await finishWalkCleanup(ownerKey, fresh);
           completed++;
         } catch {
           await mutateManifest(ownerKey, (current) =>

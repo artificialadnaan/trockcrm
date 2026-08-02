@@ -5,6 +5,7 @@ import {
   MAX_WALK_UPLOAD_ATTEMPTS,
   bumpArtifactAttempts,
   bumpCompletionAttempts,
+  classifyWalkDirFileNames,
   drainableArtifacts,
   isArtifactDrainable,
   isArtifactPut,
@@ -16,12 +17,15 @@ import {
   isWalkTerminal,
   markArtifactPut,
   markWalkCompleted,
+  needsCleanup,
   needsCompletion,
   outstandingArtifacts,
   removeQueuedWalk,
   resetTerminalWalkForRetry,
   sanitizeWalkOwnerKey,
+  selectOrphanedWalkDirs,
   toQueuedWalk,
+  toRecoveredQueuedWalk,
   upsertQueuedWalk,
   walkArtifactIdempotencyKey,
   type QueuedWalk,
@@ -104,13 +108,46 @@ describe("toQueuedWalk", () => {
     expect(toQueuedWalk("walk-1", initialWalk("deal-1", null), META, 9999)).toBeNull();
   });
 
-  it("a failed walk with only photos (glasses disconnected before finalizing) still enqueues them", () => {
+  it("a failed walk enqueues its stills but NOT a video artifact (Fix 1): videoUri survives `failed` as the PROVISIONAL uri from `started`, never a confirmed finalized file", () => {
     const walk = failedWalk(3);
     expect(walk.audioUri).toBeNull();
+    // The reducer's "failed" case never clears videoUri — it is still holding whatever `started`
+    // recorded, exactly the trap toQueuedWalk must not fall into.
+    expect(walk.videoUri).not.toBeNull();
     const queued = toQueuedWalk("walk-1", walk, META, 9999)!;
     expect(queued).not.toBeNull();
     const kinds = queued.artifacts.map((a) => a.kind).sort();
-    expect(kinds).toEqual(["photo", "photo", "photo", "video"]);
+    expect(kinds).toEqual(["photo", "photo", "photo"]); // video dropped; every still still filed
+  });
+
+  it("queues video ONLY when finalization actually succeeded — identical starting videoUri, different outcome by state alone", () => {
+    // A walk that fails (mid-recording, or because native's finalize() rejected — the failure latch
+    // from a recent native fix, which calls cancelWriting() rather than handing back a truncated
+    // file): videoUri is still the provisional one, so no video artifact should be queued, but its
+    // perfectly-good stills must still be filed.
+    const failed = failedWalk(2);
+    const queuedFromFailed = toQueuedWalk("walk-1", failed, META, 9999)!;
+    expect(queuedFromFailed.artifacts.some((a) => a.kind === "video")).toBe(false);
+    expect(queuedFromFailed.artifacts.every((a) => a.kind === "photo")).toBe(true);
+    expect(queuedFromFailed.artifacts).toHaveLength(2);
+
+    // Same walk up to the same point, but THIS one actually finalizes — video IS queued.
+    const completed = reduceWalk(reduceWalk(withStills(started, 2), { type: "ended", at: 5000 }), {
+      type: "finalized",
+      audioUri: null,
+    });
+    const queuedFromCompleted = toQueuedWalk("walk-1", completed, META, 9999)!;
+    expect(queuedFromCompleted.artifacts.some((a) => a.kind === "video")).toBe(true);
+    expect(queuedFromCompleted.artifacts).toHaveLength(3); // video + 2 photos
+  });
+
+  it("a failed walk that captured NOTHING but a provisional videoUri (glasses died before any still) still returns null — video alone is never enough to enqueue", () => {
+    // started already carries a videoUri; a walk that fails immediately after, with zero stills,
+    // must not turn into a lone (untrustworthy) video artifact.
+    const failed = reduceWalk(started, { type: "failed", reason: "glasses disconnected" });
+    expect(failed.videoUri).not.toBeNull();
+    expect(failed.stills).toHaveLength(0);
+    expect(toQueuedWalk("walk-1", failed, META, 9999)).toBeNull();
   });
 
   it("returns null for a terminal walk that captured nothing at all", () => {
@@ -358,10 +395,22 @@ describe("isWalkDrainable / isWalkTerminal", () => {
     expect(isWalkTerminal(walk)).toBe(false);
   });
 
-  it("a completed walk is neither drainable nor terminal — it's simply done", () => {
+  it("a completed walk that's STILL in the manifest is drainable for cleanup (Fix 2), and never terminal", () => {
+    // Any QueuedWalk you can observe with completedAt set IS, by construction, still present in the
+    // manifest — a walk whose cleanup (file deletes + manifest removal) already finished is removed
+    // entirely (removeQueuedWalk) and can never be observed like this again. So this object
+    // represents a walk stranded between markWalkCompleted and the cleanup that's supposed to follow
+    // it — see needsCleanup. Before Fix 2, isWalkDrainable excluded it here, which meant nothing —
+    // not getSchedulableWalkCount, not any future drain — would ever revisit it again.
     const walk = queuedWalk({ artifacts: [artifact({ putAt: 1 })], completedAt: 1 });
-    expect(isWalkDrainable(walk)).toBe(false);
-    expect(isWalkTerminal(walk)).toBe(false);
+    expect(needsCleanup(walk)).toBe(true);
+    expect(isWalkDrainable(walk)).toBe(true); // a drain must revisit it to finish cleanup
+    expect(isWalkTerminal(walk)).toBe(false); // cleanup-pending is not a failure state
+  });
+
+  it("needsCleanup is false for every walk that still has real PUT/completion work outstanding", () => {
+    expect(needsCleanup(queuedWalk({ artifacts: [artifact({ attempts: 1 })] }))).toBe(false);
+    expect(needsCleanup(queuedWalk({ artifacts: [artifact({ putAt: 1 })] }))).toBe(false); // needs completion, not cleanup
   });
 
   it("one permanently-failed artifact dooms the WHOLE walk — no partial completion", () => {
@@ -488,5 +537,111 @@ describe("sanitizeWalkOwnerKey", () => {
     expect(sanitizeWalkOwnerKey("user-123_ABC")).toBe("user-123_ABC");
     expect(sanitizeWalkOwnerKey("a/b\\c .d")).toBe("a_b_c__d");
     expect(sanitizeWalkOwnerKey("")).toBe("anon");
+  });
+});
+
+// ── Fix 3: recovering Documents/walkthroughs/<walkId>/ directories with no manifest entry ──────────
+
+describe("classifyWalkDirFileNames", () => {
+  it("recognizes walk.mp4 as video and still-NNN.jpg files, sorted into capture order", () => {
+    const result = classifyWalkDirFileNames(["still-002.jpg", "walk.mp4", "still-001.jpg"]);
+    expect(result.videoFileName).toBe("walk.mp4");
+    expect(result.stillFileNames).toEqual(["still-001.jpg", "still-002.jpg"]);
+  });
+
+  it("reports no video when walk.mp4 is absent — e.g. killed before the writer ever finalized", () => {
+    const result = classifyWalkDirFileNames(["still-001.jpg"]);
+    expect(result.videoFileName).toBeNull();
+    expect(result.stillFileNames).toEqual(["still-001.jpg"]);
+  });
+
+  it("ignores anything that isn't one of native's two known artifact shapes", () => {
+    const result = classifyWalkDirFileNames([".DS_Store", "notes.txt", "still-abc.jpg", "walk.mov"]);
+    expect(result.videoFileName).toBeNull();
+    expect(result.stillFileNames).toEqual([]);
+  });
+
+  it("returns empty classification for an empty directory (nothing to recover, not a leak)", () => {
+    expect(classifyWalkDirFileNames([])).toEqual({ videoFileName: null, stillFileNames: [] });
+  });
+});
+
+describe("selectOrphanedWalkDirs", () => {
+  it("returns directory names with no manifest entry", () => {
+    expect(selectOrphanedWalkDirs(["walk-1", "walk-2", "walk-3"], ["walk-2"])).toEqual(["walk-1", "walk-3"]);
+  });
+
+  it("is empty when every directory is already tracked", () => {
+    expect(selectOrphanedWalkDirs(["walk-1"], ["walk-1"])).toEqual([]);
+  });
+
+  it("is empty when there are no directories at all", () => {
+    expect(selectOrphanedWalkDirs([], ["walk-1"])).toEqual([]);
+  });
+});
+
+describe("toRecoveredQueuedWalk", () => {
+  it("builds video + photo artifacts straight from raw files, using each file's OWN timestamp, never `now`", () => {
+    const queued = toRecoveredQueuedWalk(
+      "walk-9",
+      "deal-42",
+      "proj-1",
+      {
+        videoUri: "file:///docs/walkthroughs/walk-9/walk.mp4",
+        videoAt: 5000,
+        stills: [
+          { uri: "file:///docs/walkthroughs/walk-9/still-001.jpg", at: 5100 },
+          { uri: "file:///docs/walkthroughs/walk-9/still-002.jpg", at: 5200 },
+        ],
+      },
+      META,
+      9_999_999, // `now` (the recovery moment) — must NOT leak into any artifact's `at`
+    )!;
+    expect(queued).not.toBeNull();
+    expect(queued.dealId).toBe("deal-42");
+    expect(queued.projectId).toBe("proj-1");
+    // Genuinely unknown — never fabricated. There is no reducer history for a recovered walk.
+    expect(queued.startedAt).toBeNull();
+    expect(queued.endedAt).toBeNull();
+    expect(queued.durationMs).toBeNull();
+    expect(queued.completedAt).toBeUndefined();
+    expect(queued.artifacts.map((a) => a.kind).sort()).toEqual(["photo", "photo", "video"]);
+    const video = queued.artifacts.find((a) => a.kind === "video")!;
+    expect(video.at).toBe(5000);
+    const photos = queued.artifacts.filter((a) => a.kind === "photo").sort((a, b) => a.at - b.at);
+    expect(photos.map((p) => p.at)).toEqual([5100, 5200]);
+    expect(queued.artifacts.every((a) => a.attempts === 0 && a.putAt === undefined)).toBe(true);
+  });
+
+  it("falls back to `now` for the video's `at` only when the caller couldn't supply a real timestamp", () => {
+    const queued = toRecoveredQueuedWalk(
+      "walk-9",
+      "deal-42",
+      null,
+      { videoUri: "file:///x/walk.mp4", stills: [] },
+      META,
+      9999,
+    )!;
+    expect(queued.artifacts[0]!.at).toBe(9999);
+  });
+
+  it("returns null when there is neither a video nor any stills to recover", () => {
+    expect(
+      toRecoveredQueuedWalk("walk-9", "deal-42", null, { videoUri: null, stills: [] }, META, 9999),
+    ).toBeNull();
+  });
+
+  it("derives the SAME idempotency keys a normal (non-recovered) enqueue would, so the server's dedupe still applies", () => {
+    const queued = toRecoveredQueuedWalk(
+      "walk-9",
+      "deal-42",
+      null,
+      { videoUri: "file:///x/walk.mp4", stills: [{ uri: "file:///x/still-001.jpg", at: 1 }] },
+      META,
+      9999,
+    )!;
+    expect(queued.artifacts.map((a) => a.idempotencyKey).sort()).toEqual(
+      [walkArtifactIdempotencyKey("walk-9", "video"), walkArtifactIdempotencyKey("walk-9", "photo", 0)].sort(),
+    );
   });
 });

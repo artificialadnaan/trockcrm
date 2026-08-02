@@ -155,16 +155,30 @@ export type WalkQueueMeta = {
  *    captured) — queuing an empty entry would sit in the manifest forever, never drainable and never
  *    completable.
  *
- * A FAILED walk enqueues exactly like a complete one, and with exactly the artifacts it actually has:
- * session.ts's reducer deliberately keeps every still captured before the failure, and a failure
- * never discards a videoUri that DID finish writing. This function must never filter artifacts by
- * walk.state — doing so would silently drop evidence from a failed walk, which is exactly the bug
- * this module exists to prevent.
+ * A FAILED walk enqueues like a complete one for its STILLS: session.ts's reducer deliberately keeps
+ * every still captured before the failure — a site visit that physically happened cannot be re-taken
+ * from a desk, and dropping them here would silently discard evidence. This function must never
+ * filter STILLS by walk.state.
  *
- * `audioUri` is currently always null (audio is muxed into the video track — see session.ts), so the
- * "audio" branch below is dead in practice today. It stays for the documented future fallback path
- * (a walk that fails before the muxed video finalizes may one day land an audio-only file), and
- * because kind:"audio" is a value the server contract already accepts.
+ * VIDEO is different, and deliberately NOT symmetric with stills: `walk.videoUri` is set by the
+ * `started` event and is only a PROVISIONAL path — native itself only resolves `endWalk` (the
+ * `finalized` event) once `AVAssetWriter` reaches `.completed` (see WalkEvent's doc comment in
+ * session.ts). The reducer's `failed` case never clears `videoUri`, so a walk that fails mid-recording
+ * or whose finalize() call rejects (native cancels the writer and rejects rather than handing back a
+ * truncated file — see WalkthroughRecorder.swift's `finalize()`) still carries that same provisional
+ * uri into the "failed" state, pointing at a file that is missing, truncated, or was never written at
+ * all. Queuing it as a video artifact would forward that as if it were a real recording: its PUTs
+ * fail repeatedly, the whole walk goes terminal (isWalkTerminal — one terminal artifact dooms
+ * completion for every artifact in the walk), and the perfectly-good stills alongside it never get
+ * filed either. So a video artifact is only ever built from `walk.state === "complete"`, the ONE
+ * state the reducer only reaches via a `finalized` event — i.e., a file native itself confirmed.
+ *
+ * `audioUri` needs no equivalent guard: the reducer only ever sets it from `finalized` too (never
+ * from `failed`), so it is already null on every failed walk today. It is currently always null in
+ * practice (audio is muxed into the video track — see session.ts), so the "audio" branch below is
+ * dead code today. It stays for the documented future fallback path (a walk that fails before the
+ * muxed video finalizes may one day land an audio-only file), and because kind:"audio" is a value the
+ * server contract already accepts.
  */
 export function toQueuedWalk(
   walkId: string,
@@ -185,7 +199,10 @@ export function toQueuedWalk(
       attempts: 0,
     });
   }
-  if (walk.videoUri) {
+  // ONLY a successful finalization ("complete") produced a confirmed, finalized video file — see
+  // this function's doc comment above for why a "failed" walk's videoUri must never be trusted here,
+  // even though it's frequently non-null.
+  if (walk.state === "complete" && walk.videoUri) {
     artifacts.push({
       idempotencyKey: walkArtifactIdempotencyKey(walkId, "video"),
       kind: "video",
@@ -282,13 +299,35 @@ export function needsCompletion(walk: QueuedWalk): boolean {
 }
 
 /**
+ * True when the server has already accepted this walk (isWalkCompleted) but it is STILL present in
+ * the manifest — which can only mean the cleanup that's supposed to follow completion (deleting every
+ * local artifact, then removeQueuedWalk) started but never finished, most likely because the app was
+ * suspended or killed in the window drainWalkQueue leaves between persisting completedAt and running
+ * those steps. This is not a hypothetical: a walk whose cleanup DID finish is removed from the
+ * manifest entirely, so it can never again be observed as a QueuedWalk with completedAt set — every
+ * walk this function sees IS, by construction, stranded mid-cleanup. See isWalkDrainable and
+ * drainWalkQueue's cleanup-only branch for how that gets finished, idempotently, on the next drain.
+ */
+export function needsCleanup(walk: QueuedWalk): boolean {
+  return isWalkCompleted(walk);
+}
+
+/**
  * A walk a drain should still act on. Note the short-circuit on any terminal artifact: because
  * completion requires EVERY artifact to be put, a single permanently-failed artifact means this walk
  * can never reach isWalkFullyPut — continuing to drain its other (still-retryable) artifacts would be
  * pure waste, since nothing they do can ever unlock completion. See isWalkTerminal, its mirror image.
+ *
+ * A walk that STILL needs cleanup (needsCleanup) is drainable too, ahead of every other check: the
+ * server already accepted it, so there is no PUT or completion work left, only finishing the local
+ * file deletes + manifest removal a prior crash left undone. Excluding it here (the original bug —
+ * see needsCleanup's doc comment) meant nothing would EVER revisit it: getSchedulableWalkCount keys
+ * on this function, so a stranded walk would never even be scheduled for another drain, let alone
+ * cleaned up — a potentially-gigabyte leak of local media plus a manifest entry that outlives every
+ * future run.
  */
 export function isWalkDrainable(walk: QueuedWalk): boolean {
-  if (isWalkCompleted(walk)) return false;
+  if (needsCleanup(walk)) return true;
   if (walk.artifacts.some(isArtifactTerminal)) return false;
   if (walk.artifacts.some(isArtifactDrainable)) return true;
   return needsCompletion(walk);
@@ -390,4 +429,142 @@ export function markWalkCompleted(walk: QueuedWalk, now: number): QueuedWalk {
 export function sanitizeWalkOwnerKey(ownerKey: string): string {
   const safe = ownerKey.replace(/[^a-zA-Z0-9_-]/g, "_");
   return safe.length > 0 ? safe : "anon";
+}
+
+// ── Recovery: Documents/walkthroughs/<walkId>/ directories with no manifest entry ─────────────────
+//
+// An app kill during recording, or after native finalizes but before useWalk.ts's terminal-enqueue
+// effect ever runs `enqueueWalk`, leaves a walk's files sitting on disk with nothing in the manifest
+// pointing at them: reducer state and the walkId are gone, so the normal toQueuedWalk path (which
+// needs a `Walk`) can never run for them. Nothing else scans that directory.
+//
+// This is the walkthrough queue's analogue of the photo queue's selectOrphanFiles
+// (../capture/upload-queue-core.ts), but the recovery it can offer is fundamentally narrower. The
+// photo queue's orphans (`<id>.orig` / `<id>.jpg` siblings) are REDUNDANT copies of content a live
+// index row already fully describes — safe to just delete. A walkthrough orphan is the OPPOSITE: it
+// is the ONLY copy, and the manifest entry that would have described it — dealId, title, siteLabel,
+// startedAt — is exactly what's missing and NOT recoverable from disk. The server requires a dealId
+// (it's the URL path segment for both the upload-url and completion endpoints); nothing on disk says
+// which deal a recovered walk belongs to, and inventing one would risk filing evidence against the
+// wrong job, which is worse than the leak this exists to close. So this module can only ever tell a
+// caller a directory's files EXIST — never queue them itself. See ./upload.ts's
+// findRecoverableWalks/enqueueRecoveredWalk for the read/write split this implies: scanning is
+// automatic, but attaching a dealId is a decision only a human (via whatever UI a caller builds) can
+// make.
+
+/** The video file native always writes — see WalkthroughRecorder.swift's `makeWalkDirectory` /
+ *  `dir.appendingPathComponent("walk.mp4")`. One fixed name, unlike stills. */
+const RECOVERED_VIDEO_FILE_NAME = "walk.mp4";
+
+/** Stills are named `still-NNN.jpg`, zero-padded to 3 digits (WalkthroughRecorder.swift's
+ *  `deliverStill`: `String(format: "still-%03d.jpg", stillIndex)`). Lexicographic sort on that fixed
+ *  width IS numeric sort, up to 999 stills — comfortably above MAX_WALK_ARTIFACTS (200) — so sorting
+ *  filenames recovers capture order without needing a per-file timestamp for ordering. */
+const RECOVERED_STILL_FILE_PATTERN = /^still-\d+\.jpg$/;
+
+export type ClassifiedWalkDirFiles = {
+  /** Non-null iff RECOVERED_VIDEO_FILE_NAME is among the directory's entries. */
+  videoFileName: string | null;
+  /** In capture order (see RECOVERED_STILL_FILE_PATTERN's doc comment) — NOT raw directory-listing
+   *  order, which FileSystem.readDirectoryAsync makes no guarantee about. */
+  stillFileNames: string[];
+};
+
+/**
+ * Sort one Documents/walkthroughs/<walkId>/ directory's raw entries into what this module recognizes
+ * as walk artifacts. Anything else (there shouldn't be — native writes nothing but these two shapes —
+ * but a stray .DS_Store or a future native change is not this function's problem to interpret) is
+ * silently ignored rather than surfaced as a mystery artifact.
+ */
+export function classifyWalkDirFileNames(fileNames: string[]): ClassifiedWalkDirFiles {
+  return {
+    videoFileName: fileNames.includes(RECOVERED_VIDEO_FILE_NAME) ? RECOVERED_VIDEO_FILE_NAME : null,
+    stillFileNames: fileNames.filter((name) => RECOVERED_STILL_FILE_PATTERN.test(name)).sort(),
+  };
+}
+
+/**
+ * Directory names under Documents/walkthroughs/ with no corresponding entry in the CURRENT manifest.
+ * `knownWalkIds` should be every walkId currently in the manifest, in ANY state (queued, mid-drain,
+ * terminal, even completed-awaiting-cleanup — see needsCleanup) — every one of those already has an
+ * owner and a dealId; only a directory with NO manifest entry at all is a Fix-3 orphan.
+ */
+export function selectOrphanedWalkDirs(dirNames: string[], knownWalkIds: Iterable<string>): string[] {
+  const known = new Set(knownWalkIds);
+  return dirNames.filter((name) => !known.has(name));
+}
+
+export type RecoveredWalkArtifactFiles = {
+  videoUri: string | null;
+  /** Video's own capture timestamp, epoch ms — see toRecoveredQueuedWalk for why this should be the
+   *  file's own timestamp, not the moment recovery ran. Ignored when videoUri is null. */
+  videoAt?: number;
+  /** In capture order (see classifyWalkDirFileNames). Empty if none were taken. */
+  stills: Array<{ uri: string; at: number }>;
+};
+
+/**
+ * Build the artifact list for a recovered walk directly from what's on disk. No `Walk` object exists
+ * for a recovered walk — session.ts's reducer state is gone; that IS the premise of Fix 3 — so this
+ * cannot reuse toQueuedWalk, which requires one.
+ *
+ * `at` for each artifact comes from the caller-supplied file timestamps (see ./upload.ts's
+ * findRecoverableWalks/enqueueRecoveredWalk, which read each file's own last-modified time), NOT
+ * `now`: defaulting every recovered artifact's capturedAtMs to the recovery moment would misrepresent
+ * evidence that may be hours or days old, only if the caller genuinely could not read one.
+ *
+ * `dealId`/`projectId`/`title`/`siteLabel` are NOT derivable from disk at all (see the module note
+ * above `classifyWalkDirFileNames`) and MUST come from the caller — who, unlike this module, is
+ * allowed to ask a human which deal this belongs to. This function never guesses.
+ *
+ * Returns null under the same "nothing to enqueue" rule as toQueuedWalk: no video AND no stills.
+ */
+export function toRecoveredQueuedWalk(
+  walkId: string,
+  dealId: string,
+  projectId: string | null,
+  files: RecoveredWalkArtifactFiles,
+  meta: WalkQueueMeta,
+  now: number,
+): QueuedWalk | null {
+  const artifacts: QueuedWalkArtifact[] = [];
+  if (files.videoUri) {
+    artifacts.push({
+      idempotencyKey: walkArtifactIdempotencyKey(walkId, "video"),
+      kind: "video",
+      uri: files.videoUri,
+      at: files.videoAt ?? now,
+      order: ORDER_MEDIA,
+      attempts: 0,
+    });
+  }
+  files.stills.forEach((still, index) => {
+    artifacts.push({
+      idempotencyKey: walkArtifactIdempotencyKey(walkId, "photo", index),
+      kind: "photo",
+      uri: still.uri,
+      at: still.at,
+      order: ORDER_PHOTO,
+      attempts: 0,
+    });
+  });
+
+  if (artifacts.length === 0) return null;
+
+  return {
+    walkId,
+    dealId,
+    projectId,
+    title: meta.title,
+    siteLabel: meta.siteLabel,
+    // Genuinely unknown — never fabricated. A recovered walk has no reducer history, so there is no
+    // truthful startedAt/endedAt/durationMs to report; null says exactly that, rather than a made-up
+    // number that would misrepresent the walk's actual timeline.
+    startedAt: null,
+    endedAt: null,
+    durationMs: null,
+    enqueuedAt: now,
+    artifacts,
+    completionAttempts: 0,
+  };
 }
