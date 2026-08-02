@@ -14,13 +14,10 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import { theme } from "../../src/theme/theme";
-import { apiFetch } from "../../src/api/client";
-import type { Fetcher } from "../../src/api/endpoints";
-import { useAuth } from "../../src/auth/AuthContext";
 import { useWalk } from "../../src/walkthrough/useWalk";
 import { isAudioTruncated, isVideoTruncated, isWalkActive } from "../../src/walkthrough/session";
 import { deriveWalkSiteLabel, deriveWalkTitle } from "../../src/walkthrough/walk-meta";
-import { walkOwnerKey } from "../../src/walkthrough/owner-key";
+import { useWalkQueueSession } from "../../src/walkthrough/use-queue-session";
 import { drainWalkQueue, enqueueWalk, type WalkQueueMeta } from "../../src/walkthrough/upload";
 import { walkthroughUploadClient } from "../../src/walkthrough/upload-client";
 import { registerWalkUploadBackgroundTask } from "../../src/walkthrough/upload-background-task";
@@ -71,14 +68,10 @@ export default function WalkScreen() {
   // Identity for the upload queue: user + ACTIVE OFFICE, same resolution rule (activeOfficeId ??
   // primary office) as capture.tsx's own queue — and the SAME rule the background drain task uses,
   // so a walk enqueued here is a walk the background task can actually find.
-  const { user, activeOfficeId, token, signOut } = useAuth();
-  const resolvedOfficeId = activeOfficeId ?? user?.tenantId ?? null;
-  const ownerKey = walkOwnerKey(user?.id, resolvedOfficeId);
-  const queueFetcher = useCallback<Fetcher>(
-    (path, opts) =>
-      apiFetch(path, { ...opts, token: token ?? undefined, officeId: resolvedOfficeId, onUnauthorized: () => void signOut() }),
-    [token, resolvedOfficeId, signOut],
-  );
+  // This screen's drain outlives it: it fires the moment a walk goes terminal and keeps uploading
+  // after the shell (and therefore this hidden tab) unmounts at sign-out, so its 401 handling has
+  // to be scoped to the session that started it. See use-queue-session.ts.
+  const { ownerKey, queueFetcher } = useWalkQueueSession();
 
   // Best-effort: schedule the background drain once signed in, so a walk still ships if the app is
   // killed/backgrounded before the foreground drain below finishes. Registration itself is

@@ -10,9 +10,7 @@ import { ScreenHeader } from "../../src/components/ScreenHeader";
 import { getSaveToCameraRoll, setSaveToCameraRoll } from "../../src/settings/camera-roll-setting";
 import { Wearables, isAvailable as wearablesBridgeAvailable } from "../../src/wearables/native";
 import { describePairing, type Pairing, type PairingStatus } from "../../src/walkthrough/pairing";
-import { apiFetch } from "../../src/api/client";
-import type { Fetcher } from "../../src/api/endpoints";
-import { walkOwnerKey } from "../../src/walkthrough/owner-key";
+import { useWalkQueueSession } from "../../src/walkthrough/use-queue-session";
 import {
   drainWalkQueue,
   getFailedWalkCount,
@@ -228,17 +226,10 @@ function PairingRow() {
  * Renders nothing when there is nothing failed, so a healthy queue adds no clutter.
  */
 function FailedWalksCard() {
-  const { user, activeOfficeId, token, signOut } = useAuth();
-  // Same resolution rule as walk.tsx and the background drain task (activeOfficeId ?? primary
-  // office) — this MUST match theirs, or this card would count/retry a manifest namespace neither
-  // of them ever actually wrote walks into.
-  const resolvedOfficeId = activeOfficeId ?? user?.tenantId ?? null;
-  const ownerKey = walkOwnerKey(user?.id, resolvedOfficeId);
-  const queueFetcher = React.useCallback<Fetcher>(
-    (path, opts) =>
-      apiFetch(path, { ...opts, token: token ?? undefined, officeId: resolvedOfficeId, onUnauthorized: () => void signOut() }),
-    [token, resolvedOfficeId, signOut],
-  );
+  // Office resolution and 401 scoping both come from the shared hook — this card's retry drain can
+  // outlive Profile (it unmounts with the shell at sign-out), so an unguarded onUnauthorized here
+  // could sign out whoever signs in next. See use-queue-session.ts.
+  const { ownerKey, queueFetcher } = useWalkQueueSession();
 
   const [failedCount, setFailedCount] = React.useState(0);
   const [retrying, setRetrying] = React.useState(false);
