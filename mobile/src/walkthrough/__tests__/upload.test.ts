@@ -106,6 +106,7 @@ jest.mock("expo-keep-awake", () => ({
 }));
 
 import * as FileSystem from "expo-file-system/legacy";
+import { ApiError } from "../../api/client";
 import { initialWalk, reduceWalk, type Walk } from "../session";
 import {
   MAX_DRAIN_PASSES,
@@ -275,6 +276,43 @@ describe("enqueueWalk / getQueuedWalks", () => {
 });
 
 describe("drainWalkQueue", () => {
+  it("treats an ALREADY_FILED presign refusal as a completed PUT, not a failure", async () => {
+    // The server refuses to re-presign an artifact it has already filed: the R2 key is deterministic, so
+    // a second PUT would silently replace the bytes behind a record whose size, checksum and derived
+    // scope all describe the OLD content. For this queue that refusal is SUCCESS reported as an error.
+    //
+    // Without the branch under test, the artifact burns all five PUT attempts and the walk lands on the
+    // failed-walk card telling the estimator their site visit did not send — for a walk the server is
+    // holding in full. Matched on the error CODE, not the 409: the completion route also answers 409 for
+    // a genuine cross-deal conflict, which must still fail.
+    const walk = completedWalk();
+    seedFiles([VIDEO_URI, PHOTO_URI]);
+    await enqueueWalk(OWNER, "walk-1", walk, META, 1000);
+
+    const client = stubClient({
+      requestUploadUrl: jest.fn(async (_f, _dealId, req) => {
+        if (req.kind === "video") {
+          throw new ApiError(
+            "Artifact walk-1:video is already filed against this deal.",
+            409,
+            "GLASSES_WALKTHROUGH_ARTIFACT_ALREADY_FILED",
+          );
+        }
+        return { uploadUrl: "https://upload.test/x", r2Key: `k-${req.kind}`, expiresIn: 900 };
+      }),
+    });
+
+    const summary = await drainWalkQueue(OWNER, fetcher, client);
+
+    // The walk completes and is pruned — not retried, not failed.
+    expect(summary.completed).toBe(1);
+    expect(await getQueuedWalks(OWNER)).toHaveLength(0);
+    // And the completion call still names the video, because the server has it.
+    const completeArgs = (client.completeWalk as jest.Mock).mock.calls[0]![2] as { artifacts: { kind: string }[] };
+    expect(completeArgs.artifacts.map((a) => a.kind).sort()).toEqual(["photo", "video"]);
+  });
+
+
   it("PUTs media before photos, then calls completion ONCE, then deletes local files and prunes the walk", async () => {
     const walk = completedWalk();
     seedFiles([VIDEO_URI, PHOTO_URI]);

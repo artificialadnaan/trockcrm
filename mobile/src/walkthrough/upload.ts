@@ -9,9 +9,11 @@
  * what has to self-heal a rotated iOS container UUID (see rebaseWalkUris below).
  *
  * TWO-PHASE drain, mirroring the server's two-step contract:
- *   1. Per artifact: request a presigned R2 URL and PUT the bytes. Safe to repeat — the server derives
- *      the object key deterministically from (walkId, idempotencyKey), so re-PUTting the same artifact
- *      overwrites the same object rather than forking a duplicate.
+ *   1. Per artifact: request a presigned R2 URL and PUT the bytes. Safe to repeat UNTIL the walk is
+ *      filed — the server derives the object key deterministically from (walkId, idempotencyKey), so a
+ *      re-PUT overwrites the same object rather than forking a duplicate. Once the artifact HAS been
+ *      filed the server refuses to re-presign it (ALREADY_FILED), precisely because that same
+ *      determinism would otherwise let a later PUT replace the bytes behind a finished record.
  *   2. Once per walk, ONLY after every artifact has been PUT: call completion, which atomically writes
  *      every `files` row and enqueues forwarding. Local files are deleted ONLY after this call
  *      succeeds — see upload-core.ts's module header for why "bytes are in R2" and "the server filed
@@ -25,6 +27,7 @@
 import * as FileSystem from "expo-file-system/legacy";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import type { Fetcher } from "../api/endpoints";
+import { ApiError } from "../api/client";
 import { rebaseDocumentDirectoryUri } from "../capture/doc-dir-uri";
 import type { Walk } from "./session";
 import {
@@ -108,8 +111,12 @@ function walkDirUri(walkId: string): string {
 // (two thin functions mirroring createUploadUrl/confirmUpload in ../api/endpoints.ts). Nothing in
 // this module or upload-core.ts needs to change.
 //
-//   Step 1 (per artifact) — POST /api/deals/:dealId/glasses-walkthroughs/artifacts/upload-url
-//   Step 2 (once per walk, after every artifact is PUT) — POST /api/deals/:dealId/glasses-walkthroughs
+//   Step 1 (per artifact) — POST /api/field/projects/:dealId/glasses-walkthroughs/artifacts/upload-url
+//   Step 2 (once per walk, after every artifact is PUT) — POST /api/field/projects/:dealId/glasses-walkthroughs
+//
+// /field, not /deals: this app signs in through `/auth/field-login`, and the server rejects that token
+// class on every CRM route by design. Addressed at /deals every walk 401'd and the app read it as a dead
+// session, so one stuck walk locked the crew out entirely.
 
 export type WalkArtifactUploadUrlRequest = {
   walkId: string;
@@ -598,6 +605,17 @@ function filenameFromUri(uri: string): string {
 /** Step 1: request a presigned URL and PUT one artifact's bytes. Returns the size that was actually
  *  uploaded (for markArtifactPut / the later completion payload). Throws on any failure — the caller
  *  bumps the artifact's attempt count and moves on. */
+/**
+ * Whether a presign refusal means "the server already has this artifact", rather than a real failure.
+ *
+ * Matched on the server's error CODE, not its status or message: a 409 alone is too broad (the
+ * completion route uses one for a genuine cross-deal conflict, which must still fail), and message text
+ * is not a contract. The code is.
+ */
+function isAlreadyFiledError(err: unknown): boolean {
+  return err instanceof ApiError && err.code === "GLASSES_WALKTHROUGH_ARTIFACT_ALREADY_FILED";
+}
+
 async function putArtifactBytes(
   client: WalkthroughUploadClient,
   f: Fetcher,
@@ -611,13 +629,27 @@ async function putArtifactBytes(
   const mimeType = contentTypeForArtifact(artifact.kind, artifact.uri);
   const fileSizeBytes = typeof info.size === "number" ? info.size : 0;
 
-  const { uploadUrl } = await client.requestUploadUrl(f, walk.dealId, {
-    walkId: walk.walkId,
-    idempotencyKey: artifact.idempotencyKey,
-    kind: artifact.kind,
-    mimeType,
-    fileSizeBytes,
-  });
+  let uploadUrl: string;
+  try {
+    ({ uploadUrl } = await client.requestUploadUrl(f, walk.dealId, {
+      walkId: walk.walkId,
+      idempotencyKey: artifact.idempotencyKey,
+      kind: artifact.kind,
+      mimeType,
+      fileSizeBytes,
+    }));
+  } catch (err) {
+    // ALREADY_FILED is success that arrived as an error. The server refuses to re-presign an artifact
+    // it has already filed, because the R2 key is deterministic and a second PUT would silently replace
+    // the bytes behind a record whose size, checksum and derived scope all describe the OLD content.
+    //
+    // For this queue that refusal means the work is DONE, not failed. Without this branch the artifact
+    // burns all five PUT attempts and the walk lands on the failed-walk card telling the estimator their
+    // site visit did not send — for a walk the server is holding in full. Treat it as put and move on;
+    // the completion call is idempotent per artifact and reconciles the rest.
+    if (isAlreadyFiledError(err)) return fileSizeBytes;
+    throw err;
+  }
 
   const put = await FileSystem.uploadAsync(uploadUrl, artifact.uri, {
     httpMethod: "PUT",

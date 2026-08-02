@@ -9,6 +9,7 @@ import {
   timestamp,
   bigserial,
   index,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { offices } from "./offices.js";
@@ -66,5 +67,18 @@ export const jobQueue = pgTable(
     index("job_queue_glasses_walkthrough_forward_idx")
       .on(sql`(payload->>'walkId')`, sql`(payload->>'dealId')`)
       .where(sql`job_type = 'glasses_walkthrough_forward'`),
+    // What actually makes the completion endpoint safe under concurrency. The dedupe there used to be
+    // check-then-act — SELECT, then INSERT — and a SELECT takes no lock, so two overlapping completions
+    // of one walk (mobile retrying after its first response timed out) could both find no live job and
+    // both enqueue. Two forwards means two transcriptions and two Anthropic classifications billed for
+    // one site visit. The insert now conflicts on THIS index instead of racing.
+    //
+    // Alongside the index above, not replacing it, and the two predicates are opposites on purpose:
+    // that one must INCLUDE dead rows, because a dead row is where an inherited TROCK Scope checkpoint
+    // lives; this one must EXCLUDE them, or re-enqueueing after a dead-letter would hit a unique
+    // violation and strand a site visit nobody can repeat. Mirrors migration 0213.
+    uniqueIndex("job_queue_glasses_walkthrough_forward_live_uniq")
+      .on(sql`(payload->>'walkId')`, sql`(payload->>'dealId')`)
+      .where(sql`job_type = 'glasses_walkthrough_forward' AND status <> 'dead'`),
   ]
 );
