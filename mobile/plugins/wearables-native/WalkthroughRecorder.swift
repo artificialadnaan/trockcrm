@@ -370,6 +370,20 @@ private final class WalkVideoWriter: @unchecked Sendable {
   private var sessionStarted = false
   private var failed = false
 
+  /// Last presentation timestamp handed to each input. AVAssetWriterInput requires STRICTLY
+  /// increasing timestamps per track; a sample that goes backwards stalls the encoder, its queue
+  /// stops draining, `isReadyForMoreMediaData` never returns true again, and every later frame is
+  /// silently dropped. Measured on a real walk 2026-08-01: 46.8s of audio and 3.4s of video,
+  /// because frames were stamped on the SDK's delivery thread BEFORE reaching this serial queue,
+  /// so two threads could stamp in one order and arrive in the other.
+  /// Video only. The audio tap delivers in order from a single CoreAudio thread and measured
+  /// complete on the same walk, so its stamping is deliberately left alone.
+  private var lastVideoPts: CMTime = .invalid
+
+  /// Frames dropped because the writer was not ready. Counted so a permanent stall reports itself
+  /// instead of producing a short video nobody notices until the file is inspected.
+  private var consecutiveVideoDrops = 0
+
   enum WalkVideoError: LocalizedError {
     case noSessionStarted
     case notCompleted(AVAssetWriter.Status)
@@ -404,15 +418,29 @@ private final class WalkVideoWriter: @unchecked Sendable {
   /// delivery thread for the duration of one append; `mediaQueue` never blocks on anything else,
   /// so that duration is just the append itself.
   func appendVideoFrame(_ frame: VideoFrame) {
-    let receivedAt = CMClockGetTime(mediaClock)
     let sampleBuffer = frame.sampleBuffer
     mediaQueue.sync {
-      guard let retimed = Self.retimed(sampleBuffer, to: receivedAt) else {
+      // Read the clock HERE, on the serial queue, not on the delivery thread. Stamping before
+      // `mediaQueue.sync` meant two delivery threads could stamp in one order and arrive in the
+      // other, handing the writer timestamps that went backwards. That stalls the H.264 encoder
+      // permanently — which is exactly what produced a 3.4s video track alongside 46.8s of audio.
+      let pts = self.nextPts(after: self.lastVideoPts)
+      self.lastVideoPts = pts
+      guard let retimed = Self.retimed(sampleBuffer, to: pts) else {
         self.fail(reason: "could not retime a video frame")
         return
       }
       self.append(retimed, to: self.videoInput, track: "video")
     }
+  }
+
+  /// A timestamp guaranteed to be strictly greater than `previous`. Normally that is just the
+  /// current clock reading; the nudge only matters when two samples land inside the same clock
+  /// tick, where returning an equal timestamp would violate the writer's ordering requirement.
+  private func nextPts(after previous: CMTime) -> CMTime {
+    let now = CMClockGetTime(mediaClock)
+    guard previous.isValid, CMTimeCompare(now, previous) <= 0 else { return now }
+    return CMTimeAdd(previous, CMTime(value: 1, timescale: previous.timescale))
   }
 
   /// Runs on the tap's real-time CoreAudio thread. The PCM bytes are copied out of `buffer`
@@ -457,7 +485,22 @@ private final class WalkVideoWriter: @unchecked Sendable {
 
     // Real-time input: if the encoder/writer is behind, drop this sample rather than queue it.
     // `expectsMediaDataInRealTime` makes `isReadyForMoreMediaData` reflect exactly this.
-    guard input.isReadyForMoreMediaData else { return }
+    //
+    // A DROP IS NORMAL. A RUN OF DROPS IS NOT. An encoder that stalls never becomes ready again,
+    // so an unbounded silent drop turns a dead video track into a walk that looks successful —
+    // which is what happened on 2026-08-01: 3.4s of video, 46.8s of audio, no error anywhere.
+    // Roughly two seconds of 30fps footage is long enough to rule out ordinary backpressure.
+    guard input.isReadyForMoreMediaData else {
+      if track == "video" {
+        consecutiveVideoDrops += 1
+        if consecutiveVideoDrops == 60 {
+          fail(reason: "video track: the writer stopped accepting frames and has not recovered "
+            + "after 60 consecutive drops — the recording will have little or no video")
+        }
+      }
+      return
+    }
+    if track == "video" { consecutiveVideoDrops = 0 }
 
     guard input.append(sampleBuffer) else {
       // append() returning false and being ignored is exactly the AVAudioRecorder.record()
