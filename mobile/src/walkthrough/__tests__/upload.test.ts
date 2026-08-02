@@ -97,11 +97,14 @@ import {
   enqueueRecoveredWalk,
   enqueueWalk,
   findRecoverableWalks,
+  forgetRecoverableWalksAtStartup,
   getFailedWalkCount,
   getQueuedWalks,
   getRecoverableWalkCount,
+  getRecoverableWalksFromStartup,
   getSchedulableWalkCount,
   retryFailedWalks,
+  scanRecoverableWalksAtStartup,
   type WalkArtifactUploadUrlResponse,
   type WalkCompletionResponse,
   type WalkQueueMeta,
@@ -128,6 +131,10 @@ beforeEach(() => {
 });
 
 const OWNER = "user-1:office-a";
+/** A SECOND signed-in identity on the same device — a different manifest namespace entirely, which
+ *  is the whole point wherever it appears below: nothing one owner's drain does can move the
+ *  other's queue. */
+const OWNER_2 = "user-2:office-b";
 const META: WalkQueueMeta = { title: "Front elevation walkthrough", siteLabel: "123 Main St" };
 
 const VIDEO_URI = `${DOC}walkthroughs/walk-1/video.mp4`;
@@ -498,6 +505,64 @@ describe("drain requested while a drain is in flight", () => {
     expect(summary.remainingWalks).toBe(0);
   });
 
+  /** Let every already-resolved promise in the in-memory FS chain run to completion. Needed because
+   *  a drain started for the WAITING owner is deliberately detached (the finishing drain must not
+   *  wait on someone else's multi-GB upload before resolving), so there is no promise to await. */
+  async function settle(ticks = 20): Promise<void> {
+    for (let i = 0; i < ticks; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  // Coalescing into the RUNNING drain only works for that drain's own owner: it re-reads one
+  // manifest, and a different signed-in identity has a different one. Recording nothing for the
+  // other owner therefore dropped their request outright — and the new shell has already spent its
+  // one mount trigger, so nothing else was going to ask again until a foreground transition or an
+  // opportunistic background window.
+  it("starts the OTHER owner's drain once the lock frees, instead of dropping a request it can't serve", async () => {
+    seedFiles([VIDEO_URI, PHOTO_URI, VIDEO_URI_2, PHOTO_URI_2]);
+    await enqueueWalk(OWNER, "walk-1", completedWalk(), META, 1000);
+    // The second user's own walk, queued under their own manifest by an earlier session.
+    await enqueueWalk(OWNER_2, "walk-2", completedWalk({ video: VIDEO_URI_2, photo: PHOTO_URI_2 }), META, 2000);
+
+    const firstPutReached = deferred();
+    const releaseFirstPut = deferred();
+    let held = false;
+    const client = stubClient({
+      requestUploadUrl: jest.fn(async (_f, _dealId, req) => {
+        if (!held) {
+          held = true;
+          firstPutReached.resolve();
+          await releaseFirstPut.promise;
+        }
+        return { uploadUrl: "https://upload.test/x", r2Key: `k-${req.idempotencyKey}`, expiresIn: 900 };
+      }),
+    });
+
+    const firstDrain = drainWalkQueue(OWNER, fetcher, client);
+    await firstPutReached.promise; // owner 1 is parked inside a multi-GB PUT
+
+    // Owner 2 signs in; their shell's mount effect asks for a drain. It cannot run now, and the
+    // running drain cannot serve it.
+    const deferredRequest = await drainWalkQueue(OWNER_2, fetcher, client);
+    expect(deferredRequest.puts).toBe(0);
+    expect(deferredRequest.remainingWalks).toBe(1);
+
+    releaseFirstPut.resolve();
+    await firstDrain;
+    await settle();
+
+    // The load-bearing assertion: owner 2's queue was actually emptied, by a drain nobody asked for
+    // a second time.
+    expect(await getQueuedWalks(OWNER_2)).toEqual([]);
+    expect(fs.__store.has(VIDEO_URI_2)).toBe(false);
+    expect(fs.__store.has(PHOTO_URI_2)).toBe(false);
+    expect((client.completeWalk as jest.Mock).mock.calls.map((c) => c[2].walkId)).toEqual([
+      "walk-1",
+      "walk-2",
+    ]);
+    // Owner 1's drain is unaffected — the follow-up runs AFTER it released the lock, never inside it.
+    expect(await getQueuedWalks(OWNER)).toEqual([]);
+  });
+
   it("bounds the follow-up passes, so a caller that re-requests a drain from every progress callback can't spin forever", async () => {
     seedFiles([VIDEO_URI, PHOTO_URI]);
     await enqueueWalk(OWNER, "walk-1", completedWalk(), META, 1000);
@@ -685,6 +750,68 @@ describe("findRecoverableWalks / getRecoverableWalkCount", () => {
     fs.__store.set(`${DOC}walkthroughs/walk-orphan/still-001.jpg`, "a");
     await findRecoverableWalks(OWNER);
     expect(await getQueuedWalks(OWNER)).toEqual([]);
+  });
+});
+
+// The snapshot the recovery card reads. It is taken once per authenticated-shell lifecycle, NOT
+// once per process: the scan is only trustworthy while nothing could be recording, and entering the
+// shell is exactly that moment. Caching it for the whole process instead is what these cover — a
+// second sign-in in the same process (the app was never killed, so a module variable survives it)
+// would keep serving the first sign-in's answer, and a walk finalized on the way out of the
+// previous session — which useWalk's unmount does precisely so it can be recovered at the next
+// login — stayed invisible until the process itself restarted.
+describe("scanRecoverableWalksAtStartup across shell lifecycles", () => {
+  beforeEach(() => {
+    forgetRecoverableWalksAtStartup();
+  });
+
+  it("rescans after the shell tears down, so a same-process re-login sees what sign-out left behind", async () => {
+    await scanRecoverableWalksAtStartup(OWNER);
+    expect(getRecoverableWalksFromStartup()).toEqual([]);
+
+    // Sign-out. useWalk's unmount stops native, which finalizes the in-progress recording into
+    // Documents/walkthroughs/<walkId>/ — files with no manifest entry, i.e. exactly what the next
+    // login's scan exists to find.
+    fs.__store.set(`${DOC}walkthroughs/walk-at-signout/walk.mp4`, "video-bytes");
+    forgetRecoverableWalksAtStartup();
+
+    await scanRecoverableWalksAtStartup(OWNER);
+    expect(getRecoverableWalksFromStartup().map((w) => w.walkId)).toEqual(["walk-at-signout"]);
+  });
+
+  it("rescans for a different owner — a snapshot taken against another identity's manifest is not an answer for this one", async () => {
+    const dir = `${DOC}walkthroughs/walk-1/`;
+    fs.__store.set(`${dir}walk.mp4`, "video-bytes");
+    // Tracked by owner 1 (so: not an orphan for them), unknown to owner 2 (so: an orphan for them).
+    await enqueueWalk(OWNER, "walk-1", completedWalk({ video: `${dir}walk.mp4`, photo: PHOTO_URI }), META, 1000);
+
+    await scanRecoverableWalksAtStartup(OWNER);
+    expect(getRecoverableWalksFromStartup()).toEqual([]);
+
+    await scanRecoverableWalksAtStartup(OWNER_2);
+    expect(getRecoverableWalksFromStartup().map((w) => w.walkId)).toEqual(["walk-1"]);
+  });
+
+  it("keeps the snapshot for repeat calls within one lifecycle — the scan stays a once-per-shell cost", async () => {
+    fs.__store.set(`${DOC}walkthroughs/walk-orphan/walk.mp4`, "video-bytes");
+    await scanRecoverableWalksAtStartup(OWNER);
+    const first = getRecoverableWalksFromStartup();
+
+    // A second call for the SAME owner must not re-walk the filesystem: the answer is only
+    // trustworthy as of shell entry, and re-taking it later is how a LIVE recording gets reported
+    // as an orphan (it has no manifest entry either until it goes terminal).
+    fs.__store.set(`${DOC}walkthroughs/walk-recording-now/walk.mp4`, "video-bytes");
+    await scanRecoverableWalksAtStartup(OWNER);
+    expect(getRecoverableWalksFromStartup()).toBe(first); // identity: nothing re-scanned, nothing republished
+  });
+
+  it("drops the snapshot when the shell tears down, so nothing renders an answer the module no longer holds", async () => {
+    fs.__store.set(`${DOC}walkthroughs/walk-orphan/walk.mp4`, "video-bytes");
+    await scanRecoverableWalksAtStartup(OWNER);
+    expect(getRecoverableWalksFromStartup()).toHaveLength(1);
+
+    forgetRecoverableWalksAtStartup();
+    expect(getRecoverableWalksFromStartup()).toEqual([]);
   });
 });
 

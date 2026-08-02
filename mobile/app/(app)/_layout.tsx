@@ -10,6 +10,7 @@ import { theme } from "../../src/theme/theme";
 import { walkOwnerKey } from "../../src/walkthrough/owner-key";
 import {
   drainWalkQueue,
+  forgetRecoverableWalksAtStartup,
   getSchedulableWalkCount,
   scanRecoverableWalksAtStartup,
 } from "../../src/walkthrough/upload";
@@ -41,20 +42,58 @@ export default function AppLayout() {
   // so scanning mid-walk would report the live recording as orphaned. This layout mounts on entry
   // to the authenticated shell, before any walk screen can exist; Profile then subscribes to the
   // snapshot rather than re-scanning.
+  //
+  // The teardown is half of that, not tidiness. upload.ts remembers the answer, and a module
+  // variable survives sign-out — the process is still running — so a second sign-in on this device
+  // was served the FIRST session's snapshot and never scanned again. That defeated useWalk's
+  // unmount finalize, whose entire purpose is to leave a walk interrupted by sign-out discoverable
+  // at the next login: the directory existed and nothing ever looked. Forgetting on the way out
+  // (rather than re-scanning on the way in) is what keeps the scan's own precondition intact —
+  // teardown is the one moment that is both "this answer is stale" and "nothing can be recording".
   React.useEffect(() => {
     if (!token || !ownerKey) return;
     void scanRecoverableWalksAtStartup(ownerKey);
+    return forgetRecoverableWalksAtStartup;
   }, [token, ownerKey]);
+
+  /**
+   * The session the queue fetcher below speaks for, as ONE object whose identity changes whenever
+   * that session does — and which the effect underneath retires when this shell (or this token)
+   * goes away.
+   *
+   * A drain deliberately outlives this shell: abandoning a multi-GB upload at sign-out is the
+   * failure the resume effect exists to prevent, so the drain keeps running with the fetcher it was
+   * handed. That fetcher holds THIS token and THIS signOut, and after a different user signs in
+   * both are obsolete — the old token is revoked, so the abandoned drain's next API call 401s, and
+   * an unguarded `onUnauthorized` would then clear the in-memory auth state and the persisted
+   * session, signing out the user who just signed IN. `retired` scopes the sign-out to the session
+   * generation that started the drain: a 401 on a live session still ends it (that token really is
+   * dead), a 401 on a superseded one is only ever news about a token nobody is using anymore.
+   */
+  const queueSession = React.useMemo(
+    () => ({ token, officeId: resolvedOfficeId, signOut, retired: false }),
+    [token, resolvedOfficeId, signOut],
+  );
+  React.useEffect(() => {
+    // Re-arm rather than assume: StrictMode and Fast Refresh run cleanup-then-effect against the
+    // SAME object, and a session left retired by that would silently stop honouring real 401s.
+    queueSession.retired = false;
+    return () => {
+      queueSession.retired = true;
+    };
+  }, [queueSession]);
 
   const queueFetcher = React.useCallback<Fetcher>(
     (path, opts) =>
       apiFetch(path, {
         ...opts,
-        token: token ?? undefined,
-        officeId: resolvedOfficeId,
-        onUnauthorized: () => void signOut(),
+        token: queueSession.token ?? undefined,
+        officeId: queueSession.officeId,
+        onUnauthorized: () => {
+          if (!queueSession.retired) void queueSession.signOut();
+        },
       }),
-    [token, resolvedOfficeId, signOut],
+    [queueSession],
   );
 
   /**
@@ -96,7 +135,8 @@ export default function AppLayout() {
     return () => {
       // Only stops NEW drains from being started after unmount; a drain already in flight is
       // deliberately left to finish — abandoning an upload on a navigation change is the failure
-      // this effect exists to prevent, not something to reintroduce.
+      // this effect exists to prevent, not something to reintroduce. What that survivor must NOT
+      // keep is the authority to end a session: queueSession's own effect retires it here too.
       active = false;
       sub.remove();
     };

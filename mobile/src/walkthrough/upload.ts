@@ -384,17 +384,33 @@ export async function getRecoverableWalkCount(ownerKey: string): Promise<number>
 }
 
 /**
- * The cold-start scan, taken once and remembered.
+ * The scan, taken once per AUTHENTICATED-SHELL LIFECYCLE and remembered for the rest of it.
  *
  * `findRecoverableWalks` is only meaningful before any walk could be recording — an ACTIVE walk has
  * no manifest entry either (it is not enqueued until terminal), so scanning mid-recording reports
  * the live walk as orphaned. `walk.tsx` is a hidden `Tabs.Screen` that never unmounts, so a screen
  * that scanned on focus would hit exactly that case the moment someone opened Profile mid-walk.
+ * Entering the authenticated shell — which every walk screen mounts UNDER, and therefore after — is
+ * the window where the answer is trustworthy. Everything until that shell goes away reads this
+ * snapshot rather than re-scanning.
  *
- * Running once at app launch, before anything can be recording, is the only window where the answer
- * is trustworthy. Everything after that reads this snapshot.
+ * Once per shell, NOT once per process, and the difference is the whole point of `scannedOwnerKey`
+ * and `forgetRecoverableWalksAtStartup` below. A module variable outlives sign-out: the process is
+ * still running, so a second sign-in on the same device kept being served the FIRST session's
+ * answer. That silently defeated useWalk's unmount finalize, which exists precisely so a walk
+ * interrupted by sign-out is discoverable at the next login — the directory it left behind never
+ * appeared until the app itself was killed and relaunched. A snapshot is also only an answer for
+ * the owner it was computed against: it excludes walks tracked in THAT owner's manifest, so serving
+ * it to a different signed-in identity both hides their orphans and claims walks that are not
+ * theirs to see.
  */
 let recoverableAtStartup: RecoveredWalk[] | null = null;
+/** Which owner `recoverableAtStartup` was computed for. Null whenever the snapshot is. */
+let scannedOwnerKey: string | null = null;
+/** Bumped on every teardown, so a scan the teardown overtook cannot publish afterwards: the scan is
+ *  async, and a shell that unmounts mid-scan would otherwise get the departing owner's result
+ *  installed as the incoming one's snapshot — the exact staleness the teardown just cleared. */
+let scanLifecycle = 0;
 
 /**
  * Notified the moment the startup scan resolves.
@@ -409,9 +425,9 @@ let recoverableAtStartup: RecoveredWalk[] | null = null;
 const startupScanListeners = new Set<() => void>();
 
 /**
- * Subscribe to startup-scan completion; returns its own unsubscribe. Shaped for React's
- * useSyncExternalStore paired with getRecoverableWalksFromStartup as the snapshot — see
- * app/(app)/profile.tsx's RecoverableWalksCard.
+ * Subscribe to any change in the snapshot — a scan resolving, or a lifecycle teardown clearing it;
+ * returns its own unsubscribe. Shaped for React's useSyncExternalStore paired with
+ * getRecoverableWalksFromStartup as the snapshot — see app/(app)/profile.tsx's RecoverableWalksCard.
  */
 export function subscribeRecoverableWalksFromStartup(listener: () => void): () => void {
   startupScanListeners.add(listener);
@@ -426,16 +442,39 @@ function notifyStartupScanListeners(): void {
   for (const listener of [...startupScanListeners]) listener();
 }
 
-/** Called once from the root layout's startup effect. Best-effort; never throws. */
+/** Called once per authenticated-shell lifecycle, from that shell's mount effect. Best-effort;
+ *  never throws. Repeat calls for the SAME owner within one lifecycle are free — and deliberately
+ *  do not re-scan, since by then a walk may well be recording. */
 export async function scanRecoverableWalksAtStartup(ownerKey: string): Promise<void> {
-  if (recoverableAtStartup !== null) return;
+  if (recoverableAtStartup !== null && scannedOwnerKey === ownerKey) return;
+  const lifecycle = scanLifecycle;
   try {
-    recoverableAtStartup = await findRecoverableWalks(ownerKey);
+    const found = await findRecoverableWalks(ownerKey);
+    if (lifecycle !== scanLifecycle) return; // the shell that asked is already gone
+    recoverableAtStartup = found;
+    scannedOwnerKey = ownerKey;
     notifyStartupScanListeners();
   } catch {
-    // A failed scan must never block launch. Left null so a later launch can retry rather than
+    // A failed scan must never block launch. Left null so the next lifecycle can retry rather than
     // caching an empty result that would hide real orphans for the rest of the session.
   }
+}
+
+/**
+ * Drop the snapshot, so the next `scanRecoverableWalksAtStartup` genuinely scans. Called from the
+ * authenticated shell's teardown — sign-out, or the shell unmounting — which is the one moment that
+ * is BOTH "this answer is now stale" and "nothing can be recording" (a walk screen only exists
+ * under that shell). Doing it at teardown rather than at the next mount is what keeps the invariant
+ * above intact: the module never has to decide mid-session whether a re-scan is safe.
+ *
+ * Notifies too, so a component still mounted against the previous snapshot drops back to empty
+ * instead of rendering a result the module no longer holds.
+ */
+export function forgetRecoverableWalksAtStartup(): void {
+  scanLifecycle++;
+  recoverableAtStartup = null;
+  scannedOwnerKey = null;
+  notifyStartupScanListeners();
 }
 
 /** The one empty result, never re-created. This getter is used as a useSyncExternalStore snapshot,
@@ -452,14 +491,6 @@ const NO_RECOVERABLE_WALKS: RecoveredWalk[] = [];
  */
 export function getRecoverableWalksFromStartup(): RecoveredWalk[] {
   return recoverableAtStartup ?? NO_RECOVERABLE_WALKS;
-}
-
-/** Test seam: forget the snapshot so the next `scanRecoverableWalksAtStartup` actually scans. Also
- *  notifies, so a component already mounted against the previous snapshot drops back to empty
- *  instead of rendering a result the module no longer holds. */
-export function __resetRecoverableStartupScanForTests(): void {
-  recoverableAtStartup = null;
-  notifyStartupScanListeners();
 }
 
 /** A file's own last-modified time in epoch ms, or `fallback` if it can't be read — see
@@ -643,6 +674,41 @@ let activeDrainOwnerKey: string | null = null;
  *  running drain serves it with a follow-up pass rather than dropping it (see drainWalkQueue). */
 let drainRequested = false;
 
+/** Everything needed to run a drain for an owner OTHER than the active one, once the lock frees.
+ *  Captured because that owner's drain cannot borrow the running one's arguments: the fetcher
+ *  carries their token and office, and the client is theirs to supply. */
+type PendingDrain = {
+  fetcher: Fetcher;
+  client: WalkthroughUploadClient;
+  opts: { onProgress?: (summary: WalkDrainSummary) => void };
+};
+/**
+ * Drains requested for other owners while one was running, keyed by owner so repeats collapse.
+ *
+ * A follow-up PASS can only ever serve the running drain's own owner — it re-reads one manifest.
+ * The other owner's request used to be dropped on exactly that reasoning, and the reasoning was
+ * half right: re-running this drain does nothing for them, but nothing else was going to ask again
+ * either. Their shell spends its mount trigger once (see (app)/_layout.tsx), so a sign-in that
+ * lands while the previous user's multi-GB upload is still running left the new owner's queue
+ * untouched until a foreground transition or an opportunistic background window iOS may not grant
+ * for hours.
+ */
+const pendingOwnerDrains = new Map<string, PendingDrain>();
+
+/** Start ONE waiting owner's drain, if any, now that the lock is free. Detached on purpose: the
+ *  drain that just finished must not have its promise held open by an unrelated owner's multi-GB
+ *  upload. Whatever this starts runs the same release path when IT finishes, so a third owner
+ *  queued behind this one is picked up in turn rather than needing its own scheduler. */
+function startPendingOwnerDrain(): void {
+  const next = pendingOwnerDrains.entries().next();
+  if (next.done) return;
+  const [ownerKey, pending] = next.value;
+  // Deleted BEFORE starting: the drain we are about to start clears `draining` in its own finally
+  // and calls back here, and an entry left in place would restart the same owner forever.
+  pendingOwnerDrains.delete(ownerKey);
+  void drainWalkQueue(ownerKey, pending.fetcher, pending.client, pending.opts).catch(() => undefined);
+}
+
 /** Total passes ONE drainWalkQueue call may make, the first included. A cap, not a target: passes 2+
  *  only happen when something re-requested a drain mid-pass, and in the normal case (a walk enqueued
  *  during a long upload) exactly one follow-up pass is needed. It exists so a caller that re-triggers
@@ -672,6 +738,9 @@ export const MAX_DRAIN_PASSES = 4;
  * walk while the first was still uploading left it queued with nothing scheduled to send it — the
  * background task is explicitly opportunistic (see upload-background-task.ts), so "later" could mean
  * hours. The returned summary covers every pass this call made, and MAX_DRAIN_PASSES bounds them.
+ * A request from a DIFFERENT owner cannot be coalesced into those passes at all — every pass reads
+ * the ACTIVE owner's manifest — so it is parked and started as its own drain the moment the lock
+ * frees. Either way its caller gets an immediate summary; what changed is that the work happens.
  */
 export async function drainWalkQueue(
   ownerKey: string,
@@ -685,10 +754,15 @@ export async function drainWalkQueue(
     // and this early return means nothing else was scheduling one either. A second walk finished
     // back-to-back with a long (multi-GB) upload therefore sat untouched until an opportunistic
     // background window iOS may not grant for hours, with the app in the foreground and a drain
-    // running the whole time. Only a request for the SAME owner is worth recording: a different
-    // signed-in identity has a different manifest, which re-running this drain's queue would do
-    // nothing for (that owner's own shell-mount/foreground drain is what covers them).
+    // running the whole time.
+    //
+    // A follow-up pass only serves the ACTIVE owner — it re-reads that owner's manifest and nothing
+    // else. A different signed-in identity is therefore parked instead, arguments and all, and run
+    // as its own drain the moment the lock frees (see startPendingOwnerDrain); returning early
+    // without recording it is how the second user on a shared device ended up with a queue nothing
+    // was scheduled to send.
     if (ownerKey === activeDrainOwnerKey) drainRequested = true;
+    else pendingOwnerDrains.set(ownerKey, { fetcher, client, opts });
     return {
       puts: 0,
       putFailures: 0,
@@ -741,6 +815,9 @@ export async function drainWalkQueue(
     if (keptAwake) await deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => undefined);
     activeDrainOwnerKey = null;
     draining = false;
+    // Strictly after the lock is dropped, or the drain this hands off to would see `draining` and
+    // park itself right back in the same map.
+    startPendingOwnerDrain();
   }
 }
 

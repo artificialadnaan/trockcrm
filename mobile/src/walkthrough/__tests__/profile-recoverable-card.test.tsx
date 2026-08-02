@@ -103,7 +103,7 @@ jest.mock("../upload-client", () => ({ walkthroughUploadClient: {} }));
 
 import * as FileSystem from "expo-file-system/legacy";
 import { act, render } from "@testing-library/react-native";
-import { __resetRecoverableStartupScanForTests, scanRecoverableWalksAtStartup } from "../upload";
+import { forgetRecoverableWalksAtStartup, scanRecoverableWalksAtStartup } from "../upload";
 // eslint-disable-next-line import/first
 import ProfileScreen from "../../../app/(app)/profile";
 
@@ -113,7 +113,9 @@ const OWNER = "user-1:office-a";
 
 beforeEach(() => {
   fs.__store.clear();
-  __resetRecoverableStartupScanForTests();
+  // What the authenticated shell does on teardown — the previous test's session ending. The
+  // snapshot is per shell lifecycle, and this suite is several of them in one process.
+  forgetRecoverableWalksAtStartup();
 });
 
 describe("Profile's recoverable-walks card", () => {

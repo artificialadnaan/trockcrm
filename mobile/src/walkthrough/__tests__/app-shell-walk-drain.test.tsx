@@ -33,10 +33,12 @@ jest.mock("../../api/client", () => ({ apiFetch: jest.fn(async () => ({})) }));
 jest.mock("../upload-client", () => ({ walkthroughUploadClient: { id: "walk-upload-client" } }));
 
 const mockScanRecoverableWalksAtStartup = jest.fn(async (..._args: unknown[]) => undefined);
+const mockForgetRecoverableWalksAtStartup = jest.fn();
 const mockGetSchedulableWalkCount = jest.fn(async (..._args: unknown[]): Promise<number> => 0);
 const mockDrainWalkQueue = jest.fn(async (..._args: unknown[]) => undefined);
 jest.mock("../upload", () => ({
   scanRecoverableWalksAtStartup: (...args: unknown[]) => mockScanRecoverableWalksAtStartup(...args),
+  forgetRecoverableWalksAtStartup: () => mockForgetRecoverableWalksAtStartup(),
   getSchedulableWalkCount: (...args: unknown[]) => mockGetSchedulableWalkCount(...args),
   drainWalkQueue: (...args: unknown[]) => mockDrainWalkQueue(...args),
 }));
@@ -52,6 +54,10 @@ jest.mock("../../auth/AuthContext", () => ({ useAuth: () => mockAuth }));
 
 import { act, render } from "@testing-library/react-native";
 // eslint-disable-next-line import/first
+import { apiFetch } from "../../api/client";
+// eslint-disable-next-line import/first
+import type { Fetcher } from "../../api/endpoints";
+// eslint-disable-next-line import/first
 import AppLayout from "../../../app/(app)/_layout";
 
 /** walkOwnerKey(user.id, activeOfficeId) for the auth below — the SAME namespace walk.tsx, Profile
@@ -62,6 +68,17 @@ const OWNER = "user-1:office-a";
  *  instead of hoping the emitter fires. */
 let appStateHandlers: Array<(status: AppStateStatus) => void>;
 
+const apiFetchMock = apiFetch as jest.Mock;
+
+/** The fetcher a drain was handed, driven the way a live drain drives it: make a request, then fire
+ *  the 401 callback apiFetch would have fired. That callback — not the fetcher itself — is the
+ *  thing that can sign someone out. */
+async function fire401(fetcher: Fetcher): Promise<void> {
+  await fetcher("/deals/deal-1/glasses-walkthroughs", { method: "POST" });
+  const opts = apiFetchMock.mock.calls.at(-1)![1] as { onUnauthorized?: () => void };
+  opts.onUnauthorized?.();
+}
+
 beforeEach(() => {
   mockAuth = {
     ready: true,
@@ -71,6 +88,8 @@ beforeEach(() => {
     signOut: jest.fn(),
   };
   mockScanRecoverableWalksAtStartup.mockClear();
+  mockForgetRecoverableWalksAtStartup.mockClear();
+  apiFetchMock.mockClear();
   mockGetSchedulableWalkCount.mockClear();
   mockGetSchedulableWalkCount.mockResolvedValue(0);
   mockDrainWalkQueue.mockClear();
@@ -87,12 +106,13 @@ afterEach(() => {
 
 /** Render and let the effects' async manifest reads settle. (`render` does its own act(); wrapping
  *  it in another one leaves the renderer unmounted.) */
-async function renderShell(): Promise<void> {
-  render(<AppLayout />);
+async function renderShell(): Promise<ReturnType<typeof render>> {
+  const view = render(<AppLayout />);
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
   });
+  return view;
 }
 
 describe("authenticated shell walk-queue drain", () => {
@@ -160,5 +180,50 @@ describe("authenticated shell walk-queue drain", () => {
   it("still runs the orphan-recovery scan it already owned", async () => {
     await renderShell();
     expect(mockScanRecoverableWalksAtStartup).toHaveBeenCalledWith(OWNER);
+  });
+});
+
+// A drain is deliberately NOT cancelled when this shell goes away — abandoning a multi-GB upload on
+// a navigation change is the failure the resume effect exists to prevent. What it does still hold is
+// THIS session's token and THIS session's signOut, and neither survives sign-out with any meaning.
+describe("a drain that outlives its shell", () => {
+  it("can no longer sign anyone out — the next user's session is not this drain's to end", async () => {
+    mockGetSchedulableWalkCount.mockResolvedValue(1);
+    const view = await renderShell();
+    const [, fetcher] = mockDrainWalkQueue.mock.calls[0] as unknown as [string, Fetcher];
+
+    // Sign-out. The drain is still running — it finishes an R2 PUT, then its next API call is
+    // rejected because the token it was started with has been revoked.
+    view.unmount();
+    await fire401(fetcher);
+
+    // Before this fix that 401 ran the OLD shell's signOut, which clears in-memory auth state and
+    // the persisted session — i.e. it signs out whoever is signed in NOW, not the user whose drain
+    // this is.
+    expect(mockAuth.signOut).not.toHaveBeenCalled();
+  });
+
+  it("still signs out on a 401 while its own session is the live one", async () => {
+    mockGetSchedulableWalkCount.mockResolvedValue(1);
+    await renderShell();
+    const [, fetcher] = mockDrainWalkQueue.mock.calls[0] as unknown as [string, Fetcher];
+
+    // Same 401, same drain, but nothing has torn this shell down: the token really is dead and the
+    // session really should end. Suppressing this would be the opposite bug.
+    await fire401(fetcher);
+
+    expect(mockAuth.signOut).toHaveBeenCalledTimes(1);
+  });
+
+  it("forgets the startup scan when the shell tears down, so the next sign-in rescans", async () => {
+    const view = await renderShell();
+    expect(mockForgetRecoverableWalksAtStartup).not.toHaveBeenCalled();
+
+    // The snapshot is only trustworthy as of shell entry, and it was taken against THIS owner's
+    // manifest. Keeping it for the whole process means a same-process re-login (and the walk
+    // useWalk finalized on the way out, specifically so it could be recovered) is never rescanned.
+    view.unmount();
+
+    expect(mockForgetRecoverableWalksAtStartup).toHaveBeenCalled();
   });
 });
