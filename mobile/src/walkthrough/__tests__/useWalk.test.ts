@@ -294,6 +294,59 @@ describe("useWalk", () => {
     expect(result.current.walk.state).toBe("complete");
   });
 
+  // The P1 bug this closes: an estimator recording a walk switches tabs, picks a DIFFERENT deal
+  // in Capture, and returns to the walk route — the route re-renders this hook with a new
+  // (dealId, projectId) while native is still actively recording. The auto-reset used to fire
+  // unconditionally here, wiping the walk id/stills/dealId without ever ending or enqueuing the
+  // recording — the next start() then tore down the orphaned native session with nothing to show
+  // for it. Fixed: an active recording must never be silently discarded, so it keeps running,
+  // still filed against the deal it actually started against (walk.dealId, which is what
+  // enqueueWalk/upload.ts key the server upload on — NOT the screen's live route params).
+  it("does NOT discard an ACTIVE recording when (dealId, projectId) changes mid-walk — it keeps running under its ORIGINAL deal", async () => {
+    mockStartWalk.mockResolvedValue({
+      walkId: "w1",
+      directory: "d",
+      videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
+      inputPortName: "RB Meta 014K",
+      negotiatedSampleRate: 16000,
+    });
+
+    const { result, rerender } = renderHook(
+      ({ dealId, projectId }: { dealId: string; projectId: string | null }) => useWalk(dealId, projectId),
+      { initialProps: { dealId: "deal-1", projectId: null as string | null } },
+    );
+
+    await act(async () => {
+      await result.current.start();
+    });
+    expect(result.current.walk.state).toBe("recording");
+    const walkIdAtStart = result.current.walkId;
+
+    // A still captured before the switch, to confirm nothing captured so far is discarded either.
+    act(() => {
+      stillListener!({ uri: "file:///s0.jpg", bytes: 1, source: "glasses" });
+    });
+    expect(result.current.stillCount).toBe(1);
+
+    // The estimator switches to a DIFFERENT deal and returns to this screen.
+    rerender({ dealId: "deal-2", projectId: "proj-9" });
+
+    // Must NOT have been torn down: still recording, still attached to the ORIGINAL deal, same
+    // walk id, same captured still — none of it silently discarded, and not re-attached to the
+    // NEW deal either (that would be filing the walk against the wrong site).
+    expect(result.current.walk.state).toBe("recording");
+    expect(result.current.walk.dealId).toBe("deal-1");
+    expect(result.current.walk.projectId).toBeNull();
+    expect(result.current.walkId).toBe(walkIdAtStart);
+    expect(result.current.stillCount).toBe(1);
+
+    // Re-rendering again with the SAME new identity must not be treated as a further change —
+    // the walk should just keep running, exactly as before.
+    rerender({ dealId: "deal-2", projectId: "proj-9" });
+    expect(result.current.walk.state).toBe("recording");
+    expect(result.current.walk.dealId).toBe("deal-1");
+  });
+
   // The other half of the fix: an explicit reset() the SCREEN can call (e.g. on route focus,
   // once the walk is terminal), independent of a prop/identity change.
   it("reset() snaps a terminal walk back to fresh idle for the current deal", async () => {
@@ -314,6 +367,35 @@ describe("useWalk", () => {
     expect(result.current.walk.projectId).toBe("proj-7");
     expect(result.current.walkId).toBeNull();
     expect(result.current.error).toBeNull();
+  });
+
+  // reset() is documented as "only call once terminal," but must refuse a misuse too — the same
+  // invariant reduceWalk itself enforces (session.ts's isWalkActive), just also applied here so
+  // walkId/error (state the reducer has no say over) can't be wiped out from under a walk that is
+  // still actually recording.
+  it("reset() is a no-op while the walk is ACTIVE (recording), even though it's not terminal", async () => {
+    mockStartWalk.mockResolvedValue({
+      walkId: "w1",
+      directory: "d",
+      videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
+      inputPortName: "RB Meta 014K",
+      negotiatedSampleRate: 16000,
+    });
+    const { result } = renderHook(() => useWalk("deal-1", "proj-7"));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    expect(result.current.walk.state).toBe("recording");
+    const walkIdAtStart = result.current.walkId;
+
+    act(() => {
+      result.current.reset();
+    });
+
+    expect(result.current.walk.state).toBe("recording");
+    expect(result.current.walk.dealId).toBe("deal-1");
+    expect(result.current.walkId).toBe(walkIdAtStart);
   });
 
   describe("captureEnabled / atCaptureLimit", () => {
@@ -356,6 +438,168 @@ describe("useWalk", () => {
         await result.current.capture();
       });
       expect(mockCaptureStill).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("in-flight capture accounting", () => {
+    // The P2 bug this closes: captureStill() resolves the instant the request is ACCEPTED, not
+    // when the photo is actually delivered — that arrives later on a separate `walkthrough:still`
+    // event. `walk.stills` only reflects DELIVERED photos, so two capture() calls issued
+    // back-to-back (before either's still has landed) used to both read the same pre-capture
+    // count and both pass, letting the walk's eventual completion payload exceed the server's cap
+    // after every byte was already uploaded. Only ONE of two such calls must actually reach
+    // native.
+    it("refuses a second capture() before the first request's photo has been delivered, once only one slot remains", async () => {
+      mockStartWalk.mockResolvedValue({
+        walkId: "w1",
+        directory: "d",
+        videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
+        inputPortName: "RB Meta 014K",
+        negotiatedSampleRate: 16000,
+      });
+      mockCaptureStill.mockResolvedValue({ requested: true });
+      const { result } = renderHook(() => useWalk("deal-1", null));
+
+      await act(async () => {
+        await result.current.start();
+      });
+
+      // Fill to exactly one remaining slot: MAX_WALK_ARTIFACTS - 2 delivered stills, the video
+      // artifact accounting for the other reserved slot (same boundary as canCaptureMore's own
+      // test in session.test.ts).
+      act(() => {
+        for (let i = 0; i < MAX_WALK_ARTIFACTS - 2; i++) {
+          stillListener!({ uri: `file:///s${i}.jpg`, bytes: 1, source: "phone" });
+        }
+      });
+      expect(result.current.stillCount).toBe(MAX_WALK_ARTIFACTS - 2);
+      expect(result.current.captureEnabled).toBe(true);
+
+      // Two fast taps, back to back — both calls share the exact same render's `capture`
+      // closure, since no re-render happens between them (mirrors what two real Pressable taps
+      // in quick succession do).
+      await act(async () => {
+        await Promise.all([result.current.capture(), result.current.capture()]);
+      });
+
+      // Only ONE tap should have actually reached native — the second must have been refused
+      // because the first request was already "in flight" (accepted, not yet delivered), even
+      // though NEITHER photo had landed in `walk.stills` yet when the second tap was checked.
+      expect(mockCaptureStill).toHaveBeenCalledTimes(1);
+    });
+
+    it("releases the in-flight reservation once the request's still is delivered, restoring the real remaining count", async () => {
+      mockStartWalk.mockResolvedValue({
+        walkId: "w1",
+        directory: "d",
+        videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
+        inputPortName: "RB Meta 014K",
+        negotiatedSampleRate: 16000,
+      });
+      mockCaptureStill.mockResolvedValue({ requested: true });
+      const { result } = renderHook(() => useWalk("deal-1", null));
+
+      await act(async () => {
+        await result.current.start();
+      });
+      act(() => {
+        for (let i = 0; i < MAX_WALK_ARTIFACTS - 2; i++) {
+          stillListener!({ uri: `file:///s${i}.jpg`, bytes: 1, source: "phone" });
+        }
+      });
+
+      await act(async () => {
+        await result.current.capture();
+      });
+      // The one remaining slot is now reserved (in flight) but not yet delivered.
+      expect(result.current.stillCount).toBe(MAX_WALK_ARTIFACTS - 2);
+      expect(result.current.captureEnabled).toBe(false);
+
+      act(() => {
+        stillListener!({ uri: "file:///delivered.jpg", bytes: 1, source: "phone" });
+      });
+
+      // Delivered: the reservation is released, but the walk is correctly AT the real cap now —
+      // not stuck one slot short because of a leaked reservation.
+      expect(result.current.stillCount).toBe(MAX_WALK_ARTIFACTS - 1);
+      expect(result.current.captureEnabled).toBe(false);
+      expect(result.current.atCaptureLimit).toBe(true);
+    });
+
+    // Explicitly the hazard called out in the fix: a request that is accepted but then REJECTED,
+    // or that native later reports failed to write, must release its reservation — an in-flight
+    // counter that only ever increments would wedge the CAPTURE button one slot short of the
+    // real cap for the rest of the walk, which is worse than the race it replaces.
+    it("releases the reservation when captureStill resolves requested:false, so the button does not wedge", async () => {
+      mockStartWalk.mockResolvedValue({
+        walkId: "w1",
+        directory: "d",
+        videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
+        inputPortName: "RB Meta 014K",
+        negotiatedSampleRate: 16000,
+      });
+      const { result } = renderHook(() => useWalk("deal-1", null));
+
+      await act(async () => {
+        await result.current.start();
+      });
+      act(() => {
+        for (let i = 0; i < MAX_WALK_ARTIFACTS - 2; i++) {
+          stillListener!({ uri: `file:///s${i}.jpg`, bytes: 1, source: "phone" });
+        }
+      });
+      expect(result.current.captureEnabled).toBe(true);
+
+      mockCaptureStill.mockResolvedValue({ requested: false });
+      await act(async () => {
+        await result.current.capture();
+      });
+      expect(result.current.error).not.toBeNull();
+
+      // Rejected outright — no `still` event will EVER follow, so the reservation must already
+      // be gone: the one real remaining slot is available again.
+      expect(result.current.captureEnabled).toBe(true);
+      expect(result.current.atCaptureLimit).toBe(false);
+
+      mockCaptureStill.mockResolvedValue({ requested: true });
+      await act(async () => {
+        await result.current.capture();
+      });
+      expect(mockCaptureStill).toHaveBeenCalledTimes(2);
+    });
+
+    it("releases the reservation when native reports the still failed to write (walkthrough:error), not just on delivery", async () => {
+      mockStartWalk.mockResolvedValue({
+        walkId: "w1",
+        directory: "d",
+        videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
+        inputPortName: "RB Meta 014K",
+        negotiatedSampleRate: 16000,
+      });
+      mockCaptureStill.mockResolvedValue({ requested: true });
+      const { result } = renderHook(() => useWalk("deal-1", null));
+
+      await act(async () => {
+        await result.current.start();
+      });
+      act(() => {
+        for (let i = 0; i < MAX_WALK_ARTIFACTS - 2; i++) {
+          stillListener!({ uri: `file:///s${i}.jpg`, bytes: 1, source: "phone" });
+        }
+      });
+
+      await act(async () => {
+        await result.current.capture();
+      });
+      expect(result.current.captureEnabled).toBe(false); // reserved, awaiting delivery
+
+      // No `still` event ever arrives for this one — instead native reports it failed to write.
+      act(() => {
+        errorListener!({ message: "still write failed: disk full" });
+      });
+
+      expect(result.current.stillCount).toBe(MAX_WALK_ARTIFACTS - 2); // never delivered
+      expect(result.current.captureEnabled).toBe(true); // but the slot is free again
     });
   });
 });

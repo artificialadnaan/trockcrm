@@ -57,13 +57,18 @@ export type WalkEvent =
   | { type: "failed"; reason: string }
   /**
    * Snaps the walk back to a fresh `idle` for (dealId, projectId), discarding whatever walk —
-   * complete, failed, or otherwise — was here before. The one event allowed to escape TERMINAL
-   * absorption: walk.tsx is a hidden `Tabs.Screen` that never unmounts on navigation, so without
-   * this a walk that finished would sit here forever, its terminal state absorbing every future
-   * "starting" event. Unlike every other event, this is not something native reports — it is
-   * dispatched by useWalk.ts when the target a walk would attach to changes (or the screen wants a
-   * clean slate), so there is no "spurious/duplicated" case to guard against the way there is for a
-   * native callback.
+   * complete, failed, or otherwise — was here before. REFUSED, however, while the walk is ACTIVE
+   * (see `isWalkActive`): starting/recording/finalizing means native has a real recording in
+   * flight, and native keeps running regardless of what this reducer does — dropping
+   * dealId/stills/video here would orphan that session, and the estimator's next "start" would
+   * tear it down with nothing captured. So this is the one event allowed to escape TERMINAL
+   * absorption, but not the one exception to "never discard an active recording": walk.tsx is a
+   * hidden `Tabs.Screen` that never unmounts on navigation, so without SOME escape a walk that
+   * finished would sit here forever, its terminal state absorbing every future "starting" event —
+   * but that only ever needs to apply once the walk is no longer actually running. Unlike every
+   * other event, this is not something native reports — it is dispatched by useWalk.ts when the
+   * target a walk would attach to changes (or the screen wants a clean slate), so there is no
+   * "spurious/duplicated" case to guard against the way there is for a native callback.
    */
   | { type: "reset"; dealId: string; projectId: string | null };
 
@@ -101,6 +106,18 @@ export function canAcceptStill(walk: Walk): boolean {
   return walk.state === "recording" || walk.state === "finalizing";
 }
 
+/**
+ * True while native has a real recording session in flight: asked to start, actively capturing,
+ * or waiting on `AVAssetWriter` to finish. A walk in any of these states represents a site visit
+ * physically happening RIGHT NOW — nothing may silently discard it (see the "reset" case of
+ * `WalkEvent` and its use in `reduceWalk`/`useWalk.ts`'s `reset()`), because native does not stop
+ * just because this reducer's state does, and a discarded walk here becomes an orphaned native
+ * session the next "start" tears down with nothing to show for it.
+ */
+export function isWalkActive(state: WalkState): boolean {
+  return state === "starting" || state === "recording" || state === "finalizing";
+}
+
 export function artifactCount(walk: Walk): number {
   return walk.stills.length;
 }
@@ -120,11 +137,20 @@ export const MAX_WALK_ARTIFACTS = 200;
  * exceeding MAX_WALK_ARTIFACTS. Layered on top of `canCapture` (the state gate): this is the COUNT
  * gate, and it is what the capture control itself should check before requesting a new still, so
  * the walk never accumulates more than the server will accept at completion.
+ *
+ * `reserved` additionally counts capture requests already ACCEPTED by native but not yet
+ * delivered as a `still` event — `walk.stills` only reflects DELIVERED stills, but
+ * `Recorder.captureStill()` resolves the moment the request is accepted, well before the photo
+ * itself arrives on its own async event. This reducer has no way to know about an outstanding
+ * request on its own (native carries no id to correlate a request to its eventual event, so
+ * there is nothing for a "requested" event to even look like) — useWalk.ts tracks that count and
+ * passes it in, so two capture requests issued back-to-back still can't both pass a check that
+ * only ever looked at what had already landed.
  */
-export function canCaptureMore(walk: Walk): boolean {
+export function canCaptureMore(walk: Walk, reserved = 0): boolean {
   if (!canCapture(walk)) return false;
   const projected =
-    walk.stills.length + 1 /* the still being requested */ +
+    walk.stills.length + reserved + 1 /* the still being requested */ +
     (walk.videoUri ? 1 : 0) +
     (walk.audioUri ? 1 : 0);
   return projected <= MAX_WALK_ARTIFACTS;
@@ -135,7 +161,12 @@ export function canCaptureMore(walk: Walk): boolean {
 const TERMINAL: ReadonlySet<WalkState> = new Set<WalkState>(["complete", "failed"]);
 
 export function reduceWalk(walk: Walk, event: WalkEvent): Walk {
-  if (event.type === "reset") return initialWalk(event.dealId, event.projectId);
+  if (event.type === "reset") {
+    // Never discard an ACTIVE recording (isWalkActive) — see WalkEvent's "reset" doc. Refusing is
+    // a genuine no-op: the walk keeps running, still attached to the deal it actually started
+    // against, until it reaches a non-active state on its own.
+    return isWalkActive(walk.state) ? walk : initialWalk(event.dealId, event.projectId);
+  }
   if (TERMINAL.has(walk.state)) return walk;
 
   switch (event.type) {

@@ -104,17 +104,36 @@ export default function WalkScreen() {
   // absorbs every further event on purpose, but that's for a late native callback, not for the
   // estimator trying to start a genuinely new walk. Only reset a TERMINAL walk — resetting one
   // that's actually recording would silently discard an in-progress site visit if focus is lost
-  // and regained mid-walk (e.g. a brief detour to another screen). enqueuedWalkIdRef is cleared in
-  // lockstep: a stale value here wouldn't, by itself, block the NEXT walk (every walkId is freshly
-  // random — see newWalkId() in useWalk.ts), but leaving a previous walk's id sitting in a guard
-  // meant for THIS walk is exactly the kind of partial reset that invites a future bug.
+  // and regained mid-walk (e.g. a brief detour to another screen); useWalk's own reset() also
+  // refuses that case now, but the intent here is to never even ask. enqueuedWalkIdRef is cleared
+  // in lockstep: a stale value here wouldn't, by itself, block the NEXT walk (every walkId is
+  // freshly random — see newWalkId() in useWalk.ts), but leaving a previous walk's id sitting in
+  // a guard meant for THIS walk is exactly the kind of partial reset that invites a future bug.
+  //
+  // The callback handed to useFocusEffect must have a STABLE identity — read walk.state/reset
+  // through refs, not directly, and depend on NEITHER. Expo Router re-runs this effect immediately
+  // whenever the route is already focused and the callback's identity changes (the same "adjust on
+  // prop change" mechanics as a plain useEffect), which used to be exactly how this fired: the
+  // instant a walk reached "complete"/"failed" WHILE this screen was already the focused route
+  // (this is a hidden tab — no blur/refocus ever has to happen), `[walk.state, reset]` changing
+  // handed useCallback a new reference, and Router ran it right then — clearing the completion
+  // summary (or fatal-error diagnostic) the same instant it appeared, before the estimator could
+  // ever read it. Refs make the callback's identity constant across renders, so this now only
+  // fires on a genuine focus transition (initial mount, or an actual blur-then-refocus) — the
+  // completion summary now survives until the estimator actually navigates away and back.
+  const walkStateForFocusRef = useRef(walk.state);
+  walkStateForFocusRef.current = walk.state;
+  const resetForFocusRef = useRef(reset);
+  resetForFocusRef.current = reset;
+
   useFocusEffect(
     useCallback(() => {
-      if (walk.state === "complete" || walk.state === "failed") {
-        reset();
+      const state = walkStateForFocusRef.current;
+      if (state === "complete" || state === "failed") {
+        resetForFocusRef.current();
         enqueuedWalkIdRef.current = null;
       }
-    }, [walk.state, reset]),
+    }, []),
   );
 
   useEffect(() => {

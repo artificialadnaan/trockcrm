@@ -4,6 +4,7 @@ import {
   canCapture,
   canAcceptStill,
   canCaptureMore,
+  isWalkActive,
   artifactCount,
   MAX_WALK_ARTIFACTS,
   type Walk,
@@ -179,12 +180,58 @@ describe("reduceWalk", () => {
     expect(reset).toEqual(initialWalk("deal-2", null));
   });
 
-  // Resetting is not gated on being terminal — the SAME target (deal unchanged) resetting an
-  // active walk is a caller decision (useWalk.reset()'s doc comment says this should only be
-  // called on a terminal walk), not something the pure reducer itself refuses.
-  it("a reset event also works on a walk that never reached a terminal state", () => {
+  // Superseded by isWalkActive's guard below: a reset is refused for ANY active walk, even one
+  // whose target (dealId/projectId) hasn't actually changed — see WalkEvent's "reset" doc for why
+  // "the same identity" is not a safe case to special-case back in. Kept as a named regression
+  // test in its own right, not just folded into the isWalkActive describe block below, because
+  // this is the exact case a naive "only refuse when the identity is DIFFERENT" fix would miss.
+  it("a reset event on a walk that never reached a terminal state is refused, even for the SAME target", () => {
     const reset = reduceWalk(started, { type: "reset", dealId: "deal-1", projectId: "proj-7" });
-    expect(reset).toEqual(initialWalk("deal-1", "proj-7"));
+    expect(reset).toBe(started);
+  });
+
+  // The bug this closes: an identity change (switching deals mid-walk) used to reset
+  // UNCONDITIONALLY, discarding an ACTIVE recording — native keeps running regardless of what
+  // this reducer does, so the estimator's next "start" would tear down that orphaned native
+  // session with nothing captured for it. A reset while starting/recording/finalizing must be a
+  // genuine no-op: the walk keeps running, still attached to the deal it actually started
+  // against, not the one the reset event was asking to switch to.
+  it("refuses to reset a RECORDING walk even when the reset targets a DIFFERENT deal — the walk keeps running under its original one", () => {
+    const withStill = reduceWalk(started, {
+      type: "still",
+      uri: "file:///s.jpg",
+      at: 2000,
+      source: "glasses",
+    });
+    const attempted = reduceWalk(withStill, { type: "reset", dealId: "deal-2", projectId: "proj-9" });
+    expect(attempted).toBe(withStill); // same reference: a genuine no-op, not just equal-by-value
+    expect(attempted.state).toBe("recording");
+    expect(attempted.dealId).toBe("deal-1");
+    expect(artifactCount(attempted)).toBe(1);
+  });
+
+  it("refuses to reset a STARTING walk", () => {
+    const starting = reduceWalk(initialWalk("deal-1", null), { type: "starting" });
+    const attempted = reduceWalk(starting, { type: "reset", dealId: "deal-2", projectId: null });
+    expect(attempted).toBe(starting);
+  });
+
+  it("refuses to reset a FINALIZING walk", () => {
+    const finalizing = reduceWalk(started, { type: "ended", at: 5000 });
+    expect(finalizing.state).toBe("finalizing");
+    const attempted = reduceWalk(finalizing, { type: "reset", dealId: "deal-2", projectId: null });
+    expect(attempted).toBe(finalizing);
+  });
+});
+
+describe("isWalkActive", () => {
+  it("is true only for starting/recording/finalizing — the states where native has a real recording session in flight", () => {
+    expect(isWalkActive(initialWalk("d", null).state)).toBe(false); // idle
+    expect(isWalkActive("starting")).toBe(true);
+    expect(isWalkActive("recording")).toBe(true);
+    expect(isWalkActive("finalizing")).toBe(true);
+    expect(isWalkActive("complete")).toBe(false);
+    expect(isWalkActive("failed")).toBe(false);
   });
 });
 
@@ -252,5 +299,31 @@ describe("canCaptureMore", () => {
     expect(atCap.stills.length).toBe(MAX_WALK_ARTIFACTS - 1);
     // Capturing again now would make stills (MAX) + video (1) === MAX_WALK_ARTIFACTS + 1.
     expect(canCaptureMore(atCap)).toBe(false);
+  });
+
+  // `reserved` accounts for capture requests already ACCEPTED by native but not yet delivered as
+  // a `still` event — useWalk.ts's in-flight tracker. Without it, a DELIVERED-only count lets two
+  // requests issued back-to-back both look safe, because neither photo has landed in
+  // `walk.stills` yet when the second one is checked.
+  it("also refuses once DELIVERED stills plus `reserved` in-flight requests would push the total past the cap", () => {
+    let walk = started;
+    for (let i = 0; i < MAX_WALK_ARTIFACTS - 3; i++) {
+      walk = reduceWalk(walk, {
+        type: "still",
+        uri: `file:///s${i}.jpg`,
+        at: 1000 + i,
+        source: "phone",
+      });
+    }
+    expect(walk.stills.length).toBe(MAX_WALK_ARTIFACTS - 3);
+    // Two slots remain (stills + video === MAX_WALK_ARTIFACTS - 2): with nothing in flight, a
+    // capture is fine.
+    expect(canCaptureMore(walk, 0)).toBe(true);
+    // With ONE request already accepted but not yet delivered, one more still fits exactly.
+    expect(canCaptureMore(walk, 1)).toBe(true);
+    // With TWO already in flight, a third would make stills(MAX-3) + reserved(2) + new(1) +
+    // video(1) === MAX_WALK_ARTIFACTS + 1 — over the cap, even though NOT ONE of those two
+    // in-flight requests has actually landed in `walk.stills` yet.
+    expect(canCaptureMore(walk, 2)).toBe(false);
   });
 });
