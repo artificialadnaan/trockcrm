@@ -109,6 +109,7 @@ function makeWalk(state: WalkState, overrides: Partial<Walk> = {}): Walk {
     videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
     audioUri: null,
     videoCoverage: null,
+    audioCoverage: null,
     stills: [],
     error: state === "failed" ? "glasses disconnected" : null,
     ...overrides,
@@ -297,5 +298,74 @@ describe("WalkScreen short-video notice", () => {
 
     const meta = mockEnqueueWalk.mock.calls[0]![3] as { title: string };
     expect(meta.title).toContain("video cut short");
+  });
+});
+
+// ── ROUND-4 FINDING 2 (P1), screen half: a truncated NARRATION is the expensive one ────────────────
+//
+// Video going short costs pictures. Audio going short costs the scope itself — the narration is
+// what the extraction reads — so the estimator has to hear about it while they are still standing
+// on the site, in the same register and on the same screen as the video notice.
+describe("WalkScreen short-audio notice", () => {
+  const shortAudio = { walkMs: 20 * 60 * 1000, audioMs: 5_000, shortfallMs: 1_195_000 };
+
+  it("says plainly on the completion screen that the narration is short, and by roughly how much", () => {
+    mockResult = resultFor(
+      makeWalk("complete", { durationMs: 20 * 60 * 1000, audioCoverage: shortAudio }),
+    );
+    const { getByText } = render(<WalkScreen />);
+
+    expect(getByText("Narration is short")).toBeTruthy();
+    expect(
+      getByText(/Only about 0:05 of this 20:00 walk has audio — roughly 19:55 is missing/),
+    ).toBeTruthy();
+  });
+
+  it("shows nothing extra for a walk whose narration covered it", () => {
+    mockResult = resultFor(
+      makeWalk("complete", {
+        durationMs: 20 * 60 * 1000,
+        audioCoverage: { walkMs: 20 * 60 * 1000, audioMs: 20 * 60 * 1000, shortfallMs: 0 },
+      }),
+    );
+    const { queryByText } = render(<WalkScreen />);
+    expect(queryByText("Narration is short")).toBeNull();
+  });
+
+  it("marks the queued title so a short narration survives past this screen", () => {
+    mockResult = resultFor(makeWalk("recording", { durationMs: null, audioCoverage: null }));
+    const { rerender } = render(<WalkScreen />);
+
+    mockResult = resultFor(
+      makeWalk("complete", { durationMs: 20 * 60 * 1000, audioCoverage: shortAudio }),
+    );
+    act(() => {
+      rerender(<WalkScreen />);
+    });
+
+    const meta = mockEnqueueWalk.mock.calls[0]![3] as { title: string };
+    expect(meta.title).toContain("audio cut short");
+  });
+
+  // Both transports can die on one walk, and the title is a single string. The existing
+  // "(video cut short)" wording must survive verbatim for a video-only truncation — the office
+  // reads it — so the two markers combine rather than one overwriting the other.
+  it("names both transports in the title when video and audio both came up short", () => {
+    mockResult = resultFor(makeWalk("recording"));
+    const { rerender } = render(<WalkScreen />);
+
+    mockResult = resultFor(
+      makeWalk("complete", {
+        durationMs: 20 * 60 * 1000,
+        videoCoverage: { walkMs: 20 * 60 * 1000, videoMs: 5_000, shortfallMs: 1_195_000 },
+        audioCoverage: shortAudio,
+      }),
+    );
+    act(() => {
+      rerender(<WalkScreen />);
+    });
+
+    const meta = mockEnqueueWalk.mock.calls[0]![3] as { title: string };
+    expect(meta.title).toContain("video and audio cut short");
   });
 });

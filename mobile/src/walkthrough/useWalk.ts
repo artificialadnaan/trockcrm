@@ -99,10 +99,16 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
   const walkStateRef = useRef(walk.state);
   walkStateRef.current = walk.state;
 
-  // The in-flight `Recorder.startWalk()` promise, or null. Also only for the unmount cleanup: a walk
-  // still in "starting" has no writer yet, so an endWalk() issued right now finalises nothing and
-  // tears down nothing — and then the start it raced goes on to open the DAT stream and the
-  // microphone with no JS left alive to ever close them.
+  // The in-flight `Recorder.startWalk()` promise, or null. Two readers, and they want it for
+  // different reasons:
+  //
+  //   - The unmount cleanup below: a walk still in "starting" has no writer yet, so an endWalk()
+  //     issued right now finalises nothing and tears down nothing — and then the start it raced
+  //     goes on to open the DAT stream and the microphone with no JS left alive to ever close them.
+  //   - `start()` itself, as a SYNCHRONOUS admission guard. `walk.state` cannot serve there: the
+  //     "starting" dispatch is committed by React on a later tick, so two taps inside one tick both
+  //     read `idle` and the reducer's own idle-only guard never sees the first one. A ref assigned
+  //     in the same tick as the native call is the only thing the second tap can observe in time.
   const startInFlightRef = useRef<Promise<unknown> | null>(null);
 
   const reset = useCallback(() => {
@@ -220,6 +226,22 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
   }, []);
 
   const start = useCallback(async () => {
+    // Both guards run BEFORE the dispatch and before native, and both read refs rather than state,
+    // because the whole defect is that state is not observable yet.
+    //
+    // Native is a singleton: one `session`, one `stream`, one `walkDirectory`, one AVAssetWriter.
+    // A second `startWalk()` does not queue behind the first, it overwrites it — so the first
+    // walk's directory and writer are orphaned while its DAT stream and microphone keep running,
+    // and the estimator is recording a walk that no longer has anywhere to land.
+    //
+    //   - startInFlightRef covers the tick-level race: two taps before React commits "starting".
+    //     Assigned synchronously alongside the native call below, so the second tap sees it.
+    //   - walkStateRef covers the rest of the walk. The ref above is cleared the moment the first
+    //     start RESOLVES, but the singleton is busiest after that — a start issued while a walk is
+    //     recording would tear down a live site visit to build a new one. Reads the ref, not
+    //     `walk.state`, so this callback keeps its empty dependency list and stable identity.
+    if (startInFlightRef.current) return;
+    if (isWalkActive(walkStateRef.current)) return;
     dispatch({ type: "starting" });
     const id = newWalkId();
     // Set BEFORE the native call resolves: even a walk that fails at startWalk() is "that" id (it's
@@ -320,6 +342,21 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
               videoFramesAppended: result.census.videoFramesAppended,
             }
           : null,
+        // The narration half of the same silence, and the more expensive one: when the writer
+        // refuses phone-mic buffers it drops them without counting anything and without latching,
+        // so the video track stays healthy and the walk finishes .completed holding a fraction of
+        // the speech that scope extraction is supposed to read.
+        //
+        // The typeof check is the trap, not ceremony. `audioSecondsAppended` was added to a census
+        // that already shipped, so a dev client can return every other counter and not this one;
+        // the type says `number | undefined` for exactly that reason. Collapsing that to zero with
+        // a `?? 0` would report NO NARRATION for every walk recorded by that build — zero is the
+        // worst value in this range, the exact inverse of the video sentinel's `-1` reading as the
+        // healthiest. Unmeasured must stay null, which session.ts then leaves as "unknown".
+        audioCensus:
+          result.census && typeof result.census.audioSecondsAppended === "number"
+            ? { audioSecondsAppended: result.census.audioSecondsAppended }
+            : null,
       });
     } catch (err) {
       const message = errorMessage(err);

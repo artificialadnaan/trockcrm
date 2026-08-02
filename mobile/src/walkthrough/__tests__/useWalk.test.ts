@@ -28,7 +28,7 @@ jest.mock("../native", () => ({
 }));
 
 import { useWalk } from "../useWalk";
-import { isVideoTruncated, MAX_WALK_ARTIFACTS } from "../session";
+import { isAudioTruncated, isVideoTruncated, MAX_WALK_ARTIFACTS } from "../session";
 
 beforeEach(() => {
   mockStartWalk.mockReset();
@@ -896,5 +896,237 @@ describe("useWalk unmount while recording", () => {
     });
 
     expect(mockEndWalk).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── ROUND-4 FINDING 2 (P1): a walk whose NARRATION was truncated must say so ───────────────────────
+//
+// The audio half of the same silence the video census exists to break, and the more expensive half:
+// the spoken narration is what scope extraction actually reads, so a walk with no usable phone-mic
+// track is a site visit that has to be repeated even if every frame landed. When
+// `audioInput.isReadyForMoreMediaData` goes false the writer drops the buffer and says nothing —
+// the video track stays healthy, AVAssetWriter finishes .completed, and the walk uploads as
+// complete with a fraction of the narration in it. Only the census can tell.
+describe("useWalk audio-coverage check", () => {
+  const STARTED = {
+    walkId: "w1",
+    directory: "d",
+    videoUri: "file:///docs/walkthroughs/w1/PARTIAL.mp4",
+    inputPortName: "iPhone Microphone",
+    negotiatedSampleRate: 48000,
+  };
+
+  /** Drives Date.now() so the walk's wall-clock duration is exact rather than test-machine timing. */
+  function withClock(): { advance: (ms: number) => void; restore: () => void } {
+    let now = 1_700_000_000_000;
+    const spy = jest.spyOn(Date, "now").mockImplementation(() => now);
+    return {
+      advance: (ms: number) => {
+        now += ms;
+      },
+      restore: () => spy.mockRestore(),
+    };
+  }
+
+  /** A healthy 20-minute video census, so an audio verdict is never an artifact of the video one. */
+  const HEALTHY_VIDEO = {
+    videoFramesReceived: 36_000,
+    videoFramesAppended: 36_000,
+    videoFramesDropped: 0,
+    secondsSinceLastFrameArrived: 0.03,
+    writerStatus: 2,
+    writerError: "none",
+    failedLatched: false,
+  };
+
+  it("flags a 20-minute walk whose audio stopped being accepted after 5 seconds — without failing it", async () => {
+    const clock = withClock();
+    mockStartWalk.mockResolvedValue(STARTED);
+    mockEndWalk.mockResolvedValue({
+      videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
+      stills: 0,
+      // The writer took ~5s of phone audio and then refused every buffer for the rest of the walk.
+      // Nothing about this census looks like a failure: the video track is perfect, the writer
+      // reached .completed, and no latch tripped.
+      census: {
+        ...HEALTHY_VIDEO,
+        audioBuffersReceived: 56_250,
+        audioBuffersAppended: 235,
+        audioBuffersDropped: 56_015,
+        audioSecondsAppended: 5,
+        longestAudioDropRun: 56_015,
+      },
+    });
+    const { result } = renderHook(() => useWalk("deal-1", null));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    clock.advance(20 * 60 * 1000);
+    await act(async () => {
+      await result.current.end();
+    });
+
+    // Annotated, never downgraded: "failed" queues no video (upload-core's toQueuedWalk), which
+    // would throw away twenty minutes of perfectly good footage over a bad audio track.
+    expect(result.current.walk.state).toBe("complete");
+    expect(result.current.walk.videoUri).toBe("file:///docs/walkthroughs/w1/walk.mp4");
+    expect(isVideoTruncated(result.current.walk.videoCoverage)).toBe(false);
+
+    const coverage = result.current.walk.audioCoverage;
+    expect(coverage).not.toBeNull();
+    expect(coverage!.walkMs).toBe(20 * 60 * 1000);
+    expect(coverage!.audioMs).toBe(5_000);
+    expect(coverage!.shortfallMs).toBe(1_195_000);
+    expect(isAudioTruncated(coverage)).toBe(true);
+    clock.restore();
+  });
+
+  it("leaves a healthy walk unflagged — the tap always stops a moment after the walk ends", async () => {
+    const clock = withClock();
+    mockStartWalk.mockResolvedValue(STARTED);
+    mockEndWalk.mockResolvedValue({
+      videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
+      stills: 0,
+      census: {
+        ...HEALTHY_VIDEO,
+        audioBuffersReceived: 56_250,
+        audioBuffersAppended: 56_250,
+        audioBuffersDropped: 0,
+        // A shade OVER the walk clock: the tap is installed before startWalk resolves and removed
+        // after endWalk is called, so a healthy walk holds marginally more audio than wall clock.
+        audioSecondsAppended: 1_200.4,
+        longestAudioDropRun: 0,
+      },
+    });
+    const { result } = renderHook(() => useWalk("deal-1", null));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    clock.advance(20 * 60 * 1000);
+    await act(async () => {
+      await result.current.end();
+    });
+
+    expect(result.current.walk.state).toBe("complete");
+    expect(result.current.walk.audioCoverage!.shortfallMs).toBe(0);
+    expect(isAudioTruncated(result.current.walk.audioCoverage)).toBe(false);
+    clock.restore();
+  });
+
+  // The trap, and it is the video sentinel's mirror image. A dev client built before the audio
+  // counters existed still resolves a census — just without them — so the field arrives
+  // `undefined`. Zero is the WORST value in this range (no narration at all), so the obvious
+  // `census.audioSecondsAppended ?? 0` would report every walk from that build as having recorded
+  // nothing, and a warning that fires on every walk is a warning nobody reads.
+  it("leaves audio coverage unknown (null), not zero, when the census predates the audio counters", async () => {
+    const clock = withClock();
+    mockStartWalk.mockResolvedValue(STARTED);
+    mockEndWalk.mockResolvedValue({
+      videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
+      stills: 0,
+      census: { ...HEALTHY_VIDEO, audioBuffersAppended: 56_250 },
+    });
+    const { result } = renderHook(() => useWalk("deal-1", null));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    clock.advance(20 * 60 * 1000);
+    await act(async () => {
+      await result.current.end();
+    });
+
+    expect(result.current.walk.state).toBe("complete");
+    expect(result.current.walk.audioCoverage).toBeNull();
+    expect(isAudioTruncated(result.current.walk.audioCoverage)).toBe(false);
+    clock.restore();
+  });
+});
+
+// ── ROUND-4 FINDING 3 (P2): a second start() must not reach the native singleton ───────────────────
+//
+// `start()` dispatches "starting" and then awaits native. React commits that dispatch on a LATER
+// tick, so the reducer's own idle-only guard cannot see the first call yet: two taps landing in the
+// same tick both read `idle`, both mint an id, and both call `Recorder.startWalk()`. Native is a
+// singleton — one `session`, one `stream`, one `walkDirectory`, one writer — so the second start
+// overwrites the first's state and the first recording is orphaned mid-walk.
+describe("useWalk double-start guard", () => {
+  const STARTED = {
+    walkId: "w1",
+    directory: "d",
+    videoUri: "file:///docs/walkthroughs/w1/PARTIAL.mp4",
+    inputPortName: "iPhone Microphone",
+    negotiatedSampleRate: 48000,
+  };
+
+  it("refuses a second start() issued before the first has resolved", async () => {
+    let release!: (value: unknown) => void;
+    mockStartWalk.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = resolve;
+        }),
+    );
+    const { result } = renderHook(() => useWalk("deal-1", null));
+
+    // Both calls in ONE act() and with no await between them: this is a double tap inside a single
+    // tick, which is the only shape the bug has. Awaiting the first would let React commit
+    // "starting" and the reducer would refuse the second on its own.
+    await act(async () => {
+      void result.current.start();
+      void result.current.start();
+      release(STARTED);
+    });
+
+    expect(mockStartWalk).toHaveBeenCalledTimes(1);
+    expect(result.current.walk.state).toBe("recording");
+  });
+
+  // The in-flight promise is cleared once the first start resolves, so the promise guard alone
+  // stops covering the walk the moment it is actually recording — which is exactly when a second
+  // startWalk() would be most destructive (native tears the live session down to build a new one).
+  it("refuses a start() once the walk is already recording", async () => {
+    mockStartWalk.mockResolvedValue(STARTED);
+    const { result } = renderHook(() => useWalk("deal-1", null));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    expect(result.current.walk.state).toBe("recording");
+
+    await act(async () => {
+      await result.current.start();
+    });
+
+    expect(mockStartWalk).toHaveBeenCalledTimes(1);
+    expect(result.current.walk.state).toBe("recording");
+  });
+
+  // The guard must not be a one-way door: a walk that finished (or failed) has no native session
+  // left, and the estimator has to be able to start the next one.
+  it("allows a new start() once the previous walk has completed", async () => {
+    mockStartWalk.mockResolvedValue(STARTED);
+    mockEndWalk.mockResolvedValue({ videoUri: "file:///docs/walkthroughs/w1/walk.mp4", stills: 0 });
+    const { result } = renderHook(() => useWalk("deal-1", null));
+
+    await act(async () => {
+      await result.current.start();
+    });
+    await act(async () => {
+      await result.current.end();
+    });
+    expect(result.current.walk.state).toBe("complete");
+
+    act(() => {
+      result.current.reset();
+    });
+    await act(async () => {
+      await result.current.start();
+    });
+
+    expect(mockStartWalk).toHaveBeenCalledTimes(2);
+    expect(result.current.walk.state).toBe("recording");
   });
 });

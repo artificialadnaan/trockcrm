@@ -43,6 +43,27 @@ export type WalkVideoCoverage = {
   shortfallMs: number;
 };
 
+/**
+ * How much of the walk the finished audio track actually holds. The same record as
+ * `WalkVideoCoverage`, for the transport that matters more: the spoken narration is the INPUT to
+ * scope extraction, so a walk with a hole in its audio is a site visit that has to be repeated even
+ * when every frame landed.
+ *
+ * Measured differently from video, though, because it fails differently. Video dies at the source —
+ * the glasses go quiet and never resume — so a quiet TAIL is the whole story. The phone microphone
+ * does not go quiet; it keeps delivering for the full walk while `AVAssetWriter` refuses buffers
+ * under backpressure, which scatters the losses through the MIDDLE of the recording. A tail
+ * measurement would read that walk as perfect. So this counts what was actually written instead.
+ */
+export type WalkAudioCoverage = {
+  /** Wall-clock ms the walk itself ran (startedAt → endedAt). */
+  walkMs: number;
+  /** Ms of narration actually written to the audio track. */
+  audioMs: number;
+  /** `walkMs - audioMs`: how much of the site visit has no narration. Never negative. */
+  shortfallMs: number;
+};
+
 /** The slice of native's `endWalk` census this module reasons about. Deliberately a subset — the
  *  other counters (received/dropped/writerStatus) are diagnostics for a human reading a log, not
  *  inputs to a verdict, and depending on them here would couple the reducer to native's full shape. */
@@ -57,6 +78,27 @@ export type WalkVideoCensus = {
   /** Frames actually written to the video track. Zero means an empty track no matter what the
    *  quiet-tail number says. */
   videoFramesAppended: number;
+};
+
+/**
+ * The audio counterpart, and deliberately its own type rather than two more fields on
+ * `WalkVideoCensus`: the two verdicts are independent measurements of two independent transports
+ * (the glasses' DAT stream and CoreAudio), either of which can be perfect while the other is dead.
+ * Merging them would let a caller supply one and silently imply the other.
+ */
+export type WalkAudioCensus = {
+  /**
+   * Seconds of phone-microphone audio native actually appended to the writer, summed from the
+   * sample buffers themselves (`WalkVideoWriter.audioSecondsAppended`) rather than inferred from a
+   * buffer count — buffer size is a tap parameter, and a count would silently change meaning if it
+   * were ever retuned.
+   *
+   * Where video's sentinel trap is that `-1` reads as the HEALTHIEST value in its range, this one's
+   * is the mirror image: `0` is the WORST value here, so a census that simply predates this counter
+   * must arrive as an absent `WalkAudioCensus` (null), never as a zeroed one. useWalk.ts is where
+   * that distinction is enforced, because that is where the raw native payload is still visible.
+   */
+  audioSecondsAppended: number;
 };
 
 export type Walk = {
@@ -80,6 +122,14 @@ export type Walk = {
    * whatever the video transport did.
    */
   videoCoverage: WalkVideoCoverage | null;
+  /**
+   * The same contract as `videoCoverage`, for the phone-microphone track: set once on "finalized"
+   * when native reported audio counters, null when it did not (UNKNOWN, not "fine"). Also
+   * deliberately not a state, and for a stronger reason than video — a walk downgraded to "failed"
+   * queues NO video at all (upload-core.ts's `toQueuedWalk`), so failing a walk over its audio
+   * would destroy the footage as well as the narration.
+   */
+  audioCoverage: WalkAudioCoverage | null;
   stills: WalkStill[];
   error: string | null;
 };
@@ -105,12 +155,18 @@ export type WalkEvent =
    * `startedAt`/`endedAt` — which only this reducer holds — and because keeping the arithmetic pure
    * is what makes the sentinel handling in `assessVideoCoverage` testable without a device. Omitted
    * or null means the walk could not be measured (a dev client older than the census).
+   *
+   * `audioCensus` is the same arrangement for the phone-microphone track, carried separately rather
+   * than folded into `videoCensus` because a dev client can predate the audio counters while still
+   * reporting every video one — so "video measured, audio not" is a real state that has to be
+   * expressible.
    */
   | {
       type: "finalized";
       audioUri: string | null;
       videoUri?: string | null;
       videoCensus?: WalkVideoCensus | null;
+      audioCensus?: WalkAudioCensus | null;
     }
   | { type: "failed"; reason: string }
   /**
@@ -141,6 +197,7 @@ export function initialWalk(dealId: string, projectId: string | null): Walk {
     videoUri: null,
     audioUri: null,
     videoCoverage: null,
+    audioCoverage: null,
     stills: [],
     error: null,
   };
@@ -200,6 +257,62 @@ export function assessVideoCoverage(walkMs: number, census: WalkVideoCensus): Wa
  */
 export function isVideoTruncated(coverage: WalkVideoCoverage | null): boolean {
   return coverage !== null && coverage.shortfallMs > WALK_VIDEO_SHORTFALL_TOLERANCE_MS;
+}
+
+/**
+ * How much narration a walk may legitimately be missing before it counts as truncated.
+ *
+ * Five seconds — the same number as the video tolerance, but NOT for the same reason, which is why
+ * it is a separate constant rather than a shared one. The video figure covers end-of-walk latency;
+ * this one covers two different sources of honest error:
+ *
+ *   - Clock skew at both ends. Native installs the microphone tap before `startWalk` resolves (which
+ *     is when JS stamps `startedAt`) and removes it inside `endWalk` (after `endedAt`), so a healthy
+ *     walk holds marginally MORE audio than wall clock, not less. That error is sub-second and, in
+ *     the direction that matters here, negative.
+ *   - Transient writer backpressure. The tap delivers 1024-frame buffers at 48 kHz — about 21ms
+ *     each — so five seconds is roughly 235 consecutive refusals. An encoder that hiccups recovers
+ *     inside a handful; one that has refused 235 in a row has stalled, which is the failure this
+ *     exists to catch.
+ *
+ * Absolute rather than proportional for the same reason the video tolerance is, and with the same
+ * cost of getting it wrong: a warning that fires on healthy walks is a warning the estimator stops
+ * reading, and by then it is the real ones being ignored.
+ */
+export const WALK_AUDIO_SHORTFALL_TOLERANCE_MS = 5_000;
+
+/**
+ * Turn one audio census into a coverage estimate against the walk's own wall clock.
+ *
+ * Direct, not inferred: `audioSecondsAppended` is what native actually wrote, so the shortfall is
+ * simply what the walk clock has and the track does not — and unlike the video estimate, it counts
+ * gaps wherever they fall rather than assuming they are all at the end. Two clamps:
+ *
+ *   - Audio is clamped to `walkMs`, because the tap outlives the walk clock at both ends (see
+ *     WALK_AUDIO_SHORTFALL_TOLERANCE_MS) and a walk must never report negative shortfall.
+ *   - A non-finite counter is treated as ZERO coverage. useWalk.ts already refuses to build a census
+ *     out of a missing counter, so this is a backstop — but the failure it prevents is quiet:
+ *     `undefined * 1000` is NaN, NaN compares false against every threshold, and the warning would
+ *     disappear rather than misfire.
+ */
+export function assessAudioCoverage(walkMs: number, census: WalkAudioCensus): WalkAudioCoverage {
+  const walk = Math.max(0, walkMs);
+  const appendedMs = Number.isFinite(census.audioSecondsAppended)
+    ? Math.max(0, census.audioSecondsAppended * 1000)
+    : 0;
+  const audioMs = Math.min(walk, Math.round(appendedMs));
+  return { walkMs: walk, audioMs, shortfallMs: walk - audioMs };
+}
+
+/**
+ * Whether this walk's narration came up short enough to tell the estimator about. The one place
+ * `WALK_AUDIO_SHORTFALL_TOLERANCE_MS` is compared against, so the screen and the upload metadata
+ * can never disagree about what "short" means — the same rule `isVideoTruncated` follows.
+ *
+ * `null` (never measured) is FALSE, not true, for the same reason it is there.
+ */
+export function isAudioTruncated(coverage: WalkAudioCoverage | null): boolean {
+  return coverage !== null && coverage.shortfallMs > WALK_AUDIO_SHORTFALL_TOLERANCE_MS;
 }
 
 /** Stills are only meaningful while the walk is actually running. Gates whether a NEW capture may
@@ -331,6 +444,13 @@ export function reduceWalk(walk: Walk, event: WalkEvent): Walk {
         videoCoverage:
           durationMs !== null && event.videoCensus
             ? assessVideoCoverage(durationMs, event.videoCensus)
+            : null,
+        // Assessed independently of the video verdict above, never derived from it: the DAT stream
+        // and CoreAudio are separate transports, and the walk this whole mechanism exists for is
+        // the one where exactly one of them died.
+        audioCoverage:
+          durationMs !== null && event.audioCensus
+            ? assessAudioCoverage(durationMs, event.audioCensus)
             : null,
       };
     }

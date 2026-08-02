@@ -47,9 +47,21 @@ export type WalkEnded = {
   videoUri: string;
   stills: number;
   /**
-   * What the writer actually did. `secondsSinceLastFrameArrived` is the one that matters: near
-   * zero means frames were still arriving and the writer refused them; large means the glasses
+   * What the writer actually did. `secondsSinceLastFrameArrived` is the one that matters for video:
+   * near zero means frames were still arriving and the writer refused them; large means the glasses
    * stopped sending. A finished file cannot distinguish those, which is why this exists.
+   *
+   * The audio counters answer a different question. The phone microphone never goes quiet, so there
+   * is no tail to measure — what can happen is the writer refusing buffers mid-walk, which leaves a
+   * healthy video track and a narration full of holes. `audioSecondsAppended` is the only field
+   * that shows it.
+   *
+   * The four audio-side counters are OPTIONAL while `census` itself is not, and that is deliberate
+   * rather than sloppy: `census?:` covers a dev client older than the census, but these were added
+   * to an already-shipped census, so a build that reports every video counter and none of these is
+   * a real intermediate state. Typing them as required would let `audioSecondsAppended` be read as
+   * a number when it is `undefined` at runtime — and zero seconds of narration is the WORST value
+   * in that range, so the mistake would surface as a warning on every walk from that build.
    */
   census?: {
     videoFramesReceived: number;
@@ -60,6 +72,13 @@ export type WalkEnded = {
     writerStatus: number;
     writerError: string;
     failedLatched: boolean;
+    audioBuffersReceived?: number;
+    audioBuffersDropped?: number;
+    /** Seconds of phone-mic audio actually written to the audio track. */
+    audioSecondsAppended?: number;
+    /** Longest unbroken run of refused audio buffers — separates one sustained stall from
+     *  scattered hiccups that happen to add up to the same total. */
+    longestAudioDropRun?: number;
   };
 };
 

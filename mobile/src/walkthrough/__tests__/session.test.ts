@@ -1,6 +1,8 @@
 import {
+  assessAudioCoverage,
   assessVideoCoverage,
   initialWalk,
+  isAudioTruncated,
   isVideoTruncated,
   reduceWalk,
   canCapture,
@@ -9,6 +11,7 @@ import {
   isWalkActive,
   artifactCount,
   MAX_WALK_ARTIFACTS,
+  WALK_AUDIO_SHORTFALL_TOLERANCE_MS,
   WALK_VIDEO_SHORTFALL_TOLERANCE_MS,
   type Walk,
 } from "../session";
@@ -429,5 +432,117 @@ describe("reduceWalk video coverage", () => {
     const done = reduceWalk(ended, { type: "finalized", audioUri: null });
     expect(done.state).toBe("complete");
     expect(done.videoCoverage).toBeNull();
+  });
+});
+
+// ── Audio coverage (round-4 FINDING 2) ────────────────────────────────────────────────────────────
+//
+// The video half above measures a QUIET TAIL, because a dead glasses transport stops delivering and
+// never resumes. Audio fails the other way round: the phone microphone keeps delivering for the
+// whole walk and the WRITER refuses buffers, so the gaps are scattered through the middle and a
+// tail measurement would read a stalled walk as perfect. What is measured here is therefore the
+// audio that was actually WRITTEN, not the silence at the end.
+describe("assessAudioCoverage", () => {
+  it("reads appended audio as the part of the walk that has narration", () => {
+    const coverage = assessAudioCoverage(20 * 60 * 1000, { audioSecondsAppended: 5 });
+    expect(coverage.walkMs).toBe(20 * 60 * 1000);
+    expect(coverage.audioMs).toBe(5_000);
+    expect(coverage.shortfallMs).toBe(1_195_000);
+  });
+
+  it("reports a healthy walk as fully covered, give or take a buffer", () => {
+    const coverage = assessAudioCoverage(20 * 60 * 1000, { audioSecondsAppended: 1_199.978 });
+    expect(coverage.shortfallMs).toBe(22);
+    expect(isAudioTruncated(coverage)).toBe(false);
+  });
+
+  // The mirror image of the video sentinel trap, and the reason a bare `?? 0` at the bridge would
+  // be wrong: for audio, ZERO is the worst value in the range, not the healthiest. A census that
+  // genuinely reports zero appended seconds is a walk with no narration at all — the single most
+  // expensive outcome here, since the narration IS the input to scope extraction.
+  it("treats zero appended audio as zero coverage rather than a rounding artifact", () => {
+    const coverage = assessAudioCoverage(600_000, { audioSecondsAppended: 0 });
+    expect(coverage.audioMs).toBe(0);
+    expect(coverage.shortfallMs).toBe(600_000);
+    expect(isAudioTruncated(coverage)).toBe(true);
+  });
+
+  // Native starts the microphone tap just BEFORE startWalk resolves (which is when JS stamps
+  // startedAt), so a healthy walk legitimately holds marginally more audio than wall clock.
+  // Coverage must never go negative, exactly as the video half never reports more missing video
+  // than there was walk.
+  it("never reports more audio than there was walk", () => {
+    const coverage = assessAudioCoverage(4_000, { audioSecondsAppended: 4.2 });
+    expect(coverage.audioMs).toBe(4_000);
+    expect(coverage.shortfallMs).toBe(0);
+  });
+
+  // Belt-and-suspenders: the bridge already refuses to build a census slice out of a missing
+  // counter (useWalk.ts), but arithmetic on `undefined` would otherwise produce NaN — which
+  // compares false against every threshold and would silently disable the warning entirely.
+  it("treats an unusable counter as zero coverage rather than NaN", () => {
+    const coverage = assessAudioCoverage(600_000, {
+      audioSecondsAppended: undefined as unknown as number,
+    });
+    expect(coverage.audioMs).toBe(0);
+    expect(coverage.shortfallMs).toBe(600_000);
+  });
+});
+
+describe("isAudioTruncated", () => {
+  it("is false when coverage was never measured", () => {
+    expect(isAudioTruncated(null)).toBe(false);
+  });
+
+  it("sits exactly at the tolerance boundary", () => {
+    const walkMs = 60_000;
+    const at = (shortfallMs: number) => ({
+      walkMs,
+      audioMs: walkMs - shortfallMs,
+      shortfallMs,
+    });
+    expect(isAudioTruncated(at(WALK_AUDIO_SHORTFALL_TOLERANCE_MS))).toBe(false);
+    expect(isAudioTruncated(at(WALK_AUDIO_SHORTFALL_TOLERANCE_MS + 1))).toBe(true);
+  });
+});
+
+describe("reduceWalk audio coverage", () => {
+  const ended = reduceWalk(started, { type: "ended", at: 1000 + 20 * 60 * 1000 });
+
+  it("records audio coverage on the walk when finalized carries an audio census", () => {
+    const done = reduceWalk(ended, {
+      type: "finalized",
+      audioUri: null,
+      videoUri: "file:///docs/walk/walk.mp4",
+      audioCensus: { audioSecondsAppended: 5 },
+    });
+    // COMPLETE, and still holding its video: a walk whose narration was truncated is annotated,
+    // never downgraded. "failed" would queue no video at all (upload-core.ts's toQueuedWalk), so
+    // an audio problem would end up destroying the footage as well as the narration.
+    expect(done.state).toBe("complete");
+    expect(done.videoUri).toBe("file:///docs/walk/walk.mp4");
+    expect(isAudioTruncated(done.audioCoverage)).toBe(true);
+    expect(done.audioCoverage!.audioMs).toBe(5_000);
+  });
+
+  it("leaves audio coverage null when finalized carries no audio census", () => {
+    const done = reduceWalk(ended, { type: "finalized", audioUri: null });
+    expect(done.state).toBe("complete");
+    expect(done.audioCoverage).toBeNull();
+  });
+
+  // The two verdicts are independent measurements of two independent transports: the glasses can
+  // die while the phone microphone is perfect, and the writer can stall on audio while every frame
+  // lands. Neither may be inferred from the other.
+  it("assesses video and audio independently from one finalized event", () => {
+    const done = reduceWalk(ended, {
+      type: "finalized",
+      audioUri: null,
+      videoUri: "file:///docs/walk/walk.mp4",
+      videoCensus: { secondsSinceLastFrameArrived: 0.03, videoFramesAppended: 36_000 },
+      audioCensus: { audioSecondsAppended: 5 },
+    });
+    expect(isVideoTruncated(done.videoCoverage)).toBe(false);
+    expect(isAudioTruncated(done.audioCoverage)).toBe(true);
   });
 });

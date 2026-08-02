@@ -18,7 +18,7 @@ import { apiFetch } from "../../src/api/client";
 import type { Fetcher } from "../../src/api/endpoints";
 import { useAuth } from "../../src/auth/AuthContext";
 import { useWalk } from "../../src/walkthrough/useWalk";
-import { isVideoTruncated, isWalkActive } from "../../src/walkthrough/session";
+import { isAudioTruncated, isVideoTruncated, isWalkActive } from "../../src/walkthrough/session";
 import { deriveWalkSiteLabel, deriveWalkTitle } from "../../src/walkthrough/walk-meta";
 import { walkOwnerKey } from "../../src/walkthrough/owner-key";
 import { drainWalkQueue, enqueueWalk, type WalkQueueMeta } from "../../src/walkthrough/upload";
@@ -179,8 +179,16 @@ export default function WalkScreen() {
     // in R2. Carried at all because the office is the other party that needs to know: a walk filed
     // as a normal 20-minute visit that turns out to hold five seconds of footage is exactly the
     // surprise the completion screen's notice exists to prevent, and the screen is gone by then.
-    const titleTarget = isVideoTruncated(walk.videoCoverage)
-      ? `${walkTargetName} (video cut short)`
+    // Both transports get named, in one marker, because the title is one string and the office
+    // needs to know WHICH half is thin: a walk missing its footage can still be scoped from the
+    // narration, a walk missing its narration usually cannot be scoped at all. The video-only
+    // wording is unchanged from what the office already reads.
+    const cutShort = [
+      isVideoTruncated(walk.videoCoverage) ? "video" : null,
+      isAudioTruncated(walk.audioCoverage) ? "audio" : null,
+    ].filter((part): part is string => part !== null);
+    const titleTarget = cutShort.length
+      ? `${walkTargetName} (${cutShort.join(" and ")} cut short)`
       : walkTargetName;
     const meta: WalkQueueMeta = {
       title: deriveWalkTitle(titleTarget, walk.startedAt ?? walk.endedAt ?? Date.now()),
@@ -264,6 +272,7 @@ export default function WalkScreen() {
   // Non-null exactly when there is something to warn about, so the summary below reads the numbers
   // without re-testing the threshold (session.ts's isVideoTruncated owns it) or asserting past null.
   const shortVideo = isVideoTruncated(walk.videoCoverage) ? walk.videoCoverage : null;
+  const shortAudio = isAudioTruncated(walk.audioCoverage) ? walk.audioCoverage : null;
 
   return (
     <SafeAreaView style={styles.safe} edges={["top", "bottom"]}>
@@ -407,14 +416,36 @@ export default function WalkScreen() {
                 failure screen: the walk really did complete, the stills are fine, and the footage
                 that does exist is still uploading. */}
             {shortVideo ? (
-              <View style={styles.shortVideoNotice}>
-                <Text style={styles.shortVideoTitle}>Video is short</Text>
-                <Text style={styles.shortVideoBody}>
+              <View style={styles.mediaShortNotice}>
+                <Text style={styles.mediaShortTitle}>Video is short</Text>
+                <Text style={styles.mediaShortBody}>
                   Only about {formatElapsed(shortVideo.videoMs)} of this{" "}
                   {formatElapsed(shortVideo.walkMs)} walk has video — roughly{" "}
                   {formatElapsed(shortVideo.shortfallMs)} is missing because the glasses stopped
-                  sending. Your stills and the audio are unaffected, and everything captured is
-                  still uploading.
+                  sending.{" "}
+                  {/* The reassurance is dropped when it would be false — the audio notice below is
+                      about to say the opposite, and a screen that contradicts itself is a screen
+                      the estimator stops trusting. */}
+                  {shortAudio ? "Your stills are unaffected" : "Your stills and the audio are unaffected"},
+                  and everything captured is still uploading.
+                </Text>
+              </View>
+            ) : null}
+            {/* The costlier half. Video going short loses pictures; narration going short loses the
+                scope itself, because the spoken walkthrough is what the estimate is written from —
+                and unlike the glasses, the phone microphone never stops sending, so this can only
+                ever mean the writer refused audio mid-walk. Same register and same colour as the
+                video notice: still not a failure screen, still uploading, but this is the one worth
+                turning around for while the estimator is standing on the site. */}
+            {shortAudio ? (
+              <View style={styles.mediaShortNotice}>
+                <Text style={styles.mediaShortTitle}>Narration is short</Text>
+                <Text style={styles.mediaShortBody}>
+                  Only about {formatElapsed(shortAudio.audioMs)} of this{" "}
+                  {formatElapsed(shortAudio.walkMs)} walk has audio — roughly{" "}
+                  {formatElapsed(shortAudio.shortfallMs)} is missing. The scope is written from what
+                  you say, so if you are still on site it is worth walking the missing part again.
+                  Everything captured is still uploading either way.
                 </Text>
               </View>
             ) : null}
@@ -658,8 +689,10 @@ const styles = StyleSheet.create({
     fontFamily: theme.font.medium,
   },
   // Warning, not danger: nothing failed, and dressing this in the red the "Walk failed" screen uses
-  // would tell the estimator to redo a walk whose stills and audio are perfectly good.
-  shortVideoNotice: {
+  // would tell the estimator to redo a walk whose remaining artifacts are perfectly good. Shared by
+  // the video and narration notices — one shortfall reads differently from two, and giving them
+  // separate styling would imply a difference in severity that does not exist.
+  mediaShortNotice: {
     borderWidth: 1,
     borderColor: theme.color.warning,
     borderRadius: theme.radius.md,
@@ -668,14 +701,14 @@ const styles = StyleSheet.create({
     marginTop: theme.space.sm,
     maxWidth: 380,
   },
-  shortVideoTitle: {
+  mediaShortTitle: {
     color: theme.color.warning,
     fontSize: 16,
     fontFamily: theme.font.bold,
     marginBottom: theme.space.xs,
     textAlign: "center",
   },
-  shortVideoBody: {
+  mediaShortBody: {
     color: theme.color.textInverse,
     fontSize: 14,
     lineHeight: 20,

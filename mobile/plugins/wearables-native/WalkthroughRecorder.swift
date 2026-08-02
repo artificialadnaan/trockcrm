@@ -68,6 +68,37 @@ final class WalkthroughRecorder: RCTEventEmitter {
     return error.localizedDescription
   }
 
+  /// Ask iOS for recording permission, and wait for the answer.
+  ///
+  /// iOS 17 moved this off `AVAudioSession` onto `AVAudioApplication`; the app deploys to 15.1
+  /// (withWearablesDat.js's `ios.deploymentTarget`), so both entry points are still required —
+  /// the same pair `WearablesBridge.recordGlassesAudio` already carries. Bridged to `async` with a
+  /// continuation rather than restructured around the callback: `startWalk` is already one linear
+  /// `Task`, and a callback here would either nest the whole start sequence inside it or need a
+  /// lock to hand the answer back — and `NSLock` is unavailable from the async context that
+  /// sequence runs in.
+  private static func requestRecordPermission() async -> Bool {
+    await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+      if #available(iOS 17.0, *) {
+        AVAudioApplication.requestRecordPermission { continuation.resume(returning: $0) }
+      } else {
+        AVAudioSession.sharedInstance().requestRecordPermission { continuation.resume(returning: $0) }
+      }
+    }
+  }
+
+  /// Whether iOS has ALREADY recorded a refusal. Read before requesting, never after — once the
+  /// request returns false the two cases are indistinguishable, and they need opposite
+  /// instructions: a fresh "Don't Allow" is undone by tapping Start again, an older one can only be
+  /// undone in Settings. Telling an estimator standing on a job site to look in the wrong place is
+  /// the difference between a ten-second fix and a wasted visit.
+  private static var recordPermissionAlreadyDenied: Bool {
+    if #available(iOS 17.0, *) {
+      return AVAudioApplication.shared.recordPermission == .denied
+    }
+    return AVAudioSession.sharedInstance().recordPermission == .denied
+  }
+
   /// Artifacts live in the DOCUMENTS directory, never tmp. iOS purges tmp, and a walk whose
   /// stills vanish before the upload queue drains is a site visit that has to be repeated.
   private static func makeWalkDirectory(_ walkId: String) throws -> URL {
@@ -102,6 +133,35 @@ final class WalkthroughRecorder: RCTEventEmitter {
       return
     }
     Task {
+      // MICROPHONE PERMISSION IS PART OF READINESS, and it is checked before anything else exists
+      // to clean up — before the walk directory, before the DAT session, before the writer.
+      //
+      // Neither `setActive(true)` below nor `AVAudioEngine.start()` fails on a denied microphone.
+      // They succeed and deliver silence. So without this, a fresh install (permission never asked)
+      // or a previously refused one produces a walk that records video perfectly and captures no
+      // narration at all — and the narration is not an accessory here, it is the input the scope is
+      // extracted from. That failure surfaces weeks later, from a site nobody can re-walk.
+      //
+      // Asking FIRST is also what keeps the refusal cheap: nothing has been created yet, so there
+      // is no session to stop, no audio session to deactivate, and no `walkthroughs/<id>/` left on
+      // disk for upload.ts's `findRecoverableWalks` to offer back as a recoverable walk holding
+      // nothing.
+      let alreadyDenied = Self.recordPermissionAlreadyDenied
+      guard await Self.requestRecordPermission() else {
+        reject(
+          "walk_mic_denied",
+          alreadyDenied
+            ? "Microphone access for T-Rock Cam is off, so this walk would record video with no "
+              + "narration — and the scope is written from what you say. Turn it on in Settings > "
+              + "T-Rock Cam > Microphone, then start the walk again."
+            : "Microphone access is required: the scope is written from your narration, so a walk "
+              + "without it is a site visit that has to be repeated. Tap Start walk again and "
+              + "choose Allow.",
+          nil
+        )
+        return
+      }
+
       let audio = AVAudioSession.sharedInstance()
       do {
         let dir = try Self.makeWalkDirectory(walkId)
@@ -445,16 +505,41 @@ private final class WalkVideoWriter: @unchecked Sendable {
   /// instead of producing a short video nobody notices until the file is inspected.
   private var consecutiveVideoDrops = 0
 
+  /// The same run length for audio — measured, but deliberately NOT wired to `fail(reason:)` the
+  /// way the video counter above is. Latching makes `endWalk` reject, which marks the walk failed
+  /// in JS, and a failed walk queues no video at all (upload-core.ts's `toQueuedWalk`): latching on
+  /// audio backpressure would destroy twenty minutes of good footage on top of the narration
+  /// already lost. The shortfall rides out in the census instead, and the completion screen says so
+  /// plainly. See `audioSecondsAppended`.
+  private var consecutiveAudioDrops = 0
+
   /// Census of what actually happened, reported by `endWalk`.
   ///
   /// Two walks produced ~4s of video against 35-47s of audio, and the file alone cannot say why:
   /// a frame that never arrived and a frame the writer refused look identical afterwards. These
   /// counters separate them. Cheap, and worth keeping — a walk that silently records four seconds
   /// of a forty-second site visit is the single most expensive failure this recorder can have.
+  ///
+  /// The audio counters answer a DIFFERENT question, because audio fails differently. The glasses
+  /// go quiet and never resume, so video is diagnosed by its tail. The phone microphone does not go
+  /// quiet: the tap keeps delivering for the whole walk while `audioInput.isReadyForMoreMediaData`
+  /// says no, so the losses land in the MIDDLE of the recording and a tail measurement would call
+  /// that walk perfect. `audioSecondsAppended` is what actually got written, which is the only
+  /// number that survives that.
   private(set) var videoFramesReceived = 0
   private(set) var videoFramesAppended = 0
   private(set) var videoFramesDropped = 0
+  private(set) var audioBuffersReceived = 0
   private(set) var audioBuffersAppended = 0
+  private(set) var audioBuffersDropped = 0
+  /// Longest unbroken run of refused audio buffers. Separates one sustained stall (the encoder
+  /// never recovered) from scattered hiccups that happen to add up to the same total — the audio
+  /// analogue of `secondsSinceLastFrameArrived` being the video discriminator.
+  private(set) var longestAudioDropRun = 0
+  /// Seconds of phone-microphone audio ACTUALLY written to the audio track, summed from the sample
+  /// buffers themselves rather than derived from a buffer count — buffer size is a parameter of the
+  /// tap (1024 frames today), and a count would silently change meaning if that were ever retuned.
+  private(set) var audioSecondsAppended: Double = 0
   /// Wall-clock seconds from the writer starting to the most recent frame ARRIVING (not appended),
   /// so "frames stopped coming" is distinguishable from "frames kept coming and were refused".
   private(set) var lastFrameArrivedAt: CMTime = .invalid
@@ -536,10 +621,17 @@ private final class WalkVideoWriter: @unchecked Sendable {
   func appendAudioBuffer(_ buffer: AVAudioPCMBuffer) {
     let receivedAt = CMClockGetTime(mediaClock)
     guard let sampleBuffer = Self.makeAudioSampleBuffer(from: buffer, presentationTime: receivedAt) else {
-      mediaQueue.async { self.fail(reason: "could not build an audio sample buffer") }
+      // Counted as received even though it never became a sample buffer: the tap DID deliver
+      // narration here, and a census that only counted the ones we managed to wrap would make this
+      // failure look like the microphone going quiet.
+      mediaQueue.async {
+        self.audioBuffersReceived += 1
+        self.fail(reason: "could not build an audio sample buffer")
+      }
       return
     }
     mediaQueue.async {
+      self.audioBuffersReceived += 1
       self.append(sampleBuffer, to: self.audioInput, track: "audio")
     }
   }
@@ -575,6 +667,14 @@ private final class WalkVideoWriter: @unchecked Sendable {
     // so an unbounded silent drop turns a dead video track into a walk that looks successful —
     // which is what happened on 2026-08-01: 3.4s of video, 46.8s of audio, no error anywhere.
     // Roughly two seconds of 30fps footage is long enough to rule out ordinary backpressure.
+    //
+    // AUDIO IS COUNTED, NOT LATCHED. Dropping phone-mic buffers silently was the same defect one
+    // track over — the video track stays healthy, the writer reaches `.completed`, and the walk
+    // ships with a narration full of holes — but the remedy cannot be the same. `fail(reason:)`
+    // makes `endWalk` reject, JS marks the walk failed, and a failed walk queues no video at all,
+    // so latching here would answer "we lost some of the audio" by throwing away all of the video
+    // too. These counters travel out in `census()` instead, and session.ts turns them into a
+    // shortfall the completion screen states outright.
     guard input.isReadyForMoreMediaData else {
       if track == "video" {
         videoFramesDropped += 1
@@ -583,10 +683,14 @@ private final class WalkVideoWriter: @unchecked Sendable {
           fail(reason: "video track: the writer stopped accepting frames and has not recovered "
             + "after 60 consecutive drops — the recording will have little or no video")
         }
+      } else {
+        audioBuffersDropped += 1
+        consecutiveAudioDrops += 1
+        longestAudioDropRun = max(longestAudioDropRun, consecutiveAudioDrops)
       }
       return
     }
-    if track == "video" { consecutiveVideoDrops = 0 }
+    if track == "video" { consecutiveVideoDrops = 0 } else { consecutiveAudioDrops = 0 }
 
     guard input.append(sampleBuffer) else {
       // append() returning false and being ignored is exactly the AVAudioRecorder.record()
@@ -596,12 +700,29 @@ private final class WalkVideoWriter: @unchecked Sendable {
         + "\(writer.error?.localizedDescription ?? "no error reported")")
       return
     }
-    if track == "video" { videoFramesAppended += 1 } else { audioBuffersAppended += 1 }
+    if track == "video" {
+      videoFramesAppended += 1
+    } else {
+      audioBuffersAppended += 1
+      // Measured per buffer rather than assumed, and only for buffers the writer actually took.
+      // `CMSampleBufferGetDuration` is the total across the buffer's samples (it was built with one
+      // timing entry over `frameLength` samples in `makeAudioSampleBuffer`), so this accumulates
+      // real recorded narration. The `isFinite` guard is not decoration: an invalid CMTime converts
+      // to NaN, and one NaN would poison the running total for the rest of the walk — turning the
+      // whole audio verdict into a number that compares false against every threshold and quietly
+      // disables the warning it exists to raise.
+      let seconds = CMTimeGetSeconds(CMSampleBufferGetDuration(sampleBuffer))
+      if seconds.isFinite, seconds > 0 { audioSecondsAppended += seconds }
+    }
   }
 
   /// What actually happened, read on `mediaQueue` so the counters are consistent with each other.
-  /// `secondsSinceLastFrame` is the discriminator: near zero means frames were still arriving and
-  /// the writer was refusing them; large means the glasses stopped sending.
+  /// `secondsSinceLastFrame` is the VIDEO discriminator: near zero means frames were still arriving
+  /// and the writer was refusing them; large means the glasses stopped sending.
+  ///
+  /// `audioSecondsAppended` is the audio one, and it is an absolute rather than a discriminator.
+  /// There is no equivalent question to ask — the phone microphone does not stop sending, so the
+  /// only thing worth measuring is how much of what it sent the writer actually took.
   func census() -> [String: Any] {
     mediaQueue.sync {
       let quiet: Double = lastFrameArrivedAt.isValid
@@ -611,7 +732,11 @@ private final class WalkVideoWriter: @unchecked Sendable {
         "videoFramesReceived": videoFramesReceived,
         "videoFramesAppended": videoFramesAppended,
         "videoFramesDropped": videoFramesDropped,
+        "audioBuffersReceived": audioBuffersReceived,
         "audioBuffersAppended": audioBuffersAppended,
+        "audioBuffersDropped": audioBuffersDropped,
+        "audioSecondsAppended": audioSecondsAppended,
+        "longestAudioDropRun": longestAudioDropRun,
         "secondsSinceLastFrameArrived": quiet,
         "writerStatus": writer.status.rawValue,
         "writerError": writer.error?.localizedDescription ?? "none",
