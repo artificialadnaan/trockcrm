@@ -457,4 +457,73 @@ describe("runGlassesWalkthroughForwardDeadLetterSweep (real SQL)", () => {
       .rows as any[];
     expect(jobs.map((j) => j.alerted)).toEqual(["true", "true"]);
   }, 5_000);
+
+  it("DESTROYS the pooled connection an abandoned deal-label read is sitting on, not just the wait for it", async () => {
+    // The one assertion that separates a fixed leak from a relabelled one. A deadline raced against a
+    // top-level `db.query` returns the CALLER on time and proves nothing: pg has already checked a
+    // connection out for that statement and holds it until the statement settles, which for the case this
+    // ceiling exists to survive — a `deals` read blocked on a lock, where the socket is perfectly healthy
+    // and keepalive will therefore never evict it — is never. So a test that only measured how long the
+    // sweep took would pass against the very code this replaces.
+    //
+    // What must be true instead: the enrichment read rides its OWN checked-out client, and when the clock
+    // wins that client is released WITH AN ERROR — pg's signal to discard the socket rather than hand a
+    // connection with an orphaned statement on it to the next caller. Without that, `dealLabelLookupAbandoned`
+    // suppresses only the rest of THIS sweep, and the 60-second interval strands one more slot per tick
+    // until the pool (max 10) is gone.
+    const db = await seed();
+    // Modelled on a real pg.Pool: each connect() is a distinct checkout with its own release() lifecycle,
+    // and pool-level `query` is a separate surface entirely — which is exactly how the leak becomes visible.
+    const checkouts: Array<{ sawDealRead: boolean; released: boolean; releasedWith: unknown }> = [];
+    const poolLevelQueries: string[] = [];
+    const pool = {
+      query: (sql: string, params?: unknown[]) => {
+        poolLevelQueries.push(sql);
+        if (sql.includes(".deals")) return new Promise<never>(() => {});
+        return db.query(sql, params as never[]) as any;
+      },
+      connect: async () => {
+        const checkout = { sawDealRead: false, released: false, releasedWith: undefined as unknown };
+        checkouts.push(checkout);
+        return {
+          query: (sql: string, params?: unknown[]) => {
+            if (sql.includes(".deals")) {
+              checkout.sawDealRead = true;
+              return new Promise<never>(() => {}); // the lock-blocked office-schema read
+            }
+            return db.query(sql, params as never[]) as any;
+          },
+          release: (err?: unknown) => {
+            checkout.released = true;
+            checkout.releasedWith = err;
+          },
+        };
+      },
+    };
+    const sendEmail = vi.fn(async () => ({ success: true, messageId: "m1" }));
+
+    const handled = await runGlassesWalkthroughForwardDeadLetterSweep({
+      db: pool as any,
+      sendEmail,
+      env: { GLASSES_WALKTHROUGH_FORWARD_EMAIL_RECIPIENTS: "ops@x.com" } as any,
+      stepTimeoutMs: 25,
+      logger: capturingLogger(),
+    });
+
+    // The read never goes out on the pool's convenience `query` — that surface owns a connection nobody
+    // holds a handle to, so nothing can ever destroy it.
+    expect(poolLevelQueries.some((sql) => sql.includes(".deals"))).toBe(false);
+    const enrichment = checkouts.filter((c) => c.sawDealRead);
+    expect(enrichment).toHaveLength(1);
+    expect(enrichment[0].released).toBe(true);
+    expect(enrichment[0].releasedWith).toBeInstanceOf(Error); // destroyed — NOT returned to the pool poisoned
+
+    // The transaction's own client is untouched by this: it is still healthy, so it goes back CLEAN, and
+    // every alert still goes out (best-effort enrichment degrades the email, never the alert).
+    const transactional = checkouts.filter((c) => !c.sawDealRead);
+    expect(transactional).toHaveLength(1);
+    expect(transactional[0].releasedWith).toBeUndefined();
+    expect(handled).toBe(2);
+    expect(String(sendEmail.mock.calls[0][2])).toContain(`Deal ${DEAL_CONFIG_ERROR}`);
+  }, 5_000);
 });

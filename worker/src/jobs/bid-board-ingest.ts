@@ -7,6 +7,7 @@
 import type { PoolClient } from "pg";
 import { pool } from "../db.js";
 import { deferJob, type JobHandlerResult } from "../queue.js";
+import { timedPoolClientQuery, type TimedPoolLike } from "../lib/timed-pool-query.js";
 
 // The importer + inbox state machine live in the server workspace; load them the same dist→src way the
 // Procore worker jobs do (compiled dist in prod, src under tsx in dev/test).
@@ -141,34 +142,16 @@ async function withOfficeSessionLock<T>(
   }
 }
 
-/** Pool query with a client-side timeout (dead-socket safety). Checks out an EXPLICIT client so a timed-out
- *  query can be DESTROYED (release(err) removes it from the pool). Racing the convenience pool.query() against
- *  a timer would only reject the caller while pool.query keeps its checked-out client — on a genuinely dead
- *  socket that slot never returns, and across retries the leaked slots exhaust the pool until ALL job
- *  processing stops (the exact failure this guard exists to prevent). Mirrors withOfficeSessionLock. */
+/** Pool query with a client-side timeout (dead-socket safety), on the shared checkout-race-destroy helper
+ *  (lib/timed-pool-query.ts). Racing the convenience pool.query() against a timer instead would only reject
+ *  the caller while pool.query keeps its checked-out client — on a genuinely dead socket that slot never
+ *  returns, and across retries the leaked slots exhaust the pool until ALL job processing stops (the exact
+ *  failure this guard exists to prevent). Mirrors withOfficeSessionLock. */
 export async function timedPoolQuery(text: string, params?: any[]): Promise<{ rows: any[]; rowCount?: number | null }> {
-  let client: PoolClient;
-  try {
-    client = await pool.connect();
-  } catch (err) {
-    throw err instanceof Error ? err : new Error(String(err));
-  }
-  let timer: NodeJS.Timeout | undefined;
-  let timedOut = false;
-  const timeout = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      timedOut = true;
-      reject(new Error(`inbox query timed out after ${INBOX_QUERY_TIMEOUT_MS}ms`));
-    }, INBOX_QUERY_TIMEOUT_MS);
+  return timedPoolClientQuery(pool as unknown as TimedPoolLike, text, params, {
+    timeoutMs: INBOX_QUERY_TIMEOUT_MS,
+    timeoutError: () => new Error(`inbox query timed out after ${INBOX_QUERY_TIMEOUT_MS}ms`),
   });
-  try {
-    return (await Promise.race([client.query(text, params), timeout])) as { rows: any[]; rowCount?: number | null };
-  } finally {
-    clearTimeout(timer);
-    // On a client-side timeout the socket may be dead or the query still pending → DESTROY the connection so
-    // its slot can't leak. A clean result (or an ordinary query error) returns the connection normally.
-    client.release(timedOut ? new Error(`inbox query timed out after ${INBOX_QUERY_TIMEOUT_MS}ms`) : undefined);
-  }
 }
 
 export async function handleBidBoardIngestJob(

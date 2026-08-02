@@ -66,6 +66,7 @@ import { getObjectRangeBuffer, R2_RANGE_READ_TIMEOUT_MS } from "../lib/r2-client
 import { sendSystemEmailWithMetadata, type SendSystemEmailResult } from "../lib/system-email.js";
 import { escapeHtml, normalizeText } from "../lib/email-format.js";
 import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "./project-number-email.js";
+import { timedPoolClientQuery, type TimedPoolLike } from "../lib/timed-pool-query.js";
 
 export const GLASSES_WALKTHROUGH_FORWARD_JOB = "glasses_walkthrough_forward";
 
@@ -117,7 +118,10 @@ type Queryable = {
  *  ROLLBACK can land on a connection that never saw the BEGIN). Falling back to `db.query` therefore did
  *  not degrade gracefully; it ran a transaction-shaped sequence with none of a transaction's properties. */
 type PoolLike = Queryable & {
-  connect: () => Promise<Queryable & { release: () => void }>;
+  /** `release` takes the error argument pg actually defines. It is not decoration: a truthy argument is the
+   *  only way to tell the pool to DISCARD a connection instead of handing it to the next caller, which is
+   *  what the enrichment read below depends on when its deadline fires. */
+  connect: () => Promise<Queryable & { release: (err?: any) => void }>;
 };
 
 interface JobArtifact {
@@ -947,10 +951,13 @@ function quoteIdent(value: string): string {
 }
 
 /** Best-effort "<number> — <name>" deal label for the alert, so the reader isn't staring at a bare UUID.
- *  Never throws — a schema-name that fails the safety check, a deleted deal, or any query error all just
- *  fall back to null (the caller renders "Deal <dealId>" instead). Runs OUTSIDE the sweep's per-row
- *  transaction (via the top-level `db`, not the transactional `client`) so a failure here can never abort
- *  that transaction — Postgres marks a transaction unusable after ANY statement error inside it. */
+ *  A schema-name that fails the safety check or a deleted deal both fall back to null (the caller renders
+ *  "Deal <dealId>" instead); a query error propagates to the caller, which treats it the same way.
+ *
+ *  The `Queryable` it is handed must NOT be the sweep's transactional client: a failure on that connection
+ *  would abort the row's open transaction, since Postgres marks a transaction unusable after ANY statement
+ *  error inside it. The sweep passes a one-shot timed checkout instead (timedEnrichmentQueryable), which
+ *  also gives the statement a deadline and a connection that gets destroyed if it blows through it. */
 async function resolveGlassesWalkthroughDealLabel(
   db: Queryable,
   officeSlug: string,
@@ -1121,16 +1128,28 @@ export type GlassesWalkthroughForwardAlertSendEmail = (
  * Wall-clock ceiling on the two network waits the sweep below performs while its per-row transaction is
  * OPEN — the alert send, and the best-effort deal-label lookup.
  *
- * Both are unbounded by default and neither can be cancelled. Resend's SDK awaits a plain `fetch` and
- * accepts no AbortSignal (resend 6.10.0: PostOptions is `{ query, headers }`), and `db.query` has no
- * cancellation either — so this RACES the wait rather than stopping the work. That is the correct trade
- * here because the resource being protected is not the socket: these calls sit between BEGIN and COMMIT on
- * a checked-out pool client, so an unbounded wait pins that client AND holds this dead row's lock against
- * every other sweeper for as long as the far end stays quiet. And this sweep is driven by a bare
- * setInterval with NO reentrancy guard (index.ts), so "as long as it stays quiet" is not one stuck
- * connection — it is one more every 60 seconds until the pool (max 10, db.ts) is gone and every unrelated
- * worker job stops with it. An alert about a lost site visit taking the queue down with it is worse than
- * the silence it was written to end.
+ * Neither can be cancelled, but they are NOT the same problem, and the difference decides what "bounding"
+ * has to mean for each:
+ *
+ *  • The SEND holds the transaction's client only for as long as the sweep is between BEGIN and COMMIT.
+ *    Abandoning the wait unwinds to the per-row catch, which ROLLBACKs, breaks, and releases that client —
+ *    so the scarce resource (a pool slot out of ten, plus this dead row's lock) really is freed on time.
+ *    What keeps running is an HTTP request nobody is reading, and there is no way to stop it: resend 6.18.0
+ *    takes no AbortSignal (`PostOptions` is `{ query, headers }`) and no fetch override (`ResendOptions` is
+ *    `{ baseUrl, userAgent }`). It is bounded instead by undici's own header/body timeouts, and by the
+ *    sweep's `break` — at most one orphan per 60-second tick, not one per row.
+ *  • The deal-label LOOKUP is the case a raced deadline cannot fix, because the thing it pins is a pool
+ *    connection pg checked out for the statement and will not give back until the statement settles. On the
+ *    failure this ceiling exists for — a `deals` read blocked on a lock, socket perfectly healthy, so
+ *    keepalive never evicts it — that is never. A deadline over a top-level `db.query` there changes who is
+ *    waiting, not what is held; the slot stays gone, and the 60-second interval strands another next tick.
+ *    So that read goes through `timedPoolClientQuery` (lib/timed-pool-query.ts), which owns an explicit
+ *    client and DESTROYS it on timeout. This constant supplies its deadline; it does not supply its safety.
+ *
+ * This sweep is driven by a bare setInterval with NO reentrancy guard (index.ts), which is why "one stuck
+ * connection" is the wrong unit for either of them: untreated, it is one more every 60 seconds until the
+ * pool (max 10, db.ts) is gone and every unrelated worker job stops with it. An alert about a lost site
+ * visit taking the queue down with it is worse than the silence it was written to end.
  *
  * Deliberately generous, like ScopeTimeouts above: it exists to bound a hang, not to police latency.
  */
@@ -1148,13 +1167,31 @@ class DeadLetterAlertStepTimeout extends Error {
 
 /** Race `work` against a deadline. The loser keeps running (nothing here is cancellable) — it is simply no
  *  longer between us and the COMMIT. `Promise.race` subscribes to both, so a late rejection from the
- *  abandoned side is still handled and can't surface as an unhandled rejection. */
+ *  abandoned side is still handled and can't surface as an unhandled rejection.
+ *
+ *  Correct ONLY where abandoning the wait actually frees what the wait was holding — i.e. the send, whose
+ *  pooled client belongs to this function and is released as the throw unwinds. Do not reach for it to bound
+ *  a query: a query's connection belongs to pg, and pg keeps it until the statement settles. */
 function withAlertStepDeadline<T>(work: Promise<T>, label: string, timeoutMs: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
   const deadline = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => reject(new DeadLetterAlertStepTimeout(label, timeoutMs)), timeoutMs);
   });
   return Promise.race([work, deadline]).finally(() => clearTimeout(timer)) as Promise<T>;
+}
+
+/** A one-shot `Queryable` whose single statement rides its own checked-out client, bounded by `timeoutMs`
+ *  and DESTROYED if the clock wins. Handed to resolveGlassesWalkthroughDealLabel so the ceiling lives with
+ *  the statement rather than around the call — the enrichment stays a plain function taking a Queryable, and
+ *  every other caller (unit tests, the fake db) is unaffected. */
+function timedEnrichmentQueryable(db: PoolLike, label: string, timeoutMs: number): Queryable {
+  return {
+    query: (sql, params) =>
+      timedPoolClientQuery<{ rows: any[] }>(db as unknown as TimedPoolLike, sql, params as any[] | undefined, {
+        timeoutMs,
+        timeoutError: () => new DeadLetterAlertStepTimeout(label, timeoutMs),
+      }),
+  };
 }
 
 /**
@@ -1198,9 +1235,11 @@ export async function runGlassesWalkthroughForwardDeadLetterSweep(
   let handled = 0;
   // Set once a deal-label lookup hits its ceiling, and never unset for the rest of this sweep. The read is
   // pure enrichment, so ONE row paying the ceiling is a reasonable price for a nicer email; twenty-five of
-  // them is twelve minutes of a checked-out connection buying nothing, since an office schema that would
-  // not answer for the first row will not answer for the twenty-fifth. Unlike a send timeout this does not
-  // stop the sweep — every alert still goes out, just naming the deal by its raw id.
+  // them is twelve minutes of the alert backlog waiting, and twenty-five connections opened only to be
+  // destroyed, since an office schema that would not answer for the first row will not answer for the
+  // twenty-fifth. Cost control, not safety — the destroy in timedPoolClientQuery is what keeps an abandoned
+  // read from costing a pool slot, so a sweep that ignored this flag would be wasteful, not dangerous.
+  // Unlike a send timeout this does not stop the sweep — every alert still goes out, by raw deal id.
   let dealLabelLookupAbandoned = false;
 
   try {
@@ -1253,21 +1292,29 @@ export async function runGlassesWalkthroughForwardDeadLetterSweep(
         const officeSlug = normalizeText(payload.officeSlug as unknown);
         const artifactCount = Array.isArray(payload.artifacts) ? payload.artifacts.length : 0;
 
-        // Best-effort deal label enrichment via the TOP-LEVEL db (not the per-row `client`) — see the
-        // function doc for why this must run outside the transaction. Never blocks the alert.
+        // Best-effort deal label enrichment on its OWN checked-out connection, never the per-row `client` —
+        // see the function doc for why this must run outside the transaction.
         //
-        // Time-bounded even though it is only a SELECT: it is issued while THIS row's transaction is open,
-        // so an office-schema read that never answers holds the claim exactly as long as a stalled send
-        // would. Hitting the ceiling is caught below like any other enrichment failure and degrades the
-        // EMAIL (raw id instead of a label) rather than the alert — an ops address that never hears about a
-        // lost site visit is the failure this whole sweep exists to prevent.
+        // Bounded AND destroyable, which are two different guarantees and only the second one was ever the
+        // point. A read issued while THIS row's transaction is open holds the claim as long as a stalled
+        // send would, so it needs a ceiling; but a ceiling raced against `db.query` would hand the wait back
+        // and leave pg holding the connection for a statement nobody will ever read — the leak, relabelled.
+        // timedEnrichmentQueryable owns the client and release(err)s it, so the abandoned slot is discarded
+        // rather than stranded, and `dealLabelLookupAbandoned` below is a courtesy (don't re-pay 25 ceilings
+        // for the same answer) instead of the only thing standing between us and an exhausted pool.
+        //
+        // The checkout itself is a bounded wait: an exhausted pool rejects the acquire after
+        // connectionTimeoutMillis (db.ts) rather than queueing, and that rejection lands in the same catch.
+        // Hitting either is treated like any other enrichment failure — it degrades the EMAIL (raw id
+        // instead of a label), never the alert. An ops address that never hears about a lost site visit is
+        // the failure this whole sweep exists to prevent.
         let dealLabel: string | null = null;
         if (dealId && officeSlug && !dealLabelLookupAbandoned) {
           try {
-            dealLabel = await withAlertStepDeadline(
-              resolveGlassesWalkthroughDealLabel(db, officeSlug, dealId),
-              `deal-label lookup for job ${job.id}`,
-              stepTimeoutMs
+            dealLabel = await resolveGlassesWalkthroughDealLabel(
+              timedEnrichmentQueryable(db, `deal-label lookup for job ${job.id}`, stepTimeoutMs),
+              officeSlug,
+              dealId
             );
           } catch (err) {
             if (err instanceof DeadLetterAlertStepTimeout) dealLabelLookupAbandoned = true;

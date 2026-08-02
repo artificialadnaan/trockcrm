@@ -1,5 +1,6 @@
 import type { PoolClient } from "pg";
 import { pool } from "./db.js";
+import { timedPoolClientQuery, type TimedPoolLike } from "./lib/timed-pool-query.js";
 
 // How many jobs a single poll tick claims AND runs. Concurrency is bounded by the claim count itself
 // (we claim exactly this many and run them all at once), so it doubles as the run-phase cap. Handlers
@@ -247,41 +248,21 @@ function withQueueTimeout<T>(query: Promise<T>, label: string): Promise<T> {
   return Promise.race([query, timeout]).finally(() => clearTimeout(timer)) as Promise<T>;
 }
 
-// Time-bounded queue query. Checks out an EXPLICIT client so a timed-out query can be DESTROYED
-// (release(err) removes it from the pool). Racing the convenience pool.query() against a timer would only
-// reject the caller while pool.query keeps its checked-out client — on a genuinely dead socket that slot
-// never returns, and because the deferred-recovery flush re-attempts the write every tick, the leaked slots
-// pile up until they exhaust the pool (max 10) and stall UNRELATED worker jobs. Mirrors the claim path here
-// and timedPoolQuery in bid-board-ingest.ts. `label` names the caller in the timeout error.
+// Time-bounded queue query, on the shared checkout-race-destroy helper (lib/timed-pool-query.ts). Racing the
+// convenience pool.query() against a timer instead would only reject the caller while pool.query keeps its
+// checked-out client — on a genuinely dead socket that slot never returns, and because the deferred-recovery
+// flush re-attempts the write every tick, the leaked slots pile up until they exhaust the pool (max 10) and
+// stall UNRELATED worker jobs. `label` names the caller in the timeout error.
 //
 // Every non-claim statement this module issues goes through here — the outcome writes, the lease renewal
 // AND the expiry sweep. The sweep was the last holdout on the convenience query, which was survivable only
 // while it ran once at startup; on a periodic tick an unbounded statement is the one that wedges the poller.
+// The timeout is read at CALL time, not module-init time, so __setQueueQueryTimeoutForTest still bites.
 async function timedQueueQuery(sql: string, params: any[], label: string): Promise<{ rows: any[] }> {
-  let client: PoolClient;
-  try {
-    client = await pool.connect();
-  } catch (err) {
-    // An exhausted pool REJECTS the acquire (connectionTimeoutMillis, db.ts). Surface it like any other write
-    // failure — the caller keeps the intent in pendingRecoveries and retries on a later tick.
-    throw err instanceof Error ? err : new Error(String(err));
-  }
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let timedOut = false;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      timedOut = true;
-      reject(new QueueQueryTimeout(label));
-    }, QUEUE_QUERY_TIMEOUT_MS);
+  return timedPoolClientQuery(pool as unknown as TimedPoolLike, sql, params, {
+    timeoutMs: QUEUE_QUERY_TIMEOUT_MS,
+    timeoutError: () => new QueueQueryTimeout(label),
   });
-  try {
-    return (await Promise.race([client.query(sql, params), timeout])) as { rows: any[] };
-  } finally {
-    clearTimeout(timer);
-    // On a client-side timeout the socket may be dead or the query still pending → DESTROY the connection so
-    // its slot can't leak. A clean result (or an ordinary query error) returns the connection normally.
-    client.release(timedOut ? new QueueQueryTimeout(label) : undefined);
-  }
 }
 
 /**
