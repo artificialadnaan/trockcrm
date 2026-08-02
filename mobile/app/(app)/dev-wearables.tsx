@@ -49,6 +49,19 @@ function isCapturePhotoResult(value: unknown): value is { requested: boolean } {
   );
 }
 
+/**
+ * How long rung 7 waits for the image after `capturePhoto` says the request was ACCEPTED.
+ *
+ * A Ray-Ban Meta JPEG round trip measures in the low seconds over the link — `WalkthroughRecorder`
+ * budgets five for the same wait at the end of a walk — so this only ever elapses when the image is
+ * genuinely never coming. Generous rather than tight on purpose: this rung's job is to MEASURE the
+ * photo, and a timeout that fires on a slow-but-successful transfer would report a defect that does
+ * not exist. What it must not do is leave the rung on "waiting" forever, with its button disabled
+ * and no way back short of leaving the screen — the same dead end the `requested: false` branch
+ * below already closes for the rejection case.
+ */
+const PHOTO_EVENT_TIMEOUT_MS = 15_000;
+
 type Rung = {
   key: string;
   label: string;
@@ -69,14 +82,31 @@ function Diagnostic() {
   const [result, setResult] = useState<Record<string, string>>({});
   const [callback, setCallback] = useState("");
   const photoSub = useRef<(() => void) | null>(null);
+  /** The pending PHOTO_EVENT_TIMEOUT_MS timer, kept next to the subscription it races. */
+  const photoTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearPhotoTimeout = useCallback(() => {
+    if (photoTimeout.current !== null) {
+      clearTimeout(photoTimeout.current);
+      photoTimeout.current = null;
+    }
+  }, []);
 
   useEffect(() => {
     photoSub.current = onPhoto((photo: PhotoMeasurement) => {
+      // Cancel first: the image won, and a timer left running would overwrite a good measurement
+      // with a failure fifteen seconds after it was already on screen.
+      clearPhotoTimeout();
       setState((s) => ({ ...s, photo: "ok" }));
       setResult((r) => ({ ...r, photo: describePhoto(photo) }));
     });
-    return () => photoSub.current?.();
-  }, []);
+    // Both halves torn down together — a timer that outlives this screen fires setState on an
+    // unmounted component, and unlike the subscription nothing else would ever clear it.
+    return () => {
+      photoSub.current?.();
+      clearPhotoTimeout();
+    };
+  }, [clearPhotoTimeout]);
 
   // The step that actually COMPLETES rung 3, and the one rung that had no owner.
   //
@@ -204,6 +234,23 @@ function Diagnostic() {
           return;
         }
         setResult((r) => ({ ...r, photo: "requested — waiting for image…" }));
+        // An ACCEPTED request is not a delivered one. `capturePhoto` resolves the moment the SDK
+        // takes the request; the image comes back later on the photo event, and when it never does
+        // — the link drops, the glasses refuse mid-transfer — nothing else in this screen is
+        // watching. Cancelled by the photo handler above on the way to "ok", so a real image is
+        // never affected by this.
+        clearPhotoTimeout(); // a re-run must not be failed by the previous attempt's timer
+        photoTimeout.current = setTimeout(() => {
+          photoTimeout.current = null;
+          setState((s) => ({ ...s, photo: "fail" }));
+          setResult((r) => ({
+            ...r,
+            photo:
+              `accepted, then no image within ${PHOTO_EVENT_TIMEOUT_MS / 1000}s — the request `
+              + "reached the glasses but nothing came back. Check the stream is still running "
+              + "(rung 6) and retry.",
+          }));
+        }, PHOTO_EVENT_TIMEOUT_MS);
         return;
       }
       setState((s) => ({ ...s, [rung.key]: "ok" }));
@@ -212,7 +259,7 @@ function Diagnostic() {
       setState((s) => ({ ...s, [rung.key]: "fail" }));
       setResult((r) => ({ ...r, [rung.key]: String(error) }));
     }
-  }, []);
+  }, [clearPhotoTimeout]);
 
   if (!isAvailable) {
     return (

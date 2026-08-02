@@ -640,7 +640,7 @@ final class WearablesBridge: RCTEventEmitter {
       }
     }
 
-    // AVAudioApplication landed in iOS 17; this app deploys to 15.1, so the older
+    // AVAudioApplication landed in iOS 17; this app deploys to 15.2, so the older
     // AVAudioSession entry point is still required.
     if #available(iOS 17.0, *) {
       AVAudioApplication.requestRecordPermission(completionHandler: proceed)
@@ -832,7 +832,7 @@ final class WearablesBridge: RCTEventEmitter {
       return delegate.result
     }
 
-    /// Synchronous read under `lock` — deployment target is iOS 15.1, so this spells out
+    /// Synchronous read under `lock` — deployment target is iOS 15.2, so this spells out
     /// lock/unlock rather than reaching for `NSLocking.withLock`, which needs iOS 16.
     private var result: (timedOut: Bool, error: Error?) {
       lock.lock()
@@ -869,6 +869,33 @@ final class WearablesBridge: RCTEventEmitter {
     Task {
       let audio = AVAudioSession.sharedInstance()
       do {
+        // THE PHONE's camera, and nothing to do with the SDK's glasses-camera permission that
+        // rung 5 requests — different subsystem, different Info.plist key, different Settings
+        // toggle. Checked here, BEFORE HFP is activated, for two reasons: an unauthorized session
+        // does not fail, it runs with no input, so the rung would sit through the 5-second shutter
+        // timeout and report "capture timed out" for what is actually a permission problem; and
+        // failing before `activateHfpAndSettle()` means nothing has put the glasses into
+        // hands-free mode that would then need handing back.
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+          break
+        case .notDetermined:
+          // Asking is the whole answer on a fresh install, and this rung cannot be run any other
+          // way. Waiting for the user is fine: nothing has been opened yet.
+          guard await AVCaptureDevice.requestAccess(for: .video) else {
+            reject("wearables_no_camera",
+                   "Camera access was declined, so the phone camera cannot be opened. Tap the rung "
+                     + "again and choose OK.", nil)
+            return
+          }
+        default:
+          reject("wearables_no_camera",
+                 "Camera access for T-Rock Cam is off, so the phone camera cannot be opened — this "
+                   + "is the PHONE's camera permission, not the glasses'. Turn it on in Settings > "
+                   + "T-Rock Cam > Camera and run this rung again.", nil)
+          return
+        }
+
         _ = try await Self.activateHfpAndSettle()
         let before = Self.routeSnapshot(audio)
 
@@ -1162,6 +1189,20 @@ extension WearablesBridge {
 
         recorder.stop()
         let bytes = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int
+
+        // Read the route AGAIN, after the run and before teardown deactivates the session.
+        //
+        // `input` above is the route as it stood BEFORE a minute of recording. iOS reroutes audio
+        // on its own — the glasses reconnecting, a headset being plugged in, a call ending — so
+        // reporting that first reading as "the input this measurement used" can describe a port
+        // that stopped being the source seconds into the run. That is not a cosmetic slip here:
+        // the whole result is void if the route ended up on the glasses, and the up-front guard
+        // cannot see a switch that happens after it. `audio.sampleRate` is read in the same breath
+        // for the same reason — a rate quoted against a different port than the one named beside it
+        // is worse than no rate at all.
+        let finalInput = audio.currentRoute.inputs.first
+        let finalSampleRate = audio.sampleRate
+
         teardown()
         try? audio.setActive(false, options: .notifyOthersOnDeactivation)
 
@@ -1170,9 +1211,13 @@ extension WearablesBridge {
           "framesPerSecond": perSecond,
           "totalFrames": perSecond.reduce(0, +),
           "secondsToLastFrame": lastArrival.map { $0.timeIntervalSince(startedAt) } ?? -1,
-          "inputPortName": input?.portName ?? "none",
-          "inputPortType": input?.portType.rawValue ?? "none",
-          "negotiatedSampleRate": audio.sampleRate,
+          "inputPortName": finalInput?.portName ?? "none",
+          "inputPortType": finalInput?.portType.rawValue ?? "none",
+          "negotiatedSampleRate": finalSampleRate,
+          // Carried alongside rather than dropped: the guard above only proves the route was not
+          // the glasses at the START, so this is what makes a mid-run switch visible instead of
+          // silently corrected away by the re-read.
+          "initialInputPortType": input?.portType.rawValue ?? "none",
           "audioBytes": bytes ?? 0,
           "audioFileUri": url.absoluteString,
         ])

@@ -51,21 +51,39 @@ final class WalkthroughRecorder: RCTEventEmitter {
   private var audioEngine: AVAudioEngine?
   private var videoWriter: WalkVideoWriter?
   private var hasListeners = false
-  private var walkDirectory: URL?
-  private var stillIndex = 0
+
+  /// EVERY piece of walk state that more than one thread touches, and the single serial queue that
+  /// owns all of it.
+  ///
+  /// Three threads meet on this state: the RN method queue (`captureStill`), the SDK's own
+  /// publisher thread (`deliverStill`), and the `Task`s `startWalk`/`endWalk` run in.
+  /// `walkDirectoryStorage` and `stillIndexStorage` were bare `var`s read and written across all
+  /// three — so two stills delivered close together could read the same index and write over each
+  /// other's JPEG, and a still landing while `endWalk` cleared the directory could read it
+  /// half-torn-down.
+  ///
+  /// ONE queue rather than one per field, because the interesting readers want several fields in
+  /// the same breath: `deliverStill` needs the in-flight count, the directory and the index
+  /// together, and stitching three independent guards would give it a view no single moment ever
+  /// had. `DispatchQueue.sync` and not `NSLock`, because `lock()`/`unlock()` are unavailable from
+  /// the async contexts `startWalk` and `endWalk` reach this state from under Swift 6.
+  ///
+  /// Deliberately NOT extended to `session`/`stream`/`videoWriter`/`audioEngine`: those are touched
+  /// only by `startWalk` and `endWalk`, and `walkActive` below is what keeps those two from ever
+  /// running against each other in the first place.
+  private let walkStateQueue = DispatchQueue(label: "com.trockcam.walkthrough.state")
+
+  /// Set by the one `startWalk` that wins `claimWalkSlot()`, cleared only by `teardown()`. This
+  /// flag *is* the re-entrancy guard — see `claimWalkSlot()` for why it is claimed where it is.
+  private var walkActive = false
+  private var walkDirectoryStorage: URL?
+  private var stillIndexStorage = 0
 
   /// Stills that `capturePhoto` ACCEPTED but whose image has not come back on `photoDataPublisher`
   /// yet. `endWalk` waits on this before teardown: tapping Capture and immediately confirming End
   /// walk is a completely ordinary sequence, and without the wait the photo the UI already told the
   /// estimator it took is thrown away when `photoToken` goes nil — silently, since nothing on
   /// either side is expecting a still that never arrives.
-  ///
-  /// Guarded by its own serial queue rather than left bare like `stillIndex`, because unlike that
-  /// counter this one is genuinely read and written from three places on different threads: the RN
-  /// method queue (`captureStill`), the SDK's publisher thread (`deliverStill`), and the `endWalk`
-  /// Task. `DispatchQueue.sync` and not `NSLock`, because `lock()`/`unlock()` are unavailable from
-  /// the async context `endWalk` polls this from under Swift 6.
-  private let stillFlightQueue = DispatchQueue(label: "com.trockcam.walkthrough.stillFlight")
   private var stillsInFlightStorage = 0
 
   /// `.high` per Meta: 720x1280 at 30fps. Read once from here for both the `addStream()` config
@@ -84,8 +102,8 @@ final class WalkthroughRecorder: RCTEventEmitter {
 
   /// Ask iOS for recording permission, and wait for the answer.
   ///
-  /// iOS 17 moved this off `AVAudioSession` onto `AVAudioApplication`; the app deploys to 15.1
-  /// (withWearablesDat.js's `ios.deploymentTarget`), so both entry points are still required —
+  /// iOS 17 moved this off `AVAudioSession` onto `AVAudioApplication`; the app deploys to 15.2
+  /// (withWearablesDat.js's `MIN_IOS_DEPLOYMENT_TARGET`), so both entry points are still required —
   /// the same pair `WearablesBridge.recordGlassesAudio` already carries. Bridged to `async` with a
   /// continuation rather than restructured around the callback: `startWalk` is already one linear
   /// `Task`, and a callback here would either nest the whole start sequence inside it or need a
@@ -123,6 +141,57 @@ final class WalkthroughRecorder: RCTEventEmitter {
     return dir
   }
 
+  // MARK: - Guarded walk state
+
+  /// Claim the recorder for exactly one walk, atomically. Returns false when a walk already owns it.
+  ///
+  /// `WalkthroughRecorder` is a singleton — React Native builds one instance per bridge — so a
+  /// second `startWalk` without this guard silently overwrites `session`, `stream`, `videoWriter`
+  /// and the walk directory of a walk that is still recording. The first walk's stream keeps
+  /// delivering into a writer nobody can reach any more, and twenty minutes of a site visit end up
+  /// in a file that is never finalized.
+  ///
+  /// Claimed at the VERY TOP of `startWalk`'s Task — before the microphone prompt, before the
+  /// directory exists — and that ordering is load-bearing, not tidiness. Every other exit from
+  /// `startWalk` calls `teardown()`, and `teardown()` releases this flag and stops the session
+  /// unconditionally. If the claim happened any later, a second `startWalk` that failed its own
+  /// microphone check would call `teardown()` while holding no claim, and take the FIRST walk's
+  /// live recording down with it — the exact damage this guard exists to prevent.
+  private func claimWalkSlot() -> Bool {
+    walkStateQueue.sync {
+      guard !walkActive else { return false }
+      walkActive = true
+      walkDirectoryStorage = nil
+      stillIndexStorage = 0
+      // A previous walk that ended while a still was genuinely lost leaves this non-zero; without
+      // the reset THIS walk's endWalk would wait out its whole deadline for that dead request.
+      stillsInFlightStorage = 0
+      return true
+    }
+  }
+
+  private func setWalkDirectory(_ url: URL) {
+    walkStateQueue.sync { walkDirectoryStorage = url }
+  }
+
+  /// Read the walk directory and clear it in one step, returning whatever was there so `teardown()`
+  /// can delete it. Atomic, and clearing BEFORE the removal, so a `deliverStill` racing teardown
+  /// gets one of exactly two clean outcomes: it takes the live URL and writes a JPEG into a
+  /// directory that is about to be removed wholesale, or it takes nil and drops the image. Removing
+  /// the directory first and clearing after would add a third — a still handed a URL whose parent
+  /// no longer exists, which fails the write and reports "Could not save still" about a walk that
+  /// was already over.
+  private func clearWalkDirectory() -> URL? {
+    walkStateQueue.sync {
+      let previous = walkDirectoryStorage
+      walkDirectoryStorage = nil
+      return previous
+    }
+  }
+
+  /// How many stills have been written for the current walk. Reported by `endWalk`.
+  private var stillIndex: Int { walkStateQueue.sync { stillIndexStorage } }
+
   // MARK: - Start
 
   @objc(startWalk:resolver:rejecter:)
@@ -147,6 +216,23 @@ final class WalkthroughRecorder: RCTEventEmitter {
       return
     }
     Task {
+      // ONE WALK AT A TIME, and this is claimed before anything else in the method — including the
+      // microphone prompt, which is the longest suspension in the whole start sequence and so the
+      // widest window for a second Start to land in.
+      //
+      // This is the ONLY exit below that must not call teardown(): the walk that owns the recorder
+      // is still recording, and stopping its session or deleting its directory to report that a
+      // SECOND start was refused would destroy the very thing being protected.
+      guard claimWalkSlot() else {
+        reject(
+          "walk_already_running",
+          "A walkthrough is already recording. End that walk before starting another — the glasses "
+            + "and the recorder handle one walk at a time.",
+          nil
+        )
+        return
+      }
+
       // MICROPHONE PERMISSION IS PART OF READINESS, and it is checked before anything else exists
       // to clean up — before the walk directory, before the DAT session, before the writer.
       //
@@ -159,9 +245,12 @@ final class WalkthroughRecorder: RCTEventEmitter {
       // Asking FIRST is also what keeps the refusal cheap: nothing has been created yet, so there
       // is no session to stop, no audio session to deactivate, and no `walkthroughs/<id>/` left on
       // disk for upload.ts's `findRecoverableWalks` to offer back as a recoverable walk holding
-      // nothing.
+      // nothing. The claim above is the one thing that does exist by now, which is why this refusal
+      // still goes through teardown() — on this path teardown finds nothing to stop and no
+      // directory to delete, and does nothing but hand the recorder back.
       let alreadyDenied = Self.recordPermissionAlreadyDenied
       guard await Self.requestRecordPermission() else {
+        await teardown(.discard)
         reject(
           "walk_mic_denied",
           alreadyDenied
@@ -178,12 +267,11 @@ final class WalkthroughRecorder: RCTEventEmitter {
 
       let audio = AVAudioSession.sharedInstance()
       do {
+        // Published to the guarded state only after it exists on disk, so `deliverStill` can never
+        // be handed a directory that failed to be created. `claimWalkSlot()` above already zeroed
+        // the still index and the in-flight count for this walk.
         let dir = try Self.makeWalkDirectory(walkId)
-        walkDirectory = dir
-        stillIndex = 0
-        // A previous walk that ended while a still was genuinely lost leaves this non-zero; without
-        // the reset the NEXT walk's endWalk would wait out its whole deadline for that dead request.
-        adjustStillsInFlight(-stillsInFlight)
+        setWalkDirectory(dir)
 
         let sdk = Wearables.shared
         let selector = AutoDeviceSelector(wearables: sdk)
@@ -192,6 +280,7 @@ final class WalkthroughRecorder: RCTEventEmitter {
           try? await Task.sleep(nanoseconds: 200_000_000)
         }
         guard selector.activeDevice != nil else {
+          await teardown(.discard)
           reject("walk_no_device", "No eligible glasses after 8s", nil)
           return
         }
@@ -205,7 +294,7 @@ final class WalkthroughRecorder: RCTEventEmitter {
         }
         guard created.state == .started else {
           let stalled = created.state.description
-          await teardown()
+          await teardown(.discard)
           reject("walk_session_not_started", "Session stalled in \(stalled)", nil)
           return
         }
@@ -214,7 +303,7 @@ final class WalkthroughRecorder: RCTEventEmitter {
         guard let newStream = try created.addStream(
           config: StreamConfiguration(videoCodec: .raw, resolution: Self.streamResolution, frameRate: 30)
         ) else {
-          await teardown()
+          await teardown(.discard)
           reject("walk_stream_nil", "addStream() returned nil", nil)
           return
         }
@@ -254,7 +343,7 @@ final class WalkthroughRecorder: RCTEventEmitter {
         // kills the video. If they are somehow chosen anyway, a walk would record 3 seconds of
         // video and nobody would find out until the file was inspected.
         guard input?.portType != .bluetoothHFP else {
-          await teardown()
+          await teardown(.discard)
           reject(
             "walk_route_is_glasses",
             "Audio would record from the glasses over Bluetooth HFP, which stops the video stream "
@@ -280,7 +369,7 @@ final class WalkthroughRecorder: RCTEventEmitter {
         ])
         vInput.expectsMediaDataInRealTime = true
         guard writer.canAdd(vInput) else {
-          await teardown()
+          await teardown(.discard)
           reject("walk_writer_video_input_refused", "AVAssetWriter refused the video input", nil)
           return
         }
@@ -303,7 +392,7 @@ final class WalkthroughRecorder: RCTEventEmitter {
         ])
         aInput.expectsMediaDataInRealTime = true
         guard writer.canAdd(aInput) else {
-          await teardown()
+          await teardown(.discard)
           reject("walk_writer_audio_input_refused", "AVAssetWriter refused the audio input", nil)
           return
         }
@@ -311,7 +400,7 @@ final class WalkthroughRecorder: RCTEventEmitter {
 
         // Both inputs are attached; nothing may be added after this.
         guard writer.startWriting() else {
-          await teardown()
+          await teardown(.discard)
           reject("walk_writer_start_failed",
                  "AVAssetWriter.startWriting() failed: \(writer.error?.localizedDescription ?? "unknown")",
                  writer.error)
@@ -340,7 +429,7 @@ final class WalkthroughRecorder: RCTEventEmitter {
           // The tap was installed above; remove it before tearing down, or it outlives the
           // engine reference this failure path never got to store.
           inputNode.removeTap(onBus: 0)
-          await teardown()
+          await teardown(.discard)
           reject("walk_audio_engine_failed", "AVAudioEngine.start() failed: \(Self.describe(error))", error)
           return
         }
@@ -357,7 +446,7 @@ final class WalkthroughRecorder: RCTEventEmitter {
           "negotiatedSampleRate": audio.sampleRate,
         ])
       } catch {
-        await teardown()
+        await teardown(.discard)
         reject("walk_start_failed", "startWalk failed: \(Self.describe(error))", error)
       }
     }
@@ -384,13 +473,13 @@ final class WalkthroughRecorder: RCTEventEmitter {
 
   @discardableResult
   private func adjustStillsInFlight(_ delta: Int) -> Int {
-    stillFlightQueue.sync {
+    walkStateQueue.sync {
       stillsInFlightStorage = max(0, stillsInFlightStorage + delta)
       return stillsInFlightStorage
     }
   }
 
-  private var stillsInFlight: Int { stillFlightQueue.sync { stillsInFlightStorage } }
+  private var stillsInFlight: Int { walkStateQueue.sync { stillsInFlightStorage } }
 
   /// Give every accepted-but-undelivered still a bounded chance to land before the publisher that
   /// would deliver it is torn down.
@@ -411,15 +500,31 @@ final class WalkthroughRecorder: RCTEventEmitter {
     }
   }
 
+  /// Runs on the SDK's publisher thread, which is why all three pieces of walk state it needs are
+  /// taken in ONE hop through `walkStateQueue` instead of three:
+  ///
+  ///   - the in-flight count is released FIRST, and on every path out of this function including
+  ///     the nil-directory return and the write failure below. This request has resolved either
+  ///     way, and a decrement that only ran on the happy path would leave `endWalk` waiting out its
+  ///     full deadline after a photo that failed to save — the one case where the estimator is
+  ///     already going to be told something went wrong.
+  ///   - the directory is read and the index bumped in the same critical section, so two stills
+  ///     delivered back to back cannot take the same number and overwrite each other's JPEG, and a
+  ///     still cannot pair this walk's index with a directory `teardown()` has already cleared.
+  ///
+  /// A nil directory means `teardown()` won: the walk this image belonged to is over, or its start
+  /// failed and the directory has been deleted. Dropping the image is the only correct answer —
+  /// the alternatives are a JPEG added to a walk that has already been reported and counted, or a
+  /// write into a deleted directory that fails and raises "Could not save still" about a walk
+  /// nobody is watching any more.
   private func deliverStill(_ photo: PhotoData) {
-    // Released FIRST, and on every path out of this function including the guard and the write
-    // failure below: this request has resolved either way, and a decrement that only ran on the
-    // happy path would leave endWalk waiting out its full deadline after a photo that failed to
-    // save — the one case where the estimator is already going to be told something went wrong.
-    adjustStillsInFlight(-1)
-    guard let dir = walkDirectory else { return }
-    stillIndex += 1
-    let url = dir.appendingPathComponent(String(format: "still-%03d.jpg", stillIndex))
+    let target: URL? = walkStateQueue.sync { () -> URL? in
+      stillsInFlightStorage = max(0, stillsInFlightStorage - 1)
+      guard let dir = walkDirectoryStorage else { return nil }
+      stillIndexStorage += 1
+      return dir.appendingPathComponent(String(format: "still-%03d.jpg", stillIndexStorage))
+    }
+    guard let url = target else { return }
     do {
       try photo.data.write(to: url)
     } catch {
@@ -479,7 +584,14 @@ final class WalkthroughRecorder: RCTEventEmitter {
       // this walk, and reporting the pre-wait count would undercount exactly the photo this wait
       // exists to save.
       let stills = stillIndex
-      await teardown()
+      // `.keep`, and this is the one call site where that is true. Everything in
+      // `walkthroughs/<walkId>/` by now is the site visit itself — the finalized walk.mp4 and every
+      // still — and none of it has been uploaded: the JS queue reads these files off disk AFTER
+      // this resolves. `.discard` here would delete the recording on the way to reporting success.
+      // Kept on the finalize-FAILURE path too: a truncated walk.mp4 and the stills beside it are
+      // still the only record of a walk nobody can repeat, and upload.ts's recovery scan is exactly
+      // the mechanism that gets them back.
+      await teardown(.keep)
 
       switch result {
       case .success(let url):
@@ -499,17 +611,42 @@ final class WalkthroughRecorder: RCTEventEmitter {
     }
   }
 
-  /// Stop everything and release the audio session. This no longer requests HFP, so the glasses
-  /// are not pinned into hands-free mode — but an active session still holds the microphone away
-  /// from every other app, and releasing it
-  /// stays 8 kHz mono.
+  /// What `teardown()` does with `walkthroughs/<walkId>/`. Spelled out at every call site rather
+  /// than given a default, because the two cases are one word apart and picking the wrong one
+  /// deletes a finished site visit.
+  private enum WalkDirectoryDisposition {
+    /// A `startWalk` that failed. Nothing in the directory is a recording — at most a `walk.mp4`
+    /// the writer never appended a single sample to — and leaving it is not merely untidy. At
+    /// login, `upload.ts`'s `findRecoverableWalks` scans `Documents/walkthroughs/` for directories
+    /// with no manifest entry and offers them to the estimator as recoverable recordings. A
+    /// directory abandoned by a failed start has exactly that shape, so leaving one behind
+    /// manufactures a phantom "recoverable" walk holding nothing the user can act on — and does it
+    /// on the one path where the app has ALREADY told them the walk could not start.
+    case discard
+    /// An `endWalk` that ran. The directory holds the walk this whole file exists to produce, and
+    /// the upload queue reads those files off disk afterwards.
+    case keep
+  }
+
+  /// Stop everything, release the audio session, and hand the recorder back for the next walk.
+  ///
+  /// This no longer requests HFP, so the glasses are not pinned into hands-free mode the way
+  /// `WearablesBridge.recordGlassesAudio` has to worry about — but a `.playAndRecord` session left
+  /// active still holds the microphone for this app alone, keeps the input route switched for
+  /// everything else on the device, and blocks other apps from recording at all. Deactivating with
+  /// `.notifyOthersOnDeactivation` is what returns the microphone and lets whatever was playing
+  /// before the walk resume.
   ///
   /// Always cancels the video writer rather than finishing it. `endWalk` finalizes the writer
   /// itself, via `WalkVideoWriter.finalize()`, before calling this — by the time this runs, the
   /// writer is already `.completed`, `.cancelled`, or `.failed`, and `cancel()` on any of those
   /// is a no-op. On the startWalk-failure paths, where no finalize ever ran, this is what
   /// actually releases the writer's resources.
-  private func teardown() async {
+  ///
+  /// The single release point for `claimWalkSlot()`, and the reason a failed start cannot wedge the
+  /// recorder shut: every exit from `startWalk` except the "already running" rejection comes through
+  /// here, so the claim is given back whether the walk succeeded, failed, or never got going.
+  private func teardown(_ disposition: WalkDirectoryDisposition) async {
     frameToken = nil
     if let engine = audioEngine {
       engine.inputNode.removeTap(onBus: 0)
@@ -523,7 +660,19 @@ final class WalkthroughRecorder: RCTEventEmitter {
     session = nil
     videoWriter?.cancel()
     videoWriter = nil
+
+    // AFTER the publisher and the writer are gone above, so nothing is left that could put a file
+    // back between the clear and the remove: `photoToken = nil` ends still delivery, and
+    // `cancel()` makes the writer delete its own output rather than keep writing to it.
+    let abandoned = clearWalkDirectory()
+    if case .discard = disposition, let abandoned {
+      try? FileManager.default.removeItem(at: abandoned)
+    }
+
     try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    // Released LAST. A `startWalk` that claimed the slot the moment this cleared would otherwise
+    // race the stop()/nil sequence above and build its session against a half-torn-down one.
+    walkStateQueue.sync { walkActive = false }
   }
 }
 
@@ -533,7 +682,7 @@ final class WalkthroughRecorder: RCTEventEmitter {
 /// rather than living there as more private properties: the closures that append video and audio
 /// samples run on `DispatchQueue.async`/`.sync`, both of which require their closures to be
 /// `@Sendable`, and `WalkthroughRecorder` — an `RCTEventEmitter` subclass carrying plenty of
-/// state (`session`, `stream`, `stillIndex`, ...) that is NOT confined to one queue — cannot
+/// state (`session`, `stream`, `videoWriter`, ...) that is NOT confined to one queue — cannot
 /// honestly claim `Sendable`. This type is small and fully self-contained instead: everything it
 /// owns is either set once at `init` (before any of the closures below exist to race it) or
 /// touched only inside a closure submitted to `mediaQueue`. `@unchecked Sendable` documents that

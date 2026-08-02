@@ -11,9 +11,10 @@
  *   2. pbxproj — the Swift Package Manager dependency. `@expo/config-plugins` has no
  *      helper for SPM, so the four objects Xcode expects are written directly.
  *
- * Developer Mode: pass metaAppId "0" (the SDK's documented sentinel) to run against
- * MockDeviceKit with no registered app. Production passes the Wearables Developer
- * Center values.
+ * Developer Mode: metaAppId defaults to "0" (the SDK's documented sentinel), which runs
+ * against MockDeviceKit with no registered app. Production passes the Wearables Developer
+ * Center values, and `requireRegisteredMetaApp` makes prebuild FAIL rather than let that
+ * sentinel reach a shipped build — see resolveMetaAppId.
  */
 const {
   withInfoPlist,
@@ -43,6 +44,40 @@ const DEFAULT_VERSION = "0.8.0";
 // it unconditionally is fine, and keeps the package list identical across configurations.
 const PRODUCTS = ["MWDATCore", "MWDATCamera", "MWDATMockDevice"];
 const ACCESSORY_PROTOCOL = "com.meta.ar.wearable";
+
+/** The SDK's documented Developer Mode sentinel: MockDeviceKit, no registered app, no real glasses. */
+const DEVELOPER_MODE_APP_ID = "0";
+
+/**
+ * Decide the MetaAppID, and refuse Developer Mode in a build that is going to real users.
+ *
+ * The sentinel is a fine default for a dev client — it is how the integration is exercised with no
+ * glasses and no Developer Center registration — but it is a silent, total failure in a shipped
+ * app: MockDeviceKit answers instead of the real transport, no device is ever eligible, and every
+ * walk dies at "no eligible glasses" with nothing on screen pointing at a missing build variable.
+ * A failed prebuild is loud, happens on the build machine, and costs minutes; the alternative is
+ * discovered by an estimator standing on a job site.
+ *
+ * Rejects an EXPLICIT "0" as well as a missing value, because the two ship the same broken app —
+ * a config that spells out the sentinel for production is a mistake, not consent.
+ *
+ * Exported for tests: this is a security guard, and the case that matters is the one nobody wants
+ * to reproduce by actually cutting a production build.
+ */
+function resolveMetaAppId({ metaAppId, requireRegisteredMetaApp }) {
+  const value = metaAppId == null || String(metaAppId).trim() === "" ? null : String(metaAppId).trim();
+  if (requireRegisteredMetaApp && (value === null || value === DEVELOPER_MODE_APP_ID)) {
+    throw new Error(
+      "withWearablesDat: META_APP_ID is required for a production build.\n\n" +
+        `MetaAppID "${DEVELOPER_MODE_APP_ID}" is the Meta Wearables SDK's Developer Mode sentinel — ` +
+        "it runs against MockDeviceKit with no registered app, so a shipped build would never see " +
+        "a real pair of glasses and every walkthrough would fail at pairing with no explanation.\n" +
+        "Set META_APP_ID (and META_CLIENT_TOKEN) from the Wearables Developer Center, or build a " +
+        "non-production EAS profile if Developer Mode is what you actually wanted."
+    );
+  }
+  return value ?? DEVELOPER_MODE_APP_ID;
+}
 
 /** Deterministic 24-hex pbxproj ids, so a re-run does not churn the project file. */
 function stableId(seed) {
@@ -99,10 +134,19 @@ const withDatInfoPlist = (config, opts) =>
       plist.NSBluetoothAlwaysUsageDescription ??
       "T-Rock Cam connects to your Meta glasses to capture walkthrough audio and photos.";
 
-    // HFP microphone capture from the glasses runs through AVAudioSession, so the app
-    // needs its own record permission independent of the DAT camera session.
+    // A walkthrough records narration from THIS PHONE's microphone, never the glasses'. Asking
+    // for the glasses over Bluetooth HFP forces their radio into hands-free mode and starves the
+    // video transport — measured, video dies after 3-8 seconds — so the recorder deliberately
+    // leaves `.allowBluetoothHFP` out. The string must say phone, because a permission prompt that
+    // names the glasses describes a capture path this app does not have.
+    //
+    // Nullish fallback, matching NSBluetoothAlwaysUsageDescription above: `ios.infoPlist` in
+    // app.config.ts already declares a microphone string for voice notes on photos, and
+    // overwriting it here would let this plugin silently redefine an app-wide permission prompt
+    // for a feature that is only one of its users.
     plist.NSMicrophoneUsageDescription =
-      "T-Rock Cam records your spoken scope notes during a walkthrough, including through Meta glasses.";
+      plist.NSMicrophoneUsageDescription ??
+      "T-Rock Cam records your spoken scope notes through this phone's microphone during a walkthrough.";
 
     return cfg;
   });
@@ -248,7 +292,13 @@ const withBridgeInTarget = (config) =>
 const withWearablesDat = (config, options = {}) => {
   const opts = {
     scheme: options.scheme ?? config.scheme ?? "trockcam",
-    metaAppId: options.metaAppId ?? "0",
+    // Throws on a production config with no registered app — see resolveMetaAppId. Deliberately
+    // evaluated here, at the top of the plugin, so prebuild fails before a single file is written
+    // rather than leaving a half-configured ios/ behind.
+    metaAppId: resolveMetaAppId({
+      metaAppId: options.metaAppId,
+      requireRegisteredMetaApp: options.requireRegisteredMetaApp === true,
+    }),
     clientToken: options.clientToken ?? null,
     version: options.version ?? DEFAULT_VERSION,
     appleTeamId: options.appleTeamId ?? null,
@@ -264,3 +314,8 @@ const withWearablesDat = (config, options = {}) => {
 };
 
 module.exports = createRunOncePlugin(withWearablesDat, "withWearablesDat", "1.0.0");
+// Named exports hang off the plugin function itself; Expo resolves the module's default export
+// (the function) and ignores everything else, so this is invisible to prebuild and reachable
+// from a unit test.
+module.exports.resolveMetaAppId = resolveMetaAppId;
+module.exports.DEVELOPER_MODE_APP_ID = DEVELOPER_MODE_APP_ID;

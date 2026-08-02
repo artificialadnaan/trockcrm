@@ -133,9 +133,23 @@ export type PhoneAudioStreamMeasurement = {
   framesPerSecond: number[];
   totalFrames: number;
   secondsToLastFrame: number;
+  /**
+   * The route as it stood when the run FINISHED, not when it started, together with the sample rate
+   * read in the same breath. iOS reroutes audio mid-run on its own, and a port named from a reading
+   * taken a minute earlier can describe something that stopped being the source seconds in.
+   */
   inputPortName: string;
   inputPortType: string;
   negotiatedSampleRate: number;
+  /**
+   * The route BEFORE the run, which is the one native's up-front guard actually vetted. Differs
+   * from `inputPortType` only when iOS switched routes during the measurement — which is exactly
+   * the case that voids the result, so it is reported rather than corrected away.
+   *
+   * Optional because it was added after the measurement shipped: a dev client built before this
+   * reports every other field and not this one.
+   */
+  initialInputPortType?: string;
   audioBytes: number;
   audioFileUri: string;
 };
