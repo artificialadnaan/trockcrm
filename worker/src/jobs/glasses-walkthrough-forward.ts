@@ -382,10 +382,36 @@ async function uploadClip(
   for (const part of signedParts) {
     const startByte = (part.partNumber - 1) * begin.partSize;
     const endByte = Math.min(startByte + begin.partSize, artifact.fileSizeBytes) - 1;
+    const expectedBytes = endByte - startByte + 1;
+    // TROCK Scope computes partCount/partSize from the size WE declared, so a plan whose part begins at or
+    // past EOF is a disagreement about the object, not a rounding detail. Checked before the read because
+    // an empty range that "matches" an empty answer is the one way a zero-byte part would still satisfy
+    // the length comparison below.
+    if (expectedBytes <= 0) {
+      throw new Error(
+        `TROCK Scope's part plan for clip ${begin.clipId} (artifact ${artifact.idempotencyKey}) puts part ` +
+          `${part.partNumber} outside the ${artifact.fileSizeBytes}-byte object (bytes ${startByte}-${endByte}).`
+      );
+    }
     // Ranged read of OUR OWN R2 object, one part at a time — bounds memory to one part (32MiB, TROCK
     // Scope's PART_SIZE_BYTES) regardless of how large the whole clip is, instead of buffering an
     // entire multi-GB video in the worker's process.
     const chunk = await downloadRange(artifact.r2Key, startByte, endByte);
+    // Never PUT bytes we did not fully read. `downloadRange` is an injection seam and its production
+    // default is a network read, so a short answer is possible from either side — and NOTHING downstream
+    // can see it: the presigned part PUT below accepts zero bytes, answers 200 and returns an ETag, and
+    // S3 multipart accepts an undersized FINAL part. A one-part clip would therefore complete as a
+    // zero-byte recording and this job would report SUCCESS, which is worse than failing — the walk looks
+    // filed, nothing retries, nothing alerts, and TROCK Scope bills a transcription of silence. A
+    // multipart clip fares no better: every attempt re-uploads invalid parts until the retry budget is
+    // gone. The byte count is the only place the two outcomes are still distinguishable.
+    if (chunk.length !== expectedBytes) {
+      throw new Error(
+        `Refusing to upload part ${part.partNumber} of clip ${begin.clipId} (artifact ` +
+          `${artifact.idempotencyKey}): read ${chunk.length} bytes for the ${expectedBytes}-byte range ` +
+          `${startByte}-${endByte} of ${artifact.r2Key}.`
+      );
+    }
     // A known TS 5.7+ / @types/node friction point: `BodyInit` wants an `ArrayBufferView<ArrayBuffer>`,
     // and both `Buffer` and a fresh `Uint8Array` are typed `<ArrayBufferLike>` here, so neither satisfies
     // it structurally even though a Buffer is exactly what Node's fetch accepts (and sends) at runtime.

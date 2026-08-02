@@ -115,7 +115,9 @@ describe("glasses_walkthrough_forward create checkpoint (real SQL)", () => {
     fetchImpl: fetchImpl as any,
     baseUrl: SCOPE_BASE_URL,
     token: "not-a-real-scope-service-token-9f3c",
-    downloadRange: vi.fn(async () => Buffer.from("x")),
+    // Returns the range's true byte count. A fixed stub under-delivers against the 10-byte artifact above,
+    // and the handler now (correctly) refuses to PUT a part it could not fully read.
+    downloadRange: vi.fn(async (_k: string, start: number, end: number) => Buffer.alloc(end - start + 1, 0x61)),
   });
 
   it("leaves the id checkpointed and the pending marker gone — one statement, real jsonb", async () => {

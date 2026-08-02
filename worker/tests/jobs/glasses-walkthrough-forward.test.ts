@@ -139,6 +139,19 @@ function makeScopeFetch(overrides: {
   return { fetchImpl, calls };
 }
 
+/**
+ * The honest R2 stand-in: answers with EXACTLY the bytes the requested range covers, which is what a
+ * satisfied ranged read returns. Every case below used a fixed one- or five-byte buffer regardless of the
+ * range asked for, and that is precisely why a zero-byte forward could reach TROCK Scope unnoticed — the
+ * suite's own fake was already under-delivering and no assertion sized what got PUT. Tests that mean to
+ * exercise a SHORT read now say so explicitly (see "part integrity").
+ */
+function makeDownloadRange() {
+  return vi.fn(async (_r2Key: string, start: number, endInclusive: number) =>
+    Buffer.alloc(endInclusive - start + 1, 0x61)
+  );
+}
+
 describe("handleGlassesWalkthroughForward", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
@@ -147,7 +160,7 @@ describe("handleGlassesWalkthroughForward", () => {
   it("creates the remote walkthrough, uploads the one clip's one part, and completes it", async () => {
     const db = makeDb();
     const { fetchImpl, calls } = makeScopeFetch();
-    const downloadRange = vi.fn(async () => Buffer.from("bytes"));
+    const downloadRange = makeDownloadRange();
 
     await handleGlassesWalkthroughForward(makePayload(), "office-1", {
       db,
@@ -189,7 +202,7 @@ describe("handleGlassesWalkthroughForward", () => {
   it("reuses a checkpointed scopeWalkthroughId instead of creating a second remote walkthrough", async () => {
     const db = makeDb();
     const { fetchImpl, calls } = makeScopeFetch();
-    const downloadRange = vi.fn(async () => Buffer.from("bytes"));
+    const downloadRange = makeDownloadRange();
 
     await handleGlassesWalkthroughForward(
       makePayload({ scopeWalkthroughId: "already-created" }),
@@ -205,20 +218,24 @@ describe("handleGlassesWalkthroughForward", () => {
 
   it("splits more than 100 parts across multiple sign-parts requests (TROCK Scope's per-request ceiling)", async () => {
     const db = makeDb();
+    // A toy partSize, not TROCK Scope's real 32MiB: the sign-parts batching this case is about depends on
+    // the part COUNT alone, and now that the download fake returns the range's true byte count, 32MiB ×
+    // 150 would zero-fill ~4.8GB to prove nothing extra.
+    const PART_SIZE = 64;
     const { fetchImpl, calls } = makeScopeFetch({
       beginBody: {
         clipId: "clip-1",
         key: "k",
         uploadId: "u",
         sequence: 1,
-        partSize: 32 * 1024 * 1024,
+        partSize: PART_SIZE,
         partCount: 150,
       },
     });
-    const downloadRange = vi.fn(async () => Buffer.from("x"));
+    const downloadRange = makeDownloadRange();
 
     await handleGlassesWalkthroughForward(
-      makePayload({ artifacts: [{ ...makePayload().artifacts[0], fileSizeBytes: 150 * 32 * 1024 * 1024 }] }),
+      makePayload({ artifacts: [{ ...makePayload().artifacts[0], fileSizeBytes: 150 * PART_SIZE }] }),
       "office-1",
       { db, fetchImpl: fetchImpl as any, baseUrl: "https://scope.example.com", token: "t", downloadRange }
     );
@@ -236,7 +253,7 @@ describe("handleGlassesWalkthroughForward", () => {
       completeStatus: 409,
       completeBody: { outcome: "duplicate_bytes", clipId: "clip-1", duplicateOfClipId: "clip-0" },
     });
-    const downloadRange = vi.fn(async () => Buffer.from("x"));
+    const downloadRange = makeDownloadRange();
 
     await expect(
       handleGlassesWalkthroughForward(makePayload(), "office-1", {
@@ -258,7 +275,7 @@ describe("handleGlassesWalkthroughForward", () => {
       completeStatus: 409,
       completeBody: { outcome: "conflict", clipId: "clip-1", reason: "some other conflict" },
     });
-    const downloadRange = vi.fn(async () => Buffer.from("x"));
+    const downloadRange = makeDownloadRange();
 
     await expect(
       handleGlassesWalkthroughForward(makePayload(), "office-1", {
@@ -277,7 +294,7 @@ describe("handleGlassesWalkthroughForward", () => {
       completeStatus: 409,
       completeBody: { clipId: "clip-1" },
     });
-    const downloadRange = vi.fn(async () => Buffer.from("x"));
+    const downloadRange = makeDownloadRange();
 
     await expect(
       handleGlassesWalkthroughForward(makePayload(), "office-1", {
@@ -300,7 +317,7 @@ describe("handleGlassesWalkthroughForward", () => {
         fetchImpl: fetchImpl as any,
         baseUrl: "https://scope.example.com",
         token: "t",
-        downloadRange: vi.fn(async () => Buffer.from("x")),
+        downloadRange: makeDownloadRange(),
       })
     ).rejects.toThrow(/walkthrough create failed/);
   });
@@ -315,9 +332,84 @@ describe("handleGlassesWalkthroughForward", () => {
         fetchImpl: fetchImpl as any,
         baseUrl: "https://scope.example.com",
         token: "t",
-        downloadRange: vi.fn(async () => Buffer.from("x")),
+        downloadRange: makeDownloadRange(),
       })
     ).rejects.toThrow(/no ETag/);
+  });
+
+  // ── Part integrity ───────────────────────────────────────────────────────────────────────────────
+  //
+  // `downloadRange` is an injection seam whose production default is a network read. Nothing downstream
+  // of it can tell a short answer from a correct one: a presigned R2 part PUT accepts zero bytes, answers
+  // 200 and returns an ETag, and S3 multipart accepts an undersized FINAL part — so a one-part clip
+  // completes as a zero-byte recording and this job reports SUCCESS. That is worse than a failure: the
+  // walk looks filed, nothing retries, nothing alerts, and TROCK Scope bills a transcription that yields
+  // a confidently empty scope. The byte count is the only thing that distinguishes the two, so it is
+  // checked before the PUT rather than after.
+  describe("part integrity", () => {
+    it("refuses to upload a part it could not fully read, instead of PUTting the short bytes", async () => {
+      const db = makeDb();
+      const { fetchImpl, calls } = makeScopeFetch();
+      // 5 bytes for the 1024-byte range the part plan asks for — the shape of a truncated R2 object.
+      const downloadRange = vi.fn(async () => Buffer.from("bytes"));
+
+      await expect(
+        handleGlassesWalkthroughForward(makePayload({ scopeWalkthroughId: "already-created" }), "office-1", {
+          db,
+          fetchImpl: fetchImpl as any,
+          baseUrl: SCOPE_BASE_URL,
+          token: "t",
+          downloadRange,
+        })
+      ).rejects.toThrow(/5 bytes/);
+
+      expect(calls.some((c) => c.url.startsWith("https://r2.example.com/part-"))).toBe(false);
+      expect(calls.some((c) => /\/complete$/.test(c.url))).toBe(false);
+    });
+
+    it("refuses a ZERO-byte part — the exact answer an unconfigured worker's R2 read used to give", async () => {
+      const db = makeDb();
+      const { fetchImpl, calls } = makeScopeFetch();
+      const downloadRange = vi.fn(async () => Buffer.alloc(0));
+
+      await expect(
+        handleGlassesWalkthroughForward(makePayload({ scopeWalkthroughId: "already-created" }), "office-1", {
+          db,
+          fetchImpl: fetchImpl as any,
+          baseUrl: SCOPE_BASE_URL,
+          token: "t",
+          downloadRange,
+        })
+      ).rejects.toThrow(/0 bytes/);
+
+      expect(calls.some((c) => c.url.startsWith("https://r2.example.com/part-"))).toBe(false);
+      expect(calls.some((c) => /\/complete$/.test(c.url))).toBe(false);
+    });
+
+    it("rejects a part plan that puts a part past the end of the filed object", async () => {
+      // partCount 2 over a 1024-byte object whose partSize is 1024: part 2 starts exactly at EOF, so its
+      // range covers nothing. An empty range that "matches" an empty read is the one way a zero-byte PUT
+      // would still slip past a pure length comparison, so the plan is checked on its own terms.
+      const db = makeDb();
+      const { fetchImpl, calls } = makeScopeFetch({
+        beginBody: { clipId: "clip-1", uploadId: "u", sequence: 1, partSize: 1024, partCount: 2 },
+      });
+      const downloadRange = vi.fn(async (_k: string, start: number, end: number) =>
+        Buffer.alloc(Math.max(0, end - start + 1))
+      );
+
+      await expect(
+        handleGlassesWalkthroughForward(makePayload({ scopeWalkthroughId: "already-created" }), "office-1", {
+          db,
+          fetchImpl: fetchImpl as any,
+          baseUrl: SCOPE_BASE_URL,
+          token: "t",
+          downloadRange,
+        })
+      ).rejects.toThrow(/outside the 1024-byte object/);
+
+      expect(calls.some((c) => /\/complete$/.test(c.url))).toBe(false);
+    });
   });
 
   it("dead-letters immediately (does not attempt a network call) when TROCK_SCOPE_BASE_URL is unset", async () => {
@@ -364,7 +456,7 @@ describe("handleGlassesWalkthroughForward", () => {
   it("uploads every artifact of a multi-clip walk under the SAME remote walkthrough", async () => {
     const db = makeDb();
     const { fetchImpl, calls } = makeScopeFetch();
-    const downloadRange = vi.fn(async () => Buffer.from("x"));
+    const downloadRange = makeDownloadRange();
 
     const payload = makePayload({
       artifacts: [
@@ -404,7 +496,7 @@ describe("handleGlassesWalkthroughForward", () => {
       fetchImpl: fetchImpl as any,
       baseUrl: SCOPE_BASE_URL,
       token: FAKE_TOKEN,
-      downloadRange: vi.fn(async () => Buffer.from("x")),
+      downloadRange: makeDownloadRange(),
     });
 
     it("never creates a SECOND remote walkthrough when the checkpoint write dies right after a successful create", async () => {
