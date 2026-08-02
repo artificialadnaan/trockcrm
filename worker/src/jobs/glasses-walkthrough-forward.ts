@@ -444,6 +444,41 @@ async function beginClip(deps: ScopeDeps, walkthroughId: string, artifact: JobAr
         `${JSON.stringify(json)}`
     );
   }
+  // Well-formed is not the same claim as SUFFICIENT, and the difference is the one failure above that
+  // still reports success. The checks above reject a plan that is malformed; this one rejects a plan that
+  // is merely too small — positive integers, every part signed, every part uploaded, and `/complete`
+  // finalizing a multipart assembled from a PREFIX of the object. Nothing downstream can see it: each
+  // range below is clamped to the artifact, so every part is exactly the length it claims to be and the
+  // per-part length check passes on all of them. The walk forwards "successfully" and its video simply
+  // stops partway, which yields a confidently partial scope — the same class of harm as a zero-byte clip,
+  // minus the one symptom (a length mismatch) that makes a zero-byte clip catchable.
+  //
+  // The arithmetic is on the TOTAL — `partSize × partCount ≥ fileSizeBytes` — because coverage is the only
+  // thing a per-part rule cannot express:
+  //   • `>=`, not `===`: the FINAL part is legitimately short whenever the object is not an exact multiple
+  //     of partSize, which is nearly always. Demanding exact arithmetic would reject every normal walk.
+  //   • the overshoot direction is a DIFFERENT fault and is deliberately not folded in here: a plan with
+  //     enough parts that one BEGINS at or past EOF is caught per-part in `uploadClip`, before that part is
+  //     read, and reads as "the plan disagrees about where the object ends" rather than "the plan stops
+  //     short of it". Merging them would give a human one message for two opposite corrections.
+  //   • S3's 5MiB floor on every non-final part is NOT enforced here even though a plan can violate it. It
+  //     is TROCK Scope's PART_SIZE_BYTES (32MiB) that the floor constrains, not this client's reads — and,
+  //     decisively, violating it fails LOUDLY: S3 rejects the finalize with EntityTooSmall, the job throws,
+  //     the queue retries. Only the uncovered tail fails quietly, and quiet is the whole reason this guard
+  //     exists.
+  // Thrown, not `deadJob(...)`: TROCK Scope re-derives this plan from the size we declare on every
+  // begin-clip, so the next attempt gets a fresh one — this belongs on the retry schedule, not in the
+  // permanent lane.
+  const plannedBytes = partSize * partCount;
+  if (plannedBytes < artifact.fileSizeBytes) {
+    throw new Error(
+      `TROCK Scope's part plan for clip ${clipId} (artifact ${artifact.idempotencyKey}) covers only ` +
+        `${plannedBytes} of the artifact's ${artifact.fileSizeBytes} bytes ` +
+        `(${partCount} part${partCount === 1 ? "" : "s"} × ${partSize}), so the last ` +
+        `${artifact.fileSizeBytes - plannedBytes} bytes would never be uploaded and completing this clip ` +
+        `would finalize a truncated recording.`
+    );
+  }
   return { clipId, uploadId, partSize, partCount };
 }
 
@@ -540,7 +575,9 @@ async function uploadClip(
     // TROCK Scope computes partCount/partSize from the size WE declared, so a plan whose part begins at or
     // past EOF is a disagreement about the object, not a rounding detail. Checked before the read because
     // an empty range that "matches" an empty answer is the one way a zero-byte part would still satisfy
-    // the length comparison below.
+    // the length comparison below. Only the OVERSHOOT is visible from in here — the opposite disagreement,
+    // a plan whose parts stop short of the object, produces nothing but well-formed full-length parts and
+    // is therefore checked against the total in `beginClip` before any of this runs.
     if (expectedBytes <= 0) {
       throw new Error(
         `TROCK Scope's part plan for clip ${begin.clipId} (artifact ${artifact.idempotencyKey}) puts part ` +

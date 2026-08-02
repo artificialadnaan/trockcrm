@@ -442,6 +442,113 @@ describe("handleGlassesWalkthroughForward", () => {
 
       expect(calls.some((c) => /\/complete$/.test(c.url))).toBe(false);
     });
+
+    // ── Plan COVERAGE, as distinct from plan shape ───────────────────────────────────────────────
+    //
+    // The three cases above all describe a plan that is malformed. An UNDERSIZED plan is well-formed —
+    // positive integers, every part signed — and it is the only one of the four that reaches `/complete`.
+    // Nothing per-part can catch it: each range is clamped to the object, so each part is exactly the
+    // length it claims, every length check passes, and the multipart is finalized from a PREFIX. The walk
+    // reports success, the video stops partway, and TROCK Scope bills a transcription of the fragment.
+    it("rejects a plan that covers only a PREFIX of the artifact, instead of finalizing it truncated", async () => {
+      // The reviewer's case at toy scale: one part for an artifact that needs two (32MiB × 1 for 40MiB).
+      const db = makeDb();
+      const { fetchImpl, calls } = makeScopeFetch({
+        beginBody: { clipId: "clip-1", uploadId: "u", sequence: 1, partSize: 1024, partCount: 1 },
+      });
+
+      await expect(
+        handleGlassesWalkthroughForward(
+          makePayload({
+            scopeWalkthroughId: "already-created",
+            artifacts: [{ ...makePayload().artifacts[0], fileSizeBytes: 1500 }],
+          }),
+          "office-1",
+          { db, fetchImpl: fetchImpl as any, baseUrl: SCOPE_BASE_URL, token: "t", downloadRange: makeDownloadRange() }
+        )
+      ).rejects.toThrow(/covers only 1024 of the artifact's 1500 bytes/);
+
+      // Nothing may move: not a signature, not a byte, and above all not the finalize. A part uploaded
+      // under a plan we have already refused is a part that has to be uploaded again on the retry.
+      expect(calls.some((c) => /\/parts$/.test(c.url))).toBe(false);
+      expect(calls.some((c) => c.url.startsWith("https://r2.example.com/part-"))).toBe(false);
+      expect(calls.some((c) => /\/complete$/.test(c.url))).toBe(false);
+    });
+
+    it("rejects a plan that is short by a SINGLE byte", async () => {
+      // Pins `<` against `<=`: a plan one byte short of the object is the same silent truncation as one a
+      // gigabyte short, and it is the version a "close enough" comparison lets through. Multi-part on
+      // purpose — the shortfall lives in the TOTAL, so a plan can be short while every one of its parts is
+      // full-length and perfectly uniform.
+      const db = makeDb();
+      const { fetchImpl, calls } = makeScopeFetch({
+        beginBody: { clipId: "clip-1", uploadId: "u", sequence: 1, partSize: 512, partCount: 2 },
+      });
+
+      await expect(
+        handleGlassesWalkthroughForward(
+          makePayload({
+            scopeWalkthroughId: "already-created",
+            artifacts: [{ ...makePayload().artifacts[0], fileSizeBytes: 1025 }],
+          }),
+          "office-1",
+          { db, fetchImpl: fetchImpl as any, baseUrl: SCOPE_BASE_URL, token: "t", downloadRange: makeDownloadRange() }
+        )
+      ).rejects.toThrow(/covers only 1024 of the artifact's 1025 bytes/);
+
+      expect(calls.some((c) => /\/complete$/.test(c.url))).toBe(false);
+    });
+
+    // GUARD (passes with or without the coverage check) — it exists to pin the two boundaries the check
+    // must NOT reject, because the cheap over-strict version of this fix ("every part is partSize" or
+    // "planned === declared") rejects both, and both are what an ordinary walk looks like.
+    it("accepts a plan whose final part is short, and PUTs every byte of the object", async () => {
+      const db = makeDb();
+      const { fetchImpl, calls } = makeScopeFetch({
+        beginBody: { clipId: "clip-1", uploadId: "u", sequence: 1, partSize: 1024, partCount: 2 },
+      });
+
+      await handleGlassesWalkthroughForward(
+        makePayload({
+          scopeWalkthroughId: "already-created",
+          artifacts: [{ ...makePayload().artifacts[0], fileSizeBytes: 1500 }],
+        }),
+        "office-1",
+        { db, fetchImpl: fetchImpl as any, baseUrl: SCOPE_BASE_URL, token: "t", downloadRange: makeDownloadRange() }
+      );
+
+      // Sized, not counted. "Two parts were PUT" is exactly the assertion an undersized plan also
+      // satisfies; only the byte totals distinguish a whole object from a prefix of one, and this suite
+      // asserted the count and never the size — which is how the truncation survived review.
+      const putBodies = calls
+        .filter((c) => c.url.startsWith("https://r2.example.com/part-"))
+        .map((c) => (c.init.body as Buffer).length);
+      expect(putBodies).toEqual([1024, 476]);
+      expect(putBodies.reduce((a, b) => a + b, 0)).toBe(1500);
+      expect(JSON.parse(calls.find((c) => /\/complete$/.test(c.url))!.init.body).parts).toHaveLength(2);
+    });
+
+    it("accepts a plan that covers the object EXACTLY, with no short final part", async () => {
+      // The other boundary: partSize × partCount === fileSizeBytes. `>=`, not `>`.
+      const db = makeDb();
+      const { fetchImpl, calls } = makeScopeFetch({
+        beginBody: { clipId: "clip-1", uploadId: "u", sequence: 1, partSize: 512, partCount: 2 },
+      });
+
+      await handleGlassesWalkthroughForward(
+        makePayload({
+          scopeWalkthroughId: "already-created",
+          artifacts: [{ ...makePayload().artifacts[0], fileSizeBytes: 1024 }],
+        }),
+        "office-1",
+        { db, fetchImpl: fetchImpl as any, baseUrl: SCOPE_BASE_URL, token: "t", downloadRange: makeDownloadRange() }
+      );
+
+      const putBodies = calls
+        .filter((c) => c.url.startsWith("https://r2.example.com/part-"))
+        .map((c) => (c.init.body as Buffer).length);
+      expect(putBodies).toEqual([512, 512]);
+    });
   });
 
   // ── Stall protection ─────────────────────────────────────────────────────────────────────────────
