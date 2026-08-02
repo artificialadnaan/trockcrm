@@ -759,6 +759,11 @@ fieldRoutes.post(
           // handed to someone who cannot reach the deal.
           await getFieldProject(officeDb, access, dealId);
           return requestGlassesWalkthroughArtifactUploadUrl({
+            // Presigning now asks the database whether this artifact is ALREADY filed, and refuses to hand
+            // out a writable URL for the live key if it is — bytes behind an immutable `files` row must not
+            // be replaceable by anyone who can reach the deal. Same office-scoped connection the completion
+            // route uses, so the check reads the same rows the completion would write.
+            tenantDb: officeDb as never,
             officeSlug: office.slug,
             // dealId comes from the PATH, never the body — otherwise a caller could presign an upload
             // key under a deal it cannot see.

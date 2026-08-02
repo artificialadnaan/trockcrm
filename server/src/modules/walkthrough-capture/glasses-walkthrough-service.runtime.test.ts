@@ -8,6 +8,7 @@ import { drizzle } from "drizzle-orm/pglite";
 import { and, eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { files, jobQueue } from "@trock-crm/shared/schema";
+import { migrationSql } from "../../../tests/helpers/migration-sql.js";
 import { tenantSchemaSql } from "../../../tests/helpers/tenant-schema-from-drizzle.js";
 import { AppError } from "../../middleware/error-handler.js";
 import {
@@ -17,6 +18,7 @@ import {
   type IngestGlassesWalkthroughInput,
   deriveGlassesWalkthroughClientUploadId,
   ingestGlassesWalkthrough,
+  requestGlassesWalkthroughArtifactUploadUrl,
 } from "./glasses-walkthrough-service.js";
 
 const U = (s: string) => `00000000-0000-4000-8000-${s.padStart(12, "0")}`;
@@ -44,6 +46,16 @@ beforeAll(async () => {
   await pg.exec(
     "CREATE UNIQUE INDEX files_client_upload_id_key ON files (client_upload_id) WHERE client_upload_id IS NOT NULL"
   );
+  // Migration 0213's index, read FROM DISK rather than retyped here. It is the arbiter the enqueue's `ON
+  // CONFLICT DO NOTHING` resolves against — without it the overlapping-completion test below writes two
+  // forward jobs, which is precisely the production defect. A hand-copied CREATE INDEX would let this suite
+  // keep passing against an index that no longer matches the one that ships (a widened predicate, a dropped
+  // column), i.e. prove the fix against a fixture instead of against the migration.
+  //
+  // CONCURRENTLY is the one thing stripped: it exists to avoid locking out a busy production job_queue, and
+  // PGlite is a single connection with no concurrent writers to protect — it cannot run it, and running it
+  // would test the migration runner's autocommit behaviour rather than the constraint.
+  await pg.exec(migrationSql("0213_job_queue_glasses_walkthrough_forward_live_uniq").replace(" CONCURRENTLY", ""));
   tenantDb = drizzle(pg);
 });
 
@@ -257,6 +269,48 @@ describe("ingestGlassesWalkthrough", () => {
     const jobs = await tenantDb.select().from(jobQueue).where(eq(jobQueue.jobType, GLASSES_WALKTHROUGH_FORWARD_JOB));
     expect(jobs).toHaveLength(2);
     expect(jobs.map((j: { payload: { dealId: string } }) => j.payload.dealId).sort()).toEqual([DEAL, OTHER_DEAL].sort());
+  });
+
+  it("REGRESSION: two OVERLAPPING completions of one (walkId, dealId) still enqueue exactly ONE forward job", async () => {
+    // The sequential retry above is the easy half. This is the half that costs money: mobile's first
+    // completion response times out in flight, the drain retries, and the two requests OVERLAP — so both
+    // run their "is a forward already scheduled?" lookup before either has inserted. A read that takes no
+    // lock and an index that is not unique serialise nothing, so both saw nothing and both enqueued: two
+    // forwards, two remote walkthroughs, two transcriptions, two Anthropic scope extractions, all billed,
+    // for one walk. Nothing anywhere records that it happened.
+    //
+    // Interleaved rather than truly parallel — PGlite is a single connection, so this lane can only
+    // demonstrate the ARBITER (the partial unique index refusing the second insert), never the WAIT (real
+    // Postgres blocking the loser's speculative insertion until the winner commits). That is enough,
+    // because the arbiter is the part that has to exist: without it the wait has nothing to enforce.
+    const input = baseInput();
+    const [first, second] = await Promise.all([
+      ingestGlassesWalkthrough(tenantDb, input, { artifactStore: healthyStore() }),
+      ingestGlassesWalkthrough(tenantDb, input, { artifactStore: healthyStore() }),
+    ]);
+
+    const jobs = await tenantDb.select().from(jobQueue).where(eq(jobQueue.jobType, GLASSES_WALKTHROUGH_FORWARD_JOB));
+    expect(jobs).toHaveLength(1);
+    // Both callers are answered with the SAME job. The loser must not be handed a NaN/undefined jobId
+    // either: mobile logs it, and "queued job undefined" is indistinguishable from "never queued".
+    expect(first.forwarding.jobId).toBe(jobs[0]!.id);
+    expect(second.forwarding.jobId).toBe(jobs[0]!.id);
+    expect([first.forwarding.status, second.forwarding.status].sort()).toEqual(["already_queued", "queued"]);
+  });
+
+  it("GUARD: overlapping completions of one walkId against TWO deals still enqueue BOTH forwards", async () => {
+    // The half a too-broad guard breaks. Serialising on the walkId alone — or on a unique index that
+    // forgot the dealId — turns the second deal's forward into a silent no-op: a 201, a full project
+    // folder, and no scope, which is strictly worse than the duplicate this fix exists to prevent.
+    const [first, second] = await Promise.all([
+      ingestGlassesWalkthrough(tenantDb, baseInput({ dealId: DEAL }), { artifactStore: healthyStore() }),
+      ingestGlassesWalkthrough(tenantDb, baseInput({ dealId: OTHER_DEAL }), { artifactStore: healthyStore() }),
+    ]);
+
+    expect(first.forwarding.status).toBe("queued");
+    expect(second.forwarding.status).toBe("queued");
+    const jobs = await tenantDb.select().from(jobQueue).where(eq(jobQueue.jobType, GLASSES_WALKTHROUGH_FORWARD_JOB));
+    expect(jobs).toHaveLength(2);
   });
 
   it("GUARD: the per-walk dedupe still holds WITHIN one deal (the dealId predicate did not disable it)", async () => {
@@ -547,6 +601,101 @@ describe("ingestGlassesWalkthrough", () => {
 
     const [row] = await tenantDb.select().from(files).where(eq(files.clientUploadId, storedId("photo-2")));
     expect(new Date(row.takenAt).toISOString()).toBe("2026-07-29T14:00:00.000Z");
+  });
+});
+
+// ── A filed artifact's bytes are not re-presignable ────────────────────────────────────────────────
+//
+// The R2 key is a pure function of (officeSlug, dealId, walkId, idempotencyKey) — that determinism is what
+// makes a dropped upload retryable at the same destination. It also means the presign route can be asked
+// for a fresh PUT URL for a key whose bytes are ALREADY filed, and a PUT to it replaces those bytes behind
+// an immutable `files` row: the row's size, its mimeType, the TROCK Scope scope derived from it and every
+// audit read of it still describe content that is no longer there. Whether the artifact is filed is a
+// `files` question, so this belongs in the real-SQL lane and not in the pure-logic suite.
+
+describe("requestGlassesWalkthroughArtifactUploadUrl — against already-filed bytes", () => {
+  const uploadUrlInput = (overrides: Partial<Record<string, unknown>> = {}) => ({
+    dealId: DEAL,
+    walkId: WALK,
+    idempotencyKey: "artifact-1",
+    kind: "video" as const,
+    mimeType: "video/mp4",
+    fileSizeBytes: 1024,
+    ...overrides,
+  });
+
+  it("REGRESSION: refuses a presign for an artifact that is already filed, instead of handing out a writable URL for its key", async () => {
+    await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+
+    await expect(
+      requestGlassesWalkthroughArtifactUploadUrl({
+        tenantDb,
+        officeSlug: "dallas",
+        input: uploadUrlInput(),
+        artifactStore: healthyStore(),
+      })
+    ).rejects.toMatchObject({ statusCode: 409, code: "GLASSES_WALKTHROUGH_ARTIFACT_ALREADY_FILED" });
+  });
+
+  it("REGRESSION: refuses even when object storage is unconfigured, so the dev/CI mock-URL branch is not a way around it", async () => {
+    // The unconfigured branch returns a `mock://` URL nobody can PUT to, which makes it tempting to let it
+    // skip the check. It must not: this is a rule about the RECORD, and a rule that holds only when an
+    // environment variable is set is one that silently stops holding in the environment where someone is
+    // most likely to be reproducing a walk by hand.
+    await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+
+    await expect(
+      requestGlassesWalkthroughArtifactUploadUrl({
+        tenantDb,
+        officeSlug: "dallas",
+        input: uploadUrlInput(),
+        artifactStore: healthyStore({ isConfigured: () => false }),
+      })
+    ).rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  it("still presigns an artifact that was presigned but never successfully PUT — the normal dropped-upload recovery", async () => {
+    // The ONE path this must not break. A mobile PUT that dies mid-body leaves no `files` row (the walk was
+    // never completed), and the drain's whole recovery strategy is to ask for the same key again. Keying
+    // the refusal on the object's presence in R2 rather than on the filed record would have broken exactly
+    // this: bytes can be in the bucket for an artifact no completion has ever accepted.
+    const result = await requestGlassesWalkthroughArtifactUploadUrl({
+      tenantDb,
+      officeSlug: "dallas",
+      input: uploadUrlInput(),
+      artifactStore: healthyStore(),
+    });
+    expect(result.uploadUrl).toBe("https://example.com/put");
+  });
+
+  it("still presigns the SAME walk and artifact key under a DIFFERENT deal", async () => {
+    // Mobile's key is a function of (walkId, kind[, index]) and nothing else, so re-filing one physical
+    // walk against the correct deal re-sends byte-identical keys. Those are different R2 keys and a
+    // different `files` row; a refusal keyed on the raw key rather than the deal-scoped stored id would
+    // make correcting a mis-tagged walk impossible — the same defect 0212 exists to repair.
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ dealId: DEAL }), { artifactStore: healthyStore() });
+
+    const result = await requestGlassesWalkthroughArtifactUploadUrl({
+      tenantDb,
+      officeSlug: "dallas",
+      input: uploadUrlInput({ dealId: OTHER_DEAL }),
+      artifactStore: healthyStore(),
+    });
+    expect(result.r2Key).toContain(`/deals/${OTHER_DEAL}/`);
+  });
+
+  it("still presigns a SECOND artifact of a walk whose first artifact is already filed", async () => {
+    // The refusal is per ARTIFACT, not per walk. A walk whose video landed and whose audio did not is the
+    // ordinary partial-upload state; refusing the whole walk would strand every remaining artifact.
+    await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+
+    const result = await requestGlassesWalkthroughArtifactUploadUrl({
+      tenantDb,
+      officeSlug: "dallas",
+      input: uploadUrlInput({ idempotencyKey: "artifact-2" }),
+      artifactStore: healthyStore(),
+    });
+    expect(result.r2Key).toContain("artifact-2");
   });
 });
 

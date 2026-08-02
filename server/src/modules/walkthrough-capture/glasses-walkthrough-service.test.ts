@@ -283,6 +283,26 @@ describe("requestGlassesWalkthroughArtifactUploadUrl", () => {
     };
   }
 
+  /**
+   * A tenant db that answers "nothing is filed" — enough for the pure-logic cases here, which are about
+   * media resolution and key derivation. The already-filed REFUSAL is a `files` question and lives in
+   * glasses-walkthrough-service.runtime.test.ts against real SQL, per this file's header.
+   *
+   * `throwingDb` is the sharper of the two: the media guard must reject BEFORE any database work, so a 400
+   * on an unsupported/miscased mimeType is proved by the db never being consulted at all. Stated as a
+   * stub-that-explodes rather than a spy assertion because the failure it prevents is silent — a
+   * validation error that first burns a pooled round trip is indistinguishable from one that does not,
+   * until the endpoint is under load from a client sending a bad Content-Type on every retry.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const emptyDb = { select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }) } as any;
+  const throwingDb = {
+    select: () => {
+      throw new Error("the media guard must reject before any database work");
+    },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  } as any;
+
   function uploadUrlInput(overrides: Record<string, unknown> = {}) {
     return {
       dealId: DEAL,
@@ -298,6 +318,7 @@ describe("requestGlassesWalkthroughArtifactUploadUrl", () => {
   it("presigns against the server-derived key, never a caller-supplied one", async () => {
     const seen: string[] = [];
     const result = await requestGlassesWalkthroughArtifactUploadUrl({
+      tenantDb: emptyDb,
       officeSlug: "dallas",
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       input: uploadUrlInput() as any,
@@ -320,6 +341,7 @@ describe("requestGlassesWalkthroughArtifactUploadUrl", () => {
     // that sent a bad media type deserves the same 400 the validator would have given it, not an alert.
     await expect(
       requestGlassesWalkthroughArtifactUploadUrl({
+        tenantDb: throwingDb,
         officeSlug: "dallas",
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         input: uploadUrlInput({ mimeType: "application/pdf", kind: "video" }) as any,
@@ -333,6 +355,7 @@ describe("requestGlassesWalkthroughArtifactUploadUrl", () => {
     // a direct caller need not have — and an unguarded lookup turns that ordinary mistake into a 500.
     await expect(
       requestGlassesWalkthroughArtifactUploadUrl({
+        tenantDb: throwingDb,
         officeSlug: "dallas",
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         input: uploadUrlInput({ mimeType: "VIDEO/MP4" }) as any,

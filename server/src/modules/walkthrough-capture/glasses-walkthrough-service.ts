@@ -327,8 +327,22 @@ export interface GlassesWalkthroughArtifactUploadUrlResult {
 /**
  * Deal access is the CALLER'S job (the route asserts it via `getDealById` before this runs — see
  * `deals/routes.ts`), same division of responsibility as every other route in this file.
+ *
+ * REFUSES, rather than presigning, once the artifact is filed — see the guard below for why that is a
+ * record-integrity rule and not an idempotency preference. It is a 409 with a stable `code` rather than a
+ * 200 carrying an `alreadyFiled` flag because a success shape whose `uploadUrl` is absent is read as
+ * `undefined` by every existing caller (mobile destructures it directly — `const { uploadUrl } = await
+ * client.requestUploadUrl(...)`, mobile/src/walkthrough/upload.ts) and by every future one, which turns a
+ * deliberate refusal into a type error at the PUT. The client already parses `error.code` into
+ * `ApiError.code` (mobile/src/api/client.ts), so the refusal is machine-readable TODAY: mapping this code
+ * to "treat the artifact as already PUT and proceed to the completion call" is a one-line change in
+ * `putArtifactBytes`, and the completion is idempotent, so that lands the walk correctly. Until that lands,
+ * an artifact in this state burns its five PUT attempts and the walk reads as failed on the phone — for a
+ * walk the server already holds in full. That is a UI regression in a rare recovery path; the alternative
+ * is letting anyone who can reach the deal rewrite filed evidence.
  */
 export async function requestGlassesWalkthroughArtifactUploadUrl(args: {
+  tenantDb: TenantDb;
   officeSlug: string;
   input: GlassesWalkthroughArtifactUploadUrlInput;
   artifactStore: GlassesWalkthroughArtifactStore;
@@ -345,6 +359,44 @@ export async function requestGlassesWalkthroughArtifactUploadUrl(args: {
       `artifact.mimeType "${args.input.mimeType}" is not an accepted glasses-walkthrough media type for kind "${args.input.kind}".`
     );
   }
+  // Filed bytes are FROZEN. The key below is a pure function of (officeSlug, dealId, walkId,
+  // idempotencyKey), which is exactly what makes a dropped upload retryable at the same destination — and
+  // exactly what lets this endpoint hand out a second writable URL for a key whose bytes a completion has
+  // already turned into a `files` row. A PUT to that URL replaces the object UNDER the record: the row's
+  // fileSizeBytes and mimeType, the completion-time HEAD that was checked against them, and the scope TROCK
+  // Scope already extracted from the old content all go on describing content that is no longer there, and
+  // nothing on the row changes to say so. There is no later check that catches it either — verification
+  // runs at completion, which for this artifact has already happened. So the refusal has to be here.
+  //
+  // Keyed on the DEAL-SCOPED stored id, never the raw client key: mobile derives its key from the walk
+  // alone, so refusing on the raw key would also refuse the legitimate re-file of one physical walk against
+  // a second deal — a different R2 key and a different row (see deriveGlassesWalkthroughClientUploadId, and
+  // migration 0212 for what that collision cost the first time). A hit that somehow belongs to another deal
+  // is the digest-collision case the completion refuses too; refusing is correct under either reading,
+  // since that artifact can never complete against this deal anyway.
+  //
+  // Deliberately NOT keyed on whether the OBJECT exists in R2. Bytes sitting at the key for a walk no
+  // completion has accepted are precisely the dropped-upload state the retry MUST be allowed to overwrite;
+  // an object-presence check would break the recovery flow while protecting nothing extra.
+  const [alreadyFiled] = await args.tenantDb
+    .select({ id: files.id })
+    .from(files)
+    .where(
+      eq(
+        files.clientUploadId,
+        deriveGlassesWalkthroughClientUploadId(args.input.dealId, args.input.idempotencyKey)
+      )
+    )
+    .limit(1);
+  if (alreadyFiled) {
+    throw new AppError(
+      409,
+      `Artifact ${args.input.idempotencyKey} of walk ${args.input.walkId} is already filed against this project. ` +
+        `Its stored bytes cannot be replaced; complete the walk instead of re-uploading it.`,
+      "GLASSES_WALKTHROUGH_ARTIFACT_ALREADY_FILED"
+    );
+  }
+
   const r2Key = deriveGlassesWalkthroughArtifactR2Key(
     args.officeSlug,
     args.input.dealId,
@@ -353,6 +405,9 @@ export async function requestGlassesWalkthroughArtifactUploadUrl(args: {
     media.extension
   );
 
+  // Checked AFTER the guard above, never before: the unconfigured branch returns a `mock://` URL nobody can
+  // PUT to, but this is a rule about the RECORD, and one that stopped holding whenever R2 happened to be
+  // unconfigured would stop holding in exactly the environment where someone is reproducing a walk by hand.
   if (!args.artifactStore.isConfigured()) {
     // Dev/CI fallback, same posture as `generateMockUploadUrl` in r2-client.ts: a fake URL the caller
     // will never actually PUT bytes to, but a deterministic key so the completion endpoint's flow can
@@ -749,11 +804,15 @@ export interface IngestGlassesWalkthroughResult {
  *     walkthroughs there. Guarded by looking for a live (non-dead) `job_queue` row for this (`walkId`,
  *     `dealId`) pair before inserting a new one — the pair, never `walkId` alone, because a phone-minted
  *     walkId is not unique across deals and deduping on it would silently drop the second deal's forward
- *     entirely (see `findGlassesWalkthroughForwardJobState`). This is a best-effort, non-transactional check (a concurrent duplicate
- *     completion call can race past it) — the same class of accepted residual as
- *     `rfp-bidboard-create.ts`'s own dealId-scoped dedupe reasoning: a rare duplicate FORWARD ATTEMPT is
- *     a wasted retry the worker's own per-walkthrough checkpoint (see the worker job) mostly absorbs, not
- *     silent data loss.
+ *     entirely (see `findGlassesWalkthroughForwardJobState`). That lookup only SHORT-CIRCUITS; under
+ *     concurrency it decides nothing, because a SELECT takes no lock and 0211's index is not unique. What
+ *     makes two OVERLAPPING completions resolve to ONE job is the partial unique index migration 0213 adds
+ *     on (`payload->>'walkId'`, `payload->>'dealId'`) over non-dead rows, which the enqueue's `ON CONFLICT
+ *     DO NOTHING` arbitrates against — see the enqueue itself. Treating this as a best-effort check was NOT
+ *     the accepted residual `rfp-bidboard-create.ts` documents for its own dedupe: a duplicate here is a
+ *     second TROCK Scope walkthrough, a second billed transcription and a second billed Anthropic scope
+ *     extraction, and the worker's per-walkthrough checkpoint cannot absorb it because two jobs never share
+ *     one.
  *   - ACROSS A DEAD ROW: a walk that dead-lettered IS re-enqueued (a site visit is not repeatable, so a
  *     walk must not be stuck forever), but the replacement INHERITS whatever the dead row learned about
  *     TROCK Scope — see `findGlassesWalkthroughForwardJobState`. The identity that must not be duplicated
@@ -947,6 +1006,29 @@ export async function ingestGlassesWalkthrough(
     jobPayload.checkpointInheritedFromJobId = knownJobState.jobId;
   }
 
+  // The enqueue ARBITRATES; the lookup above only short-circuits.
+  //
+  // `knownJobState` is a check-then-act guard, and no amount of care makes one safe on its own: the SELECT
+  // takes no lock and 0211's index is not unique, so two completions for this pair that OVERLAP — mobile
+  // retrying after its first response timed out in flight, the single likeliest retry there is — both read
+  // "no live forward" and both reach this line. Before migration 0213 both then inserted: two remote
+  // walkthroughs, two transcriptions, two Anthropic scope extractions, all really billed, for one walk,
+  // with nothing recording it. `job_queue_glasses_walkthrough_forward_live_uniq` is what actually
+  // serialises them — the loser's speculative insertion blocks until the winner commits and then does
+  // nothing, so the pair is decided by the table rather than by two racing snapshots of it.
+  //
+  // The arbiter is UNTARGETED because it cannot be named: the index is on expressions
+  // (`payload->>'walkId'`, `payload->>'dealId'`) and drizzle's conflict `target` is typed `IndexColumn =
+  // PgColumn`, so an expression index has no expressible form there — unlike the `files` insert above,
+  // whose target is a real column. That is safe here only because job_queue's ONLY other unique index is
+  // its bigserial primary key, which this insert never supplies a value for and so can never violate. Add
+  // another unique index to job_queue and this silently starts swallowing its violations too; at that point
+  // this must become a hand-written INSERT ... ON CONFLICT ((payload->>'walkId'), (payload->>'dealId'))
+  // WHERE ... DO NOTHING.
+  //
+  // No advisory lock alongside it: a lock only serialises callers that remember to take it, so it would
+  // leave any future enqueue path unprotected while looking like protection, and it constrains nothing
+  // about the rows that already exist. The index constrains the table.
   const jobRows = await tenantDb
     .insert(jobQueue)
     .values({
@@ -962,10 +1044,31 @@ export async function ingestGlassesWalkthrough(
       // to avoid ever needing.
       maxAttempts: 10,
     })
+    .onConflictDoNothing()
     .returning({ id: jobQueue.id });
 
-  const jobId = Number(jobRows[0]?.id);
-  return { walkId: input.walkId, files: fileResults, forwarding: { status: "queued", jobId } };
+  const enqueuedId = jobRows[0]?.id;
+  if (enqueuedId != null) {
+    return { walkId: input.walkId, files: fileResults, forwarding: { status: "queued", jobId: Number(enqueuedId) } };
+  }
+
+  // Lost the race. Re-read rather than reporting the insert we did not make: `Number(undefined)` is NaN,
+  // and a response saying `{"status":"queued","jobId":null}` is indistinguishable from a forward that was
+  // never scheduled — for the caller, for the logs, and for anyone later asking why a walk has no scope.
+  // The re-read is a fresh statement, so under READ COMMITTED (what runInOfficeTransaction opens — see
+  // field/cross-office.ts) it sees the winner the ON CONFLICT just waited for.
+  const winner = await findGlassesWalkthroughForwardJobState(tenantDb, input.walkId, input.dealId);
+  if (!winner?.isLive) {
+    // The row that beat us is gone or already dead — the winning transaction rolled back after its
+    // speculative insert, or a sweep killed it in the gap. Nothing was enqueued and nothing is inheritable,
+    // so this is retryable, not a walk to report as forwarded. 503 rather than 500: the caller's next
+    // attempt is expected to succeed, and mobile already treats a failed completion as retryable.
+    throw new AppError(
+      503,
+      `Could not schedule forwarding for walk ${input.walkId}; a concurrent completion is in flight. Retry.`
+    );
+  }
+  return { walkId: input.walkId, files: fileResults, forwarding: { status: "already_queued", jobId: winner.jobId } };
 }
 
 /** Test/UUID-shape helper exported for the mobile-contract report and validation tests; not applied as
