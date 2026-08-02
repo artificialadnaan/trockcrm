@@ -948,4 +948,133 @@ final class WearablesBridge: RCTEventEmitter {
       }
     }
   }
+
+  // MARK: - 11. Does the video stream sustain WITHOUT HFP audio?
+
+  /// The question four real walks raised and none could answer.
+  ///
+  /// Every walk produced 3-8 seconds of video against 23-47 seconds of audio. Instrumentation
+  /// established the writer was innocent — 239 frames received, 239 appended, none dropped — so
+  /// the glasses stopped sending. Meta documents that HFP and DAT streaming interact, and rung 9
+  /// concluded "HFP survives a DAT stream" while observing for only four seconds, which is inside
+  /// the window where it still works.
+  ///
+  /// This runs a stream with NO audio session at all. That absence is the whole experiment.
+  /// Frames are reported bucketed per second, so "sustains for a minute" and "dies at eight
+  /// seconds" are distinguishable rather than both collapsing into a total.
+  @objc(measureStreamWithoutAudio:resolver:rejecter:)
+  func measureStreamWithoutAudio(_ seconds: NSNumber,
+                                 resolver resolve: @escaping RCTPromiseResolveBlock,
+                                 rejecter reject: @escaping RCTPromiseRejectBlock) {
+    guard Self.configured else {
+      reject("wearables_not_configured", "Call configure() first", nil)
+      return
+    }
+    teardown()
+
+    Task {
+      do {
+        let sdk = Wearables.shared
+        let selector = AutoDeviceSelector(wearables: sdk)
+        var deadline = Date().addingTimeInterval(8)
+        while selector.activeDevice == nil, Date() < deadline {
+          try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        guard selector.activeDevice != nil else {
+          reject("wearables_no_active_device", "No active device after 8s. Run rung 4b.", nil)
+          return
+        }
+
+        let created = try sdk.createSession(deviceSelector: selector)
+        session = created
+        try created.start()
+        deadline = Date().addingTimeInterval(10)
+        while created.state != .started, Date() < deadline {
+          try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        guard created.state == .started else {
+          let stalled = created.state.description
+          teardown()
+          reject("wearables_session_not_started", "Stalled in \(stalled) after 10s", nil)
+          return
+        }
+
+        // Same configuration the recorder uses, so this measures the real path rather than a
+        // gentler one that might sustain where the real one does not.
+        guard let newStream = try created.addStream(
+          config: StreamConfiguration(videoCodec: .raw, resolution: .high, frameRate: 30)
+        ) else {
+          teardown()
+          reject("wearables_stream_nil", "addStream() returned nil", nil)
+          return
+        }
+        stream = newStream
+
+        let counter = FrameArrivalCounter()
+        frameToken = newStream.videoFramePublisher.listen { _ in counter.tick() }
+
+        // NO AVAudioSession is configured or activated anywhere in this method. That is the
+        // experiment: if frames sustain here and die during a walk, HFP is the difference.
+        newStream.start()
+        let startedAt = Date()
+
+        var perSecond: [Int] = []
+        let total = max(1, min(seconds.intValue, 180))
+        for _ in 0..<total {
+          try? await Task.sleep(nanoseconds: 1_000_000_000)
+          perSecond.append(counter.drainCount())
+        }
+        let lastArrival = counter.lastTick()
+
+        teardown()
+
+        resolve([
+          "secondsObserved": total,
+          "framesPerSecond": perSecond,
+          "totalFrames": perSecond.reduce(0, +),
+          // -1 when no frame ever arrived. Otherwise: how far into the run the LAST frame landed,
+          // which is the number that says whether delivery sustained or stopped.
+          "secondsToLastFrame": lastArrival.map { $0.timeIntervalSince(startedAt) } ?? -1,
+          "audioSessionUsed": false,
+        ])
+      } catch {
+        teardown()
+        reject("wearables_stream_measure_failed",
+               "measureStreamWithoutAudio failed: \(Self.describe(error))", error)
+      }
+    }
+  }
+}
+
+/// Counts frame arrivals off the SDK's delivery thread.
+///
+/// Locking happens only inside these synchronous methods — never in an `async` body, where
+/// `NSLock.lock()` is unavailable and is a hard error under Swift 6. Callers in a `Task` go
+/// through `drainCount()` / `lastTick()` rather than touching the state directly.
+private final class FrameArrivalCounter: @unchecked Sendable {
+  private let lock = NSLock()
+  private var count = 0
+  private var lastTickAt: Date?
+
+  func tick() {
+    lock.lock()
+    count += 1
+    lastTickAt = Date()
+    lock.unlock()
+  }
+
+  /// Reads and resets, so each call returns arrivals since the previous one.
+  func drainCount() -> Int {
+    lock.lock()
+    defer { lock.unlock() }
+    let value = count
+    count = 0
+    return value
+  }
+
+  func lastTick() -> Date? {
+    lock.lock()
+    defer { lock.unlock() }
+    return lastTickAt
+  }
 }

@@ -99,12 +99,31 @@ export type Diagnosis = {
   verdict: string;
 };
 
+/**
+ * How long the glasses keep sending video with NO audio session anywhere.
+ *
+ * Four real walks each produced 3-8 seconds of video against 23-47 seconds of audio, with the
+ * writer accepting every frame it was given — so delivery stopped, it was not refused. This
+ * isolates HFP as the cause: if frames sustain here, glasses audio and video cannot run together
+ * for a walk, and capture becomes audio + stills.
+ */
+export type StreamEnduranceMeasurement = {
+  secondsObserved: number;
+  /** Arrivals per second, so a stall shows as a run of zeros rather than a shrunken total. */
+  framesPerSecond: number[];
+  totalFrames: number;
+  /** How far into the run the LAST frame landed, or -1 if none ever did. */
+  secondsToLastFrame: number;
+  audioSessionUsed: false;
+};
+
 type WearablesNativeModule = {
   configure(): Promise<ConfigureResult>;
   capabilities(): Promise<Capabilities>;
   status(): Promise<WearablesStatus>;
   diagnose(): Promise<Diagnosis>;
   checkHfpWithStream(): Promise<HfpStreamCheck>;
+  measureStreamWithoutAudio(seconds: number): Promise<StreamEnduranceMeasurement>;
   checkPhoneCameraDuringHfp(): Promise<PhoneCameraCheck>;
   startRegistration(): Promise<{ started: boolean }>;
   handleUrl(url: string): Promise<{ handled: boolean }>;
@@ -133,6 +152,7 @@ export const Wearables = {
   status: () => require_().status(),
   diagnose: () => require_().diagnose(),
   checkHfpWithStream: () => require_().checkHfpWithStream(),
+  measureStreamWithoutAudio: (seconds: number) => require_().measureStreamWithoutAudio(seconds),
   checkPhoneCameraDuringHfp: () => require_().checkPhoneCameraDuringHfp(),
   startRegistration: () => require_().startRegistration(),
   handleUrl: (url: string) => require_().handleUrl(url),

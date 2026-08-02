@@ -134,6 +134,26 @@ function Diagnostic() {
       measurement: true,
     },
     {
+      key: "streamEndurance",
+      label: "11 Does video survive 60s with NO audio?",
+      run: async () => {
+        const m = await Wearables.measureStreamWithoutAudio(60);
+        // Frames stopping is the whole question, so say so plainly rather than making someone
+        // read an array. A walk needs minutes; anything under ~30s is not a walkthrough camera.
+        const verdict =
+          m.totalFrames === 0
+            ? "NO FRAMES AT ALL — the stream never delivered; this says nothing about endurance"
+            : m.secondsToLastFrame >= m.secondsObserved - 3
+              ? `SUSTAINED for the full ${m.secondsObserved}s — HFP is the difference, so glasses `
+                + `audio and video cannot run together. Capture becomes audio + stills.`
+              : `STOPPED at ${m.secondsToLastFrame.toFixed(1)}s of ${m.secondsObserved}s — video `
+                + `dies WITHOUT audio too, so HFP is not the cause and glasses video is not `
+                + `viable for a walkthrough at all.`;
+        return { verdict, ...m };
+      },
+      measurement: true,
+    },
+    {
       key: "phoneCamera",
       label: "10 Step 0 — phone camera during HFP",
       run: async () => {

@@ -39,4 +39,6 @@ RCT_EXTERN_METHOD(checkHfpWithStream : (RCTPromiseResolveBlock)resolve rejecter 
 
 RCT_EXTERN_METHOD(checkPhoneCameraDuringHfp : (RCTPromiseResolveBlock)resolve rejecter : (RCTPromiseRejectBlock)reject)
 
+RCT_EXTERN_METHOD(measureStreamWithoutAudio : (nonnull NSNumber *)seconds resolver : (RCTPromiseResolveBlock)resolve rejecter : (RCTPromiseRejectBlock)reject)
+
 @end
