@@ -26,7 +26,7 @@
 //     evidence) do not prefix theirs either, and a client-generated key colliding by ACCIDENT across
 //     producers is cryptographically negligible when the client follows the same convention (a fresh
 //     UUID per artifact) documented in this module's report to the mobile team.
-import { and, eq, isNotNull, sql } from "drizzle-orm";
+import { and, desc, eq, isNotNull, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { files, jobQueue } from "@trock-crm/shared/schema";
@@ -89,6 +89,24 @@ export const MAX_GLASSES_WALKTHROUGH_ARTIFACT_BYTES = 2 * 1024 * 1024 * 1024; //
 /** `files.client_upload_id` is `varchar(64)` (migration 0170) — the idempotency key's hard ceiling. */
 export const MAX_GLASSES_WALKTHROUGH_IDEMPOTENCY_KEY_CHARS = 64;
 export const MAX_GLASSES_WALKTHROUGH_ARTIFACTS_PER_WALK = 200;
+
+/**
+ * How many artifact HEADs may be in flight at once, and how long the whole verification phase may run.
+ *
+ * Both exist for one reason: `tenantMiddleware` (server/src/middleware/tenant.ts) checks a connection out
+ * of the 20-slot pool (`DEFAULT_POOL_MAX`, db.ts) and opens a transaction on it BEFORE any route handler —
+ * including this one — is entered. So every millisecond spent waiting on object storage here is a pooled
+ * connection held open by a request doing no database work at all. Verifying a 200-artifact walk one
+ * blocking round trip at a time is 200 serial RTTs of exactly that, and a black-holed HEAD is unbounded:
+ * the S3 client is constructed with no `requestTimeout` (server/src/lib/r2-client.ts), so nothing else in
+ * the stack ends the wait. `SET LOCAL statement_timeout` bounds QUERIES, never the gaps between them.
+ *
+ * The phase deadline is deliberately whole-phase, not per-HEAD: a per-request timeout still multiplies by
+ * the batch count and so bounds nothing that matters. Blowing the deadline is a 503 (retryable) for the
+ * same R33 reason a HEAD throw is — "we could not check" is never "the object is absent".
+ */
+export const GLASSES_WALKTHROUGH_VERIFY_CONCURRENCY = 8;
+export const GLASSES_WALKTHROUGH_VERIFY_TIMEOUT_MS = 20_000;
 const MAX_TITLE_CHARS = 300;
 const MAX_SITE_LABEL_CHARS = 300;
 const MAX_FILENAME_CHARS = 500; // files.original_filename / files.display_name are varchar(500)
@@ -385,6 +403,213 @@ export type GlassesWalkthroughForwardingResult =
   | { status: "queued"; jobId: number }
   | { status: "already_queued"; jobId: number };
 
+/** One artifact resolved down to everything the write phase needs, so that phase issues zero object-storage
+ *  calls of its own. Built in a pure pass BEFORE verification, which is also what makes the media/kind
+ *  re-validation a rejection that happens before any I/O at all rather than partway down the walk. */
+interface PreparedGlassesWalkthroughArtifact {
+  artifact: GlassesWalkthroughArtifactInput;
+  media: AcceptedGlassesWalkthroughMedia;
+  r2Key: string;
+}
+
+function prepareGlassesWalkthroughArtifacts(
+  input: IngestGlassesWalkthroughInput
+): PreparedGlassesWalkthroughArtifact[] {
+  return input.artifacts.map((artifact) => {
+    // Re-validated here (not just trusted from the route's earlier validation) — this module does not
+    // trust its caller wholesale, matching the return path's own "the receiver does not trust the
+    // sender" posture (walkthrough-ingress-service.ts), and this function is exported for direct/test
+    // use, not only reachable through the route.
+    const media = GLASSES_WALKTHROUGH_ACCEPTED_MEDIA[artifact.mimeType];
+    if (!media || media.kind !== artifact.kind) {
+      throw new AppError(400, `Artifact ${artifact.idempotencyKey} has an unsupported mimeType/kind pair.`);
+    }
+    return {
+      artifact,
+      media,
+      r2Key: deriveGlassesWalkthroughArtifactR2Key(
+        input.officeSlug,
+        input.dealId,
+        input.walkId,
+        artifact.idempotencyKey,
+        media.extension
+      ),
+    };
+  });
+}
+
+/** The three checks `confirmUpload` (files/service.ts) makes, in its order, with its status codes. Throws;
+ *  the caller turns a throw into a recorded per-index failure. Both `!= null` guards are its guards too —
+ *  R2 may not report either header, and an absent header is not a mismatch. */
+async function verifyOneGlassesWalkthroughArtifact(
+  prepared: PreparedGlassesWalkthroughArtifact,
+  artifactStore: GlassesWalkthroughArtifactStore
+): Promise<void> {
+  const { artifact, r2Key } = prepared;
+  const head = await artifactStore.head(r2Key);
+  if (!head) {
+    throw new AppError(
+      400,
+      `Artifact ${artifact.idempotencyKey} was not found at its upload key. Upload it via the ` +
+        `artifact upload-url endpoint before completing the walk.`
+    );
+  }
+  if (head.contentType && head.contentType.toLowerCase() !== artifact.mimeType) {
+    throw new AppError(
+      400,
+      `Artifact ${artifact.idempotencyKey}: Content-Type mismatch. Expected "${artifact.mimeType}", got "${head.contentType}".`
+    );
+  }
+  if (head.contentLength != null && head.contentLength !== artifact.fileSizeBytes) {
+    throw new AppError(
+      400,
+      `Artifact ${artifact.idempotencyKey}: Content-Length mismatch. Expected ${artifact.fileSizeBytes} bytes, got ${head.contentLength}.`
+    );
+  }
+}
+
+/**
+ * Verifies the WHOLE walk against object storage before the write phase issues its first statement.
+ *
+ * Two properties this shape buys, both of which the old verify-then-insert-then-verify loop lacked:
+ *   - "a failed verification writes nothing" becomes a property of THIS function rather than of the
+ *     caller. Interleaved, a walk that failed on artifact 12 had already inserted eleven `files` rows and
+ *     depended entirely on the request transaction rolling them back — true through the route today, and
+ *     silently false for any other caller (this function is exported).
+ *   - the pinned tenant connection is held for one bounded verification window instead of the sum of every
+ *     round trip. See GLASSES_WALKTHROUGH_VERIFY_CONCURRENCY for why that matters at all.
+ *
+ * The reported failure is the LOWEST-INDEXED one, never whichever HEAD happened to answer first: with
+ * concurrency a fast failure on artifact 40 can land before a slow one on artifact 2, and an endpoint
+ * whose 400 names a different artifact run to run is not debuggable. Dispatch stops as soon as any index
+ * fails, so the set examined is exactly the prefix a sequential loop would have reached.
+ *
+ * The workers are TOTAL — every await inside them is inside a try, so `Promise.all` over them can never
+ * reject. That is what makes racing it against the deadline safe: the losing promise cannot become an
+ * unhandled rejection after this function has already thrown.
+ */
+async function verifyGlassesWalkthroughArtifacts(
+  prepared: PreparedGlassesWalkthroughArtifact[],
+  artifactStore: GlassesWalkthroughArtifactStore,
+  timeoutMs: number
+): Promise<void> {
+  // With no object store configured (local dev, CI) verification is skipped, mirroring `confirmUpload`'s
+  // own gate — same posture as the rest of the CRM.
+  if (!artifactStore.isConfigured()) return;
+
+  const failures = new Array<AppError | undefined>(prepared.length);
+  let stopDispatchingAt = prepared.length;
+  let nextIndex = 0;
+
+  const worker = async (): Promise<void> => {
+    while (nextIndex < stopDispatchingAt) {
+      const index = nextIndex++;
+      try {
+        await verifyOneGlassesWalkthroughArtifact(prepared[index]!, artifactStore);
+      } catch (err) {
+        // R33: a throw out of the store means WE COULD NOT CHECK, not that the object is absent —
+        // retryable, never a 400. Only the AppErrors raised above are verdicts about the object itself.
+        failures[index] =
+          err instanceof AppError
+            ? err
+            : new AppError(
+                503,
+                `Could not verify artifact ${prepared[index]!.artifact.idempotencyKey}; object storage is unavailable. Retry.`
+              );
+        stopDispatchingAt = Math.min(stopDispatchingAt, index);
+      }
+    }
+  };
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timedOut = await Promise.race([
+      Promise.all(
+        Array.from({ length: Math.min(GLASSES_WALKTHROUGH_VERIFY_CONCURRENCY, prepared.length) }, () => worker())
+      ).then(() => false),
+      new Promise<true>((resolve) => {
+        timer = setTimeout(() => resolve(true), timeoutMs);
+        // Never keep the process alive for a verification nobody is waiting on any more.
+        timer.unref?.();
+      }),
+    ]);
+    if (timedOut) {
+      throw new AppError(
+        503,
+        `Could not verify this walk's artifacts within ${timeoutMs}ms; object storage is not answering. Retry.`
+      );
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+
+  const firstFailure = failures.find((failure) => failure !== undefined);
+  if (firstFailure) throw firstFailure;
+}
+
+/**
+ * What the queue already knows about forwarding THIS walk, in one scan.
+ *
+ * Deliberately one query, not two: the live-row dedupe check and the dead-row checkpoint lookup have the
+ * same (job_type, payload->>'walkId') shape and neither is indexed, so asking twice would double the cost
+ * of the common first-completion path — the very path where the second question always comes back empty.
+ * The ORDER BY carries the whole precedence instead:
+ *   1. a LIVE row wins outright — forwarding is already scheduled and nothing else matters;
+ *   2. otherwise prefer a dead row that carries a SETTLED `scopeWalkthroughId` over one that only carries
+ *      the unresolved pre-create marker: a known walkthrough id is strictly better information than "a
+ *      create may have happened", and it is the difference between resuming and a human reconciliation;
+ *   3. otherwise the newest such row.
+ * Dead rows with NEITHER marker are excluded by the WHERE — they prove nothing about TROCK Scope's state,
+ * and treating them as evidence would dead-letter walks that are perfectly safe to forward from scratch.
+ *
+ * `->> 'x' IS NOT NULL` rather than the `?` existence operator: identical here (nothing in this payload is
+ * ever a JSON null) and it keeps a `?` out of SQL text that drivers and query loggers like to reinterpret.
+ */
+interface GlassesWalkthroughForwardJobState {
+  jobId: number;
+  isLive: boolean;
+  scopeWalkthroughId: string | null;
+  scopeCreatePendingRef: string | null;
+}
+
+async function findGlassesWalkthroughForwardJobState(
+  tenantDb: TenantDb,
+  walkId: string
+): Promise<GlassesWalkthroughForwardJobState | null> {
+  const rows = await tenantDb
+    .select({
+      id: jobQueue.id,
+      isLive: sql<boolean>`${jobQueue.status} <> 'dead'`,
+      scopeWalkthroughId: sql<string | null>`${jobQueue.payload} ->> 'scopeWalkthroughId'`,
+      scopeCreatePendingRef: sql<string | null>`${jobQueue.payload} ->> 'scopeCreatePendingRef'`,
+    })
+    .from(jobQueue)
+    .where(
+      and(
+        eq(jobQueue.jobType, GLASSES_WALKTHROUGH_FORWARD_JOB),
+        sql`${jobQueue.payload} ->> 'walkId' = ${walkId}`,
+        sql`(${jobQueue.status} <> 'dead'
+             OR ${jobQueue.payload} ->> 'scopeWalkthroughId' IS NOT NULL
+             OR ${jobQueue.payload} ->> 'scopeCreatePendingRef' IS NOT NULL)`
+      )
+    )
+    .orderBy(
+      sql`(${jobQueue.status} <> 'dead') DESC`,
+      sql`(${jobQueue.payload} ->> 'scopeWalkthroughId') IS NULL`,
+      desc(jobQueue.id)
+    )
+    .limit(1);
+
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    jobId: Number(row.id),
+    isLive: Boolean(row.isLive),
+    scopeWalkthroughId: row.scopeWalkthroughId ?? null,
+    scopeCreatePendingRef: row.scopeCreatePendingRef ?? null,
+  };
+}
+
 export interface IngestGlassesWalkthroughResult {
   walkId: string;
   files: GlassesWalkthroughFileResult[];
@@ -408,16 +633,30 @@ export interface IngestGlassesWalkthroughResult {
  *     `rfp-bidboard-create.ts`'s own dealId-scoped dedupe reasoning: a rare duplicate FORWARD ATTEMPT is
  *     a wasted retry the worker's own per-walkthrough checkpoint (see the worker job) mostly absorbs, not
  *     silent data loss.
+ *   - ACROSS A DEAD ROW: a walk that dead-lettered IS re-enqueued (a site visit is not repeatable, so a
+ *     walk must not be stuck forever), but the replacement INHERITS whatever the dead row learned about
+ *     TROCK Scope — see `findGlassesWalkthroughForwardJobState`. The identity that must not be duplicated
+ *     is the WALK's, and it outlives any one queue row. A dead row carrying `scopeWalkthroughId` means a
+ *     remote walkthrough demonstrably exists; carrying `scopeCreatePendingRef` means one MAY exist and
+ *     the worker must not create blind. Enqueuing a blank payload in either case is a second remote
+ *     walkthrough, a second billed transcription and a second billed scope extraction, with nothing
+ *     anywhere saying so. The dead row is never mutated or revived: the replacement is a new, plainly
+ *     visible row (with `checkpointInheritedFromJobId` naming its source), so a human part-way through
+ *     the reconciliation the worker's dead letter asks for is never raced by a delayed mobile retry.
  *
  * Independence from forwarding: this function's own success/failure is determined ENTIRELY by the
  * `files` writes and the enqueue — never by whether TROCK Scope is reachable, because it never calls
  * TROCK Scope. That is what "if TROCK Scope is down, the crew's copy must still succeed" means at this
  * layer: forwarding literally cannot run synchronously with this call.
+ *
+ * PHASE ORDER — pure validation, then ALL object-storage verification, then only database work. The
+ * write phase must contain no object-storage await at all; see `verifyGlassesWalkthroughArtifacts` for
+ * what that buys and what it costs the connection pool when it is not done that way.
  */
 export async function ingestGlassesWalkthrough(
   tenantDb: TenantDb,
   input: IngestGlassesWalkthroughInput,
-  deps: { artifactStore: GlassesWalkthroughArtifactStore }
+  deps: { artifactStore: GlassesWalkthroughArtifactStore; objectVerificationTimeoutMs?: number }
 ): Promise<IngestGlassesWalkthroughResult> {
   const bucket = getGlassesWalkthroughFileBucket();
   const fileResults: GlassesWalkthroughFileResult[] = [];
@@ -425,56 +664,14 @@ export async function ingestGlassesWalkthrough(
   // real epoch millis value, not NaN.
   const capturedAtBaseMs = new Date(input.capturedAt).getTime();
 
-  for (const artifact of input.artifacts) {
-    // Re-validated here (not just trusted from the route's earlier validation) — this module does not
-    // trust its caller wholesale, matching the return path's own "the receiver does not trust the
-    // sender" posture (walkthrough-ingress-service.ts), and this function is exported for direct/test
-    // use, not only reachable through the route.
-    const media = GLASSES_WALKTHROUGH_ACCEPTED_MEDIA[artifact.mimeType];
-    if (!media || media.kind !== artifact.kind) {
-      throw new AppError(400, `Artifact ${artifact.idempotencyKey} has an unsupported mimeType/kind pair.`);
-    }
+  const prepared = prepareGlassesWalkthroughArtifacts(input);
+  await verifyGlassesWalkthroughArtifacts(
+    prepared,
+    deps.artifactStore,
+    deps.objectVerificationTimeoutMs ?? GLASSES_WALKTHROUGH_VERIFY_TIMEOUT_MS
+  );
 
-    const r2Key = deriveGlassesWalkthroughArtifactR2Key(
-      input.officeSlug,
-      input.dealId,
-      input.walkId,
-      artifact.idempotencyKey,
-      media.extension
-    );
-
-    if (deps.artifactStore.isConfigured()) {
-      let head: { contentType?: string; contentLength?: number } | null;
-      try {
-        head = await deps.artifactStore.head(r2Key);
-      } catch {
-        // R33: a throw means WE COULD NOT CHECK, not that the object is absent — retryable, never a 400.
-        throw new AppError(
-          503,
-          `Could not verify artifact ${artifact.idempotencyKey}; object storage is unavailable. Retry.`
-        );
-      }
-      if (!head) {
-        throw new AppError(
-          400,
-          `Artifact ${artifact.idempotencyKey} was not found at its upload key. Upload it via the ` +
-            `artifact upload-url endpoint before completing the walk.`
-        );
-      }
-      if (head.contentType && head.contentType.toLowerCase() !== artifact.mimeType) {
-        throw new AppError(
-          400,
-          `Artifact ${artifact.idempotencyKey}: Content-Type mismatch. Expected "${artifact.mimeType}", got "${head.contentType}".`
-        );
-      }
-      if (head.contentLength != null && head.contentLength !== artifact.fileSizeBytes) {
-        throw new AppError(
-          400,
-          `Artifact ${artifact.idempotencyKey}: Content-Length mismatch. Expected ${artifact.fileSizeBytes} bytes, got ${head.contentLength}.`
-        );
-      }
-    }
-
+  for (const { artifact, media, r2Key } of prepared) {
     const category: FileCategory = media.kind === "photo" ? "photo" : "other";
     const fileExtension = `.${media.extension}`;
 
@@ -551,27 +748,17 @@ export async function ingestGlassesWalkthrough(
     });
   }
 
-  const existingJob = await tenantDb
-    .select({ id: jobQueue.id })
-    .from(jobQueue)
-    .where(
-      and(
-        eq(jobQueue.jobType, GLASSES_WALKTHROUGH_FORWARD_JOB),
-        sql`${jobQueue.payload} ->> 'walkId' = ${input.walkId}`,
-        sql`${jobQueue.status} <> 'dead'`
-      )
-    )
-    .limit(1);
+  const knownJobState = await findGlassesWalkthroughForwardJobState(tenantDb, input.walkId);
 
-  if (existingJob[0]) {
+  if (knownJobState?.isLive) {
     return {
       walkId: input.walkId,
       files: fileResults,
-      forwarding: { status: "already_queued", jobId: Number(existingJob[0].id) },
+      forwarding: { status: "already_queued", jobId: knownJobState.jobId },
     };
   }
 
-  const jobPayload = {
+  const jobPayload: Record<string, unknown> = {
     walkId: input.walkId,
     dealId: input.dealId,
     projectId: input.projectId,
@@ -591,6 +778,20 @@ export async function ingestGlassesWalkthrough(
       capturedAtMs: input.artifacts[index]!.capturedAtMs,
     })),
   };
+
+  // Exactly one of the two markers is carried forward, never both — the worker reads `scopeWalkthroughId`
+  // first and would silently downgrade an unresolved create into a settled one. A settled id lets the
+  // replacement resume straight into clip upload (TROCK Scope's own checksum constraint rejects clip bytes
+  // that already landed); an inherited pending marker makes it dead-letter immediately with the same
+  // reconciliation instructions the original earned, which is the correct outcome — "a create may have
+  // happened" is not information a retry can improve on, and guessing costs a duplicate scope extraction.
+  if (knownJobState?.scopeWalkthroughId) {
+    jobPayload.scopeWalkthroughId = knownJobState.scopeWalkthroughId;
+    jobPayload.checkpointInheritedFromJobId = knownJobState.jobId;
+  } else if (knownJobState?.scopeCreatePendingRef) {
+    jobPayload.scopeCreatePendingRef = knownJobState.scopeCreatePendingRef;
+    jobPayload.checkpointInheritedFromJobId = knownJobState.jobId;
+  }
 
   const jobRows = await tenantDb
     .insert(jobQueue)

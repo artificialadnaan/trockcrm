@@ -5,7 +5,7 @@
 // this suite's idempotency tests are ABOUT) only exists in real SQL, not in the type system.
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { files, jobQueue } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../../tests/helpers/tenant-schema-from-drizzle.js";
@@ -333,5 +333,210 @@ describe("ingestGlassesWalkthrough", () => {
 
     const [row] = await tenantDb.select().from(files).where(eq(files.clientUploadId, "photo-2"));
     expect(new Date(row.takenAt).toISOString()).toBe("2026-07-29T14:00:00.000Z");
+  });
+});
+
+// ── The forward job's TROCK Scope checkpoint survives a dead row ────────────────────────────────────
+//
+// Every forward costs real money on the other side (a transcription plus an Anthropic scope extraction),
+// so "the walk was already sent" has to be a durable fact about the WALK, not about one job_queue row.
+// These exercise the hand-written jsonb SQL in `findGlassesWalkthroughForwardJobState`, which is exactly
+// the kind of thing the fake-db unit suite cannot check.
+
+/** Mark a forward job dead and rewrite its payload the way the worker's own `jsonb_set` checkpoint
+ *  statements would have — the states a completion retry has to read back and respect. */
+async function killJobWithPayload(jobId: number, payloadPatchSql: ReturnType<typeof sql>): Promise<void> {
+  await tenantDb.update(jobQueue).set({ status: "dead", payload: payloadPatchSql }).where(eq(jobQueue.id, jobId));
+}
+
+describe("ingestGlassesWalkthrough — forward-job checkpoint inheritance across a dead row", () => {
+  it("carries a dead job's scopeWalkthroughId onto the replacement, so a late completion retry cannot buy a SECOND scope extraction", async () => {
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+    // The worker created the remote walkthrough and checkpointed it, then burned all 10 attempts partway
+    // through uploading clips. The remote walkthrough EXISTS.
+    await killJobWithPayload(
+      first.forwarding.jobId,
+      sql`jsonb_set(${jobQueue.payload}, '{scopeWalkthroughId}', '"scope-wt-1"'::jsonb, true)`
+    );
+
+    const second = await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+    expect(second.forwarding.status).toBe("queued");
+    expect(second.forwarding.jobId).not.toBe(first.forwarding.jobId);
+
+    const [replacement] = await tenantDb.select().from(jobQueue).where(eq(jobQueue.id, second.forwarding.jobId));
+    // Without this the replacement payload is blank and the worker creates a second walkthrough — a second
+    // billed transcription and a second billed classification, with nothing anywhere saying so.
+    expect(replacement.payload.scopeWalkthroughId).toBe("scope-wt-1");
+    expect(replacement.payload.scopeCreatePendingRef).toBeUndefined();
+  });
+
+  it("carries a dead job's UNRESOLVED pending-create marker forward, so the replacement reconciles instead of creating blind", async () => {
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+    // The worker wrote its pre-create marker, sent the create, and never learned the answer. "A create may
+    // already have happened" is the whole meaning of this marker; dropping it on the floor is what makes a
+    // duplicate possible.
+    const pendingRef = `trockcrm:glasses-walkthrough:${WALK}`;
+    await killJobWithPayload(
+      first.forwarding.jobId,
+      sql`jsonb_set(${jobQueue.payload}, '{scopeCreatePendingRef}', to_jsonb(${pendingRef}::text), true)`
+    );
+
+    const second = await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+    const [replacement] = await tenantDb.select().from(jobQueue).where(eq(jobQueue.id, second.forwarding.jobId));
+    expect(replacement.payload.scopeCreatePendingRef).toBe(pendingRef);
+    // Never both: the worker reads scopeWalkthroughId first, so inventing one here would silently convert
+    // "we don't know" into "we know", which is the opposite of what the marker means.
+    expect(replacement.payload.scopeWalkthroughId).toBeUndefined();
+  });
+
+  it("prefers a SETTLED scopeWalkthroughId over a newer row's unresolved marker", async () => {
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+    await killJobWithPayload(
+      first.forwarding.jobId,
+      sql`jsonb_set(${jobQueue.payload}, '{scopeWalkthroughId}', '"scope-wt-1"'::jsonb, true)`
+    );
+    const second = await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+    // A NEWER dead row that only knows "a create may be in flight". The older row's settled id is strictly
+    // better information — it names the walkthrough to reuse instead of forcing a human reconciliation.
+    await killJobWithPayload(
+      second.forwarding.jobId,
+      sql`(${jobQueue.payload} - 'scopeWalkthroughId') || jsonb_build_object('scopeCreatePendingRef', 'ref-2')`
+    );
+
+    const third = await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+    const [replacement] = await tenantDb.select().from(jobQueue).where(eq(jobQueue.id, third.forwarding.jobId));
+    expect(replacement.payload.scopeWalkthroughId).toBe("scope-wt-1");
+    expect(replacement.payload.scopeCreatePendingRef).toBeUndefined();
+  });
+
+  it("GUARD: a dead job that never reached TROCK Scope produces a clean, uncheckpointed replacement", async () => {
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+    // Dead for a reason that proves nothing was created remotely (an unset TROCK_SCOPE_BASE_URL, say).
+    // Inheriting a marker here would dead-letter a walk that is perfectly safe to forward from scratch.
+    await tenantDb.update(jobQueue).set({ status: "dead" }).where(eq(jobQueue.id, first.forwarding.jobId));
+
+    const second = await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+    const [replacement] = await tenantDb.select().from(jobQueue).where(eq(jobQueue.id, second.forwarding.jobId));
+    expect(replacement.payload.scopeWalkthroughId).toBeUndefined();
+    expect(replacement.payload.scopeCreatePendingRef).toBeUndefined();
+    expect(replacement.status).toBe("pending");
+  });
+
+  it("GUARD: leaves the dead row itself untouched — a human mid-reconciliation is not raced by a mobile retry", async () => {
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+    await killJobWithPayload(
+      first.forwarding.jobId,
+      sql`jsonb_set(${jobQueue.payload}, '{scopeWalkthroughId}', '"scope-wt-1"'::jsonb, true)`
+    );
+
+    await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+
+    const [dead] = await tenantDb.select().from(jobQueue).where(eq(jobQueue.id, first.forwarding.jobId));
+    expect(dead.status).toBe("dead"); // NOT silently revived
+    expect(dead.attempts).toBe(0);
+    const all = await tenantDb.select().from(jobQueue).where(eq(jobQueue.jobType, GLASSES_WALKTHROUGH_FORWARD_JOB));
+    expect(all).toHaveLength(2); // a new, plainly visible row — not an edit to the one a human is reading
+  });
+
+  it("GUARD: a LIVE job still short-circuits to already_queued and is never replaced", async () => {
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+    const second = await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+    expect(second.forwarding).toEqual({ status: "already_queued", jobId: first.forwarding.jobId });
+  });
+});
+
+// ── Object verification vs. the pinned tenant connection ───────────────────────────────────────────
+//
+// `tenantMiddleware` has already checked out one of the pool's 20 connections and opened a transaction on
+// it before this service is ever called, so every millisecond the verification phase spends is a
+// pool slot held by a request doing no database work at all.
+
+function photoArtifacts(count: number) {
+  return Array.from({ length: count }, (_, index) => ({
+    idempotencyKey: `artifact-${index + 1}`,
+    kind: "photo" as const,
+    originalFilename: `frame-${index + 1}.jpg`,
+    mimeType: "image/jpeg",
+    fileSizeBytes: 1024,
+    capturedAtMs: null,
+  }));
+}
+
+describe("ingestGlassesWalkthrough — bounded object verification", () => {
+  it("verifies EVERY artifact before the first files write, so a late failure leaves no half-filed walk", async () => {
+    const input = baseInput({ artifacts: photoArtifacts(3) });
+
+    await expect(
+      ingestGlassesWalkthrough(tenantDb, input, {
+        // The second artifact never landed in R2. Verifying artifact-by-artifact interleaved with the
+        // inserts leaves artifact-1's row already written when this throws — recoverable only because the
+        // request transaction happens to roll it back, which is a property of the CALLER, not of this
+        // function.
+        artifactStore: healthyStore({ head: async (r2Key) => (r2Key.includes("artifact-2") ? null : {}) }),
+      })
+    ).rejects.toMatchObject({ statusCode: 400 });
+
+    const rows = await tenantDb.select().from(files);
+    expect(rows).toHaveLength(0);
+  });
+
+  // GUARD, not a regression: a sequential loop reports the lowest-indexed failure for free, so this
+  // passed before the concurrency change too. It exists to keep it true afterwards.
+  it("GUARD: reports the LOWEST-indexed bad artifact, so the error a caller sees does not depend on which HEAD returned first", async () => {
+    const input = baseInput({ artifacts: photoArtifacts(4) });
+    // artifact-4 answers instantly, artifact-2 slowly — under concurrency the fast failure resolves first,
+    // and reporting whichever landed first would make this endpoint's 400 nondeterministic.
+    await expect(
+      ingestGlassesWalkthrough(tenantDb, input, {
+        artifactStore: healthyStore({
+          head: async (r2Key) => {
+            if (r2Key.includes("artifact-4")) return null;
+            if (r2Key.includes("artifact-2")) {
+              await new Promise((resolve) => setTimeout(resolve, 20));
+              return null;
+            }
+            return {};
+          },
+        }),
+      })
+    ).rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining("artifact-2") });
+  });
+
+  it("issues the HEADs with bounded concurrency rather than one blocking round trip at a time", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const input = baseInput({ artifacts: photoArtifacts(6) });
+
+    await ingestGlassesWalkthrough(tenantDb, input, {
+      artifactStore: healthyStore({
+        head: async () => {
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          inFlight -= 1;
+          return {};
+        },
+      }),
+    });
+
+    // Strictly sequential verification pins the tenant connection for artifacts × round-trip; at the 200
+    // artifact ceiling that is two orders of magnitude of pool-slot occupancy for zero database work.
+    expect(maxInFlight).toBeGreaterThan(1);
+  });
+
+  it("gives up the connection with a retryable 503 when object storage stops answering, instead of holding it indefinitely", async () => {
+    const input = baseInput({ artifacts: photoArtifacts(2) });
+
+    await expect(
+      ingestGlassesWalkthrough(tenantDb, input, {
+        // Never settles and never rejects — a black-holed HEAD, which today would pin a pooled
+        // transaction until the client gave up or the process died.
+        artifactStore: healthyStore({ head: () => new Promise<null>(() => {}) }),
+        objectVerificationTimeoutMs: 25,
+      })
+    ).rejects.toMatchObject({ statusCode: 503 });
+
+    const rows = await tenantDb.select().from(files);
+    expect(rows).toHaveLength(0);
   });
 });
