@@ -1118,6 +1118,46 @@ export type GlassesWalkthroughForwardAlertSendEmail = (
 ) => Promise<SendSystemEmailResult>;
 
 /**
+ * Wall-clock ceiling on the two network waits the sweep below performs while its per-row transaction is
+ * OPEN — the alert send, and the best-effort deal-label lookup.
+ *
+ * Both are unbounded by default and neither can be cancelled. Resend's SDK awaits a plain `fetch` and
+ * accepts no AbortSignal (resend 6.10.0: PostOptions is `{ query, headers }`), and `db.query` has no
+ * cancellation either — so this RACES the wait rather than stopping the work. That is the correct trade
+ * here because the resource being protected is not the socket: these calls sit between BEGIN and COMMIT on
+ * a checked-out pool client, so an unbounded wait pins that client AND holds this dead row's lock against
+ * every other sweeper for as long as the far end stays quiet. And this sweep is driven by a bare
+ * setInterval with NO reentrancy guard (index.ts), so "as long as it stays quiet" is not one stuck
+ * connection — it is one more every 60 seconds until the pool (max 10, db.ts) is gone and every unrelated
+ * worker job stops with it. An alert about a lost site visit taking the queue down with it is worse than
+ * the silence it was written to end.
+ *
+ * Deliberately generous, like ScopeTimeouts above: it exists to bound a hang, not to police latency.
+ */
+const DEAD_LETTER_ALERT_STEP_TIMEOUT_MS = 30_000;
+
+/** A step we stopped WAITING for — never a step that failed. The distinction is what the sweep acts on:
+ *  a send that timed out says the provider is answering nobody, so the remaining dead rows would each pay
+ *  the same ceiling to learn the same thing, on one shared connection. */
+class DeadLetterAlertStepTimeout extends Error {
+  constructor(label: string, timeoutMs: number) {
+    super(`${label} did not answer within ${timeoutMs}ms — abandoned so the claim transaction could close`);
+    this.name = "DeadLetterAlertStepTimeout";
+  }
+}
+
+/** Race `work` against a deadline. The loser keeps running (nothing here is cancellable) — it is simply no
+ *  longer between us and the COMMIT. `Promise.race` subscribes to both, so a late rejection from the
+ *  abandoned side is still handled and can't surface as an unhandled rejection. */
+function withAlertStepDeadline<T>(work: Promise<T>, label: string, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new DeadLetterAlertStepTimeout(label, timeoutMs)), timeoutMs);
+  });
+  return Promise.race([work, deadline]).finally(() => clearTimeout(timer)) as Promise<T>;
+}
+
+/**
  * Dead-letter alert sweep for glasses_walkthrough_forward. See the block comment above for the full
  * rationale and how this mirrors runRfpBidBoardCreateDeadLetterSweep / runRfpVoteInvitationDeadLetterSweep.
  * Returns the count of dead jobs alerted on this sweep (0 when nothing eligible was found).
@@ -1129,12 +1169,16 @@ export async function runGlassesWalkthroughForwardDeadLetterSweep(
     env?: NodeJS.ProcessEnv;
     limit?: number;
     logger?: Pick<Console, "log" | "warn" | "error">;
+    /** Injection seam for the two in-transaction ceilings, so a stalled provider can be exercised in
+     *  milliseconds instead of waiting out DEAD_LETTER_ALERT_STEP_TIMEOUT_MS. */
+    stepTimeoutMs?: number;
   } = {}
 ): Promise<number> {
   const db = deps.db ?? (pool as unknown as PoolLike);
   const env = deps.env ?? process.env;
   const logger = deps.logger ?? console;
   const limit = deps.limit ?? 25;
+  const stepTimeoutMs = deps.stepTimeoutMs ?? DEAD_LETTER_ALERT_STEP_TIMEOUT_MS;
   const sendEmail = deps.sendEmail ?? sendSystemEmailWithMetadata;
   // Fail fast rather than degrade. The per-row work below is a transaction (BEGIN / claim UPDATE / send /
   // COMMIT-or-ROLLBACK) whose entire safety argument — a throw anywhere rolls the 'claimed' marker back
@@ -1152,6 +1196,12 @@ export async function runGlassesWalkthroughForwardDeadLetterSweep(
   }
   const client = await db.connect();
   let handled = 0;
+  // Set once a deal-label lookup hits its ceiling, and never unset for the rest of this sweep. The read is
+  // pure enrichment, so ONE row paying the ceiling is a reasonable price for a nicer email; twenty-five of
+  // them is twelve minutes of a checked-out connection buying nothing, since an office schema that would
+  // not answer for the first row will not answer for the twenty-fifth. Unlike a send timeout this does not
+  // stop the sweep — every alert still goes out, just naming the deal by its raw id.
+  let dealLabelLookupAbandoned = false;
 
   try {
     // Candidate dead rows. This SELECT only READS + briefly locks (FOR UPDATE SKIP LOCKED); it does NOT
@@ -1205,11 +1255,22 @@ export async function runGlassesWalkthroughForwardDeadLetterSweep(
 
         // Best-effort deal label enrichment via the TOP-LEVEL db (not the per-row `client`) — see the
         // function doc for why this must run outside the transaction. Never blocks the alert.
+        //
+        // Time-bounded even though it is only a SELECT: it is issued while THIS row's transaction is open,
+        // so an office-schema read that never answers holds the claim exactly as long as a stalled send
+        // would. Hitting the ceiling is caught below like any other enrichment failure and degrades the
+        // EMAIL (raw id instead of a label) rather than the alert — an ops address that never hears about a
+        // lost site visit is the failure this whole sweep exists to prevent.
         let dealLabel: string | null = null;
-        if (dealId && officeSlug) {
+        if (dealId && officeSlug && !dealLabelLookupAbandoned) {
           try {
-            dealLabel = await resolveGlassesWalkthroughDealLabel(db, officeSlug, dealId);
+            dealLabel = await withAlertStepDeadline(
+              resolveGlassesWalkthroughDealLabel(db, officeSlug, dealId),
+              `deal-label lookup for job ${job.id}`,
+              stepTimeoutMs
+            );
           } catch (err) {
+            if (err instanceof DeadLetterAlertStepTimeout) dealLabelLookupAbandoned = true;
             logger.warn(
               `[Worker:glasses_walkthrough_forward] Could not resolve a deal label for the dead-letter alert (job ${job.id}); continuing with the raw id`,
               { dealId, officeSlug, err }
@@ -1243,12 +1304,24 @@ export async function runGlassesWalkthroughForwardDeadLetterSweep(
           );
         }
 
-        const sendResult = await sendEmail(recipients, email.subject, email.html, {
-          text: email.text,
-          // Stable per-job key: an at-least-once re-send after an uncertain marker write dedupes provider-
-          // side, mirroring the bid-board heartbeat's dead-letter batch key.
-          idempotencyKey: `glasses-walkthrough-forward-dead-${job.id}`,
-        });
+        // THE unbounded await this transaction used to be built around. Resend's SDK awaits a plain fetch
+        // with no deadline and takes no signal, so a provider that accepts the connection and then goes
+        // quiet held this BEGIN open — and its pooled client, and this row's lock — for the life of the
+        // process. Abandoning the wait is a throw like any other here: the per-row catch ROLLBACKs, so the
+        // claim goes back with it and the row stays retryable rather than stranding at 'claimed'.
+        //
+        // The abandoned request may still land. That is what the stable per-job idempotency key below is
+        // for: a re-send on a later tick is deduped provider-side, so at-least-once here is not two alerts.
+        const sendResult = await withAlertStepDeadline(
+          sendEmail(recipients, email.subject, email.html, {
+            text: email.text,
+            // Stable per-job key: an at-least-once re-send after an uncertain marker write dedupes provider-
+            // side, mirroring the bid-board heartbeat's dead-letter batch key.
+            idempotencyKey: `glasses-walkthrough-forward-dead-${job.id}`,
+          }),
+          `dead-letter alert send for job ${job.id}`,
+          stepTimeoutMs
+        );
         if (!sendResult.success) {
           throw new Error("Email provider returned unsuccessful result");
         }
@@ -1265,6 +1338,19 @@ export async function runGlassesWalkthroughForwardDeadLetterSweep(
       } catch (err) {
         await client.query("ROLLBACK").catch(() => {});
         logger.error(`[Worker:glasses_walkthrough_forward] Failed to alert on dead job ${job.id}`, err);
+        if (err instanceof DeadLetterAlertStepTimeout) {
+          // Stop the SWEEP, not just this row. A step that hit the ceiling means the far end is answering
+          // nobody, so every remaining candidate would spend the same ceiling to learn the same thing —
+          // and this loop holds ONE checked-out connection for the sum of them (25 rows x 30s = twelve
+          // minutes on a connection, while the interval that started us fires another sweep every 60s
+          // regardless). Nothing is lost by stopping: the rows are untouched, still 'dead', still
+          // unclaimed, and the next tick picks them up from the top.
+          logger.warn(
+            "[Worker:glasses_walkthrough_forward] Abandoning this sweep after a step timed out; the remaining " +
+              "dead jobs stay unclaimed and are retried on the next tick"
+          );
+          break;
+        }
       }
     }
 

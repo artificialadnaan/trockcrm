@@ -32,6 +32,8 @@ const {
   registerJobHandler,
   __resetQueueStateForTest,
   __setJobLeaseRenewIntervalForTest,
+  __setJobLeaseSweepDueForTest,
+  __awaitJobLeaseSweepForTest,
 } = await import("../src/queue.js");
 
 const FORWARD_JOB = "glasses_walkthrough_forward";
@@ -121,8 +123,12 @@ describe("job_queue claim lease (real SQL)", () => {
     expect((await readJob(db, jobId)).status).toBe("processing");
 
     // The main poller carries the sweep (it cannot claim this type — its own predicate excludes it), so a
-    // tick that claims nothing still puts the abandoned row back.
+    // tick that claims nothing still puts the abandoned row back. The tick STARTS the sweep beside itself
+    // rather than awaiting it — a statement blocked on a lock or a dead socket must not be able to stall
+    // the claim path — so the assertion has to settle on it explicitly where production simply does not care.
+    __setJobLeaseSweepDueForTest();
     await pollJobs();
+    await __awaitJobLeaseSweepForTest();
     expect((await readJob(db, jobId)).status).toBe("pending");
 
     await pollGlassesWalkthroughForwardJobs();

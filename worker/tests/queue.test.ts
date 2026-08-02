@@ -23,6 +23,8 @@ const {
   __resetQueueStateForTest,
   __setQueueQueryTimeoutForTest,
   __setJobLeaseRenewIntervalForTest,
+  __awaitJobLeaseSweepForTest,
+  __setJobLeaseSweepDueForTest,
 } = await import("../src/queue.js");
 
 // ── Pool harness ────────────────────────────────────────────────────────────────────────────────
@@ -36,7 +38,9 @@ const {
 // guarded outcome writes (SET status = 'completed'|'dead'|'pending' … AND status = 'processing'). Recorded
 // queries land in `queries` (from any checked-out client) so outcome-write assertions inspect that instead
 // of the old pool.query mock. `releases` records every client.release(arg) so a leaked/destroyed connection
-// is observable. `recoverStaleJobs` still hits pool.query directly, so queryMock is kept for it.
+// is observable. `recoverStaleJobs` takes an explicit client too now, so NOTHING in queue.ts reaches for
+// pool.query any more — queryMock is kept only to complete the mocked pool's shape, and a test asserting it
+// was never called is asserting exactly that.
 type QueryCall = [string, unknown[] | undefined];
 
 type PoolHarness = {
@@ -76,6 +80,10 @@ function claimRouter(rows: () => any[]) {
     // Lease renewals: part of the ordinary claim lifecycle, not an outcome — a claimed row is re-stamped
     // for as long as its handler runs so an expiry sweep can tell a live delivery from a dead worker's.
     if (sql.includes("SET started_processing_at = NOW() WHERE")) return { rows: [] };
+    // The expired-lease sweep. Matched BEFORE the outcome-write branch and by its own predicate, because
+    // its UPDATE is `SET status = 'pending' … WHERE status = 'processing'` — an outcome write's exact
+    // shape. Anything filtering these queries loosely will pick it up, and it belongs to no claim.
+    if (sql.includes("started_processing_at <")) return { rows: [] };
     // Outcome writes (guarded terminal updates) succeed by default.
     if (sql.includes("public.job_queue SET status =")) return { rows: [] };
     throw new Error(`Unexpected SQL: ${sql}`);
@@ -406,18 +414,22 @@ describe("worker queue", () => {
     // row at attempts==max even though it never executed. Startup recovery can't tell that from a
     // handler-ran-but-outcome-write-failed row, so it must requeue (favor at-least-once) rather than
     // dead-letter — otherwise it silently drops never-run work. (The cap is enforced in the run phase,
-    // where the handler is known to have executed.) recoverStaleJobs uses pool.query directly.
-    queryMock.mockResolvedValue({ rows: [] });
+    // where the handler is known to have executed.)
+    const { queries, releases } = installPool(claimRouter(() => []));
 
     await recoverStaleJobs();
 
-    const call = queryMock.mock.calls.find(
-      (c) => String(c[0]).includes("status = 'processing'") && String(c[0]).includes("started_processing_at")
+    const call = queries.find(
+      ([sql]) => sql.includes("status = 'processing'") && sql.includes("started_processing_at")
     );
     expect(call).toBeTruthy();
     const sql = String(call![0]);
     expect(sql).toMatch(/SET status = 'pending'/);
     expect(sql).not.toMatch(/THEN 'dead'/); // must NOT dead-letter a possibly-never-run final attempt
+    // On an EXPLICIT client, like every other statement this module issues — never the pool's unbounded
+    // convenience query, which cannot be time-bounded without leaking the slot it is holding.
+    expect(queryMock).not.toHaveBeenCalled();
+    expect(releases).toEqual([undefined]); // a clean statement returns its connection, it doesn't destroy it
   });
 
   // ── The claim is a LEASE ──────────────────────────────────────────────────────────────────────────
@@ -484,28 +496,83 @@ describe("worker queue", () => {
     // minutes stale, so a worker that dies 30 seconds into a walk and restarts leaves that row 'processing'
     // with nothing that will ever look at it again. The sweep rides the main poller for the same reason
     // flushPendingRecoveries does — one place, for every poller, rather than a private timer per job type.
-    queryMock.mockResolvedValue({ rows: [] });
-    installPool(claimRouter(() => []));
-    const sweeps = () => queryMock.mock.calls.filter((c) => String(c[0]).includes("started_processing_at <"));
+    __setJobLeaseSweepDueForTest();
+    const { queries } = installPool(claimRouter(() => []));
+    // The sweep goes through a checked-out client now, like every other statement this module issues, so
+    // it is observed on the harness's recorded queries rather than on the convenience pool.query.
+    const sweeps = () => queries.filter(([sql]) => sql.includes("started_processing_at <"));
 
     await pollJobs();
+    await __awaitJobLeaseSweepForTest(); // the tick no longer waits for it, so the assertion has to
     expect(sweeps()).toHaveLength(1);
 
     // Throttled to its own cadence rather than the poll interval: at POLL_INTERVAL_MS this would otherwise
     // be a full-table UPDATE several times a minute to reclaim rows that appear only when a worker dies.
     await pollJobs();
+    await __awaitJobLeaseSweepForTest();
     expect(sweeps()).toHaveLength(1);
   });
 
-  it("GUARD: a failing lease sweep cannot reject a poll tick", async () => {
-    // pollJobs runs under a bare setInterval (index.ts), so a rejection is an unhandled rejection that
-    // takes the worker down — and the sweep's own statement is exactly what fails when the pool is
-    // exhausted, i.e. when the worker is already having a bad minute. The tick must skip, not die.
-    queryMock.mockRejectedValue(new Error("timeout exceeded when trying to connect"));
+  it("GUARD: a failing lease sweep cannot reject a poll tick — or anything else", async () => {
+    // Nothing awaits the sweep now, which sharpens this: pollJobs runs under a bare setInterval (index.ts),
+    // so an escaping rejection is an UNHANDLED rejection that takes the worker down — and the sweep's own
+    // statement is exactly what fails when the pool is exhausted, i.e. when the worker is already having a
+    // bad minute. The tick must skip, not die.
+    __setJobLeaseSweepDueForTest();
+    const router = claimRouter(() => []);
+    installPool(async (sql: string) => {
+      if (sql.includes("started_processing_at <")) throw new Error("timeout exceeded when trying to connect");
+      return router(sql);
+    });
+    await expect(pollJobs()).resolves.toBeUndefined();
+    await expect(__awaitJobLeaseSweepForTest()).resolves.toBeUndefined();
+  });
+
+  it("does NOT let a wedged lease sweep stop the poller — bounds it, destroys its socket, keeps claiming", async () => {
+    // The sweep used the pool's convenience `query`, which is unbounded — unlike the claim, the renewal and
+    // the outcome write, which all check out an explicit client under QUEUE_QUERY_TIMEOUT_MS. That was
+    // survivable while it ran once at startup. Running it every tick from inside pollJobs, it is not: a
+    // silently-dead socket (or an UPDATE parked behind a lock) leaves that promise PENDING, the surrounding
+    // catch cannot run on a promise that never settles, and the tick never finishes — so `polling` stays
+    // true and this worker stops claiming EVERY job type it serves. A self-healing mechanism that can wedge
+    // the thing it heals is worse than no mechanism.
+    __setJobLeaseSweepDueForTest();
+    __setQueueQueryTimeoutForTest(20);
+    // The convenience query is what the sweep used to reach for; the explicit client is what it reaches for
+    // now. BOTH go quiet here, so the case describes one broken socket rather than one implementation.
+    queryMock.mockImplementation(() => new Promise(() => {}));
     try {
-      installPool(claimRouter(() => []));
-      await expect(pollJobs()).resolves.toBeUndefined();
+      const jobType = "unit_test_sweep_dead_socket";
+      let ran = 0;
+      registerJobHandler(jobType, async () => {
+        ran += 1;
+      });
+      const releases: unknown[] = [];
+      const router = claimRouter(() => [
+        { id: 71, job_type: jobType, office_id: "office-1", payload: {}, attempts: 0, max_attempts: 5 },
+      ]);
+      connectMock.mockImplementation(async () => ({
+        query: vi.fn((sql: string, params?: unknown[]) => {
+          if (sql.includes("started_processing_at <")) return new Promise(() => {}); // the sweep's UPDATE, wedged
+          return router(sql, params);
+        }),
+        release: vi.fn((arg?: unknown) => releases.push(arg)),
+      }));
+
+      await expect(pollJobs()).resolves.toBeUndefined(); // before the fix this never settles at all
+
+      // The tick did its actual job while the sweep was stuck — which is the whole point: the sweep is
+      // background self-healing, and nothing in a poll tick depends on its outcome, so it must not be able
+      // to delay one, let alone end them.
+      expect(ran).toBe(1);
+      // Never the unbounded convenience query again: a pool.query that never settles ALSO keeps its
+      // checked-out client forever, so the sweep would leak a pool slot a minute until max 10 is gone.
+      expect(queryMock).not.toHaveBeenCalled();
+      // And the sweep itself still terminates and destroys its poisoned connection via release(err).
+      await expect(__awaitJobLeaseSweepForTest()).resolves.toBeUndefined();
+      expect(releases.some((arg) => arg instanceof Error)).toBe(true);
     } finally {
+      __setQueueQueryTimeoutForTest(30_000);
       queryMock.mockResolvedValue({ rows: [] });
     }
   });

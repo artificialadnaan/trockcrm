@@ -371,4 +371,90 @@ describe("runGlassesWalkthroughForwardDeadLetterSweep (real SQL)", () => {
       .rows as any[];
     expect(jobs.map((j) => j.alerted)).toEqual([null, null]);
   });
+
+  // ── Nothing unbounded inside the claim transaction ────────────────────────────────────────────────
+  //
+  // The per-row work is BEGIN / claim / enrich / send / COMMIT on ONE checked-out connection, and two of
+  // those five steps are network calls that answer to nobody's clock. Resend's SDK awaits a plain `fetch`
+  // and takes no AbortSignal (PostOptions is { query, headers }); the enrichment SELECT has no cancellation
+  // either. A provider that accepts the connection and then goes quiet therefore did not merely delay one
+  // alert — it pinned a pooled client and this row's lock against every other sweeper for the life of the
+  // process. And the sweep is driven by a bare setInterval with NO reentrancy guard (index.ts), so the next
+  // tick opens a SECOND wedged sweep 60 seconds later, and a third after that, until the pool (max 10) is
+  // gone and every unrelated worker job stops with it.
+  //
+  // A hanging fake is the whole point of these two cases: with no ceiling they do not fail, they never
+  // return at all.
+  function capturingLogger() {
+    return { log: vi.fn(), warn: vi.fn(), error: vi.fn() };
+  }
+
+  it("abandons an alert send that never answers, instead of holding the claim transaction open on it", async () => {
+    const db = await seed();
+    const client = makeClient(db);
+    const logger = capturingLogger();
+    // A provider that took the request and then said nothing — the exact shape production gets from a
+    // Resend that is up enough to accept a socket and not up enough to answer on it.
+    const sendEmail = vi.fn(() => new Promise<never>(() => {}));
+
+    const handled = await runGlassesWalkthroughForwardDeadLetterSweep({
+      db: client as any,
+      sendEmail: sendEmail as any,
+      env: { GLASSES_WALKTHROUGH_FORWARD_EMAIL_RECIPIENTS: "ops@x.com" } as any,
+      stepTimeoutMs: 25,
+      logger,
+    });
+
+    expect(handled).toBe(0);
+    // Abandoning the wait is a throw like any other, so the claim rolls back with it: the row is left
+    // unclaimed and 'dead', retried on the next tick — never stranded at 'claimed', and never marked
+    // alerted for an email nobody can prove was delivered.
+    const jobs = (await db.query(`SELECT payload->>'alertSent' AS alerted FROM public.job_queue ORDER BY id`))
+      .rows as any[];
+    expect(jobs.map((j) => j.alerted)).toEqual([null, null]);
+    // And the sweep STOPS at the first stall rather than paying the same ceiling on every remaining row
+    // while holding its one pooled connection for the sum of them. A provider that will not answer for one
+    // job will not answer for the next twenty-four either.
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    expect(logger.warn.mock.calls.flat().join(" ")).toContain("Abandoning this sweep");
+  }, 5_000);
+
+  it("abandons the best-effort deal-label lookup too, and still sends the alert with the raw id", async () => {
+    // The enrichment SELECT sits between the same BEGIN and COMMIT as the send, so it holds the connection
+    // and the row lock identically — a ceiling on one of the two bounds nothing. It is best-effort by
+    // design though, so hitting the ceiling must degrade the EMAIL (raw id instead of a label), never cost
+    // the alert: an ops address that never hears about a lost site visit is the failure this sweep exists
+    // to prevent.
+    const db = await seed();
+    let dealReads = 0;
+    const queryable = {
+      query: (sql: string, params?: unknown[]) => {
+        if (sql.includes(".deals")) {
+          dealReads += 1;
+          return new Promise<never>(() => {}); // the office-schema read that never answers
+        }
+        return db.query(sql, params as never[]) as any;
+      },
+    };
+    const client = { ...queryable, connect: async () => ({ ...queryable, release: () => {} }) };
+    const sendEmail = vi.fn(async () => ({ success: true, messageId: "m1" }));
+
+    const handled = await runGlassesWalkthroughForwardDeadLetterSweep({
+      db: client as any,
+      sendEmail,
+      env: { GLASSES_WALKTHROUGH_FORWARD_EMAIL_RECIPIENTS: "ops@x.com" } as any,
+      stepTimeoutMs: 25,
+      logger: capturingLogger(),
+    });
+
+    expect(handled).toBe(2);
+    expect(sendEmail).toHaveBeenCalledTimes(2);
+    expect(String(sendEmail.mock.calls[0][2])).toContain(`Deal ${DEAL_CONFIG_ERROR}`); // label unresolved → raw id
+    // ONE row pays the ceiling, not every row: a schema that would not answer for the first will not answer
+    // for the twenty-fifth, and the sweep holds a single connection for the sum of them.
+    expect(dealReads).toBe(1);
+    const jobs = (await db.query(`SELECT payload->>'alertSent' AS alerted FROM public.job_queue ORDER BY id`))
+      .rows as any[];
+    expect(jobs.map((j) => j.alerted)).toEqual(["true", "true"]);
+  }, 5_000);
 });

@@ -142,6 +142,19 @@ export function __setJobLeaseRenewIntervalForTest(ms: number) {
 // expiry regardless, so a faster sweep buys nothing.
 const JOB_LEASE_SWEEP_INTERVAL_MS = 60_000;
 let lastJobLeaseSweepAt = 0;
+// The sweep in flight, if any. Tracked rather than awaited by the tick that started it — see
+// startExpiredJobLeaseSweepIfDue for why, and so a second tick can't start a second sweep over the same rows.
+let jobLeaseSweep: Promise<void> | null = null;
+
+/** Test-only: settle on the in-flight sweep. Only tests need this — a poll tick deliberately does not wait. */
+export function __awaitJobLeaseSweepForTest(): Promise<void> {
+  return jobLeaseSweep ?? Promise.resolve();
+}
+
+/** Test-only: make the sweep due on the next poll tick (it is throttled by default after a reset). */
+export function __setJobLeaseSweepDueForTest() {
+  lastJobLeaseSweepAt = 0;
+}
 
 /**
  * Test-only: reset module singleton state between cases.
@@ -157,9 +170,15 @@ let lastJobLeaseSweepAt = 0;
  */
 export function __resetQueueStateForTest() {
   pendingRecoveries.clear();
-  // Without this every case after the first would find the sweep already throttled and silently exercise a
-  // poll tick that skips it — the failure mode the guards below exist to catch.
-  lastJobLeaseSweepAt = 0;
+  // Left THROTTLED, not due. The sweep checks out its OWN pooled client now (it no longer rides the
+  // convenience pool.query), so a due sweep adds a connect/release and a job_queue UPDATE to every tick —
+  // and a case asking "was the claim connection released before the handlers ran?" would be answering it
+  // over a checkout that belongs to something else entirely. Cases that ARE about the sweep opt in via
+  // __setJobLeaseSweepDueForTest, which is also the only honest way to read them.
+  lastJobLeaseSweepAt = Date.now();
+  // Same hazard one level up: a case that ends while a sweep is still in flight (a fake that never settles,
+  // a vitest timeout) would otherwise leave this non-null and make every later case's sweep a silent no-op.
+  jobLeaseSweep = null;
   polling = false;
   pollingBidBoardIngest = false;
   pollingAiReport = false;
@@ -228,13 +247,17 @@ function withQueueTimeout<T>(query: Promise<T>, label: string): Promise<T> {
   return Promise.race([query, timeout]).finally(() => clearTimeout(timer)) as Promise<T>;
 }
 
-// Time-bounded outcome-write query. Checks out an EXPLICIT client so a timed-out query can be DESTROYED
+// Time-bounded queue query. Checks out an EXPLICIT client so a timed-out query can be DESTROYED
 // (release(err) removes it from the pool). Racing the convenience pool.query() against a timer would only
 // reject the caller while pool.query keeps its checked-out client — on a genuinely dead socket that slot
 // never returns, and because the deferred-recovery flush re-attempts the write every tick, the leaked slots
 // pile up until they exhaust the pool (max 10) and stall UNRELATED worker jobs. Mirrors the claim path here
-// and timedPoolQuery in bid-board-ingest.ts. `label` distinguishes the two callers in the timeout error.
-async function timedOutcomeQuery(sql: string, params: any[], label: string): Promise<void> {
+// and timedPoolQuery in bid-board-ingest.ts. `label` names the caller in the timeout error.
+//
+// Every non-claim statement this module issues goes through here — the outcome writes, the lease renewal
+// AND the expiry sweep. The sweep was the last holdout on the convenience query, which was survivable only
+// while it ran once at startup; on a periodic tick an unbounded statement is the one that wedges the poller.
+async function timedQueueQuery(sql: string, params: any[], label: string): Promise<{ rows: any[] }> {
   let client: PoolClient;
   try {
     client = await pool.connect();
@@ -252,7 +275,7 @@ async function timedOutcomeQuery(sql: string, params: any[], label: string): Pro
     }, QUEUE_QUERY_TIMEOUT_MS);
   });
   try {
-    await Promise.race([client.query(sql, params), timeout]);
+    return (await Promise.race([client.query(sql, params), timeout])) as { rows: any[] };
   } finally {
     clearTimeout(timer);
     // On a client-side timeout the socket may be dead or the query still pending → DESTROY the connection so
@@ -270,7 +293,7 @@ async function timedOutcomeQuery(sql: string, params: any[], label: string): Pro
  * original bug, made unrecoverable.
  */
 async function renewJobLease(jobId: number, attempts: number): Promise<void> {
-  await timedOutcomeQuery(
+  await timedQueueQuery(
     `UPDATE public.job_queue SET started_processing_at = NOW() WHERE id = $1 AND status = 'processing' AND attempts = $2`,
     [jobId, attempts],
     `job ${jobId} lease renewal`
@@ -289,7 +312,7 @@ async function renewJobLease(jobId: number, attempts: number): Promise<void> {
 function startJobLeaseHeartbeat(jobId: number, attempts: number): () => void {
   let renewing = false;
   const timer = setInterval(() => {
-    // One renewal in flight at a time. On a dead socket timedOutcomeQuery waits out QUEUE_QUERY_TIMEOUT_MS,
+    // One renewal in flight at a time. On a dead socket timedQueueQuery waits out QUEUE_QUERY_TIMEOUT_MS,
     // which is longer than the renewal interval, so overlapping beats would each check out a connection and
     // pile up at exactly the moment the pool is already the thing in trouble.
     if (renewing) return;
@@ -312,10 +335,10 @@ async function attemptRecovery(jobId: number, attempts: number, outcome: Outcome
   const { sql, params } = buildOutcomeUpdate(jobId, attempts, outcome);
   try {
     // Time-bounded so a dead socket can't hang the run phase (and the reentrancy guard). Checks out an explicit
-    // client and DESTROYS it on timeout (see timedOutcomeQuery) so a hung write can't leak a pool slot — which,
+    // client and DESTROYS it on timeout (see timedQueueQuery) so a hung write can't leak a pool slot — which,
     // re-attempted every tick by the flush, would otherwise exhaust the pool and stall unrelated jobs. A timeout
     // leaves the intent in pendingRecoveries for a later tick, exactly like any other write failure.
-    await timedOutcomeQuery(sql, params, `job ${jobId} outcome write`);
+    await timedQueueQuery(sql, params, `job ${jobId} outcome write`);
     pendingRecoveries.delete(jobId);
   } catch (err) {
     pendingRecoveries.set(jobId, { attempts, outcome });
@@ -324,7 +347,9 @@ async function attemptRecovery(jobId: number, attempts: number, outcome: Outcome
 }
 
 /**
- * Requeue rows whose lease has expired, at most once per JOB_LEASE_SWEEP_INTERVAL_MS.
+ * START a sweep of rows whose lease has expired, at most once per JOB_LEASE_SWEEP_INTERVAL_MS. Returns as
+ * soon as it is running, not when it is done — the caller is a poll tick, and no part of a tick depends on
+ * the answer.
  *
  * Rides the main poller rather than its own timer in index.ts, for the reason flushPendingRecoveries does:
  * this is shared self-healing for EVERY poller — the dedicated ones (bid_board_ingest, ai_report_generation,
@@ -332,20 +357,31 @@ async function attemptRecovery(jobId: number, attempts: number, outcome: Outcome
  * their claim predicates see only their own type and only 'pending'. One sweeper for all of them beats
  * three loops racing the same rows.
  */
-async function sweepExpiredJobLeasesIfDue(): Promise<void> {
+function startExpiredJobLeaseSweepIfDue(): void {
+  // Never two at once. The throttle below almost always covers this, but "almost" is the wrong word for a
+  // full-table UPDATE: a sweep that runs long enough to outlive its own interval would otherwise get a
+  // second copy racing it over the same rows, each holding a connection.
+  if (jobLeaseSweep) return;
   const now = Date.now();
   if (now - lastJobLeaseSweepAt < JOB_LEASE_SWEEP_INTERVAL_MS) return;
-  // Stamped BEFORE the await, not after it: on a slow or hanging statement, every tick that lands meanwhile
-  // would otherwise start another sweep of the same rows.
   lastJobLeaseSweepAt = now;
-  try {
-    await recoverStaleJobs();
-  } catch (err) {
-    // Swallowed like every other per-tick failure here: pollJobs runs under a bare setInterval, so a
-    // rejection is an unhandled rejection that takes the worker down — and this statement is exactly what
-    // fails when the pool is exhausted, i.e. when the worker is already having a bad minute.
-    console.error("[Worker] Expired-lease sweep failed; retrying on a later tick:", err);
-  }
+  // Started BESIDE the tick, not inside it. Nothing in a poll tick reads this sweep's result — it requeues
+  // rows that the NEXT tick's claim will pick up either way — so making the tick wait on it only exports the
+  // sweep's worst case onto the claim path. That worst case is a statement blocked on a row lock or a
+  // half-dead socket, i.e. exactly when the poller most needs to keep claiming; a self-healing mechanism
+  // must not be able to stall the thing it heals. The statement is bounded (timedQueueQuery) so the promise
+  // always settles, and the throttle stamp above is taken before it starts, so a slow sweep delays the next
+  // sweep rather than piling up.
+  jobLeaseSweep = recoverStaleJobs()
+    .catch((err) => {
+      // Swallowed, and it MUST be: nothing awaits this promise in production, so an escaping rejection is an
+      // unhandled rejection that takes the worker down — and this statement is exactly what fails when the
+      // pool is exhausted, i.e. when the worker is already having a bad minute.
+      console.error("[Worker] Expired-lease sweep failed; retrying on a later tick:", err);
+    })
+    .finally(() => {
+      jobLeaseSweep = null;
+    });
 }
 
 /** Retry any outcome writes a prior tick couldn't persist. Stops at the first failure (pool still down). */
@@ -353,7 +389,7 @@ async function flushPendingRecoveries(): Promise<void> {
   for (const [jobId, { attempts, outcome }] of [...pendingRecoveries]) {
     const { sql, params } = buildOutcomeUpdate(jobId, attempts, outcome);
     try {
-      await timedOutcomeQuery(sql, params, `job ${jobId} outcome flush`);
+      await timedQueueQuery(sql, params, `job ${jobId} outcome flush`);
       pendingRecoveries.delete(jobId);
     } catch {
       break; // pool still unavailable / dead socket — retry the rest on a later tick
@@ -521,8 +557,9 @@ export async function pollJobs() {
     // loops racing the same intents).
     await flushPendingRecoveries();
     // Requeue rows whose owner died mid-delivery. Here rather than at startup only, and safe there only
-    // because a live delivery renews its lease — see the LEASE block above.
-    await sweepExpiredJobLeasesIfDue();
+    // because a live delivery renews its lease — see the LEASE block above. Deliberately NOT awaited: the
+    // claim below must not inherit this statement's worst case (see startExpiredJobLeaseSweepIfDue).
+    startExpiredJobLeaseSweepIfDue();
     await claimAndRunJobs(MAIN_POLL_JOB_TYPE_SQL, RUN_CONCURRENCY);
   } finally {
     polling = false;
@@ -634,7 +671,8 @@ async function processJob(job: any): Promise<void> {
  * Requeue every row whose claim LEASE has expired — a delivery whose owner has not re-stamped
  * `started_processing_at` for JOB_LEASE_EXPIRY_SECONDS, i.e. one whose worker is gone.
  *
- * Runs at startup AND on the main poller's throttled tick (sweepExpiredJobLeasesIfDue). Startup alone was
+ * Runs at startup (awaited, before any poller exists) AND alongside the main poller's throttled tick
+ * (startExpiredJobLeaseSweepIfDue, which does NOT await it). Startup alone was
  * never enough: it only sees rows already expired at boot, so a worker that crashed inside the expiry
  * window and came back left its row 'processing' forever, invisible to every poller. What makes the
  * periodic run safe is the renewal — see the LEASE block at the top of this file. Read `started_processing_at`
@@ -653,13 +691,22 @@ async function processJob(job: any): Promise<void> {
  * strictly better than dropping a never-run job.
  */
 export async function recoverStaleJobs() {
-  const result = await pool.query(
+  // Time-bounded on an EXPLICIT client, exactly like the claim, the renewal and the outcome writes — never
+  // the pool's convenience `query`. This statement has two ways to never answer: a silently-dead socket
+  // (the pool sets no query_timeout, db.ts) and an UPDATE parked behind another transaction's row lock,
+  // which is unremarkable on a table every poller writes to. Unbounded, that promise stays PENDING, so the
+  // caller's catch never runs — a rejection handler cannot fire on a promise that does not settle — and the
+  // one sweeper for every poller becomes the thing that stops them. timedQueueQuery also DESTROYS a timed-
+  // out client (release(err)) rather than returning it, so a sweep that runs every minute cannot leak a
+  // pool slot a minute until max 10 is gone and unrelated jobs stall behind it.
+  const result = await timedQueueQuery(
     `UPDATE public.job_queue
      SET status = 'pending', last_error = 'Recovered from an expired claim lease (its worker stopped renewing it)'
      WHERE status = 'processing'
        AND started_processing_at < NOW() - make_interval(secs => $1)
      RETURNING id, job_type`,
-    [JOB_LEASE_EXPIRY_SECONDS]
+    [JOB_LEASE_EXPIRY_SECONDS],
+    "expired-lease sweep"
   );
   if (result.rows.length > 0) {
     console.log(`[Worker] Recovered ${result.rows.length} stale jobs:`,
