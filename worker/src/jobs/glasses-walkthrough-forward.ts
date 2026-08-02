@@ -12,17 +12,43 @@
 // TROCK_SCOPE_BASE_URL. TROCK Scope does not yet accept this — see the module-level comment on
 // `scopeRequest` for exactly what has to land on that side.
 //
-// IDEMPOTENCY ACROSS RETRIES: TROCK Scope's `POST /walkthroughs` has no idempotency key of its own, so
-// naively re-running this handler on every retry would create a SECOND walkthrough (and re-upload every
-// clip into it) each time a later step fails. Once this handler successfully creates the remote
-// walkthrough, its id is checkpointed BACK into this job's own `job_queue.payload` (a `jsonb_set` update
-// keyed on `job_type` + `payload->>'walkId'`, the same technique `runRfpRequestDeadLetterSweep`
-// (rfp-request-delivery.ts) uses to mark dead rows handled) — so a later attempt of the SAME job reads
-// it back and reuses the existing remote walkthrough instead of creating another. Per-CLIP retries are
-// simpler: TROCK Scope's own checksum uniqueness constraint (clips_walkthrough_checksum_key) rejects a
-// second copy of identical bytes inside one walkthrough as `duplicate_bytes` (409), which
-// `completeClip` below treats as a non-fatal terminal outcome — so re-uploading a clip that fully landed
-// on a prior attempt is at worst a wasted upload, never duplicate scope data.
+// IDEMPOTENCY ACROSS RETRIES: TROCK Scope's `POST /walkthroughs` has no idempotency key of its own, AND no
+// way to look a walkthrough up by anything but its own uuid — so this job can never ask, after the fact,
+// "did my last create land?". Retries are made safe instead by a two-phase marker in this job's OWN
+// `job_queue.payload` (`jsonb_set` keyed on `job_type` + `payload->>'walkId'`, the same technique
+// `runRfpRequestDeadLetterSweep` (rfp-request-delivery.ts) uses to mark dead rows handled):
+//
+//   1. BEFORE the create call goes out, `scopeCreatePendingRef` is written — "a create with this external
+//      ref is in flight and its outcome is unknown". Writing it AFTER the call, or not at all, is the
+//      obvious shape and it is exactly what breaks: a worker that dies — or whose checkpoint write fails —
+//      in the window between a successful create and the returned id landing in the payload is redelivered
+//      the ORIGINAL payload and creates a SECOND walkthrough. That is a second transcription and a second
+//      Anthropic scope extraction, both billed, both wrong, and nothing anywhere says so.
+//   2. On success, `scopeWalkthroughId` replaces the marker in ONE statement, so no reader ever sees a
+//      payload carrying both. A later attempt of the same row reads the id back and reuses the existing
+//      remote walkthrough instead of creating another.
+//   3. The marker is CLEARED — leaving the row plainly retryable — only on positive evidence that no remote
+//      walkthrough exists: TROCK Scope answered with a non-2xx, or the connection was never established.
+//      Both are today's EXPECTED failures (TROCK Scope is not deployed at all → ECONNREFUSED, and has no
+//      machine-auth middleware → 401), so treating them as "unknown" would dead-letter every single walk on
+//      attempt 2 and make this fix worse than the bug it closes.
+//   4. Every OTHER failure — socket lost mid-flight, a 2xx whose body carries no readable id, an outright
+//      crash — leaves the marker set, and the NEXT attempt dead-letters with reconciliation instructions
+//      rather than creating a second walkthrough. A dead letter a human clears in a minute beats a silent
+//      duplicate, and the walk itself is durably filed in the project folder either way, so nothing the
+//      crew can see is ever at risk.
+//
+// A deterministic `externalRef` ("trockcrm:glasses-walkthrough:<walkId>") is sent with every create so the
+// dedupe can eventually move to where it belongs — TROCK Scope's own insert. It is inert today: that route
+// reads a fixed set of body fields off `req.body` and silently drops the rest, so sending it costs nothing
+// and breaks nothing, and step 4 collapses into "TROCK Scope just returns the existing row" the day a
+// unique index on that ref lands (see the REQUIRED trock-scope follow-up on `scopeRequest`).
+//
+// Per-CLIP retries are simpler: TROCK Scope's own checksum uniqueness constraint
+// (clips_walkthrough_checksum_key) rejects a second copy of identical bytes inside one walkthrough as
+// `duplicate_bytes` (409), which `completeClip` below treats as a non-fatal terminal outcome — so
+// re-uploading a clip that fully landed on a prior attempt is at worst a wasted upload, never duplicate
+// scope data.
 import { deadJob, type JobHandlerResult } from "../queue.js";
 import { pool } from "../db.js";
 import { getObjectRangeBuffer } from "../lib/r2-client.js";
@@ -68,6 +94,21 @@ interface JobPayload {
   /** The checkpoint: set once TROCK Scope's walkthrough has actually been created, so a retry of this
    *  same job row reuses it instead of creating a second one. */
   scopeWalkthroughId?: string;
+  /** The INTENT marker, written before the create call and cleared the moment its outcome is known (see
+   *  the IDEMPOTENCY block at the top of this file). Present on delivery ⇒ an earlier attempt sent a
+   *  create whose outcome this job never learned ⇒ retrying would risk a duplicate, so it dead-letters. */
+  scopeCreatePendingRef?: string;
+}
+
+/**
+ * The one stable, client-supplied handle for this walk, identical on every attempt of every delivery. It
+ * is a pure function of `walkId` — the same identity the deterministic R2 keys and the service's own
+ * enqueue-dedupe already treat as "this walk" — so two attempts can never disagree about it, which is the
+ * only property that makes it usable as a dedupe key at all. Namespaced because TROCK Scope will
+ * eventually take refs from more than one upstream.
+ */
+export function deriveScopeWalkthroughExternalRef(walkId: string): string {
+  return `trockcrm:glasses-walkthrough:${walkId}`;
 }
 
 function assertPayload(payload: unknown): JobPayload {
@@ -118,6 +159,12 @@ interface ScopeDeps {
  *      trock-scope user. This client already sends the estimator's trockcrm user id as `capturedBy` in
  *      the walkthrough-create body in anticipation of whichever shape is chosen; today TROCK Scope
  *      ignores it and would 401 the request outright with no machine-auth middleware in place.
+ *   3. dedupe `POST /walkthroughs` on the `externalRef` this client already sends (a unique index on the
+ *      column, and return the existing row rather than 409 on a repeat). Until that lands, the ONLY thing
+ *      preventing a duplicate walkthrough after a mid-forward crash is this job's own pre-create marker,
+ *      whose unresolvable case dead-letters and costs a human a manual reconciliation — see the
+ *      IDEMPOTENCY block at the top of this file. `externalRef` is dropped on the floor today (the route
+ *      copies a fixed set of body fields), so sending it is free and safe in the meantime.
  */
 async function scopeRequest(
   deps: ScopeDeps,
@@ -145,22 +192,107 @@ async function scopeRequest(
   return { status: response.status, json };
 }
 
+/**
+ * Positive evidence that TROCK Scope did NOT create a walkthrough for this request. Only this error type
+ * is safe to treat as "nothing happened remotely", which is what lets the caller clear the pre-create
+ * marker and leave the job on its normal retry schedule. Every other failure — including a plain `Error`
+ * out of this same function — means the outcome is UNKNOWN and the marker must survive.
+ */
+class ScopeWalkthroughNotCreatedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ScopeWalkthroughNotCreatedError";
+  }
+}
+
+/** Node/undici error codes that mean the TCP/TLS connection to TROCK Scope was never established, so not
+ *  one request byte can have been processed. Deliberately narrow: ECONNRESET / EPIPE / ETIMEDOUT /
+ *  UND_ERR_SOCKET / UND_ERR_HEADERS_TIMEOUT are all EXCLUDED because each can fire after the server
+ *  already handled the request and only the response was lost — for those, "the call failed" emphatically
+ *  does not imply "nothing was created". */
+const NEVER_DELIVERED_ERROR_CODES = new Set([
+  "ECONNREFUSED", // nothing accepted the connection — TROCK Scope isn't deployed yet, today's normal case
+  "ENOTFOUND", // DNS never resolved the host (a wrong/blank TROCK_SCOPE_BASE_URL)
+  "EAI_AGAIN", // the DNS lookup itself failed
+  "UND_ERR_CONNECT_TIMEOUT", // undici gave up before the connection came up
+]);
+
+/** Every error code reachable from a fetch rejection. `fetch` reports a bare `TypeError: fetch failed` and
+ *  hides the real reason under `cause`; when a host resolves to several addresses and all of them fail,
+ *  undici raises an `AggregateError` whose `errors` hold one code each. Reads codes ONLY — never the
+ *  request, its headers or its body — which is the structural guarantee that this path cannot surface
+ *  TROCK_SCOPE_SERVICE_TOKEN into a retry log or `last_error`. */
+function collectNetworkErrorCodes(err: unknown, depth = 0): string[] {
+  if (!err || typeof err !== "object" || depth > 4) return [];
+  const node = err as { code?: unknown; cause?: unknown; errors?: unknown };
+  const codes: string[] = [];
+  if (typeof node.code === "string") codes.push(node.code);
+  if (Array.isArray(node.errors)) {
+    for (const nested of node.errors) codes.push(...collectNetworkErrorCodes(nested, depth + 1));
+  }
+  codes.push(...collectNetworkErrorCodes(node.cause, depth + 1));
+  return codes;
+}
+
+/** True only when EVERY leg of the failure was a connect-phase refusal. `every` (not `some`) on purpose:
+ *  a mixed AggregateError where one address refused and another died mid-flight is still ambiguous, and
+ *  ambiguity has to fall on the "we don't know" side. An error carrying no code at all is also unknown. */
+function isNeverDeliveredNetworkFailure(err: unknown): boolean {
+  const codes = collectNetworkErrorCodes(err);
+  return codes.length > 0 && codes.every((code) => NEVER_DELIVERED_ERROR_CODES.has(code));
+}
+
 async function createScopeWalkthrough(
   deps: ScopeDeps,
-  payload: JobPayload
+  payload: JobPayload,
+  externalRef: string
 ): Promise<{ id: string }> {
-  const { status, json } = await scopeRequest(deps, "POST", "/api/walkthroughs", {
-    title: payload.title,
-    siteLabel: payload.siteLabel,
-    dealUuid: payload.dealId,
-    officeSlug: payload.officeSlug,
-    capturedBy: payload.capturedByUserId,
-  });
-  const id = json?.walkthrough?.id;
-  if (status !== 201 || typeof id !== "string") {
-    throw new Error(`TROCK Scope walkthrough create failed: ${status} ${JSON.stringify(json)}`);
+  let status: number;
+  let json: Record<string, any>;
+  try {
+    ({ status, json } = await scopeRequest(deps, "POST", "/api/walkthroughs", {
+      title: payload.title,
+      siteLabel: payload.siteLabel,
+      dealUuid: payload.dealId,
+      officeSlug: payload.officeSlug,
+      capturedBy: payload.capturedByUserId,
+      // Inert today (TROCK Scope copies a fixed set of body fields and drops the rest) and deliberately so:
+      // it degrades to a no-op rather than a 400, and becomes the real dedupe key the moment that side
+      // grows a unique index on it. See follow-up item 3 on `scopeRequest`.
+      externalRef,
+    }));
+  } catch (err) {
+    // No HTTP response at all. `fetch` resolves as soon as response HEADERS arrive, so a rejection here
+    // usually — but not always — means the request never got processed. Only the connect-phase codes
+    // PROVE it; anything else has to be reported as unknown so the caller keeps its pre-create marker.
+    if (isNeverDeliveredNetworkFailure(err)) {
+      throw new ScopeWalkthroughNotCreatedError(
+        `TROCK Scope walkthrough create was never delivered (${collectNetworkErrorCodes(err).join("/")}) — ` +
+          `no remote walkthrough was created.`
+      );
+    }
+    throw err;
   }
-  return { id };
+
+  const id = json?.walkthrough?.id;
+  if (status === 201 && typeof id === "string") {
+    return { id };
+  }
+  if (status >= 200 && status < 300) {
+    // A success status we cannot read an id out of is the one case where "the create threw" absolutely
+    // does NOT imply "nothing was created" — TROCK Scope answers 201 only after its INSERT returns, so a
+    // row almost certainly exists under an id we just failed to parse. Plain Error ⇒ outcome unknown ⇒ the
+    // marker stays and the next attempt reconciles rather than creating a duplicate.
+    throw new Error(
+      `TROCK Scope walkthrough create returned ${status} with no usable walkthrough id: ${JSON.stringify(json)}`
+    );
+  }
+  // TROCK Scope answered and refused. Its create route inserts and THEN replies 201, so a 4xx/5xx came off
+  // the error path with no row behind it — safe to retry, and it must be, because a 401 is exactly what
+  // every one of these calls gets until machine auth lands on that side.
+  throw new ScopeWalkthroughNotCreatedError(
+    `TROCK Scope walkthrough create failed: ${status} ${JSON.stringify(json)}`
+  );
 }
 
 interface BeginClipResult {
@@ -274,13 +406,65 @@ async function uploadClip(
   await completeClip(deps, walkthroughId, begin.clipId, completedParts);
 }
 
+/**
+ * Phase 1 of the create checkpoint: record the INTENT to create, before the request goes out. Its failure
+ * is a hard failure of the whole handler on purpose — if this write cannot land, the create must not
+ * happen, because an unrecorded create is precisely the state this whole mechanism exists to prevent.
+ * Losing an attempt is recoverable (the queue retries); an untracked remote walkthrough is not.
+ */
+async function markScopeCreatePending(db: Queryable, walkId: string, externalRef: string): Promise<void> {
+  await db.query(
+    `UPDATE public.job_queue
+        SET payload = jsonb_set(payload, '{scopeCreatePendingRef}', to_jsonb($1::text), true)
+      WHERE job_type = $2
+        AND payload ->> 'walkId' = $3`,
+    [externalRef, GLASSES_WALKTHROUGH_FORWARD_JOB, walkId]
+  );
+}
+
+/** Retract the intent marker once we have positive evidence no remote walkthrough was created, putting the
+ *  row back in its "nothing has happened remotely yet" state so the queue's ordinary backoff applies. */
+async function clearScopeCreatePending(db: Queryable, walkId: string): Promise<void> {
+  await db.query(
+    `UPDATE public.job_queue
+        SET payload = payload - 'scopeCreatePendingRef'
+      WHERE job_type = $1
+        AND payload ->> 'walkId' = $2`,
+    [GLASSES_WALKTHROUGH_FORWARD_JOB, walkId]
+  );
+}
+
+/** Phase 2: the id lands and the intent marker is dropped in the SAME statement. Two statements would
+ *  leave a window in which the payload carries both, and a reader — the next attempt, or a human reading
+ *  the row after a dead letter — could not tell a settled create from an unresolved one. */
 async function checkpointScopeWalkthroughId(db: Queryable, walkId: string, scopeWalkthroughId: string): Promise<void> {
   await db.query(
     `UPDATE public.job_queue
-        SET payload = jsonb_set(payload, '{scopeWalkthroughId}', to_jsonb($1::text), true)
+        SET payload = jsonb_set(payload, '{scopeWalkthroughId}', to_jsonb($1::text), true) - 'scopeCreatePendingRef'
       WHERE job_type = $2
         AND payload ->> 'walkId' = $3`,
     [scopeWalkthroughId, GLASSES_WALKTHROUGH_FORWARD_JOB, walkId]
+  );
+}
+
+/**
+ * The dead letter for an unresolvable create. It is read by a human — via `last_error` and the alert email
+ * built below — so it states what is unknown, why the job refuses to guess, and the two concrete moves that
+ * resolve it either way. TOKEN SAFETY: built entirely from the job's own payload; it never reads
+ * TROCK_SCOPE_SERVICE_TOKEN, which is what guarantees it cannot leak it.
+ */
+function buildUnconfirmedCreateDeadLetterMessage(payload: JobPayload, externalRef: string): string {
+  return (
+    `A TROCK Scope walkthrough create was already sent for walk ${payload.walkId} (external ref ` +
+    `${externalRef}) and this job never learned whether it succeeded — the worker died, or its checkpoint ` +
+    `write failed, inside that window. TROCK Scope exposes no way to look a walkthrough up by external ` +
+    `ref, so this job cannot tell "it was created" from "it was not", and retrying blind would risk a ` +
+    `SECOND walkthrough plus a second (billed) transcription and scope extraction. It stopped instead. ` +
+    `TO RESOLVE: look in TROCK Scope for a walkthrough on deal ${payload.dealId} titled "${payload.title}". ` +
+    `If one exists, set this job_queue row's payload.scopeWalkthroughId to its id; if none exists, remove ` +
+    `payload.scopeCreatePendingRef. Then set status = 'pending' — the forward resumes safely either way ` +
+    `(TROCK Scope's own checksum constraint already rejects duplicate clip bytes). The walk itself is ` +
+    `durably filed in the project folder and the crew can already see it.`
   );
 }
 
@@ -316,7 +500,40 @@ export async function handleGlassesWalkthroughForward(
 
   let scopeWalkthroughId = p.scopeWalkthroughId;
   if (!scopeWalkthroughId) {
-    const created = await createScopeWalkthrough(scopeDeps, p);
+    if (p.scopeCreatePendingRef) {
+      // An earlier attempt sent a create and never recorded the answer. There is nothing to query and
+      // nothing to infer, so this is where the design deliberately stops being automatic: dead-letter with
+      // instructions rather than roll the dice. Immediate (not after burning the remaining attempts) —
+      // another attempt cannot produce information this one lacks, and the alert sweep below turns the
+      // dead row into a one-time email a human can act on.
+      return deadJob(buildUnconfirmedCreateDeadLetterMessage(p, p.scopeCreatePendingRef));
+    }
+
+    const externalRef = deriveScopeWalkthroughExternalRef(p.walkId);
+    // Intent BEFORE action. Everything after this line is covered: if the process dies at ANY point up to
+    // the checkpoint below, the redelivered payload carries the marker and the branch above takes over.
+    await markScopeCreatePending(db, p.walkId, externalRef);
+
+    let created: { id: string };
+    try {
+      created = await createScopeWalkthrough(scopeDeps, p, externalRef);
+    } catch (err) {
+      if (err instanceof ScopeWalkthroughNotCreatedError) {
+        // Proven not created ⇒ retract the marker so the queue's normal backoff applies instead of a dead
+        // letter. Best-effort by necessity: if THIS write also fails the marker survives, and the next
+        // attempt dead-letters on a create that never happened. That is the fail-CLOSED direction — a
+        // spurious dead letter costs a human one minute; a missed one costs a duplicate scope extraction.
+        await clearScopeCreatePending(db, p.walkId).catch((clearErr) => {
+          console.warn(
+            `[Worker:glasses_walkthrough_forward] Could not retract the pending-create marker for walk ${p.walkId}; ` +
+              `the next attempt will dead-letter for manual reconciliation`,
+            clearErr
+          );
+        });
+      }
+      throw err;
+    }
+
     scopeWalkthroughId = created.id;
     await checkpointScopeWalkthroughId(db, p.walkId, scopeWalkthroughId);
   }
@@ -494,7 +711,10 @@ export function buildGlassesWalkthroughForwardAlertEmail(input: GlassesWalkthrou
     `This job will NOT retry automatically. Once the cause above is fixed, an engineer can reset ` +
     `job_queue row ${input.jobId} (job_type = glasses_walkthrough_forward) back to 'pending' to retry — ` +
     `the forward is idempotent (it checkpoints the created TROCK Scope walkthrough, and TROCK Scope itself ` +
-    `rejects duplicate clip bytes), so retrying will not create duplicate scope data or duplicate uploads.`;
+    `rejects duplicate clip bytes), so retrying will not create duplicate scope data or duplicate uploads. ` +
+    `If the error above says a create outcome was never confirmed, do the one-time reconciliation step it ` +
+    `spells out FIRST: that job stopped on purpose to avoid a duplicate walkthrough, and a bare status ` +
+    `reset will simply — and correctly — stop again.`;
 
   const text = [
     `A glasses-walkthrough recording was never sent to TROCK Scope for scope extraction, and it will not ` +

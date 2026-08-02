@@ -10,6 +10,48 @@ function makeDb() {
   return { query, calls };
 }
 
+/**
+ * A job_queue fake that actually APPLIES the handler's payload writes to a stored payload, so a test can
+ * redeliver the row exactly as the queue would on the next attempt (`storedPayload()`), rather than
+ * hand-writing what it assumes the row now looks like. That fidelity is the whole point for the
+ * create/checkpoint crash window: the bug is precisely that the payload the queue redelivers does not
+ * record that a create already went out.
+ *
+ * `failOn` blows one statement up mid-flight, which is how a crash inside that window is reproduced
+ * without actually killing the test process.
+ */
+function makeJobQueueDb(initialPayload: Record<string, unknown>, opts: { failOn?: RegExp } = {}) {
+  let stored: Record<string, unknown> = { ...initialPayload };
+  const calls: Array<{ sql: string; params?: unknown[] }> = [];
+  const query = vi.fn(async (sql: string, params?: unknown[]) => {
+    calls.push({ sql, params });
+    if (opts.failOn?.test(sql)) throw new Error("Connection terminated unexpectedly");
+    if (/\{scopeWalkthroughId\}/.test(sql)) {
+      const { scopeCreatePendingRef: _dropped, ...rest } = stored;
+      stored = { ...rest, scopeWalkthroughId: params![0] };
+    } else if (/\{scopeCreatePendingRef\}/.test(sql)) {
+      stored = { ...stored, scopeCreatePendingRef: params![0] };
+    } else if (/payload - 'scopeCreatePendingRef'/.test(sql)) {
+      const { scopeCreatePendingRef: _dropped, ...rest } = stored;
+      stored = rest;
+    }
+    return { rows: [] };
+  });
+  return { query, calls, storedPayload: () => stored };
+}
+
+/** Shapes a Node/undici network rejection: `fetch` rejects with `TypeError: fetch failed` and hangs the
+ *  real reason off `cause`, which is where the "never reached the server" vs "may have been processed"
+ *  distinction actually lives. */
+function networkError(code: string): TypeError {
+  const err = new TypeError("fetch failed");
+  (err as any).cause = Object.assign(new Error(`connect ${code}`), { code });
+  return err;
+}
+
+const SCOPE_BASE_URL = "https://scope.example.com";
+const CREATE_URL = `${SCOPE_BASE_URL}/api/walkthroughs`;
+
 function makePayload(overrides: Record<string, unknown> = {}) {
   return {
     walkId: "walk-1",
@@ -124,10 +166,12 @@ describe("handleGlassesWalkthroughForward", () => {
       dealUuid: "deal-1",
       officeSlug: "dallas",
       capturedBy: "user-1",
+      externalRef: "trockcrm:glasses-walkthrough:walk-1",
     });
 
-    // Checkpointed the remote walkthrough id back into THIS job row via jsonb_set, keyed on walkId.
-    const checkpoint = db.calls.find((c) => c.sql.includes("jsonb_set"));
+    // Checkpointed the remote walkthrough id back into THIS job row via jsonb_set, keyed on walkId. Match
+    // the scopeWalkthroughId statement specifically: the pre-create marker is a jsonb_set write too.
+    const checkpoint = db.calls.find((c) => /\{scopeWalkthroughId\}/.test(c.sql));
     expect(checkpoint).toBeDefined();
     expect(checkpoint!.params).toEqual(["scope-walkthrough-1", GLASSES_WALKTHROUGH_FORWARD_JOB, "walk-1"]);
 
@@ -341,5 +385,167 @@ describe("handleGlassesWalkthroughForward", () => {
     expect(createCalls).toHaveLength(1); // one remote walkthrough, not one per clip
     const beginCalls = calls.filter((c) => /\/clips$/.test(c.url));
     expect(beginCalls).toHaveLength(2);
+  });
+
+  // ── Retry-safety of the remote create ────────────────────────────────────────────────────────────
+  //
+  // TROCK Scope's POST /walkthroughs has no idempotency key and no way to look a walkthrough up by
+  // anything but its own uuid, so the ONLY thing standing between a mid-forward crash and a second
+  // walkthrough (with a second paid transcription + scope extraction behind it) is what this job wrote
+  // into its own payload before the call went out. These cases pin that contract down from both sides:
+  // an unconfirmed create must never be retried blind, and a create TROCK Scope demonstrably never
+  // performed must stay retryable.
+  describe("remote-create retry safety", () => {
+    /** A distinctive stand-in for TROCK_SCOPE_SERVICE_TOKEN (never the real secret), so the token-safety
+     *  assertion below is actually meaningful rather than matching an incidental substring. */
+    const FAKE_TOKEN = "not-a-real-scope-service-token-9f3c";
+    const deps = (db: any, fetchImpl: any) => ({
+      db,
+      fetchImpl: fetchImpl as any,
+      baseUrl: SCOPE_BASE_URL,
+      token: FAKE_TOKEN,
+      downloadRange: vi.fn(async () => Buffer.from("x")),
+    });
+
+    it("never creates a SECOND remote walkthrough when the checkpoint write dies right after a successful create", async () => {
+      // Attempt 1: the create lands remotely, then the id checkpoint fails — the exact crash window.
+      const db = makeJobQueueDb(makePayload(), { failOn: /\{scopeWalkthroughId\}/ });
+      const first = makeScopeFetch();
+      await expect(
+        handleGlassesWalkthroughForward(db.storedPayload(), "office-1", deps(db, first.fetchImpl))
+      ).rejects.toThrow(/Connection terminated/);
+      expect(first.calls.filter((c) => c.url === CREATE_URL)).toHaveLength(1);
+
+      // Attempt 2: job_queue redelivers the row's payload AS THE DB NOW HOLDS IT. A walkthrough may
+      // exist in TROCK Scope under an id nobody recorded, so the only safe move is to stop.
+      const db2 = makeJobQueueDb(db.storedPayload());
+      const second = makeScopeFetch();
+      const result = await handleGlassesWalkthroughForward(
+        db2.storedPayload(),
+        "office-1",
+        deps(db2, second.fetchImpl)
+      );
+
+      expect(second.calls.filter((c) => c.url === CREATE_URL)).toHaveLength(0);
+      expect(result).toEqual({ status: "dead", error: expect.stringContaining("walk-1") });
+      expect((result as any).error).toMatch(/never (learned|confirmed)/i);
+      // The dead letter has to tell a human how to reconcile, not just that something went wrong.
+      expect((result as any).error).toContain("scopeWalkthroughId");
+      // TOKEN SAFETY: the service token must never reach last_error / the alert email.
+      expect((result as any).error).not.toContain(FAKE_TOKEN);
+    });
+
+    it("records the pending-create marker BEFORE the create request goes out, never after", async () => {
+      // If the marker were written after the call, the crash window would still be wide open. Failing
+      // the marker write must therefore also abort the create — losing a forward attempt is recoverable,
+      // an untracked remote walkthrough is not.
+      const db = makeJobQueueDb(makePayload(), { failOn: /\{scopeCreatePendingRef\}/ });
+      const { fetchImpl, calls } = makeScopeFetch();
+
+      await expect(
+        handleGlassesWalkthroughForward(db.storedPayload(), "office-1", deps(db, fetchImpl))
+      ).rejects.toThrow(/Connection terminated/);
+      expect(calls).toHaveLength(0);
+    });
+
+    it("clears the pending-create marker when TROCK Scope ANSWERED and refused, so the job stays retryable", async () => {
+      // A completed non-2xx response is positive evidence no walkthrough row exists (the create route
+      // inserts and then answers 201; an error response comes from the error path instead). This is
+      // today's most likely failure by far — TROCK Scope has no machine-auth middleware yet and 401s
+      // every one of these calls — and it must NOT burn the job on a phantom duplicate hunt.
+      const db = makeJobQueueDb(makePayload());
+      const refused = makeScopeFetch({ createStatus: 401, createBody: { error: "unauthorized" } });
+      await expect(
+        handleGlassesWalkthroughForward(db.storedPayload(), "office-1", deps(db, refused.fetchImpl))
+      ).rejects.toThrow(/walkthrough create failed/);
+      expect(db.storedPayload().scopeCreatePendingRef).toBeUndefined();
+
+      // …and the next attempt proceeds normally rather than dead-lettering.
+      const retry = makeScopeFetch();
+      await expect(
+        handleGlassesWalkthroughForward(db.storedPayload(), "office-1", deps(db, retry.fetchImpl))
+      ).resolves.toBeUndefined();
+      expect(retry.calls.filter((c) => c.url === CREATE_URL)).toHaveLength(1);
+      expect(db.storedPayload().scopeWalkthroughId).toBe("scope-walkthrough-1");
+    });
+
+    it("clears the pending-create marker when the connection was never established (TROCK Scope not deployed)", async () => {
+      // ECONNREFUSED means nothing accepted the TCP connection, so no request bytes were ever processed.
+      // That is the steady state until TROCK Scope ships, and it must keep retrying on the normal
+      // backoff instead of dead-lettering every walk on attempt 2.
+      const db = makeJobQueueDb(makePayload());
+      const fetchImpl = vi.fn(async () => {
+        throw networkError("ECONNREFUSED");
+      });
+
+      await expect(
+        handleGlassesWalkthroughForward(db.storedPayload(), "office-1", deps(db, fetchImpl))
+      ).rejects.toThrow();
+      expect(db.storedPayload().scopeCreatePendingRef).toBeUndefined();
+    });
+
+    it("KEEPS the pending-create marker when the socket died mid-flight (the request may have been processed)", async () => {
+      // ECONNRESET can fire after TROCK Scope fully handled the request and lost only the response, so
+      // this one is genuinely unknowable and must fall to the dead letter rather than to a blind retry.
+      const db = makeJobQueueDb(makePayload());
+      const fetchImpl = vi.fn(async () => {
+        throw networkError("ECONNRESET");
+      });
+
+      await expect(
+        handleGlassesWalkthroughForward(db.storedPayload(), "office-1", deps(db, fetchImpl))
+      ).rejects.toThrow();
+      expect(db.storedPayload().scopeCreatePendingRef).toBe("trockcrm:glasses-walkthrough:walk-1");
+
+      const retry = makeScopeFetch();
+      const result = await handleGlassesWalkthroughForward(
+        db.storedPayload(),
+        "office-1",
+        deps(db, retry.fetchImpl)
+      );
+      expect(retry.calls.filter((c) => c.url === CREATE_URL)).toHaveLength(0);
+      expect(result).toEqual({ status: "dead", error: expect.any(String) });
+    });
+
+    it("KEEPS the pending-create marker on a 2xx whose body carries no usable walkthrough id", async () => {
+      // A 201 we cannot read an id out of means TROCK Scope very likely DID insert a row — the one
+      // outcome where "the create threw" absolutely does not imply "nothing was created".
+      const db = makeJobQueueDb(makePayload());
+      const { fetchImpl } = makeScopeFetch({ createStatus: 201, createBody: { walkthrough: {} } });
+
+      await expect(
+        handleGlassesWalkthroughForward(db.storedPayload(), "office-1", deps(db, fetchImpl))
+      ).rejects.toThrow(/no usable walkthrough id/);
+      expect(db.storedPayload().scopeCreatePendingRef).toBe("trockcrm:glasses-walkthrough:walk-1");
+    });
+
+    it("sends a deterministic externalRef with the create so TROCK Scope can dedupe on it once it grows a key", async () => {
+      const db = makeJobQueueDb(makePayload());
+      const { fetchImpl, calls } = makeScopeFetch();
+      await handleGlassesWalkthroughForward(db.storedPayload(), "office-1", deps(db, fetchImpl));
+
+      const createBody = JSON.parse(calls.find((c) => c.url === CREATE_URL)!.init.body);
+      expect(createBody.externalRef).toBe("trockcrm:glasses-walkthrough:walk-1");
+      // Same walk ⇒ same ref on every attempt: that is what makes it usable as a dedupe key at all.
+      const db2 = makeJobQueueDb(makePayload());
+      const again = makeScopeFetch();
+      await handleGlassesWalkthroughForward(db2.storedPayload(), "office-1", deps(db2, again.fetchImpl));
+      expect(JSON.parse(again.calls.find((c) => c.url === CREATE_URL)!.init.body).externalRef).toBe(
+        createBody.externalRef
+      );
+    });
+
+    it("clears the pending-create marker in the same statement that checkpoints the id", async () => {
+      // Two statements would leave a window where BOTH keys are set, and a reader of the payload could
+      // not tell a completed create from an unresolved one.
+      const db = makeJobQueueDb(makePayload());
+      const { fetchImpl } = makeScopeFetch();
+      await handleGlassesWalkthroughForward(db.storedPayload(), "office-1", deps(db, fetchImpl));
+
+      expect(db.storedPayload().scopeWalkthroughId).toBe("scope-walkthrough-1");
+      expect(db.storedPayload().scopeCreatePendingRef).toBeUndefined();
+      const checkpoint = db.calls.find((c) => /\{scopeWalkthroughId\}/.test(c.sql));
+      expect(checkpoint!.sql).toContain("- 'scopeCreatePendingRef'");
+    });
   });
 });
