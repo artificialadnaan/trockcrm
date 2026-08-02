@@ -1,12 +1,19 @@
 import React from "react";
 import { Redirect, Tabs, useGlobalSearchParams, usePathname } from "expo-router";
-import { ActivityIndicator, View } from "react-native";
+import { ActivityIndicator, AppState, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
+import { apiFetch } from "../../src/api/client";
+import type { Fetcher } from "../../src/api/endpoints";
 import { useAuth } from "../../src/auth/AuthContext";
 import { buildLoginReturnTo } from "../../src/navigation/return-to";
 import { theme } from "../../src/theme/theme";
 import { walkOwnerKey } from "../../src/walkthrough/owner-key";
-import { scanRecoverableWalksAtStartup } from "../../src/walkthrough/upload";
+import {
+  drainWalkQueue,
+  getSchedulableWalkCount,
+  scanRecoverableWalksAtStartup,
+} from "../../src/walkthrough/upload";
+import { walkthroughUploadClient } from "../../src/walkthrough/upload-client";
 
 // Monochrome vector icons so the active tab icon inherits tabBarActiveTintColor
 // (brand red) in lockstep with its label — the emoji glyphs never picked up the tint.
@@ -17,7 +24,13 @@ function TabIcon({ name, color }: { name: IoniconName; color: string }) {
 
 /** Authenticated tab shell (Projects / Capture / Profile) — replaces FieldLayout. */
 export default function AppLayout() {
-  const { ready, token, user, activeOfficeId } = useAuth();
+  const { ready, token, user, activeOfficeId, signOut } = useAuth();
+
+  // Same office-resolution rule as walk.tsx, profile.tsx and the background drain task
+  // (activeOfficeId ?? primary office) — all four MUST agree, or this would scan and drain a
+  // manifest namespace no walk was ever written into. owner-key.ts is the single source of truth.
+  const resolvedOfficeId = activeOfficeId ?? user?.tenantId ?? null;
+  const ownerKey = walkOwnerKey(user?.id, resolvedOfficeId);
 
   // Scan once for walk recordings that were interrupted before they could be queued — an app kill
   // mid-recording, or after native finalised but before the enqueue effect ran, leaves files under
@@ -26,14 +39,68 @@ export default function AppLayout() {
   // It runs HERE rather than on Profile because the scan is only trustworthy before anything could
   // be recording: an active walk has no manifest entry either (it is not enqueued until terminal),
   // so scanning mid-walk would report the live recording as orphaned. This layout mounts on entry
-  // to the authenticated shell, before any walk screen can exist; Profile then reads the snapshot
-  // rather than re-scanning.
+  // to the authenticated shell, before any walk screen can exist; Profile then subscribes to the
+  // snapshot rather than re-scanning.
   React.useEffect(() => {
-    if (!token) return;
-    const ownerKey = walkOwnerKey(user?.id, activeOfficeId ?? user?.tenantId ?? null);
-    if (!ownerKey) return;
+    if (!token || !ownerKey) return;
     void scanRecoverableWalksAtStartup(ownerKey);
-  }, [token, user?.id, user?.tenantId, activeOfficeId]);
+  }, [token, ownerKey]);
+
+  const queueFetcher = React.useCallback<Fetcher>(
+    (path, opts) =>
+      apiFetch(path, {
+        ...opts,
+        token: token ?? undefined,
+        officeId: resolvedOfficeId,
+        onUnauthorized: () => void signOut(),
+      }),
+    [token, resolvedOfficeId, signOut],
+  );
+
+  /**
+   * Resume whatever is ALREADY queued, both on entry to the authenticated shell and every time the
+   * app comes back to the foreground.
+   *
+   * Without this, a manifest could only ever be drained by the one trigger that created it:
+   * walk.tsx fires a drain when a walk reaches a terminal state. Kill the process mid-drain — an
+   * OS memory kill, a crash, the user swiping the app away while a multi-GB video uploads — and
+   * that trigger is gone for good. The recording stayed queued, correctly and durably, with nothing
+   * in the foreground ever looking at it again; the background task is explicitly opportunistic
+   * (see upload-background-task.ts's header — iOS may grant its window hours later or not at all),
+   * so simply reopening the app could leave a perfectly schedulable site visit unsent indefinitely.
+   *
+   * The shell is the right owner: it is the one component every authenticated route mounts under,
+   * it already resolves the owner key, and unlike walk.tsx it isn't tied to a single deal. The
+   * AppState half matters more than the mount half in practice — this layout rarely remounts,
+   * while "backgrounded mid-upload, then reopened" is the ordinary case.
+   */
+  React.useEffect(() => {
+    if (!token || !ownerKey) return;
+    let active = true;
+    const drainIfQueued = async () => {
+      // Cheap manifest read first, exactly as the background task gates itself: the overwhelmingly
+      // common answer is zero, and drainWalkQueue would otherwise take the drain lock and
+      // keep-awake on literally every foreground transition.
+      if ((await getSchedulableWalkCount(ownerKey)) === 0 || !active) return;
+      // No "is a drain already running?" check needed: drainWalkQueue coalesces a request made
+      // during an active drain into a follow-up pass. That is exactly what should happen here —
+      // a resume that lands mid-drain means the queue is worth re-reading, not ignoring.
+      await drainWalkQueue(ownerKey, queueFetcher, walkthroughUploadClient);
+    };
+    const run = () => void drainIfQueued().catch(() => undefined);
+
+    run();
+    const sub = AppState.addEventListener("change", (next) => {
+      if (next === "active") run();
+    });
+    return () => {
+      // Only stops NEW drains from being started after unmount; a drain already in flight is
+      // deliberately left to finish — abandoning an upload on a navigation change is the failure
+      // this effect exists to prevent, not something to reintroduce.
+      active = false;
+      sub.remove();
+    };
+  }, [token, ownerKey, queueFetcher]);
 
   // Capture where the user was headed (e.g. the corrective-action deep link) so a required login can return
   // them there. This is the single chokepoint for BOTH a cold-start deep link (app not running → OS opens

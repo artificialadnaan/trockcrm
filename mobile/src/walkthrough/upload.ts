@@ -396,28 +396,70 @@ export async function getRecoverableWalkCount(ownerKey: string): Promise<number>
  */
 let recoverableAtStartup: RecoveredWalk[] | null = null;
 
+/**
+ * Notified the moment the startup scan resolves.
+ *
+ * Load-bearing, not a convenience: the scan is async and is kicked off by the authenticated shell's
+ * mount effect, so a screen that renders in that same tick (a cold launch straight onto Profile, or
+ * a deep link into it) reads the snapshot BEFORE it exists. Completing the scan used to only assign
+ * the module variable above — no React state, no event — so nothing told that screen to look again;
+ * its recovery card stayed hidden until some unrelated parent rerender happened to sweep it back in,
+ * which is not something a caller can rely on and left real, unqueued recordings invisible.
+ */
+const startupScanListeners = new Set<() => void>();
+
+/**
+ * Subscribe to startup-scan completion; returns its own unsubscribe. Shaped for React's
+ * useSyncExternalStore paired with getRecoverableWalksFromStartup as the snapshot — see
+ * app/(app)/profile.tsx's RecoverableWalksCard.
+ */
+export function subscribeRecoverableWalksFromStartup(listener: () => void): () => void {
+  startupScanListeners.add(listener);
+  return () => {
+    startupScanListeners.delete(listener);
+  };
+}
+
+function notifyStartupScanListeners(): void {
+  // Iterate a copy: a React unsubscribe fired from within a listener would otherwise mutate the Set
+  // mid-iteration.
+  for (const listener of [...startupScanListeners]) listener();
+}
+
 /** Called once from the root layout's startup effect. Best-effort; never throws. */
 export async function scanRecoverableWalksAtStartup(ownerKey: string): Promise<void> {
   if (recoverableAtStartup !== null) return;
   try {
     recoverableAtStartup = await findRecoverableWalks(ownerKey);
+    notifyStartupScanListeners();
   } catch {
     // A failed scan must never block launch. Left null so a later launch can retry rather than
     // caching an empty result that would hide real orphans for the rest of the session.
   }
 }
 
+/** The one empty result, never re-created. This getter is used as a useSyncExternalStore snapshot,
+ *  and React compares snapshots by IDENTITY — returning a fresh `[]` on each call would make every
+ *  render look like a store change and spin the subscriber forever ("The result of getSnapshot
+ *  should be cached to avoid an infinite loop"). */
+const NO_RECOVERABLE_WALKS: RecoveredWalk[] = [];
+
 /**
  * What the startup scan found, or an empty list if it never ran or failed. Safe to call at any time
  * — it reads the snapshot rather than re-scanning, so it cannot mistake a live walk for an orphan.
+ * Pair it with subscribeRecoverableWalksFromStartup in a component, or a caller that reads it before
+ * the scan resolves will never learn the answer changed.
  */
 export function getRecoverableWalksFromStartup(): RecoveredWalk[] {
-  return recoverableAtStartup ?? [];
+  return recoverableAtStartup ?? NO_RECOVERABLE_WALKS;
 }
 
-/** Test seam: forget the snapshot so the next `scanRecoverableWalksAtStartup` actually scans. */
+/** Test seam: forget the snapshot so the next `scanRecoverableWalksAtStartup` actually scans. Also
+ *  notifies, so a component already mounted against the previous snapshot drops back to empty
+ *  instead of rendering a result the module no longer holds. */
 export function __resetRecoverableStartupScanForTests(): void {
   recoverableAtStartup = null;
+  notifyStartupScanListeners();
 }
 
 /** A file's own last-modified time in epoch ms, or `fallback` if it can't be read — see
@@ -552,12 +594,26 @@ async function callCompletion(
  * is somehow already gone. Shared by drainWalkQueue's normal post-completion cleanup and its Fix 2
  * cleanup-only branch (a walk found already completedAt-stamped on entry) so both paths behave
  * identically.
+ *
+ * Returns whether the cleanup actually FINISHED, and deliberately keeps the manifest entry when it
+ * did not. `idempotent: true` already resolves for a path that isn't there, so a rejection here is
+ * never "already deleted" — it is a real I/O failure with a (potentially multi-GB) file still on the
+ * phone. This used to swallow that with `.catch(() => undefined)` and prune the entry anyway, which
+ * converted a transient failure into a permanent leak: needsCleanup can only ever see walks still IN
+ * the manifest, so once the entry was gone no drain — foreground or background — could ever retry
+ * the delete, and the leftover Documents/walkthroughs/<walkId>/ directory would then read to
+ * findRecoverableWalks as an ORPHAN, i.e. a walk that never uploaded, when the server had in fact
+ * already filed it. Keeping the entry costs a few hundred bytes of manifest and one retry per drain;
+ * dropping it costs the whole recording. There is no attempt cap on this on purpose: a walk whose
+ * bytes the server already has is worth retrying indefinitely, and every retry is idempotent.
  */
-async function finishWalkCleanup(ownerKey: string, walk: QueuedWalk): Promise<void> {
-  await Promise.all(
-    walk.artifacts.map((a) => FileSystem.deleteAsync(a.uri, { idempotent: true }).catch(() => undefined)),
+async function finishWalkCleanup(ownerKey: string, walk: QueuedWalk): Promise<boolean> {
+  const deletions = await Promise.allSettled(
+    walk.artifacts.map((a) => FileSystem.deleteAsync(a.uri, { idempotent: true })),
   );
+  if (deletions.some((d) => d.status === "rejected")) return false;
   await mutateManifest(ownerKey, (current) => removeQueuedWalk(current, walk.walkId));
+  return true;
 }
 
 export type WalkDrainSummary = {
@@ -567,7 +623,10 @@ export type WalkDrainSummary = {
   /** Walks removed from the queue this drain because the server has accepted them and local cleanup
    *  (file deletes + manifest removal) finished — either the completion call succeeded THIS drain, or
    *  (Fix 2) the walk was already completedAt-stamped on entry and this drain only finished the
-   *  cleanup an earlier, interrupted run left undone. */
+   *  cleanup an earlier, interrupted run left undone. A walk whose completion succeeded but whose
+   *  local deletes then failed is NOT counted: it is still queued and its media is still on the
+   *  phone, so reporting it as completed would be a lie the caller can't check (see
+   *  finishWalkCleanup). */
   completed: number;
   completionFailures: number;
   remainingWalks: number;
@@ -577,6 +636,20 @@ export type WalkDrainSummary = {
 // caller would re-PUT/re-complete in-flight work. Module-local guard — both entry points share this
 // process, same as ../capture/upload-queue.ts's `draining` flag.
 let draining = false;
+/** Which owner the in-flight drain belongs to — see drainWalkQueue's coalescing branch for why a
+ *  pending request is only meaningful for that same owner. Null whenever `draining` is false. */
+let activeDrainOwnerKey: string | null = null;
+/** Set when a drain was requested for the ACTIVE owner while that drain was already running. The
+ *  running drain serves it with a follow-up pass rather than dropping it (see drainWalkQueue). */
+let drainRequested = false;
+
+/** Total passes ONE drainWalkQueue call may make, the first included. A cap, not a target: passes 2+
+ *  only happen when something re-requested a drain mid-pass, and in the normal case (a walk enqueued
+ *  during a long upload) exactly one follow-up pass is needed. It exists so a caller that re-triggers
+ *  a drain from its own progress/completion handling can't hold this loop — and the keep-awake lock
+ *  it owns — open forever. Nothing is lost at the cap: the manifest is durable, so whatever is still
+ *  queued is picked up by the next drain (foreground resume, enqueue, or the background task). */
+export const MAX_DRAIN_PASSES = 4;
 
 /**
  * Upload everything currently queued for `ownerKey`. Walks drain oldest-enqueued first; within a
@@ -592,6 +665,13 @@ let draining = false;
  * supposed to follow it (deleting local files, then removing the manifest entry) never finished — the
  * resumed drain finishes exactly that, and never re-attempts completion itself. See needsCleanup /
  * isWalkDrainable in upload-core.ts. Never throws — returns a summary.
+ *
+ * ONE drain runs at a time, but a request that arrives while one is running is COALESCED, not
+ * dropped: each pass (runDrainPass) works from a snapshot taken at its own entry, so a walk enqueued
+ * mid-drain can only ever be picked up by a LATER pass. Without that follow-up, finishing a second
+ * walk while the first was still uploading left it queued with nothing scheduled to send it — the
+ * background task is explicitly opportunistic (see upload-background-task.ts), so "later" could mean
+ * hours. The returned summary covers every pass this call made, and MAX_DRAIN_PASSES bounds them.
  */
 export async function drainWalkQueue(
   ownerKey: string,
@@ -600,6 +680,15 @@ export async function drainWalkQueue(
   opts: { onProgress?: (summary: WalkDrainSummary) => void } = {},
 ): Promise<WalkDrainSummary> {
   if (draining) {
+    // Record the request instead of silently dropping it. The running drain fixed its `ordered`
+    // snapshot when it entered runDrainPass, so a walk enqueued a moment ago is invisible to it —
+    // and this early return means nothing else was scheduling one either. A second walk finished
+    // back-to-back with a long (multi-GB) upload therefore sat untouched until an opportunistic
+    // background window iOS may not grant for hours, with the app in the foreground and a drain
+    // running the whole time. Only a request for the SAME owner is worth recording: a different
+    // signed-in identity has a different manifest, which re-running this drain's queue would do
+    // nothing for (that owner's own shell-mount/foreground drain is what covers them).
+    if (ownerKey === activeDrainOwnerKey) drainRequested = true;
     return {
       puts: 0,
       putFailures: 0,
@@ -609,100 +698,145 @@ export async function drainWalkQueue(
     };
   }
   draining = true;
+  activeDrainOwnerKey = ownerKey;
   let keptAwake = false;
-  try {
-    const walks = await getQueuedWalks(ownerKey);
-    const ordered = walks.filter(isWalkDrainable).sort((a, b) => a.enqueuedAt - b.enqueuedAt);
-    if (ordered.length === 0) {
-      return { puts: 0, putFailures: 0, completed: 0, completionFailures: 0, remainingWalks: walks.length };
-    }
-
+  // Activated lazily and at most once, so a pass with nothing to do never takes the lock, and a
+  // multi-pass drain holds it continuously rather than dropping it between passes.
+  const keepAwake = async (): Promise<void> => {
+    if (keptAwake) return;
     try {
       await activateKeepAwakeAsync(KEEP_AWAKE_TAG);
       keptAwake = true;
     } catch {
       // Keep-awake is best-effort; draining continues without it.
     }
+  };
+  try {
+    const total: WalkDrainSummary = {
+      puts: 0,
+      putFailures: 0,
+      completed: 0,
+      completionFailures: 0,
+      remainingWalks: 0,
+    };
+    for (let pass = 1; pass <= MAX_DRAIN_PASSES; pass++) {
+      // Cleared BEFORE the pass, never after: a request that lands WHILE this pass runs must
+      // survive to the loop check below, and one that landed during the previous pass has just been
+      // served by this one re-reading the manifest.
+      drainRequested = false;
+      const summary = await runDrainPass(ownerKey, fetcher, client, keepAwake);
+      total.puts += summary.puts;
+      total.putFailures += summary.putFailures;
+      total.completed += summary.completed;
+      total.completionFailures += summary.completionFailures;
+      total.remainingWalks = summary.remainingWalks;
+      // Cumulative, so a caller is never told "1 walk completed" by a call that shipped two.
+      opts.onProgress?.({ ...total });
+      if (!drainRequested) break;
+    }
+    return total;
+  } finally {
+    // Keep-awake is released, and only then is the lock dropped — the same strict nesting the
+    // single-pass version had, so no second drain can start while this one is still winding down.
+    if (keptAwake) await deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => undefined);
+    activeDrainOwnerKey = null;
+    draining = false;
+  }
+}
 
-    let puts = 0;
-    let putFailures = 0;
-    let completed = 0;
-    let completionFailures = 0;
+/**
+ * ONE pass over the queue as it stands right now. The `ordered` snapshot is fixed at entry — which
+ * is exactly why drainWalkQueue may run this more than once (see its coalescing loop): a walk
+ * enqueued after this point cannot be picked up by the pass already in progress.
+ */
+async function runDrainPass(
+  ownerKey: string,
+  fetcher: Fetcher,
+  client: WalkthroughUploadClient,
+  keepAwake: () => Promise<void>,
+): Promise<WalkDrainSummary> {
+  const walks = await getQueuedWalks(ownerKey);
+  const ordered = walks.filter(isWalkDrainable).sort((a, b) => a.enqueuedAt - b.enqueuedAt);
+  if (ordered.length === 0) {
+    return { puts: 0, putFailures: 0, completed: 0, completionFailures: 0, remainingWalks: walks.length };
+  }
 
-    for (const walk of ordered) {
-      // A walk that reaches here with needsCleanup(walk) true is stranded mid-cleanup: the server
-      // already accepted it (a prior, interrupted drain got as far as markWalkCompleted below) but
-      // the deletes + manifest removal that are supposed to follow never finished — most likely the
-      // app was suspended or killed in that exact window. There is no PUT or completion work left to
-      // do (both already succeeded); finish exactly the cleanup, idempotently, and move on. Before
-      // Fix 2, isWalkDrainable excluded every completed walk, so `ordered` would never have
-      // contained this walk at all — it would sit here, files and all, forever.
-      if (needsCleanup(walk)) {
-        await finishWalkCleanup(ownerKey, walk);
-        // Same observable outcome as a completion that succeeds THIS drain (files gone, walk off
-        // the manifest) — just finishing what an earlier, interrupted drain started.
-        completed++;
-        continue;
-      }
+  await keepAwake();
 
-      // Phase 1: PUT every currently-drainable artifact's bytes.
-      for (const artifact of drainableArtifacts(walk)) {
-        try {
-          const sizeBytes = await putArtifactBytes(client, fetcher, walk, artifact);
-          await mutateManifest(ownerKey, (current) =>
-            current.map((w) =>
-              w.walkId === walk.walkId ? markArtifactPut(w, artifact.idempotencyKey, sizeBytes, Date.now()) : w,
-            ),
-          );
-          puts++;
-        } catch {
-          await mutateManifest(ownerKey, (current) =>
-            current.map((w) =>
-              w.walkId === walk.walkId ? bumpArtifactAttempts(w, [artifact.idempotencyKey], Date.now()) : w,
-            ),
-          );
-          putFailures++;
-        }
-      }
+  let puts = 0;
+  let putFailures = 0;
+  let completed = 0;
+  let completionFailures = 0;
 
-      // Phase 2: the walk's ONE completion call, only once every artifact is confirmed in R2.
-      // Re-read first — phase 1 above may have just changed this walk's state, and a walk that was
-      // ALREADY fully-put on entry (a prior drain PUT everything but never completed) never entered
-      // the phase-1 loop at all (drainableArtifacts would be empty), so this is the only place its
-      // completion gets attempted.
-      const fresh = (await readManifest(ownerKey)).find((w) => w.walkId === walk.walkId);
-      if (fresh && needsCompletion(fresh)) {
-        try {
-          await callCompletion(client, fetcher, fresh);
-          // Persist completedAt BEFORE deleting anything: a crash between these two steps leaves a
-          // walk stranded with completedAt set and its local files still on disk — needsCleanup
-          // recognizes exactly that state, and isWalkDrainable (Fix 2) guarantees a FUTURE drain
-          // revisits it and runs the cleanup-only branch above. (An earlier version of this comment
-          // claimed "a future drain would try to re-complete" it — that was never true: completion
-          // already succeeded, isWalkDrainable used to EXCLUDE completed walks entirely, and nothing
-          // else ever scanned for them, so a walk stranded here stayed stranded — local files and
-          // all — forever.) The one failure mode this ordering still exists to prevent is the
-          // opposite: files deleted with no server record of them ever having existed.
-          await mutateManifest(ownerKey, (current) =>
-            current.map((w) => (w.walkId === walk.walkId ? markWalkCompleted(w, Date.now()) : w)),
-          );
-          await finishWalkCleanup(ownerKey, fresh);
-          completed++;
-        } catch {
-          await mutateManifest(ownerKey, (current) =>
-            current.map((w) => (w.walkId === walk.walkId ? bumpCompletionAttempts(w, Date.now()) : w)),
-          );
-          completionFailures++;
-        }
+  for (const walk of ordered) {
+    // A walk that reaches here with needsCleanup(walk) true is stranded mid-cleanup: the server
+    // already accepted it (a prior, interrupted drain got as far as markWalkCompleted below) but
+    // the deletes + manifest removal that are supposed to follow never finished — most likely the
+    // app was suspended or killed in that exact window, or a delete failed outright (see
+    // finishWalkCleanup). There is no PUT or completion work left to do (both already succeeded);
+    // finish exactly the cleanup, idempotently, and move on. Before Fix 2, isWalkDrainable excluded
+    // every completed walk, so `ordered` would never have contained this walk at all — it would sit
+    // here, files and all, forever.
+    if (needsCleanup(walk)) {
+      // Only counted once the cleanup genuinely finished — otherwise the walk is still queued with
+      // its media still on the phone, and the next drain gets another go at it.
+      if (await finishWalkCleanup(ownerKey, walk)) completed++;
+      continue;
+    }
+
+    // Phase 1: PUT every currently-drainable artifact's bytes.
+    for (const artifact of drainableArtifacts(walk)) {
+      try {
+        const sizeBytes = await putArtifactBytes(client, fetcher, walk, artifact);
+        await mutateManifest(ownerKey, (current) =>
+          current.map((w) =>
+            w.walkId === walk.walkId ? markArtifactPut(w, artifact.idempotencyKey, sizeBytes, Date.now()) : w,
+          ),
+        );
+        puts++;
+      } catch {
+        await mutateManifest(ownerKey, (current) =>
+          current.map((w) =>
+            w.walkId === walk.walkId ? bumpArtifactAttempts(w, [artifact.idempotencyKey], Date.now()) : w,
+          ),
+        );
+        putFailures++;
       }
     }
 
-    const remainingWalks = (await getQueuedWalks(ownerKey)).length;
-    const summary = { puts, putFailures, completed, completionFailures, remainingWalks };
-    opts.onProgress?.(summary);
-    return summary;
-  } finally {
-    if (keptAwake) await deactivateKeepAwake(KEEP_AWAKE_TAG).catch(() => undefined);
-    draining = false;
+    // Phase 2: the walk's ONE completion call, only once every artifact is confirmed in R2.
+    // Re-read first — phase 1 above may have just changed this walk's state, and a walk that was
+    // ALREADY fully-put on entry (a prior drain PUT everything but never completed) never entered
+    // the phase-1 loop at all (drainableArtifacts would be empty), so this is the only place its
+    // completion gets attempted.
+    const fresh = (await readManifest(ownerKey)).find((w) => w.walkId === walk.walkId);
+    if (fresh && needsCompletion(fresh)) {
+      try {
+        await callCompletion(client, fetcher, fresh);
+        // Persist completedAt BEFORE deleting anything: a crash between these two steps leaves a
+        // walk stranded with completedAt set and its local files still on disk — needsCleanup
+        // recognizes exactly that state, and isWalkDrainable (Fix 2) guarantees a FUTURE drain
+        // revisits it and runs the cleanup-only branch above. (An earlier version of this comment
+        // claimed "a future drain would try to re-complete" it — that was never true: completion
+        // already succeeded, isWalkDrainable used to EXCLUDE completed walks entirely, and nothing
+        // else ever scanned for them, so a walk stranded here stayed stranded — local files and
+        // all — forever.) The one failure mode this ordering still exists to prevent is the
+        // opposite: files deleted with no server record of them ever having existed.
+        await mutateManifest(ownerKey, (current) =>
+          current.map((w) => (w.walkId === walk.walkId ? markWalkCompleted(w, Date.now()) : w)),
+        );
+        // A cleanup that couldn't finish lands this walk in exactly the stranded state the branch
+        // at the top of this loop exists to resolve, so it is left queued rather than counted.
+        if (await finishWalkCleanup(ownerKey, fresh)) completed++;
+      } catch {
+        await mutateManifest(ownerKey, (current) =>
+          current.map((w) => (w.walkId === walk.walkId ? bumpCompletionAttempts(w, Date.now()) : w)),
+        );
+        completionFailures++;
+      }
+    }
   }
+
+  const remainingWalks = (await getQueuedWalks(ownerKey)).length;
+  return { puts, putFailures, completed, completionFailures, remainingWalks };
 }

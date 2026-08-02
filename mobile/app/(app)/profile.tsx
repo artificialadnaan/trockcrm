@@ -18,6 +18,7 @@ import {
   getFailedWalkCount,
   getRecoverableWalksFromStartup,
   retryFailedWalks,
+  subscribeRecoverableWalksFromStartup,
 } from "../../src/walkthrough/upload";
 import { walkthroughUploadClient } from "../../src/walkthrough/upload-client";
 
@@ -333,7 +334,17 @@ function FailedWalksCard() {
  * walk as orphaned.
  */
 function RecoverableWalksCard() {
-  const recoverable = getRecoverableWalksFromStartup();
+  // SUBSCRIBED, not just read. That scan is async and starts in the shell's mount effect, so on a
+  // cold launch that lands straight on Profile this card renders before it has an answer. Reading
+  // the module getter alone left it stuck on that first empty answer: finishing the scan publishes
+  // no React state, so nothing schedules a rerender, and the card stayed hidden — with real
+  // recordings on the phone — until some unrelated parent rerender happened to sweep it back in.
+  // useSyncExternalStore is the exact fit: the module owns the value, this just needs to be told
+  // when it lands (and the getter returns a stable empty array so the snapshot is identity-safe).
+  const recoverable = React.useSyncExternalStore(
+    subscribeRecoverableWalksFromStartup,
+    getRecoverableWalksFromStartup,
+  );
   if (recoverable.length === 0) return null;
 
   const stills = recoverable.reduce((sum, w) => sum + w.stillUris.length, 0);

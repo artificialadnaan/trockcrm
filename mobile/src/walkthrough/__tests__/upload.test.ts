@@ -12,16 +12,23 @@ jest.mock("expo-file-system/legacy", () => {
   const dirs = new Set<string>();
   const sizes = new Map<string, number>();
   const mtimes = new Map<string, number>();
+  // Paths whose deleteAsync should REJECT — a genuine I/O error, NOT "the file isn't there".
+  // deleteAsync({idempotent:true}) resolves for a missing path, so that distinction is the whole
+  // subject of the cleanup tests below; injecting it via shared closure state (rather than
+  // jest.spyOn on the imported namespace) is what makes upload.ts see the same function object.
+  const failDeletes = new Set<string>();
   const norm = (p: string) => p.replace(/\/$/, "");
   return {
     __store: store,
     __sizes: sizes,
     __mtimes: mtimes,
+    __failDeletes: failDeletes,
     __reset: () => {
       store.clear();
       dirs.clear();
       sizes.clear();
       mtimes.clear();
+      failDeletes.clear();
     },
     documentDirectory: "file:///var/mobile/Containers/Data/Application/CURRENT-UUID/Documents/",
     FileSystemUploadType: { BINARY_CONTENT: 0 },
@@ -61,6 +68,7 @@ jest.mock("expo-file-system/legacy", () => {
       store.set(p, data);
     },
     deleteAsync: async (p: string) => {
+      if (failDeletes.has(p)) throw new Error(`EBUSY ${p}`);
       store.delete(p);
       sizes.delete(p);
       dirs.delete(p);
@@ -84,6 +92,7 @@ jest.mock("expo-keep-awake", () => ({
 import * as FileSystem from "expo-file-system/legacy";
 import { initialWalk, reduceWalk, type Walk } from "../session";
 import {
+  MAX_DRAIN_PASSES,
   drainWalkQueue,
   enqueueRecoveredWalk,
   enqueueWalk,
@@ -103,6 +112,7 @@ const fs = FileSystem as unknown as {
   __store: Map<string, string>;
   __sizes: Map<string, number>;
   __mtimes: Map<string, number>;
+  __failDeletes: Set<string>;
   __reset: () => void;
 };
 const uploadAsyncMock = FileSystem.uploadAsync as jest.Mock;
@@ -122,16 +132,21 @@ const META: WalkQueueMeta = { title: "Front elevation walkthrough", siteLabel: "
 
 const VIDEO_URI = `${DOC}walkthroughs/walk-1/video.mp4`;
 const PHOTO_URI = `${DOC}walkthroughs/walk-1/still-0.jpg`;
+// A SECOND walk's artifacts, for the tests that need two walks on disk at once. Distinct paths
+// matter: cleanup deletes by uri, so sharing walk-1's files would make walk-2's PUT fail for a
+// reason the test isn't about.
+const VIDEO_URI_2 = `${DOC}walkthroughs/walk-2/video.mp4`;
+const PHOTO_URI_2 = `${DOC}walkthroughs/walk-2/still-0.jpg`;
 
-function completedWalk(): Walk {
+function completedWalk(uris: { video: string; photo: string } = { video: VIDEO_URI, photo: PHOTO_URI }): Walk {
   const started = reduceWalk(reduceWalk(initialWalk("deal-1", "proj-7"), { type: "starting" }), {
     type: "started",
     at: 1000,
-    videoUri: VIDEO_URI,
+    videoUri: uris.video,
   });
   const withStill = reduceWalk(started, {
     type: "still",
-    uri: PHOTO_URI,
+    uri: uris.photo,
     at: 2000,
     source: "glasses",
   });
@@ -418,6 +433,95 @@ describe("drainWalkQueue", () => {
   });
 });
 
+// A walk enqueued WHILE a drain is already running. The running drain fixed its `ordered` snapshot
+// at entry, so it can never see the newcomer; before the coalescing loop, the second
+// drainWalkQueue call also returned early without scheduling anything, so a second walk recorded
+// back-to-back with a long (multi-GB) first upload sat queued until some opportunistic background
+// window iOS might not grant for hours — with the app in the foreground and a drain actively
+// running the whole time.
+describe("drain requested while a drain is in flight", () => {
+  /** A promise plus its resolver — lets a test park the drain INSIDE a network call, which is the
+   *  only way to reproduce "a second walk arrives mid-drain" deterministically (no timers). */
+  function deferred(): { promise: Promise<void>; resolve: () => void } {
+    let resolve!: () => void;
+    const promise = new Promise<void>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  it("drains a walk enqueued mid-drain in a follow-up pass instead of leaving it for a background run", async () => {
+    seedFiles([VIDEO_URI, PHOTO_URI, VIDEO_URI_2, PHOTO_URI_2]);
+    await enqueueWalk(OWNER, "walk-1", completedWalk(), META, 1000);
+
+    const firstPutReached = deferred();
+    const releaseFirstPut = deferred();
+    let held = false;
+    const client = stubClient({
+      requestUploadUrl: jest.fn(async (_f, _dealId, req) => {
+        if (!held) {
+          held = true;
+          firstPutReached.resolve();
+          await releaseFirstPut.promise;
+        }
+        return { uploadUrl: "https://upload.test/x", r2Key: `k-${req.idempotencyKey}`, expiresIn: 900 };
+      }),
+    });
+
+    const firstDrain = drainWalkQueue(OWNER, fetcher, client);
+    await firstPutReached.promise; // drain 1 is now parked inside walk-1's first PUT
+
+    // The estimator finishes a second walk while the first is still uploading.
+    await enqueueWalk(OWNER, "walk-2", completedWalk({ video: VIDEO_URI_2, photo: PHOTO_URI_2 }), META, 2000);
+    const coalesced = await drainWalkQueue(OWNER, fetcher, client);
+    // The second call still returns immediately — one drain owns the queue at a time. What it must
+    // ALSO do is leave a record that the queue changed under the running drain.
+    expect(coalesced.puts).toBe(0);
+    expect(coalesced.remainingWalks).toBe(2);
+
+    releaseFirstPut.resolve();
+    const summary = await firstDrain;
+
+    // The load-bearing assertion: walk-2 shipped as part of the SAME drain call.
+    expect((client.completeWalk as jest.Mock).mock.calls.map((c) => c[2].walkId)).toEqual([
+      "walk-1",
+      "walk-2",
+    ]);
+    expect(await getQueuedWalks(OWNER)).toEqual([]);
+    expect(await getSchedulableWalkCount(OWNER)).toBe(0);
+    expect(fs.__store.has(VIDEO_URI_2)).toBe(false);
+    expect(fs.__store.has(PHOTO_URI_2)).toBe(false);
+    // The returned summary covers every pass, so a caller can't be told "1 walk completed" when the
+    // call actually shipped two.
+    expect(summary.puts).toBe(4);
+    expect(summary.completed).toBe(2);
+    expect(summary.remainingWalks).toBe(0);
+  });
+
+  it("bounds the follow-up passes, so a caller that re-requests a drain from every progress callback can't spin forever", async () => {
+    seedFiles([VIDEO_URI, PHOTO_URI]);
+    await enqueueWalk(OWNER, "walk-1", completedWalk(), META, 1000);
+
+    const client = stubClient();
+    let passes = 0;
+    const summary = await drainWalkQueue(OWNER, fetcher, client, {
+      onProgress: () => {
+        passes++;
+        // Re-entrant request on EVERY pass — the pathological caller the cap exists for. The guard
+        // is synchronous (drainWalkQueue's `draining` check runs before its first await), so this
+        // reliably lands a pending request before the loop re-checks.
+        void drainWalkQueue(OWNER, fetcher, client);
+      },
+    });
+
+    // Exactly the cap: proves follow-up passes really happen (an un-coalesced drain would run one
+    // pass and stop) AND that they terminate.
+    expect(passes).toBe(MAX_DRAIN_PASSES);
+    expect(summary.completed).toBe(1); // the extra passes find nothing left to do
+    expect(await getQueuedWalks(OWNER)).toEqual([]);
+  });
+});
+
 // A walk stranded between markWalkCompleted persisting and the cleanup (file deletes + manifest
 // removal) that's supposed to follow it never finishing — the app suspended/killed in that exact
 // window. Simulated by writing the manifest directly (as the "rebases a stored artifact's uri" test
@@ -467,6 +571,61 @@ describe("stranded completed-but-uncleaned walks (Fix 2)", () => {
     expect(fs.__store.has(VIDEO_URI)).toBe(false);
     expect(fs.__store.has(PHOTO_URI)).toBe(false);
     expect(await getQueuedWalks(OWNER)).toEqual([]);
+  });
+
+  // A delete that genuinely FAILS is not the same as one whose file was already gone, and the
+  // difference is the whole ballgame: `idempotent: true` already turns "already gone" into success,
+  // so a rejection means the (potentially multi-GB) file is still sitting on the phone. Dropping the
+  // manifest entry anyway — what the swallowing catch used to do — was unrecoverable: needsCleanup
+  // only ever sees walks still IN the manifest, so no later drain could retry, and the leftover
+  // directory would then read to findRecoverableWalks as an orphan, i.e. a walk that never uploaded
+  // when it had in fact already been filed server-side.
+  it("keeps the completed entry when a local delete genuinely fails, and a later drain finishes the cleanup", async () => {
+    const walk = completedWalk();
+    seedFiles([VIDEO_URI, PHOTO_URI]);
+    await enqueueWalk(OWNER, "walk-1", walk, META, 1000);
+    fs.__failDeletes.add(VIDEO_URI); // e.g. the file is momentarily unreadable
+
+    const client = stubClient();
+    const first = await drainWalkQueue(OWNER, fetcher, client);
+
+    // Uploading itself all worked — this is purely about the cleanup that follows.
+    expect(first.puts).toBe(2);
+    expect(client.completeWalk).toHaveBeenCalledTimes(1);
+    // Not counted as completed: the walk is still on the queue and its media is still on the phone.
+    expect(first.completed).toBe(0);
+    expect(first.remainingWalks).toBe(1);
+
+    const [stranded] = await getQueuedWalks(OWNER);
+    expect(stranded!.completedAt).toBeDefined(); // the server DID accept it — never re-complete it
+    expect(fs.__store.has(VIDEO_URI)).toBe(true); // the undeletable file, still accounted for
+    // The whole point of keeping the entry: a future drain is scheduled to try again.
+    expect(await getSchedulableWalkCount(OWNER)).toBe(1);
+
+    // Whatever was holding the file clears, and the next drain finishes the job — with no second
+    // upload and no second completion call, since both already succeeded.
+    fs.__failDeletes.delete(VIDEO_URI);
+    const second = await drainWalkQueue(OWNER, fetcher, client);
+
+    expect(second.completed).toBe(1);
+    expect(client.requestUploadUrl).toHaveBeenCalledTimes(2); // still just the original two PUTs
+    expect(client.completeWalk).toHaveBeenCalledTimes(1);
+    expect(fs.__store.has(VIDEO_URI)).toBe(false);
+    expect(await getQueuedWalks(OWNER)).toEqual([]);
+  });
+
+  it("keeps the entry when the CLEANUP-ONLY branch hits a failing delete too (same rule on the resumed path)", async () => {
+    seedFiles([VIDEO_URI, PHOTO_URI]);
+    fs.__store.set(MANIFEST_PATH, JSON.stringify([strandedCompletedWalk()]));
+    fs.__failDeletes.add(PHOTO_URI);
+
+    const summary = await drainWalkQueue(OWNER, fetcher, stubClient());
+
+    expect(summary.completed).toBe(0);
+    expect(summary.remainingWalks).toBe(1);
+    expect(fs.__store.has(VIDEO_URI)).toBe(false); // the deletable half still went — cleanup is partial, not all-or-nothing
+    expect(fs.__store.has(PHOTO_URI)).toBe(true);
+    expect((await getQueuedWalks(OWNER))[0]!.completedAt).toBe(4000);
   });
 
   it("is idempotent when an EARLIER cleanup attempt already deleted some (not all) of the files before dying again", async () => {
