@@ -22,11 +22,16 @@ const DOC = "file:///var/mobile/Containers/Data/Application/CURRENT-UUID/Documen
 
 jest.mock("expo-file-system/legacy", () => {
   const store = new Map<string, string>();
+  // Last-modified times, in epoch SECONDS like the real expo-file-system reports them. The recovery
+  // card's whole job is now to tell the estimator WHEN an orphan was recorded so they can place it,
+  // so a mock that reported no timestamps could only ever exercise the "unknown" branch.
+  const mtimes = new Map<string, number>();
   return {
     __store: store,
+    __mtimes: mtimes,
     documentDirectory: "file:///var/mobile/Containers/Data/Application/CURRENT-UUID/Documents/",
     FileSystemUploadType: { BINARY_CONTENT: 0 },
-    getInfoAsync: async (p: string) => ({ exists: store.has(p) }),
+    getInfoAsync: async (p: string) => ({ exists: store.has(p), modificationTime: mtimes.get(p) }),
     readDirectoryAsync: async (dirUri: string) => {
       const prefix = dirUri.endsWith("/") ? dirUri : `${dirUri}/`;
       const names = new Set<string>();
@@ -105,24 +110,48 @@ jest.mock("../../settings/camera-roll-setting", () => ({
 
 jest.mock("../upload-client", () => ({ walkthroughUploadClient: {} }));
 
+// ── The project picker the recovery flow reuses ───────────────────────────────────────────────────
+// The REAL TargetPicker renders here — it is the established project-choosing surface (capture.tsx,
+// the scorecard editor), and swapping in a stub would test the stub rather than the wiring. Only its
+// two data hooks and its GPS lookup are mocked, exactly as ../../components/__tests__/TargetPicker
+// does: Profile is not otherwise a react-query screen, so there is no QueryClientProvider here.
+// Typed through this seed value rather than inline: an inferred `never[]` would make every
+// mockReturnValue carrying a real target a type error.
+const NO_TARGETS: { data: { targets: FieldCaptureTarget[] }; isFetching: boolean } = {
+  data: { targets: [] },
+  isFetching: false,
+};
+const mockUseCaptureTargets = jest.fn(() => NO_TARGETS);
+const mockUseNearbyCaptureTargets = jest.fn(() => NO_TARGETS);
+jest.mock("../../query/hooks", () => ({
+  useCaptureTargets: (...args: unknown[]) => mockUseCaptureTargets(...(args as [])),
+  useNearbyCaptureTargets: (...args: unknown[]) => mockUseNearbyCaptureTargets(...(args as [])),
+}));
+jest.mock("../../capture/metadata", () => ({
+  getLiveGps: jest.fn(async () => ({ latitude: 32.911, longitude: -96.775 })),
+}));
+
 import * as FileSystem from "expo-file-system/legacy";
-import { act, render } from "@testing-library/react-native";
+import { act, fireEvent, render } from "@testing-library/react-native";
+import type { FieldCaptureTarget } from "../../api/types";
 import {
   MAX_WALK_UPLOAD_ATTEMPTS,
   drainWalkQueue,
   forgetRecoverableWalksAtStartup,
+  getQueuedWalks,
   scanRecoverableWalksAtStartup,
   type WalkthroughUploadClient,
 } from "../upload";
 // eslint-disable-next-line import/first
 import ProfileScreen from "../../../app/(app)/profile";
 
-const fs = FileSystem as unknown as { __store: Map<string, string> };
+const fs = FileSystem as unknown as { __store: Map<string, string>; __mtimes: Map<string, number> };
 // Matches walkOwnerKey(user.id, activeOfficeId) for the mocked auth above.
 const OWNER = "user-1:office-a";
 
 beforeEach(() => {
   fs.__store.clear();
+  fs.__mtimes.clear();
   // What the authenticated shell does on teardown — the previous test's session ending. The
   // snapshot is per shell lifecycle, and this suite is several of them in one process.
   forgetRecoverableWalksAtStartup();
@@ -152,11 +181,12 @@ describe("Profile's recoverable-walks card", () => {
     });
 
     expect(queryByText(/unfinished walk/)).not.toBeNull();
-    // The honest content, not just "a card rendered": one recording, no photos, and NO upload
-    // action — nothing on disk says which deal an orphaned walk belongs to, and both server
-    // endpoints require one (see findRecoverableWalks).
+    // The honest content, not just "a card rendered": one recording, no photos, and a way OUT of
+    // the card. The action is deliberately "File to a project" rather than "Upload" — nothing on
+    // disk says which deal this belongs to, so the estimator supplies it (see the filing suite
+    // below); an Upload button would have to guess one.
     expect(queryByText(/1 recording/)).not.toBeNull();
-    expect(queryByText(/Upload/)).toBeNull();
+    expect(queryByText("File to a project")).not.toBeNull();
   });
 
   it("stays hidden when the scan resolves with nothing to recover", async () => {
@@ -165,6 +195,149 @@ describe("Profile's recoverable-walks card", () => {
       await scanRecoverableWalksAtStartup(OWNER);
     });
     expect(queryByText(/unfinished walk/)).toBeNull();
+  });
+});
+
+// ── Round-7 FINDING (P1): the recovery card was a dead end ────────────────────────────────────────
+//
+// The card told the estimator the recording existed and to "mention this to support" — advice that
+// is not merely unhelpful but false, because the files sit inside this app's own sandbox and support
+// cannot reach them. `enqueueRecoveredWalk` was fully built and had no production caller, so the ONE
+// surface that can save an unrepeatable site visit could not save one.
+//
+// It was left that way for a real reason, and that reason is what these tests pin down: an orphaned
+// directory carries no dealId, both server endpoints require one, and a walk filed against the wrong
+// job is worse than an unfiled walk — nobody catches it until a scope comes back describing the
+// wrong building. So the fix is not a button that guesses. It is asking the person who was actually
+// there, through the same project picker the rest of the app already uses.
+describe("filing a recovered walk against a project the estimator picks", () => {
+  const ORPHAN_DIR = `${DOC}walkthroughs/walk-orphan/`;
+  const DEAL: FieldCaptureTarget = {
+    id: "deal-77",
+    type: "deal",
+    name: "121 Preston Oaks",
+    recordNumber: "DFW-1-17426-aa",
+    stageName: "Construction",
+    companyName: "Preston Oaks HOA",
+    lastUpdatedAt: "2026-06-20T12:00:00.000Z",
+    distanceMiles: 0.42,
+  };
+
+  beforeEach(() => {
+    mockUseCaptureTargets.mockReturnValue(NO_TARGETS);
+    // Served as "Closest jobs" the moment the picker opens, so these tests never depend on typing.
+    mockUseNearbyCaptureTargets.mockReturnValue({ data: { targets: [DEAL] }, isFetching: false });
+  });
+
+  /** Render Profile with one orphaned walk already discovered by the shell's startup scan. */
+  async function renderWithOrphan() {
+    fs.__store.set(`${ORPHAN_DIR}walk.mp4`, "video-bytes");
+    fs.__mtimes.set(`${ORPHAN_DIR}walk.mp4`, 1_700_000_720); // epoch SECONDS
+    fs.__store.set(`${ORPHAN_DIR}still-001.jpg`, "a");
+    fs.__mtimes.set(`${ORPHAN_DIR}still-001.jpg`, 1_700_000_000);
+    const screen = render(<ProfileScreen />);
+    await act(async () => {
+      await scanRecoverableWalksAtStartup(OWNER);
+    });
+    return screen;
+  }
+
+  /** Open the picker and choose DEAL, then let the enqueue + its detached drain settle. */
+  async function fileAgainstDeal(screen: ReturnType<typeof render>) {
+    fireEvent.press(screen.getByText("File to a project"));
+    await act(async () => {
+      await Promise.resolve(); // the picker's GPS lookup, so "Closest jobs" is on screen
+    });
+    fireEvent.press(screen.getByText(DEAL.name));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  }
+
+  it("enqueues the orphan against the CHOSEN deal — the one fact only the estimator has", async () => {
+    const screen = await renderWithOrphan();
+
+    await fileAgainstDeal(screen);
+
+    const queued = await getQueuedWalks(OWNER);
+    expect(queued).toHaveLength(1);
+    expect(queued[0]!.walkId).toBe("walk-orphan");
+    expect(queued[0]!.dealId).toBe("deal-77"); // never guessed — this is the picker's answer
+    // Both artifacts came along: the video AND the still. A recovery that filed only what it could
+    // most easily describe would silently drop evidence from a visit that cannot be re-taken.
+    expect(queued[0]!.artifacts.map((a) => a.kind).sort()).toEqual(["photo", "video"]);
+    // Titled from the walk's OWN recorded time, not the moment it was recovered, and marked as
+    // recovered so the office knows the timeline was reconstructed rather than captured live.
+    expect(queued[0]!.title).toContain("121 Preston Oaks");
+    expect(queued[0]!.title).toContain("(recovered)");
+  });
+
+  it("retires the row once it is filed, so the same walk cannot be re-filed against a second project", async () => {
+    const screen = await renderWithOrphan();
+
+    await fileAgainstDeal(screen);
+
+    // The card is gone: the walk now has a manifest entry and drains like any other. Leaving the
+    // row up would invite a second filing under a DIFFERENT deal for a walk the queue already owns.
+    expect(screen.queryByText(/unfinished walk/)).toBeNull();
+    expect(screen.queryByText("File to a project")).toBeNull();
+  });
+
+  it("surfaces what is knowable about the walk, so the project choice is informed rather than blind", async () => {
+    const screen = await renderWithOrphan();
+
+    // When it was recorded (the last byte written), how much of it there is, and a lower-bound
+    // duration from first write to last. These are the only clues to WHICH job this was.
+    expect(screen.queryByText(/1 recording/)).not.toBeNull();
+    expect(screen.queryByText(/1 photo/)).not.toBeNull();
+    expect(screen.queryByText(/12 min/)).not.toBeNull();
+    expect(screen.queryByText(/Nov 2023/)).not.toBeNull();
+  });
+
+  // GUARD, not a regression — it holds on either side of this change, because upsertQueuedWalk keys
+  // on walkId. It is here because "recovery must be idempotent" is a property of the FLOW, not of
+  // one function: the card kicks a drain and retires the row on the way through, and a second copy
+  // of the walk would mean a second upload of a multi-GB video off a phone on cellular.
+  it("cannot queue two copies when both halves of a double-tap reach the picker", async () => {
+    const screen = await renderWithOrphan();
+    fireEvent.press(screen.getByText("File to a project"));
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // Both presses land before React processes the first one's state update, so both read the same
+    // still-open picker.
+    const row = screen.getByText(DEAL.name);
+    fireEvent.press(row);
+    fireEvent.press(row);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(await getQueuedWalks(OWNER)).toHaveLength(1);
+  });
+
+  it("leaves the recording untouched and unqueued when the estimator backs out of the picker", async () => {
+    const screen = await renderWithOrphan();
+
+    fireEvent.press(screen.getByText("File to a project"));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    fireEvent.press(screen.getByText("Done")); // the picker's own dismiss
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // Abandoning halfway costs nothing: no queue entry, the files are still on disk, and the card
+    // is still offering the same way back in.
+    expect(await getQueuedWalks(OWNER)).toEqual([]);
+    expect(fs.__store.has(`${ORPHAN_DIR}walk.mp4`)).toBe(true);
+    expect(screen.queryByText("File to a project")).not.toBeNull();
   });
 });
 

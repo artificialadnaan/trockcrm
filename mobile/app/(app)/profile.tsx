@@ -13,13 +13,19 @@ import { describePairing, type Pairing, type PairingStatus } from "../../src/wal
 import { useWalkQueueSession } from "../../src/walkthrough/use-queue-session";
 import {
   drainWalkQueue,
+  enqueueRecoveredWalk,
+  forgetRecoveredWalk,
   getFailedWalkCount,
   getRecoverableWalksFromStartup,
   retryFailedWalks,
   subscribeRecoverableWalksFromStartup,
   subscribeWalkQueue,
+  type RecoveredWalk,
 } from "../../src/walkthrough/upload";
+import { deriveWalkSiteLabel, deriveWalkTitle, formatWalkDateTime } from "../../src/walkthrough/walk-meta";
 import { walkthroughUploadClient } from "../../src/walkthrough/upload-client";
+import { TargetPicker } from "../../src/components/TargetPicker";
+import type { FieldCaptureTarget } from "../../src/api/types";
 
 const SUPPORT_HUB_URL = "https://support-hub-production.up.railway.app/";
 
@@ -323,15 +329,52 @@ function FailedWalksCard() {
 }
 
 /**
- * Surfaces walk recordings found on disk with no queue entry — an app kill mid-recording, or after
- * native finalised but before the enqueue effect ran.
+ * Everything the device can truthfully say about ONE orphaned walk, as a single line: when it was
+ * recorded, what it holds, and how long it ran.
  *
- * Deliberately has no "upload" action, and that is the honest shape rather than a missing feature.
- * The server requires a `dealId` on both endpoints, and nothing on disk says which deal an orphaned
- * walk belongs to — `findRecoverableWalks` documents exactly this. A button that appeared to file
- * these would either guess a deal (filing a site visit against the wrong project, which nobody
- * would catch until a scope came back wrong) or fail. Telling someone the media exists and is safe
- * is the whole of what can be truthfully offered until a deal can be chosen.
+ * This is not decoration — it is the input to the only decision that can save the recording. A walk
+ * directory carries no dealId (see findRecoverableWalks), so the estimator has to say which job it
+ * was, and the recorded time is the one clue on disk that narrows that down. Every part is omitted
+ * rather than guessed when the platform cannot report it: a fabricated "just now" on a two-day-old
+ * walk would aim them at the wrong site, which is precisely the failure this whole path avoids.
+ *
+ * The span is labelled "at least" on purpose. It is first-write to last-write, and recording began
+ * before the first byte landed, so it is a lower bound on the walk's length — not its duration.
+ */
+function describeRecoveredWalk(walk: RecoveredWalk): string {
+  const stills = walk.stillUris.length;
+  const contents = [
+    walk.videoUri ? "1 recording" : "no video",
+    stills === 0 ? "no photos" : stills === 1 ? "1 photo" : `${stills} photos`,
+  ].join(", ");
+  const spanMinutes = walk.captureSpanMs === null ? null : Math.round(walk.captureSpanMs / 60_000);
+  return [
+    walk.recordedAtMs === null ? "Time unknown" : formatWalkDateTime(walk.recordedAtMs),
+    contents,
+    spanMinutes === null ? null : spanMinutes < 1 ? "under a minute" : `at least ${spanMinutes} min`,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(" · ");
+}
+
+/**
+ * Surfaces walk recordings found on disk with no queue entry — an app kill mid-recording, a
+ * sign-out, or a finalize that landed after the enqueue effect was already gone — and gives the one
+ * action that can actually save them: filing each against a project the ESTIMATOR names.
+ *
+ * This card used to end at "mention this to support", and that was worse than unhelpful — it was
+ * false. The files sit inside this app's own sandbox; support cannot reach them, so the advice sent
+ * someone to a door that does not open while an unrepeatable site visit sat on the phone.
+ *
+ * There is still no "Upload" button, and that part of the old reasoning was right: the server needs
+ * a dealId on both endpoints, nothing on disk carries one, and a walk filed against the WRONG job is
+ * worse than an unfiled walk — nobody catches it until a scope comes back describing the wrong
+ * building. What changed is who answers the question. The estimator was there; they know. So the
+ * action opens the app's existing project picker rather than guessing, and the row shows what the
+ * device knows about the walk (see describeRecoveredWalk) so the choice is informed.
+ *
+ * PER WALK, not aggregated, for the same reason: two orphans can be two different jobs, and a single
+ * card-wide action could only ever file them all against one deal.
  *
  * Reads the snapshot taken by `(app)/_layout.tsx` at shell mount rather than scanning here: an
  * ACTIVE walk has no manifest entry either, so a scan run while recording would report the live
@@ -345,14 +388,89 @@ function RecoverableWalksCard() {
   // recordings on the phone — until some unrelated parent rerender happened to sweep it back in.
   // useSyncExternalStore is the exact fit: the module owns the value, this just needs to be told
   // when it lands (and the getter returns a stable empty array so the snapshot is identity-safe).
+  // The same subscription is what makes a filed walk's row DISAPPEAR: forgetRecoveredWalk edits the
+  // snapshot and publishes (it must never re-scan — see its doc comment).
   const recoverable = React.useSyncExternalStore(
     subscribeRecoverableWalksFromStartup,
     getRecoverableWalksFromStartup,
   );
-  if (recoverable.length === 0) return null;
+  // Same shared hook as FailedWalksCard: the drain this card kicks outlives Profile, so it must not
+  // carry sign-out authority, and its office resolution has to match the manifest namespace exactly.
+  const { ownerKey, queueFetcher } = useWalkQueueSession();
 
-  const stills = recoverable.reduce((sum, w) => sum + w.stillUris.length, 0);
-  const videos = recoverable.filter((w) => w.videoUri).length;
+  // Which walk the picker is currently choosing a project FOR. Null closes the picker — and closing
+  // it is the whole of "backing out": nothing on disk or in the manifest has been touched yet.
+  const [picking, setPicking] = React.useState<RecoveredWalk | null>(null);
+  const [filingWalkId, setFilingWalkId] = React.useState<string | null>(null);
+  const [fileError, setFileError] = React.useState<string | null>(null);
+  const mountedRef = React.useRef(true);
+  React.useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  // SYNCHRONOUS double-file latch (setFilingWalkId only lands next render), same shape as
+  // capture.tsx's finishingRef. enqueueRecoveredWalk is idempotent per walkId so a duplicate cannot
+  // queue two copies of the recording — but two overlapping calls WOULD race over which deal wins,
+  // and the loser's picker would report success for a filing that never happened.
+  const filingRef = React.useRef<string | null>(null);
+
+  const file = React.useCallback(
+    async (walk: RecoveredWalk, target: FieldCaptureTarget) => {
+      if (!ownerKey) {
+        setFileError("Sign in again before filing this walk.");
+        return;
+      }
+      if (filingRef.current) return;
+      filingRef.current = walk.walkId;
+      setFilingWalkId(walk.walkId);
+      setFileError(null);
+      try {
+        // The walk's own recorded time, not now(): a recovered walk has no reducer history, so
+        // toRecoveredQueuedWalk leaves startedAt null and the completion call's capturedAt falls
+        // back to the DRAIN moment. The title is therefore the only place the office learns when
+        // this visit actually happened — and "(recovered)" is how they learn that the timeline was
+        // reconstructed from the files rather than recorded live. It goes INSIDE the target name for
+        // the reason walk.tsx documents: deriveWalkTitle clamps to the server's MAX_TITLE_CHARS, so
+        // appending afterwards could push a maximal title past the limit and 400 the completion call
+        // once every artifact is already in R2.
+        const meta = {
+          title: deriveWalkTitle(`${target.name} (recovered)`, walk.recordedAtMs ?? Date.now()),
+          // Genuinely unknown here: the picker's target carries no property address, and inventing
+          // one from the company or project name would put a non-address in the field the office
+          // reads as the site. "" is how the wire type says "absent".
+          siteLabel: deriveWalkSiteLabel(null),
+        };
+        // projectId null for the same reason — a directory on disk says nothing about which CRM
+        // project the walk belongs to, and the deal alone is what the server actually requires.
+        const queued = await enqueueRecoveredWalk(ownerKey, walk, target.id, null, meta);
+        if (!queued) {
+          // The directory had neither a video nor a still by the time this ran — it raced a cleanup.
+          // The row deliberately STAYS: nothing was queued, so retiring it would hide a walk the
+          // estimator still thinks they saved.
+          if (mountedRef.current) setFileError("That recording is no longer on this device.");
+          return;
+        }
+        // Only after the manifest write succeeded. Retiring the row on a FAILED enqueue would hide
+        // the orphan for the rest of this shell lifecycle, with nothing left that could file it.
+        forgetRecoveredWalk(ownerKey, walk.walkId);
+        // Detached, exactly like walk.tsx's post-enqueue kick. The walk is durable the moment the
+        // manifest write landed, and a multi-GB video must not hold this card's busy state (or die
+        // with it) — from here it is an ordinary queued walk, retried by the shell and the
+        // background task like any other.
+        void drainWalkQueue(ownerKey, queueFetcher, walkthroughUploadClient).catch(() => undefined);
+      } catch (error) {
+        if (mountedRef.current) setFileError(String(error));
+      } finally {
+        filingRef.current = null;
+        if (mountedRef.current) setFilingWalkId(null);
+      }
+    },
+    [ownerKey, queueFetcher],
+  );
+
+  if (recoverable.length === 0) return null;
 
   return (
     <Card style={styles.card}>
@@ -363,13 +481,49 @@ function RecoverableWalksCard() {
             {recoverable.length} unfinished walk{recoverable.length === 1 ? "" : "s"} on this device
           </Text>
           <Text style={styles.settingHint}>
-            {videos > 0 ? `${videos} recording${videos === 1 ? "" : "s"}` : "No video"}
-            {stills > 0 ? ` and ${stills} photo${stills === 1 ? "" : "s"}` : ""} were captured but
-            never sent — the app closed before the walk finished. Nothing is lost, but they aren't
-            attached to a project yet. Mention this to support so they can be filed.
+            Captured here but never attached to a project — the app closed before the walk finished.
+            Nothing is lost. Pick the project you were walking and it uploads like any other walk.
           </Text>
+          {fileError ? <Text style={styles.pairingStale}>{fileError}</Text> : null}
         </View>
       </View>
+
+      {recoverable.map((walk) => {
+        const described = describeRecoveredWalk(walk);
+        return (
+          <View key={walk.walkId} style={styles.recoveredRow}>
+            <Text style={styles.settingHint}>{described}</Text>
+            <Button
+              title="File to a project"
+              variant="ghost"
+              loading={filingWalkId === walk.walkId}
+              onPress={() => setPicking(walk)}
+              // Every row's button says the same thing, so the description is what tells a screen
+              // reader WHICH walk this one files — and that is the whole basis of the choice.
+              accessibilityLabel={`File this walk to a project — ${described}`}
+              icon={<Ionicons name="briefcase-outline" size={18} color={theme.color.textPrimary} />}
+            />
+          </View>
+        );
+      })}
+
+      {/* Mounted only while a project is being chosen. TargetPicker runs a deal search (and a GPS
+          lookup for its nearby list) from its own hooks the moment it exists, and Profile is not
+          otherwise a data screen — keeping it unmounted means opening settings costs neither.
+          `dealsOnly` because both walkthrough endpoints are addressed by dealId; a lead or an
+          opportunity is not a destination this walk can be filed to at all. */}
+      {picking ? (
+        <TargetPicker
+          visible
+          dealsOnly
+          onClose={() => setPicking(null)}
+          onSelect={(target) => {
+            const walk = picking;
+            setPicking(null);
+            void file(walk, target);
+          }}
+        />
+      ) : null}
     </Card>
   );
 }
@@ -482,6 +636,14 @@ const styles = StyleSheet.create({
   metaRow: { flexDirection: "row", gap: theme.space.sm },
   blurb: { fontFamily: theme.font.body, fontSize: 14, color: theme.color.textMuted, lineHeight: 20 },
   settingRow: { flexDirection: "row", alignItems: "center", gap: theme.space.md },
+  // One recoverable walk = one row = one project choice, so each is visibly its own decision rather
+  // than a bullet in a list the card acts on as a whole.
+  recoveredRow: {
+    gap: theme.space.sm,
+    borderTopWidth: 1,
+    borderTopColor: theme.color.border,
+    paddingTop: theme.space.md,
+  },
   settingText: { flex: 1, gap: 2 },
   settingTitle: { fontFamily: theme.font.bold, fontSize: 15, color: theme.color.textPrimary },
   settingHint: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted, lineHeight: 18 },

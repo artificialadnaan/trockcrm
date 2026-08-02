@@ -24,8 +24,14 @@ const MAX_SITE_LABEL_CHARS = 300;
 /** "30 Jul 2026, 9:15 PM" — day-month-year (unambiguous across locales, unlike MM/DD) plus a
  *  12-hour clock time, both read in the DEVICE's own timezone: `atMs` is the instant the walk
  *  actually happened, and the estimator's local wall-clock time is what makes that instant
- *  recognizable later, not a UTC offset nobody on site was looking at. */
-function formatWalkDateTime(atMs: number): string {
+ *  recognizable later, not a UTC offset nobody on site was looking at.
+ *
+ *  Exported because Profile's recovery card shows an orphaned walk's recorded time so the estimator
+ *  can work out which job it was, and that is the SAME question this format already answers inside
+ *  the title the office reads. Two formats would have the card and the filed walk describing one
+ *  recording with two different-looking timestamps — the exact ambiguity day-month-year is here to
+ *  avoid. */
+export function formatWalkDateTime(atMs: number): string {
   const d = new Date(atMs);
   const date = d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
   const time = d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });

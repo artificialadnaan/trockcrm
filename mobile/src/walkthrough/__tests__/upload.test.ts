@@ -115,6 +115,7 @@ import {
   enqueueWalk,
   findRecoverableWalks,
   forgetRecoverableWalksAtStartup,
+  forgetRecoveredWalk,
   getFailedWalkCount,
   getQueuedWalks,
   getRecoverableWalkCount,
@@ -122,6 +123,7 @@ import {
   getSchedulableWalkCount,
   retryFailedWalks,
   scanRecoverableWalksAtStartup,
+  subscribeRecoverableWalksFromStartup,
   type WalkArtifactUploadUrlResponse,
   type WalkCompletionResponse,
   type WalkQueueMeta,
@@ -844,9 +846,49 @@ describe("findRecoverableWalks / getRecoverableWalkCount", () => {
         walkId: "walk-orphan",
         videoUri: `${orphanDir}walk.mp4`,
         stillUris: [`${orphanDir}still-001.jpg`, `${orphanDir}still-002.jpg`],
+        // Unknown here, and reported as unknown: this mock stores no mtimes for these files.
+        recordedAtMs: null,
+        captureSpanMs: null,
       },
     ]);
     expect(await getRecoverableWalkCount(OWNER)).toBe(1);
+  });
+
+  // The estimator has to pick which job an orphan belongs to, and the ONLY evidence on disk that
+  // narrows that down is when the bytes were written. Without it the choice is blind — and a walk
+  // filed against the wrong project is worse than one left unfiled, because nothing catches it
+  // until a scope comes back describing the wrong building.
+  it("reports the walk's own recorded time and capture span, read from the files' timestamps", async () => {
+    const orphanDir = `${DOC}walkthroughs/walk-orphan/`;
+    fs.__store.set(`${orphanDir}walk.mp4`, "video-bytes");
+    fs.__mtimes.set(`${orphanDir}walk.mp4`, 1_700_000_720); // epoch SECONDS, as expo-file-system reports
+    fs.__store.set(`${orphanDir}still-001.jpg`, "a");
+    fs.__mtimes.set(`${orphanDir}still-001.jpg`, 1_700_000_000);
+
+    const [recovered] = await findRecoverableWalks(OWNER);
+    // The LAST byte written across the directory — for a killed app that is when capture stopped.
+    expect(recovered!.recordedAtMs).toBe(1_700_000_720_000); // seconds → ms
+    // First write to last write: a lower bound on how long the walk ran, never a fabricated duration.
+    expect(recovered!.captureSpanMs).toBe(720_000);
+  });
+
+  it("reports both as unknown rather than substituting `now` when the platform has no timestamps", async () => {
+    fs.__store.set(`${DOC}walkthroughs/walk-orphan/walk.mp4`, "video-bytes");
+    const [recovered] = await findRecoverableWalks(OWNER);
+    // "Recorded just now" for a walk that happened two days ago would send the estimator to the
+    // wrong job — the same class of harm as guessing the deal outright.
+    expect(recovered!.recordedAtMs).toBeNull();
+    expect(recovered!.captureSpanMs).toBeNull();
+  });
+
+  it("reports no span when a single file carries the only timestamp — one instant is not a duration", async () => {
+    const orphanDir = `${DOC}walkthroughs/walk-orphan/`;
+    fs.__store.set(`${orphanDir}walk.mp4`, "video-bytes");
+    fs.__mtimes.set(`${orphanDir}walk.mp4`, 1_700_000_720);
+
+    const [recovered] = await findRecoverableWalks(OWNER);
+    expect(recovered!.recordedAtMs).toBe(1_700_000_720_000);
+    expect(recovered!.captureSpanMs).toBeNull();
   });
 
   it("excludes a directory whose walkId is already tracked in the manifest, even though its files are still on disk", async () => {
@@ -997,6 +1039,70 @@ describe("enqueueRecoveredWalk", () => {
     const [stillQueued] = await getQueuedWalks(OWNER);
     expect(stillQueued!.artifacts[0]!.putAt).toBeDefined();
     expect(stillQueued!.completedAt).toBeUndefined();
+  });
+});
+
+// The other half of enqueueRecoveredWalk: once a recovered walk HAS a manifest entry it is no
+// longer an orphan, but the recovery snapshot is deliberately frozen for the whole shell lifecycle
+// (re-scanning mid-session reports a LIVE recording as orphaned). Without a way to retire one entry
+// from that snapshot the recovery card would keep offering a walk it has already filed — and every
+// re-file is a fresh chance to pick a DIFFERENT project for a walk the queue already owns.
+describe("forgetRecoveredWalk", () => {
+  beforeEach(() => {
+    forgetRecoverableWalksAtStartup();
+  });
+
+  it("retires one filed walk from the snapshot and publishes, leaving the others alone", async () => {
+    fs.__store.set(`${DOC}walkthroughs/walk-a/walk.mp4`, "video-bytes");
+    fs.__store.set(`${DOC}walkthroughs/walk-b/walk.mp4`, "video-bytes");
+    await scanRecoverableWalksAtStartup(OWNER);
+    const notified = jest.fn();
+    const unsubscribe = subscribeRecoverableWalksFromStartup(notified);
+
+    forgetRecoveredWalk(OWNER, "walk-a");
+
+    expect(getRecoverableWalksFromStartup().map((w) => w.walkId)).toEqual(["walk-b"]);
+    // Published, or the card renders the retired row until something unrelated rerenders it.
+    expect(notified).toHaveBeenCalledTimes(1);
+    unsubscribe();
+  });
+
+  it("never re-scans — a walk recording RIGHT NOW must not be swept into the snapshot", async () => {
+    fs.__store.set(`${DOC}walkthroughs/walk-a/walk.mp4`, "video-bytes");
+    await scanRecoverableWalksAtStartup(OWNER);
+    // Started after the snapshot was taken: it has no manifest entry either, so a re-scan would
+    // report the live walk as recoverable and offer to file a recording still being written.
+    fs.__store.set(`${DOC}walkthroughs/walk-recording-now/walk.mp4`, "partial");
+
+    forgetRecoveredWalk(OWNER, "walk-a");
+
+    expect(getRecoverableWalksFromStartup()).toEqual([]);
+  });
+
+  it("is a no-op for an owner the snapshot was not taken against", async () => {
+    fs.__store.set(`${DOC}walkthroughs/walk-a/walk.mp4`, "video-bytes");
+    await scanRecoverableWalksAtStartup(OWNER);
+    const notified = jest.fn();
+    const unsubscribe = subscribeRecoverableWalksFromStartup(notified);
+
+    // OWNER_2's manifest is a different namespace; their filing says nothing about OWNER's orphans.
+    forgetRecoveredWalk(OWNER_2, "walk-a");
+
+    expect(getRecoverableWalksFromStartup().map((w) => w.walkId)).toEqual(["walk-a"]);
+    expect(notified).not.toHaveBeenCalled();
+    unsubscribe();
+  });
+
+  it("does not publish for a walkId the snapshot never held", async () => {
+    fs.__store.set(`${DOC}walkthroughs/walk-a/walk.mp4`, "video-bytes");
+    await scanRecoverableWalksAtStartup(OWNER);
+    const notified = jest.fn();
+    const unsubscribe = subscribeRecoverableWalksFromStartup(notified);
+
+    forgetRecoveredWalk(OWNER, "walk-never-seen");
+
+    expect(notified).not.toHaveBeenCalled();
+    unsubscribe();
   });
 });
 

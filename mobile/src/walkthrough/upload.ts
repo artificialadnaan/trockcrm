@@ -361,15 +361,33 @@ export async function enqueueWalk(
 
 // ── Recovery (Fix 3): Documents/walkthroughs/ directories with no manifest entry ───────────────────
 //
-// See upload-core.ts's module note above classifyWalkDirFileNames for why this can only ever
-// DISCOVER orphaned files, never queue them on its own: the server requires a dealId, and nothing on
-// disk says which deal a recovered walk belongs to.
+// See upload-core.ts's module note above classifyWalkDirFileNames for why nothing in THIS module may
+// queue an orphan on its own: the server requires a dealId, and nothing on disk says which deal a
+// recovered walk belongs to. The loop is closed one level up, by a caller that is allowed to ask a
+// human — app/(app)/profile.tsx's RecoverableWalksCard, which puts the app's own project picker in
+// front of the estimator and then calls enqueueRecoveredWalk with their answer.
 
 export type RecoveredWalk = {
   walkId: string;
   videoUri: string | null;
   /** In capture order. */
   stillUris: string[];
+  /**
+   * The LATEST file write across the directory, epoch ms — for the kill this recovery exists to
+   * survive, that is the moment capture stopped. Null when the platform reports no timestamp at all.
+   *
+   * Carried because it is the only evidence on disk that narrows down WHICH job an orphan is, and
+   * the caller has to make exactly that call. Null rather than `now` for the same reason
+   * toRecoveredQueuedWalk leaves startedAt null: "recorded just now" for a two-day-old walk would
+   * point the estimator at the wrong site, which is the very harm this whole path is careful about.
+   */
+  recordedAtMs: number | null;
+  /**
+   * First write to last write, in ms — a LOWER BOUND on how long the walk ran, never a duration.
+   * Null when fewer than two files carry timestamps, or when they all landed in the same instant:
+   * one instant is not a span, and padding it out would be a fabricated number.
+   */
+  captureSpanMs: number | null;
 };
 
 /**
@@ -413,10 +431,22 @@ export async function findRecoverableWalks(ownerKey: string): Promise<RecoveredW
     if (!videoFileName && stillFileNames.length === 0) continue; // e.g. an empty dir from a walk
     // that failed before native ever produced anything — nothing to recover, not a leak.
     const dir = walkDirUri(walkId);
+    const videoUri = videoFileName ? `${dir}${videoFileName}` : null;
+    const stillUris = stillFileNames.map((name) => `${dir}${name}`);
+    // One extra stat per artifact, paid only for directories that ARE orphans (normally none), so a
+    // caller can tell the estimator when this walk happened. It is deliberately NOT reused as the
+    // artifacts' capturedAt: enqueueRecoveredWalk re-stats at enqueue time, which is both fresher
+    // and per-file, whereas these two are a display summary of the walk as a whole.
+    const times = (await Promise.all([videoUri, ...stillUris].map(fileTimestampMsOrNull))).filter(
+      (t): t is number => t !== null,
+    );
+    const span = times.length > 1 ? Math.max(...times) - Math.min(...times) : 0;
     recovered.push({
       walkId,
-      videoUri: videoFileName ? `${dir}${videoFileName}` : null,
-      stillUris: stillFileNames.map((name) => `${dir}${name}`),
+      videoUri,
+      stillUris,
+      recordedAtMs: times.length > 0 ? Math.max(...times) : null,
+      captureSpanMs: span > 0 ? span : null,
     });
   }
   return recovered;
@@ -522,6 +552,34 @@ export function forgetRecoverableWalksAtStartup(): void {
   notifyStartupScanListeners();
 }
 
+/**
+ * Retire ONE walk from the snapshot, because it is no longer an orphan — the caller just filed it
+ * with enqueueRecoveredWalk, so it now has a manifest entry and drains like any other walk.
+ *
+ * Necessary precisely BECAUSE the snapshot is frozen for the whole shell lifecycle. Re-scanning to
+ * notice the change is the one thing this module must not do mid-session: a walk recording right now
+ * has no manifest entry either, so a re-scan would report the live recording as recoverable and
+ * offer to file a video still being written. So the snapshot is edited in place instead — the only
+ * fact that changed is one this process itself caused, and it is applied without touching disk.
+ *
+ * Without it the recovery card would keep offering a walk it has already filed. That is not just a
+ * stale row: enqueueRecoveredWalk is idempotent per walkId, so a second filing under a DIFFERENT
+ * deal would appear to succeed while silently doing nothing — the estimator would be told their
+ * correction landed when the walk is still on its way to the first project they picked.
+ *
+ * Scoped to `ownerKey` for the same reason the snapshot itself is: a filing by one signed-in
+ * identity says nothing about another's orphans, and their manifests are different namespaces.
+ * Publishes only on a real change, so a repeat call (a double-tap that lost the race) costs a
+ * no-op rather than a rerender.
+ */
+export function forgetRecoveredWalk(ownerKey: string, walkId: string): void {
+  if (recoverableAtStartup === null || scannedOwnerKey !== ownerKey) return;
+  const next = recoverableAtStartup.filter((w) => w.walkId !== walkId);
+  if (next.length === recoverableAtStartup.length) return;
+  recoverableAtStartup = next;
+  notifyStartupScanListeners();
+}
+
 /** The one empty result, never re-created. This getter is used as a useSyncExternalStore snapshot,
  *  and React compares snapshots by IDENTITY — returning a fresh `[]` on each call would make every
  *  render look like a store change and spin the subscriber forever ("The result of getSnapshot
@@ -538,19 +596,27 @@ export function getRecoverableWalksFromStartup(): RecoveredWalk[] {
   return recoverableAtStartup ?? NO_RECOVERABLE_WALKS;
 }
 
-/** A file's own last-modified time in epoch ms, or `fallback` if it can't be read — see
- *  toRecoveredQueuedWalk's doc comment (upload-core.ts) for why a recovered artifact's captured-at
- *  should be the file's own timestamp, not the moment recovery happened, whenever the platform can
- *  report one. expo-file-system reports `modificationTime` in seconds, not ms. */
-async function fileTimestampMs(uri: string, fallback: number): Promise<number> {
+/** A file's own last-modified time in epoch ms, or null when the platform reports none (or the uri
+ *  is absent — accepted so a walk with no video can be summarised in one pass). expo-file-system
+ *  reports `modificationTime` in SECONDS, not ms. */
+async function fileTimestampMsOrNull(uri: string | null): Promise<number | null> {
+  if (!uri) return null;
   try {
     const info = await FileSystem.getInfoAsync(uri);
     return info.exists && typeof info.modificationTime === "number"
       ? Math.round(info.modificationTime * 1000)
-      : fallback;
+      : null;
   } catch {
-    return fallback;
+    return null;
   }
+}
+
+/** A file's own last-modified time in epoch ms, or `fallback` if it can't be read — see
+ *  toRecoveredQueuedWalk's doc comment (upload-core.ts) for why a recovered artifact's captured-at
+ *  should be the file's own timestamp, not the moment recovery happened, whenever the platform can
+ *  report one. */
+async function fileTimestampMs(uri: string, fallback: number): Promise<number> {
+  return (await fileTimestampMsOrNull(uri)) ?? fallback;
 }
 
 /**
