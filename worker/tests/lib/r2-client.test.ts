@@ -133,6 +133,74 @@ describe("worker r2-client getObjectRangeBuffer", () => {
     });
   });
 
+  it("gives up when R2 accepts the request and then never answers at all", async () => {
+    // The hang this bounds is not a lost connection — a lost connection rejects, and the queue retries. It
+    // is a socket that CONNECTS and then goes quiet, which nothing in the stack ends: the S3 client is
+    // built with no requestTimeout, `client.send` has no deadline of its own, and this job runs on a
+    // dedicated poller with a reentrancy guard and a concurrency of 1 (queue.ts,
+    // pollGlassesWalkthroughForwardJobs). So one stalled range read does not merely lose its own walk — it
+    // holds that guard for the life of the process and every LATER walkthrough forward goes unclaimed
+    // until a human restarts the worker. Unfixed, this test does not fail: it HANGS to the suite timeout,
+    // which is the defect stated exactly.
+    configureR2();
+    sendMock.mockReturnValue(new Promise(() => {})); // connected, never resolves
+    const { getObjectRangeBuffer } = await import("../../src/lib/r2-client.js");
+
+    const err = await getObjectRangeBuffer(KEY, 0, 9, 25).catch((e: Error) => e);
+    expect((err as Error).message).toMatch(/25ms/);
+    // RETRYABLE, and unmistakably so. The worker's queue classifies by "did the handler throw" (retry)
+    // versus deadJob (permanent), so throwing is already the right lane — what matters here is that the
+    // TEXT a human reads in job_queue.last_error cannot be read as "the object isn't there", which is the
+    // one conclusion that would send someone hunting a missing upload instead of a stalled read.
+    expect((err as Error).message).not.toMatch(/not found|no body|not configured/i);
+    expect((err as Error).message).toContain(KEY);
+  });
+
+  it("gives up when the body starts arriving and then stalls part-way through", async () => {
+    // The likelier shape in practice, and the one an abort on `send` alone would miss: headers and a first
+    // chunk arrive (so the call RESOLVES), then the stream goes silent forever. The deadline has to cover
+    // the drain loop, not just the request — the same reason scopeRequest's signal covers `response.text()`
+    // rather than only the fetch.
+    configureR2();
+    sendMock.mockResolvedValue({
+      Body: {
+        async *[Symbol.asyncIterator]() {
+          yield new Uint8Array(4);
+          await new Promise(() => {}); // …and never another byte
+        },
+      },
+    });
+    const { getObjectRangeBuffer } = await import("../../src/lib/r2-client.js");
+
+    const err = await getObjectRangeBuffer(KEY, 0, 9, 25).catch((e: Error) => e);
+    expect((err as Error).message).toMatch(/25ms/);
+    // NOT the short-read message. Four bytes did arrive, so the length check would also have rejected this
+    // — with `read 4 bytes for the 10-byte range`, which reads as a mis-declared file size and sends a
+    // human to the wrong place entirely. The read never finished; that is what has to be reported.
+    expect((err as Error).message).not.toMatch(/4 bytes/);
+  });
+
+  it("names no credential when it times out", async () => {
+    // Same rule as the unconfigured path above: this text reaches job_queue.last_error and the dead-letter
+    // alert email. A timeout message is assembled from the key and the deadline and nothing else.
+    configureR2();
+    sendMock.mockReturnValue(new Promise(() => {}));
+    const { getObjectRangeBuffer } = await import("../../src/lib/r2-client.js");
+
+    const err = await getObjectRangeBuffer(KEY, 0, 9, 25).catch((e: Error) => e);
+    expect((err as Error).message).not.toContain(FAKE_SECRET);
+  });
+
+  it("GUARD: a read that completes well inside the deadline is not disturbed by it", async () => {
+    // The timer must not become its own failure mode — an over-eager deadline on the one leg that moves
+    // 32MiB per call would turn every large part into a retry storm.
+    configureR2();
+    sendMock.mockResolvedValue({ Body: bodyOf(new Uint8Array(10)) });
+    const { getObjectRangeBuffer } = await import("../../src/lib/r2-client.js");
+
+    await expect(getObjectRangeBuffer(KEY, 0, 9, 5_000)).resolves.toHaveLength(10);
+  });
+
   // `getObjectBuffer` deliberately keeps its lenient `null` return: it is typed `Buffer | null`, so the
   // compiler forces every caller (exif-extract, field-scorecard-email,
   // scorecard-corrective-action-oversight-email) to branch on the miss, and none of them can relay it

@@ -51,7 +51,7 @@
 // scope data.
 import { deadJob, type JobHandlerResult } from "../queue.js";
 import { pool } from "../db.js";
-import { getObjectRangeBuffer } from "../lib/r2-client.js";
+import { getObjectRangeBuffer, R2_RANGE_READ_TIMEOUT_MS } from "../lib/r2-client.js";
 import { sendSystemEmailWithMetadata, type SendSystemEmailResult } from "../lib/system-email.js";
 import { escapeHtml, normalizeText } from "../lib/email-format.js";
 import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "./project-number-email.js";
@@ -80,12 +80,20 @@ export interface ScopeTimeouts {
   completeMs: number;
   /** One presigned part PUT — at most TROCK Scope's 32MiB PART_SIZE_BYTES, over the worker's own link. */
   partPutMs: number;
+  /** The SOURCE side of that same part: one ranged read of our own R2 object. Declared here with the other
+   *  three because a forward is a round trip, and a ceiling on three of its four legs bounds nothing —
+   *  the poller is held just as long by a stalled read as by a stalled write, and R2 is not more reliable
+   *  inbound than outbound. Enforced inside `getObjectRangeBuffer`, which owns both the request and the
+   *  drain of its body (the fetch-based legs above can bound themselves with an AbortSignal; the SDK read
+   *  cannot). */
+  sourceReadMs: number;
 }
 
 const DEFAULT_SCOPE_TIMEOUTS: ScopeTimeouts = {
   requestMs: 60_000,
   completeMs: 15 * 60_000,
   partPutMs: 10 * 60_000,
+  sourceReadMs: R2_RANGE_READ_TIMEOUT_MS,
 };
 
 type Queryable = {
@@ -518,7 +526,7 @@ async function uploadClip(
   deps: ScopeDeps,
   walkthroughId: string,
   artifact: JobArtifact,
-  downloadRange: (r2Key: string, start: number, end: number) => Promise<Buffer>
+  downloadRange: (r2Key: string, start: number, end: number, timeoutMs: number) => Promise<Buffer>
 ): Promise<void> {
   const begin = await beginClip(deps, walkthroughId, artifact);
   const partNumbers = Array.from({ length: begin.partCount }, (_, index) => index + 1);
@@ -541,8 +549,9 @@ async function uploadClip(
     }
     // Ranged read of OUR OWN R2 object, one part at a time — bounds memory to one part (32MiB, TROCK
     // Scope's PART_SIZE_BYTES) regardless of how large the whole clip is, instead of buffering an
-    // entire multi-GB video in the worker's process.
-    const chunk = await downloadRange(artifact.r2Key, startByte, endByte);
+    // entire multi-GB video in the worker's process. Bounded in TIME as well as memory, and by the same
+    // deadline the PUT below gets: this leg holds the dedicated poller's guard exactly as hard.
+    const chunk = await downloadRange(artifact.r2Key, startByte, endByte, deps.timeouts.sourceReadMs);
     // Never PUT bytes we did not fully read. `downloadRange` is an injection seam and its production
     // default is a network read, so a short answer is possible from either side — and NOTHING downstream
     // can see it: the presigned part PUT below accepts zero bytes, answers 200 and returns an ETag, and
@@ -703,7 +712,7 @@ export async function handleGlassesWalkthroughForward(
     fetchImpl?: typeof fetch;
     baseUrl?: string;
     token?: string;
-    downloadRange?: (r2Key: string, start: number, end: number) => Promise<Buffer>;
+    downloadRange?: (r2Key: string, start: number, end: number, timeoutMs: number) => Promise<Buffer>;
     /** Injection seam for the request ceilings, so a test can exercise the abort path in milliseconds
      *  rather than waiting out a production-sized budget. The queue never passes it. */
     timeouts?: Partial<ScopeTimeouts>;

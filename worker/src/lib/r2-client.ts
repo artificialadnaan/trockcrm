@@ -87,6 +87,18 @@ export async function getObjectBuffer(r2Key: string): Promise<Buffer | null> {
 }
 
 /**
+ * Wall-clock ceiling on ONE ranged read — the request AND the drain of its body — when the caller does not
+ * supply its own.
+ *
+ * Sized like the part PUT it feeds (glasses-walkthrough-forward.ts, `ScopeTimeouts.partPutMs`): the same
+ * 32MiB moving the other direction over the same link, so anything that would trip this would already have
+ * tripped that. It exists to bound a HANG, not to police latency — see `getObjectRangeBuffer` for what a
+ * hang costs on the dedicated poller, and note that a premature abort here is cheap by comparison (the
+ * part is re-read on the next attempt; nothing remote has been touched yet).
+ */
+export const R2_RANGE_READ_TIMEOUT_MS = 10 * 60_000;
+
+/**
  * Fetch ONE byte range of an object (inclusive `endByte`, HTTP Range semantics). Used by
  * glasses-walkthrough-forward.ts to relay a clip to TROCK Scope's multipart upload one 32MiB part at a
  * time instead of buffering an entire (potentially multi-GB) video/audio file in the worker's memory.
@@ -109,8 +121,30 @@ export async function getObjectBuffer(r2Key: string): Promise<Buffer | null> {
  * The length check catches what a credential check cannot: R2 clamps a range to the object's real end, so
  * a `files` row overstating fileSizeBytes yields a SHORT part, and S3 multipart accepts an undersized
  * FINAL part — that one completes "successfully" as a silently truncated recording.
+ *
+ * BOUNDED IN WALL-CLOCK, unlike every other read in this module, because of where its one caller runs. A
+ * failure that REJECTS is ordinary here: the job throws, the queue retries it. The failure this bound is
+ * for is the one that does not reject — a socket R2 accepts and then goes quiet on. The S3 client is
+ * constructed with no `requestTimeout` and `client.send` carries no deadline of its own, so nothing else
+ * in the stack ever ends that wait; and glasses-walkthrough-forward.ts is polled by a DEDICATED loop with
+ * a reentrancy guard and a concurrency of 1 (queue.ts, pollGlassesWalkthroughForwardJobs). One stalled
+ * read therefore does not merely lose its own walk — it holds that guard for the life of the process, and
+ * every later walkthrough forward goes unclaimed until a human restarts the worker. It is the same hazard
+ * the TROCK Scope request timeouts and the destination part-PUT timeout already cover, on the one leg of
+ * the round trip that they do not reach.
+ *
+ * A blown deadline is deliberately a plain `Error`: the queue's contract is "throw ⇒ retry, deadJob(...) ⇒
+ * permanent", and a stall is exactly the transient this job's 10 attempts exist for. The message is
+ * likewise deliberately unlike the absence/short-read ones above — "we could not finish reading" must
+ * never be filed as "the object isn't there" or "the file is smaller than declared", which are what a
+ * human would go chasing instead.
  */
-export async function getObjectRangeBuffer(r2Key: string, startByte: number, endByteInclusive: number): Promise<Buffer> {
+export async function getObjectRangeBuffer(
+  r2Key: string,
+  startByte: number,
+  endByteInclusive: number,
+  timeoutMs: number = R2_RANGE_READ_TIMEOUT_MS
+): Promise<Buffer> {
   const expectedBytes = endByteInclusive - startByte + 1;
 
   if (!isR2Configured()) {
@@ -125,24 +159,69 @@ export async function getObjectRangeBuffer(r2Key: string, startByte: number, end
   const client = getR2Client();
   const bucket = getR2Bucket();
 
-  const response = await client.send(
-    new GetObjectCommand({
-      Bucket: bucket,
-      Key: r2Key,
-      Range: `bytes=${startByte}-${endByteInclusive}`,
-    })
+  // ONE deadline spanning both phases, not a timeout per phase. `client.send` resolves the moment the
+  // response headers arrive, so a per-request bound would leave the drain below — where the 32MiB actually
+  // moves, and where a stall is likeliest — completely uncovered. Same reasoning as scopeRequest's signal
+  // covering `response.text()` rather than only the fetch.
+  const controller = new AbortController();
+  let timedOut = false;
+  // Set inside the read so the timer can tear down a stream the SDK has stopped tracking: `abortSignal` is
+  // the SDK's handle on an in-flight REQUEST, and after `send` resolves the socket belongs to the body.
+  // Aborting alone would reject this call and leak the connection for the rest of the process.
+  let body: { destroy?: (error?: Error) => void } | undefined;
+  const timeoutError = new Error(
+    `R2 did not finish the ${expectedBytes}-byte range ${startByte}-${endByteInclusive} of ${r2Key} within ` +
+      `${timeoutMs}ms, so the read was abandoned.`
   );
+  let failDeadline!: (error: Error) => void;
+  const deadline = new Promise<never>((_, reject) => {
+    failDeadline = reject;
+  });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+    body?.destroy?.(timeoutError);
+    failDeadline(timeoutError);
+  }, timeoutMs);
 
-  if (!response.Body) {
-    throw new Error(`R2 returned no body for bytes ${startByte}-${endByteInclusive} of ${r2Key}.`);
-  }
+  const read = async (): Promise<Buffer> => {
+    const response = await client.send(
+      new GetObjectCommand({
+        Bucket: bucket,
+        Key: r2Key,
+        Range: `bytes=${startByte}-${endByteInclusive}`,
+      }),
+      { abortSignal: controller.signal }
+    );
 
-  const chunks: Uint8Array[] = [];
-  const reader = response.Body as AsyncIterable<Uint8Array>;
-  for await (const chunk of reader) {
-    chunks.push(chunk);
+    if (!response.Body) {
+      throw new Error(`R2 returned no body for bytes ${startByte}-${endByteInclusive} of ${r2Key}.`);
+    }
+
+    body = response.Body as { destroy?: (error?: Error) => void };
+    const chunks: Uint8Array[] = [];
+    const reader = response.Body as AsyncIterable<Uint8Array>;
+    for await (const chunk of reader) {
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks);
+  };
+
+  let buffer: Buffer;
+  try {
+    // RACED, not merely aborted. Both teardown levers are best-effort against the case that matters: an
+    // async iterable that simply never yields again has nothing to reject, and `destroy` is not part of
+    // AsyncIterable at all. Only the race guarantees this function returns — which is the whole point, since
+    // the caller's problem is a promise that never settles, not one that settles badly.
+    buffer = await Promise.race([read(), deadline]);
+  } catch (err) {
+    // The abort may surface first and in the SDK's own words ("Request aborted"), which says nothing about
+    // a deadline and reads like someone cancelled the job. Once the timer has fired, the cause is known and
+    // this is the only accurate account of it.
+    throw timedOut ? timeoutError : err;
+  } finally {
+    clearTimeout(timer);
   }
-  const buffer = Buffer.concat(chunks);
   if (buffer.length !== expectedBytes) {
     // Also the only guard against a Range header R2 rejected as unparseable: S3 answers those by ignoring
     // the header and returning the WHOLE object, which is a length mismatch in the other direction.

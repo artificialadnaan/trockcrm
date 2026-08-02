@@ -15,6 +15,7 @@ import {
   GLASSES_WALKTHROUGH_VERIFY_CONCURRENCY,
   type GlassesWalkthroughArtifactStore,
   type IngestGlassesWalkthroughInput,
+  deriveGlassesWalkthroughClientUploadId,
   ingestGlassesWalkthrough,
 } from "./glasses-walkthrough-service.js";
 
@@ -23,6 +24,11 @@ const DEAL = U("11111");
 const OTHER_DEAL = U("11112");
 const USER = U("22222");
 const WALK = U("33333");
+
+/** Rows are found by the DEAL-SCOPED id the service stores, never by the key the client sent — a lookup on
+ *  the raw key matches nothing at all. See `deriveGlassesWalkthroughClientUploadId` for why the two differ. */
+const storedId = (idempotencyKey: string, dealId: string = DEAL) =>
+  deriveGlassesWalkthroughClientUploadId(dealId, idempotencyKey);
 
 let pg: PGlite;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -96,7 +102,13 @@ describe("ingestGlassesWalkthrough", () => {
 
     const rows = await tenantDb.select().from(files).where(eq(files.dealId, DEAL));
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.clientUploadId).toBe("artifact-1");
+    // Stored DEAL-SCOPED, not as the client sent it — and demonstrably scoped: the same key under another
+    // deal is a different stored id, which is the whole reason the cross-deal case below can work at all.
+    expect(rows[0]!.clientUploadId).toBe(storedId("artifact-1"));
+    expect(rows[0]!.clientUploadId).not.toBe("artifact-1");
+    expect(storedId("artifact-1", OTHER_DEAL)).not.toBe(storedId("artifact-1"));
+    // The raw key is not lost, just moved off the column that has to be unique.
+    expect(rows[0]!.systemFilename).toBe("glasses-walk-artifact-1.mp4");
     expect(rows[0]!.mimeType).toBe("video/mp4");
     expect(rows[0]!.category).toBe("other"); // video has no dedicated FILE_CATEGORIES entry
     expect(rows[0]!.uploadedBy).toBe(USER);
@@ -119,7 +131,7 @@ describe("ingestGlassesWalkthrough", () => {
       artifactStore: healthyStore({ head: async () => ({ contentType: "image/jpeg", contentLength: 2048 }) }),
     });
 
-    const [row] = await tenantDb.select().from(files).where(eq(files.clientUploadId, "photo-1"));
+    const [row] = await tenantDb.select().from(files).where(eq(files.clientUploadId, storedId("photo-1")));
     expect(row.category).toBe("photo");
   });
 
@@ -131,17 +143,66 @@ describe("ingestGlassesWalkthrough", () => {
     expect(first.files[0]!.fileId).toBe(second.files[0]!.fileId);
     expect(second.files[0]!.created).toBe(false);
 
-    const rows = await tenantDb.select().from(files).where(eq(files.clientUploadId, "artifact-1"));
+    const rows = await tenantDb.select().from(files).where(eq(files.clientUploadId, storedId("artifact-1")));
     expect(rows).toHaveLength(1); // NOT two — this is the exact defect the task calls out
   });
 
-  it("refuses a reused idempotencyKey pointed at a DIFFERENT deal rather than silently reassociating it", async () => {
-    await ingestGlassesWalkthrough(tenantDb, baseInput({ dealId: DEAL }), { artifactStore: healthyStore() });
+  it("files the SAME walkId and artifact keys against a SECOND deal instead of colliding on them", async () => {
+    // Mobile derives every artifact key from (walkId, kind[, index]) and NOTHING else
+    // (walkArtifactIdempotencyKey, mobile/src/walkthrough/upload-core.ts), while `files.client_upload_id`
+    // is unique across the whole TENANT. So the two flows that re-file one physical walk under a new deal
+    // re-send byte-identical keys: a mis-tagged walk corrected to the right deal, and a recovered orphan
+    // walk whose dealId a human supplies at recovery time (toRecoveredQueuedWalk — nothing on disk says
+    // which deal it belongs to, so the FIRST attempt can be the wrong one).
+    //
+    // Stored raw, deal B's insert conflicts with deal A's row, and the completion is then refused forever:
+    // correcting a mis-filed walk becomes impossible, and the evidence stays on the wrong job.
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ dealId: DEAL }), {
+      artifactStore: healthyStore(),
+    });
+    const second = await ingestGlassesWalkthrough(tenantDb, baseInput({ dealId: OTHER_DEAL }), {
+      artifactStore: healthyStore(),
+    });
+
+    expect(second.files[0]!.created).toBe(true);
+    expect(second.files[0]!.fileId).not.toBe(first.files[0]!.fileId);
+    // The key the CLIENT sent is what comes back. Deal scoping is a STORAGE detail: mobile matches the
+    // response against its own queue entries by the key it generated, so leaking the stored form here
+    // would strand every artifact as unacknowledged and re-upload the whole walk on the next drain.
+    expect(second.files[0]!.idempotencyKey).toBe("artifact-1");
+
+    const rows = await tenantDb.select().from(files);
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r: { dealId: string }) => r.dealId).sort()).toEqual([DEAL, OTHER_DEAL].sort());
+    // Two DISTINCT stored ids — the per-artifact retry dedupe is still a unique-index property, not a
+    // property that was dropped to make the above pass.
+    expect(new Set(rows.map((r: { clientUploadId: string }) => r.clientUploadId)).size).toBe(2);
+  });
+
+  it("GUARD: still refuses a stored id that already belongs to a DIFFERENT deal rather than relaying its row", async () => {
+    // Deal-scoping makes this unreachable through the ingress itself, which is exactly why the check has
+    // to be tested against a row planted by hand: a stored id that is already some other deal's can now
+    // only come from a digest collision or a future producer emitting the same shape. The failure it
+    // prevents is silent and expensive either way — the response would hand this walk's forward job
+    // another deal's fileId/r2Key, and the forward job has no way to notice it is shipping the wrong
+    // evidence to TROCK Scope.
+    await tenantDb.insert(files).values({
+      category: "other",
+      displayName: "someone-elses.mp4",
+      systemFilename: "someone-elses.mp4",
+      originalFilename: "someone-elses.mp4",
+      mimeType: "video/mp4",
+      fileSizeBytes: 1024,
+      fileExtension: ".mp4",
+      r2Key: "dallas/deals/other/collision.mp4",
+      r2Bucket: "trock-crm-files",
+      dealId: OTHER_DEAL,
+      uploadedBy: USER,
+      clientUploadId: storedId("artifact-1"), // the id DEAL's artifact-1 will derive
+    });
 
     await expect(
-      ingestGlassesWalkthrough(tenantDb, baseInput({ dealId: OTHER_DEAL, walkId: U("44444") }), {
-        artifactStore: healthyStore(),
-      })
+      ingestGlassesWalkthrough(tenantDb, baseInput({ dealId: DEAL }), { artifactStore: healthyStore() })
     ).rejects.toMatchObject({ statusCode: 409 });
   });
 
@@ -182,13 +243,12 @@ describe("ingestGlassesWalkthrough", () => {
     const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ dealId: DEAL }), {
       artifactStore: healthyStore(),
     });
-    const second = await ingestGlassesWalkthrough(
-      tenantDb,
-      // Distinct artifact keys: files.client_upload_id is globally unique, so reusing the SAME key across
-      // deals is a different defect entirely (the cross-deal 409 above) and would mask this one.
-      baseInput({ dealId: OTHER_DEAL, artifacts: [{ ...baseInput().artifacts[0]!, idempotencyKey: "artifact-2" }] }),
-      { artifactStore: healthyStore() }
-    );
+    // The SAME artifact keys, not distinct ones — that is what mobile actually re-sends when a walk is
+    // re-filed, and the artifact-level and walk-level scoping have to hold together or the request fails
+    // before the enqueue this test is about is ever reached.
+    const second = await ingestGlassesWalkthrough(tenantDb, baseInput({ dealId: OTHER_DEAL }), {
+      artifactStore: healthyStore(),
+    });
 
     expect(first.forwarding.status).toBe("queued");
     expect(second.forwarding.status).toBe("queued"); // NOT already_queued
@@ -221,11 +281,9 @@ describe("ingestGlassesWalkthrough", () => {
       sql`jsonb_set(${jobQueue.payload}, '{scopeWalkthroughId}', '"scope-wt-DEAL-A"'::jsonb, true)`
     );
 
-    const second = await ingestGlassesWalkthrough(
-      tenantDb,
-      baseInput({ dealId: OTHER_DEAL, artifacts: [{ ...baseInput().artifacts[0]!, idempotencyKey: "artifact-2" }] }),
-      { artifactStore: healthyStore() }
-    );
+    const second = await ingestGlassesWalkthrough(tenantDb, baseInput({ dealId: OTHER_DEAL }), {
+      artifactStore: healthyStore(),
+    });
     const [replacement] = await tenantDb.select().from(jobQueue).where(eq(jobQueue.id, second.forwarding.jobId));
     expect(replacement.payload.scopeWalkthroughId).toBeUndefined();
     expect(replacement.payload.scopeCreatePendingRef).toBeUndefined();
@@ -429,7 +487,7 @@ describe("ingestGlassesWalkthrough", () => {
 
   it("tags every artifact of a walk with the same walkId so the project folder can group them", async () => {
     await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
-    const [row] = await tenantDb.select().from(files).where(eq(files.clientUploadId, "artifact-1"));
+    const [row] = await tenantDb.select().from(files).where(eq(files.clientUploadId, storedId("artifact-1")));
     expect(row.tags).toContain(WALK);
   });
 
@@ -463,7 +521,7 @@ describe("ingestGlassesWalkthrough", () => {
       artifactStore: healthyStore({ head: async () => ({ contentType: "image/jpeg", contentLength: 2048 }) }),
     });
 
-    const [row] = await tenantDb.select().from(files).where(eq(files.clientUploadId, "photo-1"));
+    const [row] = await tenantDb.select().from(files).where(eq(files.clientUploadId, storedId("photo-1")));
     // Under the doubling bug this would resolve to on the order of the year 4052, not 2026 — the string
     // comparison below fails loudly rather than silently passing on a near-miss.
     expect(new Date(row.takenAt).toISOString()).toBe(artifactCapturedAt);
@@ -487,7 +545,7 @@ describe("ingestGlassesWalkthrough", () => {
       artifactStore: healthyStore({ head: async () => ({ contentType: "image/jpeg", contentLength: 2048 }) }),
     });
 
-    const [row] = await tenantDb.select().from(files).where(eq(files.clientUploadId, "photo-2"));
+    const [row] = await tenantDb.select().from(files).where(eq(files.clientUploadId, storedId("photo-2")));
     expect(new Date(row.takenAt).toISOString()).toBe("2026-07-29T14:00:00.000Z");
   });
 });

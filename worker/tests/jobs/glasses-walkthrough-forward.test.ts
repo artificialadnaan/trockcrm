@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { GLASSES_WALKTHROUGH_FORWARD_JOB, handleGlassesWalkthroughForward } from "../../src/jobs/glasses-walkthrough-forward.js";
+import { R2_RANGE_READ_TIMEOUT_MS } from "../../src/lib/r2-client.js";
 
 /**
  * `markerRows` is what the pre-create marker UPDATE answers with. It defaults to one row because that is
@@ -207,11 +208,15 @@ describe("handleGlassesWalkthroughForward", () => {
       "deal-1",
     ]);
 
-    // Downloaded exactly the one part's byte range from OUR OWN R2 key.
+    // Downloaded exactly the one part's byte range from OUR OWN R2 key, under a deadline. The source read
+    // is the one leg of the round trip that cannot bound ITSELF — the fetch-based legs carry an
+    // AbortSignal, the S3 client is built with no requestTimeout — so an unpassed ceiling here is not a
+    // slower forward, it is a poller that stops claiming work until someone restarts the worker.
     expect(downloadRange).toHaveBeenCalledWith(
       "dallas/deals/deal-1/glasses-walkthroughs/walk-1/artifact-1.mp4",
       0,
-      1023
+      1023,
+      R2_RANGE_READ_TIMEOUT_MS
     );
 
     const completeCall = calls.find((c) => c.url.endsWith("/complete"));
@@ -545,6 +550,27 @@ describe("handleGlassesWalkthroughForward", () => {
         })
       ).rejects.toThrow(/did not answer within/);
     }, 3_000);
+
+    it("hands the SOURCE read the ceiling it was configured with, not just the default", async () => {
+      // The other half of that same part. The read cannot bound itself from the caller's side — it is an
+      // SDK call, not a fetch, so there is no signal to hand it — and `getObjectRangeBuffer` therefore
+      // takes the deadline as an argument. A ceiling that is declared and then never passed is the exact
+      // shape of a fix that reviews clean and changes nothing at runtime, so it is asserted at the seam.
+      const db = makeDb();
+      const { fetchImpl } = makeScopeFetch();
+      const downloadRange = makeDownloadRange();
+
+      await handleGlassesWalkthroughForward(makePayload({ scopeWalkthroughId: "already-created" }), "office-1", {
+        db,
+        fetchImpl: fetchImpl as any,
+        baseUrl: SCOPE_BASE_URL,
+        token: "t",
+        downloadRange,
+        timeouts: { sourceReadMs: 1_234 },
+      });
+
+      expect(downloadRange).toHaveBeenCalledWith(expect.any(String), 0, 1023, 1_234);
+    });
   });
 
   // ── Part integrity ───────────────────────────────────────────────────────────────────────────────

@@ -22,10 +22,11 @@
 //     mechanism: it is already exactly "an idempotency key the mobile client sends per artifact",
 //     already has a partial unique index, and `field/routes.ts`'s `parseOptionalClientUploadId` already
 //     establishes the validation rule this module mirrors (non-empty string, at most 64 characters — the
-//     column width). No namespacing prefix: the existing producers (field photos, scorecard edit
-//     evidence) do not prefix theirs either, and a client-generated key colliding by ACCIDENT across
-//     producers is cryptographically negligible when the client follows the same convention (a fresh
-//     UUID per artifact) documented in this module's report to the mobile team.
+//     column width). What this producer does NOT do is store the client's key verbatim, unlike field
+//     photos and scorecard edit evidence: those mint a fresh UUID per artifact, whereas this client
+//     derives its keys from (walkId, kind) and reuses them across deals by design. See
+//     `deriveGlassesWalkthroughClientUploadId` for what that costs and why the stored id is deal-scoped.
+import { createHash } from "node:crypto";
 import { and, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
@@ -86,7 +87,13 @@ export const GLASSES_WALKTHROUGH_ACCEPTED_MEDIA: Readonly<Record<string, Accepte
  */
 export const MAX_GLASSES_WALKTHROUGH_ARTIFACT_BYTES = 2 * 1024 * 1024 * 1024; // 2 GiB
 
-/** `files.client_upload_id` is `varchar(64)` (migration 0170) — the idempotency key's hard ceiling. */
+/**
+ * The ceiling on the key the CLIENT sends. It matches `files.client_upload_id`'s `varchar(64)` (migration
+ * 0170) and mobile's own `MAX_IDEMPOTENCY_KEY_LENGTH`, but since the stored id is now a fixed-width digest
+ * (`deriveGlassesWalkthroughClientUploadId`) the column is no longer what enforces it — these are. The raw
+ * key still reaches `system_filename` (varchar(500)) and `r2_key` (varchar(1000)) verbatim, and an
+ * agreed-in-both-directions bound is worth more than the few bytes relaxing it would buy.
+ */
 export const MAX_GLASSES_WALKTHROUGH_IDEMPOTENCY_KEY_CHARS = 64;
 
 /**
@@ -238,6 +245,47 @@ export function deriveGlassesWalkthroughArtifactR2Key(
   const safeWalkId = encodeURIComponent(walkId);
   const safeIdempotencyKey = encodeURIComponent(idempotencyKey);
   return `${safeOfficeSlug}/deals/${safeDealId}/glasses-walkthroughs/${safeWalkId}/${safeIdempotencyKey}.${extension}`;
+}
+
+/**
+ * What actually goes into `files.client_upload_id` for one artifact: a DEAL-SCOPED digest of the client's
+ * key, never the key itself.
+ *
+ * Mobile derives every artifact key from (walkId, kind[, photoIndex]) and nothing else
+ * (`walkArtifactIdempotencyKey`, mobile/src/walkthrough/upload-core.ts), while that column's unique index
+ * is TENANT-wide (migration 0170). Those two facts collide on exactly the flows that re-file ONE physical
+ * walk under a DIFFERENT deal, both of which are supported: a mis-tagged walk corrected to the right job,
+ * and a recovered orphan walk whose deal a human supplies at recovery time (`toRecoveredQueuedWalk` —
+ * nothing on disk records the deal, so the first answer can be the wrong one). Stored raw, the second
+ * deal's insert loses the conflict, the re-select then finds the FIRST deal's row, and the completion
+ * 409s on every retry forever: the evidence is stranded on the wrong job with no way to move it.
+ *
+ * Digested rather than concatenated because the column is varchar(64) and a dealId (36) + separator + a
+ * key (up to 64) does not fit. Truncating a composite to fit would be worse than not scoping at all:
+ * mobile's keys differ only in their SUFFIX (`<walkId>:photo:11` vs `<walkId>:photo:12`), so a
+ * length-truncated pair silently merges two stills of the same walk into one row and drops one — a
+ * missing frame nothing reports, in the one artifact class a human might never count.
+ *
+ * Nothing is lost to debugging. The raw key stays on the row twice over — `system_filename`
+ * (`glasses-walk-<key>.<ext>`) and `r2_key` — and `tags` carries the walkId, so "which artifact is this,
+ * and which walk" is still answerable from the row alone. The one column that has to be UNIQUE is simply
+ * not the one to answer it from.
+ *
+ * The client's key is never replaced in the API contract: the completion response echoes what the client
+ * sent (`GlassesWalkthroughFileResult.idempotencyKey`), because mobile retires its upload-queue entries by
+ * matching on the key it generated — returning the stored form would leave every artifact unacknowledged
+ * and re-upload the whole walk on the next drain.
+ */
+export function deriveGlassesWalkthroughClientUploadId(dealId: string, idempotencyKey: string): string {
+  // NUL-separated, not hyphen/colon-separated: both components are free-form client-or-caller text, and any
+  // separator that CAN appear inside them makes the pair re-cuttable — ("deal-a", "b:key") and ("deal",
+  // "a-b:key") would digest identically, which is the very cross-deal aliasing this function exists to
+  // remove. NUL is the one byte neither can contain (Postgres rejects it in `text`/`varchar` outright).
+  const digest = createHash("sha256").update(`${dealId}\u0000${idempotencyKey}`).digest("hex");
+  // 3 + 61 = 64, the column exactly. The `gw_` prefix also puts these values in a shape no other producer
+  // emits (field photos and scorecard evidence send bare UUIDs), so a cross-producer collision is ruled out
+  // by construction rather than by probability; 244 retained bits rule out the within-producer one.
+  return `gw_${digest.slice(0, 61)}`;
 }
 
 // ── Endpoint A: request a presigned upload URL for one artifact ────────────────────────────────────
@@ -450,6 +498,10 @@ interface PreparedGlassesWalkthroughArtifact {
   artifact: GlassesWalkthroughArtifactInput;
   media: AcceptedGlassesWalkthroughMedia;
   r2Key: string;
+  /** The DEAL-SCOPED id this artifact is stored and re-found under — NOT `artifact.idempotencyKey`, which
+   *  is only what the client called it. Derived once here so the write phase can never key one statement
+   *  by the raw value and the next by the scoped one, which would read as a phantom conflict. */
+  clientUploadId: string;
 }
 
 function prepareGlassesWalkthroughArtifacts(
@@ -474,6 +526,7 @@ function prepareGlassesWalkthroughArtifacts(
         artifact.idempotencyKey,
         media.extension
       ),
+      clientUploadId: deriveGlassesWalkthroughClientUploadId(input.dealId, artifact.idempotencyKey),
     };
   });
 }
@@ -685,7 +738,11 @@ export interface IngestGlassesWalkthroughResult {
  *   - PER ARTIFACT: `files.client_upload_id` (unique, partial index — migration 0170) means re-running
  *     this for an artifact whose idempotency key already produced a row returns THAT row (`created:
  *     false`) instead of a second one. `onConflictDoNothing` + re-select mirrors `confirmUpload`
- *     (files/service.ts) exactly, including the concurrent-race case it also handles.
+ *     (files/service.ts) exactly, including the concurrent-race case it also handles. Scoped to the
+ *     (`dealId`, key) PAIR, never the key alone, for the same reason the per-walk guard below is scoped
+ *     to a pair: mobile's key is a function of the walk and nothing else, so keying the row on it alone
+ *     made re-filing a walk against the correct deal permanently impossible — see
+ *     `deriveGlassesWalkthroughClientUploadId`.
  *   - PER WALK: retrying the WHOLE completion call (e.g. the mobile app never saw the first response)
  *     must not enqueue a SECOND forward job — TROCK Scope's `POST /walkthroughs` has no idempotency key
  *     of its own (see the report's TROCK Scope follow-up), so two jobs for one walk would create two
@@ -746,7 +803,7 @@ export async function ingestGlassesWalkthrough(
   // Row order is NOT relied on anywhere below: `returning()` on a conflicting multi-row insert yields only
   // the rows that actually inserted, in no promised order, so results are matched back by
   // `client_upload_id` and the per-artifact bookkeeping is driven by iterating `prepared`.
-  const insertValues = prepared.map(({ artifact, media, r2Key }) => ({
+  const insertValues = prepared.map(({ artifact, media, r2Key, clientUploadId }) => ({
     category: (media.kind === "photo" ? "photo" : "other") as FileCategory,
     subcategory: GLASSES_WALKTHROUGH_SUBCATEGORY,
     folderPath: GLASSES_WALKTHROUGH_FOLDER_PATH,
@@ -762,7 +819,9 @@ export async function ingestGlassesWalkthrough(
     dealId: input.dealId,
     description: input.siteLabel ? `Glasses walkthrough — ${input.siteLabel}` : "Glasses walkthrough",
     uploadedBy: input.userId,
-    clientUploadId: artifact.idempotencyKey,
+    // The DEAL-SCOPED id, not the client's raw key — see `deriveGlassesWalkthroughClientUploadId`. The raw
+    // key is still on this row in `systemFilename` and `r2Key` above.
+    clientUploadId,
     // WHEN this artifact was actually captured on site, not when this request happened to file it —
     // same reasoning as createWalkthroughContactSheetFile (walkthrough-ingress-service.ts): everything
     // that orders/filters files chronologically (field gallery, photo-timeline-filters.ts,
@@ -788,29 +847,32 @@ export async function ingestGlassesWalkthrough(
     .onConflictDoNothing({ target: files.clientUploadId, where: isNotNull(files.clientUploadId) })
     .returning();
 
-  // Which keys THIS call created, as opposed to which already existed — `created` is per artifact and a
-  // partly-landed walk being retried legitimately reports a mix. Deriving it from "did the statement
-  // insert anything" would collapse that.
-  const createdKeys = new Set(inserted.map((row) => row.clientUploadId));
+  // Which artifacts THIS call created, as opposed to which already existed — `created` is per artifact and
+  // a partly-landed walk being retried legitimately reports a mix. Deriving it from "did the statement
+  // insert anything" would collapse that. Keyed by the STORED id throughout, because that is what the
+  // returned rows carry; the client's raw key is reattached only in the response below.
+  const createdClientUploadIds = new Set(inserted.map((row) => row.clientUploadId));
 
-  const artifactKeys = prepared.map(({ artifact }) => artifact.idempotencyKey);
+  const storedIds = prepared.map(({ clientUploadId }) => clientUploadId);
   // One re-select covering the whole walk, conflicts and inserts alike, so the retry path costs the same
   // single round trip as the first-completion path.
-  const rowsByKey = new Map(
-    (await tenantDb.select().from(files).where(inArray(files.clientUploadId, artifactKeys))).map((row) => [
+  const rowsByStoredId = new Map(
+    (await tenantDb.select().from(files).where(inArray(files.clientUploadId, storedIds))).map((row) => [
       row.clientUploadId,
       row,
     ])
   );
 
-  const fileResults: GlassesWalkthroughFileResult[] = prepared.map(({ artifact, media }) => {
-    const fileRow = rowsByKey.get(artifact.idempotencyKey);
+  const fileResults: GlassesWalkthroughFileResult[] = prepared.map(({ artifact, media, clientUploadId }) => {
+    const fileRow = rowsByStoredId.get(clientUploadId);
     if (!fileRow) {
       throw new AppError(409, `Artifact ${artifact.idempotencyKey} could not be filed. Please retry.`);
     }
-    // A reused idempotency key pointed at a DIFFERENT deal is not a legitimate retry — refuse rather
-    // than silently associating this walk's artifact list with someone else's file. Checked against the
-    // row that is actually in the table, so it catches the pre-existing row the conflict skipped over.
+    // Unreachable through this module now that the stored id is deal-scoped — which is the point of
+    // keeping it. It fires only if some OTHER producer has written this exact value (ruled out by the
+    // `gw_` shape) or on a 244-bit digest collision, and in both cases the row belongs to a different job:
+    // relaying its fileId would hand this walk's forward job someone else's evidence, and the forward job
+    // cannot tell. Refusing is the only answer that stays correct without knowing which happened.
     if (fileRow.dealId !== input.dealId) {
       throw new AppError(
         409,
@@ -819,11 +881,14 @@ export async function ingestGlassesWalkthrough(
     }
     return {
       fileId: fileRow.id,
+      // The key the CLIENT sent, never the stored form: mobile retires its queue entries by matching this
+      // against the key it generated (upload.ts's drain loop), so echoing the digest would leave every
+      // artifact unacknowledged and re-upload the whole walk on the next drain.
       idempotencyKey: artifact.idempotencyKey,
       kind: media.kind,
       r2Key: fileRow.r2Key,
       displayName: fileRow.displayName,
-      created: createdKeys.has(artifact.idempotencyKey),
+      created: createdClientUploadIds.has(clientUploadId),
     };
   });
 
