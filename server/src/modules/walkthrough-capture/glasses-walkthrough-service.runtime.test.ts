@@ -277,12 +277,19 @@ describe("ingestGlassesWalkthrough", () => {
     expect(row.tags).toContain(WALK);
   });
 
-  it("stamps takenAt from capturedAt + capturedAtMs, not the moment the row was inserted", async () => {
-    // The site visit happened at capturedAt; capturedAtMs is this artifact's offset from the walk's start.
-    // An offline/background-delayed walk can file its rows minutes or days later — takenAt must reflect the
-    // site visit, not createdAt (which the field gallery and its date filters fall back to when takenAt is
-    // null), or glasses stills get grouped/sorted/reported under the day they uploaded instead of the day
-    // they were shot.
+  it("stamps takenAt directly from capturedAtMs — an ABSOLUTE epoch-ms timestamp, not an offset added to capturedAt", async () => {
+    // capturedAtMs is `Date.now()` on the phone at the moment of capture (QueuedWalkArtifact.at in
+    // mobile/src/walkthrough/upload-core.ts, sent as `a.at` in upload.ts) — an absolute epoch timestamp,
+    // NOT an offset from the walk's start, despite what the field name suggests.
+    //
+    // This test deliberately uses a REALISTIC epoch value (an actual `Date.parse(...)` result) rather than
+    // something small like `100` or `5 * 60 * 1000`. A small "offset-shaped" number passes under BOTH
+    // `takenAt = capturedAtMs` (correct) AND the previously-shipped `takenAt = capturedAtBaseMs +
+    // capturedAtMs` (the bug: adding two absolute epoch timestamps together roughly doubles the value) —
+    // at that scale the doubling is a few minutes' difference, easy to miss in a date-string assertion.
+    // With a real epoch value the two implementations diverge by ~56 years (2026 -> ~4052), which is
+    // exactly the class of bug that shipped to production undetected the first time this was "fixed".
+    const artifactCapturedAt = "2026-07-29T14:05:00.000Z";
     const input = baseInput({
       capturedAt: "2026-07-29T14:00:00.000Z",
       artifacts: [
@@ -292,7 +299,7 @@ describe("ingestGlassesWalkthrough", () => {
           originalFilename: "frame.jpg",
           mimeType: "image/jpeg",
           fileSizeBytes: 2048,
-          capturedAtMs: 5 * 60 * 1000, // 5 minutes into the walk
+          capturedAtMs: new Date(artifactCapturedAt).getTime(), // e.g. 1785333900000 — NOT 300000
         },
       ],
     });
@@ -301,10 +308,12 @@ describe("ingestGlassesWalkthrough", () => {
     });
 
     const [row] = await tenantDb.select().from(files).where(eq(files.clientUploadId, "photo-1"));
-    expect(new Date(row.takenAt).toISOString()).toBe("2026-07-29T14:05:00.000Z");
+    // Under the doubling bug this would resolve to on the order of the year 4052, not 2026 — the string
+    // comparison below fails loudly rather than silently passing on a near-miss.
+    expect(new Date(row.takenAt).toISOString()).toBe(artifactCapturedAt);
   });
 
-  it("stamps takenAt at the walk's capturedAt when an artifact has no capturedAtMs offset", async () => {
+  it("stamps takenAt at the walk's capturedAt when an artifact never reports its own capturedAtMs", async () => {
     const input = baseInput({
       capturedAt: "2026-07-29T14:00:00.000Z",
       artifacts: [

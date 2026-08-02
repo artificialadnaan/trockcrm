@@ -84,6 +84,23 @@ final class WalkthroughRecorder: RCTEventEmitter {
   func startWalk(_ walkId: String,
                  resolver resolve: @escaping RCTPromiseResolveBlock,
                  rejecter reject: @escaping RCTPromiseRejectBlock) {
+    // Mirrors the guard in WearablesBridge.startStream(): `Wearables.configure()` must already
+    // have succeeded — via the app's one-time startup call in _layout.tsx, or Profile's
+    // PairingRow — before `AutoDeviceSelector` below can ever resolve a device. Without this
+    // guard, an unconfigured SDK sends that selector into the same 8-second wait as a genuine
+    // "no device" case, then fails with `walk_no_device` — blaming the glasses for a failure
+    // that actually happened at launch. Reads `WearablesBridge.configured` directly (rather than
+    // tracking a second flag here) so the two can never disagree about whether configure() ran.
+    guard WearablesBridge.configured else {
+      reject(
+        "walk_not_configured",
+        "Wearables SDK is not configured. The app attempts this once at startup; if that failed "
+          + "(bad Meta credentials, SDK init error), a walk cannot start until it succeeds — "
+          + "check Profile's \"Pair glasses\" for the real cause.",
+        nil
+      )
+      return
+    }
     Task {
       let audio = AVAudioSession.sharedInstance()
       do {

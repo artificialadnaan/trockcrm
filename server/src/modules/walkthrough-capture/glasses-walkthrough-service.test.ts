@@ -224,7 +224,7 @@ describe("validateGlassesWalkthroughCompleteInput", () => {
     );
   });
 
-  it("defaults a missing capturedAtMs to null rather than 0 (0 is a real, meaningful offset)", () => {
+  it("defaults a missing capturedAtMs to null rather than 0 (0 — the Unix epoch — is a real, meaningful timestamp)", () => {
     const artifacts = [baseArtifact({ capturedAtMs: undefined })];
     const result = validateGlassesWalkthroughCompleteInput(baseCompleteInput({ artifacts }));
     expect(result.artifacts[0]!.capturedAtMs).toBeNull();

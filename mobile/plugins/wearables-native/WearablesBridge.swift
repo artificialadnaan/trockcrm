@@ -47,8 +47,11 @@ final class WearablesBridge: RCTEventEmitter {
   private var teardownGeneration = 0
 
   /// `Wearables.configure()` is not idempotent in 0.8.0, so the guard lives here rather
-  /// than trusting every JS caller to remember.
-  private static var configured = false
+  /// than trusting every JS caller to remember. Internal (not `private`), deliberately: this is
+  /// the single source of truth for "has configure() actually succeeded", and
+  /// `WalkthroughRecorder.startWalk` reads it directly for its own configured guard — a second,
+  /// separately-tracked flag over there could drift out of sync with what this class actually did.
+  static var configured = false
 
   override static func requiresMainQueueSetup() -> Bool { true }
 

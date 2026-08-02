@@ -14,7 +14,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import { AuthProvider } from "../src/auth/AuthContext";
 import { ErrorBoundary } from "../src/components/ErrorBoundary";
-import { isAvailable as wearablesAvailable, Wearables } from "../src/wearables/native";
+import { isAvailable as wearablesAvailable, setStartupConfigureError, Wearables } from "../src/wearables/native";
 // Side-effect import: registers the background upload-drain task at startup so the OS can invoke it even
 // when the app is cold-launched in the background (before the capture screen mounts).
 import "../src/capture/upload-background-task";
@@ -69,11 +69,16 @@ export default function RootLayout() {
   //
   // `Wearables.configure()` is idempotent-safe on the native side (guarded on a static `configured`
   // flag, resolving `alreadyConfigured: true`), so this does not conflict with Profile configuring
-  // again later. Failures are swallowed — a configure error must never block app launch; the
-  // walk's own error path surfaces it if it still matters by the time a walk is attempted.
+  // again later. A rejection here must still never block app launch — it is never rethrown, and
+  // this effect never sets any state — but it IS retained (not discarded) via
+  // `setStartupConfigureError`, so `WalkthroughRecorder.startWalk`'s own `configured` guard has a
+  // real cause to report instead of the generic "not configured" the native rejection alone can
+  // give it.
   useEffect(() => {
     if (!wearablesAvailable) return;
-    void Wearables.configure().catch(() => {});
+    void Wearables.configure().catch((error: unknown) => {
+      setStartupConfigureError(error);
+    });
   }, []);
 
   if (!fontsLoaded) return null;

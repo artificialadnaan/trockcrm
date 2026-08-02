@@ -278,9 +278,18 @@ export interface GlassesWalkthroughArtifactInput {
   originalFilename: string;
   mimeType: string;
   fileSizeBytes: number;
-  /** Offset from the walk's start, milliseconds. Informational only — TROCK Scope derives the real
-   *  clip timeline from the media's own embedded metadata (exif/container), not from a client claim, so
-   *  this is not threaded into the forward call. Kept for the project-folder record and future use. */
+  /**
+   * ABSOLUTE epoch-ms timestamp of when this artifact was captured on the phone — mobile sends
+   * `Date.now()` at capture time (`QueuedWalkArtifact.at` / `a.at` in mobile/src/walkthrough/upload-core.ts
+   * and upload.ts), NOT an offset from the walk's start. The name reads like an offset; it is not one.
+   * Do not add this to another absolute timestamp (e.g. the walk's own `capturedAt`) — see the `takenAt`
+   * assignment below, where doing exactly that once shipped a bug that filed every photo decades in the
+   * future. Used directly to stamp `files.takenAt`. Otherwise informational only for the TROCK Scope
+   * forward — TROCK Scope derives the real clip timeline from the media's own embedded metadata
+   * (exif/container), not from a client claim, so it is not sent on to TROCK Scope's API (see
+   * worker/src/jobs/glasses-walkthrough-forward.ts's beginClip). Kept in the job payload for the
+   * project-folder record and future use.
+   */
   capturedAtMs: number | null;
 }
 
@@ -493,10 +502,15 @@ export async function ingestGlassesWalkthrough(
         // that orders/filters files chronologically (field gallery, photo-timeline-filters.ts,
         // files/feed-service.ts) does it on COALESCE(taken_at, created_at). Leaving this null for an
         // offline/background-delayed walk would group and sort glasses stills under the day they finally
-        // uploaded rather than the day of the site visit. capturedAtMs is the artifact's offset from the
-        // walk's own start (capturedAt); default to 0 when absent so a walk that never reported a per-clip
-        // offset still lands on the walk's captured day instead of falling back to createdAt.
-        takenAt: new Date(capturedAtBaseMs + (artifact.capturedAtMs ?? 0)),
+        // uploaded rather than the day of the site visit.
+        //
+        // capturedAtMs is ALREADY an absolute epoch-ms timestamp (mobile's `Date.now()` at capture time —
+        // see the type doc above), NOT an offset from the walk's start despite the field name. Use it
+        // directly rather than adding it to capturedAtBaseMs: that used to add two absolute epoch values
+        // together, roughly doubling the timestamp and filing every real walkthrough photo decades in the
+        // future. Fall back to the walk's own capturedAt (capturedAtBaseMs) only when an artifact never
+        // reported its own capture time.
+        takenAt: new Date(artifact.capturedAtMs ?? capturedAtBaseMs),
       })
       // Mirrors confirmUpload (files/service.ts): a concurrent retry for the same idempotency key can
       // race past this insert too — let the partial unique index arbitrate rather than throw a 23505

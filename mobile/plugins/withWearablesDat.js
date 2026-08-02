@@ -19,6 +19,7 @@ const {
   withInfoPlist,
   withXcodeProject,
   withDangerousMod,
+  withPodfileProperties,
   IOSConfig,
   createRunOncePlugin,
 } = require("@expo/config-plugins");
@@ -178,6 +179,40 @@ const withDevelopmentTeam = (config, teamId) =>
     return cfg;
   });
 
+/**
+ * Raise the iOS deployment target to what MWDATCore actually requires.
+ *
+ * Expo SDK 54's default deployment target is 15.1; MWDATCore requires 15.2 (see the design doc,
+ * docs/superpowers/specs/2026-07-30-glasses-capture-design.md). Below that floor the SDK's minimum is
+ * silently unmet on modern build/test hardware (which is always >= 15.2 anyway) but a genuine 15.1
+ * device fails to LAUNCH the app outright — not a graceful degradation. This constraint originates from
+ * MWDAT, so it belongs on this plugin (which already owns the MWDAT integration) rather than pulling in
+ * a whole new `expo-build-properties` dependency for one value.
+ *
+ * Two independent places need it — Expo's template Podfile and the Xcode project each keep their own
+ * copy of the deployment target, and only setting one leaves the other silently at 15.1:
+ *   - Podfile.properties.json's `ios.deploymentTarget`: the generated Podfile already does
+ *     `platform :ios, podfile_properties['ios.deploymentTarget'] || '15.1'`, so writing this key alone
+ *     raises the floor every Pod (including Expo's own modules) builds against.
+ *   - `IPHONEOS_DEPLOYMENT_TARGET` in the Xcode project's build settings, every target/configuration
+ *     (mirrors `withDevelopmentTeam` below, which uses the same all-targets `updateBuildProperty` call) —
+ *     this is what actually becomes the app's `MinimumOSVersion` at build time, which is the number that
+ *     decides whether a 15.1 device can launch the app at all.
+ */
+const MIN_IOS_DEPLOYMENT_TARGET = "15.2";
+
+const withIosDeploymentTarget = (config, target) => {
+  let next = withPodfileProperties(config, (cfg) => {
+    cfg.modResults["ios.deploymentTarget"] = target;
+    return cfg;
+  });
+  next = withXcodeProject(next, (cfg) => {
+    cfg.modResults.updateBuildProperty("IPHONEOS_DEPLOYMENT_TARGET", target);
+    return cfg;
+  });
+  return next;
+};
+
 /** Copy the bridge sources next to AppDelegate so Xcode can compile them in-target. */
 const withBridgeSources = (config) =>
   withDangerousMod(config, [
@@ -224,6 +259,7 @@ const withWearablesDat = (config, options = {}) => {
   next = withBridgeSources(next);
   next = withBridgeInTarget(next);
   next = withDevelopmentTeam(next, opts.appleTeamId);
+  next = withIosDeploymentTarget(next, MIN_IOS_DEPLOYMENT_TARGET);
   return next;
 };
 

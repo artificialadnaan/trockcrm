@@ -176,9 +176,10 @@ async function beginClip(deps: ScopeDeps, walkthroughId: string, artifact: JobAr
     mimeType: artifact.mimeType,
     sizeBytes: artifact.fileSizeBytes,
     // capturedAt/capturedAtSource deliberately omitted: TROCK Scope only accepts a client-declared
-    // "manual" wall-clock timestamp, and all we have is a walk-relative offset (capturedAtMs), not an
-    // absolute time. Left at the default ("upload_order"); TROCK Scope's own worker later derives the
-    // real per-clip timeline from the media's embedded exif/container metadata.
+    // "manual" wall-clock timestamp, and this artifact's capturedAtMs (an absolute epoch-ms timestamp —
+    // see the type doc on GlassesWalkthroughArtifactInput.capturedAtMs in glasses-walkthrough-service.ts)
+    // is not threaded on to TROCK Scope's API. Left at the default ("upload_order"); TROCK Scope's own
+    // worker later derives the real per-clip timeline from the media's embedded exif/container metadata.
   });
   if (status !== 201) {
     throw new Error(`TROCK Scope begin-clip failed for artifact ${artifact.idempotencyKey}: ${status} ${JSON.stringify(json)}`);

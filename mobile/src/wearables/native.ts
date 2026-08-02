@@ -161,6 +161,28 @@ type WearablesNativeModule = {
 
 export const isAvailable = Platform.OS === "ios" && native != null;
 
+/**
+ * The error (if any) from the app's one-time startup `Wearables.configure()` call
+ * (app/_layout.tsx). That call must never block app launch, so it deliberately swallows its own
+ * promise rejection rather than throwing — but silently discarding it left nothing for a walk to
+ * report when the REAL cause of a `walk_not_configured` rejection (from
+ * `WalkthroughRecorder.startWalk`'s own configured guard) was a launch-time configuration
+ * failure (bad Meta credentials, SDK init error), not "no device". A plain module-level variable,
+ * rather than React state, so it survives regardless of which screen the user is on when a walk
+ * actually starts, without wiring a provider through the whole app for one rarely-needed value.
+ */
+let startupConfigureError: Error | null = null;
+
+/** Called once, from the startup effect's `.catch`. Never throws. */
+export function setStartupConfigureError(error: unknown): void {
+  startupConfigureError = error instanceof Error ? error : new Error(String(error));
+}
+
+/** The real cause of a failed startup `configure()`, or null if it never failed (or never ran). */
+export function getStartupConfigureError(): Error | null {
+  return startupConfigureError;
+}
+
 function require_(): WearablesNativeModule {
   if (!native) {
     throw new Error(
