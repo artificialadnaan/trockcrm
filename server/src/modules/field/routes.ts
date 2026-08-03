@@ -74,6 +74,7 @@ import {
   searchFieldCaptureTargets,
   starFieldProject,
   unstarFieldProject,
+  type FieldAccessContext,
   type FieldProject,
 } from "./projects-service.js";
 import { assertValidCaptureTargetIds, assertValidUuid } from "./photos-service.js";
@@ -726,6 +727,45 @@ fieldRoutes.delete("/photos/:photoId/tags/:tag", requireFieldContractor, async (
 });
 
 /**
+ * The access gate BOTH glasses-walkthrough routes assert with, named once so the two can never drift onto
+ * different rules — a presign a completion would refuse (or the reverse) strands a walk halfway.
+ *
+ * It is `assertAccessibleFieldCaptureTarget`, NOT `getFieldProject`, and the difference is one predicate:
+ * `getFieldProject` carries `activeProjectWhere()`, which is the field BROWSING rule — active pipeline, or
+ * Won-family; never Lost/terminal — and exists so the project list and detail pages are not flooded with
+ * hundreds of dead jobs. That rule is right for browsing and wrong for FILING, because these two routes are
+ * not reads. They are the tail of an upload whose bytes drain long after the recording: a multi-gigabyte
+ * walk over a jobsite connection, or a phone that stayed offline, routinely spans hours or days, and mobile
+ * retries the completion for as long as it takes. A deal that moved to Lost inside that window turned every
+ * remaining attempt into a 404, and the walk — real evidence of a site visit that really happened, on a
+ * trip nobody is making again — died on the phone. The stage the deal reached AFTERWARDS says nothing about
+ * whether the visit occurred, and a lost bid is exactly when its record is most likely to be re-examined.
+ *
+ * Nothing is loosened beyond that. `assertAccessibleFieldCaptureTarget` is the gate the ordinary field
+ * PHOTO upload has always used for the identical act — a field user attaching captured evidence to a deal
+ * (photos-service.ts) — so this is the established rule for this operation, not a weaker one invented here.
+ * It still requires the deal to EXIST and to be `is_active` (an archived/soft-deleted deal is refused by
+ * both gates), and it is unscoped by rep in exactly the way the browsing gate already was, so no caller
+ * gains reach they did not have. The office is still resolved from the DEAL by `runFieldDealWrite` before
+ * this runs, so a deal in an office this session cannot reach never gets here at all.
+ *
+ * And it does NOT make a terminal deal browsable: no list, detail, photo-feed, report or scorecard read
+ * goes through this function — every one of them keeps `activeProjectWhere()`. A Lost deal remains
+ * invisible in the app and merely stays FILEABLE by someone who could already reach it.
+ */
+async function assertGlassesWalkthroughDealAccess(
+  officeDb: FieldTenantDb,
+  access: FieldAccessContext,
+  dealId: string,
+): Promise<void> {
+  await assertAccessibleFieldCaptureTarget(officeDb, {
+    dealId,
+    userId: access.userId,
+    userRole: access.userRole,
+  });
+}
+
+/**
  * GLASSES WALKTHROUGH, step 1 of 2: presign one artifact's upload.
  *
  * These two routes live on the FIELD router, not the CRM deals router, because TrockCam — their only
@@ -754,10 +794,9 @@ fieldRoutes.post(
         req,
         { dealId },
         async (officeDb, office) => {
-          // Access is asserted BEFORE a presigned URL is minted — getFieldProject throws unless this
-          // field user can actually see this project, so a URL scoped to the deal's R2 prefix is never
-          // handed to someone who cannot reach the deal.
-          await getFieldProject(officeDb, access, dealId);
+          // Access is asserted BEFORE a presigned URL is minted, so a URL scoped to the deal's R2 prefix
+          // is never handed to someone who cannot reach the deal.
+          await assertGlassesWalkthroughDealAccess(officeDb, access, dealId);
           return requestGlassesWalkthroughArtifactUploadUrl({
             // Presigning now asks the database whether this artifact is ALREADY filed, and refuses to hand
             // out a writable URL for the live key if it is — bytes behind an immutable `files` row must not
@@ -805,7 +844,7 @@ fieldRoutes.post("/projects/:dealId/glasses-walkthroughs", requireFieldContracto
       req,
       { dealId },
       async (officeDb, office) => {
-        await getFieldProject(officeDb, access, dealId);
+        await assertGlassesWalkthroughDealAccess(officeDb, access, dealId);
         const input = validateGlassesWalkthroughCompleteInput({
           ...(req.body as Record<string, unknown> | undefined),
           dealId,

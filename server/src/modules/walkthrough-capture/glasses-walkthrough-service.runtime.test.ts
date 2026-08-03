@@ -737,13 +737,15 @@ describe("ingestGlassesWalkthrough — the stills enter the photo pipeline", () 
     // request would re-emit for every previously-filed still on every retry: a re-run of EXIF over bytes
     // that have not changed, and a second push of the same photo into the deal's Procore album.
     //
-    // This also pins WHERE the emit sits. The second call finds a live forward job and returns early from
-    // the dedupe branch below; an emit written after that branch would file this still and tell nobody.
+    // This also pins WHERE the emit sits. The second call finds a live forward job and returns from the
+    // dedupe branch below WITHOUT reaching the enqueue; an emit written after that branch would file this
+    // still and tell nobody. `artifacts_added` rather than `already_queued` because this is a WIDENING
+    // retry — 2 stills then 3 — so the branch amends the forward job's artifact list on the way out.
     await ingestGlassesWalkthrough(tenantDb, stillsWalk(2), { artifactStore: blindStore() });
     expect(await domainEvents()).toHaveLength(2);
 
     const second = await ingestGlassesWalkthrough(tenantDb, stillsWalk(3), { artifactStore: blindStore() });
-    expect(second.forwarding.status).toBe("already_queued"); // the early return this emit must precede
+    expect(second.forwarding.status).toBe("artifacts_added"); // the early return this emit must precede
 
     const events = await domainEvents();
     expect(events).toHaveLength(3); // NOT 5 — the two already-filed stills emit nothing a second time
@@ -1002,6 +1004,191 @@ describe("ingestGlassesWalkthrough — forward-job checkpoint inheritance across
     const first = await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
     const second = await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
     expect(second.forwarding).toEqual({ status: "already_queued", jobId: first.forwarding.jobId });
+  });
+});
+
+// ── A completion retry that ADDS artifacts to a walk already being forwarded ───────────────────────
+//
+// The `files` half of a widening retry always worked: the third still gets its row and its `file.uploaded`
+// event on the retry that first names it. The FORWARD half did not. The early return for an existing live
+// job left `payload.artifacts` frozen at whatever the first completion carried, so TROCK Scope transcribed
+// and extracted a scope from a walk that was short by however much arrived late — while the response, the
+// project folder and the queue all reported a complete walk. Nothing anywhere could notice.
+//
+// The retry is ordinary, not exotic: mobile completes with what it has PUT, and a walk re-enqueued from its
+// on-disk directory during recovery carries stills the first manifest never listed.
+//
+// The three job states below are three different answers, and the difference is not stylistic — it is
+// whether the worker can still OBSERVE an amendment. A handler reads `payload` once, at claim time.
+
+/** Put a live forward job into the state a claim leaves it in: `processing`, with an attempt spent. Nothing
+ *  in this lane runs a worker, so this is how a row a worker is actively uploading from is expressed. */
+async function claimJobForTest(jobId: number): Promise<void> {
+  await tenantDb
+    .update(jobQueue)
+    .set({ status: "processing", attempts: 1, startedProcessingAt: new Date() })
+    .where(eq(jobQueue.id, jobId));
+}
+
+const keysOf = (job: { payload: { artifacts: { idempotencyKey: string }[] } }) =>
+  job.payload.artifacts.map((a) => a.idempotencyKey);
+
+const readJob = async (jobId: number) =>
+  (await tenantDb.select().from(jobQueue).where(eq(jobQueue.id, jobId)))[0];
+
+describe("ingestGlassesWalkthrough — a retry that ADDS artifacts to a live forward job", () => {
+  it("REGRESSION: amends a still-PENDING forward job, so the artifact the retry added is forwarded too", async () => {
+    // Two stills, then three — the shape a widening retry actually has. Before this, the third artifact got
+    // a `files` row and a `file.uploaded` event and then simply never reached TROCK Scope.
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(2) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+    const second = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(3) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+
+    expect(second.forwarding).toEqual({ status: "artifacts_added", jobId: first.forwarding.jobId });
+    const jobs = await tenantDb.select().from(jobQueue).where(eq(jobQueue.jobType, GLASSES_WALKTHROUGH_FORWARD_JOB));
+    expect(jobs).toHaveLength(1); // amended IN PLACE — a second row would be a second billed scope extraction
+    expect(keysOf(jobs[0]!)).toEqual(["artifact-1", "artifact-2", "artifact-3"]);
+    // The appended entry is a real forwardable artifact, not a stub: the worker addresses R2 by `r2Key` and
+    // a missing/placeholder one forwards nothing while still reporting success.
+    expect(jobs[0]!.payload.artifacts[2]).toMatchObject({
+      fileId: second.files[2]!.fileId,
+      r2Key: second.files[2]!.r2Key,
+      mimeType: "image/jpeg",
+      originalFilename: "frame-3.jpg",
+      fileSizeBytes: 1024,
+    });
+  });
+
+  it("GUARD: an ordinary duplicate completion still short-circuits without rewriting the payload", async () => {
+    // The overwhelmingly common retry adds nothing. It must stay a pure read — an amend on every duplicate
+    // would rewrite a payload a worker may be mid-checkpoint on, for no gain at all.
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(2) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+    const before = await readJob(first.forwarding.jobId);
+
+    const second = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(2) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+
+    expect(second.forwarding).toEqual({ status: "already_queued", jobId: first.forwarding.jobId });
+    expect(await readJob(first.forwarding.jobId)).toEqual(before);
+  });
+
+  it("GUARD: the amend is a UNION — an artifact only the JOB carries survives a retry that omits it", async () => {
+    // A recovered walk's manifest is not guaranteed to be a superset of the one that completed first (the
+    // recovery scan reads a directory, not the original queue entry). Writing THIS call's list over the
+    // job's would then silently delete a clip from a walk already scheduled to forward — the same defect
+    // this fix exists to remove, pointed the other way.
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(2) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+    const retry = await ingestGlassesWalkthrough(
+      tenantDb,
+      baseInput({ artifacts: photoArtifacts(3).slice(1) }), // artifact-2 and artifact-3; artifact-1 omitted
+      { artifactStore: healthyStore({ head: async () => ({}) }) }
+    );
+
+    expect(retry.forwarding.status).toBe("artifacts_added");
+    expect(keysOf(await readJob(retry.forwarding.jobId))).toEqual(["artifact-1", "artifact-2", "artifact-3"]);
+  });
+
+  it("REGRESSION: supersedes a job a worker has CLAIMED rather than amending a payload it has already read", async () => {
+    // A claimed row's handler holds the artifact list it read at claim time and iterates THAT. An amend it
+    // cannot observe is dropped the moment the attempt succeeds and the row goes terminal — a fix that
+    // looks applied, in the state it is least likely to be checked. So the row is dead-lettered instead,
+    // carrying the complete list, which is a state a human (and the dead-letter alert sweep) can see.
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(2) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+    await claimJobForTest(first.forwarding.jobId);
+
+    const second = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(3) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+
+    expect(second.forwarding).toEqual({
+      status: "superseded_for_reconciliation",
+      jobId: first.forwarding.jobId,
+    });
+    const job = await readJob(first.forwarding.jobId);
+    expect(job.status).toBe("dead");
+    expect(keysOf(job)).toEqual(["artifact-1", "artifact-2", "artifact-3"]);
+    // The dead letter has to name the walk and what is missing — it is the only thing a human gets.
+    expect(job.lastError).toContain(WALK);
+    expect(job.lastError).toContain("artifact-3");
+  });
+
+  it("REGRESSION: supersedes a COMPLETED forward, whose row is never claimed again", async () => {
+    // The forward ran and succeeded — for the artifacts it carried. Nothing will ever re-read this row, so
+    // an amend here is not merely racy, it is inert: the extras would sit in a payload no worker looks at.
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(2) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+    await tenantDb
+      .update(jobQueue)
+      .set({ status: "completed", attempts: 1, completedAt: new Date() })
+      .where(eq(jobQueue.id, first.forwarding.jobId));
+
+    const second = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(3) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+
+    expect(second.forwarding.status).toBe("superseded_for_reconciliation");
+    const job = await readJob(first.forwarding.jobId);
+    expect(job.status).toBe("dead");
+    // `completed_at` is deliberately left standing: it is the only thing on the row that still says this
+    // forward once ran, and a reconciler reading "dead" alone would re-forward blind.
+    expect(job.completedAt).not.toBeNull();
+    expect(keysOf(job)).toEqual(["artifact-1", "artifact-2", "artifact-3"]);
+  });
+
+  it("GUARD: a claimed job whose artifact set did NOT change is left running — a duplicate never kills a live forward", async () => {
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(2) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+    await claimJobForTest(first.forwarding.jobId);
+
+    const second = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(2) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+
+    expect(second.forwarding).toEqual({ status: "already_queued", jobId: first.forwarding.jobId });
+    expect((await readJob(first.forwarding.jobId)).status).toBe("processing"); // still uploading, untouched
+  });
+
+  it("GUARD: the retry AFTER a supersede enqueues a replacement carrying every artifact and the inherited checkpoint", async () => {
+    // Why dead-lettering is a repair and not just an alarm: the superseded row leaves the live partial
+    // unique index, so the next completion takes the existing dead-row path — a replacement carrying the
+    // COMPLETE list plus whatever the dead row learned about TROCK Scope. Reconciliation by hand is the
+    // fallback, not the only route out.
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(2) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+    await tenantDb
+      .update(jobQueue)
+      .set({
+        status: "processing",
+        payload: sql`jsonb_set(${jobQueue.payload}, '{scopeWalkthroughId}', '"scope-wt-1"'::jsonb, true)`,
+      })
+      .where(eq(jobQueue.id, first.forwarding.jobId));
+
+    const superseding = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(3) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+    expect(superseding.forwarding.status).toBe("superseded_for_reconciliation");
+
+    const replacementCall = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(3) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+    expect(replacementCall.forwarding.status).toBe("queued");
+    const replacement = await readJob(replacementCall.forwarding.jobId);
+    expect(keysOf(replacement)).toEqual(["artifact-1", "artifact-2", "artifact-3"]);
+    expect(replacement.payload.scopeWalkthroughId).toBe("scope-wt-1");
+    expect(replacement.status).toBe("pending");
   });
 });
 

@@ -633,7 +633,28 @@ export interface GlassesWalkthroughFileResult {
 
 export type GlassesWalkthroughForwardingResult =
   | { status: "queued"; jobId: number }
-  | { status: "already_queued"; jobId: number };
+  | { status: "already_queued"; jobId: number }
+  /** A live forward job was WIDENED in place to cover artifacts this call filed and it did not carry. */
+  | { status: "artifacts_added"; jobId: number }
+  /** A live forward job could not be widened (see `supersedeUnamendableGlassesWalkthroughForwardJob`) and
+   *  was dead-lettered, carrying the complete artifact list, for reconciliation. */
+  | { status: "superseded_for_reconciliation"; jobId: number };
+
+/**
+ * One entry of `job_queue.payload.artifacts` — what the worker iterates to ship a walk to TROCK Scope
+ * (`JobPayload.artifacts`, worker/src/jobs/glasses-walkthrough-forward.ts). Named because it is now built
+ * in one place and written in three: the enqueue below, the in-place amend, and the supersede.
+ */
+interface GlassesWalkthroughForwardArtifact {
+  fileId: string;
+  idempotencyKey: string;
+  kind: GlassesWalkthroughArtifactKind;
+  r2Key: string;
+  mimeType: string;
+  originalFilename: string;
+  fileSizeBytes: number;
+  capturedAtMs: number | null;
+}
 
 /** One artifact resolved down to everything the write phase needs, so that phase issues zero object-storage
  *  calls of its own. Built in a pure pass BEFORE verification, which is also what makes the media/kind
@@ -825,6 +846,20 @@ async function verifyGlassesWalkthroughArtifacts(
 interface GlassesWalkthroughForwardJobState {
   jobId: number;
   isLive: boolean;
+  /**
+   * The row's status VERBATIM, carried for one purpose only: naming it in the dead letter a supersede
+   * writes, so the human reading that email knows whether they are reconciling against a forward that was
+   * mid-flight or one that had already finished. It is NOT what decides whether the job can be amended —
+   * that is decided by the guarded UPDATE itself, because this value is a snapshot the dedicated poller
+   * (2s tick, worker/src/index.ts) can invalidate before the next statement runs.
+   */
+  status: string;
+  /**
+   * `payload.artifacts` as stored, NOT re-derived from this call's input. An amend has to be a union with
+   * whatever is actually on the row (see the live branch of `ingestGlassesWalkthrough`), and re-deriving
+   * would silently drop any artifact the row carries that the current completion happens to omit.
+   */
+  artifacts: GlassesWalkthroughForwardArtifact[];
   scopeWalkthroughId: string | null;
   scopeCreatePendingRef: string | null;
 }
@@ -837,7 +872,12 @@ async function findGlassesWalkthroughForwardJobState(
   const rows = await tenantDb
     .select({
       id: jobQueue.id,
+      status: jobQueue.status,
       isLive: sql<boolean>`${jobQueue.status} <> 'dead'`,
+      // COALESCEd to an empty array rather than trusted: `payload` is jsonb a worker and a human both
+      // write to, and `undefined.map` in the union below would turn a hand-edited row into a 500 on a
+      // completion that is otherwise perfectly filable.
+      artifacts: sql<GlassesWalkthroughForwardArtifact[]>`COALESCE(${jobQueue.payload} -> 'artifacts', '[]'::jsonb)`,
       scopeWalkthroughId: sql<string | null>`${jobQueue.payload} ->> 'scopeWalkthroughId'`,
       scopeCreatePendingRef: sql<string | null>`${jobQueue.payload} ->> 'scopeCreatePendingRef'`,
     })
@@ -864,9 +904,126 @@ async function findGlassesWalkthroughForwardJobState(
   return {
     jobId: Number(row.id),
     isLive: Boolean(row.isLive),
+    status: String(row.status),
+    artifacts: Array.isArray(row.artifacts) ? row.artifacts : [],
     scopeWalkthroughId: row.scopeWalkthroughId ?? null,
     scopeCreatePendingRef: row.scopeCreatePendingRef ?? null,
   };
+}
+
+/**
+ * Widen a forward job's artifact list IN PLACE, and only while nothing can be reading it.
+ *
+ * `status = 'pending'` is the whole safety argument, and it is a predicate on the STATEMENT, never a
+ * decision taken from an earlier SELECT: a pending row is one no delivery owns, so the next claim reads
+ * whatever this write leaves. The dedicated poller ticks every 2s (worker/src/index.ts), which is well
+ * inside the window between a completion and its retry, so "it was pending a moment ago" is not a fact
+ * worth acting on — the row lock is. Under a concurrent claim the two orderings are both safe: the claim's
+ * `SELECT ... FOR UPDATE SKIP LOCKED` skips a row this UPDATE already locked (the job simply waits a tick
+ * and is then claimed with the full list), and an UPDATE that arrives second blocks on the claim, re-checks
+ * its predicate against the committed row, finds 'processing' and matches nothing.
+ *
+ * Returns whether it landed. A `false` is not an error — it is the caller's signal that this row must be
+ * superseded instead, and conflating the two would silently swallow exactly the case that needs a human.
+ *
+ * `jsonb_set` on the one key rather than a whole-payload rewrite, matching the worker's own checkpoint
+ * writes (glasses-walkthrough-forward.ts): the payload also carries `scopeWalkthroughId` /
+ * `scopeCreatePendingRef` / `alertSent`, all written by other actors, and a read-modify-write of the whole
+ * column here would clobber whichever of them landed between this transaction's snapshot and this write.
+ */
+async function amendPendingGlassesWalkthroughForwardArtifacts(
+  tenantDb: TenantDb,
+  jobId: number,
+  artifacts: GlassesWalkthroughForwardArtifact[]
+): Promise<boolean> {
+  const updated = await tenantDb
+    .update(jobQueue)
+    .set({
+      payload: sql`jsonb_set(${jobQueue.payload}, '{artifacts}', ${JSON.stringify(artifacts)}::jsonb, true)`,
+    })
+    .where(and(eq(jobQueue.id, jobId), eq(jobQueue.status, "pending")))
+    .returning({ id: jobQueue.id });
+  return updated.length > 0;
+}
+
+/**
+ * The answer for a live forward job whose artifact list CANNOT be amended: record the complete list on it
+ * anyway, then dead-letter it so a human is told.
+ *
+ * WHICH STATES LAND HERE, and why amending them would be worse than refusing to:
+ *   - `processing` — a worker holds the lease and is iterating the artifact list it read at CLAIM time
+ *     (`assertPayload(payload)` runs once, at the top of handleGlassesWalkthroughForward). A row write
+ *     cannot reach that snapshot. If the attempt then SUCCEEDS the row goes terminal and the amendment is
+ *     dropped, which is the original defect wearing a fix's clothes — and it would only ever be visible on
+ *     the retry path, where nobody looks. Enqueuing a second job instead is worse still: two uploaders
+ *     racing multipart clips into the SAME remote walkthrough is not a state this seam has any way to
+ *     reconcile.
+ *   - `completed` / `failed` — no poller selects either (they take 'pending' only), so the row will never
+ *     be claimed again and an amendment to it is simply inert: the artifacts would sit in a payload no
+ *     worker reads, indistinguishable from being forwarded.
+ * Nothing is enumerated here, deliberately. The caller reaches this only after the `status = 'pending'`
+ * amend matched nothing, so the set is "everything that is live and not pending" by construction — a new
+ * live status added to the enum lands on the safe side without this file being edited.
+ *
+ * The payload is written BEFORE the row is killed, in one statement, so the row a reconciler opens already
+ * carries the complete walk: their whole job is `status = 'pending'`, not reassembling an artifact list by
+ * hand from `files`. And because a dead row leaves the live partial unique index (0213), the very next
+ * completion retry takes the EXISTING dead-row replacement path — a fresh job with the full list and the
+ * inherited TROCK Scope checkpoint. The dead letter is the fallback, not the only way out.
+ *
+ * Guarded on `status <> 'dead'` so this can never stomp the `last_error` of a row that genuinely
+ * dead-lettered in the gap; the caller treats a miss as retryable rather than guessing.
+ */
+async function supersedeUnamendableGlassesWalkthroughForwardJob(
+  tenantDb: TenantDb,
+  jobId: number,
+  artifacts: GlassesWalkthroughForwardArtifact[],
+  lastError: string
+): Promise<boolean> {
+  const updated = await tenantDb
+    .update(jobQueue)
+    .set({
+      payload: sql`jsonb_set(${jobQueue.payload}, '{artifacts}', ${JSON.stringify(artifacts)}::jsonb, true)`,
+      status: "dead",
+      lastError,
+    })
+    // `completed_at` is deliberately NOT cleared. On a superseded `completed` row it is the only remaining
+    // evidence that this forward ever ran, and a reconciler who cannot see it re-forwards blind.
+    .where(and(eq(jobQueue.id, jobId), sql`${jobQueue.status} <> 'dead'`))
+    .returning({ id: jobQueue.id });
+  return updated.length > 0;
+}
+
+/**
+ * The `last_error` a supersede leaves, which is the entire content of the alert the dead-letter sweep
+ * emails (worker/src/jobs/glasses-walkthrough-forward.ts). Written in the same shape as
+ * `buildUnconfirmedCreateDeadLetterMessage` there: what happened, why it stopped rather than guessing, the
+ * literal resolution step, and the reassurance that the crew's copy is already safe.
+ *
+ * TOKEN SAFETY, same rule as that sibling: built only from this walk's own identifiers, never from
+ * anything in the environment.
+ */
+function buildSupersededForwardDeadLetterMessage(args: {
+  walkId: string;
+  dealId: string;
+  jobStatus: string;
+  missingKeys: string[];
+  scopeWalkthroughId: string | null;
+}): string {
+  return (
+    `Superseded for reconciliation: walk ${args.walkId} (deal ${args.dealId}) was completed again carrying ` +
+    `${args.missingKeys.length} artifact(s) this forward never held (${args.missingKeys.join(", ")}). The row ` +
+    `was '${args.jobStatus}' when they were filed, so its artifact list could not be widened in flight — a ` +
+    `handler reads its payload once, at claim time, and a row that has already finished is never claimed ` +
+    `again. Forwarding the incomplete set would have extracted a scope from a partial walk with nothing ` +
+    `reporting it, so it stopped instead. This row's payload NOW CARRIES THE COMPLETE ARTIFACT LIST. ` +
+    `TO RESOLVE: check what TROCK Scope walkthrough ` +
+    `${args.scopeWalkthroughId ? args.scopeWalkthroughId : "(none recorded — nothing was created yet)"} ` +
+    `already holds, then set this row's status = 'pending' to forward the whole walk (TROCK Scope's own ` +
+    `checksum constraint rejects clip bytes that already landed). A later completion retry from the phone ` +
+    `does this automatically. The walk itself is durably filed in the project folder and the crew can ` +
+    `already see it.`
+  );
 }
 
 /**
@@ -999,6 +1156,13 @@ export interface IngestGlassesWalkthroughResult {
  *     second TROCK Scope walkthrough, a second billed transcription and a second billed Anthropic scope
  *     extraction, and the worker's per-walkthrough checkpoint cannot absorb it because two jobs never share
  *     one.
+ *     Not enqueuing a second job is NOT the same as doing nothing, and reading it that way is what let a
+ *     widening retry file artifacts the forward never carried. A retry may legitimately name MORE artifacts
+ *     than the one that scheduled the forward, so the live branch reconciles the job's artifact list
+ *     against what is now filed: widened in place while the row is still `pending`, and superseded (full
+ *     list recorded, then dead-lettered for reconciliation) once it is not — see
+ *     `amendPendingGlassesWalkthroughForwardArtifacts` and
+ *     `supersedeUnamendableGlassesWalkthroughForwardJob` for why those are the only two safe answers.
  *   - ACROSS A DEAD ROW: a walk that dead-lettered IS re-enqueued (a site visit is not repeatable, so a
  *     walk must not be stuck forever), but the replacement INHERITS whatever the dead row learned about
  *     TROCK Scope — see `findGlassesWalkthroughForwardJobState`. The identity that must not be duplicated
@@ -1151,22 +1315,104 @@ export async function ingestGlassesWalkthrough(
     officeId: input.officeId,
   });
 
-  const knownJobState = await findGlassesWalkthroughForwardJobState(tenantDb, input.walkId, input.dealId);
-
-  if (knownJobState?.isLive) {
-    return {
-      walkId: input.walkId,
-      files: fileResults,
-      forwarding: { status: "already_queued", jobId: knownJobState.jobId },
-    };
-  }
-
   // Keyed by idempotency key, never by array position. `fileResults` and `input.artifacts` line up today
   // only because one loop happens to preserve order; positional lookup silently forwards every artifact
   // under a NEIGHBOUR's mimeType and filename the moment that stops being true, and TROCK Scope has no way
   // to notice — it would transcode a jpeg as audio and blame the bytes. The keys are already unique per
   // walk (the validator rejects duplicates within a request), so they are the correct join.
   const artifactsByKey = new Map(input.artifacts.map((artifact) => [artifact.idempotencyKey, artifact]));
+
+  // Built BEFORE the live-job branch, not after it. The branch below needs exactly this list to decide
+  // whether an existing forward covers the walk, and building it twice — once for the amend, once for the
+  // enqueue — is how the two copies drift.
+  const forwardArtifacts: GlassesWalkthroughForwardArtifact[] = fileResults.map((fileResult) => {
+    const artifact = artifactsByKey.get(fileResult.idempotencyKey)!;
+    return {
+      fileId: fileResult.fileId,
+      idempotencyKey: fileResult.idempotencyKey,
+      kind: fileResult.kind,
+      r2Key: fileResult.r2Key,
+      mimeType: artifact.mimeType,
+      originalFilename: artifact.originalFilename,
+      fileSizeBytes: artifact.fileSizeBytes,
+      capturedAtMs: artifact.capturedAtMs,
+    };
+  });
+
+  const knownJobState = await findGlassesWalkthroughForwardJobState(tenantDb, input.walkId, input.dealId);
+
+  if (knownJobState?.isLive) {
+    // A live forward job is not proof the forward covers this walk, and treating it as one is how a walk
+    // reaches TROCK Scope short. Mobile completes with whatever it has PUT and retries the whole call
+    // later, and the artifact set it sends can GROW between attempts — most plainly when a walk is
+    // recovered from its on-disk directory, whose stills the first manifest never listed. The `files` rows
+    // for those extras land on the retry; the forward's payload used to stay frozen at the first call's
+    // set, so the scope was extracted from a partial walk while the 201, the project folder and the queue
+    // all reported a complete one. Nothing downstream can detect a missing clip — TROCK Scope only ever
+    // sees what it is handed.
+    const carriedKeys = new Set(knownJobState.artifacts.map((artifact) => artifact.idempotencyKey));
+    const missing = forwardArtifacts.filter((artifact) => !carriedKeys.has(artifact.idempotencyKey));
+
+    if (missing.length === 0) {
+      // The ordinary duplicate: nothing new was filed, so this stays a pure read. Rewriting the payload on
+      // every retry would put a write in the path of the most common request there is, against a row a
+      // worker may be mid-checkpoint on, to change nothing.
+      return {
+        walkId: input.walkId,
+        files: fileResults,
+        forwarding: { status: "already_queued", jobId: knownJobState.jobId },
+      };
+    }
+
+    // A UNION with what the row already holds, never this call's list written over it. The two are not the
+    // same set: a recovered walk's manifest is assembled from a directory scan, not from the queue entry
+    // that completed first, so it can legitimately OMIT an artifact the job is already scheduled to
+    // forward. Overwriting would delete that clip from the forward — the same silent shortfall this branch
+    // exists to close, pointed the other way. Existing entries are carried through VERBATIM, because a
+    // worker or a reconciling human may have edited them and this call has no better information.
+    const unionArtifacts = [...knownJobState.artifacts, ...missing];
+
+    if (await amendPendingGlassesWalkthroughForwardArtifacts(tenantDb, knownJobState.jobId, unionArtifacts)) {
+      return {
+        walkId: input.walkId,
+        files: fileResults,
+        forwarding: { status: "artifacts_added", jobId: knownJobState.jobId },
+      };
+    }
+
+    // Not pending — claimed, finished, or failed. None of those can observe an amendment, so the row is
+    // superseded (complete list recorded, then dead-lettered for a human) rather than quietly edited.
+    if (
+      await supersedeUnamendableGlassesWalkthroughForwardJob(
+        tenantDb,
+        knownJobState.jobId,
+        unionArtifacts,
+        buildSupersededForwardDeadLetterMessage({
+          walkId: input.walkId,
+          dealId: input.dealId,
+          jobStatus: knownJobState.status,
+          missingKeys: missing.map((artifact) => artifact.idempotencyKey),
+          scopeWalkthroughId: knownJobState.scopeWalkthroughId,
+        })
+      )
+    ) {
+      return {
+        walkId: input.walkId,
+        files: fileResults,
+        forwarding: { status: "superseded_for_reconciliation", jobId: knownJobState.jobId },
+      };
+    }
+
+    // Neither write matched: the row dead-lettered on its own between the lookup and here. That is the
+    // replacement path below, not this branch — but re-deriving the inheritance from a second lookup
+    // inside this branch would duplicate it, so the caller retries into the ordinary path instead. 503 for
+    // the same reason the lost-race case at the end of this function is: the next attempt is expected to
+    // succeed, and mobile already treats a failed completion as retryable.
+    throw new AppError(
+      503,
+      `Forwarding for walk ${input.walkId} changed state while this completion was filing its artifacts. Retry.`
+    );
+  }
 
   const jobPayload: Record<string, unknown> = {
     walkId: input.walkId,
@@ -1177,19 +1423,7 @@ export async function ingestGlassesWalkthrough(
     capturedAt: input.capturedAt,
     capturedByUserId: input.userId,
     officeSlug: input.officeSlug,
-    artifacts: fileResults.map((fileResult) => {
-      const artifact = artifactsByKey.get(fileResult.idempotencyKey)!;
-      return {
-        fileId: fileResult.fileId,
-        idempotencyKey: fileResult.idempotencyKey,
-        kind: fileResult.kind,
-        r2Key: fileResult.r2Key,
-        mimeType: artifact.mimeType,
-        originalFilename: artifact.originalFilename,
-        fileSizeBytes: artifact.fileSizeBytes,
-        capturedAtMs: artifact.capturedAtMs,
-      };
-    }),
+    artifacts: forwardArtifacts,
   };
 
   // Exactly one of the two markers is carried forward, never both — the worker reads `scopeWalkthroughId`
