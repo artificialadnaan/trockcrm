@@ -53,19 +53,21 @@ async function seed(): Promise<PGlite> {
   return db;
 }
 
-/** Insert one row in a named state. `leaseAgeSql` is an interval expression, so a test can describe a row
- *  as "claimed ten minutes ago and never heard from since" rather than compute a timestamp in JS and
- *  introduce a second clock. */
+/** Insert one row in a named state. `leaseAge` is an interval, so a test can describe a row as "claimed ten
+ *  minutes ago and never heard from since" rather than compute a timestamp in JS and introduce a second
+ *  clock. BOUND, not spliced: every other value on this statement is a parameter, and the odd one out is
+ *  both what the SQL-injection linters flag and a standing invitation for a later caller to pass something
+ *  that isn't a literal. */
 async function insertJob(
   db: PGlite,
   status: string,
-  opts: { leaseAgeSql?: string; attempts?: number } = {},
+  opts: { leaseAge?: string; attempts?: number } = {},
 ): Promise<number> {
-  const started = opts.leaseAgeSql ? `now() - interval '${opts.leaseAgeSql}'` : "NULL";
   const result = (await db.query(
     `INSERT INTO public.job_queue (job_type, status, attempts, started_processing_at)
-     VALUES ($1, $2, $3, ${started}) RETURNING id`,
-    [FORWARD_JOB, status, opts.attempts ?? 0],
+     VALUES ($1, $2, $3, CASE WHEN $4::text IS NULL THEN NULL ELSE now() - $4::interval END)
+     RETURNING id`,
+    [FORWARD_JOB, status, opts.attempts ?? 0, opts.leaseAge ?? null],
   )) as any;
   return Number(result.rows[0].id);
 }
@@ -112,7 +114,7 @@ describe("job_queue claim lease (real SQL)", () => {
     // startup sweep already ran (the worker restarted). Before the periodic sweep existed this walk simply
     // stopped being work: no dead letter, no alert, no retry, and a site visit that cannot be repeated.
     const db = await seed();
-    const jobId = await insertJob(db, "processing", { leaseAgeSql: "10 minutes", attempts: 1 });
+    const jobId = await insertJob(db, "processing", { leaseAge: "10 minutes", attempts: 1 });
     let runs = 0;
     registerJobHandler(FORWARD_JOB, async () => {
       runs += 1;
@@ -142,9 +144,9 @@ describe("job_queue claim lease (real SQL)", () => {
     // walk to a second worker, which is the duplicate transcription/extraction everything else in this seam
     // exists to prevent. Age is only safe to read because a live owner keeps re-stamping the column.
     const db = await seed();
-    const abandoned = await insertJob(db, "processing", { leaseAgeSql: "10 minutes" });
-    const live = await insertJob(db, "processing", { leaseAgeSql: "30 seconds" });
-    const pending = await insertJob(db, "pending", { leaseAgeSql: "10 minutes" });
+    const abandoned = await insertJob(db, "processing", { leaseAge: "10 minutes" });
+    const live = await insertJob(db, "processing", { leaseAge: "30 seconds" });
+    const pending = await insertJob(db, "pending", { leaseAge: "10 minutes" });
 
     await recoverStaleJobs();
 

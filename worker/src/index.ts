@@ -87,7 +87,8 @@ async function main() {
   console.log(`[Worker] Polling glasses_walkthrough_forward queue every ${POLL_INTERVAL_MS}ms (dedicated)`);
 
   // NOTE: the recoverStaleJobs call above is no longer the ONLY one. It now also runs periodically, from
-  // inside pollJobs (sweepExpiredJobLeasesIfDue) — deliberately there rather than on a timer of its own, so
+  // inside pollJobs (startExpiredJobLeaseSweepIfDue, which STARTS the sweep beside the tick rather than
+  // awaiting it) — deliberately there rather than on a timer of its own, so
   // every poller shares one sweeper, the same way they share one flushPendingRecoveries. Startup-only was
   // never a complete answer: it requeues rows already five minutes stale, so a worker that crashed thirty
   // seconds into a delivery and restarted left that row 'processing' forever, and nothing selects that
