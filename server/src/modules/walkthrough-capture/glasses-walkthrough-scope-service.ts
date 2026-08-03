@@ -56,7 +56,7 @@ export const GLASSES_WALKTHROUGH_SCOPE_TIMEOUT_MS = 5_000;
 export const GLASSES_WALKTHROUGH_SCOPE_CONCURRENCY = 6;
 
 /** `"processing" | "ready" | "unavailable" | "missing"` — see the module header for what each claims. */
-export type GlassesWalkthroughState = "processing" | "ready" | "unavailable" | "missing";
+export type GlassesWalkthroughState = "processing" | "ready" | "unavailable" | "missing" | "failed";
 
 export interface GlassesWalkthroughScopeItem {
   id: string;
@@ -123,7 +123,7 @@ export interface GlassesWalkthroughScopeReader {
         outcome: "found";
         items: unknown[];
         /**
-         * Whether TROCK Scope's pipeline has FINISHED for this walkthrough.
+         * What TROCK Scope's pipeline has DONE with this walkthrough.
          *
          * Load-bearing only when `items` is empty, which is the one shape that is genuinely
          * ambiguous: a walk still being transcribed has no scope rows yet, and a walk that finished
@@ -132,7 +132,7 @@ export interface GlassesWalkthroughScopeReader {
          * manually refresh, because the panel does not poll. The window is ordinary, not exotic: the
          * forward publishes `scope_walkthrough_id` BEFORE it uploads a single clip.
          */
-        pipelineComplete: boolean;
+        pipeline: "working" | "finished" | "failed";
       }
     | { outcome: "missing" }
   >;
@@ -337,8 +337,11 @@ export async function resolveGlassesWalkthroughScope(
         // An EMPTY list is only `ready` once TROCK Scope says the pipeline is done. Before that it is a
         // walk in progress, and calling it ready tells the estimator the machine looked and found
         // nothing — which they cannot correct, and will not re-check, because this panel does not poll.
-        if (answer.items.length === 0 && !answer.pipelineComplete) {
-          entry.state = "processing";
+        if (answer.items.length === 0 && answer.pipeline !== "finished") {
+          // `failed` is terminal but it is NOT a result. Reported as ready-and-empty, a died
+          // extraction reads as "TROCK Scope processed this and found nothing" — the same false
+          // negative as the in-progress case, and the scope that WAS in the narration never gets bid.
+          entry.state = answer.pipeline === "failed" ? "failed" : "processing";
           entry.scope = null;
           continue;
         }

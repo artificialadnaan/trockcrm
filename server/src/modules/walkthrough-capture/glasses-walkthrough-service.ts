@@ -27,7 +27,7 @@
 //     derives its keys from (walkId, kind) and reuses them across deals by design. See
 //     `deriveGlassesWalkthroughClientUploadId` for what that costs and why the stored id is deal-scoped.
 import { createHash } from "node:crypto";
-import { and, desc, eq, inArray, isNotNull, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { files, glassesWalkthroughs, jobQueue, photoAuditLog } from "@trock-crm/shared/schema";
@@ -1550,6 +1550,31 @@ async function recordGlassesWalkthrough(
     .onConflictDoNothing({ target: [glassesWalkthroughs.dealId, glassesWalkthroughs.walkId] });
 }
 
+/**
+ * Fill in the TROCK Scope id on a read-model row that has none.
+ *
+ * `IS NULL` in the predicate rather than a blind SET: the forward job is the authority on this value,
+ * and a row that already carries one is carrying the id its own forward learned. Overwriting that with
+ * an id inherited from an older job is how a walk ends up pointed at a different walkthrough than the
+ * one holding its clips.
+ */
+async function stampScopeWalkthroughId(
+  tenantDb: TenantDb,
+  input: IngestGlassesWalkthroughInput,
+  scopeWalkthroughId: string
+): Promise<void> {
+  await tenantDb
+    .update(glassesWalkthroughs)
+    .set({ scopeWalkthroughId, updatedAt: new Date() })
+    .where(
+      and(
+        eq(glassesWalkthroughs.dealId, input.dealId),
+        eq(glassesWalkthroughs.walkId, input.walkId),
+        isNull(glassesWalkthroughs.scopeWalkthroughId)
+      )
+    );
+}
+
 export interface IngestGlassesWalkthroughResult {
   walkId: string;
   files: GlassesWalkthroughFileResult[];
@@ -1775,6 +1800,37 @@ export async function ingestGlassesWalkthrough(
   });
 
   const knownJobState = await findGlassesWalkthroughForwardJobState(tenantDb, input.walkId, input.dealId);
+
+  // STAMP AN INHERITED SCOPE ID BEFORE ANY EARLY RETURN, or a re-completed walk shows "processing"
+  // for ever on the deal page.
+  //
+  // The row above is inserted with a null `scope_walkthrough_id`, because the forward job is what
+  // learns it. That is right for a first completion. It is WRONG for a walk that predates 0214 and is
+  // completed again after its forward already finished: the read model row is created here for the
+  // first time, the branch below treats every non-dead job as live and returns without enqueueing
+  // anything, and so nothing ever comes back to fill the column. The panel then reports "still
+  // processing" on a walk whose scope has been sitting in TROCK Scope for weeks.
+  //
+  // The id is already in hand — `knownJobState` carries the completed job's checkpoint, which is the
+  // same value line 1837 inherits onto a replacement payload. Written only into a row that has none,
+  // so a live forward that later learns a different id cannot be overwritten by a stale one.
+  if (knownJobState?.scopeWalkthroughId) {
+    // FAILURE HERE MUST NOT FAIL THE COMPLETION. The read-model row is deliberately not part of the
+    // response mobile parses; the ingest's contract is filing the artifacts and forwarding them. The
+    // id also comes from a REMOTE service through a jsonb payload with no constraint, while this
+    // column is `uuid` — so a malformed value that has always been storable would, written here,
+    // raise 22P02 and 500 a completion the phone is waiting on, for a walk that is otherwise fine.
+    // Logged and left null instead: the panel then says "processing", which is recoverable, and the
+    // next completion retry stamps it.
+    try {
+      await stampScopeWalkthroughId(tenantDb, input, knownJobState.scopeWalkthroughId);
+    } catch (error: unknown) {
+      console.warn(
+        `[glasses-walkthrough] Could not record the TROCK Scope id for walk ${input.walkId}: ` +
+          `${error instanceof Error ? error.message : "unknown error"}`
+      );
+    }
+  }
 
   if (knownJobState?.isLive) {
     // A live forward job is not proof the forward covers this walk, and treating it as one is how a walk

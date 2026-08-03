@@ -126,7 +126,7 @@ describe("createGlassesWalkthroughScopeReader — a 200 is not automatically an 
       items: [{ id: "item-1", description: "Paint wall red" }],
       // A non-empty scope is finished by construction — there are rows, so consolidation ran. The
       // walkthrough is not re-fetched for it, which is why this reader makes one request here.
-      pipelineComplete: true,
+      pipeline: "finished",
     });
   });
 

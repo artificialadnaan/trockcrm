@@ -180,6 +180,10 @@ const STATE_BADGE: Record<GlassesWalkthrough["state"], { label: string; classNam
   ready: { label: "Scope ready", className: "border-green-200 bg-green-100 text-green-800" },
   unavailable: { label: "Scope unavailable", className: "border-red-200 bg-red-100 text-red-800" },
   missing: { label: "No longer in TROCK Scope", className: "border-gray-200 bg-gray-100 text-gray-700" },
+  // Red like `unavailable`, because both mean "do not treat the absence of scope as an answer" — but
+  // worded as a statement about the EXTRACTION rather than about our reading of it, since this one is
+  // TROCK Scope's own verdict and re-reading will not change it.
+  failed: { label: "Extraction failed", className: "border-red-200 bg-red-100 text-red-800" },
 };
 
 /** One extracted line item. Every field except the description is optional on the wire, and each one that is
@@ -317,6 +321,18 @@ export function AiWalkCard({
           <p className="text-sm text-muted-foreground">
             No longer in TROCK Scope. That service has no record of this walkthrough, so there is nothing to
             show or to retry.
+          </p>
+        ) : null}
+
+        {/* NO RETRY CONTROL, deliberately, and that is the difference from `unavailable`. This is TROCK
+            Scope's own verdict on the extraction, not our failure to read it, so re-reading returns the
+            same answer. What it needs is someone to look at the walkthrough, which is what the review
+            link beside it is for. Said plainly because the alternative — an empty scope with no
+            explanation — is indistinguishable from a walk that genuinely had nothing in it. */}
+        {walkthrough.state === "failed" ? (
+          <p className="text-sm text-muted-foreground">
+            TROCK Scope could not extract a scope from this walk. Nothing was produced, which is not the
+            same as the walk having no scope in it — the narration is still there to be looked at.
           </p>
         ) : null}
 

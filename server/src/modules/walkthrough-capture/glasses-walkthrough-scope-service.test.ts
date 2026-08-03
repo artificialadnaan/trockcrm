@@ -48,7 +48,7 @@ function scopeItem(overrides: Record<string, unknown> = {}) {
 function reader(overrides: Partial<GlassesWalkthroughScopeReader> = {}): GlassesWalkthroughScopeReader {
   return {
     isConfigured: () => true,
-    fetchScopeItems: async () => ({ outcome: "found", items: [scopeItem()], pipelineComplete: true }),
+    fetchScopeItems: async () => ({ outcome: "found", items: [scopeItem()], pipeline: "finished" }),
     ...overrides,
   };
 }
@@ -240,7 +240,7 @@ describe("resolveGlassesWalkthroughScope — one walk failing must not fail the 
         fetchScopeItems: async (scopeWalkthroughId) => {
           if (scopeWalkthroughId.startsWith("bbbb")) throw new Error("TROCK Scope answered 500.");
           if (scopeWalkthroughId.startsWith("cccc")) return { outcome: "missing" };
-          return { outcome: "found", items: [scopeItem()], pipelineComplete: true };
+          return { outcome: "found", items: [scopeItem()], pipeline: "finished" };
         },
       }),
       warn,
@@ -272,7 +272,7 @@ describe("resolveGlassesWalkthroughScope — one walk failing must not fail the 
       scopeReader: reader({
         fetchScopeItems: async (scopeWalkthroughId) => {
           if (scopeWalkthroughId.startsWith("00000000")) throw new Error("boom");
-          return { outcome: "found", items: [scopeItem()], pipelineComplete: true };
+          return { outcome: "found", items: [scopeItem()], pipeline: "finished" };
         },
       }),
       warn,
@@ -291,7 +291,7 @@ describe("resolveGlassesWalkthroughScope — what TROCK Scope sends is not trust
     const [entry] = await resolveGlassesWalkthroughScope([row()], {
       scopeReader: reader({
         // FINISHED with nothing, which is the only shape that may be reported as "ready" and empty.
-        fetchScopeItems: async () => ({ outcome: "found", items: [], pipelineComplete: true }),
+        fetchScopeItems: async () => ({ outcome: "found", items: [], pipeline: "finished" }),
       }),
       warn,
     });
@@ -308,12 +308,28 @@ describe("resolveGlassesWalkthroughScope — what TROCK Scope sends is not trust
     const { warn } = collectWarnings();
     const [entry] = await resolveGlassesWalkthroughScope([row()], {
       scopeReader: reader({
-        fetchScopeItems: async () => ({ outcome: "found", items: [], pipelineComplete: false }),
+        fetchScopeItems: async () => ({ outcome: "found", items: [], pipeline: "working" }),
       }),
       warn,
     });
 
     expect(entry!.state).toBe("processing");
+    expect(entry!.scope).toBeNull();
+  });
+
+  it("REGRESSION: a FAILED extraction is not an empty result", async () => {
+    // `failed` is terminal, so a set of "the pipeline has stopped" statuses counts it as finished and
+    // the panel reports ready-with-no-items — "TROCK Scope processed this and found nothing". The
+    // estimator has no reason to doubt that, and the scope that WAS in the narration is never bid.
+    const { warn } = collectWarnings();
+    const [entry] = await resolveGlassesWalkthroughScope([row()], {
+      scopeReader: reader({
+        fetchScopeItems: async () => ({ outcome: "found", items: [], pipeline: "failed" }),
+      }),
+      warn,
+    });
+
+    expect(entry!.state).toBe("failed");
     expect(entry!.scope).toBeNull();
   });
 
@@ -323,7 +339,7 @@ describe("resolveGlassesWalkthroughScope — what TROCK Scope sends is not trust
       scopeReader: reader({
         fetchScopeItems: async () => ({
           outcome: "found",
-          pipelineComplete: true,
+          pipeline: "finished",
           items: [
             scopeItem({ trade: null, quantity: null, unit: null, confidence: null, description: "Replace fan" }),
           ],
@@ -351,7 +367,7 @@ describe("resolveGlassesWalkthroughScope — what TROCK Scope sends is not trust
       scopeReader: reader({
         fetchScopeItems: async () => ({
           outcome: "found",
-          pipelineComplete: true,
+          pipeline: "finished",
           items: [
             scopeItem({ id: "aaaa1111-2222-4333-8444-555566667777", quantity: "700.5", confidence: "0.4" }),
             scopeItem({ id: "bbbb1111-2222-4333-8444-555566667777", quantity: "", confidence: Number.NaN }),
@@ -375,7 +391,7 @@ describe("resolveGlassesWalkthroughScope — what TROCK Scope sends is not trust
       scopeReader: reader({
         fetchScopeItems: async () => ({
           outcome: "found",
-          pipelineComplete: true,
+          pipeline: "finished",
           items: [null, "not an object", { description: "no id at all" }, scopeItem()],
         }),
       }),
@@ -392,7 +408,7 @@ describe("resolveGlassesWalkthroughScope — what TROCK Scope sends is not trust
       scopeReader: reader({
         fetchScopeItems: async () => ({
           outcome: "found",
-          pipelineComplete: true,
+          pipeline: "finished",
           items: [scopeItem({ workTypeCode: "PAINT-WALL" })],
         }),
       }),

@@ -55,7 +55,17 @@ function walkthroughPath(scopeWalkthroughId: string): string {
  * as "finished with nothing" — a claim about the estimator's site visit that they would have no reason
  * to doubt.
  */
-const TERMINAL_SCOPE_STATUSES = new Set(["ready", "stale", "failed"]);
+const FINISHED_SCOPE_STATUSES = new Set(["ready", "stale"]);
+
+/**
+ * `failed` is TERMINAL BUT NOT FINISHED, and collapsing the two is how a failure becomes a lie.
+ *
+ * An extraction that died has no scope rows either. Counted as "finished", the panel says TROCK Scope
+ * processed this walk and found nothing — the exact false negative the empty-list fix exists to
+ * prevent, reintroduced one layer up. The estimator has no reason to doubt it, and the scope that WAS
+ * in the narration is simply never bid.
+ */
+const FAILED_SCOPE_STATUS = "failed";
 
 /**
  * Whether TROCK Scope has stopped working on this walkthrough. BEST EFFORT: never throws.
@@ -70,25 +80,26 @@ const TERMINAL_SCOPE_STATUSES = new Set(["ready", "stale", "failed"]);
  * Only called when the scope came back empty, so it is one extra request per walk with nothing yet to
  * show, not one per render.
  */
-async function pipelineHasFinished(
+async function pipelineOutcome(
   baseUrl: string,
   token: string,
   scopeWalkthroughId: string,
   signal: AbortSignal
-): Promise<boolean> {
+): Promise<"working" | "finished" | "failed"> {
   try {
     const response = await fetch(`${baseUrl}${walkthroughPath(scopeWalkthroughId)}`, {
       method: "GET",
       headers: { accept: "application/json", authorization: `Bearer ${token}` },
       signal,
     });
-    if (!response.ok) return false;
+    if (!response.ok) return "working";
     const status = (JSON.parse(await response.text()) as { walkthrough?: { status?: unknown } } | null)
       ?.walkthrough?.status;
-    return typeof status === "string" && TERMINAL_SCOPE_STATUSES.has(status);
+    if (status === FAILED_SCOPE_STATUS) return "failed";
+    return typeof status === "string" && FINISHED_SCOPE_STATUSES.has(status) ? "finished" : "working";
   } catch {
-    // Including the abort: a deadline that fired mid-probe is not evidence the pipeline finished.
-    return false;
+    // Including the abort: a deadline that fired mid-probe is not evidence of anything.
+    return "working";
   }
 }
 
@@ -188,7 +199,7 @@ export function createGlassesWalkthroughScopeReader(): GlassesWalkthroughScopeRe
         );
       }
 
-      if (items.length > 0) return { outcome: "found", items, pipelineComplete: true };
+      if (items.length > 0) return { outcome: "found", items, pipeline: "finished" };
 
       // EMPTY, so the ambiguous case: ask the walkthrough whether it is finished. A failure here is not
       // fatal — an empty scope we cannot qualify is reported as still-processing, which costs the
@@ -196,7 +207,7 @@ export function createGlassesWalkthroughScopeReader(): GlassesWalkthroughScopeRe
       return {
         outcome: "found",
         items,
-        pipelineComplete: await pipelineHasFinished(baseUrl, token, scopeWalkthroughId, signal),
+        pipeline: await pipelineOutcome(baseUrl, token, scopeWalkthroughId, signal),
       };
     },
   };

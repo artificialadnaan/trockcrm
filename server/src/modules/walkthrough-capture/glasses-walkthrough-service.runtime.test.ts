@@ -1806,3 +1806,34 @@ describe("ingestGlassesWalkthrough — bounded object verification", () => {
     expect(signals.every((signal) => signal.aborted)).toBe(true);
   });
 });
+
+describe("recording an inherited TROCK Scope id", () => {
+  it("REGRESSION: a re-completed walk whose forward already FINISHED is not stuck processing", async () => {
+    // A walk that predates 0214 has no read-model row. Completed again after its forward finished, the
+    // row is created for the first time with a null scope id — and the live-job branch treats every
+    // non-dead job as still live and returns without enqueueing anything, so nothing ever comes back to
+    // fill it. The panel then reports "still processing" on a walk whose scope has been sitting in TROCK
+    // Scope for weeks, and no amount of retrying changes it, because the id was already known.
+    //
+    // A REAL uuid, because the column is `uuid` — the payload it comes from has no such constraint,
+    // which is why the stamp is also wrapped against 22P02 rather than trusted.
+    const scopeId = "b91a5bfd-eca9-4dbd-bde4-06528658b2b6";
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput(), {
+      artifactStore: healthyStore(),
+    });
+    await tenantDb
+      .update(jobQueue)
+      .set({
+        status: "completed",
+        payload: sql`jsonb_set(${jobQueue.payload}, '{scopeWalkthroughId}', ${JSON.stringify(scopeId)}::jsonb, true)`,
+      })
+      .where(eq(jobQueue.id, first.forwarding.jobId));
+    // The read model predates the migration for this walk.
+    await tenantDb.delete(glassesWalkthroughs);
+
+    await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+
+    const [row] = await tenantDb.select().from(glassesWalkthroughs);
+    expect(row!.scopeWalkthroughId).toBe(scopeId);
+  });
+});

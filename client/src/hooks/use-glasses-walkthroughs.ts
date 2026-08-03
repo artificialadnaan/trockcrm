@@ -15,7 +15,7 @@ import { api } from "@/lib/api";
  * duplication honest: this file describes the JSON, not the database, so it must change when and only when
  * `GET /api/deals/:id/glasses-walkthroughs` changes.
  */
-export type GlassesWalkthroughState = "processing" | "ready" | "unavailable" | "missing";
+export type GlassesWalkthroughState = "processing" | "ready" | "unavailable" | "missing" | "failed";
 
 export interface GlassesWalkthroughScopeItem {
   id: string;
@@ -46,6 +46,9 @@ export interface GlassesWalkthrough {
    *   unavailable  we could not read — outage, refused credential, timeout. Says NOTHING about whether a
    *                scope exists, which is why this state gets a retry and `missing` does not.
    *   missing      TROCK Scope answered 404 for this walkthrough. The one negative claim in the list.
+   *   failed       TROCK Scope's extraction DIED. Terminal, but not a result — reported as ready-and-
+   *                empty it would read as "processed, found nothing", and the scope that was in the
+   *                narration would simply never be bid.
    */
   state: GlassesWalkthroughState;
   scope: { status: "ready"; items: GlassesWalkthroughScopeItem[] } | null;
