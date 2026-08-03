@@ -31,10 +31,15 @@
 --   • `handleGlassesWalkthroughForward` (worker/src/jobs/glasses-walkthrough-forward.ts) stamps
 --     `scope_walkthrough_id` once TROCK Scope's walkthrough id is known — the same value it already
 --     checkpoints into its own job payload.
--- Nothing else writes it, and no backfill is included: rows for the walks already filed in production
--- cannot be reconstructed here, because `files` carries the walkId only inside a `tags` array and the
--- captured-by/captured-at pair belongs to the walk rather than to any one artifact. The next completion
--- retry from a phone files them correctly; anything older is a one-off script decision, not a schema one.
+-- A BACKFILL IS INCLUDED, and an earlier draft of this comment argued it could not be — that the walks
+-- already filed in production were unreconstructable, because `files` carries the walkId only inside a
+-- `tags` array and the captured-by/captured-at pair belongs to the walk rather than to any one artifact.
+-- That reasoning looked in the wrong place. The FORWARD JOB payload holds every field this table needs:
+-- officeSlug, dealId, walkId, capturedAt, capturedByUserId, and any checkpointed scopeWalkthroughId.
+--
+-- It matters more than a tidy-up. A phone does not re-complete a walk it finished weeks ago, so without
+-- the backfill those walks never get a row at all — including the one real hardware walk in production,
+-- which is the walk this feature exists to show. See the DO-loop below.
 
 DO $tenant$
 DECLARE
@@ -102,6 +107,52 @@ BEGIN
          ON %I.glasses_walkthroughs (deal_id, walk_id)',
       schema_name
     );
+
+    -- BACKFILL FROM THE FORWARD JOBS, or this table is empty for every walk that already happened —
+    -- including the one real hardware walk in production, which is the walk this whole feature exists
+    -- to show. A row is only written by `ingestGlassesWalkthrough` from now on, and a phone does not
+    -- re-complete a walk it finished weeks ago, so without this those walks are invisible on the deal
+    -- page for ever rather than merely until something refreshes.
+    --
+    -- Every field is already in the payload the forwarder wrote: officeSlug decides the schema, and
+    -- dealId / walkId / capturedAt / capturedByUserId / scopeWalkthroughId are the same values the
+    -- ingest path would have inserted.
+    --
+    -- GUARDED, because a job payload is jsonb and constrains nothing:
+    --   * the uuid columns take a value only when it LOOKS like one — a checkpoint repaired by hand can
+    --     hold anything, and one malformed row must not abort a migration for every office;
+    --   * the deal must still exist, or the FK fails on a walk whose deal was deleted;
+    --   * DISTINCT ON keeps one row per (deal, walk) — a walk that dead-lettered and was replaced has
+    --     several jobs — preferring the newest job that actually carries a scope id.
+    -- Skipped when there is no queue to read, rather than assumed. `job_queue` is created in 0001 so it
+    -- is always there on a real migration run; this keeps the statement from being the thing that decides
+    -- whether 0214 can run at all in any context where it is not, which a backfill has no business doing.
+    IF to_regclass('public.job_queue') IS NOT NULL THEN
+    EXECUTE format(
+      $bf$INSERT INTO %I.glasses_walkthroughs (deal_id, walk_id, scope_walkthrough_id, captured_at, captured_by_user_id)
+         SELECT DISTINCT ON (deal_id, walk_id) deal_id, walk_id, scope_walkthrough_id, captured_at, captured_by_user_id
+           FROM (
+             SELECT (q.payload->>'dealId')::uuid AS deal_id,
+                    q.payload->>'walkId' AS walk_id,
+                    CASE WHEN q.payload->>'scopeWalkthroughId' ~* '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+                         THEN (q.payload->>'scopeWalkthroughId')::uuid END AS scope_walkthrough_id,
+                    (q.payload->>'capturedAt')::timestamptz AS captured_at,
+                    CASE WHEN q.payload->>'capturedByUserId' ~* '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+                         THEN (q.payload->>'capturedByUserId')::uuid END AS captured_by_user_id,
+                    q.id AS job_id
+               FROM public.job_queue q
+              WHERE q.job_type = 'glasses_walkthrough_forward'
+                AND q.payload->>'officeSlug' = %L
+                AND q.payload->>'dealId' ~* '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+                AND q.payload->>'walkId' IS NOT NULL
+                AND q.payload->>'capturedAt' IS NOT NULL
+           ) candidates
+          WHERE EXISTS (SELECT 1 FROM %I.deals d WHERE d.id = candidates.deal_id)
+          ORDER BY deal_id, walk_id, (scope_walkthrough_id IS NOT NULL) DESC, job_id DESC
+       ON CONFLICT (deal_id, walk_id) DO NOTHING$bf$,
+      schema_name, replace(schema_name, 'office_', ''), schema_name
+    );
+    END IF;
   END LOOP;
 END $tenant$;
 

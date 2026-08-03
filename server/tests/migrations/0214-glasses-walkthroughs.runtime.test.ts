@@ -129,6 +129,48 @@ describe("migration 0214 — glasses_walkthroughs", () => {
     expect(rows.find((r) => r.column_name === "captured_at")?.is_nullable).toBe("NO");
   });
 
+  it("BACKFILLS walks that were forwarded before this migration existed", async () => {
+    // Without it the table is empty for every walk that already happened — including the one real
+    // hardware walk in production, which is the walk this feature exists to show. A phone does not
+    // re-complete a walk it finished weeks ago, so those rows would never appear at all.
+    const pg = new PGlite();
+    await seedPrerequisites(pg, ["office_dallas"]);
+    await pg.exec(`CREATE TABLE public.job_queue (id bigserial PRIMARY KEY, job_type text, payload jsonb);`);
+    const deal = "00000000-0000-4000-8000-000000000001";
+    const user = "00000000-0000-4000-8000-0000000000aa";
+    const scopeId = "b91a5bfd-eca9-4dbd-bde4-06528658b2b6";
+    await pg.exec(`INSERT INTO public.users (id) VALUES ('${user}');`);
+    await pg.exec(`INSERT INTO office_dallas.deals (id) VALUES ('${deal}');`);
+    await pg.exec(`
+      INSERT INTO public.job_queue (job_type, payload) VALUES
+        ('glasses_walkthrough_forward', '{"officeSlug":"dallas","dealId":"${deal}","walkId":"walk-old","capturedAt":"2026-08-02T22:21:47.702Z","capturedByUserId":"${user}","scopeWalkthroughId":"${scopeId}"}'),
+        -- A hand-repaired checkpoint holding a non-uuid: the row must still land, without its scope id,
+        -- rather than aborting the migration for every office.
+        ('glasses_walkthrough_forward', '{"officeSlug":"dallas","dealId":"${deal}","walkId":"walk-bad","capturedAt":"2026-08-02T22:00:00.000Z","scopeWalkthroughId":"repaired-by-hand"}'),
+        -- A walk whose deal is gone: skipped, or the FK aborts the migration.
+        ('glasses_walkthrough_forward', '{"officeSlug":"dallas","dealId":"00000000-0000-4000-8000-0000000000ff","walkId":"walk-orphan","capturedAt":"2026-08-02T22:00:00.000Z"}'),
+        -- Another office entirely: must not land in dallas.
+        ('glasses_walkthrough_forward', '{"officeSlug":"atlanta","dealId":"${deal}","walkId":"walk-elsewhere","capturedAt":"2026-08-02T22:00:00.000Z"}');
+    `);
+
+    await pg.exec(MIGRATION_SQL);
+
+    const rows = (await pg.query(
+      `SELECT walk_id, scope_walkthrough_id, captured_by_user_id FROM office_dallas.glasses_walkthroughs ORDER BY walk_id`,
+    )) as any;
+    expect(rows.rows.map((r: any) => r.walk_id)).toEqual(["walk-bad", "walk-old"]);
+    expect(rows.rows.find((r: any) => r.walk_id === "walk-old").scope_walkthrough_id).toBe(scopeId);
+    expect(rows.rows.find((r: any) => r.walk_id === "walk-old").captured_by_user_id).toBe(user);
+    // The malformed checkpoint is dropped, not written and not fatal.
+    expect(rows.rows.find((r: any) => r.walk_id === "walk-bad").scope_walkthrough_id).toBeNull();
+
+    // Replayable: a second run inserts nothing new.
+    await pg.exec(MIGRATION_SQL);
+    const again = (await pg.query(`SELECT count(*)::int AS n FROM office_dallas.glasses_walkthroughs`)) as any;
+    expect(again.rows[0].n).toBe(2);
+    await pg.close();
+  });
+
   it("skips an office schema that has no deals table, instead of failing the whole migration", async () => {
     // A half-provisioned schema must not take the migration down for every OTHER office in the install —
     // the DO-loop's `to_regclass ... IS NULL THEN CONTINUE` guard, which every tenant migration here
