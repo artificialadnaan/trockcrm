@@ -1199,6 +1199,39 @@ describe("ingestGlassesWalkthrough — a retry that ADDS artifacts to a live for
     expect(job.payload.pendingArtifacts).toBeUndefined();
   });
 
+  it("REGRESSION: inherits artifacts from a CHECKPOINT-LESS dead predecessor, which the checkpoint lookup cannot see", async () => {
+    // A forward that died before it ever reached TROCK Scope has no checkpoint, so
+    // `findGlassesWalkthroughForwardJobState` — whose job is "is there a checkpoint worth
+    // inheriting" — returns null for it. The replacement was therefore built from this call's list
+    // alone. A recovered manifest is a directory scan and can legitimately omit an artifact the
+    // prior job carried, so a dead [1,2,3] met by a retry carrying [2,3] queued a replacement with
+    // no artifact-1 at all.
+    //
+    // That gap predates the supersede work but was survivable while the dead row still alerted: a
+    // human reading the dead letter could see artifact-1. Stamping predecessors `supersededByJobId`
+    // silences that alert, so the omission became observable by nobody — no worker reads a dead row,
+    // and no operator is told.
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(3) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+    // Dead with NO checkpoint of any kind — the common predecessor.
+    await tenantDb
+      .update(jobQueue)
+      .set({ status: "dead", lastError: "died before reaching TROCK Scope" })
+      .where(eq(jobQueue.id, first.forwarding.jobId));
+
+    // The recovered retry omits artifact-1, exactly as a directory scan legitimately can.
+    const replacement = await ingestGlassesWalkthrough(
+      tenantDb,
+      baseInput({ artifacts: [photoArtifact(2), photoArtifact(3)] }),
+      { artifactStore: healthyStore({ head: async () => ({}) }) },
+    );
+
+    expect(replacement.forwarding.status).toBe("queued");
+    const job = await readJob(replacement.forwarding.jobId);
+    expect(keysOf(job)).toEqual(["artifact-1", "artifact-2", "artifact-3"]);
+  });
+
   it("REGRESSION: a dead row that has been REPLACED stops alerting, and says which job replaced it", async () => {
     // The dead-letter sweep selects every dead row whose `alertSent` is unset, without asking whether
     // anything took its place. A mobile retry reaching the dead row before the minute-based sweep

@@ -982,6 +982,44 @@ async function amendPendingGlassesWalkthroughForwardArtifacts(
 }
 
 /**
+ * Every artifact any DEAD forward for this walk was carrying, oldest row first, deduped.
+ *
+ * Deliberately NOT `findGlassesWalkthroughForwardJobState`: that lookup answers "is there a job whose
+ * CHECKPOINT this replacement should inherit", and to do so it excludes a dead row with no checkpoint.
+ * For artifacts the opposite is true — a row that died before it ever reached TROCK Scope is the most
+ * likely one to be holding clips nothing else has, precisely because nothing was forwarded from it.
+ *
+ * Ordered by id so the earliest surviving copy of an entry wins in the merge, which matches the rule
+ * everywhere else here: an entry a worker or a reconciling human may have edited is carried through
+ * verbatim, and a later completion has no better information than they did.
+ */
+async function loadDeadPredecessorArtifacts(
+  tenantDb: TenantDb,
+  walkId: string,
+  dealId: string
+): Promise<GlassesWalkthroughForwardArtifact[]> {
+  const rows = await tenantDb
+    .select({
+      artifacts: sql<GlassesWalkthroughForwardArtifact[]>`COALESCE(${jobQueue.payload} -> 'artifacts', '[]'::jsonb)`,
+    })
+    .from(jobQueue)
+    .where(
+      and(
+        eq(jobQueue.jobType, GLASSES_WALKTHROUGH_FORWARD_JOB),
+        eq(jobQueue.status, "dead"),
+        sql`${jobQueue.payload} ->> 'walkId' = ${walkId}`,
+        sql`${jobQueue.payload} ->> 'dealId' = ${dealId}`
+      )
+    )
+    .orderBy(jobQueue.id);
+
+  return rows.reduce<GlassesWalkthroughForwardArtifact[]>(
+    (merged, row) => mergeForwardArtifacts(merged, row.artifacts ?? []),
+    []
+  );
+}
+
+/**
  * Union two forward artifact lists, deduped on `idempotencyKey`, with `existing` winning and keeping its
  * order. The in-place amend does exactly this in SQL (see above); this is the same rule for the paths that
  * build a payload in JS rather than editing one in place — a dead row's replacement, principally.
@@ -1572,6 +1610,12 @@ export async function ingestGlassesWalkthrough(
     );
   }
 
+  // Read before the payload is built, and unconditionally: whether a predecessor is worth inheriting
+  // ARTIFACTS from is a different question from whether it carries a checkpoint, and only the second
+  // one `knownJobState` can answer. On the ordinary first-forward path this finds nothing and costs
+  // one indexed lookup.
+  const deadPredecessorArtifacts = await loadDeadPredecessorArtifacts(tenantDb, input.walkId, input.dealId);
+
   const jobPayload: Record<string, unknown> = {
     walkId: input.walkId,
     dealId: input.dealId,
@@ -1589,10 +1633,21 @@ export async function ingestGlassesWalkthrough(
     // reports success, and never forwards A — indistinguishable from a complete walk everywhere the
     // office looks.
     //
-    // Safe to inherit unconditionally: `knownJobState` is only non-null here for a row that is dead
-    // (a live one returns from the branch above), and the checkpoint carried forward below is taken
-    // from that same row, so the artifacts and the checkpoint always describe one walk.
-    artifacts: mergeForwardArtifacts(knownJobState?.artifacts ?? [], forwardArtifacts),
+    // Inherited from EVERY dead predecessor for this walk, read independently of the checkpoint
+    // lookup — not from `knownJobState`, which is the wrong source for this question.
+    //
+    // `findGlassesWalkthroughForwardJobState` deliberately returns a dead row only when it carries a
+    // checkpoint worth inheriting, so for the common predecessor — a forward that died before it
+    // ever reached TROCK Scope — it answers null. A dead row holding [A,B,C] met by a recovered
+    // completion carrying [B,C] therefore produced a replacement with no A at all: the recovered
+    // manifest is a directory scan and can legitimately omit an artifact the prior job carried.
+    //
+    // That gap predates the supersede work but was survivable while the dead row still alerted — a
+    // human reading the dead letter could see A. Stamping predecessors `supersededByJobId` silences
+    // that alert, so the omission became unobservable by anyone: no worker looks at a dead row, and
+    // no operator is told. Widening the suppression is what made closing this mandatory rather than
+    // merely correct.
+    artifacts: mergeForwardArtifacts(deadPredecessorArtifacts, forwardArtifacts),
   };
 
   // Exactly one of the two markers is carried forward, never both — the worker reads `scopeWalkthroughId`
