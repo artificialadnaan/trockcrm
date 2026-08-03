@@ -205,11 +205,18 @@ describe("handleGlassesWalkthroughForward", () => {
     expect(checkpoint).toBeDefined();
     // Scoped to the (walkId, dealId) PAIR: a phone-minted walkId is not unique across deals, so keying on
     // it alone would write this walkthrough's id into the other deal's job row as well.
+    //
+    // The trailing null is the CLAIMED ATTEMPT, absent here because this test calls the handler
+    // directly rather than through the queue. In production it is always a number, and the statement
+    // additionally requires `attempts = $5` — `status = 'processing'` alone stopped being this
+    // handler's identity once lease recovery could requeue and re-claim the row back INTO
+    // `processing` under a still-running attempt.
     expect(checkpoint!.params).toEqual([
       "scope-walkthrough-1",
       GLASSES_WALKTHROUGH_FORWARD_JOB,
       "walk-1",
       "deal-1",
+      null,
     ]);
 
     // Downloaded exactly the one part's byte range from OUR OWN R2 key, under a deadline. The source read

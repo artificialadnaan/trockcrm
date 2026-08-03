@@ -60,7 +60,7 @@
 // `duplicate_bytes` (409), which `completeClip` below treats as a non-fatal terminal outcome — so
 // re-uploading a clip that fully landed on a prior attempt is at worst a wasted upload, never duplicate
 // scope data.
-import { deadJob, type JobHandlerResult } from "../queue.js";
+import { deadJob, type JobAttemptContext, type JobHandlerResult } from "../queue.js";
 import { pool } from "../db.js";
 import { getObjectRangeBuffer, R2_RANGE_READ_TIMEOUT_MS } from "../lib/r2-client.js";
 import { sendSystemEmailWithMetadata, type SendSystemEmailResult } from "../lib/system-email.js";
@@ -709,7 +709,8 @@ async function markScopeCreatePending(
   db: Queryable,
   walkId: string,
   dealId: string,
-  externalRef: string
+  externalRef: string,
+  claimedAttempt: number | null
 ): Promise<void> {
   const result = await db.query(
     `UPDATE public.job_queue
@@ -718,8 +719,9 @@ async function markScopeCreatePending(
         AND payload ->> 'walkId' = $3
         AND payload ->> 'dealId' = $4
         AND status = 'processing'
+        AND ($5::int IS NULL OR attempts = $5::int)
       RETURNING id`,
-    [externalRef, GLASSES_WALKTHROUGH_FORWARD_JOB, walkId, dealId]
+    [externalRef, GLASSES_WALKTHROUGH_FORWARD_JOB, walkId, dealId, claimedAttempt]
   );
   if (!result?.rows?.length) {
     throw new Error(
@@ -732,15 +734,21 @@ async function markScopeCreatePending(
 
 /** Retract the intent marker once we have positive evidence no remote walkthrough was created, putting the
  *  row back in its "nothing has happened remotely yet" state so the queue's ordinary backoff applies. */
-async function clearScopeCreatePending(db: Queryable, walkId: string, dealId: string): Promise<void> {
+async function clearScopeCreatePending(
+  db: Queryable,
+  walkId: string,
+  dealId: string,
+  claimedAttempt: number | null
+): Promise<void> {
   await db.query(
     `UPDATE public.job_queue
         SET payload = payload - 'scopeCreatePendingRef'
       WHERE job_type = $1
         AND payload ->> 'walkId' = $2
         AND payload ->> 'dealId' = $3
-        AND status = 'processing'`,
-    [GLASSES_WALKTHROUGH_FORWARD_JOB, walkId, dealId]
+        AND status = 'processing'
+        AND ($4::int IS NULL OR attempts = $4::int)`,
+    [GLASSES_WALKTHROUGH_FORWARD_JOB, walkId, dealId, claimedAttempt]
   );
 }
 
@@ -751,7 +759,8 @@ async function checkpointScopeWalkthroughId(
   db: Queryable,
   walkId: string,
   dealId: string,
-  scopeWalkthroughId: string
+  scopeWalkthroughId: string,
+  claimedAttempt: number | null
 ): Promise<void> {
   await db.query(
     `UPDATE public.job_queue
@@ -759,8 +768,9 @@ async function checkpointScopeWalkthroughId(
       WHERE job_type = $2
         AND payload ->> 'walkId' = $3
         AND payload ->> 'dealId' = $4
-        AND status = 'processing'`,
-    [scopeWalkthroughId, GLASSES_WALKTHROUGH_FORWARD_JOB, walkId, dealId]
+        AND status = 'processing'
+        AND ($5::int IS NULL OR attempts = $5::int)`,
+    [scopeWalkthroughId, GLASSES_WALKTHROUGH_FORWARD_JOB, walkId, dealId, claimedAttempt]
   );
 }
 
@@ -811,9 +821,25 @@ export async function handleGlassesWalkthroughForward(
     /** Injection seam for the request ceilings, so a test can exercise the abort path in milliseconds
      *  rather than waiting out a production-sized budget. The queue never passes it. */
     timeouts?: Partial<ScopeTimeouts>;
-  } = {}
+  } = {},
+  /**
+   * The queue's own claim context (queue.ts passes `attempt: claimedAttempt`). Load-bearing, not
+   * telemetry: `status = 'processing'` alone is NOT this handler's identity once lease recovery
+   * exists. A handler that loses lease renewals while still uploading gets its row requeued and
+   * RE-CLAIMED — back to `processing`, with a higher `attempts` — and the old handler then matches
+   * the new claim. It could fold and clear `pendingArtifacts` under a handler that had already read
+   * the older list, which then completes and silently omits the added clips. The attempt number is
+   * what distinguishes the two claims, and it is exactly what the queue guards its own terminal
+   * writes with.
+   *
+   * Optional only because `JobHandler` declares it so and direct-call tests predate it. When it is
+   * absent the writes below fall back to `status = 'processing'`, which is the pre-existing
+   * behaviour — weaker, and never the production path.
+   */
+  ctx?: JobAttemptContext
 ): Promise<JobHandlerResult> {
   const p = assertPayload(payload);
+  const claimedAttempt = ctx?.attempt ?? null;
   const db = deps.db ?? (pool as unknown as Queryable);
   const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
   const baseUrl = deps.baseUrl ?? process.env.TROCK_SCOPE_BASE_URL;
@@ -851,7 +877,7 @@ export async function handleGlassesWalkthroughForward(
     const externalRef = deriveScopeWalkthroughExternalRef(p.walkId, p.dealId);
     // Intent BEFORE action. Everything after this line is covered: if the process dies at ANY point up to
     // the checkpoint below, the redelivered payload carries the marker and the branch above takes over.
-    await markScopeCreatePending(db, p.walkId, p.dealId, externalRef);
+    await markScopeCreatePending(db, p.walkId, p.dealId, externalRef, claimedAttempt);
 
     let created: { id: string };
     try {
@@ -862,7 +888,7 @@ export async function handleGlassesWalkthroughForward(
         // letter. Best-effort by necessity: if THIS write also fails the marker survives, and the next
         // attempt dead-letters on a create that never happened. That is the fail-CLOSED direction — a
         // spurious dead letter costs a human one minute; a missed one costs a duplicate scope extraction.
-        await clearScopeCreatePending(db, p.walkId, p.dealId).catch((clearErr) => {
+        await clearScopeCreatePending(db, p.walkId, p.dealId, claimedAttempt).catch((clearErr) => {
           console.warn(
             `[Worker:glasses_walkthrough_forward] Could not retract the pending-create marker for walk ${p.walkId}; ` +
               `the next attempt will dead-letter for manual reconciliation`,
@@ -874,7 +900,7 @@ export async function handleGlassesWalkthroughForward(
     }
 
     scopeWalkthroughId = created.id;
-    await checkpointScopeWalkthroughId(db, p.walkId, p.dealId, scopeWalkthroughId);
+    await checkpointScopeWalkthroughId(db, p.walkId, p.dealId, scopeWalkthroughId, claimedAttempt);
   }
 
   for (const artifact of p.artifacts) {
@@ -889,7 +915,7 @@ export async function handleGlassesWalkthroughForward(
   // `pendingArtifacts` and changes nothing else (recordPendingArtifactsOnRunningForwardJob in
   // server/src/modules/walkthrough-capture/glasses-walkthrough-service.ts). Reading it back here turns
   // that into the supersede it always wanted to be, taken after the race it would have caused is over.
-  const reconciliation = await supersedeSelfForPendingArtifacts(db, p.walkId, p.dealId);
+  const reconciliation = await supersedeSelfForPendingArtifacts(db, p.walkId, p.dealId, claimedAttempt);
   if (reconciliation) return deadJob(reconciliation);
 }
 
@@ -912,7 +938,8 @@ export async function handleGlassesWalkthroughForward(
 async function supersedeSelfForPendingArtifacts(
   db: Queryable,
   walkId: string,
-  dealId: string
+  dealId: string,
+  claimedAttempt: number | null
 ): Promise<string | null> {
   const result = await db.query(
     `UPDATE public.job_queue
@@ -935,9 +962,10 @@ async function supersedeSelfForPendingArtifacts(
         AND payload ->> 'walkId' = $2
         AND payload ->> 'dealId' = $3
         AND status = 'processing'
+        AND ($4::int IS NULL OR attempts = $4::int)
         AND payload ? 'pendingArtifacts'
       RETURNING jsonb_array_length(COALESCE(payload -> 'artifacts', '[]'::jsonb)) AS artifact_count`,
-    [GLASSES_WALKTHROUGH_FORWARD_JOB, walkId, dealId]
+    [GLASSES_WALKTHROUGH_FORWARD_JOB, walkId, dealId, claimedAttempt]
   );
   if (!result?.rows?.length) return null;
   return buildPendingArtifactsDeadLetterMessage(walkId, dealId, Number(result.rows[0]?.artifact_count ?? 0));

@@ -165,6 +165,53 @@ describe("glasses_walkthrough_forward pending-artifact reconciliation (real SQL)
     expect(payload.pendingArtifacts).toBeUndefined();
   });
 
+  it("REGRESSION: a handler whose row was re-claimed after a lost lease reconciles NOTHING", async () => {
+    // `status = 'processing'` is not this handler's identity once lease recovery exists. A handler
+    // that loses lease renewals while still uploading has its row requeued and RE-CLAIMED — back to
+    // `processing`, with a higher `attempts` — and the old handler then matched the new claim. It
+    // could fold and CLEAR `pendingArtifacts` under the new handler, which had captured the older
+    // artifact list at claim time, sees no pending marker, and completes: the added clips silently
+    // never forwarded. The old handler cannot even dead-letter to say so, because the queue's
+    // terminal write is guarded on its own attempt.
+    //
+    // Attempt 2 holds the row; the stale attempt-1 handler must not touch it.
+    const db = await seed([
+      { payload: payloadJson({ artifacts: [1, 2], pendingArtifacts: [1, 2, 3] }), status: "processing" },
+    ]);
+    await db.query("UPDATE public.job_queue SET attempts = 2 WHERE id = 1");
+
+    const result = await handleGlassesWalkthroughForward(await storedPayload(db), null, deps(db), {
+      attempt: 1,
+      maxAttempts: 10,
+      isFinalAttempt: false,
+    });
+
+    // No self-supersede: this handler no longer owns the claim, so it reports ordinary success and
+    // leaves the reconciliation to the attempt that does.
+    expect(result).toBeUndefined();
+    const payload = await storedPayload(db);
+    expect(payload.pendingArtifacts.map((a: any) => a.idempotencyKey)).toEqual(["a1", "a2", "a3"]);
+    expect(payload.artifacts.map((a: any) => a.idempotencyKey)).toEqual(["a1", "a2"]);
+  });
+
+  it("GUARD: the handler holding the current claim still reconciles", async () => {
+    // The other side of the same predicate — a fix that simply stopped reconciling would pass the
+    // test above and lose the feature.
+    const db = await seed([
+      { payload: payloadJson({ artifacts: [1, 2], pendingArtifacts: [1, 2, 3] }), status: "processing" },
+    ]);
+    await db.query("UPDATE public.job_queue SET attempts = 2 WHERE id = 1");
+
+    const result = await handleGlassesWalkthroughForward(await storedPayload(db), null, deps(db), {
+      attempt: 2,
+      maxAttempts: 10,
+      isFinalAttempt: false,
+    });
+
+    expect(result).toEqual({ status: "dead", error: expect.stringContaining(WALK) });
+    expect((await storedPayload(db)).pendingArtifacts).toBeUndefined();
+  });
+
   it("REGRESSION: checkpoints land ONLY on this handler's claimed row, never on a replacement for the same walk", async () => {
     // The checkpoint statements match on (job_type, walkId, dealId), which is NOT unique across a row and
     // its replacement — and they carry no LIMIT, so an unscoped UPDATE writes to every matching row. A

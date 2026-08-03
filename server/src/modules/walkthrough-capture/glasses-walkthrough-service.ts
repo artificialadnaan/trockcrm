@@ -1081,7 +1081,36 @@ async function recordPendingArtifactsOnRunningForwardJob(
   const updated = await tenantDb
     .update(jobQueue)
     .set({
-      payload: sql`jsonb_set(${jobQueue.payload}, '{pendingArtifacts}', ${JSON.stringify(artifacts)}::jsonb, true)`,
+      // Built against the row's own current value, exactly like the pending amend above — and for
+      // the same reason, which the first version of this branch missed. Two widening completions
+      // against the SAME claimed job each derive their list from `payload.artifacts` and knew
+      // nothing about a `pendingArtifacts` already written: a call carrying [A,C] arriving after one
+      // carrying [A,B] replaced the pending set wholesale, and B was never forwarded. The handler
+      // then folded in a set that had quietly lost a clip, and later completion retries could still
+      // see B among the filed rows — a shortfall visible nowhere except a walk that came back short.
+      //
+      // Three sources, deduped on idempotencyKey with the earliest occurrence winning: what the
+      // handler is delivering, whatever a previous widening already recorded, and this call's list.
+      // `artifacts` is included so the first write is complete on its own rather than relying on the
+      // caller having unioned correctly, and so a reader of the row never sees a pending set that is
+      // narrower than the delivery it is meant to supersede.
+      payload: sql`jsonb_set(
+        ${jobQueue.payload},
+        '{pendingArtifacts}',
+        (
+          SELECT COALESCE(jsonb_agg(d.elem ORDER BY d.ord), '[]'::jsonb)
+          FROM (
+            SELECT DISTINCT ON (t.elem ->> 'idempotencyKey') t.elem, t.ord
+            FROM jsonb_array_elements(
+              COALESCE(${jobQueue.payload} -> 'artifacts', '[]'::jsonb)
+                || COALESCE(${jobQueue.payload} -> 'pendingArtifacts', '[]'::jsonb)
+                || ${JSON.stringify(artifacts)}::jsonb
+            ) WITH ORDINALITY AS t(elem, ord)
+            ORDER BY t.elem ->> 'idempotencyKey', t.ord
+          ) d
+        ),
+        true
+      )`,
     })
     .where(
       and(

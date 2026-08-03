@@ -1134,6 +1134,38 @@ describe("ingestGlassesWalkthrough — a retry that ADDS artifacts to a live for
     expect(pendingKeysOf(job)).toEqual(["artifact-1", "artifact-2", "artifact-3"]);
   });
 
+  it("REGRESSION: a second widening against the SAME claimed job unions with the pending set, it does not replace it", async () => {
+    // The first version of this branch fixed the stale-union bug for `artifacts` and then repeated it
+    // one key over. Each call derived its list from `payload.artifacts` and knew nothing about a
+    // `pendingArtifacts` already written, so the assignment replaced that key wholesale: a call
+    // carrying [A,C] arriving after one carrying [A,B] left the pending set as [A,C], and B was never
+    // forwarded. The handler then folded in a set that had quietly lost a clip — while later
+    // completion retries could still see B among the filed rows, so nothing anywhere disagreed.
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(2) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+    await claimJobForTest(first.forwarding.jobId);
+
+    // Two widening completions carrying DIFFERENT additions, as two mobile retries would.
+    await ingestGlassesWalkthrough(
+      tenantDb,
+      baseInput({ artifacts: [...photoArtifacts(2), photoArtifact(3)] }),
+      { artifactStore: healthyStore({ head: async () => ({}) }) },
+    );
+    await ingestGlassesWalkthrough(
+      tenantDb,
+      baseInput({ artifacts: [...photoArtifacts(2), photoArtifact(4)] }),
+      { artifactStore: healthyStore({ head: async () => ({}) }) },
+    );
+
+    const job = await readJob(first.forwarding.jobId);
+    expect(job.status).toBe("processing");
+    // Both additions survive. Neither retry knew about the other's.
+    expect(pendingKeysOf(job)).toEqual(["artifact-1", "artifact-2", "artifact-3", "artifact-4"]);
+    // And the list the handler is DELIVERING is still untouched.
+    expect(keysOf(job)).toEqual(["artifact-1", "artifact-2"]);
+  });
+
   it("REGRESSION: a replacement cannot be inserted beside a claimed forward that grew mid-flight", async () => {
     // The consequence the branch above exists to prevent, asserted directly rather than inferred from the
     // row's status: after a widening completion against a claimed job, the pair still has exactly ONE live
@@ -1240,6 +1272,19 @@ describe("ingestGlassesWalkthrough — a retry that ADDS artifacts to a live for
 // `tenantMiddleware` has already checked out one of the pool's 20 connections and opened a transaction on
 // it before this service is ever called, so every millisecond the verification phase spends is a
 // pool slot held by a request doing no database work at all.
+
+/** One artifact by its 1-based index, so a test can build a set that is not a prefix — two retries
+ *  adding DIFFERENT artifacts is the case `photoArtifacts(n)` cannot express. */
+function photoArtifact(index: number) {
+  return {
+    idempotencyKey: `artifact-${index}`,
+    kind: "photo" as const,
+    originalFilename: `frame-${index}.jpg`,
+    mimeType: "image/jpeg",
+    fileSizeBytes: 1024,
+    capturedAtMs: null,
+  };
+}
 
 function photoArtifacts(count: number) {
   return Array.from({ length: count }, (_, index) => ({
