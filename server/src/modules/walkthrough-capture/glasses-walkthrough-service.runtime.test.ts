@@ -1259,6 +1259,36 @@ describe("ingestGlassesWalkthrough — a retry that ADDS artifacts to a live for
     });
   });
 
+  it("REGRESSION: a predecessor already holding [null] is survivable, not a permanent 500", async () => {
+    // The type guard added last round stops a JSON-null key becoming `[null]` GOING FORWARD. Rows
+    // written before it can already hold one — the old reconciliation concatenated a null key with a
+    // real array and stored the result — and such a row is a perfectly valid array, so the guard passes
+    // it straight through. Reading `idempotencyKey` off that `null` threw, so the completion 500'd and
+    // the replacement that would have rescued the walk was never created: the bad data outlives the fix
+    // that prevents it, and the walk is stuck until someone edits the row by hand.
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(2) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+    await tenantDb
+      .update(jobQueue)
+      .set({
+        status: "dead",
+        lastError: "died with a malformed artifact list",
+        payload: sql`jsonb_set(${jobQueue.payload}, '{artifacts}', '[null]'::jsonb, true)`,
+      })
+      .where(eq(jobQueue.id, first.forwarding.jobId));
+
+    const replacement = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(2) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+
+    // The junk element is dropped, not thrown on: it carries no key, so it identifies no artifact and
+    // nothing downstream could have acted on it. Refusing the whole list would turn a recoverable walk
+    // into a permanently failing one.
+    expect(replacement.forwarding.status).toBe("queued");
+    expect(keysOf(await readJob(replacement.forwarding.jobId))).toEqual(["artifact-1", "artifact-2"]);
+  });
+
   it("REGRESSION: a `failed` predecessor is superseded, not parked as though a handler were still running", async () => {
     // `job_status` is an enum containing `failed` (0001_initial.sql:17). This queue's own transitions
     // never write it, but it is schema-valid and reachable by another actor — and the catch-all here
@@ -1603,5 +1633,35 @@ describe("ingestGlassesWalkthrough — bounded object verification", () => {
     // fired may still settle — at most one per worker, hence the concurrency allowance.
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(issued).toBeLessThanOrEqual(atDeadline + GLASSES_WALKTHROUGH_VERIFY_CONCURRENCY);
+  });
+
+  it("REGRESSION: ABORTS the requests already in flight, not only the ones not yet sent", async () => {
+    // Stopping dispatch released this caller's WAIT and nothing else. The S3 client has no request
+    // timeout, so every HEAD that R2 had accepted and never answered kept its socket and its promise
+    // for the life of the process — up to one per worker, per timed-out completion. And because the
+    // 503 is retryable, the client's next attempt and every other walk stacked a fresh batch on top of
+    // the leaked one until the pool was gone. Releasing the database transaction made that harder to
+    // see rather than less real.
+    const signals: AbortSignal[] = [];
+    const store = healthyStore({
+      head: async (_r2Key: string, signal?: AbortSignal) => {
+        if (signal) signals.push(signal);
+        // Never answers, which is exactly the case: R2 accepted the request and went quiet.
+        await new Promise(() => {});
+        return { contentType: "image/jpeg", contentLength: 1024 };
+      },
+    });
+
+    await expect(
+      ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(12) }), {
+        artifactStore: store,
+        objectVerificationTimeoutMs: 40,
+      })
+    ).rejects.toMatchObject({ statusCode: 503 });
+
+    // Every request the phase issued received a signal, and every one of them is aborted — the store
+    // is handed the means to release the socket rather than merely being left alone.
+    expect(signals.length).toBeGreaterThan(0);
+    expect(signals.every((signal) => signal.aborted)).toBe(true);
   });
 });

@@ -187,7 +187,16 @@ export interface GlassesWalkthroughArtifactStore {
   /** `headObjectStrict(r2Key)`. `null` = genuinely absent (400, sender must upload first). A THROW means
    *  we could not check (network/auth/outage) and must not be read as "absent" — callers map it to a
    *  retryable 503, never a 400. */
-  head: (r2Key: string) => Promise<{ contentType?: string; contentLength?: number } | null>;
+  head: (
+    r2Key: string,
+    /** Aborted when the verification phase's deadline fires. Optional so a test double may ignore it,
+     *  but production MUST honour it: without an abort, a HEAD that R2 accepts and never answers keeps
+     *  its socket for the life of the process, and each timed-out completion strands another batch —
+     *  the 503 is retryable, so the client's next attempt stacks a fresh set on top of the leaked one
+     *  until the pool is gone. Stopping dispatch, which is all this used to do, releases the WAIT and
+     *  not the REQUESTS. */
+    signal?: AbortSignal
+  ) => Promise<{ contentType?: string; contentLength?: number } | null>;
   /**
    * `generateUploadUrl(r2Key, mimeType, fileSizeBytes, expiresInSeconds)`.
    *
@@ -727,10 +736,11 @@ function prepareGlassesWalkthroughArtifacts(
  *  R2 may not report either header, and an absent header is not a mismatch. */
 async function verifyOneGlassesWalkthroughArtifact(
   prepared: PreparedGlassesWalkthroughArtifact,
-  artifactStore: GlassesWalkthroughArtifactStore
+  artifactStore: GlassesWalkthroughArtifactStore,
+  signal?: AbortSignal
 ): Promise<void> {
   const { artifact, r2Key } = prepared;
-  const head = await artifactStore.head(r2Key);
+  const head = await artifactStore.head(r2Key, signal);
   if (!head) {
     throw new AppError(
       400,
@@ -784,12 +794,16 @@ async function verifyGlassesWalkthroughArtifacts(
   const failures = new Array<AppError | undefined>(prepared.length);
   let stopDispatchingAt = prepared.length;
   let nextIndex = 0;
+  // One controller for the whole phase: every HEAD it issues is abandoned together when the deadline
+  // fires, because they are all waiting on the same store and the deadline's verdict is about that
+  // store rather than about any one object.
+  const abort = new AbortController();
 
   const worker = async (): Promise<void> => {
     while (nextIndex < stopDispatchingAt) {
       const index = nextIndex++;
       try {
-        await verifyOneGlassesWalkthroughArtifact(prepared[index]!, artifactStore);
+        await verifyOneGlassesWalkthroughArtifact(prepared[index]!, artifactStore, abort.signal);
       } catch (err) {
         // R33: a throw out of the store means WE COULD NOT CHECK, not that the object is absent —
         // retryable, never a 400. Only the AppErrors raised above are verdicts about the object itself.
@@ -813,14 +827,20 @@ async function verifyGlassesWalkthroughArtifacts(
       ).then(() => false),
       new Promise<true>((resolve) => {
         timer = setTimeout(() => {
-          // Stop DISPATCHING as well as stop waiting. The already-issued HEADs cannot be aborted (no
-          // AbortSignal is threaded through the store interface), but the workers are still sitting in
-          // their `while` loops, and each one that settles after this point would otherwise pick up the
-          // next index and fire another request into a store that has already proven it is not answering.
-          // For a 200-artifact walk that is ~192 further HEADs issued AFTER the caller got its 503 — and
-          // since a 503 is retryable, the client's next attempt stacks another round on top, multiplying
-          // load during exactly the slowdown this deadline exists to contain.
+          // Stop DISPATCHING, and ABORT what is already in flight. Stopping dispatch alone released
+          // this caller's wait and nothing else: the S3 client has no request timeout, so every HEAD
+          // R2 had accepted and not answered kept its socket and its promise for the life of the
+          // process. Each timed-out completion stranded up to `GLASSES_WALKTHROUGH_VERIFY_CONCURRENCY`
+          // of them, and because the 503 is retryable the client's next attempt — and every other
+          // walk — stacked a fresh batch on top of the leaked one until the pool was gone. The
+          // database transaction being released made that harder to see, not less real.
+          //
+          // Both are needed. The abort ends the outstanding requests; the dispatch stop keeps a worker
+          // that settles after this point from picking up the next index and firing another into a
+          // store that has already proven it is not answering — ~192 further HEADs on a 200-artifact
+          // walk, issued after the caller had its answer.
           stopDispatchingAt = 0;
+          abort.abort();
           resolve(true);
         }, timeoutMs);
         // Never keep the process alive for a verification nobody is waiting on any more.
@@ -1179,6 +1199,20 @@ export function mergeForwardArtifacts(
   const merged: GlassesWalkthroughForwardArtifact[] = [];
   const seen = new Set<string>();
   for (const artifact of [...existing, ...incoming]) {
+    // ELEMENTS, not just the container. Guarding the payload key by `jsonb_typeof(...) = 'array'`
+    // stopped a JSON-null key from becoming `[null]` GOING FORWARD, and stopped there — but rows
+    // written before that guard can already hold `[null, …]`, because the old reconciliation
+    // concatenated a null key with a real array and stored the result. Such a row is a perfectly
+    // valid array, so the type guard passes it through, and this loop then reads `idempotencyKey`
+    // off `null`: the completion 500s and the replacement that would have rescued the walk is never
+    // created. The bad data outlives the fix that prevents it, which is the whole reason this belongs
+    // here rather than only in the SQL.
+    //
+    // Dropped rather than thrown. A malformed entry carries no key, so it identifies no artifact and
+    // nothing downstream could act on it; refusing the whole list because one element is junk would
+    // turn a recoverable walk into a permanently failing one, which is the outcome this seam spends
+    // everything else avoiding.
+    if (typeof artifact?.idempotencyKey !== "string" || artifact.idempotencyKey.length === 0) continue;
     if (seen.has(artifact.idempotencyKey)) continue;
     seen.add(artifact.idempotencyKey);
     merged.push(artifact);

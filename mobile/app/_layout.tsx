@@ -27,6 +27,29 @@ const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, staleTime: 30_000 } },
 });
 
+/**
+ * `Wearables.configure()`, started at most once per process and shared by everything that must not run
+ * before it.
+ *
+ * A promise rather than a flag because the callers need to WAIT, not merely to know. It resolves on
+ * failure too — a configure that rejects must never block app launch, and its cause is retained via
+ * `setStartupConfigureError` for `useWalk` to surface when a walk is refused. Callers therefore get
+ * "configuration has been attempted", which is the strongest thing that can honestly be offered here
+ * and exactly what the URL handlers need: after this settles, `handleUrl` reaches an SDK in whatever
+ * state it is really in, rather than one that has not been asked yet.
+ */
+let wearablesConfigurePromise: Promise<void> | null = null;
+function ensureWearablesConfigured(): Promise<void> {
+  if (!wearablesConfigurePromise) {
+    wearablesConfigurePromise = Wearables.configure()
+      .then(() => undefined)
+      .catch((error: unknown) => {
+        setStartupConfigureError(error);
+      });
+  }
+  return wearablesConfigurePromise;
+}
+
 export default function RootLayout() {
   const [fontsLoaded] = useFonts({
     Inter_400Regular,
@@ -49,13 +72,22 @@ export default function RootLayout() {
   // during the release pairing flow, so a warm return from Profile's "Pair glasses" button was
   // silently dropped and registration never completed. Registering the listener here, alongside
   // the cold-launch handler, covers both without duplicating a screen-scoped effect.
+  // BOTH handlers wait for configure(), and the initial URL is the one that makes this load-bearing.
+  // These were two independent effects with no ordering between them: on a cold return from the Meta AI
+  // app — iOS having terminated us mid-pairing — `getInitialURL()` could resolve first, `handleUrl`
+  // would reach an SDK that had not been configured yet, and its rejection was swallowed here. That
+  // callback is ONE-SHOT: nothing replays it, so the registration simply never completed and the glasses
+  // stayed unpaired with no error anywhere. The live `url` listener could lose the same race on a fast
+  // warm return, so it waits too.
   useEffect(() => {
     if (!wearablesAvailable) return;
-    void Linking.getInitialURL().then((url) => {
-      if (url) void Wearables.handleUrl(url).catch(() => {});
-    });
+    void ensureWearablesConfigured()
+      .then(() => Linking.getInitialURL())
+      .then((url) => {
+        if (url) void Wearables.handleUrl(url).catch(() => {});
+      });
     const sub = Linking.addEventListener("url", ({ url }) => {
-      void Wearables.handleUrl(url).catch(() => {});
+      void ensureWearablesConfigured().then(() => Wearables.handleUrl(url).catch(() => {}));
     });
     return () => sub.remove();
   }, []);
@@ -76,9 +108,7 @@ export default function RootLayout() {
   // give it.
   useEffect(() => {
     if (!wearablesAvailable) return;
-    void Wearables.configure().catch((error: unknown) => {
-      setStartupConfigureError(error);
-    });
+    void ensureWearablesConfigured();
   }, []);
 
   if (!fontsLoaded) return null;

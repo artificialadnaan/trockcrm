@@ -248,14 +248,19 @@ export function isR2ObjectNotFoundError(error: unknown): boolean {
  * so a storage outage returns a retryable error instead of launching an expensive regeneration stampede.
  */
 export async function headObjectStrict(
-  r2Key: string
+  r2Key: string,
+  /** Aborts the in-flight request. The S3 client has no request timeout configured, so without this a
+   *  HEAD that R2 accepts and never answers holds its socket and its promise for the life of the
+   *  process — a caller that gave up on a deadline releases only its own wait, not the request. */
+  signal?: AbortSignal
 ): Promise<{ contentType?: string; contentLength?: number } | null> {
   const client = getClient();
   const bucket = getBucket();
 
   try {
     const resp = await client.send(
-      new HeadObjectCommand({ Bucket: bucket, Key: r2Key })
+      new HeadObjectCommand({ Bucket: bucket, Key: r2Key }),
+      signal ? { abortSignal: signal as never } : undefined
     );
     return {
       contentType: resp.ContentType,

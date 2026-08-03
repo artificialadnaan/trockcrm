@@ -21,7 +21,7 @@ export function createGlassesWalkthroughArtifactStore(): GlassesWalkthroughArtif
     // 404 (null) means the sender's pre-upload never landed (a 400 the sender must fix), while a THROW
     // (network blip, expired credential, R2 outage) means we could not check and must not report that
     // as "not found" — the ingress maps a throw to a retryable 503 instead.
-    head: (r2Key) => headObjectStrict(r2Key),
+    head: (r2Key, signal) => headObjectStrict(r2Key, signal),
     // `fileSizeBytes` is passed but NOT signed, and that is deliberate — `generateUploadUrl` takes it as
     // `_maxSizeBytes` and signs only ContentType. Signing an exact `Content-Length` would put it in SigV4's
     // SignedHeaders, so R2 would reject any PUT whose header did not match to the byte, and the mobile
