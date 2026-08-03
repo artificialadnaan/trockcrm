@@ -104,6 +104,47 @@ type RecoveryIntent = { attempts: number; outcome: Outcome };
 // next tick rather than after a lease's worth of waiting. Keyed by job id → the exact intent to replay.
 const pendingRecoveries = new Map<number, RecoveryIntent>();
 
+// ── Whose intent is it? ─────────────────────────────────────────────────────────────────────────────
+//
+// The map is keyed by JOB ID, but an intent belongs to one ATTEMPT — and two attempts of one row genuinely
+// overlap. That is an ordinary consequence of the claim being a LEASE (the block below): a handler that is
+// slow rather than dead — its renewals failing under pool pressure, its process paused — lets the lease
+// lapse, the sweep requeues the row, and another worker claims it. For a while the older attempt is still
+// inside its own outcome write while the newer one runs, finishes, and stores ITS intent under the same key.
+//
+// So every touch of this map asks whose entry it is first. Without that the older attempt silently discards
+// the newer attempt's only record of an outcome that already happened — by DELETING it (its own guarded write
+// matched nothing, but a delete keyed on job id alone cannot know that) or by OVERWRITING it with its own.
+// The consequence is the same either way, and it is not a lost log line: the row stays 'processing' with
+// nobody renewing it, no poller selects that status, so it waits out a full lease before the sweep requeues
+// it and the handler RE-RUNS work that was already done — a second billed transcription of one walkthrough.
+//
+// `attempts` is the ownership token here exactly as it is in every guarded statement in this file.
+
+/** Does the map still hold the intent THIS attempt stored — rather than a newer attempt's? */
+function ownsPendingRecovery(jobId: number, attempts: number): boolean {
+  return pendingRecoveries.get(jobId)?.attempts === attempts;
+}
+
+/** May THIS attempt store an intent, or would it evict a newer claim's? A held intent proves a later claim
+ *  exists, and a re-claim only moves attempts forward, so a lower-numbered intent could never match again. */
+function mayStorePendingRecovery(jobId: number, attempts: number): boolean {
+  const held = pendingRecoveries.get(jobId);
+  return held === undefined || attempts >= held.attempts;
+}
+
+// Did a guarded UPDATE actually land? pg reports the matched-row count on an UPDATE without RETURNING, and
+// zero means this attempt no longer owns the row — nothing was written, however cleanly the query returned.
+//
+// ABSENT is not zero. `rowCount` is pg's field specifically: the unit suite's fakes return bare `{ rows }`,
+// and PGlite (the real-SQL suites) reports the same number under `affectedRows`. Reading "no count" as
+// "matched nothing" would quietly stop intents ever being retired on either. So this is the narrow "my own
+// write demonstrably did not land" signal, and the ownership checks above — which need no driver support at
+// all — are what actually protect another attempt's intent.
+function guardedWriteMatched(result: { rowCount?: number | null }): boolean {
+  return result.rowCount !== 0;
+}
+
 // ── The claim is a LEASE ────────────────────────────────────────────────────────────────────────────
 //
 // A claim marks a row 'processing', and NOTHING selects that status: every poller takes 'pending' rows
@@ -258,7 +299,11 @@ function withQueueTimeout<T>(query: Promise<T>, label: string): Promise<T> {
 // AND the expiry sweep. The sweep was the last holdout on the convenience query, which was survivable only
 // while it ran once at startup; on a periodic tick an unbounded statement is the one that wedges the poller.
 // The timeout is read at CALL time, not module-init time, so __setQueueQueryTimeoutForTest still bites.
-async function timedQueueQuery(sql: string, params: any[], label: string): Promise<{ rows: any[] }> {
+async function timedQueueQuery(
+  sql: string,
+  params: any[],
+  label: string
+): Promise<{ rows: any[]; rowCount?: number | null }> {
   return timedPoolClientQuery(pool as unknown as TimedPoolLike, sql, params, {
     timeoutMs: QUEUE_QUERY_TIMEOUT_MS,
     timeoutError: () => new QueueQueryTimeout(label),
@@ -293,9 +338,12 @@ async function renewJobLease(jobId: number, attempts: number): Promise<void> {
 function startJobLeaseHeartbeat(jobId: number, attempts: number): () => void {
   let renewing = false;
   const timer = setInterval(() => {
-    // One renewal in flight at a time. On a dead socket timedQueueQuery waits out QUEUE_QUERY_TIMEOUT_MS,
-    // which is longer than the renewal interval, so overlapping beats would each check out a connection and
-    // pile up at exactly the moment the pool is already the thing in trouble.
+    // One renewal in flight at a time. A beat overlaps its predecessor whenever a renewal outlives the
+    // interval — on a dead socket timedQueueQuery waits out QUEUE_QUERY_TIMEOUT_MS, which at 30s against a
+    // 60s interval leaves production margin today, but the two constants are independent (and the suite runs
+    // this at a 20ms interval via __setJobLeaseRenewIntervalForTest, where they invert). Unguarded,
+    // overlapping beats would each check out a connection and pile up at exactly the moment the pool is
+    // already the thing in trouble.
     if (renewing) return;
     renewing = true;
     void renewJobLease(jobId, attempts)
@@ -311,7 +359,8 @@ function startJobLeaseHeartbeat(jobId: number, attempts: number): () => void {
   return () => clearInterval(timer);
 }
 
-/** Persist a job's outcome (its normal terminal write). On failure, keep the full intent for a later tick. */
+/** Persist a job's outcome (its normal terminal write). On failure, keep the full intent for a later tick —
+ *  unless a newer attempt of the same row already owns that slot (see "Whose intent is it?" above). */
 async function attemptRecovery(jobId: number, attempts: number, outcome: Outcome): Promise<void> {
   const { sql, params } = buildOutcomeUpdate(jobId, attempts, outcome);
   try {
@@ -319,9 +368,24 @@ async function attemptRecovery(jobId: number, attempts: number, outcome: Outcome
     // client and DESTROYS it on timeout (see timedQueueQuery) so a hung write can't leak a pool slot — which,
     // re-attempted every tick by the flush, would otherwise exhaust the pool and stall unrelated jobs. A timeout
     // leaves the intent in pendingRecoveries for a later tick, exactly like any other write failure.
-    await timedQueueQuery(sql, params, `job ${jobId} outcome write`);
-    pendingRecoveries.delete(jobId);
+    const result = await timedQueueQuery(sql, params, `job ${jobId} outcome write`);
+    // Retire an intent only if this write MATCHED and the intent is still THIS attempt's. A guarded write
+    // that matched nothing is not a write that happened — the row moved past this attempt while the handler
+    // ran — so it resolved nothing and has no standing to retire anything. Deleting on the bare job id here
+    // is how a stale attempt used to erase a newer attempt's stored outcome: the query returns cleanly with
+    // zero rows affected, and the row it did not write then sits 'processing' with no heartbeat behind it.
+    if (guardedWriteMatched(result) && ownsPendingRecovery(jobId, attempts)) pendingRecoveries.delete(jobId);
   } catch (err) {
+    // The same collision on the way IN. A superseded attempt storing its own intent evicts the newer one just
+    // as completely as deleting it, and what it leaves behind can never match again (a re-claim only moves
+    // attempts forward) — a doomed write replayed every tick in place of the outcome that actually happened.
+    if (!mayStorePendingRecovery(jobId, attempts)) {
+      console.warn(
+        `[Worker] Job ${jobId} outcome write ('${outcome.status}') failed on attempt ${attempts}, which a later claim has already superseded; leaving the newer attempt's recovery intent in place:`,
+        err
+      );
+      return;
+    }
     pendingRecoveries.set(jobId, { attempts, outcome });
     console.error(`[Worker] Job ${jobId} outcome write ('${outcome.status}') failed; will retry next tick:`, err);
   }
@@ -371,7 +435,15 @@ async function flushPendingRecoveries(): Promise<void> {
     const { sql, params } = buildOutcomeUpdate(jobId, attempts, outcome);
     try {
       await timedQueueQuery(sql, params, `job ${jobId} outcome flush`);
-      pendingRecoveries.delete(jobId);
+      // Retire the intent this iteration WROTE, not whatever the key holds now. The snapshot above is taken
+      // once, but the dedicated pollers keep running deliveries throughout a main-poller tick, so a newer
+      // attempt of this same row can store its intent here while this write is in flight — and a delete by
+      // job id alone would drop it, exactly as the outcome path could.
+      //
+      // Deliberately NOT also conditional on the write matching, unlike attemptRecovery: an intent whose
+      // guarded write matched nothing can never match again (the row has moved past its attempt), so keeping
+      // it would re-issue a doomed UPDATE every tick forever. This is where such an intent is retired.
+      if (ownsPendingRecovery(jobId, attempts)) pendingRecoveries.delete(jobId);
     } catch {
       break; // pool still unavailable / dead socket — retry the rest on a later tick
     }

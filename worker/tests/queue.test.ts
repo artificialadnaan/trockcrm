@@ -379,6 +379,214 @@ describe("worker queue", () => {
     expect(pendingCallsForJob55[0][1]).toEqual(["handler boom", 3, 55, 1]);
   });
 
+  // ── Two attempts of ONE row, overlapping ────────────────────────────────────────────────────────
+  // The state every case below starts from: a lease expired under a handler that was slow rather than dead
+  // (its renewals were failing, or the process was paused), the sweep requeued the row, and a second worker
+  // claimed it. For a while both attempts are live, and pendingRecoveries is keyed by JOB ID alone — so the
+  // older attempt can reach the newer attempt's intent, which is the newer attempt's only record of an
+  // outcome that has already happened. Losing it leaves the row 'processing' with nobody renewing it: no
+  // poller selects that status, so it waits out a full lease and is then RE-RUN, work already done.
+  //
+  // One process cannot claim one row twice on one poller — the reentrancy guard is in the way, and it is not
+  // what these cases are about. So the second poller stands in for the second WORKER PROCESS: the fake
+  // ignores the claim's job_type predicate, both pollers are handed the SAME row (id 42, same type, at the
+  // attempts value each would really see), and the queue code under test cannot tell the difference — it
+  // reads a claimed row and a job id, never which loop claimed it.
+  const OVERLAP_JOB_ID = 42;
+
+  /** A statement the router parks until the test opens it — how one write is held across another worker's
+   *  entire delivery, which is the interleaving these cases exist for. */
+  function latch(): { held: Promise<void>; open: () => void } {
+    let open!: () => void;
+    const held = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    return { held, open };
+  }
+
+  async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (predicate()) return;
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+    throw new Error("Timed out waiting for the expected statement to be issued");
+  }
+
+  /** Completed-outcome writes for the overlap row bound to one specific attempt. */
+  function completedWritesForAttempt(queries: QueryCall[], attempt: number): QueryCall[] {
+    return queries.filter(
+      ([sql, params]) =>
+        sql.includes("SET status = 'completed'") &&
+        Array.isArray(params) &&
+        (params as unknown[])[0] === OVERLAP_JOB_ID &&
+        (params as unknown[])[1] === attempt
+    );
+  }
+
+  /** Rows for the overlap job as each worker's claim would see them (worker 2 claims after a requeue). */
+  function overlapRow(jobType: string, attempts: number) {
+    return { id: OVERLAP_JOB_ID, job_type: jobType, office_id: "office-1", payload: {}, attempts, max_attempts: 5 };
+  }
+
+  it("a STALE attempt's zero-row outcome write does not delete the NEWER attempt's recovery intent", async () => {
+    // The stale attempt's guarded write is answered normally by PostgreSQL and matches NOTHING (the row is at
+    // attempts 2 now), so it resolved nothing at all — and a delete keyed on job id alone would still throw
+    // away the newer attempt's intent, the only surviving record that this walk's handler already succeeded.
+    const jobType = "unit_test_overlapping_attempts";
+    registerJobHandler(jobType, async () => {}); // both deliveries succeed; the race is over the WRITE
+    const gate = latch();
+    let staleWriteIssued = false;
+    let worker1Claimed = false;
+    let worker2Claimed = false;
+    let newerWrites = 0;
+    const { queries } = installPool(async (sql: string, params?: unknown[]) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+      if (sql.includes("SELECT * FROM public.job_queue")) {
+        if (sql.includes("job_type = 'ai_report_generation'")) {
+          if (worker2Claimed) return { rows: [] };
+          worker2Claimed = true;
+          return { rows: [overlapRow(jobType, 1)] }; // requeued at 1 by the sweep → this claim is attempt 2
+        }
+        if (worker1Claimed) return { rows: [] };
+        worker1Claimed = true;
+        return { rows: [overlapRow(jobType, 0)] }; // → attempt 1
+      }
+      if (sql.includes("UPDATE public.job_queue SET status = 'processing'")) return { rows: [] };
+      if (sql.includes("SET started_processing_at = NOW() WHERE")) return { rows: [] };
+      if (sql.includes("SET status = 'completed'")) {
+        if ((params as unknown[])[1] === 1) {
+          staleWriteIssued = true;
+          await gate.held;
+          return { rows: [], rowCount: 0 }; // guarded on attempts = 1; the row is at 2 → matched nothing
+        }
+        newerWrites += 1;
+        if (newerWrites === 1) throw new Error("outcome write failed (pool exhausted)");
+        return { rows: [], rowCount: 1 };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+
+    const worker1 = pollJobs(); // claims attempt 1, handler succeeds, outcome write held open
+    await waitUntil(() => staleWriteIssued);
+    // Worker 2, meanwhile, runs the whole delivery: claims attempt 2, succeeds, and its outcome write fails
+    // under pool pressure — so 'completed' for attempt 2 now lives ONLY in pendingRecoveries.
+    await pollAiReportJobs();
+    gate.open();
+    await worker1; // the stale, zero-row write lands here
+
+    await pollJobs(); // the next tick's flush must still have the newer intent to replay
+
+    // Worker 2's own failed write, then the flush replaying it. Without the ownership check the flush finds
+    // nothing to replay, and the row stays 'processing' until a sweep re-runs a walk that already completed.
+    expect(completedWritesForAttempt(queries, 2)).toHaveLength(2);
+  });
+
+  it("a STALE attempt's FAILED outcome write does not overwrite the NEWER attempt's recovery intent", async () => {
+    // The same collision one statement over: the stale attempt's write fails rather than returning zero rows,
+    // and storing its own intent would evict the newer one just as completely. Attempt 1's intent can never
+    // match again — a re-claim only moves attempts forward — so the replay would be a doomed write every tick
+    // while the outcome that DID happen is gone.
+    const jobType = "unit_test_overlapping_attempts_failed_write";
+    registerJobHandler(jobType, async () => {});
+    const gate = latch();
+    let staleWriteIssued = false;
+    let worker1Claimed = false;
+    let worker2Claimed = false;
+    let newerWrites = 0;
+    const { queries } = installPool(async (sql: string, params?: unknown[]) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+      if (sql.includes("SELECT * FROM public.job_queue")) {
+        if (sql.includes("job_type = 'ai_report_generation'")) {
+          if (worker2Claimed) return { rows: [] };
+          worker2Claimed = true;
+          return { rows: [overlapRow(jobType, 1)] };
+        }
+        if (worker1Claimed) return { rows: [] };
+        worker1Claimed = true;
+        return { rows: [overlapRow(jobType, 0)] };
+      }
+      if (sql.includes("UPDATE public.job_queue SET status = 'processing'")) return { rows: [] };
+      if (sql.includes("SET started_processing_at = NOW() WHERE")) return { rows: [] };
+      if (sql.includes("SET status = 'completed'")) {
+        if ((params as unknown[])[1] === 1) {
+          staleWriteIssued = true;
+          await gate.held;
+          throw new Error("stale outcome write failed (pool exhausted)");
+        }
+        newerWrites += 1;
+        if (newerWrites === 1) throw new Error("outcome write failed (pool exhausted)");
+        return { rows: [], rowCount: 1 };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+
+    const worker1 = pollJobs();
+    await waitUntil(() => staleWriteIssued);
+    await pollAiReportJobs();
+    gate.open();
+    await worker1;
+
+    await pollJobs();
+
+    expect(completedWritesForAttempt(queries, 2)).toHaveLength(2); // failed write + flush replay
+    // …and the superseded attempt is never replayed: it is one write, its own, and no later tick repeats it.
+    expect(completedWritesForAttempt(queries, 1)).toHaveLength(1);
+  });
+
+  it("a flush in flight does not delete an intent stored while it was waiting", async () => {
+    // Third statement, same assumption. The flush snapshots the map and deletes by job id after its write,
+    // but the dedicated pollers keep running deliveries throughout a main-poller tick — so the entry it
+    // deletes need not be the entry it wrote.
+    const jobType = "unit_test_flush_overwritten_intent";
+    registerJobHandler(jobType, async () => {});
+    const gate = latch();
+    let flushWriteIssued = false;
+    let worker1Claimed = false;
+    let worker2Claimed = false;
+    let staleWrites = 0;
+    let newerWrites = 0;
+    const { queries } = installPool(async (sql: string, params?: unknown[]) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+      if (sql.includes("SELECT * FROM public.job_queue")) {
+        if (sql.includes("job_type = 'ai_report_generation'")) {
+          if (worker2Claimed) return { rows: [] };
+          worker2Claimed = true;
+          return { rows: [overlapRow(jobType, 1)] };
+        }
+        if (worker1Claimed) return { rows: [] };
+        worker1Claimed = true;
+        return { rows: [overlapRow(jobType, 0)] };
+      }
+      if (sql.includes("UPDATE public.job_queue SET status = 'processing'")) return { rows: [] };
+      if (sql.includes("SET started_processing_at = NOW() WHERE")) return { rows: [] };
+      if (sql.includes("SET status = 'completed'")) {
+        if ((params as unknown[])[1] === 1) {
+          staleWrites += 1;
+          if (staleWrites === 1) throw new Error("outcome write failed (pool exhausted)"); // → intent for attempt 1
+          flushWriteIssued = true;
+          await gate.held; // the FLUSH's replay of that intent, held open
+          return { rows: [], rowCount: 0 }; // the row moved to attempt 2 → matched nothing
+        }
+        newerWrites += 1;
+        if (newerWrites === 1) throw new Error("outcome write failed (pool exhausted)");
+        return { rows: [], rowCount: 1 };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+
+    await pollJobs(); // tick 1: attempt 1 succeeds, its write fails → intent for attempt 1
+    const tick2 = pollJobs(); // tick 2: the flush replays that intent — held open
+    await waitUntil(() => flushWriteIssued);
+    await pollAiReportJobs(); // worker 2's whole delivery lands here, replacing the intent with attempt 2's
+    gate.open();
+    await tick2;
+
+    await pollJobs(); // tick 3: the flush must replay the intent it did NOT write
+
+    expect(completedWritesForAttempt(queries, 2)).toHaveLength(2);
+  });
+
   it("requeues rows to pending when the claim COMMIT fails (it may have committed server-side)", async () => {
     // A COMMIT that lands server-side but returns a rejection (dead socket after commit) leaves the claimed
     // rows 'processing'; `claimed` is reset so the run phase skips them. pollJobs must requeue them.
