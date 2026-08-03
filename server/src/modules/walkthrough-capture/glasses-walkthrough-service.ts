@@ -1045,8 +1045,8 @@ export function mergeForwardArtifacts(
  * The answer for a live forward job whose artifact list CANNOT be amended: record the complete list on it
  * anyway, then dead-letter it so a human is told.
  *
- * ONLY a row whose handler has provably STOPPED may be superseded, which here means `completed`. A
- * `completed` row is never selected by any poller, so an amendment to it would be inert — the artifacts
+ * ONLY a row whose handler has provably STOPPED may be superseded: `completed` and `failed`. Neither
+ * is ever selected by any poller, so an amendment to either would be inert — the artifacts
  * would sit in a payload no worker reads, indistinguishable from being forwarded — and killing it releases
  * nothing that is still in use.
  *
@@ -1087,7 +1087,7 @@ async function supersedeUnamendableGlassesWalkthroughForwardJob(
     })
     // `completed_at` is deliberately NOT cleared. On a superseded `completed` row it is the only remaining
     // evidence that this forward ever ran, and a reconciler who cannot see it re-forwards blind.
-    .where(and(eq(jobQueue.id, jobId), eq(jobQueue.status, "completed")))
+    .where(and(eq(jobQueue.id, jobId), sql`${jobQueue.status} IN ('completed', 'failed')`))
     .returning({ id: jobQueue.id });
   return updated.length > 0;
 }
@@ -1153,7 +1153,25 @@ async function recordPendingArtifactsOnRunningForwardJob(
     .where(
       and(
         eq(jobQueue.id, jobId),
-        sql`${jobQueue.status} NOT IN ('pending', 'completed', 'dead')`,
+        // `processing` NAMED, not a catch-all over "everything else that is live". That catch-all was
+        // wrong, and wrong in the direction that loses the walk. `job_status` is an enum containing
+        // `failed` (0001_initial.sql:17), which nothing in this queue's own transitions writes but
+        // which is schema-valid and reachable by another actor. A `failed` row routed here got a
+        // `pendingArtifacts` write and a `reconciliation_pending` answer — and then: the poller
+        // claims only `pending`, lease recovery touches only `processing`, the alert sweep selects
+        // only `dead`, and 0213's partial index still counts it as LIVE, so no replacement can be
+        // inserted either. Nothing consumes the update and nothing can supersede it: an acknowledged
+        // walk, permanently unforwarded, with every mechanism that exists to notice looking
+        // elsewhere.
+        //
+        // The earlier reasoning — "an unrecognised status lands on the branch that touches no
+        // lifecycle state, which is the safe side" — had it backwards. Under a partial unique index
+        // keyed on `<> 'dead'`, parking a row is not neutral: it holds the slot that the recovery
+        // path needs. Superseding at least releases it. So the two live sets are now both named, and
+        // anything outside them falls to the 503 below rather than being guessed at in either
+        // direction. A new status with a CLAIMED handler must be added here; a new terminal one to
+        // the supersede predicate.
+        eq(jobQueue.status, "processing"),
         // The handler's reconciliation has NOT already run. `status = 'processing'` is true for a
         // window after `supersedeSelfForPendingArtifacts` folds the pending set in and before the
         // queue's separate terminal write lands — and a completion arriving inside that window used

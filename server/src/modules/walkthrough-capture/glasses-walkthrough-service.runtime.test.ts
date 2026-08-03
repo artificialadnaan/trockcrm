@@ -1199,6 +1199,34 @@ describe("ingestGlassesWalkthrough — a retry that ADDS artifacts to a live for
     expect(job.payload.pendingArtifacts).toBeUndefined();
   });
 
+  it("REGRESSION: a `failed` predecessor is superseded, not parked as though a handler were still running", async () => {
+    // `job_status` is an enum containing `failed` (0001_initial.sql:17). This queue's own transitions
+    // never write it, but it is schema-valid and reachable by another actor — and the catch-all here
+    // used to route it to the running-job branch. Then: the poller claims only `pending`, lease
+    // recovery touches only `processing`, the alert sweep selects only `dead`, and 0213's partial
+    // index still counts `failed` as LIVE so no replacement can be inserted. Nothing consumed the
+    // pendingArtifacts write and nothing could supersede the row — an acknowledged walk, permanently
+    // unforwarded, with every mechanism that exists to notice looking somewhere else.
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(2) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+    await tenantDb
+      .update(jobQueue)
+      .set({ status: "failed", lastError: "put here by something other than this queue" })
+      .where(eq(jobQueue.id, first.forwarding.jobId));
+
+    const second = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(3) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+
+    expect(second.forwarding.status).toBe("superseded_for_reconciliation");
+    const job = await readJob(first.forwarding.jobId);
+    // Dead — which is what releases 0213's slot so the next retry can enqueue a replacement at all.
+    expect(job.status).toBe("dead");
+    expect(keysOf(job)).toEqual(["artifact-1", "artifact-2", "artifact-3"]);
+    expect(job.payload.pendingArtifacts).toBeUndefined();
+  });
+
   it("REGRESSION: inherits artifacts from a CHECKPOINT-LESS dead predecessor, which the checkpoint lookup cannot see", async () => {
     // A forward that died before it ever reached TROCK Scope has no checkpoint, so
     // `findGlassesWalkthroughForwardJobState` — whose job is "is there a checkpoint worth
