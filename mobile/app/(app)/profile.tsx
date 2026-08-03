@@ -29,7 +29,7 @@ import {
   formatWalkDateTime,
 } from "../../src/walkthrough/walk-meta";
 import { walkthroughUploadClient } from "../../src/walkthrough/upload-client";
-import { TargetPicker } from "../../src/components/TargetPicker";
+import { RecoveryProjectPicker } from "../../src/components/RecoveryProjectPicker";
 import type { FieldCaptureTarget } from "../../src/api/types";
 
 const SUPPORT_HUB_URL = "https://support-hub-production.up.railway.app/";
@@ -523,15 +523,21 @@ function RecoverableWalksCard() {
         );
       })}
 
-      {/* Mounted only while a project is being chosen. TargetPicker runs a deal search (and a GPS
-          lookup for its nearby list) from its own hooks the moment it exists, and Profile is not
-          otherwise a data screen — keeping it unmounted means opening settings costs neither.
-          `dealsOnly` because both walkthrough endpoints are addressed by dealId; a lead or an
-          opportunity is not a destination this walk can be filed to at all. */}
+      {/* Mounted only while a project is being chosen. The picker runs its deal search from its own
+          hooks the moment it exists, and Profile is not otherwise a data screen — keeping it
+          unmounted means opening settings costs neither.
+          RecoveryProjectPicker, not the shared TargetPicker, and the difference is the whole point:
+          TargetPicker's `dealsOnly` is the SCORECARD question, and the server answers it with
+          browsable field projects only — never Lost/terminal. The walkthrough upload routes accept
+          any ACTIVE deal (commit fde1d0a04), deliberately, so that a walk still draining when its
+          deal goes to Lost can finish filing. Asking the browsing question here meant the app
+          accepted the filing at the server and refused to let the estimator name the job — for
+          exactly the walk that most needs recovering. See that component for how it widens without
+          loosening anything else, and note it still offers DEALS only: both walkthrough endpoints
+          are addressed by dealId, so a lead or an opportunity is not a destination at all. */}
       {picking ? (
-        <TargetPicker
+        <RecoveryProjectPicker
           visible
-          dealsOnly
           onClose={() => setPicking(null)}
           onSelect={(target) => {
             const walk = picking;
