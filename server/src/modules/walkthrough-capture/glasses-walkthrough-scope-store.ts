@@ -38,6 +38,60 @@ function scopeItemsPath(scopeWalkthroughId: string): string {
   return `/api/walkthroughs/${encodeURIComponent(scopeWalkthroughId)}/scope-items`;
 }
 
+/** The walkthrough itself, for the one question `/scope-items` cannot answer: is the pipeline done. */
+function walkthroughPath(scopeWalkthroughId: string): string {
+  return `/api/walkthroughs/${encodeURIComponent(scopeWalkthroughId)}`;
+}
+
+/**
+ * The statuses that mean TROCK Scope has STOPPED working on a walkthrough.
+ *
+ * Read from `WALKTHROUGH_STATUSES` over there: draft / uploading / processing are work in progress;
+ * ready / stale / failed are terminal. Only asked when the scope came back EMPTY, so the extra request
+ * is paid once per walk that has nothing to show yet rather than on every render.
+ *
+ * Listing the TERMINAL ones rather than the in-progress ones is deliberate: a status this build has
+ * never heard of reads as "still working", which resolves to `processing` and a re-check, instead of
+ * as "finished with nothing" — a claim about the estimator's site visit that they would have no reason
+ * to doubt.
+ */
+const TERMINAL_SCOPE_STATUSES = new Set(["ready", "stale", "failed"]);
+
+/**
+ * Whether TROCK Scope has stopped working on this walkthrough. BEST EFFORT: never throws.
+ *
+ * Deliberately NOT sharing the scope-items read's error handling, which is a different contract. That
+ * one distinguishes 404 from 5xx from an unreadable body, because each becomes a different state an
+ * estimator sees. This one has a single question and a single safe default: anything it cannot
+ * establish means "still working", which resolves to `processing` and a re-check. The failure mode it
+ * must avoid is claiming a walk FINISHED with no scope, which is a statement about someone's site
+ * visit; "give it another moment" costs nothing.
+ *
+ * Only called when the scope came back empty, so it is one extra request per walk with nothing yet to
+ * show, not one per render.
+ */
+async function pipelineHasFinished(
+  baseUrl: string,
+  token: string,
+  scopeWalkthroughId: string,
+  signal: AbortSignal
+): Promise<boolean> {
+  try {
+    const response = await fetch(`${baseUrl}${walkthroughPath(scopeWalkthroughId)}`, {
+      method: "GET",
+      headers: { accept: "application/json", authorization: `Bearer ${token}` },
+      signal,
+    });
+    if (!response.ok) return false;
+    const status = (JSON.parse(await response.text()) as { walkthrough?: { status?: unknown } } | null)
+      ?.walkthrough?.status;
+    return typeof status === "string" && TERMINAL_SCOPE_STATUSES.has(status);
+  } catch {
+    // Including the abort: a deadline that fired mid-probe is not evidence the pipeline finished.
+    return false;
+  }
+}
+
 /**
  * A function rather than a frozen object literal so `process.env` is read per request — a module-level
  * snapshot would bake in whatever the environment looked like at import time, which is the same reason
@@ -134,7 +188,16 @@ export function createGlassesWalkthroughScopeReader(): GlassesWalkthroughScopeRe
         );
       }
 
-      return { outcome: "found", items };
+      if (items.length > 0) return { outcome: "found", items, pipelineComplete: true };
+
+      // EMPTY, so the ambiguous case: ask the walkthrough whether it is finished. A failure here is not
+      // fatal — an empty scope we cannot qualify is reported as still-processing, which costs the
+      // estimator a re-check and never tells them the machine found nothing when it had not looked yet.
+      return {
+        outcome: "found",
+        items,
+        pipelineComplete: await pipelineHasFinished(baseUrl, token, scopeWalkthroughId, signal),
+      };
     },
   };
 }

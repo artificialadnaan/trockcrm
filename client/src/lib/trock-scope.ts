@@ -22,6 +22,18 @@
 function trimOrigin(value: string | undefined): string | null {
   const trimmed = value?.trim();
   if (!trimmed) return null;
+  // PARSED, not merely trimmed. This value is concatenated into an `href`, so a misconfigured build
+  // variable is not a broken link — it is a link somewhere else. `walkthroughs/x/review` (no scheme)
+  // resolves against the CRM's own origin and sends an estimator to a 404 inside the CRM; `javascript:`
+  // and `data:` are worse than a 404. Only an absolute http(s) URL is a base URL, and anything else is
+  // treated the same as unset, which every caller already renders correctly.
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
   return trimmed.replace(/\/+$/, "");
 }
 

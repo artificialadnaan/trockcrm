@@ -121,7 +121,13 @@ describe("createGlassesWalkthroughScopeReader — a 200 is not automatically an 
 
     await expect(
       createGlassesWalkthroughScopeReader().fetchScopeItems(SCOPE_ID, new AbortController().signal),
-    ).resolves.toEqual({ outcome: "found", items: [{ id: "item-1", description: "Paint wall red" }] });
+    ).resolves.toEqual({
+      outcome: "found",
+      items: [{ id: "item-1", description: "Paint wall red" }],
+      // A non-empty scope is finished by construction — there are rows, so consolidation ran. The
+      // walkthrough is not re-fetched for it, which is why this reader makes one request here.
+      pipelineComplete: true,
+    });
   });
 
   it("REGRESSION: THROWS on a 200 with no `items` array, instead of reporting an empty scope", async () => {

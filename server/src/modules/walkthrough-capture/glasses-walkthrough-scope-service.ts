@@ -118,7 +118,24 @@ export interface GlassesWalkthroughScopeReader {
   fetchScopeItems: (
     scopeWalkthroughId: string,
     signal: AbortSignal
-  ) => Promise<{ outcome: "found"; items: unknown[] } | { outcome: "missing" }>;
+  ) => Promise<
+    | {
+        outcome: "found";
+        items: unknown[];
+        /**
+         * Whether TROCK Scope's pipeline has FINISHED for this walkthrough.
+         *
+         * Load-bearing only when `items` is empty, which is the one shape that is genuinely
+         * ambiguous: a walk still being transcribed has no scope rows yet, and a walk that finished
+         * with nothing to say has none either. Reported as `ready`, the first reads to an estimator
+         * as "TROCK Scope processed this and found no scope" — a false negative they keep until they
+         * manually refresh, because the panel does not poll. The window is ordinary, not exotic: the
+         * forward publishes `scope_walkthrough_id` BEFORE it uploads a single clip.
+         */
+        pipelineComplete: boolean;
+      }
+    | { outcome: "missing" }
+  >;
 }
 
 /**
@@ -317,9 +334,14 @@ export async function resolveGlassesWalkthroughScope(
           entry.state = "missing";
           continue;
         }
-        // `items` may legitimately be empty — a walkthrough whose pipeline has not reached consolidation
-        // has no scope rows yet, and that is a walk in progress rather than a walk with nothing in it. The
-        // contract distinguishes the two through `state`, not through the length of this array.
+        // An EMPTY list is only `ready` once TROCK Scope says the pipeline is done. Before that it is a
+        // walk in progress, and calling it ready tells the estimator the machine looked and found
+        // nothing — which they cannot correct, and will not re-check, because this panel does not poll.
+        if (answer.items.length === 0 && !answer.pipelineComplete) {
+          entry.state = "processing";
+          entry.scope = null;
+          continue;
+        }
         entry.state = "ready";
         entry.scope = {
           status: "ready",

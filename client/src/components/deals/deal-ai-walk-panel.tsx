@@ -172,6 +172,9 @@ export function summarizeScopeItems(items: GlassesWalkthroughScopeItem[]): {
   return { total: items.length, needsVerification };
 }
 
+/** The fallback when the server names a state this build predates. */
+const UNKNOWN_STATE_BADGE = { label: "Unknown", className: "text-muted-foreground" };
+
 const STATE_BADGE: Record<GlassesWalkthrough["state"], { label: string; className: string }> = {
   processing: { label: "Still processing", className: "border-amber-200 bg-amber-100 text-amber-800" },
   ready: { label: "Scope ready", className: "border-green-200 bg-green-100 text-green-800" },
@@ -246,7 +249,10 @@ export function AiWalkCard({
   retrying?: boolean;
   reviewUrl?: string | null;
 }) {
-  const badge = STATE_BADGE[walkthrough.state];
+  // A state this build does not know about must still render a card. The server owns the contract and
+  // can add a state before the client is redeployed; an undefined lookup here would take the whole
+  // scoping tab down over a string, which is a far worse answer than an honest "unrecognised".
+  const badge = STATE_BADGE[walkthrough.state] ?? UNKNOWN_STATE_BADGE;
   const items = walkthrough.scope?.items ?? [];
   const summary = summarizeScopeItems(items);
 
@@ -264,7 +270,11 @@ export function AiWalkCard({
         </div>
         {/* Absent when TROCK Scope's origin is not configured for this build, or when this walk has no remote
             walkthrough yet. Never a guessed host — see lib/trock-scope.ts. */}
-        {reviewUrl ? (
+        {/* NOT for `missing`: TROCK Scope has answered 404 for this id, so the card already says the
+            walkthrough is gone. Offering "Review in TROCK Scope" beside that sends the estimator to a
+            page guaranteed to be missing — a link whose destination this component already knows does
+            not exist. Visibility is about the STATE, not merely about whether a URL can be built. */}
+        {reviewUrl && walkthrough.state !== "missing" ? (
           <a
             href={reviewUrl}
             target="_blank"
