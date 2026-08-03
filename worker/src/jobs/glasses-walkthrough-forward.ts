@@ -988,11 +988,45 @@ function buildUnconfirmedCreateDeadLetterMessage(payload: JobPayload, externalRe
  * table: what that helper actually provides is a deadline plus destroy-the-connection-on-timeout, and this
  * statement holds the dedicated poller's reentrancy guard exactly as hard as those do.
  */
+/**
+ * TROCK Scope's id, as this seam is actually allowed to assume it looks.
+ *
+ * Nothing upstream constrains it. `createScopeWalkthrough` takes `json.walkthrough.id` as any string,
+ * and `assertPayload` accepts any inherited `scopeWalkthroughId` — the checkpoint lives in jsonb, which
+ * holds anything, and a human reconciling a dead letter edits that payload by hand. The CRM column is
+ * `uuid`.
+ */
+const SCOPE_WALKTHROUGH_ID_RE = /^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/;
+
 async function stampGlassesWalkthroughScopeId(
   write: JobQueueWrite,
   payload: JobPayload,
   scopeWalkthroughId: string
 ): Promise<void> {
+  // A MALFORMED ID MUST NOT BLOCK THE FORWARD, and unguarded it did so permanently.
+  //
+  // The statement below casts `$1::uuid`. An id that is not one raises 22P02, and because this runs
+  // BEFORE the clip loop the whole attempt fails — so the job retries, re-derives the SAME bad id from
+  // its own checkpoint, and fails identically until the queue gives up. Not one clip is ever uploaded.
+  // The doc above says failing here costs nothing but a retry; that is true of a transient failure and
+  // false of a permanent one, which is exactly the case this guard exists for.
+  //
+  // Skipped, not thrown, and the ordering is the argument: the walk's clips reaching TROCK Scope is the
+  // job; the CRM read model catching up is a convenience. Losing the second to protect the first is the
+  // right trade, and the panel then shows "processing" — recoverable, and visibly wrong to anyone
+  // looking — rather than the walk never being forwarded at all.
+  //
+  // ONLY this shape is tolerated. A database or transport failure still throws, because those are the
+  // failures a retry can actually fix.
+  if (!SCOPE_WALKTHROUGH_ID_RE.test(scopeWalkthroughId)) {
+    console.warn(
+      `[Worker:glasses_walkthrough_forward] TROCK Scope walkthrough id ${JSON.stringify(scopeWalkthroughId)} ` +
+        `for walk ${payload.walkId} is not a uuid, so the CRM read model cannot record it. Forwarding ` +
+        `continues; the deal's AI Walk panel will read as still processing until it is repaired.`
+    );
+    return;
+  }
+
   const schemaName = `office_${payload.officeSlug}`;
   if (!isSafeTenantSchema(schemaName)) {
     throw new Error(

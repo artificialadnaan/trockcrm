@@ -345,13 +345,26 @@ export async function resolveGlassesWalkthroughScope(
           entry.scope = null;
           continue;
         }
+        const items = answer.items
+          .map((item) => toPanelScopeItem(item))
+          .filter((item): item is GlassesWalkthroughScopeItem => item !== null);
+        // EVERY row unusable from a NON-EMPTY response is a shape change, not an empty scope. Rendered
+        // as ready-and-empty it makes the same claim the malformed-envelope check refuses to make —
+        // "this walk produced no line items" — about a response that plainly contained scope rows. The
+        // per-item degrading above is for one bad field among good rows; losing all of them is a
+        // different event, and `unavailable` is the recoverable one.
+        if (items.length === 0 && answer.items.length > 0) {
+          entry.state = "unavailable";
+          entry.scope = null;
+          warn(
+            `[glasses-walkthroughs] TROCK Scope returned ${answer.items.length} scope item(s) for walk ` +
+              `${entry.walkId} and none carried a usable id; reporting the scope as unavailable rather ` +
+              `than as empty.`
+          );
+          continue;
+        }
         entry.state = "ready";
-        entry.scope = {
-          status: "ready",
-          items: answer.items
-            .map((item) => toPanelScopeItem(item))
-            .filter((item): item is GlassesWalkthroughScopeItem => item !== null),
-        };
+        entry.scope = { status: "ready", items };
       } catch (err) {
         // Left at `unavailable`, with `scope` still null. The message names the WALKTHROUGH, never the
         // reader's error object — see the store for why the underlying rejection is not safe to log.

@@ -1558,6 +1558,10 @@ async function recordGlassesWalkthrough(
  * an id inherited from an older job is how a walk ends up pointed at a different walkthrough than the
  * one holding its clips.
  */
+/** The shape the `uuid` column accepts. Mirrors the worker's guard — see that one for why neither side
+ *  may assume the id is well-formed. */
+const SCOPE_WALKTHROUGH_ID_RE = /^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/;
+
 async function stampScopeWalkthroughId(
   tenantDb: TenantDb,
   input: IngestGlassesWalkthroughInput,
@@ -1814,22 +1818,29 @@ export async function ingestGlassesWalkthrough(
   // The id is already in hand — `knownJobState` carries the completed job's checkpoint, which is the
   // same value line 1837 inherits onto a replacement payload. Written only into a row that has none,
   // so a live forward that later learns a different id cannot be overwritten by a stale one.
-  if (knownJobState?.scopeWalkthroughId) {
-    // FAILURE HERE MUST NOT FAIL THE COMPLETION. The read-model row is deliberately not part of the
-    // response mobile parses; the ingest's contract is filing the artifacts and forwarding them. The
-    // id also comes from a REMOTE service through a jsonb payload with no constraint, while this
-    // column is `uuid` — so a malformed value that has always been storable would, written here,
-    // raise 22P02 and 500 a completion the phone is waiting on, for a walk that is otherwise fine.
-    // Logged and left null instead: the panel then says "processing", which is recoverable, and the
-    // next completion retry stamps it.
-    try {
-      await stampScopeWalkthroughId(tenantDb, input, knownJobState.scopeWalkthroughId);
-    } catch (error: unknown) {
-      console.warn(
-        `[glasses-walkthrough] Could not record the TROCK Scope id for walk ${input.walkId}: ` +
-          `${error instanceof Error ? error.message : "unknown error"}`
-      );
-    }
+  // VALIDATED, not merely attempted. The id crosses two systems with no constraint on it — TROCK Scope
+  // returns any string, the checkpoint is jsonb, and a human repairing a dead letter edits that payload by
+  // hand — while this column is `uuid`. Relying on the catch below to absorb 22P02 would also absorb a
+  // real database failure, and those are not the same event. The worker's `stampGlassesWalkthroughScopeId`
+  // applies the identical rule for the identical reason.
+  if (knownJobState?.scopeWalkthroughId && !SCOPE_WALKTHROUGH_ID_RE.test(knownJobState.scopeWalkthroughId)) {
+    console.warn(
+      `[glasses-walkthrough] Inherited TROCK Scope id ${JSON.stringify(knownJobState.scopeWalkthroughId)} ` +
+        `for walk ${input.walkId} is not a uuid; the deal's AI Walk panel will read as still processing ` +
+        `until it is repaired.`
+    );
+  } else if (knownJobState?.scopeWalkthroughId) {
+    // NO try/catch, deliberately, and an earlier draft had one that was worse than nothing.
+    //
+    // Catching 22P02 does not restore the transaction — Postgres leaves it ABORTED, so the next
+    // statement fails with 25P02 or, on the path where nothing else runs, `runInOfficeTransaction`
+    // issues a COMMIT that silently rolls back. The route would then answer 201 for a completion whose
+    // `files` rows had been discarded: the one outcome this endpoint must never produce. Swallowing a
+    // database error to protect a read model trades a stale panel for lost filing.
+    //
+    // Validating above is what makes the catch unnecessary: the only failure this write can now raise
+    // is a genuine database failure, and that one SHOULD abort the completion.
+    await stampScopeWalkthroughId(tenantDb, input, knownJobState.scopeWalkthroughId);
   }
 
   if (knownJobState?.isLive) {
@@ -1890,6 +1901,10 @@ export async function ingestGlassesWalkthrough(
   // that already landed); an inherited pending marker makes it dead-letter immediately with the same
   // reconciliation instructions the original earned, which is the correct outcome — "a create may have
   // happened" is not information a retry can improve on, and guessing costs a duplicate scope extraction.
+  // The PAYLOAD inherits the checkpoint whatever shape it is in. This is jsonb with no constraint, and
+  // the id is what the forward addresses TROCK Scope with — withholding a malformed one here would not
+  // repair it, it would buy a SECOND scope extraction for a walk that already has one. Only the `uuid`
+  // read-model column is guarded, above.
   if (knownJobState?.scopeWalkthroughId) {
     jobPayload.scopeWalkthroughId = knownJobState.scopeWalkthroughId;
     jobPayload.checkpointInheritedFromJobId = knownJobState.jobId;

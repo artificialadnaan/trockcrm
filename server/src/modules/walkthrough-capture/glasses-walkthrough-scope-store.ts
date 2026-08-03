@@ -92,7 +92,13 @@ async function pipelineOutcome(
       headers: { accept: "application/json", authorization: `Bearer ${token}` },
       signal,
     });
-    if (!response.ok) return "working";
+    if (!response.ok) {
+      // Drained before returning, like the 404 branch above. An unread body holds the connection open
+      // until the agent times it out, and this probe runs on every render of a deal with a walk that has
+      // nothing to show yet — the one shape that repeats.
+      await response.text().catch(() => "");
+      return "working";
+    }
     const status = (JSON.parse(await response.text()) as { walkthrough?: { status?: unknown } } | null)
       ?.walkthrough?.status;
     if (status === FAILED_SCOPE_STATUS) return "failed";

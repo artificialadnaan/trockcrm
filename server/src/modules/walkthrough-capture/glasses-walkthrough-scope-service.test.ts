@@ -317,6 +317,27 @@ describe("resolveGlassesWalkthroughScope — what TROCK Scope sends is not trust
     expect(entry!.scope).toBeNull();
   });
 
+  it("REGRESSION: a non-empty response whose items are ALL unusable is unavailable, not empty", async () => {
+    // An upstream shape change drops every id, the per-item degrading filters them all out, and the
+    // walk lands on ready-with-no-items — "this walk produced no line items" about a response that
+    // plainly contained scope rows. The per-item degrading is for one bad field among good rows;
+    // losing all of them is a different event, and it is recoverable.
+    const { warn } = collectWarnings();
+    const [entry] = await resolveGlassesWalkthroughScope([row()], {
+      scopeReader: reader({
+        fetchScopeItems: async () => ({
+          outcome: "found",
+          pipeline: "finished",
+          items: [{ description: "Paint wall red" }, { description: "Replace fan" }],
+        }),
+      }),
+      warn,
+    });
+
+    expect(entry!.state).toBe("unavailable");
+    expect(entry!.scope).toBeNull();
+  });
+
   it("REGRESSION: a FAILED extraction is not an empty result", async () => {
     // `failed` is terminal, so a set of "the pipeline has stopped" statuses counts it as finished and
     // the panel reports ready-with-no-items — "TROCK Scope processed this and found nothing". The

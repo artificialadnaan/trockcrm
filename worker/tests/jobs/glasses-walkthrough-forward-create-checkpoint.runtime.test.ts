@@ -612,6 +612,47 @@ describe("glasses_walkthrough_forward create checkpoint (real SQL)", () => {
     expect((await storedPayload(db)).scopeWalkthroughId).toBe("8f1c0a6e-1111-4222-8333-444455556666");
   });
 
+  it("REGRESSION: a MALFORMED create-response id does not block the forward for ever", async () => {
+    // Nothing upstream constrains this value: `createScopeWalkthrough` takes `json.walkthrough.id` as
+    // any string. The stamp casts `$1::uuid`, so a non-uuid raises 22P02 — and because the stamp runs
+    // BEFORE the clip loop, the whole attempt fails, the retry re-derives the SAME id from its own
+    // checkpoint, and fails identically until the queue gives up. Not one clip is ever uploaded, and no
+    // retry can fix it, which is the difference from the transient failure the test below covers.
+    const db = await seed();
+    await seedWalkRow(db, DEAL_A);
+    const { fetchImpl, calls } = makeScopeFetch({ createBody: { walkthrough: { id: "not-a-uuid" } } });
+
+    await expect(
+      handleGlassesWalkthroughForward(await storedPayload(db), null, deps(makeClient(db), fetchImpl)),
+    ).resolves.toBeUndefined();
+
+    // The clips went, which is the job. The read model is what was given up.
+    expect(calls.some((call) => /\/clips$/.test(call.url))).toBe(true);
+    expect((await storedPayload(db)).scopeWalkthroughId).toBe("not-a-uuid");
+    expect(await storedScopeId(db, DEAL_A)).toBeNull();
+  });
+
+  it("REGRESSION: a MALFORMED INHERITED checkpoint id does not block the forward either", async () => {
+    // The other way in, and the likelier one: the checkpoint lives in jsonb, which holds anything, and a
+    // human reconciling a dead letter edits that payload by hand. This attempt skips the create entirely
+    // and goes straight to the stamp with a value nothing ever validated.
+    const db = await seed();
+    await seedWalkRow(db, DEAL_A);
+    const { fetchImpl, calls } = makeScopeFetch();
+    await db.query(
+      `UPDATE job_queue SET payload = jsonb_set(payload, '{scopeWalkthroughId}', '"repaired-by-hand"'::jsonb, true)`,
+    );
+
+    await expect(
+      handleGlassesWalkthroughForward(await storedPayload(db), null, deps(makeClient(db), fetchImpl)),
+    ).resolves.toBeUndefined();
+
+    // No create was re-issued (the checkpoint is honoured) and the clips still moved.
+    expect(calls.some((call) => call.url === CREATE_URL)).toBe(false);
+    expect(calls.some((call) => /\/clips$/.test(call.url))).toBe(true);
+    expect(await storedScopeId(db, DEAL_A)).toBeNull();
+  });
+
   it("REGRESSION: a failed stamp fails the ATTEMPT before any clip bytes move", async () => {
     // The stamp sits after the create block and before the clip loop precisely so failing it costs a retry
     // and nothing else: the next attempt reads the id back out of the payload, skips the create, and lands
