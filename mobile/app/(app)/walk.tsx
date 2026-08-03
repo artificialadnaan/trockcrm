@@ -23,7 +23,7 @@ import { theme } from "../../src/theme/theme";
 import { useWalk } from "../../src/walkthrough/useWalk";
 import { Wearables, isAvailable as wearablesBridgeAvailable } from "../../src/wearables/native";
 import { describePairing, type Pairing } from "../../src/walkthrough/pairing";
-import { isAudioTruncated, isVideoTruncated, isWalkActive } from "../../src/walkthrough/session";
+import { isAudioTruncated, isVideoTruncated, isWalkActive, type Walk } from "../../src/walkthrough/session";
 import { deriveWalkSiteLabel, deriveWalkTitle } from "../../src/walkthrough/walk-meta";
 import { useWalkQueueSession } from "../../src/walkthrough/use-queue-session";
 import { drainWalkQueue, enqueueWalk, type WalkQueueMeta } from "../../src/walkthrough/upload";
@@ -295,6 +295,66 @@ export default function WalkScreen() {
     }, []),
   );
 
+  /**
+   * A finished walk the queue REFUSED, kept until it is taken.
+   *
+   * It carries its own copy of the recording and its metadata rather than pointing at the render,
+   * because it has to outlive both: the focus effect just above resets a terminal walk the moment
+   * this never-unmounting route is left and reopened, so `walk`/`walkId` are gone by the time a
+   * hurried estimator gets back to the notice. That reset is what USED to be the whole story — the
+   * failed enqueue cleared a ref, changed no state, and the walk quietly ceased to exist as far as
+   * anything in the app was concerned, with the files still on disk and nobody told to go looking.
+   */
+  const [unqueuedWalk, setUnqueuedWalk] = useState<{
+    walkId: string;
+    walk: Walk;
+    meta: WalkQueueMeta;
+    /** Whatever the queue threw, verbatim — the same rule the error banner follows. "No space left
+     *  on device" is the only part of it the estimator can act on, and no wording of ours knows
+     *  which failure this was. */
+    message: string;
+  } | null>(null);
+  const [refiling, setRefiling] = useState(false);
+
+  /**
+   * Hand ONE finished walk to the queue — from the terminal-state effect below, and from the retry
+   * the notice offers. Both go through here so a retry is the same filing, not a second path with
+   * its own idea of what "queued" means.
+   */
+  const fileWalk = useCallback(
+    async (finishedWalkId: string, finishedWalk: Walk, meta: WalkQueueMeta) => {
+      if (!ownerKey) return;
+      try {
+        const queued = await enqueueWalk(ownerKey, finishedWalkId, finishedWalk, meta);
+        // Scoped to the walk this call was about: a late retry landing after a LATER walk failed to
+        // queue must not clear the notice standing for that one.
+        setUnqueuedWalk((current) => (current?.walkId === finishedWalkId ? null : current));
+        // null = nothing to enqueue (not yet terminal, or terminal with zero captured artifacts —
+        // e.g. failed before anything was recorded). Only kick a drain when there is something to
+        // drain; the background task above still covers the case where this foreground kick itself
+        // gets interrupted.
+        if (queued) void drainWalkQueue(ownerKey, queueFetcher, walkthroughUploadClient).catch(() => undefined);
+      } catch (error) {
+        // The walk's artifacts are still on disk (nothing is deleted before a successful completion
+        // call — see upload.ts), so this is recoverable in principle. What it is not is discoverable:
+        // the startup orphan scan is the only thing that would ever find them again, and it needs the
+        // estimator to reopen the app and go looking for a problem nobody mentioned. So it is said
+        // here, where they are standing, with the one action that fixes it.
+        if (enqueuedWalkIdRef.current === finishedWalkId) enqueuedWalkIdRef.current = null;
+        setUnqueuedWalk({ walkId: finishedWalkId, walk: finishedWalk, meta, message: String(error) });
+      }
+    },
+    [ownerKey, queueFetcher],
+  );
+
+  const retryFiling = useCallback(() => {
+    if (!unqueuedWalk || refiling) return;
+    setRefiling(true);
+    void fileWalk(unqueuedWalk.walkId, unqueuedWalk.walk, unqueuedWalk.meta).finally(() =>
+      setRefiling(false),
+    );
+  }, [unqueuedWalk, refiling, fileWalk]);
+
   useEffect(() => {
     if (walk.state !== "complete" && walk.state !== "failed") return;
     if (!walkId || !ownerKey) return;
@@ -327,24 +387,8 @@ export default function WalkScreen() {
       title: deriveWalkTitle(titleTarget, walk.startedAt ?? walk.endedAt ?? Date.now()),
       siteLabel: deriveWalkSiteLabel(walkPropertyAddress),
     };
-    void enqueueWalk(ownerKey, walkId, walk, meta)
-      .then((queued) => {
-        // null = nothing to enqueue (not yet terminal, or terminal with zero captured artifacts —
-        // e.g. failed before anything was recorded). Only kick a drain when there is something to
-        // drain; the background task above still covers the case where this foreground kick itself
-        // gets interrupted.
-        if (queued) void drainWalkQueue(ownerKey, queueFetcher, walkthroughUploadClient).catch(() => undefined);
-      })
-      .catch(() => {
-        // Best-effort: a failed enqueue here (e.g. storage full) is not surfaced to the estimator —
-        // per the owner decision there is no review gate to surface it INTO. The walk's artifacts
-        // remain on disk (never deleted before a successful completion call — see upload.ts), so
-        // nothing is lost; a future resume of this screen (or an app-level recovery pass, not yet
-        // built) is the retry path. Not silently losing evidence matters more here than surfacing a
-        // banner the estimator has already walked away from.
-        enqueuedWalkIdRef.current = null;
-      });
-  }, [walk, walkId, ownerKey, targetName, propertyAddress, queueFetcher]);
+    void fileWalk(walkId, walk, meta);
+  }, [walk, walkId, ownerKey, targetName, propertyAddress, queueFetcher, fileWalk]);
 
   // Local UI-only state: whether the harder-to-hit End walk control is asking for confirmation.
   // Not lifecycle — nothing here decides whether ending is ALLOWED, only how many taps it takes.
@@ -462,6 +506,39 @@ export default function WalkScreen() {
         {error ? (
           <View style={styles.errorBanner}>
             <Text style={styles.errorText}>{error}</Text>
+          </View>
+        ) : null}
+
+        {/* Outside every walk.state branch, deliberately, and for a different reason than the banner
+            above: this notice is about a walk that is already OVER, so hanging it off the completion
+            card would put it inside the one thing the focus effect wipes. It stays until the walk is
+            queued — including through a walk the estimator starts next, because an unfiled site visit
+            outranks the tidiness of the screen it is sitting on. */}
+        {unqueuedWalk ? (
+          <View style={styles.unqueuedBanner}>
+            <Text style={styles.unqueuedTitle}>This walk has not been queued</Text>
+            <Text style={styles.unqueuedBody}>
+              Nothing has been deleted — the recording is still on this phone — but it could not be
+              handed to the upload queue: {unqueuedWalk.message}
+            </Text>
+            <Text style={styles.unqueuedBody}>
+              Free up storage if the phone is full, then try again. It uploads on its own once it is
+              queued.
+            </Text>
+            <Pressable
+              onPress={retryFiling}
+              disabled={refiling}
+              accessibilityRole="button"
+              accessibilityLabel="Try queueing this walk again"
+              accessibilityState={{ disabled: refiling, busy: refiling }}
+              style={({ pressed }) => [
+                styles.unqueuedRetry,
+                refiling && styles.startButtonBusy,
+                pressed && !refiling && styles.pressed,
+              ]}
+            >
+              <Text style={styles.unqueuedRetryText}>{refiling ? "Trying…" : "Try again"}</Text>
+            </Pressable>
           </View>
         ) : null}
 
@@ -721,6 +798,38 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 20,
     fontFamily: theme.font.semibold,
+  },
+
+  // Warning, not danger: the recording is intact and one tap from being saved, and dressing that in
+  // the same red as a walk that failed outright would read as the loss it is not.
+  unqueuedBanner: {
+    backgroundColor: theme.color.warning,
+    paddingHorizontal: theme.space.lg,
+    paddingVertical: theme.space.md,
+    gap: theme.space.sm,
+  },
+  unqueuedTitle: {
+    color: theme.color.brandBlack,
+    fontSize: 15,
+    fontFamily: theme.font.bold,
+  },
+  unqueuedBody: {
+    color: theme.color.brandBlack,
+    fontSize: 13,
+    lineHeight: 19,
+    fontFamily: theme.font.medium,
+  },
+  unqueuedRetry: {
+    alignSelf: "flex-start",
+    backgroundColor: theme.color.brandBlack,
+    borderRadius: theme.radius.pill,
+    paddingVertical: theme.space.sm,
+    paddingHorizontal: theme.space.lg,
+  },
+  unqueuedRetryText: {
+    color: theme.color.textInverse,
+    fontSize: 15,
+    fontFamily: theme.font.bold,
   },
 
   missingTitle: {

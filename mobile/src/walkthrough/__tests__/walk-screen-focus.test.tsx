@@ -401,6 +401,85 @@ describe("WalkScreen short-audio notice", () => {
   });
 });
 
+// ── Round-10 FINDING 2 (P2): an enqueue that fails must not take the walk with it ─────────────────
+//
+// enqueueWalk is the moment a finished site visit stops being loose files and becomes something the
+// queue owns. When it rejected — a filesystem error, a phone with no space left — the catch cleared
+// one ref and nothing else: no state changed, so the terminal-state effect never ran again, and the
+// next focus of this never-unmounting route reset the walk out of existence. The bytes survived on
+// disk, but the only thing that could still find them was the startup orphan scan, which needs the
+// estimator to notice, reopen the app, and go looking. They were never told there was anything to
+// look for. This screen already shows native's failures verbatim and prominently; a queue that
+// refused the walk is the same kind of fact, and unlike native's it has an action attached.
+describe("WalkScreen enqueue failure", () => {
+  async function completeAWalk(enqueue: () => Promise<unknown>) {
+    mockEnqueueWalk.mockImplementationOnce(enqueue);
+    mockResult = resultFor(makeWalk("recording"));
+    const view = render(<WalkScreen />);
+    mockResult = resultFor(makeWalk("complete"));
+    await act(async () => {
+      view.rerender(<WalkScreen />);
+    });
+    return view;
+  }
+
+  it("says the walk is not queued, in the queue's own words, instead of dropping it", async () => {
+    const { getByText } = await completeAWalk(() => Promise.reject(new Error("ENOSPC: no space left")));
+
+    expect(getByText("This walk has not been queued")).toBeTruthy();
+    // Verbatim, same rule as the error banner: "no space left" is the one word here that tells the
+    // estimator what to do about it, and no paraphrase of ours knows what the failure was.
+    expect(getByText(/ENOSPC: no space left/)).toBeTruthy();
+  });
+
+  // The interaction that made the old catch fatal: this route is a hidden tab that never unmounts,
+  // so leaving and coming back re-runs the focus effect, which resets a terminal walk. If the notice
+  // hung off walk.state it would be wiped by the same reset that discarded the problem in the first
+  // place — the estimator would return to an idle screen with no sign a recording is unaccounted for.
+  it("survives the focus reset that clears the terminal walk", async () => {
+    const { rerender, getByText } = await completeAWalk(() =>
+      Promise.reject(new Error("ENOSPC: no space left")),
+    );
+
+    mockResult = resultFor(makeWalk("idle"), { walkId: null }); // what reset() leaves behind
+    await act(async () => {
+      rerender(<WalkScreen />);
+    });
+
+    expect(getByText("This walk has not been queued")).toBeTruthy();
+    expect(getByText("Try again")).toBeTruthy();
+  });
+
+  it("retries the SAME walk when asked, and clears the notice once it lands", async () => {
+    const { getByText, queryByText, rerender } = await completeAWalk(() =>
+      Promise.reject(new Error("ENOSPC: no space left")),
+    );
+    // The reset has already happened by the time a hurried estimator taps retry — so the retry has
+    // to carry its own copy of the walk, not read one out of a screen that no longer holds it.
+    mockResult = resultFor(makeWalk("idle"), { walkId: null });
+    await act(async () => {
+      rerender(<WalkScreen />);
+    });
+
+    await act(async () => {
+      fireEvent.press(getByText("Try again"));
+    });
+
+    expect(mockEnqueueWalk).toHaveBeenCalledTimes(2);
+    const [firstOwner, firstWalkId, firstWalk, firstMeta] = mockEnqueueWalk.mock.calls[0]!;
+    expect(mockEnqueueWalk.mock.calls[1]).toEqual([firstOwner, firstWalkId, firstWalk, firstMeta]);
+    expect(queryByText("This walk has not been queued")).toBeNull();
+  });
+
+  // GUARD (passes before the fix too): the notice is about a REFUSAL, so an enqueue that worked must
+  // leave the completion summary exactly as it was.
+  it("says nothing when the walk queues normally", async () => {
+    const { queryByText, getByText } = await completeAWalk(() => Promise.resolve(null));
+    expect(queryByText("This walk has not been queued")).toBeNull();
+    expect(getByText("Walk complete")).toBeTruthy();
+  });
+});
+
 // ── Round-6 FINDING 5 (P2): a walk with no deal has nowhere to be filed ───────────────────────────
 //
 // This is a hidden route. Opening it directly, or following a link whose dealId got dropped,

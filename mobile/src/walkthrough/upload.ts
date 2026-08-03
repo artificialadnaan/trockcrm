@@ -56,7 +56,12 @@ import {
   type WalkArtifactKind,
   type WalkQueueMeta,
 } from "./upload-core";
-import { settleWalkTeardowns, walkTeardownsInFlight } from "./walk-teardown";
+import {
+  settleWalkTeardowns,
+  walkBeingRecorded,
+  walkTeardownsInFlight,
+  watchWalkStarts,
+} from "./walk-teardown";
 
 export {
   MAX_IDEMPOTENCY_KEY_LENGTH,
@@ -445,8 +450,48 @@ const WALK_TEARDOWN_SETTLE_MS = 15_000;
  * which on this path is unrecoverable in the only sense that matters: nobody re-walks a site because
  * an app said the video was broken. So the teardown is waited out first, and any walk still being
  * torn down when the budget runs out is left OUT of the answer rather than described wrongly.
+ *
+ * That wait is what makes the caller's precondition insufficient on its own. It runs while the
+ * authenticated shell is already on screen and usable — up to fifteen seconds of it — so "nothing
+ * could be recording when this was called" stopped implying "nothing could be recording while this
+ * ran". A walk started in that window has no manifest entry (not enqueued until terminal) and no
+ * teardown claim (it is starting, not ending), which is the precise shape this function reports as
+ * an orphan: the live recording, offered to be filed a second time. And a row here is not just a
+ * label — filing one uploads what it has and cleanup then deletes the walk DIRECTORY, so a live walk
+ * in this answer is a site visit this app destroys while the estimator is still walking it.
+ *
+ * So starts are WATCHED for the whole call and dropped from the answer at the end — the one moment
+ * that can account for a start at any await in between, without assuming anything about when
+ * native's directory appears relative to the JS call — and whatever native was already recording at
+ * entry is dropped with them. Not gated the other way round (a Start button that refuses for up to
+ * fifteen seconds while this settles) because the estimator is standing on the roof by then, and a
+ * wedged teardown must never be able to take a site visit away; the wait was bounded for that exact
+ * reason. `enqueueRecoveredWalk` refuses a recording walk as well — a snapshot is frozen for a whole
+ * shell lifecycle, so the last word on "is this still true" cannot be a check made at scan time.
  */
 export async function findRecoverableWalks(ownerKey: string): Promise<RecoveredWalk[]> {
+  // Seeded, not just watched: `watchWalkStarts` only hears walks that begin from here on, and the
+  // caller's own precondition ("nothing can be recording at shell mount") is a fact about the
+  // CALLER. A directory native is writing into right now is out of this answer on its own account.
+  const recordingAtEntry = walkBeingRecorded();
+  const liveWalkIds: string[] = recordingAtEntry === null ? [] : [recordingAtEntry];
+  const stopWatchingStarts = watchWalkStarts((walkId) => liveWalkIds.push(walkId));
+  try {
+    return await scanForOrphanedWalkDirs(ownerKey, liveWalkIds);
+  } finally {
+    // Unsubscribed on the throwing path too, or a failed scan leaves a listener pushing into an
+    // array nobody will ever read for the rest of the process.
+    stopWatchingStarts();
+  }
+}
+
+/** The scan itself. Split out only so the watch above is a plain try/finally around ONE expression —
+ *  the exclusion is read at the end (see the caller), and a `return` buried in this body would be the
+ *  easy way to lose it. */
+async function scanForOrphanedWalkDirs(
+  ownerKey: string,
+  liveWalkIds: readonly string[],
+): Promise<RecoveredWalk[]> {
   await settleWalkTeardowns(WALK_TEARDOWN_SETTLE_MS);
   // Read after the wait: whatever is still here outlasted the budget, and its directory is the one
   // thing on disk this function cannot make a truthful statement about.
@@ -507,7 +552,15 @@ export async function findRecoverableWalks(ownerKey: string): Promise<RecoveredW
       captureSpanMs: span > 0 ? span : null,
     });
   }
-  return recovered;
+  // Read once, here, rather than skipped inside the loop: a walk can start at ANY await above — the
+  // teardown wait, the manifest reads, the box-chain reads of some other directory — and only the
+  // end of the scan is after all of them. Every field of a row for a walk that is recording right now
+  // is a reading of a file still being written, cached for the whole shell lifecycle, and the action
+  // attached to that row deletes the directory it describes. The bytes are untouched, so the next
+  // shell lifecycle — with that walk long since queued, or genuinely orphaned — describes them
+  // correctly. Same declining-to-classify rule as a teardown that outlasts the budget, for the same
+  // reason.
+  return recovered.filter((walk) => !liveWalkIds.includes(walk.walkId));
 }
 
 /**
@@ -832,6 +885,15 @@ async function fileTimestampMs(uri: string, fallback: number): Promise<number> {
  * downstream of the manifest needs to know it was recovered rather than freshly captured. Returns
  * null if the directory turned out to have neither a video nor any stills by the time this ran (e.g.
  * it raced a concurrent cleanup).
+ *
+ * THROWS for a walk native is recording right now, and that refusal is the point at which this stops
+ * being a bookkeeping function. Its input is a row from a snapshot deliberately frozen for a whole
+ * shell lifecycle (see scanRecoverableWalksAtStartup), so "this was an orphan" is a statement about
+ * a moment that has already passed. Acting on a stale one is destructive, not merely wrong: the
+ * queued walk uploads the stills it can see, the completion call succeeds, and cleanup then removes
+ * the walk DIRECTORY — walk.mp4 and every still still to come with it — out from under a writer that
+ * is still appending to them. The scan will not produce such a row (it excludes live walks at both
+ * ends), and this is the guarantee that does not depend on the scan having been right.
  */
 export async function enqueueRecoveredWalk(
   ownerKey: string,
@@ -841,6 +903,12 @@ export async function enqueueRecoveredWalk(
   meta: WalkQueueMeta,
   now: number = Date.now(),
 ): Promise<QueuedWalk | null> {
+  if (walkBeingRecorded() === recovered.walkId) {
+    // Loud rather than a silent null: the caller's null branch means "the files are gone" and leaves
+    // the row in place, which is the right handling for a race with cleanup and the wrong handling
+    // for this. Profile renders this text, and the estimator is the one person who can end the walk.
+    throw new Error("That walk is still recording — end it before filing it.");
+  }
   const [videoAt, stills] = await Promise.all([
     recovered.videoUri ? fileTimestampMs(recovered.videoUri, now) : Promise.resolve(undefined),
     Promise.all(recovered.stillUris.map(async (uri) => ({ uri, at: await fileTimestampMs(uri, now) }))),

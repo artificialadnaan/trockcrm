@@ -136,12 +136,13 @@ import {
   retryFailedWalks,
   scanRecoverableWalksAtStartup,
   subscribeRecoverableWalksFromStartup,
+  type RecoveredWalk,
   type WalkArtifactUploadUrlResponse,
   type WalkCompletionResponse,
   type WalkQueueMeta,
   type WalkthroughUploadClient,
 } from "../upload";
-import { noteWalkTeardown } from "../walk-teardown";
+import { noteWalkStarted, noteWalkTeardown } from "../walk-teardown";
 
 const fs = FileSystem as unknown as {
   __store: Map<string, string>;
@@ -1189,6 +1190,106 @@ describe("findRecoverableWalks / getRecoverableWalkCount", () => {
         jest.useRealTimers();
         await Promise.resolve();
       }
+    });
+  });
+
+  // ── Round-10 FINDING 1 (P1): the teardown wait let a LIVE walk into the answer ──────────────────
+  //
+  // The wait above is right and stays, but it happens while the authenticated shell is already on
+  // screen and usable — up to fifteen seconds of it. Start a walk in that window and the resumed
+  // scan meets a directory with no manifest entry (an active walk is not enqueued until terminal)
+  // and no teardown claim (it is starting, not ending), and calls the recording under the
+  // estimator's nose an orphan. That is the exact false positive the scan-once-at-mount rule exists
+  // to prevent, arrived at the long way round: the answer no longer describes the moment the caller
+  // guaranteed, because the scan outlived it.
+  //
+  // And the row is not just a label. Filing one from Profile uploads what it can see, completes, and
+  // cleanup deletes the walk DIRECTORY — so the snapshot's frozen answer is a live grenade: a walk
+  // still being recorded gets its video and its remaining stills deleted while the estimator walks
+  // the site. That is why the walk being recorded is excluded at BOTH ends (here, and at the filing
+  // itself, below): a snapshot held for a whole shell lifecycle cannot be the last word on whether
+  // its rows are still true.
+  describe("a walk that starts while the scan is running", () => {
+    it("leaves the live recording out, and still reports the orphan it was called for", async () => {
+      const orphan = `${DOC}walkthroughs/walk-old/`;
+      seedVideoFile(`${orphan}walk.mp4`); // left by a previous launch — a real orphan
+      const live = `${DOC}walkthroughs/walk-live/`;
+
+      let finishTeardown!: () => void;
+      noteWalkTeardown(
+        "walk-signout",
+        new Promise<void>((resolve) => {
+          finishTeardown = () => resolve();
+        }),
+      );
+
+      const scan = findRecoverableWalks(OWNER);
+      await Promise.resolve(); // the scan is now parked on the teardown wait
+      // The estimator taps Start and captures a still. native creates walkthroughs/<walkId>/ during
+      // startWalk, which is why the id is claimed BEFORE the call rather than when it resolves.
+      noteWalkStarted("walk-live");
+      seedVideoFile(`${live}walk.mp4`, UNFINALIZED_MP4);
+      fs.__store.set(`${live}still-001.jpg`, "a");
+      finishTeardown();
+
+      expect((await scan).map((w) => w.walkId)).toEqual(["walk-old"]);
+      // The recorder slot is process-global, so hand it back before the next case scans against a
+      // walk this one left recording.
+      noteWalkTeardown("walk-live", Promise.resolve());
+    });
+
+    // A walk already recording when the scan is CALLED, not one that starts during it. Not reachable
+    // from today's shell (the effect that scans runs once per authenticated mount, and every walk
+    // screen lives under it), but the scan's precondition is a fact about its caller and this is the
+    // one function that pays for it being wrong — with the estimator's live recording.
+    it("leaves out a walk native is already recording when it is called", async () => {
+      const dir = `${DOC}walkthroughs/walk-in-progress/`;
+      seedVideoFile(`${dir}walk.mp4`, UNFINALIZED_MP4);
+      fs.__store.set(`${dir}still-001.jpg`, "a");
+      noteWalkStarted("walk-in-progress");
+
+      expect(await findRecoverableWalks(OWNER)).toEqual([]);
+      noteWalkTeardown("walk-in-progress", Promise.resolve());
+    });
+
+    // The other end, and the one that decides whether this is a fix or a smaller window: the snapshot
+    // is frozen for a whole shell lifecycle, so a row can be acted on long after it stopped being
+    // true. Filing is what deletes — upload, complete, then remove the whole walk directory — so the
+    // refusal has to live at the filing itself, not only at the scan that produced the row.
+    it("refuses to FILE a walk native is recording, so a stale row cannot delete a live site visit", async () => {
+      const dir = `${DOC}walkthroughs/walk-in-progress-2/`;
+      const still = `${dir}still-001.jpg`;
+      seedFiles([still]);
+      noteWalkStarted("walk-in-progress-2");
+      const stale: RecoveredWalk = {
+        walkId: "walk-in-progress-2",
+        videoUri: null, // the video is not finalized yet — it is still being written
+        stillUris: [still],
+        unfinishedVideo: true,
+        recordedAtMs: null,
+        captureSpanMs: null,
+      };
+
+      await expect(enqueueRecoveredWalk(OWNER, stale, "deal-1", null, META)).rejects.toThrow(
+        /still recording/,
+      );
+      // Nothing queued means nothing to drain, and therefore nothing that deletes the directory.
+      expect(await getQueuedWalks(OWNER)).toEqual([]);
+      noteWalkTeardown("walk-in-progress-2", Promise.resolve());
+    });
+
+    // GUARD (passes before the fix too, which excluded nothing at all): "recording" ends where the
+    // teardown registry begins. An endWalk issued for the walk hands the directory over to the wait
+    // above, so a walk this process started is recoverable again the moment native is let go of —
+    // otherwise a wedged teardown would keep it off the recovery card even after the budget that
+    // exists to bound exactly that gave up on it.
+    it("reports the same walk once an endWalk has been issued for it", async () => {
+      const dir = `${DOC}walkthroughs/walk-was-live/`;
+      seedVideoFile(`${dir}walk.mp4`);
+      noteWalkStarted("walk-was-live");
+      noteWalkTeardown("walk-was-live", Promise.resolve());
+
+      expect((await findRecoverableWalks(OWNER)).map((w) => w.walkId)).toEqual(["walk-was-live"]);
     });
   });
 });

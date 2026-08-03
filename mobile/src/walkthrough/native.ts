@@ -7,7 +7,7 @@
  */
 import { NativeEventEmitter, NativeModules, Platform } from "react-native";
 import type { StillSource } from "./session";
-import { noteWalkTeardown } from "./walk-teardown";
+import { noteWalkStarted, noteWalkTeardown } from "./walk-teardown";
 
 const native = NativeModules.WalkthroughRecorder as WalkthroughNativeModule | undefined;
 
@@ -113,8 +113,11 @@ let startedWalkId: string | null = null;
 export const Recorder = {
   startWalk: (walkId: string) => {
     // Before the call, not after it resolves: native creates walkthroughs/<walkId>/ during
-    // startWalk, so from this line on the directory is this process's to account for.
+    // startWalk, so from this line on the directory is this process's to account for. Announced for
+    // the same reason it is remembered — a recovery scan running right now (see walk-teardown.ts)
+    // has to hear about this walk before its directory can appear under it.
     startedWalkId = walkId;
+    noteWalkStarted(walkId);
     return require_().startWalk(walkId);
   },
   captureStill: () => require_().captureStill(),
