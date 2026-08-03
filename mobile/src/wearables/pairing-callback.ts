@@ -29,7 +29,7 @@ import { setStartupConfigureError, Wearables } from "./native";
 let wearablesConfigurePromise: Promise<boolean> | null = null;
 
 /**
- * A pairing callback URL that arrived while the SDK was not configured, held for a retry.
+ * A pairing callback URL that arrived while the SDK could not receive it, held for a retry.
  *
  * In memory only, and that boundary is deliberate rather than overlooked: this survives a failed
  * configure, a screen change and a foreground round trip, which is the span a retry actually happens
@@ -38,6 +38,58 @@ let wearablesConfigurePromise: Promise<boolean> | null = null;
  * re-taps Pair and Meta issues a fresh one.
  */
 let pendingPairingUrl: string | null = null;
+
+/**
+ * Every delivery runs on one chain, so a replay can never observe the slot MID-ATTEMPT.
+ *
+ * `PairingRow.check()` fires on foreground, which is exactly when a warm `url` event is also being
+ * delivered. Read without this, the replay could find the slot empty while the delivery it is racing
+ * had not yet failed and written to it — passing the only automatic retry point, leaving the callback
+ * held with nothing scheduled to hand it over, and the row reporting unpaired glasses until the user
+ * happened to background the app again. Serialising also stops two `handleUrl` calls overlapping for
+ * the same registration.
+ */
+let deliveryChain: Promise<unknown> = Promise.resolve();
+
+function enqueue<T>(task: () => Promise<T>): Promise<T> {
+  // Both arms run `task`: a previous delivery's failure must not cancel the next one.
+  const run = deliveryChain.then(task, task);
+  deliveryChain = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
+
+/**
+ * The app's OWN deep-link hosts — `trockcam://accept-invite?token=…` (app/accept-invite.tsx) and
+ * `trockcam://scorecards/corrective-action/<id>` (src/navigation/return-to.ts).
+ */
+const APP_OWN_DEEP_LINK_HOSTS = new Set(["accept-invite", "scorecards"]);
+
+/** The first path segment of a deep link, lowercased: `trockcam://scorecards/x/1?a=b` → `scorecards`. */
+function firstSegmentOf(url: string): string {
+  const withoutScheme = url.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "");
+  const withoutQuery = withoutScheme.split(/[?#]/)[0] ?? "";
+  return (withoutQuery.split("/")[0] ?? "").toLowerCase();
+}
+
+/**
+ * Whether a URL is worth HOLDING — i.e. whether it is not one of the app's own deep links.
+ *
+ * A deny-list rather than an allow-list, and the asymmetry is the whole point. The SDK is the
+ * authority on what a pairing callback looks like and Meta publishes no stable path for it, so an
+ * allow-list guessed from one observed URL would quietly stop retaining the real thing and put back
+ * the exact defect this module exists to prevent. The app's own links are a finite, knowable set;
+ * everything else is treated as possibly-a-callback and kept.
+ *
+ * Without this, the root listener — which forwards EVERY incoming URL — would let an invite or a
+ * corrective-action link overwrite a held pairing callback, and the later replay would faithfully
+ * re-deliver the unrelated link while the glasses stayed unpaired.
+ */
+export function isRetainablePairingUrl(url: string): boolean {
+  return !APP_OWN_DEEP_LINK_HOSTS.has(firstSegmentOf(url));
+}
 
 /**
  * Attempt configuration once, and report whether it SUCCEEDED. Never rejects.
@@ -77,54 +129,75 @@ export function ensureWearablesConfigured(): Promise<boolean> {
 }
 
 /**
- * Hand a pairing callback URL to the SDK, or hold it until one can actually receive it.
+ * Hand a URL to the SDK, and hold it for a retry if it could be a pairing callback the SDK did not
+ * take.
  *
  * Both the cold-launch (`getInitialURL`) and warm (`Linking` url event) paths come through here, so
  * the retention rule cannot be present on one and missing on the other — which is how the original
  * defect was shaped.
  *
- * A rejection from `handleUrl` retains too, not just a failed configure. The loss is identical from
- * the user's side: the callback is spent and registration silently never completed.
+ * THREE outcomes count as "not delivered", and all three retain: a failed configure, a `handleUrl`
+ * rejection, and a `handleUrl` that RESOLVES `{ handled: false }`. The last is the quietest — the SDK
+ * declining a URL without throwing looks identical to success at the call site — and treating it as
+ * success would discard the only copy of a callback that never landed.
  */
-export async function deliverPairingUrl(url: string): Promise<void> {
-  const configured = await ensureWearablesConfigured();
-  if (!configured) {
-    pendingPairingUrl = url;
-    return;
-  }
-  try {
-    await Wearables.handleUrl(url);
-    // Pairing got through. Anything retained from an earlier failure is stale by definition.
-    pendingPairingUrl = null;
-  } catch {
-    pendingPairingUrl = url;
-  }
+export function deliverPairingUrl(url: string): Promise<void> {
+  return enqueue(async () => {
+    const retainable = isRetainablePairingUrl(url);
+    const hold = () => {
+      if (retainable) pendingPairingUrl = url;
+    };
+
+    const configured = await ensureWearablesConfigured();
+    if (!configured) {
+      hold();
+      return;
+    }
+    try {
+      const result = await Wearables.handleUrl(url);
+      if (result?.handled) {
+        // Pairing got through. Only a HANDLED pairing callback makes a held one stale — an unrelated
+        // deep link the SDK happens to accept says nothing about a registration still outstanding.
+        if (retainable) pendingPairingUrl = null;
+        return;
+      }
+      hold();
+    } catch {
+      hold();
+    }
+  });
 }
 
 /**
- * Replay a retained callback into a now-configured SDK. Returns whether one was actually delivered.
+ * Replay a held callback into a now-configured SDK. Returns whether one was actually delivered.
  *
  * Called from the pairing row after its own successful `configure()` — which runs on mount, on manual
  * refresh and on every foreground — so the retry is something the user reaches by returning to the
  * screen they are already on, rather than a step they have to be told about.
  *
- * The slot is cleared only when the SDK ACCEPTS the URL. A rejected replay leaves it retained for the
- * next attempt; clearing it eagerly would spend the callback on a failure, which is the whole defect
- * this module exists to prevent.
+ * Queued behind any in-flight delivery, so a foreground check that coincides with a warm callback
+ * sees that attempt's outcome rather than the empty slot it had before it failed.
+ *
+ * The slot is cleared only when the SDK reports it actually HANDLED the URL. A rejected or declined
+ * replay leaves it held for the next attempt; clearing it eagerly would spend the callback on a
+ * failure, which is the whole defect this module exists to prevent.
  */
-export async function deliverPendingPairingUrl(): Promise<boolean> {
-  const url = pendingPairingUrl;
-  if (!url) return false;
-  try {
-    await Wearables.handleUrl(url);
-    pendingPairingUrl = null;
-    return true;
-  } catch {
-    return false;
-  }
+export function deliverPendingPairingUrl(): Promise<boolean> {
+  return enqueue(async () => {
+    const url = pendingPairingUrl;
+    if (!url) return false;
+    try {
+      const result = await Wearables.handleUrl(url);
+      if (!result?.handled) return false;
+      pendingPairingUrl = null;
+      return true;
+    } catch {
+      return false;
+    }
+  });
 }
 
-/** Whether a pairing callback is waiting for a configured SDK. */
+/** Whether a pairing callback is waiting for an SDK that can receive it. */
 export function hasPendingPairingUrl(): boolean {
   return pendingPairingUrl !== null;
 }

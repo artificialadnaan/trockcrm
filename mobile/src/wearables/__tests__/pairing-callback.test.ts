@@ -32,6 +32,9 @@ function load(): PairingCallback {
   return mod;
 }
 
+/** Let queued chain work start: deliveries run on a promise chain, not synchronously at call time. */
+const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+
 const CALLBACK_URL = "trockcam://wearables/callback?state=abc123";
 const LATER_CALLBACK_URL = "trockcam://wearables/callback?state=def456";
 const CONFIGURED = { configured: true, alreadyConfigured: false };
@@ -110,7 +113,96 @@ describe("deliverPairingUrl", () => {
   });
 });
 
+describe("a `handled: false` result", () => {
+  it("REGRESSION: a callback the SDK DECLINES without throwing is held, not treated as delivered", async () => {
+    mockConfigure.mockResolvedValue(CONFIGURED);
+    // The quietest of the three failures: the promise resolves, so at the call site a decline is
+    // indistinguishable from success unless the result is actually read.
+    mockHandleUrl.mockResolvedValue({ handled: false });
+    const pairing = load();
+
+    await pairing.deliverPairingUrl(CALLBACK_URL);
+
+    expect(pairing.hasPendingPairingUrl()).toBe(true);
+  });
+
+  it("REGRESSION: a DECLINED replay reports failure and keeps the callback", async () => {
+    mockConfigure.mockRejectedValueOnce(new Error("SDK init failed")).mockResolvedValue(CONFIGURED);
+    const pairing = load();
+    await pairing.deliverPairingUrl(CALLBACK_URL);
+
+    mockHandleUrl.mockResolvedValueOnce({ handled: false });
+    expect(await pairing.deliverPendingPairingUrl()).toBe(false);
+    expect(pairing.hasPendingPairingUrl()).toBe(true);
+
+    mockHandleUrl.mockResolvedValueOnce({ handled: true });
+    expect(await pairing.deliverPendingPairingUrl()).toBe(true);
+    expect(pairing.hasPendingPairingUrl()).toBe(false);
+  });
+});
+
+describe("the app's own deep links", () => {
+  it.each([
+    ["trockcam://accept-invite?token=abc", "an invite"],
+    ["trockcam://scorecards/corrective-action/42", "a corrective action"],
+  ])("REGRESSION: %s does not overwrite a held pairing callback (%s)", async (deepLink) => {
+    mockConfigure.mockRejectedValue(new Error("SDK init failed"));
+    const pairing = load();
+
+    await pairing.deliverPairingUrl(CALLBACK_URL);
+    expect(pairing.hasPendingPairingUrl()).toBe(true);
+
+    // The root listener forwards EVERY incoming URL, so this arrives on the same path.
+    await pairing.deliverPairingUrl(deepLink);
+
+    // Still the pairing callback that is held — not the link the user happened to open next.
+    mockConfigure.mockResolvedValue(CONFIGURED);
+    mockHandleUrl.mockResolvedValue({ handled: true });
+    expect(await pairing.deliverPendingPairingUrl()).toBe(true);
+    expect(mockHandleUrl).toHaveBeenLastCalledWith(CALLBACK_URL);
+  });
+
+  it("GUARD: an unrecognised URL is still held — the SDK, not this module, decides what a callback is", () => {
+    const pairing = load();
+    // Meta publishes no stable callback path, so anything that is not one of ours is kept.
+    expect(pairing.isRetainablePairingUrl("trockcam://wearables/callback?state=x")).toBe(true);
+    expect(pairing.isRetainablePairingUrl("trockcam://some-unknown-meta-path")).toBe(true);
+    expect(pairing.isRetainablePairingUrl("trockcam://accept-invite?token=abc")).toBe(false);
+    expect(pairing.isRetainablePairingUrl("trockcam://Scorecards/corrective-action/1")).toBe(false);
+  });
+});
+
 describe("deliverPendingPairingUrl", () => {
+  it("REGRESSION: a foreground replay racing an in-flight delivery waits for it instead of reading an empty slot", async () => {
+    let failConfigure!: (error: Error) => void;
+    mockConfigure.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          failConfigure = reject;
+        })
+    );
+    mockConfigure.mockResolvedValue(CONFIGURED);
+    mockHandleUrl.mockResolvedValue({ handled: true });
+    const pairing = load();
+
+    // A warm callback arrives. Its configure has not settled, so nothing is held YET.
+    const delivering = pairing.deliverPairingUrl(CALLBACK_URL);
+    await flush(); // let the delivery reach configure(), so it is genuinely in flight
+    expect(pairing.hasPendingPairingUrl()).toBe(false);
+
+    // `PairingRow.check()` fires on the same foreground, inside that window.
+    const replaying = pairing.deliverPendingPairingUrl();
+
+    failConfigure(new Error("SDK init failed"));
+    await delivering;
+
+    // Queued behind the delivery, so it sees what that delivery held rather than the empty slot it
+    // had a moment earlier — which would have passed the only automatic retry point.
+    expect(await replaying).toBe(true);
+    expect(mockHandleUrl).toHaveBeenCalledWith(CALLBACK_URL);
+    expect(pairing.hasPendingPairingUrl()).toBe(false);
+  });
+
   it("REGRESSION: a REJECTED replay keeps the callback held rather than spending it", async () => {
     mockConfigure.mockRejectedValueOnce(new Error("SDK init failed")).mockResolvedValue(CONFIGURED);
     const pairing = load();
