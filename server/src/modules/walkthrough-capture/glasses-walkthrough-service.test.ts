@@ -208,6 +208,52 @@ describe("validateGlassesWalkthroughCompleteInput", () => {
     );
   });
 
+  it("REGRESSION: rejects JavaScript date shorthand that Date.parse happens to accept", () => {
+    // `Date.parse` takes implementation-defined shorthand, so a parse-only check let non-ISO values
+    // through despite this endpoint's contract. It is not a cosmetic laxity: when an artifact omits its
+    // optional `capturedAtMs`, this walk timestamp becomes that artifact's `files.taken_at`, so "1" files
+    // a site visit into 2001 and puts the evidence in the wrong place in every chronological gallery,
+    // feed and report — behind a 201 and no complaint anywhere.
+    for (const shorthand of ["1", "2026", "Jan 5 2026", "2026-07-30 15:04:00", "2026/07/30"]) {
+      expect(Number.isNaN(Date.parse(shorthand))).toBe(false); // Date.parse really does take these
+      expect(() =>
+        validateGlassesWalkthroughCompleteInput(baseCompleteInput({ capturedAt: shorthand })),
+      ).toThrow(/capturedAt must be an ISO-8601 timestamp/);
+    }
+  });
+
+  it("GUARD: still accepts what mobile actually sends, offsets and milliseconds included", () => {
+    // The shape guard must not narrow past the real client. `toISOString()` is what the phone emits;
+    // the offset form is accepted because the contract is a timestamp, not a timezone policy.
+    for (const valid of [
+      "2026-07-30T15:04:00.000Z",
+      "2026-07-30T15:04:00Z",
+      "2026-07-30T15:04:00.12Z",
+      "2026-07-30T10:04:00-05:00",
+    ]) {
+      expect(validateGlassesWalkthroughCompleteInput(baseCompleteInput({ capturedAt: valid })).capturedAt).toBe(valid);
+    }
+  });
+
+  it("GUARD: out-of-range components are still refused, which is why Date.parse runs after the regex", () => {
+    // The regex only checks SHAPE, so `Date.parse` still has work to do: month 13 and hour 25 are
+    // well-shaped and impossible, and it rejects both.
+    for (const impossible of ["2026-13-01T00:00:00Z", "2026-07-30T25:00:00Z"]) {
+      expect(() =>
+        validateGlassesWalkthroughCompleteInput(baseCompleteInput({ capturedAt: impossible })),
+      ).toThrow(/capturedAt must be an ISO-8601 timestamp/);
+    }
+
+    // KNOWN RESIDUAL, asserted so it stays a decision rather than a surprise: `Date.parse` ROLLS OVER a
+    // day overflow — 2026-02-31 becomes 2026-03-03 — and the shape regex cannot see it either. Catching
+    // it means validating the calendar components by hand, which is real code to maintain for an error
+    // bounded at a few days. The bug this validation exists to stop is a wrong-DECADE one ("1" -> 2001),
+    // and that is closed. If a few days ever matters here, this is the test that says where to start.
+    expect(
+      validateGlassesWalkthroughCompleteInput(baseCompleteInput({ capturedAt: "2026-02-31T00:00:00Z" })).capturedAt,
+    ).toBe("2026-02-31T00:00:00Z");
+  });
+
   it("rejects an empty artifacts array", () => {
     expect(() => validateGlassesWalkthroughCompleteInput(baseCompleteInput({ artifacts: [] }))).toThrow(
       /artifacts must be a non-empty array/

@@ -551,7 +551,28 @@ export function validateGlassesWalkthroughCompleteInput(raw: Record<string, unkn
   const siteLabel = assertOptionalString(raw.siteLabel, "siteLabel", MAX_SITE_LABEL_CHARS);
   const projectId = assertOptionalString(raw.projectId, "projectId", 100);
 
-  if (typeof raw.capturedAt !== "string" || Number.isNaN(Date.parse(raw.capturedAt))) {
+  // SHAPE first, then parse. `Date.parse` accepts implementation-defined shorthand — `"1"` is a valid
+  // JavaScript date string and becomes 2001-01-01 — so a parse-only check admitted values that are not
+  // ISO-8601 at all, despite this endpoint's contract saying so. It is not merely a lax validator: when
+  // an artifact omits its optional `capturedAtMs`, this walk timestamp becomes the artifact's
+  // `files.taken_at`, so `"1"` files a site visit into 2001 and sends the evidence to the wrong place in
+  // every chronological gallery, feed and report that orders by it — with a 201 and no complaint.
+  //
+  // The anchored pattern is the interchange shape mobile actually sends (`toISOString()`), not the whole
+  // of ISO-8601: accepting week dates or ordinal dates here would widen what the column can hold for no
+  // caller that exists. `Date.parse` still runs afterwards, because the regex checks only shape and
+  // out-of-range components are well-shaped: month 13 and hour 25 are both rejected by the parse.
+  //
+  // It does NOT catch a day overflow — `Date.parse` rolls 2026-02-31 over to 2026-03-03 — and closing
+  // that means hand-validating the calendar components. Left open deliberately: the error it would fix
+  // is bounded at a few days, while the one this check exists for is bounded by nothing ("1" files a
+  // walk into 2001). The test asserts the rollover so it stays a decision rather than a discovery.
+  const ISO_8601_UTC = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/;
+  if (
+    typeof raw.capturedAt !== "string"
+    || !ISO_8601_UTC.test(raw.capturedAt)
+    || Number.isNaN(Date.parse(raw.capturedAt))
+  ) {
     throw new AppError(400, "capturedAt must be an ISO-8601 timestamp.");
   }
 

@@ -35,6 +35,29 @@ function newWalkId(): string {
   return `walk-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+/**
+ * Is this native rejection the "SDK was never configured" one?
+ *
+ * Read from `err.code` FIRST, because that is where it actually lives. `WalkthroughRecorder.swift`
+ * calls `reject("walk_not_configured", "Wearables SDK is not configured. …", nil)`, and React Native
+ * puts the first argument on `err.code` and the second on `err.message`. The previous version of this
+ * check tested `/not_configured/i` against the MESSAGE — which in production reads "Wearables SDK is
+ * not configured", with spaces — so it never matched, and the retained startup cause this whole path
+ * exists to surface was still dropped.
+ *
+ * Its test passed anyway, because the test built `new Error("walk_not_configured")` and put the CODE
+ * where the message goes. That fixture could not have failed for the right reason, which is the only
+ * thing a regression test is for.
+ *
+ * The message is still matched as a fallback, spaces or underscores, so a future native change that
+ * moves the string around does not silently take this path out again.
+ */
+function isNotConfiguredRejection(err: unknown, nativeMessage: string): boolean {
+  const code = typeof err === "object" && err !== null ? (err as { code?: unknown }).code : undefined;
+  if (typeof code === "string" && /not[_ ]configured/i.test(code)) return true;
+  return /not[_ ]configured/i.test(nativeMessage);
+}
+
 /** `walk.mp4`'s size on disk right now, or null when it cannot be read for ANY reason — no path yet,
  *  a file the platform reports no size for, a stat that threw. Null is what `assessWalkVideoSize`
  *  treats as "unmeasured, therefore fine": see its doc for why that direction is not negotiable. */
@@ -389,7 +412,7 @@ export function useWalk(dealId: string, projectId: string | null, ownerKey: stri
       const nativeMessage = errorMessage(err);
       const startupCause = getStartupConfigureError();
       const message =
-        startupCause && /not_configured/i.test(nativeMessage)
+        startupCause && isNotConfiguredRejection(err, nativeMessage)
           ? `${nativeMessage} — ${errorMessage(startupCause)}`
           : nativeMessage;
       setError(message);

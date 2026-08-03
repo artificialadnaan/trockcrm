@@ -48,6 +48,17 @@ import { useWalk } from "../useWalk";
 // retained, so mocking the store would test the mock. Only its native bridge is absent here, which is
 // fine — `setStartupConfigureError`/`getStartupConfigureError` are plain module state.
 import { setStartupConfigureError } from "../../wearables/native";
+
+/** A rejection shaped the way React Native delivers `reject(code, message, nil)` from Swift: the code
+ *  on `.code`, the human sentence on `.message`. Anything that reads only one of the two is exactly
+ *  the defect this helper exists to stop a fixture from hiding. */
+function nativeReject(code: string, message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code });
+}
+
+/** Verbatim from WalkthroughRecorder.swift's `guard WearablesBridge.configured` reject — spaces, not
+ *  underscores, which is the whole point. */
+const NOT_CONFIGURED_MESSAGE = "Wearables SDK is not configured. Check Profile's pairing row for the real cause.";
 import {
   isAudioTruncated,
   isVideoTruncated,
@@ -260,7 +271,13 @@ describe("useWalk", () => {
     // reason (a credential, an SDK init failure) sat in a module variable one import away while the
     // estimator was shown a refusal with no remedy in it.
     setStartupConfigureError(new Error("MetaAppID rejected: invalid client token"));
-    mockStartWalk.mockRejectedValue(new Error("walk_not_configured"));
+    // The REAL rejection shape. WalkthroughRecorder.swift calls
+    // `reject("walk_not_configured", "Wearables SDK is not configured. …", nil)`, and React Native puts
+    // the first argument on `err.code` and the second on `err.message`. The first version of this test
+    // built `new Error("walk_not_configured")` — the CODE where the message goes — so it passed against
+    // a check that could never have matched in production. A fixture that cannot fail for the right
+    // reason is the only thing a regression test must not be.
+    mockStartWalk.mockRejectedValue(nativeReject("walk_not_configured", NOT_CONFIGURED_MESSAGE));
     const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {
@@ -268,8 +285,9 @@ describe("useWalk", () => {
     });
 
     // Native's text still LEADS — it names the state. The cause is appended, because it names the fix.
-    expect(result.current.error).toBe("walk_not_configured — MetaAppID rejected: invalid client token");
-    expect(result.current.walk.error).toBe("walk_not_configured — MetaAppID rejected: invalid client token");
+    const expected = `${NOT_CONFIGURED_MESSAGE} — MetaAppID rejected: invalid client token`;
+    expect(result.current.error).toBe(expected);
+    expect(result.current.walk.error).toBe(expected);
   });
 
   it("GUARD: does not staple the startup cause onto an unrelated refusal", async () => {
@@ -277,7 +295,7 @@ describe("useWalk", () => {
     // routing problem — would send the estimator after a launch-time credential for a fault that has
     // nothing to do with it.
     setStartupConfigureError(new Error("MetaAppID rejected: invalid client token"));
-    mockStartWalk.mockRejectedValue(new Error("walk_no_hfp: RB Meta 014K"));
+    mockStartWalk.mockRejectedValue(nativeReject("walk_no_hfp", "walk_no_hfp: RB Meta 014K"));
     const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {

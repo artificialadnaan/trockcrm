@@ -1330,11 +1330,19 @@ export function buildGlassesWalkthroughForwardAlertEmail(input: GlassesWalkthrou
         `if one exists, put its id in payload.scopeWalkthroughId; if none does, remove ` +
         `payload.scopeCreatePendingRef. Only then set status = 'pending' — resetting with the marker ` +
         `still on the row dead-letters it again immediately, and this alert will not be sent twice.`
-      : configProblem || !stoppedEarly
-        ? `The walk itself is safely filed in the project folder — the crew can already see it — but no scope ` +
-          `was ever generated from it.`
-        : `The walk itself is safely filed in the project folder — the crew can already see it. Whether ` +
-          `anything reached TROCK Scope is exactly what this job could not determine; the error below says so.`;
+      : // NEITHER marker, which the pre-create protocol makes conclusive: `scopeCreatePendingRef` is
+        // written BEFORE the request goes out, so its absence alongside an absent id proves no create was
+        // ever sent. That is true whatever the attempt count says, and the previous version only used it
+        // on the exhausted-attempt path. An artifact-widening completion superseding a pre-create
+        // `failed` row lands with attempts below max and no markers at all, so `stoppedEarly` sent the
+        // responder to search TROCK Scope for a walkthrough that was never requested — while the
+        // dead-letter reason on the same row said otherwise.
+        //
+        // `configProblem` no longer participates: it is a claim about WHY the job stopped, and this
+        // sentence is a claim about the REMOTE side. Conflating them is what produced both this bug and
+        // the one before it.
+        `The walk itself is safely filed in the project folder — the crew can already see it — but no scope ` +
+        `was ever generated from it.`;
 
   const subject = `TROCK Scope forward permanently failed — ${input.title}`;
 

@@ -177,6 +177,32 @@ describe("buildGlassesWalkthroughForwardAlertEmail", () => {
     expect(email.text).toContain("Only then set status = 'pending'");
   });
 
+  it("REGRESSION: a marker-free dead letter says nothing was created even when it stopped EARLY", () => {
+    // The mirror of the fix above, and the same conflation one branch over. `scopeCreatePendingRef` is
+    // written BEFORE the create request, so its absence alongside an absent id PROVES no create was
+    // sent — whatever the attempt count says. The previous version only drew that conclusion on the
+    // exhausted-attempt path, so an artifact-widening completion superseding a pre-create `failed` row
+    // (attempts below max, neither marker) was reported as "outcome unknown" and sent the responder to
+    // search TROCK Scope for a walkthrough nobody had ever requested — while the dead-letter reason on
+    // the same row told them the opposite.
+    const email = buildGlassesWalkthroughForwardAlertEmail(
+      baseEmailInput({
+        attempts: 2,
+        maxAttempts: 10,
+        scopeWalkthroughId: null,
+        scopeCreatePendingRef: null,
+        lastError: SUPERSEDED_LAST_ERROR,
+      }),
+    );
+
+    expect(email.text).toContain("no scope was ever generated");
+    expect(email.text).not.toContain("could not determine");
+    expect(email.text).not.toContain("may or may not exist");
+    // And it still must not blame deploy config — that classification is about WHY it stopped, which is
+    // a different question from what exists remotely.
+    expect(email.text).not.toContain("deploy-config problem");
+  });
+
   it("GUARD: a dead letter with neither marker still says plainly that no scope was generated", () => {
     // The other side of the same branch. A forward that exhausted its retries without ever sending a
     // create really did produce nothing, and softening that into "unknown" would send a responder
