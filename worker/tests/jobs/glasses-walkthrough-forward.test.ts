@@ -466,6 +466,58 @@ describe("handleGlassesWalkthroughForward", () => {
     // Nothing per-part can catch it: each range is clamped to the object, so each part is exactly the
     // length it claims, every length check passes, and the multipart is finalized from a PREFIX. The walk
     // reports success, the video stops partway, and TROCK Scope bills a transcription of the fragment.
+    it("REGRESSION: refuses an absurd part count BEFORE allocating the part list", async () => {
+      // The coverage rule below only rejects a plan that is too SMALL, so a corrupt-but-positive count
+      // sailed through it — `partSize × partCount` covers the artifact many times over. `uploadClip` then
+      // opens with `Array.from({ length: partCount })`, so the allocation happens before the per-part
+      // "begins at or past EOF" check that was supposed to catch a wrong count. At a large enough value
+      // that line exhausts the worker's heap, and the guard is downstream of the thing it guards against.
+      //
+      // 100 million parts of 1KiB for a 1.5KiB artifact: absurd, positive, and comfortably "covering".
+      const db = makeDb();
+      const { fetchImpl, calls } = makeScopeFetch({
+        beginBody: { clipId: "clip-1", uploadId: "u", sequence: 1, partSize: 1024, partCount: 100_000_000 },
+      });
+
+      await expect(
+        handleGlassesWalkthroughForward(
+          makePayload({
+            scopeWalkthroughId: "already-created",
+            artifacts: [{ ...makePayload().artifacts[0], fileSizeBytes: 1500 }],
+          }),
+          "office-1",
+          { db, fetchImpl: fetchImpl as any, baseUrl: SCOPE_BASE_URL, token: "t", downloadRange: makeDownloadRange() }
+        )
+      ).rejects.toThrow(/more than the 2 any plan for this object could need/);
+
+      expect(calls.some((c) => /\/parts$/.test(c.url))).toBe(false);
+      expect(calls.some((c) => /\/complete$/.test(c.url))).toBe(false);
+    });
+
+    it("GUARD: accepts the ordinary plan whose final part is short", async () => {
+      // The bound must not narrow past the normal case: an artifact that is not an exact multiple of
+      // partSize needs exactly ceil(size/partSize) parts, the last of them short. 1500 bytes at 1024 is
+      // two parts — 0-1023 and 1024-1499 — and a bound that rejected this would fail every ordinary walk.
+      //
+      // This test is also what caught the first draft of the bound, which allowed ceil + 1 "for the short
+      // final part" and thereby admitted a third part starting at byte 2048, past EOF.
+      const db = makeDb();
+      const { fetchImpl, calls } = makeScopeFetch({
+        beginBody: { clipId: "clip-1", uploadId: "u", sequence: 1, partSize: 1024, partCount: 2 },
+      });
+
+      await handleGlassesWalkthroughForward(
+        makePayload({
+          scopeWalkthroughId: "already-created",
+          artifacts: [{ ...makePayload().artifacts[0], fileSizeBytes: 1500 }],
+        }),
+        "office-1",
+        { db, fetchImpl: fetchImpl as any, baseUrl: SCOPE_BASE_URL, token: "t", downloadRange: makeDownloadRange() }
+      );
+
+      expect(calls.some((c) => /\/complete$/.test(c.url))).toBe(true);
+    });
+
     it("rejects a plan that covers only a PREFIX of the artifact, instead of finalizing it truncated", async () => {
       // The reviewer's case at toy scale: one part for an artifact that needs two (32MiB × 1 for 40MiB).
       const db = makeDb();
@@ -749,6 +801,14 @@ describe("handleGlassesWalkthroughForward", () => {
       // partCount 2 over a 1024-byte object whose partSize is 1024: part 2 starts exactly at EOF, so its
       // range covers nothing. An empty range that "matches" an empty read is the one way a zero-byte PUT
       // would still slip past a pure length comparison, so the plan is checked on its own terms.
+      //
+      // The REJECTION MOVED EARLIER, and the message with it. The heap-exhaustion bound added above
+      // refuses any count beyond ceil(size/partSize) before the part list is allocated, and this plan
+      // (2 parts where 1 covers the object) is exactly such a count — so it is now caught at the plan,
+      // not per-part. The property this test exists for is unchanged and still asserted below: the plan
+      // is refused and NOTHING moves. The per-part overshoot check it used to reach is retained as
+      // defence in depth — `uploadClip` derives each range itself, so a future change to that derivation
+      // must still not be able to PUT an empty part.
       const db = makeDb();
       const { fetchImpl, calls } = makeScopeFetch({
         beginBody: { clipId: "clip-1", uploadId: "u", sequence: 1, partSize: 1024, partCount: 2 },
@@ -765,7 +825,7 @@ describe("handleGlassesWalkthroughForward", () => {
           token: "t",
           downloadRange,
         })
-      ).rejects.toThrow(/outside the 1024-byte object/);
+      ).rejects.toThrow(/more than the 1 any plan for this object could need/);
 
       expect(calls.some((c) => /\/complete$/.test(c.url))).toBe(false);
     });

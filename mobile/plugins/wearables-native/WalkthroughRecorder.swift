@@ -79,6 +79,19 @@ final class WalkthroughRecorder: RCTEventEmitter {
   private var walkDirectoryStorage: URL?
   private var stillIndexStorage = 0
 
+  /// Stills whose JPEG is actually ON DISK — distinct from `stillIndexStorage`, which only allocates
+  /// unique filenames and counts requests that reached the directory whether or not their write
+  /// succeeded.
+  ///
+  /// `endWalk` decides keep-or-discard from THIS, not from the index. The two diverge exactly when a
+  /// write fails, and the likeliest reason a write fails is exhausted storage — which is also the
+  /// likeliest reason the video's finalize fails, so the two arrive together. Reading the index there
+  /// meant `stills > 0` was true with nothing usable on disk: the directory was kept, the recovery
+  /// scan refused its unfinalized walk.mp4 and found no still to offer beside it, and a possibly
+  /// multi-gigabyte folder stayed on the device permanently, invisible to every path that could have
+  /// cleaned it up. On a phone whose storage is the reason walks are deleted after upload at all.
+  private var stillsWrittenStorage = 0
+
   /// Stills that `capturePhoto` ACCEPTED but whose image has not come back on `photoDataPublisher`
   /// yet. `endWalk` waits on this before teardown: tapping Capture and immediately confirming End
   /// walk is a completely ordinary sequence, and without the wait the photo the UI already told the
@@ -151,6 +164,7 @@ final class WalkthroughRecorder: RCTEventEmitter {
       walkActive = true
       walkDirectoryStorage = nil
       stillIndexStorage = 0
+      stillsWrittenStorage = 0
       // A previous walk that ended while a still was genuinely lost leaves this non-zero; without
       // the reset THIS walk's endWalk would wait out its whole deadline for that dead request.
       stillsInFlightStorage = 0
@@ -179,6 +193,7 @@ final class WalkthroughRecorder: RCTEventEmitter {
 
   /// How many stills have been written for the current walk. Reported by `endWalk`.
   private var stillIndex: Int { walkStateQueue.sync { stillIndexStorage } }
+  private var stillsWritten: Int { walkStateQueue.sync { stillsWrittenStorage } }
 
   // MARK: - Start
 
@@ -512,11 +527,18 @@ final class WalkthroughRecorder: RCTEventEmitter {
   /// nobody is watching any more.
   private func deliverStill(_ photo: PhotoData) {
     let target: URL? = walkStateQueue.sync { () -> URL? in
-      stillsInFlightStorage = max(0, stillsInFlightStorage - 1)
       guard let dir = walkDirectoryStorage else { return nil }
       stillIndexStorage += 1
       return dir.appendingPathComponent(String(format: "still-%03d.jpg", stillIndexStorage))
     }
+    // Released only when this request can no longer produce a manifest entry — after the write AND
+    // the event, or on any early return. It used to be released at the TOP of this function, which
+    // made `awaitPendingStills` observe zero while the write was still running: `endWalk` resolved,
+    // the JS reducer went terminal, and the `walkthrough:still` event that arrived a moment later was
+    // ignored by a reducer that had stopped listening. The JPEG existed in the directory, was absent
+    // from the upload manifest, and was deleted by cleanup without ever being filed — the one
+    // sequence (Capture, then immediately End) this wait exists to protect.
+    defer { walkStateQueue.sync { stillsInFlightStorage = max(0, stillsInFlightStorage - 1) } }
     guard let url = target else { return }
     do {
       try photo.data.write(to: url)
@@ -527,6 +549,8 @@ final class WalkthroughRecorder: RCTEventEmitter {
       }
       return
     }
+    // Counted only now, with the bytes genuinely on disk. See `stillsWrittenStorage`.
+    walkStateQueue.sync { stillsWrittenStorage += 1 }
     if hasListeners {
       sendEvent(withName: "walkthrough:still",
                 body: ["uri": url.absoluteString, "bytes": photo.data.count, "source": "glasses"])
@@ -576,7 +600,7 @@ final class WalkthroughRecorder: RCTEventEmitter {
       // Read after the wait, not before it: a still that lands during the window above is part of
       // this walk, and reporting the pre-wait count would undercount exactly the photo this wait
       // exists to save.
-      let stills = stillIndex
+      let stills = stillsWritten
       let finalized: Bool
       if case .success = result { finalized = true } else { finalized = false }
       // `.keep`, and this is the one call site where that is true. Everything in

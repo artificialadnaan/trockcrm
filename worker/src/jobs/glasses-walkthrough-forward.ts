@@ -510,6 +510,33 @@ async function beginClip(deps: ScopeDeps, walkthroughId: string, artifact: JobAr
   // Thrown, not `deadJob(...)`: TROCK Scope re-derives this plan from the size we declare on every
   // begin-clip, so the next attempt gets a fresh one — this belongs on the retry schedule, not in the
   // permanent lane.
+  // OVERSHOOT is bounded HERE, before the count is used to allocate anything, and that ordering is the
+  // point rather than a detail. `uploadClip` opens with `Array.from({ length: begin.partCount })`, so a
+  // corrupt-but-positive count — a billion parts — exhausts the worker's heap on that line, long before
+  // the per-part "this part begins at or past EOF" check the comment above defers to could ever run. The
+  // guard that was supposed to catch a wrong count sat downstream of the allocation the wrong count kills
+  // the process with.
+  //
+  // The bound is derived, not a constant, and it is EXACT: `ceil(fileSizeBytes / partSize)` already
+  // includes the short final part, so a plan needing more than that is one whose extra parts all begin at
+  // or past EOF. An earlier draft of this allowed one spare "for the short final chunk" — double-counting
+  // it — and its own guard test caught that: 3 × 1024 for a 1500-byte artifact puts part 3 at byte 2048,
+  // which the per-part check below rejects anyway. An allowance that only ever admits plans guaranteed to
+  // fail one step later is not slack, it is a second bug wearing the first one's clothes.
+  //
+  // Derived rather than a magic ceiling so it does not need re-tuning when TROCK Scope's PART_SIZE_BYTES
+  // moves, and so it keeps the same arithmetic shape as the coverage rule below.
+  const maxUsableParts = Math.ceil(artifact.fileSizeBytes / partSize);
+  if (partCount > maxUsableParts) {
+    throw new Error(
+      `TROCK Scope's part plan for clip ${clipId} (artifact ${artifact.idempotencyKey}) declares ` +
+        `${partCount} parts of ${partSize} bytes for an artifact of ${artifact.fileSizeBytes} bytes, which ` +
+        `is more than the ${maxUsableParts} any plan for this object could need. Refused before allocating ` +
+        `the part list, because a large enough count exhausts this process's heap before any per-part ` +
+        `check can run.`
+    );
+  }
+
   const plannedBytes = partSize * partCount;
   if (plannedBytes < artifact.fileSizeBytes) {
     throw new Error(
