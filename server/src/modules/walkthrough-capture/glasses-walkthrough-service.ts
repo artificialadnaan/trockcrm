@@ -1115,7 +1115,22 @@ async function recordPendingArtifactsOnRunningForwardJob(
     .where(
       and(
         eq(jobQueue.id, jobId),
-        sql`${jobQueue.status} NOT IN ('pending', 'completed', 'dead')`
+        sql`${jobQueue.status} NOT IN ('pending', 'completed', 'dead')`,
+        // The handler's reconciliation has NOT already run. `status = 'processing'` is true for a
+        // window after `supersedeSelfForPendingArtifacts` folds the pending set in and before the
+        // queue's separate terminal write lands — and a completion arriving inside that window used
+        // to be accepted, writing a NEW pendingArtifacts set that the handler had already stopped
+        // looking at. It answered success, so mobile stopped retrying; the handler dead-lettered
+        // carrying the EARLIER list; and the late clips were forwarded by nobody. Worse, the dead
+        // row's `alertSent` suppresses a second alert, so requeuing once folds the late set, dead-
+        // letters again, and says nothing.
+        //
+        // `reconciliationClosed` is written by that same fold, in the same statement, so there is no
+        // window between clearing the pending set and becoming unmatchable here. A completion that
+        // arrives after it falls through to the 503 below — which is correct rather than a loss:
+        // mobile retries, by then the row is dead, and the retry takes the dead-row replacement path
+        // with the complete list.
+        sql`NOT (${jobQueue.payload} ? 'reconciliationClosed')`
       )
     )
     .returning({ id: jobQueue.id });
@@ -1637,6 +1652,41 @@ export async function ingestGlassesWalkthrough(
 
   const enqueuedId = jobRows[0]?.id;
   if (enqueuedId != null) {
+    // The dead row this replacement inherited from is now SUPERSEDED, and must stop alerting.
+    //
+    // The dead-letter sweep selects every dead row whose `alertSent` is unset, without asking whether
+    // anything took its place — so a mobile retry that reached the dead row before the minute-based
+    // sweep still produced a permanent-failure alert, even though the replacement was already pending
+    // or running. The alert's own instruction ("set this row's status back to 'pending'") then could
+    // not be followed: doing so collides with 0213's live partial unique index, because the successor
+    // holds that slot. An operator was being paged about a walk that was already being forwarded, and
+    // handed a remedy the database refuses.
+    //
+    // Recorded as `supersededByJobId` rather than just setting `alertSent`, because the two mean
+    // different things to whoever reads the row later: "somebody has been told" versus "this row's
+    // work is being done by job N". Written only when a replacement really was inserted — the
+    // lost-race path below deliberately leaves the source alone, since it enqueued nothing.
+    //
+    // Matched on the WALK, not on `knownJobState.jobId`. That lookup deliberately returns a dead row
+    // only when it carries a checkpoint worth inheriting, so keying off it would stamp exactly the
+    // minority of dead rows and leave every checkpoint-less predecessor — the common case, a forward
+    // that died before it ever reached TROCK Scope — alerting as though nothing had replaced it.
+    // Every dead row for this pair is superseded by this job, whether or not it had anything to hand
+    // over.
+    await tenantDb
+      .update(jobQueue)
+      .set({
+        payload: sql`jsonb_set(${jobQueue.payload}, '{supersededByJobId}', to_jsonb(${Number(enqueuedId)}::bigint), true)`,
+      })
+      .where(
+        and(
+          eq(jobQueue.jobType, GLASSES_WALKTHROUGH_FORWARD_JOB),
+          eq(jobQueue.status, "dead"),
+          sql`${jobQueue.payload} ->> 'walkId' = ${input.walkId}`,
+          sql`${jobQueue.payload} ->> 'dealId' = ${input.dealId}`,
+          sql`NOT (${jobQueue.payload} ? 'supersededByJobId')`
+        )
+      );
     return { walkId: input.walkId, files: fileResults, forwarding: { status: "queued", jobId: Number(enqueuedId) } };
   }
 

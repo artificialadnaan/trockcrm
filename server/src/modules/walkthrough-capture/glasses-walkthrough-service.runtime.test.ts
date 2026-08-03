@@ -1166,6 +1166,77 @@ describe("ingestGlassesWalkthrough — a retry that ADDS artifacts to a live for
     expect(keysOf(job)).toEqual(["artifact-1", "artifact-2"]);
   });
 
+  it("REGRESSION: refuses a completion that arrives AFTER the handler's reconciliation, instead of orphaning a second pending set", async () => {
+    // `status = 'processing'` stays true for a window after the handler folds `pendingArtifacts` in
+    // and before the queue's separate terminal write lands. A completion arriving inside it used to
+    // be accepted and write a NEW pending set the handler had already stopped looking at — it
+    // answered success so mobile stopped retrying, the handler dead-lettered carrying the EARLIER
+    // list, and the late clips were forwarded by nobody. The dead row's `alertSent` then suppressed
+    // a second alert, so even requeuing once would fold the late set, dead-letter again, and say
+    // nothing.
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(2) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+    await claimJobForTest(first.forwarding.jobId);
+    // The handler has folded and closed: pendingArtifacts gone, marker set, row still 'processing'
+    // because the queue's terminal write is a separate statement.
+    await tenantDb
+      .update(jobQueue)
+      .set({
+        payload: sql`(${jobQueue.payload} - 'pendingArtifacts') || '{"reconciliationClosed": true}'::jsonb`,
+      })
+      .where(eq(jobQueue.id, first.forwarding.jobId));
+
+    await expect(
+      ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(3) }), {
+        artifactStore: healthyStore({ head: async () => ({}) }),
+      }),
+    ).rejects.toMatchObject({ statusCode: 503 });
+
+    // No orphaned second pending set — the retry the 503 asks for lands on the dead row and takes
+    // the replacement path with the complete list.
+    const job = await readJob(first.forwarding.jobId);
+    expect(job.payload.pendingArtifacts).toBeUndefined();
+  });
+
+  it("REGRESSION: a dead row that has been REPLACED stops alerting, and says which job replaced it", async () => {
+    // The dead-letter sweep selects every dead row whose `alertSent` is unset, without asking whether
+    // anything took its place. A mobile retry reaching the dead row before the minute-based sweep
+    // enqueues a successor carrying the full list and the inherited checkpoint — and the operator was
+    // paged anyway, about a walk already being forwarded, with an instruction (reset this row to
+    // 'pending') that 0213's live partial unique index refuses because the successor holds the slot.
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(2) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+    await tenantDb
+      .update(jobQueue)
+      .set({ status: "dead", lastError: "forward failed" })
+      .where(eq(jobQueue.id, first.forwarding.jobId));
+
+    const replacement = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(3) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+    expect(replacement.forwarding.status).toBe("queued");
+
+    const source = await readJob(first.forwarding.jobId);
+    expect(source.status).toBe("dead"); // still dead — the history is not rewritten
+    expect(Number(source.payload.supersededByJobId)).toBe(replacement.forwarding.jobId);
+  });
+
+  it("GUARD: a dead row with no replacement keeps no supersede marker, so it still alerts", async () => {
+    // The other side of the same predicate. A fix that stamped every dead row would silence the
+    // alert this sweep exists to send.
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(2) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+    await tenantDb
+      .update(jobQueue)
+      .set({ status: "dead", lastError: "forward failed" })
+      .where(eq(jobQueue.id, first.forwarding.jobId));
+
+    expect((await readJob(first.forwarding.jobId)).payload.supersededByJobId).toBeUndefined();
+  });
+
   it("REGRESSION: a replacement cannot be inserted beside a claimed forward that grew mid-flight", async () => {
     // The consequence the branch above exists to prevent, asserted directly rather than inferred from the
     // row's status: after a widening completion against a claimed job, the pair still has exactly ONE live

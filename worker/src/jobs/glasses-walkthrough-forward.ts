@@ -958,6 +958,7 @@ async function supersedeSelfForPendingArtifacts(
               ),
               true
             ) - 'pendingArtifacts'
+            || '{"reconciliationClosed": true}'::jsonb
       WHERE job_type = $1
         AND payload ->> 'walkId' = $2
         AND payload ->> 'dealId' = $3
@@ -1360,6 +1361,13 @@ export async function runGlassesWalkthroughForwardDeadLetterSweep(
         WHERE status = 'dead'
           AND job_type = 'glasses_walkthrough_forward'
           AND (payload->>'alertSent' IS NULL OR payload->>'alertSent' IN ('false', 'claimed'))
+          -- Not already replaced. A mobile completion retry that reaches a dead row enqueues a
+          -- successor carrying the complete artifact list and the inherited checkpoint, and stamps
+          -- this row with its id. Alerting on it anyway pages an operator about a walk that is
+          -- already being forwarded — and the alert's own instruction, reset the row to 'pending',
+          -- collides with 0213's live partial unique index, because the successor holds that slot.
+          -- So the remedy could not be followed even by someone who wanted to.
+          AND NOT (payload ? 'supersededByJobId')
         ORDER BY id ASC
         LIMIT $1
         FOR UPDATE SKIP LOCKED`,
@@ -1378,6 +1386,7 @@ export async function runGlassesWalkthroughForwardDeadLetterSweep(
             WHERE id = $1
               AND status = 'dead'
               AND (payload->>'alertSent' IS NULL OR payload->>'alertSent' IN ('false', 'claimed'))
+              AND NOT (payload ? 'supersededByJobId')
             FOR UPDATE SKIP LOCKED`,
           [job.id]
         );
