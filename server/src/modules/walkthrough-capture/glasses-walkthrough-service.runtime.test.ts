@@ -1199,6 +1199,47 @@ describe("ingestGlassesWalkthrough — a retry that ADDS artifacts to a live for
     expect(job.payload.pendingArtifacts).toBeUndefined();
   });
 
+  it("REGRESSION: inherits a dead predecessor's pendingArtifacts too, not only the list it was delivering", async () => {
+    // `pendingArtifacts` is the widened list a completion recorded BESIDE a delivery that was still
+    // running. The handler folds it into `artifacts` only if it reaches supersedeSelfForPending-
+    // Artifacts — a handler that exhausts its attempts first never gets there, and the queue marks the
+    // row dead with the two keys still separate.
+    //
+    // Reading only `artifacts` therefore inherited exactly what the dead attempt was carrying and
+    // dropped what a later completion had already filed. And `supersededByJobId` then suppresses that
+    // row's alert, so the shortfall reached nobody. This is the same defect the predecessor loader was
+    // written to fix, one key over: it read the predecessor independently of its CHECKPOINT, and then
+    // read only one of its two artifact lists.
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(2) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+    // Died with a widening recorded but never folded — attempts exhausted before the handler finished.
+    await tenantDb
+      .update(jobQueue)
+      .set({
+        status: "dead",
+        lastError: "attempts exhausted before reconciliation",
+        payload: sql`jsonb_set(${jobQueue.payload}, '{pendingArtifacts}', ${JSON.stringify(
+          [1, 2, 3].map((n) => ({ idempotencyKey: `artifact-${n}` })),
+        )}::jsonb, true)`,
+      })
+      .where(eq(jobQueue.id, first.forwarding.jobId));
+
+    // The recovered retry carries only what its directory scan found.
+    const replacement = await ingestGlassesWalkthrough(
+      tenantDb,
+      baseInput({ artifacts: [photoArtifact(2)] }),
+      { artifactStore: healthyStore({ head: async () => ({}) }) },
+    );
+
+    expect(replacement.forwarding.status).toBe("queued");
+    expect(keysOf(await readJob(replacement.forwarding.jobId))).toEqual([
+      "artifact-1",
+      "artifact-2",
+      "artifact-3",
+    ]);
+  });
+
   it("REGRESSION: a `failed` predecessor is superseded, not parked as though a handler were still running", async () => {
     // `job_status` is an enum containing `failed` (0001_initial.sql:17). This queue's own transitions
     // never write it, but it is schema-valid and reachable by another actor — and the catch-all here

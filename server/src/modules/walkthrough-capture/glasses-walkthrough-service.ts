@@ -981,6 +981,100 @@ async function amendPendingGlassesWalkthroughForwardArtifacts(
   return updated.length > 0;
 }
 
+
+/**
+ * Widen an ALREADY-LIVE forward so it carries `incoming` too, choosing the write by what the row's
+ * current state can actually observe. The one place this decision is made.
+ *
+ * Extracted because there are two callers, and they were not obviously the same problem. The second is
+ * the LOSER of the enqueue race: its `ON CONFLICT DO NOTHING` matched nothing, but its `files` rows are
+ * already committed, so the artifacts it filed are real and belong on the winner's job. It used to
+ * return `already_queued` without merging anything — mobile then marked the walk complete and deleted
+ * its local media, and those clips reached TROCK Scope from nobody. Two completions that overlap and
+ * carry DIFFERENT new artifacts is exactly the retry mobile makes when its first response times out in
+ * flight, so this is the ordinary path, not an exotic one.
+ *
+ * Duplicating the three-way flow at the second call site would have been smaller and wrong: every round
+ * of review on this seam has moved one of these branches, and a copy would have silently stopped
+ * agreeing with the original.
+ */
+async function widenLiveForwardArtifacts(
+  tenantDb: TenantDb,
+  jobState: NonNullable<Awaited<ReturnType<typeof findGlassesWalkthroughForwardJobState>>>,
+  incoming: GlassesWalkthroughForwardArtifact[],
+  input: { walkId: string; dealId: string }
+): Promise<GlassesWalkthroughForwardingResult> {
+  // A live forward job is not proof the forward covers this walk, and treating it as one is how a walk
+  // reaches TROCK Scope short. Mobile completes with whatever it has PUT and retries the whole call
+  // later, and the artifact set it sends can GROW between attempts — most plainly when a walk is
+  // recovered from its on-disk directory, whose stills the first manifest never listed. The `files` rows
+  // for those extras land on the retry; the forward's payload used to stay frozen at the first call's
+  // set, so the scope was extracted from a partial walk while the 201, the project folder and the queue
+  // all reported a complete one. Nothing downstream can detect a missing clip — TROCK Scope only ever
+  // sees what it is handed.
+  const carriedKeys = new Set(jobState.artifacts.map((artifact) => artifact.idempotencyKey));
+  const missing = incoming.filter((artifact) => !carriedKeys.has(artifact.idempotencyKey));
+
+  if (missing.length === 0) {
+    // The ordinary duplicate: nothing new was filed, so this stays a pure read. Rewriting the payload on
+    // every retry would put a write in the path of the most common request there is, against a row a
+    // worker may be mid-checkpoint on, to change nothing.
+    return { status: "already_queued", jobId: jobState.jobId };
+  }
+
+  // A UNION with what the row already holds, never this call's list written over it. The two are not the
+  // same set: a recovered walk's manifest is assembled from a directory scan, not from the queue entry
+  // that completed first, so it can legitimately OMIT an artifact the job is already scheduled to
+  // forward. Overwriting would delete that clip from the forward — the same silent shortfall this branch
+  // exists to close, pointed the other way. Existing entries are carried through VERBATIM, because a
+  // worker or a reconciling human may have edited them and this call has no better information.
+  const unionArtifacts = [...jobState.artifacts, ...missing];
+
+  if (await amendPendingGlassesWalkthroughForwardArtifacts(tenantDb, jobState.jobId, unionArtifacts)) {
+    return { status: "artifacts_added", jobId: jobState.jobId };
+  }
+
+  // Not pending. Two very different cases hide behind that, and conflating them was the defect: a
+  // FINISHED row can be superseded safely because nothing is using it, whereas a row being WORKED
+  // right now must keep its claim and its place in the live unique index until its handler stops —
+  // otherwise a replacement can be inserted alongside a delivery that is still uploading. Finished
+  // first, and the running case falls through to the branch below.
+  if (
+    await supersedeUnamendableGlassesWalkthroughForwardJob(
+      tenantDb,
+      jobState.jobId,
+      unionArtifacts,
+      buildSupersededForwardDeadLetterMessage({
+        walkId: input.walkId,
+        dealId: input.dealId,
+        jobStatus: jobState.status,
+        missingKeys: missing.map((artifact) => artifact.idempotencyKey),
+        scopeWalkthroughId: jobState.scopeWalkthroughId,
+      })
+    )
+  ) {
+    return { status: "superseded_for_reconciliation", jobId: jobState.jobId };
+  }
+
+  // Being worked right now. The list is recorded BESIDE the one the handler is delivering and nothing
+  // else is touched — see recordPendingArtifactsOnRunningForwardJob. The handler reads it back when it
+  // finishes and dead-letters itself carrying the union, so the reconciliation still happens, at the one
+  // moment it cannot race the delivery.
+  if (await recordPendingArtifactsOnRunningForwardJob(tenantDb, jobState.jobId, unionArtifacts)) {
+    return { status: "reconciliation_pending", jobId: jobState.jobId };
+  }
+
+  // No write matched: the row dead-lettered on its own between the lookup and here. That is the
+  // replacement path below, not this branch — but re-deriving the inheritance from a second lookup
+  // inside this branch would duplicate it, so the caller retries into the ordinary path instead. 503 for
+  // the same reason the lost-race case at the end of this function is: the next attempt is expected to
+  // succeed, and mobile already treats a failed completion as retryable.
+  throw new AppError(
+    503,
+    `Forwarding for walk ${input.walkId} changed state while this completion was filing its artifacts. Retry.`
+  );
+}
+
 /**
  * Every artifact any DEAD forward for this walk was carrying, oldest row first, deduped.
  *
@@ -1000,7 +1094,21 @@ async function loadDeadPredecessorArtifacts(
 ): Promise<GlassesWalkthroughForwardArtifact[]> {
   const rows = await tenantDb
     .select({
-      artifacts: sql<GlassesWalkthroughForwardArtifact[]>`COALESCE(${jobQueue.payload} -> 'artifacts', '[]'::jsonb)`,
+      // BOTH keys, concatenated in the row's own order. `pendingArtifacts` is not a duplicate of
+      // `artifacts` — it is the widened list a completion recorded beside a delivery that was still
+      // running, and the handler folds it in only if it reaches `supersedeSelfForPendingArtifacts`.
+      // A handler that exhausts its attempts first never gets there, and the queue marks the row dead
+      // with the two keys still separate. Reading `artifacts` alone therefore inherits exactly the
+      // clips the dead attempt was carrying and drops the ones a later completion had already filed
+      // — and last round's `supersededByJobId` stamp then suppresses that row's alert, so the
+      // shortfall reaches nobody.
+      //
+      // This is the same defect this function was written to fix, one key over: the fix read the
+      // predecessor independently of its CHECKPOINT and then read only one of its two artifact
+      // lists.
+      artifacts: sql<GlassesWalkthroughForwardArtifact[]>`
+        COALESCE(${jobQueue.payload} -> 'artifacts', '[]'::jsonb)
+          || COALESCE(${jobQueue.payload} -> 'pendingArtifacts', '[]'::jsonb)`,
     })
     .from(jobQueue)
     .where(
@@ -1544,88 +1652,12 @@ export async function ingestGlassesWalkthrough(
     // A live forward job is not proof the forward covers this walk, and treating it as one is how a walk
     // reaches TROCK Scope short. Mobile completes with whatever it has PUT and retries the whole call
     // later, and the artifact set it sends can GROW between attempts — most plainly when a walk is
-    // recovered from its on-disk directory, whose stills the first manifest never listed. The `files` rows
-    // for those extras land on the retry; the forward's payload used to stay frozen at the first call's
-    // set, so the scope was extracted from a partial walk while the 201, the project folder and the queue
-    // all reported a complete one. Nothing downstream can detect a missing clip — TROCK Scope only ever
-    // sees what it is handed.
-    const carriedKeys = new Set(knownJobState.artifacts.map((artifact) => artifact.idempotencyKey));
-    const missing = forwardArtifacts.filter((artifact) => !carriedKeys.has(artifact.idempotencyKey));
-
-    if (missing.length === 0) {
-      // The ordinary duplicate: nothing new was filed, so this stays a pure read. Rewriting the payload on
-      // every retry would put a write in the path of the most common request there is, against a row a
-      // worker may be mid-checkpoint on, to change nothing.
-      return {
-        walkId: input.walkId,
-        files: fileResults,
-        forwarding: { status: "already_queued", jobId: knownJobState.jobId },
-      };
-    }
-
-    // A UNION with what the row already holds, never this call's list written over it. The two are not the
-    // same set: a recovered walk's manifest is assembled from a directory scan, not from the queue entry
-    // that completed first, so it can legitimately OMIT an artifact the job is already scheduled to
-    // forward. Overwriting would delete that clip from the forward — the same silent shortfall this branch
-    // exists to close, pointed the other way. Existing entries are carried through VERBATIM, because a
-    // worker or a reconciling human may have edited them and this call has no better information.
-    const unionArtifacts = [...knownJobState.artifacts, ...missing];
-
-    if (await amendPendingGlassesWalkthroughForwardArtifacts(tenantDb, knownJobState.jobId, unionArtifacts)) {
-      return {
-        walkId: input.walkId,
-        files: fileResults,
-        forwarding: { status: "artifacts_added", jobId: knownJobState.jobId },
-      };
-    }
-
-    // Not pending. Two very different cases hide behind that, and conflating them was the defect: a
-    // FINISHED row can be superseded safely because nothing is using it, whereas a row being WORKED
-    // right now must keep its claim and its place in the live unique index until its handler stops —
-    // otherwise a replacement can be inserted alongside a delivery that is still uploading. Finished
-    // first, and the running case falls through to the branch below.
-    if (
-      await supersedeUnamendableGlassesWalkthroughForwardJob(
-        tenantDb,
-        knownJobState.jobId,
-        unionArtifacts,
-        buildSupersededForwardDeadLetterMessage({
-          walkId: input.walkId,
-          dealId: input.dealId,
-          jobStatus: knownJobState.status,
-          missingKeys: missing.map((artifact) => artifact.idempotencyKey),
-          scopeWalkthroughId: knownJobState.scopeWalkthroughId,
-        })
-      )
-    ) {
-      return {
-        walkId: input.walkId,
-        files: fileResults,
-        forwarding: { status: "superseded_for_reconciliation", jobId: knownJobState.jobId },
-      };
-    }
-
-    // Being worked right now. The list is recorded BESIDE the one the handler is delivering and nothing
-    // else is touched — see recordPendingArtifactsOnRunningForwardJob. The handler reads it back when it
-    // finishes and dead-letters itself carrying the union, so the reconciliation still happens, at the one
-    // moment it cannot race the delivery.
-    if (await recordPendingArtifactsOnRunningForwardJob(tenantDb, knownJobState.jobId, unionArtifacts)) {
-      return {
-        walkId: input.walkId,
-        files: fileResults,
-        forwarding: { status: "reconciliation_pending", jobId: knownJobState.jobId },
-      };
-    }
-
-    // No write matched: the row dead-lettered on its own between the lookup and here. That is the
-    // replacement path below, not this branch — but re-deriving the inheritance from a second lookup
-    // inside this branch would duplicate it, so the caller retries into the ordinary path instead. 503 for
-    // the same reason the lost-race case at the end of this function is: the next attempt is expected to
-    // succeed, and mobile already treats a failed completion as retryable.
-    throw new AppError(
-      503,
-      `Forwarding for walk ${input.walkId} changed state while this completion was filing its artifacts. Retry.`
-    );
+    // recovered from its on-disk directory, whose stills the first manifest never listed.
+    return {
+      walkId: input.walkId,
+      files: fileResults,
+      forwarding: await widenLiveForwardArtifacts(tenantDb, knownJobState, forwardArtifacts, input),
+    };
   }
 
   // Read before the payload is built, and unconditionally: whether a predecessor is worth inheriting
@@ -1779,7 +1811,21 @@ export async function ingestGlassesWalkthrough(
       `Could not schedule forwarding for walk ${input.walkId}; a concurrent completion is in flight. Retry.`
     );
   }
-  return { walkId: input.walkId, files: fileResults, forwarding: { status: "already_queued", jobId: winner.jobId } };
+  // The loser's artifacts are REAL and already committed — its `files` rows landed before the insert it
+  // lost. Answering `already_queued` and stopping there dropped them: two completions that overlap and
+  // carry DIFFERENT new artifacts is exactly mobile's retry after its first response times out in flight,
+  // so only the winner's list reached the job, mobile marked the walk complete on our 201 and deleted its
+  // local media, and those clips reached TROCK Scope from nobody. Nothing downstream could notice — TROCK
+  // Scope only ever sees what it is handed.
+  //
+  // Widened through the SAME status-safe flow the ordinary live path uses, rather than a second copy of
+  // it: every round of review on this seam has moved one of those branches, and a copy would have quietly
+  // stopped agreeing.
+  return {
+    walkId: input.walkId,
+    files: fileResults,
+    forwarding: await widenLiveForwardArtifacts(tenantDb, winner, forwardArtifacts, input),
+  };
 }
 
 /** Test/UUID-shape helper exported for the mobile-contract report and validation tests; not applied as
