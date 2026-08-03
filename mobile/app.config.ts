@@ -34,13 +34,17 @@ const IS_PRODUCTION_BUILD = process.env.EAS_BUILD_PROFILE === "production";
 // cannot be loaded — it makes `expo config` exit non-zero with no output at all.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { assertProductionBuildEnv } = require("./plugins/assert-production-build-env") as {
-  assertProductionBuildEnv: (env: NodeJS.ProcessEnv, isProductionBuild: boolean) => void;
+  assertProductionBuildEnv: (env: NodeJS.ProcessEnv) => void;
 };
 
 // Fails the BUILD rather than shipping one that installs and cannot reach the CRM. The Meta
 // credentials are already treated this way below (`requireRegisteredMetaApp`); this is the same
 // rule for the API host, which is the other half of what a production build has to be told.
-assertProductionBuildEnv(process.env, IS_PRODUCTION_BUILD);
+//
+// It decides for itself whether it is on the builder: EAS evaluates this file LOCALLY too, where
+// a secret-visibility variable does not exist, so asserting there would abort every production
+// build on the laptop that started it.
+assertProductionBuildEnv(process.env);
 
 export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
