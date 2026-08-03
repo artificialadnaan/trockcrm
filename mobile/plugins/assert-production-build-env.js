@@ -32,10 +32,7 @@ const PRIVATE_HOST_PATTERNS = [
   /\.local$/i,
 ];
 
-export function assertProductionBuildEnv(
-  env: NodeJS.ProcessEnv,
-  isProductionBuild: boolean
-): void {
+function assertProductionBuildEnv(env, isProductionBuild) {
   if (!isProductionBuild) return;
 
   const raw = env.EXPO_PUBLIC_API_BASE_URL?.trim() ?? "";
@@ -48,8 +45,8 @@ export function assertProductionBuildEnv(
     );
   }
 
-  let host: string;
-  let protocol: string;
+  let host;
+  let protocol;
   try {
     const url = new URL(raw);
     host = url.hostname;
@@ -77,3 +74,9 @@ export function assertProductionBuildEnv(
     );
   }
 }
+
+// CommonJS, and a `.js`, to match `withWearablesDat.js`. `app.config.ts` is transpiled by Expo's
+// config loader, but the modules it imports are required by Node as-is — so a `.ts` sibling cannot
+// be loaded at all, and importing one makes `expo config` exit non-zero with no output, which is
+// exactly as much explanation as a failing build would have given.
+module.exports.assertProductionBuildEnv = assertProductionBuildEnv;

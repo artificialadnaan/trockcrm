@@ -1,4 +1,9 @@
-import { assertProductionBuildEnv } from "../assert-production-build-env";
+// Same shape as withWearablesDat.test.ts: the module is CommonJS `.js`, because Expo requires
+// what app.config.ts imports as-is and cannot load a `.ts` sibling.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { assertProductionBuildEnv } = require("../assert-production-build-env") as {
+  assertProductionBuildEnv: (env: NodeJS.ProcessEnv, isProductionBuild: boolean) => void;
+};
 
 /**
  * The build-time half of "a production build must know where it is pointed".

@@ -1,5 +1,4 @@
 import type { ExpoConfig, ConfigContext } from "expo/config";
-import { assertProductionBuildEnv } from "./plugins/assert-production-build-env";
 
 /**
  * T-Rock Cam — iOS-only Expo config (dynamic).
@@ -29,6 +28,14 @@ const FIELD_APP_HOST = process.env.EXPO_PUBLIC_FIELD_APP_HOST?.trim();
  * must differ between a dev client and a shipped build has to key off this.
  */
 const IS_PRODUCTION_BUILD = process.env.EAS_BUILD_PROFILE === "production";
+
+// `require`, and a `.js` module, for the same reason the plugins array names its plugin by
+// string: Expo transpiles THIS file but requires what it imports as-is, so a `.ts` sibling
+// cannot be loaded — it makes `expo config` exit non-zero with no output at all.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { assertProductionBuildEnv } = require("./plugins/assert-production-build-env") as {
+  assertProductionBuildEnv: (env: NodeJS.ProcessEnv, isProductionBuild: boolean) => void;
+};
 
 // Fails the BUILD rather than shipping one that installs and cannot reach the CRM. The Meta
 // credentials are already treated this way below (`requireRegisteredMetaApp`); this is the same
