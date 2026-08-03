@@ -302,4 +302,206 @@ describe("glasses_walkthrough_forward create checkpoint (real SQL)", () => {
     expect(retry.calls.filter((c) => c.url === CREATE_URL)).toHaveLength(0);
     expect(result).toEqual({ status: "dead", error: expect.stringContaining(EXTERNAL_REF_DEAL_A) });
   });
+
+  // ── The four payload writes, when the DATABASE is the thing that stops answering ──────────────────
+  //
+  // Every case above kills a statement with a REJECTION, which is the polite failure. The one this
+  // handler cannot survive is the impolite one: an UPDATE parked behind another transaction's row lock,
+  // or issued down a pooled socket that was accepted and went quiet. That promise never settles, so the
+  // handler never returns — and because this job runs on a dedicated poller with a reentrancy guard and a
+  // concurrency of one (queue.ts), the guard is held for the life of the PROCESS and every later
+  // walkthrough forward goes unclaimed. Worse, `processJob` keeps renewing this attempt's lease while it
+  // waits, so the expired-lease sweep cannot recover the row either: its heartbeat stays fresh forever.
+  //
+  // These four cases are one per write, because the four do NOT fail in the same direction, and the
+  // direction is the whole point:
+  //   • the pre-create marker must stop the create (an unrecorded create is a duplicate walkthrough),
+  //   • the checkpoint must never LOOK like it succeeded (it is the only thing that prevents a duplicate),
+  //   • the marker retraction is best-effort and must stay best-effort,
+  //   • the pending-artifacts reconciliation must never resolve `null`, because `null` completes the job.
+  //
+  // A hanging fake is the whole point: with no ceiling these do not fail, they never return at all.
+
+  /**
+   * A pool-shaped adapter — `connect()` hands out a DISTINCT checkout with its own `release()` — so a case
+   * can see both halves of what bounding a write has to mean: stop waiting, AND destroy the connection the
+   * abandoned statement is still sitting on. A deadline raced against a bare `query` does only the first;
+   * pg holds the checked-out slot until the statement settles, which for a lock-blocked UPDATE is never,
+   * so the leak would simply be relabelled. Pool-level `query` is a separate surface here for the same
+   * reason it is in the dead-letter suite: a statement issued on it owns a connection nobody holds a
+   * handle to, and nothing can ever destroy that.
+   */
+  function makePool(db: PGlite, hangOn: RegExp) {
+    const checkouts: Array<{ sawHungStatement: boolean; released: boolean; releasedWith: unknown }> = [];
+    const poolLevelQueries: string[] = [];
+    const pool = {
+      query: (sql: string, params?: unknown[]) => {
+        poolLevelQueries.push(sql);
+        if (hangOn.test(sql)) return new Promise<never>(() => {});
+        return db.query(sql, params as never[]) as any;
+      },
+      connect: async () => {
+        const checkout = { sawHungStatement: false, released: false, releasedWith: undefined as unknown };
+        checkouts.push(checkout);
+        return {
+          query: (sql: string, params?: unknown[]) => {
+            if (hangOn.test(sql)) {
+              checkout.sawHungStatement = true;
+              return new Promise<never>(() => {}); // the lock-blocked / dead-socket write
+            }
+            return db.query(sql, params as never[]) as any;
+          },
+          release: (err?: unknown) => {
+            checkout.released = true;
+            checkout.releasedWith = err;
+          },
+        };
+      },
+    };
+    return { pool, checkouts, poolLevelQueries };
+  }
+
+  /**
+   * The outcome of `work`, or the literal string "never settled" if it does not answer within `ms`.
+   *
+   * Written this way deliberately. An unbounded write does not make these cases FAIL, it makes them never
+   * return, and a bare `await` would report that as a vitest timeout — "this test was slow", where the
+   * defect is "the poller is wedged until someone restarts the worker". Returning a value the assertion
+   * can name keeps the red honest.
+   */
+  async function outcomeWithin<T>(work: Promise<T>, ms: number): Promise<T | Error | "never settled"> {
+    return Promise.race([
+      work.then(
+        (value) => value,
+        (err) => (err instanceof Error ? err : new Error(String(err))),
+      ),
+      new Promise<"never settled">((resolve) => setTimeout(() => resolve("never settled"), ms)),
+    ]);
+  }
+
+  /** The one hung checkout, asserted to exist exactly once. */
+  function hungCheckout(checkouts: Array<{ sawHungStatement: boolean; releasedWith: unknown }>) {
+    const hung = checkouts.filter((c) => c.sawHungStatement);
+    expect(hung).toHaveLength(1);
+    return hung[0];
+  }
+
+  it("bounds the pre-create marker write and never sends the create when it stalls", async () => {
+    // Fail-CLOSED, and it is the strictest of the four: the marker is written BEFORE the create precisely
+    // so that a death anywhere after it is recoverable. A stalled marker write whose wait was abandoned
+    // must therefore stop the create outright — proceeding would put a remote walkthrough on the wire with
+    // the entire duplicate-prevention scheme disarmed, which is the exact state this marker exists to make
+    // impossible. Whether the UPDATE eventually lands is unknown and does not matter: no create went out,
+    // so both readings of the row are safe (a surviving marker costs one spurious dead letter a human
+    // clears in a minute; a missing one costs nothing at all).
+    const db = await seed();
+    const { pool, checkouts } = makePool(db, /\{scopeCreatePendingRef\}/);
+    const { fetchImpl, calls } = makeScopeFetch();
+
+    const outcome = await outcomeWithin(
+      handleGlassesWalkthroughForward(await storedPayload(db), null, {
+        ...deps(pool, fetchImpl),
+        checkpointWriteTimeoutMs: 25,
+      }),
+      1_000,
+    );
+
+    expect(outcome).toBeInstanceOf(Error);
+    expect(calls).toHaveLength(0); // not one request reached TROCK Scope
+    expect(hungCheckout(checkouts).releasedWith).toBeInstanceOf(Error); // destroyed, not returned poisoned
+  });
+
+  it("bounds the id checkpoint and reports the stall as a FAILURE, never as a settled create", async () => {
+    // The one write where a timeout mistaken for success is worse than the stall it replaced. The
+    // checkpoint is what a later attempt reads to reuse the walkthrough it already has; a stall that
+    // resolved quietly would let this attempt carry on believing the id is durable, and the next
+    // redelivery — reading a payload that records neither the id nor a resolved outcome — is exactly the
+    // blind re-create (a second billed transcription and scope extraction) the whole mechanism exists to
+    // prevent. So it must reject, and the marker must still be on the row afterwards so the retry
+    // dead-letters into reconciliation rather than guessing.
+    const db = await seed();
+    const { pool, checkouts } = makePool(db, /\{scopeWalkthroughId\}/);
+    const { fetchImpl, calls } = makeScopeFetch();
+
+    const outcome = await outcomeWithin(
+      handleGlassesWalkthroughForward(await storedPayload(db), null, {
+        ...deps(pool, fetchImpl),
+        checkpointWriteTimeoutMs: 25,
+      }),
+      1_000,
+    );
+
+    expect(outcome).toBeInstanceOf(Error);
+    expect(calls.filter((c) => c.url === CREATE_URL)).toHaveLength(1); // the create DID go out
+    const payload = await storedPayload(db);
+    expect(payload.scopeWalkthroughId).toBeUndefined();
+    expect(payload.scopeCreatePendingRef).toBe(EXTERNAL_REF_DEAL_A); // → the retry reconciles, never re-creates
+    expect(hungCheckout(checkouts).releasedWith).toBeInstanceOf(Error);
+  });
+
+  it("bounds the best-effort marker retraction without letting it change the error the job reports", async () => {
+    // The retraction is the one write that is ALLOWED to fail — the caller already swallows it, because a
+    // surviving marker is the fail-closed direction (a spurious dead letter beats a duplicate). What it is
+    // not allowed to do is hang: it runs on the failure path, i.e. exactly when the pool is already having
+    // a bad minute, and an unbounded wait there holds the dedicated poller's guard just as permanently as
+    // one on the happy path. Bounded, it goes back to being what it was always documented as — logged,
+    // ignored, and invisible to the error the attempt actually reports.
+    const db = await seed();
+    const { pool, checkouts } = makePool(db, /payload - 'scopeCreatePendingRef'/);
+    const { fetchImpl } = makeScopeFetch({ createStatus: 401, createBody: { error: "unauthorized" } });
+
+    const outcome = await outcomeWithin(
+      handleGlassesWalkthroughForward(await storedPayload(db), null, {
+        ...deps(pool, fetchImpl),
+        checkpointWriteTimeoutMs: 25,
+      }),
+      1_000,
+    );
+
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toMatch(/refused before it created anything/);
+    expect(hungCheckout(checkouts).releasedWith).toBeInstanceOf(Error);
+  });
+
+  it("bounds the pending-artifacts reconciliation, and a stall must NOT read as 'nothing to reconcile'", async () => {
+    // The sharpest direction of the four, because here the success value is `null`. This UPDATE runs after
+    // every clip has been delivered, and its answer decides whether the handler returns a dead letter or
+    // simply returns — and a plain return is how the queue writes `status = 'completed'`. A stall that
+    // degraded to "no rows, nothing pending" would therefore complete the row, and the clips filed while
+    // this forward was running would be forwarded by nobody: no dead letter, no alert, no retry, and the
+    // walk comes back short with the only record of it gone. It must reject.
+    const db = await seed();
+    await db.query(`UPDATE public.job_queue SET payload = payload || $1::jsonb WHERE id = 1`, [
+      JSON.stringify({
+        scopeWalkthroughId: "8f1c0a6e-1111-4222-8333-444455556666",
+        pendingArtifacts: [
+          {
+            fileId: "f1",
+            idempotencyKey: "a1",
+            kind: "photo",
+            r2Key: "k1",
+            mimeType: "image/jpeg",
+            originalFilename: "still-1.jpg",
+            fileSizeBytes: 10,
+            capturedAtMs: 0,
+          },
+        ],
+      }),
+    ]);
+    const { pool, checkouts } = makePool(db, /pendingArtifacts/);
+    const { fetchImpl } = makeScopeFetch();
+
+    const outcome = await outcomeWithin(
+      handleGlassesWalkthroughForward(await storedPayload(db), null, {
+        ...deps(pool, fetchImpl),
+        checkpointWriteTimeoutMs: 25,
+      }),
+      1_000,
+    );
+
+    expect(outcome).toBeInstanceOf(Error); // NOT undefined, which the queue would record as 'completed'
+    expect(hungCheckout(checkouts).releasedWith).toBeInstanceOf(Error);
+    // The pending set is still on the row, so the retry (or a human) can still see what was missed.
+    expect((await storedPayload(db)).pendingArtifacts).toHaveLength(1);
+  });
 });

@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import {
+  __resetGlassesWalkthroughForwardSweepStateForTest,
   buildGlassesWalkthroughForwardAlertEmail,
   resolveGlassesWalkthroughForwardAlertRecipients,
   runGlassesWalkthroughForwardDeadLetterSweep,
@@ -21,11 +22,23 @@ function baseEmailInput(overrides: Partial<Parameters<typeof buildGlassesWalkthr
     artifactCount: 3,
     attempts: 10,
     maxAttempts: 10,
+    scopeWalkthroughId: null,
     lastError: "TROCK Scope walkthrough create failed: 500 {\"error\":\"boom\"}",
     frontendUrl: "https://trockcrm.com",
     ...overrides,
   };
 }
+
+/** The `last_error` a supersede-for-reconciliation leaves, abridged to its opening sentence — the shape
+ *  `buildSupersededForwardDeadLetterMessage`
+ *  (server/src/modules/walkthrough-capture/glasses-walkthrough-service.ts) writes when a COMPLETED forward
+ *  is flipped to 'dead' because the walk grew after it finished. Spelled out here rather than imported:
+ *  it crosses a package boundary, and the alert's classification has to keep faith with the text that
+ *  actually lands in the column. */
+const SUPERSEDED_LAST_ERROR =
+  "Superseded for reconciliation: walk walk-1 (deal deal-1) was completed again carrying 2 artifact(s) this " +
+  "forward never held (a7, a8). The row was 'completed' when they were filed, so its artifact list could not " +
+  "be widened in flight.";
 
 describe("buildGlassesWalkthroughForwardAlertEmail", () => {
   it("includes the deal, walk, captured time, attempt count, verbatim error, and a deal link", () => {
@@ -93,6 +106,94 @@ describe("buildGlassesWalkthroughForwardAlertEmail", () => {
     const email = buildGlassesWalkthroughForwardAlertEmail(baseEmailInput({ lastError: null }));
     expect(email.text).toContain("(no error message captured)");
   });
+
+  // ── The explanation has to come from the REASON, not from the attempt count ───────────────────────
+  //
+  // "attempts < max_attempts" was reading as "it never got off the ground, so check the URL and the
+  // token". Two of this seam's dead letters break that inference outright, and both land well inside the
+  // retry budget: a supersede-for-reconciliation flips a COMPLETED row to 'dead' (attempts is whatever the
+  // successful forward used — normally 1), and an unconfirmed-create stop returns deadJob(...) on whichever
+  // attempt first read the pending marker back. Those rows can have created a TROCK Scope walkthrough and
+  // uploaded some or all of its clips, and their `last_error` carries a specific row repair. Telling the
+  // responder it is "almost always a deploy-config problem" sends them to the environment variables while
+  // the row waits for the one edit that actually fixes it.
+
+  it("does not blame deploy config for a supersede-for-reconciliation dead letter", () => {
+    const email = buildGlassesWalkthroughForwardAlertEmail(
+      baseEmailInput({
+        attempts: 1,
+        maxAttempts: 10,
+        scopeWalkthroughId: "8f1c0a6e-1111-4222-8333-444455556666",
+        lastError: SUPERSEDED_LAST_ERROR,
+      }),
+    );
+    expect(email.text).not.toContain("deploy-config problem");
+    // Still names the attempt it stopped on — the number was never the problem, the inference drawn from
+    // it was — and still points the reader at the error, which is where the repair is written down.
+    expect(email.text).toContain("(attempt 1 of 10)");
+  });
+
+  it("does not blame deploy config for an unconfirmed-create dead letter", () => {
+    const email = buildGlassesWalkthroughForwardAlertEmail(
+      baseEmailInput({
+        attempts: 4,
+        maxAttempts: 10,
+        lastError:
+          "A TROCK Scope walkthrough create was already sent for walk walk-1 (external ref " +
+          "trockcrm:glasses-walkthrough:walk-1:deal:deal-1) and this job never learned whether it succeeded.",
+      }),
+    );
+    expect(email.text).not.toContain("deploy-config problem");
+    expect(email.text).toContain("(attempt 4 of 10)");
+  });
+
+  it("GUARD: still calls a genuinely unset env var what it is, however early the job stopped", () => {
+    // The inference is wrong, the conclusion is not — a config dead letter really IS a deploy-config
+    // problem, and narrowing the branch must not cost the one case it was always right about.
+    const email = buildGlassesWalkthroughForwardAlertEmail(
+      baseEmailInput({
+        attempts: 1,
+        maxAttempts: 10,
+        lastError: "TROCK_SCOPE_BASE_URL is not configured for glasses_walkthrough_forward.",
+      }),
+    );
+    expect(email.text).toContain("deploy-config problem");
+    expect(email.text).toContain("(attempt 1 of 10)");
+  });
+
+  it("stops telling the reader no scope was ever generated when the row records a created walkthrough", () => {
+    // The ADJACENT half of the same assumption, and it is stated twice — once in the lead paragraph of the
+    // text body and once in the HTML sub-heading. "The walk is safely filed in the project folder, but no
+    // scope was ever generated from it" is false for exactly the rows above: a supersede flips a forward
+    // that FINISHED, and TROCK Scope's own worker transcribes and extracts from the clips it received. A
+    // responder who believes nothing landed has no reason to check what the remote walkthrough already
+    // holds, which is the first step every one of these repairs asks for.
+    const email = buildGlassesWalkthroughForwardAlertEmail(
+      baseEmailInput({
+        attempts: 1,
+        maxAttempts: 10,
+        scopeWalkthroughId: "8f1c0a6e-1111-4222-8333-444455556666",
+        lastError: SUPERSEDED_LAST_ERROR,
+      }),
+    );
+    expect(email.text).not.toContain("no scope was ever generated");
+    expect(email.html).not.toContain("no scope was ever generated");
+    // And the id itself is printed, because "check what that walkthrough already holds" is unactionable
+    // without it.
+    expect(email.text).toContain("8f1c0a6e-1111-4222-8333-444455556666");
+  });
+
+  it("GUARD: still says no scope was generated when nothing remote was ever created", () => {
+    const email = buildGlassesWalkthroughForwardAlertEmail(
+      baseEmailInput({
+        attempts: 1,
+        maxAttempts: 10,
+        scopeWalkthroughId: null,
+        lastError: "TROCK_SCOPE_BASE_URL is not configured for glasses_walkthrough_forward.",
+      }),
+    );
+    expect(email.text).toContain("no scope was ever generated");
+  });
 });
 
 // ---- resolveGlassesWalkthroughForwardAlertRecipients ----
@@ -148,6 +249,12 @@ function artifactsJson(n: number) {
 
 describe("runGlassesWalkthroughForwardDeadLetterSweep (real SQL)", () => {
   let pg: PGlite | null = null;
+  // The sweep is single-flight process-wide now, and the flag is module state. A case that ends with a
+  // sweep still in flight would otherwise leave it set for the rest of the FILE, and every later case
+  // would fail on an email its own sweep silently never sent.
+  beforeEach(() => {
+    __resetGlassesWalkthroughForwardSweepStateForTest();
+  });
   afterEach(async () => {
     await pg?.close();
     pg = null;
@@ -526,4 +633,188 @@ describe("runGlassesWalkthroughForwardDeadLetterSweep (real SQL)", () => {
     expect(handled).toBe(2);
     expect(String(sendEmail.mock.calls[0][2])).toContain(`Deal ${DEAL_CONFIG_ERROR}`);
   }, 5_000);
+
+  // ── The sweep's OWN job_queue statements ──────────────────────────────────────────────────────────
+  //
+  // The two ceilings above cover the send and the enrichment read — the steps that leave this process.
+  // Every OTHER statement here is a `client.query` on the one connection this sweep checked out, and none
+  // of them was bounded at all: the candidate SELECT, the BEGIN, the re-lock, the claim UPDATE, the
+  // alertSent UPDATE, the COMMIT and the ROLLBACK. `job_queue` is a table every poller writes to, so an
+  // UPDATE parked behind another transaction's row lock is unremarkable, and a pooled socket that was
+  // accepted and went quiet gives the same shape (the worker pool sets no statement_timeout — db.ts).
+  // Either one leaves a promise that never settles, so the sweep never reaches its `finally`, never
+  // releases, and never returns. Nothing notices: `runGlassesWalkthroughForwardDeadLetterSweep` is driven
+  // by a bare setInterval with no reentrancy guard (index.ts), so 60 seconds later a SECOND sweep checks
+  // out a second connection, and so on until the pool (max 10) is gone and every unrelated worker job
+  // stops behind an alert about a lost site visit.
+  //
+  // A statement that hit its ceiling also cannot be cleaned up in place: it still owns this connection, so
+  // the ROLLBACK the per-row catch would normally issue queues behind it and never answers either. The
+  // connection has to be DESTROYED — which is also what ends the open transaction, because Postgres aborts
+  // an uncommitted one when its backend sees the socket close.
+
+  /** Like the pool above, but the hang is keyed to a SQL pattern so a case can pick which of the sweep's
+   *  own statements is the one that stops answering, and every statement it issues is recorded. */
+  function makeHangingPool(db: PGlite, hangOn: RegExp) {
+    const checkouts: Array<{ released: boolean; releasedWith: unknown; statements: string[] }> = [];
+    const pool = {
+      query: (sql: string, params?: unknown[]) => db.query(sql, params as never[]) as any,
+      connect: async () => {
+        const checkout = { released: false, releasedWith: undefined as unknown, statements: [] as string[] };
+        checkouts.push(checkout);
+        return {
+          query: (sql: string, params?: unknown[]) => {
+            checkout.statements.push(sql);
+            if (hangOn.test(sql)) return new Promise<never>(() => {});
+            return db.query(sql, params as never[]) as any;
+          },
+          release: (err?: unknown) => {
+            checkout.released = true;
+            checkout.releasedWith = err;
+          },
+        };
+      },
+    };
+    return { pool, checkouts };
+  }
+
+  async function outcomeWithin<T>(work: Promise<T>, ms: number): Promise<T | Error | "never settled"> {
+    return Promise.race([
+      work.then(
+        (value) => value,
+        (err) => (err instanceof Error ? err : new Error(String(err))),
+      ),
+      new Promise<"never settled">((resolve) => setTimeout(() => resolve("never settled"), ms)),
+    ]);
+  }
+
+  it("abandons a candidate query that never answers, and destroys the connection it is stuck on", async () => {
+    const db = await seed();
+    const { pool, checkouts } = makeHangingPool(db, /FROM public\.job_queue/);
+    const sendEmail = vi.fn(async () => ({ success: true, messageId: "m1" }));
+
+    const outcome = await outcomeWithin(
+      runGlassesWalkthroughForwardDeadLetterSweep({
+        db: pool as any,
+        sendEmail,
+        env: { GLASSES_WALKTHROUGH_FORWARD_EMAIL_RECIPIENTS: "ops@x.com" } as any,
+        stepTimeoutMs: 25,
+        logger: capturingLogger(),
+      }),
+      1_000,
+    );
+
+    expect(outcome).toBeInstanceOf(Error);
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(checkouts).toHaveLength(1);
+    expect(checkouts[0].released).toBe(true);
+    expect(checkouts[0].releasedWith).toBeInstanceOf(Error); // destroyed — the slot goes back to the pool
+  }, 5_000);
+
+  it("abandons a claim UPDATE that never answers WITHOUT issuing a rollback down the same stuck connection", async () => {
+    // The claim marker is written inside the transaction so that a throw rolls it back. That contract has
+    // one hole a ceiling opens: the statement that hit the ceiling is still running server-side and still
+    // owns this connection, so the recovery ROLLBACK would queue behind it and hang in its place — the same
+    // wedge, one statement later. Destroying the connection is what has to undo the claim instead.
+    const db = await seed();
+    const { pool, checkouts } = makeHangingPool(db, /'\{alertSent\}', '"claimed"'/);
+    const sendEmail = vi.fn(async () => ({ success: true, messageId: "m1" }));
+    const logger = capturingLogger();
+
+    const outcome = await outcomeWithin(
+      runGlassesWalkthroughForwardDeadLetterSweep({
+        db: pool as any,
+        sendEmail,
+        env: { GLASSES_WALKTHROUGH_FORWARD_EMAIL_RECIPIENTS: "ops@x.com" } as any,
+        stepTimeoutMs: 25,
+        logger,
+      }),
+      1_000,
+    );
+
+    expect(outcome).toBe(0); // it returns, having alerted on nothing
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(checkouts).toHaveLength(1);
+    expect(checkouts[0].releasedWith).toBeInstanceOf(Error);
+    // No ROLLBACK on the poisoned connection, and no attempt at the SECOND row either: one stuck statement
+    // means the far end is not answering, and the remaining rows are untouched for the next tick.
+    expect(checkouts[0].statements.some((sql) => /ROLLBACK/.test(sql))).toBe(false);
+    expect(checkouts[0].statements.filter((sql) => /BEGIN/.test(sql))).toHaveLength(1);
+  }, 5_000);
+
+  it("refuses to start a second sweep while one is still running, rather than checking out another connection", async () => {
+    // The other half of "one stuck connection is the wrong unit". Even with every statement bounded, a
+    // sweep of 25 rows against a slow-but-answering provider can outlive the 60-second interval that
+    // started it — and an overlapping sweep is not merely wasted work, it is a second pooled connection
+    // out of ten, held for the same reason the first one is.
+    const db = await seed();
+    let connects = 0;
+    const queryable = { query: (sql: string, params?: unknown[]) => db.query(sql, params as never[]) as any };
+    const pool = {
+      ...queryable,
+      connect: async () => {
+        connects += 1;
+        return { ...queryable, release: () => {} };
+      },
+    };
+    let releaseSend: () => void = () => {};
+    const sendGate = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    const sendEmail = vi.fn(async () => {
+      await sendGate;
+      return { success: true, messageId: "m1" };
+    });
+    const env = { GLASSES_WALKTHROUGH_FORWARD_EMAIL_RECIPIENTS: "ops@x.com" } as any;
+
+    const first = runGlassesWalkthroughForwardDeadLetterSweep({ db: pool as any, sendEmail, env });
+    // Let the first sweep get as far as its (gated) send, so it is genuinely mid-flight.
+    for (let i = 0; i < 100 && sendEmail.mock.calls.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+
+    // Bounded, because an UNGUARDED second sweep does not merely do redundant work — it opens its own
+    // transaction on a row the first one is holding and blocks on the same gate, which is the wedge itself.
+    const connectsBeforeSecond = connects;
+    const second = await outcomeWithin(
+      runGlassesWalkthroughForwardDeadLetterSweep({ db: pool as any, sendEmail, env }),
+      500,
+    );
+
+    expect(connects).toBe(connectsBeforeSecond); // the overlapping tick checked nothing out at all
+    expect(second).toBe(0);
+    releaseSend();
+    expect(await first).toBe(2);
+  }, 10_000);
+
+  it("classifies the dead-letter reason from last_error, not from how much retry budget was left", async () => {
+    // End to end through the sweep, because the classification is only useful if the payload and the error
+    // it reads actually reach the renderer. A supersede-for-reconciliation row: 'dead', attempts 1 of 10,
+    // a recorded TROCK Scope walkthrough, and a last_error asking for a specific repair.
+    const db = await seed();
+    await db.query(
+      `INSERT INTO public.job_queue (job_type, payload, office_id, status, last_error, attempts, max_attempts)
+       VALUES ('glasses_walkthrough_forward', $1::jsonb, $2, 'dead', $3, 1, 10)`,
+      [
+        `{"walkId":"walk-9","dealId":"${DEAL_CONFIG_ERROR}","title":"Superseded walk","officeSlug":"test","scopeWalkthroughId":"8f1c0a6e-1111-4222-8333-444455556666","artifacts":${artifactsJson(3)}}`,
+        OFFICE,
+        SUPERSEDED_LAST_ERROR,
+      ],
+    );
+    const sendEmail = vi.fn(async () => ({ success: true, messageId: "m1" }));
+
+    await runGlassesWalkthroughForwardDeadLetterSweep({
+      db: makeClient(db) as any,
+      sendEmail,
+      env: { GLASSES_WALKTHROUGH_FORWARD_EMAIL_RECIPIENTS: "ops@x.com" } as any,
+    });
+
+    const call = sendEmail.mock.calls.find((c) => String(c[1]).includes("Superseded walk"));
+    expect(call).toBeDefined();
+    const body = String(call![2]);
+    expect(body).not.toContain("deploy-config problem");
+    expect(body).not.toContain("no scope was ever generated");
+    expect(body).toContain("8f1c0a6e-1111-4222-8333-444455556666");
+  });
 });

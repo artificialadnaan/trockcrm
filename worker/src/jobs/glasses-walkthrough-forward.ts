@@ -685,11 +685,83 @@ async function uploadClip(
   await completeClip(deps, walkthroughId, begin.clipId, completedParts);
 }
 
+// ── The handler's OWN job_queue writes ─────────────────────────────────────────────────────────────
+//
+// The four statements below are this handler's entire durable memory of a delivery: the pre-create marker,
+// its retraction, the id checkpoint, and the pending-artifacts reconciliation. They were issued as a bare
+// `db.query`, which bounds nothing.
+//
+// What an unbounded one costs, precisely. `job_queue` is a table every poller writes to, so an UPDATE
+// parked behind another transaction's row lock is unremarkable; a pooled socket that was accepted and then
+// went quiet has the same shape (the worker pool sets no statement_timeout — db.ts). Either leaves a
+// promise that never settles, and a promise that never settles is not a slow job:
+//   • the handler never returns, and `pollGlassesWalkthroughForwardJobs` holds a reentrancy guard at a
+//     concurrency of one (queue.ts), so every LATER walkthrough forward stays pending until someone
+//     restarts the worker;
+//   • `processJob` keeps renewing this attempt's lease for as long as it awaits the handler, so the
+//     expired-lease sweep cannot recover the row either — its heartbeat stays fresh forever. The one
+//     mechanism built to rescue a stuck delivery is looking straight at it and seeing a healthy one.
+//
+// NOT `timedQueueQuery` (queue.ts), which is this exact mechanism one layer up: it is module-private
+// there AND hard-wired to the shared `pool`, so it cannot honour this handler's `deps.db` injection seam —
+// every direct-call test would silently write to the real pool instead of to its fake. Both go through the
+// one shared implementation underneath instead (lib/timed-pool-query.ts), which is the part that actually
+// matters: bound the wait AND destroy the connection the abandoned statement is still sitting on. Racing
+// a deadline against a top-level `db.query` would do only the first, and pg holds the checked-out slot
+// until the statement settles — for a lock-blocked UPDATE, never — so the leak would just be relabelled.
+const CHECKPOINT_WRITE_TIMEOUT_MS = 30_000;
+
+/**
+ * A write we stopped WAITING for — never a write that failed, and never one that succeeded. Its outcome is
+ * genuinely UNKNOWN: the statement is still running server-side, and nothing on a pg client can cancel it.
+ * Each of the four callers below states what it does with that, because they do not all do the same thing.
+ */
+class CheckpointWriteTimeout extends Error {
+  constructor(label: string, timeoutMs: number) {
+    super(
+      `${label} did not answer within ${timeoutMs}ms, so the attempt was abandoned with that write's outcome unknown`
+    );
+    this.name = "CheckpointWriteTimeout";
+  }
+}
+
+/** One of this handler's payload writes, already bound to a deadline and a destroy-on-timeout checkout. */
+type JobQueueWrite = (sql: string, params: unknown[], label: string) => Promise<{ rows: any[] }>;
+
+/**
+ * Bind the handler's payload writes to a client that is DESTROYED if the clock wins.
+ *
+ * Degrades to a plain `db.query` for an adapter that cannot check a connection out, and this is the one
+ * place in this file where degrading is right — the opposite of the dead-letter sweep, which refuses
+ * outright. There the fallback was semantically WRONG (a BEGIN and a COMMIT on different connections is
+ * not a transaction, so "it ran" and "it worked" came apart). Here each of the four is a single
+ * independent statement whose meaning does not depend on which connection carries it; all a bare `query`
+ * loses is the ceiling. The adapters that take this path are the direct-call test fakes, which are not a
+ * production path — `handleGlassesWalkthroughForward` defaults `db` to the real pool, which connects.
+ */
+function makeJobQueueWriter(db: Queryable, timeoutMs: number): JobQueueWrite {
+  if (typeof (db as Partial<PoolLike>).connect !== "function") {
+    return (sql, params) => db.query(sql, params) as Promise<{ rows: any[] }>;
+  }
+  return (sql, params, label) =>
+    timedPoolClientQuery<{ rows: any[] }>(db as unknown as TimedPoolLike, sql, params, {
+      timeoutMs,
+      timeoutError: () => new CheckpointWriteTimeout(label, timeoutMs),
+    });
+}
+
 /**
  * Phase 1 of the create checkpoint: record the INTENT to create, before the request goes out. Its failure
  * is a hard failure of the whole handler on purpose — if this write cannot land, the create must not
  * happen, because an unrecorded create is precisely the state this whole mechanism exists to prevent.
  * Losing an attempt is recoverable (the queue retries); an untracked remote walkthrough is not.
+ *
+ * FAILURE DIRECTION, timeout included: the strictest of the four. A stalled marker write is abandoned as a
+ * THROW, so the create never goes out, and that is safe under BOTH readings of a write whose outcome is
+ * unknown — no remote walkthrough exists either way. If the UPDATE did eventually land, the next attempt
+ * reads the marker back and dead-letters over a create that was never sent; the message's own remedy
+ * ("if none exists, remove payload.scopeCreatePendingRef") resolves that correctly, and one spurious dead
+ * letter a human clears in a minute is the price this seam has always chosen over a duplicate.
  *
  * "Cannot land" includes the quiet case: an UPDATE that matches zero rows SUCCEEDS. If the row this
  * payload was delivered from no longer answers to the key below — hand-edited during a reconciliation,
@@ -706,13 +778,13 @@ async function uploadClip(
  * never sent, or clear B's marker under it and reopen the duplicate window.
  */
 async function markScopeCreatePending(
-  db: Queryable,
+  write: JobQueueWrite,
   walkId: string,
   dealId: string,
   externalRef: string,
   claimedAttempt: number | null
 ): Promise<void> {
-  const result = await db.query(
+  const result = await write(
     `UPDATE public.job_queue
         SET payload = jsonb_set(payload, '{scopeCreatePendingRef}', to_jsonb($1::text), true)
       WHERE job_type = $2
@@ -721,7 +793,8 @@ async function markScopeCreatePending(
         AND status = 'processing'
         AND ($5::int IS NULL OR attempts = $5::int)
       RETURNING id`,
-    [externalRef, GLASSES_WALKTHROUGH_FORWARD_JOB, walkId, dealId, claimedAttempt]
+    [externalRef, GLASSES_WALKTHROUGH_FORWARD_JOB, walkId, dealId, claimedAttempt],
+    `the pre-create marker write for walk ${walkId} on deal ${dealId}`
   );
   if (!result?.rows?.length) {
     throw new Error(
@@ -733,14 +806,21 @@ async function markScopeCreatePending(
 }
 
 /** Retract the intent marker once we have positive evidence no remote walkthrough was created, putting the
- *  row back in its "nothing has happened remotely yet" state so the queue's ordinary backoff applies. */
+ *  row back in its "nothing has happened remotely yet" state so the queue's ordinary backoff applies.
+ *
+ *  FAILURE DIRECTION: the only one of the four that is ALLOWED to fail — the caller already swallows it,
+ *  because a surviving marker is the fail-closed side (a spurious dead letter beats a duplicate). A timeout
+ *  is therefore just another rejection into that same catch, and deliberately not retried. What bounding
+ *  buys is that it can no longer HANG: this runs on the error path, i.e. exactly when the pool is already
+ *  having a bad minute, and an unbounded wait here wedges the dedicated poller every bit as permanently as
+ *  one on the happy path — a "best-effort" step taking the whole queue down with it. */
 async function clearScopeCreatePending(
-  db: Queryable,
+  write: JobQueueWrite,
   walkId: string,
   dealId: string,
   claimedAttempt: number | null
 ): Promise<void> {
-  await db.query(
+  await write(
     `UPDATE public.job_queue
         SET payload = payload - 'scopeCreatePendingRef'
       WHERE job_type = $1
@@ -748,21 +828,30 @@ async function clearScopeCreatePending(
         AND payload ->> 'dealId' = $3
         AND status = 'processing'
         AND ($4::int IS NULL OR attempts = $4::int)`,
-    [GLASSES_WALKTHROUGH_FORWARD_JOB, walkId, dealId, claimedAttempt]
+    [GLASSES_WALKTHROUGH_FORWARD_JOB, walkId, dealId, claimedAttempt],
+    `the pending-create marker retraction for walk ${walkId} on deal ${dealId}`
   );
 }
 
 /** Phase 2: the id lands and the intent marker is dropped in the SAME statement. Two statements would
  *  leave a window in which the payload carries both, and a reader — the next attempt, or a human reading
- *  the row after a dead letter — could not tell a settled create from an unresolved one. */
+ *  the row after a dead letter — could not tell a settled create from an unresolved one.
+ *
+ *  FAILURE DIRECTION: this is the write where a timeout mistaken for success would be far worse than the
+ *  stall it replaced. This statement IS the duplicate prevention — it is what a later attempt reads to
+ *  reuse the walkthrough that already exists — so a ceiling that resolved quietly would leave the payload
+ *  recording neither the id nor a resolved outcome, and hand the next redelivery a clean slate to create a
+ *  SECOND walkthrough (a second billed transcription and scope extraction). It therefore rejects, exactly
+ *  like any other failed write: the attempt fails, the pre-create marker is still on the row, and the
+ *  redelivery dead-letters into reconciliation instead of guessing. Nothing here may ever swallow it. */
 async function checkpointScopeWalkthroughId(
-  db: Queryable,
+  write: JobQueueWrite,
   walkId: string,
   dealId: string,
   scopeWalkthroughId: string,
   claimedAttempt: number | null
 ): Promise<void> {
-  await db.query(
+  await write(
     `UPDATE public.job_queue
         SET payload = jsonb_set(payload, '{scopeWalkthroughId}', to_jsonb($1::text), true) - 'scopeCreatePendingRef'
       WHERE job_type = $2
@@ -770,8 +859,33 @@ async function checkpointScopeWalkthroughId(
         AND payload ->> 'dealId' = $4
         AND status = 'processing'
         AND ($5::int IS NULL OR attempts = $5::int)`,
-    [scopeWalkthroughId, GLASSES_WALKTHROUGH_FORWARD_JOB, walkId, dealId, claimedAttempt]
+    [scopeWalkthroughId, GLASSES_WALKTHROUGH_FORWARD_JOB, walkId, dealId, claimedAttempt],
+    `the walkthrough-id checkpoint for walk ${walkId} on deal ${dealId}`
   );
+}
+
+// ── Which dead letters are actually a DEPLOY-CONFIG problem ───────────────────────────────────────
+//
+// Named constants because two things read them: the `deadJob(...)` calls that write them, and the alert
+// below, which classifies on them. These two are the ONLY reasons this seam stops for an unusable
+// environment. Every other reason it stops early is a deliberate refusal to guess, carrying its own
+// specific repair in `last_error` — the unconfirmed-create stop
+// (`buildUnconfirmedCreateDeadLetterMessage`), the pending-artifacts reconciliation
+// (`buildPendingArtifactsDeadLetterMessage`), and the server-side supersede of an already-finished forward
+// (`buildSupersededForwardDeadLetterMessage`, glasses-walkthrough-service.ts). Matching the config pair
+// EXPLICITLY, rather than enumerating the others, is the safe direction: a dead-letter reason added later
+// lands in the "it stopped on purpose, read the error" bucket by default, never in the one that sends a
+// responder to check environment variables that were never the problem.
+const MISSING_BASE_URL_DEAD_LETTER = "TROCK_SCOPE_BASE_URL is not configured for glasses_walkthrough_forward.";
+const MISSING_SERVICE_TOKEN_DEAD_LETTER =
+  "TROCK_SCOPE_SERVICE_TOKEN is not configured for glasses_walkthrough_forward.";
+
+/** Does this row's `last_error` name an unset environment variable? `includes`, not `===`: `last_error` is
+ *  whatever the queue stored, and only these two sentences are the claim being tested. */
+function isDeployConfigDeadLetter(lastError: string | null): boolean {
+  const text = normalizeText(lastError);
+  if (!text) return false;
+  return text.includes(MISSING_BASE_URL_DEAD_LETTER) || text.includes(MISSING_SERVICE_TOKEN_DEAD_LETTER);
 }
 
 /**
@@ -821,6 +935,10 @@ export async function handleGlassesWalkthroughForward(
     /** Injection seam for the request ceilings, so a test can exercise the abort path in milliseconds
      *  rather than waiting out a production-sized budget. The queue never passes it. */
     timeouts?: Partial<ScopeTimeouts>;
+    /** The same seam for the four job_queue payload writes below (CHECKPOINT_WRITE_TIMEOUT_MS). Separate
+     *  from `timeouts` on purpose: those are ceilings on OUTBOUND HTTP, this one is a ceiling on a
+     *  statement, and the two fail — and are recovered from — in entirely different ways. */
+    checkpointWriteTimeoutMs?: number;
   } = {},
   /**
    * The queue's own claim context (queue.ts passes `attempt: claimedAttempt`). Load-bearing, not
@@ -841,6 +959,7 @@ export async function handleGlassesWalkthroughForward(
   const p = assertPayload(payload);
   const claimedAttempt = ctx?.attempt ?? null;
   const db = deps.db ?? (pool as unknown as Queryable);
+  const writeJobQueue = makeJobQueueWriter(db, deps.checkpointWriteTimeoutMs ?? CHECKPOINT_WRITE_TIMEOUT_MS);
   const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
   const baseUrl = deps.baseUrl ?? process.env.TROCK_SCOPE_BASE_URL;
   const token = deps.token ?? process.env.TROCK_SCOPE_SERVICE_TOKEN;
@@ -849,10 +968,10 @@ export async function handleGlassesWalkthroughForward(
     // Fail loudly and clearly, per the auth-config contract: an unset service token/base URL is a
     // deploy-config error, not "TROCK Scope is down" — dead-letter immediately rather than burning the
     // retry budget on a call that can never succeed until an operator fixes the environment.
-    return deadJob("TROCK_SCOPE_BASE_URL is not configured for glasses_walkthrough_forward.");
+    return deadJob(MISSING_BASE_URL_DEAD_LETTER);
   }
   if (!token) {
-    return deadJob("TROCK_SCOPE_SERVICE_TOKEN is not configured for glasses_walkthrough_forward.");
+    return deadJob(MISSING_SERVICE_TOKEN_DEAD_LETTER);
   }
 
   const scopeDeps: ScopeDeps = {
@@ -877,7 +996,7 @@ export async function handleGlassesWalkthroughForward(
     const externalRef = deriveScopeWalkthroughExternalRef(p.walkId, p.dealId);
     // Intent BEFORE action. Everything after this line is covered: if the process dies at ANY point up to
     // the checkpoint below, the redelivered payload carries the marker and the branch above takes over.
-    await markScopeCreatePending(db, p.walkId, p.dealId, externalRef, claimedAttempt);
+    await markScopeCreatePending(writeJobQueue, p.walkId, p.dealId, externalRef, claimedAttempt);
 
     let created: { id: string };
     try {
@@ -888,7 +1007,7 @@ export async function handleGlassesWalkthroughForward(
         // letter. Best-effort by necessity: if THIS write also fails the marker survives, and the next
         // attempt dead-letters on a create that never happened. That is the fail-CLOSED direction — a
         // spurious dead letter costs a human one minute; a missed one costs a duplicate scope extraction.
-        await clearScopeCreatePending(db, p.walkId, p.dealId, claimedAttempt).catch((clearErr) => {
+        await clearScopeCreatePending(writeJobQueue, p.walkId, p.dealId, claimedAttempt).catch((clearErr) => {
           console.warn(
             `[Worker:glasses_walkthrough_forward] Could not retract the pending-create marker for walk ${p.walkId}; ` +
               `the next attempt will dead-letter for manual reconciliation`,
@@ -900,7 +1019,7 @@ export async function handleGlassesWalkthroughForward(
     }
 
     scopeWalkthroughId = created.id;
-    await checkpointScopeWalkthroughId(db, p.walkId, p.dealId, scopeWalkthroughId, claimedAttempt);
+    await checkpointScopeWalkthroughId(writeJobQueue, p.walkId, p.dealId, scopeWalkthroughId, claimedAttempt);
   }
 
   for (const artifact of p.artifacts) {
@@ -915,7 +1034,12 @@ export async function handleGlassesWalkthroughForward(
   // `pendingArtifacts` and changes nothing else (recordPendingArtifactsOnRunningForwardJob in
   // server/src/modules/walkthrough-capture/glasses-walkthrough-service.ts). Reading it back here turns
   // that into the supersede it always wanted to be, taken after the race it would have caused is over.
-  const reconciliation = await supersedeSelfForPendingArtifacts(db, p.walkId, p.dealId, claimedAttempt);
+  const reconciliation = await supersedeSelfForPendingArtifacts(
+    writeJobQueue,
+    p.walkId,
+    p.dealId,
+    claimedAttempt
+  );
   if (reconciliation) return deadJob(reconciliation);
 }
 
@@ -934,14 +1058,24 @@ export async function handleGlassesWalkthroughForward(
  * amend in the service exactly; the artifacts an operator sees on the dead row are therefore the complete
  * walk, and their job is `status = 'pending'` rather than reassembling a list by hand. `pendingArtifacts`
  * is dropped in the same statement so a reader cannot mistake a settled reconciliation for an open one.
+ *
+ * FAILURE DIRECTION: the sharpest of the four, because here the SUCCESS value is `null`. This runs after
+ * every clip has been delivered, and its answer decides whether the handler dead-letters or simply
+ * returns — and a plain return is how the queue writes `status = 'completed'`. A timeout degraded to "no
+ * rows, so nothing was pending" would therefore complete the row, and the clips filed while this forward
+ * was running would be forwarded by nobody: no dead letter, no alert, no retry, and the walk comes back
+ * short with the only record of it gone. So it REJECTS — the attempt fails, the clips are re-uploaded on
+ * the next one (TROCK Scope's checksum constraint makes that free of duplicate scope data), and the
+ * pending set is still on the row for that attempt or a human to find. Nothing here may ever coerce a
+ * failed read into `null`.
  */
 async function supersedeSelfForPendingArtifacts(
-  db: Queryable,
+  write: JobQueueWrite,
   walkId: string,
   dealId: string,
   claimedAttempt: number | null
 ): Promise<string | null> {
-  const result = await db.query(
+  const result = await write(
     `UPDATE public.job_queue
         SET payload = jsonb_set(
               payload,
@@ -966,7 +1100,8 @@ async function supersedeSelfForPendingArtifacts(
         AND ($4::int IS NULL OR attempts = $4::int)
         AND payload ? 'pendingArtifacts'
       RETURNING jsonb_array_length(COALESCE(payload -> 'artifacts', '[]'::jsonb)) AS artifact_count`,
-    [GLASSES_WALKTHROUGH_FORWARD_JOB, walkId, dealId, claimedAttempt]
+    [GLASSES_WALKTHROUGH_FORWARD_JOB, walkId, dealId, claimedAttempt],
+    `the pending-artifacts reconciliation for walk ${walkId} on deal ${dealId}`
   );
   if (!result?.rows?.length) return null;
   return buildPendingArtifactsDeadLetterMessage(walkId, dealId, Number(result.rows[0]?.artifact_count ?? 0));
@@ -1113,6 +1248,12 @@ export interface GlassesWalkthroughForwardAlertInput {
   artifactCount: number;
   attempts: number;
   maxAttempts: number;
+  /** The row's checkpointed TROCK Scope walkthrough id, or null when the payload records none. Threaded in
+   *  because it is the difference between "nothing remote exists" and "a walkthrough exists and some or all
+   *  of its clips already uploaded" — which decides both what this email may claim and what the responder's
+   *  first move is. REQUIRED, not optional: the sweep is the only production caller, and a field that can
+   *  be forgotten is exactly how the alert started stating things it could not know. */
+  scopeWalkthroughId: string | null;
   lastError: string | null;
   frontendUrl: string;
 }
@@ -1125,18 +1266,51 @@ export function buildGlassesWalkthroughForwardAlertEmail(input: GlassesWalkthrou
   const safeDealUrl = escapeHtml(dealUrl);
   const dealDisplay = input.dealLabel ?? `Deal ${input.dealId}`;
   const capturedAtText = formatCapturedAtForAlert(input.capturedAt);
-  const immediateFailure = input.attempts < input.maxAttempts;
-  // The REAL attempt, not a hardcoded 1. Stopping before the budget is spent does not imply stopping on
-  // the first delivery: an unconfirmed-create dead letter (see buildUnconfirmedCreateDeadLetterMessage)
-  // lands here on whatever attempt first read the marker back, and the config-error paths land here on
-  // the first attempt AFTER a redeploy changed the environment. Printing "attempt 1" told the reader the
-  // one thing that made those two impossible to tell apart from job_queue's own numbers.
-  const attemptsText = immediateFailure
-    ? `Failed immediately, without retrying (attempt ${input.attempts} of ${input.maxAttempts}) — this is ` +
-      `almost always a deploy-config problem (TROCK Scope's URL or service token), not a transient outage.`
-    : `Exhausted all ${input.attempts} of ${input.maxAttempts} retry attempts.`;
+  const stoppedEarly = input.attempts < input.maxAttempts;
+  const configProblem = isDeployConfigDeadLetter(input.lastError);
+  const remoteWalkthroughId = normalizeText(input.scopeWalkthroughId);
+  // The explanation comes from the dead-letter REASON, with the attempt count as detail rather than as the
+  // inference. "attempts < max_attempts" used to be read as "it never got off the ground, so check the URL
+  // and the token", and two of this seam's stops break that outright while landing well inside the retry
+  // budget: a supersede-for-reconciliation flips a row that had already COMPLETED (its attempts column is
+  // whatever the successful forward used — normally 1), and the unconfirmed-create stop returns
+  // deadJob(...) on whichever attempt first read the pending marker back. Those rows can have created a
+  // remote walkthrough and uploaded some or all of its clips, and their `last_error` is asking for one
+  // specific row repair. Telling the responder it is "almost always a deploy-config problem" sent them to
+  // the environment variables while the row waited for the edit that actually fixes it.
+  //
+  // The REAL attempt number stays in every branch. Stopping before the budget is spent does not imply
+  // stopping on the FIRST delivery, and printing "attempt 1" made the email contradict the row the reader
+  // is looking at.
+  const attemptsText = configProblem
+    ? stoppedEarly
+      ? `Failed immediately, without retrying (attempt ${input.attempts} of ${input.maxAttempts}) — this is ` +
+        `almost always a deploy-config problem (TROCK Scope's URL or service token), not a transient outage.`
+      : `Stopped on attempt ${input.attempts} of ${input.maxAttempts} with a deploy-config problem (TROCK ` +
+        `Scope's URL or service token), not a transient outage.`
+    : stoppedEarly
+      ? `Stopped deliberately, with retries still budgeted (attempt ${input.attempts} of ` +
+        `${input.maxAttempts}) — nothing to do with TROCK Scope's URL or service token. This forward ` +
+        `refuses to guess when it cannot tell what already landed remotely; the error below names the ` +
+        `exact state it stopped on and the repair it needs.`
+      : `Exhausted all ${input.attempts} of ${input.maxAttempts} retry attempts.`;
   const errorText = normalizeText(input.lastError) ?? "(no error message captured)";
   const artifactsText = `${input.artifactCount} artifact${input.artifactCount === 1 ? "" : "s"} filed`;
+
+  // The ADJACENT half of the same assumption, and it was stated twice — once here and once in the HTML
+  // sub-heading below. "no scope was ever generated from it" is a claim about the REMOTE side, and it is
+  // false for exactly the rows above: a superseded forward is one that FINISHED, so TROCK Scope has its
+  // clips and its own worker transcribes and extracts from them. A responder who believes nothing landed
+  // has no reason to check what the remote walkthrough already holds — which is the first step every one of
+  // these repairs asks for. So it is now said only where the payload supports it.
+  const remoteStateText = remoteWalkthroughId
+    ? `A TROCK Scope walkthrough WAS created for this walk and some or all of its clips were uploaded, so ` +
+      `check what it already holds before doing anything else.`
+    : configProblem || !stoppedEarly
+      ? `The walk itself is safely filed in the project folder — the crew can already see it — but no scope ` +
+        `was ever generated from it.`
+      : `The walk itself is safely filed in the project folder — the crew can already see it. Whether ` +
+        `anything reached TROCK Scope is exactly what this job could not determine; the error below says so.`;
 
   const subject = `TROCK Scope forward permanently failed — ${input.title}`;
 
@@ -1147,6 +1321,11 @@ export function buildGlassesWalkthroughForwardAlertEmail(input: GlassesWalkthrou
     ["Captured at", capturedAtText],
     ["Office", input.officeSlug],
     ["Filed as", artifactsText],
+    // Printed only when there is one. "Check what that walkthrough already holds" is the first line of
+    // every reconciliation instruction this seam writes, and it is unactionable without the id.
+    ...(remoteWalkthroughId
+      ? ([["TROCK Scope walkthrough", remoteWalkthroughId]] as Array<[string, string]>)
+      : []),
     ["Attempts", attemptsText],
     ["Job queue id", String(input.jobId)],
   ];
@@ -1170,9 +1349,8 @@ export function buildGlassesWalkthroughForwardAlertEmail(input: GlassesWalkthrou
     `reset will simply — and correctly — stop again.`;
 
   const text = [
-    `A glasses-walkthrough recording was never sent to TROCK Scope for scope extraction, and it will not ` +
-      `retry automatically. The walk itself is safely filed in the project folder — the crew can already see ` +
-      `it — but no scope was ever generated from it.`,
+    `A glasses-walkthrough recording did not finish being sent to TROCK Scope for scope extraction, and it ` +
+      `will not retry automatically. ${remoteStateText}`,
     "",
     ...rows.map(([label, value]) => `${label}: ${value}`),
     `Error: ${errorText}`,
@@ -1200,7 +1378,7 @@ export function buildGlassesWalkthroughForwardAlertEmail(input: GlassesWalkthrou
           <tr><td style="background-color:#b91c1c;height:4px;line-height:4px;font-size:4px;mso-line-height-rule:exactly;">&nbsp;</td></tr>
           <tr><td align="center" style="padding:28px 24px 8px 24px;"><img src="${TROCK_LOGO_EMAIL_URL}" alt="T Rock Construction" width="220" height="246" style="display:block;width:220px;height:246px;border:0;outline:none;text-decoration:none;-ms-interpolation-mode:bicubic;" /></td></tr>
           <tr><td align="center" style="padding:4px 24px 0 24px;"><h1 style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:20px;line-height:26px;color:#991b1b;font-weight:bold;">TROCK Scope forward permanently failed</h1></td></tr>
-          <tr><td align="center" style="padding:6px 24px 16px 24px;"><p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#334155;">The walk is safely filed in the project folder, but no scope was ever generated from it, and this will not retry automatically.</p></td></tr>
+          <tr><td align="center" style="padding:6px 24px 16px 24px;"><p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#334155;">${escapeHtml(remoteStateText)} This will not retry automatically.</p></td></tr>
           <tr><td style="padding:0 28px;"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;border-top:1px solid #e2e8f0;">${htmlRows}</table></td></tr>
           <tr><td style="padding:16px 28px 0 28px;">
             <p style="margin:0 0 4px;font-family:Arial,Helvetica,sans-serif;font-size:13px;line-height:18px;color:#64748b;font-weight:bold;">Error</p>
@@ -1276,17 +1454,61 @@ class DeadLetterAlertStepTimeout extends Error {
 
 /** Race `work` against a deadline. The loser keeps running (nothing here is cancellable) — it is simply no
  *  longer between us and the COMMIT. `Promise.race` subscribes to both, so a late rejection from the
- *  abandoned side is still handled and can't surface as an unhandled rejection.
- *
- *  Correct ONLY where abandoning the wait actually frees what the wait was holding — i.e. the send, whose
- *  pooled client belongs to this function and is released as the throw unwinds. Do not reach for it to bound
- *  a query: a query's connection belongs to pg, and pg keeps it until the statement settles. */
-function withAlertStepDeadline<T>(work: Promise<T>, label: string, timeoutMs: number): Promise<T> {
+ *  abandoned side is still handled and can't surface as an unhandled rejection. */
+function raceDeadline<T>(work: Promise<T>, makeError: () => Error, timeoutMs: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
   const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new DeadLetterAlertStepTimeout(label, timeoutMs)), timeoutMs);
+    timer = setTimeout(() => reject(makeError()), timeoutMs);
   });
   return Promise.race([work, deadline]).finally(() => clearTimeout(timer)) as Promise<T>;
+}
+
+/** The SEND's ceiling. Abandoning this wait really does free what the wait was holding — the transaction's
+ *  pooled client belongs to this function and is released as the throw unwinds. Do not reach for it to bound
+ *  a query on its own: a query's connection belongs to pg until the statement settles, so racing it frees
+ *  nothing unless the caller ALSO destroys the client (which is what `sweepQuery` below adds). */
+function withAlertStepDeadline<T>(work: Promise<T>, label: string, timeoutMs: number): Promise<T> {
+  return raceDeadline(work, () => new DeadLetterAlertStepTimeout(label, timeoutMs), timeoutMs);
+}
+
+/**
+ * A `job_queue` statement of this sweep's OWN that blew through its ceiling — distinct from
+ * DeadLetterAlertStepTimeout because the recovery is different, and confusing the two reintroduces the
+ * wedge one statement later: the per-row catch answers a step timeout with a ROLLBACK, and a ROLLBACK
+ * issued down a connection whose previous statement is still running queues behind it and never answers
+ * either. This one's recovery is to send nothing more down that connection and DESTROY it.
+ */
+class DeadLetterSweepStatementTimeout extends Error {
+  constructor(label: string, timeoutMs: number) {
+    super(
+      `${label} did not answer within ${timeoutMs}ms — its connection was destroyed and the sweep abandoned`
+    );
+    this.name = "DeadLetterSweepStatementTimeout";
+  }
+}
+
+// ONE sweep at a time, process-wide.
+//
+// index.ts drives this from a bare `setInterval` whose async callback nothing awaits, so a tick that runs
+// long does not delay the next tick — it OVERLAPS it. Bounding every statement (below) fixes the case where
+// a sweep never finishes; it does not fix the case where a sweep merely takes longer than 60 seconds, which
+// twenty-five rows against a slow-but-answering provider comfortably can. An overlapping sweep is not just
+// redundant work: it is a second pooled connection out of ten, held for the whole of its run, racing the
+// first over the same rows. There is nothing for a second one to do — the rows it would find are the ones
+// the first is already working — so it returns immediately instead.
+let glassesForwardDeadLetterSweepRunning = false;
+
+/**
+ * Test-only: clear the single-flight guard between cases.
+ *
+ * The guard is set for the whole of a sweep and cleared in a `finally`, so it only survives a case that
+ * DIDN'T let the sweep finish — a fake that never settles, a vitest timeout, an assertion thrown from
+ * inside an injected dependency. When that happens it is stuck `true` for the rest of the FILE and every
+ * later sweep returns 0 having done nothing, so the next case fails on an email that was never sent with
+ * no hint that its own sweep never ran. Same hazard, and same remedy, as `__resetQueueStateForTest`.
+ */
+export function __resetGlassesWalkthroughForwardSweepStateForTest() {
+  glassesForwardDeadLetterSweepRunning = false;
 }
 
 /** A one-shot `Queryable` whose single statement rides its own checked-out client, bounded by `timeoutMs`
@@ -1340,7 +1562,26 @@ export async function runGlassesWalkthroughForwardDeadLetterSweep(
         "(db.connect): its per-row claim and send are one transaction, which arbitrary pooled connections cannot honour."
     );
   }
-  const client = await db.connect();
+  // Single-flight — see the guard's declaration. Checked BEFORE the checkout, because the whole point is
+  // not to hold a second one of the pool's ten connections.
+  if (glassesForwardDeadLetterSweepRunning) {
+    logger.warn(
+      "[Worker:glasses_walkthrough_forward] Dead-letter alert sweep is still running from an earlier tick; " +
+        "skipping this one rather than opening a second connection over the same rows"
+    );
+    return 0;
+  }
+  glassesForwardDeadLetterSweepRunning = true;
+  let client: Queryable & { release: (err?: any) => void };
+  try {
+    client = await db.connect();
+  } catch (err) {
+    // An exhausted pool REJECTS the acquire (connectionTimeoutMillis, db.ts) rather than queueing forever.
+    // Nothing was checked out, so there is nothing to release — but the guard is already set and has to
+    // come back off before this leaves, or one bad minute silences the sweep for the life of the process.
+    glassesForwardDeadLetterSweepRunning = false;
+    throw err;
+  }
   let handled = 0;
   // Set once a deal-label lookup hits its ceiling, and never unset for the rest of this sweep. The read is
   // pure enrichment, so ONE row paying the ceiling is a reasonable price for a nicer email; twenty-five of
@@ -1350,12 +1591,48 @@ export async function runGlassesWalkthroughForwardDeadLetterSweep(
   // read from costing a pool slot, so a sweep that ignored this flag would be wasteful, not dangerous.
   // Unlike a send timeout this does not stop the sweep — every alert still goes out, by raw deal id.
   let dealLabelLookupAbandoned = false;
+  // Set when one of THIS sweep's own job_queue statements blows through its ceiling, and never unset. Two
+  // things follow from it, and neither is optional:
+  //   • the connection is DESTROYED in the finally rather than returned. The abandoned statement is still
+  //     running server-side — nothing on a pg client can cancel it — so handing that socket back would give
+  //     the next caller a connection with an orphaned statement and an open transaction on it.
+  //   • nothing else is issued down it, because anything sent now simply queues behind the statement that
+  //     is already stuck. That includes the per-row ROLLBACK, which is why the catch below skips it: the
+  //     destroy is what ends the transaction instead, since Postgres aborts an uncommitted one as soon as
+  //     its backend sees the socket close. So the 'claimed' marker still goes back, exactly as the claim's
+  //     safety argument requires.
+  let sweepConnectionError: Error | undefined;
+
+  /**
+   * Every statement this sweep issues on its own held connection. `job_queue` is a table every poller
+   * writes to, so an UPDATE parked behind another transaction's row lock is unremarkable, and the worker
+   * pool sets no statement_timeout (db.ts) — a silently-dead socket hangs a query forever. Unbounded, that
+   * promise never settles, so the sweep never reaches its finally, never releases, and never returns; the
+   * interval that started it opens another 60 seconds later, and another, until the pool (max 10) is gone
+   * and every unrelated worker job stops behind an alert about a lost site visit.
+   */
+  const sweepQuery = async (
+    sql: string,
+    params: unknown[] | undefined,
+    label: string
+  ): Promise<{ rows: any[] }> => {
+    try {
+      return await raceDeadline(
+        client.query(sql, params),
+        () => new DeadLetterSweepStatementTimeout(label, stepTimeoutMs),
+        stepTimeoutMs
+      );
+    } catch (err) {
+      if (err instanceof DeadLetterSweepStatementTimeout) sweepConnectionError = err;
+      throw err;
+    }
+  };
 
   try {
     // Candidate dead rows. This SELECT only READS + briefly locks (FOR UPDATE SKIP LOCKED); it does NOT
     // write the 'claimed' marker — that happens per-row inside the transaction below, so a later throw
     // rolls it back too (mirrors runRfpBidBoardCreateDeadLetterSweep's finding #4).
-    const result = await client.query(
+    const result = await sweepQuery(
       `SELECT id, payload, office_id, last_error, attempts, max_attempts
          FROM public.job_queue
         WHERE status = 'dead'
@@ -1371,16 +1648,17 @@ export async function runGlassesWalkthroughForwardDeadLetterSweep(
         ORDER BY id ASC
         LIMIT $1
         FOR UPDATE SKIP LOCKED`,
-      [limit]
+      [limit],
+      "dead-letter candidate query"
     );
 
     for (const job of result.rows) {
       try {
-        await client.query("BEGIN");
+        await sweepQuery("BEGIN", undefined, `claim BEGIN for job ${job.id}`);
         // Re-lock the row inside the txn and re-check it's still unclaimed, so a concurrent sweep tick
         // can't double-alert: FOR UPDATE SKIP LOCKED returns 0 rows if another tick holds the row, and the
         // WHERE excludes it once that tick has committed alertSent='true'.
-        const locked = await client.query(
+        const locked = await sweepQuery(
           `SELECT id
              FROM public.job_queue
             WHERE id = $1
@@ -1388,17 +1666,19 @@ export async function runGlassesWalkthroughForwardDeadLetterSweep(
               AND (payload->>'alertSent' IS NULL OR payload->>'alertSent' IN ('false', 'claimed'))
               AND NOT (payload ? 'supersededByJobId')
             FOR UPDATE SKIP LOCKED`,
-          [job.id]
+          [job.id],
+          `claim re-lock for job ${job.id}`
         );
         if (locked.rows.length === 0) {
-          await client.query("ROLLBACK");
+          await sweepQuery("ROLLBACK", undefined, `claim ROLLBACK for job ${job.id}`);
           continue;
         }
         // Claim marker — written in the SAME transaction as the send below. A throw before COMMIT rolls
         // this back too, leaving the row unclaimed + retryable for the next sweep instead of stuck 'claimed'.
-        await client.query(
+        await sweepQuery(
           "UPDATE public.job_queue SET payload = jsonb_set(payload, '{alertSent}', '\"claimed\"'::jsonb, true) WHERE id = $1",
-          [job.id]
+          [job.id],
+          `claim marker for job ${job.id}`
         );
 
         const payload = (job.payload ?? {}) as Record<string, unknown>;
@@ -1454,6 +1734,11 @@ export async function runGlassesWalkthroughForwardDeadLetterSweep(
           artifactCount,
           attempts: Number(job.attempts) || 0,
           maxAttempts: Number(job.max_attempts) || 0,
+          // The checkpoint, read straight off the row. Its presence is the only durable evidence this
+          // sweep has that a remote walkthrough exists — a superseded forward is one that already
+          // FINISHED, so the alert must neither claim nothing was created nor withhold the id the
+          // reconciliation instruction tells the reader to look up.
+          scopeWalkthroughId: normalizeText(payload.scopeWalkthroughId as unknown),
           lastError: job.last_error ?? null,
           frontendUrl: resolveFrontendUrl(env),
         });
@@ -1490,18 +1775,32 @@ export async function runGlassesWalkthroughForwardDeadLetterSweep(
           throw new Error("Email provider returned unsuccessful result");
         }
 
-        await client.query(
+        await sweepQuery(
           "UPDATE public.job_queue SET payload = jsonb_set(payload, '{alertSent}', 'true'::jsonb, true) WHERE id = $1",
-          [job.id]
+          [job.id],
+          `alert-sent marker for job ${job.id}`
         );
-        await client.query("COMMIT");
+        await sweepQuery("COMMIT", undefined, `claim COMMIT for job ${job.id}`);
         handled += 1;
         logger.log(
           `[Worker:glasses_walkthrough_forward] Alerted on permanently-failed forward (job ${job.id}, deal ${dealId ?? "unknown"})`
         );
       } catch (err) {
-        await client.query("ROLLBACK").catch(() => {});
+        // No ROLLBACK once a statement has hit its ceiling: that statement still owns this connection, so
+        // the rollback would queue behind it and hang in its place — the same wedge, one statement later.
+        // The destroy in the finally is what ends the transaction, and with it the claim.
+        if (!sweepConnectionError) {
+          await sweepQuery("ROLLBACK", undefined, `recovery ROLLBACK for job ${job.id}`).catch(() => {});
+        }
         logger.error(`[Worker:glasses_walkthrough_forward] Failed to alert on dead job ${job.id}`, err);
+        if (sweepConnectionError) {
+          logger.warn(
+            "[Worker:glasses_walkthrough_forward] Abandoning this sweep: one of its own job_queue statements " +
+              "blew through its ceiling, so that connection is being discarded rather than reused; the " +
+              "remaining dead jobs stay unclaimed and are retried on the next tick"
+          );
+          break;
+        }
         if (err instanceof DeadLetterAlertStepTimeout) {
           // Stop the SWEEP, not just this row. A step that hit the ceiling means the far end is answering
           // nobody, so every remaining candidate would spend the same ceiling to learn the same thing —
@@ -1520,6 +1819,10 @@ export async function runGlassesWalkthroughForwardDeadLetterSweep(
 
     return handled;
   } finally {
-    client.release();
+    // `release(err)` is pg's "discard this connection" signal. A healthy sweep passes undefined and the
+    // slot goes back clean; one that abandoned a statement passes the timeout, and the socket — with its
+    // orphaned statement and its uncommitted transaction — is thrown away instead of handed on.
+    client.release(sweepConnectionError);
+    glassesForwardDeadLetterSweepRunning = false;
   }
 }
