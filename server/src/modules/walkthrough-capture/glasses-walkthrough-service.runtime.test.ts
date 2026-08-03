@@ -1274,7 +1274,25 @@ describe("ingestGlassesWalkthrough — a retry that ADDS artifacts to a live for
       .set({
         status: "dead",
         lastError: "died with a malformed artifact list",
-        payload: sql`jsonb_set(${jobQueue.payload}, '{artifacts}', '[null]'::jsonb, true)`,
+        // The junk sits BESIDE a real entry, which is the only seeding that can tell the two
+        // survivable outcomes apart. A `[null]` on its own leaves the predecessor list empty either
+        // way — whether the element alone is dropped or the whole malformed list is refused — so the
+        // assertion below would read the current ingest's own artifacts back and pass under both.
+        // `artifact-9` is the clip that only the dead row was carrying: if refusing the list were the
+        // behaviour, it is what would be silently lost.
+        payload: sql`jsonb_set(${jobQueue.payload}, '{artifacts}', ${JSON.stringify([
+          null,
+          {
+            fileId: "file-9",
+            idempotencyKey: "artifact-9",
+            kind: "photo",
+            r2Key: "dallas/deals/deal-1/glasses-walkthroughs/walk-1/artifact-9.jpg",
+            mimeType: "image/jpeg",
+            originalFilename: "frame-9.jpg",
+            fileSizeBytes: 1024,
+            capturedAtMs: null,
+          },
+        ])}::jsonb, true)`,
       })
       .where(eq(jobQueue.id, first.forwarding.jobId));
 
@@ -1286,7 +1304,14 @@ describe("ingestGlassesWalkthrough — a retry that ADDS artifacts to a live for
     // nothing downstream could have acted on it. Refusing the whole list would turn a recoverable walk
     // into a permanently failing one.
     expect(replacement.forwarding.status).toBe("queued");
-    expect(keysOf(await readJob(replacement.forwarding.jobId))).toEqual(["artifact-1", "artifact-2"]);
+    // Element-wise, then: the junk goes and the sound entry beside it stays. Predecessor first, because
+    // `mergeForwardArtifacts(deadPredecessorArtifacts, forwardArtifacts)` gives the inherited list the
+    // lower ordinality — an entry a worker or a reconciling human may have edited is carried verbatim.
+    expect(keysOf(await readJob(replacement.forwarding.jobId))).toEqual([
+      "artifact-9",
+      "artifact-1",
+      "artifact-2",
+    ]);
   });
 
   it("REGRESSION: a `failed` predecessor is superseded, not parked as though a handler were still running", async () => {

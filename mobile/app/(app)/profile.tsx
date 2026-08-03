@@ -10,6 +10,7 @@ import { Badge, Button, Card } from "../../src/components/ui";
 import { ScreenHeader } from "../../src/components/ScreenHeader";
 import { getSaveToCameraRoll, setSaveToCameraRoll } from "../../src/settings/camera-roll-setting";
 import { Wearables, isAvailable as wearablesBridgeAvailable } from "../../src/wearables/native";
+import { deliverPendingPairingUrl } from "../../src/wearables/pairing-callback";
 import { describePairing, type Pairing, type PairingStatus } from "../../src/walkthrough/pairing";
 import { useWalkQueueSession } from "../../src/walkthrough/use-queue-session";
 import {
@@ -95,6 +96,14 @@ function PairingRow() {
     }
     try {
       const configureResult = await Wearables.configure();
+      // A pairing callback that arrived while the SDK was unconfigured is held rather than spent (see
+      // `pairing-callback.ts`). This is the retry: it runs on mount, on manual refresh and on every
+      // foreground, so a user whose launch-time configure failed completes pairing by coming back to
+      // this screen — not by running the whole Meta AI handoff again for a callback nothing kept.
+      //
+      // Before `status()` deliberately, so the very same check reads the registration state the replay
+      // produced, instead of reporting "No glasses paired" until the next foreground.
+      if (configureResult.configured) await deliverPendingPairingUrl();
       const status = await Wearables.status();
       // diagnose()'s cameraPermission was previously read and discarded here — a registered,
       // connected device was labelled "Ready" even with no camera authorization, and the recorder

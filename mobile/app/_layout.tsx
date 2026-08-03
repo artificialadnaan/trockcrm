@@ -14,7 +14,8 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import { AuthProvider } from "../src/auth/AuthContext";
 import { ErrorBoundary } from "../src/components/ErrorBoundary";
-import { isAvailable as wearablesAvailable, setStartupConfigureError, Wearables } from "../src/wearables/native";
+import { isAvailable as wearablesAvailable } from "../src/wearables/native";
+import { deliverPairingUrl, ensureWearablesConfigured } from "../src/wearables/pairing-callback";
 // Side-effect import: registers the background upload-drain task at startup so the OS can invoke it even
 // when the app is cold-launched in the background (before the capture screen mounts).
 import "../src/capture/upload-background-task";
@@ -26,29 +27,6 @@ import "../src/walkthrough/upload-background-task";
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, staleTime: 30_000 } },
 });
-
-/**
- * `Wearables.configure()`, started at most once per process and shared by everything that must not run
- * before it.
- *
- * A promise rather than a flag because the callers need to WAIT, not merely to know. It resolves on
- * failure too — a configure that rejects must never block app launch, and its cause is retained via
- * `setStartupConfigureError` for `useWalk` to surface when a walk is refused. Callers therefore get
- * "configuration has been attempted", which is the strongest thing that can honestly be offered here
- * and exactly what the URL handlers need: after this settles, `handleUrl` reaches an SDK in whatever
- * state it is really in, rather than one that has not been asked yet.
- */
-let wearablesConfigurePromise: Promise<void> | null = null;
-function ensureWearablesConfigured(): Promise<void> {
-  if (!wearablesConfigurePromise) {
-    wearablesConfigurePromise = Wearables.configure()
-      .then(() => undefined)
-      .catch((error: unknown) => {
-        setStartupConfigureError(error);
-      });
-  }
-  return wearablesConfigurePromise;
-}
 
 export default function RootLayout() {
   const [fontsLoaded] = useFonts({
@@ -72,22 +50,25 @@ export default function RootLayout() {
   // during the release pairing flow, so a warm return from Profile's "Pair glasses" button was
   // silently dropped and registration never completed. Registering the listener here, alongside
   // the cold-launch handler, covers both without duplicating a screen-scoped effect.
-  // BOTH handlers wait for configure(), and the initial URL is the one that makes this load-bearing.
-  // These were two independent effects with no ordering between them: on a cold return from the Meta AI
-  // app — iOS having terminated us mid-pairing — `getInitialURL()` could resolve first, `handleUrl`
-  // would reach an SDK that had not been configured yet, and its rejection was swallowed here. That
-  // callback is ONE-SHOT: nothing replays it, so the registration simply never completed and the glasses
-  // stayed unpaired with no error anywhere. The live `url` listener could lose the same race on a fast
-  // warm return, so it waits too.
+  // BOTH handlers go through `deliverPairingUrl`, and the initial URL is the one that makes this
+  // load-bearing. These were two independent effects with no ordering between them: on a cold return
+  // from the Meta AI app — iOS having terminated us mid-pairing — `getInitialURL()` could resolve
+  // first, `handleUrl` would reach an SDK that had not been configured yet, and its rejection was
+  // swallowed here. That callback is ONE-SHOT: nothing replays it, so the registration simply never
+  // completed and the glasses stayed unpaired with no error anywhere. The live `url` listener could
+  // lose the same race on a fast warm return, so it goes through the same path.
+  //
+  // Waiting for configure() is necessary but was not sufficient: the wait resolves on a FAILED
+  // configure too, and the callback was then spent against an SDK that could not receive it. Holding
+  // it for a retry is `deliverPairingUrl`'s job — see that module. No policy is left here on purpose;
+  // this effect is wiring, and the two paths cannot drift apart while they share one function.
   useEffect(() => {
     if (!wearablesAvailable) return;
-    void ensureWearablesConfigured()
-      .then(() => Linking.getInitialURL())
-      .then((url) => {
-        if (url) void Wearables.handleUrl(url).catch(() => {});
-      });
+    void Linking.getInitialURL().then((url) => {
+      if (url) return deliverPairingUrl(url);
+    });
     const sub = Linking.addEventListener("url", ({ url }) => {
-      void ensureWearablesConfigured().then(() => Wearables.handleUrl(url).catch(() => {}));
+      void deliverPairingUrl(url);
     });
     return () => sub.remove();
   }, []);
@@ -101,9 +82,9 @@ export default function RootLayout() {
   //
   // `Wearables.configure()` is idempotent-safe on the native side (guarded on a static `configured`
   // flag, resolving `alreadyConfigured: true`), so this does not conflict with Profile configuring
-  // again later. A rejection here must still never block app launch — it is never rethrown, and
-  // this effect never sets any state — but it IS retained (not discarded) via
-  // `setStartupConfigureError`, so `WalkthroughRecorder.startWalk`'s own `configured` guard has a
+  // again later. A rejection here must still never block app launch — `ensureWearablesConfigured`
+  // never rejects and this effect never sets any state — but the cause IS retained (not discarded)
+  // via `setStartupConfigureError`, so `WalkthroughRecorder.startWalk`'s own `configured` guard has a
   // real cause to report instead of the generic "not configured" the native rejection alone can
   // give it.
   useEffect(() => {
