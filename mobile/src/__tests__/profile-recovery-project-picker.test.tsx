@@ -173,8 +173,12 @@ jest.mock("../query/hooks", () => ({
   useCaptureTargets: (...args: unknown[]) => mockUseCaptureTargets(...(args as [string, boolean, boolean])),
   useNearbyCaptureTargets: (...args: unknown[]) => mockUseNearbyCaptureTargets(...(args as [])),
 }));
+// Referenced lazily inside the factory (same shape as the two hooks above) so a single test can make
+// the fix it rejects — a denied location permission, or a fix that times out — without every other
+// case in this file losing its coordinates.
+const mockGetLiveGps = jest.fn(async () => ({ latitude: 32.911, longitude: -96.775 }));
 jest.mock("../capture/metadata", () => ({
-  getLiveGps: jest.fn(async () => ({ latitude: 32.911, longitude: -96.775 })),
+  getLiveGps: (...args: unknown[]) => mockGetLiveGps(...(args as [])),
 }));
 
 import * as FileSystem from "expo-file-system/legacy";
@@ -300,5 +304,47 @@ describe("the project picker offered for an unfiled walk", () => {
     const screen = await openPickerAndSearch("preston");
 
     expect(screen.getAllByText(SHARED_DEAL.name)).toHaveLength(1);
+  });
+
+  // The picker's GPS lookup is `getLiveGps().then(...).finally(...)`, and `.finally` RE-THROWS: a
+  // rejection there had nothing handling it, and the `void` in front handles nothing either.
+  //
+  // NOT reachable through today's getLiveGps, and the review comment that raised this named causes
+  // that are not causes: a denied permission and a timed-out fix are both handled INSIDE
+  // capture/metadata.ts (one try/catch around the whole body, degrading to a timestamp-only result),
+  // which is why capture.tsx's own session handler states "getLiveGps always resolves (coordless on
+  // denial/timeout)". So this is a contract test, not a reproduction — what it pins is that the
+  // PICKER survives a lookup that rejects, so the totality of one function two modules away stops
+  // being load-bearing for a screen whose whole job is saving an unrepeatable recording.
+  //
+  // The visible recovery was already fine either way (`.finally` sets locationChecked before
+  // re-throwing), which is exactly what would have made this quiet: the only symptom is a rejection
+  // nobody is listening for.
+  it("consumes a location lookup that rejects, and still offers the search that answers it", async () => {
+    const unhandled: unknown[] = [];
+    const noteUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", noteUnhandled);
+    try {
+      mockGetLiveGps.mockRejectedValueOnce(new Error("Location permission denied"));
+      fs.__store.set(`${ORPHAN_DIR}walk.mp4`, FINALIZED_MP4);
+      fs.__store.set(`${ORPHAN_DIR}owner`, "user-1_office-a");
+      const screen = render(<ProfileScreen />);
+      await act(async () => {
+        await scanRecoverableWalksAtStartup(OWNER);
+      });
+      fireEvent.press(screen.getByText("File to a project"));
+      // A macrotask, not just microtasks: node reports an unhandled rejection on the tick AFTER the
+      // microtask queue drains, so a purely-microtask flush would pass whether or not it happened.
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
+      expect(unhandled).toEqual([]);
+      // …and the picker is usable: no coordinates means no "Closest jobs", which is what the search
+      // box is for. Asserted so the catch can never be a silent swallow that also loses the screen.
+      expect(screen.queryByText(/Search for the project you walked/)).not.toBeNull();
+    } finally {
+      process.off("unhandledRejection", noteUnhandled);
+    }
   });
 });

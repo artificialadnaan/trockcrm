@@ -68,9 +68,15 @@ describe("api endpoints", () => {
 
     await searchCaptureTargets(fetcher, "preston", 20, true);
     await searchCaptureTargets(fetcher, "preston");
+    // The flag is DEALS-SCOPED, and the server applies the same conjunction: on its own it must add
+    // nothing. Pinned because the widening is only safe while it is confined to the recovery
+    // question — a future edit dropping the `dealsOnly &&` guard would widen the ALL-TYPES query
+    // silently, and no other case here would notice.
+    await searchCaptureTargets(fetcher, "preston", 20, false, true);
 
     expect(calls.map((call) => call.opts?.query)).toEqual([
       { search: "preston", limit: 20, dealsOnly: "true" },
+      { search: "preston", limit: 20 },
       { search: "preston", limit: 20 },
     ]);
   });

@@ -4,6 +4,7 @@ import { router, useFocusEffect } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useAuth } from "../../src/auth/AuthContext";
+import { errorMessage } from "../../src/lib/error-message";
 import { theme } from "../../src/theme/theme";
 import { Badge, Button, Card } from "../../src/components/ui";
 import { ScreenHeader } from "../../src/components/ScreenHeader";
@@ -114,7 +115,9 @@ function PairingRow() {
         setCheckError(null);
       }
     } catch (error) {
-      if (mountedRef.current) setCheckError(String(error));
+      // The SDK's own words. Every one of these three is rendered to a crew member trying to
+      // get their glasses working, and "Error:" in front of it is not part of what Meta said.
+      if (mountedRef.current) setCheckError(errorMessage(error));
     } finally {
       if (mountedRef.current) setChecking(false);
     }
@@ -139,7 +142,7 @@ function PairingRow() {
       // No further action here — control has handed off to the Meta AI app. The AppState
       // listener above re-checks status the moment this app regains focus.
     } catch (error) {
-      setPairError(String(error));
+      setPairError(errorMessage(error));
     } finally {
       if (mountedRef.current) setStarting(false);
     }
@@ -157,7 +160,7 @@ function PairingRow() {
     try {
       await Wearables.requestCameraPermission();
     } catch (error) {
-      if (mountedRef.current) setCameraError(String(error));
+      if (mountedRef.current) setCameraError(errorMessage(error));
     } finally {
       if (mountedRef.current) setRequestingCamera(false);
     }
@@ -298,7 +301,9 @@ function FailedWalksCard() {
       await retryFailedWalks(ownerKey);
       await drainWalkQueue(ownerKey, queueFetcher, walkthroughUploadClient);
     } catch (error) {
-      if (mountedRef.current) setRetryError(String(error));
+      // Same rule as the recovery card below, and the same reason: a manifest write that failed for
+      // want of space says so in its message, and "Error:" in front of it helps nobody.
+      if (mountedRef.current) setRetryError(errorMessage(error));
     } finally {
       if (mountedRef.current) setRetrying(false);
       await refresh();
@@ -358,7 +363,10 @@ function describeRecoveredWalk(walk: RecoveredWalk): string {
     walk.videoUri ? "1 recording" : walk.unfinishedVideo ? "video unusable (not uploaded)" : "no video",
     stills === 0 ? "no photos" : stills === 1 ? "1 photo" : `${stills} photos`,
   ].join(", ");
-  const spanMinutes = walk.captureSpanMs === null ? null : Math.round(walk.captureSpanMs / 60_000);
+  // FLOOR, never round: the line reads "at least N min", and rounding 90 seconds up to 2 claims more
+  // walk than the files can support. A bound that overstates is not a bound — and this line is one
+  // of only three clues the estimator has to which job this recording was.
+  const spanMinutes = walk.captureSpanMs === null ? null : Math.floor(walk.captureSpanMs / 60_000);
   return [
     walk.recordedAtMs === null ? UNKNOWN_WALK_TIME : formatWalkDateTime(walk.recordedAtMs),
     contents,
@@ -473,7 +481,11 @@ function RecoverableWalksCard() {
         // background task like any other.
         void drainWalkQueue(ownerKey, queueFetcher, walkthroughUploadClient).catch(() => undefined);
       } catch (error) {
-        if (mountedRef.current) setFileError(String(error));
+        // The MESSAGE, not the stringified Error. enqueueRecoveredWalk's refusals are written as
+        // prose for this exact line ("That walk is still recording — end it before filing it."), and
+        // an "Error:" prefix in front of an instruction is noise on the one surface that can save
+        // the recording.
+        if (mountedRef.current) setFileError(errorMessage(error));
       } finally {
         filingRef.current = null;
         if (mountedRef.current) setFilingWalkId(null);

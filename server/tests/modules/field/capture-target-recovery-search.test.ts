@@ -101,10 +101,23 @@ function officeAnswer(prefix: string, input: { dealsOnly?: boolean }) {
   };
 }
 
+/**
+ * Which office the mock is currently answering for.
+ *
+ * `searchFieldCaptureTargets` takes no office argument — the route swaps the tenant connection per
+ * office — so the per-office dimension lives entirely in what the mock returns. Hardcoding one
+ * prefix made both iterations return the SAME target ids, and `mergeFieldCaptureTargets` does not
+ * dedupe (it flatMaps and slices), so the merged list was two copies of one office's answer: the
+ * property under test — narrowing PER OFFICE, before one global cap — could not be told apart from
+ * narrowing a single office, and every assertion here would have held with the atlanta read deleted.
+ */
+let currentOfficeSlug = dallas.slug;
+
 /** Search every office the way the cross-office route does, then merge under ONE global cap. */
 async function searchAndMerge(input: Parameters<typeof searchFieldCaptureTargets>[2]) {
   const perOffice = [];
   for (const office of [dallas, atlanta]) {
+    currentOfficeSlug = office.slug;
     const { targets } = await searchFieldCaptureTargets(db, access, input);
     perOffice.push({ office, targets });
   }
@@ -113,6 +126,8 @@ async function searchAndMerge(input: Parameters<typeof searchFieldCaptureTargets
 
 beforeEach(() => {
   searchMock.mockReset();
+  // Reset too, or a merged search leaves the single-call cases below answering as atlanta.
+  currentOfficeSlug = dallas.slug;
 });
 
 describe("recovery capture-target search (includeTerminalDeals)", () => {
@@ -121,7 +136,7 @@ describe("recovery capture-target search (includeTerminalDeals)", () => {
   // GUARD-of-the-bug (passes before AND after — it exercises the OLD input, which is unchanged).
   it("MECHANISM: the unfiltered question loses every deal once 20 leads match (global cap, lead-first order)", async () => {
     searchMock.mockImplementation(async (_db: unknown, input: { dealsOnly?: boolean }) =>
-      officeAnswer("dallas", input),
+      officeAnswer(currentOfficeSlug, input),
     );
 
     const merged = await searchAndMerge({ search: "preston", limit: PICKER_LIMIT });
@@ -132,7 +147,7 @@ describe("recovery capture-target search (includeTerminalDeals)", () => {
 
   it("narrows to deals PER OFFICE, so the terminal deal survives the global cap", async () => {
     searchMock.mockImplementation(async (_db: unknown, input: { dealsOnly?: boolean }) =>
-      officeAnswer("dallas", input),
+      officeAnswer(currentOfficeSlug, input),
     );
 
     const merged = await searchAndMerge({
@@ -146,6 +161,10 @@ describe("recovery capture-target search (includeTerminalDeals)", () => {
     expect(merged.map((t) => t.id)).toContain(`dallas-${LOST_DEAL}`);
     // and not by trading the ordinary jobs away for it
     expect(merged.map((t) => t.id)).toContain(`dallas-${LIVE_DEAL}`);
+    // PER OFFICE is the actual claim, so the second office has to be in the answer on its own
+    // account. Without distinct ids this whole case would hold with the atlanta read deleted.
+    expect(merged.map((t) => t.id)).toContain(`atlanta-${LOST_DEAL}`);
+    expect(merged.map((t) => t.id)).toContain(`atlanta-${LIVE_DEAL}`);
   });
 
   it("asks the underlying search WITHOUT the browsing stage rule (that rule is what hides the Lost deal)", async () => {
@@ -184,7 +203,7 @@ describe("recovery capture-target search (includeTerminalDeals)", () => {
   // active deal, and honouring it alone would silently drop the leads the ordinary picker needs.
   it("ignores includeTerminalDeals when dealsOnly is off (the unfiltered answer already includes them)", async () => {
     searchMock.mockImplementation(async (_db: unknown, input: { dealsOnly?: boolean }) =>
-      officeAnswer("dallas", input),
+      officeAnswer(currentOfficeSlug, input),
     );
 
     const { targets } = await searchFieldCaptureTargets(db, access, {

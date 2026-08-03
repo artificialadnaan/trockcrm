@@ -124,11 +124,13 @@ jest.mock("../../settings/camera-roll-setting", () => ({
 
 jest.mock("../upload-client", () => ({ walkthroughUploadClient: {} }));
 
-// ── The project picker the recovery flow reuses ───────────────────────────────────────────────────
-// The REAL TargetPicker renders here — it is the established project-choosing surface (capture.tsx,
-// the scorecard editor), and swapping in a stub would test the stub rather than the wiring. Only its
-// two data hooks and its GPS lookup are mocked, exactly as ../../components/__tests__/TargetPicker
-// does: Profile is not otherwise a react-query screen, so there is no QueryClientProvider here.
+// ── The project picker the recovery flow opens ────────────────────────────────────────────────────
+// The REAL RecoveryProjectPicker renders here — it is the surface profile.tsx actually mounts for
+// this card (and ../../__tests__/profile-recovery-project-picker.test.tsx covers why it is NOT the
+// shared TargetPicker: the two ask the server different questions), so swapping in a stub would test
+// the stub rather than the wiring. Only its two data hooks and its GPS lookup are mocked, the same
+// way ../../components/__tests__/TargetPicker mocks that picker's: Profile is not otherwise a
+// react-query screen, so there is no QueryClientProvider here.
 // Typed through this seed value rather than inline: an inferred `never[]` would make every
 // mockReturnValue carrying a real target a type error.
 const NO_TARGETS: { data: { targets: FieldCaptureTarget[] }; isFetching: boolean } = {
@@ -156,6 +158,7 @@ import {
   scanRecoverableWalksAtStartup,
   type WalkthroughUploadClient,
 } from "../upload";
+import { noteWalkStarted, noteWalkTeardown } from "../walk-teardown";
 // eslint-disable-next-line import/first
 import ProfileScreen from "../../../app/(app)/profile";
 
@@ -383,6 +386,51 @@ describe("filing a recovered walk against a project the estimator picks", () => 
     expect(screen.queryByText(/1 photo/)).not.toBeNull();
     expect(screen.queryByText(/12 min/)).not.toBeNull();
     expect(screen.queryByText(/Nov 2023/)).not.toBeNull();
+  });
+
+  // The span is first-write to last-write and the row says "at least" — a LOWER BOUND, never a
+  // duration (recording began before the first byte landed). Rounding breaks exactly that word: a
+  // 90-second span rounds UP to 2 and the card then claims more walk than the files can support, on
+  // the one line the estimator uses to work out which job this was. Ninety seconds is the smallest
+  // span that shows it, and the direction of the error is the whole point — a bound that overstates
+  // is not a bound.
+  it("never rounds the span UP — 'at least' has to stay a lower bound", async () => {
+    fs.__store.set(`${ORPHAN_DIR}walk.mp4`, FINALIZED_MP4);
+    seedOrphanOwner();
+    fs.__store.set(`${ORPHAN_DIR}still-001.jpg`, "a");
+    // 90 seconds apart, in epoch SECONDS like the platform reports them.
+    fs.__mtimes.set(`${ORPHAN_DIR}walk.mp4`, 1_700_000_090);
+    fs.__mtimes.set(`${ORPHAN_DIR}still-001.jpg`, 1_700_000_000);
+    const screen = render(<ProfileScreen />);
+    await act(async () => {
+      await scanRecoverableWalksAtStartup(OWNER);
+    });
+
+    expect(screen.queryByText(/at least 1 min/)).not.toBeNull();
+    expect(screen.queryByText(/at least 2 min/)).toBeNull();
+  });
+
+  // The message the estimator reads has to be the message the queue WROTE. `enqueueRecoveredWalk`
+  // throws prose meant for this card ("end it before filing it") and the catch stringified the Error
+  // itself, so the card rendered "Error: That walk is still recording…" — the prefix is noise on a
+  // line whose whole job is to tell the one person who can fix it what to do.
+  it("shows the queue's own words when a filing is refused, not a stringified Error", async () => {
+    const screen = await renderWithOrphan();
+    // Native picks the recorder back up for THIS walk after the scan already listed it — the exact
+    // stale-row case enqueueRecoveredWalk refuses, and the only refusal with user-facing prose.
+    noteWalkStarted("walk-orphan");
+    try {
+      await fileAgainstDeal(screen);
+
+      expect(
+        screen.queryByText("That walk is still recording — end it before filing it."),
+      ).not.toBeNull();
+      expect(screen.queryByText(/^Error:/)).toBeNull();
+    } finally {
+      // The recorder slot is process-global — hand it back however this test ends, or every later
+      // scan in this file silently excludes walk-orphan.
+      noteWalkTeardown("walk-orphan", Promise.resolve());
+    }
   });
 
   // GUARD, not a regression — it holds on either side of this change, because upsertQueuedWalk keys

@@ -146,6 +146,16 @@ export function RecoveryProjectPicker({
           setNearbyCoords(null);
         }
       })
+      // `.finally` RE-THROWS, so without this a rejection here is an unhandled one — the `void` in
+      // front of the chain handles nothing. `getLiveGps` is total today (capture/metadata.ts catches
+      // a denied permission and a timed-out fix and degrades to a timestamp-only result), so this is
+      // insurance rather than a live bug — but it is insurance on the surface where an unrepeatable
+      // recording gets filed, and the totality of a function two modules away should not be what
+      // keeps this screen quiet. There is nothing to report either way: without coordinates the
+      // search box below IS the answer, which is what the empty state already says.
+      .catch(() => {
+        if (!cancelled) setNearbyCoords(null);
+      })
       .finally(() => {
         if (!cancelled) setLocationChecked(true);
       });
