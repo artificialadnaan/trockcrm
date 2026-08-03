@@ -107,6 +107,27 @@ export function deriveRecoveredWalkTitle(targetName: string, atMs: number | null
   return clampedTitle(targetName, ` (recovered) — ${when}`);
 }
 
+/**
+ * Add a note to an ALREADY-COMPOSED title — for a fact that only becomes true after the walk was
+ * enqueued, which is the one case the derive functions above cannot cover. Today that is exactly one
+ * thing: an artifact the upload queue found it can never file (upload-core.ts's
+ * `dropUnfilableArtifact`), where the title is the only channel that reaches the office alongside
+ * the walk.
+ *
+ * Appended ONLY when it fits, and left off entirely when it does not — deliberately NOT clamped.
+ * `clampedTitle` takes its overflow out of the front, which is right when the front is a project
+ * name (recoverable in full from the deal the walk files against) and the tail is the timestamp. But
+ * everything handed to THIS function is already "the front", so making room would cut exactly the
+ * timestamp `deriveRecoveredWalkTitle` goes to such lengths to preserve — and for a recovered walk
+ * that string is the only record of when the site visit happened. A title already within a note's
+ * length of the cap keeps its timestamp and loses the note; the alternative trades a fact nothing
+ * else carries for one the missing artifact itself implies.
+ */
+export function withWalkTitleNote(title: string, note: string): string {
+  const suffix = ` ${note}`;
+  return title.length + suffix.length <= MAX_TITLE_CHARS ? `${title}${suffix}` : title;
+}
+
 /** The deal's property address when known, else "" (never undefined/null — the wire type is a
  *  plain `string`; the server treats "" the same as absent). Trimmed so a whitespace-only address
  *  from an incomplete deal record reads as "unknown" rather than a blank-looking label. Clamped

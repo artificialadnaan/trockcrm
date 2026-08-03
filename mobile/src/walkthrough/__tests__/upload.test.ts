@@ -1234,6 +1234,22 @@ describe("findRecoverableWalks / getRecoverableWalkCount", () => {
   // itself, below): a snapshot held for a whole shell lifecycle cannot be the last word on whether
   // its rows are still true.
   describe("a walk that starts while the scan is running", () => {
+    // The recorder slot is PROCESS-GLOBAL (walk-teardown.ts holds one walkId for the whole module),
+    // so every case below has to hand it back. Released here rather than as the last statement of
+    // each test body: a failing assertion above that line skips the cleanup, `recordingWalkId` stays
+    // set for the rest of the file, and every later findRecoverableWalks silently excludes that
+    // walkId — one real failure becomes several, and the extra ones point away from it.
+    let startedWalkId: string | null = null;
+    const started = (walkId: string): string => {
+      noteWalkStarted(walkId);
+      startedWalkId = walkId;
+      return walkId;
+    };
+    afterEach(() => {
+      if (startedWalkId !== null) noteWalkTeardown(startedWalkId, Promise.resolve());
+      startedWalkId = null;
+    });
+
     it("leaves the live recording out, and still reports the orphan it was called for", async () => {
       const orphan = `${DOC}walkthroughs/walk-old/`;
       seedVideoFile(`${orphan}walk.mp4`); // left by a previous launch — a real orphan
@@ -1251,15 +1267,12 @@ describe("findRecoverableWalks / getRecoverableWalkCount", () => {
       await Promise.resolve(); // the scan is now parked on the teardown wait
       // The estimator taps Start and captures a still. native creates walkthroughs/<walkId>/ during
       // startWalk, which is why the id is claimed BEFORE the call rather than when it resolves.
-      noteWalkStarted("walk-live");
+      started("walk-live");
       seedVideoFile(`${live}walk.mp4`, UNFINALIZED_MP4);
       fs.__store.set(`${live}still-001.jpg`, "a");
       finishTeardown();
 
       expect((await scan).map((w) => w.walkId)).toEqual(["walk-old"]);
-      // The recorder slot is process-global, so hand it back before the next case scans against a
-      // walk this one left recording.
-      noteWalkTeardown("walk-live", Promise.resolve());
     });
 
     // A walk already recording when the scan is CALLED, not one that starts during it. Not reachable
@@ -1270,10 +1283,9 @@ describe("findRecoverableWalks / getRecoverableWalkCount", () => {
       const dir = `${DOC}walkthroughs/walk-in-progress/`;
       seedVideoFile(`${dir}walk.mp4`, UNFINALIZED_MP4);
       fs.__store.set(`${dir}still-001.jpg`, "a");
-      noteWalkStarted("walk-in-progress");
+      started("walk-in-progress");
 
       expect(await findRecoverableWalks(OWNER)).toEqual([]);
-      noteWalkTeardown("walk-in-progress", Promise.resolve());
     });
 
     // The other end, and the one that decides whether this is a fix or a smaller window: the snapshot
@@ -1284,7 +1296,7 @@ describe("findRecoverableWalks / getRecoverableWalkCount", () => {
       const dir = `${DOC}walkthroughs/walk-in-progress-2/`;
       const still = `${dir}still-001.jpg`;
       seedFiles([still]);
-      noteWalkStarted("walk-in-progress-2");
+      started("walk-in-progress-2");
       const stale: RecoveredWalk = {
         walkId: "walk-in-progress-2",
         videoUri: null, // the video is not finalized yet — it is still being written
@@ -1299,7 +1311,6 @@ describe("findRecoverableWalks / getRecoverableWalkCount", () => {
       );
       // Nothing queued means nothing to drain, and therefore nothing that deletes the directory.
       expect(await getQueuedWalks(OWNER)).toEqual([]);
-      noteWalkTeardown("walk-in-progress-2", Promise.resolve());
     });
 
     // GUARD (passes before the fix too, which excluded nothing at all): "recording" ends where the
@@ -1310,7 +1321,10 @@ describe("findRecoverableWalks / getRecoverableWalkCount", () => {
     it("reports the same walk once an endWalk has been issued for it", async () => {
       const dir = `${DOC}walkthroughs/walk-was-live/`;
       seedVideoFile(`${dir}walk.mp4`);
-      noteWalkStarted("walk-was-live");
+      started("walk-was-live");
+      // The subject, not cleanup: handing the directory to the teardown registry is what makes it
+      // recoverable again. The afterEach above repeats it harmlessly (noteWalkTeardown is keyed by
+      // walkId and the second claim settles the same way).
       noteWalkTeardown("walk-was-live", Promise.resolve());
 
       expect((await findRecoverableWalks(OWNER)).map((w) => w.walkId)).toEqual(["walk-was-live"]);
@@ -1610,5 +1624,113 @@ describe("retryFailedWalks", () => {
   it("is a no-op when nothing is terminal", async () => {
     await enqueueWalk(OWNER, "walk-1", completedWalk(), META, 1000);
     expect(await retryFailedWalks(OWNER)).toBe(0);
+  });
+});
+
+// ── FINDING A (Codex), the salvage half: one unfilable artifact must not take the walk with it ─────
+//
+// The bound in useWalk.ts stops THIS build producing an over-ceiling walk.mp4. It cannot do anything
+// about the ones that already exist: a walk queued by an earlier build, or an orphan directory
+// recovered from one. For those, the server refuses every presign on the file's size — deterministic,
+// unchanged by any retry — and because completion needs EVERY artifact in R2, the stills captured on
+// the same site visit were refused along with it. The walk sat on the failed-walk card saying
+// "nothing is lost — tap retry" about an outcome that could never change, and orphan recovery could
+// not offer a stills-only salvage either, because the manifest already claimed the directory.
+//
+// So a file this device can never file is dropped from the walk rather than retried at it, and the
+// walk completes with what CAN be sent. The office is told in the title — the one channel that
+// travels with the walk — because by drain time they are the only party who can act on it; the
+// estimator was told at recording time, which is the only moment they could have.
+describe("an artifact larger than the server's per-artifact ceiling", () => {
+  /** glasses-walkthrough-service.ts's MAX_GLASSES_WALKTHROUGH_ARTIFACT_BYTES. */
+  const SERVER_CEILING_BYTES = 2 * 1024 * 1024 * 1024;
+
+  /** A walk on disk whose video weighs `videoBytes` and whose still is ordinary. */
+  async function queueWalkWithVideoOf(videoBytes: number, opts: { withStill?: boolean } = {}) {
+    const withStill = opts.withStill ?? true;
+    seedFiles(withStill ? [VIDEO_URI, PHOTO_URI] : [VIDEO_URI]);
+    fs.__sizes.set(VIDEO_URI, videoBytes);
+    const walk = withStill ? completedWalk() : completedWalkWithoutStills();
+    await enqueueWalk(OWNER, "walk-1", walk, META, 1000);
+  }
+
+  /** The same completed walk, minus the still — a recording with nothing else to salvage. */
+  function completedWalkWithoutStills(): Walk {
+    const started = reduceWalk(reduceWalk(initialWalk("deal-1", "proj-7"), { type: "starting" }), {
+      type: "started",
+      at: 1000,
+      videoUri: VIDEO_URI,
+    });
+    return reduceWalk(reduceWalk(started, { type: "ended", at: 5000 }), {
+      type: "finalized",
+      audioUri: null,
+    });
+  }
+
+  it("files the STILLS anyway, instead of failing the whole site visit over the video", async () => {
+    await queueWalkWithVideoOf(SERVER_CEILING_BYTES + 1);
+    const client = stubClient();
+
+    const summary = await drainWalkQueue(OWNER, fetcher, client);
+
+    // The video was never even offered to the server: its size is known here, and the refusal is
+    // deterministic, so five round-trips could only ever produce the same answer more slowly.
+    const presigned = (client.requestUploadUrl as jest.Mock).mock.calls.map(([, , req]) => req.kind);
+    expect(presigned).toEqual(["photo"]);
+    // …and the walk COMPLETED, with the photo in the payload.
+    const [, , completion] = (client.completeWalk as jest.Mock).mock.calls[0]!;
+    expect(completion.artifacts.map((a: { kind: string }) => a.kind)).toEqual(["photo"]);
+    expect(summary.completed).toBe(1);
+    expect(await getQueuedWalks(OWNER)).toEqual([]);
+    // Not reported as a failure — because it was not one. The stills are filed.
+    expect(await getFailedWalkCount(OWNER)).toBe(0);
+  });
+
+  it("tells the office the video did not come, rather than filing a walk that quietly has none", async () => {
+    await queueWalkWithVideoOf(SERVER_CEILING_BYTES + 1);
+    const client = stubClient();
+
+    await drainWalkQueue(OWNER, fetcher, client);
+
+    const [, , completion] = (client.completeWalk as jest.Mock).mock.calls[0]!;
+    expect(completion.title).toContain(META.title);
+    expect(completion.title).toMatch(/video too large/i);
+    // Still inside the cap the completion call enforces AFTER every artifact is already in R2 —
+    // the one place a 400 can no longer be retried out of.
+    expect(completion.title.length).toBeLessThanOrEqual(300);
+  });
+
+  // The other half, and the one a naive drop would turn into a silent leak: with nothing else to
+  // file, dropping the video would leave a walk with ZERO artifacts — never fully-put, never
+  // completable, never terminal, and therefore never drained, counted or cleaned up again. It has to
+  // FAIL, and be seen to.
+  it("fails a video-only walk at once — visibly, and without five futile presigns", async () => {
+    await queueWalkWithVideoOf(SERVER_CEILING_BYTES + 1, { withStill: false });
+    const client = stubClient();
+
+    await drainWalkQueue(OWNER, fetcher, client);
+
+    expect(client.requestUploadUrl).not.toHaveBeenCalled();
+    expect(client.completeWalk).not.toHaveBeenCalled();
+    // ONE drain pass, not five: the size is knowable here and re-reading it four more times tells
+    // the estimator nothing they could not have been told immediately.
+    expect(await getFailedWalkCount(OWNER)).toBe(1);
+    // The bytes are untouched — this module never deletes for a walk it did not file.
+    expect(fs.__store.has(VIDEO_URI)).toBe(true);
+  });
+
+  // GUARD (passes before this change too): an ordinary walk must be completely unaffected. A ceiling
+  // check that misfired would drop real footage from every site visit.
+  it("leaves a walk inside the ceiling exactly as it was", async () => {
+    await queueWalkWithVideoOf(SERVER_CEILING_BYTES);
+    const client = stubClient();
+
+    await drainWalkQueue(OWNER, fetcher, client);
+
+    const presigned = (client.requestUploadUrl as jest.Mock).mock.calls.map(([, , req]) => req.kind);
+    expect(presigned.sort()).toEqual(["photo", "video"]);
+    const [, , completion] = (client.completeWalk as jest.Mock).mock.calls[0]!;
+    expect(completion.title).toBe(META.title);
+    expect(completion.artifacts).toHaveLength(2);
   });
 });

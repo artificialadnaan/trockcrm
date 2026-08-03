@@ -368,6 +368,79 @@ export function artifactCount(walk: Walk): number {
 export const MAX_WALK_ARTIFACTS = 200;
 
 /**
+ * Hard cap the server enforces on ONE artifact's bytes (glasses-walkthrough-service.ts's
+ * `MAX_GLASSES_WALKTHROUGH_ARTIFACT_BYTES`). Mirrored rather than imported for the same reason
+ * MAX_WALK_ARTIFACTS above is — the mobile app shares no package with the server — so if the
+ * server's ceiling ever moves, this needs moving with it.
+ *
+ * It is validated at PRESIGN, not at upload: an artifact over it is refused a URL at all, with a 400
+ * that no retry can change. For the stills that is unreachable; for `walk.mp4` it is a real end of
+ * the line, because nothing in this app bounds a walk's duration or the glasses' output bitrate.
+ */
+export const MAX_WALK_ARTIFACT_BYTES = 2 * 1024 * 1024 * 1024; // 2 GiB
+
+/**
+ * How far under the ceiling a recording is stopped.
+ *
+ * Two things have to fit in here, and both land AFTER the last size this app can read:
+ *
+ *   - `moov`. AVAssetWriter appends the index in `finishWriting`, so the file grows once more after
+ *     the recording stops — a few MB on a long walk, and the one part of the file that is not there
+ *     to be measured while it is being written.
+ *   - One polling interval of media. The size is read from disk every WALK_VIDEO_SIZE_POLL_MS, so
+ *     the bound can be crossed by up to that much before anything notices — about 15 MB at the
+ *     ~8 Mbps a 720p30 encode runs at.
+ *
+ * 64 MiB is several times both together. Erring large costs a few seconds of a recording nobody was
+ * going to reach; erring small costs the entire video.
+ */
+export const WALK_VIDEO_SIZE_HEADROOM_BYTES = 64 * 1024 * 1024;
+
+/** The size at which the walk is ended for it. Below the server's ceiling by the headroom above, so
+ *  the FINALISED file — moov and all — still fits. */
+export const WALK_VIDEO_STOP_BYTES = MAX_WALK_ARTIFACT_BYTES - WALK_VIDEO_SIZE_HEADROOM_BYTES;
+
+/**
+ * The size at which the estimator is TOLD, so the stop is never the first they hear of it.
+ *
+ * 256 MiB of warning is roughly four to eight minutes at the bitrates these recordings run at —
+ * long enough to finish the elevation being walked and end the walk deliberately, which is the whole
+ * point of warning rather than only stopping. The number is a margin below the stop, not a fraction
+ * of the ceiling: what it buys is TIME, and time does not scale with the cap.
+ */
+export const WALK_VIDEO_WARN_BYTES = WALK_VIDEO_STOP_BYTES - 256 * 1024 * 1024;
+
+/** How often `walk.mp4` is re-measured while recording. A stat, not a read — the cost is negligible
+ *  at any interval, and the only thing shortening it buys is a tighter bound on the overshoot the
+ *  headroom above already covers several times over. */
+export const WALK_VIDEO_SIZE_POLL_MS = 10_000;
+
+/** Where this recording stands against the server's per-artifact ceiling. */
+export type WalkVideoSizeVerdict =
+  /** Nothing to say. */
+  | "ok"
+  /** Close enough that the estimator should be finishing up — still their call. */
+  | "nearLimit"
+  /** Past the point where a finalised file would still fit. Not their call any more. */
+  | "atLimit";
+
+/**
+ * Judge a recording's CURRENT size on disk against the bounds above.
+ *
+ * `null` — and any non-finite or negative reading — is "ok", never "atLimit", and that direction is
+ * the important one. An unmeasurable walk is not an oversized walk: a `walk.mp4` native reported no
+ * path for, a stat that failed, a platform that returned no size. The same rule the coverage
+ * verdicts follow for a census that never arrived, and for a stronger reason here — the action
+ * attached to "atLimit" ENDS a site visit, so being unable to read a file must never be what takes
+ * one away.
+ */
+export function assessWalkVideoSize(bytes: number | null): WalkVideoSizeVerdict {
+  if (bytes === null || !Number.isFinite(bytes) || bytes < 0) return "ok";
+  if (bytes >= WALK_VIDEO_STOP_BYTES) return "atLimit";
+  return bytes >= WALK_VIDEO_WARN_BYTES ? "nearLimit" : "ok";
+}
+
+/**
  * Whether ONE MORE still could be captured right now without the walk's eventual completion
  * payload — video, plus audio if that dead-but-modeled path is ever revived, plus every still —
  * exceeding MAX_WALK_ARTIFACTS. Layered on top of `canCapture` (the state gate): this is the COUNT

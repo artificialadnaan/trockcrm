@@ -8,13 +8,24 @@ const TEST_OWNER = "user-1:office-a";
 const mockStartWalk = jest.fn();
 const mockCaptureStill = jest.fn();
 const mockEndWalk = jest.fn();
+/** What `walk.mp4` currently weighs on disk. The hook watches the file itself rather than guessing
+ *  from a bitrate — the glasses' encoder is not ours to predict — so this is the whole input to the
+ *  size bound below. */
+const mockVideoBytes = { size: 0 };
+jest.mock("expo-file-system/legacy", () => ({
+  getInfoAsync: async () => ({ exists: true, size: mockVideoBytes.size }),
+}));
 let stillListener: ((still: { uri: string; bytes: number; source: string }) => void) | null = null;
 let errorListener: ((error: { message: string }) => void) | null = null;
 
 jest.mock("../native", () => ({
   isAvailable: true,
   Recorder: {
-    startWalk: (id: string) => mockStartWalk(id),
+    // BOTH arguments forwarded. `Recorder.startWalk(walkId, ownerKey)` stamps the walk's directory
+    // with the signed-in identity before native writes a byte (native.ts's claimWalkDirForOwner), so
+    // a mock that dropped the second argument could not tell a walk stamped with the right owner
+    // from one stamped with nothing.
+    startWalk: (id: string, ownerKey: string) => mockStartWalk(id, ownerKey),
     captureStill: () => mockCaptureStill(),
     endWalk: () => mockEndWalk(),
   },
@@ -33,12 +44,18 @@ jest.mock("../native", () => ({
 }));
 
 import { useWalk } from "../useWalk";
-import { isAudioTruncated, isVideoTruncated, MAX_WALK_ARTIFACTS } from "../session";
+import {
+  isAudioTruncated,
+  isVideoTruncated,
+  MAX_WALK_ARTIFACTS,
+  WALK_VIDEO_WARN_BYTES,
+} from "../session";
 
 beforeEach(() => {
   mockStartWalk.mockReset();
   mockCaptureStill.mockReset();
   mockEndWalk.mockReset();
+  mockVideoBytes.size = 0;
   stillListener = null;
   errorListener = null;
 });
@@ -64,11 +81,36 @@ describe("useWalk", () => {
     const usedId = mockStartWalk.mock.calls[0]![0] as string;
     // Safe as a directory component: no slashes, colons, or spaces.
     expect(usedId).toMatch(/^[a-z0-9-]+$/);
+    // GUARD: the identity reaches the recorder, which is what stamps the walk directory with it
+    // before the first byte. A hook that minted the id and dropped the owner would record a walk no
+    // account can be shown to own — recoverable by nobody.
+    expect(mockStartWalk).toHaveBeenCalledWith(usedId, TEST_OWNER);
     expect(result.current.walk.state).toBe("recording");
     expect(result.current.error).toBeNull();
     // Exposed so a caller can enqueue this walk once it reaches a terminal state — session.ts's Walk
     // carries no id of its own, so this is the only place it's available.
     expect(result.current.walkId).toBe(usedId);
+  });
+
+  // GUARD (holds before this suite covered it too — the refusal itself is not new). Here because the
+  // file's own header claims these tests pin it and nothing did: `useWalkQueueSession` resolves the
+  // owner asynchronously, so this screen really does render for a frame or two without one, and the
+  // whole recovery path depends on the walk directory being stamped. Recording anyway costs the
+  // walk — an unstamped directory is one the recovery scan can only ever offer to nobody; refusing
+  // costs a retriable message, which is what the failed state carries.
+  it("REFUSES to record without a signed-in owner, rather than starting an unattributable walk", async () => {
+    const { result } = renderHook(() => useWalk("deal-1", null, null));
+
+    await act(async () => {
+      await result.current.start();
+    });
+
+    // Never reached native: no directory, no writer, no microphone — nothing to own.
+    expect(mockStartWalk).not.toHaveBeenCalled();
+    expect(result.current.walk.state).toBe("failed");
+    expect(result.current.error).not.toBeNull();
+    // Retriable, and it says what to do — the owner arrives a moment later on its own.
+    expect(result.current.error).toMatch(/Not signed in/);
   });
 
   it("exposes null walkId before a walk has ever started", () => {
@@ -1422,5 +1464,134 @@ describe("useWalk in-flight reservations across walks", () => {
     });
 
     expect(result.current.captureEnabled).toBe(false);
+  });
+});
+
+// ── FINDING A (Codex): an unbounded recording against a bounded upload ─────────────────────────────
+//
+// A walk has no duration limit and the glasses' encoder has no output-bitrate limit this app sets, so
+// a long enough recording produces a walk.mp4 larger than the 2 GiB the server accepts per artifact
+// (glasses-walkthrough-service.ts's MAX_GLASSES_WALKTHROUGH_ARTIFACT_BYTES). Nothing downstream can
+// recover from that: every presign for that video is refused on its size, the queue burns all five
+// PUT attempts, and — because completion needs EVERY artifact — the stills beside it never file
+// either. Retrying from the failed-walk card cannot change a file's size, and orphan recovery cannot
+// offer a stills-only salvage because the manifest already claims the directory.
+//
+// The only moment the outcome is still open is DURING the recording, which is why the bound lives
+// here. Ending the walk at the bound is not a loss: endWalk finalizes a valid, uploadable file and
+// the estimator can start another walk on the same job immediately. Letting it run past the ceiling
+// IS the loss — the whole video, not just the excess.
+describe("useWalk recording-size bound", () => {
+  const STARTED = {
+    walkId: "w1",
+    directory: "d",
+    videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
+    inputPortName: "RB Meta 014K",
+    negotiatedSampleRate: 48000,
+  };
+  const FINALIZED = { videoUri: "file:///docs/walkthroughs/w1/walk.mp4", stills: 0 };
+  /** Half a gigabyte PAST the server's 2 GiB per-artifact ceiling — far enough that no headroom this
+   *  module chooses could leave it filable. Stated as a literal rather than derived from the mirror
+   *  constant so this case pins the server's rule, not our arithmetic about it. */
+  const OVER_THE_SERVER_CEILING = 2.5 * 1024 * 1024 * 1024;
+
+  async function recordingWalk() {
+    mockStartWalk.mockResolvedValue(STARTED);
+    mockEndWalk.mockResolvedValue(FINALIZED);
+    const hook = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
+    await act(async () => {
+      await hook.result.current.start();
+    });
+    expect(hook.result.current.walk.state).toBe("recording");
+    return hook;
+  }
+
+  it("ends the walk itself rather than letting walk.mp4 grow past what the server will accept", async () => {
+    jest.useFakeTimers();
+    try {
+      const { result } = await recordingWalk();
+
+      mockVideoBytes.size = OVER_THE_SERVER_CEILING;
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(60_000);
+      });
+
+      // Ended ONCE, through the ordinary path — so the writer finalizes and the file is a real,
+      // uploadable recording rather than a truncated one.
+      expect(mockEndWalk).toHaveBeenCalledTimes(1);
+      expect(result.current.walk.state).toBe("complete");
+      // …and the screen can say WHY, because a walk that stopped on its own with no explanation is
+      // indistinguishable from one the estimator ended by accident.
+      expect(result.current.stoppedAtSizeLimit).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("warns while there is still time to act, before it stops anything", async () => {
+    jest.useFakeTimers();
+    try {
+      const { result } = await recordingWalk();
+      expect(result.current.videoSize).toBe("ok");
+
+      // Inside the warning margin but under the bound: the estimator gets told, the walk keeps
+      // running, and ending it stays THEIR decision for as long as that is safe.
+      mockVideoBytes.size = WALK_VIDEO_WARN_BYTES;
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(60_000);
+      });
+
+      expect(result.current.videoSize).toBe("nearLimit");
+      expect(mockEndWalk).not.toHaveBeenCalled();
+      expect(result.current.walk.state).toBe("recording");
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  // GUARD: an ordinary walk must be untouched. A bound that fires on a normal site visit would be
+  // worse than the failure it prevents — it would end walks that were never in danger.
+  it("leaves an ordinary walk alone", async () => {
+    jest.useFakeTimers();
+    try {
+      const { result } = await recordingWalk();
+
+      mockVideoBytes.size = 400 * 1024 * 1024; // ~an hour of glasses video, comfortably filable
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(10 * 60_000);
+      });
+
+      expect(result.current.videoSize).toBe("ok");
+      expect(mockEndWalk).not.toHaveBeenCalled();
+      expect(result.current.walk.state).toBe("recording");
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  // A walk native reported no path for cannot be measured, and an unmeasurable walk must not be
+  // stopped: the same rule the coverage verdicts follow for a census that never arrived (unknown is
+  // not "bad"). Taking a site visit away over our own inability to read a file is the one outcome
+  // this whole bound exists to avoid.
+  it("never stops a walk it cannot measure", async () => {
+    jest.useFakeTimers();
+    try {
+      mockStartWalk.mockResolvedValue({ ...STARTED, videoUri: null });
+      mockEndWalk.mockResolvedValue(FINALIZED);
+      mockVideoBytes.size = OVER_THE_SERVER_CEILING; // would stop it, if anything were reading it
+      const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
+      await act(async () => {
+        await result.current.start();
+      });
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(60_000);
+      });
+
+      expect(result.current.videoSize).toBe("ok");
+      expect(mockEndWalk).not.toHaveBeenCalled();
+      expect(result.current.walk.state).toBe("recording");
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

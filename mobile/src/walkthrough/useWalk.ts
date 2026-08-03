@@ -7,14 +7,19 @@
  * No JSX here on purpose: this file should be testable without mounting anything visual.
  */
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
+import * as FileSystem from "expo-file-system/legacy";
+import { errorMessage } from "../lib/error-message";
 import {
   artifactCount,
+  assessWalkVideoSize,
   canCapture,
   canCaptureMore,
   initialWalk,
   isWalkActive,
   reduceWalk,
+  WALK_VIDEO_SIZE_POLL_MS,
   type Walk,
+  type WalkVideoSizeVerdict,
 } from "./session";
 import { isAvailable, onRecorderError, onStill, Recorder } from "./native";
 
@@ -27,8 +32,16 @@ function newWalkId(): string {
   return `walk-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function errorMessage(err: unknown): string {
-  return err instanceof Error && err.message ? err.message : String(err);
+/** `walk.mp4`'s size on disk right now, or null when it cannot be read for ANY reason — no path yet,
+ *  a file the platform reports no size for, a stat that threw. Null is what `assessWalkVideoSize`
+ *  treats as "unmeasured, therefore fine": see its doc for why that direction is not negotiable. */
+async function readRecordingBytes(uri: string): Promise<number | null> {
+  try {
+    const info = await FileSystem.getInfoAsync(uri);
+    return info.exists && typeof info.size === "number" ? info.size : null;
+  } catch {
+    return null;
+  }
 }
 
 export type UseWalkResult = {
@@ -69,6 +82,21 @@ export type UseWalkResult = {
    *  artifact cap — distinct from merely "not recording," so the screen can explain WHY the
    *  (still-recording) control just went dark instead of leaving a silently disabled button. */
   atCaptureLimit: boolean;
+  /**
+   * Where the RECORDING's own file stands against the server's per-artifact byte ceiling, measured
+   * from `walk.mp4` on disk while it is being written (session.ts's `assessWalkVideoSize`).
+   *
+   * "ok" whenever the walk is not recording, and whenever the file cannot be measured — the screen
+   * should read this as "nothing to say", never as an assurance.
+   */
+  videoSize: WalkVideoSizeVerdict;
+  /**
+   * True when THIS hook ended the walk because the recording reached the bound, rather than the
+   * estimator ending it. Survives into the terminal state on purpose: a walk that stopped on its own
+   * with nothing said is indistinguishable from one ended by a mis-tap, and the difference decides
+   * whether the estimator starts a second walk to finish the site.
+   */
+  stoppedAtSizeLimit: boolean;
 };
 
 /**
@@ -116,6 +144,25 @@ export function useWalk(dealId: string, projectId: string | null, ownerKey: stri
     setInFlightCount(0);
   }, []);
 
+  // `walk.mp4`'s size on disk, re-read while recording — null until the first reading lands, and
+  // whenever it cannot be taken. See the size-watch effect below the callbacks for why this is
+  // measured rather than estimated from a bitrate.
+  const [videoBytes, setVideoBytes] = useState<number | null>(null);
+  const [stoppedAtSizeLimit, setStoppedAtSizeLimit] = useState(false);
+  // Whether the auto-stop below has already fired for THIS walk. `end()` has its own in-flight
+  // guard, so a second call would be a no-op anyway — this is about not re-announcing it: the effect
+  // re-runs on every render until React commits "finalizing", and `stoppedAtSizeLimit` is state that
+  // cannot be read back in the same tick it is set.
+  const stoppingForSizeRef = useRef(false);
+  /** Forget the previous walk's measurements. Cleared on exactly the paths clearInFlight is, and for
+   *  the same reason: a reading belongs to a WALK, and carrying one into the next would start it
+   *  already "nearLimit" — or, worse, stop it before a byte was written. */
+  const clearSizeWatch = useCallback(() => {
+    setVideoBytes(null);
+    setStoppedAtSizeLimit(false);
+    stoppingForSizeRef.current = false;
+  }, []);
+
   // Read ONLY by the unmount cleanup below, which fires after the last render and therefore cannot
   // close over `walk` — an effect with `walk` in its deps would tear the recorder down on every
   // state change instead of on unmount, which is the opposite of the fix.
@@ -153,7 +200,8 @@ export function useWalk(dealId: string, projectId: string | null, ownerKey: stri
     setError(null);
     setWalkId(null);
     clearInFlight();
-  }, [dealId, projectId, walk.state, clearInFlight]);
+    clearSizeWatch();
+  }, [dealId, projectId, walk.state, clearInFlight, clearSizeWatch]);
 
   // Auto-reset whenever the TARGET a walk would attach to changes — belt-and-suspenders alongside
   // walk.tsx's own focus-triggered reset() call: a caller that re-renders this hook against a
@@ -182,7 +230,8 @@ export function useWalk(dealId: string, projectId: string | null, ownerKey: stri
     setError(null);
     setWalkId(null);
     clearInFlight();
-  }, [walk, dealId, projectId, clearInFlight]);
+    clearSizeWatch();
+  }, [walk, dealId, projectId, clearInFlight, clearSizeWatch]);
 
   useEffect(() => {
     const offStill = onStill((still) => {
@@ -291,6 +340,8 @@ export function useWalk(dealId: string, projectId: string | null, ownerKey: stri
     // terminal walk can be started over without one: `isWalkActive` is false for complete/failed).
     // Zeroed at the same instant native does it, for the same reason. See clearInFlight.
     clearInFlight();
+    // The previous walk's file size belongs to the previous walk — see clearSizeWatch.
+    clearSizeWatch();
     dispatch({ type: "starting" });
     const id = newWalkId();
     // Set BEFORE the native call resolves: even a walk that fails at startWalk() is "that" id (it's
@@ -336,7 +387,7 @@ export function useWalk(dealId: string, projectId: string | null, ownerKey: stri
       // not be allowed to match a ref that a racing start legitimately left at null.
       if (pending !== null && startInFlightRef.current === pending) startInFlightRef.current = null;
     }
-  }, [clearInFlight, ownerKey]);
+  }, [clearInFlight, clearSizeWatch, ownerKey]);
 
   const capture = useCallback(async () => {
     // canCaptureMore, not canCapture: also refuses once capturing would push the walk past the
@@ -455,6 +506,67 @@ export function useWalk(dealId: string, projectId: string | null, ownerKey: stri
     }
   }, []);
 
+  // ── The recording's own size, against the ceiling the server presigns under ──────────────────────
+  //
+  // Nothing in this app bounds a walk's duration, and nothing bounds the glasses' output bitrate
+  // either, so a long enough recording produces a `walk.mp4` bigger than the 2 GiB the server accepts
+  // per artifact (session.ts's MAX_WALK_ARTIFACT_BYTES). Past that point the file is unfilable and
+  // stays unfilable: every presign is refused on the size, the queue burns all five PUT attempts, and
+  // — because completion needs EVERY artifact — the stills from the same site visit go down with it.
+  // Retrying cannot change a file's size, and the walk's manifest entry keeps orphan recovery from
+  // offering a stills-only salvage. So the LAST moment the outcome is still open is right here, while
+  // the recording is running.
+  //
+  // MEASURED, never estimated. A bitrate guess would be wrong in both directions — too high stops
+  // walks that were never in danger, too low is the same bug with extra steps — and the file itself
+  // is one stat away.
+  //
+  // Re-read on an interval rather than once, and keyed on `walk.videoUri` so a walk native reported
+  // no path for is simply never measured (assessWalkVideoSize reads null as "nothing to say").
+  //
+  // KNOWN LIMIT, stated rather than papered over: a JS interval does not run while iOS has the app
+  // suspended. Native keeps writing, so a walk left recording with the app backgrounded can cross the
+  // bound unobserved and be over it by the time this resumes. The walk screen holds keep-awake for
+  // the whole recording precisely so that is not the normal shape of a walk, and upload.ts's
+  // unfilable-artifact handling is what catches whatever gets past here — this bound is the cheap,
+  // in-time answer, not the only one.
+  useEffect(() => {
+    if (walk.state !== "recording") return;
+    const uri = walk.videoUri;
+    if (!uri) return;
+    let cancelled = false;
+    const measure = async () => {
+      const bytes = await readRecordingBytes(uri);
+      // A reading that lands after the walk ended (or after this effect was torn down) belongs to
+      // nothing — dropping it keeps the previous walk's last size from becoming the next one's first.
+      if (!cancelled) setVideoBytes(bytes);
+    };
+    void measure();
+    const id = setInterval(() => void measure(), WALK_VIDEO_SIZE_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [walk.state, walk.videoUri]);
+
+  // The bound itself. Ending the walk here is NOT the loss it looks like: `end()` is the ordinary
+  // path, so AVAssetWriter finalises and what has been recorded so far is a real, uploadable file —
+  // and the estimator can start another walk on the same job straight away. Letting it run past the
+  // ceiling is the loss, and it takes the whole video rather than the excess.
+  //
+  // Deliberately NOT a "failed" walk and not an error: nothing went wrong. `stoppedAtSizeLimit` is
+  // what the screen reads to say so, because a recording that stopped on its own with nothing said
+  // is indistinguishable from one ended by a mis-tap — and the difference is whether anyone goes back
+  // and records the rest of the site.
+  useEffect(() => {
+    if (walk.state !== "recording") return;
+    if (stoppingForSizeRef.current) return;
+    if (assessWalkVideoSize(videoBytes) !== "atLimit") return;
+    stoppingForSizeRef.current = true;
+    setStoppedAtSizeLimit(true);
+    void end();
+  }, [walk.state, videoBytes, end]);
+
   return {
     walk,
     error,
@@ -467,5 +579,9 @@ export function useWalk(dealId: string, projectId: string | null, ownerKey: stri
     bridgeAvailable: isAvailable,
     captureEnabled: canCaptureMore(walk, inFlightCount),
     atCaptureLimit: canCapture(walk) && !canCaptureMore(walk, inFlightCount),
+    // Only while RECORDING: the verdict is about a file still being written, and reporting a stale
+    // one against a finished walk would put a warning on a screen where nothing can act on it.
+    videoSize: walk.state === "recording" ? assessWalkVideoSize(videoBytes) : "ok",
+    stoppedAtSizeLimit,
   };
 }

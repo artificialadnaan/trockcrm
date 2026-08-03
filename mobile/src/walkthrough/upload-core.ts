@@ -23,7 +23,8 @@
  * would otherwise leave bytes in R2 with no `files` row pointing at them and no local copy to retry
  * from — invisible to the crew, never forwarded, unrecoverable.
  */
-import type { StillSource, Walk } from "./session";
+import { MAX_WALK_ARTIFACT_BYTES, type StillSource, type Walk } from "./session";
+import { withWalkTitleNote } from "./walk-meta";
 
 export type WalkArtifactKind = "audio" | "video" | "photo";
 
@@ -407,6 +408,88 @@ export function markArtifactPut(
     ...walk,
     artifacts: walk.artifacts.map((a) =>
       a.idempotencyKey === idempotencyKey ? { ...a, putAt: now, sizeBytes } : a,
+    ),
+  };
+}
+
+// ── An artifact this device can never file ────────────────────────────────────────────────────────
+//
+// The server presigns under a per-artifact byte ceiling (session.ts's MAX_WALK_ARTIFACT_BYTES) and
+// refuses anything over it with a 400. Every other upload failure this queue models is worth
+// retrying — a dropped connection, a 500, an expired signature — because the next attempt can go
+// differently. This one cannot: the input to the refusal is the file's own size, and nothing on the
+// phone can change it. Five attempts produce the same 400 five times.
+//
+// What made that expensive is that completion needs EVERY artifact, so one permanently-refused video
+// took the STILLS from the same site visit down with it (isWalkTerminal), and the manifest entry
+// then kept orphan recovery from offering a stills-only salvage. useWalk.ts's recording bound stops
+// this build producing such a file at all; these two functions are for the ones that already exist —
+// a walk queued by an earlier build, or an orphan directory recovered from one.
+
+/** Whether the server will refuse to presign this artifact on its SIZE alone, whatever else is true
+ *  of it. Strictly greater-than: the server's check is `> ceiling`, and a mirror that disagreed at
+ *  the boundary would drop a file the server would have taken. */
+export function isArtifactTooLargeToFile(sizeBytes: number): boolean {
+  return sizeBytes > MAX_WALK_ARTIFACT_BYTES;
+}
+
+/**
+ * Remove ONE unfilable artifact so the rest of the walk can still be filed, and record in the title
+ * that it did not come.
+ *
+ * REFUSES to remove the last one, and that refusal is the difference between a fix and a silent
+ * leak. A walk with zero artifacts is never fully-put, never completable, never terminal and
+ * therefore never drainable — `isWalkDrainable` would stop returning it, `isWalkTerminal` would not
+ * count it, and it would sit in the manifest with its files on disk, invisible to every surface, for
+ * good. A walk whose only artifact cannot be sent has genuinely failed and must be seen to fail; the
+ * caller handles that case (see upload.ts's drain) rather than this function inventing an outcome.
+ *
+ * The title note is the only channel that travels with the walk. By the time a drain discovers this,
+ * the estimator is long gone from the site — they were told at RECORDING time, which is the only
+ * moment they could have acted — and the office is the party left who can do anything with the fact
+ * that a walk arrived without its video.
+ *
+ * The dropped file is NOT preserved: `finishWalkCleanup` deletes the walk's whole directory once the
+ * server has filed it. That is deliberate and already the established treatment of a file this queue
+ * refuses to upload — see toQueuedWalk, which excludes a failed walk's provisional walk.mp4, and
+ * finishWalkCleanup's own header on why leaving such a file behind resurfaces it as a phantom orphan
+ * at every launch, forever, for a walk the server already accepted.
+ *
+ * Returns the SAME reference when nothing was dropped, so a caller can tell the two outcomes apart
+ * without re-deriving them.
+ */
+export function dropUnfilableArtifact(walk: QueuedWalk, idempotencyKey: string): QueuedWalk {
+  const artifact = walk.artifacts.find((a) => a.idempotencyKey === idempotencyKey);
+  if (!artifact) return walk;
+  const remaining = walk.artifacts.filter((a) => a.idempotencyKey !== idempotencyKey);
+  if (remaining.length === 0) return walk;
+  return {
+    ...walk,
+    artifacts: remaining,
+    title: withWalkTitleNote(walk.title, `(${artifact.kind} too large to send)`),
+  };
+}
+
+/**
+ * Spend an artifact's remaining PUT attempts at once — for a refusal that is already known to be
+ * permanent, so the walk reaches the failed-walk card on THIS drain instead of four drains later.
+ *
+ * Not a shortcut for ordinary failures: those get their five attempts precisely because the next one
+ * can go differently. Here the input is a fact about the file, so the four extra passes would re-read
+ * the same size, reach the same verdict, and tell the estimator nothing they could not have been told
+ * immediately — while the walk sat in the queue looking like it was still being tried.
+ */
+export function exhaustArtifactAttempts(
+  walk: QueuedWalk,
+  idempotencyKey: string,
+  now: number,
+): QueuedWalk {
+  return {
+    ...walk,
+    artifacts: walk.artifacts.map((a) =>
+      a.idempotencyKey === idempotencyKey
+        ? { ...a, attempts: MAX_WALK_UPLOAD_ATTEMPTS, lastTriedAt: now }
+        : a,
     ),
   };
 }

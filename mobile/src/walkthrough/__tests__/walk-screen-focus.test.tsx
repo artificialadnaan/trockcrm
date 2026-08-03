@@ -60,10 +60,17 @@ jest.mock("../../api/client", () => ({
   apiFetch: jest.fn(),
 }));
 
+// Mutable, and only one test moves it: the walk queue's owner key is `user.id + resolved office`
+// (use-queue-session.ts), so "signed out" is expressible here and nowhere else. Every other case
+// wants the signed-in default, which is what beforeEach restores.
+const SIGNED_IN_USER = { id: "user-1", tenantId: "tenant-1" };
+let mockAuthUser: { id: string; tenantId: string } | null = SIGNED_IN_USER;
 jest.mock("../../auth/AuthContext", () => ({
+  // Rebuilt on every call (this is a hook), so the value below is read at render time rather than
+  // frozen when the factory ran.
   useAuth: () => ({
-    user: { id: "user-1", tenantId: "tenant-1" },
-    activeOfficeId: "office-1",
+    user: mockAuthUser,
+    activeOfficeId: mockAuthUser ? "office-1" : null,
     token: "token-1",
     signOut: jest.fn(),
   }),
@@ -151,11 +158,14 @@ function resultFor(walk: Walk, extra: Partial<UseWalkResult> = {}): UseWalkResul
     bridgeAvailable: true,
     captureEnabled: true,
     atCaptureLimit: false,
+    videoSize: "ok",
+    stoppedAtSizeLimit: false,
     ...extra,
   };
 }
 
 beforeEach(() => {
+  mockAuthUser = SIGNED_IN_USER;
   mockParams = {
     dealId: "deal-1",
     targetName: "Riverside Plaza",
@@ -478,6 +488,40 @@ describe("WalkScreen enqueue failure", () => {
     expect(queryByText("This walk has not been queued")).toBeNull();
     expect(getByText("Walk complete")).toBeTruthy();
   });
+
+  // The one caller `fileWalk`'s ownerKey guard could not simply return from. The terminal-state
+  // effect checks ownerKey itself before ever calling in, so a silent return there is correct and
+  // unreachable — but the RETRY button has no such check, and a sign-out between the refusal and the
+  // tap is exactly the sequence this banner exists for (an estimator who cannot queue a walk goes
+  // looking at Profile, which is where sign-out lives). The tap then set the busy flag, cleared it,
+  // changed nothing, and left the same message standing: the button reads as broken on the ONE
+  // surface that can still save the recording.
+  it("says WHY when a retry lands with no signed-in identity, instead of failing silently", async () => {
+    const { getByText, queryByText, rerender } = await completeAWalk(() =>
+      Promise.reject(new Error("ENOSPC: no space left")),
+    );
+    expect(getByText(/ENOSPC: no space left/)).toBeTruthy();
+
+    // Signed out while the notice is on screen. The banner survives — it is the screen's own state,
+    // and this route never unmounts — so the retry is still one tap away.
+    mockAuthUser = null;
+    mockEnqueueWalk.mockClear();
+    await act(async () => {
+      rerender(<WalkScreen />);
+    });
+
+    await act(async () => {
+      fireEvent.press(getByText("Try again"));
+    });
+
+    // Nothing was filed — there is no manifest namespace to file into — and the banner now says so
+    // in the same words Profile's recovery card uses for the same condition.
+    expect(mockEnqueueWalk).not.toHaveBeenCalled();
+    expect(getByText("This walk has not been queued")).toBeTruthy();
+    expect(getByText(/Sign in again before queueing this walk\./)).toBeTruthy();
+    // ONE banner, not two: the same recording refusing a second time replaces its own row.
+    expect(queryByText(/ENOSPC: no space left/)).toBeNull();
+  });
 });
 
 // ── Round-6 FINDING 5 (P2): a walk with no deal has nowhere to be filed ───────────────────────────
@@ -702,5 +746,47 @@ describe("WalkScreen glasses camera authorization", () => {
 
     expect(await findByText("CAPTURE")).toBeTruthy();
     expect(queryByText("Camera access needed")).toBeNull();
+  });
+});
+
+// ── FINDING A (Codex): the screen's half of the recording-size bound ───────────────────────────────
+//
+// useWalk owns the measurement and the stop (see its own suite). What must not be left to it is the
+// telling: a warning the estimator can still act on while they are standing on the site, and — if it
+// comes to the stop — a reason, because a recording that ended itself with nothing said reads
+// exactly like one ended by a mis-tap on a screen built to make End hard to hit by accident.
+describe("WalkScreen recording-size notices", () => {
+  it("tells the estimator to wrap up while the walk is still theirs to end", () => {
+    mockResult = resultFor(makeWalk("recording"), { videoSize: "nearLimit" });
+    const { getByText } = render(<WalkScreen />);
+
+    expect(getByText(/close to the largest recording/i)).toBeTruthy();
+    // Not a failure and not an interruption: the walk is still running, and every control it had is
+    // still on screen.
+    expect(getByText("CAPTURE")).toBeTruthy();
+    expect(getByText("End walk")).toBeTruthy();
+  });
+
+  it("says WHY a walk stopped on its own, and that the site can still be finished", () => {
+    mockResult = resultFor(makeWalk("complete"), { stoppedAtSizeLimit: true });
+    const { getByText } = render(<WalkScreen />);
+
+    // Still the completion screen — nothing failed, and the recording is uploading.
+    expect(getByText("Walk complete")).toBeTruthy();
+    expect(getByText(/reached the largest size/i)).toBeTruthy();
+    // The one instruction that matters: the rest of the site is recorded as a SECOND walk.
+    expect(getByText(/start another walk/i)).toBeTruthy();
+  });
+
+  // GUARD: an ordinary walk must say neither thing. A size notice on a normal site visit would train
+  // the estimator to end walks early for no reason.
+  it("says nothing about size on an ordinary walk", () => {
+    mockResult = resultFor(makeWalk("recording"));
+    const recording = render(<WalkScreen />);
+    expect(recording.queryByText(/largest recording/i)).toBeNull();
+
+    mockResult = resultFor(makeWalk("complete"));
+    const complete = render(<WalkScreen />);
+    expect(complete.queryByText(/largest size/i)).toBeNull();
   });
 });

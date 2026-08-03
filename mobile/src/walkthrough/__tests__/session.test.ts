@@ -10,7 +10,11 @@ import {
   canCaptureMore,
   isWalkActive,
   artifactCount,
+  assessWalkVideoSize,
+  MAX_WALK_ARTIFACT_BYTES,
   MAX_WALK_ARTIFACTS,
+  WALK_VIDEO_STOP_BYTES,
+  WALK_VIDEO_WARN_BYTES,
   WALK_AUDIO_SHORTFALL_TOLERANCE_MS,
   WALK_VIDEO_SHORTFALL_TOLERANCE_MS,
   type Walk,
@@ -558,5 +562,50 @@ describe("reduceWalk audio coverage", () => {
     });
     expect(isVideoTruncated(done.videoCoverage)).toBe(false);
     expect(isAudioTruncated(done.audioCoverage)).toBe(true);
+  });
+});
+
+// ── FINDING A (Codex): the recording bound, as arithmetic ─────────────────────────────────────────
+//
+// The server presigns under a 2 GiB per-artifact ceiling, refuses anything over it with a 400, and a
+// 400 on a file's SIZE is the one upload failure no retry can resolve. useWalk.ts is where the walk
+// is actually stopped; this is where the numbers that decide when are pinned, because a bound that
+// fires late is no bound and a bound that fires early ends site visits that were never at risk.
+describe("assessWalkVideoSize", () => {
+  it("stops SHORT of the server's ceiling, leaving room for the moov and one more poll", () => {
+    // The margin is the whole point: the size read while recording is the file BEFORE
+    // AVAssetWriter appends its index in finishWriting, and before the media of the next polling
+    // interval. A bound set AT the ceiling would be crossed by the finalise itself.
+    expect(WALK_VIDEO_STOP_BYTES).toBeLessThan(MAX_WALK_ARTIFACT_BYTES);
+    // …and the warning has to come first, or the stop is the first the estimator hears of it.
+    expect(WALK_VIDEO_WARN_BYTES).toBeLessThan(WALK_VIDEO_STOP_BYTES);
+  });
+
+  it("says nothing about an ordinary walk", () => {
+    expect(assessWalkVideoSize(0)).toBe("ok");
+    expect(assessWalkVideoSize(400 * 1024 * 1024)).toBe("ok");
+    expect(assessWalkVideoSize(WALK_VIDEO_WARN_BYTES - 1)).toBe("ok");
+  });
+
+  it("warns from the warn mark up to the stop mark, and not past it", () => {
+    expect(assessWalkVideoSize(WALK_VIDEO_WARN_BYTES)).toBe("nearLimit");
+    expect(assessWalkVideoSize(WALK_VIDEO_STOP_BYTES - 1)).toBe("nearLimit");
+  });
+
+  it("stops from the stop mark on", () => {
+    expect(assessWalkVideoSize(WALK_VIDEO_STOP_BYTES)).toBe("atLimit");
+    expect(assessWalkVideoSize(MAX_WALK_ARTIFACT_BYTES)).toBe("atLimit");
+    expect(assessWalkVideoSize(8 * 1024 * 1024 * 1024)).toBe("atLimit");
+  });
+
+  // The direction that is not negotiable. An unmeasurable walk is not an oversized one — and the
+  // action attached to "atLimit" ENDS a site visit, so a reading nobody could take must never be
+  // what takes one away. Same rule the coverage verdicts follow for an absent census, with a higher
+  // price for getting it backwards.
+  it("treats an unreadable size as nothing to say, never as a reason to stop", () => {
+    expect(assessWalkVideoSize(null)).toBe("ok");
+    expect(assessWalkVideoSize(Number.NaN)).toBe("ok");
+    expect(assessWalkVideoSize(Number.POSITIVE_INFINITY)).toBe("ok");
+    expect(assessWalkVideoSize(-1)).toBe("ok");
   });
 });

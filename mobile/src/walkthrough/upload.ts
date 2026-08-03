@@ -38,6 +38,9 @@ import {
   bumpCompletionAttempts,
   classifyWalkDirFileNames,
   drainableArtifacts,
+  dropUnfilableArtifact,
+  exhaustArtifactAttempts,
+  isArtifactTooLargeToFile,
   isWalkDrainable,
   isWalkOwnedBy,
   isWalkTerminal,
@@ -989,9 +992,18 @@ function filenameFromUri(uri: string): string {
   return idx >= 0 ? withoutQuery.slice(idx + 1) : withoutQuery;
 }
 
-/** Step 1: request a presigned URL and PUT one artifact's bytes. Returns the size that was actually
- *  uploaded (for markArtifactPut / the later completion payload). Throws on any failure — the caller
- *  bumps the artifact's attempt count and moves on. */
+/**
+ * What one PUT attempt settled as. `"unfilable"` is NOT a failure and must not be counted as one:
+ * it says the server will refuse this artifact on its SIZE, permanently, so there is nothing here an
+ * attempt counter could ever measure. Modelled as a returned outcome rather than a thrown error
+ * because the caller's two branches are genuinely different actions — one bumps a counter and moves
+ * on, the other rewrites the walk — and because `instanceof` on a subclassed Error is not something
+ * to depend on through this app's transpile.
+ */
+type ArtifactPutOutcome =
+  | { status: "put"; sizeBytes: number }
+  | { status: "unfilable"; sizeBytes: number };
+
 /**
  * Whether a presign refusal means "the server already has this artifact", rather than a real failure.
  *
@@ -1003,18 +1015,28 @@ function isAlreadyFiledError(err: unknown): boolean {
   return err instanceof ApiError && err.code === "GLASSES_WALKTHROUGH_ARTIFACT_ALREADY_FILED";
 }
 
+/** Step 1: request a presigned URL and PUT one artifact's bytes. Resolves with the size that was
+ *  actually uploaded (for markArtifactPut / the later completion payload), or with "unfilable" for an
+ *  artifact the server can never accept. THROWS on any ordinary failure — the caller bumps the
+ *  artifact's attempt count and moves on. */
 async function putArtifactBytes(
   client: WalkthroughUploadClient,
   f: Fetcher,
   walk: QueuedWalk,
   artifact: QueuedWalkArtifact,
-): Promise<number> {
+): Promise<ArtifactPutOutcome> {
   const info = await FileSystem.getInfoAsync(artifact.uri);
   if (!info.exists) {
     throw new Error(`Walk artifact missing on disk: ${artifact.kind} ${artifact.idempotencyKey}`);
   }
   const mimeType = contentTypeForArtifact(artifact.kind, artifact.uri);
   const fileSizeBytes = typeof info.size === "number" ? info.size : 0;
+
+  // Asked BEFORE the presign, not learned from its rejection. The server's answer for a file this
+  // size is a 400 and will be a 400 on every future attempt, so the round trip buys nothing but
+  // delay — and the caller's response to it (rewrite the walk) is nothing a retry loop can express.
+  // See upload-core.ts's isArtifactTooLargeToFile / dropUnfilableArtifact.
+  if (isArtifactTooLargeToFile(fileSizeBytes)) return { status: "unfilable", sizeBytes: fileSizeBytes };
 
   let uploadUrl: string;
   try {
@@ -1034,7 +1056,7 @@ async function putArtifactBytes(
     // burns all five PUT attempts and the walk lands on the failed-walk card telling the estimator their
     // site visit did not send — for a walk the server is holding in full. Treat it as put and move on;
     // the completion call is idempotent per artifact and reconciles the rest.
-    if (isAlreadyFiledError(err)) return fileSizeBytes;
+    if (isAlreadyFiledError(err)) return { status: "put", sizeBytes: fileSizeBytes };
     throw err;
   }
 
@@ -1046,7 +1068,34 @@ async function putArtifactBytes(
   if (put.status < 200 || put.status >= 300) {
     throw new Error(`Walk artifact upload to storage failed (R2 returned ${put.status}).`);
   }
-  return fileSizeBytes;
+  return { status: "put", sizeBytes: fileSizeBytes };
+}
+
+/**
+ * Take ONE unfilable artifact out of a walk so the rest of it can still be filed. Returns whether
+ * anything was actually dropped — false means this was the walk's LAST artifact, which
+ * `dropUnfilableArtifact` refuses to remove (a walk with none is invisible to every surface this
+ * module has; see that function).
+ *
+ * The decision is made INSIDE the mutation, against the live manifest, not against the drain's entry
+ * snapshot. A walk carrying two unfilable artifacts would otherwise see "there are others" twice —
+ * from a snapshot neither drop had been applied to — and empty itself.
+ */
+async function dropUnfilableArtifactFromManifest(
+  ownerKey: string,
+  walkId: string,
+  idempotencyKey: string,
+): Promise<boolean> {
+  let dropped = false;
+  await mutateManifest(ownerKey, (current) =>
+    current.map((w) => {
+      if (w.walkId !== walkId) return w;
+      const next = dropUnfilableArtifact(w, idempotencyKey);
+      dropped = next !== w;
+      return next;
+    }),
+  );
+  return dropped;
 }
 
 /** Step 2: the ONE completion call for a fully-put walk. Sizes/filenames come from the artifact
@@ -1343,10 +1392,37 @@ async function runDrainPass(
     // Phase 1: PUT every currently-drainable artifact's bytes.
     for (const artifact of drainableArtifacts(walk)) {
       try {
-        const sizeBytes = await putArtifactBytes(client, fetcher, walk, artifact);
+        const outcome = await putArtifactBytes(client, fetcher, walk, artifact);
+        // The server will never take this one, whatever happens next. Two outcomes, and which one
+        // applies is decided by whether the walk has anything ELSE worth filing:
+        //
+        //   - it does: drop this artifact and carry on, so the site visit's stills still reach the
+        //     office instead of being held hostage to a video that cannot be sent;
+        //   - it does not: the walk has genuinely failed, and must be SEEN to — spent at once rather
+        //     than over four more drains that would each re-read the same size.
+        if (outcome.status === "unfilable") {
+          const dropped = await dropUnfilableArtifactFromManifest(
+            ownerKey,
+            walk.walkId,
+            artifact.idempotencyKey,
+          );
+          if (!dropped) {
+            await mutateManifest(ownerKey, (current) =>
+              current.map((w) =>
+                w.walkId === walk.walkId
+                  ? exhaustArtifactAttempts(w, artifact.idempotencyKey, Date.now())
+                  : w,
+              ),
+            );
+            putFailures++;
+          }
+          continue;
+        }
         await mutateManifest(ownerKey, (current) =>
           current.map((w) =>
-            w.walkId === walk.walkId ? markArtifactPut(w, artifact.idempotencyKey, sizeBytes, Date.now()) : w,
+            w.walkId === walk.walkId
+              ? markArtifactPut(w, artifact.idempotencyKey, outcome.sizeBytes, Date.now())
+              : w,
           ),
         );
         puts++;

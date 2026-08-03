@@ -19,6 +19,7 @@ import { AppState, Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
+import { errorMessage } from "../../src/lib/error-message";
 import { theme } from "../../src/theme/theme";
 import { useWalk } from "../../src/walkthrough/useWalk";
 import { Wearables, isAvailable as wearablesBridgeAvailable } from "../../src/wearables/native";
@@ -144,7 +145,10 @@ function useCameraAuthorization(): {
         );
       }
     } catch (error) {
-      if (mountedRef.current) setRequestNotice(String(error));
+      // Meta's own words, and only those — the "Error:" a stringified Error carries is not part of
+      // what the SDK said, and this notice is shown precisely because the SDK's text is the only
+      // information anyone has about why the grant did not take.
+      if (mountedRef.current) setRequestNotice(errorMessage(error));
     } finally {
       if (mountedRef.current) setRequesting(false);
     }
@@ -208,6 +212,8 @@ export default function WalkScreen() {
     bridgeAvailable,
     captureEnabled,
     atCaptureLimit,
+    videoSize,
+    stoppedAtSizeLimit,
   } = useWalk(dealId, projectId, ownerKey);
 
   const {
@@ -342,9 +348,44 @@ export default function WalkScreen() {
    * the notice offers. Both go through here so a retry is the same filing, not a second path with
    * its own idea of what "queued" means.
    */
+  /**
+   * Put ONE refusal on screen, keyed by walkId — a retry that fails again is the SAME recording
+   * refusing a second time, so it replaces its own entry (with the newer reason, which is often not
+   * the first one's) rather than adding a duplicate row for a single walk.
+   *
+   * Extracted because there are now two ways to be refused and they must produce one row either way:
+   * the queue throwing, and this screen declining to call the queue at all.
+   */
+  const noteRefusal = useCallback((refused: UnqueuedWalk) => {
+    setUnqueuedWalks((current) => {
+      const at = current.findIndex((entry) => entry.walkId === refused.walkId);
+      if (at === -1) return [...current, refused];
+      const next = current.slice();
+      next[at] = refused;
+      return next;
+    });
+  }, []);
+
   const fileWalk = useCallback(
     async (finishedWalkId: string, finishedWalk: Walk, meta: WalkQueueMeta) => {
-      if (!ownerKey) return;
+      if (!ownerKey) {
+        // Reachable from the RETRY button and only from there: the terminal-state effect below makes
+        // this same check before it ever calls in, so its path is unaffected. A silent return here
+        // left the retry setting a busy flag, clearing it, changing nothing, and leaving the previous
+        // reason standing — the button reads as broken on the one surface that can still save the
+        // recording. The sequence is not exotic: an estimator whose walk would not queue goes to
+        // Profile to look, and sign-out is what lives there.
+        //
+        // Same words as Profile's recovery card for the same condition, because it is the same
+        // condition: no signed-in identity means no manifest namespace to file into.
+        noteRefusal({
+          walkId: finishedWalkId,
+          walk: finishedWalk,
+          meta,
+          message: "Sign in again before queueing this walk.",
+        });
+        return;
+      }
       try {
         const queued = await enqueueWalk(ownerKey, finishedWalkId, finishedWalk, meta);
         // Scoped to the walk this call was about: a late retry landing after a LATER walk failed to
@@ -362,25 +403,18 @@ export default function WalkScreen() {
         // estimator to reopen the app and go looking for a problem nobody mentioned. So it is said
         // here, where they are standing, with the one action that fixes it.
         if (enqueuedWalkIdRef.current === finishedWalkId) enqueuedWalkIdRef.current = null;
-        const refused: UnqueuedWalk = {
+        // The MESSAGE, not the stringified Error: the banner reads "…it could not be handed to the
+        // upload queue: {message}", and "Error: No space left on device" puts a prefix in front of
+        // the only clause the estimator can act on.
+        noteRefusal({
           walkId: finishedWalkId,
           walk: finishedWalk,
           meta,
-          message: String(error),
-        };
-        // Keyed by walkId: a RETRY that fails again is the same walk refusing a second time, so it
-        // replaces its own entry (with the newer reason — the second failure is often not the first
-        // one's) rather than adding a duplicate row for a single recording.
-        setUnqueuedWalks((current) => {
-          const at = current.findIndex((entry) => entry.walkId === finishedWalkId);
-          if (at === -1) return [...current, refused];
-          const next = current.slice();
-          next[at] = refused;
-          return next;
+          message: errorMessage(error),
         });
       }
     },
-    [ownerKey, queueFetcher],
+    [ownerKey, queueFetcher, noteRefusal],
   );
 
   const retryFiling = useCallback(
@@ -679,6 +713,18 @@ export default function WalkScreen() {
                 Maximum captures reached for this walk — end walk to upload what you have.
               </Text>
             ) : null}
+            {/* The recording's own file is closing on the largest single artifact the office can
+                accept (session.ts's MAX_WALK_ARTIFACT_BYTES). Said HERE, while the estimator can
+                still choose the moment: finish the elevation you are on, end the walk, and start
+                another. If nothing is done the walk ends itself a few minutes from now — which is
+                strictly better than a recording nothing can upload, but far worse than a stop the
+                estimator picked. Warning colour, not danger: nothing has gone wrong yet. */}
+            {videoSize === "nearLimit" ? (
+              <Text style={styles.captureLimitNotice}>
+                This recording is close to the largest recording that can be uploaded — finish up and
+                end the walk. You can start another walk on this project straight away.
+              </Text>
+            ) : null}
 
             {/* The one control this screen is built around: huge, centered, impossible to miss
                 even gloved and one-handed. Disabled — not merely unresponsive — the moment
@@ -758,6 +804,22 @@ export default function WalkScreen() {
               <Text style={styles.summaryValue}>{stillCount}</Text>
               <Text style={styles.summaryCaption}>still{stillCount === 1 ? "" : "s"} captured</Text>
             </View>
+            {/* Why the walk ended without anyone tapping End. A recording that stops on its own and
+                says nothing is indistinguishable from one ended by a mis-tap — on a screen that goes
+                to some trouble to make End hard to hit by accident, that reads as a fault. It is
+                not: the file is finalised, complete and uploading, and the ONE thing the estimator
+                needs to know is that the rest of the site is a second walk. Same warning register as
+                the coverage notices below, for the same reason — nothing failed. */}
+            {stoppedAtSizeLimit ? (
+              <View style={styles.mediaShortNotice}>
+                <Text style={styles.mediaShortTitle}>Walk ended at the size limit</Text>
+                <Text style={styles.mediaShortBody}>
+                  This recording reached the largest size that can be uploaded, so it was saved and
+                  ended here — nothing has been lost, and everything captured is uploading. If you
+                  have more of the site to cover, start another walk on this project.
+                </Text>
+              </View>
+            ) : null}
             {/* The whole point of measuring coverage. A walk whose glasses went quiet finalizes as
                 a perfectly valid file, so without this the estimator walks away from the site
                 believing they have twenty minutes of footage — and finds out weeks later, from a

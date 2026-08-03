@@ -127,6 +127,8 @@ function resultFor(walk: Walk, extra: Partial<UseWalkResult> = {}): UseWalkResul
     bridgeAvailable: true,
     captureEnabled: true,
     atCaptureLimit: false,
+    videoSize: "ok",
+    stoppedAtSizeLimit: false,
     ...extra,
   };
 }
