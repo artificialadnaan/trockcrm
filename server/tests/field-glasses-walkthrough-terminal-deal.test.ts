@@ -158,6 +158,14 @@ describe("glasses-walkthrough routes against a deal that has since gone terminal
     expect(res.status).toBe(200);
     expect(presignMock).toHaveBeenCalledTimes(1);
     expect(getFieldProjectMock).not.toHaveBeenCalled();
+    // The POSITIVE half, which only the completion case above was pinning. "The browsing gate was not
+    // called" passes just as well if the route asserts NO gate at all — and this is the route that mints
+    // a writable R2 capability, so the gate actually running, against the dealId from the PATH rather
+    // than anything the body could carry, is the property most worth holding here.
+    expect(assertCaptureTargetMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ dealId: DEAL }),
+    );
   });
 
   it.each([

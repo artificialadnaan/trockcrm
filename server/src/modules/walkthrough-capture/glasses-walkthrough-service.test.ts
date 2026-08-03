@@ -442,7 +442,11 @@ describe("requestGlassesWalkthroughArtifactUploadUrl", () => {
           presignUpload: async () => ({ uploadUrl: "https://r2.example.com/put", expiresIn: 1800 }),
         },
       })
-    ).rejects.toBeInstanceOf(AppError);
+    // The STATUS, not merely the type. This function throws `AppError` on three separate paths — 400 for
+    // unaccepted media, 409 for an artifact already filed, 500 for the expiry ceiling — so
+    // `toBeInstanceOf` would stay green if a later change made the fixture fail media validation and the
+    // ceiling check were never reached at all.
+    ).rejects.toMatchObject({ statusCode: 500 });
   });
 
   it("GUARD: the glasses ceiling stays strictly under the shared upload default", async () => {
