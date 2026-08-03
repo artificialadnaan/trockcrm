@@ -81,6 +81,11 @@ function ipv6IsGlobal(host) {
     const lo = parseInt(hex[2], 16);
     return ipv4IsGlobal(`${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`);
   }
+  // Anything still leading with `::` has 96 zero bits in front of it — that is `::/96`, the
+  // deprecated IPv4-COMPATIBLE space, and it is not routable. It needs its own arm because the
+  // mapped patterns above require the `ffff` marker: `https://[::10.0.0.5]` normalises to `::a00:5`,
+  // which carries no marker, matches no dotted pattern, and would otherwise be called global.
+  if (h.startsWith("::")) return false;
   if (/^f[cd]/.test(h)) return false; // fc00::/7 — unique-local
   if (/^fe[89ab]/.test(h)) return false; // fe80::/10 — link-local
   if (h.startsWith("2001:db8")) return false; // documentation
@@ -94,7 +99,18 @@ function ipv6IsGlobal(host) {
  * resolves to loopback on every resolver that honours it, so a phone pointed there calls ITSELF.
  * The optional trailing dot is the fully-qualified spelling of the same name.
  */
-const PRIVATE_HOSTNAME_PATTERNS = [/(^|\.)localhost\.?$/i, /\.local\.?$/i];
+const PRIVATE_HOSTNAME_PATTERNS = [
+  // RFC 6761 / RFC 8375 special-use names, plus mDNS. Each is guaranteed NOT to resolve publicly,
+  // so a build pointed at one is unreachable by definition rather than by accident. `local` and
+  // `localhost` are matched as whole names as well as suffixes — the bare mDNS root is a valid
+  // hostname that resolves nowhere useful.
+  /(^|\.)localhost\.?$/i,
+  /(^|\.)local\.?$/i,
+  /(^|\.)test\.?$/i,
+  /(^|\.)invalid\.?$/i,
+  /(^|\.)example\.?$/i,
+  /(^|\.)home\.arpa\.?$/i,
+];
 
 function isPrivateHost(host) {
   const family = net.isIP(host);
@@ -115,6 +131,27 @@ function assertProductionBuildEnv(env) {
         "bundle time, so a build without it installs and then cannot reach the CRM at all. " +
         "`mobile/.env` is gitignored and never reaches EAS — set it as an EAS environment " +
         "variable: eas env:create --scope project --name EXPO_PUBLIC_API_BASE_URL --value <host>"
+    );
+  }
+
+  // THE RAW SPELLING, checked before parsing, because the WHATWG parser REPAIRS separator typos.
+  // `https:/api.example.com` and `https:api.example.com` both parse to `https://api.example.com/`,
+  // so every check below would pass — but `src/config.ts` keeps the raw string, and the request
+  // React Native hands to NSURL is `https:/api.example.com/api/...`: an https scheme with no
+  // network host. It parses here and reaches nothing there.
+  // Cleartext first, because it is by far the likeliest mistake and deserves the specific reason.
+  if (/^http:\/\//i.test(raw)) {
+    throw new Error(
+      `EXPO_PUBLIC_API_BASE_URL must be https for a production build (got "${raw}"). iOS App ` +
+        "Transport Security blocks cleartext by default, so this ships an app that cannot call the " +
+        "API from a device."
+    );
+  }
+  if (!/^https:\/\//i.test(raw)) {
+    throw new Error(
+      `EXPO_PUBLIC_API_BASE_URL must begin with "https://" (got "${raw}"). A missing slash still ` +
+        "parses — the URL standard repairs it — but the raw string is what the app builds requests " +
+        "from, and an https URL with no authority reaches no host at all."
     );
   }
 
@@ -149,6 +186,14 @@ function assertProductionBuildEnv(env) {
       `EXPO_PUBLIC_API_BASE_URL must not carry a query string or fragment (got "${raw}"). The ` +
         "client appends `/api<path>` to this value, so anything after the host ends up inside the " +
         "query or fragment and the request never reaches the API."
+    );
+  }
+
+  // Port 0 is reserved and can host nothing. It parses, and every other check passes.
+  if (url.port === "0") {
+    throw new Error(
+      `EXPO_PUBLIC_API_BASE_URL specifies port 0 ("${raw}"), which is reserved and cannot host a ` +
+        "service. Leave the port off to use 443."
     );
   }
 

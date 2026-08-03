@@ -70,6 +70,13 @@ describe("assertProductionBuildEnv", () => {
     // `.localhost` is a whole special-use namespace, not just the bare name.
     "https://api.localhost",
     "https://api.localhost.",
+    // IPv4-COMPATIBLE IPv6 (::/96, deprecated): normalises to `::a00:5`, carrying no `ffff` marker.
+    "https://[::10.0.0.5]",
+    // RFC 6761 / RFC 8375 special-use names — guaranteed not to resolve publicly.
+    "https://api.test",
+    "https://api.invalid",
+    "https://local",
+    "https://api.home.arpa",
   ])("REGRESSION: rejects the private host %s", (url) => {
     expect(() => assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: url }))).toThrow(
       /private host/
@@ -119,9 +126,32 @@ describe("assertProductionBuildEnv", () => {
     }
   );
 
-  it("rejects a value that is not a URL at all, rather than passing it through", () => {
+  it.each(["https:/api.example.com", "https:api.example.com"])(
+    "REGRESSION: rejects the repaired separator typo %s",
+    (url) => {
+      // The WHATWG parser repairs both to `https://api.example.com/`, so every later check passes —
+      // but `src/config.ts` keeps the RAW string and NSURL gets an https scheme with no host.
+      expect(() => assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: url }))).toThrow(
+        /must begin with/
+      );
+    }
+  );
+
+  it("REGRESSION: rejects port 0, which is reserved and can host nothing", () => {
+    expect(() =>
+      assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: "https://api.example.com:0" }))
+    ).toThrow(/port 0/);
+  });
+
+  it("rejects a bare hostname with no scheme", () => {
     expect(() =>
       assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: "api.example.com" }))
+    ).toThrow(/must begin with/);
+  });
+
+  it("rejects a value that carries the scheme but parses to nothing", () => {
+    expect(() =>
+      assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: "https://[not-an-address" }))
     ).toThrow(/not a valid URL/);
   });
 
