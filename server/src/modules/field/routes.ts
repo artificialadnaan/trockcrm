@@ -1238,17 +1238,28 @@ fieldRoutes.get("/photo-targets/search", requireFieldContractor, async (req, res
     // Scorecard picker: filter to deals server-side (before the caps) so a lead/opportunity-heavy result
     // set can't starve out matching deals.
     const dealsOnly = req.query.dealsOnly === "true";
+    // Walkthrough RECOVERY picker: the same deals-only narrowing WITHOUT the browsing stage rule, so an
+    // orphaned walk can be filed to the Lost deal it was recorded on — which is precisely the set the
+    // walkthrough upload routes already accept (assertAccessibleFieldCaptureTarget), so this reaches no
+    // record a caller could not already file to, and no wider. Opt-in and deals-scoped: ordinary
+    // browsing keeps excluding Lost/terminal, and on its own the flag does nothing (the all-types
+    // answer carries every active deal already).
+    const includeTerminalDeals = dealsOnly && req.query.includeTerminalDeals === "true";
 
     if (!isFieldCrossOfficeWritesEnabled()) {
       const office = await getFieldOfficeById(req.fieldUser!.tenantId);
-      const result = await runInOffice(office, (db) => searchFieldCaptureTargets(db, access, { search, limit, dealsOnly }));
+      const result = await runInOffice(office, (db) =>
+        searchFieldCaptureTargets(db, access, { search, limit, dealsOnly, includeTerminalDeals }),
+      );
       res.json(result);
       return;
     }
 
     const globalLimit = limit ?? FIELD_CAPTURE_TARGET_DEFAULT_LIMIT;
     const { results, failures } = assertFanOutNotFullyDegraded(
-      await fanOutActiveOffices((db) => searchFieldCaptureTargets(db, access, { search, limit: globalLimit, dealsOnly })),
+      await fanOutActiveOffices((db) =>
+        searchFieldCaptureTargets(db, access, { search, limit: globalLimit, dealsOnly, includeTerminalDeals }),
+      ),
     );
     const targets = mergeFieldCaptureTargets(
       results.map(({ office, value }) => ({ office, targets: value.targets })),

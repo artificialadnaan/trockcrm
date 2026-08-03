@@ -357,6 +357,7 @@ describe("field routes", () => {
       search: "waters",
       limit: 15,
       dealsOnly: false,
+      includeTerminalDeals: false,
     });
   });
 
@@ -368,7 +369,39 @@ describe("field routes", () => {
     expect(projectMocks.searchFieldCaptureTargets).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ userId: "admin-1" }),
-      expect.objectContaining({ search: "waters", dealsOnly: true }),
+      expect.objectContaining({ search: "waters", dealsOnly: true, includeTerminalDeals: false }),
+    );
+  });
+
+  // The walkthrough RECOVERY picker: deals-only, but every ACTIVE one — the browsing stage rule is
+  // what hides the Lost deal an orphaned walk has to be filed against, and the upload routes accept it.
+  it("passes includeTerminalDeals=true to the search service when ?includeTerminalDeals=true (recovery picker)", async () => {
+    projectMocks.searchFieldCaptureTargets.mockResolvedValueOnce({ targets: [] });
+
+    await invokeRoute("get", "/photo-targets/search", {
+      query: { search: "waters", dealsOnly: "true", includeTerminalDeals: "true" },
+    });
+
+    expect(projectMocks.searchFieldCaptureTargets).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ userId: "admin-1" }),
+      expect.objectContaining({ search: "waters", dealsOnly: true, includeTerminalDeals: true }),
+    );
+  });
+
+  // The widening is opt-in and deals-scoped: on its own the flag must not change the ordinary,
+  // all-types answer, which already carries every active deal.
+  it("ignores ?includeTerminalDeals=true without dealsOnly (the unfiltered answer already includes them)", async () => {
+    projectMocks.searchFieldCaptureTargets.mockResolvedValueOnce({ targets: [] });
+
+    await invokeRoute("get", "/photo-targets/search", {
+      query: { search: "waters", includeTerminalDeals: "true" },
+    });
+
+    expect(projectMocks.searchFieldCaptureTargets).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ userId: "admin-1" }),
+      expect.objectContaining({ dealsOnly: false, includeTerminalDeals: false }),
     );
   });
 

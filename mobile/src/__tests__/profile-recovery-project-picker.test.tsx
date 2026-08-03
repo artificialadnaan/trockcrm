@@ -95,15 +95,24 @@ jest.mock("../settings/camera-roll-setting", () => ({
 }));
 jest.mock("../walkthrough/upload-client", () => ({ walkthroughUploadClient: {} }));
 
-// ── The two answers the capture-target search can give ────────────────────────────────────────────
+// ── The three answers the capture-target search can give ──────────────────────────────────────────
 //
 // `dealsOnly=true` is the SCORECARD question, and the server answers it with browsable field
-// projects only — active pipeline or Won-family, never Lost/terminal (files/service.ts). Asked
-// WITHOUT it, the same endpoint applies nothing to deals but `is_active = true`, which is exactly
-// the set the glasses-walkthrough routes accept (assertAccessibleFieldCaptureTarget). The mock is
-// keyed on that argument so a test can tell which question the screen actually asked, and the two
-// answers are deliberately DISJOINT apart from one shared deal — a picker that merely swapped one
-// question for the other would lose the browsable half, and this is what proves it did not.
+// projects only — active pipeline or Won-family, never Lost/terminal (files/service.ts).
+//
+// Asked with NEITHER flag, the same endpoint applies nothing to deals but `is_active = true` — the
+// set the glasses-walkthrough routes accept — but it pays for that in leads and opportunities, and
+// with cross-office reads on those are ranked AHEAD of every deal under one global cap of 20
+// (mergeFieldCaptureTargets). Twenty matching leads therefore return zero deals, which is why the
+// unfiltered answer below is leads-only: it is not a contrived fixture, it is the documented result
+// shape for a common search, and it is why the widened half cannot be the unfiltered question.
+//
+// `dealsOnly=true&includeTerminalDeals=true` is the RECOVERY question: the deals-only narrowing
+// WITHOUT the browsing stage rule, applied per office before the cap. The mock is keyed on both
+// arguments so a test can tell which question the screen actually asked, and the browsable and
+// recovery answers are deliberately DISJOINT apart from one shared deal — a picker that merely
+// swapped one question for the other would lose the browsable half, and this is what proves it did
+// not.
 const BROWSABLE_DEAL: FieldCaptureTarget = {
   id: "deal-77",
   type: "deal",
@@ -132,8 +141,11 @@ const LOST_DEAL: FieldCaptureTarget = {
   companyName: "Trails Management",
   lastUpdatedAt: "2026-06-22T12:00:00.000Z",
 };
-/** Comes back with the unfiltered question and must never be offered: both walkthrough endpoints are
- *  addressed by dealId, so a lead is not a destination this walk can be filed to at all. */
+/** A lead, and must never be offered: both walkthrough endpoints are addressed by dealId, so a lead
+ *  is not a destination this walk can be filed to at all. Seeded into the unfiltered answer (where
+ *  the server really does return leads) AND, as a stray, into the recovery one — the client filter is
+ *  belt-and-suspenders now that the narrowing is server-side, and a belt is only worth keeping if
+ *  something tests it. */
 const A_LEAD: FieldCaptureTarget = {
   id: "lead-12",
   type: "lead",
@@ -144,8 +156,13 @@ const A_LEAD: FieldCaptureTarget = {
   lastUpdatedAt: "2026-06-23T12:00:00.000Z",
 };
 
-const mockUseCaptureTargets = jest.fn((_search: string, dealsOnly = false) => ({
-  data: { targets: dealsOnly ? [BROWSABLE_DEAL, SHARED_DEAL] : [A_LEAD, LOST_DEAL, SHARED_DEAL] },
+function answerFor(dealsOnly: boolean, includeTerminalDeals: boolean): FieldCaptureTarget[] {
+  if (!dealsOnly) return [A_LEAD]; // 20 leads filled the global cap; every deal was cut
+  if (includeTerminalDeals) return [LOST_DEAL, SHARED_DEAL, A_LEAD];
+  return [BROWSABLE_DEAL, SHARED_DEAL];
+}
+const mockUseCaptureTargets = jest.fn((_search: string, dealsOnly = false, includeTerminalDeals = false) => ({
+  data: { targets: answerFor(dealsOnly, includeTerminalDeals) },
   isFetching: false,
 }));
 const mockUseNearbyCaptureTargets = jest.fn(() => ({
@@ -153,7 +170,7 @@ const mockUseNearbyCaptureTargets = jest.fn(() => ({
   isFetching: false,
 }));
 jest.mock("../query/hooks", () => ({
-  useCaptureTargets: (...args: unknown[]) => mockUseCaptureTargets(...(args as [string, boolean])),
+  useCaptureTargets: (...args: unknown[]) => mockUseCaptureTargets(...(args as [string, boolean, boolean])),
   useNearbyCaptureTargets: (...args: unknown[]) => mockUseNearbyCaptureTargets(...(args as [])),
 }));
 jest.mock("../capture/metadata", () => ({
@@ -242,9 +259,24 @@ describe("the project picker offered for an unfiled walk", () => {
     expect(queued[0]!.title).toContain(LOST_DEAL.name);
   });
 
-  // GUARD (passes before this change too): a lead comes back from the unfiltered search and must
-  // still never be offered — both walkthrough endpoints are addressed by dealId, so filing a walk to
-  // a lead could only ever 404, forever, on a recording that cannot be re-taken.
+  // Round-12 FINDING (P2): asking the UNFILTERED question for the widened half was not enough to
+  // deliver the deal above. That answer is ordered lead → opportunity → deal and capped ONCE across
+  // every office, so a search matching 20 active leads returns no deal at all — and the `dealsOnly`
+  // half it is merged with cannot make up the difference, because its whole job is to exclude the
+  // terminal deal. Both halves lost the same job, for different reasons. The widened half must
+  // therefore ask a question the SERVER narrows to deals, before its own cap.
+  it("asks the server for every ACTIVE deal, instead of filtering an all-types answer on the client", async () => {
+    await openPickerAndSearch("preston");
+
+    expect(mockUseCaptureTargets).toHaveBeenCalledWith("preston", true, true);
+    // and never the all-types question — its deals are the first thing the global cap cuts
+    expect(mockUseCaptureTargets.mock.calls.every(([, dealsOnly]) => dealsOnly === true)).toBe(true);
+  });
+
+  // GUARD (passes before this change too): a lead must never be offered — both walkthrough endpoints
+  // are addressed by dealId, so filing a walk to a lead could only ever 404, forever, on a recording
+  // that cannot be re-taken. The narrowing is the server's job now, so this is the belt to that
+  // suspenders: the stray lead in the recovery answer stands for a server that stopped doing it.
   it("still refuses to offer a lead", async () => {
     const screen = await openPickerAndSearch("preston");
 
@@ -253,9 +285,9 @@ describe("the project picker offered for an unfiled walk", () => {
 
   // GUARD (passes before this change too): the widening must be a SUPERSET, never a swap. The
   // browsable deals the ordinary picker lists are the common case, and a recovery flow that traded
-  // them for terminal ones would fix the rare walk by breaking every other one — which is exactly
-  // what asking ONLY the unfiltered question would risk, since without `dealsOnly` the server caps
-  // leads and opportunities ahead of deals.
+  // them for terminal ones would fix the rare walk by breaking every other one. Both questions are
+  // capped independently, so a job ranked into one answer's window and out of the other's is real —
+  // which is why the widened question is asked ALONGSIDE the browsable one, not instead of it.
   it("still offers the ordinary, browsable projects alongside it", async () => {
     const screen = await openPickerAndSearch("preston");
 

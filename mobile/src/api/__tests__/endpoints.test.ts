@@ -1,6 +1,7 @@
 import {
   getNearbyCaptureTargets,
   requestGlassesWalkthroughArtifactUploadUrl,
+  searchCaptureTargets,
   submitGlassesWalkthrough,
 } from "../endpoints";
 import type { Fetcher } from "../endpoints";
@@ -34,6 +35,44 @@ describe("api endpoints", () => {
       path: "/field/photo-targets/nearby",
       opts: { query: { lat: 32.911, lng: -96.775, limit: 3 } },
     }]);
+  });
+
+  // Both narrowings are SERVER-side and for the same reason: the endpoint caps its answer before the
+  // client sees it (per type in one office, and once globally across offices, ordered lead →
+  // opportunity → deal), so anything filtered on the phone is filtered out of an already-truncated
+  // list. `dealsOnly` alone also applies the field BROWSING rule; the walkthrough recovery picker
+  // needs the deals narrowing WITHOUT it, which is what includeTerminalDeals asks for.
+  it("asks for every ACTIVE deal — deals-only WITHOUT the browsing stage rule — for the recovery picker", async () => {
+    const calls: Array<{ path: string; opts: Parameters<Fetcher>[1] }> = [];
+    const fetcher: Fetcher = async (path, opts) => {
+      calls.push({ path, opts });
+      return { targets: [] } as never;
+    };
+
+    await searchCaptureTargets(fetcher, "preston", 20, true, true);
+
+    expect(calls).toEqual([{
+      path: "/field/photo-targets/search",
+      opts: { query: { search: "preston", limit: 20, dealsOnly: "true", includeTerminalDeals: "true" } },
+    }]);
+  });
+
+  // GUARD: the ordinary pickers must keep asking exactly what they ask today — the scorecard picker's
+  // server gate refuses a terminal deal outright, so widening its list would offer a project it 404s.
+  it("leaves the scorecard and all-types searches unwidened", async () => {
+    const calls: Array<{ path: string; opts: Parameters<Fetcher>[1] }> = [];
+    const fetcher: Fetcher = async (path, opts) => {
+      calls.push({ path, opts });
+      return { targets: [] } as never;
+    };
+
+    await searchCaptureTargets(fetcher, "preston", 20, true);
+    await searchCaptureTargets(fetcher, "preston");
+
+    expect(calls.map((call) => call.opts?.query)).toEqual([
+      { search: "preston", limit: 20, dealsOnly: "true" },
+      { search: "preston", limit: 20 },
+    ]);
   });
 
   // dealId must land on the URL path (never the request body) — see the route's comment on why: a body

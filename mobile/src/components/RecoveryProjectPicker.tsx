@@ -16,19 +16,22 @@
  * before it ever got a manifest entry is that case at its worst — the recording is unrepeatable, and
  * for a lost bid the record is exactly the one most likely to be re-examined.
  *
- * So this picker asks the unfiltered question (`dealsOnly` OFF), where the server applies nothing to
- * deals but `is_active = true` — precisely the set `assertAccessibleFieldCaptureTarget` accepts —
- * and re-narrows to deals HERE. Two consequences, both deliberate:
+ * So this picker asks for `dealsOnly` WITH `includeTerminalDeals`: the deals narrowing kept, the
+ * browsing stage rule dropped, leaving `is_active = true` as the only predicate on deals — precisely
+ * the set `assertAccessibleFieldCaptureTarget` accepts. Two consequences, both deliberate:
  *
- *   - The client-side deal filter is LOAD-BEARING here, not the belt-and-suspenders one TargetPicker
- *     keeps: the unfiltered answer really does contain leads and opportunities, and both walkthrough
- *     endpoints are addressed by dealId, so filing a walk to a lead could only ever 404 forever.
- *   - Both questions are asked and the answers MERGED, not swapped. Without `dealsOnly` the server
- *     caps leads and opportunities before deals (per-type in one office, and in ONE global slice
- *     ordered lead → opportunity → deal when cross-office reads are on), so the unfiltered answer
- *     alone can come back with fewer deals — or none — for a search the ordinary picker answers
- *     fine. Merging keeps this list a strict superset of what the estimator would otherwise be
- *     offered: recovery WIDENS the choice, it never narrows it.
+ *   - The narrowing to deals is the SERVER's, and has to be. Asking the plainly unfiltered question
+ *     and filtering here would filter an already-capped list: the server caps leads and
+ *     opportunities before deals (per-type in one office, and in ONE global slice ordered
+ *     lead → opportunity → deal when cross-office reads are on), so a search matching 20 active
+ *     leads returns no deal at all to filter. The client-side deal filter that remains is the
+ *     belt-and-suspenders one TargetPicker keeps — both walkthrough endpoints are addressed by
+ *     dealId, so a stray lead could only ever 404 forever, and cheap insurance against a server that
+ *     stops narrowing is worth keeping on a recording that cannot be re-taken.
+ *   - Both questions are asked and the answers MERGED, not swapped. Each is capped independently, so
+ *     a browsable job ranked into the ordinary picker's window can rank out of the widened one's
+ *     (which draws from a strictly larger set). Merging keeps this list a superset of what the
+ *     estimator would otherwise be offered: recovery WIDENS the choice, it never narrows it.
  *
  * The "closest jobs" default is kept, unchanged, from the shared picker. The commonest orphan by
  * far is an app kill DURING a walk, noticed immediately, on the site — and there the nearest jobs
@@ -105,7 +108,7 @@ export function RecoveryProjectPicker({
   // useCaptureTargets is `enabled` only for a non-empty search — so an open picker costs nothing
   // until the estimator actually asks a question.
   const browsable = useCaptureTargets(debounced, true);
-  const everyActiveDeal = useCaptureTargets(debounced, false);
+  const everyActiveDeal = useCaptureTargets(debounced, true, true);
   const targets = mergeRecoveryDeals(
     browsable.data?.targets ?? [],
     everyActiveDeal.data?.targets ?? [],

@@ -131,10 +131,27 @@ export const getProjectTags = (f: Fetcher, dealId: string, q: string, limit = 8)
   f<ProjectTagsResponse>(`/field/projects/${dealId}/tags`, { query: { q, limit } });
 
 // ── Capture targets ───────────────────────────────────────────────────────────
-export const searchCaptureTargets = (f: Fetcher, search: string, limit = 20, dealsOnly = false) =>
+export const searchCaptureTargets = (
+  f: Fetcher,
+  search: string,
+  limit = 20,
+  dealsOnly = false,
+  includeTerminalDeals = false,
+) =>
   f<CaptureTargetsResponse>("/field/photo-targets/search", {
     // dealsOnly filters to deals server-side (before the result cap) for the scorecard picker.
-    query: { search, limit, ...(dealsOnly ? { dealsOnly: "true" } : {}) },
+    // includeTerminalDeals keeps that narrowing but drops the browsing stage rule dealsOnly also
+    // carries — every ACTIVE deal, Lost included, which is what the walkthrough upload routes accept
+    // and what the recovery picker has to be able to name. Narrowing server-side is the whole point:
+    // the answer is capped before it is sent (per type in one office, then ONCE globally across
+    // offices, ordered lead → opportunity → deal), so filtering on the phone filters a list the deals
+    // may already have been cut from.
+    query: {
+      search,
+      limit,
+      ...(dealsOnly ? { dealsOnly: "true" } : {}),
+      ...(dealsOnly && includeTerminalDeals ? { includeTerminalDeals: "true" } : {}),
+    },
   });
 
 export const getNearbyCaptureTargets = (
