@@ -44,6 +44,10 @@ jest.mock("../native", () => ({
 }));
 
 import { useWalk } from "../useWalk";
+// The REAL wearables module: what is under test is whether the hook reads back what the root layout
+// retained, so mocking the store would test the mock. Only its native bridge is absent here, which is
+// fine — `setStartupConfigureError`/`getStartupConfigureError` are plain module state.
+import { setStartupConfigureError } from "../../wearables/native";
 import {
   isAudioTruncated,
   isVideoTruncated,
@@ -52,6 +56,9 @@ import {
 } from "../session";
 
 beforeEach(() => {
+  // Module state survives between tests in one file, and a leaked cause would silently change what
+  // every later refusal renders.
+  setStartupConfigureError(null);
   mockStartWalk.mockReset();
   mockCaptureStill.mockReset();
   mockEndWalk.mockReset();
@@ -243,6 +250,41 @@ describe("useWalk", () => {
     expect(result.current.error).toBe("walk_no_hfp: RB Meta 014K");
     expect(result.current.walk.state).toBe("failed");
     expect(result.current.walk.error).toBe("walk_no_hfp: RB Meta 014K");
+  });
+
+  it("REGRESSION: explains a not_configured refusal with the launch-time cause the root layout retained", async () => {
+    // `walk_not_configured` is native saying the SDK was never configured. It cannot say WHY, because
+    // the failure happened in the root layout's `configure()` at launch — possibly on a screen this
+    // estimator never opened. The layout retains that cause via `setStartupConfigureError`, and
+    // nothing in the app read it back: the setter had no matching getter call anywhere, so the real
+    // reason (a credential, an SDK init failure) sat in a module variable one import away while the
+    // estimator was shown a refusal with no remedy in it.
+    setStartupConfigureError(new Error("MetaAppID rejected: invalid client token"));
+    mockStartWalk.mockRejectedValue(new Error("walk_not_configured"));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
+
+    await act(async () => {
+      await result.current.start();
+    });
+
+    // Native's text still LEADS — it names the state. The cause is appended, because it names the fix.
+    expect(result.current.error).toBe("walk_not_configured — MetaAppID rejected: invalid client token");
+    expect(result.current.walk.error).toBe("walk_not_configured — MetaAppID rejected: invalid client token");
+  });
+
+  it("GUARD: does not staple the startup cause onto an unrelated refusal", async () => {
+    // The retained cause explains exactly one refusal. Appending it to `walk_no_hfp` — a live audio
+    // routing problem — would send the estimator after a launch-time credential for a fault that has
+    // nothing to do with it.
+    setStartupConfigureError(new Error("MetaAppID rejected: invalid client token"));
+    mockStartWalk.mockRejectedValue(new Error("walk_no_hfp: RB Meta 014K"));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
+
+    await act(async () => {
+      await result.current.start();
+    });
+
+    expect(result.current.error).toBe("walk_no_hfp: RB Meta 014K");
   });
 
   // The finalised path must come from endWalk, NOT from startWalk. Native only resolves endWalk

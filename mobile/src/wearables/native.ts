@@ -187,8 +187,21 @@ export const isAvailable = Platform.OS === "ios" && native != null;
  */
 let startupConfigureError: Error | null = null;
 
-/** Called once, from the startup effect's `.catch`. Never throws. */
+/**
+ * Called from the startup effect's `.catch`. Never throws.
+ *
+ * `null` and `undefined` CLEAR the retained cause rather than storing `Error("null")`. Without that
+ * branch the coercion below is a trap: the one caller that wants to say "there is no startup error"
+ * — a reset between tests, or a later successful configure — would instead install a cause reading
+ * `null`, which then gets appended to the next `walk_not_configured` refusal as though it explained
+ * something. A setter whose only clearing input silently stores a lie is worse than one that cannot
+ * clear at all.
+ */
 export function setStartupConfigureError(error: unknown): void {
+  if (error === null || error === undefined) {
+    startupConfigureError = null;
+    return;
+  }
   startupConfigureError = error instanceof Error ? error : new Error(String(error));
 }
 

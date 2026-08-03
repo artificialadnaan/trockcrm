@@ -22,6 +22,9 @@ import {
   type WalkVideoSizeVerdict,
 } from "./session";
 import { isAvailable, onRecorderError, onStill, Recorder } from "./native";
+// The SDK bridge, not the recorder bridge — two different native modules. This is the only consumer
+// of the error the root layout retains when its launch-time `configure()` fails.
+import { getStartupConfigureError } from "../wearables/native";
 
 /**
  * A filesystem-safe walk id. Native creates `Documents/walkthroughs/<id>/`, so this must be safe
@@ -374,7 +377,21 @@ export function useWalk(dealId: string, projectId: string | null, ownerKey: stri
       // otherwise have recorded from. That text IS the instruction — replacing it with
       // something generic would throw away the one piece of information that explains the
       // failure.
-      const message = errorMessage(err);
+      //
+      // With ONE exception, and it is the reason `setStartupConfigureError` exists at all.
+      // `walk_not_configured` is native saying the SDK was never configured; it does not know why,
+      // because the failure happened in the root layout's `configure()` at launch, on a screen the
+      // estimator may never have opened. Until now nothing read that retained error — the setter
+      // had no matching getter call anywhere in the app — so the estimator got a generic refusal
+      // while the real cause (a credential, an SDK init failure) sat in a module variable one
+      // import away. Native's text still leads, because it names the state; the cause is appended,
+      // because it names the fix.
+      const nativeMessage = errorMessage(err);
+      const startupCause = getStartupConfigureError();
+      const message =
+        startupCause && /not_configured/i.test(nativeMessage)
+          ? `${nativeMessage} — ${errorMessage(startupCause)}`
+          : nativeMessage;
       setError(message);
       dispatch({ type: "failed", reason: message });
     } finally {
