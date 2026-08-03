@@ -62,16 +62,34 @@ function enqueue<T>(task: () => Promise<T>): Promise<T> {
 }
 
 /**
- * The app's OWN deep-link hosts — `trockcam://accept-invite?token=…` (app/accept-invite.tsx) and
- * `trockcam://scorecards/corrective-action/<id>` (src/navigation/return-to.ts).
+ * The app's OWN routes — `accept-invite` (app/accept-invite.tsx) and `scorecards`
+ * (`scorecards/corrective-action/<id>`, src/navigation/return-to.ts).
+ *
+ * Reached by TWO link forms, which is what makes the parser below scheme-aware rather than a plain
+ * split. The custom scheme carries the route in the authority (`trockcam://accept-invite?token=…`);
+ * the HTTPS universal link carries it in the PATH, behind a host
+ * (`https://<field-host>/accept-invite?token=…`) — that flow is switched on by
+ * `EXPO_PUBLIC_FIELD_APP_HOST` via `associatedDomains: applinks:<host>` in app.config.ts, and an
+ * emailed invite is exactly how it arrives.
  */
-const APP_OWN_DEEP_LINK_HOSTS = new Set(["accept-invite", "scorecards"]);
+const APP_OWN_ROUTES = new Set(["accept-invite", "scorecards"]);
 
-/** The first path segment of a deep link, lowercased: `trockcam://scorecards/x/1?a=b` → `scorecards`. */
-function firstSegmentOf(url: string): string {
-  const withoutScheme = url.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "");
-  const withoutQuery = withoutScheme.split(/[?#]/)[0] ?? "";
-  return (withoutQuery.split("/")[0] ?? "").toLowerCase();
+/**
+ * The route key of a deep link, lowercased.
+ *
+ * For `http(s)` the authority is SKIPPED, because for a universal link the host is the field web
+ * host and the route is the first path segment. Reading the authority there returned
+ * `field.example.com`, which matches no known route, so an emailed invite counted as retainable and
+ * could evict a held Meta callback — the same defect as the custom-scheme invite, one link form over.
+ */
+function routeKeyOf(url: string): string {
+  const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(url);
+  let rest = (scheme ? url.slice(scheme[0].length) : url).split(/[?#]/)[0] ?? "";
+  if (scheme && (scheme[1]?.toLowerCase() === "http" || scheme[1]?.toLowerCase() === "https")) {
+    const slash = rest.indexOf("/");
+    rest = slash === -1 ? "" : rest.slice(slash + 1);
+  }
+  return (rest.replace(/^\/+/, "").split("/")[0] ?? "").toLowerCase();
 }
 
 /**
@@ -88,7 +106,7 @@ function firstSegmentOf(url: string): string {
  * re-deliver the unrelated link while the glasses stayed unpaired.
  */
 export function isRetainablePairingUrl(url: string): boolean {
-  return !APP_OWN_DEEP_LINK_HOSTS.has(firstSegmentOf(url));
+  return !APP_OWN_ROUTES.has(routeKeyOf(url));
 }
 
 /**

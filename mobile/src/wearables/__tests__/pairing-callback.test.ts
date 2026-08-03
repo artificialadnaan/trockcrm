@@ -145,6 +145,10 @@ describe("the app's own deep links", () => {
   it.each([
     ["trockcam://accept-invite?token=abc", "an invite"],
     ["trockcam://scorecards/corrective-action/42", "a corrective action"],
+    // The HTTPS universal-link form of the same invite, which `associatedDomains` switches on when
+    // EXPO_PUBLIC_FIELD_APP_HOST is set. An emailed invite arrives exactly like this.
+    ["https://field.example.com/accept-invite?token=abc", "an emailed universal-link invite"],
+    ["https://field.example.com/scorecards/corrective-action/42", "a universal-link corrective action"],
   ])("REGRESSION: %s does not overwrite a held pairing callback (%s)", async (deepLink) => {
     mockConfigure.mockRejectedValue(new Error("SDK init failed"));
     const pairing = load();
@@ -169,6 +173,22 @@ describe("the app's own deep links", () => {
     expect(pairing.isRetainablePairingUrl("trockcam://some-unknown-meta-path")).toBe(true);
     expect(pairing.isRetainablePairingUrl("trockcam://accept-invite?token=abc")).toBe(false);
     expect(pairing.isRetainablePairingUrl("trockcam://Scorecards/corrective-action/1")).toBe(false);
+  });
+
+  it("REGRESSION: the route is read from the PATH of an https link, not its host", () => {
+    const pairing = load();
+    // The universal-link form: reading the authority gave `field.example.com`, which matches no
+    // route, so an emailed invite counted as retainable and could evict a held Meta callback.
+    expect(pairing.isRetainablePairingUrl("https://field.example.com/accept-invite?token=abc")).toBe(false);
+    expect(pairing.isRetainablePairingUrl("https://field.example.com/scorecards/corrective-action/1")).toBe(
+      false
+    );
+    // Host casing and a trailing hash must not change the answer.
+    expect(pairing.isRetainablePairingUrl("HTTPS://Field.Example.COM/Accept-Invite#x")).toBe(false);
+    // A custom scheme still carries its route in the authority — skipping it there would break the
+    // fix from the previous round.
+    expect(pairing.isRetainablePairingUrl("trockcam://accept-invite")).toBe(false);
+    expect(pairing.isRetainablePairingUrl("trockcam:///accept-invite")).toBe(false);
   });
 });
 
