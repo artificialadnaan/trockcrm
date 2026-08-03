@@ -1147,6 +1147,33 @@ export default function CaptureScreen() {
           />
         </View>
 
+        {/* A walk always belongs to a deal (session.ts), so this only shows once a deal target is
+            selected — a lead/opportunity target or no target has nowhere for the walk to attach. */}
+        {target?.type === "deal" ? (
+          <Button
+            title="Start AI walk"
+            variant="ghost"
+            icon={<Ionicons name="glasses-outline" size={18} color={theme.color.textPrimary} />}
+            onPress={() =>
+              router.push({
+                pathname: "/(app)/walk",
+                // propertyAddress only carries over when it's the SAME deal this screen's own
+                // route params describe (same guard as detailParamsFor) — a target picked via
+                // TargetPicker has no address on it, so the walk screen falls back to "" (no
+                // prompt; see walk-meta.ts) rather than a stale/wrong address from a prior deal.
+                params: {
+                  dealId: target.id,
+                  targetName: target.name,
+                  ...(typeof params.dealId === "string" && params.dealId === target.id && typeof params.propertyAddress === "string"
+                    ? { propertyAddress: params.propertyAddress }
+                    : {}),
+                },
+              })
+            }
+            accessibilityLabel="Start AI walk"
+          />
+        ) : null}
+
         {queuedCount === 0 && !draining && failedShots.length === 0 && pending.length === 0 ? (
           <View style={styles.emptyWrap}>
             <EmptyState

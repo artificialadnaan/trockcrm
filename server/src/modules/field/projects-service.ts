@@ -594,13 +594,37 @@ export async function listFieldProjectPhotos(
 export async function searchFieldCaptureTargets(
   tenantDb: TenantDb,
   _access: FieldAccessContext,
-  input: { search?: string; limit?: number; dealsOnly?: boolean } = {}
+  input: { search?: string; limit?: number; dealsOnly?: boolean; includeTerminalDeals?: boolean } = {}
 ) {
   // The field/TrockCam capture-target picker is intentionally UNSCOPED: any rep must
   // be able to find ANY lead/deal to attach photos to, so we do NOT forward the
   // rep identity into searchPhotoUploadTargets (forwarding it rep-scoped the search
   // and hid every non-owned lead). See .audit/trockcam-leads-not-returning.md.
   // dealsOnly (scorecard picker) filters to deals in SQL — before the per-type + cross-office caps.
+  //
+  // includeTerminalDeals (walkthrough RECOVERY picker) keeps that deals-only narrowing but drops the
+  // BROWSING stage rule `dealsOnly` also carries, because the two things that flag conflates pull
+  // apart here. The glasses-walkthrough upload routes accept ANY ACTIVE deal, Lost included, so a
+  // walk still draining when its bid is lost can finish filing (assertAccessibleFieldCaptureTarget);
+  // an orphaned recording is that case at its worst. So ask the UNFILTERED question — where the only
+  // predicate on deals is `is_active = true`, i.e. exactly the filing rule — and narrow to deals HERE,
+  // per office, BEFORE the caller's cross-office cap.
+  //
+  // Narrowing here rather than in SQL is not a shortcut, and it is not the client-side filter that
+  // starved leads: searchPhotoUploadTargets caps PER TYPE, so its deal slice is already every matching
+  // active deal it would have returned had the stage rule simply been omitted from the query. What
+  // must not happen after a cap is a filter across TYPES — and the one that does the damage is
+  // mergeFieldCaptureTargets' single global slice, ordered lead → opportunity → deal, which is
+  // downstream of this function. Twenty matching leads there cut every deal; dropping them first is
+  // what keeps the deals competing only with each other.
+  if (input.dealsOnly && input.includeTerminalDeals) {
+    const { targets } = await searchPhotoUploadTargets(tenantDb, {
+      search: input.search,
+      limit: input.limit,
+      dealsOnly: false,
+    });
+    return { targets: targets.filter((target) => target.type === "deal") };
+  }
   return searchPhotoUploadTargets(tenantDb, {
     search: input.search,
     limit: input.limit,

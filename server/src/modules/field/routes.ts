@@ -74,6 +74,7 @@ import {
   searchFieldCaptureTargets,
   starFieldProject,
   unstarFieldProject,
+  type FieldAccessContext,
   type FieldProject,
 } from "./projects-service.js";
 import { assertValidCaptureTargetIds, assertValidUuid } from "./photos-service.js";
@@ -99,6 +100,13 @@ import {
   assertScorecardEvidenceUploadAccess,
   discardScorecardEditEvidence,
 } from "./scorecard-evidence-upload.js";
+import {
+  ingestGlassesWalkthrough,
+  requestGlassesWalkthroughArtifactUploadUrl,
+  validateGlassesWalkthroughArtifactUploadUrlInput,
+  validateGlassesWalkthroughCompleteInput,
+} from "../walkthrough-capture/glasses-walkthrough-service.js";
+import { createGlassesWalkthroughArtifactStore } from "../walkthrough-capture/glasses-walkthrough-store.js";
 import { registerCorrectiveActionRoutes } from "./corrective-action-routes.js";
 
 // Default capture-target picker page size (mirrors searchPhotoUploadTargets' internal default), used as
@@ -718,6 +726,145 @@ fieldRoutes.delete("/photos/:photoId/tags/:tag", requireFieldContractor, async (
   }
 });
 
+/**
+ * The access gate BOTH glasses-walkthrough routes assert with, named once so the two can never drift onto
+ * different rules — a presign a completion would refuse (or the reverse) strands a walk halfway.
+ *
+ * It is `assertAccessibleFieldCaptureTarget`, NOT `getFieldProject`, and the difference is one predicate:
+ * `getFieldProject` carries `activeProjectWhere()`, which is the field BROWSING rule — active pipeline, or
+ * Won-family; never Lost/terminal — and exists so the project list and detail pages are not flooded with
+ * hundreds of dead jobs. That rule is right for browsing and wrong for FILING, because these two routes are
+ * not reads. They are the tail of an upload whose bytes drain long after the recording: a multi-gigabyte
+ * walk over a jobsite connection, or a phone that stayed offline, routinely spans hours or days, and mobile
+ * retries the completion for as long as it takes. A deal that moved to Lost inside that window turned every
+ * remaining attempt into a 404, and the walk — real evidence of a site visit that really happened, on a
+ * trip nobody is making again — died on the phone. The stage the deal reached AFTERWARDS says nothing about
+ * whether the visit occurred, and a lost bid is exactly when its record is most likely to be re-examined.
+ *
+ * Nothing is loosened beyond that. `assertAccessibleFieldCaptureTarget` is the gate the ordinary field
+ * PHOTO upload has always used for the identical act — a field user attaching captured evidence to a deal
+ * (photos-service.ts) — so this is the established rule for this operation, not a weaker one invented here.
+ * It still requires the deal to EXIST and to be `is_active` (an archived/soft-deleted deal is refused by
+ * both gates), and it is unscoped by rep in exactly the way the browsing gate already was, so no caller
+ * gains reach they did not have. The office is still resolved from the DEAL by `runFieldDealWrite` before
+ * this runs, so a deal in an office this session cannot reach never gets here at all.
+ *
+ * And it does NOT make a terminal deal browsable: no list, detail, photo-feed, report or scorecard read
+ * goes through this function — every one of them keeps `activeProjectWhere()`. A Lost deal remains
+ * invisible in the app and merely stays FILEABLE by someone who could already reach it.
+ */
+async function assertGlassesWalkthroughDealAccess(
+  officeDb: FieldTenantDb,
+  access: FieldAccessContext,
+  dealId: string,
+): Promise<void> {
+  await assertAccessibleFieldCaptureTarget(officeDb, {
+    dealId,
+    userId: access.userId,
+    userRole: access.userRole,
+  });
+}
+
+/**
+ * GLASSES WALKTHROUGH, step 1 of 2: presign one artifact's upload.
+ *
+ * These two routes live on the FIELD router, not the CRM deals router, because TrockCam — their only
+ * caller — signs in through `/auth/field-login` and carries a `surface: "field"` token. `authMiddleware`
+ * rejects those on every CRM route by design (#722: a field token must never be replayable against
+ * CRM/admin). Built on the CRM router, the feature could not work at all: every upload came back 401
+ * "This session is not valid for CRM access", and because the app read that as a dead session it signed
+ * the user out — so one undeliverable walk locked the crew out of the app entirely. Found on hardware,
+ * not in review.
+ *
+ * The office is resolved from the DEAL, never from the client, and the presigned key is scoped to that
+ * office's prefix — same rule the photo upload path follows.
+ */
+fieldRoutes.post(
+  "/projects/:dealId/glasses-walkthroughs/artifacts/upload-url",
+  requireFieldContractor,
+  async (req, res, next) => {
+    try {
+      const dealId = String(req.params.dealId);
+      // Format before resolution: a non-uuid would otherwise reach the resolver's per-office `::uuid`
+      // cast, fail in every office, and surface as a misleading 503 instead of a 400.
+      assertValidUuid(dealId, "dealId");
+      const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
+
+      const result = await runFieldDealWrite(
+        req,
+        { dealId },
+        async (officeDb, office) => {
+          // Access is asserted BEFORE a presigned URL is minted, so a URL scoped to the deal's R2 prefix
+          // is never handed to someone who cannot reach the deal.
+          await assertGlassesWalkthroughDealAccess(officeDb, access, dealId);
+          return requestGlassesWalkthroughArtifactUploadUrl({
+            // Presigning now asks the database whether this artifact is ALREADY filed, and refuses to hand
+            // out a writable URL for the live key if it is — bytes behind an immutable `files` row must not
+            // be replaceable by anyone who can reach the deal. Same office-scoped connection the completion
+            // route uses, so the check reads the same rows the completion would write.
+            tenantDb: officeDb as never,
+            officeSlug: office.slug,
+            // dealId comes from the PATH, never the body — otherwise a caller could presign an upload
+            // key under a deal it cannot see.
+            input: validateGlassesWalkthroughArtifactUploadUrlInput({
+              ...(req.body as Record<string, unknown> | undefined),
+              dealId,
+            }),
+            artifactStore: createGlassesWalkthroughArtifactStore(),
+          });
+        },
+        "Project not found",
+      );
+
+      res.status(200).json(result);
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+/**
+ * GLASSES WALKTHROUGH, step 2 of 2: the completed walk.
+ *
+ * Every artifact named here MUST already be uploaded to the key this route re-derives server-side — the
+ * body never carries a key. Files the walk into the project folder and hands the TROCK Scope forward to
+ * the job queue; see `ingestGlassesWalkthrough` for how those two destinations are decoupled and how
+ * per-artifact / per-walk idempotency works.
+ *
+ * dealId comes from the path and the identity from the session, never the body, for the same reason as
+ * every other write here: the body cannot forge who recorded this or which project it lands on.
+ */
+fieldRoutes.post("/projects/:dealId/glasses-walkthroughs", requireFieldContractor, async (req, res, next) => {
+  try {
+    const dealId = String(req.params.dealId);
+    assertValidUuid(dealId, "dealId");
+    const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
+
+    const result = await runFieldDealWrite(
+      req,
+      { dealId },
+      async (officeDb, office) => {
+        await assertGlassesWalkthroughDealAccess(officeDb, access, dealId);
+        const input = validateGlassesWalkthroughCompleteInput({
+          ...(req.body as Record<string, unknown> | undefined),
+          dealId,
+          userId: req.fieldUser!.id,
+          officeSlug: office.slug,
+          officeId: office.id,
+        });
+        return ingestGlassesWalkthrough(officeDb as never, input, {
+          artifactStore: createGlassesWalkthroughArtifactStore(),
+        });
+      },
+      "Project not found",
+    );
+
+    res.status(201).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
 fieldRoutes.get("/projects/:dealId/tags", requireFieldContractor, async (req, res, next) => {
   try {
     const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
@@ -1091,17 +1238,28 @@ fieldRoutes.get("/photo-targets/search", requireFieldContractor, async (req, res
     // Scorecard picker: filter to deals server-side (before the caps) so a lead/opportunity-heavy result
     // set can't starve out matching deals.
     const dealsOnly = req.query.dealsOnly === "true";
+    // Walkthrough RECOVERY picker: the same deals-only narrowing WITHOUT the browsing stage rule, so an
+    // orphaned walk can be filed to the Lost deal it was recorded on — which is precisely the set the
+    // walkthrough upload routes already accept (assertAccessibleFieldCaptureTarget), so this reaches no
+    // record a caller could not already file to, and no wider. Opt-in and deals-scoped: ordinary
+    // browsing keeps excluding Lost/terminal, and on its own the flag does nothing (the all-types
+    // answer carries every active deal already).
+    const includeTerminalDeals = dealsOnly && req.query.includeTerminalDeals === "true";
 
     if (!isFieldCrossOfficeWritesEnabled()) {
       const office = await getFieldOfficeById(req.fieldUser!.tenantId);
-      const result = await runInOffice(office, (db) => searchFieldCaptureTargets(db, access, { search, limit, dealsOnly }));
+      const result = await runInOffice(office, (db) =>
+        searchFieldCaptureTargets(db, access, { search, limit, dealsOnly, includeTerminalDeals }),
+      );
       res.json(result);
       return;
     }
 
     const globalLimit = limit ?? FIELD_CAPTURE_TARGET_DEFAULT_LIMIT;
     const { results, failures } = assertFanOutNotFullyDegraded(
-      await fanOutActiveOffices((db) => searchFieldCaptureTargets(db, access, { search, limit: globalLimit, dealsOnly })),
+      await fanOutActiveOffices((db) =>
+        searchFieldCaptureTargets(db, access, { search, limit: globalLimit, dealsOnly, includeTerminalDeals }),
+      ),
     );
     const targets = mergeFieldCaptureTargets(
       results.map(({ office, value }) => ({ office, targets: value.targets })),

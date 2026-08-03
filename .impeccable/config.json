@@ -1,0 +1,10 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [
+      "worker/src/**",
+      "server/src/**"
+    ],
+    "ignoreValues": []
+  }
+}

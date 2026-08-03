@@ -40,6 +40,10 @@ import {
   SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB,
 } from "./scorecard-corrective-action-email.js";
 import {
+  GLASSES_WALKTHROUGH_FORWARD_JOB,
+  handleGlassesWalkthroughForward,
+} from "./glasses-walkthrough-forward.js";
+import {
   handleScorecardCorrectiveActionOversightEmail,
   SCORECARD_CORRECTIVE_ACTION_OVERSIGHT_EMAIL_JOB,
 } from "./scorecard-corrective-action-oversight-email.js";
@@ -147,6 +151,7 @@ export function registerAllJobs() {
   registerJobHandler(RFP_REJECTED_JOB, handleRfpRejectedEmail);
   registerJobHandler(FIELD_SCORECARD_EMAIL_JOB, handleFieldScorecardEmail);
   registerJobHandler(SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB, handleScorecardCorrectiveActionEmail);
+  registerJobHandler(GLASSES_WALKTHROUGH_FORWARD_JOB, handleGlassesWalkthroughForward);
   registerJobHandler(
     SCORECARD_CORRECTIVE_ACTION_OVERSIGHT_EMAIL_JOB,
     handleScorecardCorrectiveActionOversightEmail,

@@ -3497,6 +3497,18 @@ router.post("/:id/estimating/walkthrough-extractions", async (req, res, next) =>
   }
 });
 
+/*
+ * The glasses-walkthrough routes used to live here. They are now on the FIELD router
+ * (`/api/field/projects/:dealId/glasses-walkthroughs...`, server/src/modules/field/routes.ts).
+ *
+ * They had to move: TrockCam is their only caller and it authenticates through `/auth/field-login`,
+ * which mints a `surface: "field"` token that authMiddleware rejects on every CRM route by design.
+ * Mounted here, every upload returned 401 "This session is not valid for CRM access" — and the app,
+ * reading that as a dead session, signed the user out. A single undeliverable walk therefore locked
+ * the crew out of the app. Deliberately NOT left behind as a second CRM-side copy: one auth boundary
+ * for this path is the point.
+ */
+
 router.get("/:id/estimating", async (req, res, next) => {
   try {
     await assertDealRouteAccess(req, req.params.id);

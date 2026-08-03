@@ -207,12 +207,19 @@ export function useProjectTags(dealId: string | undefined, q: string) {
   });
 }
 
-/** Capture-target search (deals/leads/opps) for the target picker. `dealsOnly` restricts to deals (scorecard). */
-export function useCaptureTargets(search: string, dealsOnly = false) {
+/**
+ * Capture-target search (deals/leads/opps) for the target picker. `dealsOnly` restricts to deals
+ * (scorecard); `includeTerminalDeals` additionally drops the browsing stage rule, so Lost/terminal
+ * deals are offered too (walkthrough recovery only — see RecoveryProjectPicker).
+ *
+ * Both flags are part of the cache key: they are different QUESTIONS, not a view of one answer, and
+ * the recovery picker asks two of them at once for the same search term.
+ */
+export function useCaptureTargets(search: string, dealsOnly = false, includeTerminalDeals = false) {
   const { fetcher, user } = useAuth();
   return useQuery({
-    queryKey: [...qk.targets(user?.id ?? "anon", search), dealsOnly] as const,
-    queryFn: () => api.searchCaptureTargets(fetcher, search.trim(), 20, dealsOnly),
+    queryKey: [...qk.targets(user?.id ?? "anon", search), dealsOnly, includeTerminalDeals] as const,
+    queryFn: () => api.searchCaptureTargets(fetcher, search.trim(), 20, dealsOnly, includeTerminalDeals),
     enabled: !!user && search.trim().length > 0,
   });
 }

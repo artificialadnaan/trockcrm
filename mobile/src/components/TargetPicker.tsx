@@ -77,6 +77,13 @@ export function TargetPicker({
           setNearbyCoords(null);
         }
       })
+      // The same guard RecoveryProjectPicker carries, for the same reason and against the same
+      // shape: `.finally` re-throws, and `void` handles nothing. See that file for why this is
+      // insurance rather than a live bug — the two pickers run identical GPS lifecycles, so a
+      // rejection either one cannot absorb is one neither can.
+      .catch(() => {
+        if (!cancelled) setNearbyCoords(null);
+      })
       .finally(() => {
         if (!cancelled) setLocationChecked(true);
       });

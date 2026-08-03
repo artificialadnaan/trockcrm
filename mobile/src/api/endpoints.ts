@@ -40,6 +40,12 @@ import type {
   CorrectiveActionConfirmUploadResponse,
 } from "./types";
 import type { ScorecardSubmissionPayload, ScorecardUpdatePayload } from "../scorecards/draft";
+import type {
+  WalkArtifactUploadUrlRequest,
+  WalkArtifactUploadUrlResponse,
+  WalkCompletionRequest,
+  WalkCompletionResponse,
+} from "../walkthrough/upload";
 
 /**
  * A `Fetcher` is `apiFetch` already bound to the current token / officeId /
@@ -125,10 +131,27 @@ export const getProjectTags = (f: Fetcher, dealId: string, q: string, limit = 8)
   f<ProjectTagsResponse>(`/field/projects/${dealId}/tags`, { query: { q, limit } });
 
 // ── Capture targets ───────────────────────────────────────────────────────────
-export const searchCaptureTargets = (f: Fetcher, search: string, limit = 20, dealsOnly = false) =>
+export const searchCaptureTargets = (
+  f: Fetcher,
+  search: string,
+  limit = 20,
+  dealsOnly = false,
+  includeTerminalDeals = false,
+) =>
   f<CaptureTargetsResponse>("/field/photo-targets/search", {
     // dealsOnly filters to deals server-side (before the result cap) for the scorecard picker.
-    query: { search, limit, ...(dealsOnly ? { dealsOnly: "true" } : {}) },
+    // includeTerminalDeals keeps that narrowing but drops the browsing stage rule dealsOnly also
+    // carries — every ACTIVE deal, Lost included, which is what the walkthrough upload routes accept
+    // and what the recovery picker has to be able to name. Narrowing server-side is the whole point:
+    // the answer is capped before it is sent (per type in one office, then ONCE globally across
+    // offices, ordered lead → opportunity → deal), so filtering on the phone filters a list the deals
+    // may already have been cut from.
+    query: {
+      search,
+      limit,
+      ...(dealsOnly ? { dealsOnly: "true" } : {}),
+      ...(dealsOnly && includeTerminalDeals ? { includeTerminalDeals: "true" } : {}),
+    },
   });
 
 export const getNearbyCaptureTargets = (
@@ -320,3 +343,33 @@ export const getDealTeam = (f: Fetcher, dealId: string) =>
 // the app selects from the same roster the CRM shows. Any failure degrades to free-text entry in the picker.
 export const getFieldResponders = (f: Fetcher, dealId: string) =>
   f<FieldRespondersResponse>(`/field/projects/${dealId}/responders`);
+
+// ── Glasses walkthroughs (AI walk) ──────────────────────────────────────────────
+// The real server contract as of commit e901547bc — see ../walkthrough/upload.ts's "SERVER CONTRACT
+// SEAM" comment and ../walkthrough/upload-client.ts, which binds these two calls into the
+// WalkthroughUploadClient the upload queue is written against. `/deals/...` (not `/field/...`): these
+// routes live on the deal itself (server/src/modules/deals/routes.ts), not the field surface.
+//
+// Both calls are under /field, NOT /deals. This app signs in through `/auth/field-login`, which mints a
+// `surface: "field"` token, and the server rejects those on every CRM route by design (#722) — a field
+// token must never be replayable against CRM/admin. Addressed at /deals these returned 401 "This session
+// is not valid for CRM access" on every walk, and the app read that as a dead session and signed the user
+// out, so one undeliverable walk locked the crew out of the app. Caught on a device, not in review.
+//
+// Step 1 (per artifact): presign an R2 PUT. dealId is a URL path segment on both calls, never a body
+// field — the server derives it from the URL so a caller can never presign/file a walk under a project it
+// cannot reach (see the field routes' comments on both handlers).
+export const requestGlassesWalkthroughArtifactUploadUrl = (
+  f: Fetcher,
+  dealId: string,
+  body: WalkArtifactUploadUrlRequest,
+) =>
+  f<WalkArtifactUploadUrlResponse>(`/field/projects/${dealId}/glasses-walkthroughs/artifacts/upload-url`, {
+    method: "POST",
+    body,
+  });
+
+// Step 2 (once per walk, after every artifact from step 1 is PUT): files the walk into the deal's
+// project folder and hands forwarding to TROCK Scope off to the job queue.
+export const submitGlassesWalkthrough = (f: Fetcher, dealId: string, body: WalkCompletionRequest) =>
+  f<WalkCompletionResponse>(`/field/projects/${dealId}/glasses-walkthroughs`, { method: "POST", body });
