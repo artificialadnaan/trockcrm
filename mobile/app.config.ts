@@ -1,4 +1,5 @@
 import type { ExpoConfig, ConfigContext } from "expo/config";
+import { assertProductionBuildEnv } from "./plugins/assert-production-build-env";
 
 /**
  * T-Rock Cam — iOS-only Expo config (dynamic).
@@ -28,6 +29,11 @@ const FIELD_APP_HOST = process.env.EXPO_PUBLIC_FIELD_APP_HOST?.trim();
  * must differ between a dev client and a shipped build has to key off this.
  */
 const IS_PRODUCTION_BUILD = process.env.EAS_BUILD_PROFILE === "production";
+
+// Fails the BUILD rather than shipping one that installs and cannot reach the CRM. The Meta
+// credentials are already treated this way below (`requireRegisteredMetaApp`); this is the same
+// rule for the API host, which is the other half of what a production build has to be told.
+assertProductionBuildEnv(process.env, IS_PRODUCTION_BUILD);
 
 export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
