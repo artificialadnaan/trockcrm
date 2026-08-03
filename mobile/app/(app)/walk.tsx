@@ -300,16 +300,30 @@ export default function WalkScreen() {
   );
 
   /**
-   * A finished walk the queue REFUSED, kept until it is taken.
+   * EVERY finished walk the queue REFUSED this shell lifecycle, each kept until it is taken.
    *
-   * It carries its own copy of the recording and its metadata rather than pointing at the render,
-   * because it has to outlive both: the focus effect just above resets a terminal walk the moment
-   * this never-unmounting route is left and reopened, so `walk`/`walkId` are gone by the time a
-   * hurried estimator gets back to the notice. That reset is what USED to be the whole story — the
+   * Each entry carries its own copy of the recording and its metadata rather than pointing at the
+   * render, because it has to outlive both: the focus effect just above resets a terminal walk the
+   * moment this never-unmounting route is left and reopened, so `walk`/`walkId` are gone by the time
+   * a hurried estimator gets back to the notice. That reset is what USED to be the whole story — the
    * failed enqueue cleared a ref, changed no state, and the walk quietly ceased to exist as far as
    * anything in the app was concerned, with the files still on disk and nobody told to go looking.
+   *
+   * A LIST rather than the single entry this started as, because the notice never gated Start —
+   * deliberately: an estimator with a site to record must not be held hostage to a queue that is
+   * refusing (the same trade the startup scan already refuses to make; see the "Rejected: gating
+   * Start until the scan settles" reasoning). So the next walk goes ahead, and when ITS enqueue also
+   * fails — which is the EXPECTED shape of this failure, not a corner case, since a full phone or a
+   * broken manifest write does not repair itself between two walks — a single slot meant the second
+   * refusal overwrote the first. The first recording was then unreachable for the rest of the
+   * session: reset out of the screen, absent from the manifest, and invisible to the startup orphan
+   * scan, which runs ONCE per shell lifecycle and had already run. Nothing else in the app would
+   * have mentioned it again before sign-out or a process restart.
+   *
+   * Oldest first (append order), so the walk that has been waiting longest — the one closest to
+   * being forgotten — is the one at the top rather than the one pushed off the bottom.
    */
-  const [unqueuedWalk, setUnqueuedWalk] = useState<{
+  type UnqueuedWalk = {
     walkId: string;
     walk: Walk;
     meta: WalkQueueMeta;
@@ -317,8 +331,11 @@ export default function WalkScreen() {
      *  on device" is the only part of it the estimator can act on, and no wording of ours knows
      *  which failure this was. */
     message: string;
-  } | null>(null);
-  const [refiling, setRefiling] = useState(false);
+  };
+  const [unqueuedWalks, setUnqueuedWalks] = useState<readonly UnqueuedWalk[]>([]);
+  // Which walks have a retry in flight — per walkId, not one flag for the screen, or retrying the
+  // older walk would grey out the newer one's button and read as if both were being handled.
+  const [refilingWalkIds, setRefilingWalkIds] = useState<readonly string[]>([]);
 
   /**
    * Hand ONE finished walk to the queue — from the terminal-state effect below, and from the retry
@@ -332,7 +349,7 @@ export default function WalkScreen() {
         const queued = await enqueueWalk(ownerKey, finishedWalkId, finishedWalk, meta);
         // Scoped to the walk this call was about: a late retry landing after a LATER walk failed to
         // queue must not clear the notice standing for that one.
-        setUnqueuedWalk((current) => (current?.walkId === finishedWalkId ? null : current));
+        setUnqueuedWalks((current) => current.filter((entry) => entry.walkId !== finishedWalkId));
         // null = nothing to enqueue (not yet terminal, or terminal with zero captured artifacts —
         // e.g. failed before anything was recorded). Only kick a drain when there is something to
         // drain; the background task above still covers the case where this foreground kick itself
@@ -345,19 +362,41 @@ export default function WalkScreen() {
         // estimator to reopen the app and go looking for a problem nobody mentioned. So it is said
         // here, where they are standing, with the one action that fixes it.
         if (enqueuedWalkIdRef.current === finishedWalkId) enqueuedWalkIdRef.current = null;
-        setUnqueuedWalk({ walkId: finishedWalkId, walk: finishedWalk, meta, message: String(error) });
+        const refused: UnqueuedWalk = {
+          walkId: finishedWalkId,
+          walk: finishedWalk,
+          meta,
+          message: String(error),
+        };
+        // Keyed by walkId: a RETRY that fails again is the same walk refusing a second time, so it
+        // replaces its own entry (with the newer reason — the second failure is often not the first
+        // one's) rather than adding a duplicate row for a single recording.
+        setUnqueuedWalks((current) => {
+          const at = current.findIndex((entry) => entry.walkId === finishedWalkId);
+          if (at === -1) return [...current, refused];
+          const next = current.slice();
+          next[at] = refused;
+          return next;
+        });
       }
     },
     [ownerKey, queueFetcher],
   );
 
-  const retryFiling = useCallback(() => {
-    if (!unqueuedWalk || refiling) return;
-    setRefiling(true);
-    void fileWalk(unqueuedWalk.walkId, unqueuedWalk.walk, unqueuedWalk.meta).finally(() =>
-      setRefiling(false),
-    );
-  }, [unqueuedWalk, refiling, fileWalk]);
+  const retryFiling = useCallback(
+    (entry: UnqueuedWalk) => {
+      // State-only guard, no synchronous ref latch — unlike Profile's recovery card, where a
+      // double-tap races over WHICH DEAL the walk gets filed against. Here both halves of a
+      // double-tap carry the SAME walkId, walk and meta, and enqueueWalk is idempotent per walkId,
+      // so the worst a duplicate can do is write the same manifest entry twice.
+      if (refilingWalkIds.includes(entry.walkId)) return;
+      setRefilingWalkIds((current) => [...current, entry.walkId]);
+      void fileWalk(entry.walkId, entry.walk, entry.meta).finally(() =>
+        setRefilingWalkIds((current) => current.filter((walkId) => walkId !== entry.walkId)),
+      );
+    },
+    [refilingWalkIds, fileWalk],
+  );
 
   useEffect(() => {
     if (walk.state !== "complete" && walk.state !== "failed") return;
@@ -514,37 +553,48 @@ export default function WalkScreen() {
         ) : null}
 
         {/* Outside every walk.state branch, deliberately, and for a different reason than the banner
-            above: this notice is about a walk that is already OVER, so hanging it off the completion
-            card would put it inside the one thing the focus effect wipes. It stays until the walk is
-            queued — including through a walk the estimator starts next, because an unfiled site visit
-            outranks the tidiness of the screen it is sitting on. */}
-        {unqueuedWalk ? (
-          <View style={styles.unqueuedBanner}>
-            <Text style={styles.unqueuedTitle}>This walk has not been queued</Text>
-            <Text style={styles.unqueuedBody}>
-              Nothing has been deleted — the recording is still on this phone — but it could not be
-              handed to the upload queue: {unqueuedWalk.message}
-            </Text>
-            <Text style={styles.unqueuedBody}>
-              Free up storage if the phone is full, then try again. It uploads on its own once it is
-              queued.
-            </Text>
-            <Pressable
-              onPress={retryFiling}
-              disabled={refiling}
-              accessibilityRole="button"
-              accessibilityLabel="Try queueing this walk again"
-              accessibilityState={{ disabled: refiling, busy: refiling }}
-              style={({ pressed }) => [
-                styles.unqueuedRetry,
-                refiling && styles.startButtonBusy,
-                pressed && !refiling && styles.pressed,
-              ]}
-            >
-              <Text style={styles.unqueuedRetryText}>{refiling ? "Trying…" : "Try again"}</Text>
-            </Pressable>
-          </View>
-        ) : null}
+            above: these notices are about walks that are already OVER, so hanging them off the
+            completion card would put them inside the one thing the focus effect wipes. Each stays
+            until ITS walk is queued — including through the walks the estimator starts next, because
+            an unfiled site visit outranks the tidiness of the screen it is sitting on. One banner per
+            refused walk, never a summary count: the message is the queue's own words about THAT
+            walk, and the retry has to be attached to the recording it re-files. */}
+        {unqueuedWalks.map((unqueuedWalk) => {
+          const retrying = refilingWalkIds.includes(unqueuedWalk.walkId);
+          return (
+            <View key={unqueuedWalk.walkId} style={styles.unqueuedBanner}>
+              <Text style={styles.unqueuedTitle}>This walk has not been queued</Text>
+              {/* WHICH walk, in the same words the office will see it under (deriveWalkTitle's
+                  target + date/time). Two identical banners would leave the estimator retrying one
+                  of them twice and never learning which recording is still unfiled. */}
+              <Text style={styles.unqueuedBody}>{unqueuedWalk.meta.title}</Text>
+              <Text style={styles.unqueuedBody}>
+                Nothing has been deleted — the recording is still on this phone — but it could not be
+                handed to the upload queue: {unqueuedWalk.message}
+              </Text>
+              <Text style={styles.unqueuedBody}>
+                Free up storage if the phone is full, then try again. It uploads on its own once it is
+                queued.
+              </Text>
+              <Pressable
+                onPress={() => retryFiling(unqueuedWalk)}
+                disabled={retrying}
+                accessibilityRole="button"
+                // Every banner's button reads "Try again", so the walk's title is what tells a screen
+                // reader WHICH recording this one re-files — same rule as Profile's recovery rows.
+                accessibilityLabel={`Try queueing this walk again — ${unqueuedWalk.meta.title}`}
+                accessibilityState={{ disabled: retrying, busy: retrying }}
+                style={({ pressed }) => [
+                  styles.unqueuedRetry,
+                  retrying && styles.startButtonBusy,
+                  pressed && !retrying && styles.pressed,
+                ]}
+              >
+                <Text style={styles.unqueuedRetryText}>{retrying ? "Trying…" : "Try again"}</Text>
+              </Pressable>
+            </View>
+          );
+        })}
 
         {walk.state === "idle" || walk.state === "starting" ? (
           <View style={styles.centered}>
