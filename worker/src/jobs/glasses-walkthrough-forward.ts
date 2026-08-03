@@ -717,6 +717,7 @@ async function markScopeCreatePending(
       WHERE job_type = $2
         AND payload ->> 'walkId' = $3
         AND payload ->> 'dealId' = $4
+        AND status = 'processing'
       RETURNING id`,
     [externalRef, GLASSES_WALKTHROUGH_FORWARD_JOB, walkId, dealId]
   );
@@ -737,7 +738,8 @@ async function clearScopeCreatePending(db: Queryable, walkId: string, dealId: st
         SET payload = payload - 'scopeCreatePendingRef'
       WHERE job_type = $1
         AND payload ->> 'walkId' = $2
-        AND payload ->> 'dealId' = $3`,
+        AND payload ->> 'dealId' = $3
+        AND status = 'processing'`,
     [GLASSES_WALKTHROUGH_FORWARD_JOB, walkId, dealId]
   );
 }
@@ -756,7 +758,8 @@ async function checkpointScopeWalkthroughId(
         SET payload = jsonb_set(payload, '{scopeWalkthroughId}', to_jsonb($1::text), true) - 'scopeCreatePendingRef'
       WHERE job_type = $2
         AND payload ->> 'walkId' = $3
-        AND payload ->> 'dealId' = $4`,
+        AND payload ->> 'dealId' = $4
+        AND status = 'processing'`,
     [scopeWalkthroughId, GLASSES_WALKTHROUGH_FORWARD_JOB, walkId, dealId]
   );
 }
@@ -877,6 +880,83 @@ export async function handleGlassesWalkthroughForward(
   for (const artifact of p.artifacts) {
     await uploadClip(scopeDeps, scopeWalkthroughId, artifact, downloadRange);
   }
+
+  // The delivery has stopped. THIS is the only moment at which the row can safely be taken out of the
+  // live unique index, and it is why the API no longer does it for a claimed row: marking a `processing`
+  // row dead does not cancel this loop, it just lets a replacement be inserted alongside it.
+  //
+  // A completion that arrived mid-flight carrying artifacts this attempt was never given records them as
+  // `pendingArtifacts` and changes nothing else (recordPendingArtifactsOnRunningForwardJob in
+  // server/src/modules/walkthrough-capture/glasses-walkthrough-service.ts). Reading it back here turns
+  // that into the supersede it always wanted to be, taken after the race it would have caused is over.
+  const reconciliation = await supersedeSelfForPendingArtifacts(db, p.walkId, p.dealId);
+  if (reconciliation) return deadJob(reconciliation);
+}
+
+/**
+ * Fold `pendingArtifacts` into `artifacts` on this handler's own row and report that it happened, or null
+ * when there is nothing to reconcile (overwhelmingly the common case — one SELECT-shaped UPDATE per
+ * successful forward).
+ *
+ * Scoped to `status = 'processing'`, which is what makes it THIS handler's row: 0213's live partial unique
+ * index permits at most one live forward per (walkId, dealId), and a replacement inserted by any other
+ * path arrives `pending`. The same predicate guards the three checkpoint writes above, for the same
+ * reason — before it, a handler whose row had been killed under it would write its checkpoints into
+ * whatever row had taken its place.
+ *
+ * The union keeps existing entries verbatim and appends only genuinely new ones, matching the in-place
+ * amend in the service exactly; the artifacts an operator sees on the dead row are therefore the complete
+ * walk, and their job is `status = 'pending'` rather than reassembling a list by hand. `pendingArtifacts`
+ * is dropped in the same statement so a reader cannot mistake a settled reconciliation for an open one.
+ */
+async function supersedeSelfForPendingArtifacts(
+  db: Queryable,
+  walkId: string,
+  dealId: string
+): Promise<string | null> {
+  const result = await db.query(
+    `UPDATE public.job_queue
+        SET payload = jsonb_set(
+              payload,
+              '{artifacts}',
+              (
+                SELECT COALESCE(jsonb_agg(d.elem ORDER BY d.ord), '[]'::jsonb)
+                FROM (
+                  SELECT DISTINCT ON (t.elem ->> 'idempotencyKey') t.elem, t.ord
+                  FROM jsonb_array_elements(
+                    COALESCE(payload -> 'artifacts', '[]'::jsonb) || COALESCE(payload -> 'pendingArtifacts', '[]'::jsonb)
+                  ) WITH ORDINALITY AS t(elem, ord)
+                  ORDER BY t.elem ->> 'idempotencyKey', t.ord
+                ) d
+              ),
+              true
+            ) - 'pendingArtifacts'
+      WHERE job_type = $1
+        AND payload ->> 'walkId' = $2
+        AND payload ->> 'dealId' = $3
+        AND status = 'processing'
+        AND payload ? 'pendingArtifacts'
+      RETURNING jsonb_array_length(COALESCE(payload -> 'artifacts', '[]'::jsonb)) AS artifact_count`,
+    [GLASSES_WALKTHROUGH_FORWARD_JOB, walkId, dealId]
+  );
+  if (!result?.rows?.length) return null;
+  return buildPendingArtifactsDeadLetterMessage(walkId, dealId, Number(result.rows[0]?.artifact_count ?? 0));
+}
+
+/** The alert an operator receives when a walk grew while it was being forwarded. Same shape as the other
+ *  dead letters here: what happened, why it stopped rather than guessing, and the one action that fixes
+ *  it. */
+function buildPendingArtifactsDeadLetterMessage(walkId: string, dealId: string, artifactCount: number): string {
+  return (
+    `Walk ${walkId} (deal ${dealId}) was forwarded to TROCK Scope, and then MORE artifacts were filed for ` +
+    `the same walk while that forward was already running — a completion retry carrying files the running ` +
+    `attempt had never been given. The clips this attempt delivered did reach TROCK Scope; the later ones ` +
+    `did not, because a handler reads its artifact list once, when it claims the row, and no write can ` +
+    `reach that snapshot. The row's payload now carries the COMPLETE list (${artifactCount} artifacts), ` +
+    `so no reassembly is needed: set this row's status back to 'pending' to forward the whole walk again. ` +
+    `TROCK Scope's own checksum constraint rejects clip bytes that already landed, so re-running is safe ` +
+    `and will not duplicate the scope extraction.`
+  );
 }
 
 // ── Dead-letter alert ──────────────────────────────────────────────────────────────────────────────

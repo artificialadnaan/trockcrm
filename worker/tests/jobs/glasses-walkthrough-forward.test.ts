@@ -239,7 +239,12 @@ describe("handleGlassesWalkthroughForward", () => {
     );
 
     expect(calls.some((c) => c.url === "https://scope.example.com/api/walkthroughs")).toBe(false);
-    expect(db.calls.some((c) => c.sql.includes("jsonb_set"))).toBe(false);
+    // No CHECKPOINT write: the id is already settled, so neither marker statement should run. Asserted on
+    // the two payload keys those statements touch rather than on `jsonb_set` alone — every successful
+    // forward now ends with one more jsonb_set, the pending-artifact reconciliation, and a blanket ban on
+    // the operator would fail for a statement that has nothing to do with checkpointing.
+    expect(db.calls.some((c) => c.sql.includes("scopeWalkthroughId"))).toBe(false);
+    expect(db.calls.some((c) => c.sql.includes("scopeCreatePendingRef"))).toBe(false);
     const beginCall = calls.find((c) => /\/clips$/.test(c.url));
     expect(beginCall!.url).toContain("already-created");
   });

@@ -183,10 +183,16 @@ describe("glasses_walkthrough_forward create checkpoint (real SQL)", () => {
     // dealUuid still names A) and the extracted scope is filed against a job it does not describe.
     // Driven off the REAL rows: both payloads are read back from job_queue exactly as the queue would
     // deliver them, so the refs are derived from what is actually stored, not from a hand-built object.
+    //
+    // Seeded 'processing' rather than 'pending' because THIS test runs the handler against the row: the
+    // queue claims a row before invoking a handler, so a handler never executes against a pending one.
+    // The checkpoint statements are scoped `AND status = 'processing'` — that predicate is what keeps a
+    // handler's writes on its own row instead of on any other row sharing (walkId, dealId) — so a pending
+    // fixture here would describe a state that cannot occur.
     const db = await seed();
     await db.query(
       `INSERT INTO public.job_queue (job_type, payload, status)
-       VALUES ('glasses_walkthrough_forward', $1::jsonb, 'pending')`,
+       VALUES ('glasses_walkthrough_forward', $1::jsonb, 'processing')`,
       [payloadJson(DEAL_B)],
     );
 

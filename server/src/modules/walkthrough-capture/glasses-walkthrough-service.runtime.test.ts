@@ -1033,6 +1033,11 @@ async function claimJobForTest(jobId: number): Promise<void> {
 const keysOf = (job: { payload: { artifacts: { idempotencyKey: string }[] } }) =>
   job.payload.artifacts.map((a) => a.idempotencyKey);
 
+/** The list recorded BESIDE the one a claimed handler is delivering — see
+ *  `recordPendingArtifactsOnRunningForwardJob`. Absent on every row that has nothing to reconcile. */
+const pendingKeysOf = (job: { payload: { pendingArtifacts?: { idempotencyKey: string }[] } }) =>
+  (job.payload.pendingArtifacts ?? []).map((a) => a.idempotencyKey);
+
 const readJob = async (jobId: number) =>
   (await tenantDb.select().from(jobQueue).where(eq(jobQueue.id, jobId)))[0];
 
@@ -1096,11 +1101,17 @@ describe("ingestGlassesWalkthrough — a retry that ADDS artifacts to a live for
     expect(keysOf(await readJob(retry.forwarding.jobId))).toEqual(["artifact-1", "artifact-2", "artifact-3"]);
   });
 
-  it("REGRESSION: supersedes a job a worker has CLAIMED rather than amending a payload it has already read", async () => {
-    // A claimed row's handler holds the artifact list it read at claim time and iterates THAT. An amend it
-    // cannot observe is dropped the moment the attempt succeeds and the row goes terminal — a fix that
-    // looks applied, in the state it is least likely to be checked. So the row is dead-lettered instead,
-    // carrying the complete list, which is a state a human (and the dead-letter alert sweep) can see.
+  it("REGRESSION: leaves a CLAIMED job alive and records the reconciliation beside it, instead of killing a row a handler is still using", async () => {
+    // This used to dead-letter the claimed row. Marking it dead does NOT cancel the handler — it is
+    // already iterating the list it read at claim time and keeps uploading — but it does remove the row
+    // from 0213's live partial unique index immediately, so a concurrent completion retry can insert a
+    // REPLACEMENT beside a delivery that is still running. With more than one worker replica that is two
+    // handlers uploading the same walkthrough at once, which this seam cannot reconcile. It also strands
+    // the handler's own completion, which is guarded `WHERE id = $1 AND status = 'processing'`.
+    //
+    // So the barrier is held: status untouched, claim untouched, and the complete list recorded under
+    // `pendingArtifacts` for the handler to fold in when it stops (see supersedeSelfForPendingArtifacts
+    // in worker/src/jobs/glasses-walkthrough-forward.ts).
     const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(2) }), {
       artifactStore: healthyStore({ head: async () => ({}) }),
     });
@@ -1111,15 +1122,42 @@ describe("ingestGlassesWalkthrough — a retry that ADDS artifacts to a live for
     });
 
     expect(second.forwarding).toEqual({
-      status: "superseded_for_reconciliation",
+      status: "reconciliation_pending",
       jobId: first.forwarding.jobId,
     });
     const job = await readJob(first.forwarding.jobId);
-    expect(job.status).toBe("dead");
-    expect(keysOf(job)).toEqual(["artifact-1", "artifact-2", "artifact-3"]);
-    // The dead letter has to name the walk and what is missing — it is the only thing a human gets.
-    expect(job.lastError).toContain(WALK);
-    expect(job.lastError).toContain("artifact-3");
+    // Still claimed, still in the live unique index — nothing can be inserted alongside it.
+    expect(job.status).toBe("processing");
+    // The list the handler is DELIVERING is untouched; the complete one is recorded beside it, so the two
+    // can never be confused for one another.
+    expect(keysOf(job)).toEqual(["artifact-1", "artifact-2"]);
+    expect(pendingKeysOf(job)).toEqual(["artifact-1", "artifact-2", "artifact-3"]);
+  });
+
+  it("REGRESSION: a replacement cannot be inserted beside a claimed forward that grew mid-flight", async () => {
+    // The consequence the branch above exists to prevent, asserted directly rather than inferred from the
+    // row's status: after a widening completion against a claimed job, the pair still has exactly ONE live
+    // forward. Before the fix the claimed row went dead, left the live unique index, and the very next
+    // completion inserted a second live row while the first was still uploading.
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(2) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+    await claimJobForTest(first.forwarding.jobId);
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(3) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+
+    // A further retry — the one that would have raced the running delivery.
+    const third = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(3) }), {
+      artifactStore: healthyStore({ head: async () => ({}) }),
+    });
+    expect(third.forwarding.jobId).toBe(first.forwarding.jobId);
+
+    const live = await tenantDb
+      .select({ id: jobQueue.id })
+      .from(jobQueue)
+      .where(and(eq(jobQueue.jobType, GLASSES_WALKTHROUGH_FORWARD_JOB), sql`${jobQueue.status} <> 'dead'`));
+    expect(live).toHaveLength(1);
   });
 
   it("REGRESSION: supersedes a COMPLETED forward, whose row is never claimed again", async () => {
@@ -1168,10 +1206,15 @@ describe("ingestGlassesWalkthrough — a retry that ADDS artifacts to a live for
     const first = await ingestGlassesWalkthrough(tenantDb, baseInput({ artifacts: photoArtifacts(2) }), {
       artifactStore: healthyStore({ head: async () => ({}) }),
     });
+    // COMPLETED, not `processing`. A claimed row is no longer superseded at all — its handler is still
+    // uploading and killing it would let this very replacement be inserted alongside a live delivery.
+    // Completed is the state where the supersede is safe, because nothing is using the row any more.
     await tenantDb
       .update(jobQueue)
       .set({
-        status: "processing",
+        status: "completed",
+        attempts: 1,
+        completedAt: new Date(),
         payload: sql`jsonb_set(${jobQueue.payload}, '{scopeWalkthroughId}', '"scope-wt-1"'::jsonb, true)`,
       })
       .where(eq(jobQueue.id, first.forwarding.jobId));

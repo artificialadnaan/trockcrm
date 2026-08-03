@@ -636,9 +636,14 @@ export type GlassesWalkthroughForwardingResult =
   | { status: "already_queued"; jobId: number }
   /** A live forward job was WIDENED in place to cover artifacts this call filed and it did not carry. */
   | { status: "artifacts_added"; jobId: number }
-  /** A live forward job could not be widened (see `supersedeUnamendableGlassesWalkthroughForwardJob`) and
-   *  was dead-lettered, carrying the complete artifact list, for reconciliation. */
-  | { status: "superseded_for_reconciliation"; jobId: number };
+  /** A FINISHED forward job could not be widened (see `supersedeUnamendableGlassesWalkthroughForwardJob`)
+   *  and was dead-lettered, carrying the complete artifact list, for reconciliation. */
+  | { status: "superseded_for_reconciliation"; jobId: number }
+  /** The forward job is being WORKED right now, so it keeps its claim and its place in the live unique
+   *  index. The complete artifact list is recorded beside the one being delivered, and the handler
+   *  dead-letters itself carrying the union once it stops. Distinct from `superseded_for_reconciliation`
+   *  because the reconciliation has been SCHEDULED here, not performed — the row is still alive. */
+  | { status: "reconciliation_pending"; jobId: number };
 
 /**
  * One entry of `job_queue.payload.artifacts` — what the worker iterates to ship a walk to TROCK Scope
@@ -939,7 +944,37 @@ async function amendPendingGlassesWalkthroughForwardArtifacts(
   const updated = await tenantDb
     .update(jobQueue)
     .set({
-      payload: sql`jsonb_set(${jobQueue.payload}, '{artifacts}', ${JSON.stringify(artifacts)}::jsonb, true)`,
+      // The union is built HERE, against the row's own current value, and not in the caller from a
+      // payload it read a moment ago. Two widening completions for the same walk can overlap — mobile
+      // retrying after a response timed out in flight is the likeliest retry there is — and a union
+      // computed before the UPDATE is computed from a snapshot. The guarded write serializes them,
+      // which is not the same as making them correct: under READ COMMITTED the second UPDATE blocks on
+      // the first's lock, then re-evaluates BOTH its predicate and this expression against the row the
+      // first COMMITTED. A caller-built list would instead overwrite that committed result with one
+      // derived from the pre-first-write payload, so [A,B] becomes [A,C] and the artifact the first
+      // call filed never reaches TROCK Scope — while both requests report success.
+      //
+      // Deduped on idempotencyKey with the EXISTING entry winning (`DISTINCT ON` over the appended
+      // list takes the lowest ordinality, and the row's own artifacts are concatenated first). That
+      // preserves the verbatim-carry-through rule the caller's comment states: a worker or a
+      // reconciling human may have edited an entry, and this call has no better information. WITH
+      // ORDINALITY then restores the original order, so the forward's sequence is unchanged and only
+      // genuinely new artifacts are appended, at the end.
+      payload: sql`jsonb_set(
+        ${jobQueue.payload},
+        '{artifacts}',
+        (
+          SELECT COALESCE(jsonb_agg(d.elem ORDER BY d.ord), '[]'::jsonb)
+          FROM (
+            SELECT DISTINCT ON (t.elem ->> 'idempotencyKey') t.elem, t.ord
+            FROM jsonb_array_elements(
+              COALESCE(${jobQueue.payload} -> 'artifacts', '[]'::jsonb) || ${JSON.stringify(artifacts)}::jsonb
+            ) WITH ORDINALITY AS t(elem, ord)
+            ORDER BY t.elem ->> 'idempotencyKey', t.ord
+          ) d
+        ),
+        true
+      )`,
     })
     .where(and(eq(jobQueue.id, jobId), eq(jobQueue.status, "pending")))
     .returning({ id: jobQueue.id });
@@ -947,23 +982,46 @@ async function amendPendingGlassesWalkthroughForwardArtifacts(
 }
 
 /**
+ * Union two forward artifact lists, deduped on `idempotencyKey`, with `existing` winning and keeping its
+ * order. The in-place amend does exactly this in SQL (see above); this is the same rule for the paths that
+ * build a payload in JS rather than editing one in place — a dead row's replacement, principally.
+ *
+ * Existing-wins rather than newest-wins because an entry already on a job may have been edited by a worker
+ * or by a human reconciling a dead letter, and a completion retry has no better information than they did.
+ */
+export function mergeForwardArtifacts(
+  existing: readonly GlassesWalkthroughForwardArtifact[],
+  incoming: readonly GlassesWalkthroughForwardArtifact[]
+): GlassesWalkthroughForwardArtifact[] {
+  const merged: GlassesWalkthroughForwardArtifact[] = [];
+  const seen = new Set<string>();
+  for (const artifact of [...existing, ...incoming]) {
+    if (seen.has(artifact.idempotencyKey)) continue;
+    seen.add(artifact.idempotencyKey);
+    merged.push(artifact);
+  }
+  return merged;
+}
+
+/**
  * The answer for a live forward job whose artifact list CANNOT be amended: record the complete list on it
  * anyway, then dead-letter it so a human is told.
  *
- * WHICH STATES LAND HERE, and why amending them would be worse than refusing to:
- *   - `processing` — a worker holds the lease and is iterating the artifact list it read at CLAIM time
- *     (`assertPayload(payload)` runs once, at the top of handleGlassesWalkthroughForward). A row write
- *     cannot reach that snapshot. If the attempt then SUCCEEDS the row goes terminal and the amendment is
- *     dropped, which is the original defect wearing a fix's clothes — and it would only ever be visible on
- *     the retry path, where nobody looks. Enqueuing a second job instead is worse still: two uploaders
- *     racing multipart clips into the SAME remote walkthrough is not a state this seam has any way to
- *     reconcile.
- *   - `completed` / `failed` — no poller selects either (they take 'pending' only), so the row will never
- *     be claimed again and an amendment to it is simply inert: the artifacts would sit in a payload no
- *     worker reads, indistinguishable from being forwarded.
- * Nothing is enumerated here, deliberately. The caller reaches this only after the `status = 'pending'`
- * amend matched nothing, so the set is "everything that is live and not pending" by construction — a new
- * live status added to the enum lands on the safe side without this file being edited.
+ * ONLY a row whose handler has provably STOPPED may be superseded, which here means `completed`. A
+ * `completed` row is never selected by any poller, so an amendment to it would be inert — the artifacts
+ * would sit in a payload no worker reads, indistinguishable from being forwarded — and killing it releases
+ * nothing that is still in use.
+ *
+ * `processing` is NOT superseded, and that restriction is the whole point of this split. Marking a claimed
+ * row dead does not cancel the handler: it is already iterating the artifact list it read at claim time
+ * and keeps uploading. Two things then go wrong at once. The row leaves 0213's live partial unique index
+ * immediately, so a concurrent completion retry can insert a REPLACEMENT — and with multiple worker
+ * replicas that is two handlers uploading the same walkthrough at the same time, which this seam has no
+ * way to reconcile. And the original handler's checkpoint writes match on `(job_type, walkId, dealId)`
+ * with no job id, so they would land on that replacement row while it runs. The queue's own terminal
+ * writes are guarded `WHERE id = $1 AND status = 'processing' AND attempts = $n`, so killing the row also
+ * strands the handler's completion against a predicate that can no longer match. See
+ * `recordPendingArtifactsOnRunningForwardJob` for what happens instead.
  *
  * The payload is written BEFORE the row is killed, in one statement, so the row a reconciler opens already
  * carries the complete walk: their whole job is `status = 'pending'`, not reassembling an artifact list by
@@ -971,8 +1029,10 @@ async function amendPendingGlassesWalkthroughForwardArtifacts(
  * completion retry takes the EXISTING dead-row replacement path — a fresh job with the full list and the
  * inherited TROCK Scope checkpoint. The dead letter is the fallback, not the only way out.
  *
- * Guarded on `status <> 'dead'` so this can never stomp the `last_error` of a row that genuinely
- * dead-lettered in the gap; the caller treats a miss as retryable rather than guessing.
+ * Enumerating `completed` rather than excluding `dead` is deliberate, and it is the SAFE direction: a new
+ * status added to this queue is by default treated as possibly-running and routed to the pending-artifacts
+ * path, which touches no lifecycle state. The previous `<> 'dead'` form did the opposite — it would kill
+ * anything unrecognised.
  */
 async function supersedeUnamendableGlassesWalkthroughForwardJob(
   tenantDb: TenantDb,
@@ -989,7 +1049,46 @@ async function supersedeUnamendableGlassesWalkthroughForwardJob(
     })
     // `completed_at` is deliberately NOT cleared. On a superseded `completed` row it is the only remaining
     // evidence that this forward ever ran, and a reconciler who cannot see it re-forwards blind.
-    .where(and(eq(jobQueue.id, jobId), sql`${jobQueue.status} <> 'dead'`))
+    .where(and(eq(jobQueue.id, jobId), eq(jobQueue.status, "completed")))
+    .returning({ id: jobQueue.id });
+  return updated.length > 0;
+}
+
+/**
+ * The answer for a forward job that is being WORKED right now: record the complete artifact list beside
+ * the one the handler is using, and change nothing else.
+ *
+ * The barrier — 0213's live partial unique index, and the handler's claim — stays exactly where it is.
+ * Nothing can insert a replacement, nothing else can claim the row, the handler's own completion predicate
+ * still matches, and its checkpoints still find the row they were written for. The cost is that the new
+ * artifacts do not reach TROCK Scope on THIS attempt, which is unavoidable: the handler read its list at
+ * claim time and no row write can reach that snapshot.
+ *
+ * `pendingArtifacts` is a separate key rather than an edit to `artifacts` precisely so the running handler
+ * and the reconciliation cannot be confused for one another — `artifacts` remains, verbatim, the list the
+ * current attempt is delivering. The handler reads this key back when it finishes and dead-letters itself
+ * carrying the union (see worker/src/jobs/glasses-walkthrough-forward.ts), which is the same supersede as
+ * above but taken at the one moment it is safe: after the delivery it would have raced has stopped.
+ *
+ * Excludes the states with their own handling rather than naming `processing`, so an unrecognised status
+ * lands HERE — the branch that cannot break anything — instead of on the one that kills rows.
+ */
+async function recordPendingArtifactsOnRunningForwardJob(
+  tenantDb: TenantDb,
+  jobId: number,
+  artifacts: GlassesWalkthroughForwardArtifact[]
+): Promise<boolean> {
+  const updated = await tenantDb
+    .update(jobQueue)
+    .set({
+      payload: sql`jsonb_set(${jobQueue.payload}, '{pendingArtifacts}', ${JSON.stringify(artifacts)}::jsonb, true)`,
+    })
+    .where(
+      and(
+        eq(jobQueue.id, jobId),
+        sql`${jobQueue.status} NOT IN ('pending', 'completed', 'dead')`
+      )
+    )
     .returning({ id: jobQueue.id });
   return updated.length > 0;
 }
@@ -1380,8 +1479,11 @@ export async function ingestGlassesWalkthrough(
       };
     }
 
-    // Not pending — claimed, finished, or failed. None of those can observe an amendment, so the row is
-    // superseded (complete list recorded, then dead-lettered for a human) rather than quietly edited.
+    // Not pending. Two very different cases hide behind that, and conflating them was the defect: a
+    // FINISHED row can be superseded safely because nothing is using it, whereas a row being WORKED
+    // right now must keep its claim and its place in the live unique index until its handler stops —
+    // otherwise a replacement can be inserted alongside a delivery that is still uploading. Finished
+    // first, and the running case falls through to the branch below.
     if (
       await supersedeUnamendableGlassesWalkthroughForwardJob(
         tenantDb,
@@ -1403,7 +1505,19 @@ export async function ingestGlassesWalkthrough(
       };
     }
 
-    // Neither write matched: the row dead-lettered on its own between the lookup and here. That is the
+    // Being worked right now. The list is recorded BESIDE the one the handler is delivering and nothing
+    // else is touched — see recordPendingArtifactsOnRunningForwardJob. The handler reads it back when it
+    // finishes and dead-letters itself carrying the union, so the reconciliation still happens, at the one
+    // moment it cannot race the delivery.
+    if (await recordPendingArtifactsOnRunningForwardJob(tenantDb, knownJobState.jobId, unionArtifacts)) {
+      return {
+        walkId: input.walkId,
+        files: fileResults,
+        forwarding: { status: "reconciliation_pending", jobId: knownJobState.jobId },
+      };
+    }
+
+    // No write matched: the row dead-lettered on its own between the lookup and here. That is the
     // replacement path below, not this branch — but re-deriving the inheritance from a second lookup
     // inside this branch would duplicate it, so the caller retries into the ordinary path instead. 503 for
     // the same reason the lost-race case at the end of this function is: the next attempt is expected to
@@ -1423,7 +1537,18 @@ export async function ingestGlassesWalkthrough(
     capturedAt: input.capturedAt,
     capturedByUserId: input.userId,
     officeSlug: input.officeSlug,
-    artifacts: forwardArtifacts,
+    // The DEAD row's artifacts are inherited too, not just this call's list — the same union the live
+    // branch above applies, for the same reason, and leaving it off here was an asymmetry with a real
+    // casualty. A recovered manifest is assembled from a directory scan and can legitimately OMIT an
+    // artifact the prior job carried; if that job died before the clip landed remotely, a retry
+    // carrying [B,C] would replace a dead [A,B,C] payload with [B,C]. The replacement then succeeds,
+    // reports success, and never forwards A — indistinguishable from a complete walk everywhere the
+    // office looks.
+    //
+    // Safe to inherit unconditionally: `knownJobState` is only non-null here for a row that is dead
+    // (a live one returns from the branch above), and the checkpoint carried forward below is taken
+    // from that same row, so the artifacts and the checkpoint always describe one walk.
+    artifacts: mergeForwardArtifacts(knownJobState?.artifacts ?? [], forwardArtifacts),
   };
 
   // Exactly one of the two markers is carried forward, never both — the worker reads `scopeWalkthroughId`
