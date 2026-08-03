@@ -431,6 +431,45 @@ export function sanitizeWalkOwnerKey(ownerKey: string): string {
   return safe.length > 0 ? safe : "anon";
 }
 
+/** Written into `walkthroughs/<walkId>/` at START, before native is asked to record anything.
+ *
+ *  The manifest cannot answer "whose walk is this" for the case that matters. A walk interrupted by
+ *  sign-out is deliberately never enqueued, so it has no manifest entry under ANY owner — that is
+ *  the whole shape of the recovery path. Every consumer of that fact so far read it as "unowned",
+ *  which on a shared device means the NEXT account to sign in is offered the previous estimator's
+ *  site footage and can file it under any deal it can pick. Nothing about the directory says
+ *  otherwise, because native has no signed-in identity to name.
+ *
+ *  So identity is written next to the bytes, at the one moment it is known and before any bytes
+ *  exist. Not in the manifest: the manifest is the thing that is absent exactly when this is needed.
+ *
+ *  The name has no extension on purpose — `classifyWalkDirFileNames` recognises only `walk.mp4` and
+ *  the still pattern and silently ignores everything else, so this can never be mistaken for an
+ *  artifact, and it is removed with the directory by the ordinary cleanup delete. */
+export const WALK_OWNER_FILE_NAME = "owner";
+
+/** The marker's contents: the SANITIZED key, so it compares equal to the owner directory name the
+ *  manifest already lives under and cannot carry a raw address into a file on disk. */
+export function walkOwnerFileContents(ownerKey: string): string {
+  return sanitizeWalkOwnerKey(ownerKey);
+}
+
+/**
+ * Does this recording belong to `ownerKey`?
+ *
+ * `null` means the marker could not be read — either the directory predates this marker, or the
+ * process died between native creating the directory and the marker landing. **Both answer false.**
+ * An unattributable recording is not offered to anybody: the alternative is guessing, and the only
+ * account available to guess in favour of is whoever happens to be signed in now, which is the
+ * exposure this exists to prevent. The bytes are never deleted by that refusal — this module's scan
+ * only ever declines to LIST them — so a wrongly-orphaned recording is recoverable by a build that
+ * knows better, whereas footage filed under the wrong account is not recallable at all.
+ */
+export function isWalkOwnedBy(markerContents: string | null, ownerKey: string): boolean {
+  if (markerContents === null) return false;
+  return markerContents.trim() === sanitizeWalkOwnerKey(ownerKey);
+}
+
 // ── Recovery: Documents/walkthroughs/<walkId>/ directories with no manifest entry ─────────────────
 //
 // An app kill during recording, or after native finalizes but before useWalk.ts's terminal-enqueue

@@ -184,6 +184,18 @@ export default function WalkScreen() {
   const targetName = typeof params.targetName === "string" && params.targetName ? params.targetName : "this project";
   const propertyAddress = typeof params.propertyAddress === "string" ? params.propertyAddress : null;
 
+  // Identity for the upload queue: user + ACTIVE OFFICE, same resolution rule (activeOfficeId ??
+  // primary office) as capture.tsx's own queue — and the SAME rule the background drain task uses,
+  // so a walk enqueued here is a walk the background task can actually find.
+  // This screen's drain outlives it: it fires the moment a walk goes terminal and keeps uploading
+  // after the shell (and therefore this hidden tab) unmounts at sign-out, so its 401 handling has
+  // to be scoped to the session that started it. See use-queue-session.ts.
+  //
+  // Resolved ABOVE useWalk, not below it: the recorder now stamps the walk's directory with this
+  // identity before native writes a byte (see claimWalkDirForOwner), so useWalk needs it at start
+  // rather than only at enqueue.
+  const { ownerKey, queueFetcher } = useWalkQueueSession();
+
   const {
     walk,
     error,
@@ -196,7 +208,7 @@ export default function WalkScreen() {
     bridgeAvailable,
     captureEnabled,
     atCaptureLimit,
-  } = useWalk(dealId, projectId);
+  } = useWalk(dealId, projectId, ownerKey);
 
   const {
     blocked: cameraBlocked,
@@ -204,14 +216,6 @@ export default function WalkScreen() {
     requestNotice: cameraRequestNotice,
     request: requestCameraAccess,
   } = useCameraAuthorization();
-
-  // Identity for the upload queue: user + ACTIVE OFFICE, same resolution rule (activeOfficeId ??
-  // primary office) as capture.tsx's own queue — and the SAME rule the background drain task uses,
-  // so a walk enqueued here is a walk the background task can actually find.
-  // This screen's drain outlives it: it fires the moment a walk goes terminal and keeps uploading
-  // after the shell (and therefore this hidden tab) unmounts at sign-out, so its 401 handling has
-  // to be scoped to the session that started it. See use-queue-session.ts.
-  const { ownerKey, queueFetcher } = useWalkQueueSession();
 
   // Best-effort: schedule the background drain once signed in, so a walk still ships if the app is
   // killed/backgrounded before the foreground drain below finishes. Registration itself is

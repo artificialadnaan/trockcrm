@@ -122,6 +122,7 @@ import { ApiError } from "../../api/client";
 import { initialWalk, reduceWalk, type Walk } from "../session";
 import {
   MAX_DRAIN_PASSES,
+  claimWalkDirForOwner,
   drainWalkQueue,
   enqueueRecoveredWalk,
   enqueueWalk,
@@ -142,6 +143,7 @@ import {
   type WalkQueueMeta,
   type WalkthroughUploadClient,
 } from "../upload";
+import { sanitizeWalkOwnerKey } from "../upload-core";
 import { noteWalkStarted, noteWalkTeardown } from "../walk-teardown";
 
 const fs = FileSystem as unknown as {
@@ -231,10 +233,32 @@ const FINALIZED_MP4 = mp4Box("ftyp", 24) + mp4Box("mdat", 4096) + mp4Box("moov",
 /** walk.mp4 as an app kill leaves one: header and media, and no moov anywhere. */
 const UNFINALIZED_MP4 = mp4Box("ftyp", 24) + mp4Box("mdat", 4096);
 
-/** Seed one walk directory's `walk.mp4` with real container bytes, sized from those bytes. */
+/**
+ * Stamp a walk directory with the account that recorded it, exactly as `claimWalkDirForOwner` does
+ * on device. Split out so a test can seed a walk belonging to somebody ELSE, or deliberately seed
+ * one with no marker at all.
+ */
+function seedWalkOwner(walkId: string, owner: string = OWNER): void {
+  fs.__store.set(`${DOC}walkthroughs/${walkId}/owner`, sanitizeWalkOwnerKey(owner));
+}
+
+/** The walkId a `${DOC}walkthroughs/<walkId>/...` uri belongs to. */
+function walkIdFromUri(uri: string): string {
+  return uri.slice(`${DOC}walkthroughs/`.length).split("/")[0]!;
+}
+
+/**
+ * Seed one walk directory's `walk.mp4` with real container bytes, sized from those bytes — and its
+ * owner marker, because on device the marker is written BEFORE native creates the directory, so a
+ * walk.mp4 that exists without one is a state no real recording can reach. Seeding the video alone
+ * would model a device that cannot exist and quietly make every recovery test a test of the
+ * unowned-directory path. Tests that want an unowned or foreign-owned directory say so explicitly
+ * (see the ownership describe below).
+ */
 function seedVideoFile(uri: string, bytes: string = FINALIZED_MP4): void {
   fs.__store.set(uri, bytes);
   fs.__sizes.set(uri, bytes.length);
+  seedWalkOwner(walkIdFromUri(uri));
 }
 
 let urlCounter = 0;
@@ -1324,13 +1348,63 @@ describe("scanRecoverableWalksAtStartup across shell lifecycles", () => {
     await scanRecoverableWalksAtStartup(OWNER);
     expect(getRecoverableWalksFromStartup()).toEqual([]);
 
-    // An account switch, with an orphan on disk that the first owner's scan predates. Serving the
-    // cached answer would hide it from the person now signed in — and each owner's manifest is a
-    // different namespace, so the previous scan is not an answer that transfers.
+    // An account switch, with an orphan on disk that the first owner's scan predates — and one
+    // OWNER_2 actually recorded, or ownership would (correctly) withhold it regardless of caching.
+    // Serving the cached answer would hide it from the person now signed in, and each owner's
+    // manifest is a different namespace, so the previous scan is not an answer that transfers.
     seedVideoFile(`${DOC}walkthroughs/walk-orphan/walk.mp4`);
+    seedWalkOwner("walk-orphan", OWNER_2);
 
     await scanRecoverableWalksAtStartup(OWNER_2);
     expect(getRecoverableWalksFromStartup().map((w) => w.walkId)).toEqual(["walk-orphan"]);
+  });
+
+  // ── Ownership: a recording belongs to the account that made it ──────────────────────────────────
+  //
+  // The manifest cannot answer this and never could. A walk interrupted by sign-out is deliberately
+  // never enqueued, so it has no entry under ANY owner — the exact case recovery exists for. Reading
+  // "absent from every manifest" as "unowned" meant that on a shared device the next estimator to
+  // sign in was offered the previous one's site footage, with a project picker attached, and could
+  // file it against any deal they could select. Nothing on disk contradicted them.
+  it("does not offer one account's recording to another account that signs in on the same device", async () => {
+    seedVideoFile(`${DOC}walkthroughs/walk-of-owner-1/walk.mp4`);
+    seedWalkOwner("walk-of-owner-1", OWNER);
+
+    // OWNER_2 signs in on the shared phone. The directory is in no manifest — not theirs, not
+    // OWNER's — which is precisely the shape that used to read as "free to claim".
+    expect(await findRecoverableWalks(OWNER_2)).toEqual([]);
+    expect(await getRecoverableWalkCount(OWNER_2)).toBe(0);
+
+    // ...and it is still recoverable by the account that actually recorded it.
+    expect((await findRecoverableWalks(OWNER)).map((w) => w.walkId)).toEqual(["walk-of-owner-1"]);
+  });
+
+  it("offers an unattributable recording to nobody rather than to whoever is signed in", async () => {
+    // No owner marker at all: a directory from a build that predates markers, or a process killed
+    // between native creating the directory and the marker landing. There is no evidence of who
+    // recorded it, and the only account available to guess in favour of is whoever happens to be
+    // here now — which is the exposure, not a recovery. The bytes are untouched either way: this
+    // scan only ever declines to LIST them, so a build that knows better can still surface them,
+    // whereas footage filed under the wrong account cannot be recalled.
+    fs.__store.set(`${DOC}walkthroughs/walk-unmarked/walk.mp4`, FINALIZED_MP4);
+    fs.__sizes.set(`${DOC}walkthroughs/walk-unmarked/walk.mp4`, FINALIZED_MP4.length);
+
+    expect(await findRecoverableWalks(OWNER)).toEqual([]);
+    expect(await findRecoverableWalks(OWNER_2)).toEqual([]);
+    // The recording itself is untouched — declining to offer it is not deleting it.
+    expect(fs.__store.has(`${DOC}walkthroughs/walk-unmarked/walk.mp4`)).toBe(true);
+  });
+
+  it("stamps the owner before the recorder is asked for anything, so a kill mid-start still attributes", async () => {
+    // claimWalkDirForOwner runs BEFORE Recorder.startWalk (see useWalk), so by the time native can
+    // create or write a single byte the marker is already on disk. Asserting the marker exists
+    // independently of any artifact is asserting exactly that ordering: there is no window in which
+    // a directory holds a recording but no owner.
+    await claimWalkDirForOwner(OWNER, "walk-just-started");
+    expect(fs.__store.get(`${DOC}walkthroughs/walk-just-started/owner`)).toBe(sanitizeWalkOwnerKey(OWNER));
+
+    // A claim with no artifacts yet is not offered as a recoverable walk — there is nothing to file.
+    expect(await findRecoverableWalks(OWNER)).toEqual([]);
   });
 
   it("keeps the snapshot for repeat calls within one lifecycle — the scan stays a once-per-shell cost", async () => {
@@ -1403,6 +1477,7 @@ describe("enqueueRecoveredWalk", () => {
   it("is idempotent: calling it twice for the same recovered walkId keeps the first attempt's progress", async () => {
     fs.__store.set(`${orphanDir}still-001.jpg`, "a");
     fs.__sizes.set(`${orphanDir}still-001.jpg`, 512);
+    seedWalkOwner("walk-orphan"); // stills-only walk: no seedVideoFile to stamp it
     const [recovered] = await findRecoverableWalks(OWNER);
 
     await enqueueRecoveredWalk(OWNER, recovered!, "deal-99", null, META, 1000);

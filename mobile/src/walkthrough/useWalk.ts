@@ -71,7 +71,14 @@ export type UseWalkResult = {
   atCaptureLimit: boolean;
 };
 
-export function useWalk(dealId: string, projectId: string | null): UseWalkResult {
+/**
+ * `ownerKey` is the signed-in identity the recording is stamped with at start — nullable because
+ * `useWalkQueueSession` resolves it asynchronously and this screen can render for a frame before it
+ * lands. A null key REFUSES the start rather than recording anyway: an unstamped directory is one no
+ * account can be shown to own later, and the recovery scan's only safe reading of that is to offer
+ * it to nobody. Refusing up front costs a retriable error message; recording anyway costs the walk.
+ */
+export function useWalk(dealId: string, projectId: string | null, ownerKey: string | null): UseWalkResult {
   const [walk, dispatch] = useReducer(reduceWalk, undefined, () => initialWalk(dealId, projectId));
   const [error, setError] = useState<string | null>(null);
   const [walkId, setWalkId] = useState<string | null>(null);
@@ -297,7 +304,14 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
     // stay set and refuse every subsequent start. A permanent wedge from one synchronous throw.
     let pending: Promise<{ videoUri: string | null }> | null = null;
     try {
-      pending = Recorder.startWalk(id);
+      // Refused rather than recorded unowned: `Recorder.startWalk` stamps the walk's directory with
+      // this identity before native writes a byte, and a walk with no identity to stamp is one the
+      // recovery scan can only ever offer to nobody. Costing a retriable message here is strictly
+      // better than costing the walk later.
+      if (!ownerKey) {
+        throw new Error("Not signed in yet — wait a moment and tap Start again.");
+      }
+      pending = Recorder.startWalk(id, ownerKey);
       startInFlightRef.current = pending;
       const started = await pending;
       // Record the path native reports rather than null. It is not playable yet — the writer
@@ -322,7 +336,7 @@ export function useWalk(dealId: string, projectId: string | null): UseWalkResult
       // not be allowed to match a ref that a racing start legitimately left at null.
       if (pending !== null && startInFlightRef.current === pending) startInFlightRef.current = null;
     }
-  }, [clearInFlight]);
+  }, [clearInFlight, ownerKey]);
 
   const capture = useCallback(async () => {
     // canCaptureMore, not canCapture: also refuses once capturing would push the walk past the

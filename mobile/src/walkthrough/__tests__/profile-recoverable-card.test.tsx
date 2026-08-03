@@ -163,6 +163,13 @@ const fs = FileSystem as unknown as { __store: Map<string, string>; __mtimes: Ma
 // Matches walkOwnerKey(user.id, activeOfficeId) for the mocked auth above.
 const OWNER = "user-1:office-a";
 
+/** Stamp the orphan directory with OWNER, exactly as `claimWalkDirForOwner` does at walk start.
+ *  Without it the recovery scan correctly declines to surface the walk at all — an unattributable
+ *  recording is offered to nobody — and every assertion below would be testing an empty card. */
+function seedOrphanOwner(): void {
+  fs.__store.set(`${DOC}walkthroughs/walk-orphan/owner`, "user-1_office-a");
+}
+
 /** One top-level MP4 box: 32-bit size, 4-char type, zero-filled payload. */
 function mp4Box(type: string, payloadBytes: number): string {
   const size = 8 + payloadBytes;
@@ -188,6 +195,7 @@ describe("Profile's recoverable-walks card", () => {
     // A walk directory native wrote but nothing ever queued — the app was killed before the enqueue
     // effect ran.
     fs.__store.set(`${DOC}walkthroughs/walk-orphan/walk.mp4`, FINALIZED_MP4);
+    seedOrphanOwner();
 
     const { queryByText } = render(<ProfileScreen />);
 
@@ -258,6 +266,7 @@ describe("filing a recovered walk against a project the estimator picks", () => 
   /** Render Profile with one orphaned walk already discovered by the shell's startup scan. */
   async function renderWithOrphan() {
     fs.__store.set(`${ORPHAN_DIR}walk.mp4`, FINALIZED_MP4);
+    seedOrphanOwner();
     fs.__mtimes.set(`${ORPHAN_DIR}walk.mp4`, 1_700_000_720); // epoch SECONDS
     fs.__store.set(`${ORPHAN_DIR}still-001.jpg`, "a");
     fs.__mtimes.set(`${ORPHAN_DIR}still-001.jpg`, 1_700_000_000);
@@ -310,6 +319,7 @@ describe("filing a recovered walk against a project the estimator picks", () => 
   it("carries an unknown recording time through to the title instead of dating the walk today", async () => {
     // No mtimes at all — the platform reported nothing, which is the whole premise here.
     fs.__store.set(`${ORPHAN_DIR}walk.mp4`, FINALIZED_MP4);
+    seedOrphanOwner();
     const screen = render(<ProfileScreen />);
     await act(async () => {
       await scanRecoverableWalksAtStartup(OWNER);
@@ -330,6 +340,7 @@ describe("filing a recovered walk against a project the estimator picks", () => 
   // ── Round-8 FINDING 1 (P1): the card cannot promise a recording it cannot open ──────────────────
   it("does not offer a video the writer never finalized, and files the photos beside it anyway", async () => {
     fs.__store.set(`${ORPHAN_DIR}walk.mp4`, UNFINALIZED_MP4); // the app died mid-recording
+    seedOrphanOwner();
     fs.__mtimes.set(`${ORPHAN_DIR}walk.mp4`, 1_700_000_720);
     fs.__store.set(`${ORPHAN_DIR}still-001.jpg`, "a");
     fs.__mtimes.set(`${ORPHAN_DIR}still-001.jpg`, 1_700_000_000);

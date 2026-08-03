@@ -33,11 +33,13 @@ import type { Walk } from "./session";
 import {
   MIN_FINALIZED_MP4_BYTES,
   MP4_BOX_HEADER_BYTES,
+  WALK_OWNER_FILE_NAME,
   bumpArtifactAttempts,
   bumpCompletionAttempts,
   classifyWalkDirFileNames,
   drainableArtifacts,
   isWalkDrainable,
+  isWalkOwnedBy,
   isWalkTerminal,
   markArtifactPut,
   markWalkCompleted,
@@ -51,6 +53,7 @@ import {
   toQueuedWalk,
   toRecoveredQueuedWalk,
   upsertQueuedWalk,
+  walkOwnerFileContents,
   type QueuedWalk,
   type QueuedWalkArtifact,
   type WalkArtifactKind,
@@ -111,6 +114,41 @@ function manifestFile(ownerKey: string): string {
 }
 function walkDirUri(walkId: string): string {
   return `${WALKTHROUGHS_DIR}${walkId}/`;
+}
+function walkOwnerMarkerFile(walkId: string): string {
+  return `${walkDirUri(walkId)}${WALK_OWNER_FILE_NAME}`;
+}
+
+/**
+ * Stamp `walkthroughs/<walkId>/` with the account starting this walk, BEFORE native records anything.
+ *
+ * The ordering is the entire point. Native creates the directory inside `startWalk`, so a marker
+ * written after that call returns leaves a window — an app kill inside it produces a recording no
+ * account can be shown to own. Writing first closes it: `WalkthroughRecorder.makeWalkDirectory` uses
+ * `createDirectory(withIntermediateDirectories: true)`, which succeeds on a directory that already
+ * exists, so pre-creating here leaves native's own call a no-op rather than a conflict.
+ *
+ * A start that then FAILS leaves a directory holding only this marker. That is deliberately not
+ * cleaned up here: the scan skips any directory that classifies to no video and no stills, so an
+ * empty claim is invisible rather than offered as a walk holding nothing, and deleting on the
+ * failure path would mean this function's error handling could destroy a directory a RETRY had
+ * already legitimately re-claimed.
+ */
+export async function claimWalkDirForOwner(ownerKey: string, walkId: string): Promise<void> {
+  await FileSystem.makeDirectoryAsync(walkDirUri(walkId), { intermediates: true });
+  await FileSystem.writeAsStringAsync(walkOwnerMarkerFile(walkId), walkOwnerFileContents(ownerKey));
+}
+
+/** The marker's contents, or null when it cannot be read for ANY reason — absent, unreadable, or a
+ *  directory that predates markers. `isWalkOwnedBy` treats null as "not yours", so the failure
+ *  direction here is toward showing an estimator nothing rather than showing them someone else's
+ *  walk. */
+async function readWalkOwnerMarker(walkId: string): Promise<string | null> {
+  try {
+    return await FileSystem.readAsStringAsync(walkOwnerMarkerFile(walkId));
+  } catch {
+    return null;
+  }
 }
 
 // ── SERVER CONTRACT SEAM ──────────────────────────────────────────────────────────────────────────
@@ -511,6 +549,16 @@ async function scanForOrphanedWalkDirs(
     // guess dressed as a reading, cached for the whole shell lifecycle. The bytes are untouched and
     // unclaimed, so the next launch (where nothing is in flight) describes them correctly.
     if (stillTearingDown.has(walkId)) continue;
+    // Whose walk is this? Asked BEFORE any of the reads below, because the answer is the one that
+    // can disqualify the directory outright, and asking it late would mean statting another
+    // estimator's files to build a row we then discard.
+    //
+    // The manifest cannot answer this. A walk interrupted by sign-out is never enqueued, so it has
+    // no entry under ANY owner — which is exactly the case this scan exists for, and exactly the
+    // case where "absent from every manifest" was being read as "belongs to whoever is signed in
+    // now". On a shared device that handed the next estimator the previous one's site footage, with
+    // a project picker attached.
+    if (!isWalkOwnedBy(await readWalkOwnerMarker(walkId), ownerKey)) continue;
     let fileNames: string[];
     try {
       fileNames = await FileSystem.readDirectoryAsync(walkDirUri(walkId));

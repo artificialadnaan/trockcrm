@@ -7,6 +7,7 @@
  */
 import { NativeEventEmitter, NativeModules, Platform } from "react-native";
 import type { StillSource } from "./session";
+import { claimWalkDirForOwner } from "./upload";
 import { noteWalkStarted, noteWalkTeardown } from "./walk-teardown";
 
 const native = NativeModules.WalkthroughRecorder as WalkthroughNativeModule | undefined;
@@ -111,13 +112,20 @@ function require_(): WalkthroughNativeModule {
 let startedWalkId: string | null = null;
 
 export const Recorder = {
-  startWalk: (walkId: string) => {
+  startWalk: async (walkId: string, ownerKey: string) => {
     // Before the call, not after it resolves: native creates walkthroughs/<walkId>/ during
     // startWalk, so from this line on the directory is this process's to account for. Announced for
     // the same reason it is remembered — a recovery scan running right now (see walk-teardown.ts)
     // has to hear about this walk before its directory can appear under it.
     startedWalkId = walkId;
     noteWalkStarted(walkId);
+    // Ownership is stamped HERE, in the same wrapper that already accounts for the directory, and
+    // BEFORE native is asked for anything. Native has no signed-in identity to record — that
+    // asymmetry is permanent — so this is the only moment at which the walk's account is both known
+    // and guaranteed to precede the first byte. A marker written after `startWalk` resolves would
+    // leave a window whose casualty is a recording no account can be shown to own, which the
+    // recovery scan can only answer by offering it to nobody.
+    await claimWalkDirForOwner(ownerKey, walkId);
     return require_().startWalk(walkId);
   },
   captureStill: () => require_().captureStill(),

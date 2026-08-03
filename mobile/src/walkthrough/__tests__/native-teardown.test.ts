@@ -38,7 +38,7 @@ describe("Recorder.endWalk teardown tracking", () => {
         finish = () => resolve({ videoUri: "file:///walk.mp4", stills: 2 });
       }),
     );
-    void Recorder.startWalk("walk-77");
+    void Recorder.startWalk("walk-77", "user-1:office-a");
 
     const ended = Recorder.endWalk();
     // Synchronously, not after an await: the recovery scan can be kicked off by the incoming shell's
@@ -56,7 +56,7 @@ describe("Recorder.endWalk teardown tracking", () => {
     // life of the process — the walk this path exists to save, made invisible by the machinery
     // saving it.
     nativeEndWalk.mockRejectedValue(new Error("walk_video_finalize_failed"));
-    void Recorder.startWalk("walk-88");
+    void Recorder.startWalk("walk-88", "user-1:office-a");
 
     await expect(Recorder.endWalk()).rejects.toThrow("walk_video_finalize_failed");
     expect(walkTeardownsInFlight()).toEqual([]);

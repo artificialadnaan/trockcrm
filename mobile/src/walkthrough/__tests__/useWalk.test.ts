@@ -1,5 +1,10 @@
 import { act, renderHook } from "@testing-library/react-native";
 
+/** The signed-in identity a walk is stamped with at start. `../native` is mocked wholesale below, so
+ *  these tests never reach the filesystem — what they pin is that useWalk REFUSES to start without an
+ *  owner, and passes the one it has through to the recorder. */
+const TEST_OWNER = "user-1:office-a";
+
 const mockStartWalk = jest.fn();
 const mockCaptureStill = jest.fn();
 const mockEndWalk = jest.fn();
@@ -47,7 +52,7 @@ describe("useWalk", () => {
       inputPortName: "RB Meta 014K",
       negotiatedSampleRate: 16000,
     });
-    const { result } = renderHook(() => useWalk("deal-1", "proj-7"));
+    const { result } = renderHook(() => useWalk("deal-1", "proj-7", TEST_OWNER));
 
     expect(result.current.walk.state).toBe("idle");
 
@@ -67,7 +72,7 @@ describe("useWalk", () => {
   });
 
   it("exposes null walkId before a walk has ever started", () => {
-    const { result } = renderHook(() => useWalk("deal-1", null));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
     expect(result.current.walkId).toBeNull();
   });
 
@@ -75,7 +80,7 @@ describe("useWalk", () => {
   // native before the rejection, so a caller reading walkId off a failed state must see it populated.
   it("keeps the minted walkId even when start() rejects", async () => {
     mockStartWalk.mockRejectedValue(new Error("walk_no_hfp: RB Meta 014K"));
-    const { result } = renderHook(() => useWalk("deal-1", null));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {
       await result.current.start();
@@ -101,7 +106,7 @@ describe("useWalk", () => {
       // The SECOND start must behave normally — the point of the test is that the synchronous throw
       // did not leave startInFlightRef holding a lock nobody can release.
       .mockResolvedValue({ videoUri: "file:///walkthroughs/walk-1/walk.mp4" });
-    const { result } = renderHook(() => useWalk("deal-1", null));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {
       await result.current.start();
@@ -128,7 +133,7 @@ describe("useWalk", () => {
       negotiatedSampleRate: 16000,
     });
     mockCaptureStill.mockResolvedValue({ requested: false });
-    const { result } = renderHook(() => useWalk("deal-1", null));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {
       await result.current.start();
@@ -145,7 +150,7 @@ describe("useWalk", () => {
   });
 
   it("does not call captureStill when the walk cannot capture (not recording)", async () => {
-    const { result } = renderHook(() => useWalk("deal-1", null));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {
       await result.current.capture();
@@ -163,7 +168,7 @@ describe("useWalk", () => {
       negotiatedSampleRate: 16000,
     });
     mockCaptureStill.mockResolvedValue({ requested: true });
-    const { result } = renderHook(() => useWalk("deal-1", null));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {
       await result.current.start();
@@ -187,7 +192,7 @@ describe("useWalk", () => {
   // would have recorded from) and must reach the caller unmodified.
   it("propagates a native start rejection message verbatim and marks the walk failed", async () => {
     mockStartWalk.mockRejectedValue(new Error("walk_no_hfp: RB Meta 014K"));
-    const { result } = renderHook(() => useWalk("deal-1", null));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {
       await result.current.start();
@@ -214,7 +219,7 @@ describe("useWalk", () => {
       videoUri: "file:///docs/walkthroughs/w1/walk.mp4",
       stills: 0,
     });
-    const { result } = renderHook(() => useWalk("deal-1", null));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {
       await result.current.start();
@@ -241,7 +246,7 @@ describe("useWalk", () => {
       inputPortName: "RB Meta 014K",
       negotiatedSampleRate: 16000,
     });
-    const { result } = renderHook(() => useWalk("deal-1", null));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {
       await result.current.start();
@@ -271,7 +276,7 @@ describe("useWalk", () => {
     mockEndWalk.mockResolvedValue({ videoUri: "file:///docs/walkthroughs/w1/walk.mp4", stills: 0 });
 
     const { result, rerender } = renderHook(
-      ({ dealId, projectId }: { dealId: string; projectId: string | null }) => useWalk(dealId, projectId),
+      ({ dealId, projectId }: { dealId: string; projectId: string | null }) => useWalk(dealId, projectId, TEST_OWNER),
       { initialProps: { dealId: "deal-1", projectId: null as string | null } },
     );
 
@@ -307,7 +312,7 @@ describe("useWalk", () => {
     mockEndWalk.mockResolvedValue({ videoUri: "file:///docs/walkthroughs/w1/walk.mp4", stills: 0 });
 
     const { result, rerender } = renderHook(
-      ({ dealId, projectId }: { dealId: string; projectId: string | null }) => useWalk(dealId, projectId),
+      ({ dealId, projectId }: { dealId: string; projectId: string | null }) => useWalk(dealId, projectId, TEST_OWNER),
       { initialProps: { dealId: "deal-1", projectId: null as string | null } },
     );
 
@@ -343,7 +348,7 @@ describe("useWalk", () => {
     });
 
     const { result, rerender } = renderHook(
-      ({ dealId, projectId }: { dealId: string; projectId: string | null }) => useWalk(dealId, projectId),
+      ({ dealId, projectId }: { dealId: string; projectId: string | null }) => useWalk(dealId, projectId, TEST_OWNER),
       { initialProps: { dealId: "deal-1", projectId: null as string | null } },
     );
 
@@ -382,7 +387,7 @@ describe("useWalk", () => {
   // once the walk is terminal), independent of a prop/identity change.
   it("reset() snaps a terminal walk back to fresh idle for the current deal", async () => {
     mockStartWalk.mockRejectedValue(new Error("walk_no_hfp: RB Meta 014K"));
-    const { result } = renderHook(() => useWalk("deal-1", "proj-7"));
+    const { result } = renderHook(() => useWalk("deal-1", "proj-7", TEST_OWNER));
 
     await act(async () => {
       await result.current.start();
@@ -412,7 +417,7 @@ describe("useWalk", () => {
       inputPortName: "RB Meta 014K",
       negotiatedSampleRate: 16000,
     });
-    const { result } = renderHook(() => useWalk("deal-1", "proj-7"));
+    const { result } = renderHook(() => useWalk("deal-1", "proj-7", TEST_OWNER));
 
     await act(async () => {
       await result.current.start();
@@ -431,7 +436,7 @@ describe("useWalk", () => {
 
   describe("captureEnabled / atCaptureLimit", () => {
     it("captureEnabled is false and atCaptureLimit is false before recording starts", () => {
-      const { result } = renderHook(() => useWalk("deal-1", null));
+      const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
       expect(result.current.captureEnabled).toBe(false);
       expect(result.current.atCaptureLimit).toBe(false);
     });
@@ -445,7 +450,7 @@ describe("useWalk", () => {
         negotiatedSampleRate: 16000,
       });
       mockCaptureStill.mockResolvedValue({ requested: true });
-      const { result } = renderHook(() => useWalk("deal-1", null));
+      const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
       await act(async () => {
         await result.current.start();
@@ -489,7 +494,7 @@ describe("useWalk", () => {
         negotiatedSampleRate: 16000,
       });
       mockCaptureStill.mockResolvedValue({ requested: true });
-      const { result } = renderHook(() => useWalk("deal-1", null));
+      const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
       await act(async () => {
         await result.current.start();
@@ -528,7 +533,7 @@ describe("useWalk", () => {
         negotiatedSampleRate: 16000,
       });
       mockCaptureStill.mockResolvedValue({ requested: true });
-      const { result } = renderHook(() => useWalk("deal-1", null));
+      const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
       await act(async () => {
         await result.current.start();
@@ -569,7 +574,7 @@ describe("useWalk", () => {
         inputPortName: "RB Meta 014K",
         negotiatedSampleRate: 16000,
       });
-      const { result } = renderHook(() => useWalk("deal-1", null));
+      const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
       await act(async () => {
         await result.current.start();
@@ -608,7 +613,7 @@ describe("useWalk", () => {
         negotiatedSampleRate: 16000,
       });
       mockCaptureStill.mockResolvedValue({ requested: true });
-      const { result } = renderHook(() => useWalk("deal-1", null));
+      const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
       await act(async () => {
         await result.current.start();
@@ -684,7 +689,7 @@ describe("useWalk video-coverage check", () => {
         failedLatched: false,
       },
     });
-    const { result } = renderHook(() => useWalk("deal-1", null));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {
       await result.current.start();
@@ -729,7 +734,7 @@ describe("useWalk video-coverage check", () => {
         failedLatched: false,
       },
     });
-    const { result } = renderHook(() => useWalk("deal-1", null));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {
       await result.current.start();
@@ -765,7 +770,7 @@ describe("useWalk video-coverage check", () => {
         failedLatched: false,
       },
     });
-    const { result } = renderHook(() => useWalk("deal-1", null));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {
       await result.current.start();
@@ -789,7 +794,7 @@ describe("useWalk video-coverage check", () => {
   it("leaves coverage unknown (null), not truncated, when native reports no census", async () => {
     mockStartWalk.mockResolvedValue(STARTED);
     mockEndWalk.mockResolvedValue({ videoUri: "file:///docs/walkthroughs/w1/walk.mp4", stills: 0 });
-    const { result } = renderHook(() => useWalk("deal-1", null));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {
       await result.current.start();
@@ -834,7 +839,7 @@ describe("useWalk unmount while recording", () => {
   it("stops the native recorder when the hook unmounts with a walk still recording", async () => {
     mockStartWalk.mockResolvedValue(STARTED);
     mockEndWalk.mockResolvedValue({ videoUri: "file:///docs/walkthroughs/w1/walk.mp4", stills: 0 });
-    const { result, unmount } = renderHook(() => useWalk("deal-1", null));
+    const { result, unmount } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {
       await result.current.start();
@@ -850,7 +855,7 @@ describe("useWalk unmount while recording", () => {
   });
 
   it("does not touch native when the hook unmounts with no walk in flight", async () => {
-    const { unmount } = renderHook(() => useWalk("deal-1", null));
+    const { unmount } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
     await act(async () => {
       unmount();
     });
@@ -860,7 +865,7 @@ describe("useWalk unmount while recording", () => {
   it("does not touch native when the hook unmounts after the walk already completed", async () => {
     mockStartWalk.mockResolvedValue(STARTED);
     mockEndWalk.mockResolvedValue({ videoUri: "file:///docs/walkthroughs/w1/walk.mp4", stills: 0 });
-    const { result, unmount } = renderHook(() => useWalk("deal-1", null));
+    const { result, unmount } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {
       await result.current.start();
@@ -884,7 +889,7 @@ describe("useWalk unmount while recording", () => {
     mockStartWalk.mockResolvedValue(STARTED);
     const hangingEnd = pending();
     mockEndWalk.mockImplementation(() => hangingEnd.promise);
-    const { result, unmount } = renderHook(() => useWalk("deal-1", null));
+    const { result, unmount } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {
       await result.current.start();
@@ -919,7 +924,7 @@ describe("useWalk unmount while recording", () => {
     mockStartWalk.mockResolvedValue(STARTED);
     const hangingEnd = pending();
     mockEndWalk.mockImplementation(() => hangingEnd.promise);
-    const { result, unmount } = renderHook(() => useWalk("deal-1", null));
+    const { result, unmount } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {
       await result.current.start();
@@ -945,7 +950,7 @@ describe("useWalk unmount while recording", () => {
     const hangingStart = pending();
     mockStartWalk.mockImplementation(() => hangingStart.promise);
     mockEndWalk.mockResolvedValue({ videoUri: "file:///docs/walkthroughs/w1/walk.mp4", stills: 0 });
-    const { result, unmount } = renderHook(() => useWalk("deal-1", null));
+    const { result, unmount } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     act(() => {
       void result.current.start();
@@ -1023,7 +1028,7 @@ describe("useWalk audio-coverage check", () => {
         longestAudioDropRun: 56_015,
       },
     });
-    const { result } = renderHook(() => useWalk("deal-1", null));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {
       await result.current.start();
@@ -1065,7 +1070,7 @@ describe("useWalk audio-coverage check", () => {
         longestAudioDropRun: 0,
       },
     });
-    const { result } = renderHook(() => useWalk("deal-1", null));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {
       await result.current.start();
@@ -1094,7 +1099,7 @@ describe("useWalk audio-coverage check", () => {
       stills: 0,
       census: { ...HEALTHY_VIDEO, audioBuffersAppended: 56_250 },
     });
-    const { result } = renderHook(() => useWalk("deal-1", null));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {
       await result.current.start();
@@ -1135,7 +1140,7 @@ describe("useWalk double-start guard", () => {
           release = resolve;
         }),
     );
-    const { result } = renderHook(() => useWalk("deal-1", null));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     // Both calls in ONE act() and with no await between them: this is a double tap inside a single
     // tick, which is the only shape the bug has. Awaiting the first would let React commit
@@ -1155,7 +1160,7 @@ describe("useWalk double-start guard", () => {
   // startWalk() would be most destructive (native tears the live session down to build a new one).
   it("refuses a start() once the walk is already recording", async () => {
     mockStartWalk.mockResolvedValue(STARTED);
-    const { result } = renderHook(() => useWalk("deal-1", null));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {
       await result.current.start();
@@ -1175,7 +1180,7 @@ describe("useWalk double-start guard", () => {
   it("allows a new start() once the previous walk has completed", async () => {
     mockStartWalk.mockResolvedValue(STARTED);
     mockEndWalk.mockResolvedValue({ videoUri: "file:///docs/walkthroughs/w1/walk.mp4", stills: 0 });
-    const { result } = renderHook(() => useWalk("deal-1", null));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {
       await result.current.start();
@@ -1223,7 +1228,7 @@ describe("useWalk double-end guard", () => {
           release = resolve;
         }),
     );
-    const { result } = renderHook(() => useWalk("deal-1", null));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
     await act(async () => {
       await result.current.start();
     });
@@ -1247,7 +1252,7 @@ describe("useWalk double-end guard", () => {
   it("still ends the NEXT walk after a previous end() resolved", async () => {
     mockStartWalk.mockResolvedValue(STARTED);
     mockEndWalk.mockResolvedValue(FINALIZED);
-    const { result } = renderHook(() => useWalk("deal-1", null));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {
       await result.current.start();
@@ -1276,7 +1281,7 @@ describe("useWalk double-end guard", () => {
   it("releases the guard when endWalk rejects", async () => {
     mockStartWalk.mockResolvedValue(STARTED);
     mockEndWalk.mockRejectedValueOnce(new Error("finishWriting failed")).mockResolvedValue(FINALIZED);
-    const { result } = renderHook(() => useWalk("deal-1", null));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {
       await result.current.start();
@@ -1341,7 +1346,7 @@ describe("useWalk in-flight reservations across walks", () => {
     mockStartWalk.mockResolvedValue(STARTED);
     mockEndWalk.mockResolvedValue({ videoUri: "file:///docs/walkthroughs/w1/walk.mp4", stills: 0 });
     mockCaptureStill.mockResolvedValue({ requested: true });
-    const { result } = renderHook(() => useWalk("deal-1", null));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {
       await result.current.start();
@@ -1372,7 +1377,7 @@ describe("useWalk in-flight reservations across walks", () => {
     mockEndWalk.mockResolvedValue({ videoUri: "file:///docs/walkthroughs/w1/walk.mp4", stills: 0 });
     mockCaptureStill.mockResolvedValue({ requested: true });
     const { result, rerender } = renderHook(
-      ({ dealId }: { dealId: string }) => useWalk(dealId, null),
+      ({ dealId }: { dealId: string }) => useWalk(dealId, null, TEST_OWNER),
       { initialProps: { dealId: "deal-1" } },
     );
 
@@ -1402,7 +1407,7 @@ describe("useWalk in-flight reservations across walks", () => {
   it("still holds a reservation for the walk that made it", async () => {
     mockStartWalk.mockResolvedValue(STARTED);
     mockCaptureStill.mockResolvedValue({ requested: true });
-    const { result } = renderHook(() => useWalk("deal-1", null));
+    const { result } = renderHook(() => useWalk("deal-1", null, TEST_OWNER));
 
     await act(async () => {
       await result.current.start();
