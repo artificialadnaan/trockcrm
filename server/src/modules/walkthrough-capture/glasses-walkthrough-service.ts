@@ -30,7 +30,7 @@ import { createHash } from "node:crypto";
 import { and, desc, eq, inArray, isNotNull, sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import { files, jobQueue, photoAuditLog } from "@trock-crm/shared/schema";
+import { files, glassesWalkthroughs, jobQueue, photoAuditLog } from "@trock-crm/shared/schema";
 import { DOMAIN_EVENTS, type FileCategory } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 
@@ -1501,6 +1501,55 @@ async function recordCreatedGlassesWalkthroughStills(
   // emit from here would announce a walk a rollback can still erase.
 }
 
+/**
+ * Records — once per (deal, walk) — that this walk EXISTS, which is a different fact from any of the
+ * three this module already writes and the only one the CRM deal page can be built on.
+ *
+ * The `files` rows say "these artifacts are in the project folder"; the `job_queue` row says "a forward is
+ * scheduled". Neither answers "which glasses walks does this deal have, and which TROCK Scope walkthrough
+ * did each become". Before this table that question was answerable only by scanning job payloads by
+ * `payload->>'dealId'` — and a queue is the wrong source for it in three separate ways: rows are
+ * dead-lettered, superseded and hand-edited during reconciliation; a walk that is filed but not yet
+ * claimed has no payload state to read at all; and a walk whose forward permanently failed would simply
+ * vanish from the deal page, which is exactly the walk an estimator most needs to see. See migration 0214.
+ *
+ * `scope_walkthrough_id` is deliberately NOT written here. This module never calls TROCK Scope — that is
+ * the whole basis of the crew's copy being independent of the engine — so at this point the id genuinely
+ * does not exist. The forward job stamps it when it learns it (worker/src/jobs/
+ * glasses-walkthrough-forward.ts), and NULL until then is what the panel renders as "processing".
+ *
+ * `onConflictDoNothing` on (deal_id, walk_id), for the same reason and with the same shape as the `files`
+ * insert above: a completion is retried as a matter of course — a response lost in flight, or a recovered
+ * walk re-filed from an on-disk directory scan — and a second row per retry would put a duplicate panel
+ * entry on the deal page and fan a duplicate request out to TROCK Scope for it. DO NOTHING rather than DO
+ * UPDATE because every column here is a fact about the WALK and the first completion's copy is the one to
+ * keep: `capturedAt` is the phone's end-of-walk clock and `capturedByUserId` is whoever recorded it, and a
+ * later retry — potentially from a different session on a recovered walk — has no better information about
+ * either. (The unique index is what actually arbitrates; a SELECT-then-INSERT would not, for the same
+ * reason 0213 exists.)
+ *
+ * NOT reported in the response. `IngestGlassesWalkthroughResult` is the contract mobile parses to retire
+ * its upload-queue entries, and this row is a CRM-side read model the phone has no use for; widening that
+ * shape would make a mobile change a prerequisite for a server-only feature.
+ */
+async function recordGlassesWalkthrough(
+  tenantDb: TenantDb,
+  input: IngestGlassesWalkthroughInput
+): Promise<void> {
+  await tenantDb
+    .insert(glassesWalkthroughs)
+    .values({
+      dealId: input.dealId,
+      walkId: input.walkId,
+      // Already validated ISO-8601 by `validateGlassesWalkthroughCompleteInput`, so this is a real Date and
+      // never an Invalid Date the INSERT would reject — see that validator's ISO_8601_UTC comment for why
+      // a bare `Date.parse` check was not enough.
+      capturedAt: new Date(input.capturedAt),
+      capturedByUserId: input.userId,
+    })
+    .onConflictDoNothing({ target: [glassesWalkthroughs.dealId, glassesWalkthroughs.walkId] });
+}
+
 export interface IngestGlassesWalkthroughResult {
   walkId: string;
   files: GlassesWalkthroughFileResult[];
@@ -1692,6 +1741,14 @@ export async function ingestGlassesWalkthrough(
     userId: input.userId,
     officeId: input.officeId,
   });
+
+  // BEFORE the forward-job branches below, and the position is load-bearing for exactly the reason the
+  // stills emit above states: the live-forward branch RETURNS EARLY. A completion retry for a walk whose
+  // forward is already queued is the single most common shape of second call this endpoint receives, and
+  // written past that return the row would exist only for walks whose FIRST completion reached this line —
+  // so a walk whose first attempt died after its `files` write would be filed, forwarded, scoped, and
+  // invisible on the deal page forever. Cheap to keep here: the insert is a no-op on every retry.
+  await recordGlassesWalkthrough(tenantDb, input);
 
   // Keyed by idempotency key, never by array position. `fileResults` and `input.artifacts` line up today
   // only because one loop happens to preserve order; positional lookup silently forwards every artifact

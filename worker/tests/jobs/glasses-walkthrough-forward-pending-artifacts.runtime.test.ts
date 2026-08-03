@@ -96,6 +96,18 @@ describe("glasses_walkthrough_forward pending-artifact reconciliation (real SQL)
         status text NOT NULL, last_error text, attempts integer NOT NULL DEFAULT 0,
         max_attempts integer NOT NULL DEFAULT 10, created_at timestamptz NOT NULL DEFAULT now()
       );
+      -- The per-office read model migration 0214 adds. These payloads carry officeSlug "test", so the
+      -- handler's walkthrough-id stamp addresses office_test — part of the schema it runs against, not an
+      -- optional extra. This suite asserts nothing about it; the stamp's own coverage is in
+      -- glasses-walkthrough-forward-create-checkpoint.runtime.test.ts, and the shipped DDL is executed in
+      -- server/tests/migrations/0214-glasses-walkthroughs.runtime.test.ts.
+      CREATE SCHEMA IF NOT EXISTS office_test;
+      CREATE TABLE IF NOT EXISTS office_test.glasses_walkthroughs (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        deal_id uuid NOT NULL, walk_id varchar(100) NOT NULL, scope_walkthrough_id uuid,
+        captured_at timestamptz NOT NULL, captured_by_user_id uuid,
+        created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
+      );
     `);
     for (const row of rows) {
       await db.query(

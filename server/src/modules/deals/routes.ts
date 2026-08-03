@@ -160,6 +160,11 @@ import {
   validateWalkthroughIngressPayload,
 } from "../estimating/walkthrough-ingress-service.js";
 import { createWalkthroughContactSheetStore } from "../estimating/walkthrough-contact-sheet-store.js";
+import {
+  loadDealGlassesWalkthroughRows,
+  resolveGlassesWalkthroughScope,
+} from "../walkthrough-capture/glasses-walkthrough-scope-service.js";
+import { createGlassesWalkthroughScopeReader } from "../walkthrough-capture/glasses-walkthrough-scope-store.js";
 
 function buildRouteAuditContext(req: { user?: any; headers: Record<string, unknown>; ip?: string | undefined }) {
   const actor = buildAuditActorFromUser({
@@ -3498,7 +3503,7 @@ router.post("/:id/estimating/walkthrough-extractions", async (req, res, next) =>
 });
 
 /*
- * The glasses-walkthrough routes used to live here. They are now on the FIELD router
+ * The glasses-walkthrough WRITE routes used to live here. They are now on the FIELD router
  * (`/api/field/projects/:dealId/glasses-walkthroughs...`, server/src/modules/field/routes.ts).
  *
  * They had to move: TrockCam is their only caller and it authenticates through `/auth/field-login`,
@@ -3507,7 +3512,47 @@ router.post("/:id/estimating/walkthrough-extractions", async (req, res, next) =>
  * reading that as a dead session, signed the user out. A single undeliverable walk therefore locked
  * the crew out of the app. Deliberately NOT left behind as a second CRM-side copy: one auth boundary
  * for this path is the point.
+ *
+ * The READ below is the mirror image and belongs here for the same reason the writes do not: its caller
+ * is the CRM web app's deal page, held open by estimators with an ordinary CRM session. It shares no
+ * handler, no gate and no client with the field routes — only the feature.
  */
+
+/**
+ * GET /api/deals/:id/glasses-walkthroughs — the deal page's AI-walk panel.
+ *
+ * Every glasses walk filed against this deal, each carrying whatever scope TROCK Scope has extracted from
+ * it, or the reason it cannot be shown. See glasses-walkthrough-scope-service.ts for what each `state`
+ * claims; the short version is that NO TROCK Scope failure may degrade this page, so an outage, a refused
+ * credential and a slow answer are all per-walk states rather than a non-200 from here.
+ *
+ * AUTHORISATION is `assertDealRouteAccess` — the same gate the neighbouring `GET /:id/estimating` reads
+ * use, and deliberately not a new rule. It resolves the deal through the caller's own tenant `search_path`
+ * and refuses a deal outside their office; a deal they cannot see is a 404 before any row is read.
+ *
+ * THE COMMIT SITS BETWEEN THE TWO CALLS, and that placement is the reason they are two calls.
+ * `tenantMiddleware` has pinned one of the pool's 20 connections and opened a transaction before this
+ * handler runs, and `commitTransaction` is what releases it. Fanning out to TROCK Scope before committing
+ * would hold that slot for the whole network wait — up to the 5s deadline — on an endpoint the deal page
+ * POLLS. That is the same pool-occupancy cost the ingest side reshaped its phases around
+ * (GLASSES_WALKTHROUGH_VERIFY_CONCURRENCY), on the side with far more traffic. After the commit the
+ * resolver touches no database at all, which is what makes committing early safe rather than merely
+ * faster.
+ */
+router.get("/:id/glasses-walkthroughs", async (req, res, next) => {
+  try {
+    await assertDealRouteAccess(req, req.params.id);
+    const rows = await loadDealGlassesWalkthroughRows(req.tenantDb! as any, req.params.id);
+    await req.commitTransaction!();
+
+    const walkthroughs = await resolveGlassesWalkthroughScope(rows, {
+      scopeReader: createGlassesWalkthroughScopeReader(),
+    });
+    res.status(200).json({ walkthroughs });
+  } catch (err) {
+    next(err);
+  }
+});
 
 router.get("/:id/estimating", async (req, res, next) => {
   try {
