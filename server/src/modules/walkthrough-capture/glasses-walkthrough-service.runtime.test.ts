@@ -1219,8 +1219,21 @@ describe("ingestGlassesWalkthrough — a retry that ADDS artifacts to a live for
       .set({
         status: "dead",
         lastError: "attempts exhausted before reconciliation",
+        // COMPLETE artifact objects, not key-only stubs. A real `pendingArtifacts` entry is a full
+        // GlassesWalkthroughForwardArtifact — the worker uploads the clip from `r2Key`, `mimeType`,
+        // `fileSizeBytes` and the rest — so seeding bare keys would let inheritance drop every field
+        // except the one the assertion reads, and this test would stay green through it.
         payload: sql`jsonb_set(${jobQueue.payload}, '{pendingArtifacts}', ${JSON.stringify(
-          [1, 2, 3].map((n) => ({ idempotencyKey: `artifact-${n}` })),
+          [1, 2, 3].map((n) => ({
+            fileId: `file-${n}`,
+            idempotencyKey: `artifact-${n}`,
+            kind: "photo",
+            r2Key: `dallas/deals/deal-1/glasses-walkthroughs/walk-1/artifact-${n}.jpg`,
+            mimeType: "image/jpeg",
+            originalFilename: `frame-00${n}.jpg`,
+            fileSizeBytes: 1024 * n,
+            capturedAtMs: n * 1000,
+          })),
         )}::jsonb, true)`,
       })
       .where(eq(jobQueue.id, first.forwarding.jobId));
@@ -1233,11 +1246,17 @@ describe("ingestGlassesWalkthrough — a retry that ADDS artifacts to a live for
     );
 
     expect(replacement.forwarding.status).toBe("queued");
-    expect(keysOf(await readJob(replacement.forwarding.jobId))).toEqual([
-      "artifact-1",
-      "artifact-2",
-      "artifact-3",
-    ]);
+    const inherited = await readJob(replacement.forwarding.jobId);
+    expect(keysOf(inherited)).toEqual(["artifact-1", "artifact-2", "artifact-3"]);
+    // Carried WHOLE, not just by key: the worker cannot upload a clip it only knows the name of.
+    const artifact3 = inherited.payload.artifacts.find(
+      (a: { idempotencyKey: string }) => a.idempotencyKey === "artifact-3",
+    );
+    expect(artifact3).toMatchObject({
+      r2Key: "dallas/deals/deal-1/glasses-walkthroughs/walk-1/artifact-3.jpg",
+      mimeType: "image/jpeg",
+      fileSizeBytes: 3072,
+    });
   });
 
   it("REGRESSION: a `failed` predecessor is superseded, not parked as though a handler were still running", async () => {

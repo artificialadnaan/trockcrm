@@ -27,7 +27,7 @@
 //     derives its keys from (walkId, kind) and reuses them across deals by design. See
 //     `deriveGlassesWalkthroughClientUploadId` for what that costs and why the stored id is deal-scoped.
 import { createHash } from "node:crypto";
-import { and, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { files, jobQueue, photoAuditLog } from "@trock-crm/shared/schema";
@@ -989,7 +989,7 @@ async function amendPendingGlassesWalkthroughForwardArtifacts(
           FROM (
             SELECT DISTINCT ON (t.elem ->> 'idempotencyKey') t.elem, t.ord
             FROM jsonb_array_elements(
-              COALESCE(${jobQueue.payload} -> 'artifacts', '[]'::jsonb) || ${JSON.stringify(artifacts)}::jsonb
+              ${jsonbArrayOrEmpty(sql`${jobQueue.payload} -> 'artifacts'`)} || ${JSON.stringify(artifacts)}::jsonb
             ) WITH ORDINALITY AS t(elem, ord)
             ORDER BY t.elem ->> 'idempotencyKey', t.ord
           ) d
@@ -1128,8 +1128,8 @@ async function loadDeadPredecessorArtifacts(
       // predecessor independently of its CHECKPOINT and then read only one of its two artifact
       // lists.
       artifacts: sql<GlassesWalkthroughForwardArtifact[]>`
-        COALESCE(${jobQueue.payload} -> 'artifacts', '[]'::jsonb)
-          || COALESCE(${jobQueue.payload} -> 'pendingArtifacts', '[]'::jsonb)`,
+        ${jsonbArrayOrEmpty(sql`${jobQueue.payload} -> 'artifacts'`)}
+          || ${jsonbArrayOrEmpty(sql`${jobQueue.payload} -> 'pendingArtifacts'`)}`,
     })
     .from(jobQueue)
     .where(
@@ -1146,6 +1146,22 @@ async function loadDeadPredecessorArtifacts(
     (merged, row) => mergeForwardArtifacts(merged, row.artifacts ?? []),
     []
   );
+}
+
+/**
+ * A payload key as a jsonb ARRAY, or an empty array when it is anything else.
+ *
+ * `COALESCE` only answers "is it SQL NULL", which is a different question from "is it a list". A key
+ * holding JSON `null` — no constraint forbids one, and these payloads are edited by workers and by
+ * humans reconciling dead letters — survives COALESCE untouched, `|| '[]'::jsonb` then yields
+ * `[null]`, and `mergeForwardArtifacts` dereferences `idempotencyKey` off it. One hand-edit during a
+ * repair would take down the completion path for that walk.
+ *
+ * Applied per key rather than to the concatenation, so a malformed `pendingArtifacts` cannot discard
+ * a perfectly good `artifacts` alongside it.
+ */
+function jsonbArrayOrEmpty(expr: SQL): SQL {
+  return sql`CASE WHEN jsonb_typeof(${expr}) = 'array' THEN ${expr} ELSE '[]'::jsonb END`;
 }
 
 /**
@@ -1269,8 +1285,8 @@ async function recordPendingArtifactsOnRunningForwardJob(
           FROM (
             SELECT DISTINCT ON (t.elem ->> 'idempotencyKey') t.elem, t.ord
             FROM jsonb_array_elements(
-              COALESCE(${jobQueue.payload} -> 'artifacts', '[]'::jsonb)
-                || COALESCE(${jobQueue.payload} -> 'pendingArtifacts', '[]'::jsonb)
+              ${jsonbArrayOrEmpty(sql`${jobQueue.payload} -> 'artifacts'`)}
+                || ${jsonbArrayOrEmpty(sql`${jobQueue.payload} -> 'pendingArtifacts'`)}
                 || ${JSON.stringify(artifacts)}::jsonb
             ) WITH ORDINALITY AS t(elem, ord)
             ORDER BY t.elem ->> 'idempotencyKey', t.ord

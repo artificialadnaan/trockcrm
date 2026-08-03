@@ -429,6 +429,40 @@ describe("worker queue", () => {
     return { id: OVERLAP_JOB_ID, job_type: jobType, office_id: "office-1", payload: {}, attempts, max_attempts: 5 };
   }
 
+  /**
+   * The statements every overlap case answers identically: the transaction verbs, the two-worker claim
+   * branch keyed on job type, and the two lease writes. Only the `SET status = 'completed'` branch
+   * differs between them, so that is the one thing a case supplies.
+   *
+   * Extracted because three copies of a router is three places to update when `claimAndRunJobs` gains a
+   * statement — and the failure mode of missing one is not a red test, it is `Unexpected SQL` from a
+   * case that was supposed to be exercising something else entirely.
+   */
+  function overlapRouter(
+    jobType: string,
+    onCompletedWrite: (params: unknown[]) => Promise<{ rows: unknown[]; rowCount?: number }>,
+  ) {
+    let worker1Claimed = false;
+    let worker2Claimed = false;
+    return async (sql: string, params?: unknown[]) => {
+      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+      if (sql.includes("SELECT * FROM public.job_queue")) {
+        if (sql.includes("job_type = 'ai_report_generation'")) {
+          if (worker2Claimed) return { rows: [] };
+          worker2Claimed = true;
+          return { rows: [overlapRow(jobType, 1)] }; // requeued at 1 by the sweep -> this claim is attempt 2
+        }
+        if (worker1Claimed) return { rows: [] };
+        worker1Claimed = true;
+        return { rows: [overlapRow(jobType, 0)] }; // -> attempt 1
+      }
+      if (sql.includes("UPDATE public.job_queue SET status = 'processing'")) return { rows: [] };
+      if (sql.includes("SET started_processing_at = NOW() WHERE")) return { rows: [] };
+      if (sql.includes("SET status = 'completed'")) return onCompletedWrite((params ?? []) as unknown[]);
+      throw new Error(`Unexpected SQL: ${sql}`);
+    };
+  }
+
   it("a STALE attempt's zero-row outcome write does not delete the NEWER attempt's recovery intent", async () => {
     // The stale attempt's guarded write is answered normally by PostgreSQL and matches NOTHING (the row is at
     // attempts 2 now), so it resolved nothing at all — and a delete keyed on job id alone would still throw
@@ -437,35 +471,19 @@ describe("worker queue", () => {
     registerJobHandler(jobType, async () => {}); // both deliveries succeed; the race is over the WRITE
     const gate = latch();
     let staleWriteIssued = false;
-    let worker1Claimed = false;
-    let worker2Claimed = false;
     let newerWrites = 0;
-    const { queries } = installPool(async (sql: string, params?: unknown[]) => {
-      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
-      if (sql.includes("SELECT * FROM public.job_queue")) {
-        if (sql.includes("job_type = 'ai_report_generation'")) {
-          if (worker2Claimed) return { rows: [] };
-          worker2Claimed = true;
-          return { rows: [overlapRow(jobType, 1)] }; // requeued at 1 by the sweep → this claim is attempt 2
-        }
-        if (worker1Claimed) return { rows: [] };
-        worker1Claimed = true;
-        return { rows: [overlapRow(jobType, 0)] }; // → attempt 1
-      }
-      if (sql.includes("UPDATE public.job_queue SET status = 'processing'")) return { rows: [] };
-      if (sql.includes("SET started_processing_at = NOW() WHERE")) return { rows: [] };
-      if (sql.includes("SET status = 'completed'")) {
-        if ((params as unknown[])[1] === 1) {
+    const { queries } = installPool(
+      overlapRouter(jobType, async (params) => {
+        if (params[1] === 1) {
           staleWriteIssued = true;
           await gate.held;
-          return { rows: [], rowCount: 0 }; // guarded on attempts = 1; the row is at 2 → matched nothing
+          return { rows: [], rowCount: 0 }; // guarded on attempts = 1; the row is at 2 -> matched nothing
         }
         newerWrites += 1;
         if (newerWrites === 1) throw new Error("outcome write failed (pool exhausted)");
         return { rows: [], rowCount: 1 };
-      }
-      throw new Error(`Unexpected SQL: ${sql}`);
-    });
+      }),
+    );
 
     const worker1 = pollJobs(); // claims attempt 1, handler succeeds, outcome write held open
     await waitUntil(() => staleWriteIssued);
@@ -491,25 +509,10 @@ describe("worker queue", () => {
     registerJobHandler(jobType, async () => {});
     const gate = latch();
     let staleWriteIssued = false;
-    let worker1Claimed = false;
-    let worker2Claimed = false;
     let newerWrites = 0;
-    const { queries } = installPool(async (sql: string, params?: unknown[]) => {
-      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
-      if (sql.includes("SELECT * FROM public.job_queue")) {
-        if (sql.includes("job_type = 'ai_report_generation'")) {
-          if (worker2Claimed) return { rows: [] };
-          worker2Claimed = true;
-          return { rows: [overlapRow(jobType, 1)] };
-        }
-        if (worker1Claimed) return { rows: [] };
-        worker1Claimed = true;
-        return { rows: [overlapRow(jobType, 0)] };
-      }
-      if (sql.includes("UPDATE public.job_queue SET status = 'processing'")) return { rows: [] };
-      if (sql.includes("SET started_processing_at = NOW() WHERE")) return { rows: [] };
-      if (sql.includes("SET status = 'completed'")) {
-        if ((params as unknown[])[1] === 1) {
+    const { queries } = installPool(
+      overlapRouter(jobType, async (params) => {
+        if (params[1] === 1) {
           staleWriteIssued = true;
           await gate.held;
           throw new Error("stale outcome write failed (pool exhausted)");
@@ -517,9 +520,8 @@ describe("worker queue", () => {
         newerWrites += 1;
         if (newerWrites === 1) throw new Error("outcome write failed (pool exhausted)");
         return { rows: [], rowCount: 1 };
-      }
-      throw new Error(`Unexpected SQL: ${sql}`);
-    });
+      }),
+    );
 
     const worker1 = pollJobs();
     await waitUntil(() => staleWriteIssued);
@@ -542,38 +544,22 @@ describe("worker queue", () => {
     registerJobHandler(jobType, async () => {});
     const gate = latch();
     let flushWriteIssued = false;
-    let worker1Claimed = false;
-    let worker2Claimed = false;
     let staleWrites = 0;
     let newerWrites = 0;
-    const { queries } = installPool(async (sql: string, params?: unknown[]) => {
-      if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
-      if (sql.includes("SELECT * FROM public.job_queue")) {
-        if (sql.includes("job_type = 'ai_report_generation'")) {
-          if (worker2Claimed) return { rows: [] };
-          worker2Claimed = true;
-          return { rows: [overlapRow(jobType, 1)] };
-        }
-        if (worker1Claimed) return { rows: [] };
-        worker1Claimed = true;
-        return { rows: [overlapRow(jobType, 0)] };
-      }
-      if (sql.includes("UPDATE public.job_queue SET status = 'processing'")) return { rows: [] };
-      if (sql.includes("SET started_processing_at = NOW() WHERE")) return { rows: [] };
-      if (sql.includes("SET status = 'completed'")) {
-        if ((params as unknown[])[1] === 1) {
+    const { queries } = installPool(
+      overlapRouter(jobType, async (params) => {
+        if (params[1] === 1) {
           staleWrites += 1;
-          if (staleWrites === 1) throw new Error("outcome write failed (pool exhausted)"); // → intent for attempt 1
+          if (staleWrites === 1) throw new Error("outcome write failed (pool exhausted)"); // -> intent for attempt 1
           flushWriteIssued = true;
           await gate.held; // the FLUSH's replay of that intent, held open
-          return { rows: [], rowCount: 0 }; // the row moved to attempt 2 → matched nothing
+          return { rows: [], rowCount: 0 }; // the row moved to attempt 2 -> matched nothing
         }
         newerWrites += 1;
         if (newerWrites === 1) throw new Error("outcome write failed (pool exhausted)");
         return { rows: [], rowCount: 1 };
-      }
-      throw new Error(`Unexpected SQL: ${sql}`);
-    });
+      }),
+    );
 
     await pollJobs(); // tick 1: attempt 1 succeeds, its write fails → intent for attempt 1
     const tick2 = pollJobs(); // tick 2: the flush replays that intent — held open

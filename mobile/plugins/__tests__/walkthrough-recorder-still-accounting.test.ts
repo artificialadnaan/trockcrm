@@ -34,12 +34,22 @@ const SOURCE = readFileSync(
   "utf8",
 );
 
-/** The body of a `private func <name>(` … up to the next top-level `  private func`/`  func`. */
+/**
+ * The body of a `private func <name>(` up to the next top-level member.
+ *
+ * The terminator has to cover every member form Swift allows at this indent, not just the two this
+ * file happens to use today. An earlier version stopped only at `func`/`var` with an optional
+ * `private`, so adding a `static func`, `@objc func`, `fileprivate func` or `private(set) var` after
+ * `deliverStill` would have made this absorb it — and the ORDERING assertions below would then be
+ * comparing positions across two functions, silently, while still passing.
+ */
 function swiftFunctionBody(name: string): string {
   const start = SOURCE.indexOf(`private func ${name}(`);
   expect(start).toBeGreaterThan(-1);
   const rest = SOURCE.slice(start);
-  const next = rest.slice(1).search(/\n {2}(?:private )?(?:func|var) /);
+  const MEMBER_START =
+    /\n {2}(?:@\w+(?:\([^)]*\))?\s+)*(?:(?:private|fileprivate|internal|public|open)(?:\(set\))?\s+)*(?:static\s+|class\s+|final\s+)*(?:func|var|let|init|deinit|subscript)[\s(]/;
+  const next = rest.slice(1).search(MEMBER_START);
   return next === -1 ? rest : rest.slice(0, next + 1);
 }
 

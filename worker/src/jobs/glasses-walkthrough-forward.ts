@@ -1112,7 +1112,15 @@ async function supersedeSelfForPendingArtifacts(
                 FROM (
                   SELECT DISTINCT ON (t.elem ->> 'idempotencyKey') t.elem, t.ord
                   FROM jsonb_array_elements(
-                    COALESCE(payload -> 'artifacts', '[]'::jsonb) || COALESCE(payload -> 'pendingArtifacts', '[]'::jsonb)
+                    -- Guarded by TYPE, not just by NULL. A payload key holding JSON null -- nothing
+                    -- forbids one, and these payloads are hand-edited during dead-letter repairs --
+                    -- survives COALESCE, concatenating an empty array then yields a one-element list
+                    -- holding null, and the fold below reads idempotencyKey off it. Applied per key so
+                    -- a malformed pendingArtifacts cannot discard a good artifacts list with it.
+                    (CASE WHEN jsonb_typeof(payload -> 'artifacts') = 'array'
+                          THEN payload -> 'artifacts' ELSE '[]'::jsonb END)
+                      || (CASE WHEN jsonb_typeof(payload -> 'pendingArtifacts') = 'array'
+                               THEN payload -> 'pendingArtifacts' ELSE '[]'::jsonb END)
                   ) WITH ORDINALITY AS t(elem, ord)
                   ORDER BY t.elem ->> 'idempotencyKey', t.ord
                 ) d

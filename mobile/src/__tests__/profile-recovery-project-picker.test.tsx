@@ -339,6 +339,12 @@ describe("the project picker offered for an unfiled walk", () => {
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
 
+      // The lookup actually RAN. Without this the test is vacuous in the direction that matters: no
+      // unhandled rejection and a rendered empty state both hold just as well if `getLiveGps` is never
+      // called at all — a later change that skips the lookup, or a module mock that stops matching the
+      // picker's import path. `mockRejectedValueOnce` is consumed by the first call only, so a silent
+      // miss leaves nothing behind to notice.
+      expect(mockGetLiveGps).toHaveBeenCalled();
       expect(unhandled).toEqual([]);
       // …and the picker is usable: no coordinates means no "Closest jobs", which is what the search
       // box is for. Asserted so the catch can never be a silent swallow that also loses the screen.
