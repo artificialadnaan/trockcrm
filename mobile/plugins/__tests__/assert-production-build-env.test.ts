@@ -55,13 +55,36 @@ describe("assertProductionBuildEnv", () => {
     "https://[::1]:3002",
     "https://[fc00::1]",
     "https://[fe80::1]",
+    // Carrier-grade NAT: a tailnet or developer-VPN address. net.isIP calls it IPv4 and it is not
+    // globally routable, so it is a plausible paste that no field phone can reach.
+    "https://100.64.0.1",
+    "https://100.100.1.1",
+    // IPv4 embedded in IPv6 — slips past every IPv6 rule unless the IPv4 question is asked of it.
+    "https://[::ffff:10.0.0.5]",
+    // Documentation, benchmarking and test ranges are equally unreachable.
+    "https://192.0.2.10",
+    "https://198.51.100.10",
+    "https://203.0.113.10",
+    "https://198.18.0.1",
+    "https://[2001:db8::1]",
+    // `.localhost` is a whole special-use namespace, not just the bare name.
+    "https://api.localhost",
+    "https://api.localhost.",
   ])("REGRESSION: rejects the private host %s", (url) => {
     expect(() => assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: url }))).toThrow(
       /private host/
     );
   });
 
-  it.each(["https://10.example.com", "https://172.16.example.com", "https://127.0.0.1.example.com"])(
+  it.each([
+    "https://10.example.com",
+    "https://172.16.example.com",
+    "https://127.0.0.1.example.com",
+    "https://100.64.example.com",
+    // A public IP must still be accepted — the rule is "not globally routable", not "is an IP".
+    "https://8.8.8.8",
+    "https://99.99.99.99",
+  ])(
     "GUARD: accepts the ordinary domain %s, which only LOOKS like a private range",
     (url) => {
       // The private-range patterns are applied only to something `net.isIP` calls an IP. Matching
@@ -78,7 +101,14 @@ describe("assertProductionBuildEnv", () => {
     ).toThrow(/must be https/);
   });
 
-  it.each(["https://api.example.com?x=y", "https://api.example.com#frag"])(
+  it.each([
+    "https://api.example.com?x=y",
+    "https://api.example.com#frag",
+    // BARE delimiters: `url.search`/`url.hash` normalise these to "", so a component check misses
+    // them — but `src/config.ts` keeps the raw string and the API path lands in the query anyway.
+    "https://api.example.com?",
+    "https://api.example.com#",
+  ])(
     "REGRESSION: rejects %s, where the appended /api path lands inside the query or fragment",
     (url) => {
       // `src/config.ts` strips only a trailing slash and a trailing `/api`, then `apiFetch`

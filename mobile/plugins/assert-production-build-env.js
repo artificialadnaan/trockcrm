@@ -34,40 +34,72 @@ const net = require("net");
  */
 
 /**
- * Private IP ranges, checked ONLY against something that is actually an IP.
+ * Whether an address is GLOBALLY ROUTABLE — asked as a range question, not a pattern-match.
  *
- * Applying these to hostnames is how `10.example.com` — a perfectly ordinary domain — gets refused
- * by a rule meant for `10.0.0.5`. `net.isIP` is what separates the two, so the patterns below never
- * see a name.
+ * The question is not "is this RFC1918" but "can a phone on a cell network reach it", and those are
+ * different sets. Carrier-grade NAT (`100.64.0.0/10`) is neither private nor reachable: it is what a
+ * tailnet or a developer VPN hands out, so `https://100.100.1.1` is a plausible thing to paste in
+ * and is unreachable from every field device. Benchmarking and documentation ranges have the same
+ * property. Enumerating "private" would have kept missing these one at a time; enumerating
+ * NOT-GLOBAL is the complete question.
  *
- * Both families, because `new URL()` accepts either and an IPv6 loopback is exactly as unreachable
- * as an IPv4 one. Link-local is included on both sides — `169.254.0.0/16` and `fe80::/10` — because
- * a self-assigned address is what a machine ends up with when DHCP fails, reachable from nothing but
- * the same wire.
+ * Checked ONLY against something `net.isIP` calls an IP. Applied to hostnames, a rule for
+ * `10.0.0.5` refuses `10.example.com` — a perfectly ordinary domain.
  */
-const PRIVATE_IPV4_PATTERNS = [
-  /^127\./, // loopback
-  /^0\./, // unspecified / "this network"
-  /^10\./, // RFC1918
-  /^192\.168\./, // RFC1918
-  /^172\.(1[6-9]|2\d|3[01])\./, // RFC1918, 172.16–172.31
-  /^169\.254\./, // link-local
-];
+function ipv4IsGlobal(host) {
+  const [a, b, c] = host.split(".").map(Number);
+  if (a === 0) return false; // 0.0.0.0/8 — "this network"
+  if (a === 10) return false; // RFC1918
+  if (a === 127) return false; // loopback
+  if (a === 100 && b >= 64 && b <= 127) return false; // 100.64/10 — carrier-grade NAT, tailnets
+  if (a === 169 && b === 254) return false; // link-local, what DHCP failure leaves behind
+  if (a === 172 && b >= 16 && b <= 31) return false; // RFC1918
+  if (a === 192 && b === 0 && c === 0) return false; // 192.0.0/24 — IETF protocol assignments
+  if (a === 192 && b === 0 && c === 2) return false; // TEST-NET-1
+  if (a === 192 && b === 168) return false; // RFC1918
+  if (a === 198 && (b === 18 || b === 19)) return false; // 198.18/15 — benchmarking
+  if (a === 198 && b === 51 && c === 100) return false; // TEST-NET-2
+  if (a === 203 && b === 0 && c === 113) return false; // TEST-NET-3
+  if (a >= 224) return false; // 224/4 multicast, 240/4 reserved, 255.255.255.255 broadcast
+  return true;
+}
 
-const PRIVATE_IPV6_PATTERNS = [
-  /^::1$/, // loopback
-  /^::$/, // unspecified
-  /^[fF][cCdD]/, // unique-local, fc00::/7
-  /^[fF][eE][89abAB]/, // link-local, fe80::/10
-];
+function ipv6IsGlobal(host) {
+  const h = host.toLowerCase();
+  if (h === "::1" || h === "::") return false; // loopback, unspecified
+  // IPv4-mapped forms carry an IPv4 address; ask the IPv4 question about it, or `::ffff:10.0.0.5`
+  // slips through every IPv6 rule below.
+  //
+  // BOTH SPELLINGS, because `new URL()` rewrites the readable one: `https://[::ffff:10.0.0.5]` comes
+  // back as `[::ffff:a00:5]`, hex, and a dotted-quad pattern never sees it. That normalisation is
+  // exactly the kind of thing a guard is asserted against rather than reasoned about.
+  const dotted = /^::(?:ffff:)?(\d+\.\d+\.\d+\.\d+)$/.exec(h);
+  if (dotted) return ipv4IsGlobal(dotted[1]);
+  const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(h);
+  if (hex) {
+    const hi = parseInt(hex[1], 16);
+    const lo = parseInt(hex[2], 16);
+    return ipv4IsGlobal(`${hi >> 8}.${hi & 0xff}.${lo >> 8}.${lo & 0xff}`);
+  }
+  if (/^f[cd]/.test(h)) return false; // fc00::/7 — unique-local
+  if (/^fe[89ab]/.test(h)) return false; // fe80::/10 — link-local
+  if (h.startsWith("2001:db8")) return false; // documentation
+  return true;
+}
 
-/** Names that resolve only on the local machine or the local segment. */
-const PRIVATE_HOSTNAME_PATTERNS = [/^localhost$/i, /\.local$/i];
+/**
+ * Names that resolve to the local machine or the local segment.
+ *
+ * `.localhost` is a whole special-use namespace (RFC 6761), not just the bare name: `api.localhost`
+ * resolves to loopback on every resolver that honours it, so a phone pointed there calls ITSELF.
+ * The optional trailing dot is the fully-qualified spelling of the same name.
+ */
+const PRIVATE_HOSTNAME_PATTERNS = [/(^|\.)localhost\.?$/i, /\.local\.?$/i];
 
 function isPrivateHost(host) {
   const family = net.isIP(host);
-  if (family === 4) return PRIVATE_IPV4_PATTERNS.some((pattern) => pattern.test(host));
-  if (family === 6) return PRIVATE_IPV6_PATTERNS.some((pattern) => pattern.test(host));
+  if (family === 4) return !ipv4IsGlobal(host);
+  if (family === 6) return !ipv6IsGlobal(host);
   return PRIVATE_HOSTNAME_PATTERNS.some((pattern) => pattern.test(host));
 }
 
@@ -108,7 +140,11 @@ function assertProductionBuildEnv(env) {
   // trailing `/api`, and `apiFetch` then concatenates `/api<path>` onto what is left — so
   // `https://host?x=y` becomes `https://host?x=y/api/...`, where the API path is part of the query
   // and the request goes to `/`. It parses, it looks configured, and the build still cannot log in.
-  if (url.search !== "" || url.hash !== "") {
+  // Tested on the RAW value, not on `url.search`/`url.hash`, which normalise a BARE delimiter to
+  // "". `https://host?` and `https://host#` therefore passed — and `src/config.ts` keeps the raw
+  // string, so the built URL becomes `https://host?/api/auth/field-login`: pathname `/`, the entire
+  // API path sitting in the query. Verified, not assumed.
+  if (/[?#]/.test(raw)) {
     throw new Error(
       `EXPO_PUBLIC_API_BASE_URL must not carry a query string or fragment (got "${raw}"). The ` +
         "client appends `/api<path>` to this value, so anything after the host ends up inside the " +
