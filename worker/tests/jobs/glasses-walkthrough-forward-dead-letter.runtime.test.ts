@@ -23,6 +23,7 @@ function baseEmailInput(overrides: Partial<Parameters<typeof buildGlassesWalkthr
     attempts: 10,
     maxAttempts: 10,
     scopeWalkthroughId: null,
+    scopeCreatePendingRef: null,
     lastError: "TROCK Scope walkthrough create failed: 500 {\"error\":\"boom\"}",
     frontendUrl: "https://trockcrm.com",
     ...overrides,
@@ -145,6 +146,53 @@ describe("buildGlassesWalkthroughForwardAlertEmail", () => {
     );
     expect(email.text).not.toContain("deploy-config problem");
     expect(email.text).toContain("(attempt 4 of 10)");
+  });
+
+  it("REGRESSION: calls the remote state UNKNOWN when a create went out on the FINAL attempt and never came back", () => {
+    // The adjacent half of the previous fix. That one taught the alert to stop claiming "no scope was
+    // ever generated" for a forward that stopped EARLY — and left the same false claim standing on the
+    // final-attempt path, where a create request (or its checkpoint write) failed with an unknown
+    // outcome on attempt maxAttempts. `stoppedEarly` is false there, so the row still carried
+    // `scopeCreatePendingRef` and no id while the alert told operations nothing had landed.
+    //
+    // The cost of believing it: the generic "reset to pending" requeues the row, the retained marker
+    // dead-letters it immediately, and `alertSent: true` suppresses the second alert — the one that
+    // would have carried the actual repair. Whether a create happened is a fact about the PAYLOAD; the
+    // attempt count cannot answer it in either direction.
+    const email = buildGlassesWalkthroughForwardAlertEmail(
+      baseEmailInput({
+        attempts: 10,
+        maxAttempts: 10,
+        scopeWalkthroughId: null,
+        scopeCreatePendingRef: "trockcrm:glasses-walkthrough:walk-1:deal:deal-1",
+        lastError: "socket hang up",
+      }),
+    );
+
+    expect(email.text).not.toContain("no scope was ever generated");
+    expect(email.text).toContain("may or may not exist");
+    // The ref is the only thing a human can look the walkthrough up BY, so it has to be in the email.
+    expect(email.text).toContain("trockcrm:glasses-walkthrough:walk-1:deal:deal-1");
+    // And the order matters: resetting to pending with the marker still on the row dead-letters it again.
+    expect(email.text).toContain("Only then set status = 'pending'");
+  });
+
+  it("GUARD: a dead letter with neither marker still says plainly that no scope was generated", () => {
+    // The other side of the same branch. A forward that exhausted its retries without ever sending a
+    // create really did produce nothing, and softening that into "unknown" would send a responder
+    // hunting for a remote walkthrough that was never requested.
+    const email = buildGlassesWalkthroughForwardAlertEmail(
+      baseEmailInput({
+        attempts: 10,
+        maxAttempts: 10,
+        scopeWalkthroughId: null,
+        scopeCreatePendingRef: null,
+        lastError: "connect ETIMEDOUT",
+      }),
+    );
+
+    expect(email.text).toContain("no scope was ever generated");
+    expect(email.text).not.toContain("may or may not exist");
   });
 
   it("GUARD: still calls a genuinely unset env var what it is, however early the job stopped", () => {

@@ -1254,6 +1254,11 @@ export interface GlassesWalkthroughForwardAlertInput {
    *  first move is. REQUIRED, not optional: the sweep is the only production caller, and a field that can
    *  be forgotten is exactly how the alert started stating things it could not know. */
   scopeWalkthroughId: string | null;
+  /** The unresolved-create marker, same REQUIRED-not-optional rule as the id above and for the same
+   *  reason: it is the only evidence distinguishing "no scope exists" from "a scope may exist and
+   *  nobody recorded it", and an optional field is exactly how the alert started stating things it
+   *  could not know. */
+  scopeCreatePendingRef: string | null;
   lastError: string | null;
   frontendUrl: string;
 }
@@ -1269,6 +1274,10 @@ export function buildGlassesWalkthroughForwardAlertEmail(input: GlassesWalkthrou
   const stoppedEarly = input.attempts < input.maxAttempts;
   const configProblem = isDeployConfigDeadLetter(input.lastError);
   const remoteWalkthroughId = normalizeText(input.scopeWalkthroughId);
+  // The create that went out and never came back. Phase 1 writes this marker BEFORE the request, so a row
+  // carrying it without an id is the one state where the remote side is genuinely UNKNOWN — a walkthrough
+  // may exist under this ref, or may not.
+  const pendingCreateRef = normalizeText(input.scopeCreatePendingRef);
   // The explanation comes from the dead-letter REASON, with the attempt count as detail rather than as the
   // inference. "attempts < max_attempts" used to be read as "it never got off the ground, so check the URL
   // and the token", and two of this seam's stops break that outright while landing well inside the retry
@@ -1306,11 +1315,26 @@ export function buildGlassesWalkthroughForwardAlertEmail(input: GlassesWalkthrou
   const remoteStateText = remoteWalkthroughId
     ? `A TROCK Scope walkthrough WAS created for this walk and some or all of its clips were uploaded, so ` +
       `check what it already holds before doing anything else.`
-    : configProblem || !stoppedEarly
-      ? `The walk itself is safely filed in the project folder — the crew can already see it — but no scope ` +
-        `was ever generated from it.`
-      : `The walk itself is safely filed in the project folder — the crew can already see it. Whether ` +
-        `anything reached TROCK Scope is exactly what this job could not determine; the error below says so.`;
+    : pendingCreateRef
+      ? // Read from the PAYLOAD, not from how the attempt ended. Last round taught this branch to stop
+        // claiming "no scope was ever generated" for a forward that stopped early — and left the same
+        // false claim standing on the final-attempt path, where a create request or its checkpoint write
+        // failed with an unknown outcome on attempt maxAttempts. `stoppedEarly` is false there, so the
+        // row still carried `scopeCreatePendingRef` and no id while the alert told operations nothing
+        // landed. The generic "reset to pending" then requeues it, the retained marker dead-letters it
+        // immediately, and `alertSent: true` suppresses the second alert — the one that would have
+        // carried the actual repair. Whether a create happened is a fact about the payload; the attempt
+        // count cannot answer it either way.
+        `A create request for this walk WAS sent to TROCK Scope and its answer was never recorded, so a ` +
+        `walkthrough may or may not exist under external ref ${pendingCreateRef}. Look it up there FIRST: ` +
+        `if one exists, put its id in payload.scopeWalkthroughId; if none does, remove ` +
+        `payload.scopeCreatePendingRef. Only then set status = 'pending' — resetting with the marker ` +
+        `still on the row dead-letters it again immediately, and this alert will not be sent twice.`
+      : configProblem || !stoppedEarly
+        ? `The walk itself is safely filed in the project folder — the crew can already see it — but no scope ` +
+          `was ever generated from it.`
+        : `The walk itself is safely filed in the project folder — the crew can already see it. Whether ` +
+          `anything reached TROCK Scope is exactly what this job could not determine; the error below says so.`;
 
   const subject = `TROCK Scope forward permanently failed — ${input.title}`;
 
@@ -1323,6 +1347,9 @@ export function buildGlassesWalkthroughForwardAlertEmail(input: GlassesWalkthrou
     ["Filed as", artifactsText],
     // Printed only when there is one. "Check what that walkthrough already holds" is the first line of
     // every reconciliation instruction this seam writes, and it is unactionable without the id.
+    ...(pendingCreateRef && !remoteWalkthroughId
+      ? ([["Unresolved create (external ref)", pendingCreateRef]] as Array<[string, string]>)
+      : []),
     ...(remoteWalkthroughId
       ? ([["TROCK Scope walkthrough", remoteWalkthroughId]] as Array<[string, string]>)
       : []),
@@ -1739,6 +1766,7 @@ export async function runGlassesWalkthroughForwardDeadLetterSweep(
           // FINISHED, so the alert must neither claim nothing was created nor withhold the id the
           // reconciliation instruction tells the reader to look up.
           scopeWalkthroughId: normalizeText(payload.scopeWalkthroughId as unknown),
+          scopeCreatePendingRef: normalizeText(payload.scopeCreatePendingRef as unknown),
           lastError: job.last_error ?? null,
           frontendUrl: resolveFrontendUrl(env),
         });
