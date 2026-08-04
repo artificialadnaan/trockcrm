@@ -72,9 +72,78 @@ export type DashboardDealListFilter =
   | "closing_soon"
   | "stale"
   | "at_risk"
+  | "at_risk_service"
+  | "at_risk_non_service"
   | "opportunities"
   | "bid_board"
   | null;
+
+/**
+ * The workflow-route split of the at-risk cohort, shared by the three At-Risk KPI cards and by the
+ * drill-down each one links to.
+ *
+ * "service" is `deals.workflow_route === "service"`. "non_service" is its exact complement — which
+ * DELIBERATELY includes a deal whose route is null/absent. The column is `.default("normal").notNull()`
+ * so a real row always has a route, but the client `Deal` type still declares `workflowRoute` as
+ * `WorkflowRoute | null` (a payload could omit it). A route-less deal is NOT service, so it belongs on
+ * the non-service side; putting it in neither bucket would silently break Service + Non-service === All.
+ */
+export type AtRiskRouteBucket = "all" | "service" | "non_service";
+
+/** The three at-risk KPI cards, in render order. Service + Non-service partition All exactly. */
+export const AT_RISK_ROUTE_BUCKETS = ["service", "non_service", "all"] as const satisfies readonly AtRiskRouteBucket[];
+
+/** A deal is on the SERVICE side only when its route is literally "service"; null/absent is not. */
+export function isServiceRouteDeal(deal: Pick<Deal, "workflowRoute">): boolean {
+  return deal.workflowRoute === "service";
+}
+
+/**
+ * The ONE route predicate every at-risk surface uses — the card counts, the kanban narrowing, and the
+ * drill-down list all call this, so a card can never count a deal the list it links to would drop.
+ * Total partition: every deal matches exactly one of "service" / "non_service", and always "all".
+ */
+export function matchesAtRiskRouteBucket(deal: Pick<Deal, "workflowRoute">, bucket: AtRiskRouteBucket): boolean {
+  if (bucket === "all") return true;
+  return isServiceRouteDeal(deal) === (bucket === "service");
+}
+
+/**
+ * The two halves of the card↔list contract, and inverses of each other: a card links to
+ * `atRiskFilterForRouteBucket(bucket)`, and the destination re-derives the SAME bucket from that
+ * ?filter via `atRiskRouteBucketForFilter`. Keeping the mapping in one round-trippable pair is what
+ * makes "the number on the card" and "the rows on the page it opens" the same set by construction.
+ */
+export function atRiskFilterForRouteBucket(
+  bucket: AtRiskRouteBucket
+): "at_risk" | "at_risk_service" | "at_risk_non_service" {
+  if (bucket === "service") return "at_risk_service";
+  if (bucket === "non_service") return "at_risk_non_service";
+  return "at_risk";
+}
+
+export function atRiskRouteBucketForFilter(filter: DashboardDealListFilter): AtRiskRouteBucket {
+  if (filter === "at_risk_service") return "service";
+  if (filter === "at_risk_non_service") return "non_service";
+  return "all";
+}
+
+/** The KPI card copy per bucket — one source so the card, its aria-label, and the drill-down agree. */
+export const AT_RISK_CARD_LABELS: Record<AtRiskRouteBucket, { eyebrow: string; ariaLabel: string }> = {
+  service: { eyebrow: "Service at risk", ariaLabel: "View service at-risk deals" },
+  non_service: { eyebrow: "Non-service at risk", ariaLabel: "View non-service at-risk deals" },
+  all: { eyebrow: "All at risk", ariaLabel: "View at-risk deals" },
+};
+
+/**
+ * The SLA drill-downs are CURRENT-STATE views where ?period is a deliberate no-op (see
+ * getDashboardDealListView / buildDealsPageKpiDrilldownPath). All three at-risk routes share that
+ * property with "stale" — splitting the card by workflow route changes WHICH deals are shown, never
+ * the date axis.
+ */
+export function isCurrentStateDrilldownFilter(filter: DashboardDealListFilter): boolean {
+  return filter === "stale" || filter === "at_risk" || filter === "at_risk_service" || filter === "at_risk_non_service";
+}
 
 type DashboardPeriod = "today" | "week" | "mtd" | "qtd" | "ytd" | "last_month" | "last_quarter" | "last_year";
 type DashboardPeriodSelection = DashboardPeriod | null;
@@ -271,6 +340,12 @@ function normalizeDashboardDealFilter(filterParam: string | null | undefined): D
     case "at_risk":
     case "at-risk":
       return "at_risk";
+    case "at_risk_service":
+    case "at-risk-service":
+      return "at_risk_service";
+    case "at_risk_non_service":
+    case "at-risk-non-service":
+      return "at_risk_non_service";
     case "opportunities":
     case "opportunity":
       return "opportunities";
@@ -409,19 +484,33 @@ export function getDashboardDealListView(input: {
     };
   }
 
-  if (filter === "stale" || filter === "at_risk") {
+  if (isCurrentStateDrilldownFilter(filter)) {
+    // The three at-risk routes are the SAME cohort narrowed by workflow route, so they share one branch:
+    // identical boardMode / base filters / sort, differing only in title+subtitle and in the route bucket
+    // the page re-derives from `filter` (atRiskRouteBucketForFilter). Sharing the branch is what keeps the
+    // route split from accidentally acquiring a second date axis or a second at-risk predicate.
+    const atRiskTitle =
+      filter === "at_risk_service"
+        ? "Service Deals At Risk"
+        : filter === "at_risk_non_service"
+          ? "Non-service Deals At Risk"
+          : "Deals At Risk";
+    const atRiskSubtitle =
+      filter === "at_risk_service"
+        ? "Service-route open-stage deals over SLA and needing attention."
+        : filter === "at_risk_non_service"
+          ? "Non-service-route open-stage deals over SLA and needing attention."
+          : "Open-stage deals over SLA and needing attention.";
     return {
       filter,
       eyebrow: "Dashboard drill-down",
-      title: filter === "stale" ? "Stale Deals" : "Deals At Risk",
+      title: filter === "stale" ? "Stale Deals" : atRiskTitle,
       // "Stale"/"Deals At Risk" are CURRENT-STATE views — ?period is a deliberate no-op here. Period-
       // windowing by updated_at would hide the stalest (least-recently-touched, i.e. MOST at-risk) deals,
       // which is backwards for an SLA surface. So the subtitle never claims a period, and listBaseFilters
       // carries no updated-at window — the card, kanban, list, and link all show the full current cohort.
-      subtitle:
-        filter === "stale"
-          ? "Open-stage deals past their stage SLA."
-          : "Open-stage deals over SLA and needing attention.",
+      // The route split inherits this unchanged: it narrows WHICH deals, never the date axis.
+      subtitle: filter === "stale" ? "Open-stage deals past their stage SLA." : atRiskSubtitle,
       boardMode: "at_risk",
       listBaseFilters: {},
       listInitialSort: { key: "stage_entered_at", dir: "asc" },
@@ -510,13 +599,14 @@ export function buildDealsPageKpiDrilldownPath(
       if (
         key === "assignedRepId" ||
         // Keep the header period scope through outcome-aware drill-downs (active pipeline / Won), but NOT
-        // the SLA drill-downs (at_risk / stale): those are CURRENT-STATE views where ?period is a deliberate
-        // no-op (getDashboardDealListView gives them no updated-at window — period-filtering an SLA surface
-        // by updated_at would hide the stalest, most at-risk deals). So the link must NOT carry a period
-        // either — omitting it keeps the destination on the full current at-risk cohort, matching the card.
+        // the SLA drill-downs (at_risk / at_risk_service / at_risk_non_service / stale): those are
+        // CURRENT-STATE views where ?period is a deliberate no-op (getDashboardDealListView gives them no
+        // updated-at window — period-filtering an SLA surface by updated_at would hide the stalest, most
+        // at-risk deals). So the link must NOT carry a period either — omitting it keeps the destination on
+        // the full current at-risk cohort, matching the card. All THREE at-risk route cards share this.
         // won_*/lost_* are NOT forwarded — the Won drill-down inherits the single shared ?period (already
         // set above), not a collapsed per-column override.
-        (key === "period" && filter !== "at_risk" && filter !== "stale")
+        (key === "period" && !isCurrentStateDrilldownFilter(filter))
       ) {
         params.set(key, value);
       }
@@ -571,16 +661,48 @@ export function recountColumnFromCards(column: DealBoardColumn, cards: Deal[]): 
  * board's per-stage preview cap (SLA_DRILLDOWN_PREVIEW_LIMIT, 1000), far above the real at-risk volume.
  * A stage with >1000 at-risk deals would under-count uniformly across all three — if that ever becomes
  * reachable, the fix is a server at-risk aggregate feeding all three, not a per-card divergence here.
+ *
+ * `routeBucket` narrows the SAME set by workflow route for the Service / Non-service drill-downs. The
+ * at-risk predicate is untouched — this composes isEngineAtRiskDeal with matchesAtRiskRouteBucket, the
+ * one route predicate the KPI counts also use, so a route drill-down can never show a different cohort
+ * than the card that linked to it. The default "all" is byte-identical to the pre-split behaviour.
  */
-export function getAtRiskBoardColumns(boardColumns: DealBoardColumn[]): DealBoardColumn[] {
+export function getAtRiskBoardColumns(
+  boardColumns: DealBoardColumn[],
+  routeBucket: AtRiskRouteBucket = "all"
+): DealBoardColumn[] {
   return boardColumns
     .filter((column) => !isTerminalStage(column.stage.slug))
     .map((column) =>
       recountColumnFromCards(
         column,
-        column.cards.filter((deal) => isEngineAtRiskDeal(deal))
+        column.cards.filter((deal) => isEngineAtRiskDeal(deal) && matchesAtRiskRouteBucket(deal, routeBucket))
       )
     );
+}
+
+/**
+ * The At-Risk KPI card count for one route bucket, over whatever columns the current view shows.
+ *
+ * This is the ONE counter behind all three cards, and it applies exactly the pair of predicates
+ * getAtRiskBoardColumns applies (terminal-column exclusion + isEngineAtRiskDeal + matchesAtRiskRouteBucket).
+ * That is the reconciliation guarantee: the number rendered on a card and the rows on the drill-down the
+ * card links to come from the same two predicates, not from two hand-rolled copies that can drift.
+ *
+ * Because matchesAtRiskRouteBucket is a total partition of the deals,
+ *   count(cols,"service") + count(cols,"non_service") === count(cols,"all")
+ * holds for ANY column set, by construction (asserted in at-risk-summary.runtime.test.ts).
+ */
+export function countAtRiskDeals(columns: DealBoardColumn[], routeBucket: AtRiskRouteBucket): number {
+  return columns.reduce(
+    (sum, column) =>
+      sum +
+      (isTerminalStage(column.stage.slug)
+        ? 0
+        : column.cards.filter((deal) => isEngineAtRiskDeal(deal) && matchesAtRiskRouteBucket(deal, routeBucket))
+            .length),
+    0
+  );
 }
 
 /**
@@ -600,11 +722,16 @@ export function getActivePipelineSummary(columns: DealBoardColumn[]) {
 /**
  * The Active Pipeline KPI card drills into the cohort it DISPLAYS: the at-risk set on the at-risk
  * drill-down (so the click-through matches the number on the card), the full active pipeline otherwise.
+ *
+ * On a ROUTE drill-down the card displays the route-narrowed at-risk set (the page feeds it the same
+ * route-filtered columns the kanban renders), so it must link back to that same route — linking to the
+ * unsplit `at_risk` would open a strictly larger set than the number printed on the card.
  */
 export function activePipelineDrilldownFilter(
-  boardMode: "all" | "active" | "won" | "at_risk"
-): "at_risk" | "active_pipeline" {
-  return boardMode === "at_risk" ? "at_risk" : "active_pipeline";
+  boardMode: "all" | "active" | "won" | "at_risk",
+  atRiskRouteBucket: AtRiskRouteBucket = "all"
+): "at_risk" | "at_risk_service" | "at_risk_non_service" | "active_pipeline" {
+  return boardMode === "at_risk" ? atRiskFilterForRouteBucket(atRiskRouteBucket) : "active_pipeline";
 }
 
 function stageAgeDaysLabel(deal: Deal) {
@@ -956,7 +1083,11 @@ function DealListPageContent({
       }),
     [searchParams]
   );
-  const isAtRiskDrilldown = dashboardView.filter === "stale" || dashboardView.filter === "at_risk";
+  const isAtRiskDrilldown = isCurrentStateDrilldownFilter(dashboardView.filter);
+  // The route bucket THIS view is scoped to, re-derived from ?filter. It is the same value the card that
+  // linked here passed to atRiskFilterForRouteBucket, so the board, the drill-down list, and that card's
+  // number are all narrowed by one route predicate. "all" on every non-route view (incl. plain at_risk).
+  const atRiskRouteBucket = atRiskRouteBucketForFilter(dashboardView.filter);
   const { board, loading, error } = useDealBoard(
     scope,
     true,
@@ -1074,42 +1205,6 @@ function DealListPageContent({
       stageIdFamilies: families.map((family) => family.ids),
     };
   }, [stages]);
-  const columns = useMemo(
-    () => {
-      const searchTerm = search.trim().toLowerCase();
-      const sourceColumns =
-        dashboardView.boardStageSlugs.length > 0
-          ? boardColumns.filter((column) => dashboardView.boardStageSlugs.includes(column.stage.slug))
-          : dashboardView.boardMode === "active"
-          ? boardColumns.filter((column) => !isTerminalStage(column.stage.slug))
-          : dashboardView.boardMode === "won"
-            ? boardColumns.filter((column) => column.stage.slug === "won")
-            : dashboardView.boardMode === "at_risk"
-              ? getAtRiskBoardColumns(boardColumns)
-          : boardColumns;
-      return sourceColumns
-        .map((column) => {
-          if (!searchTerm) return column;
-          const cards = column.cards.filter((deal) => {
-            const haystack = [
-              deal.name,
-              deal.dealNumber,
-              deal.projectNumber,
-              deal.companyName,
-              deal.propertyCity,
-              deal.propertyState,
-              deal.assignedRepName,
-            ]
-              .filter(Boolean)
-              .join(" ")
-              .toLowerCase();
-            return haystack.includes(searchTerm);
-          });
-          return recountColumnFromCards(column, cards);
-        });
-    },
-    [boardColumns, dashboardView.boardMode, dashboardView.boardStageSlugs, search]
-  );
   const unsearchedColumns = useMemo(() => {
     if (dashboardView.boardStageSlugs.length > 0) {
       return boardColumns.filter((column) => dashboardView.boardStageSlugs.includes(column.stage.slug));
@@ -1121,10 +1216,54 @@ function DealListPageContent({
       return boardColumns.filter((column) => column.stage.slug === "won");
     }
     if (dashboardView.boardMode === "at_risk") {
-      return getAtRiskBoardColumns(boardColumns);
+      return getAtRiskBoardColumns(boardColumns, atRiskRouteBucket);
     }
     return boardColumns;
-  }, [boardColumns, dashboardView.boardMode, dashboardView.boardStageSlugs]);
+  }, [atRiskRouteBucket, boardColumns, dashboardView.boardMode, dashboardView.boardStageSlugs]);
+  /**
+   * The column set the three At-Risk KPI cards count over: `unsearchedColumns` with the view's ROUTE
+   * narrowing removed. Each card then applies its OWN bucket to this one set, which is what makes
+   * Service + Non-service === All hold on every view — including while standing on a route drill-down,
+   * where narrowing the counters too would zero the other card while its link still opened a non-empty
+   * list (exactly the card/list divergence this split has to avoid).
+   *
+   * On every non-route view the bucket is "all", so this IS `unsearchedColumns` and the "All at risk"
+   * number is byte-identical to the single pre-split card's.
+   */
+  const kpiAtRiskColumns = useMemo(
+    () => (atRiskRouteBucket === "all" ? unsearchedColumns : getAtRiskBoardColumns(boardColumns, "all")),
+    [atRiskRouteBucket, boardColumns, unsearchedColumns]
+  );
+  /**
+   * The kanban's columns: `unsearchedColumns` with ONLY the text search layered on.
+   *
+   * This is DERIVED from unsearchedColumns rather than re-selecting the stage/at-risk/route set a second
+   * time. The two used to be separate copies of the same selection chain, which meant the route narrowing
+   * had to be added in two places to stay correct — the board and list would otherwise have shown the full
+   * at-risk cohort under a route card's number. One selection, one place, no drift.
+   */
+  const columns = useMemo(() => {
+    const searchTerm = search.trim().toLowerCase();
+    if (!searchTerm) return unsearchedColumns;
+    return unsearchedColumns.map((column) => {
+      const cards = column.cards.filter((deal) => {
+        const haystack = [
+          deal.name,
+          deal.dealNumber,
+          deal.projectNumber,
+          deal.companyName,
+          deal.propertyCity,
+          deal.propertyState,
+          deal.assignedRepName,
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        return haystack.includes(searchTerm);
+      });
+      return recountColumnFromCards(column, cards);
+    });
+  }, [search, unsearchedColumns]);
   // On the at-risk drill-down the Active Pipeline KPI card aggregates the SAME at-risk-filtered set that
   // feeds the At-Risk card and the kanban (unsearchedColumns), so the three reconcile by construction —
   // not the whole open board. Everywhere else it stays the full active (non-terminal) pipeline.
@@ -1172,19 +1311,19 @@ function DealListPageContent({
     getActivePipelineSummary(activePipelineColumns);
   const wonMetric = getCanonicalTerminalMetric(boardColumns, "won");
   const wonValue = wonMetric.totalValue;
-  const unsearchedOverSlaCount = unsearchedColumns.reduce(
-    (sum, column) =>
-      sum +
-      (isTerminalStage(column.stage.slug)
-        ? 0
-        : column.cards.filter(isEngineAtRiskDeal).length),
-    0
-  );
+  // The three At-Risk KPI numbers, all from ONE counter over ONE column set. countAtRiskDeals("all") is
+  // the exact reduce the single pre-split card used, so "All at risk" keeps today's number verbatim; the
+  // other two are that same count with the route partition applied, so they sum back to it.
+  const atRiskCounts: Record<AtRiskRouteBucket, number> = {
+    service: countAtRiskDeals(kpiAtRiskColumns, "service"),
+    non_service: countAtRiskDeals(kpiAtRiskColumns, "non_service"),
+    all: countAtRiskDeals(kpiAtRiskColumns, "all"),
+  };
   // On the at-risk drill-down the Active Pipeline card DISPLAYS the at-risk cohort, so its click-through
   // must land on that same cohort — not the full active pipeline (which would show a larger, different set
   // than the number on the card). Everywhere else it drills into the full active pipeline.
   const activePipelineDestination = buildDealsPageKpiDrilldownPath(
-    activePipelineDrilldownFilter(dashboardView.boardMode),
+    activePipelineDrilldownFilter(dashboardView.boardMode, atRiskRouteBucket),
     scope,
     undefined,
     { queryParams: searchParams }
@@ -1192,9 +1331,20 @@ function DealListPageContent({
   const wonDestination = buildDealsPageKpiDrilldownPath("won", scope, selectedPeriod, {
     queryParams: searchParams,
   });
-  const atRiskDestination = buildDealsPageKpiDrilldownPath("at_risk", scope, undefined, {
-    queryParams: searchParams,
-  });
+  // One destination per bucket, built through atRiskFilterForRouteBucket — the inverse of the
+  // atRiskRouteBucketForFilter the destination page uses to narrow its board and list. That round trip
+  // is the card↔list contract: whatever bucket produced the number also produces the rows.
+  const atRiskDestinations: Record<AtRiskRouteBucket, string> = {
+    service: buildDealsPageKpiDrilldownPath(atRiskFilterForRouteBucket("service"), scope, undefined, {
+      queryParams: searchParams,
+    }),
+    non_service: buildDealsPageKpiDrilldownPath(atRiskFilterForRouteBucket("non_service"), scope, undefined, {
+      queryParams: searchParams,
+    }),
+    all: buildDealsPageKpiDrilldownPath(atRiskFilterForRouteBucket("all"), scope, undefined, {
+      queryParams: searchParams,
+    }),
+  };
   const wonCaption =
     terminalDateFilters.won.preset !== "all"
       ? getWonMetricTerminalLabel(terminalDateFilters.won)
@@ -1405,7 +1555,7 @@ function DealListPageContent({
       </section>
 
       <>
-      <div className={`grid gap-4 ${showWonKpiCard ? "md:grid-cols-3" : "md:grid-cols-2"}`}>
+      <div className={`grid gap-4 sm:grid-cols-2 ${showWonKpiCard ? "xl:grid-cols-5" : "xl:grid-cols-4"}`}>
         <MetricCard
           eyebrow="Active pipeline"
           value={USD_COMPACT(totalValue)}
@@ -1428,16 +1578,24 @@ function DealListPageContent({
             ariaLabel="View won deals"
           />
         ) : null}
-        <MetricCard
-          eyebrow="At risk"
-          value={String(unsearchedOverSlaCount)}
-          badge="Over SLA"
-          caption="Needs touch"
-          tone={unsearchedOverSlaCount > 0 ? "red" : "green"}
-          accent="red"
-          to={atRiskDestination}
-          ariaLabel="View at-risk deals"
-        />
+        {/* The at-risk cohort split by workflow route: Service | Non-service | All. Rendered from one
+            bucket list so each card's number (atRiskCounts) and link (atRiskDestinations) are indexed by
+            the SAME bucket key — there is no per-card wiring that could pair one bucket's count with
+            another's destination. Non-service carries every route that is not "service", including a
+            null/absent one, so the first two always sum to the third. */}
+        {AT_RISK_ROUTE_BUCKETS.map((bucket) => (
+          <MetricCard
+            key={bucket}
+            eyebrow={AT_RISK_CARD_LABELS[bucket].eyebrow}
+            value={String(atRiskCounts[bucket])}
+            badge="Over SLA"
+            caption="Needs touch"
+            tone={atRiskCounts[bucket] > 0 ? "red" : "green"}
+            accent="red"
+            to={atRiskDestinations[bucket]}
+            ariaLabel={AT_RISK_CARD_LABELS[bucket].ariaLabel}
+          />
+        ))}
       </div>
 
       <label className="block">
