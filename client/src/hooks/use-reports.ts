@@ -1307,6 +1307,36 @@ function useOfficeScopeKey() {
 }
 
 /**
+ * ┌───────────────────────────────────────────────────────────────────────────────────────────────┐
+ * │ BEFORE YOU CONVERT A HOOK TO THIS WRAPPER, READ THIS.                                         │
+ * │                                                                                               │
+ * │   A hook may not become office-scoped unless EVERY link on its pages carries the office.      │
+ * │                                                                                               │
+ * │ Converting a hook makes its rows follow ?officeId. Any link on those pages that still emits a │
+ * │ bare /deals/:id (or /companies/:id, /properties/:id) then points at the viewer's DEFAULT       │
+ * │ tenant while the rows came from the scoped one — correct rows under wrong links, which is      │
+ * │ worse than the stale list the conversion was meant to fix, because nothing looks broken.      │
+ * │                                                                                               │
+ * │ This is not hypothetical: converting useSalesReport and usePortfolioLoadReport did exactly    │
+ * │ this to Pipeline Velocity, Closed Won Revenue and Portfolio Load, whose inline links had been  │
+ * │ deferred as an acceptable follow-up while those reports were NOT office-aware. The conversion  │
+ * │ is what turned a harmless deferral into a bug.                                                │
+ * │                                                                                               │
+ * │ The wrapper CANNOT enforce this — it owns the fetch, not the JSX, and has no way to see what   │
+ * │ a page renders. It is a manual checklist item, which is why it is stated here rather than      │
+ * │ left to a lint rule that does not exist:                                                      │
+ * │                                                                                               │
+ * │   1. grep the pages using the hook for `to={\`/deals/`, `/companies/`, `/properties/`          │
+ * │   2. route every one through useDealHref / useOfficeScopedHref (hooks/use-office-scope.ts)     │
+ * │   3. test BOTH directions — officeId carried verbatim when present, nothing when absent        │
+ * │                                                                                               │
+ * │ Still unconverted, each carrying this obligation when its turn comes: the analytics family     │
+ * │ (useLeadSourceROI, useForecastVarianceOverview, useMarketMixReport,                            │
+ * │ useCustomerConcentrationReport, useExecutiveTrendsReport, useUnifiedWorkflowOverview,          │
+ * │ useDataMiningOverview, useRegionalOwnershipOverview) and the showcase family                   │
+ * │ (useMondayShowcase, useShowcaseEvidence, useRepPack, useAtRiskWatchlist, useRegionReport).     │
+ * └───────────────────────────────────────────────────────────────────────────────────────────────┘
+ *
  * The office-scope plumbing every report hook needs, in one place.
  *
  * Three DISTINCT properties that have to travel together. They were added one at a time, to one hook

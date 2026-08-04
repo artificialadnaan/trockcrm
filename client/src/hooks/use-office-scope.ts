@@ -33,9 +33,29 @@ export function useOfficeScopeId(): string | null {
  * built this href by hand, and the shared ones dropped the scope entirely.
  */
 export function useDealHref(): (dealId: string) => string {
+  const scopedHref = useOfficeScopedHref();
+  return useCallback((dealId: string) => scopedHref(`/deals/${dealId}`), [scopedHref]);
+}
+
+/**
+ * The same rule for any in-app route, not just deals.
+ *
+ * Reports link to companies and properties too (Portfolio Load), and those detail pages are scoped
+ * the same way — though by a DIFFERENT mechanism, which is worth knowing before trusting this:
+ * DealDetailPage reads ?officeId explicitly and hands it to useDealDetail, whereas CompanyDetailPage
+ * and PropertyDetailPage never mention officeId. They do not have to: api() injects x-office-id from
+ * ?officeId in window.location for any request that has not set the header itself
+ * (readOfficeIdFromLocation / hasOfficeHeader), and useCompanyDetail / usePropertyDetail both fetch
+ * through api(). So carrying ?officeId works for all three entity types; only the plumbing differs.
+ */
+export function useOfficeScopedHref(): (path: string) => string {
   const officeId = useOfficeScopeId();
   return useCallback(
-    (dealId: string) => `/deals/${dealId}${officeId ? `?officeId=${encodeURIComponent(officeId)}` : ""}`,
+    (path: string) => {
+      if (!officeId) return path;
+      const separator = path.includes("?") ? "&" : "?";
+      return `${path}${separator}officeId=${encodeURIComponent(officeId)}`;
+    },
     [officeId]
   );
 }
