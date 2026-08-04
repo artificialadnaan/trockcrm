@@ -105,7 +105,7 @@ export function AtRiskPage() {
       // moves to the front for DISPLAY only — the sort accessor above still reads the stored name.
       render: (r) => (
         <div className="min-w-0">
-          <div className="truncate font-medium text-slate-800">{formatDealDisplayName(r.name)}</div>
+          <div className="truncate font-medium text-slate-800">{formatDealDisplayName(r.name, r.isChangeOrder)}</div>
           {r.dealNumber ? <div className="text-xs text-slate-400">#{r.dealNumber}</div> : null}
         </div>
       ),

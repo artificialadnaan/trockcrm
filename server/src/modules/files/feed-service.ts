@@ -230,6 +230,8 @@ export async function getPhotoFeed(
     uploadedBy: string;
     dealNumber: string | null;
     dealName: string | null;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder: boolean | null;
     uploaderName: string;
   }>;
   pagination: { page: number; limit: number; total: number; totalPages: number };
@@ -392,6 +394,8 @@ export interface ProjectPhotoStatsOptions extends PhotoFeedFilters {
 export interface ProjectPhotoStat {
   dealId: string;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder: boolean;
   dealNumber: string;
   /** Owner of the deal. Powers the "My Projects" pill, which had nothing to filter on before. */
   assignedRepId: string | null;
@@ -630,6 +634,7 @@ export async function getProjectPhotoStats(
       return {
         dealId: row.dealId!,
         dealName: row.dealName,
+        dealIsChangeOrder: row.dealIsChangeOrder === true,
         dealNumber: row.dealNumber,
         assignedRepId: row.assignedRepId ?? null,
         propertyCity: row.propertyCity,

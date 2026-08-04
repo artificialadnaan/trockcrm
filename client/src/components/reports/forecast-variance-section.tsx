@@ -377,7 +377,7 @@ export function ForecastVarianceSection() {
                               {/* A change-order child is STORED "<Parent> — Change Order N"; move the
                                   label to the front on screen only — the CSV/print export above keeps
                                   the stored name. */}
-                              <div className="font-medium text-slate-900">{formatDealDisplayName(row.dealName)}</div>
+                              <div className="font-medium text-slate-900">{formatDealDisplayName(row.dealName, row.dealIsChangeOrder)}</div>
                               <div className="text-xs uppercase tracking-wide text-slate-400">{row.workflowRoute}</div>
                             </td>
                             <td className="px-4 py-4">{row.repName}</td>

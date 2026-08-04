@@ -84,7 +84,7 @@ export function PipelineVelocityPage() {
                         // A change-order child is STORED "<Parent> — Change Order N"; the label moves to
                         // the front for DISPLAY only, so a CO is not mistaken for its parent here.
                         <Link to={`/deals/${stage.oldestDeal.dealId}`} className="font-semibold text-brand-red hover:underline">
-                          {formatDealDisplayName(stage.oldestDeal.dealName)} ({stage.oldestDeal.daysInStage}d)
+                          {formatDealDisplayName(stage.oldestDeal.dealName, stage.oldestDeal.dealIsChangeOrder)} ({stage.oldestDeal.daysInStage}d)
                         </Link>
                       ) : "None"}
                     </TableCell>
@@ -111,7 +111,7 @@ export function PipelineVelocityPage() {
                 ) : data.stuckDeals.map((deal) => (
                   <TableRow key={deal.dealId}>
                     <TableCell>
-                      <Link to={`/deals/${deal.dealId}`} className="font-semibold text-brand-red hover:underline">{formatDealDisplayName(deal.dealName)}</Link>
+                      <Link to={`/deals/${deal.dealId}`} className="font-semibold text-brand-red hover:underline">{formatDealDisplayName(deal.dealName, deal.dealIsChangeOrder)}</Link>
                     </TableCell>
                     <TableCell>{deal.ownerName}</TableCell>
                     <TableCell>{deal.stageName}</TableCell>

@@ -323,6 +323,8 @@ export interface ForecastVarianceRepRollup {
 export interface ForecastVarianceDealRow {
   dealId: string;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   repName: string;
   workflowRoute: WorkflowRoute;
   initialForecast: number;
@@ -436,6 +438,7 @@ export async function getForecastVarianceOverview(
       SELECT
         d.id AS deal_id,
         d.name AS deal_name,
+        d.is_change_order AS deal_is_change_order,
         cw.workflow_route,
         cw.assigned_rep_id,
         u.display_name AS rep_name,
@@ -595,6 +598,7 @@ export async function getForecastVarianceOverview(
     deals: dealRows.map((row) => ({
       dealId: row.deal_id,
       dealName: row.deal_name,
+      dealIsChangeOrder: row.deal_is_change_order === true ? true : row.deal_is_change_order === false ? false : undefined,
       repName: row.rep_name,
       workflowRoute: row.workflow_route,
       initialForecast: Number(row.initial_forecast ?? 0),

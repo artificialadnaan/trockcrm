@@ -81,7 +81,7 @@ export function ClosedWonRevenuePage() {
                         // A change-order child is STORED "<Parent> — Change Order N"; the label moves to
                         // the front for DISPLAY only — the stored name and the Excel export are unchanged.
                         <Link to={`/deals/${owner.largestWonDeal.dealId}`} className="font-semibold text-brand-red hover:underline">
-                          {formatDealDisplayName(owner.largestWonDeal.dealName)} ({formatCurrency(owner.largestWonDeal.value)})
+                          {formatDealDisplayName(owner.largestWonDeal.dealName, owner.largestWonDeal.dealIsChangeOrder)} ({formatCurrency(owner.largestWonDeal.value)})
                         </Link>
                       ) : "None"}
                     </TableCell>
@@ -149,7 +149,7 @@ export function ClosedWonRevenuePage() {
               <TableBody>
                 {data.topDeals.map((deal) => (
                   <TableRow key={deal.dealId}>
-                    <TableCell><Link to={`/deals/${deal.dealId}`} className="font-semibold text-brand-red hover:underline">{formatDealDisplayName(deal.dealName)}</Link></TableCell>
+                    <TableCell><Link to={`/deals/${deal.dealId}`} className="font-semibold text-brand-red hover:underline">{formatDealDisplayName(deal.dealName, deal.dealIsChangeOrder)}</Link></TableCell>
                     <TableCell>{deal.ownerName}</TableCell>
                     <TableCell className="text-right">{formatCurrency(deal.value)}</TableCell>
                     <TableCell>{formatDate(deal.wonAt)}</TableCell>
