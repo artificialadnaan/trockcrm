@@ -119,4 +119,41 @@ describe("EmailThreadView", () => {
     expect(html).toContain("Detach");
     expect(html).toContain("Reassign email");
   });
+
+  it("leads the BOUND deal name with 'Change Order N', matching the picker above it", () => {
+    // Without this the thread showed the front-loaded name while choosing a deal and then REVERTED
+    // to the stored "<Parent> — Change Order N" the moment it was assigned.
+    useEmailThreadMock.mockReturnValue({
+      thread: buildThread({
+        binding: {
+          id: "binding-1",
+          mailboxAccountId: "mailbox-1",
+          contactId: null,
+          contactName: null,
+          companyId: null,
+          companyName: null,
+          propertyId: null,
+          propertyName: null,
+          leadId: null,
+          leadName: null,
+          dealId: "deal-1",
+          dealName: "Tides Park Lane — Change Order 2",
+          projectId: null,
+          projectName: null,
+          confidence: "high",
+          assignmentReason: "manual_thread_assignment",
+        },
+      }),
+      loading: false,
+      error: null,
+      setThread: vi.fn(),
+    });
+
+    const html = renderToStaticMarkup(
+      <EmailThreadView conversationId="conv-1" onBack={() => {}} />
+    );
+
+    expect(html).toContain("Change Order 2 — Tides Park Lane");
+    expect(html).not.toContain("Tides Park Lane — Change Order 2");
+  });
 });

@@ -26,7 +26,11 @@ const EM_DASH = "—";
 // Anchored at `$` on purpose: a name that merely CONTAINS "Change Order" somewhere in the middle
 // ("Change Order Backlog Review", "Tides — Change Order 1 Addendum") is NOT a generated child name and
 // is left alone. A hyphen or en-dash separator is likewise not ours and is left alone.
-const CHANGE_ORDER_NAME_SUFFIX = /\s*—\s*Change Order\s+(\d+)\s*$/;
+//
+// The ordinal is `[1-9]\d*`, matching exactly what the generator can emit: nextChildOrdinal() returns
+// `COUNT(*)::int + 1`, so it is always a positive, unpadded decimal. "Change Order 0" and a zero-padded
+// "Change Order 01" are therefore names a HUMAN typed, and must survive byte for byte.
+const CHANGE_ORDER_NAME_SUFFIX = /\s*—\s*Change Order\s+([1-9]\d*)\s*$/;
 
 /**
  * The display form of a deal name: for a generated change-order child, "Change Order N" is moved from
@@ -38,13 +42,22 @@ const CHANGE_ORDER_NAME_SUFFIX = /\s*—\s*Change Order\s+(\d+)\s*$/;
  *     "Change Order Backlog Review"             ->  "Change Order Backlog Review"        (mid-string)
  *     "Change Order 7 — Lobby — Change Order 1" ->  "Change Order 1 — Change Order 7 — Lobby"
  *
- * IDEMPOTENT BY CONSTRUCTION, not by a guard. This peels every generated trailing suffix off the end
- * rather than short-circuiting when the name merely LOOKS already-formatted, because prefix-shaped text
- * cannot identify this function's own output. A parent deal a human named "Change Order 7 — Lobby" gets
- * a child stored "Change Order 7 — Lobby — Change Order 1": a prefix test fires on it and returns it
- * unchanged, leaving the child's real "Change Order 1" stranded at the end — exactly the truncation this
- * helper exists to prevent. Peeling has no such blind spot: the result never ENDS in a generated suffix,
- * so re-applying it finds nothing left to move.
+ * It peels every generated trailing suffix rather than short-circuiting when the name merely LOOKS
+ * already-formatted, because prefix-shaped text cannot identify this function's own output: a parent a
+ * human named "Change Order 7 — Lobby" gets a child stored "Change Order 7 — Lobby — Change Order 1", and
+ * a prefix test fires on it and returns it unchanged, stranding the child's real label at the end.
+ *
+ * POST-CONDITION — the output never ends in a generated suffix. This is the ONE invariant that makes the
+ * function idempotent, and it is enforced (below), not assumed. Peeling alone does not give it: rejoining
+ * the pieces can RE-CREATE a trailing suffix whenever what precedes it is itself label-shaped, e.g.
+ *   " — Change Order 1 — Change Order 2"  peels to labels[2] + an EMPTY base -> "Change Order 2 — Change Order 1"
+ *   "Change Order 1 — Change Order 2"     peels to labels[1] + base "Change Order 1" -> the same string
+ * and both of those then peel again on the next pass, oscillating forever between two spellings. When the
+ * rejoined candidate would still end in a suffix we return the name UNCHANGED instead: the input is
+ * degenerate, leaving it exactly as stored is defensible, and "unchanged" is trivially a fixed point.
+ *
+ * Idempotency then follows for every input, by cases: either the result does not end in a suffix (so a
+ * second pass peels nothing and returns it untouched), or we returned the input itself (a fixed point).
  *
  * Total and non-throwing: null/undefined pass straight through, and an empty or whitespace-only name is
  * returned exactly as given. Nullish is preserved rather than coerced to "" so call sites that supply
@@ -72,5 +85,8 @@ export function formatDealDisplayName(name: string | null | undefined): string |
   // A name that is ONLY the suffix (" — Change Order 1") leaves nothing, so we emit the bare label(s)
   // rather than a dangling separator.
   const base = rest.trim();
-  return (base.length === 0 ? labels : [...labels, base]).join(` ${EM_DASH} `);
+  const candidate = (base.length === 0 ? labels : [...labels, base]).join(` ${EM_DASH} `);
+  // Enforce the post-condition. See the note above: a rejoin can re-create a trailing suffix, and
+  // returning such a string would make this function oscillate instead of settle.
+  return CHANGE_ORDER_NAME_SUFFIX.test(candidate) ? name : candidate;
 }

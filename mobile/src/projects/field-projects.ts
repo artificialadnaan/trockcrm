@@ -184,7 +184,9 @@ export function projectNumberLabel(projectNumber: string | null | undefined): st
 // can't import the workspace `shared` package, so this is a deliberate mirror — update both together.
 // A drift guard lives in shared/src/types/deal-display-name.test.ts, which reads this file.
 const EM_DASH = "—";
-const CHANGE_ORDER_NAME_SUFFIX = /\s*—\s*Change Order\s+(\d+)\s*$/;
+// The ordinal is `[1-9]\d*` — exactly what nextChildOrdinal() can emit (`COUNT(*)::int + 1`, always a
+// positive unpadded decimal). "Change Order 0" / "Change Order 01" are human-typed and survive as-is.
+const CHANGE_ORDER_NAME_SUFFIX = /\s*—\s*Change Order\s+([1-9]\d*)\s*$/;
 
 /**
  * The display form of a deal/project name. A change order is a real CHILD deal whose stored name is
@@ -194,9 +196,15 @@ const CHANGE_ORDER_NAME_SUFFIX = /\s*—\s*Change Order\s+(\d+)\s*$/;
  *
  *     "Tides Park Lane — Change Order 1"  ->  "Change Order 1 — Tides Park Lane"
  *
- * Idempotent BY CONSTRUCTION: it peels every generated trailing suffix rather than short-circuiting on a
- * name that merely looks already-formatted, so a parent a human named "Change Order 7 — Lobby" still gets
- * its child's real label moved to the front. The result never ends in a generated suffix.
+ * It peels every generated trailing suffix rather than short-circuiting on a name that merely looks
+ * already-formatted, so a parent a human named "Change Order 7 — Lobby" still gets its child's real label
+ * moved to the front.
+ *
+ * POST-CONDITION — the output never ends in a generated suffix; that invariant is what makes this
+ * idempotent, and it is ENFORCED below rather than assumed. Rejoining the pieces can re-create a trailing
+ * suffix when what precedes it is itself label-shaped (" — Change Order 1 — Change Order 2" and
+ * "Change Order 1 — Change Order 2" both do), which would oscillate forever between two spellings. Such a
+ * degenerate name is returned UNCHANGED, which is trivially a fixed point.
  *
  * DISPLAY-ONLY: the stored `deals.name` is unchanged, so this must never be applied to a value that gets
  * written back (a walk title, a scorecard draft's dealName, a report cover, a nav param) — only to the
@@ -216,7 +224,8 @@ export function formatDealDisplayName(name: string | null | undefined): string |
   }
   if (labels.length === 0) return name;
   const base = rest.trim();
-  return (base.length === 0 ? labels : [...labels, base]).join(` ${EM_DASH} `);
+  const candidate = (base.length === 0 ? labels : [...labels, base]).join(` ${EM_DASH} `);
+  return CHANGE_ORDER_NAME_SUFFIX.test(candidate) ? name : candidate;
 }
 
 /**

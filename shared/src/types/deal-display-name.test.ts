@@ -54,8 +54,19 @@ const CASES: Array<[label: string, input: string, expected: string]> = [
   ["no ordinal", "Tides Park Lane — Change Order", "Tides Park Lane — Change Order"],
   ["the wrong casing", "Tides Park Lane — change order 1", "Tides Park Lane — change order 1"],
   ["a non-numeric ordinal", "Tides Park Lane — Change Order A", "Tides Park Lane — Change Order A"],
+  // nextChildOrdinal() is `COUNT(*)::int + 1`, so it can only ever emit a positive, unpadded decimal.
+  // A zero or a zero-padded ordinal is therefore something a human typed.
+  ["a ZERO ordinal, which the generator can never emit", "Tides Park Lane — Change Order 0", "Tides Park Lane — Change Order 0"],
+  ["a ZERO-PADDED ordinal", "Tides Park Lane — Change Order 01", "Tides Park Lane — Change Order 01"],
   ["an empty name", "", ""],
   ["a whitespace-only name", "   ", "   "],
+
+  // --- DEGENERATE: a rejoin that would re-create a trailing suffix is refused ------------------
+  // Both of these peel to a candidate that itself ends in a generated suffix, so formatting them would
+  // oscillate forever between two spellings. They are returned exactly as stored instead.
+  ["an empty base under two stacked labels", " — Change Order 1 — Change Order 2", " — Change Order 1 — Change Order 2"],
+  ["a base that is itself a bare label", "Change Order 1 — Change Order 2", "Change Order 1 — Change Order 2"],
+  ["a base that is itself a bare label, equal ordinals", "Change Order 1 — Change Order 1", "Change Order 1 — Change Order 1"],
 ];
 
 describe("formatDealDisplayName", () => {
@@ -64,20 +75,71 @@ describe("formatDealDisplayName", () => {
   });
 });
 
-describe("formatDealDisplayName is idempotent", () => {
-  // The whole table, not a hand-picked subset. Applying twice must equal applying once for EVERY case:
-  // the rewrite is structural (peel the trailing suffixes, emit the labels first), so its own output can
-  // never END in a generated suffix and therefore can never be rotated a second time.
-  it.each(CASES)("%s — applying twice equals applying once", (_label, input) => {
-    const once = formatDealDisplayName(input);
-    expect(formatDealDisplayName(once)).toBe(once);
+/**
+ * THE post-condition: a formatted name never ends in a generated suffix.
+ *
+ * This is the invariant idempotency rests on — if it holds, a second pass has nothing to peel — so it is
+ * asserted directly rather than inferred from a handful of before/after pairs. The regex is duplicated
+ * here on purpose: a test that imported the implementation's own constant would keep passing if that
+ * constant were loosened.
+ */
+const GENERATED_SUFFIX = /\s*—\s*Change Order\s+[1-9]\d*\s*$/;
+
+const expectSettled = (input: string) => {
+  const once = formatDealDisplayName(input);
+  // Either the rewrite happened and its output is suffix-free, or it declined and handed back the input.
+  if (once !== input) expect(GENERATED_SUFFIX.test(once)).toBe(false);
+  expect(formatDealDisplayName(once)).toBe(once);
+};
+
+describe("formatDealDisplayName settles — post-condition + idempotency", () => {
+  it.each(CASES)("%s", (_label, input) => {
+    expectSettled(input);
   });
 
-  it("stays stable under repeated application, not only the second one", () => {
-    const settled = formatDealDisplayName("Change Order 7 — Lobby — Change Order 1");
-    let value = "Change Order 7 — Lobby — Change Order 1";
-    for (let i = 0; i < 5; i += 1) value = formatDealDisplayName(value);
-    expect(value).toBe(settled);
+  /**
+   * Hand-picked rows are what let the last oscillation through: the table simply did not contain the
+   * shape that broke it. So generate the shapes instead of choosing them — every combination of a base
+   * (including the empty and label-shaped ones that caused it), a stack depth, and surrounding padding.
+   */
+  const BASES = [
+    "",
+    "   ",
+    "Tides",
+    "Tides — Phase 2",
+    "Change Order 1", // label-shaped: rejoining onto this re-creates a suffix
+    "Change Order 7 — Lobby",
+    "Suite 200 - Change Order 3", // hyphen: never ours
+  ];
+  const PADDING: Array<[string, string]> = [["", ""], ["   ", ""], ["", "   "], ["  ", "  "]];
+
+  const GENERATED: string[] = [];
+  for (const base of BASES) {
+    for (let depth = 0; depth <= 3; depth += 1) {
+      let composed = base;
+      for (let n = 1; n <= depth; n += 1) composed += ` — Change Order ${n}`;
+      for (const [lead, trail] of PADDING) GENERATED.push(`${lead}${composed}${trail}`);
+    }
+  }
+
+  it(`holds for all ${GENERATED.length} composed names`, () => {
+    // One `it` rather than `it.each` so a failure reports the offending inputs together — the useful
+    // signal is WHICH shape family broke, not one arbitrary member of it.
+    const violations = GENERATED.filter((input) => {
+      const once = formatDealDisplayName(input);
+      const reformatted = formatDealDisplayName(once);
+      return (once !== input && GENERATED_SUFFIX.test(once)) || reformatted !== once;
+    });
+    expect(violations).toEqual([]);
+  });
+
+  it("reaches a fixed point in ONE application, and stays there", () => {
+    for (const input of GENERATED) {
+      const once = formatDealDisplayName(input);
+      let value = input;
+      for (let i = 0; i < 6; i += 1) value = formatDealDisplayName(value);
+      expect(value).toBe(once);
+    }
   });
 });
 

@@ -376,6 +376,40 @@ describe("formatDealDisplayName", () => {
     expect(formatDealDisplayName("Change Order 5 — Lobby")).toBe("Change Order 5 — Lobby");
   });
 
+  it("REGRESSION: refuses a rejoin that would re-create a trailing suffix (would oscillate)", () => {
+    // Both of these peel to a candidate that itself ends in a generated suffix, so formatting them would
+    // flip between two spellings forever. Returned exactly as stored instead — trivially a fixed point.
+    expect(formatDealDisplayName(" — Change Order 1 — Change Order 2")).toBe(" — Change Order 1 — Change Order 2");
+    expect(formatDealDisplayName("Change Order 1 — Change Order 2")).toBe("Change Order 1 — Change Order 2");
+  });
+
+  it("leaves an ordinal the generator can never emit (zero / zero-padded)", () => {
+    // nextChildOrdinal() is `COUNT(*)::int + 1` — always a positive, unpadded decimal.
+    expect(formatDealDisplayName("Tides — Change Order 0")).toBe("Tides — Change Order 0");
+    expect(formatDealDisplayName("Tides — Change Order 01")).toBe("Tides — Change Order 01");
+  });
+
+  it("POST-CONDITION: a formatted name never ends in a generated suffix, over composed shapes", () => {
+    // Generated, not hand-picked — choosing the inputs myself is what let an oscillation through before.
+    const suffix = /\s*—\s*Change Order\s+[1-9]\d*\s*$/;
+    const bases = ["", "   ", "Tides", "Tides — Phase 2", "Change Order 1", "Change Order 7 — Lobby"];
+    const padding: Array<[string, string]> = [["", ""], ["   ", ""], ["", "   "], ["  ", "  "]];
+    const violations: string[] = [];
+    for (const base of bases) {
+      for (let depth = 0; depth <= 3; depth += 1) {
+        let composed = base;
+        for (let n = 1; n <= depth; n += 1) composed += ` — Change Order ${n}`;
+        for (const [lead, trail] of padding) {
+          const input = `${lead}${composed}${trail}`;
+          const once = formatDealDisplayName(input);
+          if (once !== input && suffix.test(once)) violations.push(input);
+          else if (formatDealDisplayName(once) !== once) violations.push(input);
+        }
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
   it("is idempotent for EVERY case above — applying twice equals applying once", () => {
     // Structural, not guarded: the output never ends in a generated suffix, so there is nothing left to
     // move on a second pass. Asserted over the whole set rather than a hand-picked input.
