@@ -63,11 +63,24 @@ BEGIN
   -- this file is: `search_path` is not this block's to assume.
   --
   -- STABLE, not IMMUTABLE: parsing a timestamp without an offset depends on the TimeZone setting.
+  --
+  -- INFINITY IS REJECTED TOO, and it is not a cast failure — `'infinity'::timestamptz` is perfectly valid
+  -- Postgres, so the EXCEPTION block never sees it. It has to be refused by VALUE. node-postgres hands
+  -- those back as numeric Infinity, and `resolveGlassesWalkthroughScope` calls `row.capturedAt
+  -- .toISOString()` on every row it returns — which throws a RangeError on a non-finite date. So a single
+  -- hand-edited `"infinity"` would not corrupt one row quietly; it would make the AI-walk panel fail for
+  -- that entire deal. A capture time of infinity is not a capture time, and null is the honest answer.
   EXECUTE $fn$
     CREATE OR REPLACE FUNCTION pg_temp.glasses_walkthrough_backfill_ts(value text)
     RETURNS timestamptz LANGUAGE plpgsql STABLE AS $body$
+    DECLARE
+      parsed timestamptz;
     BEGIN
-      RETURN value::timestamptz;
+      parsed := value::timestamptz;
+      IF parsed = 'infinity'::timestamptz OR parsed = '-infinity'::timestamptz THEN
+        RETURN NULL;
+      END IF;
+      RETURN parsed;
     EXCEPTION WHEN others THEN
       RETURN NULL;
     END;
@@ -159,7 +172,15 @@ BEGIN
     IF to_regclass('public.job_queue') IS NOT NULL THEN
     EXECUTE format(
       $bf$INSERT INTO %I.glasses_walkthroughs (deal_id, walk_id, scope_walkthrough_id, captured_at, captured_by_user_id)
-         SELECT DISTINCT ON (deal_id, walk_id) deal_id, walk_id, scope_walkthrough_id, captured_at, captured_by_user_id
+         SELECT DISTINCT ON (deal_id, walk_id) deal_id, walk_id, scope_walkthrough_id, captured_at,
+                -- THE CAPTURER MUST STILL EXIST. Looking like a uuid is not the same as being a live
+                -- `public.users` row, and this column has a real FK. A user removed since the walk was
+                -- forwarded — the exact case `ON DELETE SET NULL` exists to tolerate — would pass the regex
+                -- and then violate the constraint, aborting the one tenant-wide DO block and taking 0214
+                -- down for EVERY office. Nulled rather than skipped, because the WALK is still a fact worth
+                -- showing; only its actor is unknown, which is precisely what the nullable column means.
+                CASE WHEN EXISTS (SELECT 1 FROM public.users u WHERE u.id = candidates.captured_by_user_id)
+                     THEN candidates.captured_by_user_id END AS captured_by_user_id
            FROM (
              SELECT (q.payload->>'dealId')::uuid AS deal_id,
                     q.payload->>'walkId' AS walk_id,

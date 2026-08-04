@@ -158,7 +158,15 @@ describe("migration 0214 — glasses_walkthroughs", () => {
         -- Shaped exactly like a date and still uncastable: February 30th. This is the case that makes the
         -- guard a real cast-with-EXCEPTION rather than another regex — bounding month 01-12 and day 01-31
         -- admits this string, and it throws anyway.
-        ('glasses_walkthrough_forward', '{"officeSlug":"dallas","dealId":"${deal}","walkId":"walk-feb30","capturedAt":"2026-02-30T00:00:00.000Z"}');
+        ('glasses_walkthrough_forward', '{"officeSlug":"dallas","dealId":"${deal}","walkId":"walk-feb30","capturedAt":"2026-02-30T00:00:00.000Z"}'),
+        -- VALID Postgres and still refused. 'infinity' casts fine, so the EXCEPTION block never sees it;
+        -- node-postgres returns a non-finite Date and the panel's .toISOString() throws, failing the whole
+        -- deal's walk list. Rejected by value, not by castability.
+        ('glasses_walkthrough_forward', '{"officeSlug":"dallas","dealId":"${deal}","walkId":"walk-inf","capturedAt":"infinity"}'),
+        -- A capturer that LOOKS like a uuid but names no live user — the row this column's ON DELETE SET
+        -- NULL exists to tolerate. Must land WITHOUT an actor rather than violating the FK, which would
+        -- abort the single DO block for every office.
+        ('glasses_walkthrough_forward', '{"officeSlug":"dallas","dealId":"${deal}","walkId":"walk-ghostuser","capturedAt":"2026-08-02T21:00:00.000Z","capturedByUserId":"00000000-0000-4000-8000-0000000000bb"}');
     `);
 
     await pg.exec(MIGRATION_SQL);
@@ -166,7 +174,11 @@ describe("migration 0214 — glasses_walkthroughs", () => {
     const rows = (await pg.query(
       `SELECT walk_id, scope_walkthrough_id, captured_by_user_id FROM office_dallas.glasses_walkthroughs ORDER BY walk_id`,
     )) as any;
-    expect(rows.rows.map((r: any) => r.walk_id)).toEqual(["walk-bad", "walk-old"]);
+    // walk-ghostuser IS present — the walk survives its capturer going missing — while the two uncastable
+    // times and the infinity are absent. All four are guards on the SAME statement, so any one of them
+    // firing would have emptied this list entirely rather than dropping a single row.
+    expect(rows.rows.map((r: any) => r.walk_id)).toEqual(["walk-bad", "walk-ghostuser", "walk-old"]);
+    expect(rows.rows.find((r: any) => r.walk_id === "walk-ghostuser").captured_by_user_id).toBeNull();
     expect(rows.rows.find((r: any) => r.walk_id === "walk-old").scope_walkthrough_id).toBe(scopeId);
     expect(rows.rows.find((r: any) => r.walk_id === "walk-old").captured_by_user_id).toBe(user);
     // The malformed checkpoint is dropped, not written and not fatal.
@@ -178,7 +190,7 @@ describe("migration 0214 — glasses_walkthroughs", () => {
     // Replayable: a second run inserts nothing new.
     await pg.exec(MIGRATION_SQL);
     const again = (await pg.query(`SELECT count(*)::int AS n FROM office_dallas.glasses_walkthroughs`)) as any;
-    expect(again.rows[0].n).toBe(2);
+    expect(again.rows[0].n).toBe(3);
     await pg.close();
   });
 
