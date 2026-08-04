@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
 import { useOfficeScopeId } from "./use-office-scope";
 import { api } from "@/lib/api";
 import type {
@@ -892,34 +892,25 @@ async function executeSalesReport<T>(endpoint: string, options: SalesReportQuery
   return api<{ data: T }>(`${endpoint}${qs ? `?${qs}` : ""}`);
 }
 
+// Pipeline Velocity, Closed Won Revenue and Lead Conversion.
 function useSalesReport<T>(
   endpoint: string,
   options: SalesReportQueryOptions,
   errorMessage: string
 ) {
-  const [data, setData] = useState<T | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const fetchReport = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await executeSalesReport<T>(endpoint, options);
-      setData(result.data);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : errorMessage);
-      setData(null);
-    } finally {
-      setLoading(false);
-    }
-  }, [endpoint, options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(","), options.ownerEmails?.join(","), errorMessage]);
-
-  useEffect(() => {
-    fetchReport();
-  }, [fetchReport]);
-
-  return { data, loading, error, refetch: fetchReport };
+  return useScopedReport<T>(
+    async () => (await executeSalesReport<T>(endpoint, options)).data,
+    [
+      endpoint,
+      options.dateFrom,
+      options.dateTo,
+      options.office,
+      options.ownerIds?.join(","),
+      options.ownerNames?.join(","),
+      options.ownerEmails?.join(","),
+    ],
+    errorMessage
+  );
 }
 
 export function usePipelineVelocityReport(options: SalesReportQueryOptions = {}) {
@@ -1020,78 +1011,27 @@ async function executeOperationsReport<T>(endpoint: string, options: OperationsR
 }
 
 export function useWorkflowBottlenecksReport(options: OperationsReportQueryOptions = {}) {
-  const [data, setData] = useState<WorkflowBottlenecksReport | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const fetchReport = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await executeOperationsReport<WorkflowBottlenecksReport>("/reports/workflow-bottlenecks", options);
-      setData(result.data);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load workflow bottlenecks");
-    } finally {
-      setLoading(false);
-    }
-  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(",")]);
-
-  useEffect(() => {
-    fetchReport();
-  }, [fetchReport]);
-
-  return { data, loading, error, refetch: fetchReport };
+  return useScopedReport<WorkflowBottlenecksReport>(
+    async () => (await executeOperationsReport<WorkflowBottlenecksReport>("/reports/workflow-bottlenecks", options)).data,
+    [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(",")],
+    "Failed to load workflow bottlenecks"
+  );
 }
 
 export function useProjectReadinessReport(options: OperationsReportQueryOptions = {}) {
-  const [data, setData] = useState<ProjectReadinessReport | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const fetchReport = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await executeOperationsReport<ProjectReadinessReport>("/reports/project-readiness", options);
-      setData(result.data);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load project readiness");
-    } finally {
-      setLoading(false);
-    }
-  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(",")]);
-
-  useEffect(() => {
-    fetchReport();
-  }, [fetchReport]);
-
-  return { data, loading, error, refetch: fetchReport };
+  return useScopedReport<ProjectReadinessReport>(
+    async () => (await executeOperationsReport<ProjectReadinessReport>("/reports/project-readiness", options)).data,
+    [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(",")],
+    "Failed to load project readiness"
+  );
 }
 
 export function usePortfolioLoadReport(options: OperationsReportQueryOptions = {}) {
-  const [data, setData] = useState<PortfolioLoadReport | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const fetchReport = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await executeOperationsReport<PortfolioLoadReport>("/reports/portfolio-load", options);
-      setData(result.data);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load portfolio load");
-    } finally {
-      setLoading(false);
-    }
-  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(",")]);
-
-  useEffect(() => {
-    fetchReport();
-  }, [fetchReport]);
-
-  return { data, loading, error, refetch: fetchReport };
+  return useScopedReport<PortfolioLoadReport>(
+    async () => (await executeOperationsReport<PortfolioLoadReport>("/reports/portfolio-load", options)).data,
+    [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(",")],
+    "Failed to load portfolio load"
+  );
 }
 
 export function useLeadSourceROI(options: AnalyticsQueryOptions = {}) {
@@ -1366,6 +1306,82 @@ function useOfficeScopeKey() {
   return useOfficeScopeId() ?? "";
 }
 
+/**
+ * The office-scope plumbing every report hook needs, in one place.
+ *
+ * Three DISTINCT properties that have to travel together. They were added one at a time, to one hook
+ * family at a time, and each omission produced its own bug:
+ *
+ *   1. Office DEPENDENCY — refetch when ?officeId changes. Without it the previous office's rows stay
+ *      on screen forever after a scope switch.
+ *   2. Stale-response GUARD — a monotonic request id, so an older office's in-flight response cannot
+ *      land after a newer one and overwrite it. Adding (1) without (2) creates this race.
+ *   3. Synchronous INVALIDATION — clear rows in a LAYOUT effect keyed on the scope. (2) stops an old
+ *      RESPONSE being accepted; it does nothing about old ROWS already painted. The request id is
+ *      bumped inside the async fetch callback, which runs in a passive effect AFTER commit, while
+ *      useDealHref has already re-rendered links with the NEW office. That leaves a painted frame
+ *      showing office A's rows under office B's links, and a fast click goes to the wrong tenant.
+ *      A layout effect runs after commit but before paint and before any pending response's
+ *      resolution microtask, so it closes that window.
+ *
+ * The layout-effect approach is lifted from usePendingRfp (client/src/hooks/use-deals.ts), which
+ * solved exactly this and documents why a layout effect beats mutating a ref during render (safe
+ * under concurrent rendering, and only for committed renders). Keyed here on the office scope alone
+ * rather than the whole search string: filter/page changes already refetch through `deps`, and
+ * blanking the table on every filter tweak would be a behaviour change beyond this fix.
+ */
+function useScopedReport<T>(
+  fetcher: () => Promise<T>,
+  deps: readonly unknown[],
+  errorMessage: string
+) {
+  const officeScopeKey = useOfficeScopeKey();
+  const [data, setData] = useState<T | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const requestIdRef = useRef(0);
+  const isFirstLayout = useRef(true);
+
+  useLayoutEffect(() => {
+    requestIdRef.current += 1;
+    // Skip the mount run: state already starts as loading with no rows, and only a real scope CHANGE
+    // should clear anything.
+    if (isFirstLayout.current) {
+      isFirstLayout.current = false;
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    setData(null);
+  }, [officeScopeKey]);
+
+  const fetchReport = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await fetcher();
+      if (requestId !== requestIdRef.current) return; // superseded
+      setData(result);
+    } catch (err: unknown) {
+      if (requestId !== requestIdRef.current) return;
+      setError(err instanceof Error ? err.message : errorMessage);
+      setData(null);
+    } finally {
+      if (requestId === requestIdRef.current) setLoading(false);
+    }
+    // `fetcher` is intentionally not a dep — it is a fresh closure every render. The listed deps are
+    // the values that actually change the request, matching what these hooks already did.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [officeScopeKey, errorMessage, ...deps]);
+
+  useEffect(() => {
+    fetchReport();
+  }, [fetchReport]);
+
+  return { data, loading, error, refetch: fetchReport };
+}
+
 function performanceDeps(options: PerformanceReportQueryOptions) {
   return [
     options.dateFrom,
@@ -1383,43 +1399,13 @@ async function executePerformanceReport<T>(path: string, options: PerformanceRep
   return api<{ data: T }>(`/reports/${path}${qs ? `?${qs}` : ""}`);
 }
 
+// Director Scorecard, Rep Activity and Forecast Accuracy.
 function usePerformanceReport<T>(path: string, options: PerformanceReportQueryOptions = {}, errorMessage: string) {
-  const [data, setData] = useState<T | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const deps = performanceDeps(options);
-  // Shared with the Director Scorecard, Rep Activity and Forecast Accuracy reports: all three used to
-  // keep the previous office's rows after a scope switch, for the reason described on useOfficeScopeKey.
-  const officeScopeKey = useOfficeScopeKey();
-  // Monotonic request id. Adding the office-scope refetch trigger above without this would hand these
-  // three reports a race they did not previously have: switching office while an earlier request is
-  // still in flight lets the OLD office's response land last and overwrite the new one -- the very
-  // stale-rows symptom the refetch was added to fix, just arrived at from the other direction. A
-  // refetch trigger and an ordering guarantee belong in the same change.
-  const latestRequest = useRef(0);
-
-  const fetchReport = useCallback(async () => {
-    const requestId = ++latestRequest.current;
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await executePerformanceReport<T>(path, options);
-      if (requestId !== latestRequest.current) return; // superseded by a newer request
-      setData(result.data);
-    } catch (err: unknown) {
-      if (requestId !== latestRequest.current) return;
-      setError(err instanceof Error ? err.message : errorMessage);
-      setData(null);
-    } finally {
-      if (requestId === latestRequest.current) setLoading(false);
-    }
-  }, [path, errorMessage, officeScopeKey, ...deps]);
-
-  useEffect(() => {
-    fetchReport();
-  }, [fetchReport]);
-
-  return { data, loading, error, refetch: fetchReport };
+  return useScopedReport<T>(
+    async () => (await executePerformanceReport<T>(path, options)).data,
+    [path, ...performanceDeps(options)],
+    errorMessage
+  );
 }
 
 export function useDirectorScorecardReport(options: PerformanceReportQueryOptions = {}) {
@@ -1444,59 +1430,29 @@ export function useRepActivityReport(options: PerformanceReportQueryOptions = {}
  * otherwise turning a type filter on or paging forward would leave the previous page on screen.
  */
 export function useDailyActivityLogReport(options: DailyActivityLogQueryOptions = {}) {
-  const [data, setData] = useState<DailyActivityLogReport | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const typeKey = options.types?.join(",") ?? "";
-  // ?officeId is an implicit input via api()'s x-office-id header (see useOfficeScopeKey). Without it
-  // in the deps, switching office left the PREVIOUS office's entries on screen while dealHref had
-  // already switched to the new office — every row then linked somewhere it did not belong.
-  const officeScopeKey = useOfficeScopeKey();
-  // Monotonic request id -- the same guard useMondayShowcase uses. This report has MANY controls that
-  // can fire in quick succession (13 type chips, paging, owner/office/date), so a slower earlier
-  // response can land after a newer one and repaint the page with the previous filter's entries. Only
-  // the latest request may write state; a superseded response is dropped, and a superseded `finally`
-  // must not clear the loading flag while the current request is still in flight.
-  const latestRequest = useRef(0);
-
-  const fetchReport = useCallback(async () => {
-    const requestId = ++latestRequest.current;
-    setLoading(true);
-    setError(null);
-    try {
+  return useScopedReport<DailyActivityLogReport>(
+    async () => {
       const params = new URLSearchParams();
       appendPerformanceReportQueryOptions(params, options);
       if (options.types?.length) params.set("types", options.types.join(","));
       if (options.page && options.page > 1) params.set("page", String(options.page));
       if (options.limit) params.set("limit", String(options.limit));
       const qs = params.toString();
-      const result = await api<{ data: DailyActivityLogReport }>(`/reports/daily-activity-log${qs ? `?${qs}` : ""}`);
-      if (requestId !== latestRequest.current) return; // superseded by a newer request
-      setData(result.data);
-    } catch (err: unknown) {
-      if (requestId !== latestRequest.current) return;
-      setError(err instanceof Error ? err.message : "Failed to load the daily activity log");
-      setData(null);
-    } finally {
-      if (requestId === latestRequest.current) setLoading(false);
-    }
-  }, [
-    options.dateFrom,
-    options.dateTo,
-    options.office,
-    options.ownerIds?.join(","),
-    options.ownerNames?.join(","),
-    typeKey,
-    options.page,
-    options.limit,
-    officeScopeKey,
-  ]);
-
-  useEffect(() => {
-    fetchReport();
-  }, [fetchReport]);
-
-  return { data, loading, error, refetch: fetchReport };
+      return (await api<{ data: DailyActivityLogReport }>(`/reports/daily-activity-log${qs ? `?${qs}` : ""}`)).data;
+    },
+    [
+      options.dateFrom,
+      options.dateTo,
+      options.office,
+      options.ownerIds?.join(","),
+      options.ownerNames?.join(","),
+      typeKey,
+      options.page,
+      options.limit,
+    ],
+    "Failed to load the daily activity log"
+  );
 }
 
 export function useForecastAccuracyReport(options: PerformanceReportQueryOptions = {}) {

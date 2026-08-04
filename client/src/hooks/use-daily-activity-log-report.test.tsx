@@ -22,7 +22,42 @@ vi.mock("@/lib/api", () => ({
   ),
 }));
 
-const { useDailyActivityLogReport, useRepActivityReport } = await import("./use-reports");
+const {
+  useDailyActivityLogReport,
+  useRepActivityReport,
+  useWorkflowBottlenecksReport,
+  useProjectReadinessReport,
+} = await import("./use-reports");
+
+/**
+ * Generic harness: mount any report hook inside a router and switch ?officeId IN PLACE (no remount —
+ * a remount would refetch trivially and prove nothing about the dependency).
+ */
+async function renderScopedHook<T>(useHook: () => T, initialEntry: string) {
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  let current: T;
+  let setParams: ReturnType<typeof useSearchParams>[1];
+  function Probe() {
+    const [, setSearchParams] = useSearchParams();
+    setParams = setSearchParams;
+    current = useHook();
+    return null;
+  }
+  await act(async () => {
+    root.render(createElement(MemoryRouter, { initialEntries: [initialEntry] }, createElement(Probe)));
+  });
+  return {
+    get current() {
+      return current;
+    },
+    async setOffice(officeId: string) {
+      await act(async () => {
+        setParams(new URLSearchParams({ officeId }));
+      });
+    },
+  };
+}
 
 function payload(tag: string) {
   return {
@@ -213,6 +248,98 @@ describe("usePerformanceReport office scope (shared by 3 sibling reports)", () =
 
     expect(hook.current.error).toBeNull();
     expect((hook.current.data as { kpis: { totalTouchpoints: number } } | null)?.kpis.totalTouchpoints).toBe(22);
+  });
+});
+
+// The operations reports use a DIFFERENT hook family from usePerformanceReport, so the office-scope
+// refetch never reached them. Their DealLink was then given a correct ?officeId, which made them
+// strictly worse: correct links rendered over rows fetched from the previous office. Both hooks now
+// go through useScopedReport, so they carry all three properties.
+describe.each([
+  ["useWorkflowBottlenecksReport", useWorkflowBottlenecksReport],
+  ["useProjectReadinessReport", useProjectReadinessReport],
+])("%s office scope", (_name, useHook) => {
+  it("refetches on an office switch and shows the NEW office's rows", async () => {
+    const hook = await renderScopedHook(() => useHook({}), "/reports/x?officeId=office-a");
+    expect(pending).toHaveLength(1);
+
+    await act(async () => {
+      pending[0].resolve({ data: { marker: "office-a" } });
+    });
+    expect((hook.current.data as { marker: string } | null)?.marker).toBe("office-a");
+
+    await hook.setOffice("office-b");
+    expect(pending).toHaveLength(2);
+
+    await act(async () => {
+      pending[1].resolve({ data: { marker: "office-b" } });
+    });
+    expect((hook.current.data as { marker: string } | null)?.marker).toBe("office-b");
+  });
+
+  it("does not let the previous office's rows survive the switch", async () => {
+    // Property 3, distinct from the stale-response guard: the guard stops an old RESPONSE landing, it
+    // does nothing about old ROWS already painted. The layout effect must clear them before paint,
+    // because deal links have ALREADY re-rendered with the new office id by this point.
+    const hook = await renderScopedHook(() => useHook({}), "/reports/x?officeId=office-a");
+    await act(async () => {
+      pending[0].resolve({ data: { marker: "office-a" } });
+    });
+    expect(hook.current.data).not.toBeNull();
+
+    await hook.setOffice("office-b");
+
+    expect(hook.current.data).toBeNull();
+    expect(hook.current.loading).toBe(true);
+  });
+
+  it("ignores the old office's response when it lands after the new one", async () => {
+    const hook = await renderScopedHook(() => useHook({}), "/reports/x?officeId=office-a");
+    await hook.setOffice("office-b");
+    expect(pending).toHaveLength(2);
+
+    await act(async () => {
+      pending[1].resolve({ data: { marker: "office-b" } });
+    });
+    await act(async () => {
+      pending[0].resolve({ data: { marker: "office-a" } });
+    });
+
+    expect((hook.current.data as { marker: string } | null)?.marker).toBe("office-b");
+  });
+});
+
+describe("synchronous invalidation on scope change", () => {
+  it("clears rows for the Daily Activity Log too, not just the operations reports", async () => {
+    const hook = await renderScopedHook(
+      () => useDailyActivityLogReport({ dateFrom: "2026-06-01", dateTo: "2026-06-30" }),
+      "/reports/performance/daily-activity-log?officeId=office-a"
+    );
+    await act(async () => {
+      pending[0].resolve(payload("office-a-rows"));
+    });
+    expect(hook.current.data).not.toBeNull();
+
+    await hook.setOffice("office-b");
+
+    expect(hook.current.data).toBeNull();
+    expect(hook.current.loading).toBe(true);
+  });
+
+  it("does not blank the data on a non-office change", async () => {
+    // The invalidation is keyed on the office scope alone. A filter or page change already refetches
+    // through `deps`; blanking the table on every filter tweak would be a different behaviour change.
+    const hook = await renderLog("/reports/performance/daily-activity-log?officeId=office-a");
+    await act(async () => {
+      pending[0].resolve(payload("first"));
+    });
+    expect(hook.current.data).not.toBeNull();
+
+    await hook.rerender(["note"]);
+
+    // A refetch is in flight, but the previous rows are still shown until it lands.
+    expect(hook.current.data).not.toBeNull();
+    expect(pending).toHaveLength(2);
   });
 });
 
