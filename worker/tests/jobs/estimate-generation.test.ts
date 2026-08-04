@@ -622,6 +622,7 @@ describe("estimate generation job", () => {
     } as any;
     let tenantSelectCallCount = 0;
     const statusUpdates: unknown[] = [];
+    const reviewEvents: any[] = [];
     const tenantDb = {
       select: vi.fn(() => ({
         from: vi.fn(() => {
@@ -634,7 +635,10 @@ describe("estimate generation job", () => {
         }),
       })),
       insert: vi.fn(() => ({
-        values: vi.fn(() => ({ returning: vi.fn().mockResolvedValue([{ id: "generated-id" }]) })),
+        values: vi.fn((values: any) => {
+          if (values?.eventType) reviewEvents.push(values);
+          return { returning: vi.fn().mockResolvedValue([{ id: "generated-id" }]) };
+        }),
       })),
       update: vi.fn(() => ({
         set: vi.fn((values: unknown) => {
@@ -701,6 +705,14 @@ describe("estimate generation job", () => {
     // Both unpriceable rows are flagged rather than dropped — somebody has to put a number on them.
     expect(statusUpdates).toContainEqual({ status: "needs_quantity" });
     expect(statusUpdates.filter((u: any) => u.status === "needs_quantity")).toHaveLength(2);
+
+    // WHICH rows, not merely how many. A count alone passes if the same row is flagged twice and the
+    // other is missed entirely, which is precisely the confusion this branch could produce.
+    const flagged = reviewEvents
+      .filter((event) => event.eventType === "needs_quantity")
+      .map((event) => event.subjectId)
+      .sort();
+    expect(flagged).toEqual(["ext-ocr-null", "ext-walk-null"]);
     expect(lockedClient.query).toHaveBeenLastCalledWith("COMMIT");
   });
 

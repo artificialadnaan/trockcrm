@@ -330,6 +330,14 @@ export async function runEstimateGeneration(
       // The row is NOT dropped and NOT failed. It is a real line item somebody has to put a number on,
       // and it stays visible as one; what it must not do is carry a price nobody chose.
       if (extraction.quantity === null || extraction.quantity === undefined) {
+        // ALREADY FLAGGED ⇒ say nothing further. The candidate filter is
+        // `status = 'pending' OR extraction_type = 'measurement_candidate'`, so a normal row drops out
+        // of the set the moment it is marked — but a MEASUREMENT CANDIDATE is re-selected on every run
+        // regardless of status. Without this, one unmeasured candidate emits a fresh `needs_quantity`
+        // event on every generation run for as long as it lacks a number, burying the review feed under
+        // repetitions of a fact already recorded. The row still skips pricing either way.
+        if (extraction.status === "needs_quantity") continue;
+
         await tenantDb.insert(estimateReviewEvents).values({
           dealId: extraction.dealId,
           projectId: extraction.projectId,
