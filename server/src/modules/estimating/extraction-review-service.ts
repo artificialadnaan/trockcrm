@@ -50,7 +50,24 @@ async function loadEstimateExtraction(
         eq(estimateExtractions.dealId, dealId)
       )
     )
-    .limit(1);
+    .limit(1)
+    // LOCKED FOR THE REST OF THE REQUEST'S TRANSACTION.
+    //
+    // `tenantMiddleware` opens a transaction before any of these handlers run and holds it until
+    // `commitTransaction`, so this SELECT and the UPDATE that follows it are already one transaction —
+    // but an unlocked read is still only a snapshot, and the generation worker can change the row in
+    // between. That is not hypothetical here: it claims quantity-less rows and moves them to
+    // `needs_quantity`, so an edit could correctly requeue a row while recording `pending -> pending`
+    // in its own audit event, contradicting the worker event written moments earlier.
+    //
+    // `FOR UPDATE` makes the snapshot authoritative rather than merely recent: the row cannot change
+    // under any of the three callers between reading it and writing it. All three want that — approve
+    // and reject read a status and then overwrite it, which is the same check-then-act.
+    //
+    // Cheap because it is one row by primary key, already inside a transaction that is about to write
+    // it. The worker's own claim is a single conditional UPDATE, so the two contend for one row lock
+    // and one of them waits rather than either losing an update.
+    .for("update");
 
   return extraction ?? null;
 }

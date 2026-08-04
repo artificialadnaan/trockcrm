@@ -24,7 +24,7 @@ describe("extraction-review-service", () => {
     });
     const eventValues: any[] = [];
     const tenantDb = {
-      select: vi.fn(() => ({ from: vi.fn(() => ({ where: vi.fn(() => ({ limit: selectLimit })) })) })),
+      select: vi.fn(() => ({ from: vi.fn(() => ({ where: vi.fn(() => ({ limit: vi.fn(() => ({ for: selectLimit })) })) })) })),
       update: vi.fn(() => ({ set: updateSet })),
       insert: vi.fn(() => ({
         values: vi.fn((values: any) => {
@@ -150,7 +150,7 @@ describe("extraction-review-service", () => {
       select: vi.fn(() => ({
         from: vi.fn(() => ({
           where: vi.fn(() => ({
-            limit: selectLimit,
+            limit: vi.fn(() => ({ for: selectLimit })),
           })),
         })),
       })),
@@ -218,7 +218,7 @@ describe("extraction-review-service", () => {
       select: vi.fn(() => ({
         from: vi.fn(() => ({
           where: vi.fn(() => ({
-            limit: selectLimit,
+            limit: vi.fn(() => ({ for: selectLimit })),
           })),
         })),
       })),
@@ -308,7 +308,7 @@ describe("extraction-review-service", () => {
       select: vi.fn(() => ({
         from: vi.fn(() => ({
           where: vi.fn(() => ({
-            limit: selectLimit,
+            limit: vi.fn(() => ({ for: selectLimit })),
           })),
         })),
       })),

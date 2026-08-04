@@ -241,6 +241,10 @@ describe("buildEstimatingWorkbenchState", () => {
         approved: 1,
         rejected: 0,
         unmatched: 1,
+        // The bucket for rows parked awaiting a human-supplied quantity. Present and zero here rather
+        // than absent, because the buckets are meant to reconcile with `total` — a state that exists
+        // but is never reported is how the counts silently stopped adding up.
+        needsQuantity: 0,
       },
       matches: {
         total: 2,
