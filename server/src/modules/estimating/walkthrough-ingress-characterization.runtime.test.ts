@@ -90,7 +90,8 @@ const WORKER_QUANTITY_GUARDS = [
   //    it observed, so a reviewer who approved or rejected the row in that window is not overwritten.
   // Names the COLUMN, not just the operator: a bare "is null" matches any nullable predicate that
   // happens to be in the file and would keep passing after the quantity re-check was removed.
-  "estimateExtractions.quantity} is null",
+  // Nonpositive as well as null — the guard and the claim have to agree about what unpriceable means.
+  "is null or",
   "= ${extraction.status}",
 ];
 

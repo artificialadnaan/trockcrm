@@ -79,6 +79,20 @@ export async function loadApprovedRecommendationsForRun(
     eq(estimatePricingRecommendations.dealId, dealId),
     eq(estimatePricingRecommendations.createdByRunId, generationRunId),
     inArray(estimatePricingRecommendations.status, ["approved", "overridden"]),
+    // THE EXTRACTION MUST STILL HAVE A PRICEABLE QUANTITY, checked here because this is the query that
+    // puts a number into a client-facing estimate.
+    //
+    // An approval is a statement about a recommendation, and the recommendation outlives the quantity
+    // it was computed from: an estimator clearing a quantity leaves the approved row untouched, and
+    // nothing between here and the estimate looks at the extraction again. So a price derived from a
+    // number somebody explicitly deleted could still be promoted — and it would arrive looking exactly
+    // like every other approved line.
+    //
+    // Enforced at the PROMOTE rather than only at the edit, because the edit is one of several ways a
+    // quantity can end up absent (a reconciliation, a rerun, a hand-written correction), and this is
+    // the single point they all funnel through. Nonpositive is refused with null for the same reason
+    // the worker refuses it: `applyMarketRateAdjustment` cannot price it either.
+    sql`${estimateExtractions.quantity} is not null and ${estimateExtractions.quantity} > 0`,
   ];
 
   if (recommendationIds) {

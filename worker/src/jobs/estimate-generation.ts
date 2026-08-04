@@ -415,7 +415,13 @@ export async function runEstimateGeneration(
             .where(
               and(
                 eq(estimateExtractions.id, extraction.id),
-                sql`${estimateExtractions.quantity} is null`,
+                // MATCHES EVERY UNPRICEABLE QUANTITY, not only a null one. Widening the guard above to
+                // reject zero and negatives without widening this predicate meant such a row ENTERED the
+                // branch and then always lost the claim — so no event was written, the status stayed
+                // `pending`, and the row was silently skipped on every rerun while never appearing in the
+                // needs-quantity bucket either. Invisible in both directions, which is worse than the
+                // defect the guard was widened to catch.
+                sql`(${estimateExtractions.quantity} is null or ${estimateExtractions.quantity} <= 0)`,
                 sql`${estimateExtractions.status} = ${extraction.status}`
               )
             )
