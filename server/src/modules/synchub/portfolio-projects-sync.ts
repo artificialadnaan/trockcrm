@@ -221,7 +221,13 @@ export function toPortfolioSeedCandidate(row: SyncHubProcoreProjectRow): Portfol
   // Only the EXPLICITLY off-board stages (Procore's two legacy buckets) are skipped. A stage
   // we have no alias for is still seeded — it lands in the board's "Other / No Column" column,
   // where somebody can see it, rather than being silently left out of the CRM entirely.
-  if (!rawStage || !isPortfolioProjectBoardRelevantStage(rawStage)) {
+  //
+  // Deliberately NOT guarded by `!rawStage`. An active project whose stage is blank on both
+  // source fields is precisely an unclassifiable project, and short-circuiting it here would
+  // exclude it BEFORE the fail-open classifier ever ran — the same shape of bug as the board
+  // drop this file's classifier exists to prevent, one layer up. A blank stage normalizes to
+  // "", matches no column, and surfaces under "Other / No Column" like any other unknown.
+  if (!isPortfolioProjectBoardRelevantStage(rawStage)) {
     return { ...baseSkipped, reason: "non_board_relevant_stage" };
   }
 
@@ -248,7 +254,9 @@ export function toPortfolioSeedCandidate(row: SyncHubProcoreProjectRow): Portfol
     procoreProjectId,
     projectNumber: firstString(row.project_number),
     name,
-    currentStage: rawStage,
+    // `current_stage` is NOT NULL (migration 0135), so a blank-stage project stores "" rather
+    // than inventing a stage name for it. "" normalizes to "" and lands in "Other / No Column".
+    currentStage: rawStage ?? "",
     currentStageNormalized: normalizedStage,
     source: row,
   };

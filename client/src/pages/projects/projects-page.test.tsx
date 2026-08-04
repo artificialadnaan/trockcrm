@@ -227,8 +227,70 @@ describe("ProjectsPage", () => {
     expect(card!.textContent).toContain("Total is a floor, not a final number");
     expect(card!.textContent).toContain("2 projects have no synced value");
     expect(card!.textContent).toContain("count as $0");
-    expect(card!.textContent).toContain("1 value is counted");
+    expect(card!.textContent).toContain("a further 1 value was last synced");
     expect(card!.textContent).toContain("more than 7 days ago");
+  });
+
+  /**
+   * The four caveat combinations. "The total is a floor" is only true when something is MISSING
+   * from it: a stale value IS counted, and Procore may since have revised it up OR down, so the
+   * stale-only case is complete-but-possibly-out-of-date — a different claim entirely. Saying
+   * "floor" there, alongside "0 projects have no synced value", asserted two false things at once.
+   */
+  async function renderCaveat(missing: number, stale: number) {
+    mocks.api.mockResolvedValue(
+      boardResponse([], {
+        productionRollup: {
+          ...emptyRollup,
+          totalValue: 875000,
+          projectCount: 6,
+          construction: { ...emptyRollup.construction, projectCount: 6, totalValue: 875000 },
+          unsyncedValueCount: missing,
+          staleValueCount: stale,
+        },
+      }),
+    );
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <ProjectsPage />
+        </MemoryRouter>,
+      );
+    });
+    await vi.waitFor(() => expect(container.textContent).toContain("Production Revenue"));
+    return container.querySelector('[aria-label="Production revenue roll-up"]')!.textContent ?? "";
+  }
+
+  it("caveat — neither stale nor unsynced: claims completeness, no floor language", async () => {
+    const text = await renderCaveat(0, 0);
+    expect(text).toContain("All 6 projects have a value synced from Procore within the last 7 days");
+    expect(text).not.toContain("floor");
+    expect(text).not.toContain("no synced value");
+  });
+
+  it("caveat — stale only: says the value is included but may have moved EITHER WAY, never 'floor'", async () => {
+    const text = await renderCaveat(0, 3);
+    expect(text).toContain("Every project's value is included");
+    expect(text).toContain("3 values were last synced from Procore more than 7 days ago");
+    expect(text).toContain("may have moved in either direction");
+    // The two false claims the old single-branch message made:
+    expect(text).not.toContain("floor");
+    expect(text).not.toContain("0 projects have no synced value");
+  });
+
+  it("caveat — unsynced only: floor language, and no stale sentence invented", async () => {
+    const text = await renderCaveat(2, 0);
+    expect(text).toContain("Total is a floor, not a final number");
+    expect(text).toContain("2 projects have no synced value and count as $0");
+    expect(text).not.toContain("0 values were last synced");
+    expect(text).not.toContain("either direction");
+  });
+
+  it("caveat — both: floor language AND the staleness qualifier, singular forms correct", async () => {
+    const text = await renderCaveat(1, 1);
+    expect(text).toContain("Total is a floor, not a final number");
+    expect(text).toContain("1 project has no synced value and counts as $0");
+    expect(text).toContain("a further 1 value was last synced from Procore more than 7 days ago");
   });
 
   it("does not claim 'all 0 projects are synced' when the roll-up stages are empty", async () => {

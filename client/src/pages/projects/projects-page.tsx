@@ -101,6 +101,59 @@ function RollupGroupTile({
 }
 
 /**
+ * The caveat text, as four distinct statements — because "the total is a floor" is only true
+ * when something is MISSING from it.
+ *
+ * A stale value is present and counted; Procore may since have revised it up or down, so a
+ * stale-only roll-up is complete-but-possibly-out-of-date IN EITHER DIRECTION, which is a
+ * different claim from understating. Saying "floor" there — and pairing it with "0 projects
+ * have no synced value" — asserted two things that were both false.
+ */
+function rollupCaveat(rollup: PortfolioProductionRollup) {
+  const { unsyncedValueCount: missing, staleValueCount: stale, staleAfterDays: days } = rollup;
+  const staleClause = (
+    <>
+      <span className="tabular-nums">{stale}</span>{" "}
+      {stale === 1 ? "value was" : "values were"} last synced from Procore more than {days} days
+      ago and may have moved in either direction
+    </>
+  );
+  const missingClause = (
+    <>
+      <span className="tabular-nums">{missing}</span>{" "}
+      {missing === 1 ? "project has" : "projects have"} no synced value and
+      {missing === 1 ? " counts" : " count"} as $0
+    </>
+  );
+
+  if (missing > 0 && stale > 0) {
+    return { tone: "warn" as const, body: <>Total is a floor, not a final number: {missingClause}; a further {staleClause}.</> };
+  }
+  if (missing > 0) {
+    return { tone: "warn" as const, body: <>Total is a floor, not a final number: {missingClause}.</> };
+  }
+  if (stale > 0) {
+    // Complete, but not necessarily current. Deliberately does NOT say "floor".
+    return { tone: "warn" as const, body: <>Every project's value is included, but {staleClause}.</> };
+  }
+  if (rollup.projectCount === 0) {
+    return {
+      tone: "calm" as const,
+      body: <>No projects are in Buy Out, Pre-Construction or In Production right now.</>,
+    };
+  }
+  return {
+    tone: "calm" as const,
+    body: (
+      <>
+        All {rollup.projectCount} {rollup.projectCount === 1 ? "project" : "projects"} have a value
+        synced from Procore within the last {days} days.
+      </>
+    ),
+  };
+}
+
+/**
  * Production Revenue roll-up.
  *
  * Every dollar here is the sum of the board's OWN stage-column subtotals (the server rolls up
@@ -111,7 +164,8 @@ function RollupGroupTile({
  * headline can only ever UNDERSTATE. The card says how much of it is unreliable and why.
  */
 function ProductionRollupCard({ rollup }: { rollup: PortfolioProductionRollup }) {
-  const hasCaveat = rollup.unsyncedValueCount > 0 || rollup.staleValueCount > 0;
+  const caveat = rollupCaveat(rollup);
+  const hasCaveat = caveat.tone === "warn";
 
   return (
     <section
@@ -156,28 +210,7 @@ function ProductionRollupCard({ rollup }: { rollup: PortfolioProductionRollup })
         <AlertTriangle
           className={cn("mt-px h-3.5 w-3.5 shrink-0", hasCaveat ? "text-amber-700" : "text-slate-400")}
         />
-        <p>
-          {hasCaveat ? (
-            <>
-              Total is a floor, not a final number:{" "}
-              <span className="tabular-nums">{rollup.unsyncedValueCount}</span>{" "}
-              {rollup.unsyncedValueCount === 1 ? "project has" : "projects have"} no synced value and
-              {rollup.unsyncedValueCount === 1 ? " counts" : " count"} as $0;{" "}
-              <span className="tabular-nums">{rollup.staleValueCount}</span>{" "}
-              {rollup.staleValueCount === 1 ? "value is" : "values are"} counted at a figure Procore
-              last synced more than {rollup.staleAfterDays} days ago.
-            </>
-          ) : rollup.projectCount === 0 ? (
-            <>
-              No projects are in Buy Out, Pre-Construction or In Production right now.
-            </>
-          ) : (
-            <>
-              All {rollup.projectCount} {rollup.projectCount === 1 ? "project" : "projects"} have a
-              value synced from Procore within the last {rollup.staleAfterDays} days.
-            </>
-          )}
-        </p>
+        <p>{caveat.body}</p>
       </div>
     </section>
   );

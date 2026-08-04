@@ -128,13 +128,27 @@ const STAGE_ALIASES: Record<string, PortfolioProjectBoardStage | PortfolioProjec
   "lost/cancelled": "lost/cancelled (legacy)",
 };
 
-export function normalizePortfolioProjectStage(stage: string | null | undefined): string {
-  const normalized = String(stage ?? "")
+/**
+ * Purely TEXTUAL normalization — case, underscores, whitespace, hyphen spacing — with NO alias
+ * table consulted. Exported because it is the one form that is stable across alias-map edits.
+ *
+ * Anything PERSISTED that is derived from a stage should be derivable from this, not from the
+ * alias output: `normalizePortfolioProjectStage` returns this value only for stages that have
+ * no alias, so adding an alias silently changes the alias output for that stage. Stage-event
+ * idempotency keys are the place that bit us — see `legacyEventKeysForPayload` in
+ * procore-project-stage-relay-service.ts.
+ */
+export function bareNormalizePortfolioProjectStage(stage: string | null | undefined): string {
+  return String(stage ?? "")
     .trim()
     .toLowerCase()
     .replace(/[_\s]+/g, " ")
     .replace(/\s*-\s*/g, " - ")
     .replace(/\s+/g, " ");
+}
+
+export function normalizePortfolioProjectStage(stage: string | null | undefined): string {
+  const normalized = bareNormalizePortfolioProjectStage(stage);
 
   const hyphenAsSpace = normalized.replace(/\s*-\s*/g, " ").replace(/\s+/g, " ");
   const compactHyphen = normalized.replace(/\s*-\s*/g, "-");
