@@ -47,6 +47,7 @@ import {
 import { type FileRecord, uploadFile, useFiles } from "@/hooks/use-files";
 import { usePipelineStages, useProjectTypes, type PipelineStage } from "@/hooks/use-pipeline-config";
 import { useAuth } from "@/lib/auth";
+import { DealAiWalkPanel } from "@/components/deals/deal-ai-walk-panel";
 import { PropertySelector } from "@/components/properties/property-selector";
 import {
   isScopeLockedWorkspaceField,
@@ -1266,6 +1267,14 @@ export function DealScopingWorkspace({
             </div>
           </CardContent>
         </Card>
+
+        {/* Between the hand-built scope and the summary written from it, because that is the order the work
+            happens in: the estimator picks the scope items, reads what the walk actually found on site, and
+            then writes the summary. The panel renders NOTHING when this deal has no glasses walk — which is
+            nearly every deal today — so it costs the layout nothing until it has something to say. It is
+            read-only in both workspace modes, including the post-RFP read-only one, because it is reference
+            material rather than a scoped field: nothing here is ours to lock. */}
+        <DealAiWalkPanel dealId={deal.id} />
 
         <Card id={getSectionElementId("scopeSummary")} className="scroll-mt-6">
           <CardHeader>

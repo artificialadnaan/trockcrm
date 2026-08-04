@@ -168,6 +168,7 @@ export {
   fieldScorecardPhotos,
   fieldScorecardEditUploads,
 } from "./tenant/field-scorecards.js";
+export { glassesWalkthroughs } from "./tenant/glasses-walkthroughs.js";
 export { scorecardCorrectiveActions } from "./tenant/scorecard-corrective-actions.js";
 export { scorecardCorrectiveActionTokens } from "./tenant/scorecard-corrective-action-tokens.js";
 export { scorecardCorrectiveActionEvents } from "./tenant/scorecard-corrective-action-events.js";

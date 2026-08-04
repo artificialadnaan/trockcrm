@@ -79,6 +79,50 @@ function makeScopeFetch(overrides: { createStatus?: number; createBody?: Record<
   return { fetchImpl, calls };
 }
 
+/**
+ * `office_test.glasses_walkthroughs` — the per-office read model migration 0214 adds, which the handler now
+ * stamps the TROCK Scope walkthrough id into so the CRM deal page can stop saying "processing".
+ *
+ * Present in this suite's seed because it is part of the schema the handler runs against: the payloads here
+ * carry `officeSlug: "test"`, so the stamp addresses `office_test`. Only the columns the stamp touches, plus
+ * the (deal_id, walk_id) key it matches on — the shipped DDL, FKs included, is executed in
+ * server/tests/migrations/0214-glasses-walkthroughs.runtime.test.ts.
+ */
+async function seedTenantReadModel(db: PGlite) {
+  await db.exec(`
+    CREATE SCHEMA IF NOT EXISTS office_test;
+    CREATE TABLE IF NOT EXISTS office_test.glasses_walkthroughs (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      deal_id uuid NOT NULL,
+      walk_id varchar(100) NOT NULL,
+      scope_walkthrough_id uuid,
+      captured_at timestamptz NOT NULL,
+      captured_by_user_id uuid,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      updated_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS glasses_walkthroughs_deal_walk_uidx
+      ON office_test.glasses_walkthroughs (deal_id, walk_id);
+  `);
+}
+
+/** The row `ingestGlassesWalkthrough` writes in the same transaction as the forward job it enqueues. */
+async function seedWalkRow(db: PGlite, dealId: string, walkId = "walk-1") {
+  await db.query(
+    `INSERT INTO office_test.glasses_walkthroughs (deal_id, walk_id, captured_at)
+     VALUES ($1, $2, '2026-07-30T15:04:00.000Z')`,
+    [dealId, walkId],
+  );
+}
+
+async function storedScopeId(db: PGlite, dealId: string, walkId = "walk-1"): Promise<string | null> {
+  const result = (await db.query(
+    `SELECT scope_walkthrough_id FROM office_test.glasses_walkthroughs WHERE deal_id = $1 AND walk_id = $2`,
+    [dealId, walkId],
+  )) as any;
+  return result.rows[0]?.scope_walkthrough_id ?? null;
+}
+
 describe("glasses_walkthrough_forward create checkpoint (real SQL)", () => {
   let pg: PGlite | null = null;
   afterEach(async () => {
@@ -100,6 +144,7 @@ describe("glasses_walkthrough_forward create checkpoint (real SQL)", () => {
         max_attempts integer NOT NULL DEFAULT 10, created_at timestamptz NOT NULL DEFAULT now()
       );
     `);
+    await seedTenantReadModel(db);
     await db.query(
       `INSERT INTO public.job_queue (job_type, payload, status)
        VALUES ('glasses_walkthrough_forward', $1::jsonb, 'processing')`,
@@ -503,5 +548,131 @@ describe("glasses_walkthrough_forward create checkpoint (real SQL)", () => {
     expect(hungCheckout(checkouts).releasedWith).toBeInstanceOf(Error);
     // The pending set is still on the row, so the retry (or a human) can still see what was missed.
     expect((await storedPayload(db)).pendingArtifacts).toHaveLength(1);
+  });
+  // ── The CRM read-model stamp (migration 0214) ────────────────────────────────────────────────────
+  //
+  // The payload checkpoint above is this JOB's private memory. `office_<slug>.glasses_walkthroughs` is the
+  // same value in the place a human reads it from — the deal page's AI-walk panel, whose "processing" state
+  // is exactly `scope_walkthrough_id IS NULL`. Without this write that column has no writer at all, so the
+  // panel would say "processing" for every walk forever while the scope sat finished in TROCK Scope.
+
+  it("stamps the TROCK Scope walkthrough id onto the deal's read-model row", async () => {
+    const db = await seed();
+    await seedWalkRow(db, DEAL_A);
+    const { fetchImpl } = makeScopeFetch();
+
+    await handleGlassesWalkthroughForward(await storedPayload(db), null, deps(makeClient(db), fetchImpl));
+
+    expect(await storedScopeId(db, DEAL_A)).toBe("8f1c0a6e-1111-4222-8333-444455556666");
+  });
+
+  it("REGRESSION: stamps on a REDELIVERY that already carries the checkpoint, not only on the creating attempt", async () => {
+    // The placement that makes a failed stamp recoverable. Inside the create block this would run exactly
+    // once — on the one attempt that could not retry it — so a single failure would leave the panel reading
+    // "processing" for a walk with a full scope, permanently, with nothing anywhere saying so. Outside it,
+    // every attempt converges the row.
+    const db = await seed();
+    await seedWalkRow(db, DEAL_A);
+    // A row whose create already landed and was checkpointed: the branch that skips the create entirely.
+    await db.query(`UPDATE public.job_queue SET payload = payload || $1::jsonb WHERE id = 1`, [
+      JSON.stringify({ scopeWalkthroughId: "8f1c0a6e-1111-4222-8333-444455556666" }),
+    ]);
+    const { fetchImpl, calls } = makeScopeFetch();
+
+    await handleGlassesWalkthroughForward(await storedPayload(db), null, deps(makeClient(db), fetchImpl));
+
+    expect(calls.some((call) => call.url === CREATE_URL)).toBe(false); // no second create was sent
+    expect(await storedScopeId(db, DEAL_A)).toBe("8f1c0a6e-1111-4222-8333-444455556666");
+  });
+
+  it("stamps ONLY the row for this (deal, walk) pair", async () => {
+    // walkId is minted on the phone and is not unique across deals — the same physical walk is legitimately
+    // filed against two. Keyed on the walk alone, deal B's panel would show deal A's scope.
+    const db = await seed();
+    await seedWalkRow(db, DEAL_A);
+    await seedWalkRow(db, DEAL_B);
+    const { fetchImpl } = makeScopeFetch();
+
+    await handleGlassesWalkthroughForward(await storedPayload(db), null, deps(makeClient(db), fetchImpl));
+
+    expect(await storedScopeId(db, DEAL_A)).toBe("8f1c0a6e-1111-4222-8333-444455556666");
+    expect(await storedScopeId(db, DEAL_B)).toBeNull();
+  });
+
+  it("forwards a walk that has NO read-model row, instead of stranding it", async () => {
+    // A forward enqueued before 0214 shipped — production holds one such row — has nothing to stamp.
+    // Refusing to forward it would strand a real walk over a read model it predates, so an UPDATE that
+    // matches zero rows is not a failure here.
+    const db = await seed();
+    const { fetchImpl } = makeScopeFetch();
+
+    await expect(
+      handleGlassesWalkthroughForward(await storedPayload(db), null, deps(makeClient(db), fetchImpl)),
+    ).resolves.toBeUndefined();
+    expect((await storedPayload(db)).scopeWalkthroughId).toBe("8f1c0a6e-1111-4222-8333-444455556666");
+  });
+
+  it("REGRESSION: a MALFORMED create-response id does not block the forward for ever", async () => {
+    // Nothing upstream constrains this value: `createScopeWalkthrough` takes `json.walkthrough.id` as
+    // any string. The stamp casts `$1::uuid`, so a non-uuid raises 22P02 — and because the stamp runs
+    // BEFORE the clip loop, the whole attempt fails, the retry re-derives the SAME id from its own
+    // checkpoint, and fails identically until the queue gives up. Not one clip is ever uploaded, and no
+    // retry can fix it, which is the difference from the transient failure the test below covers.
+    const db = await seed();
+    await seedWalkRow(db, DEAL_A);
+    const { fetchImpl, calls } = makeScopeFetch({ createBody: { walkthrough: { id: "not-a-uuid" } } });
+
+    await expect(
+      handleGlassesWalkthroughForward(await storedPayload(db), null, deps(makeClient(db), fetchImpl)),
+    ).resolves.toBeUndefined();
+
+    // The clips went, which is the job. The read model is what was given up.
+    expect(calls.some((call) => /\/clips$/.test(call.url))).toBe(true);
+    expect((await storedPayload(db)).scopeWalkthroughId).toBe("not-a-uuid");
+    expect(await storedScopeId(db, DEAL_A)).toBeNull();
+  });
+
+  it("REGRESSION: a MALFORMED INHERITED checkpoint id does not block the forward either", async () => {
+    // The other way in, and the likelier one: the checkpoint lives in jsonb, which holds anything, and a
+    // human reconciling a dead letter edits that payload by hand. This attempt skips the create entirely
+    // and goes straight to the stamp with a value nothing ever validated.
+    const db = await seed();
+    await seedWalkRow(db, DEAL_A);
+    const { fetchImpl, calls } = makeScopeFetch();
+    await db.query(
+      `UPDATE job_queue SET payload = jsonb_set(payload, '{scopeWalkthroughId}', '"repaired-by-hand"'::jsonb, true)`,
+    );
+
+    await expect(
+      handleGlassesWalkthroughForward(await storedPayload(db), null, deps(makeClient(db), fetchImpl)),
+    ).resolves.toBeUndefined();
+
+    // No create was re-issued (the checkpoint is honoured) and the clips still moved.
+    expect(calls.some((call) => call.url === CREATE_URL)).toBe(false);
+    expect(calls.some((call) => /\/clips$/.test(call.url))).toBe(true);
+    expect(await storedScopeId(db, DEAL_A)).toBeNull();
+  });
+
+  it("REGRESSION: a failed stamp fails the ATTEMPT before any clip bytes move", async () => {
+    // The stamp sits after the create block and before the clip loop precisely so failing it costs a retry
+    // and nothing else: the next attempt reads the id back out of the payload, skips the create, and lands
+    // on the stamp again. This also covers the deploy window — the worker does not run migrations, so a
+    // worker build can briefly outrun the API that creates the table.
+    const db = await seed();
+    await seedWalkRow(db, DEAL_A);
+    const { fetchImpl, calls } = makeScopeFetch();
+
+    await expect(
+      handleGlassesWalkthroughForward(
+        await storedPayload(db),
+        null,
+        deps(makeClient(db, /glasses_walkthroughs/), fetchImpl),
+      ),
+    ).rejects.toThrow();
+
+    // The create went out and IS checkpointed (so the retry will not buy a second scope extraction), but
+    // not one clip byte was uploaded.
+    expect((await storedPayload(db)).scopeWalkthroughId).toBe("8f1c0a6e-1111-4222-8333-444455556666");
+    expect(calls.some((call) => /\/clips$/.test(call.url))).toBe(false);
   });
 });
