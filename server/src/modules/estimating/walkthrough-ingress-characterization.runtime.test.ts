@@ -88,7 +88,9 @@ const WORKER_QUANTITY_GUARDS = [
   // 3. The claim re-checks BOTH facts in the WHERE, so a row that gained a quantity between the
   //    select and the write is not stamped and stranded by a concurrent run — and it pins the STATUS
   //    it observed, so a reviewer who approved or rejected the row in that window is not overwritten.
-  "is null",
+  // Names the COLUMN, not just the operator: a bare "is null" matches any nullable predicate that
+  // happens to be in the file and would keep passing after the quantity re-check was removed.
+  "estimateExtractions.quantity} is null",
   "= ${extraction.status}",
 ];
 

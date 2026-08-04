@@ -121,7 +121,10 @@ export async function updateEstimateExtraction(args: {
     throw new AppError(404, "Estimate extraction not found");
   }
 
-  const nextQuantity = args.input.quantity ?? existing.quantity;
+  // OMITTED IS NOT THE SAME AS NULL. `?? existing.quantity` collapsed the two: a caller explicitly
+  // clearing a quantity had the old value silently restored, so the field could not be emptied at all.
+  // `in` distinguishes "the request did not mention quantity" from "the request said null".
+  const nextQuantity = "quantity" in args.input ? args.input.quantity ?? null : existing.quantity;
 
   // SUPPLYING THE MISSING NUMBER MUST PUT THE ROW BACK IN THE QUEUE, or `needs_quantity` is a trap
   // rather than a flag.
@@ -166,8 +169,25 @@ export async function updateEstimateExtraction(args: {
       }),
       updatedAt: new Date(),
     })
-    .where(eq(estimateExtractions.id, args.extractionId))
+    // SCOPED BY DEAL, like its approve and reject siblings. The id alone was enough while the row was
+    // only read back for its own fields; it stopped being enough the moment `updated.status` is
+    // dereferenced below, because a mismatch now throws a TypeError where the siblings return a clean
+    // 404. `loadEstimateExtraction` already refused a foreign deal, so this is defence in depth rather
+    // than a hole being closed — but the two statements should not disagree about what they address.
+    .where(
+      and(
+        eq(estimateExtractions.id, args.extractionId),
+        eq(estimateExtractions.dealId, args.dealId)
+      )
+    )
     .returning();
+
+  // The locked read above makes this unreachable in practice: the row was found, and held, moments ago.
+  // Guarded anyway because the alternative is a TypeError on the next line, and "not found" is the
+  // answer the two sibling verbs already give for the same shape.
+  if (!updated) {
+    throw new AppError(404, "Estimate extraction not found");
+  }
 
   const reviewEvent = await insertReviewEvent(args.tenantDb, {
     dealId: args.dealId,

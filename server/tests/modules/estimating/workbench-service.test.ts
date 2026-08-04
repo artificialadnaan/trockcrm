@@ -189,6 +189,15 @@ describe("buildEstimatingWorkbenchState", () => {
           status: "unmatched",
           metadataJson: { sourceParseRunId: "run-2", activeArtifact: true },
         },
+        {
+          // A row the generation job parked awaiting a human-supplied quantity. Present so the bucket
+          // is exercised rather than merely declared: asserting a zero proves the key exists, not that
+          // anything is ever counted into it.
+          id: "ext-5",
+          documentId: "doc-2",
+          status: "needs_quantity",
+          metadataJson: { sourceParseRunId: "run-2", activeArtifact: true },
+        },
       ],
       matches: [
         { id: "match-1", extractionId: "ext-1", status: "suggested" },
@@ -236,7 +245,7 @@ describe("buildEstimatingWorkbenchState", () => {
         failed: 1,
       },
       extractions: {
-        total: 3,
+        total: 4,
         pending: 1,
         approved: 1,
         rejected: 0,
@@ -244,7 +253,7 @@ describe("buildEstimatingWorkbenchState", () => {
         // The bucket for rows parked awaiting a human-supplied quantity. Present and zero here rather
         // than absent, because the buckets are meant to reconcile with `total` — a state that exists
         // but is never reported is how the counts silently stopped adding up.
-        needsQuantity: 0,
+        needsQuantity: 1,
       },
       matches: {
         total: 2,
@@ -266,7 +275,7 @@ describe("buildEstimatingWorkbenchState", () => {
       generationRunIds: ["run-approved-active"],
     });
     expect(state.documents).toHaveLength(2);
-    expect(state.extractionRows).toHaveLength(3);
+    expect(state.extractionRows).toHaveLength(4);
     expect(state.matchRows).toHaveLength(2);
     expect(state.pricingRows).toHaveLength(2);
     expect(state.pricingRows.find((row) => row.id === "rec-1")?.recommendationOptions).toEqual([

@@ -562,6 +562,16 @@ export async function runEstimateGeneration(
 
       if (!lockedClient && typeof tenantDb.transaction === "function") {
         await tenantDb.transaction(async (tx: any) => {
+          // SET LOCAL FIRST, for the same reason the claim transaction above does it — and this call
+          // site is OLDER than that one, so the exposure predates the quantity work rather than being
+          // introduced by it. On the deal-wide path `tenantDb` wraps the shared pool and the earlier
+          // `SET search_path` ran as one statement on whichever connection served it; a transaction
+          // checks out its own, carrying the default path. Every write in this bundle would then
+          // address `public`, or another office's schema while several tenants have jobs in flight.
+          //
+          // LOCAL, so it reverts at transaction end rather than leaking the tenant onto a pooled
+          // connection some later, unrelated statement borrows.
+          await tx.execute(sql.raw(`SET LOCAL search_path TO ${schemaName}, public`));
           await persistPricingRecommendationBundle({
             tenantDb: tx,
             generationRunId,

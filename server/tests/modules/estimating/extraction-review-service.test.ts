@@ -20,7 +20,14 @@ describe("extraction-review-service", () => {
     const updateSetCalls: any[] = [];
     const updateSet = vi.fn((values: any) => {
       updateSetCalls.push(values);
-      return { where: vi.fn(() => ({ returning: vi.fn().mockResolvedValue([{ id: existing.id }]) })) };
+      return {
+        where: vi.fn(() => ({
+          // A CONCRETE status, because the event asserts what the row BECAME. Returning only an id let
+          // the afterJson assertion pass on presence alone, which would survive the CASE resolving to
+          // the wrong value.
+          returning: vi.fn().mockResolvedValue([{ id: existing.id, status: "pending" }]),
+        })),
+      };
     });
     const eventValues: any[] = [];
     const tenantDb = {
@@ -75,7 +82,7 @@ describe("extraction-review-service", () => {
     // priced again. `after` is read off the UPDATED row because the reset is a SQL CASE resolved under
     // the row lock — the database is the only thing that knows what it became.
     expect(eventValues[0].beforeJson.status).toBe("needs_quantity");
-    expect("status" in eventValues[0].afterJson).toBe(true);
+    expect(eventValues[0].afterJson.status).toBe("pending");
   });
 
   it("does NOT requeue while the quantity is still missing", async () => {
