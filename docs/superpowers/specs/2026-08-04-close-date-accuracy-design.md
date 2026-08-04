@@ -452,24 +452,30 @@ Two conventions govern this whole section, both defined once in §4 and referenc
   as the CRM stage. Using `pipeline_stage_config.is_terminal = false` instead would classify a Bid-Board
   deal already won or lost in the mirror as an open deal with a rotting forecast, and charge its rep for a
   coverage failure on a deal that has closed.
-- **"The date" means `state_at(deal, T)`** (§4.0.3), never the raw `expected_close_date` column. The state
-  distinguishes a rep's date from a machine's, from a deliberate clear, from no record at all — and those
-  four cases belong in four different buckets.
+- **"The date" for any *current-open* bucket means `cov_state` / `cov_prediction`** (§4.1) — the
+  provenance-**resolved** pair, never the raw column and never the pre-resolution `pnow_state`. The state
+  distinguishes a rep's date from a machine's, from a deliberate clear, from no record at all, and those
+  four cases belong in four different buckets. Keying some buckets on `pnow_state` and others on
+  `cov_state` splits one population in two: an audit-gap deal with a past raw date resolves to
+  `rep_prediction` and lands in `at_risk_n`, while a `pnow_state`-keyed overdue bucket would call the same
+  deal undated and omit it from `overdue_open_n` — the numerator/denominator class one layer up. Historical
+  anchors (P₃₀, P_final) still use their own `p30_*` / `pfinal_*` state; resolution applies to *now* only,
+  for the reason given in §4.1.
 
 Every deal in scope lands in exactly one bucket:
 
 1. **Landed** — Won or Lost with a usable outcome date (`D_landed`). Contributes to hit rate and error
    statistics *if* it also carried a usable rep prediction — `D_score`, defined in §4.2.
-2. **Overdue-open** — open, `pnow_state = 'rep_prediction'`, prediction earlier than business today. The
+2. **Overdue-open** — open, `cov_state = 'rep_prediction'`, `cov_prediction` earlier than business today. The
    error is **right-censored**: at least `today − prediction` days, and it will only grow. Own columns
    (`overdue_open_n`, `median_days_overdue`), **never** folded into the landed mean — doing so would let a
    rep improve their average by leaving deals open — and never counted as hits.
-3. **Undated-open** — open, `pnow_state ∈ {cleared, no_event}`. Not an error; a **coverage** failure.
-4. **Parked-open** — open, `pnow_state = 'rep_prediction'`, prediction more than 90 days out (§4.1). Not
+3. **Undated-open** — open, `cov_state ∈ {cleared, no_event}`. Not an error; a **coverage** failure.
+4. **Parked-open** — open, `cov_state = 'rep_prediction'`, `cov_prediction` more than 90 days out (§4.1). Not
    yet judgeable *and* not covered: a date beyond the platform's own hold horizon forecasts nothing.
-5. **Live-open** — open, `pnow_state = 'rep_prediction'`, prediction between today and +90 days. Counted in
+5. **Live-open** — open, `cov_state = 'rep_prediction'`, `cov_prediction` between today and +90 days. Counted in
    coverage favourably, excluded from error metrics until it lands.
-6. **Machine-dated open** — open, `pnow_state = 'machine'`. Held out of the coverage rate entirely
+6. **Machine-dated open** — open, `cov_state = 'machine'`. Held out of the coverage rate entirely
    (§4.1): the standing value is not the rep's, so it can neither credit nor charge them.
 7. **Terminal-no-date** — won or lost with no usable outcome date (`D_nodate`, §4.0.5). Not scoreable and
    not open; surfaced as a diagnostic so the drop is visible rather than silent.
@@ -650,12 +656,46 @@ Postgres is **transaction-stable**: two writes to the same deal inside one trans
 `BIGSERIAL PRIMARY KEY` in both the public and tenant definitions (`0001_initial.sql:731`,
 `0032_ensure_tenant_audit_log.sql:12` and `:50`), so it is always available as a tie-breaker.
 
-Precisely what the tie-breaker buys, stated honestly: **determinism always, and insertion order in the case
-that matters.** Identical `changed_at` implies the same transaction, and within one transaction the
-sequence is drawn in insertion order, so `id` is the true ordering. Across *different* transactions `id`
-can interleave with commit order — but then `changed_at` differs and is the primary key of the sort, so it
-decides. The residual case (two concurrent transactions with a `NOW()` collision) is resolved
-arbitrarily-but-repeatably, which is all that is required: `state_at` must be a function.
+**Correction (round 10): `changed_at` must not be the primary sort key at all, and an earlier draft of this
+paragraph claimed a guarantee it does not have.**
+
+`NOW()` is **transaction-start** time, not statement time. Two overlapping requests can therefore commit in
+one order while carrying `changed_at` values in the *opposite* order:
+
+| | begins | writes | `changed_at` | `audit_log_id` |
+|---|---|---|---|---|
+| Txn A | 10:00:00 | 10:00:05 | **10:00:00** | 500 |
+| Txn B | 10:00:02 | 10:00:03 | **10:00:02** | 499 |
+
+B wrote first and A wrote last, so A holds the final value — but `ORDER BY changed_at DESC` picks **B**,
+and the `audit_log_id` tie-breaker never engages because the timestamps are not tied. The earlier claim
+that the tie-breaker delivers "insertion order in the case that matters" was exactly backwards: this
+concurrent-overlap case *is* the case that matters, and it is the one `changed_at` gets wrong.
+
+**Decision: order same-deal state by `audit_log_id` alone.**
+
+```sql
+ORDER BY t.audit_log_id DESC     -- NOT changed_at; see above
+```
+
+Why `audit_log_id` is faithful here specifically: the trigger's INSERT fires as part of the `UPDATE` on
+`deals`, and concurrent updates to the **same deal row** are serialised by Postgres's row lock — the second
+writer blocks until the first commits, then writes. So for one deal the trigger inserts occur in true write
+order, and a `BIGSERIAL` drawn at insert time records that order. This depends on the sequence not being
+cached; `BIGSERIAL` defaults to `CACHE 1`, so values are handed out in request order (verified against
+`0001_initial.sql:731` and `0032_ensure_tenant_audit_log.sql:12`, both plain `BIGSERIAL PRIMARY KEY`).
+A cached sequence would break it, so do not add `CACHE > 1` to that sequence.
+
+`changed_at` is still used for the **anchor bound** (`< business_day_end_exclusive(...)`), where an error of
+seconds is immaterial except for an event written within seconds of midnight in a long transaction. That
+residual exposure is accepted and recorded rather than engineered away.
+
+**The thorough fix is a trigger change, and it is deliberately out of scope.** Stamping
+`clock_timestamp()` instead of `NOW()` in `audit_trigger_func()` would make `changed_at` a true statement
+time. But that function is shared by **eight** audited tables (`deals`, `contacts`, `change_orders`,
+`deal_approvals`, `emails`, `activities`, `files`, `tasks` — `0001_initial.sql:757-808`), it would need a
+migration replayed per tenant, and it would leave every historical row on the old semantics, so the
+ordering rule above is still required for existing data. Recorded as a follow-up in §7, not adopted here.
 
 #### 4.0.2 The classifier — the single place provenance is decided
 
@@ -764,7 +804,7 @@ LEFT JOIN LATERAL (
   FROM close_date_timeline t
   WHERE t.deal_id = o.deal_id
     AND t.changed_at < <T_exclusive_upper_bound>
-  ORDER BY t.changed_at DESC, t.audit_log_id DESC   -- total order; see §4.0.1
+  ORDER BY t.audit_log_id DESC          -- write order, NOT changed_at; see §4.0.1
   LIMIT 1
 ) p ON TRUE
 ```
@@ -830,11 +870,17 @@ p30 = CASE
       END
 ```
 
-The "earliest event" arm needs the same total order as `state_at`, in the other direction:
+The "earliest event" arm needs the same order as `state_at`, in the other direction — **and the same
+outcome cap.** `expected_close_date` stays editable after a deal closes (§4.0.5), so an uncapped
+earliest-event lookup can return a post-close cleanup edit and make a genuinely no-prediction deal
+scoreable. `E` was capped at the outcome for churn in round 5b; that cap did not reach this lookup:
 
 ```sql
-ORDER BY t.changed_at ASC, t.audit_log_id ASC
+WHERE t.deal_id = o.deal_id
+  AND t.changed_at < business_day_end_exclusive(o.outcome_date)   -- no post-close edit may become P30
+ORDER BY t.audit_log_id ASC           -- write order, NOT changed_at; see §4.0.1
 LIMIT 1
+-- no row -> 'no_event'. A deal whose only close-date write came after it closed never had a prediction.
 ```
 
 A deal created and forecast twice within one transaction would otherwise resolve its *first* prediction
@@ -919,11 +965,12 @@ It excludes only **stored** `on_hold` deals — the far-out auto-park leg is del
 | `D_landed` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NOT NULL` ∩ `outcome_date BETWEEN from AND to` (both inclusive) | period |
 | `D_nodate` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NULL` | — |
 | `D_open` | `D` ∩ `outcome_kind = 'open'` | **today** (see below) |
+| `D_reopened` | `D` ∩ `outcome_kind = 'open'` ∩ a `deal_stage_history` row into a Won or Lost stage with `created_at` inside `[from, to]` | period |
 | `D_outside` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NOT NULL` ∩ `outcome_date` **outside** `[from, to]` — before `from` **or** after `to` | out of period |
 | `D_book` | `D_landed ∪ D_open` — the rep's book *for this period*. Denominator for churn rates. | mixed, stated |
 | `D_score` | `D_landed` ∩ `p30_state = 'rep_prediction'` ∩ P₃₀ not parked-at-write (§6.2) | period |
 | `D_score_final` | `D_landed` ∩ `pfinal_state = 'rep_prediction'` ∩ P_final not parked-at-write | period |
-| `D_cov` | `D_open` ∩ `pnow_state NOT IN ('machine')`, with `provenance_unknown` folded in as rep-authored (§4.1) | today |
+| `D_cov` | `D_open` ∩ `cov_state <> 'machine'` ∩ **not in `D_reopened`**, with `provenance_unknown` folded in as rep-authored (§4.1) | today |
 | `E` | Events in `close_date_timeline` on deals in `D_book`, `source = 'rep'`, `changed_at < event_window_end(deal)` | per-deal, see below |
 
 **On `D_landed`'s period bounds:** `outcome_date` is a `DATE`, and `getWtdPeriod` returns `from`/`to` as
@@ -942,7 +989,22 @@ so the test pinning it would fail on the first realistic dataset — or, worse, 
 test rather than name the population. `D_outside` is excluded from every metric; it exists so the partition
 closes and the invariant is true as written.
 
-`D_landed ⊎ D_open ⊎ D_nodate ⊎ D_outside = D` — a four-way partition.
+**`D_reopened` is carved out of `D_open`, and it is a diagnostic, not a silent reclassification.** A deal
+won or lost *inside* the period and later reopened has no terminal stage today, and `stage-change.ts:357-362`
+clears `actual_close_date`, `won_closed_date`, `lost_at` and the lost-reason fields on any terminal change
+or reopen. So the §4.0.5 CASE classifies it `open` and its landing vanishes from the period's landed and
+error columns — a rep's closed deal disappearing from their record, exactly the class of quiet wrong this
+document exists to prevent.
+
+v1 does **not** reconstruct the outcome date from history: `won_closed_date` is gone, and
+`deal_stage_history.created_at` is a different basis from the canonical Won date (§1.8), so folding it into
+`D_landed` would put those deals on a second, unreconciled Won basis. Instead the deal is *detected* — the
+stage-history row into a Won/Lost stage survives the reopen — reported as `reopened_after_landing_n`, and
+**excluded from `D_cov`** so it is not silently counted as an ordinary open deal with a forecast obligation
+either. Reconstructing landed outcomes for reopened deals is a stated §7 follow-up.
+
+`D_landed ⊎ D_open ⊎ D_nodate ⊎ D_outside = D`, with `D_reopened ⊂ D_open` reported separately — a four-way
+partition plus one carve-out.
 
 **The name is `D_outside`, not `D_prior`.** `D` reflects current row state, so for any completed-period
 view ("last week", "last month") the set contains deals that closed *after* `to` as well as before
@@ -1013,6 +1075,7 @@ here. Adding a metric without adding a row is the defect re-entering.**
 | `mirror_terminal_no_date_n` | 4.0.5 | **`D_nodate`** | — | Diagnostic |
 | `bid_board_owned_n` | 2.5(c) | `D_book` | — | Diagnostic |
 | `out_of_period_landed_n` | 4.0.5 | `D_outside` | — | Diagnostic; excluded from every other metric |
+| `reopened_after_landing_n` | 4.0.5 | `D_reopened` | — | Diagnostic; carved out of `D_cov` |
 | `provenance_unknown_n` | 4.0.6 | `D_open` with a non-null `expected_close_date` but `pnow_state = 'no_event'` | — | Integrity diagnostic |
 
 `provenance_unknown_n` is computed inside the **coverage provenance-resolution block** (§4.1), the single
@@ -1046,9 +1109,11 @@ Invariants to pin as tests — they are the point of the table:
   `business_day_end_exclusive(d)` (§4.0.3) for an upper bound and
   `(<ts> AT TIME ZONE 'America/Chicago')::date` for a cast. A day-boundary error is invisible in test data
   seeded at midday and appears in production only for evening edits.
-- **Every "latest" or "earliest" selection needs a total order.** `changed_at` alone is not one: `NOW()` is
-  transaction-stable, so same-transaction writes tie (§4.0.1). Always append `audit_log_id` in the matching
-  direction. A `LIMIT 1` over a non-total order is a query whose answer can change between runs.
+- **Order same-deal event lookups by `audit_log_id`, never by `changed_at`.** `NOW()` is transaction-start
+  time, so `changed_at` can invert the true write order for concurrent overlapping requests, and no
+  tie-breaker rescues it because the values are not tied (§4.0.1). `audit_log_id` is faithful because
+  row-level locking serialises same-deal writes. A `LIMIT 1` over any other order is a query whose answer
+  can be wrong, not merely unstable.
 - **State the precision you actually have.** `outcome_date` is a `DATE`; the data does not record what time
   a deal was won. Where a bound is derived from it, say in prose which end of the day is meant rather than
   letting `<` versus `<=` carry a definition the reader has to reverse-engineer.
@@ -1076,6 +1141,13 @@ column. The convention was implicit for three rounds; stated here because otherw
 
 **Derived scalars**, defined once here and consumed by name everywhere else:
 
+**Two blocks, not one — the row-level scalars come BEFORE `E`, the churn aggregates AFTER.** An earlier
+draft put all of these in a single block, which made the chain circular: `E` is filtered by
+`event_window_end`, while `deal_move_count` aggregates over `E`. Implemented literally, each needed the
+other. The split below is what makes the chain executable, and §4.0.7's table is ordered to match.
+
+**Block A — row-level scalars (before `E`; consume only `outcomes` and the state anchors):**
+
 ```sql
 -- Row-level predicates (per deal)
 open       = (outcome_kind = 'open')                                       -- §4.0.5, mirror-aware
@@ -1087,15 +1159,19 @@ in_d_cov   = (open AND cov_state <> 'machine')                             -- §
 signed_error_p30    = (outcome_date - p30_prediction)
 signed_error_pfinal = (outcome_date - pfinal_prediction)
 
--- Per-deal churn aggregates over that deal's rows in E. DISTINCT from the rep-level totals in §4.4/§4.5.
-deal_move_count       = count(*) FILTER (WHERE old_date IS NOT NULL AND new_date IS NOT NULL
-                                           AND new_date IS DISTINCT FROM old_date)
-deal_days_pushed_out  = COALESCE(sum(greatest(new_date - old_date, 0)), 0)
-
--- Per-deal event cutoff (§4.0.5)
+-- Per-deal event cutoff. Consumed by E's definition, so it MUST be available before E exists.
 event_window_end = CASE WHEN open THEN now()
                         ELSE business_day_end_exclusive(
                                COALESCE(outcome_date, terminal_entry_date)) END
+```
+
+**Block B — per-deal churn aggregates (after `E`; aggregate over it):**
+
+```sql
+-- DISTINCT from the rep-level totals in §4.4/§4.5 -- see the granularity note below.
+deal_move_count       = count(*) FILTER (WHERE old_date IS NOT NULL AND new_date IS NOT NULL
+                                           AND new_date IS DISTINCT FROM old_date)
+deal_days_pushed_out  = COALESCE(sum(greatest(new_date - old_date, 0)), 0)
 ```
 
 `signed_error_pfinal` and `landed` had **no definition at all** before this section; `signed_error_p30` was
@@ -1118,12 +1194,28 @@ column. Re-run this check whenever a name is added:
 | `outcomes` (§4.0.5) | `deal_id`, `rep_id`, `deal_created_at`, `outcome_kind`, `outcome_date`, **`terminal_entry_date`**, `bid_board_owned` | `deals.stage_entered_at`, `deals.bid_board_stage_entered_at`, `deals.created_at`, `deals.won_closed_date`, `deals.lost_at`, `deals.assigned_rep_id`, flags; `public.pipeline_stage_config.slug/is_terminal` |
 | `state_at` ×3 (§4.0.3) | `p30_state`, `p30_prediction`, `p30_changed_at`, `p30_source`; `pfinal_state`, `pfinal_prediction`, `pfinal_changed_at`, `pfinal_source`; `pnow_state`, `pnow_prediction`, `pnow_changed_at`, `pnow_source` — all `*_state` coalesced (§4.0.3) | `close_date_timeline`: `deal_id`, `changed_at`, **`audit_log_id`**, `source`, `new_date`; `outcomes.outcome_date` |
 | `coverage_resolution` (§4.1) | `cov_state`, `cov_prediction`, `is_provenance_unknown`, `cov_n` | `outcomes.deal_id`; `state_at(deal, now())`; **`deals.expected_close_date`** — the only block that joins `deals` for it, and the whole reason convention 10's exception is buildable |
-| Derived scalars (this section) | `open`, `landed`, `in_d_cov`, `signed_error_*`, `deal_move_count`, `deal_days_pushed_out`, `event_window_end` | `outcomes.*`, `cov_*`, `p30_*`, `pfinal_*`, `E` |
-| `E` (§4.0.6) | the event set for churn | `close_date_timeline` filtered by `source='rep'` and `event_window_end` |
+| Derived scalars **block A** (§4.0.7) | `open`, `landed`, `in_d_cov`, `signed_error_p30`, `signed_error_pfinal`, `p30_parked_at_write`, `pfinal_parked_at_write`, `event_window_end` | `outcomes.*`, `cov_state`, `cov_prediction`, `p30_*`, `pfinal_*` — deliberately nothing from the event set |
+| `E` (§4.0.5) | the event set for churn | `close_date_timeline`; `event_window_end` (block A) |
+| Derived scalars **block B** (§4.0.7) | `deal_move_count`, `deal_days_pushed_out` | `E` |
 | Metrics (§4.1–4.7) | the report columns | everything above, by name only |
 
 The `audit_log_id` row is bolded because it is the one that broke: §4.0.3 ordered by it while §4.0.2 did not
 project it. The table makes that a one-line check instead of a review finding.
+
+**The table's ordering is part of the check, and is verifiable from the table alone.**
+
+> **Ordering rule:** a block may consume only names produced by blocks **strictly above** it. Read top to
+> bottom, maintaining the set of names produced so far; every backticked name in a row's *Consumes* column
+> must already be in that set, be a real table (`audit_log`, `deals`, `pipeline_stage_config`,
+> `hubspot_refresh_log`) or one of its columns, or be a CTE named in an earlier *Block* cell. A row that
+> fails is a cycle or a forward reference.
+
+This rule is what the table was missing. An earlier version listed one combined "derived scalars" block
+that both produced `event_window_end` (consumed by `E`) and consumed `E` (for `deal_move_count`) — a cycle
+that no amount of reading the *contents* would reveal, because each individual entry looked correct. The
+table certified an ordering that cannot execute. Splitting into blocks A and B breaks the cycle, and the
+ordering rule makes the next one visible without needing to hold the whole chain in your head: a
+producer/consumer table whose row order is not itself checked is a list, not a dependency check.
 
 ### 4.1 Coverage rate
 
@@ -1420,8 +1512,8 @@ rate metrics now describe the same book, so a reader can compare them.
 
 `::numeric` on the numerator (§4.0.6).
 
-3 and 60 are proposals. Make them constants in one place so they can be tuned after the first real
-distribution is visible.
+`CHRONIC_MIN_MOVES = 3` and `CHRONIC_MIN_PUSHED_DAYS = 60` — both proposals, both in the §6.4 constants
+table so they can be re-tuned in one place once the first real distribution is visible.
 
 ### 4.7 Silent misses
 
@@ -1587,7 +1679,7 @@ it true. **A claim with no construct is not a claim — it is either implemented
 | 6.2c | Parked deals still count as churn | `E` filters on `source` and `event_window_end` only — no parked predicate | Adding a parked filter to `E` "for consistency" with §4.2 | ✅ |
 | 6.3a | Last-minute re-dating is visible, not hidden | P₃₀ anchored 30 days out (§4.0.3); `D_score` requires a P₃₀; the deal lands in `no_prediction_n` and depresses `scoreable_n` vs `landed_n` | Dropping the shortfall columns, leaving only a hit rate over a shrunken denominator | ✅ |
 | 6.3b | …and still shows a strong final call rather than vanishing | `D_score_final` is a separate population (§4.2) | Computing `hit_rate_14d_final` over `D_score` | ✅ |
-| 6.3c | A short-lived deal's fallback cannot be gamed by a late re-date | Fallback selects the **earliest** state, `ORDER BY changed_at ASC, audit_log_id ASC` (§4.0.4) | Reverting the fallback to `state_at(deal, outcome_date)`, i.e. the latest | ✅ |
+| 6.3c | A short-lived deal's fallback cannot be gamed by a late re-date | Fallback selects the **earliest** state, `ORDER BY audit_log_id ASC`, capped below the outcome boundary (§4.0.4) | Reverting to the latest state, or removing the outcome cap so a post-close edit becomes P₃₀ | ✅ |
 | 6.4 | **No rate ranks on fewer than `MIN_RANKED_SCOREABLE` underlying deals** | Every ranked rate gates on its own denominator count: `scoreable_n`, `scoreable_final_n`, `cov_n`; a **composite** gates on *all* its operands' denominators (§6.4) | A rate whose floor keys on a different population than its denominator — or a composite gated on neither operand | ✅ *(was ✗ — see below)* |
 | 6.5a | Clearing a date does not erase prior churn | `E` is not truncated at a clear; `clear_count` is its own counter | Capping `event_window_end` at the clear instead of the outcome | ✅ |
 | 6.5b | A cleared date does not keep counting as standing | `state_at` returns `'cleared'` from the latest event's NULL `new_date` (§4.0.3) | Adding `AND new_date IS NOT NULL` inside the `state_at` lateral | ✅ |
@@ -1715,6 +1807,29 @@ rep with a single scoreable-final deal who hit it could rank first on a one-deal
 failure, reintroduced by the very fix that made the metric correct. A floor that keys on a *different*
 population than the rate it guards is not a floor.
 
+**Every tunable in this document, with a value.** A named constant with no assigned value is the same
+failure as a claim with no construct: it reads as enforced and isn't, and an implementer must invent a
+number — for `MIN_RANKED_COVERAGE` they could reasonably pick 1 and recreate the one-open-deal ranking bug
+§6.4 exists to close.
+
+| Constant | Value | Used by | Source |
+|---|---|---|---|
+| `MIN_RANKED_SCOREABLE` | **5** | hit-rate, signed-error and churn ranking floors (§6.4) | proposed here; open question 5 |
+| `MIN_RANKED_COVERAGE` | **5** — deliberately the same number | `coverage_rate` and `forecast_reliability` floors (§6.4) | proposed here |
+| `CLOSE_TARGET_HOLD_HORIZON_DAYS` | **90** | parked tests (§4.1, §4.2, §6.2) | **imported** from `shared/src/types/deal-hold-risk.ts:137` — never redefine |
+| `TOLERANCE_DAYS` | **14** | `hit_rate_14d`, `silent_miss_n` (§2.3, §4.2) | proposed here; open question 1 |
+| `WIDE_TOLERANCE_DAYS` | **30** | `hit_rate_30d` (§2.3) | proposed here; open question 1 |
+| `STANDING_ANCHOR_DAYS` | **30** | the P₃₀ anchor and its fallback gate (§4.0.3, §4.0.4) | proposed here; open question 2 |
+| `CHRONIC_MIN_MOVES` | **3** | `chronic_mover` (§4.6) | proposed here |
+| `CHRONIC_MIN_PUSHED_DAYS` | **60** | `chronic_mover` (§4.6) | proposed here |
+
+`MIN_RANKED_COVERAGE` is set equal to `MIN_RANKED_SCOREABLE` rather than given an independent value: there
+is no evidence to justify two different thresholds, and one number is easier to defend and to re-tune. They
+are named separately because they gate different populations, so a future decision can move one without the
+other. Every value except the imported horizon is a **proposal**, and three of them are already open
+questions for the approver — the point of the table is that they are visible and tunable in one place, not
+that they are correct.
+
 Name the constant `MIN_RANKED_SCOREABLE = 5` and apply it as an explicit predicate on the ranked set, not
 as a rendering convention — §6.0 row 6.4 points at that predicate as the enforcing construct, and a floor
 that lives only in the UI is a floor that a CSV export or a second consumer silently ignores.
@@ -1778,9 +1893,10 @@ Ten NULL-capable columns, all previously exposed. The counts and the slip sums a
 **The signed-error columns have a second, different ranking hazard: they have no good end.** Sorting
 `median_signed_error_days DESC` puts the most optimistic rep first; `ASC` puts the most pessimistic first.
 Neither is "best" — best is *nearest zero*. A naive sort therefore ranks a rep who is 40 days pessimistic
-as the polar opposite of one who is 40 days optimistic, when they are equally inaccurate. **Rank on
-`abs(median_signed_error_days) ASC NULLS LAST` while displaying the signed value**, so the ordering means
-"most accurate first" and the sign still shows the direction of the bias. This is the one place the report
+as the polar opposite of one who is 40 days optimistic, when they are equally inaccurate. **Rank on `abs(<the sorted signed-error column>) ASC NULLS LAST` while displaying the signed value** — for
+`mean_signed_error_days`, `median_signed_error_days` **and** `p90_signed_error_days` alike, so the ordering
+means "most accurate first" on whichever one the user sorts. An earlier draft named the median alone, which
+left the other two ranking extreme pessimism ahead of near-zero accuracy. This is the one place the report
 sorts on a transform of what it displays, and the header must say so.
 
 ---
@@ -1848,6 +1964,7 @@ work or an omission, and there is no way to tell which from a list that only nam
 | `mirror_terminal_no_date_n` | Diag | `D_nodate` | 4.0.5 |
 | `bid_board_owned_n` | Diag | `D_book` | 2.5(c) |
 | `out_of_period_landed_n` | Diag | `D_outside` | 4.0.5 |
+| `reopened_after_landing_n` | Diag | `D_reopened` | 4.0.5 |
 | `provenance_unknown_n` | Diag | `D_open`, raw date with `pnow_state='no_event'` | 4.0.6 |
 
 `hit_rate_30d` and `p90_signed_error_days` are marked in bold because they were **missing from an earlier
@@ -1975,7 +2092,7 @@ must therefore be stated with its exceptions, and each was checked against the s
 | 14 §6 claims name constructs | §6.0 | Obeyed |
 | 15 no dangling identifiers | §4.0.7 producer/consumer chain | Obeyed — re-run after round 8; `coverage_resolution` added as a producer |
 | 16 fixes fully propagated | every round-8/9 change | **Still the dominant finding class** — 3 of 4 round-9 findings were round-8 fixes reaching some consumers and not others. Audits re-run after each round |
-| 17 audit rows state their falsifier | §6.0, §4.0.7 | Added round 9, after §6.0 certified a claim its own construct did not deliver |
+| 17 audit rows state their falsifier | §6.0, §4.0.7 | Added round 9; extended round 10 with §4.0.7's ordering rule after the chain table certified a cycle |
 
 **One companion decision v1 must make, not defer.** The existing Forecast Variance report publishes
 `avg_close_drift_days` — unsigned, Won-only, and structurally frozen since 2026-04-23 (§1.5). Shipping a
@@ -2074,7 +2191,7 @@ individual fix.
 | # | Was | Now |
 |---|---|---|
 | P1a | P_final defined as "the prediction held at the outcome instant", implemented as `changed_at < outcome_date` | `outcome_date` is a `DATE`, so the comparison meant midnight at the *start* of the closing day and excluded every same-day edit. Both P_final and P₃₀ are now defined as the state at the **end of** their business date, via an exclusive next-day bound, with the precision limitation stated in §2.1 rather than implied by an operator. |
-| P1b | `ORDER BY changed_at DESC ... LIMIT 1` | `NOW()` is transaction-stable, so same-transaction writes tie and `state_at` was not a function. `audit_log.id` (`BIGSERIAL`) is carried through the timeline and every lookup orders by `changed_at, audit_log_id`. |
+| P1b | `ORDER BY changed_at DESC ... LIMIT 1` | `NOW()` is transaction-stable, so same-transaction writes tie and `state_at` was not a function. `audit_log.id` (`BIGSERIAL`) is carried through the timeline. *(Superseded in round 10: the composite order was itself wrong — `changed_at` must not be a sort key at all.)* |
 | S1 | P₃₀ had the identical boundary defect | Fixed with the same helper — it was one bug at two anchors, not a P_final special case. |
 | S2 | `d.created_at > outcome_date - interval '30 days'` in the P₃₀ fallback | `timestamptz` against a bare date resolves in the *session* timezone. Rewritten with the explicit business-timezone bound. |
 | S3 | `p30_changed_at::date` in the parked-at-write test | Same session-timezone defect; an evening Chicago edit shifted the horizon a day. Now `(… AT TIME ZONE 'America/Chicago')::date`. |
@@ -2092,6 +2209,18 @@ complement of `futureDatedCloseDatePredicateSql`'s `>= today` (`foundations.ts:4
 `>` matches `closeTargetFarOutSqlPredicate` (`deal-reporting.ts:137`), so a deal exactly 90 days out is
 unparked in both. One ordering — `percentile_cont`'s `WITHIN GROUP` — deliberately needs no tie-breaker,
 and §4.3 now says why.
+
+**Round 10 (a chain that cannot execute, and an ordering guarantee that was false)**
+
+| # | Was | Now |
+|---|---|---|
+| 1 | The derived-scalar block produced `event_window_end` (consumed by `E`) *and* consumed `E` (for `deal_move_count`) | A **cycle**: each needed the other. Split into block A (row-level, before `E`) and block B (churn aggregates, after `E`). §4.0.7 certified an ordering that cannot execute — a producer/consumer table whose row order is not itself checked is a list, not a dependency check. Added an explicit **ordering rule** verifiable from the table alone. |
+| 2 | `ORDER BY changed_at DESC, audit_log_id DESC` | `NOW()` is transaction-**start** time, so overlapping requests can commit in one order and carry `changed_at` in the opposite order — the sort then picks the stale event and the tie-breaker never engages, because the timestamps are not tied. Round 5's claim that it bought "insertion order in the case that matters" was backwards: this *is* that case. Now `ORDER BY audit_log_id` alone, which is faithful because row locks serialise same-deal writes. |
+| 3 | The short-lived P₃₀ fallback had no outcome cap | A post-close cleanup edit could become P₃₀ and make a no-prediction deal scoreable. `E` was capped at the outcome in round 5b; the cap did not reach this lookup. |
+| 4 | Open buckets keyed on pre-resolution `pnow_state` | An audit-gap deal with a past raw date resolves to `rep_prediction` → `at_risk_n`, while a `pnow_state`-keyed overdue bucket called the same deal undated and omitted it from `overdue_open_n`. All current-open buckets now key on `cov_state` / `cov_prediction`. |
+| 5 | A deal won/lost in-period then reopened silently became "open" | The terminal date fields are cleared on reopen (`stage-change.ts:357-362`), so the landing vanished from the rep's record. Now detected via stage history, reported as `reopened_after_landing_n`, and carved out of `D_cov`. v1 does not reconstruct the outcome date — that would put those deals on a second, unreconciled Won basis. |
+| 6 | `MIN_RANKED_COVERAGE` was named but never assigned | A constant with no value is a claim with no construct. Full constants table added: all eight tunables with values, users and sources. Four were previously unnamed literals (14, 30, 3, 60). |
+| 7 | `abs()` sort prescribed for `median_signed_error_days` only | §6.6 identified all signed-error columns as hazards; mean and p90 would still rank extreme pessimism first. Now specified for every signed-error sort. |
 
 **Round 9 (an audit that certified itself, plus three more propagation misses)**
 
@@ -2198,6 +2327,19 @@ were themselves silently broken**, because `NOT <nullable>` inside `FILTER` coun
 failing loudly. A check that can fail open is not a check. That is why the state enum is coalesced and
 non-null by construction, and why "never negate a nullable" is now a stated SQL rule (§4.0.6) rather than
 something to remember at each site.
+
+**Round 10's lesson: a check can be structurally sound and still not check anything.** §4.0.7 listed the
+right blocks with the right contents and certified a chain that cannot run, because *row order* was never
+part of what it verified. Every individual cell was correct. The fix was not more care but a rule that
+makes the table's own ordering falsifiable — read top to bottom, and every consumed name must already have
+appeared. Round 9 made the enforcement table checkable against the text; round 10 had to do the same for
+the dependency table, which had exactly the same flaw one level down.
+
+The other half of the round is a guarantee I asserted and did not have. I wrote that `audit_log_id` bought
+"determinism always, and insertion order in the case that matters" — and the case that matters is
+concurrent overlapping writes, which is precisely where a transaction-start timestamp inverts the order and
+a secondary key never engages. Stating a guarantee more confidently than the mechanism supports is the same
+failure as a false ✅, in prose rather than in a table.
 
 **Round 9's lesson: an audit is not exempt from being audited.** §6.0 was built to make unenforced claims
 visible and its own guarantee is *"a claim with no construct is not a claim"* — yet it shipped a row marked
