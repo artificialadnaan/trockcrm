@@ -1,6 +1,11 @@
+// @vitest-environment jsdom
 import { describe, expect, it, vi } from "vitest";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
+
+(globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 vi.mock("@/components/reports/report-filter-bar", () => ({
   ReportFilterBar: () => <div>Report Filters</div>,
@@ -137,6 +142,82 @@ function htmlFor(entry = "/reports/performance/daily-activity-log") {
     </MemoryRouter>
   ).replace(/\s+/g, " ");
 }
+
+/** Mounts the page for real (jsdom) so chip clicks run the actual handlers and rewrite the URL. */
+function mountLog(initialEntry: string) {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  function LocationProbe() {
+    const location = useLocation();
+    return <span data-testid="search">{location.search}</span>;
+  }
+  act(() => {
+    root.render(
+      <MemoryRouter initialEntries={[initialEntry]}>
+        <DailyActivityLogPage />
+        <LocationProbe />
+      </MemoryRouter>
+    );
+  });
+  return {
+    search: () => container.querySelector("[data-testid='search']")?.textContent ?? "",
+    clickChip(label: string) {
+      const chip = Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent?.trim() === label
+      );
+      if (!chip) throw new Error(`chip not found: ${label}`);
+      act(() => {
+        chip.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+    },
+    cleanup() {
+      act(() => root.unmount());
+      container.remove();
+    },
+  };
+}
+
+describe("DailyActivityLogPage paging staleness", () => {
+  // Same failure mode as the shared filter bar: a page offset that outlives a filter change points at
+  // the wrong slice of a different result set, and because the rows are real nothing looks broken.
+  it("drops a stale page when a type chip is toggled", () => {
+    const page = mountLog("/reports/performance/daily-activity-log?page=2&dateFrom=2026-06-01");
+    try {
+      expect(page.search()).toContain("page=2");
+      page.clickChip("Note");
+      expect(page.search()).toContain("types=note");
+      expect(page.search()).not.toContain("page=");
+      // An unrelated param the page did not touch must survive.
+      expect(page.search()).toContain("dateFrom=2026-06-01");
+    } finally {
+      page.cleanup();
+    }
+  });
+
+  it("drops a stale page when the type filter is cleared via All types", () => {
+    const page = mountLog("/reports/performance/daily-activity-log?page=4&types=note");
+    try {
+      page.clickChip("All types");
+      expect(page.search()).not.toContain("page=");
+      expect(page.search()).not.toContain("types=");
+    } finally {
+      page.cleanup();
+    }
+  });
+
+  it("keeps the page param when only paging", () => {
+    // The reset must be scoped to FILTER changes -- Next/Previous obviously has to set it.
+    const page = mountLog("/reports/performance/daily-activity-log?types=note");
+    try {
+      page.clickChip("Next");
+      expect(page.search()).toContain("page=2");
+      expect(page.search()).toContain("types=note");
+    } finally {
+      page.cleanup();
+    }
+  });
+});
 
 describe("DailyActivityLogPage", () => {
   it("renders the log shell, filters, KPIs and the type filter", () => {
