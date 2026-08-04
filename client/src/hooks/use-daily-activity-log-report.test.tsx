@@ -8,6 +8,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
+import { MemoryRouter, useSearchParams } from "react-router-dom";
 
 type Deferred = { url: string; resolve: (value: unknown) => void; reject: (err: unknown) => void };
 const pending: Deferred[] = [];
@@ -21,7 +22,7 @@ vi.mock("@/lib/api", () => ({
   ),
 }));
 
-const { useDailyActivityLogReport } = await import("./use-reports");
+const { useDailyActivityLogReport, useRepActivityReport } = await import("./use-reports");
 
 function payload(tag: string) {
   return {
@@ -34,16 +35,29 @@ function payload(tag: string) {
   };
 }
 
-async function renderLog() {
+// The hook reads ?officeId (the app-level cross-office scope) via useSearchParams, so it has to run
+// inside a router. setParams is captured from the live tree so a test can change the URL WITHOUT
+// remounting — a remount would refetch trivially and prove nothing about the dependency key.
+async function renderLog(initialEntry = "/reports/performance/daily-activity-log") {
   const container = document.createElement("div");
   const root = createRoot(container);
   let current: ReturnType<typeof useDailyActivityLogReport>;
+  let setParams: ReturnType<typeof useSearchParams>[1];
   function Probe({ types }: { types: string[] }) {
+    const [, setSearchParams] = useSearchParams();
+    setParams = setSearchParams;
     current = useDailyActivityLogReport({ dateFrom: "2026-06-01", dateTo: "2026-06-30", types });
     return null;
   }
+  function Tree({ types }: { types: string[] }) {
+    return createElement(
+      MemoryRouter,
+      { initialEntries: [initialEntry] },
+      createElement(Probe, { types })
+    );
+  }
   await act(async () => {
-    root.render(createElement(Probe, { types: [] }));
+    root.render(createElement(Tree, { types: [] }));
   });
   return {
     get current() {
@@ -51,7 +65,13 @@ async function renderLog() {
     },
     async rerender(types: string[]) {
       await act(async () => {
-        root.render(createElement(Probe, { types }));
+        root.render(createElement(Tree, { types }));
+      });
+    },
+    /** Change the app-level office scope in place, as the office switcher does. */
+    async setOffice(officeId: string) {
+      await act(async () => {
+        setParams(new URLSearchParams({ officeId }));
       });
     },
   };
@@ -59,6 +79,102 @@ async function renderLog() {
 
 beforeEach(() => {
   pending.length = 0;
+});
+
+describe("useDailyActivityLogReport office scope", () => {
+  // ?officeId never reaches the hook's options — api() reads it off window.location and sends it as
+  // x-office-id. Leaving it out of the dependency key meant switching office re-rendered the page
+  // (so deal links immediately pointed at the NEW office) without refetching, so the rows on screen
+  // still belonged to the PREVIOUS office. Every row then linked somewhere it did not belong.
+  it("refetches when the app-level office scope changes and shows the NEW office's rows", async () => {
+    const hook = await renderLog("/reports/performance/daily-activity-log?officeId=office-a");
+    expect(pending).toHaveLength(1);
+
+    await act(async () => {
+      pending[0].resolve(payload("office-a-rows"));
+    });
+    expect(hook.current.data?.appliedTypes).toEqual(["office-a-rows"]);
+
+    // Switch office in place — no remount, exactly what the office switcher does.
+    await hook.setOffice("office-b");
+
+    // A second request must actually have been issued...
+    expect(pending).toHaveLength(2);
+
+    await act(async () => {
+      pending[1].resolve(payload("office-b-rows"));
+    });
+
+    // ...and the DISPLAYED data must come from it. Asserting only that the URL changed would pass
+    // while the bug was live, which is the exact shape of the bug.
+    expect(hook.current.data?.appliedTypes).toEqual(["office-b-rows"]);
+  });
+
+  it("does not leave the previous office's rows visible if the new request is still pending", async () => {
+    const hook = await renderLog("/reports/performance/daily-activity-log?officeId=office-a");
+    await act(async () => {
+      pending[0].resolve(payload("office-a-rows"));
+    });
+    expect(hook.current.data?.appliedTypes).toEqual(["office-a-rows"]);
+
+    await hook.setOffice("office-b");
+
+    // While office B is in flight the report must read as loading rather than presenting office A's
+    // rows as if they belonged to office B.
+    expect(hook.current.loading).toBe(true);
+  });
+});
+
+describe("usePerformanceReport office scope (shared by 3 sibling reports)", () => {
+  // The same gap existed in usePerformanceReport, which backs Director Scorecard, Rep Activity and
+  // Forecast Accuracy. The fix lives in that shared hook, so it needs its own guard — otherwise a
+  // future edit could restore the bug for all three while the Daily Activity Log tests stayed green.
+  // Rep Activity stands in for the three; they share one code path.
+  async function renderRepActivity(initialEntry: string) {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    let current: ReturnType<typeof useRepActivityReport>;
+    let setParams: ReturnType<typeof useSearchParams>[1];
+    function Probe() {
+      const [, setSearchParams] = useSearchParams();
+      setParams = setSearchParams;
+      current = useRepActivityReport({ dateFrom: "2026-06-01", dateTo: "2026-06-30" });
+      return null;
+    }
+    await act(async () => {
+      root.render(
+        createElement(MemoryRouter, { initialEntries: [initialEntry] }, createElement(Probe))
+      );
+    });
+    return {
+      get current() {
+        return current;
+      },
+      async setOffice(officeId: string) {
+        await act(async () => {
+          setParams(new URLSearchParams({ officeId }));
+        });
+      },
+    };
+  }
+
+  it("refetches Rep Activity when the office scope changes", async () => {
+    const hook = await renderRepActivity("/reports/performance/rep-activity?officeId=office-a");
+    expect(pending).toHaveLength(1);
+
+    await act(async () => {
+      pending[0].resolve({ data: { kpis: { totalTouchpoints: 11 } } });
+    });
+    expect((hook.current.data as { kpis: { totalTouchpoints: number } } | null)?.kpis.totalTouchpoints).toBe(11);
+
+    await hook.setOffice("office-b");
+    expect(pending).toHaveLength(2);
+
+    await act(async () => {
+      pending[1].resolve({ data: { kpis: { totalTouchpoints: 22 } } });
+    });
+    expect((hook.current.data as { kpis: { totalTouchpoints: number } } | null)?.kpis.totalTouchpoints).toBe(22);
+  });
 });
 
 describe("useDailyActivityLogReport superseded responses", () => {

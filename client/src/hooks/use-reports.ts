@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api } from "@/lib/api";
 import type {
   MondayShowcaseData,
@@ -1344,6 +1345,26 @@ function appendPerformanceReportQueryOptions(params: URLSearchParams, options: P
   if (options.ownerNames?.length) params.set("ownerNames", options.ownerNames.join(","));
 }
 
+/**
+ * The app-level cross-office scope (?officeId) as a dependency key.
+ *
+ * This is an INVISIBLE input to every report request: api() reads ?officeId straight off
+ * window.location at call time and sends it as the x-office-id header, so it never appears in a
+ * hook's options object and is trivially left out of a dependency array. When that happens the
+ * symptom is nasty rather than obvious — switching office re-renders the page (so links and headers
+ * pick up the new office) but does NOT refetch, leaving the PREVIOUS office's rows on screen now
+ * presented under, and linking into, the new office.
+ *
+ * Any hook whose request goes through api() must therefore include this in its deps, the same way it
+ * includes the filters it passes explicitly. Reading it here rather than making every caller thread
+ * it keeps the implicit input handled in one place. (EstimatorPipelinePage solves the same problem by
+ * hand with an `officeScopeKey` prop; this is that idea made reusable.)
+ */
+function useOfficeScopeKey() {
+  const [searchParams] = useSearchParams();
+  return searchParams.get("officeId") ?? "";
+}
+
 function performanceDeps(options: PerformanceReportQueryOptions) {
   return [
     options.dateFrom,
@@ -1366,6 +1387,9 @@ function usePerformanceReport<T>(path: string, options: PerformanceReportQueryOp
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const deps = performanceDeps(options);
+  // Shared with the Director Scorecard, Rep Activity and Forecast Accuracy reports: all three used to
+  // keep the previous office's rows after a scope switch, for the reason described on useOfficeScopeKey.
+  const officeScopeKey = useOfficeScopeKey();
 
   const fetchReport = useCallback(async () => {
     setLoading(true);
@@ -1379,7 +1403,7 @@ function usePerformanceReport<T>(path: string, options: PerformanceReportQueryOp
     } finally {
       setLoading(false);
     }
-  }, [path, errorMessage, ...deps]);
+  }, [path, errorMessage, officeScopeKey, ...deps]);
 
   useEffect(() => {
     fetchReport();
@@ -1414,6 +1438,10 @@ export function useDailyActivityLogReport(options: DailyActivityLogQueryOptions 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const typeKey = options.types?.join(",") ?? "";
+  // ?officeId is an implicit input via api()'s x-office-id header (see useOfficeScopeKey). Without it
+  // in the deps, switching office left the PREVIOUS office's entries on screen while dealHref had
+  // already switched to the new office — every row then linked somewhere it did not belong.
+  const officeScopeKey = useOfficeScopeKey();
   // Monotonic request id -- the same guard useMondayShowcase uses. This report has MANY controls that
   // can fire in quick succession (13 type chips, paging, owner/office/date), so a slower earlier
   // response can land after a newer one and repaint the page with the previous filter's entries. Only
@@ -1451,6 +1479,7 @@ export function useDailyActivityLogReport(options: DailyActivityLogQueryOptions 
     typeKey,
     options.page,
     options.limit,
+    officeScopeKey,
   ]);
 
   useEffect(() => {
