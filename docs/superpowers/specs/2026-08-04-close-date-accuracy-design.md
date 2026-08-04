@@ -907,8 +907,8 @@ the other.
 during the P₃₀ business date, carrying no close date, and first forecast after that day ended would slip
 through: it demonstrably existed at the anchor with no prediction — precisely the `no_event` case — yet
 the fallback fired and promoted the late forecast. Both arms use the identical
-`business_day_end_exclusive(outcome_date - 30)` expression; two spellings of "the anchor" is how the
-off-by-one got in.
+`business_day_end_exclusive(outcome_date - STANDING_ANCHOR_DAYS)` expression; two spellings of "the
+anchor" is how the off-by-one got in.
 
 #### 4.0.5 Outcomes and populations
 
@@ -967,9 +967,26 @@ outcomes AS (
              -- this rule to THIS column. Do not mix a bare `>= :from` with a converted upper bound.
              AND (h.created_at AT TIME ZONE 'America/Chicago')::date >= :from::date
              AND (h.created_at AT TIME ZONE 'America/Chicago')::date <= :to::date
+           -- ...AND a later row moving OUT of a terminal stage. This is the positive evidence that a
+           -- REOPEN happened. Without it the predicate proved only "landed in-window, and the landing
+           -- is missing from D_landed", which a NULL outcome_date or a corrected out-of-window date
+           -- also satisfies -- misreporting a data-quality problem as a workflow event, in a
+           -- diagnostic people act on.
+           AND EXISTS (
+             SELECT 1
+             FROM deal_stage_history reo
+             JOIN public.pipeline_stage_config rf ON rf.id = reo.from_stage_id
+             JOIN public.pipeline_stage_config rt ON rt.id = reo.to_stage_id
+             WHERE reo.deal_id = d.id
+               AND reo.created_at > h.created_at
+               AND (rf.slug IN (:won_slugs) OR rf.slug IN (:lost_slugs))
+               AND rt.slug NOT IN (:won_slugs) AND rt.slug NOT IN (:lost_slugs)
+           )
          )
          AND NOT (
-           -- ...and that landing is NOT already represented in D_landed for this period.
+           -- ...and that landing is NOT already represented in D_landed for this period. A deal that
+           -- reopened and RE-CLOSED inside the window has its landing represented by the reclose date,
+           -- so it is not a lost landing and is not flagged.
            (psc.slug IN (:won_slugs) OR COALESCE(d.bid_board_stage_slug,'') IN (:won_slugs)
             OR psc.slug IN (:lost_slugs) OR COALESCE(d.bid_board_stage_slug,'') IN (:lost_slugs))
            AND <outcome_date> BETWEEN :from::date AND :to::date
@@ -1037,6 +1054,20 @@ stating because it is larger than it looks:** this boundary decides `is_reopened
 gates `D_cov`, `machine_dated_n` and `reopened_after_landing_n` — so a terminal stage entry near midnight
 moves a deal between three buckets *and* breaks the population tie-out in §4.0.6.
 
+**What counts as a reopen.** Two pieces of positive evidence, both from `deal_stage_history`: a row
+*into* a Won/Lost stage whose CT date falls in `[from, to]` (the landing), and a **later** row whose
+`from_stage_id` is a Won/Lost stage and whose `to_stage_id` is not (the reopen). An earlier draft required
+only the landing plus "the landing is absent from `D_landed`" — but absence has other causes. A deal whose
+`outcome_date` is NULL (`D_nodate`, a mirror-terminal with no Won date) or whose Won date was later
+corrected to fall outside the window both satisfy that predicate without ever having reopened, so a
+data-quality problem was reported as a workflow event in a diagnostic people would act on.
+
+**Residual:** `deal_stage_history.from_stage_id` is nullable (`0001_initial.sql:467`), and the
+`0143`/`0207` backstop populates it only on the UPDATE branch. A reopen recorded with a NULL
+`from_stage_id` is invisible to this test. Every reopen is an UPDATE so it should be populated, but this is
+**unverified against production** — count `deal_stage_history` rows with a NULL `from_stage_id` before
+trusting `reopened_after_landing_n` as complete.
+
 **`D_reopened` is an overlay, not a member of the partition — and it is excluded from churn as well as
 from coverage.**
 
@@ -1074,8 +1105,23 @@ stage-history row into a Won/Lost stage survives the reopen — reported as `reo
 **excluded from `D_cov`** so it is not silently counted as an ordinary open deal with a forecast obligation
 either. Reconstructing landed outcomes for reopened deals is a stated §7 follow-up.
 
-`D_landed ⊎ D_open ⊎ D_nodate ⊎ D_outside = D`, with `D_reopened ⊂ D_open` reported separately — a four-way
-partition plus one carve-out.
+**Canonical relations block — the single declaration of how these populations relate.** Every set
+assertion anywhere in this document must appear here; nothing else may *state* a relation, only cite one.
+This exists because three separate audit-table cells asserted relations the SQL had already contradicted
+and no check read them: the contents check verifies the *populations column* against the SQL and is blind
+to prose in neighbouring cells.
+
+```text
+RELATIONS
+  D_landed + D_open + D_nodate + D_outside = D      -- disjoint partition, four-way
+  D_reopened subset of (D_open union D_outside)     -- OVERLAY: not a partition member, NOT subset of D_open
+  D_cov   = D_open minus (machine-dated union D_reopened)
+  D_book  = (D_landed union D_open) minus D_reopened
+  D_score subset of D_landed
+  D_score_final subset of D_landed
+  E       = events on D_book only
+  DISJOINT( D_cov , machine-dated-and-not-reopened , D_reopened-and-open )
+```
 
 **`D_outside` spans both directions.** `D` reflects current row state, so for any completed-period view
 ("last week", "last month") it contains deals that closed *after* `to` as well as before `from` — a deal
@@ -2208,9 +2254,17 @@ em dash and an "insufficient data" marker, not merely sorted last. The columns i
 report could otherwise mislead, and dropping them for width is not a cosmetic decision.
 
 **Evidence drill.** Clicking any cell opens the deal list behind it. Per deal: the full close-date timeline
-from `audit_log` — `changed_at`, `old_date → new_date`, actor (display name, or "Unattributed"), whether
-the event was excluded as HubSpot-written, and the matching Move Close Date note body when one exists
-within a short window of the event (§1.7). Every number on the summary row is reachable this way.
+from `audit_log` — `changed_at`, `old_date → new_date`, actor (display name, or "Unattributed"), the
+event's `source`, and when that is `machine`, its **`machine_source`** (`hubspot_refresh` or
+`migration_seed`), plus the matching Move Close Date note body when one exists within a short window of the
+event (§1.7). Every number on the summary row is reachable this way.
+
+**The drill must distinguish the two machine writers, not merely mark an event machine-written.** §1.1.1
+makes the `hubspot_refresh_log` census the prerequisite for building this report at all, and §2.5(b) splits
+the rep-row counts for the same reason: a book carrying migration seeds and no refresh writes must not read
+as HubSpot contamination. A drill that collapses both to "machine" defeats that at the row level, which is
+exactly where someone checks a suspicious number. The classifier already emits `machine_source` (§4.0.2) —
+surface it.
 
 **Conventions v1 must follow**, restated so they are not lost in implementation:
 
@@ -2414,6 +2468,23 @@ complement of `futureDatedCloseDatePredicateSql`'s `>= today` (`foundations.ts:4
 unparked in both. One ordering — `percentile_cont`'s `WITHIN GROUP` — deliberately needs no tie-breaker,
 and §4.3 now says why.
 
+**Round 16 (a diagnostic that inferred a workflow event from an absence, and table prose no check reads)**
+
+| # | Was | Now |
+|---|---|---|
+| 4 | `D_reopened` required an in-window landing **and** that landing being absent from `D_landed` — never that the deal **reopened** | Absence has other causes: a NULL `outcome_date` (`D_nodate`) or a Won date later corrected outside the window both matched. A data-quality problem was reported as a workflow event, in a diagnostic people act on. Now requires positive evidence: a later `deal_stage_history` row whose `from_stage_id` is terminal and `to_stage_id` is not. Residual recorded — `from_stage_id` is nullable, so a reopen written without it is invisible, **unverified against production**. |
+| 1, 2, 6 | Three audit-table cells asserted relations the SQL had already contradicted: `D_reopened ⊂ D_open` (it is an overlay), `machine_dated_n = D_open \ D_cov` (re-including reopened deals), and `overdue_open_n` over `D_open` rather than the resolved `D_cov` | All three were **table prose lagging correct SQL**. Fixed, and the class closed — see below. |
+| 3 | A P₃₀ literal `30` surviving in prose | The constants check excludes prose by design and this is the second instance it has hidden. Fixed; prose exclusion kept, but now listed as a known cost rather than an assumption. |
+| 5 | The evidence drill marked events machine-written without saying **which** machine | The classifier emits `machine_source`, and §1.1.1 makes the HubSpot census the build prerequisite — a drill collapsing refresh and migration seeds defeats that at the row level, which is where a suspicious number gets checked. |
+
+**The table-prose class, closed.** Findings 1, 2 and 6 were assertions *inside* a table that no check
+reads — the §4.0.6 contents check verifies the populations column against the SQL and is blind to prose in
+neighbouring cells, so a subset claim sitting beside a machine-checked column read as equally verified and
+was not. Rather than fix three cells, the load-bearing content was **moved into one canonical `RELATIONS`
+block** (§4.0.5) and a check now asserts that no set assertion appears anywhere else without citing it.
+Everything remaining in those cells is commentary. Coverage line: the check matches set symbols and the
+stock phrases "subset of" / "carved out of", so a relation asserted in freeform English is still invisible.
+
 **Round 15 (the table not widened with the SQL, and a check blind to markdown)**
 
 | # | Was | Now |
@@ -2608,6 +2679,15 @@ were themselves silently broken**, because `NOT <nullable>` inside `FILTER` coun
 failing loudly. A check that can fail open is not a check. That is why the state enum is coalesced and
 non-null by construction, and why "never negate a nullable" is now a stated SQL rule (§4.0.6) rather than
 something to remember at each site.
+
+**Round 16's lesson: prose adjacent to a checked column inherits its credibility without earning it.** The
+audit table has now been wrong about three distinct things — its ordering, its *Produces* contents, and now
+free text in cells beside both. A reader cannot tell which parts of a table a check actually read, and the
+checked columns lend authority to the unchecked ones sitting inches away. The fix that generalises is not
+another checker but a **single canonical declaration** of the load-bearing facts, with everything else
+demoted to commentary that cites it: one place to be right, and a cheap grep to catch anything asserting a
+relation elsewhere. Where that consolidation is not possible, the honest move is to say which cells are
+commentary — not to leave them looking verified.
 
 **Round 15's lesson: the scope line has to be written from the code, not from intent.** Round 14 added a
 "does NOT cover" line to every check. The constants check's line said it ignored "prose formulas and column
