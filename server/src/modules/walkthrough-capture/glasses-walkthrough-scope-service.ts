@@ -350,6 +350,43 @@ function createLimiter(limit: number): (task: () => Promise<void>) => Promise<vo
   };
 }
 
+/**
+ * Adds fetched media to the citations `/scope-items` already gave, rather than replacing them.
+ *
+ * THE TWO RESPONSES ARE NOT INTERCHANGEABLE. `/scope-items` carries every mention behind a row; the
+ * evidence call carries the same mentions WITH presigned stills and clip URLs. Overwriting the first
+ * with the second looked equivalent and was not: `toPanelEvidence` drops malformed entries
+ * independently, so one bad entry in an otherwise good answer replaced the complete baseline with a
+ * subset — silently deleting quotes that were perfectly readable. A partial answer is a reason to add
+ * less, never to know less.
+ *
+ * Matched on (clipId, timelineMs), which is what identifies a mention across the two reads; a fetched
+ * entry that matches nothing is still kept, because the evidence call is the more detailed of the two
+ * and may legitimately know about a mention the summary omitted.
+ */
+function mergeEvidence(
+  baseline: GlassesWalkthroughScopeEvidence[],
+  fetched: GlassesWalkthroughScopeEvidence[]
+): GlassesWalkthroughScopeEvidence[] {
+  if (fetched.length === 0) return baseline;
+  if (baseline.length === 0) return fetched;
+
+  const keyOf = (mention: GlassesWalkthroughScopeEvidence): string =>
+    `${mention.clipId ?? ""}@${mention.timelineMs ?? ""}`;
+  const byKey = new Map(fetched.map((mention) => [keyOf(mention), mention]));
+
+  const merged = baseline.map((mention) => {
+    const match = byKey.get(keyOf(mention));
+    if (!match) return mention;
+    byKey.delete(keyOf(mention));
+    // The fetched entry wins on MEDIA only. The quote and the spoken numbers stay as the baseline had
+    // them, so a truncated or re-worded copy in the richer response cannot quietly rewrite testimony.
+    return { ...mention, frames: match.frames, clipUrl: match.clipUrl };
+  });
+
+  return [...merged, ...byKey.values()];
+}
+
 function toPanelFrames(raw: unknown): GlassesWalkthroughScopeFrame[] {
   if (!Array.isArray(raw)) return [];
   return raw.flatMap((entry) => {
@@ -554,17 +591,24 @@ export async function resolveGlassesWalkthroughScope(
           Promise.all(
             items.map((item) =>
               evidenceLimiter(async () => {
+                // CHECKED BEFORE THE CALL, because the limiter queues. A task admitted after the phase
+                // deadline would otherwise open a request nobody is waiting on — against a service this
+                // endpoint already polls — long after the response went out.
+                if (returned || abort.signal.aborted) return;
+
                 const raw = await deps.scopeReader.fetchScopeItemEvidence(
                   entry.scopeWalkthroughId!,
                   item.id,
                   abort.signal
                 );
+
+                // …AND AFTER IT. The await is where the deadline usually lands, and mutating `item`
+                // once `resolveGlassesWalkthroughScope` has returned edits an object the route has
+                // already serialised — a write with no reader, and a confusing one to find later.
+                if (returned || abort.signal.aborted) return;
                 if (raw === null) return;
-                const withFrames = toPanelEvidence(raw);
-              // Only REPLACE when the evidence call actually said something. `/scope-items` already
-              // carries the quotes; this call adds pictures to them. An empty answer must not delete
-              // the words.
-                if (withFrames.length > 0) item.evidence = withFrames;
+
+                item.evidence = mergeEvidence(item.evidence, toPanelEvidence(raw));
               })
             )
           ).then(() => undefined)

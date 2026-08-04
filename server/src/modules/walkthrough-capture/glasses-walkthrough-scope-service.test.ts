@@ -8,6 +8,7 @@
 // the row read has its own real-SQL suite in glasses-walkthrough-scope-service.runtime.test.ts.
 import { describe, expect, it, vi } from "vitest";
 import {
+  GLASSES_WALKTHROUGH_SCOPE_CONCURRENCY,
   GLASSES_WALKTHROUGH_SCOPE_TIMEOUT_MS,
   __resetGlassesWalkthroughScopeWarningsForTest,
   resolveGlassesWalkthroughScope,
@@ -161,6 +162,108 @@ describe("resolveGlassesWalkthroughScope — the four states", () => {
     expect(entry!.state).toBe("ready");
     expect(entry!.scope!.items).toHaveLength(1);
     expect(entry!.scope!.items[0]!.description).toBe("Paint wall red");
+  });
+
+  it("ADDS media to the baseline citations instead of replacing them", async () => {
+    // The two responses are not interchangeable: `/scope-items` carries every mention, the evidence
+    // call carries them WITH pictures. `toPanelEvidence` drops malformed entries independently, so
+    // overwriting meant one bad entry in an otherwise good answer replaced the complete baseline with
+    // a subset — silently deleting quotes that were perfectly readable.
+    const [entry] = await resolveGlassesWalkthroughScope([row()], {
+      scopeReader: reader({
+        fetchScopeItems: async () => ({
+          outcome: "found",
+          pipeline: "finished",
+          items: [
+            scopeItem({
+              evidence: [
+                { quote: "paint this wall red", clipId: "c1", timelineMs: 1000 },
+                { quote: "and replace the vinyl", clipId: "c1", timelineMs: 5000 },
+              ],
+            }),
+          ],
+        }),
+        // Only ONE of the two mentions comes back usable.
+        fetchScopeItemEvidence: async () => [
+          {
+            quote: "paint this wall red",
+            clipId: "c1",
+            timelineMs: 1000,
+            frames: [{ url: "https://scope.test/f1.jpg?sig=1", timelineMs: 1000 }],
+            clipProxyUrl: "https://scope.test/clip.mp4?sig=1",
+          },
+          { clipId: "c1", timelineMs: 5000 },
+        ],
+      }),
+      warn: collectWarnings().warn,
+    });
+
+    const evidence = entry!.scope!.items[0]!.evidence;
+    // BOTH quotes survive; the one with media gains it.
+    expect(evidence.map((mention) => mention.quote)).toEqual([
+      "paint this wall red",
+      "and replace the vinyl",
+    ]);
+    expect(evidence[0]!.frames.map((frame) => frame.url)).toEqual(["https://scope.test/f1.jpg?sig=1"]);
+    expect(evidence[0]!.clipUrl).toBe("https://scope.test/clip.mp4?sig=1");
+    expect(evidence[1]!.frames).toEqual([]);
+  });
+
+  it("does NOT let the richer response rewrite what was said", async () => {
+    // The evidence call wins on MEDIA only. A truncated or re-worded copy of a quote in the richer
+    // response must not quietly become the record of what somebody said on site.
+    const [entry] = await resolveGlassesWalkthroughScope([row()], {
+      scopeReader: reader({
+        fetchScopeItems: async () => ({
+          outcome: "found",
+          pipeline: "finished",
+          items: [scopeItem({ evidence: [{ quote: "paint this whole wall red", clipId: "c1", timelineMs: 1000 }] })],
+        }),
+        fetchScopeItemEvidence: async () => [
+          { quote: "paint wall", clipId: "c1", timelineMs: 1000, frames: [], clipProxyUrl: null },
+        ],
+      }),
+      warn: collectWarnings().warn,
+    });
+
+    expect(entry!.scope!.items[0]!.evidence[0]!.quote).toBe("paint this whole wall red");
+  });
+
+  it("makes NO evidence request from a task the limiter admits AFTER the deadline", async () => {
+    // The limiter queues once its ceiling is reached, so a task can be admitted long after the phase
+    // ended — opening a request nobody is waiting on, against a service this endpoint already polls.
+    //
+    // Built so the queue genuinely drains post-deadline: more items than the concurrency ceiling, an
+    // evidence reader that outlives the timeout, and an assertion taken after the queued slots would
+    // have run. An earlier version of this test set a 1ms deadline and a slow scope read — it passed
+    // with the guard REMOVED, because evidence was never queued at all, and proved nothing.
+    const itemCount = GLASSES_WALKTHROUGH_SCOPE_CONCURRENCY + 2;
+    let calls = 0;
+    await resolveGlassesWalkthroughScope([row()], {
+      scopeReader: reader({
+        fetchScopeItems: async () => ({
+          outcome: "found",
+          pipeline: "finished",
+          items: Array.from({ length: itemCount }, (_, index) =>
+            scopeItem({ id: `1f0c0a6e-2222-4333-8444-00000000000${index}` })
+          ),
+        }),
+        fetchScopeItemEvidence: async () => {
+          calls += 1;
+          await new Promise((resolve) => setTimeout(resolve, 40));
+          return null;
+        },
+      }),
+      timeoutMs: 15,
+      warn: collectWarnings().warn,
+    });
+
+    // The first batch was already in flight when the deadline fired; only the ceiling may have run.
+    expect(calls).toBe(GLASSES_WALKTHROUGH_SCOPE_CONCURRENCY);
+
+    // Let the in-flight batch finish, which is when the queued slots would otherwise be admitted.
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(calls).toBe(GLASSES_WALKTHROUGH_SCOPE_CONCURRENCY);
   });
 
   it("still renders the scope when the citations cannot be fetched", async () => {
