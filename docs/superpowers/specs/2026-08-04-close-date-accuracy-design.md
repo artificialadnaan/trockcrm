@@ -816,7 +816,7 @@ LEFT JOIN LATERAL (
 | Anchor | Bound | Why |
 |---|---|---|
 | `pfinal` | `business_day_end_exclusive(outcome_date)` | Includes edits made on the closing day (the fix above) |
-| `p30` | `business_day_end_exclusive(outcome_date - 30)` | Same convention, so the two anchors are comparable |
+| `p30` | `business_day_end_exclusive(outcome_date - STANDING_ANCHOR_DAYS)` | Same convention, so the two anchors are comparable |
 | `pnow` | `now()` | A true instant, not a date — no day-boundary question arises, and no event can be in the future |
 
 `pnow` deliberately does **not** use the helper. It is the only anchor that is genuinely an instant rather
@@ -847,7 +847,7 @@ Evaluated at three anchors:
 
 | Anchor | `T` | Used by |
 |---|---|---|
-| `p30` | `outcome_date - interval '30 days'` (with the §4.0.4 fallback) | headline hit rate, all error stats |
+| `p30` | `outcome_date - STANDING_ANCHOR_DAYS` (with the §4.0.4 fallback) | headline hit rate, all error stats |
 | `pfinal` | `outcome_date` | `hit_rate_14d_final` (§4.2) |
 | `pnow` | `now()` | coverage (§4.1) |
 
@@ -1001,7 +1001,7 @@ It excludes only **stored** `on_hold` deals — the far-out auto-park leg is del
 | `D_landed` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NOT NULL` ∩ `outcome_date BETWEEN from AND to` (both inclusive) | period |
 | `D_nodate` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NULL` | — |
 | `D_open` | `D` ∩ `outcome_kind = 'open'` | **today** (see below) |
-| `D_reopened` | `D` ∩ `outcome_kind = 'open'` ∩ a `deal_stage_history` row into a Won or Lost stage with `created_at` inside `[from, to]` | period |
+| `D_reopened` | `D` ∩ a `deal_stage_history` row into a Won or Lost stage whose CT date is inside `[from, to]` ∩ **that landing is not represented in `D_landed`**. An **overlay**, not a partition member: it intersects `D_open` (reopened, still open) and `D_outside` (reopened, re-closed after `to`) | period |
 | `D_outside` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NOT NULL` ∩ `outcome_date` **outside** `[from, to]` — before `from` **or** after `to` | out of period |
 | `D_book` | `(D_landed ∪ D_open) \ D_reopened` — the rep's book *for this period*. Denominator for churn rates. | mixed, stated |
 | `D_score` | `D_landed` ∩ `p30_state = 'rep_prediction'` ∩ P₃₀ not parked-at-write (§6.2) | period |
@@ -1077,11 +1077,10 @@ either. Reconstructing landed outcomes for reopened deals is a stated §7 follow
 `D_landed ⊎ D_open ⊎ D_nodate ⊎ D_outside = D`, with `D_reopened ⊂ D_open` reported separately — a four-way
 partition plus one carve-out.
 
-**The name is `D_outside`, not `D_prior`.** `D` reflects current row state, so for any completed-period
-view ("last week", "last month") the set contains deals that closed *after* `to` as well as before
-`from` — a deal that landed yesterday is outside a period that ended last Saturday. Calling the count
-`prior_period_landed_n` told the reader it meant one thing while it counted both. If the before/after
-split is ever wanted it is a trivial extra `FILTER`, but the honest default is one correctly-named bucket. `D_nodate` exists because a mirror-won deal can
+**`D_outside` spans both directions.** `D` reflects current row state, so for any completed-period view
+("last week", "last month") it contains deals that closed *after* `to` as well as before `from` — a deal
+that landed yesterday is outside a period that ended last Saturday. If a before/after split is ever wanted
+it is a trivial extra `FILTER`; the default is one correctly-named bucket. `D_nodate` exists because a mirror-won deal can
 have a NULL `won_closed_date` (nothing stamps it while the CRM stage stays open): it is terminal, so not in
 `D_open`, and has no outcome date, so not in `D_landed`. Without naming it, those deals fall out of every
 population and the `mirror_terminal_no_date_n` diagnostic that is supposed to make the drop visible would
@@ -1122,7 +1121,7 @@ here. Adding a metric without adding a row is the defect re-entering.**
 
 | Metric | § | Numerator drawn from | Denominator | Same set? |
 |---|---|---|---|---|
-| `coverage_rate` | 4.1 | `D_cov` where `cov_state = 'rep_prediction'` and `cov_prediction` in `[today, today+90]` | `D_cov` | Yes |
+| `coverage_rate` | 4.1 | `D_cov` where `cov_state = 'rep_prediction'` and `cov_prediction` in `[today, today + CLOSE_TARGET_HOLD_HORIZON_DAYS]` | `D_cov` | Yes |
 | `covered_n` / `parked_n` / `at_risk_n` | 4.1 | partition of `D_cov` | — | Sums to `\|D_cov\|` |
 | `machine_dated_n` | 4.1 | `D_open` \ `D_cov` | — | Complement, reported |
 | `hit_rate_14d`, `hit_rate_30d` | 4.2 | `D_score` within tolerance | `D_score` | Yes |
@@ -1137,7 +1136,7 @@ here. Adding a metric without adding a row is the defect re-entering.**
 | `total_days_slipped`, `days_pushed_out`, `days_pulled_in` | 4.5 | `E` | — | Event sums |
 | `chronic_mover_n` | 4.6 | deals in `D_book` meeting the flag | — | Count |
 | `chronic_mover_rate` | 4.6 | `chronic_mover_n` | `\|D_book\|` | Yes |
-| `silent_miss_n` | 4.7 | `D_score` with `deal_move_count = 0` and `abs(signed_error_p30) > 14` | — | Count |
+| `silent_miss_n` | 4.7 | `D_score` with `deal_move_count = 0` and `abs(signed_error_p30) > TOLERANCE_DAYS` | — | Count |
 | `forecast_reliability` | 6.1 | `COALESCE(coverage_rate,0) * COALESCE(hit_rate_14d,0)` | — | Composite; both operands coalesced so zero coverage yields zero |
 | `scoreable_final_n` | 4.2 | `D_score_final` | — | Count; the `hit_rate_14d_final` volume floor (§6.4) |
 | `cov_n` | 4.1 | `D_cov` | — | Count; the `coverage_rate` volume floor (§6.4) |
@@ -1218,7 +1217,7 @@ the prefixed names used throughout §4 are those columns qualified by the instan
 
 | Instance | Alias | Produces |
 |---|---|---|
-| `state_at(deal, business_day_end_exclusive(outcome_date - 30))` | `p30` | `p30_state`, `p30_prediction`, `p30_changed_at`, `p30_source` |
+| `state_at(deal, business_day_end_exclusive(outcome_date - STANDING_ANCHOR_DAYS))` | `p30` | `p30_state`, `p30_prediction`, `p30_changed_at`, `p30_source` |
 | `state_at(deal, business_day_end_exclusive(outcome_date))` | `pfinal` | `pfinal_state`, `pfinal_prediction`, `pfinal_changed_at`, `pfinal_source` |
 | `state_at(deal, now())` | `pnow` | `pnow_state`, `pnow_prediction`, `pnow_changed_at`, `pnow_source` |
 
@@ -1346,11 +1345,12 @@ lines of P₃₀ date arithmetic it never scanned.
 | Duplicate definitions | no scalar is defined twice with different bodies | **extraction** — collect `<name> =` across all fences, compare bodies | mechanical · misses definitions split between prose and SQL, and two names for one concept |
 | Window both-ends basis | no range mixes an explicit bound with a bare one | **extraction** — pair comparisons on a shared left operand, classify each bound | mechanical · paired comparisons inside SQL fences only; a single-sided bound whose partner lives elsewhere is invisible |
 | Convention restatement (§7) | no rule is half-amended across its copies | **extraction** — signature regex per convention, all hit lines listed | mechanical · a restatement that avoids the signature words is invisible |
-| Constants (§6.4) — **inverted this round** | for each named constant, its literal value appears nowhere in SQL except its own definition row | **extraction** — value → literal search across every fence | mechanical · ignores prose formulas and column *names* (`hit_rate_14d`); two constants sharing a value are indistinguishable, so a hit must be assigned by hand |
+| Constants (§6.4) — **inverted** | for each named constant, its literal value appears nowhere except its own definition row | **extraction** — value → literal search across SQL fences **and `code spans` in markdown table cells** | mechanical · ignores plain prose and identifier-embedded digits (`hit_rate_14d`); excludes the appendix, which quotes superseded literals on purpose; two constants sharing a value are reported against both names and a human assigns the right one |
 | Rate casts / `NULLS LAST` | every rate casts, every ranked column sorts NULLs last | **extraction** — grep per pattern | mechanical · misses rates written in prose and sorts specified outside a fence |
 | §6.0 falsifying inputs | each fairness claim names an input that would break it | **read** — a human must judge whether the input really falsifies | **memory-based** |
 | §4.0.7 contents for `E` and Metrics | those two rows' *Produces* lists | not derivable — prose-shaped SQL | **unverifiable** |
-| Population definitions (§4.0.5) | that each `D_*` predicate matches its prose | **read** | **memory-based** |
+| Population **names** (§4.0.5) | every `D_*` used anywhere has a table row, and every declared row is referenced by a fence or a table | **extraction** — name sets differenced across the normative body | mechanical *(added this round)* · checks NAMES only; a row whose set-notation definition drifts from its SQL predicate while the name stays put is invisible |
+| Population **definitions** (§4.0.5) | that each `D_*` predicate matches the SQL implementing it | **read** — set notation is not an extractable expression | **memory-based** (residual of the row above) |
 | Disjointness of tie-out terms | that summed buckets cannot overlap | **read** — set arithmetic a human must do | **memory-based** |
 | Everything against production | census, coverage floor, mirror-terminal counts | not derivable — needs a database | **unverified** |
 
@@ -2414,6 +2414,28 @@ complement of `futureDatedCloseDatePredicateSql`'s `>= today` (`foundations.ts:4
 unparked in both. One ordering — `percentile_cont`'s `WITHIN GROUP` — deliberately needs no tie-breaker,
 and §4.3 now says why.
 
+**Round 15 (the table not widened with the SQL, and a check blind to markdown)**
+
+| # | Was | Now |
+|---|---|---|
+| 1 | The `D_reopened` **predicate** was widened to catch re-closed reopens; the **populations table row** still said `D ∩ outcome_kind = 'open' ∩ …` | Table-vs-SQL divergence, in the table that exists to prevent it, and the direct consequence of changing the SQL and *reading* the row rather than re-deriving it. Row now states the widened predicate and that `D_reopened` is an **overlay**, not a partition member. |
+| 2 | The §4.0.6 audit row for `silent_miss_n` still said `> 14` after the metric SQL moved to `TOLERANCE_DAYS` | **Fourth wave on constants.** The inverted check scanned only lines inside ` ```sql ` fences, so **every markdown table cell was structurally invisible to it** — and three of this document's metric tables are markdown. Extended to scan `code spans` inside table cells; it then found **five** live sites, not one. |
+
+**Why the check missed it, precisely.** Not a subtle bug: the scanner built a set of line numbers inside
+SQL fences and skipped everything else. Table cells were never in scope, and the check said "none" rather
+than "none, in fences". Extending it required distinguishing executable fragments from column *names* —
+`hit_rate_14d` legitimately embeds 14 — which the existing identifier guard already handles, and excluding
+the appendix, whose round-history rows quote superseded literals on purpose. Both are now stated as
+coverage lines.
+
+**The population check.** §4.0.5 had no mechanical check at all, and finding 1 is exactly what the
+memory-based list predicts. Set-notation definitions are not extractable expressions, so a contents diff is
+not available — but names are: every `D_*` used anywhere must have a table row, and every declared row must
+be referenced by a fence or a table. That is weaker than a contents diff and it immediately found `D_prior`,
+a name deleted in round 8 still living in §4.0.5 prose. **Residual, stated in the inventory:** a row whose
+definition drifts from its SQL predicate while the name stays put is still invisible — which is finding 1
+itself, so this check would *not* have caught it. That half stays memory-based and is labelled as such.
+
 **Round 14 (a check that reported a clean it had not earned)**
 
 | # | Was | Now |
@@ -2586,6 +2608,13 @@ were themselves silently broken**, because `NOT <nullable>` inside `FILTER` coun
 failing loudly. A check that can fail open is not a check. That is why the state enum is coalesced and
 non-null by construction, and why "never negate a nullable" is now a stated SQL rule (§4.0.6) rather than
 something to remember at each site.
+
+**Round 15's lesson: the scope line has to be written from the code, not from intent.** Round 14 added a
+"does NOT cover" line to every check. The constants check's line said it ignored "prose formulas and column
+names" — accurate as far as it went, and it omitted the thing that actually mattered: it never looked
+outside SQL fences at all. I wrote that line from what I *meant* the check to cover rather than from what
+the scanner does, which is the same failure the checks exist to catch, one level up. A scope line is only
+worth trusting if it was derived the same way the check's results are.
 
 **Round 14's lesson: a green check is a claim, and claims need their scope stated.** Round 13 argued that
 when a sweep finds N defects the useful follow-up is the structural invariant they share. The corollary
