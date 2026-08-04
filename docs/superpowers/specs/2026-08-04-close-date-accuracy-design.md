@@ -942,6 +942,16 @@ outcomes AS (
            ELSE (COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at)
                    AT TIME ZONE 'America/Chicago')::date
          END                        AS terminal_entry_date,
+         -- D_reopened membership (§4.0.5). Produced HERE so Block A's in_d_cov can consume it; the
+         -- stage-history row into a Won/Lost stage survives the reopen even though the terminal date
+         -- fields do not (stage-change.ts:357-362). Non-null boolean, so `NOT` on it is safe (§4.0.6).
+         EXISTS (
+           SELECT 1 FROM deal_stage_history h
+           JOIN public.pipeline_stage_config hp ON hp.id = h.to_stage_id
+           WHERE h.deal_id = d.id
+             AND (hp.slug IN (:won_slugs) OR hp.slug IN (:lost_slugs))
+             AND h.created_at >= :from AND h.created_at < business_day_end_exclusive(:to)
+         )                          AS is_reopened_after_landing,
          -- NOTE: expected_close_date is deliberately NOT selected. State comes from §4.0.3.
          COALESCE(d.is_bid_board_owned, false) OR COALESCE(d.is_read_only_mirror, false) AS bid_board_owned
   FROM deals d
@@ -1093,9 +1103,14 @@ excluding them would let an unverifiable gap quietly shrink a rep's denominator.
 Invariants to pin as tests — they are the point of the table:
 
 1. `covered_n + parked_n + at_risk_n = |D_cov|`, and
-   `|D_cov| + machine_dated_n + reopened_after_landing_n = |D_open|`. **Three terms on the right**, because
-   `D_cov` now excludes both machine-dated and reopened deals; the two-term form was false the moment
-   `D_reopened` was carved out.
+   `|D_cov| + machine_dated_n + reopened_after_landing_n = |D_open|`.
+
+   **The three right-hand terms are disjoint by construction, and that is load-bearing.** `D_cov` requires
+   neither machine-dated nor reopened; `reopened_after_landing_n` takes precedence; `machine_dated_n`
+   carries `NOT is_reopened_after_landing`. Without that precedence a deal reopened after landing *and*
+   later given a machine close-date write satisfies two predicates and is counted twice — an identity
+   whose terms can overlap is not an identity, and this one was widened to fix a double-count while
+   introducing one of its own. Assert disjointness in the test alongside the sum, not just the total.
 2. `scoreable_n + no_prediction_n + cleared_n + machine_superseded_n + parked_prediction_n = landed_n`.
 3. `|D_landed| + |D_open| + |D_nodate| + |D_outside| = |D|`. **Four terms, not three** — `D_outside`
    (deals that closed outside the selected period, in either direction) is the remainder that made the
@@ -1160,7 +1175,10 @@ other. The split below is what makes the chain executable, and §4.0.7's table i
 open       = (outcome_kind = 'open')                                       -- §4.0.5, mirror-aware
 landed     = (outcome_kind IN ('won','lost') AND outcome_date IS NOT NULL
               AND outcome_date BETWEEN :from AND :to)                      -- membership in D_landed
-in_d_cov   = (open AND cov_state <> 'machine')                             -- §4.1
+-- THE definition of in_d_cov. Three conjuncts. §4.1 references this and must not restate it:
+-- an earlier draft carried a two-conjunct copy here and a three-conjunct one in §4.1, so an
+-- implementation either left reopened deals in coverage or failed to resolve the third name.
+in_d_cov   = (open AND cov_state <> 'machine' AND NOT is_reopened_after_landing)
 
 -- Signed error, in whole days. Positive = closed LATER than predicted (optimistic). Never ABS (§4.3).
 signed_error_p30    = (outcome_date - p30_prediction)
@@ -1207,13 +1225,13 @@ column. Re-run this check whenever a name is added:
 | Block | Produces | Consumes (and from where) |
 |---|---|---|
 | `raw_close_date_events` (§4.0.1) | `audit_log_id`, `deal_id`, `changed_at`, `actor_user_id`, `event_kind`, `old_date`, `new_date` | `audit_log`: `id`, `record_id`, `created_at`, `changed_by`, `table_name`, `action`, `changes`, `full_row` — all real columns (§1.2) |
-| `close_date_timeline` (§4.0.2) | all of the above **passed through**, plus `source`, `machine_source` | `raw_close_date_events.*`; `deals.hubspot_deal_id`; `public.hubspot_refresh_log.*` (§0064) |
-| `outcomes` (§4.0.5) | `deal_id`, `rep_id`, `deal_created_at`, `outcome_kind`, `outcome_date`, **`terminal_entry_date`**, `bid_board_owned` | `deals.stage_entered_at`, `deals.bid_board_stage_entered_at`, `deals.created_at`, `deals.won_closed_date`, `deals.lost_at`, `deals.assigned_rep_id`, flags; `public.pipeline_stage_config.slug/is_terminal` |
+| `close_date_timeline` (§4.0.2) | `audit_log_id`, `deal_id`, `changed_at`, `actor_user_id`, `event_kind`, `old_date`, `new_date` **passed through**, plus `source`, `machine_source` | `raw_close_date_events.*`; `deals.hubspot_deal_id`; `public.hubspot_refresh_log.*` (§0064) |
+| `outcomes` (§4.0.5) | `deal_id`, `rep_id`, `deal_created_at`, `outcome_kind`, `outcome_date`, `terminal_entry_date`, **`is_reopened_after_landing`**, `bid_board_owned` | `deals`: `stage_entered_at`, `bid_board_stage_entered_at`, `created_at`, `won_closed_date`, `lost_at`, `assigned_rep_id`, `stage_id`, `bid_board_stage_slug`, `is_active`, `is_test_data`, `is_bid_board_owned`, `is_read_only_mirror`, `on_hold`; `pipeline_stage_config`: `slug`, `is_terminal`; `deal_stage_history`: `deal_id`, `to_stage_id`, `created_at` |
 | `state_at` ×3 (§4.0.3) *(contents: **convention-derived** — the block projects `state`, `prediction`, `changed_at`, `source`; the prefixes come from the three aliased instances in §4.0.7's anchor table, so an extractor sees a mismatch that is expected)* | `p30_state`, `p30_prediction`, `p30_changed_at`, `p30_source`; `pfinal_state`, `pfinal_prediction`, `pfinal_changed_at`, `pfinal_source`; `pnow_state`, `pnow_prediction`, `pnow_changed_at`, `pnow_source` — all `*_state` coalesced (§4.0.3) | `close_date_timeline`: `deal_id`, `changed_at`, **`audit_log_id`**, `source`, `new_date`; `outcomes.outcome_date` |
 | `coverage_resolution` (§4.1) | `cov_state`, `cov_prediction`, `is_provenance_unknown` | `outcomes.deal_id`; `state_at(deal, now())`; **`deals.expected_close_date`** — the only block that joins `deals` for it, and the whole reason convention 10's exception is buildable |
-| Derived scalars **block A** (§4.0.7) | `open`, `landed`, `in_d_cov`, `signed_error_p30`, `signed_error_pfinal`, `p30_parked_at_write`, `pfinal_parked_at_write`, `event_window_end` | `outcomes.*`, `cov_state`, `cov_prediction`, `p30_*`, `pfinal_*` — deliberately nothing from the event set |
+| Derived scalars **block A** (§4.0.7) | `open`, `landed`, `in_d_cov`, `signed_error_p30`, `signed_error_pfinal`, `p30_parked_at_write`, `pfinal_parked_at_write`, `event_window_end` | `outcome_kind`, `outcome_date`, `terminal_entry_date`, `is_reopened_after_landing`, `deal_created_at`, `cov_state`, `cov_prediction`, `p30_prediction`, `p30_changed_at`, `pfinal_prediction`, `pfinal_changed_at` — deliberately nothing from the event set |
 | `E` (§4.0.5) *(contents: **unverifiable** — defined in prose, no literal SQL fence)* | the event set for churn | `close_date_timeline`; `event_window_end` (block A) |
-| Derived scalars **block B** (§4.0.7) | `deal_move_count`, `deal_days_pushed_out` | `E` |
+| Derived scalars **block B** (§4.0.7) | `deal_move_count`, `deal_days_pushed_out` | `E`: `old_date`, `new_date` |
 | Metrics (§4.1–4.7) *(contents: **unverifiable** — many fences, no single block boundary)* | the report columns, incl. `cov_n`, `scoreable_n`, `scoreable_final_n` | everything above, by name only |
 
 The `audit_log_id` row is bolded because it is the one that broke: §4.0.3 ordered by it while §4.0.2 did not
@@ -1221,6 +1239,14 @@ project it. The table makes that a one-line check instead of a review finding.
 
 **The table's ordering is part of the check, and is verifiable from the table alone.**
 
+> **Completeness rule:** every identifier a block's SQL *references* must appear in that row's *Consumes*
+> column (or be produced by the block itself). This is the check the other two miss: the contents rule
+> verifies names the table *claims*, and the ordering rule verifies names the table *lists* — a name that
+> appears in the SQL and **nowhere in the table** falls through both. `is_reopened_after_landing` came
+> through exactly that hole. Extractable by pulling referenced identifiers per fence and diffing against
+> the column. **Glob entries defeat it**, which is why `outcomes.*`, `p30_*` and `pfinal_*` were expanded
+> to explicit name lists — the fourth time a grouped label has blinded a mechanical check in this document.
+>
 > **Contents rule:** a row's *Produces* list must match the names its SQL block actually projects —
 > `AS <name>` in a `SELECT`, or `<name> =` for a scalar block. This is extractable: pull the projected
 > names from each ```sql fence and diff them against the column. Rows whose SQL is **prose-shaped rather
@@ -1245,16 +1271,32 @@ same way twice.
 |---|---|---|---|
 | Three-table agreement (§4.0.6 / v1 / §6.0) | every metric appears in each table | **extraction** — backticked identifiers per table, set-differenced | mechanical |
 | §4.0.7 **ordering** rule | no block consumes a name produced below it | **extraction** — walk rows top-down, accumulate produced names | mechanical |
-| §4.0.7 **contents** rule | a row's *Produces* matches what its SQL projects | **extraction** — `AS <name>` / `<name> =` per fence, diffed | mechanical *(added this round)* |
+| §4.0.7 **contents** rule | a row's *Produces* matches what its SQL projects | **extraction** — `AS <name>` / `<name> =` per fence, diffed | mechanical |
+| §4.0.7 **completeness** rule | every name a block's SQL references appears in its *Consumes* | **extraction** — referenced identifiers per fence, diffed | mechanical *(added this round)* |
+| Duplicate definitions | no scalar is defined twice with different bodies | **extraction** — collect `<name> =` across all fences, compare bodies | mechanical *(added this round)* |
 | Convention restatement (§7) | no rule is half-amended across its copies | **extraction** — signature regex per convention, all hit lines listed | mechanical *(added this round)* |
 | Constants (§6.4) | every named constant has a value and every formula uses it | **extraction** — constant names vs assigned values; literal sweep | mechanical |
 | Rate casts / `NULLS LAST` | every rate casts, every ranked column sorts NULLs last | **extraction** — grep per pattern | mechanical |
 | §6.0 falsifying inputs | each fairness claim names an input that would break it | **read** — a human must judge whether the input really falsifies | **memory-based** |
 | §4.0.7 contents for `E` and Metrics | those two rows' *Produces* lists | not derivable — prose-shaped SQL | **unverifiable** |
 | Population definitions (§4.0.5) | that each `D_*` predicate matches its prose | **read** | **memory-based** |
+| Disjointness of tie-out terms | that summed buckets cannot overlap | **read** — set arithmetic a human must do | **memory-based** |
 | Everything against production | census, coverage floor, mirror-terminal counts | not derivable — needs a database | **unverified** |
 
-**Distrust the bottom four rows.** The §6.0 falsifying-input column makes a claim *checkable by a reader*,
+Three checks were added this round, and two of them found defects on their first run that three
+mechanical audits had already passed over. The completeness rule exists because a name in the SQL and
+**nowhere in the table** falls through both earlier checks: the contents rule verifies names the table
+*claims*, the ordering rule verifies names the table *lists*, and `is_reopened_after_landing` was in
+neither. The duplicate-definition check was validated by running it against the previous commit, where it
+correctly reports `in_d_cov` defined at two lines with different bodies.
+
+Known extractor limits, stated rather than hidden: the §4.1 fence mixes a CTE with metric expressions, so
+its block boundary is approximate and two names (`in_d_cov`, `pnow`) read as unlisted consumers; **glob
+entries in the table defeat all three checks**, which is why `outcomes.*`, `p30_*`, `pfinal_*` and `flags`
+were expanded to explicit lists this round — the fourth time a grouped label has blinded a mechanical check
+here.
+
+**Distrust the bottom five rows.** The §6.0 falsifying-input column makes a claim *checkable by a reader*,
 which is a real improvement over an unadorned ✅, but nothing verifies that the stated input actually
 falsifies the claim — that judgement is still a human one, and it is where a false ✅ could recur. The
 population definitions are prose next to SQL with no extraction tying them together. Both are candidates
@@ -1313,9 +1355,17 @@ coverage_resolution AS (
 
 provenance_unknown_n = count(*) FILTER (WHERE open AND is_provenance_unknown)
 
+-- The three exclusions from D_cov, made DISJOINT BY CONSTRUCTION via a priority order. A deal that was
+-- reopened after landing AND later given a machine close-date write satisfies both predicates; without
+-- the NOT below it would be counted in both terms and the tie-out would double-count the very deal the
+-- reopened bucket was added to stop double-counting.
+reopened_after_landing_n = count(*) FILTER (WHERE open AND is_reopened_after_landing)
+
 -- machine_dated_n leaves the rate on BOTH sides: charging it as at-risk blames the rep for a machine
--- write, counting it as covered credits them for one.
-machine_dated_n = count(*) FILTER (WHERE open AND cov_state = 'machine')
+-- write, counting it as covered credits them for one. Reopened takes precedence, so this is the
+-- machine-dated portion of D_open \ D_reopened.
+machine_dated_n = count(*) FILTER (WHERE open AND NOT is_reopened_after_landing
+                                             AND cov_state = 'machine')
 
 -- The coverage denominator, as a named metric: it is the §6.4 volume floor for coverage_rate and
 -- forecast_reliability, so it must exist as a column rather than only as an inline NULLIF operand.
@@ -1338,17 +1388,11 @@ coverage_rate = count(*) FILTER (WHERE in_d_cov AND cov_state = 'rep_prediction'
               / NULLIF(count(*) FILTER (WHERE in_d_cov), 0)
 ```
 
-`open` is `outcome_kind = 'open'` (§4.0.5) — the mirror-aware test. `in_d_cov` is
-
-```sql
-in_d_cov = open AND cov_state <> 'machine' AND NOT is_reopened_after_landing
-```
-
-— all three conjuncts. The `is_reopened_after_landing` term is what the populations table has always
-claimed for `D_cov` and the scalar previously omitted, so a deal that landed in-period and was later
-reopened was counted as ordinary coverage anyway, *and* reported as a diagnostic: double-counted, and the
-tie-out below silently false. Safe against NULLs because the state enum is coalesced (§4.0.6) and
-`is_reopened_after_landing` is a non-null boolean from `D_reopened` membership. After
+`open` is `outcome_kind = 'open'` (§4.0.5) — the mirror-aware test. **`in_d_cov` is defined once, in
+§4.0.7 Block A**, with three conjuncts: open, not machine-dated, and not reopened-after-landing. It is not
+restated here — an earlier draft carried a two-conjunct copy in Block A and a three-conjunct one in this
+section, so an implementation either left reopened deals in ordinary coverage (following Block A) or failed
+to resolve `is_reopened_after_landing` (following §4.1). After
 resolution, `cov_state = 'no_event'` means the deal genuinely has no date at all, which is the at-risk
 reading intended all along.
 
@@ -2289,6 +2333,22 @@ complement of `futureDatedCloseDatePredicateSql`'s `>= today` (`foundations.ts:4
 unparked in both. One ordering — `percentile_cont`'s `WITHIN GROUP` — deliberately needs no tie-breaker,
 and §4.3 now says why.
 
+**Round 12 (defects in round 11's own fix, and the hole all three checks missed)**
+
+| # | Was | Now |
+|---|---|---|
+| 1 | `in_d_cov` defined **twice** — two conjuncts in Block A, three in §4.1 — and the third name, `is_reopened_after_landing`, defined nowhere and absent from §4.0.7 entirely | An implementation either left reopened deals in ordinary coverage or failed to resolve the identifier. One definition now, in Block A; `is_reopened_after_landing` is produced by `outcomes` via an `EXISTS` over `deal_stage_history` and listed in the chain table; §4.1 references rather than restates. |
+| 2 | `machine_dated_n` and `reopened_after_landing_n` overlapped | A deal reopened after landing *and* later given a machine close-date write satisfied both, so the tie-out counted it twice — the identity widened to fix a double-count had one of its own. Made disjoint by precedence (`machine_dated_n` carries `NOT is_reopened_after_landing`), with disjointness asserted beside the sum. |
+
+**The hole this exposed.** The *Produces* extraction added in round 11 could not catch
+`is_reopened_after_landing`, because that name was in **neither** column: the contents rule verifies names
+the table *claims*, the ordering rule verifies names the table *lists*, and a name present in the SQL and
+absent from the table falls between them. Added a **completeness rule** — every identifier a block's SQL
+references must appear in its *Consumes* column — plus a **duplicate-definition check**, validated by
+running it against the previous commit, where it correctly reports `in_d_cov` at two lines with different
+bodies. Expanding the `outcomes.*`, `p30_*`, `pfinal_*` and `flags` globs was required to make any of it
+work: that is the fourth time a grouped label has blinded a mechanical check in this document.
+
 **Round 11 (fixes that reached one site and not the others)**
 
 | # | Was | Now |
@@ -2415,6 +2475,17 @@ were themselves silently broken**, because `NOT <nullable>` inside `FILTER` coun
 failing loudly. A check that can fail open is not a check. That is why the state enum is coalesced and
 non-null by construction, and why "never negate a nullable" is now a stated SQL rule (§4.0.6) rather than
 something to remember at each site.
+
+**Round 12's lesson: three checks can all pass and still share a blind spot.** The ordering, contents and
+three-table checks were each mechanical and each ran clean while `is_reopened_after_landing` sat in the SQL
+of one block, in the definition of another, and in no table at all. Every check verified *the table against
+itself or against a subset of the SQL*; none asked whether the SQL contained anything the table had never
+heard of. That is a different question from the ones already being asked, and it needed its own extractor.
+
+The generalisable form: a set of checks is only as complete as the *directions* it runs in. Table→SQL was
+covered; SQL→table was not. When adding a check, ask which direction it runs and whether the reverse is
+also covered — and note that the duplicate-definition check, the cheapest one added this round, would have
+caught a defect that survived a full review round.
 
 **Round 11's lesson: an audit is only as good as where its inputs come from.** All four findings were a
 correction applied where it was noticed and not where it also applied — and the two audits built to catch
