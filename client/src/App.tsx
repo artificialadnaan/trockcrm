@@ -293,14 +293,10 @@ export function App() {
               {/* Open to all authenticated users (no RequireRole) — matches the analytics report
                   routes; server /api/reports/region is likewise no longer director-gated. */}
               <Route path="/reports/region" element={<RegionReportPage />} />
-              <Route
-                path="/reports/at-risk"
-                element={(
-                  <RequireRole allowedRoles={["admin", "director"]}>
-                    <AtRiskPage />
-                  </RequireRole>
-                )}
-              />
+              {/* Open to all authenticated users (no RequireRole) — the reports index lists the
+                  At-Risk Watchlist card to every role, so gating only the route turned the click into
+                  a 403. Server /api/reports/at-risk is likewise no longer director-gated. */}
+              <Route path="/reports/at-risk" element={<AtRiskPage />} />
               <Route
                 path="/reports/rep-pack"
                 element={(

@@ -56,11 +56,16 @@ vi.mock("../../../src/modules/reports/qc-scorecards-service.js", () => ({
   getQcScorecardsReport: vi.fn(),
 }));
 
+vi.mock("../../../src/modules/reports/at-risk-service.js", () => ({
+  getAtRiskWatchlist: vi.fn(),
+}));
+
 import { errorHandler } from "../../../src/middleware/error-handler.js";
 import * as reportService from "../../../src/modules/reports/service.js";
 import * as mondayShowcaseService from "../../../src/modules/reports/monday-showcase-service.js";
 import * as estimatorPipelineService from "../../../src/modules/reports/estimator-pipeline-service.js";
 import * as qcScorecardsService from "../../../src/modules/reports/qc-scorecards-service.js";
+import * as atRiskService from "../../../src/modules/reports/at-risk-service.js";
 import { runReportBuilder } from "../../../src/modules/reports/report-builder-service.js";
 import * as savedReportsService from "../../../src/modules/reports/saved-reports-service.js";
 import { reportRoutes } from "../../../src/modules/reports/routes.js";
@@ -112,6 +117,41 @@ describe("report route role guards", () => {
     expect(response.status).not.toBe(403);
     expect(response.status).toBe(200);
     expect(runReportBuilder).toHaveBeenCalledOnce();
+  });
+
+  it("lets every CRM role — not just directors — load the At-Risk watchlist, unscoped", async () => {
+    vi.mocked(atRiskService.getAtRiskWatchlist).mockResolvedValue({ summary: {}, records: [] } as any);
+
+    const repResponse = await request(buildApp("rep")).get("/api/reports/at-risk");
+    const directorResponse = await request(buildApp("director")).get("/api/reports/at-risk");
+
+    expect(repResponse.status).toBe(200);
+    expect(directorResponse.status).toBe(200);
+
+    // The point of the change is not merely "a rep gets a 200" — it is that the rep gets the SAME
+    // office-wide watchlist a director gets. If a future edit quietly pins repId to req.user.id to
+    // "scope" the report, the rep's total would stop reconciling with the director's and this fails.
+    expect(atRiskService.getAtRiskWatchlist).toHaveBeenCalledTimes(2);
+    expect(atRiskService.getAtRiskWatchlist).toHaveBeenNthCalledWith(1, {}, { repId: undefined });
+    expect(atRiskService.getAtRiskWatchlist).toHaveBeenNthCalledWith(2, {}, { repId: undefined });
+  });
+
+  it("still treats ?repId on the At-Risk watchlist as a filter, and still validates it", async () => {
+    vi.mocked(atRiskService.getAtRiskWatchlist).mockResolvedValue({ summary: {}, records: [] } as any);
+
+    const filtered = await request(buildApp("rep")).get(
+      "/api/reports/at-risk?repId=11111111-1111-4111-8111-111111111111",
+    );
+    const malformed = await request(buildApp("rep")).get("/api/reports/at-risk?repId=not-a-uuid");
+
+    expect(filtered.status).toBe(200);
+    expect(atRiskService.getAtRiskWatchlist).toHaveBeenCalledWith(
+      {},
+      { repId: "11111111-1111-4111-8111-111111111111" },
+    );
+    // Opening the route must not open the door to unvalidated input reaching the SQL builder.
+    expect(malformed.status).toBe(400);
+    expect(atRiskService.getAtRiskWatchlist).toHaveBeenCalledTimes(1);
   });
 
   it("allows reps to load the Monday showcase and drill evidence", async () => {

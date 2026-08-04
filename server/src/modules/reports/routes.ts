@@ -1304,7 +1304,16 @@ router.get("/estimator-pipeline/evidence", requireDirector, async (req, res, nex
 });
 
 // Reports Part 4 -- A·3 At-Risk & Value-at-Stake Watchlist (the forecast blind spots; M − N).
-router.get("/at-risk", requireDirector, async (req, res, next) => {
+//
+// Deliberately NOT director-gated. A rep whose own deal has no maintained close date is exactly who
+// needs to see it, and the reports index has always listed this card to every role — so the previous
+// guard did not hide the report, it only turned the click into a 403. Same call as /region, which was
+// opened to all authenticated users for the same reason.
+//
+// The response is office-wide and is NOT scoped to the viewer: everyone sees the same watchlist, so the
+// number a rep reads reconciles with the one a director reads. `repId` stays a caller-supplied FILTER,
+// not a permission boundary — narrowing to one rep is a view, not an authorization decision.
+router.get("/at-risk", async (req, res, next) => {
   try {
     const repIdRaw = pickQueryValue(req.query.repId);
     let repId: string | null | undefined;
