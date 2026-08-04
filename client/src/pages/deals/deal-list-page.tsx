@@ -598,12 +598,27 @@ export function buildDealsPageKpiDrilldownPath(
       if (!value) continue;
       if (
         key === "assignedRepId" ||
+        // Office context is URL-driven: api() reads ?officeId from window.location.search and sends it as
+        // x-office-id. A KPI card that drops it silently returns a cross-office viewer to their ACTIVE
+        // office, so the drill-down lists a DIFFERENT office's deals than the card counted. Forward it on
+        // every drill-down (this was missing for all of them — Active Pipeline and Won too, not just the
+        // at-risk cards). Same-office users carry no ?officeId, so their links are unchanged.
+        key === "officeId" ||
         // Keep the header period scope through outcome-aware drill-downs (active pipeline / Won), but NOT
         // the SLA drill-downs (at_risk / at_risk_service / at_risk_non_service / stale): those are
         // CURRENT-STATE views where ?period is a deliberate no-op (getDashboardDealListView gives them no
         // updated-at window — period-filtering an SLA surface by updated_at would hide the stalest, most
-        // at-risk deals). So the link must NOT carry a period either — omitting it keeps the destination on
-        // the full current at-risk cohort, matching the card. All THREE at-risk route cards share this.
+        // at-risk deals). So the link must NOT carry a period either. All THREE at-risk route cards share
+        // this.
+        //
+        // KNOWN GAP (not fixed here): "omitting it keeps the destination matching the card" holds only
+        // while ENABLE_STAGE_ENTRY_DATE_FILTER is OFF (its default). With that flag ON *and* a ?period
+        // selected, getDealsForPipeline additionally bounds the OPEN columns by stage_entered_at, so the
+        // board this page counts from is period-scoped while the destination it links to is not — the
+        // destination can then hold MORE rows than the card shows. That affects the pre-existing "All at
+        // risk" card exactly as it affects the two new route cards. Closing it needs an unwindowed count
+        // source (a second board fetch, or dropping the board period), which changes what "All at risk"
+        // displays — a product decision, deliberately left out of this change.
         // won_*/lost_* are NOT forwarded — the Won drill-down inherits the single shared ?period (already
         // set above), not a collapsed per-column override.
         (key === "period" && !isCurrentStateDrilldownFilter(filter))
@@ -1229,6 +1244,15 @@ function DealListPageContent({
    *
    * On every non-route view the bucket is "all", so this IS `unsearchedColumns` and the "All at risk"
    * number is byte-identical to the single pre-split card's.
+   *
+   * KNOWN GAP (not fixed here): on a STAGE-SCOPED view — Won, Opportunities, Bid Board —
+   * `unsearchedColumns` is only that view's columns, while every at-risk link opens the ALL-STAGE
+   * cohort. On the Won drill-down the visible columns are terminal, so all three cards read 0 while
+   * their destinations hold rows. This is pre-existing behaviour of the single "At risk" card (it read 0
+   * there before this split too), not something the route split introduced. The fix is to count from
+   * `getAtRiskBoardColumns(boardColumns, "all")` unconditionally — one line — but that CHANGES the
+   * number "All at risk" displays on those three views (0 -> the real cohort size), so it is a product
+   * decision rather than a bug fix and is deliberately not taken here.
    */
   const kpiAtRiskColumns = useMemo(
     () => (atRiskRouteBucket === "all" ? unsearchedColumns : getAtRiskBoardColumns(boardColumns, "all")),

@@ -2516,6 +2516,46 @@ describe("DealListPage", () => {
     }
   });
 
+  it("forwards ?officeId through every KPI drill-down link so a cross-office viewer stays in that office", () => {
+    // api() derives x-office-id from ?officeId in the URL. A card that drops it sends the viewer back to
+    // their ACTIVE office, so the drill-down lists a different office's deals than the card counted.
+    expect(
+      buildDealsPageKpiDrilldownPath("at_risk_service", "all", null, {
+        queryParams: new URLSearchParams("officeId=office-2&assignedRepId=rep-1&period=mtd"),
+      })
+    ).toBe("/deals?filter=at_risk_service&scope=all&officeId=office-2&assignedRepId=rep-1");
+    // Not an at-risk-only concern — the pre-existing cards dropped it too, so assert them as well.
+    expect(
+      buildDealsPageKpiDrilldownPath("at_risk", "all", null, {
+        queryParams: new URLSearchParams("officeId=office-2"),
+      })
+    ).toBe("/deals?filter=at_risk&scope=all&officeId=office-2");
+    expect(
+      buildDealsPageKpiDrilldownPath("won", "all", "mtd", {
+        queryParams: new URLSearchParams("officeId=office-2"),
+      })
+    ).toBe("/deals?filter=won&scope=all&period=mtd&officeId=office-2");
+    expect(
+      buildDealsPageKpiDrilldownPath("active_pipeline", "all", null, {
+        queryParams: new URLSearchParams("officeId=office-2"),
+      })
+    ).toBe("/deals?filter=active_pipeline&scope=all&officeId=office-2");
+    // A same-office viewer has no ?officeId, so their links are unchanged.
+    expect(buildDealsPageKpiDrilldownPath("at_risk", "mine")).toBe("/deals?filter=at_risk&scope=mine");
+  });
+
+  it("renders every at-risk card with an officeId-carrying href on a cross-office view", () => {
+    mockRouteMixedAtRiskBoard();
+    const html = renderPage("/deals?scope=all&officeId=office-2", "director");
+    for (const ariaLabel of [
+      "View service at-risk deals",
+      "View non-service at-risk deals",
+      "View at-risk deals",
+    ]) {
+      expect(readKpiCard(html, ariaLabel).href).toContain("officeId=office-2");
+    }
+  });
+
   it("resolves the route drill-down views (titles, at-risk board mode, no period window)", () => {
     const service = getDashboardDealListView({ filterParam: "at_risk_service", periodParam: "mtd" });
     expect(service.filter).toBe("at_risk_service");
