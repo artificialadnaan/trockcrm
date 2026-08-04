@@ -110,9 +110,14 @@ export function DealEstimatesTab({ dealId, proposalMode = false }: DealEstimates
     }
   };
 
+  // THE AI WALK PANEL IS NOT GATED ON THE ESTIMATE FETCH. It has its own endpoint and its own error
+  // handling, and it used to live on a different tab entirely — so letting `/deals/:id/estimates`
+  // failing hide it would mean moving it here made a healthy walk unreachable, which is a regression
+  // the move itself introduced. Rendered above both early returns for that reason.
   if (loading) {
     return (
       <div className="space-y-3">
+        <DealAiWalkPanel dealId={dealId} />
         {[1, 2].map((i) => (
           <div key={i} className="h-32 bg-muted animate-pulse rounded-lg" />
         ))}
@@ -122,14 +127,17 @@ export function DealEstimatesTab({ dealId, proposalMode = false }: DealEstimates
 
   if (error) {
     return (
-      <div className="text-center py-8">
-        <p className="text-sm text-muted-foreground">{error}</p>
-        <button
-          className="mt-2 text-sm text-[#CC0000] hover:underline"
-          onClick={fetchEstimates}
-        >
-          Retry
-        </button>
+      <div className="space-y-4">
+        <DealAiWalkPanel dealId={dealId} />
+        <div className="text-center py-8">
+          <p className="text-sm text-muted-foreground">{error}</p>
+          <button
+            className="mt-2 text-sm text-[#CC0000] hover:underline"
+            onClick={fetchEstimates}
+          >
+            Retry
+          </button>
+        </div>
       </div>
     );
   }

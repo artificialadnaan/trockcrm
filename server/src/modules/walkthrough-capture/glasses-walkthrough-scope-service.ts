@@ -431,6 +431,8 @@ export async function resolveGlassesWalkthroughScope(
   // Created once PER REQUEST and closed over by every walk, so the ceiling holds across walks rather
   // than per walk. See `createLimiter`.
   const evidenceLimiter = createLimiter(GLASSES_WALKTHROUGH_SCOPE_CONCURRENCY);
+  // Citations in flight, collected across every walk and awaited once the scope reads are all done.
+  const evidenceWork: Array<Promise<void>> = [];
 
   const entries: GlassesWalkthroughPanelEntry[] = rows.map((row) => ({
     id: row.id,
@@ -540,22 +542,32 @@ export async function resolveGlassesWalkthroughScope(
         // FAILURES ARE INVISIBLE BY DESIGN — `fetchScopeItemEvidence` returns null rather than throwing,
         // and a null simply leaves that row with no citations. Degrading a walk because a thumbnail
         // could not be signed would hide work TROCK Scope did perfectly well.
-        await Promise.all(
-          items.map((item) =>
-            evidenceLimiter(async () => {
-              const raw = await deps.scopeReader.fetchScopeItemEvidence(
-                entry.scopeWalkthroughId!,
-                item.id,
-                abort.signal
-              );
-              if (raw === null) return;
-              const withFrames = toPanelEvidence(raw);
+        // NOT AWAITED BY THIS WALK'S WORKER, and that is the last coupling to remove.
+        //
+        // The walks run through a pool of six. Awaiting citations here kept a worker occupied on
+        // best-effort media, so on a deal with more than six walks the seventh could not even START its
+        // `/scope-items` read until someone else's thumbnails finished — best-effort work suppressing
+        // primary data for a different walk. The promise is collected and awaited once, after every
+        // walk has had its scope read, so the citations still land before the response is built and no
+        // walk waits on another walk's pictures to be told what its own scope is.
+        evidenceWork.push(
+          Promise.all(
+            items.map((item) =>
+              evidenceLimiter(async () => {
+                const raw = await deps.scopeReader.fetchScopeItemEvidence(
+                  entry.scopeWalkthroughId!,
+                  item.id,
+                  abort.signal
+                );
+                if (raw === null) return;
+                const withFrames = toPanelEvidence(raw);
               // Only REPLACE when the evidence call actually said something. `/scope-items` already
               // carries the quotes; this call adds pictures to them. An empty answer must not delete
               // the words.
-              if (withFrames.length > 0) item.evidence = withFrames;
-            })
-          )
+                if (withFrames.length > 0) item.evidence = withFrames;
+              })
+            )
+          ).then(() => undefined)
         );
       } catch (err) {
         // Left at `unavailable`, with `scope` still null. The message names the WALKTHROUGH, never the
@@ -574,9 +586,19 @@ export async function resolveGlassesWalkthroughScope(
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
-      Promise.all(
-        Array.from({ length: Math.min(GLASSES_WALKTHROUGH_SCOPE_CONCURRENCY, pending.length) }, () => worker())
-      ),
+      (async () => {
+        // SCOPE READS FIRST, FOR EVERY WALK, then the citations they queued. Splitting the wait this
+        // way is what stops best-effort media from starving primary data: no walk can be left
+        // `unavailable` because an earlier walk's thumbnails were slow, and the citations still land
+        // before the response is assembled.
+        await Promise.all(
+          Array.from({ length: Math.min(GLASSES_WALKTHROUGH_SCOPE_CONCURRENCY, pending.length) }, () =>
+            worker()
+          )
+        );
+        // Cannot reject: each task absorbs its own failures and the limiter is a further backstop.
+        await Promise.all(evidenceWork);
+      })(),
       new Promise<void>((resolve) => {
         timer = setTimeout(() => {
           stopDispatchingAt = 0;

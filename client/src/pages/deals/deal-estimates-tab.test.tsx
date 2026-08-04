@@ -75,6 +75,25 @@ describe("the AI Walk panel's placement", () => {
     await act(async () => root.unmount());
     container.remove();
   });
+
+  it("still renders when the ESTIMATES fetch fails, because it is a different endpoint", async () => {
+    // The regression the move itself would have introduced. The panel used to live on the scoping tab;
+    // putting it here behind the estimates error gate meant a broken `/deals/:id/estimates` hid an
+    // otherwise healthy walk, and there was no longer anywhere else to find it.
+    mocks.apiMock.mockRejectedValue(new Error("estimates are down"));
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<DealEstimatesTab dealId="deal-1" />);
+    });
+
+    expect(container.querySelector('[data-testid="ai-walk-panel"]')).not.toBeNull();
+    expect(container.textContent).toContain("Failed to load estimates");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
 });
 
 describe("DealEstimatesTab", () => {

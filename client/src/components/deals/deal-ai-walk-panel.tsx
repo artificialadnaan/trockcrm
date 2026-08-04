@@ -360,11 +360,14 @@ export function AiWalkCard({
   const badge = STATE_BADGE[walkthrough.state] ?? UNKNOWN_STATE_BADGE;
   const items = walkthrough.scope?.items ?? [];
   const summary = summarizeScopeItems(items);
-  // Whether anything on this card is behind a short-lived signature. Frames and clips both are; a card
-  // whose citations are text-only has nothing that can rot, so it gets no control it does not need.
-  const hasSignedMedia = items.some((item) =>
-    item.evidence.some((mention) => mention.frames.length > 0 || mention.clipUrl !== null)
-  );
+  // OFFERED WHENEVER THERE ARE CITATIONS AT ALL, not only once signed media has arrived.
+  //
+  // Two things need it and only one is obvious. The obvious one: frame and clip URLs are short-lived,
+  // so a tab left open past the TTL shows broken stills. The one the first version missed: frames are
+  // extracted AFTER transcription, so a freshly processed walk legitimately has quotes and no pictures
+  // yet — and gating the control on media already being present hid the refresh exactly when it was
+  // the only way to discover that the pictures had since landed. This panel does not poll.
+  const hasCitations = items.some((item) => item.evidence.length > 0);
 
   return (
     <div className="rounded-lg border bg-background p-4">
@@ -464,9 +467,8 @@ export function AiWalkCard({
                 frame and clip URLs with a short TTL, and the images are lazy — so an estimator who
                 scrolls to a later citation after the TTL lapses gets broken stills even though the
                 evidence is perfectly healthy. There is no per-walk refresh route, so this re-reads the
-                deal's walks exactly as the other retry controls do, which re-signs everything.
-                Offered only when there is something signed to go stale. */}
-            {hasSignedMedia ? (
+                deal's walks exactly as the other retry controls do, which re-signs everything. */}
+            {hasCitations ? (
               <div className="flex justify-end">
                 <RetryButton label="Refresh evidence" onRetry={onRetry} retrying={retrying} />
               </div>
@@ -517,7 +519,11 @@ export function DealAiWalkPanel({ dealId }: { dealId: string }) {
   // would flash a panel onto every scoping tab and then take it away again.
   if (!hasLoaded) return null;
 
-  if (error) {
+  // ONLY WHEN THERE IS NOTHING TO SHOW. The hook deliberately keeps the walks it already loaded when a
+  // refetch fails, and replacing them with this card threw that away — so an estimator who pressed
+  // "Refresh evidence" and hit a transient failure lost the scope they were reading, in exchange for
+  // re-signing pictures. A failure with cards in hand is reported ALONGSIDE them, below.
+  if (error && walkthroughs.length === 0) {
     // Deliberately quiet — muted, not the red treatment the workspace uses for a failed scoping-intake load.
     // This panel is supplementary to the scope an estimator writes by hand; if it fails to load, the tab is
     // still doing its job, and an alarm here would read as "the scoping tab is broken".
@@ -545,6 +551,16 @@ export function DealAiWalkPanel({ dealId }: { dealId: string }) {
           Scope that TROCK Scope extracted from a glasses walkthrough of this project. Read-only and
           AI-generated — verify a line before you price it, and make corrections in TROCK Scope.
         </CardDescription>
+        {/* A refetch that failed while we still hold walks. Said here rather than in place of them:
+            the cards below are the last good answer, and they are still worth reading. Muted, because
+            what it reports is "this may be out of date", not "this is wrong". */}
+        {error ? (
+          <p className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden="true" />
+            Couldn’t refresh — showing the last loaded scope.
+            <RetryButton label="Try again" onRetry={() => void refetch()} retrying={loading} />
+          </p>
+        ) : null}
       </CardHeader>
       <CardContent className="space-y-3">
         {walkthroughs.map((walkthrough) => (
