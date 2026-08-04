@@ -108,7 +108,16 @@ Sequence:
 1. Read the walkthrough's scope items — ALL of them, confirmed quantity or not. Rows with no quantity
    travel as null and arrive as rows needing input, which is the whole point of the CRM-side change.
 2. Compose the contact sheet from evidence frames → one `image/jpeg`.
-3. `HEAD` the derived key. If absent, `PUT` it. If present, **do not re-upload** — this is a retry.
+3. Upload the sheet with an **atomic create-if-absent** write (`If-None-Match: *`), not a HEAD followed
+   by a PUT. HEAD-then-PUT is a TOCTOU: two deliveries of the same walkthrough can both observe "absent"
+   and both write, and the loser overwrites evidence the deal has already committed — the exact damage
+   the no-re-upload rule exists to prevent. The conditional write makes "only if nobody got here first"
+   a property of the operation rather than of the gap between two operations.
+   On the precondition failure (`412`) the object already exists, which is the ordinary retry path: fetch
+   its size and checksum and compare them to what this attempt would have written. **Equal ⇒ reuse it**,
+   this is a true retry and there is nothing to do. **Unequal ⇒ abort the export and dead-letter** — the
+   key holds something this walkthrough did not produce, and posting would attach the deal's estimating
+   chain to a foreign object.
 4. `POST` the payload with the service token.
 5. Retry policy, per operation rather than one rule for all three:
    - **Timeouts**: HEAD 5s, PUT 60s (it carries the sheet), POST 30s. Bounded attempts — 5 for HEAD/PUT,
@@ -118,10 +127,11 @@ Sequence:
      `500`/`502`/`503`/`504`.
    - **Never retryable**: `400`, `409`, and any `401`/`403`. Auth failures dead-letter immediately —
      retrying a refused credential cannot succeed and only advances a lockout.
-   - **A 403 on HEAD is NOT "absent".** This is the one that matters: treating an unauthorized or
-     otherwise non-404 HEAD as "no object" leads straight to a PUT that overwrites evidence the deal has
-     already committed. Only an explicit `404` means absent. Anything else aborts the export and
-     dead-letters.
+   - **Never infer "absent" from a failed read.** The conditional write above removes the original form
+     of this hazard, but it survives on the `412` path: a `403` when fetching the existing object's
+     metadata is not "no object" and must not be treated as a mismatch OR as a match. Only an explicit
+     `404` means absent, and only a successful metadata read can justify reuse. Anything else aborts the
+     export and dead-letters.
    - Every dead-letter carries the operation, the derived key, and the response body.
 6. Record the returned `documentId` / `parseRunId` on the Scope walkthrough so the review UI can say
    "exported" and link back.
