@@ -333,7 +333,14 @@ describe("estimate generation job", () => {
             };
           }
 
-          throw new Error(`Unexpected tenant select call: ${tenantSelectCallCount}`);
+          // Every later select is `stillPriceable`, the re-read the persist path does under the row
+          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
+          // value so these tests exercise the pricing they are about; the skip path has its own test.
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700" }]) })),
+            })),
+          };
         }),
       })),
       insert: vi.fn(() => ({
@@ -481,7 +488,14 @@ describe("estimate generation job", () => {
               where: extractionWhere,
             };
           }
-          throw new Error(`Unexpected tenant select call: ${tenantSelectCallCount}`);
+          // Every later select is `stillPriceable`, the re-read the persist path does under the row
+          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
+          // value so these tests exercise the pricing they are about; the skip path has its own test.
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700" }]) })),
+            })),
+          };
         }),
       })),
       insert: vi.fn(() => ({
@@ -549,6 +563,121 @@ describe("estimate generation job", () => {
     expect(rankedExtractionIds).toEqual(["ext-normal", "ext-confirmed"]);
     expect(rankedExtractionIds).not.toContain("ext-unconfirmed");
     expect(buildPricingRecommendationMock).toHaveBeenCalledTimes(2);
+    expect(lockedClient.query).toHaveBeenLastCalledWith("COMMIT");
+  });
+
+  it("does NOT persist a recommendation for a quantity cleared since the snapshot", async () => {
+    // `pendingExtractions` is read once at the top of a run, and a generation takes a while. An
+    // estimator clearing a quantity in that window leaves the loop's guard looking at the OLD positive
+    // value — so the worker prices it and `persistPricingRecommendationBundle` sets the row
+    // `processed`, overwriting the `needs_quantity` the edit just wrote and publishing a number built
+    // on a quantity somebody explicitly removed. The re-read happens under the row lock, immediately
+    // before the write it guards.
+    const statusWrites: any[] = [];
+    const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
+    const extractionWhere = vi.fn().mockResolvedValue([
+      {
+        id: "ext-cleared",
+        dealId: "deal-1",
+        projectId: null,
+        documentId: "doc-1",
+        extractionType: "scope_line",
+        status: "pending",
+        // What the snapshot saw.
+        quantity: "700",
+        unit: "SF",
+        normalizedLabel: "Install laminate",
+        metadataJson: { sourceParseRunId: "parse-run-1", activeArtifact: true },
+      },
+    ]);
+    const appDb = {
+      select: vi.fn(() => ({ from: vi.fn(() => ({ where: vi.fn(() => ({ limit: sourceLimit })) })) })),
+    } as any;
+    const lockedClient = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: "doc-1", active_parse_run_id: "parse-run-1" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    } as any;
+    let tenantSelectCallCount = 0;
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => {
+          tenantSelectCallCount += 1;
+          if (tenantSelectCallCount === 1) {
+            return { where: vi.fn(() => ({ limit: vi.fn().mockResolvedValue([]) })) };
+          }
+          if (tenantSelectCallCount === 2) return { where: extractionWhere };
+          // The re-read: by now the estimator has cleared it.
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: null }]) })),
+            })),
+          };
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn(() => ({ returning: vi.fn().mockResolvedValue([{ id: "generated-id" }]) })),
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn((values: unknown) => {
+          statusWrites.push(values);
+          return { where: vi.fn(() => ({ returning: vi.fn().mockResolvedValue([{ id: "claimed" }]) })) };
+        }),
+      })),
+    } as any;
+
+    getHistoricalPricingSignalsMock.mockResolvedValue({
+      historicalItems: [],
+      vendorQuotes: [],
+      currentDeal: null,
+    });
+    resolveActiveCatalogSnapshotVersionIdMock.mockResolvedValue("snapshot-1");
+    listCatalogCandidatesForMatchingMock.mockResolvedValue([]);
+    rankExtractionMatchesMock.mockImplementation(async ({ extraction }: any) => [
+      {
+        catalogItemId: `catalog-${extraction.id}`,
+        matchScore: 99,
+        reasons: {},
+        historicalLineItemIds: [],
+        catalogBaselinePrice: 100,
+        historicalUnitPrices: [],
+        vendorQuotePrice: null,
+        awardedOutcomeAdjustmentPercent: 0,
+        internalAdjustmentPercent: 0,
+      },
+    ]);
+    buildPricingRecommendationMock.mockImplementation(() => ({
+      quantity: 700,
+      priceBasis: "mock",
+      recommendedUnitPrice: 10,
+      recommendedTotalPrice: 7000,
+      comparableHistoricalPrices: [],
+      historicalMedianPrice: null,
+      catalogBaselinePrice: null,
+      marketAdjustmentPercent: 0,
+      assumptions: {},
+      confidence: 1,
+    }));
+    poolConnectMock.mockResolvedValue(lockedClient);
+    drizzleMock.mockReturnValueOnce(appDb).mockReturnValueOnce(tenantDb);
+
+    const { runEstimateGeneration } = await import("../../src/jobs/estimate-generation.js");
+    await runEstimateGeneration(
+      { documentId: "doc-1", dealId: "deal-1", parseRunId: "parse-run-1" },
+      "office-1"
+    );
+
+    // It matched and priced from the snapshot — that work is wasted, not wrong. What must NOT happen is
+    // the write: `persistPricingRecommendationBundle` marks the extraction `processed`, which would
+    // overwrite the `needs_quantity` the estimator's edit just set and leave a recommendation standing
+    // on a quantity they removed.
+    expect(buildPricingRecommendationMock).toHaveBeenCalledTimes(1);
+    expect(statusWrites.some((write) => write?.status === "processed")).toBe(false);
     expect(lockedClient.query).toHaveBeenLastCalledWith("COMMIT");
   });
 
@@ -633,7 +762,14 @@ describe("estimate generation job", () => {
             return { where: vi.fn(() => ({ limit: vi.fn().mockResolvedValue([]) })) };
           }
           if (tenantSelectCallCount === 2) return { where: extractionWhere };
-          throw new Error(`Unexpected tenant select call: ${tenantSelectCallCount}`);
+          // Every later select is `stillPriceable`, the re-read the persist path does under the row
+          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
+          // value so these tests exercise the pricing they are about; the skip path has its own test.
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700" }]) })),
+            })),
+          };
         }),
       })),
       insert: vi.fn(() => ({
@@ -829,7 +965,14 @@ describe("estimate generation job", () => {
               where: extractionWhere,
             };
           }
-          throw new Error(`Unexpected tenant select call: ${tenantSelectCallCount}`);
+          // Every later select is `stillPriceable`, the re-read the persist path does under the row
+          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
+          // value so these tests exercise the pricing they are about; the skip path has its own test.
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700" }]) })),
+            })),
+          };
         }),
       })),
       insert: vi.fn(() => ({
@@ -944,7 +1087,14 @@ describe("estimate generation job", () => {
               where: extractionWhere,
             };
           }
-          throw new Error(`Unexpected tenant select call: ${tenantSelectCallCount}`);
+          // Every later select is `stillPriceable`, the re-read the persist path does under the row
+          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
+          // value so these tests exercise the pricing they are about; the skip path has its own test.
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700" }]) })),
+            })),
+          };
         }),
       })),
       insert: vi.fn(() => ({
@@ -1035,7 +1185,14 @@ describe("estimate generation job", () => {
             };
           }
 
-          throw new Error(`Unexpected tenant select call: ${tenantSelectCallCount}`);
+          // Every later select is `stillPriceable`, the re-read the persist path does under the row
+          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
+          // value so these tests exercise the pricing they are about; the skip path has its own test.
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700" }]) })),
+            })),
+          };
         }),
       })),
       insert: vi.fn(() => ({
@@ -1126,7 +1283,14 @@ describe("estimate generation job", () => {
             };
           }
 
-          throw new Error(`Unexpected tenant select call: ${tenantSelectCallCount}`);
+          // Every later select is `stillPriceable`, the re-read the persist path does under the row
+          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
+          // value so these tests exercise the pricing they are about; the skip path has its own test.
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700" }]) })),
+            })),
+          };
         }),
       })),
       insert: vi.fn(() => ({
@@ -1232,7 +1396,14 @@ describe("estimate generation job", () => {
               where: extractionWhere,
             };
           }
-          throw new Error(`Unexpected tenant select call: ${tenantSelectCallCount}`);
+          // Every later select is `stillPriceable`, the re-read the persist path does under the row
+          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
+          // value so these tests exercise the pricing they are about; the skip path has its own test.
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700" }]) })),
+            })),
+          };
         }),
       })),
       insert: vi.fn((table: any) => ({
@@ -1488,7 +1659,14 @@ describe("estimate generation job", () => {
               where: extractionWhere,
             };
           }
-          throw new Error(`Unexpected tenant select call: ${tenantSelectCallCount}`);
+          // Every later select is `stillPriceable`, the re-read the persist path does under the row
+          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
+          // value so these tests exercise the pricing they are about; the skip path has its own test.
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700" }]) })),
+            })),
+          };
         }),
       })),
       insert: vi.fn(() => ({

@@ -97,6 +97,32 @@ function buildSourceRowIdentity(input: {
   return `extracted:${input.extractionId}`;
 }
 
+/**
+ * Whether this extraction still carries a priceable quantity, asked again immediately before the write.
+ *
+ * THE SNAPSHOT IS STALE BY CONSTRUCTION. `pendingExtractions` is read once at the top of the run and a
+ * generation can take a while; an estimator clearing a quantity in that window leaves the guard above
+ * looking at the OLD positive value. The worker then prices it and
+ * `persistPricingRecommendationBundle` sets the row `processed` unconditionally — overwriting the
+ * `needs_quantity` the edit had just written, and publishing a recommendation built on a number the
+ * estimator explicitly removed.
+ *
+ * Asked INSIDE the persistence transaction and `FOR UPDATE`, so the answer cannot go stale between this
+ * check and the write it guards. Returns false for absent, non-finite and nonpositive alike, which is
+ * the same definition of priceable the loop's own guard uses.
+ */
+async function stillPriceable(db: any, extractionId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ quantity: estimateExtractions.quantity })
+    .from(estimateExtractions)
+    .where(eq(estimateExtractions.id, extractionId))
+    .limit(1)
+    .for("update");
+  if (!row || row.quantity === null || row.quantity === undefined) return false;
+  const value = Number(row.quantity);
+  return Number.isFinite(value) && value > 0;
+}
+
 export async function runEstimateGeneration(
   payload: { documentId?: string; dealId?: string; parseRunId?: string; rerunRequestId?: string },
   officeId: string | null
@@ -329,7 +355,19 @@ export async function runEstimateGeneration(
       //
       // The row is NOT dropped and NOT failed. It is a real line item somebody has to put a number on,
       // and it stays visible as one; what it must not do is carry a price nobody chose.
-      if (extraction.quantity === null || extraction.quantity === undefined) {
+      // NONPOSITIVE IS AS UNPRICEABLE AS ABSENT, and checking only for null left a bypass. A
+      // measurement candidate is re-selected by the candidate predicate regardless of status, so a
+      // PATCH writing "0" or a negative onto one produced a row this guard waved through — priced at
+      // zero and marked `processed`, which is the same stranding as the original defect reached by
+      // satisfying the check instead of evading it. `applyMarketRateAdjustment` already treats a
+      // quantity at or below zero as invalid; this is the guard agreeing with it.
+      const quantityValue = Number(extraction.quantity);
+      if (
+        extraction.quantity === null ||
+        extraction.quantity === undefined ||
+        !Number.isFinite(quantityValue) ||
+        quantityValue <= 0
+      ) {
         // ALREADY FLAGGED ⇒ say nothing further. The candidate filter is
         // `status = 'pending' OR extraction_type = 'measurement_candidate'`, so a normal row drops out
         // of the set the moment it is marked — but a MEASUREMENT CANDIDATE is re-selected on every run
@@ -572,6 +610,8 @@ export async function runEstimateGeneration(
           // LOCAL, so it reverts at transaction end rather than leaking the tenant onto a pooled
           // connection some later, unrelated statement borrows.
           await tx.execute(sql.raw(`SET LOCAL search_path TO ${schemaName}, public`));
+          // Re-asked under the row lock: the quantity may have been cleared since the snapshot.
+          if (!(await stillPriceable(tx, extraction.id))) return;
           await persistPricingRecommendationBundle({
             tenantDb: tx,
             generationRunId,
@@ -602,6 +642,11 @@ export async function runEstimateGeneration(
           });
         });
       } else {
+        // The SAME re-check on the locked path. That path runs inside the locked client's own
+        // transaction, so the row lock holds until it commits exactly as it does above; skipping the
+        // check here would leave the document-scoped run — the common one — with the stale-quantity
+        // hole this closes.
+        if (!(await stillPriceable(tenantDb, extraction.id))) continue;
         await persistPricingRecommendationBundle({
           tenantDb: tenantDb as any,
           generationRunId,
