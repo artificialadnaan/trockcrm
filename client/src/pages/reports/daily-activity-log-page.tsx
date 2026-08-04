@@ -11,7 +11,6 @@ import { ACTIVITY_TYPES } from "@trock-crm/shared/types";
 import { PageHeader } from "@/components/layout/page-header";
 import { ReportFilterBar, useReportFilters } from "@/components/reports/report-filter-bar";
 import { ExportExcelButton } from "@/components/reports/export-excel-button";
-import { useAccessibleOffices } from "@/hooks/use-accessible-offices";
 import { useDailyActivityLogReport, type DailyActivityLogEntry } from "@/hooks/use-reports";
 import { parseDisplayDate } from "@/lib/deal-utils";
 import { EmptyState, ErrorState, KpiCard, LoadingState, ReportPanel, formatNumber } from "./performance-report-ui";
@@ -134,36 +133,32 @@ export function DailyActivityLogPage() {
     setParam("types", next.length ? next.join(",") : null);
   }
 
-  // Preserve the cross-office scope on deal links; a bare /deals/:id resolves against the user's
-  // default office and 404s an off-office deal.
+  // Deal links carry the TENANT SCOPE only — ?officeId, never ?office.
   //
-  // TWO different params can carry office context and they are not interchangeable:
-  //   ?officeId — the app-level cross-office SCOPE. api() forwards it as the x-office-id header, so it
-  //               is the scope this report's rows were actually read under.
-  //   ?office   — the ReportFilterBar's office FILTER, written by its dropdown as an id OR a legacy
-  //               slug, and never a valid ?officeId value on its own.
-  // Reading only ?officeId meant that picking an office in the report's own dropdown produced links
-  // with no office context at all. Precedence: ?officeId wins when present, because it names the scope
-  // the deal was actually read from; the filter only narrows what is displayed within that scope. When
-  // ?officeId is absent we fall back to the filter, resolving a slug to its canonical id the same way
-  // ReportFilterBar's canonicalOfficeId does (the deal route needs an id, not a slug).
-  const { offices, loading: officesLoading } = useAccessibleOffices();
+  // The two params look interchangeable and are not:
+  //   ?officeId — the app-level cross-office SCOPE. api() turns it into the x-office-id header, which
+  //               is what tenantMiddleware resolves into a search_path (`office_<slug>`). It selects
+  //               WHICH SCHEMA the request reads.
+  //   ?office   — ReportFilterBar's display FILTER. It is a query param this report passes to its own
+  //               endpoint and nothing else; it never reaches tenantMiddleware and never changes the
+  //               schema. Rows are read from the viewer's CURRENT tenant either way.
+  //
+  // An earlier revision resolved ?office into an officeId for these links. That was wrong, and
+  // actively harmful: it promoted a report predicate into a tenant switch. The office filter matches
+  // on the activity's RESPONSIBLE USER (activities are tenant tables; users/offices are PUBLIC, so
+  // the join crosses schemas), and the activity route lets an elevated caller set responsibleUserId
+  // freely. So a Dallas-schema deal can carry an activity whose responsible user is Atlanta; under
+  // ?office=atlanta that row is shown, and linking it as ?officeId=<atlanta> pointed the detail
+  // request at Atlanta's schema, where that deal id does not exist — reintroducing exactly the 404
+  // this link logic exists to prevent.
+  //
+  // With only ?office set, the deal lives in the viewer's current tenant, which is precisely where a
+  // bare /deals/:id resolves. So the correct fallback is NO officeId at all. The genuinely complete
+  // fix is a per-row office/scope from the server (deals.office_code determines a deal's schema, not
+  // the responsible user's office) — that remains an open follow-up, deliberately not faked here.
   const scopeOfficeId = searchParams.get("officeId");
-  const filterOffice = searchParams.get("office");
-  const needsOfficeLookup = !scopeOfficeId && Boolean(filterOffice) && filterOffice !== "all";
-  // The accessible-office list arrives asynchronously, so on the FIRST paint of a ?office=<slug> view
-  // the lookup cannot succeed yet. Emitting a bare /deals/:id during that window is not a cosmetic
-  // gap -- it is precisely the 404 this resolution exists to prevent, handed to whoever clicks fast.
-  // So we distinguish "resolved to nothing" (a genuinely unknown office: bare link is correct) from
-  // "not resolvable YET", and withhold the link only for the latter.
-  const officeLinkPending = needsOfficeLookup && officesLoading;
-  const linkOfficeId = useMemo(() => {
-    if (scopeOfficeId) return scopeOfficeId;
-    if (!needsOfficeLookup) return null;
-    return offices.find((office) => office.id === filterOffice || office.slug === filterOffice)?.id ?? null;
-  }, [scopeOfficeId, needsOfficeLookup, filterOffice, offices]);
   const dealHref = (dealId: string) =>
-    `/deals/${dealId}${linkOfficeId ? `?officeId=${encodeURIComponent(linkOfficeId)}` : ""}`;
+    `/deals/${dealId}${scopeOfficeId ? `?officeId=${encodeURIComponent(scopeOfficeId)}` : ""}`;
 
   const pagination = data?.pagination;
   const rangeStart = pagination && pagination.returned > 0 ? (pagination.page - 1) * pagination.limit + 1 : 0;
@@ -319,20 +314,7 @@ export function DailyActivityLogPage() {
                           </div>
 
                           <div className="mt-1 text-sm text-slate-600">
-                            {entry.dealId && officeLinkPending ? (
-                              // Office context is still resolving. Render the deal as plain text
-                              // rather than a link that would navigate without it — a click here
-                              // would land on the 404 this resolution exists to prevent. It becomes
-                              // a link on the very next render, once the office list arrives.
-                              <span
-                                className="font-bold text-slate-500"
-                                title="Resolving office context…"
-                                aria-busy="true"
-                              >
-                                {entry.dealName || "Deal"}
-                                {entry.dealNumber ? ` (${entry.dealNumber})` : ""}
-                              </span>
-                            ) : entry.dealId ? (
+                            {entry.dealId ? (
                               <Link
                                 to={dealHref(entry.dealId)}
                                 className="font-bold text-slate-950 underline decoration-brand-red/40 underline-offset-4 hover:text-brand-red"

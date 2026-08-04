@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -7,19 +7,9 @@ import { MemoryRouter, useLocation } from "react-router-dom";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-// The page resolves the report's ?office filter (id OR legacy slug) to a canonical office id for deal
-// links, so the accessible-office list has to be present. Held in a mutable cell so a test can put the
-// hook back into its LOADING state and inspect the frame before resolution completes.
-const OFFICES = [
-  { id: "office-dallas", name: "Dallas Office", slug: "dallas" },
-  { id: "office-atlanta", name: "Atlanta Office", slug: "atlanta" },
-];
-const officesState = vi.hoisted(() => ({
-  current: { offices: [] as Array<{ id: string; name: string; slug: string }>, loading: false, error: null as string | null, refetch: () => {} },
-}));
-vi.mock("@/hooks/use-accessible-offices", () => ({
-  useAccessibleOffices: () => officesState.current,
-}));
+// No accessible-offices mock: the page no longer looks offices up at all. Deal links carry the tenant
+// scope (?officeId) verbatim or nothing, so there is no async resolution — and therefore no loading
+// state, no error state, and no client-side office matching to keep in step with the server's.
 
 vi.mock("@/components/reports/report-filter-bar", () => ({
   ReportFilterBar: () => <div>Report Filters</div>,
@@ -148,11 +138,6 @@ vi.mock("@/hooks/use-reports", async () => {
 });
 
 const { DailyActivityLogPage } = await import("./daily-activity-log-page");
-
-beforeEach(() => {
-  // Default: office list already loaded. The pre-resolution test opts into the loading state.
-  officesState.current = { offices: OFFICES, loading: false, error: null, refetch: () => {} };
-});
 
 function htmlFor(entry = "/reports/performance/daily-activity-log") {
   return renderToStaticMarkup(
@@ -283,65 +268,28 @@ describe("DailyActivityLogPage", () => {
     expect(html.match(/logged by/g)).toHaveLength(1);
   });
 
-  it("resolves the report's office FILTER to an officeId when no app scope is set", () => {
-    // ReportFilterBar's dropdown writes ?office=<id|slug>, never ?officeId. Reading only ?officeId
-    // meant choosing an office in the report's own dropdown produced a bare /deals/:id, which resolves
-    // under the viewer's default office and 404s an off-office deal.
-    const bySlug = htmlFor("/reports/performance/daily-activity-log?office=dallas");
-    expect(bySlug).toContain('href="/deals/deal-1?officeId=office-dallas"');
-
-    // The dropdown can also write the id directly — that must pass through, not be dropped.
-    const byId = htmlFor("/reports/performance/daily-activity-log?office=office-atlanta");
-    expect(byId).toContain('href="/deals/deal-1?officeId=office-atlanta"');
+  it("never turns the ?office FILTER into an officeId on deal links", () => {
+    // ?office is a report predicate applied INSIDE the viewer's current tenant; only ?officeId reaches
+    // tenantMiddleware and selects a schema. Promoting the filter to a tenant switch is not merely
+    // imprecise, it is wrong: the office filter matches on the activity's RESPONSIBLE USER (users and
+    // offices are public tables, activities and deals are tenant tables), and the activity route lets
+    // an elevated caller set responsibleUserId freely — so a Dallas-schema deal can legitimately carry
+    // an Atlanta-responsible activity. Emitting ?officeId=<atlanta> for it would point the detail
+    // request at a schema that does not contain the deal, producing the exact 404 this link logic is
+    // for. With no ?officeId the deal is in the viewer's tenant, which is where a bare link resolves.
+    for (const value of ["dallas", "office-atlanta", "DALLAS", "Dallas%20Office", "all", "nonexistent"]) {
+      const html = htmlFor(`/reports/performance/daily-activity-log?office=${value}`);
+      expect(html).toContain('href="/deals/deal-1"');
+      expect(html).not.toContain("officeId=");
+    }
   });
 
-  it("renders the deal as plain text while office context is still resolving", () => {
-    // The accessible-office list arrives asynchronously, so the FIRST paint of a ?office=<slug> view
-    // cannot resolve the id yet. Emitting /deals/:id with no office during that window hands a
-    // fast-clicking user exactly the 404 this resolution exists to prevent.
-    officesState.current = { offices: [], loading: true, error: null, refetch: () => {} };
-
-    const html = htmlFor("/reports/performance/daily-activity-log?office=dallas");
-
-    // No navigable link at all for the deal row in this frame...
-    expect(html).not.toContain('href="/deals/deal-1"');
-    expect(html).not.toContain("href=\"/deals/deal-1?");
-    // ...but the deal is still named, marked busy, so the row is not blank.
-    expect(html).toContain("Roof Replacement - Tower A (D-1001)");
-    expect(html).toContain('aria-busy="true"');
-  });
-
-  it("links normally once the office list has resolved", () => {
-    // The same URL, one render later: the pending state must not be sticky.
-    officesState.current = { offices: OFFICES, loading: false, error: null, refetch: () => {} };
-    const html = htmlFor("/reports/performance/daily-activity-log?office=dallas");
-
-    expect(html).toContain('href="/deals/deal-1?officeId=office-dallas"');
-    expect(html).not.toContain('aria-busy="true"');
-  });
-
-  it("does not withhold links while loading when no office lookup is needed", () => {
-    // ?officeId is already explicit, so nothing has to resolve — a slow office list must not suppress
-    // links that were never going to depend on it.
-    officesState.current = { offices: [], loading: true, error: null, refetch: () => {} };
-    const html = htmlFor("/reports/performance/daily-activity-log?officeId=office-atlanta");
-
-    expect(html).toContain('href="/deals/deal-1?officeId=office-atlanta"');
-    expect(html).not.toContain('aria-busy="true"');
-  });
-
-  it("prefers the app-level ?officeId over the report's office filter", () => {
-    // ?officeId is the scope the rows were actually READ under (api() sends it as x-office-id); the
-    // filter only narrows what is displayed within that scope. So the scope wins for the link target.
+  it("ignores the ?office filter entirely when a real tenant scope is present", () => {
+    // ?officeId is the scope the rows were actually READ under (api() sends it as x-office-id), so it
+    // is the only correct link target; the filter beside it must have no influence at all.
     const html = htmlFor("/reports/performance/daily-activity-log?officeId=office-atlanta&office=dallas");
     expect(html).toContain('href="/deals/deal-1?officeId=office-atlanta"');
     expect(html).not.toContain("officeId=office-dallas");
-  });
-
-  it("emits no office param for an unresolvable or all-offices filter", () => {
-    expect(htmlFor("/reports/performance/daily-activity-log?office=all")).toContain('href="/deals/deal-1"');
-    // A slug that is not in the accessible list must not be pasted through as if it were an id.
-    expect(htmlFor("/reports/performance/daily-activity-log?office=nonexistent")).toContain('href="/deals/deal-1"');
   });
 
   it("links the deal and keeps the office scope on the link", () => {
