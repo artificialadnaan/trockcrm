@@ -281,11 +281,14 @@ export default function CaptureScreen() {
 
   function detailParamsFor(
     t: SelectedTarget,
-  ): { id: string; name: string; projectNumber?: string; stage?: string; propertyAddress?: string } {
-    const out: { id: string; name: string; projectNumber?: string; stage?: string; propertyAddress?: string } = {
+  ): { id: string; name: string; isChangeOrder?: string; projectNumber?: string; stage?: string; propertyAddress?: string } {
+    const out: { id: string; name: string; isChangeOrder?: string; projectNumber?: string; stage?: string; propertyAddress?: string } = {
       id: t.id,
       name: t.name,
     };
+    // Carry the AUTHORITY to the detail header alongside the name. Omitted when unknown — an absent param
+    // falls back to reading the name, whereas "0" would assert "not a change order" and hide a real label.
+    if (t.isChangeOrder !== undefined) out.isChangeOrder = t.isChangeOrder ? "1" : "0";
     if (typeof params.dealId === "string" && params.dealId === t.id) {
       if (typeof params.projectNumber === "string") out.projectNumber = params.projectNumber;
       if (typeof params.stage === "string") out.stage = params.stage;
@@ -1318,7 +1321,9 @@ export default function CaptureScreen() {
         visible={pickerOpen}
         onClose={() => setPickerOpen(false)}
         onSelect={(t) => {
-          setTarget({ id: t.id, type: t.type, name: t.name });
+          // Keep the flag the picker already had: dropping it here blanked the /walk nav param and
+          // sent the target card + AI-walk headline back to guessing from the name.
+          setTarget({ id: t.id, type: t.type, name: t.name, isChangeOrder: t.isChangeOrder ?? undefined });
           setPickerOpen(false);
         }}
       />

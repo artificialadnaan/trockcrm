@@ -509,6 +509,18 @@ describe("captureTargetDisplayName", () => {
       .toBe("Lobby — Change Order 1");
   });
 
+  it("REGRESSION: a selection that keeps the picker's flag suppresses a false-flagged relabel", () => {
+    // capture.tsx's onSelect used to store only { id, type, name }, dropping the flag the picker row had
+    // just used. Everything downstream — the target card, the /walk nav param, the AI-walk headline —
+    // then fell back to reading the name. This pins the shape the handler must preserve.
+    const picked = { id: "d1", type: "deal" as const, name: "Lobby — Change Order 1", isChangeOrder: false };
+    const stored = { id: picked.id, type: picked.type, name: picked.name, isChangeOrder: picked.isChangeOrder };
+    expect(captureTargetDisplayName(stored)).toBe("Lobby — Change Order 1");
+    // Dropping the flag (the old behaviour) silently changes what the user sees.
+    expect(captureTargetDisplayName({ id: picked.id, type: picked.type, name: picked.name }))
+      .toBe("Change Order 1 — Lobby");
+  });
+
   it("leaves an ordinary deal name alone", () => {
     expect(captureTargetDisplayName({ type: "deal", name: "Tides Park Lane" })).toBe("Tides Park Lane");
   });

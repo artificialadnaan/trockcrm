@@ -71,6 +71,7 @@ export function buildUnifiedCaptureHref(
   fieldCaptureParams.delete("dealName");
   fieldCaptureParams.delete("leadName");
   fieldCaptureParams.delete("opportunityName");
+  fieldCaptureParams.delete("isChangeOrder");
 
   if (selectedTarget) {
     if (selectedTarget.type === "lead") {
@@ -85,6 +86,12 @@ export function buildUnifiedCaptureHref(
       fieldCaptureParams.set("dealName", selectedTarget.name);
     }
     fieldCaptureParams.set("targetName", selectedTarget.name);
+    // Hand the AUTHORITY across the app boundary too. Without it the field app receives only a name and
+    // has to re-derive "is this a change order?" from its shape — the one thing the flag exists to avoid.
+    // Omitted entirely when unknown: absent means "not stated", whereas "0" would assert NOT a CO.
+    if (selectedTarget.isChangeOrder != null) {
+      fieldCaptureParams.set("isChangeOrder", selectedTarget.isChangeOrder ? "1" : "0");
+    }
   }
 
   if (activeOfficeId && !fieldCaptureParams.get("officeId")) {

@@ -181,6 +181,12 @@ export type FieldScorecardSummary = {
   pmName: string | null;
   /** Current canonical deal/job name. Optional while older API deployments roll out. */
   projectName?: string | null;
+  /**
+   * `deals.is_change_order` for `projectName` — the AUTHORITY for the change-order display relabel.
+   * Optional and possibly ABSENT: an older API deployment omits it, and absent must stay absent (the
+   * display helper then reads the name). Never default this to false — false is an assertion.
+   */
+  isChangeOrder?: boolean | null;
   projectNumber: string | null;
   criticalDeficiencyCount: number;
   submittedByName: string | null;

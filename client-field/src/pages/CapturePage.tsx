@@ -52,10 +52,15 @@ function initialTargetFromParams(params: URLSearchParams): FieldCaptureTarget | 
 
   const dealId = getTrimmedParam(params, "dealId");
   if (!dealId) return null;
+  // `deals.is_change_order`, handed over by the CRM's "Open unified capture" link. Absent (older link,
+  // or a CRM target whose payload lacked it) stays UNDEFINED rather than false — false would assert
+  // "not a change order" and suppress the relabel for a project that is one.
+  const changeOrderParam = params.get("isChangeOrder");
   return {
     id: dealId,
     type: params.get("targetType") === "opportunity" ? "opportunity" : "deal",
     name: params.get("targetName") ?? params.get("dealName") ?? "Selected deal",
+    isChangeOrder: changeOrderParam === "1" ? true : changeOrderParam === "0" ? false : undefined,
     recordNumber: null,
     stageName: null,
     companyName: null,
