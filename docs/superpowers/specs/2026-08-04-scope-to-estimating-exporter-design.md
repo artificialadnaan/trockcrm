@@ -1,6 +1,7 @@
 # TROCK Scope → CRM estimating exporter
 
-**Status:** design, not approved. Nothing below is built.
+**Status:** design, not approved. Nothing below is built, and one prerequisite is BLOCKED — see the
+authentication blocker below.
 **Date:** 2026-08-04
 
 ## The gap in one sentence
@@ -30,6 +31,36 @@ Worth stating, because it removes most of the hard problems from this design:
 - **Status codes are already meaningful** and the sender must distinguish them: `400` = "your upload
   is not at the derived key, fix it", NOT retryable. `503` = "we could not reach object storage",
   retryable. `409` = the stored object no longer matches what the `files` row recorded.
+
+## BLOCKER: there is no way for a machine to call this endpoint
+
+**This spec originally said "POST the payload with the service token". That was wrong, and it is the
+single biggest correction here.** There is no service token for this route, and nothing in the CRM
+issues one.
+
+`POST /api/deals/:id/estimating/walkthrough-extractions` is mounted on the CRM's `tenantRouter`
+(`app.ts`, `CRM_ONLY_TENANT_ROUTE_MOUNTS[0]`), which means it sits behind `authMiddleware`, per-user
+rate limiting, CSRF on unsafe methods, and tenant/office resolution from an authenticated user. Every
+one of those assumes a logged-in human.
+
+The CRM's only existing machine path is `field-login`, which serves the FIELD routes — TrockCam is its
+only caller — and it does not reach `/api/deals`. Searching the auth middleware for a service-token
+mechanism returns nothing.
+
+So the exporter is **not** Scope-side work plus configuration. It needs a CRM-side authentication path
+that does not exist. Two ways, and this is a decision before any code:
+
+1. **A service principal for this route**, mirroring what TROCK Scope already built for its own
+   inbound service token: a bearer credential, an allow-list of exactly the routes it may reach, and a
+   provenance column so a machine-filed extraction is distinguishable from a human's. This is the
+   honest shape and the one that matches how the two systems already talk in the other direction.
+2. **Scope holds a CRM user's credentials** and logs in. Rejected here: it puts a human's session in a
+   machine, inherits CSRF and rate-limiting designed for a browser, and makes every row that machine
+   files indistinguishable from one that person typed.
+
+Recommended: (1). Note it also decides what `userId` on the payload means — today the spec passes
+`capturedByExternalId`, which is the CRM user who captured the walk, and that stays correct as the
+*actor* even when the *caller* is a service.
 
 ## The three things that make this non-trivial
 
@@ -66,8 +97,10 @@ write-only access, this decision inverts** and the fallback is CRM-issued presig
 upload-proxy endpoint), because an unscoped bucket credential held by a second service is a worse trade
 than the extra hop it was chosen to avoid.
 
-Nothing in Scope currently composes a contact sheet. It has evidence frames per clip; turning them into
-one `image/jpeg` is new work (sharp is already a CRM dependency; Scope would need its own).
+Nothing in Scope currently composes a contact sheet, and it has **no image library at all** — no sharp,
+no jimp, no canvas in any workspace. It has evidence frames (`frames`, `moment_frames`), so the inputs
+exist, but turning them into one `image/jpeg` means adding an image dependency to Scope, not just
+writing new code against an existing one.
 
 ### 2. A null quantity is refused today, and that refusal is being removed
 
@@ -118,7 +151,7 @@ Sequence:
    this is a true retry and there is nothing to do. **Unequal ⇒ abort the export and dead-letter** — the
    key holds something this walkthrough did not produce, and posting would attach the deal's estimating
    chain to a foreign object.
-4. `POST` the payload with the service token.
+4. `POST` the payload — **see the authentication blocker below, which this step cannot be written against yet.**
 5. Retry policy, per operation rather than one rule for all three:
    - **Timeouts**: HEAD 5s, PUT 60s (it carries the sheet), POST 30s. Bounded attempts — 5 for HEAD/PUT,
      5 for POST — with exponential backoff and full jitter, so a Scope-wide retry storm cannot
