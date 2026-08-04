@@ -19,7 +19,7 @@ export function SubmittedScorecardRow({
     : `${scorecard.totalScore}/100`;
   // A change-order child deal is stored "<Parent> — Change Order N"; this row clamps to two lines, so
   // move the label to the front. Display-only — `scorecard.projectName` itself is untouched.
-  const canonicalProjectName = formatDealDisplayName(scorecard.projectName?.trim());
+  const canonicalProjectName = formatDealDisplayName(scorecard.projectName?.trim(), scorecard.isChangeOrder);
   const projectName =
     canonicalProjectName || (scorecard.projectNumber ? `Project ${scorecard.projectNumber}` : "Untitled project");
   const metadata = [

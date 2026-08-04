@@ -585,7 +585,7 @@ function LeadershipForm(props: {
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <ScreenHeader onBack={goBack} title={formatDealDisplayName(draft.dealName)} />
+      <ScreenHeader onBack={goBack} title={formatDealDisplayName(draft.dealName, draft.isChangeOrder)} />
 
       {/* Freeze the whole form once submit begins: pointerEvents="none" makes every mutation control (scores,
           text, dictation, photo add/remove/caption) a no-op so a mid-submit edit can't be silently lost when
@@ -609,7 +609,7 @@ function LeadershipForm(props: {
         ) : null}
 
         <View style={{ gap: theme.space.md }}>
-          <Field label="Project"><Text style={styles.readonly}>{formatDealDisplayName(draft.dealName)}</Text></Field>
+          <Field label="Project"><Text style={styles.readonly}>{formatDealDisplayName(draft.dealName, draft.isChangeOrder)}</Text></Field>
           {draft.projectNumber ? <Field label="Project number"><Text style={styles.readonly}>{draft.projectNumber}</Text></Field> : null}
           <Field label="Evaluator">
             {/* Display-only: the Evaluator IS whoever submits (the server stamps submittedByName from the

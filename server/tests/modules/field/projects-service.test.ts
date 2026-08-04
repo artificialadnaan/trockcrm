@@ -349,6 +349,8 @@ describe("field projects service", () => {
         id: "deal-1",
         type: "deal",
         name: "121 Preston Oaks",
+        // `deals.is_change_order` — the AUTHORITY the picker uses for the change-order display relabel.
+        isChangeOrder: false,
         recordNumber: "DFW-1-17426-aa",
         stageName: "Construction",
         companyName: "Preston Oaks HOA",

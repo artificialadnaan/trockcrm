@@ -49,7 +49,15 @@ import { ReviewTray } from "../../src/components/ReviewTray";
 // a physical-device-only surface; the iOS Simulator has no camera).
 const CameraCapture = React.lazy(() => import("../../src/capture/CameraCapture"));
 
-type SelectedTarget = { id: string; type: "deal" | "lead" | "opportunity"; name: string };
+// `isChangeOrder` is present only when this target arrived from the project detail route, which has
+// the authoritative `deals.is_change_order`. A target picked in TargetPicker has no flag on its payload,
+// so it stays undefined and the display helper falls back to reading the name.
+type SelectedTarget = {
+  id: string;
+  type: "deal" | "lead" | "opportunity";
+  name: string;
+  isChangeOrder?: boolean;
+};
 
 function targetRef(t: SelectedTarget | null): CaptureTargetRef {
   if (!t) return {};
@@ -81,6 +89,7 @@ export default function CaptureScreen() {
   const params = useLocalSearchParams<{
     dealId?: string;
     targetName?: string;
+    isChangeOrder?: string;
     projectNumber?: string;
     stage?: string;
     propertyAddress?: string;
@@ -107,7 +116,12 @@ export default function CaptureScreen() {
 
   const initialTarget: SelectedTarget | null =
     typeof params.dealId === "string" && params.dealId
-      ? { id: params.dealId, type: "deal", name: typeof params.targetName === "string" ? params.targetName : "Project" }
+      ? {
+          id: params.dealId,
+          type: "deal",
+          name: typeof params.targetName === "string" ? params.targetName : "Project",
+          isChangeOrder: params.isChangeOrder === undefined ? undefined : params.isChangeOrder === "1",
+        }
       : null;
 
   const [target, setTarget] = useState<SelectedTarget | null>(initialTarget);
@@ -120,9 +134,10 @@ export default function CaptureScreen() {
         id: params.dealId,
         type: "deal",
         name: typeof params.targetName === "string" ? params.targetName : "Project",
+        isChangeOrder: params.isChangeOrder === undefined ? undefined : params.isChangeOrder === "1",
       });
     }
-  }, [params.dealId, params.targetName]);
+  }, [params.dealId, params.targetName, params.isChangeOrder]);
 
   const [pickerOpen, setPickerOpen] = useState(false);
   const [assigningPhotoId, setAssigningPhotoId] = useState<string | null>(null);
@@ -1169,6 +1184,8 @@ export default function CaptureScreen() {
                 params: {
                   dealId: target.id,
                   targetName: target.name,
+                  // Forward the authority too — the walk screen's headline would otherwise re-guess.
+                  isChangeOrder: target.isChangeOrder === undefined ? "" : target.isChangeOrder ? "1" : "0",
                   ...(typeof params.dealId === "string" && params.dealId === target.id && typeof params.propertyAddress === "string"
                     ? { propertyAddress: params.propertyAddress }
                     : {}),

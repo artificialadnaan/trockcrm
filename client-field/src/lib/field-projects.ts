@@ -53,6 +53,8 @@ export type FieldCaptureTarget = {
   id: string;
   type: "lead" | "opportunity" | "deal";
   name: string;
+  /** `deals.is_change_order` — deal rows only; the AUTHORITY for the change-order display relabel. */
+  isChangeOrder?: boolean | null;
   recordNumber: string | null;
   stageName: string | null;
   companyName: string | null;
@@ -68,8 +70,14 @@ export type FieldCaptureTarget = {
  * child is always Won. Rewriting every type would mangle a lead someone legitimately called
  * "Lobby — Change Order 1".
  */
-export function captureTargetDisplayName(target: Pick<FieldCaptureTarget, "type" | "name">): string {
-  return target.type === "deal" ? formatDealDisplayName(target.name) : target.name;
+export function captureTargetDisplayName(
+  target: Pick<FieldCaptureTarget, "type" | "name"> & { isChangeOrder?: boolean | null },
+): string {
+  // The type gate stays: only a deal can be a generated change-order child, and a lead a human named
+  // "Lobby — Change Order 1" must render as typed. `isChangeOrder` then makes the DEAL branch
+  // authoritative instead of syntactic — when the caller has it. Capture-target search does not carry
+  // it, so most picker rows pass undefined and fall back to reading the name.
+  return target.type === "deal" ? formatDealDisplayName(target.name, target.isChangeOrder) : target.name;
 }
 
 export type FieldPhoto = {

@@ -665,7 +665,7 @@ function Wizard(props: {
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <ScreenHeader onBack={goBack} title={formatDealDisplayName(draft.dealName)} />
+      <ScreenHeader onBack={goBack} title={formatDealDisplayName(draft.dealName, draft.isChangeOrder)} />
       <View style={styles.progressTrack}>
         <View style={[styles.progressFill, { width: `${completionPercent}%` }]} />
       </View>
@@ -931,7 +931,7 @@ function OverviewStep({
       </View>
 
       <View style={{ gap: theme.space.md }}>
-        <Field label="Project"><Text style={styles.readonly}>{formatDealDisplayName(draft.dealName)}</Text></Field>
+        <Field label="Project"><Text style={styles.readonly}>{formatDealDisplayName(draft.dealName, draft.isChangeOrder)}</Text></Field>
         {draft.projectNumber ? <Field label="Project number"><Text style={styles.readonly}>{draft.projectNumber}</Text></Field> : null}
         <Field label="Superintendent">
           <ResponderPicker value={draft.superintendentName} onChange={(name, responder) => dispatch(responderPickAction("superintendentName", name, responder))} responderId={draft.superintendentResponderId} role="superintendent" responders={responders} error={respondersError} />
@@ -1082,7 +1082,7 @@ function SetupStep({ draft, dispatch }: { draft: ScorecardDraft; dispatch: React
   const { responders, error: respondersError } = useFieldResponders(draft.dealId);
   return (
     <View style={{ gap: theme.space.md }}>
-      <Field label="Project"><Text style={styles.readonly}>{formatDealDisplayName(draft.dealName)}</Text></Field>
+      <Field label="Project"><Text style={styles.readonly}>{formatDealDisplayName(draft.dealName, draft.isChangeOrder)}</Text></Field>
       {draft.projectNumber ? <Field label="Project number"><Text style={styles.readonly}>{draft.projectNumber}</Text></Field> : null}
       <Field label="Superintendent">
         <ResponderPicker value={draft.superintendentName} onChange={(name, responder) => dispatch(responderPickAction("superintendentName", name, responder))} responderId={draft.superintendentResponderId} role="superintendent" responders={responders} error={respondersError} />

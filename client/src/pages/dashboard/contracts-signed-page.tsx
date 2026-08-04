@@ -173,7 +173,7 @@ export function ContractsSignedPage() {
                   <div className="flex items-center gap-2">
                     {/* A change-order child is STORED "<Parent> — Change Order N" and this row truncates;
                         move the label to the front for DISPLAY only. */}
-                    <p className="truncate text-sm font-semibold text-slate-950">{formatDealDisplayName(deal.name)}</p>
+                    <p className="truncate text-sm font-semibold text-slate-950">{formatDealDisplayName(deal.name, deal.isChangeOrder)}</p>
                     <span className="text-xs text-slate-500">{deal.dealNumber}</span>
                   </div>
                   <p className="mt-1 truncate text-sm text-slate-600">{buildPropertyLine(deal)}</p>

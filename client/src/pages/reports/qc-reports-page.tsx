@@ -380,14 +380,14 @@ function QcTable({ rows, onRowClick, compact }: { rows: QcScorecardRow[]; onRowC
             }}
             tabIndex={0}
             role="button"
-            aria-label={`Open ${kindLabel(r.kind).toLowerCase()} scorecard for ${formatDealDisplayName(r.projectName)}, dated ${fmtWeek(r.weekOf)}`}
+            aria-label={`Open ${kindLabel(r.kind).toLowerCase()} scorecard for ${formatDealDisplayName(r.projectName, r.isChangeOrder)}, dated ${fmtWeek(r.weekOf)}`}
             className={`cursor-pointer border-b border-slate-100 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-red/40 ${r.deficiencyCount > 0 ? "shadow-[inset_3px_0_0_var(--tw-shadow-color)] shadow-brand-red" : ""}`}
           >
             <td className="px-3.5 py-3">
               <div className="flex flex-wrap items-center gap-2">
                 {/* A change-order child deal is STORED "<Parent> — Change Order N"; lead with the label. Display
                     only — the scorecard snapshot and the PDF are generated from the stored value. */}
-                <div className="font-semibold text-slate-950">{formatDealDisplayName(r.projectName)}</div>
+                <div className="font-semibold text-slate-950">{formatDealDisplayName(r.projectName, r.isChangeOrder)}</div>
                 <Badge
                   variant="outline"
                   className={r.kind === "leadership"
@@ -496,7 +496,7 @@ function QcDetailSheet({ row, onClose }: { row: QcScorecardRow | null; onClose: 
         {row && (
           <>
             <SheetHeader className="shrink-0 border-b border-slate-100 px-6 py-5">
-              <SheetTitle className="pr-8 leading-snug">{formatDealDisplayName(row.projectName)}</SheetTitle>
+              <SheetTitle className="pr-8 leading-snug">{formatDealDisplayName(row.projectName, row.isChangeOrder)}</SheetTitle>
               <div className="text-[12.5px] text-slate-500">
                 {[
                   kindLabel(row.kind),

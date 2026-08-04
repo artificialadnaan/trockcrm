@@ -134,6 +134,30 @@ describe("QcReportsPage — change-order display name", () => {
   });
 });
 
+describe("QcReportsPage — deals.is_change_order decides, not the name", () => {
+  it("leaves a hand-named deal alone when the server says it is not a change order", async () => {
+    // The QC query now returns d.is_change_order. A deal a human named "Lobby — Change Order 1" has the
+    // flag false and must render exactly as typed, even though its name matches the generated shape.
+    const existing = mocks.useQcScorecards();
+    mocks.useQcScorecards.mockReturnValue({
+      ...existing,
+      scorecards: [{ ...existing.scorecards[1], projectName: "Lobby — Change Order 1", isChangeOrder: false }],
+    });
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/projects/qc-reports?officeId=office-dallas"]}>
+          <QcReportsPage />
+        </MemoryRouter>,
+      );
+    });
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("Lobby — Change Order 1");
+    expect(text).not.toContain("Change Order 1 — Lobby");
+  });
+});
+
 describe("QcReportsPage", () => {
   it("shows project and leadership cards together with a report-type filter and kind-aware labels", async () => {
     await act(async () => {

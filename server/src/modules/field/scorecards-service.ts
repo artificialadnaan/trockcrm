@@ -197,6 +197,7 @@ interface ScorecardSummarySource {
   superintendentName: string | null;
   pmName: string | null;
   projectName?: string | null;
+  isChangeOrder?: boolean | null;
   projectNumber: string | null;
   criticalDeficiencies: string[] | null;
   status?: string;
@@ -935,6 +936,7 @@ export async function listRecentFieldScorecards(
       sc.superintendent_name AS "superintendentName",
       sc.pm_name AS "pmName",
       d.name AS "projectName",
+      d.is_change_order AS "isChangeOrder",
       sc.project_number AS "projectNumber",
       sc.critical_deficiencies AS "criticalDeficiencies",
       sc.status AS "status",
@@ -1629,6 +1631,7 @@ async function findByClientSubmissionId(
     .select({
       ...getTableColumns(fieldScorecards),
       projectName: deals.name,
+      isChangeOrder: deals.isChangeOrder,
     })
     .from(fieldScorecards)
     .innerJoin(deals, eq(deals.id, fieldScorecards.dealId))
@@ -2029,6 +2032,7 @@ function toSummary(
     superintendentName: row.superintendentName ?? null,
     pmName: row.pmName ?? null,
     projectName,
+    isChangeOrder: row.isChangeOrder === true,
     projectNumber: row.projectNumber ?? null,
     criticalDeficiencyCount: (row.criticalDeficiencies ?? []).length,
     submittedByName: row.submittedByName ?? null,

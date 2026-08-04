@@ -1205,6 +1205,8 @@ export async function activateServiceHandoff(dealId: string) {
 export interface PendingRfpDeal {
   id: string;
   name: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  isChangeOrder: boolean;
   projectNumber: string | null;
   dealNumber: string | null;
   workflowRoute: string;

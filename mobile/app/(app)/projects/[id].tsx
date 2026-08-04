@@ -264,6 +264,9 @@ export default function ProjectDetailScreen() {
                   params: {
                     dealId,
                     targetName: toStr(params.name),
+                    // Forward the AUTHORITY, not just the name: capture would otherwise have to infer
+                    // "is this a change order?" from the name's shape all over again.
+                    isChangeOrder: toStr(params.isChangeOrder),
                     projectNumber: toStr(params.projectNumber),
                     stage: toStr(params.stage),
                     propertyAddress: toStr(params.propertyAddress),

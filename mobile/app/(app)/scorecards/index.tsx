@@ -155,6 +155,8 @@ export default function ScorecardsScreen() {
       clientSubmissionId: newSubmissionId(),
       dealId: target.id,
       dealName: target.name,
+      // The AUTHORITY, captured with the name so every screen that shows this draft stops guessing.
+      isChangeOrder: target.isChangeOrder ?? undefined,
       projectNumber: target.recordNumber ?? null,
       weekOf: todayIso(),
       now: Date.now(),
@@ -204,9 +206,9 @@ export default function ScorecardsScreen() {
       editingSubmitted ? "Discard changes?" : "Discard scorecard?",
       editingSubmitted
         ? cleanupIds.length > 0
-          ? `This removes your local changes to ${formatDealDisplayName(draft.dealName)}. New photos uploaded only for this edit will also be removed from the project gallery. The submitted scorecard will remain unchanged.`
-          : `This removes your local changes to ${formatDealDisplayName(draft.dealName)}. The submitted scorecard will remain unchanged.`
-        : `This permanently removes the in-progress ${draft.kind === "leadership" ? "Leadership " : ""}Scorecard for ${formatDealDisplayName(draft.dealName)}.`,
+          ? `This removes your local changes to ${formatDealDisplayName(draft.dealName, draft.isChangeOrder)}. New photos uploaded only for this edit will also be removed from the project gallery. The submitted scorecard will remain unchanged.`
+          : `This removes your local changes to ${formatDealDisplayName(draft.dealName, draft.isChangeOrder)}. The submitted scorecard will remain unchanged.`
+        : `This permanently removes the in-progress ${draft.kind === "leadership" ? "Leadership " : ""}Scorecard for ${formatDealDisplayName(draft.dealName, draft.isChangeOrder)}.`,
       [
         { text: "Keep editing", style: "cancel" },
         {
@@ -270,10 +272,10 @@ export default function ScorecardsScreen() {
                   onPress={() => router.push(draftPath(d, draftOfficeId))}
                   style={({ pressed }) => [styles.draftResume, pressed && { opacity: 0.7 }]}
                   accessibilityRole="button"
-                  accessibilityLabel={`${isEditingScorecardDraft(d) ? "Resume editing submitted" : "Resume"} ${d.kind === "leadership" ? "Leadership " : ""}Scorecard for ${formatDealDisplayName(d.dealName)}`}
+                  accessibilityLabel={`${isEditingScorecardDraft(d) ? "Resume editing submitted" : "Resume"} ${d.kind === "leadership" ? "Leadership " : ""}Scorecard for ${formatDealDisplayName(d.dealName, d.isChangeOrder)}`}
                 >
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.rowTitle} numberOfLines={1}>{formatDealDisplayName(d.dealName)}</Text>
+                  <Text style={styles.rowTitle} numberOfLines={1}>{formatDealDisplayName(d.dealName, d.isChangeOrder)}</Text>
                   <Text style={styles.rowSub}>
                     {isEditingScorecardDraft(d) ? "Editing submitted · " : ""}{d.kind === "leadership" ? "Leadership · " : ""}Week of {shortDate(d.weekOf)} · {scorecardDraftSectionsAnswered(d)}/{d.kind === "leadership" ? LEADERSHIP_SECTION_COUNT : SECTION_COUNT} scored
                   </Text>

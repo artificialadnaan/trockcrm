@@ -60,6 +60,8 @@ export async function getPendingRfpDeals(tenantDb: any): Promise<PendingRfpDeal[
     .select({
       id: deals.id,
       name: deals.name,
+      // `deals.is_change_order` — the AUTHORITY for the change-order display relabel on the client.
+      isChangeOrder: deals.isChangeOrder,
       projectNumber: deals.projectNumber,
       dealNumber: deals.dealNumber,
       workflowRoute: deals.workflowRoute,

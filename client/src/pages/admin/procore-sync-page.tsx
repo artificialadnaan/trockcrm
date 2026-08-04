@@ -185,7 +185,9 @@ function formatDealLabel(deal: ProjectValidationDeal | null) {
 
   // The CRM deal only -- a change-order child is STORED "<Parent> — Change Order N", so lead with the
   // label here. Display-only; the Procore project name below is a different record and is untouched.
-  const name = formatDealDisplayName(deal.name) ?? "Untitled CRM deal";
+  // `false` is asserted, not guessed: project-validation-service.ts filters its CRM candidates with
+  // `eq(deals.isChangeOrder, false)`, so every deal that reaches this formatter is known not to be one.
+  const name = formatDealDisplayName(deal.name, false) ?? "Untitled CRM deal";
   const displayNumber = formatDealDisplayNumber(deal).label;
   const number = displayNumber === "Pending" ? "" : ` (${displayNumber})`;
   return `${name}${number}`;

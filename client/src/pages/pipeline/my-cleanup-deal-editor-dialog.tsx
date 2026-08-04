@@ -36,7 +36,7 @@ export function MyCleanupDealEditorDialog({
         <DialogHeader>
           {/* A change-order child is STORED as "<Parent> — Change Order N"; lead the title with the label.
               Display-only — the DealForm below still edits the stored name. */}
-          <DialogTitle>{deal ? `Edit Deal: ${formatDealDisplayName(deal.name)}` : "Edit Deal"}</DialogTitle>
+          <DialogTitle>{deal ? `Edit Deal: ${formatDealDisplayName(deal.name, deal.isChangeOrder)}` : "Edit Deal"}</DialogTitle>
           <DialogDescription>
             Update the deal directly from your cleanup queue. The item will disappear automatically once the
             underlying cleanup issue is resolved.

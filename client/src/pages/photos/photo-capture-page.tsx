@@ -42,8 +42,11 @@ interface QueuedPhoto {
  * CO child is always Won. Rewriting every type would mangle a lead legitimately called
  * "Lobby — Change Order 1". Display-only — the `dealName` search param still carries the stored name.
  */
-function targetDisplayName(target: Pick<PhotoUploadTarget, "type" | "name">): string {
-  return target.type === "deal" ? formatDealDisplayName(target.name) : target.name;
+function targetDisplayName(target: Pick<PhotoUploadTarget, "type" | "name" | "isChangeOrder">): string {
+  // The type gate stays — a lead a human named "Lobby — Change Order 1" must render as typed. Within the
+  // deal branch, `deals.is_change_order` (now returned by the photo-target search) is the AUTHORITY, so
+  // this no longer has to read the name's shape to decide.
+  return target.type === "deal" ? formatDealDisplayName(target.name, target.isChangeOrder) : target.name;
 }
 
 export function groupPhotoUploadTargets(targets: PhotoUploadTarget[]) {

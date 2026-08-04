@@ -141,7 +141,7 @@ export default function CorrectiveActionScreen() {
           <>
             <View style={{ gap: theme.space.xs }}>
               <Text style={styles.projectName} numberOfLines={2}>
-                {formatDealDisplayName(scorecard?.projectName) ?? scorecard?.projectNumber ?? "Project"}
+                {formatDealDisplayName(scorecard?.projectName, scorecard?.isChangeOrder) ?? scorecard?.projectNumber ?? "Project"}
               </Text>
               <Text style={styles.meta}>
                 {allApproved

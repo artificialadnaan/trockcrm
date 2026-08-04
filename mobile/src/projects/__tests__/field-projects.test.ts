@@ -499,6 +499,16 @@ describe("captureTargetDisplayName", () => {
       .toBe("Lobby — Change Order 1");
   });
 
+  it("obeys the DEAL branch's isChangeOrder flag over the name's shape", () => {
+    expect(captureTargetDisplayName({ type: "deal", name: "Lobby — Change Order 1", isChangeOrder: false }))
+      .toBe("Lobby — Change Order 1");
+    expect(captureTargetDisplayName({ type: "deal", name: "Tides — Change Order 2", isChangeOrder: true }))
+      .toBe("Change Order 2 — Tides");
+    // A LEAD is still never rewritten, flag or not.
+    expect(captureTargetDisplayName({ type: "lead", name: "Lobby — Change Order 1", isChangeOrder: true }))
+      .toBe("Lobby — Change Order 1");
+  });
+
   it("leaves an ordinary deal name alone", () => {
     expect(captureTargetDisplayName({ type: "deal", name: "Tides Park Lane" })).toBe("Tides Park Lane");
   });

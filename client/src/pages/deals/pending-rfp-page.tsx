@@ -244,7 +244,7 @@ export function PendingRfpPage() {
                                 >
                                   {/* A change-order child is STORED as "<Parent> — Change Order N"; lead
                                       with the label so the queue row names the CO. Display-only. */}
-                                  {formatDealDisplayName(deal.name)}
+                                  {formatDealDisplayName(deal.name, deal.isChangeOrder)}
                                 </Link>
                                 <p className="text-xs text-muted-foreground">
                                   {displayNumber ?? "No number"}

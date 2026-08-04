@@ -68,7 +68,7 @@ export function ScorecardDetailView({
   const displayMax = isV2 ? "10" : String(SCORECARD_TOTAL_POINTS);
   // A change-order child deal is stored "<Parent> — Change Order N"; move the label to the front so it
   // survives the two-line clamp. Display-only — `scorecard.projectName` itself is untouched.
-  const canonicalProjectName = formatDealDisplayName(scorecard.projectName?.trim());
+  const canonicalProjectName = formatDealDisplayName(scorecard.projectName?.trim(), scorecard.isChangeOrder);
   const projectName =
     canonicalProjectName || (scorecard.projectNumber ? `Project ${scorecard.projectNumber}` : "Untitled project");
 

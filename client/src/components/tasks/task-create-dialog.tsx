@@ -32,6 +32,8 @@ interface DealOption {
   dealNumber: string;
   projectNumber?: string | null;
   name: string;
+  /** `deals.is_change_order` — present on the /deals list payload. */
+  isChangeOrder?: boolean | null;
 }
 
 const PROJECT_SEARCH_DEBOUNCE_MS = 150;
@@ -42,7 +44,7 @@ const PROJECT_SEARCH_MIN_CHARS = 2;
 // truncates away. formatDealDisplayName moves the label to the front; DISPLAY-ONLY, never persisted.
 function dealOptionLabel(deal: DealOption) {
   const display = formatDealDisplayNumber(deal);
-  const name = formatDealDisplayName(deal.name);
+  const name = formatDealDisplayName(deal.name, deal.isChangeOrder);
   return display.isPending ? name : `${display.label} - ${name}`;
 }
 

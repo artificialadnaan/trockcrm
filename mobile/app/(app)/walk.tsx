@@ -182,6 +182,7 @@ export default function WalkScreen() {
   const params = useLocalSearchParams<{
     dealId?: string;
     targetName?: string;
+    isChangeOrder?: string;
     projectId?: string;
     propertyAddress?: string;
   }>();
@@ -190,6 +191,9 @@ export default function WalkScreen() {
   const dealId = typeof params.dealId === "string" ? params.dealId : "";
   const projectId = typeof params.projectId === "string" && params.projectId ? params.projectId : null;
   const targetName = typeof params.targetName === "string" && params.targetName ? params.targetName : "this project";
+  // "1"/"0" from capture; "" or absent means the target was picked somewhere without the flag.
+  const targetIsChangeOrder =
+    params.isChangeOrder === "1" ? true : params.isChangeOrder === "0" ? false : undefined;
   const propertyAddress = typeof params.propertyAddress === "string" ? params.propertyAddress : null;
 
   // Identity for the upload queue: user + ACTIVE OFFICE, same resolution rule (activeOfficeId ??
@@ -638,7 +642,7 @@ export default function WalkScreen() {
           <View style={styles.centered}>
             <Text style={styles.aboutToLabel}>About to record</Text>
             <Text style={styles.aboutToTarget} numberOfLines={2}>
-              {formatDealDisplayName(targetName)}
+              {formatDealDisplayName(targetName, targetIsChangeOrder)}
             </Text>
             {/* Only while IDLE. Once a walk is "starting" native owns the sequence and this gate has
                 no say left — swapping the "Starting…" button out from under a start already in

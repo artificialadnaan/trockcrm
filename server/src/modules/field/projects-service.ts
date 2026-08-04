@@ -672,6 +672,7 @@ export async function listNearbyFieldCaptureTargets(
     SELECT
       d.id,
       d.name,
+      d.is_change_order,
       d.deal_number,
       d.project_number,
       COALESCE(psc.name, d.bid_board_stage_slug, 'Active') AS stage_name,
@@ -695,6 +696,7 @@ export async function listNearbyFieldCaptureTargets(
       id: row.id,
       type: "deal" as const,
       name: row.name,
+      isChangeOrder: row.is_change_order === true,
       recordNumber: resolveDealDisplayNumber({ projectNumber: row.project_number, dealNumber: row.deal_number }),
       stageName: row.stage_name ?? null,
       companyName: row.company_name ?? null,

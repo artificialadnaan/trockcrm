@@ -264,6 +264,13 @@ export interface PhotoUploadTarget {
   id: string;
   type: "lead" | "opportunity" | "deal";
   name: string;
+  /**
+   * `deals.is_change_order`, on deal/opportunity rows only (a lead cannot be a change-order child).
+   * The picker moves "Change Order N" to the FRONT of a change-order child's displayed name — it is
+   * STORED as "<Parent> — Change Order N" and truncates to look like its parent — and this flag is the
+   * AUTHORITY for that, so the client stops inferring it from the name's shape.
+   */
+  isChangeOrder?: boolean;
   recordNumber: string | null;
   stageName: string | null;
   companyName: string | null;
@@ -1396,6 +1403,7 @@ export async function searchPhotoUploadTargets(
       .select({
         id: deals.id,
         name: deals.name,
+        isChangeOrder: deals.isChangeOrder,
         dealNumber: deals.dealNumber,
         projectNumber: deals.projectNumber,
         pipelineDisposition: deals.pipelineDisposition,
@@ -1435,6 +1443,7 @@ export async function searchPhotoUploadTargets(
       id: row.id,
       type: row.pipelineDisposition === "opportunity" ? ("opportunity" as const) : ("deal" as const),
       name: row.name,
+      isChangeOrder: row.isChangeOrder === true,
       // Show the canonical DFW/ATL project number (resolver), never the raw deal_number — which is the
       // HubSpot import id for HubSpot deals and a change order's own generated number. Mirrors the field
       // project-list + nearby paths (projects-service.ts); this search path was the one PR #784 missed.

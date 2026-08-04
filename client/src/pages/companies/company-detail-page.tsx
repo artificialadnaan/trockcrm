@@ -780,7 +780,7 @@ function CompanyDealsTab({ companyId, companyName }: { companyId: string; compan
           {/* Deal name. A change-order child is STORED "<Parent> — Change Order N" and this line
               truncates the suffix off; formatDealDisplayName is DISPLAY-only, the stored name stands. */}
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-semibold text-foreground truncate">{formatDealDisplayName(deal.name)}</p>
+            <p className="text-sm font-semibold text-foreground truncate">{formatDealDisplayName(deal.name, deal.isChangeOrder)}</p>
           </div>
 
           {/* Stage pill */}
@@ -1077,7 +1077,7 @@ function CompanyPortfolioTab({ companyId, companyName }: { companyId: string; co
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <p className="text-sm font-medium">{formatDealDisplayName(deal.name)}</p>
+                      <p className="text-sm font-medium">{formatDealDisplayName(deal.name, deal.isChangeOrder)}</p>
                       <p className="text-xs text-muted-foreground font-mono">{deal.dealNumber}</p>
                     </div>
                     {opensLeadDetail ? (

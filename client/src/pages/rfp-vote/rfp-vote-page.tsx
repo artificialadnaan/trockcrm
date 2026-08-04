@@ -159,7 +159,7 @@ export function RfpVotePage() {
           <CardDescription>
             {/* A change-order child deal is STORED as "<Parent> — Change Order N". These two are RENDER
                 sites only; the submitted form snapshot (rfp-vote-form) keeps the raw stored name. */}
-            {formatDealDisplayName(f.dealname || deal.name)} · {f.project_number || "Pending"} — two of three approvals create the Bid Board
+            {formatDealDisplayName(f.dealname || deal.name, deal.isChangeOrder)} · {f.project_number || "Pending"} — two of three approvals create the Bid Board
             project; two rejections escalate for a final decision. Rejections require a reason.
           </CardDescription>
         </CardHeader>
@@ -172,7 +172,7 @@ export function RfpVotePage() {
           <section className="flex flex-col gap-4 rounded-lg border border-border p-4">
             <h3 className="text-sm font-semibold text-foreground">Project details</h3>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-              <ReadOnlyRow label="Deal name" value={formatDealDisplayName(f.dealname)} />
+              <ReadOnlyRow label="Deal name" value={formatDealDisplayName(f.dealname, deal.isChangeOrder)} />
               <ReadOnlyRow label="Project number" value={f.project_number || "Pending"} />
               <ReadOnlyRow label="Amount" value={formatMoney(f.amount)} />
               <ReadOnlyRow label="Project type" value={f.project_types ? `${f.project_types} - ${labelForTypeCode(f.project_types)}` : "—"} />

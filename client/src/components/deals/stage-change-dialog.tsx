@@ -149,6 +149,8 @@ interface StageChangeDialogProps {
     name: string;
     stageId: string;
     workflowRoute?: "normal" | "service" | null;
+    /** `deals.is_change_order`. The sole caller passes a full DealDetail, so this is always present. */
+    isChangeOrder?: boolean | null;
   };
   targetStageId: string;
   officeId?: string | null;
@@ -359,7 +361,7 @@ export function StageChangeDialog({
           <DialogDescription>
             {/* A change-order child is STORED as "<Parent> — Change Order N"; lead with the label so the
                 dialog names the CO, not its parent. Display-only — the stage write is unaffected. */}
-            {formatDealDisplayName(deal.name)}
+            {formatDealDisplayName(deal.name, deal.isChangeOrder)}
           </DialogDescription>
         </DialogHeader>
 

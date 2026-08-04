@@ -248,7 +248,7 @@ function linkedLabel(file: FileRecord, dealMap: Map<string, Deal>) {
       type: "deal" as const,
       // A change-order child deal is STORED as "<Parent> — Change Order N" and this label is rendered
       // truncated, so the suffix is what disappears. Display-only -- the stored name never changes.
-      label: deal ? `${displayNumber} · ${formatDealDisplayName(deal.name)}` : "Linked deal",
+      label: deal ? `${displayNumber} · ${formatDealDisplayName(deal.name, deal.isChangeOrder)}` : "Linked deal",
       href: `/deals/${file.dealId}`,
     };
   }
@@ -790,7 +790,7 @@ export function FilesPage() {
                     <SelectItem value="none">No deal</SelectItem>
                     {deals.map((deal) => (
                       <SelectItem key={deal.id} value={deal.id}>
-                        {formatDealDisplayNumber(deal).label} · {formatDealDisplayName(deal.name)}
+                        {formatDealDisplayNumber(deal).label} · {formatDealDisplayName(deal.name, deal.isChangeOrder)}
                       </SelectItem>
                     ))}
                   </SelectContent>

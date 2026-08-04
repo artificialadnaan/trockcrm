@@ -16,6 +16,18 @@ describe("captureTargetDisplayName", () => {
       .toBe("Lobby — Change Order 1");
   });
 
+  it("obeys the DEAL branch's isChangeOrder flag over the name's shape", () => {
+    // The capture-target search now returns `deals.is_change_order`, so the deal branch is authoritative
+    // rather than syntactic. A deal a human named "Lobby — Change Order 1" must render as typed.
+    expect(captureTargetDisplayName({ type: "deal", name: "Lobby — Change Order 1", isChangeOrder: false }))
+      .toBe("Lobby — Change Order 1");
+    expect(captureTargetDisplayName({ type: "deal", name: "Tides — Change Order 2", isChangeOrder: true }))
+      .toBe("Change Order 2 — Tides");
+    // No flag on the payload -> documented fallback to syntax.
+    expect(captureTargetDisplayName({ type: "deal", name: "Tides — Change Order 2" }))
+      .toBe("Change Order 2 — Tides");
+  });
+
   it("leaves an ordinary deal name alone", () => {
     expect(captureTargetDisplayName({ type: "deal", name: "Tides Park Lane" })).toBe("Tides Park Lane");
   });
