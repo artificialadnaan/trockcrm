@@ -20,7 +20,7 @@ function ProjectCard({
   const offOffice = isProjectOffOffice(project, writableOfficeId);
   // A change-order child is stored "<Parent> — Change Order N"; this row is one truncated line, so the
   // suffix never survives. Display-only — `project.name` itself is untouched.
-  const displayName = formatDealDisplayName(project.name);
+  const displayName = formatDealDisplayName(project.name, project.isChangeOrder);
   return (
     <Link
       to={`/projects/${project.id}`}

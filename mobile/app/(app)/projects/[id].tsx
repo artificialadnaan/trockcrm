@@ -75,6 +75,8 @@ export default function ProjectDetailScreen() {
   const params = useLocalSearchParams<{
     id: string;
     name?: string;
+    /** "1"/"0" from the list row — `deals.is_change_order`, the authority for the name relabel. */
+    isChangeOrder?: string;
     projectNumber?: string;
     propertyAddress?: string;
     stage?: string;
@@ -82,6 +84,9 @@ export default function ProjectDetailScreen() {
     officeSlug?: string;
   }>();
   const dealId = toStr(params.id);
+  // `deals.is_change_order`, forwarded by the list row as "1"/"0". `undefined` on a direct deep link
+  // (no params) — which is exactly the case where the helper should fall back to reading the name.
+  const changeOrderParam = params.isChangeOrder === undefined ? undefined : params.isChangeOrder === "1";
   const router = useRouter();
   const { fetcher, user, activeOfficeId } = useAuth();
   // Off-office projects are view-only until cross-office writes ship: the single-office report/capture
@@ -517,7 +522,7 @@ export default function ProjectDetailScreen() {
     <SafeAreaView style={styles.safe} edges={["top"]}>
       {/* Display-only change-order prefix. The `params.name` value itself stays RAW — it is forwarded on
           to /capture and then /walk, where it becomes a walk title PERSISTED to the server. */}
-      <ScreenHeader onBack={() => router.back()} title={formatDealDisplayName(toStr(params.name)) || "Project"} />
+      <ScreenHeader onBack={() => router.back()} title={formatDealDisplayName(toStr(params.name), changeOrderParam) || "Project"} />
 
       {/* The gallery is VIRTUALIZED. It used to be a ScrollView rendering every photo of every group,
           which on a project with thousands of photos mounted thousands of native image views and held

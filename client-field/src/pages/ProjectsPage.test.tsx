@@ -121,6 +121,25 @@ describe("ProjectsPage", () => {
     expect(node.querySelector('a[aria-label="Open Tides Park Lane (TR-5)"]')).not.toBeNull();
   });
 
+  it("obeys the SERVER's isChangeOrder flag, not the name's shape", async () => {
+    // `deals.is_change_order` is the authority. A deal a human named "Lobby — Change Order 1" arrives
+    // with the flag false and must render exactly as typed, even though its name looks generated.
+    apiMock
+      .mockResolvedValueOnce({ projects: [
+        { id: "deal-6", name: "Lobby — Change Order 1", isChangeOrder: false, dealNumber: "TR-6", projectNumber: "TR-6", propertyName: "Lobby", propertyAddress: "9 Lobby", stage: "Contract", lastActivityAt: null, photoCount: 0, starred: false, officeId: "office-1", officeSlug: "dallas" },
+        { id: "deal-7", name: "Tides Park Lane — Change Order 3", isChangeOrder: true, dealNumber: "TR-7", projectNumber: "TR-7", propertyName: "Tides", propertyAddress: "9 Tides", stage: "Contract", lastActivityAt: null, photoCount: 0, starred: false, officeId: "office-1", officeSlug: "dallas" },
+      ] })
+      .mockResolvedValueOnce({ projects: [] });
+
+    const node = renderPage();
+
+    await vi.waitFor(() => expect(node.textContent).toContain("Change Order 3 — Tides Park Lane"));
+    // The flag-false row is untouched, despite matching the generated shape exactly.
+    expect(node.textContent).toContain("Lobby — Change Order 1");
+    expect(node.textContent).not.toContain("Change Order 1 — Lobby");
+    expect(node.querySelector('a[aria-label="Open Lobby — Change Order 1 (TR-6)"]')).not.toBeNull();
+  });
+
   it("shows empty state when no active projects exist", async () => {
     apiMock.mockResolvedValueOnce({ projects: [] }).mockResolvedValueOnce({ projects: [] });
     const node = renderPage();

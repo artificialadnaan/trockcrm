@@ -9,6 +9,8 @@ export type FieldProject = {
   /** The human-facing project number to display (canonical DFW/ATL), or null when pending. Server-resolved. */
   projectNumber: string | null;
   name: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel; never infer it from the name. */
+  isChangeOrder: boolean;
   propertyName: string | null;
   propertyAddress: string | null;
   stage: string;
@@ -209,11 +211,22 @@ const CHANGE_ORDER_NAME_SUFFIX = /\s*—\s*Change Order\s+([1-9]\d*)\s*$/;
  * DISPLAY-ONLY: the stored `deals.name` is unchanged, so this must never be applied to a value that gets
  * written back (a walk title, a scorecard draft's dealName, a report cover, a nav param) — only to the
  * text a screen renders. Total, and it leaves every non-generated name byte for byte.
+ *
+ * `isChangeOrder` — pass it whenever the payload carries it. `deals.is_change_order` is the AUTHORITY;
+ * the name is only evidence. `false` returns the name unchanged whatever it looks like, `true` peels, and
+ * `undefined`/`null` falls back to syntax — an explicit degradation for payloads without the flag.
  */
-export function formatDealDisplayName(name: string): string;
-export function formatDealDisplayName(name: string | null | undefined): string | null | undefined;
-export function formatDealDisplayName(name: string | null | undefined): string | null | undefined {
+export function formatDealDisplayName(name: string, isChangeOrder?: boolean | null): string;
+export function formatDealDisplayName(
+  name: string | null | undefined,
+  isChangeOrder?: boolean | null
+): string | null | undefined;
+export function formatDealDisplayName(
+  name: string | null | undefined,
+  isChangeOrder?: boolean | null
+): string | null | undefined {
   if (typeof name !== "string" || name.length === 0) return name;
+  if (isChangeOrder === false) return name;
   const labels: string[] = [];
   let rest = name;
   for (;;) {

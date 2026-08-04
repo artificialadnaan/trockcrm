@@ -131,6 +131,17 @@ describe("KanbanDealCard", () => {
     expect(html).not.toContain("Tides Park Lane — Change Order 2");
   });
 
+  it("obeys deals.is_change_order over the name's shape", () => {
+    // The flag is the AUTHORITY: createDeal stores a hand-typed name verbatim with is_change_order
+    // false, so a deal someone named "Lobby — Change Order 1" must render exactly as typed.
+    const notACo = render(makeDeal({ name: "Lobby — Change Order 1", isChangeOrder: false }));
+    expect(notACo).toContain("Lobby — Change Order 1");
+    expect(notACo).not.toContain("Change Order 1 — Lobby");
+
+    const realCo = render(makeDeal({ name: "Tides Park Lane — Change Order 2", isChangeOrder: true }));
+    expect(realCo).toContain("Change Order 2 — Tides Park Lane");
+  });
+
   it("leaves an ordinary deal name byte for byte", () => {
     const html = render(makeDeal({ name: "Tides — Phase 2" }));
     expect(html).toContain("Tides — Phase 2");

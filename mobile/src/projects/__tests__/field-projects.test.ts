@@ -446,6 +446,44 @@ describe("formatDealDisplayName", () => {
   });
 });
 
+describe("formatDealDisplayName — the is_change_order flag outranks the name", () => {
+  // `deals.is_change_order` is the AUTHORITY. createDeal stores a hand-typed name verbatim with the flag
+  // false, so syntax alone cannot tell a human's "Lobby — Change Order 1" from a generated child.
+  it("false NEVER rewrites, even on a perfect generated suffix", () => {
+    expect(formatDealDisplayName("Lobby — Change Order 1", false)).toBe("Lobby — Change Order 1");
+    expect(formatDealDisplayName("Tides Park Lane — Change Order 2", false)).toBe("Tides Park Lane — Change Order 2");
+  });
+
+  it("true peels, and undefined/null fall back to syntax", () => {
+    expect(formatDealDisplayName("Tides Park Lane — Change Order 2", true)).toBe("Change Order 2 — Tides Park Lane");
+    expect(formatDealDisplayName("Tides Park Lane — Change Order 2", undefined)).toBe("Change Order 2 — Tides Park Lane");
+    expect(formatDealDisplayName("Tides Park Lane — Change Order 2", null)).toBe("Change Order 2 — Tides Park Lane");
+  });
+
+  it("POST-CONDITION and idempotency hold in ALL flag states, over composed shapes", () => {
+    const suffix = /\s*—\s*Change Order\s+[1-9]\d*\s*$/;
+    const bases = ["", "   ", "Tides", "Tides — Phase 2", "Change Order 1", "Change Order 7 — Lobby"];
+    const padding: Array<[string, string]> = [["", ""], ["   ", ""], ["", "   "], ["  ", "  "]];
+    const violations: string[] = [];
+    for (const flag of [undefined, null, true, false] as const) {
+      for (const base of bases) {
+        for (let depth = 0; depth <= 3; depth += 1) {
+          let composed = base;
+          for (let n = 1; n <= depth; n += 1) composed += ` — Change Order ${n}`;
+          for (const [lead, trail] of padding) {
+            const input = `${lead}${composed}${trail}`;
+            const once = formatDealDisplayName(input, flag);
+            if (once !== input && suffix.test(once)) violations.push(`${String(flag)}:${input}`);
+            else if (formatDealDisplayName(once, flag) !== once) violations.push(`${String(flag)}:${input}`);
+            else if (flag === false && once !== input) violations.push(`false-rewrote:${input}`);
+          }
+        }
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+});
+
 describe("captureTargetDisplayName", () => {
   it("moves the generated change-order label to the front for a DEAL target", () => {
     expect(captureTargetDisplayName({ type: "deal", name: "Tides Park Lane — Change Order 2" }))

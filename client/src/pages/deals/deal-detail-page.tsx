@@ -1159,7 +1159,7 @@ export function DealDetailPage() {
 
   // A change-order child is STORED as "<Parent> — Change Order N", which buries the label at the end of
   // the H1 and the breadcrumb. Display-only reorder; every write path still uses the stored name.
-  const displayName = formatDealDisplayName(deal.name);
+  const displayName = formatDealDisplayName(deal.name, deal.isChangeOrder);
 
   return (
     <div>

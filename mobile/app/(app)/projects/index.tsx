@@ -52,6 +52,8 @@ export default function ProjectsScreen() {
       params: {
         id: project.id,
         name: project.name,
+        // The AUTHORITY for the change-order relabel on the detail header. Router params are strings.
+        isChangeOrder: project.isChangeOrder ? "1" : "0",
         projectNumber: project.projectNumber ?? "",
         propertyAddress: project.propertyAddress ?? "",
         stage: project.stage,
@@ -190,7 +192,7 @@ function ProjectRow({
   // A change-order child is stored "<Parent> — Change Order N" and this row is a single truncated line,
   // so the suffix is precisely the part a phone never shows. Display-only — the nav param below still
   // carries `project.name`, and the server still matches the STORED name for search.
-  const displayName = formatDealDisplayName(project.name);
+  const displayName = formatDealDisplayName(project.name, project.isChangeOrder);
   // The star is a SIBLING of the row's tappable area (not nested inside it), so
   // tapping the star toggles only — it can never bubble into opening the project.
   return (

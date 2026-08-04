@@ -88,7 +88,7 @@ export function ContactDealsTab({ contactId, contact }: ContactDealsTabProps) {
               </div>
               {/* A change-order child is STORED "<Parent> — Change Order N"; this line truncates the
                   suffix away, so a CO reads as its parent. Display-only; the stored name is unchanged. */}
-              <p className="font-medium truncate">{formatDealDisplayName(assoc.deal.name)}</p>
+              <p className="font-medium truncate">{formatDealDisplayName(assoc.deal.name, assoc.deal.isChangeOrder)}</p>
               {assoc.role && (
                 <p className="text-xs text-muted-foreground">Role: {assoc.role}</p>
               )}

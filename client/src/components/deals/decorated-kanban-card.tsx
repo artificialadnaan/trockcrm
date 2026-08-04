@@ -56,7 +56,7 @@ export function DecoratedKanbanCard({
   const displayNumber = getDealDisplayNumber(deal);
   // A change-order child is STORED as "<Parent> — Change Order N", so a truncated card title reads as
   // its parent. Display-only reorder to "Change Order N — <Parent>"; the stored name is untouched.
-  const displayName = formatDealDisplayName(deal.name);
+  const displayName = formatDealDisplayName(deal.name, deal.isChangeOrder);
   const days = getEffectiveStageAgeDays(getEffectiveStageAgeDeal(deal));
   const slaDays = resolveKanbanSlaThresholdDays(stageSlug);
   const showSla = !isTerminalStage(stageSlug) && slaDays !== null;

@@ -56,7 +56,9 @@ function ResultCard({ result }: { result: SearchResult }) {
             GATED on entityType: this same card renders companies, contacts, leads, properties and FILES,
             and a file legitimately named "Proposal — Change Order 1" is NOT a generated deal name. */}
         <div className="font-medium text-gray-900 truncate">
-          {result.entityType === "deal" ? formatDealDisplayName(result.primaryLabel) : result.primaryLabel}
+          {result.entityType === "deal"
+            ? formatDealDisplayName(result.primaryLabel, result.isChangeOrder)
+            : result.primaryLabel}
         </div>
         {(() => {
           // Deal-only assignedRepName appended to the number/location meta line; falsy parts drop

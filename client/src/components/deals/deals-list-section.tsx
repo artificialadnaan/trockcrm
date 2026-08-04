@@ -1070,7 +1070,7 @@ export function DealsListSection({
         const displayNumber = getDealDisplayNumber(deal);
         // A change-order child is STORED as "<Parent> — Change Order N", so this truncating cell reads as
         // its parent. Display-only reorder; the stored name still feeds sort/search/CSV untouched.
-        const displayName = formatDealDisplayName(deal.name);
+        const displayName = formatDealDisplayName(deal.name, deal.isChangeOrder);
         const propertyLabel = getDealPropertyLabel(deal);
         return (
           <div className="min-w-0 space-y-1">
@@ -1403,7 +1403,7 @@ export function DealsListSection({
             <div className="space-y-3 md:hidden" aria-label="Deals list cards">
               {deals.map((deal) => {
                 const displayNumber = getDealDisplayNumber(deal);
-                const displayName = formatDealDisplayName(deal.name);
+                const displayName = formatDealDisplayName(deal.name, deal.isChangeOrder);
                 const ownerName = deal.assignedRepName ?? assigneeNameById.get(deal.assignedRepId) ?? "Unassigned";
                 const ownerColor = getOwnerInitialColor(deal.assignedRepId ?? ownerName);
                 const propertyLabel = getDealPropertyLabel(deal);

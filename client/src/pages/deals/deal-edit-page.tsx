@@ -44,7 +44,7 @@ export function DealEditPage() {
         <h2 className="text-2xl font-bold">Edit Deal</h2>
         {/* A change-order child is STORED as "<Parent> — Change Order N"; lead the subtitle with the
             label. Display-only — the form below still edits the stored name. */}
-        <p className="text-sm text-muted-foreground">{formatDealDisplayNumber(deal).label} - {formatDealDisplayName(deal.name)}</p>
+        <p className="text-sm text-muted-foreground">{formatDealDisplayNumber(deal).label} - {formatDealDisplayName(deal.name, deal.isChangeOrder)}</p>
       </div>
       <DealForm deal={deal} />
     </div>

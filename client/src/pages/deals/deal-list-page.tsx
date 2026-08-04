@@ -1544,11 +1544,11 @@ function DealListPageContent({
                     key={deal.id}
                     type="button"
                     onClick={() => navigate(`/deals/${deal.id}`)}
-                    aria-label={`Open project ${formatDealDisplayName(deal.name)}; stage ${deal.boardStageName}; project owner ${dealOwnerLabel(deal)}; time in stage ${stageAgeDaysLabel(deal)}; last updated ${formatDateInput(new Date(deal.updatedAt))}; value ${USD_COMPACT(moneyValue(deal))}`}
+                    aria-label={`Open project ${formatDealDisplayName(deal.name, deal.isChangeOrder)}; stage ${deal.boardStageName}; project owner ${dealOwnerLabel(deal)}; time in stage ${stageAgeDaysLabel(deal)}; last updated ${formatDateInput(new Date(deal.updatedAt))}; value ${USD_COMPACT(moneyValue(deal))}`}
                     className="grid w-full grid-cols-2 items-start gap-x-4 gap-y-3 px-1 py-4 text-left transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-red/40 lg:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)_minmax(0,0.9fr)_minmax(7rem,0.65fr)_minmax(7rem,0.65fr)_minmax(5.5rem,0.55fr)] lg:items-center"
                   >
                     <div className="col-span-2 min-w-0 lg:col-span-1">
-                      <p className="truncate text-sm font-black text-slate-950">{formatDealDisplayName(deal.name)}</p>
+                      <p className="truncate text-sm font-black text-slate-950">{formatDealDisplayName(deal.name, deal.isChangeOrder)}</p>
                     </div>
                     <div className="min-w-0">
                       <span className="block text-[10px] font-black uppercase tracking-[0.14em] text-slate-500 lg:hidden">Stage</span>

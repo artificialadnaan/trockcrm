@@ -17,6 +17,8 @@ export { formatDealDisplayName };
 export type FieldProject = {
   id: string;
   name: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel; never infer it from the name. */
+  isChangeOrder: boolean;
   /** RAW deals.deal_number — the HubSpot id ("HS-…") for HubSpot-imported deals. Never display this; render `projectNumber`. */
   dealNumber: string;
   /** The human-facing project number to display (canonical DFW/ATL), or null when pending. Server-resolved. */

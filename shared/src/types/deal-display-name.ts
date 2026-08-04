@@ -62,11 +62,35 @@ const CHANGE_ORDER_NAME_SUFFIX = /\s*—\s*Change Order\s+([1-9]\d*)\s*$/;
  * Total and non-throwing: null/undefined pass straight through, and an empty or whitespace-only name is
  * returned exactly as given. Nullish is preserved rather than coerced to "" so call sites that supply
  * their own fallback (`formatDealDisplayName(deal.name) ?? "Untitled"`) keep working.
+ *
+ * `isChangeOrder` — PASS IT WHENEVER YOU HAVE IT. `deals.is_change_order` is the authority on what a
+ * change-order child is; the name is only ever evidence. A deal a human manually names
+ * "Lobby — Change Order 1" is stored verbatim by createDeal with is_change_order = false, and syntax
+ * alone cannot tell it apart from a generated child. Three states, deliberately:
+ *
+ *   false      -> return the name UNCHANGED. The flag is authoritative: this is not a generated child,
+ *                 so there is nothing to move, whatever the name happens to look like.
+ *   true       -> peel, as below.
+ *   undefined  -> fall back to syntax. An explicit, documented degradation for the surfaces whose
+ *   / null       payload does not carry the flag — NOT a default anyone should reach for. `null` is
+ *                treated as unknown rather than false because several client types spell the
+ *                "endpoint didn't send it" case as `boolean | null`.
+ *
+ * The parameter is optional on purpose. Making it required would force every flag-less call site to
+ * assert something it does not know, and a confident wrong answer is worse than an honest `undefined`.
  */
-export function formatDealDisplayName(name: string): string;
-export function formatDealDisplayName(name: string | null | undefined): string | null | undefined;
-export function formatDealDisplayName(name: string | null | undefined): string | null | undefined {
+export function formatDealDisplayName(name: string, isChangeOrder?: boolean | null): string;
+export function formatDealDisplayName(
+  name: string | null | undefined,
+  isChangeOrder?: boolean | null
+): string | null | undefined;
+export function formatDealDisplayName(
+  name: string | null | undefined,
+  isChangeOrder?: boolean | null
+): string | null | undefined {
   if (typeof name !== "string" || name.length === 0) return name;
+  // The flag, when the caller has it, outranks the name entirely.
+  if (isChangeOrder === false) return name;
 
   // Peel generated suffixes off the tail, outermost first. Each match consumes at least "—Change Order N",
   // so `rest` strictly shrinks and the loop always terminates.

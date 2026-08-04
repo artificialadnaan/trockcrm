@@ -122,23 +122,83 @@ describe("formatDealDisplayName settles — post-condition + idempotency", () =>
     }
   }
 
-  it(`holds for all ${GENERATED.length} composed names`, () => {
-    // One `it` rather than `it.each` so a failure reports the offending inputs together — the useful
-    // signal is WHICH shape family broke, not one arbitrary member of it.
+  // The property has to hold on EVERY branch, not just the syntax one — the flag added a `false`
+  // short-circuit and a `true` path, and either could have broken settling.
+  const FLAG_STATES: Array<[string, boolean | null | undefined]> = [
+    ["flag absent (syntax fallback)", undefined],
+    ["flag null (unknown -> syntax)", null],
+    ["is_change_order = true", true],
+    ["is_change_order = false", false],
+  ];
+
+  it.each(FLAG_STATES)(`holds for all ${GENERATED.length} composed names — %s`, (_label, flag) => {
+    // One `it` per state rather than per input so a failure reports the offending inputs together —
+    // the useful signal is WHICH shape family broke, not one arbitrary member of it.
     const violations = GENERATED.filter((input) => {
-      const once = formatDealDisplayName(input);
-      const reformatted = formatDealDisplayName(once);
+      const once = formatDealDisplayName(input, flag);
+      const reformatted = formatDealDisplayName(once, flag);
       return (once !== input && GENERATED_SUFFIX.test(once)) || reformatted !== once;
     });
     expect(violations).toEqual([]);
   });
 
-  it("reaches a fixed point in ONE application, and stays there", () => {
+  it.each(FLAG_STATES)("reaches a fixed point in ONE application and stays there — %s", (_label, flag) => {
     for (const input of GENERATED) {
-      const once = formatDealDisplayName(input);
+      const once = formatDealDisplayName(input, flag);
       let value = input;
-      for (let i = 0; i < 6; i += 1) value = formatDealDisplayName(value);
+      for (let i = 0; i < 6; i += 1) value = formatDealDisplayName(value, flag);
       expect(value).toBe(once);
+    }
+  });
+
+  it.each(FLAG_STATES)("agrees with the unflagged call wherever the flag is not false — %s", (_label, flag) => {
+    for (const input of GENERATED) {
+      const expected = flag === false ? input : formatDealDisplayName(input);
+      expect(formatDealDisplayName(input, flag)).toBe(expected);
+    }
+  });
+});
+
+/**
+ * `deals.is_change_order` is the AUTHORITY; the name is only ever evidence for it.
+ *
+ * `createDeal` persists `input.name` verbatim and stamps is_change_order = false, so a deal a human
+ * manually names "Lobby — Change Order 1" is indistinguishable from a generated child BY SYNTAX. Where a
+ * caller has the flag, it must win. Where it doesn't, the syntax fallback is an explicit degradation.
+ */
+describe("formatDealDisplayName — the is_change_order flag outranks the name", () => {
+  it("false NEVER rewrites, even on a perfect generated suffix", () => {
+    expect(formatDealDisplayName("Lobby — Change Order 1", false)).toBe("Lobby — Change Order 1");
+    expect(formatDealDisplayName("Tides Park Lane — Change Order 2", false)).toBe("Tides Park Lane — Change Order 2");
+    expect(formatDealDisplayName("Change Order 7 — Lobby — Change Order 1", false)).toBe("Change Order 7 — Lobby — Change Order 1");
+    expect(formatDealDisplayName(" — Change Order 1", false)).toBe(" — Change Order 1");
+  });
+
+  it("true peels, exactly as the syntax path does", () => {
+    expect(formatDealDisplayName("Tides Park Lane — Change Order 2", true)).toBe("Change Order 2 — Tides Park Lane");
+    expect(formatDealDisplayName("Change Order 7 — Lobby — Change Order 1", true)).toBe("Change Order 1 — Change Order 7 — Lobby");
+  });
+
+  it("true on a name with NO generated suffix still leaves it byte for byte", () => {
+    // The flag says "this is a CO child", but there is nothing at the end to move — e.g. a child whose
+    // stored name was later edited by hand. Never fabricate a label that isn't in the name.
+    expect(formatDealDisplayName("Tides Park Lane", true)).toBe("Tides Park Lane");
+    expect(formatDealDisplayName("Change Order 5 — Lobby", true)).toBe("Change Order 5 — Lobby");
+  });
+
+  it("undefined and null both fall back to syntax — null means 'endpoint didn't send it', not 'false'", () => {
+    // Several client payload types spell the missing case as `boolean | null`. Treating null as false
+    // would silently switch the feature off wherever that shape is used.
+    expect(formatDealDisplayName("Tides Park Lane — Change Order 2")).toBe("Change Order 2 — Tides Park Lane");
+    expect(formatDealDisplayName("Tides Park Lane — Change Order 2", undefined)).toBe("Change Order 2 — Tides Park Lane");
+    expect(formatDealDisplayName("Tides Park Lane — Change Order 2", null)).toBe("Change Order 2 — Tides Park Lane");
+  });
+
+  it("passes nullish names through in every flag state", () => {
+    for (const flag of [true, false, undefined, null] as const) {
+      expect(formatDealDisplayName(null, flag)).toBeNull();
+      expect(formatDealDisplayName(undefined, flag)).toBeUndefined();
+      expect(formatDealDisplayName("", flag)).toBe("");
     }
   });
 });
@@ -161,15 +221,17 @@ describe("the mobile mirror does not drift", () => {
   );
   const canonical = readFileSync(new URL("./deal-display-name.ts", import.meta.url), "utf8");
 
-  const IMPLEMENTATION_SIGNATURE =
-    "export function formatDealDisplayName(name: string | null | undefined): string | null | undefined {";
+  // Anchored on the implementation's FIRST BODY LINE rather than its signature: the signature is split
+  // across lines and formatted differently in each file, and an anchor that stops matching would make
+  // this guard throw rather than compare — which is a broken guard, not a passing one.
+  const IMPLEMENTATION_SIGNATURE = `if (typeof name !== "string" || name.length === 0) return name;`;
 
   // Compare the SOURCE, not the behaviour: a mirror can only be verified against the original by looking
   // at what it actually says. Comments and indentation may differ (each file explains itself to its own
   // readers); every line of LOGIC must be identical.
   const implementationOf = (source: string) => {
     const start = source.indexOf(IMPLEMENTATION_SIGNATURE);
-    if (start === -1) throw new Error("implementation signature not found — was it renamed?");
+    if (start === -1) throw new Error("implementation body not found — was the first line changed?");
     const end = source.indexOf("\n}", start);
     if (end === -1) throw new Error("implementation end not found");
     return source

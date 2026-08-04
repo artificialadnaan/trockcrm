@@ -36,7 +36,7 @@ export function DealCard({ deal, isDragging }: DealCardProps) {
   const days = daysInStage(deal.stageEnteredAt);
   // A change-order child is STORED as "<Parent> — Change Order N", so this truncating title reads as its
   // parent. Display-only reorder to "Change Order N — <Parent>"; the stored name is untouched.
-  const displayName = formatDealDisplayName(deal.name);
+  const displayName = formatDealDisplayName(deal.name, deal.isChangeOrder);
 
   return (
     <Card
