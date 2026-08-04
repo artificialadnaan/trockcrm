@@ -32,9 +32,9 @@ function normalize(html: string) {
   return html.replace(/\s+/g, " ").trim();
 }
 
-function renderPage() {
+function renderPage(entry = "/properties/property-1") {
   return renderToStaticMarkup(
-    <MemoryRouter initialEntries={["/properties/property-1"]}>
+    <MemoryRouter initialEntries={[entry]}>
       <Routes>
         <Route path="/properties/:id" element={<PropertyDetailPage />} />
       </Routes>
@@ -367,5 +367,68 @@ describe("PropertyDetailPage", () => {
     expect(html).toContain('href="/leads/new?propertyId=property-1&amp;companyId=company-1&amp;name=Building+A+-+Main+Campus+opportunity"');
     expect(html).toContain("New lead");
     expect(html).not.toContain("New deal");
+  });
+
+  it("new service opportunity action preloads the property, its company and the return target", () => {
+    const html = normalize(renderPage());
+
+    expect(html).toContain(
+      'href="/deals/service-opportunity/new?propertyId=property-1&amp;companyId=company-1&amp;name=Building+A+-+Main+Campus+opportunity&amp;returnPropertyId=property-1"'
+    );
+    expect(html).toContain("New service opportunity");
+    // No office in the URL here, so none is invented.
+    expect(html).not.toContain("officeId=");
+  });
+
+  it("threads ?officeId through to the service opportunity form", () => {
+    // Office context is URL-driven (lib/api turns ?officeId into the x-office-id header). Losing it on this
+    // hop would create the opportunity while the rep is looking at another office's data.
+    const html = normalize(renderPage("/properties/property-1?officeId=office-atlanta"));
+
+    expect(html).toContain(
+      'href="/deals/service-opportunity/new?propertyId=property-1&amp;companyId=company-1&amp;name=Building+A+-+Main+Campus+opportunity&amp;returnPropertyId=property-1&amp;officeId=office-atlanta"'
+    );
+  });
+
+  it("hides the service opportunity action on a soft-deleted property", () => {
+    // The create endpoint only accepts an ACTIVE property, so leaving the action here would hand the rep a
+    // fully prefilled form that can only fail with "Property not found" after they've filled it in.
+    mocks.usePropertyDetailMock.mockReturnValue({
+      property: makeProperty({ isActive: false }),
+      leads: [],
+      deals: [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = normalize(renderPage());
+
+    expect(html).not.toContain("New service opportunity");
+    expect(html).not.toContain("/deals/service-opportunity/new");
+    // NOTE: "New lead" is still rendered here. Lead create validates the property with the same
+    // isActive = true predicate (server/src/modules/leads/service.ts), so it has the identical gap — left
+    // as-is deliberately rather than silently changing an existing control in this PR.
+    expect(html).toContain("New lead");
+  });
+
+  it("still links a company-less property, with no companyId param to prefill", () => {
+    mocks.usePropertyDetailMock.mockReturnValue({
+      property: makeProperty({ companyId: null, companyName: null }),
+      leads: [],
+      deals: [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = normalize(renderPage());
+
+    // The property still rides along — the form explains the missing owner company rather than sending the
+    // rep off to type the address in again.
+    expect(html).toContain(
+      'href="/deals/service-opportunity/new?propertyId=property-1&amp;name=Building+A+-+Main+Campus+opportunity&amp;returnPropertyId=property-1"'
+    );
+    expect(html).toContain("New service opportunity");
   });
 });
