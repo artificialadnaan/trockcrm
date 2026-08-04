@@ -880,6 +880,18 @@ outcomes AS (
              THEN d.lost_at::date
            ELSE NULL
          END                        AS outcome_date,
+         -- Terminal stage-entry business date, for D_nodate deals that have no outcome_date at all
+         -- (§4.0.7 event_window_end). Mirrors HOW outcome_kind was derived: if the CRM stage is the
+         -- terminal signal, use the CRM stage entry; if the Bid Board mirror is, use the mirror entry --
+         -- a mirror-terminal deal's CRM stage_entered_at reflects its still-open CRM stage, not the
+         -- transition that made it terminal. Real columns: deals.stage_entered_at (NOT NULL) and
+         -- deals.bid_board_stage_entered_at (nullable). Timezone-explicit per §4.0.6.
+         CASE
+           WHEN psc.slug IN (:won_slugs) OR psc.slug IN (:lost_slugs)
+             THEN (d.stage_entered_at AT TIME ZONE 'America/Chicago')::date
+           ELSE (COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at)
+                   AT TIME ZONE 'America/Chicago')::date
+         END                        AS terminal_entry_date,
          -- NOTE: expected_close_date is deliberately NOT selected. State comes from §4.0.3.
          COALESCE(d.is_bid_board_owned, false) OR COALESCE(d.is_read_only_mirror, false) AS bid_board_owned
   FROM deals d
@@ -992,9 +1004,10 @@ here. Adding a metric without adding a row is the defect re-entering.**
 | `total_days_slipped`, `days_pushed_out`, `days_pulled_in` | 4.5 | `E` | — | Event sums |
 | `chronic_mover_n` | 4.6 | deals in `D_book` meeting the flag | — | Count |
 | `chronic_mover_rate` | 4.6 | `chronic_mover_n` | `\|D_book\|` | Yes |
-| `silent_miss_n` | 4.7 | `D_score` with `move_count = 0` and `abs(err) > 14` | — | Count |
+| `silent_miss_n` | 4.7 | `D_score` with `deal_move_count = 0` and `abs(signed_error_p30) > 14` | — | Count |
 | `forecast_reliability` | 6.1 | `COALESCE(coverage_rate,0) * COALESCE(hit_rate_14d,0)` | — | Composite; both operands coalesced so zero coverage yields zero |
 | `scoreable_final_n` | 4.2 | `D_score_final` | — | Count; the `hit_rate_14d_final` volume floor (§6.4) |
+| `cov_n` | 4.1 | `D_cov` | — | Count; the `coverage_rate` volume floor (§6.4) |
 | `moves_by_other_actor` | 3 | `E` where `actor_user_id` is a user other than the owner (NULL ≠ "other") | — | Event count |
 | `machine_written_events_n`, `hubspot_refresh_events_n`, `migration_seed_events_n` | 2.5(b) | `close_date_timeline` on `D_book`: `source='machine'` for the total, `machine_source='hubspot_refresh'` / `='migration_seed'` for the two arms | — | Diagnostic |
 | `mirror_terminal_no_date_n` | 4.0.5 | **`D_nodate`** | — | Diagnostic |
@@ -1081,7 +1094,8 @@ deal_days_pushed_out  = COALESCE(sum(greatest(new_date - old_date, 0)), 0)
 
 -- Per-deal event cutoff (§4.0.5)
 event_window_end = CASE WHEN open THEN now()
-                        ELSE business_day_end_exclusive(COALESCE(outcome_date, stage_entry_date)) END
+                        ELSE business_day_end_exclusive(
+                               COALESCE(outcome_date, terminal_entry_date)) END
 ```
 
 `signed_error_pfinal` and `landed` had **no definition at all** before this section; `signed_error_p30` was
@@ -1101,9 +1115,9 @@ column. Re-run this check whenever a name is added:
 |---|---|---|
 | `raw_close_date_events` (§4.0.1) | `audit_log_id`, `deal_id`, `changed_at`, `actor_user_id`, `event_kind`, `old_date`, `new_date` | `audit_log`: `id`, `record_id`, `created_at`, `changed_by`, `table_name`, `action`, `changes`, `full_row` — all real columns (§1.2) |
 | `close_date_timeline` (§4.0.2) | all of the above **passed through**, plus `source`, `machine_source` | `raw_close_date_events.*`; `deals.hubspot_deal_id`; `public.hubspot_refresh_log.*` (§0064) |
-| `outcomes` (§4.0.5) | `deal_id`, `rep_id`, `deal_created_at`, `outcome_kind`, `outcome_date`, `bid_board_owned` | `deals.*`, `public.pipeline_stage_config.slug/is_terminal` |
-| `state_at` ×3 (§4.0.3) | `p30_*`, `pfinal_*`, `pnow_*` | `close_date_timeline`: `deal_id`, `changed_at`, **`audit_log_id`**, `source`, `new_date`; `outcomes.outcome_date` |
-| `coverage_resolution` (§4.1) | `cov_state`, `cov_prediction`, `is_provenance_unknown` | `outcomes.deal_id`; `state_at(deal, now())`; **`deals.expected_close_date`** — the only block that joins `deals` for it, and the whole reason convention 10's exception is buildable |
+| `outcomes` (§4.0.5) | `deal_id`, `rep_id`, `deal_created_at`, `outcome_kind`, `outcome_date`, **`terminal_entry_date`**, `bid_board_owned` | `deals.stage_entered_at`, `deals.bid_board_stage_entered_at`, `deals.created_at`, `deals.won_closed_date`, `deals.lost_at`, `deals.assigned_rep_id`, flags; `public.pipeline_stage_config.slug/is_terminal` |
+| `state_at` ×3 (§4.0.3) | `p30_state`, `p30_prediction`, `p30_changed_at`, `p30_source`; `pfinal_state`, `pfinal_prediction`, `pfinal_changed_at`, `pfinal_source`; `pnow_state`, `pnow_prediction`, `pnow_changed_at`, `pnow_source` — all `*_state` coalesced (§4.0.3) | `close_date_timeline`: `deal_id`, `changed_at`, **`audit_log_id`**, `source`, `new_date`; `outcomes.outcome_date` |
+| `coverage_resolution` (§4.1) | `cov_state`, `cov_prediction`, `is_provenance_unknown`, `cov_n` | `outcomes.deal_id`; `state_at(deal, now())`; **`deals.expected_close_date`** — the only block that joins `deals` for it, and the whole reason convention 10's exception is buildable |
 | Derived scalars (this section) | `open`, `landed`, `in_d_cov`, `signed_error_*`, `deal_move_count`, `deal_days_pushed_out`, `event_window_end` | `outcomes.*`, `cov_*`, `p30_*`, `pfinal_*`, `E` |
 | `E` (§4.0.6) | the event set for churn | `close_date_timeline` filtered by `source='rep'` and `event_window_end` |
 | Metrics (§4.1–4.7) | the report columns | everything above, by name only |
@@ -1130,14 +1144,20 @@ Coverage reads `pnow_state` from §4.0.3, **resolved for provenance first — in
 -- that keeps that promise; without it every 'no_event' row fell into at_risk_n and the promise was prose.
 coverage_resolution AS (
   SELECT o.deal_id,
-         CASE WHEN pnow.state = 'no_event' AND d.expected_close_date IS NOT NULL
-              THEN 'rep_prediction' ELSE pnow.state END          AS cov_state,
-         CASE WHEN pnow.state = 'no_event' AND d.expected_close_date IS NOT NULL
+         -- COALESCE FIRST. The LEFT JOIN LATERAL yields NULL when no event exists -- which is exactly the
+         -- audit-window case this CTE is here to rescue. Testing pnow.state directly makes BOTH CASE arms
+         -- NULL, so cov_state / cov_prediction / is_provenance_unknown all go NULL, in_d_cov goes NULL,
+         -- and the deal falls out of EVERY coverage bucket -- reinstating the defect this CTE fixes.
+         -- This is §4.0.3's coalescing rule, which the CTE must inherit rather than re-derive.
+         CASE WHEN pnow_state = 'no_event' AND d.expected_close_date IS NOT NULL
+              THEN 'rep_prediction' ELSE pnow_state END            AS cov_state,
+         CASE WHEN pnow_state = 'no_event' AND d.expected_close_date IS NOT NULL
               THEN d.expected_close_date ELSE pnow.prediction END  AS cov_prediction,
-         (pnow.state = 'no_event' AND d.expected_close_date IS NOT NULL) AS is_provenance_unknown
+         (pnow_state = 'no_event' AND d.expected_close_date IS NOT NULL) AS is_provenance_unknown
   FROM outcomes o
   JOIN deals d ON d.id = o.deal_id            -- the ONLY join to deals for expected_close_date
   LEFT JOIN LATERAL <state_at(o.deal_id, now())> pnow ON TRUE
+  CROSS JOIN LATERAL (SELECT COALESCE(pnow.state, 'no_event') AS pnow_state) c
 )
 -- Downstream reads cov_state / cov_prediction / is_provenance_unknown by name. Nothing else touches
 -- d.expected_close_date. `pnow_state` elsewhere in this section means `coverage_resolution.cov_state`'s
@@ -1556,26 +1576,44 @@ A fairness guarantee with nothing implementing it is worse than no guarantee, be
 looking for the mechanism. Every protective claim in §6 is listed here with the exact construct that makes
 it true. **A claim with no construct is not a claim — it is either implemented or deleted.**
 
-| # | Claim | Enforced by | Status |
-|---|---|---|---|
-| 6.1a | A rep who forecasts nothing scores 0% coverage, not a blank | `coverage_rate` numerator requires `cov_state='rep_prediction'`; denominator is all of `D_cov`. Undated open deals land in `at_risk_n`, which is in the denominator only → `0/N = 0` | ✅ |
-| 6.1b | A rep with **no open deals at all** does not outrank one who forecasts badly | `|D_cov| = 0` → `NULLIF` → NULL. Requires `NULLS LAST` **and** exclusion from the ranked set (§6.6) | ✅ after §6.6 |
-| 6.1c | Hit rate never carries the ranking on its own | Default sort is `coverage_rate DESC NULLS LAST, hit_rate_14d DESC NULLS LAST`; plus the §6.4 volume gate | ✅ after §6.6 |
-| 6.1d | "Forecast reliability" is zero when coverage is zero | `COALESCE(coverage_rate,0) * COALESCE(hit_rate_14d,0)` — see §6.1, the bare product does **not** hold this | ✅ after §6.1 fix |
-| 6.2a | Parking the book cannot buy coverage | `parked_n` branch removes `cov_prediction > today + CLOSE_TARGET_HOLD_HORIZON_DAYS` from the `covered_n` numerator while leaving it in the denominator | ✅ |
-| 6.2b | Parking cannot buy a hit rate | `p30_parked_at_write` conjunct in `scoreable` (§4.2) | ✅ |
-| 6.2c | Parked deals still count as churn | `E` filters on `source` and the event window only — it has no parked predicate, so parked writes remain in `move_count` / `days_pushed_out` / chronic-mover | ✅ |
-| 6.3a | Last-minute re-dating shows as weak P₃₀ | P₃₀ anchored 30 days out (§4.0.3); `D_score` requires a P₃₀ | ✅ |
-| 6.3b | …and still shows a strong final call rather than vanishing | `D_score_final` is a separate population (§4.2) — reusing `D_score` would have dropped exactly this rep | ✅ |
-| 6.3c | A short-lived deal's fallback cannot be gamed by a late re-date | Fallback selects the **earliest** state, `ORDER BY changed_at ASC, audit_log_id ASC` (§4.0.4) | ✅ |
-| 6.4 | Tiny denominators do not rank | Each rate gates on **its own** denominator: `scoreable_n`, `scoreable_final_n`, or `\|D_cov\| > 0` — all `>= MIN_RANKED_SCOREABLE` where a count applies (§6.4, §6.6) | ✅ |
-| 6.5a | Clearing a date does not erase prior churn | `E` is not truncated at a clear; `clear_count` is its own counter | ✅ |
-| 6.5b | A cleared date does not keep counting as standing | `state_at` returns `'cleared'` from the latest event's NULL `new_date` (§4.0.3) | ✅ |
-| 6.5c | Coverage treats a cleared deal as uncovered | `cov_state IN ('cleared','no_event')` → `at_risk_n` (§4.1) | ✅ |
+| # | Claim | Enforced by | Falsifying input — what would break it | Status |
+|---|---|---|---|---|
+| 6.1a | A rep who forecasts nothing scores 0% coverage, not a blank | `coverage_rate` numerator requires `cov_state='rep_prediction'`; denominator is all of `D_cov`. Undated open deals land in `at_risk_n`, denominator-only → `0/N = 0` | An undated open deal excluded from `D_cov`, shrinking the denominator to 0 | ✅ |
+| 6.1b | A rep with **no open deals at all** does not outrank one who forecasts badly | `\|D_cov\| = 0` → `NULLIF` → NULL; `NULLS LAST` **and** exclusion from the ranked set (§6.6) | A `DESC` sort without `NULLS LAST` anywhere in the stack | ✅ |
+| 6.1c | A hit rate computed over fewer than `MIN_RANKED_SCOREABLE` deals never ranks, on any sort | §6.4 gates each rate on its own denominator; the default sort leads with `coverage_rate` | A user-initiated sort on a rate column that bypasses the floor | ✅ *(claim narrowed — see below)* |
+| 6.1d | "Forecast reliability" is zero when coverage is zero | `COALESCE(coverage_rate,0) * COALESCE(hit_rate_14d,0)` — the bare product does **not** hold this | Either operand left un-coalesced (`0 * NULL = NULL`) | ✅ |
+| 6.2a | Parking the book cannot buy coverage | `parked_n` branch removes `cov_prediction > today + CLOSE_TARGET_HOLD_HORIZON_DAYS` from the numerator while leaving it in the denominator | Parked deals dropped from `D_cov` entirely, which would *raise* the rate | ✅ |
+| 6.2b | Parking cannot buy a hit rate | `p30_parked_at_write` conjunct in `scoreable` (§4.2) | `p30_parked_at_write` left un-coalesced, taking `scoreable` NULL instead of false | ✅ |
+| 6.2c | Parked deals still count as churn | `E` filters on `source` and `event_window_end` only — no parked predicate | Adding a parked filter to `E` "for consistency" with §4.2 | ✅ |
+| 6.3a | Last-minute re-dating is visible, not hidden | P₃₀ anchored 30 days out (§4.0.3); `D_score` requires a P₃₀; the deal lands in `no_prediction_n` and depresses `scoreable_n` vs `landed_n` | Dropping the shortfall columns, leaving only a hit rate over a shrunken denominator | ✅ |
+| 6.3b | …and still shows a strong final call rather than vanishing | `D_score_final` is a separate population (§4.2) | Computing `hit_rate_14d_final` over `D_score` | ✅ |
+| 6.3c | A short-lived deal's fallback cannot be gamed by a late re-date | Fallback selects the **earliest** state, `ORDER BY changed_at ASC, audit_log_id ASC` (§4.0.4) | Reverting the fallback to `state_at(deal, outcome_date)`, i.e. the latest | ✅ |
+| 6.4 | **No rate ranks on fewer than `MIN_RANKED_SCOREABLE` underlying deals** | Every ranked rate gates on its own denominator count: `scoreable_n`, `scoreable_final_n`, `cov_n`; a **composite** gates on *all* its operands' denominators (§6.4) | A rate whose floor keys on a different population than its denominator — or a composite gated on neither operand | ✅ *(was ✗ — see below)* |
+| 6.5a | Clearing a date does not erase prior churn | `E` is not truncated at a clear; `clear_count` is its own counter | Capping `event_window_end` at the clear instead of the outcome | ✅ |
+| 6.5b | A cleared date does not keep counting as standing | `state_at` returns `'cleared'` from the latest event's NULL `new_date` (§4.0.3) | Adding `AND new_date IS NOT NULL` inside the `state_at` lateral | ✅ |
+| 6.5c | Coverage treats a cleared deal as uncovered | `cov_state IN ('cleared','no_event')` → `at_risk_n` (§4.1) | `coverage_resolution` testing `pnow.state` un-coalesced, taking every branch NULL | ✅ *(was ✗ for the `no_event` arm)* |
 
-Three rows in this table were **prose-only** until this pass — 6.1b, 6.1d and 6.4 — and one of them (6.1d)
-was actively false as written. That is the value of the table: the claims that had no mechanism were
-indistinguishable, on the page, from the ones that did.
+**Every ✅ above was re-derived from the current SQL rather than from the intent that produced the row**, by
+naming a falsifying input and checking whether the text admits it. Eleven of thirteen survived unchanged.
+Two did not:
+
+- **6.4 was a false ✅.** It claimed tiny denominators do not rank while `coverage_rate` was rankable at
+  `|D_cov| = 1`, and `forecast_reliability` could rank a rep with a single scoreable hit because its
+  `hit_rate_14d` operand was *coalesced* but never *volume-gated*. Coalescing turns NULL into 0; it does
+  nothing about a rate computed over one deal. Fixed below.
+- **6.1c was unfalsifiable as worded.** "Hit rate never carries the ranking on its own" describes the
+  default sort, but any user-initiated sort makes some column carry the ranking — so the row could be read
+  as true or false at will. Narrowed to a claim with a construct: *no rate ranks on fewer than
+  `MIN_RANKED_SCOREABLE` underlying deals, on any sort.*
+
+A row marked ✅ against a construct that does not deliver it is worse than a missing row: §6.0 exists so an
+unenforced claim is visible, and a false ✅ is a false negative **in the check built to prevent false
+negatives**. It stops the next reader looking, which is precisely the harm the table was created to remove.
+The falsifying-input column is the structural answer — a row is now checkable against the text by anyone,
+rather than resting on the author remembering what they meant.
+
+Three rows were **prose-only** until an earlier pass — 6.1b, 6.1d and 6.4 — and 6.1d was actively false as
+written. The claims that had no mechanism were indistinguishable, on the page, from the ones that did.
 
 ### 6.1 Not forecasting is the worst score, not a blank
 
@@ -1656,8 +1694,22 @@ denominator — proposed **5 deals in `D_score`** — to appear in the ranking. 
 real numbers and an "insufficient volume" marker, excluded from sort order. This is the same discipline
 `at-risk-service.ts` applies by making every row its own evidence.
 
-**Each ranked rate is gated on its own denominator.** `hit_rate_14d` and `hit_rate_30d` gate on
-`scoreable_n`; `hit_rate_14d_final` gates on `scoreable_final_n`; `coverage_rate` gates on `|D_cov| > 0`.
+**Each ranked rate is gated on its own denominator count — and a composite is gated on all of them.**
+
+| Ranked column | Floor |
+|---|---|
+| `hit_rate_14d`, `hit_rate_30d` | `scoreable_n >= MIN_RANKED_SCOREABLE` |
+| `hit_rate_14d_final` | `scoreable_final_n >= MIN_RANKED_SCOREABLE` |
+| `coverage_rate` | `cov_n >= MIN_RANKED_COVERAGE` where `cov_n = \|D_cov\|` |
+| `forecast_reliability` | **both** `cov_n >= MIN_RANKED_COVERAGE` **and** `scoreable_n >= MIN_RANKED_SCOREABLE` |
+| `moves_per_deal`, `chronic_mover_rate` | `\|D_book\| >= MIN_RANKED_SCOREABLE` |
+| signed-error columns | `scoreable_n >= MIN_RANKED_SCOREABLE` |
+
+`coverage_rate` previously had only a `> 0` guard, which is not a floor — a rep with one open dated deal
+scored 100% and ranked first. And `forecast_reliability` inherited *neither* operand's floor: coalescing
+its operands (§6.1) fixes the `0 * NULL = NULL` hole but does nothing about sample size, so a rep with one
+covered deal and one scoreable hit scored 1.0. **A composite must clear every floor its inputs clear**, or
+it becomes the unguarded back door to the ranking.
 Round 7 gave the final hit rate its own population (`D_score_final`) without giving it its own floor, so a
 rep with a single scoreable-final deal who hit it could rank first on a one-deal sample — §6.4's exact
 failure, reintroduced by the very fix that made the metric correct. A floor that keys on a *different*
@@ -1775,6 +1827,7 @@ work or an omission, and there is no way to tell which from a list that only nam
 | `hit_rate_30d` | **Col** | `D_score` | 4.2 / 2.3 |
 | `hit_rate_14d_final` | Col | `D_score_final` | 4.2 |
 | `scoreable_final_n` | Col | `D_score_final` | 4.2 |
+| `cov_n` | Col | `D_cov` | 4.1 |
 | `forecast_reliability` | Col | composite of `D_cov` + `D_score` | 6.1 |
 | `mean_signed_error_days` | Col | `D_score` | 4.3 |
 | `median_signed_error_days` | Col | `D_score` | 4.3 |
@@ -1891,6 +1944,12 @@ within a short window of the event (§1.7). Every number on the summary row is r
     a metric given its own population but not its own floor, a ranked column in neither table, an exception
     granted to a block that could not reach the data. Re-run the §7 convention audit and the three
     table-agreement checks **after** a change, never before.
+17. **Every audit row must state what would falsify it.** §6.0 carries a falsifying-input column and
+    §4.0.7 a producer/consumer chain precisely so a reader can check a claim *against the text* instead of
+    trusting the author's intent. An audit that certifies itself is worse than no audit: §6.0's row 6.4
+    was marked ✅ against a construct that did not deliver it, which is a false negative in the check built
+    to prevent false negatives. When adding an audit row, write the falsifying input first — if none can be
+    named, the claim is too vague to enforce.
 
 **A convention that forbids something the spec requires is worse than no convention, because it will be
 enforced.** Convention 10 was exactly that for one round: it banned every raw read of
@@ -1915,7 +1974,8 @@ must therefore be stated with its exceptions, and each was checked against the s
 | 13 `NULLS LAST` + unranked | §6.6, default sort | Obeyed; default sort also needed `rep_id` for totality. Fixed |
 | 14 §6 claims name constructs | §6.0 | Obeyed |
 | 15 no dangling identifiers | §4.0.7 producer/consumer chain | Obeyed — re-run after round 8; `coverage_resolution` added as a producer |
-| 16 fixes fully propagated | every round-8 change | **Was the round-8 finding class itself** — three of seven were round 7's fixes leaving new gaps. Audits re-run after this round, not before |
+| 16 fixes fully propagated | every round-8/9 change | **Still the dominant finding class** — 3 of 4 round-9 findings were round-8 fixes reaching some consumers and not others. Audits re-run after each round |
+| 17 audit rows state their falsifier | §6.0, §4.0.7 | Added round 9, after §6.0 certified a claim its own construct did not deliver |
 
 **One companion decision v1 must make, not defer.** The existing Forecast Variance report publishes
 `avg_close_drift_days` — unsigned, Won-only, and structurally frozen since 2026-04-23 (§1.5). Shipping a
@@ -2033,6 +2093,22 @@ complement of `futureDatedCloseDatePredicateSql`'s `>= today` (`foundations.ts:4
 unparked in both. One ordering — `percentile_cont`'s `WITHIN GROUP` — deliberately needs no tie-breaker,
 and §4.3 now says why.
 
+**Round 9 (an audit that certified itself, plus three more propagation misses)**
+
+| # | Was | Now |
+|---|---|---|
+| 1 | `coverage_resolution` tested `pnow.state = 'no_event'` un-coalesced | The `LEFT JOIN LATERAL` yields NULL when no event exists — exactly the audit-window case the CTE exists to rescue — so both CASE arms went NULL, `in_d_cov` went NULL, and the deal fell out of **every** coverage bucket. Round 6's defect, reintroduced by round 8's CTE. Coalesced inside the CTE. |
+| 2 | `event_window_end` referenced `stage_entry_date` | A name that **does not exist** — the real columns are `deals.stage_entered_at` and `deals.bid_board_stage_entered_at`. `outcomes` now projects `terminal_entry_date`, derived the same way `outcome_kind` is (CRM stage entry when the CRM stage is terminal, mirror entry when the mirror is), with the producer/consumer row. |
+| 3 | `silent_miss_n`'s audit row still said `move_count = 0` | Round 8's granularity fix reached §4.7 and not its audit row. Now `deal_move_count`. |
+| 4 | **§6.0 row 6.4 was a false ✅** | It claimed tiny denominators do not rank while `coverage_rate` was rankable at `\|D_cov\| = 1` and `forecast_reliability` could rank one scoreable hit — its `hit_rate_14d` operand was *coalesced* but never *volume-gated*. Per-column floor table added, including `MIN_RANKED_COVERAGE` and the rule that a composite clears **every** operand's floor. |
+
+**The §6.0 re-derivation.** All thirteen ✅ were re-derived from the current SQL by naming a falsifying
+input. **Eleven survived unchanged.** 6.4 was false (above). 6.1c was *unfalsifiable as worded* — "hit rate
+never carries the ranking on its own" describes the default sort, while any user-initiated sort makes some
+column carry it, so the row could be read true or false at will; narrowed to "no rate ranks on fewer than
+`MIN_RANKED_SCOREABLE` underlying deals, on any sort". §6.0 now carries a **falsifying-input column** so
+every row is checkable against the text rather than against the author's intent.
+
 **Round 8 (incomplete propagation — round 7's own fixes leaving new gaps)**
 
 | # | Was | Now |
@@ -2122,6 +2198,18 @@ were themselves silently broken**, because `NOT <nullable>` inside `FILTER` coun
 failing loudly. A check that can fail open is not a check. That is why the state enum is coalesced and
 non-null by construction, and why "never negate a nullable" is now a stated SQL rule (§4.0.6) rather than
 something to remember at each site.
+
+**Round 9's lesson: an audit is not exempt from being audited.** §6.0 was built to make unenforced claims
+visible and its own guarantee is *"a claim with no construct is not a claim"* — yet it shipped a row marked
+✅ against a construct that did not deliver it. A false ✅ is a false negative **in the check built to
+prevent false negatives**, and it is worse than a missing row because it stops the next reader looking.
+The structural fix is not vigilance but the falsifying-input column: a claim you cannot name a
+counter-input for is too vague to enforce, and one you can is checkable by anyone. Convention 17 now
+requires writing the falsifying input *first*.
+
+The same flaw applied to §4.0.7's producer/consumer table, which I wrote from my mental model of the CTE
+chain rather than by extracting from the text — which is exactly why it did not catch `stage_entry_date`, a
+name that never existed, added in the same round as the table. Both tables are now verified by extraction.
 
 **Round 8's lesson is about tooling, not design.** Finding 3 was not a judgement error: the note had been
 written and I reported it as landed, but the scripted replacement silently did not match — I had targeted
