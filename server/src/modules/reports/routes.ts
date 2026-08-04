@@ -1327,7 +1327,23 @@ router.get("/estimator-pipeline/evidence", requireDirector, async (req, res, nex
 });
 
 // Reports Part 4 -- A·3 At-Risk & Value-at-Stake Watchlist (the forecast blind spots; M − N).
-router.get("/at-risk", requireDirector, async (req, res, next) => {
+//
+// Deliberately not DIRECTOR-gated: a rep whose own deal has no maintained close date is exactly who
+// needs to see it, and the reports index has always listed this card to every CRM role — so the old
+// guard did not hide the report, it only turned the click into a 403.
+//
+// But NOT ungated either. `requireAnyRole` (admin/director/rep) is the report-capable CRM set, and the
+// same guard /qc-scorecards, /rep-activity, /market-mix and /customer-concentration already use.
+// Dropping the guard entirely would NOT have left `construction` where it was: the upstream
+// requireCrmUser mount turns away field_contractor but lets construction through, so an ungated route
+// would have handed that role office-wide deal names, owners and values — a widening nobody asked for,
+// on the same route whose whole purpose here was to widen access by exactly one role.
+//
+// The response is office-wide and is NOT scoped to the viewer: everyone who may read it sees the same
+// watchlist, so the number a rep reads reconciles with the one a director reads. `repId` stays a
+// caller-supplied FILTER, not a permission boundary — narrowing to one rep is a view, not an
+// authorization decision.
+router.get("/at-risk", requireAnyRole, async (req, res, next) => {
   try {
     const repIdRaw = pickQueryValue(req.query.repId);
     let repId: string | null | undefined;

@@ -294,10 +294,15 @@ export function App() {
               {/* Open to all authenticated users (no RequireRole) — matches the analytics report
                   routes; server /api/reports/region is likewise no longer director-gated. */}
               <Route path="/reports/region" element={<RegionReportPage />} />
+              {/* Widened from admin+director to the report-capable CRM roles. The reports index lists
+                  the At-Risk Watchlist card to reps too, so the old gate did not hide the report — it
+                  turned the click into a 403. `rep` is added and nothing else: this mirrors the server
+                  guard (requireAnyRole) exactly, so the page can never render for a role the API will
+                  refuse. */}
               <Route
                 path="/reports/at-risk"
                 element={(
-                  <RequireRole allowedRoles={["admin", "director"]}>
+                  <RequireRole allowedRoles={["admin", "director", "rep"]}>
                     <AtRiskPage />
                   </RequireRole>
                 )}
