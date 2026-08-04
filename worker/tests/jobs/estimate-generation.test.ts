@@ -552,6 +552,158 @@ describe("estimate generation job", () => {
     expect(lockedClient.query).toHaveBeenLastCalledWith("COMMIT");
   });
 
+  it("REFUSES to price a row with no quantity, and marks it needs_quantity instead of billing one unit", async () => {
+    // THE DEFECT. `Number(extraction.quantity ?? 1)` stood at three sites — the recommendation and both
+    // persist branches — and turned "nobody said how much" into "one of them". One unit of anything has
+    // a price, so the row emerged carrying a number no evidence supports, indistinguishable in the
+    // totals from a quantity somebody actually stated.
+    //
+    // BOTH INPUTS ARE COVERED because the coercion sites are shared. `ext-ocr-null` is an OCR-parsed row,
+    // which could always reach the default; `ext-walk-null` is a walkthrough row, which the ingress
+    // refuses at the door today and will stop refusing once null quantities are accepted. Testing only
+    // the walkthrough path would leave the parsed path silently inheriting this change.
+    const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
+    const extractionWhere = vi.fn().mockResolvedValue([
+      {
+        id: "ext-priced",
+        dealId: "deal-1",
+        projectId: null,
+        documentId: "doc-1",
+        extractionType: "scope_line",
+        status: "pending",
+        quantity: "700",
+        unit: "SF",
+        normalizedLabel: "Install laminate flooring",
+        metadataJson: { sourceParseRunId: "parse-run-1", activeArtifact: true },
+      },
+      {
+        id: "ext-ocr-null",
+        dealId: "deal-1",
+        projectId: null,
+        documentId: "doc-1",
+        extractionType: "scope_line",
+        status: "pending",
+        quantity: null,
+        unit: null,
+        normalizedLabel: "Paint one wall",
+        metadataJson: { sourceParseRunId: "parse-run-1", activeArtifact: true },
+      },
+      {
+        id: "ext-walk-null",
+        dealId: "deal-1",
+        projectId: null,
+        documentId: "doc-1",
+        extractionType: "scope_line",
+        status: "pending",
+        quantity: null,
+        unit: null,
+        normalizedLabel: "Paint wall red",
+        metadataJson: {
+          sourceParseRunId: "parse-run-1",
+          activeArtifact: true,
+          sourceType: "walkthrough",
+        },
+      },
+    ]);
+    const appDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({ where: vi.fn(() => ({ limit: sourceLimit })) })),
+      })),
+    } as any;
+    const lockedClient = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: "doc-1", active_parse_run_id: "parse-run-1" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    } as any;
+    let tenantSelectCallCount = 0;
+    const statusUpdates: unknown[] = [];
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => {
+          tenantSelectCallCount += 1;
+          if (tenantSelectCallCount === 1) {
+            return { where: vi.fn(() => ({ limit: vi.fn().mockResolvedValue([]) })) };
+          }
+          if (tenantSelectCallCount === 2) return { where: extractionWhere };
+          throw new Error(`Unexpected tenant select call: ${tenantSelectCallCount}`);
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn(() => ({ returning: vi.fn().mockResolvedValue([{ id: "generated-id" }]) })),
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn((values: unknown) => {
+          statusUpdates.push(values);
+          return { where: vi.fn().mockResolvedValue(undefined) };
+        }),
+      })),
+    } as any;
+
+    getHistoricalPricingSignalsMock.mockResolvedValue({
+      historicalItems: [],
+      vendorQuotes: [],
+      currentDeal: null,
+    });
+    resolveActiveCatalogSnapshotVersionIdMock.mockResolvedValue("snapshot-1");
+    listCatalogCandidatesForMatchingMock.mockResolvedValue([]);
+    rankExtractionMatchesMock.mockImplementation(async ({ extraction }: any) => [
+      {
+        catalogItemId: `catalog-${extraction.id}`,
+        matchScore: 99,
+        reasons: { matched: extraction.id },
+        historicalLineItemIds: [],
+        catalogBaselinePrice: 100,
+        historicalUnitPrices: [],
+        vendorQuotePrice: null,
+        awardedOutcomeAdjustmentPercent: 0,
+        internalAdjustmentPercent: 0,
+      },
+    ]);
+    buildPricingRecommendationMock.mockImplementation(() => ({
+      quantity: 700,
+      priceBasis: "mock",
+      recommendedUnitPrice: 10,
+      recommendedTotalPrice: 7000,
+      comparableHistoricalPrices: [],
+      historicalMedianPrice: null,
+      catalogBaselinePrice: null,
+      marketAdjustmentPercent: 0,
+      assumptions: {},
+      confidence: 1,
+    }));
+    poolConnectMock.mockResolvedValue(lockedClient);
+    drizzleMock.mockReturnValueOnce(appDb).mockReturnValueOnce(tenantDb);
+
+    const { runEstimateGeneration } = await import("../../src/jobs/estimate-generation.js");
+
+    await runEstimateGeneration(
+      { documentId: "doc-1", dealId: "deal-1", parseRunId: "parse-run-1" },
+      "office-1"
+    );
+
+    // Skipped BEFORE matching: the answer could not be used, so the work is not done.
+    const rankedExtractionIds = rankExtractionMatchesMock.mock.calls.map(
+      ([input]: any) => input.extraction.id
+    );
+    expect(rankedExtractionIds).toEqual(["ext-priced"]);
+
+    // Priced exactly once, and never with the invented 1.
+    expect(buildPricingRecommendationMock).toHaveBeenCalledTimes(1);
+    const pricedQuantities = buildPricingRecommendationMock.mock.calls.map(([input]: any) => input.quantity);
+    expect(pricedQuantities).toEqual([700]);
+    expect(pricedQuantities).not.toContain(1);
+
+    // Both unpriceable rows are flagged rather than dropped — somebody has to put a number on them.
+    expect(statusUpdates).toContainEqual({ status: "needs_quantity" });
+    expect(statusUpdates.filter((u: any) => u.status === "needs_quantity")).toHaveLength(2);
+    expect(lockedClient.query).toHaveBeenLastCalledWith("COMMIT");
+  });
+
   it("assigns distinct source row identities to inferred rows that share section and normalized intent", async () => {
     const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
     const extractionWhere = vi.fn().mockResolvedValue([

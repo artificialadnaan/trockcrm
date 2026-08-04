@@ -314,6 +314,37 @@ export async function runEstimateGeneration(
         : [];
 
     for (const extraction of eligibleExtractions) {
+      // A ROW WITH NO QUANTITY IS NOT PRICEABLE, and until now it was priced anyway.
+      //
+      // `Number(extraction.quantity ?? 1)` appeared three times below — once to compute the
+      // recommendation and twice to persist it — and each turned "nobody said how much" into "one of
+      // them". One unit of anything has a price, so the row emerged carrying a number no evidence
+      // supports, indistinguishable in the totals from a quantity somebody actually stated. The
+      // walkthrough ingress refuses null quantities at the door specifically to keep its rows away
+      // from this; OCR-parsed rows have always been able to reach it.
+      //
+      // Skipped BEFORE matching rather than defaulted after it: matching costs work whose answer
+      // cannot be used. `needs_quantity` is a new status value, which `status` being plain `text` with
+      // no enum and no CHECK makes a code-only change — see schema/tenant/estimate-extractions.ts.
+      //
+      // The row is NOT dropped and NOT failed. It is a real line item somebody has to put a number on,
+      // and it stays visible as one; what it must not do is carry a price nobody chose.
+      if (extraction.quantity === null || extraction.quantity === undefined) {
+        await tenantDb.insert(estimateReviewEvents).values({
+          dealId: extraction.dealId,
+          projectId: extraction.projectId,
+          subjectType: "estimate_extraction",
+          subjectId: extraction.id,
+          eventType: "needs_quantity",
+          afterJson: { normalizedLabel: extraction.normalizedLabel },
+        });
+        await tenantDb
+          .update(estimateExtractions)
+          .set({ status: "needs_quantity" })
+          .where(eq(estimateExtractions.id, extraction.id));
+        continue;
+      }
+
       const matches = await rankExtractionMatches({
         extraction,
         catalogItems: catalogItems as any,
@@ -421,7 +452,7 @@ export async function runEstimateGeneration(
       }
 
       const recommendation = buildPricingRecommendation({
-        quantity: Number(extraction.quantity ?? 1),
+        quantity: Number(extraction.quantity),
         catalogBaselinePrice: topMatch.catalogBaselinePrice ?? null,
         historicalPrices: topMatch.historicalUnitPrices ?? [],
         vendorQuotePrice: topMatch.vendorQuotePrice ?? historicalSignals.vendorQuotes[0]?.unitPrice ?? null,
@@ -467,7 +498,7 @@ export async function runEstimateGeneration(
               dealId: extraction.dealId,
               projectId: extraction.projectId,
               documentId: extraction.documentId ?? null,
-              quantity: Number(extraction.quantity ?? 1),
+              quantity: Number(extraction.quantity),
               unit: extraction.unit ?? null,
               sourceType,
               normalizedIntent,
@@ -497,7 +528,7 @@ export async function runEstimateGeneration(
             dealId: extraction.dealId,
             projectId: extraction.projectId,
             documentId: extraction.documentId ?? null,
-            quantity: Number(extraction.quantity ?? 1),
+            quantity: Number(extraction.quantity),
             unit: extraction.unit ?? null,
             sourceType,
             normalizedIntent,
