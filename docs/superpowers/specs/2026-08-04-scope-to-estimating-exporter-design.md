@@ -12,7 +12,7 @@ that mentions the endpoint. The receiving door was built anticipating Scope as t
 it before it posts"*), and the sender was never written. Scope extracts the line items and they stay in
 Scope.
 
-This spec covers only the sender. The CRM side needs no changes.
+This spec covers the sender, plus the one CRM-side change the quantity decision requires.
 
 ## What the receiver already guarantees
 
@@ -50,28 +50,25 @@ Consequences the sender must honour:
   nothing to upload.
 
 Scope must therefore **write into the CRM's R2 bucket**, which it does not do today and has no
-credentials for. That is a new trust edge and the single biggest piece of this work — see Open
-decision 1.
+credentials for. That is a new trust edge and the single biggest piece of this work.
 
 Nothing in Scope currently composes a contact sheet. It has evidence frames per clip; turning them into
 one `image/jpeg` is new work (sharp is already a CRM dependency; Scope would need its own).
 
-### 2. A null quantity is refused, so a human must review first
+### 2. A null quantity is refused today, and that refusal is being removed
 
 `WalkthroughScopeRow.quantity` is nullable — *"only ever set when the quantity was spoken and
-human-confirmed"* — but `validateWalkthroughIngressPayload` **refuses** a null one, because downstream a
-null quantity is priced as one unit.
+human-confirmed"* — but `validateWalkthroughIngressPayload` currently **refuses** a null one, because
+downstream a null quantity is priced as one unit.
 
-This is the important workflow consequence and it is not a detail: **there is no fully automatic
-walk → estimating path.** An extraction straight off the glasses will have unconfirmed quantities on
-most rows. Somebody has to confirm them in Scope's review UI before an export can be accepted.
+Left as-is this would mean **no fully automatic walk → estimating path**: an extraction straight off the
+glasses has unconfirmed quantities on most rows, so somebody would have to confirm every one in Scope's
+review UI before any export could be accepted.
 
-That in turn means the demo depends on Scope's review UI being reachable, which needs a login, and the
-Scope database had **zero users** when last checked. Creating that user is a prerequisite, not a
-follow-up.
-
-The alternative — dropping unconfirmed rows from the export — is worse: it silently ships a partial
-scope, and the estimator has no way to see what was withheld.
+That is why the refusal is being lifted instead — see *Accepting a null quantity* below, which is the
+decision taken and the one piece of CRM-side work this project requires. Dropping unconfirmed rows from
+the export was rejected as the third option: it silently ships a partial scope, and the estimator has no
+way to see what was withheld.
 
 ### 3. Scope does not know the CRM's `projectId`
 
@@ -88,17 +85,14 @@ The payload needs `dealId`, `projectId` and `userId`. Scope's `walkthroughs` row
 
 ## Proposed shape
 
-A new `worker/src/jobs/estimating-export.ts` in **trock-scope**, triggered by an explicit
-**"Send to estimating"** action in the review UI — not automatically on `status = ready`.
-
-Explicit rather than automatic for the reason in §2: the export is only valid once quantities are
-confirmed, and "confirmed" is a human judgement. An automatic export would either fire too early and
-400, or force us to drop rows.
+A new `worker/src/jobs/estimating-export.ts` in **trock-scope**. Trigger is still open (see Remaining
+open decisions) — with null quantities accepted, firing automatically once extraction finishes becomes
+viable for the first time, because the export no longer waits on a human.
 
 Sequence:
 
-1. Read the walkthrough's confirmed scope items; refuse early (with a UI message) if any selected row
-   has a null quantity, so the operator learns it here rather than as an opaque 400.
+1. Read the walkthrough's scope items — ALL of them, confirmed quantity or not. Rows with no quantity
+   travel as null and arrive as rows needing input, which is the whole point of the CRM-side change.
 2. Compose the contact sheet from evidence frames → one `image/jpeg`.
 3. `HEAD` the derived key. If absent, `PUT` it. If present, **do not re-upload** — this is a retry.
 4. `POST` the payload with the service token.
