@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { parseShowcaseEvidenceParams, assertShowcaseEvidenceAccess } from "../../../src/modules/reports/routes.js";
+import {
+  parseShowcaseEvidenceParams,
+  assertShowcaseEvidenceAccess,
+  parseShowcaseRouteBuckets,
+} from "../../../src/modules/reports/routes.js";
 
 // The evidence endpoint's query parsing/validation (the HTTP wiring is thin; this locks the contract).
 describe("parseShowcaseEvidenceParams", () => {
@@ -131,5 +135,51 @@ describe("assertShowcaseEvidenceAccess — the region drill's elevated surface i
     const rep = "11111111-1111-1111-1111-111111111111";
     expect(() => parseShowcaseEvidenceParams({ metric: "pipeline", repId: rep, regionName: "West Coast" })).toThrow(/only be combined for the won metric/);
     expect(() => parseShowcaseEvidenceParams({ metric: "projection", repId: rep, regionName: "Central" })).toThrow(/only be combined for the won metric/);
+  });
+});
+
+// The Service / Other selection, shared by BOTH showcase endpoints. An unrecognised value must be a 400 --
+// never a silently full result under a filtered-looking UI -- and an ABSENT value must stay exactly the
+// no-narrowing request the report has always made.
+describe("parseShowcaseRouteBuckets", () => {
+  it("absent means no narrowing at all (undefined, not an implicit both-list)", () => {
+    expect(parseShowcaseRouteBuckets(undefined)).toBeUndefined();
+  });
+
+  it("accepts each single bucket and the explicit pair", () => {
+    expect(parseShowcaseRouteBuckets("service")).toEqual(["service"]);
+    expect(parseShowcaseRouteBuckets("other")).toEqual(["other"]);
+    expect(parseShowcaseRouteBuckets("service,other")).toEqual(["service", "other"]);
+  });
+
+  it("normalizes order and whitespace so a link cannot mean two different things", () => {
+    expect(parseShowcaseRouteBuckets("other,service")).toEqual(["service", "other"]);
+    expect(parseShowcaseRouteBuckets(" service , other ")).toEqual(["service", "other"]);
+  });
+
+  it("rejects an unknown bucket rather than dropping it and returning a broader set", () => {
+    expect(() => parseShowcaseRouteBuckets("banana")).toThrow(/routes/);
+    expect(() => parseShowcaseRouteBuckets("service,banana")).toThrow(/routes/);
+    // 'normal' is the raw COLUMN value, not a bucket name -- accepting it would quietly mean "other".
+    expect(() => parseShowcaseRouteBuckets("normal")).toThrow(/routes/);
+  });
+
+  it("rejects a duplicate bucket", () => {
+    expect(() => parseShowcaseRouteBuckets("service,service")).toThrow(/duplicate/);
+  });
+
+  it("rejects an EMPTY selection -- there is no honest report for 'neither'", () => {
+    expect(() => parseShowcaseRouteBuckets("")).toThrow(/at least one/);
+    expect(() => parseShowcaseRouteBuckets(",")).toThrow(/at least one/);
+    expect(() => parseShowcaseRouteBuckets("  ")).toThrow(/at least one/);
+  });
+
+  it("is wired into the evidence params, for every metric", () => {
+    expect(parseShowcaseEvidenceParams({ metric: "won", routes: "service" }).routes).toEqual(["service"]);
+    // Accepted for `leads` too: the service reports applied=false rather than the client having to know
+    // which metrics may carry the page's filter.
+    expect(parseShowcaseEvidenceParams({ metric: "leads", routes: "other" }).routes).toEqual(["other"]);
+    expect(parseShowcaseEvidenceParams({ metric: "won" }).routes).toBeUndefined();
+    expect(() => parseShowcaseEvidenceParams({ metric: "won", routes: "nope" })).toThrow(/routes/);
   });
 });

@@ -20,7 +20,8 @@ import { usd, int, winPct } from "../format";
 import { ScrollSyncX } from "../scroll-sync-x";
 import { EVIDENCE_COLUMNS, visibleEvidenceColumns, type SortKey } from "./evidence-columns";
 import { buildEvidenceCsv, buildEvidenceCsvFilename } from "./evidence-csv";
-import type { EvidenceRecord, EvidenceRequest, MondayShowcaseEvidence } from "./types";
+import { ROUTE_BUCKET_LABEL } from "./types";
+import type { EvidenceRecord, EvidenceRequest, MondayShowcaseEvidence, RouteBucket } from "./types";
 import type { WeekMode } from "../week-mode";
 
 // Literal-day formatting (no UTC-midnight off-by-one), matching the app's date-only rendering (#572).
@@ -147,21 +148,37 @@ function SortIcon({ state, colKey }: { state: SortState; colKey: SortKey }) {
 }
 
 function ReconciliationBanner({ ev }: { ev: MondayShowcaseEvidence }) {
-  const { total } = ev;
+  const { total, routeFilter } = ev;
   return (
-    <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
-      <span className="font-semibold">{int(total.count)}</span> {total.count === 1 ? "record" : "records"}
-      {total.value != null && (
-        <>
-          {" · "}
-          <span className="font-semibold">{usd(total.value)}</span>
-        </>
-      )}
-      {total.basisLabel && <span className="text-emerald-700"> · {total.basisLabel}</span>}
-      <div className="mt-0.5 text-xs text-emerald-700">
-        These are the exact records behind the number — they reconcile to it by construction.
+    <>
+      <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
+        <span className="font-semibold">{int(total.count)}</span> {total.count === 1 ? "record" : "records"}
+        {total.value != null && (
+          <>
+            {" · "}
+            <span className="font-semibold">{usd(total.value)}</span>
+          </>
+        )}
+        {total.basisLabel && <span className="text-emerald-700"> · {total.basisLabel}</span>}
+        {/* Name the applied slice INSIDE the reconciliation banner: the count above is this slice's count,
+            and saying which slice is what lets a reader check it against the card they clicked. */}
+        {routeFilter.applied && (
+          <span className="text-emerald-700"> · {ROUTE_BUCKET_LABEL[routeFilter.selected[0]]} only</span>
+        )}
+        <div className="mt-0.5 text-xs text-emerald-700">
+          These are the exact records behind the number — they reconcile to it by construction.
+        </div>
       </div>
-    </div>
+      {/* The selection narrows the page but could NOT reach this metric's source. Said plainly, because the
+          alternative is a viewer reading an office-wide list as a filtered one. The card that opened this
+          drawer is unfiltered too, so the two still agree — they just answer a broader question. */}
+      {routeFilter.active && !routeFilter.applied && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          Not filtered by the {ROUTE_BUCKET_LABEL[routeFilter.selected[0]]} selection — leads carry no
+          workflow route, so this list (and the number that opened it) covers every department.
+        </div>
+      )}
+    </>
   );
 }
 
@@ -302,11 +319,16 @@ function EvidenceTable({
 export function EvidenceDrawer({
   request,
   mode,
+  routes,
   onClose,
   onMutated,
 }: {
   request: EvidenceRequest | null;
   mode: WeekMode;
+  /** The page's Service/Other selection — the SAME one the clicked number was computed under. Undefined =
+   *  both buckets = no narrowing. This is what makes the drawer's total equal the figure that was clicked
+   *  rather than an office-wide superset. */
+  routes?: readonly RouteBucket[];
   onClose: () => void;
   /** Called after an inline edit lands (a close-date move on the undated list) so the parent showcase
    *  can refetch — the edited deal then re-bands and leaves the "No future close date" card. */
@@ -315,7 +337,7 @@ export function EvidenceDrawer({
   const navigate = useNavigate();
   const { search } = useLocation();
   const { user } = useAuth();
-  const { data, loading, error, refetch } = useShowcaseEvidence(request, mode);
+  const { data, loading, error, refetch } = useShowcaseEvidence(request, mode, routes);
   // The row whose close date is being set inline (undated list only); null = the editor is closed.
   const [editing, setEditing] = useState<EvidenceRecord | null>(null);
   // The inline close-date editor writes through the OWNER-ONLY PATCH /deals/:id (the same gate the deal

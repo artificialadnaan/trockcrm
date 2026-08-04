@@ -3,6 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { UNFILTERED_EVIDENCE_ROUTE_FILTER } from "./types";
 import type { EvidenceMetric, EvidenceRecord, MondayShowcaseEvidence } from "./types";
 
 // Controllable mock of the data hook so we can render the drawer with a fixed evidence payload.
@@ -50,6 +51,7 @@ function evidence(metric: EvidenceMetric, records: EvidenceRecord[]): MondayShow
     scope: { kind: "office" },
     band: null,
     leadStage: null,
+    routeFilter: UNFILTERED_EVIDENCE_ROUTE_FILTER,
     total: { count: records.length, value: 1000, basisLabel: "Best current estimate" },
     records,
   };

@@ -530,3 +530,50 @@ export function aliasedActiveNonZeroDealSortTierSql(alias: string, valueSql: SQL
 export function aliasedWonHsClosedWonDateSql(alias: string): SQL {
   return sql`${sql.raw(alias)}.won_closed_date`;
 }
+
+/**
+ * The two buckets of the Service / Other split. "service" is deals.workflow_route = 'service'; "other" is
+ * EVERYTHING else. Same meaning as the deals dashboard's Service / Non-service At Risk cards (#1035) —
+ * one definition of "service" across the platform, so a director comparing the two surfaces is comparing
+ * the same population.
+ */
+export const WORKFLOW_ROUTE_BUCKETS = ["service", "other"] as const;
+export type WorkflowRouteBucket = (typeof WORKFLOW_ROUTE_BUCKETS)[number];
+
+/**
+ * Service-vs-Other narrowing on deals.workflow_route, as a LEADING-` AND ` fragment (the same composition
+ * idiom as the showcase's repScopeSql / regionScopeSql) or EMPTY when nothing should be narrowed.
+ *
+ * A NULL / absent route is NOT service, so it lands in "other" — the same convention #1035 asserted for the
+ * At Risk split. It is spelled out as `IS NULL OR <> 'service'` rather than a bare `<> 'service'` because a
+ * bare inequality is UNKNOWN (not true) for a NULL row, which would silently drop that row from BOTH
+ * buckets. The column is NOT NULL with a 'normal' default today, so this leg is currently inert — it is the
+ * guard that keeps the partition total if that ever stops holding (a new nullable source, a legacy import).
+ *
+ * TOTALITY IS THE POINT: service ∪ other = every row and service ∩ other = ∅, so a bucket's figure plus its
+ * complement's always re-sums to the unfiltered figure. Callers depend on that additivity to prove a split
+ * lost nothing.
+ *
+ * `undefined` (caller passed no selection) and BOTH buckets selected return the SAME empty fragment — no
+ * predicate at all. So a surface that ships this filter defaulted to "everything" emits SQL byte-identical
+ * to the surface before the filter existed, and cannot move a number on first load.
+ *
+ * `alias` is always a trusted developer literal ("d"/"deals"), never user input.
+ */
+export function aliasedWorkflowRouteFilterSql(
+  alias: string,
+  buckets?: readonly WorkflowRouteBucket[]
+): SQL {
+  if (buckets === undefined) return sql``;
+  const service = buckets.includes("service");
+  const other = buckets.includes("other");
+  if (service && other) return sql``;
+  if (service) return sql` AND ${sql.raw(alias)}.workflow_route = 'service'`;
+  if (other) {
+    return sql` AND (${sql.raw(alias)}.workflow_route IS NULL OR ${sql.raw(alias)}.workflow_route <> 'service')`;
+  }
+  // Neither bucket. There is no honest row set for "no selection at all", and emitting a `false` predicate
+  // would return zeros that read like real measurements — the exact failure this split exists to avoid. The
+  // request layer rejects an empty selection with a 400 long before this; the throw is the invariant backstop.
+  throw new Error("workflow-route filter needs at least one bucket: service and/or other");
+}

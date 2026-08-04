@@ -1,12 +1,26 @@
-import { useState, type ComponentType } from "react";
+import { useCallback, useMemo, useState, type ComponentType } from "react";
 import { Loader2 } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
 import { useMondayShowcase } from "@/hooks/use-reports";
 import {
   SHOWCASE_VARIANTS,
+  ROUTE_BUCKETS,
+  ROUTE_BUCKET_LABEL,
   type ShowcaseVariantKey,
   type MondayShowcaseData,
   type EvidenceRequest,
+  type RouteBucket,
 } from "./monday-showcase/types";
+import {
+  ROUTES_PARAM,
+  isBucketSelected,
+  isFetchableSelection,
+  parseRouteSelection,
+  routesForRequest,
+  serializeRouteSelection,
+  toggleRouteBucket,
+  DEFAULT_ROUTE_SELECTION,
+} from "./monday-showcase/route-filter";
 import { DrillProvider } from "./monday-showcase/drill";
 import { EvidenceDrawer } from "./monday-showcase/evidence-drawer";
 import { DEFAULT_WEEK_MODE, WEEK_MODE_LABELS, type WeekMode } from "./week-mode";
@@ -30,7 +44,33 @@ export function MondayShowcasePage() {
   const [mode, setMode] = useState<WeekMode>(DEFAULT_WEEK_MODE);
   const [variant, setVariant] = useState<ShowcaseVariantKey>("HERO");
   const [evidence, setEvidence] = useState<EvidenceRequest | null>(null);
-  const { data, loading, error, refetch } = useMondayShowcase(mode);
+
+  // The Service/Other selection lives in the URL (NOT component state): switching variants keeps it, and
+  // the link a director pastes into Slack reproduces the exact slice they were looking at. `variant` and
+  // `mode` stay local -- they are already ephemeral view controls and moving them is out of scope here.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const rawRoutes = searchParams.get(ROUTES_PARAM);
+  const selection = useMemo(() => parseRouteSelection(rawRoutes), [rawRoutes]);
+  const setSelection = useCallback(
+    (next: typeof selection) => {
+      const params = new URLSearchParams(searchParams);
+      const encoded = serializeRouteSelection(next);
+      // Both-buckets removes the param entirely, so the default state leaves a clean, pre-filter-shaped URL.
+      if (encoded === null) params.delete(ROUTES_PARAM);
+      else params.set(ROUTES_PARAM, encoded);
+      // replace: a chip toggle is a view control, not a navigation step -- Back should leave the report,
+      // not walk the user through every chip they tried.
+      setSearchParams(params, { replace: true });
+    },
+    [searchParams, setSearchParams]
+  );
+
+  // Only a real selection may be fetched. "Neither selected" and an unparseable ?routes render their own
+  // panels below; passing undefined here would fetch the UNFILTERED report and show office-wide numbers
+  // under an empty or broken chip state.
+  const fetchable = isFetchableSelection(selection);
+  const requestRoutes: RouteBucket[] | undefined = fetchable ? routesForRequest(selection) : undefined;
+  const { data, loading, error, refetch } = useMondayShowcase(mode, requestRoutes, fetchable);
   const Active = VARIANT_COMPONENT[variant];
 
   // Deliberately NOT wrapped in ReportShell: this is a fixed weekly Monday view whose only control is the
@@ -58,7 +98,74 @@ export function MondayShowcasePage() {
         </button>
       </div>
 
-      {loading ? (
+      {/* Service / Other chips. Rendered OUTSIDE the loading/error/data switch so they stay reachable in
+          the "nothing selected" and "bad ?routes" states — a filter you cannot un-set is a trap. Additive
+          and stackable: both on (the default) is the whole report, exactly as it read before this shipped. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Department
+        </span>
+        <div className="flex flex-wrap gap-1.5">
+          {ROUTE_BUCKETS.map((bucket) => {
+            const on = isBucketSelected(selection, bucket);
+            return (
+              <button
+                key={bucket}
+                type="button"
+                aria-pressed={on}
+                onClick={() => setSelection(toggleRouteBucket(selection, bucket))}
+                className={`rounded-full border px-3 py-1 text-xs transition-colors ${
+                  on
+                    ? "border-foreground bg-foreground text-background"
+                    : "bg-white text-muted-foreground hover:bg-gray-50"
+                }`}
+              >
+                {ROUTE_BUCKET_LABEL[bucket]}
+              </button>
+            );
+          })}
+        </div>
+        {selection.kind === "selection" && selection.buckets.length === ROUTE_BUCKETS.length ? (
+          <span className="text-xs text-muted-foreground">All departments — the full report.</span>
+        ) : null}
+        {data?.routeFilter.active ? (
+          <span className="text-xs text-amber-700">
+            Showing {ROUTE_BUCKET_LABEL[data.routeFilter.selected[0]]} only. Not filtered:{" "}
+            {data.routeFilter.unfilterable.join("; ")}.
+          </span>
+        ) : null}
+      </div>
+
+      {selection.kind === "invalid" ? (
+        // A ?routes value we cannot parse. Deliberately NOT a silent fall-back to "both": showing the full
+        // report under a URL that claims a filter is how an office-wide number gets read as a slice.
+        <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+          <p className="font-medium">That filter link isn’t valid.</p>
+          <p className="mt-1">
+            <code className="rounded bg-red-100 px-1">?{ROUTES_PARAM}={selection.raw}</code> isn’t a
+            department selection, so no numbers are shown — they would not be the ones the link asked for.
+            Pick a chip above, or{" "}
+            <button
+              type="button"
+              className="underline underline-offset-2"
+              onClick={() => setSelection(DEFAULT_ROUTE_SELECTION)}
+            >
+              show all departments
+            </button>
+            .
+          </p>
+        </div>
+      ) : selection.kind === "empty" ? (
+        // Both chips off. There is no such report, so we say so — rendering zeros here would look like a
+        // measured result ("Service and Other both closed nothing this week") rather than an empty filter.
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+          <p className="font-medium">Select at least one department.</p>
+          <p className="mt-1">
+            Nothing is selected, so there is nothing to report. These would be zeros, not results — turn{" "}
+            {ROUTE_BUCKET_LABEL.service} or {ROUTE_BUCKET_LABEL.other} back on above.
+          </p>
+        </div>
+      ) : loading ? (
         <div className="flex items-center justify-center py-16">
           <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
         </div>
@@ -120,9 +227,12 @@ export function MondayShowcasePage() {
         </div>
       )}
 
+      {/* The drawer gets the SAME selection the clicked number was rendered under, so its total equals
+          that figure. Without this a card reading 6 under "Service" would open the office's 10. */}
       <EvidenceDrawer
         request={evidence}
         mode={mode}
+        routes={requestRoutes}
         onClose={() => setEvidence(null)}
         onMutated={refetch}
       />

@@ -91,6 +91,10 @@ import {
   type MondayShowcaseEvidenceOptions,
 } from "./monday-showcase-service.js";
 import type { ProjectionBand } from "./foundations.js";
+import {
+  WORKFLOW_ROUTE_BUCKETS,
+  type WorkflowRouteBucket,
+} from "../shared/deal-value-sql.js";
 import { getAtRiskWatchlist } from "./at-risk-service.js";
 import { getRepPackData } from "./rep-pack-service.js";
 import { getRegionReport } from "./region-report-service.js";
@@ -1173,11 +1177,41 @@ router.post(
 // the exec hero tile) render slices of THIS one response, so they reconcile by construction. Visible to
 // standard CRM sales roles so reps can review the same Monday visibility. ?mode=to_date (live WTD) |
 // completed (prior full Sun-Sat box).
+/**
+ * Page-local Service / Other selection, as a comma-separated bucket list (`?routes=service`,
+ * `?routes=service,other`). ABSENT = both = no narrowing at all, so every pre-existing caller and bookmark
+ * keeps today's numbers exactly.
+ *
+ * An unrecognised bucket, a duplicate, or an EMPTY selection is a 400 — never a silently-full result. The
+ * empty case matters as much as the typo one: "neither bucket" has no honest payload, and answering it with
+ * the unfiltered report (or with zeros) is exactly the lie this endpoint must not tell. The client renders
+ * its own "select at least one" state and does not call the server at all in that state.
+ */
+export function parseShowcaseRouteBuckets(raw: string | undefined): WorkflowRouteBucket[] | undefined {
+  if (raw === undefined) return undefined;
+  const parts = raw.split(",").map((p) => p.trim()).filter((p) => p.length > 0);
+  if (parts.length === 0) {
+    throw new AppError(400, `routes must select at least one of: ${WORKFLOW_ROUTE_BUCKETS.join(", ")}`);
+  }
+  const seen = new Set<string>();
+  for (const part of parts) {
+    if (!(WORKFLOW_ROUTE_BUCKETS as readonly string[]).includes(part)) {
+      throw new AppError(400, `routes must be a comma-separated list of: ${WORKFLOW_ROUTE_BUCKETS.join(", ")}`);
+    }
+    if (seen.has(part)) throw new AppError(400, `routes contains a duplicate bucket: ${part}`);
+    seen.add(part);
+  }
+  // Normalize to the canonical order so the SQL helper's both-buckets short-circuit is order-independent
+  // ("other,service" must be as inert as "service,other").
+  return WORKFLOW_ROUTE_BUCKETS.filter((b) => seen.has(b));
+}
+
 router.get("/monday-showcase", requireAnyRole, async (req, res, next) => {
   try {
     const modeRaw = pickQueryValue(req.query.mode);
     const mode = parseWeekMode(modeRaw);
-    const data = await getMondayShowcaseData(req.tenantDb!, { mode });
+    const routes = parseShowcaseRouteBuckets(pickQueryValue(req.query.routes));
+    const data = await getMondayShowcaseData(req.tenantDb!, { mode, routes });
     await req.commitTransaction!();
     res.json({ data });
   } catch (err) {
@@ -1273,7 +1307,15 @@ export function parseShowcaseEvidenceParams(query: Record<string, unknown>): Mon
     throw new AppError(400, "from must be on or before to"); // ISO YYYY-MM-DD sorts chronologically
   }
 
-  return { metric, mode, repId, band, leadStage, stageSlug, regionName, from, to };
+  // routes: the SAME Service/Other selection the clicked number was computed under, so the drawer's total
+  // equals that number instead of an office-wide superset. Same validation as the data endpoint (an
+  // unrecognised or empty value is a 400, never a silently-unfiltered drill). It is accepted for EVERY
+  // metric — including `leads`, whose source table has no workflow_route: rejecting it there would force the
+  // client to special-case which metrics may carry the page's filter, and the service reports
+  // routeFilter.applied=false so the drawer states plainly that this one list ignores the selection.
+  const routes = parseShowcaseRouteBuckets(pickQueryValue(query.routes));
+
+  return { metric, mode, repId, band, leadStage, stageSlug, regionName, from, to, routes };
 }
 
 /**

@@ -30,6 +30,25 @@ function basisLabel(metric: { value: { basisLabel: string } | null }) {
   return metric.value?.basisLabel ?? "";
 }
 
+/**
+ * Marks a figure the Service/Other selection could NOT narrow (today: the lead counts — the leads table
+ * has no workflow_route). Renders NOTHING when the selection isn't narrowing, so the default report is
+ * visually unchanged; when it is narrowing, this sits ON the number rather than in a footnote, because a
+ * footnote is not where someone reads a leaderboard column. The badge is the honest alternative to letting
+ * an office-wide count sit unlabeled beside filtered ones.
+ */
+function AllDeptsBadge({ data, className = "" }: { data: MondayShowcaseData; className?: string }) {
+  if (!data.routeFilter.active) return null;
+  return (
+    <span
+      title="Leads have no workflow route, so the Service / Other filter does not apply to this number — it covers all departments."
+      className={`ml-1 whitespace-nowrap rounded-full bg-amber-100 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-800 ring-1 ring-amber-200 ${className}`}
+    >
+      all depts
+    </span>
+  );
+}
+
 function CoverageCaption({ ladder }: { ladder: ProjectionLadder }) {
   return <p className="mt-1 text-[11px] text-slate-400">{ladder.coverageCaption}</p>;
 }
@@ -274,7 +293,10 @@ export function VariantB2Leaderboard({ data }: { data: MondayShowcaseData }) {
             <Th k="closed">Closed $</Th>
             <Th k="projected">Projected #</Th>
             <Th k="sent">Sent</Th>
-            <Th k="leads">Active leads</Th>
+            <Th k="leads">
+              Active leads
+              <AllDeptsBadge data={data} />
+            </Th>
           </tr>
         </thead>
         <tbody>
@@ -349,6 +371,9 @@ export function VariantB3LoadLane({ data }: { data: MondayShowcaseData }) {
             <DrillNumber request={{ metric: "leads", repId: rep.repId, title: `${rep.repName} — Active leads` }} className="rounded-full bg-amber-50 px-2.5 py-1 font-medium text-amber-700 ring-1 ring-amber-200">
               Leads {int(repLeadTotal(rep))}
             </DrillNumber>
+            {/* The lane's first pill is the ONLY unfiltered figure in it — mark it here rather than let it
+                read as this rep's Service (or Other) lead count next to three figures that are. */}
+            <AllDeptsBadge data={data} className="ml-0" />
             <span className="text-slate-300">→</span>
             <DrillNumber request={{ metric: "sent", repId: rep.repId, title: `${rep.repName} — Sent` }} className="rounded-full bg-sky-50 px-2.5 py-1 font-medium text-sky-700 ring-1 ring-sky-200">
               Sent {int(rep.sentThisWeek.count)}

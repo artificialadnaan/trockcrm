@@ -4,6 +4,7 @@ import type {
   MondayShowcaseData,
   MondayShowcaseEvidence,
   EvidenceRequest,
+  RouteBucket,
 } from "@/pages/reports/monday-showcase/types";
 import type { RepPackData, AtRiskWatchlist } from "@/pages/reports/part4-types";
 import type { WeekMode } from "@/pages/reports/week-mode";
@@ -1487,7 +1488,20 @@ export async function runReportBuilder(input: ReportBuilderRequest) {
 }
 
 // Reports Part 2 -- the Monday showcase. ONE payload feeds all 8 variants (so they reconcile).
-export function useMondayShowcase(mode: WeekMode = "to_date") {
+/**
+ * `routes` is the page-local Service/Other selection. `undefined` = both buckets = NO ?routes param, so a
+ * default page load issues the exact request it did before the filter existed. A narrowing selection is
+ * part of the cache key (the deps below), so toggling a chip refetches rather than repainting stale
+ * office-wide numbers under a filtered chip.
+ */
+export function useMondayShowcase(
+  mode: WeekMode = "to_date",
+  routes?: readonly RouteBucket[],
+  // `false` when the page is in a state that has no honest payload to request (no bucket selected, or an
+  // unparseable ?routes). It must not fetch: an un-narrowed request would load the OFFICE-WIDE report and
+  // leave a full payload sitting behind a filter UI that claims otherwise.
+  enabled: boolean = true
+) {
   const [data, setData] = useState<MondayShowcaseData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1495,23 +1509,38 @@ export function useMondayShowcase(mode: WeekMode = "to_date") {
   // request in flight. Only the latest request is allowed to write state -- a stale response is dropped,
   // so the page never shows the new toggle with the previous period's data.
   const latestRequest = useRef(0);
+  // Depend on the VALUE, not the array identity -- a caller rebuilding the array each render must not
+  // retrigger an infinite fetch loop.
+  const routesKey = routes?.join(",") ?? "";
 
   const fetchShowcase = useCallback(async () => {
     const requestId = ++latestRequest.current;
+    if (!enabled) {
+      // Drop any previously-loaded payload. Leaving it would let the last filter's numbers stay on screen
+      // while the controls say "nothing selected" — a stale set read as the current one.
+      setData(null);
+      setError(null);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
-      const result = await api<{ data: MondayShowcaseData }>(`/reports/monday-showcase?mode=${mode}`);
+      const params = new URLSearchParams({ mode });
+      if (routesKey) params.set("routes", routesKey);
+      const result = await api<{ data: MondayShowcaseData }>(`/reports/monday-showcase?${params.toString()}`);
       if (requestId !== latestRequest.current) return; // superseded by a newer request
       setData(result.data);
     } catch (err: unknown) {
       if (requestId !== latestRequest.current) return;
       setError(err instanceof Error ? err.message : "Failed to load the Monday showcase");
+      // Clear the payload on failure. A rejected ?routes value (400) must NOT leave the previous, more
+      // broadly-scoped numbers on screen under the new chip state -- that is a stale set read as a filtered one.
       setData(null);
     } finally {
       if (requestId === latestRequest.current) setLoading(false);
     }
-  }, [mode]);
+  }, [mode, routesKey, enabled]);
 
   useEffect(() => {
     fetchShowcase();
@@ -1525,12 +1554,17 @@ export function useMondayShowcase(mode: WeekMode = "to_date") {
 // can't show stale evidence under a newer heading.
 export function useShowcaseEvidence(
   request: EvidenceRequest | null,
-  mode: WeekMode
+  mode: WeekMode,
+  // The SAME Service/Other selection the clicked number was rendered under. Passing it is what makes the
+  // drawer's total equal the figure that was clicked instead of an office-wide superset -- a card reading
+  // 6 under "Service" opening 10 records is the exact defect this threading exists to prevent.
+  routes?: readonly RouteBucket[]
 ) {
   const [data, setData] = useState<MondayShowcaseEvidence | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const latestRequest = useRef(0);
+  const routesKey = routes?.join(",") ?? "";
 
   // The fetch is a stable callback so the drawer can REFETCH it after an inline edit (a close-date move on
   // the undated list) — the edited deal then drops out of the reconciling set without reopening the drawer.
@@ -1559,6 +1593,8 @@ export function useShowcaseEvidence(
     if (request.from) params.set("from", request.from);
     if (request.to) params.set("to", request.to);
     if (request.stageSlug) params.set("stageSlug", request.stageSlug);
+    // Omitted when both buckets are selected — the same "no narrowing" request as before the filter shipped.
+    if (routesKey) params.set("routes", routesKey);
 
     try {
       const result = await api<{ data: MondayShowcaseEvidence }>(
@@ -1572,7 +1608,7 @@ export function useShowcaseEvidence(
     } finally {
       if (requestId === latestRequest.current) setLoading(false);
     }
-  }, [request, mode]);
+  }, [request, mode, routesKey]);
 
   useEffect(() => {
     void fetchEvidence();

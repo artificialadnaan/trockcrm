@@ -55,6 +55,8 @@ import {
   aliasedDealBestEstimateSql,
   aliasedEffectiveDealValueSql,
   aliasedEffectiveWonDealValueSql,
+  aliasedWorkflowRouteFilterSql,
+  type WorkflowRouteBucket,
 } from "../shared/deal-value-sql.js";
 import {
   aliasedWonHsClosedWonDateSql,
@@ -2647,9 +2649,13 @@ async function getRecentCloses(
 
 export async function getWonCloseSummary(
   tenantDb: TenantDb,
-  options: { from: string; to: string } & DashboardScopeOptions
+  options: { from: string; to: string; workflowRoutes?: readonly WorkflowRouteBucket[] } & DashboardScopeOptions
 ): Promise<{ count: number; totalValue: number }> {
   const repFilter = dealScopeFilterSql("d", options);
+  // OPTIONAL Service/Other narrowing (the Monday-showcase page filter). Omitted or both-buckets ->
+  // the EMPTY fragment, so every existing caller emits the SAME SQL it always has and the protected
+  // 191 / $9,778,045.90 basis is untouched.
+  const routeFilter = aliasedWorkflowRouteFilterSql("d", options.workflowRoutes);
   // §6.1: gate the period on the true HubSpot close-won date alone. The previous
   // COALESCE(actual_close_date, ..., updated_at::date) inflated the card — the
   // updated_at fallback counted any deal "touched in-period" as "won in-period".
@@ -2676,7 +2682,7 @@ export async function getWonCloseSummary(
       AND ${aliasedHasUsableWonDateSql("d")}
       AND ${aliasedWonHsClosedWonDateSql("d")} >= ${options.from}::date
       AND ${aliasedWonHsClosedWonDateSql("d")} <= ${options.to}::date
-      ${repFilter}
+      ${repFilter}${routeFilter}
   `);
 
   const [row] = rowsFromExecute<any>(result);
@@ -2703,9 +2709,12 @@ export interface CanonicalRepWonRow {
 // (unassigned) groups are RETAINED so the sum still equals the card exactly.
 export async function getCanonicalRepWonSummary(
   tenantDb: TenantDb,
-  options: { from: string; to: string } & DashboardScopeOptions
+  options: { from: string; to: string; workflowRoutes?: readonly WorkflowRouteBucket[] } & DashboardScopeOptions
 ): Promise<CanonicalRepWonRow[]> {
   const repFilter = dealScopeFilterSql("d", options);
+  // Same optional Service/Other narrowing as getWonCloseSummary above, applied IDENTICALLY -- that is what
+  // keeps SUM(rows) === the card under a route filter, exactly as it does without one.
+  const routeFilter = aliasedWorkflowRouteFilterSql("d", options.workflowRoutes);
   const result = await tenantDb.execute(sql`
     SELECT
       d.assigned_rep_id AS rep_id,
@@ -2720,7 +2729,7 @@ export async function getCanonicalRepWonSummary(
       AND ${aliasedHasUsableWonDateSql("d")}
       AND ${aliasedWonHsClosedWonDateSql("d")} >= ${options.from}::date
       AND ${aliasedWonHsClosedWonDateSql("d")} <= ${options.to}::date
-      ${repFilter}
+      ${repFilter}${routeFilter}
     GROUP BY d.assigned_rep_id
   `);
 
