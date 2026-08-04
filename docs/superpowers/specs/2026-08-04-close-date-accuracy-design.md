@@ -864,11 +864,11 @@ shorter than 30 days**. The gate is the deal's own age, not its first close-date
 
 ```sql
 p30 = CASE
-        WHEN <an event exists below business_day_end_exclusive(outcome_date - 30)>
-          THEN state_at(deal, business_day_end_exclusive(o.outcome_date - 30))
+        WHEN <an event exists below business_day_end_exclusive(outcome_date - STANDING_ANCHOR_DAYS)>
+          THEN state_at(deal, business_day_end_exclusive(o.outcome_date - STANDING_ANCHOR_DAYS))
         -- The DEAL is younger than the anchor: its whole life sits inside the window, so its earliest
         -- recorded state is all there is. Same tz-explicit boundary as everywhere else (§4.0.3).
-        WHEN o.deal_created_at >= business_day_end_exclusive(o.outcome_date - 30)
+        WHEN o.deal_created_at >= business_day_end_exclusive(o.outcome_date - STANDING_ANCHOR_DAYS)
           THEN <earliest event state, see below>
         ELSE 'no_event'                        -- long-lived, forecast late: NOT scoreable
       END
@@ -896,8 +896,14 @@ January and first forecast on 20 July, closing on 30 July, has `min(changed_at)`
 guard passed and the ten-day-old date became P₃₀ — scoring a last-minute guess as a confident month-ahead
 forecast. The deal's `created_at` is the honest measure of how long the rep had to form a view.
 
+Both arms use `STANDING_ANCHOR_DAYS` (§6.4), not a literal `30`. Open question 2 invites the approver to
+move the anchor to 60; an implementation copied from a snippet with `30` baked in would keep scoring at 30
+while the constants table said 60. Note that `STANDING_ANCHOR_DAYS` and `WIDE_TOLERANCE_DAYS` currently
+*share* the value 30 — they are independent settings that happen to coincide, and moving one must not move
+the other.
+
 **The gate compares against the anchor itself, not one day earlier.** An intermediate draft used
-`outcome_date - 31`, which is the *start* of day `outcome_date - 30` rather than its end. A deal created
+`outcome_date - 31`, which is the *start* of day `outcome_date - STANDING_ANCHOR_DAYS` rather than its end. A deal created
 during the P₃₀ business date, carrying no close date, and first forecast after that day ended would slip
 through: it demonstrably existed at the anchor with no prediction — precisely the `no_event` case — yet
 the fallback fired and promoted the late forecast. Both arms use the identical
@@ -945,6 +951,12 @@ outcomes AS (
          -- D_reopened membership (§4.0.5). Produced HERE so Block A's in_d_cov can consume it; the
          -- stage-history row into a Won/Lost stage survives the reopen even though the terminal date
          -- fields do not (stage-change.ts:357-362). Non-null boolean, so `NOT` on it is safe (§4.0.6).
+         --
+         -- NOT gated on the deal being open TODAY. A deal that landed in-window, reopened, and re-closed
+         -- after `to` is currently terminal with an out-of-window outcome_date: its in-window landing is
+         -- still missing from D_landed, but an `outcome_kind = 'open'` test would miss it entirely and
+         -- drop it into D_outside unflagged. That is the common case for any period more than a few weeks
+         -- old, so the test is "had an in-window landing that D_landed does not represent".
          EXISTS (
            SELECT 1 FROM deal_stage_history h
            JOIN public.pipeline_stage_config hp ON hp.id = h.to_stage_id
@@ -955,6 +967,12 @@ outcomes AS (
              -- this rule to THIS column. Do not mix a bare `>= :from` with a converted upper bound.
              AND (h.created_at AT TIME ZONE 'America/Chicago')::date >= :from::date
              AND (h.created_at AT TIME ZONE 'America/Chicago')::date <= :to::date
+         )
+         AND NOT (
+           -- ...and that landing is NOT already represented in D_landed for this period.
+           (psc.slug IN (:won_slugs) OR COALESCE(d.bid_board_stage_slug,'') IN (:won_slugs)
+            OR psc.slug IN (:lost_slugs) OR COALESCE(d.bid_board_stage_slug,'') IN (:lost_slugs))
+           AND <outcome_date> BETWEEN :from::date AND :to::date
          )                          AS is_reopened_after_landing,
          -- NOTE: expected_close_date is deliberately NOT selected. State comes from §4.0.3.
          COALESCE(d.is_bid_board_owned, false) OR COALESCE(d.is_read_only_mirror, false) AS bid_board_owned
@@ -985,11 +1003,11 @@ It excludes only **stored** `on_hold` deals — the far-out auto-park leg is del
 | `D_open` | `D` ∩ `outcome_kind = 'open'` | **today** (see below) |
 | `D_reopened` | `D` ∩ `outcome_kind = 'open'` ∩ a `deal_stage_history` row into a Won or Lost stage with `created_at` inside `[from, to]` | period |
 | `D_outside` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NOT NULL` ∩ `outcome_date` **outside** `[from, to]` — before `from` **or** after `to` | out of period |
-| `D_book` | `D_landed ∪ D_open` — the rep's book *for this period*. Denominator for churn rates. | mixed, stated |
+| `D_book` | `(D_landed ∪ D_open) \ D_reopened` — the rep's book *for this period*. Denominator for churn rates. | mixed, stated |
 | `D_score` | `D_landed` ∩ `p30_state = 'rep_prediction'` ∩ P₃₀ not parked-at-write (§6.2) | period |
 | `D_score_final` | `D_landed` ∩ `pfinal_state = 'rep_prediction'` ∩ P_final not parked-at-write | period |
 | `D_cov` | `D_open` ∩ `cov_state <> 'machine'` ∩ **not in `D_reopened`**, with `provenance_unknown` folded in as rep-authored (§4.1) | today |
-| `E` | Events in `close_date_timeline` on deals in `D_book`, `source = 'rep'`, `changed_at < event_window_end(deal)` | per-deal, see below |
+| `E` | Events in `close_date_timeline` on deals in `D_book` (so never a reopened deal), `source = 'rep'`, `changed_at < event_window_end(deal)` | per-deal, see below |
 
 **On `D_landed`'s period bounds:** `outcome_date` is a `DATE`, and `getWtdPeriod` returns `from`/`to` as
 inclusive `YYYY-MM-DD` strings (§1.9), so `BETWEEN from AND to` is correct and needs no adjustment. Do
@@ -1019,7 +1037,30 @@ stating because it is larger than it looks:** this boundary decides `is_reopened
 gates `D_cov`, `machine_dated_n` and `reopened_after_landing_n` — so a terminal stage entry near midnight
 moves a deal between three buckets *and* breaks the population tie-out in §4.0.6.
 
-**`D_reopened` is carved out of `D_open`, and it is a diagnostic, not a silent reclassification.** A deal
+**`D_reopened` is an overlay, not a member of the partition — and it is excluded from churn as well as
+from coverage.**
+
+It intersects `D_open` (reopened and still open) *and* `D_outside` (reopened and re-closed after `to`),
+because both describe the same failure: an in-window landing that `D_landed` does not represent. So it is
+reported as a diagnostic across both, while only its `D_open` slice participates in the coverage tie-out:
+
+- `reopened_after_landing_n` = `|D_reopened|` — the full diagnostic, the number leadership should see.
+- `reopened_open_n` = `|D_reopened ∩ D_open|` — the term in §4.0.6's `D_open` identity.
+
+**Excluded from `E` and `D_book` too.** `D_book` previously included all of `D_open`, and the `open → now()`
+branch of `event_window_end` runs the event window right through the interval when the deal was *closed* —
+so close-date edits made while it was closed counted as forecast churn, inflating `move_count`,
+`total_days_slipped` and the chronic-mover flag. That is precisely the post-outcome churn removed in round
+5b, reappearing through a population that did not exist then.
+
+Two repairs were possible. Splitting the event window around the closed interval is more faithful — it
+would keep the pre-landing churn, which is real forecasting — but it requires knowing when the deal closed
+and reopened, which is the same landed-history reconstruction §4.0.5 already declines to attempt. Excluding
+the deal is less informative and more honest: it says "this rep's churn number does not describe these
+deals" rather than quietly computing a wrong one. **v1 excludes**, and the exclusion lifts if and when the
+reconstruction lands (§7 follow-up). `reopened_after_landing_n` is what stops the exclusion being silent.
+
+**It is a diagnostic, not a silent reclassification.** A deal
 won or lost *inside* the period and later reopened has no terminal stage today, and `stage-change.ts:357-362`
 clears `actual_close_date`, `won_closed_date`, `lost_at` and the lost-reason fields on any terminal change
 or reopen. So the §4.0.5 CASE classifies it `open` and its landing vanishes from the period's landed and
@@ -1105,7 +1146,8 @@ here. Adding a metric without adding a row is the defect re-entering.**
 | `mirror_terminal_no_date_n` | 4.0.5 | **`D_nodate`** | — | Diagnostic |
 | `bid_board_owned_n` | 2.5(c) | `D_book` | — | Diagnostic |
 | `out_of_period_landed_n` | 4.0.5 | `D_outside` | — | Diagnostic; excluded from every other metric |
-| `reopened_after_landing_n` | 4.0.5 | `D_reopened` | — | Diagnostic; carved out of `D_cov` |
+| `reopened_after_landing_n` | 4.0.5 | `D_reopened` (all of it, `D_open` ∪ `D_outside` slices) | — | Diagnostic |
+| `reopened_open_n` | 4.0.5 | `D_reopened ∩ D_open` | — | The `D_open` tie-out term; excluded from `D_cov`, `D_book`, `E` |
 | `provenance_unknown_n` | 4.0.6 | `D_open` with a non-null `expected_close_date` but `pnow_state = 'no_event'` | — | Integrity diagnostic |
 
 `provenance_unknown_n` is computed inside the **coverage provenance-resolution block** (§4.1), the single
@@ -1119,7 +1161,9 @@ excluding them would let an unverifiable gap quietly shrink a rep's denominator.
 Invariants to pin as tests — they are the point of the table:
 
 1. `covered_n + parked_n + at_risk_n = |D_cov|`, and
-   `|D_cov| + machine_dated_n + reopened_after_landing_n = |D_open|`.
+   `|D_cov| + machine_dated_n + reopened_open_n = |D_open|`. The third term is the `D_open` **slice** of
+   `D_reopened`, not the whole diagnostic — `reopened_after_landing_n` also counts re-closed deals sitting
+   in `D_outside`, and using it here would over-subtract.
 
    **The three right-hand terms are disjoint by construction, and that is load-bearing.** `D_cov` requires
    neither machine-dated nor reopened; `reopened_after_landing_n` takes precedence; `machine_dated_n`
@@ -1288,24 +1332,37 @@ audit's inputs are *extracted* from the document or *recalled* by whoever last e
 by the author against their memory of what they just changed will pass whenever the author is wrong in the
 same way twice.
 
-| Audit | What it checks | Inputs derived by | Status |
+**Every mechanical check states what it does NOT cover.** A check that is wrong about its own scope reports
+clean and stops anyone looking, which is worse than no check — the constants check did exactly that for a
+full round, reporting "hardcoded thresholds: none" while `STANDING_ANCHOR_DAYS`' literal `30` sat in three
+lines of P₃₀ date arithmetic it never scanned.
+
+| Audit | What it checks | Inputs derived by | Status · **does NOT cover** |
 |---|---|---|---|
-| Three-table agreement (§4.0.6 / v1 / §6.0) | every metric appears in each table | **extraction** — backticked identifiers per table, set-differenced | mechanical |
-| §4.0.7 **ordering** rule | no block consumes a name produced below it | **extraction** — walk rows top-down, accumulate produced names | mechanical |
-| §4.0.7 **contents** rule | a row's *Produces* matches what its SQL projects | **extraction** — `AS <name>` / `<name> =` per fence, diffed | mechanical |
-| §4.0.7 **completeness** rule | every name a block's SQL references appears in its *Consumes* | **extraction** — referenced identifiers per fence, diffed | mechanical *(added this round)* |
-| Duplicate definitions | no scalar is defined twice with different bodies | **extraction** — collect `<name> =` across all fences, compare bodies | mechanical |
-| Window both-ends basis | no range mixes an explicit bound with a bare one | **extraction** — pair comparisons on a shared left operand, classify each bound | mechanical *(added this round)* |
-| Convention restatement (§7) | no rule is half-amended across its copies | **extraction** — signature regex per convention, all hit lines listed | mechanical *(added this round)* |
-| Constants (§6.4) | every named constant has a value and every formula uses it | **extraction** — constant names vs assigned values; literal sweep | mechanical |
-| Rate casts / `NULLS LAST` | every rate casts, every ranked column sorts NULLs last | **extraction** — grep per pattern | mechanical |
+| Three-table agreement (§4.0.6 / v1 / §6.0) | every metric appears in each table | **extraction** — backticked identifiers per table, set-differenced | mechanical · misses names not in backticks; says nothing about whether a row's *content* is right |
+| §4.0.7 **ordering** rule | no block consumes a name produced below it | **extraction** — walk rows top-down, accumulate produced names | mechanical · misses names absent from the table entirely (that is the completeness rule's job) |
+| §4.0.7 **contents** rule | a row's *Produces* matches what its SQL projects | **extraction** — `AS <name>` / `<name> =` per fence, diffed | mechanical · cannot read prose-shaped blocks (`E`, Metrics); flags convention-derived aliases (`state_at`) as expected mismatches |
+| §4.0.7 **completeness** rule | every name a block's SQL references appears in its *Consumes* | **extraction** — referenced identifiers per fence, diffed | mechanical · defeated by glob entries; the §4.1 fence mixes a CTE with metrics so its boundary is approximate |
+| Duplicate definitions | no scalar is defined twice with different bodies | **extraction** — collect `<name> =` across all fences, compare bodies | mechanical · misses definitions split between prose and SQL, and two names for one concept |
+| Window both-ends basis | no range mixes an explicit bound with a bare one | **extraction** — pair comparisons on a shared left operand, classify each bound | mechanical · paired comparisons inside SQL fences only; a single-sided bound whose partner lives elsewhere is invisible |
+| Convention restatement (§7) | no rule is half-amended across its copies | **extraction** — signature regex per convention, all hit lines listed | mechanical · a restatement that avoids the signature words is invisible |
+| Constants (§6.4) — **inverted this round** | for each named constant, its literal value appears nowhere in SQL except its own definition row | **extraction** — value → literal search across every fence | mechanical · ignores prose formulas and column *names* (`hit_rate_14d`); two constants sharing a value are indistinguishable, so a hit must be assigned by hand |
+| Rate casts / `NULLS LAST` | every rate casts, every ranked column sorts NULLs last | **extraction** — grep per pattern | mechanical · misses rates written in prose and sorts specified outside a fence |
 | §6.0 falsifying inputs | each fairness claim names an input that would break it | **read** — a human must judge whether the input really falsifies | **memory-based** |
 | §4.0.7 contents for `E` and Metrics | those two rows' *Produces* lists | not derivable — prose-shaped SQL | **unverifiable** |
 | Population definitions (§4.0.5) | that each `D_*` predicate matches its prose | **read** | **memory-based** |
 | Disjointness of tie-out terms | that summed buckets cannot overlap | **read** — set arithmetic a human must do | **memory-based** |
 | Everything against production | census, coverage floor, mirror-terminal counts | not derivable — needs a database | **unverified** |
 
-Three checks were added this round, and two of them found defects on their first run that three
+**The constants check now runs the other direction.** It previously grepped the specific literals it knew
+about — 14, 3, 60 — inside *comparisons*, so it could not see a named constant used as a literal in **date
+arithmetic** (`outcome_date - 30`). Inverted, it starts from the table: for each constant, assert its value
+appears nowhere in SQL but its own row. That direction cannot miss a site. It found the three `30`s on its
+first run, and surfaced a limitation worth stating — `STANDING_ANCHOR_DAYS` and `WIDE_TOLERANCE_DAYS` both
+equal 30 (as do `MIN_RANKED_SCOREABLE` and `MIN_RANKED_COVERAGE` at 5), so the check reports both candidates
+and a human assigns the right one.
+
+Three checks were added in an earlier round, and two of them found defects on their first run that three
 mechanical audits had already passed over. The completeness rule exists because a name in the SQL and
 **nowhere in the table** falls through both earlier checks: the contents rule verifies names the table
 *claims*, the ordering rule verifies names the table *lists*, and `is_reopened_after_landing` was in
@@ -1381,7 +1438,8 @@ provenance_unknown_n = count(*) FILTER (WHERE open AND is_provenance_unknown)
 -- reopened after landing AND later given a machine close-date write satisfies both predicates; without
 -- the NOT below it would be counted in both terms and the tie-out would double-count the very deal the
 -- reopened bucket was added to stop double-counting.
-reopened_after_landing_n = count(*) FILTER (WHERE open AND is_reopened_after_landing)
+reopened_after_landing_n = count(*) FILTER (WHERE is_reopened_after_landing)            -- all slices
+reopened_open_n          = count(*) FILTER (WHERE open AND is_reopened_after_landing)   -- tie-out term
 
 -- machine_dated_n leaves the rate on BOTH sides: charging it as at-risk blames the rep for a machine
 -- write, counting it as covered credits them for one. Reopened takes precedence, so this is the
@@ -2103,6 +2161,7 @@ work or an omission, and there is no way to tell which from a list that only nam
 | `bid_board_owned_n` | Diag | `D_book` | 2.5(c) |
 | `out_of_period_landed_n` | Diag | `D_outside` | 4.0.5 |
 | `reopened_after_landing_n` | Diag | `D_reopened` | 4.0.5 |
+| `reopened_open_n` | Diag | `D_reopened ∩ D_open` | 4.0.5 |
 | `provenance_unknown_n` | Diag | `D_open`, raw date with `pnow_state='no_event'` | 4.0.6 |
 
 `hit_rate_30d` and `p90_signed_error_days` are marked in bold because they were **missing from an earlier
@@ -2355,6 +2414,21 @@ complement of `futureDatedCloseDatePredicateSql`'s `>= today` (`foundations.ts:4
 unparked in both. One ordering — `percentile_cont`'s `WITHIN GROUP` — deliberately needs no tie-breaker,
 and §4.3 now says why.
 
+**Round 14 (a check that reported a clean it had not earned)**
+
+| # | Was | Now |
+|---|---|---|
+| 1 | `D_book` included all of `D_open`, so `E`'s `open → now()` window ran through the interval a reopened deal was **closed** | Edits made while the deal was closed counted as forecast churn — the post-outcome churn removed in round 5b, back through a population that did not exist then. `D_reopened` is now excluded from `D_book` and `E`. Splitting the window around the closed interval would be more faithful but needs the same landed-history reconstruction §4.0.5 declines; excluding is less informative and more honest, and `reopened_after_landing_n` keeps it from being silent. |
+| 2 | `D_reopened` was gated on `outcome_kind = 'open'` | A deal that landed in-window, reopened, and **re-closed after `to`** stopped matching and fell into `D_outside` unflagged — the common case for any period more than a few weeks old, and exactly the dropped landing the diagnostic exists to surface. Now based on in-window terminal stage history **plus** the landing not being represented in `D_landed`, so it catches both slices. It is an overlay across `D_open` and `D_outside`, so the tie-out uses `reopened_open_n` (the `D_open` slice) while `reopened_after_landing_n` reports the whole thing. |
+| 3 | P₃₀ bounds subtracted a literal `30` while §6.4 defined `STANDING_ANCHOR_DAYS` | Open question 2 invites moving the anchor to 60; a copied implementation would keep scoring at 30. **Third wave of constant defects**, and it got past a check built after the second. |
+
+**The check that failed, and why.** My last report said "hardcoded thresholds: none". It grepped the
+literals it already knew about (14, 3, 60) inside *comparisons*, so a named constant used as a literal in
+**date arithmetic** was outside its scope — and it reported clean rather than reporting limited. Inverted
+to run table→SQL: for each named constant, assert its value appears nowhere in a fence but its own row.
+Found the three `30`s immediately. Every mechanical check now carries an explicit **does NOT cover** line,
+because the check's silence was more damaging than the defect.
+
 **Round 13 (a half-converted window, and the asymmetry check that finds them)**
 
 | # | Was | Now |
@@ -2512,6 +2586,15 @@ were themselves silently broken**, because `NOT <nullable>` inside `FILTER` coun
 failing loudly. A check that can fail open is not a check. That is why the state enum is coalesced and
 non-null by construction, and why "never negate a nullable" is now a stated SQL rule (§4.0.6) rather than
 something to remember at each site.
+
+**Round 14's lesson: a green check is a claim, and claims need their scope stated.** Round 13 argued that
+when a sweep finds N defects the useful follow-up is the structural invariant they share. The corollary
+this round supplies: *a check written for that invariant can still be wrong about its own scope*, and then
+its zero is indistinguishable from a real zero — worse than no check, because it stops the search. The
+constants check reported clean for a full round while the third wave of constant defects sat in lines it
+never read. Every check in the inventory now states what it does not cover, and that line is the part a
+reader should read first: the both-ends check's zero is trustworthy *because* it says "paired comparisons
+inside SQL fences only", and the constants check's zero was not.
 
 **Round 13's lesson: check the property that is cheap to verify, not the one you actually care about.**
 What matters is whether each boundary is *correct*, which needs judgement about intent and timezone
