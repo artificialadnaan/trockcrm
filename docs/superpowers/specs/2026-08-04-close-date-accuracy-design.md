@@ -370,11 +370,22 @@ All period slicing in this report goes through it. "Today" in every day-math exp
 The prediction is the value of `deals.expected_close_date`, reconstructed **as of a point in time** from
 the `audit_log` trigger timeline (§1.2). Two anchors, both computed:
 
-- **P₃₀ — the standing prediction.** The value the field held 30 calendar days before the outcome date. If
-  the deal's entire recorded life was shorter than 30 days, P₃₀ is the *first* value ever recorded for the
-  deal. **This is the headline.**
-- **P_final — the final call.** The value the field held at the outcome instant. Reported as a secondary
-  column.
+- **P₃₀ — the standing prediction.** The value the field held at the **end of the business day 30 calendar
+  days before the outcome date**. If the deal itself was created inside that 30-day window — so its entire
+  life sits after the anchor — P₃₀ falls back to the *first* value ever recorded for the deal. **This is
+  the headline.**
+- **P_final — the final call.** The value the field held at the **end of the outcome business date**.
+  Reported as a secondary column.
+
+**Why "end of the business date" and not "at the outcome instant".** There is no outcome instant available:
+`won_closed_date` is a `DATE` column and the Lost stamp is read as `lost_at::date`, so the data records
+*which day* a deal closed and never *what time*. Within the closing day we cannot order a forecast edit
+against the win. Two readings are possible and only one is defensible: excluding same-day edits would
+penalise a rep for updating the forecast on the morning of a win that was recorded that afternoon, for no
+reason other than a missing timestamp. So the last value written on the closing day counts. An earlier
+draft said "at the outcome instant" while the SQL compared against midnight at the *start* of that date —
+the definition and the implementation meant different things, and the implementation is what would have
+shipped. The boundary is specified concretely in §4.0.3.
 
 Why the headline is P₃₀ and not P_final: a close date is a planning instrument. Its value is that it was
 right *far enough ahead for someone to act on it*. A rep who re-dates a deal to "this Friday" on Thursday
@@ -390,7 +401,7 @@ distribution is visible.
 | Deal state | Outcome date | Expression |
 |---|---|---|
 | Won | canonical Won-close date | `aliasedWonHsClosedWonDateSql('d')`, guarded by `aliasedHasUsableWonDateSql('d')` |
-| Lost | loss stamp | `d.lost_at::date` (as in `deal-date-scope.ts:54`) |
+| Lost | loss stamp | `d.lost_at::date` — inherited verbatim from `deal-date-scope.ts:54` |
 | Open, date in the past | **no outcome yet** — right-censored | see §2.4 |
 | Open, date today or future | **not yet judgeable** | excluded from error metrics, counted in coverage |
 | Open, no date at all | **no prediction** | counted as a coverage failure, never as a hit or a miss |
@@ -586,7 +597,8 @@ future machine writer means adding one `WHEN` arm to the classifier in §4.0.2, 
 -- or it also catches the rep spreadsheet campaign (§5.4), which produces the same NULL-actor shape
 -- on an UPDATE.
 WITH raw_close_date_events AS (
-  SELECT a.record_id                                            AS deal_id,
+  SELECT a.id                                                   AS audit_log_id,   -- tie-breaker, see below
+         a.record_id                                            AS deal_id,
          a.created_at                                           AS changed_at,
          a.changed_by                                           AS actor_user_id,
          'update'::text                                         AS event_kind,
@@ -600,7 +612,7 @@ WITH raw_close_date_events AS (
   UNION ALL
 
   -- The date the deal was born with (0028 already reads this exact expression).
-  SELECT a.record_id, a.created_at, a.changed_by,
+  SELECT a.id, a.record_id, a.created_at, a.changed_by,
          'insert'::text,
          NULL::date,
          NULLIF(a.full_row->>'expected_close_date','')::date
@@ -613,6 +625,20 @@ WITH raw_close_date_events AS (
 ```
 
 Index support: `audit_record_idx (table_name, record_id, created_at)`.
+
+**`audit_log_id` is not decoration.** The `audit_deals` trigger stamps `created_at` with `NOW()`, which in
+Postgres is **transaction-stable**: two writes to the same deal inside one transaction receive an
+*identical* `changed_at`. `ORDER BY changed_at DESC` alone can then return either row, which means
+`state_at` is not a function — the same inputs can yield different answers between runs. `audit_log.id` is
+`BIGSERIAL PRIMARY KEY` in both the public and tenant definitions (`0001_initial.sql:731`,
+`0032_ensure_tenant_audit_log.sql:12` and `:50`), so it is always available as a tie-breaker.
+
+Precisely what the tie-breaker buys, stated honestly: **determinism always, and insertion order in the case
+that matters.** Identical `changed_at` implies the same transaction, and within one transaction the
+sequence is drawn in insertion order, so `id` is the true ordering. Across *different* transactions `id`
+can interleave with commit order — but then `changed_at` differs and is the primary key of the sort, so it
+decides. The residual case (two concurrent transactions with a `NOW()` collision) is resolved
+arbitrarily-but-repeatably, which is all that is required: `state_at` must be a function.
 
 #### 4.0.2 The classifier — the single place provenance is decided
 
@@ -665,10 +691,32 @@ probing per event. If it turns out to be large, add an index — that is a migra
 
 #### 4.0.3 State at an instant — one function, four outcomes, never NULL
 
+**Anchor precision, stated before the SQL because it is a definitional choice, not an implementation
+detail.** Two of the three anchors are derived from `outcome_date`, which is a **DATE** — `won_closed_date`
+is a `DATE` column and `lost_at::date` is a cast to one. The underlying data does not record *what time* a
+deal was won. So an anchor expressed as a bare date silently means **midnight at the start** of that day,
+and a rep who updated the forecast at any hour of the closing day would be excluded from P_final — despite
+§2.1 defining P_final as the prediction held *at the outcome instant*.
+
+**P_final and P₃₀ are therefore defined as the state at the END of their business date**, implemented with
+an exclusive next-day boundary. This is the honest reading of the available precision: within the closing
+day we cannot order a forecast edit against the win, so we credit the rep with the last thing they wrote
+that day. State this limitation in the report's own documentation; do not leave it to be inferred from a
+comparison operator.
+
 ```sql
--- state_at(deal, T): what stood immediately before T.
--- Takes the LATEST event before T REGARDLESS OF SOURCE. A machine write is not skipped: it supersedes
--- whatever the rep had entered, which is the whole point of §4.0.0.
+-- business_day_end_exclusive(d) -- the instant business date `d` ends, i.e. the start of the next
+-- business day, in America/Chicago (BUSINESS_TIMEZONE, §1.9). Compare a timestamptz strictly BELOW this
+-- to mean "at any point on or before business date d".
+--   ((d + 1)::date::timestamp AT TIME ZONE 'America/Chicago')
+-- The explicit AT TIME ZONE is required: comparing a timestamptz against a bare date resolves in the
+-- SESSION timezone, which is not guaranteed to be the business timezone.
+```
+
+```sql
+-- state_at(deal, T): what stood as of T.
+-- Takes the LATEST event at-or-before T REGARDLESS OF SOURCE. A machine write is not skipped: it
+-- supersedes whatever the rep had entered, which is the whole point of §4.0.0.
 LEFT JOIN LATERAL (
   SELECT CASE
            WHEN t.source = 'machine'   THEN 'machine'
@@ -679,11 +727,24 @@ LEFT JOIN LATERAL (
          t.changed_at,
          t.source
   FROM close_date_timeline t
-  WHERE t.deal_id = o.deal_id AND t.changed_at < <T>
-  ORDER BY t.changed_at DESC
+  WHERE t.deal_id = o.deal_id
+    AND t.changed_at < <T_exclusive_upper_bound>
+  ORDER BY t.changed_at DESC, t.audit_log_id DESC   -- total order; see §4.0.1
   LIMIT 1
 ) p ON TRUE
 ```
+
+`<T_exclusive_upper_bound>` per anchor:
+
+| Anchor | Bound | Why |
+|---|---|---|
+| `pfinal` | `business_day_end_exclusive(outcome_date)` | Includes edits made on the closing day (the fix above) |
+| `p30` | `business_day_end_exclusive(outcome_date - 30)` | Same convention, so the two anchors are comparable |
+| `pnow` | `now()` | A true instant, not a date — no day-boundary question arises, and no event can be in the future |
+
+`pnow` deliberately does **not** use the helper. It is the only anchor that is genuinely an instant rather
+than a date, so `< now()` is exact; wrapping it in a day boundary would add nothing and would invite the
+reader to think a date is involved.
 
 and every consumer reads the **coalesced** state, never the raw lateral columns:
 
@@ -724,13 +785,26 @@ shorter than 30 days**. The gate is the deal's own age, not its first close-date
 
 ```sql
 p30 = CASE
-        WHEN <an event exists strictly before outcome_date - 30>
-          THEN state_at(deal, outcome_date - interval '30 days')
-        WHEN d.created_at > o.outcome_date - interval '30 days'   -- the DEAL is younger than the anchor
-          THEN state_at(deal, o.outcome_date)                     -- its earliest state is all there is
-        ELSE 'no_event'                                           -- long-lived, forecast late: NOT scoreable
+        WHEN <an event exists below business_day_end_exclusive(outcome_date - 30)>
+          THEN state_at(deal, business_day_end_exclusive(o.outcome_date - 30))
+        -- The DEAL is younger than the anchor: its whole life sits inside the window, so its earliest
+        -- recorded state is all there is. Same tz-explicit boundary as everywhere else (§4.0.3).
+        WHEN d.created_at >= business_day_end_exclusive(o.outcome_date - 31)
+          THEN <earliest event state, see below>
+        ELSE 'no_event'                        -- long-lived, forecast late: NOT scoreable
       END
 ```
+
+The "earliest event" arm needs the same total order as `state_at`, in the other direction:
+
+```sql
+ORDER BY t.changed_at ASC, t.audit_log_id ASC
+LIMIT 1
+```
+
+A deal created and forecast twice within one transaction would otherwise resolve its *first* prediction
+non-deterministically — the mirror of the §4.0.1 problem, and just as easy to miss because it only bites on
+same-transaction writes.
 
 An earlier draft gated on `min(changed_at)` over the deal's *events*. That is circular: a deal created in
 January and first forecast on 20 July, closing on 30 July, has `min(changed_at)` after the anchor, so the
@@ -787,7 +861,7 @@ It excludes only **stored** `on_hold` deals — the far-out auto-park leg is del
 | Name | Definition | Time basis |
 |---|---|---|
 | `D` | The base `outcomes` CTE above | current row state |
-| `D_landed` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NOT NULL` ∩ `outcome_date ∈ [from, to]` | period |
+| `D_landed` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NOT NULL` ∩ `outcome_date BETWEEN from AND to` (both inclusive) | period |
 | `D_nodate` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NULL` | — |
 | `D_open` | `D` ∩ `outcome_kind = 'open'` | **today** (see below) |
 | `D_book` | `D_landed ∪ D_open` — the rep's book. Denominator for churn rates. | mixed, stated |
@@ -795,6 +869,13 @@ It excludes only **stored** `on_hold` deals — the far-out auto-park leg is del
 | `D_score_final` | `D_landed` ∩ `pfinal_state = 'rep_prediction'` ∩ P_final not parked-at-write | period |
 | `D_cov` | `D_open` ∩ `pnow_state <> 'machine'` | today |
 | `E` | Events in `close_date_timeline` on deals in `D_book`, `source = 'rep'`, `changed_at <= now()` | to date |
+
+**On `D_landed`'s period bounds:** `outcome_date` is a `DATE`, and `getWtdPeriod` returns `from`/`to` as
+inclusive `YYYY-MM-DD` strings (§1.9), so `BETWEEN from AND to` is correct and needs no adjustment. Do
+**not** import the timestamp convention from `deal-date-scope.ts` (`>= from::date` and
+`< to::date + interval '1 day'`, §1.8) — that exclusive upper bound exists to cover a *timestamp* column's
+intraday values, and applying it to a date column is harmless only by luck. Two different boundary
+conventions in one query is how an off-by-one day enters.
 
 `D_landed ⊎ D_open ⊎ D_nodate = D` — a three-way partition. `D_nodate` exists because a mirror-won deal can
 have a NULL `won_closed_date` (nothing stamps it while the CRM stage stays open): it is terminal, so not in
@@ -864,6 +945,17 @@ Invariants to pin as tests — they are the point of the table:
   landing in a bucket. The state enum in §4.0.3 is coalesced precisely so every downstream test is a
   positive equality against a non-null value. Where a negative test is unavoidable, write it as
   `<col> IS DISTINCT FROM x` or `<col> IS NOT TRUE`.
+- **Never compare a `timestamptz` against a bare date, and never `::date` one without a timezone.** Both
+  resolve in the *session* timezone, which is not guaranteed to be `America/Chicago`. Use
+  `business_day_end_exclusive(d)` (§4.0.3) for an upper bound and
+  `(<ts> AT TIME ZONE 'America/Chicago')::date` for a cast. A day-boundary error is invisible in test data
+  seeded at midday and appears in production only for evening edits.
+- **Every "latest" or "earliest" selection needs a total order.** `changed_at` alone is not one: `NOW()` is
+  transaction-stable, so same-transaction writes tie (§4.0.1). Always append `audit_log_id` in the matching
+  direction. A `LIMIT 1` over a non-total order is a query whose answer can change between runs.
+- **State the precision you actually have.** `outcome_date` is a `DATE`; the data does not record what time
+  a deal was won. Where a bound is derived from it, say in prose which end of the day is meant rather than
+  letting `<` versus `<=` carry a definition the reader has to reverse-engineer.
 
 ### 4.1 Coverage rate
 
@@ -943,9 +1035,23 @@ hit_rate_14d = count(*) FILTER (WHERE scoreable AND abs(signed_error_p30) <= 14)
              / NULLIF(count(*) FILTER (WHERE scoreable), 0)
 ```
 
-`p30_parked_at_write` is computed as `COALESCE(p30_prediction > p30_changed_at::date + 90, false)` — a
-non-null boolean, so the `NOT` is safe. Written as a bare comparison it would be NULL whenever there is no
-P₃₀ row and the whole `scoreable` conjunct would go NULL rather than false (§4.0.6).
+`p30_parked_at_write` is computed as:
+
+```sql
+COALESCE(
+  p30_prediction > (p30_changed_at AT TIME ZONE 'America/Chicago')::date
+                   + CLOSE_TARGET_HOLD_HORIZON_DAYS,
+  false)
+```
+
+Three things are load-bearing in that one line. The `COALESCE` makes it a non-null boolean so the `NOT` in
+`scoreable` is safe — as a bare comparison it would be NULL whenever there is no P₃₀ row, taking the whole
+conjunct NULL rather than false (§4.0.6). The **explicit `AT TIME ZONE`** is required because
+`p30_changed_at` is a `timestamptz` and a bare `::date` cast resolves in the *session* timezone, not the
+business timezone — an event written late on a Chicago evening would land on the following date under a UTC
+session and shift the horizon by a day. And the comparison is strict `>`, matching
+`closeTargetFarOutSqlPredicate` (`shared/src/types/deal-reporting.ts:137`), so a prediction written exactly
+90 days out is *not* parked in either world.
 
 **The shortfall partition.** `D_landed \ D_score` splits by `p30_state`, and the four buckets are
 exhaustive over the enum:
@@ -998,6 +1104,12 @@ mean_signed_error_days   = avg(signed_error_p30)                                
 median_signed_error_days = percentile_cont(0.5) WITHIN GROUP (ORDER BY signed_error_p30) FILTER (WHERE scoreable)
 p90_signed_error_days    = percentile_cont(0.9) WITHIN GROUP (ORDER BY signed_error_p30) FILTER (WHERE scoreable)
 ```
+
+**These are the one ordering in the document that deliberately needs no tie-breaker** (§4.0.6's total-order
+rule). `percentile_cont` interpolates over the multiset of values and there is no `LIMIT`, so two rows with
+an equal `signed_error_p30` produce an identical result in either order — the ordering selects a position
+in a distribution, not a winning row. The rule exists for "pick the latest/earliest record" lookups, where
+a tie decides *which row's data you read*; that is not what is happening here.
 
 `scoreable`, not `landed` — same reason as §4.2. A landed deal with no standing prediction has a NULL
 error; `avg` would skip it silently, but `count`-based columns beside it would not, and the row would stop
@@ -1269,7 +1381,8 @@ This report applies the horizon in **two** places, and both are required:
    `(horizon) > CT_TODAY_SQL + INTERVAL '90 days'`. Same anchor, same strict `>`, so a deal exactly 90 days
    out is *not* parked in either world.
 2. **Scoring.** A prediction is **parked-at-write** when it was more than 90 days beyond **the date it was
-   written** — `new_date > changed_at::date + 90`. Such a prediction is excluded from `scoreable` (§4.2)
+   written** — `new_date > (changed_at AT TIME ZONE 'America/Chicago')::date + 90`, the explicit-timezone
+   form required by §4.0.6. Such a prediction is excluded from `scoreable` (§4.2)
    and from every error statistic, while still counted in `move_count`, `days_pushed_out` and the
    chronic-mover flag. Without this the winning strategy is "push everything to 2028, then set an accurate
    date the week it closes" — a perfect hit rate on a forecast nobody could plan with.
@@ -1507,6 +1620,30 @@ individual fix.
 | H | `mirror_terminal_no_date_n` drawn from `D_book` | A mirror-won deal with a NULL won date is in neither `D_landed` nor `D_open`, so the diagnostic could not see its own case. New `D_nodate` population; `D` is now a stated three-way partition (§4.0.5). |
 | I | Watchlist tie-out asserted as equality | `at-risk-service.ts:71` filters `psc.is_terminal = false` and never reads `bid_board_stage_slug` (verified: zero occurrences). Stated as an identity with two correction terms, and raised as a finding about the *existing* watchlist (§4.1). |
 
+**Round 4 → 5 (boundary and ordering sweep)**
+
+| # | Was | Now |
+|---|---|---|
+| P1a | P_final defined as "the prediction held at the outcome instant", implemented as `changed_at < outcome_date` | `outcome_date` is a `DATE`, so the comparison meant midnight at the *start* of the closing day and excluded every same-day edit. Both P_final and P₃₀ are now defined as the state at the **end of** their business date, via an exclusive next-day bound, with the precision limitation stated in §2.1 rather than implied by an operator. |
+| P1b | `ORDER BY changed_at DESC ... LIMIT 1` | `NOW()` is transaction-stable, so same-transaction writes tie and `state_at` was not a function. `audit_log.id` (`BIGSERIAL`) is carried through the timeline and every lookup orders by `changed_at, audit_log_id`. |
+| S1 | P₃₀ had the identical boundary defect | Fixed with the same helper — it was one bug at two anchors, not a P_final special case. |
+| S2 | `d.created_at > outcome_date - interval '30 days'` in the P₃₀ fallback | `timestamptz` against a bare date resolves in the *session* timezone. Rewritten with the explicit business-timezone bound. |
+| S3 | `p30_changed_at::date` in the parked-at-write test | Same session-timezone defect; an evening Chicago edit shifted the horizon a day. Now `(… AT TIME ZONE 'America/Chicago')::date`. |
+| S4 | §6.2 restated the parked test with the old bare cast | Internal contradiction with the corrected §4.2. Aligned. |
+| S5 | "earliest event" in the P₃₀ fallback had no tie-breaker | Mirror of P1b in the ascending direction; a deal created and forecast twice in one transaction resolved its first prediction non-deterministically. |
+| S6 | `D_landed` period bounds unspecified | Stated as `BETWEEN from AND to` (inclusive, matching `getWtdPeriod`), with an explicit warning not to import the `< to + 1 day` timestamp convention from `deal-date-scope.ts` onto a date column. |
+
+**The sweep.** Twenty boundary comparisons and orderings were checked — every line inside a ```sql fence
+containing a comparison operator, `BETWEEN`, `ORDER BY`, `::date`, `interval`, `now()` or `today`, read in
+context, plus the period bounds stated only in prose. Six were wrong (two reported, four found), and the
+four found were all the *same two* root causes reaching sites the report did not name: one boundary
+convention and one timezone assumption. Fourteen were correct, and the four that reconcile against platform
+predicates were verified against the source rather than assumed — `at_risk`'s `< today` is the exact
+complement of `futureDatedCloseDatePredicateSql`'s `>= today` (`foundations.ts:46`), and `parked`'s strict
+`>` matches `closeTargetFarOutSqlPredicate` (`deal-reporting.ts:137`), so a deal exactly 90 days out is
+unparked in both. One ordering — `percentile_cont`'s `WITHIN GROUP` — deliberately needs no tie-breaker,
+and §4.3 now says why.
+
 **The pattern.** Almost every round-2 and round-3 defect is one error: *a numerator and a denominator that
 describe different sets of deals*. `moves_per_deal` (twice), the coverage hole, the ranking floor, the
 hit-rate denominator, the reportable filter — all the same shape. Fixing them individually is what let the
@@ -1538,3 +1675,11 @@ were themselves silently broken**, because `NOT <nullable>` inside `FILTER` coun
 failing loudly. A check that can fail open is not a check. That is why the state enum is coalesced and
 non-null by construction, and why "never negate a nullable" is now a stated SQL rule (§4.0.6) rather than
 something to remember at each site.
+
+**Round 5 is the same lesson a third time, in a third dimension.** The population table made
+numerator/denominator disagreement visible; round 5's findings were the *boundary* equivalent — prose
+saying "at the outcome instant" while SQL said "before midnight", and a `LIMIT 1` over an order that was
+not total. Both are a definition and a comparison that do not mean the same thing. The three new standing
+rules in §4.0.6 (timezone-explicit comparisons, total orders, state-the-precision) are the structural
+answer, in the same spirit as the population table: turn a thing the author has to remember at every site
+into a thing the reader can check mechanically at every site.
