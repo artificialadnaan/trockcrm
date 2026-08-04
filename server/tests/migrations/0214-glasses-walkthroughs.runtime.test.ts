@@ -150,7 +150,15 @@ describe("migration 0214 — glasses_walkthroughs", () => {
         -- A walk whose deal is gone: skipped, or the FK aborts the migration.
         ('glasses_walkthrough_forward', '{"officeSlug":"dallas","dealId":"00000000-0000-4000-8000-0000000000ff","walkId":"walk-orphan","capturedAt":"2026-08-02T22:00:00.000Z"}'),
         -- Another office entirely: must not land in dallas.
-        ('glasses_walkthrough_forward', '{"officeSlug":"atlanta","dealId":"${deal}","walkId":"walk-elsewhere","capturedAt":"2026-08-02T22:00:00.000Z"}');
+        ('glasses_walkthrough_forward', '{"officeSlug":"atlanta","dealId":"${deal}","walkId":"walk-elsewhere","capturedAt":"2026-08-02T22:00:00.000Z"}'),
+        -- A capturedAt that is not a timestamp at all. jsonb constrains nothing and reconciliation edits
+        -- these payloads by hand, so an unguarded ::timestamptz here raises 22007 and — since every office
+        -- is backfilled in ONE DO block in ONE transaction — takes migration 0214 down for EVERY tenant.
+        ('glasses_walkthrough_forward', '{"officeSlug":"dallas","dealId":"${deal}","walkId":"walk-badtime","capturedAt":"not-a-timestamp"}'),
+        -- Shaped exactly like a date and still uncastable: February 30th. This is the case that makes the
+        -- guard a real cast-with-EXCEPTION rather than another regex — bounding month 01-12 and day 01-31
+        -- admits this string, and it throws anyway.
+        ('glasses_walkthrough_forward', '{"officeSlug":"dallas","dealId":"${deal}","walkId":"walk-feb30","capturedAt":"2026-02-30T00:00:00.000Z"}');
     `);
 
     await pg.exec(MIGRATION_SQL);
@@ -163,11 +171,39 @@ describe("migration 0214 — glasses_walkthroughs", () => {
     expect(rows.rows.find((r: any) => r.walk_id === "walk-old").captured_by_user_id).toBe(user);
     // The malformed checkpoint is dropped, not written and not fatal.
     expect(rows.rows.find((r: any) => r.walk_id === "walk-bad").scope_walkthrough_id).toBeNull();
+    // Both uncastable capture times are absent from that list rather than having aborted the run — and the
+    // GOOD rows above landing is the other half of the assertion, since a raising cast would have left this
+    // office with no table content at all.
 
     // Replayable: a second run inserts nothing new.
     await pg.exec(MIGRATION_SQL);
     const again = (await pg.query(`SELECT count(*)::int AS n FROM office_dallas.glasses_walkthroughs`)) as any;
     expect(again.rows[0].n).toBe(2);
+    await pg.close();
+  });
+
+  it("BACKFILLS an office whose own slug contains the schema prefix", async () => {
+    // `office_${slug}` is the provisioner's rule and it accepts `^[a-z][a-z0-9_]*$` (office/service.ts),
+    // so `north_office_1` is a legal slug and `office_north_office_1` a legal schema. Deriving the slug
+    // with an unanchored `replace(schema_name, 'office_', '')` stripped BOTH occurrences and produced
+    // `north_1`, which matches no payload — so this office's walks were skipped silently while the
+    // migration reported success. Nothing here fails loudly; the row count is the only witness.
+    const pg = new PGlite();
+    // office_dallas alongside it because the file's TENANT_SCHEMA block names that schema literally —
+    // it is the placeholder the provisioner rewrites, so the migration cannot run without it.
+    await seedPrerequisites(pg, ["office_dallas", "office_north_office_1"]);
+    await pg.exec(`CREATE TABLE public.job_queue (id bigserial PRIMARY KEY, job_type text, payload jsonb);`);
+    await pg.exec(`
+      INSERT INTO public.job_queue (job_type, payload) VALUES
+        ('glasses_walkthrough_forward', '{"officeSlug":"north_office_1","dealId":"${DEAL_A}","walkId":"walk-nested","capturedAt":"2026-08-02T22:00:00.000Z"}');
+    `);
+
+    await pg.exec(MIGRATION_SQL);
+
+    const rows = (await pg.query(
+      `SELECT walk_id FROM office_north_office_1.glasses_walkthroughs`,
+    )) as any;
+    expect(rows.rows.map((r: any) => r.walk_id)).toEqual(["walk-nested"]);
     await pg.close();
   });
 

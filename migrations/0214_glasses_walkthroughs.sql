@@ -45,6 +45,35 @@ DO $tenant$
 DECLARE
   schema_name text;
 BEGIN
+  -- A CASTABLE-OR-NULL TIMESTAMP, because the uuid regex guards below are only half the problem.
+  --
+  -- `job_queue.payload` is unconstrained jsonb that reconciliation edits by hand, so `capturedAt` can hold
+  -- any string at all. `IS NOT NULL` does not make it a timestamp: a bare `::timestamptz` on one bad value
+  -- raises 22007 and — because every office is backfilled in this single DO block, in one transaction —
+  -- aborts migration 0214 for EVERY tenant, not just the office holding the bad row. That is the same
+  -- failure the uuid columns are already guarded against, on the one field that was left unguarded.
+  --
+  -- A REGEX WOULD NOT BE ENOUGH here, which is why this is a function rather than another `~*`. Bounding
+  -- the fields (month 01-12, day 01-31) still admits `2026-02-30`, which is shaped like a date and throws
+  -- on cast anyway. Only an actual attempted cast decides castability, and only an EXCEPTION block can
+  -- catch the failure without taking the statement down with it.
+  --
+  -- `pg_temp` so it is session-local and disappears on its own — a migration has no business leaving a
+  -- helper behind in a schema the application reads. Called fully qualified for the same reason the rest of
+  -- this file is: `search_path` is not this block's to assume.
+  --
+  -- STABLE, not IMMUTABLE: parsing a timestamp without an offset depends on the TimeZone setting.
+  EXECUTE $fn$
+    CREATE OR REPLACE FUNCTION pg_temp.glasses_walkthrough_backfill_ts(value text)
+    RETURNS timestamptz LANGUAGE plpgsql STABLE AS $body$
+    BEGIN
+      RETURN value::timestamptz;
+    EXCEPTION WHEN others THEN
+      RETURN NULL;
+    END;
+    $body$
+  $fn$;
+
   FOR schema_name IN
     SELECT nspname FROM pg_namespace WHERE nspname LIKE 'office\_%' ESCAPE '\' ORDER BY nspname
   LOOP
@@ -136,7 +165,7 @@ BEGIN
                     q.payload->>'walkId' AS walk_id,
                     CASE WHEN q.payload->>'scopeWalkthroughId' ~* '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
                          THEN (q.payload->>'scopeWalkthroughId')::uuid END AS scope_walkthrough_id,
-                    (q.payload->>'capturedAt')::timestamptz AS captured_at,
+                    pg_temp.glasses_walkthrough_backfill_ts(q.payload->>'capturedAt') AS captured_at,
                     CASE WHEN q.payload->>'capturedByUserId' ~* '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
                          THEN (q.payload->>'capturedByUserId')::uuid END AS captured_by_user_id,
                     q.id AS job_id
@@ -147,10 +176,16 @@ BEGIN
                 AND q.payload->>'walkId' IS NOT NULL
                 AND q.payload->>'capturedAt' IS NOT NULL
            ) candidates
-          WHERE EXISTS (SELECT 1 FROM %I.deals d WHERE d.id = candidates.deal_id)
+          WHERE captured_at IS NOT NULL
+            AND EXISTS (SELECT 1 FROM %I.deals d WHERE d.id = candidates.deal_id)
           ORDER BY deal_id, walk_id, (scope_walkthrough_id IS NOT NULL) DESC, job_id DESC
        ON CONFLICT (deal_id, walk_id) DO NOTHING$bf$,
-      schema_name, replace(schema_name, 'office_', ''), schema_name
+      -- THE LEADING PREFIX ONLY. `replace()` here removed EVERY occurrence, and an office slug may contain
+      -- the prefix as a substring — the provisioner accepts `^[a-z][a-z0-9_]*$` (office/service.ts), so
+      -- `north_office_1` is a legal slug whose schema is `office_north_office_1`. `replace` turned that back
+      -- into `north_1`, which matches no payload, so the backfill silently skipped every historical walk for
+      -- that office while reporting success. Anchored, it round-trips the provisioner's `office_${slug}`.
+      schema_name, regexp_replace(schema_name, '^office_', ''), schema_name
     );
     END IF;
   END LOOP;
