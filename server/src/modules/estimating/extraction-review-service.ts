@@ -1,7 +1,12 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import { estimateExtractions, estimateReviewEvents } from "@trock-crm/shared/schema";
+import {
+  estimateExtractionMatches,
+  estimateExtractions,
+  estimatePricingRecommendations,
+  estimateReviewEvents,
+} from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { resolvePricingScopeFromExtraction } from "./pricing-service.js";
 
@@ -14,6 +19,11 @@ async function insertReviewEvent(
     subjectId: string;
     eventType: string;
     userId: string;
+    // Defaults to the extraction because that is what three of this file's four callers are about. The
+    // fourth records a status change on `estimate_pricing_recommendations`, and an event filed under the
+    // wrong subject is worse than no event: it is answerable only by someone who already knows to look
+    // at the other table.
+    subjectType?: string;
     beforeJson?: Record<string, unknown>;
     afterJson?: Record<string, unknown>;
     reason?: string | null;
@@ -23,7 +33,7 @@ async function insertReviewEvent(
     .insert(estimateReviewEvents)
     .values({
       dealId: input.dealId,
-      subjectType: "estimate_extraction",
+      subjectType: input.subjectType ?? "estimate_extraction",
       subjectId: input.subjectId,
       eventType: input.eventType,
       userId: input.userId,
@@ -101,6 +111,119 @@ function buildUpdatedPricingScopeMetadata(input: {
     ...metadata,
     ...pricingScope,
   };
+}
+
+/**
+ * Drops the review decision on any recommendation whose price was computed from a quantity that was
+ * never supplied, once the real quantity arrives.
+ *
+ * WHY THIS IS NOT COVERED BY THE PROMOTE PREDICATE. `loadApprovedRecommendationsForRun` refuses a
+ * recommendation whose extraction has no priceable quantity — but it asks about the LIVE quantity, and
+ * the correction has just made that quantity valid. So the gate that was holding the stale row back
+ * swings open at the exact moment the row becomes wrong: the extraction now says 700, the approved
+ * recommendation still says the `1` the old pricer invented, and the promote reads its numbers off the
+ * recommendation. A client-facing line for one unit, carrying a human's approval, produced by an edit
+ * that was correct.
+ *
+ * SENT BACK TO REVIEW, NOT REJECTED. The approval was a real judgement about a real row; what it was
+ * not is a judgement about 700. `pending_review` is the value `reviewEstimatePricingRecommendation`
+ * already writes for "somebody has to look at this again" — every consumer maps it to a non-promotable
+ * state, so nothing here needs a new status or a migration to be understood.
+ *
+ * ALREADY-PROMOTED ROWS ARE LEFT ALONE. Their line item exists; changing the recommendation's status
+ * would not unmake it, and `reviewEstimatePricingRecommendation` refuses to review a promoted row at
+ * all (409). Re-promotion is already blocked by `promotable`. Correcting what is on an issued estimate
+ * is an estimate revision, not a side effect of an edit.
+ *
+ * MANUAL ROWS ARE EXEMPT, on `sourceType` and for exactly the reason the promote query is: a manual
+ * recommendation carries its own `manualQuantity`, and its extraction match exists only as an
+ * active-artifact anchor. It was never priced from this quantity, so this correction says nothing
+ * about it.
+ */
+async function sendStaleRecommendationsBackToReview(args: {
+  tenantDb: TenantDb;
+  dealId: string;
+  extractionId: string;
+  userId: string;
+  correctedQuantity: string | null;
+}) {
+  // KEYED ON THE MATCH JOIN, not on `sourceExtractionId`, because that is the path the promote query
+  // travels: anything it can admit for this extraction has to be something this can reach. The column
+  // is also nullable and `on delete set null`, and the rows at issue here are the oldest ones in the
+  // table — keying on it would miss precisely the population this exists for.
+  const stale = await args.tenantDb
+    .select({
+      id: estimatePricingRecommendations.id,
+      status: estimatePricingRecommendations.status,
+      recommendedQuantity: estimatePricingRecommendations.recommendedQuantity,
+    })
+    .from(estimatePricingRecommendations)
+    .where(
+      and(
+        eq(estimatePricingRecommendations.dealId, args.dealId),
+        // Only the promotable states. `pending`, `pending_review` and `rejected` cannot reach an
+        // estimate, so rewriting them would churn rows without removing any risk.
+        inArray(estimatePricingRecommendations.status, ["approved", "overridden"]),
+        ne(estimatePricingRecommendations.sourceType, "manual"),
+        isNull(estimatePricingRecommendations.promotedEstimateLineItemId),
+        inArray(
+          estimatePricingRecommendations.extractionMatchId,
+          args.tenantDb
+            .select({ id: estimateExtractionMatches.id })
+            .from(estimateExtractionMatches)
+            .where(eq(estimateExtractionMatches.extractionId, args.extractionId))
+        )
+      )
+    )
+    // Read before the write and held, so the event below can state which decision was dropped. RETURNING
+    // hands back the new status, not the one being replaced, and "approved or overridden, we did not
+    // record which" is not an audit trail anybody can act on.
+    //
+    // THIS TAKES ITS LOCKS IN THE OPPOSITE ORDER TO THE PROMOTE, which locks recommendations and then
+    // the joined extraction in one statement while the caller here locked the extraction first. Stated
+    // rather than hidden: a promote running concurrently with this edit can deadlock, and Postgres ends
+    // it by aborting one of them (40P01) — a failed request, not a lost update. The inversion is not
+    // caused by this `for update`; writing the recommendation at all creates it. Dropping the lock would
+    // only trade a detected abort for silently overwriting a decision made in the same window.
+    .for("update");
+
+  if (stale.length === 0) return;
+
+  const staleIds = stale.map((recommendation) => recommendation.id);
+
+  await args.tenantDb
+    .update(estimatePricingRecommendations)
+    .set({ status: "pending_review", updatedAt: new Date() })
+    .where(
+      and(
+        eq(estimatePricingRecommendations.dealId, args.dealId),
+        inArray(estimatePricingRecommendations.id, staleIds)
+      )
+    );
+
+  for (const recommendation of stale) {
+    await insertReviewEvent(args.tenantDb, {
+      dealId: args.dealId,
+      subjectType: "estimate_pricing_recommendation",
+      subjectId: recommendation.id,
+      // The same event type `reviewEstimatePricingRecommendation` writes for this transition, so a
+      // reader filtering the recommendation's history does not have to know this caller exists. What
+      // makes it legible is `reason` plus the quantity on both sides.
+      eventType: "pending_review",
+      userId: args.userId,
+      beforeJson: {
+        status: recommendation.status,
+        recommendedQuantity: recommendation.recommendedQuantity,
+      },
+      afterJson: {
+        status: "pending_review",
+        extractionQuantity: args.correctedQuantity,
+      },
+      reason:
+        "Extraction quantity corrected from an unpriceable value; the approved price was computed " +
+        "without one",
+    });
+  }
 }
 
 export async function updateEstimateExtraction(args: {
@@ -201,6 +324,11 @@ export async function updateEstimateExtraction(args: {
   // Requeuing on any quantity change is right beyond that legacy case: a priced row whose quantity
   // moved needs re-pricing, and `pending` is how this system says so.
   //
+  // THE REQUEUE ALONE DOES NOT RETIRE THE OLD PRICE. `pending` asks for a new recommendation; it does
+  // nothing to the approved one already sitting there, and the promote reads its numbers off the
+  // recommendation rather than the extraction. See `sendStaleRecommendationsBackToReview` below, which
+  // closes the other half of that window.
+  //
   // AND IT DOES NOT OVERWRITE A HUMAN DECISION. `approved`, `rejected` and `overridden` are somebody's
   // judgement about this row; making a quantity unpriceable is a reason to stop PRICING it, never a
   // reason to silently undo a review. Those rows are held out of the promote by the quantity predicate
@@ -274,6 +402,27 @@ export async function updateEstimateExtraction(args: {
       divisionHint: updated.divisionHint,
     },
   });
+
+  // NARROWER THAN THE REQUEUE ABOVE, deliberately. The requeue fires on any real quantity change,
+  // because a priced row whose quantity moved needs re-pricing. Retiring somebody's APPROVAL is a
+  // heavier act, and it is warranted by one thing only: the price was computed from a quantity nobody
+  // supplied. An edit from 700 to 800 changes what the recommendation should say — a re-pricing
+  // question — but the approval behind it was still a judgement about a number a human stated, and
+  // dropping it would cost a re-review on every ordinary quantity edit.
+  const correctsUnpriceable = quantityChanged && !isPriceable(existing.quantity) && suppliesQuantity;
+
+  // AFTER the edit's own event, so the history reads in the order it happened: the estimator supplied a
+  // number, and these are the decisions that supplying it invalidated. One transaction either way —
+  // `tenantMiddleware` holds it open — so nothing here can commit without the edit that caused it.
+  if (correctsUnpriceable) {
+    await sendStaleRecommendationsBackToReview({
+      tenantDb: args.tenantDb,
+      dealId: args.dealId,
+      extractionId: args.extractionId,
+      userId: args.userId,
+      correctedQuantity: nextQuantity,
+    });
+  }
 
   return { extraction: updated, reviewEvent };
 }

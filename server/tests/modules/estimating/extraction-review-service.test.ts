@@ -31,7 +31,21 @@ describe("extraction-review-service", () => {
     });
     const eventValues: any[] = [];
     const tenantDb = {
-      select: vi.fn(() => ({ from: vi.fn(() => ({ where: vi.fn(() => ({ limit: vi.fn(() => ({ for: selectLimit })) })) })) })),
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: vi.fn(() => ({ for: selectLimit })),
+            // The stale-decision sweep reads `.where(...).for("update")` with NO limit, where the
+            // extraction load goes through `.limit(1).for("update")`. Two distinct shapes off one
+            // builder, so this cannot hand the sweep the extraction row by accident.
+            //
+            // Empty on purpose. What the sweep does once it finds something is asserted against a real
+            // database in extraction-review-quantity-correction.runtime.test.ts — a mock can say which
+            // statement was sent but not whether it selects the right rows, which is the entire question.
+            for: vi.fn().mockResolvedValue([]),
+          })),
+        })),
+      })),
       update: vi.fn(() => ({ set: updateSet })),
       insert: vi.fn(() => ({
         values: vi.fn((values: any) => {

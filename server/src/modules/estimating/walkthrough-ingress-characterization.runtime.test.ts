@@ -88,12 +88,21 @@ const WORKER_QUANTITY_GUARDS = [
   // 3. The claim re-checks BOTH facts in the WHERE, so a row that gained a quantity between the
   //    select and the write is not stamped and stranded by a concurrent run — and it pins the STATUS
   //    it observed, so a reviewer who approved or rejected the row in that window is not overwritten.
-  // Names the COLUMN, not just the operator: a bare "is null" matches any nullable predicate that
-  // happens to be in the file and would keep passing after the quantity re-check was removed.
-  // Nonpositive and NaN as well as null — the guard and the claim have to agree about what unpriceable
-  // means. Named WITH the column, because a bare "is null or" matches any nullable predicate that
-  // happens to be in the file and would keep passing after the quantity re-check was removed.
-  "estimateExtractions.quantity} is null or",
+  //
+  // COLUMN AND OPERATOR TOGETHER, in one string each. `"is null or"` was neither: the worker's job has
+  // other nullable columns, so deleting the quantity re-check entirely and leaving any unrelated
+  // `is null or` behind kept this lock green — a source lock that cannot fail on the deletion it exists
+  // to catch. Naming `${estimateExtractions.quantity}` immediately before the operator is what ties the
+  // assertion to this predicate and no other.
+  //
+  // ALL THREE HALVES of unpriceable are pinned, because the claim has to agree with the guard above
+  // about what that word means. Keeping only the null one would let the claim narrow back to nulls, and
+  // a zero-quantity row would then enter the skip branch, lose the claim, and be stranded at `pending`
+  // with no event — invisible on every rerun and absent from the needs-quantity bucket too. NaN needs
+  // naming separately because Postgres orders numeric NaN ABOVE all finite values, so neither the null
+  // test nor the nonpositive one reaches it.
+  "${estimateExtractions.quantity} is null",
+  "${estimateExtractions.quantity} <= 0",
   "= 'NaN'::numeric",
   "= ${extraction.status}",
 ];
@@ -258,8 +267,13 @@ describe("DEFECT 1 — a walkthrough row with no spoken quantity is priced as on
     // ABSENCE IS NOT ENOUGH. Deleting the coercion without putting anything in its place would also
     // satisfy the count above while leaving `Number(null)` = 0 to price the row at zero — a different
     // wrong answer wearing the same clothes. Each guard has to be positively present.
+    //
+    // WHITESPACE COLLAPSED FIRST, now that a guard spans a column reference AND its operator. That is
+    // long enough for the formatter to wrap at any space in it, and a lock that goes red on reformatting
+    // teaches the next reader to weaken the assertion rather than read the comment above it.
+    const collapsed = code.replace(/\s+/g, " ");
     for (const guard of WORKER_QUANTITY_GUARDS) {
-      expect(code).toContain(guard);
+      expect(collapsed).toContain(guard.replace(/\s+/g, " "));
     }
   });
 });
