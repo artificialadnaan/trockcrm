@@ -61,7 +61,7 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE TABLE users (id uuid PRIMARY KEY, display_name text, avatar_url text);
     CREATE TABLE deals (
-      id uuid PRIMARY KEY, name text, deal_number text, assigned_rep_id uuid,
+      id uuid PRIMARY KEY, name text, is_change_order boolean NOT NULL DEFAULT false, deal_number text, assigned_rep_id uuid,
       property_city text, property_state text, source_lead_id uuid
     );
     INSERT INTO users (id, display_name) VALUES

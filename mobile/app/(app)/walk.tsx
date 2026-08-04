@@ -29,7 +29,7 @@ import { deriveWalkSiteLabel, deriveWalkTitle } from "../../src/walkthrough/walk
 // Display-only change-order prefix, used for the "About to record" headline ONLY. `targetName` itself
 // stays RAW: deriveWalkTitle builds the walk title the office sees, and that title is PERSISTED — the
 // unqueued-walk banners below deliberately echo that stored title verbatim, so they are not transformed.
-import { formatDealDisplayName } from "../../src/projects/field-projects";
+import { decodeChangeOrderParam, formatDealDisplayName } from "../../src/projects/field-projects";
 import { useWalkQueueSession } from "../../src/walkthrough/use-queue-session";
 import { drainWalkQueue, enqueueWalk, type WalkQueueMeta } from "../../src/walkthrough/upload";
 import { walkthroughUploadClient } from "../../src/walkthrough/upload-client";
@@ -192,8 +192,7 @@ export default function WalkScreen() {
   const projectId = typeof params.projectId === "string" && params.projectId ? params.projectId : null;
   const targetName = typeof params.targetName === "string" && params.targetName ? params.targetName : "this project";
   // "1"/"0" from capture; "" or absent means the target was picked somewhere without the flag.
-  const targetIsChangeOrder =
-    params.isChangeOrder === "1" ? true : params.isChangeOrder === "0" ? false : undefined;
+  const targetIsChangeOrder = decodeChangeOrderParam(params.isChangeOrder);
   const propertyAddress = typeof params.propertyAddress === "string" ? params.propertyAddress : null;
 
   // Identity for the upload queue: user + ACTIVE OFFICE, same resolution rule (activeOfficeId ??

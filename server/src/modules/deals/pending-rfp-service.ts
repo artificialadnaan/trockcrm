@@ -96,6 +96,8 @@ export async function getPendingRfpDeals(tenantDb: any): Promise<PendingRfpDeal[
   return rows.map((r: any) => ({
     id: r.id,
     name: r.name,
+    // Selected above and previously dropped right here — the classic "query has it, mapper loses it".
+    isChangeOrder: r.isChangeOrder === true,
     projectNumber: r.projectNumber ?? null,
     dealNumber: r.dealNumber ?? null,
     workflowRoute: r.workflowRoute ?? "normal",

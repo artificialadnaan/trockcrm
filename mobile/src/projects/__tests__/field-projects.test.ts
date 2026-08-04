@@ -2,6 +2,8 @@ import {
   categoryLabel,
   captureTargetDisplayName,
   correctiveAffordance,
+  decodeChangeOrderParam,
+  encodeChangeOrderParam,
   filterPhotos,
   formatDealDisplayName,
   formatDistanceMiles,
@@ -443,6 +445,34 @@ describe("formatDealDisplayName", () => {
     expect(formatDealDisplayName("   ")).toBe("   ");
     expect(formatDealDisplayName(null)).toBeNull();
     expect(formatDealDisplayName(undefined)).toBeUndefined();
+  });
+});
+
+describe("change-order router params — unknown must never become an assertion", () => {
+  // `false` is AUTHORITATIVE downstream, so encoding an UNKNOWN flag as anything that decodes to `false`
+  // is worse than sending nothing. This is the bug that shipped twice: `toStr(undefined)` produced "",
+  // and `"" === "1"` is false — an unknown silently became "definitely not a change order".
+  it("round-trips a known flag in both directions", () => {
+    expect(decodeChangeOrderParam(encodeChangeOrderParam(true))).toBe(true);
+    expect(decodeChangeOrderParam(encodeChangeOrderParam(false))).toBe(false);
+    expect(encodeChangeOrderParam(true)).toBe("1");
+    expect(encodeChangeOrderParam(false)).toBe("0");
+  });
+
+  it("encodes UNKNOWN as undefined so the caller omits the key entirely", () => {
+    expect(encodeChangeOrderParam(undefined)).toBeUndefined();
+    expect(encodeChangeOrderParam(null)).toBeUndefined();
+  });
+
+  it("decodes anything that is not exactly 1/0 as UNKNOWN, never false", () => {
+    for (const value of [undefined, "", "  ", "true", "false", "2", "undefined", ["1"]] as const) {
+      expect(decodeChangeOrderParam(value as string | string[] | undefined)).toBeUndefined();
+    }
+  });
+
+  it("REGRESSION: an unknown flag survives a full emit -> decode round trip as unknown", () => {
+    // projects/[id] -> capture was doing toStr(undefined) === "" -> decoded false.
+    expect(decodeChangeOrderParam(encodeChangeOrderParam(undefined))).toBeUndefined();
   });
 });
 

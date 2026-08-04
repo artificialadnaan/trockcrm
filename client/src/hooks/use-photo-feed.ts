@@ -17,6 +17,8 @@ export interface FeedPhoto {
   uploadedBy: string;
   dealNumber: string | null;
   dealName: string | null;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   uploaderName: string | null;
 }
 

@@ -37,7 +37,7 @@ export function SalesReviewForecastTable({ rows }: { rows: SalesReviewForecastRo
                         label. Display-only, and GATED on entityType — these rows mix deals and LEADS, and
                         only a deal can be a generated change-order child. */}
                     <div className="font-medium">
-                      {row.entityType === "deal" ? formatDealDisplayName(row.name) : row.name}
+                      {row.entityType === "deal" ? formatDealDisplayName(row.name, row.isChangeOrder) : row.name}
                     </div>
                     <div className="text-xs text-muted-foreground">
                       {[row.companyName, row.propertyName].filter(Boolean).join(" • ") || row.stageId}

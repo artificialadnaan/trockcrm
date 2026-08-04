@@ -45,6 +45,8 @@ interface ProjectRecentPhoto {
 interface ProjectStat {
   dealId: string;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   dealNumber: string;
   /** Deal owner. The "My Projects" pill had nothing to compare against before this was returned. */
   assignedRepId: string | null;
@@ -351,7 +353,7 @@ function ProjectRow({
         {/* Feature thumbnail */}
         <div className="h-16 w-16 rounded-lg overflow-hidden bg-gray-100 shrink-0">
           {featurePhoto ? (
-            <ProjectRecentMediaThumb photo={featurePhoto} alt={formatDealDisplayName(project.dealName)} size="feature" />
+            <ProjectRecentMediaThumb photo={featurePhoto} alt={formatDealDisplayName(project.dealName, project.dealIsChangeOrder)} size="feature" />
           ) : (
             <div className="h-full w-full flex items-center justify-center">
               <ImageIcon className="h-6 w-6 text-gray-300" />
@@ -363,7 +365,7 @@ function ProjectRow({
           {/* A change-order child deal is STORED as "<Parent> — Change Order N" and every one of these
               titles/captions truncates, hiding the suffix. Display-only; the stored name is unchanged. */}
           <p className="font-semibold text-gray-900 truncate text-sm">
-            {formatDealDisplayName(project.dealName)}
+            {formatDealDisplayName(project.dealName, project.dealIsChangeOrder)}
           </p>
           {location && (
             <p className="text-xs text-gray-500 truncate">{location}</p>
@@ -481,7 +483,7 @@ function PhotoGridCard({
         ) : thumbUrl ? (
           <img
             src={thumbUrl}
-            alt={formatDealDisplayName(photo.dealName) || photo.displayName}
+            alt={formatDealDisplayName(photo.dealName, photo.dealIsChangeOrder) || photo.displayName}
             loading="lazy"
             className="w-full h-full object-cover group-hover:opacity-90 transition-opacity"
           />
@@ -499,7 +501,7 @@ function PhotoGridCard({
       {/* Caption */}
       <div className="mt-1.5 px-0.5">
         <p className="text-xs font-medium text-gray-900 truncate">
-          {truncate(formatDealDisplayName(photo.dealName) || "Unassigned", 22)}
+          {truncate(formatDealDisplayName(photo.dealName, photo.dealIsChangeOrder) || "Unassigned", 22)}
         </p>
         <p className="text-[11px] text-gray-500 truncate">
           {timeStr} &bull; {truncate(photo.uploaderName || "Unknown", 16)}

@@ -10,6 +10,8 @@ import { getAiReportStatus, getReportDownload, getTranscriptionConfig } from "..
 import {
   categoryLabel,
   correctiveAffordance,
+  decodeChangeOrderParam,
+  encodeChangeOrderParam,
   filterPhotos,
   formatDealDisplayName,
   groupPhotos,
@@ -84,9 +86,10 @@ export default function ProjectDetailScreen() {
     officeSlug?: string;
   }>();
   const dealId = toStr(params.id);
-  // `deals.is_change_order`, forwarded by the list row as "1"/"0". `undefined` on a direct deep link
-  // (no params) — which is exactly the case where the helper should fall back to reading the name.
-  const changeOrderParam = params.isChangeOrder === undefined ? undefined : params.isChangeOrder === "1";
+  // `deals.is_change_order`, forwarded by the list row as "1"/"0". Anything else — absent on a direct
+  // deep link, or an empty string — decodes to UNDEFINED, so the display helper reads the name instead
+  // of being told "not a change order".
+  const changeOrderParam = decodeChangeOrderParam(params.isChangeOrder);
   const router = useRouter();
   const { fetcher, user, activeOfficeId } = useAuth();
   // Off-office projects are view-only until cross-office writes ship: the single-office report/capture
@@ -264,9 +267,9 @@ export default function ProjectDetailScreen() {
                   params: {
                     dealId,
                     targetName: toStr(params.name),
-                    // Forward the AUTHORITY, not just the name: capture would otherwise have to infer
-                    // "is this a change order?" from the name's shape all over again.
-                    isChangeOrder: toStr(params.isChangeOrder),
+                    // Forward the AUTHORITY, not just the name — but only when we actually have one.
+                    // `toStr(undefined)` was emitting "", which capture then read as an assertive FALSE.
+                    isChangeOrder: encodeChangeOrderParam(changeOrderParam),
                     projectNumber: toStr(params.projectNumber),
                     stage: toStr(params.stage),
                     propertyAddress: toStr(params.propertyAddress),

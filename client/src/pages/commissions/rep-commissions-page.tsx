@@ -14,6 +14,8 @@ interface CommissionDeal {
   dealId: string;
   dealNumber: string | null;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   companyName: string | null;
   propertyName: string | null;
   propertyAddress: string | null;
@@ -590,7 +592,7 @@ export function RepCommissionsPage() {
                                   export above keeps the stored name. */}
                               <p className="truncate font-bold text-slate-950">
                                 {deal.dealNumber ? `${deal.dealNumber} · ` : ""}
-                                {formatDealDisplayName(deal.dealName)}
+                                {formatDealDisplayName(deal.dealName, deal.dealIsChangeOrder)}
                               </p>
                               <p className="mt-0.5 truncate text-xs text-slate-500">
                                 {[deal.companyName, deal.propertyName ?? deal.propertyAddress].filter(Boolean).join(" · ")}

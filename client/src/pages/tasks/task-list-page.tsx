@@ -116,13 +116,13 @@ function getInitials(name: string | null | undefined) {
     .toUpperCase();
 }
 
-export function getTaskProjectContext(task: Pick<Task, "dealId" | "dealName" | "dealNumber" | "projectNumber">): string | null {
+export function getTaskProjectContext(task: Pick<Task, "dealId" | "dealName" | "dealIsChangeOrder" | "dealNumber" | "projectNumber">): string | null {
   if (!task.dealId) return null;
   const displayNumber = formatDealDisplayNumber(task).label;
   if (task.dealName) {
     // A change-order child deal is STORED as "<Parent> — Change Order N" and this context line renders
     // truncated, so the suffix is the first thing lost. Display-only -- the stored name is unchanged.
-    const dealName = formatDealDisplayName(task.dealName);
+    const dealName = formatDealDisplayName(task.dealName, task.dealIsChangeOrder);
     return displayNumber === "Pending" ? dealName : `${displayNumber} - ${dealName}`;
   }
   if (displayNumber !== "Pending") return displayNumber;

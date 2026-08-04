@@ -73,6 +73,20 @@ describe("getPendingRfpDeals", () => {
     expect(rows[1]).toMatchObject({ subState: "attention", reason: "missing docs" });
   });
 
+  it("REGRESSION: surfaces deals.is_change_order, which the query selected and the mapper dropped", async () => {
+    // The SELECT has carried `deals.isChangeOrder` all along; the response mapper simply never copied it
+    // out. The client then had to guess from the name's shape — the exact thing the flag exists to
+    // prevent — on a queue where a change order and its parent read identically.
+    const rows = await getPendingRfpDeals(tdb);
+    const older = rows.find((r) => r.id === "00000000-0000-0000-0000-00000000d001");
+    expect(older?.isChangeOrder).toBe(false);
+    // ...and a real change order reports true rather than being inferred.
+    await tdb.execute(sql`UPDATE deals SET is_change_order = true WHERE id = '00000000-0000-0000-0000-00000000d001'`);
+    const after = await getPendingRfpDeals(tdb);
+    expect(after.find((r) => r.id === "00000000-0000-0000-0000-00000000d001")?.isChangeOrder).toBe(true);
+    await tdb.execute(sql`UPDATE deals SET is_change_order = false WHERE id = '00000000-0000-0000-0000-00000000d001'`);
+  });
+
   it("surfaces a status-specific reason for conflict (rfp_conflict_reason) and send_failed (rfp_last_attempt_error)", async () => {
     await pg.exec(`
       INSERT INTO deals (id,name,stage_id,rfp_approval_status,rfp_approval_requested_at,rfp_conflict_reason,rfp_last_attempt_error)

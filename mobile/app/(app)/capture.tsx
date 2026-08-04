@@ -17,7 +17,7 @@ import type { FieldCaptureTarget } from "../../src/api/types";
 // opportunity, neither of which can be a generated change-order child). Applied at the RENDER sites below
 // and nowhere else: `target.name` is forwarded raw into the /walk nav param, where it becomes a walk
 // title persisted to the server.
-import { captureTargetDisplayName } from "../../src/projects/field-projects";
+import { captureTargetDisplayName, decodeChangeOrderParam, encodeChangeOrderParam } from "../../src/projects/field-projects";
 import { extractExifMetadata, getLiveGps, type PhotoMetadata } from "../../src/capture/metadata";
 import { type CaptureTargetRef, type CaptureUploadInput } from "../../src/capture/upload";
 import {
@@ -120,7 +120,7 @@ export default function CaptureScreen() {
           id: params.dealId,
           type: "deal",
           name: typeof params.targetName === "string" ? params.targetName : "Project",
-          isChangeOrder: params.isChangeOrder === undefined ? undefined : params.isChangeOrder === "1",
+          isChangeOrder: decodeChangeOrderParam(params.isChangeOrder),
         }
       : null;
 
@@ -134,7 +134,7 @@ export default function CaptureScreen() {
         id: params.dealId,
         type: "deal",
         name: typeof params.targetName === "string" ? params.targetName : "Project",
-        isChangeOrder: params.isChangeOrder === undefined ? undefined : params.isChangeOrder === "1",
+        isChangeOrder: decodeChangeOrderParam(params.isChangeOrder),
       });
     }
   }, [params.dealId, params.targetName, params.isChangeOrder]);
@@ -288,7 +288,8 @@ export default function CaptureScreen() {
     };
     // Carry the AUTHORITY to the detail header alongside the name. Omitted when unknown — an absent param
     // falls back to reading the name, whereas "0" would assert "not a change order" and hide a real label.
-    if (t.isChangeOrder !== undefined) out.isChangeOrder = t.isChangeOrder ? "1" : "0";
+    const encoded = encodeChangeOrderParam(t.isChangeOrder);
+    if (encoded) out.isChangeOrder = encoded;
     if (typeof params.dealId === "string" && params.dealId === t.id) {
       if (typeof params.projectNumber === "string") out.projectNumber = params.projectNumber;
       if (typeof params.stage === "string") out.stage = params.stage;
@@ -1188,7 +1189,7 @@ export default function CaptureScreen() {
                   dealId: target.id,
                   targetName: target.name,
                   // Forward the authority too — the walk screen's headline would otherwise re-guess.
-                  isChangeOrder: target.isChangeOrder === undefined ? "" : target.isChangeOrder ? "1" : "0",
+                  isChangeOrder: encodeChangeOrderParam(target.isChangeOrder),
                   ...(typeof params.dealId === "string" && params.dealId === target.id && typeof params.propertyAddress === "string"
                     ? { propertyAddress: params.propertyAddress }
                     : {}),

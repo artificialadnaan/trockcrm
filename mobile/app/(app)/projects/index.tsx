@@ -7,7 +7,7 @@ import { useDebouncedValue } from "../../../src/hooks/useDebouncedValue";
 import { useDeviceLocation } from "../../../src/hooks/useDeviceLocation";
 import { useNearbyProjects, useProjects, useStarredProjects, useToggleStar } from "../../../src/query/hooks";
 import { useAuth } from "../../../src/auth/AuthContext";
-import { formatDealDisplayName, formatDistanceMiles, isProjectOffOffice, partitionProjectSections, projectNumberLabel, relativeDate, selectNearbySource, type FieldProject } from "../../../src/projects/field-projects";
+import { encodeChangeOrderParam, formatDealDisplayName, formatDistanceMiles, isProjectOffOffice, partitionProjectSections, projectNumberLabel, relativeDate, selectNearbySource, type FieldProject } from "../../../src/projects/field-projects";
 import { Badge, EmptyState, LoadingState, TextInput } from "../../../src/components/ui";
 import { Banner } from "../../../src/components/Banner";
 import { ScreenHeader } from "../../../src/components/ScreenHeader";
@@ -53,7 +53,9 @@ export default function ProjectsScreen() {
         id: project.id,
         name: project.name,
         // The AUTHORITY for the change-order relabel on the detail header. Router params are strings.
-        isChangeOrder: project.isChangeOrder ? "1" : "0",
+        // Always known here (the server sends a real boolean on every project row), but encoded through
+        // the shared pair so every producer of this param goes through one place.
+        isChangeOrder: encodeChangeOrderParam(project.isChangeOrder),
         projectNumber: project.projectNumber ?? "",
         propertyAddress: project.propertyAddress ?? "",
         stage: project.stage,

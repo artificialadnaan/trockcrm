@@ -250,6 +250,28 @@ export function formatDealDisplayName(
 }
 
 /**
+ * `deals.is_change_order` across a ROUTER PARAM, as a matched pair.
+ *
+ * Expo router params are strings, so the flag has to be encoded — and this is where it kept getting
+ * corrupted. `false` is AUTHORITATIVE downstream: it asserts "not a change order" and suppresses the
+ * relabel. So an UNKNOWN flag must never be encoded as something that decodes to `false`. Twice now an
+ * inline ternary got that backwards (`toStr(undefined)` -> `""` -> `"" === "1"` -> false), which is
+ * exactly the unknown-becomes-an-assertion bug, wearing a router param instead of a serializer.
+ *
+ * Encode returns `undefined` for unknown so the caller can OMIT the key; decode treats anything that is
+ * not exactly "1"/"0" — absent, "", junk — as unknown. Use these two rather than hand-rolling either half.
+ */
+export function encodeChangeOrderParam(flag: boolean | null | undefined): "1" | "0" | undefined {
+  return flag === true ? "1" : flag === false ? "0" : undefined;
+}
+
+export function decodeChangeOrderParam(value: string | string[] | undefined): boolean | undefined {
+  if (value === "1") return true;
+  if (value === "0") return false;
+  return undefined;
+}
+
+/**
  * Split the three project sources into non-overlapping display sections with precedence
  * Nearby > Starred > All: a project shown in Nearby is removed from Starred and All; a starred project
  * is removed from All — so nothing renders twice. `hasSections` is true when any header section (Nearby

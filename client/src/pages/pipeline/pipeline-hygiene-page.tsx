@@ -43,7 +43,7 @@ export function PipelineHygienePage() {
                     Display-only, and GATED on entityType — this queue mixes deals and LEADS, and a lead a
                     human named "Lobby — Change Order 1" is not a generated child name. */}
                 <p className="font-medium">
-                  {row.entityType === "deal" ? formatDealDisplayName(row.name) : row.name}
+                  {row.entityType === "deal" ? formatDealDisplayName(row.name, row.isChangeOrder) : row.name}
                 </p>
                 <p className="text-xs text-muted-foreground">
                   {row.assignedRepName ?? "Unassigned"} • {row.entityType} • {stageNameById.get(row.stageId) ?? "Unknown stage"}

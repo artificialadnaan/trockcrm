@@ -263,6 +263,7 @@ export async function getPhotoFeed(
       uploadedBy: files.uploadedBy,
       dealNumber: deals.dealNumber,
       dealName: deals.name,
+      dealIsChangeOrder: deals.isChangeOrder,
       uploaderName: sql<string>`COALESCE(${users.displayName}, 'Unknown')`.as("uploader_name"),
     })
     .from(files)
@@ -537,6 +538,7 @@ export async function getProjectPhotoStats(
     .select({
       dealId: files.dealId,
       dealName: deals.name,
+      dealIsChangeOrder: deals.isChangeOrder,
       dealNumber: deals.dealNumber,
       assignedRepId: deals.assignedRepId,
       propertyCity: deals.propertyCity,
@@ -551,7 +553,7 @@ export async function getProjectPhotoStats(
     .from(files)
     .innerJoin(deals, eq(deals.id, files.dealId))
     .where(where)
-    .groupBy(files.dealId, deals.name, deals.dealNumber, deals.assignedRepId, deals.propertyCity, deals.propertyState)
+    .groupBy(files.dealId, deals.name, deals.isChangeOrder, deals.dealNumber, deals.assignedRepId, deals.propertyCity, deals.propertyState)
     .having(havingCursor)
     // Tiebreaker is load-bearing, not cosmetic: on `most_photos` dozens of projects share a count, and
     // without a deterministic second key the cursor has no unique boundary to resume from.
