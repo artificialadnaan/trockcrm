@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useOfficeScopeId } from "./use-office-scope";
 import { api } from "@/lib/api";
 import type {
   MondayShowcaseData,
@@ -1361,8 +1361,9 @@ function appendPerformanceReportQueryOptions(params: URLSearchParams, options: P
  * hand with an `officeScopeKey` prop; this is that idea made reusable.)
  */
 function useOfficeScopeKey() {
-  const [searchParams] = useSearchParams();
-  return searchParams.get("officeId") ?? "";
+  // Same source of truth as the deal links (useDealHref) — one reader of ?officeId, so the fetch
+  // scope and the link scope can never disagree about what the current tenant is.
+  return useOfficeScopeId() ?? "";
 }
 
 function performanceDeps(options: PerformanceReportQueryOptions) {

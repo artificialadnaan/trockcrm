@@ -12,6 +12,7 @@ import { PageHeader } from "@/components/layout/page-header";
 import { ReportFilterBar, useReportFilters } from "@/components/reports/report-filter-bar";
 import { ExportExcelButton } from "@/components/reports/export-excel-button";
 import { useDailyActivityLogReport, type DailyActivityLogEntry } from "@/hooks/use-reports";
+import { useDealHref } from "@/hooks/use-office-scope";
 import { parseDisplayDate } from "@/lib/deal-utils";
 import { EmptyState, ErrorState, KpiCard, LoadingState, ReportPanel, formatNumber } from "./performance-report-ui";
 
@@ -156,9 +157,8 @@ export function DailyActivityLogPage() {
   // bare /deals/:id resolves. So the correct fallback is NO officeId at all. The genuinely complete
   // fix is a per-row office/scope from the server (deals.office_code determines a deal's schema, not
   // the responsible user's office) — that remains an open follow-up, deliberately not faked here.
-  const scopeOfficeId = searchParams.get("officeId");
-  const dealHref = (dealId: string) =>
-    `/deals/${dealId}${scopeOfficeId ? `?officeId=${encodeURIComponent(scopeOfficeId)}` : ""}`;
+  // Shared with both report DealLink components so this rule is stated once, not three times.
+  const dealHref = useDealHref();
 
   const pagination = data?.pagination;
   const rangeStart = pagination && pagination.returned > 0 ? (pagination.page - 1) * pagination.limit + 1 : 0;
