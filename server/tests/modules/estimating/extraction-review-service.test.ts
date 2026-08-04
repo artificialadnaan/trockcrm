@@ -85,6 +85,62 @@ describe("extraction-review-service", () => {
     expect(eventValues[0].afterJson.status).toBe("pending");
   });
 
+  it("does NOT reopen an APPROVED row when its quantity is cleared", async () => {
+    // Clearing a quantity is a reason to stop pricing a row, never a reason to silently undo somebody's
+    // review. The harm this branch was added for — a stale price reaching a client estimate — is held
+    // off by the quantity predicate on the promote query, so reopening the row buys nothing and costs a
+    // human decision.
+    const { tenantDb, updateSetCalls } = editHarness({
+      id: "ext-approved",
+      status: "approved",
+      normalizedLabel: "Install laminate",
+      quantity: "700.000",
+      unit: "SF",
+      divisionHint: null,
+      rawLabel: "Install laminate",
+      metadataJson: {},
+    });
+
+    await updateEstimateExtraction({
+      tenantDb,
+      dealId: "deal-1",
+      extractionId: "ext-approved",
+      userId: "user-1",
+      input: { quantity: null },
+    });
+
+    // The CASE is sent, but it holds `approved` — the transition is restricted to claimable states.
+    const sqlText = sqlTextOf(updateSetCalls[0].status);
+    expect(sqlText).toContain("needs_quantity");
+    expect(sqlText).toContain("in (");
+    expect(sqlText).toContain("else");
+  });
+
+  it("does NOT reopen a row whose quantity was ALREADY null", async () => {
+    // A full-form edit resubmits every field, so `"quantity" in input` fires on a row nobody changed.
+    // Without an actual positive-to-null transition that would reopen rows on every save.
+    const { tenantDb, updateSetCalls } = editHarness({
+      id: "ext-blank",
+      status: "unmatched",
+      normalizedLabel: "Paint one wall",
+      quantity: null,
+      unit: null,
+      divisionHint: null,
+      rawLabel: "Paint one wall",
+      metadataJson: {},
+    });
+
+    await updateEstimateExtraction({
+      tenantDb,
+      dealId: "deal-1",
+      extractionId: "ext-blank",
+      userId: "user-1",
+      input: { quantity: null, unit: "SF" },
+    });
+
+    expect(updateSetCalls[0].status).toBeUndefined();
+  });
+
   it("REFUSES zero as a correction — it is unpriceable, not a number", async () => {
     // `applyMarketRateAdjustment` already treats a quantity at or below zero as invalid, but the worker
     // still persists the zero-valued recommendation and marks the row `processed`. Accepting "0" would

@@ -421,7 +421,12 @@ export async function runEstimateGeneration(
                 // `pending`, and the row was silently skipped on every rerun while never appearing in the
                 // needs-quantity bucket either. Invisible in both directions, which is worse than the
                 // defect the guard was widened to catch.
-                sql`(${estimateExtractions.quantity} is null or ${estimateExtractions.quantity} <= 0)`,
+                // `NOT (quantity > 0)` rather than `<= 0`, because Postgres numeric NaN compares FALSE
+                // to everything — so `NaN <= 0` is false and a NaN quantity, which the guard above does
+                // reject, would never have claimed. Negating the positive test catches every value that
+                // is not a usable quantity in one predicate: zero, negatives and NaN alike. Null is
+                // still named separately, since `NOT (null > 0)` is null and matches nothing.
+                sql`(${estimateExtractions.quantity} is null or not (${estimateExtractions.quantity} > 0))`,
                 sql`${estimateExtractions.status} = ${extraction.status}`
               )
             )

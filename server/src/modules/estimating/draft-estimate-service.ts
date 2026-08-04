@@ -135,7 +135,14 @@ export async function loadApprovedRecommendationsForRun(
       estimateExtractions,
       eq(estimateExtractionMatches.extractionId, estimateExtractions.id)
     )
-    .where(and(...conditions)) as Promise<PromotionCandidateRow[]>;
+    .where(and(...conditions))
+    // LOCKED, because the predicate above is otherwise a check-then-act. A quantity-clearing PATCH that
+    // commits after this SELECT returns but before the promotion loop writes its line item would find
+    // the recommendation already admitted — and the promotion's own advisory locks cover recommendation
+    // ids, not the joined extraction, so the two never serialise. `updateEstimateExtraction` takes
+    // `FOR UPDATE` on that row; taking it here too is what makes these two operations queue behind each
+    // other instead of interleaving.
+    .for("update") as Promise<PromotionCandidateRow[]>;
 }
 
 async function lockPromotionCandidates(

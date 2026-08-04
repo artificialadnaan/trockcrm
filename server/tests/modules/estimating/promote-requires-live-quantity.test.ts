@@ -39,9 +39,11 @@ describe("promoting approved recommendations into an estimate", () => {
         from: vi.fn(() => ({
           innerJoin: vi.fn(() => ({
             innerJoin: vi.fn(() => ({
+              // `.where(...).for("update")` — the promote also LOCKS the joined extraction, so a
+              // quantity-clearing PATCH cannot commit between this read and the line item it creates.
               where: vi.fn((condition: unknown) => {
                 captured = condition;
-                return Promise.resolve([]);
+                return { for: vi.fn().mockResolvedValue([]) };
               }),
             })),
           })),

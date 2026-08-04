@@ -167,11 +167,26 @@ export async function updateEstimateExtraction(args: {
   // recommendation computed from the OLD quantity stays visible and priceable while the quantity
   // behind it is gone: a number on the estimate that no longer has anything supporting it, and nothing
   // anywhere asking a human to look.
+  //
+  // A REAL TRANSITION, not merely a field that is present. `"quantity" in args.input` alone fires when a
+  // full-form edit resubmits a null that was already null — reopening a row nobody changed. `existing`
+  // is read `FOR UPDATE`, so the stored value here is authoritative rather than a guess.
   const clearsQuantity =
-    "quantity" in args.input && (nextQuantity === null || nextQuantity === undefined);
+    "quantity" in args.input &&
+    (nextQuantity === null || nextQuantity === undefined) &&
+    existing.quantity !== null &&
+    existing.quantity !== undefined;
 
+  // AND IT DOES NOT OVERWRITE A HUMAN DECISION. `approved`, `rejected` and `overridden` are somebody's
+  // judgement about this row; clearing a quantity is a reason to stop PRICING it, never a reason to
+  // silently undo a review. Those rows are held out of the promote by the quantity predicate in
+  // draft-estimate-service.ts, which is where the harm actually was — so the flag adds nothing here
+  // except the erasure of a decision.
+  //
+  // Decided in SQL for the same reason the requeue is: `existing` is authoritative only until this
+  // statement takes its own lock, and the CASE is evaluated when the row is held.
   const statusAfterEdit = clearsQuantity
-    ? sql`'needs_quantity'`
+    ? sql`case when ${estimateExtractions.status} in ('pending', 'needs_quantity', 'processed', 'unmatched') then 'needs_quantity' else ${estimateExtractions.status} end`
     : sql`case when ${estimateExtractions.status} = 'needs_quantity' then 'pending' else ${estimateExtractions.status} end`;
 
   const [updated] = await args.tenantDb
