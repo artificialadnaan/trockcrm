@@ -22,14 +22,18 @@ describe("extraction-review-service", () => {
       updateSetCalls.push(values);
       return { where: vi.fn(() => ({ returning: vi.fn().mockResolvedValue([{ id: existing.id }]) })) };
     });
+    const eventValues: any[] = [];
     const tenantDb = {
       select: vi.fn(() => ({ from: vi.fn(() => ({ where: vi.fn(() => ({ limit: selectLimit })) })) })),
       update: vi.fn(() => ({ set: updateSet })),
       insert: vi.fn(() => ({
-        values: vi.fn(() => ({ returning: vi.fn().mockResolvedValue([{ id: "evt", eventType: "edited" }]) })),
+        values: vi.fn((values: any) => {
+          eventValues.push(values);
+          return { returning: vi.fn().mockResolvedValue([{ id: "evt", eventType: "edited" }]) };
+        }),
       })),
     } as any;
-    return { tenantDb, updateSetCalls };
+    return { tenantDb, updateSetCalls, eventValues };
   }
 
   it("REQUEUES a needs_quantity row once the missing quantity is supplied", async () => {
@@ -38,7 +42,7 @@ describe("extraction-review-service", () => {
     // so without this the estimator does exactly what the flag asks, the row keeps the flag, and it is
     // never priced again — silently, and permanently. Worse than the mispricing the flag replaced,
     // because that at least produced a number somebody could argue with.
-    const { tenantDb, updateSetCalls } = editHarness({
+    const { tenantDb, updateSetCalls, eventValues } = editHarness({
       id: "ext-nq",
       status: "needs_quantity",
       normalizedLabel: "Paint one wall",
@@ -65,6 +69,13 @@ describe("extraction-review-service", () => {
     const sqlText = sqlTextOf(updateSetCalls[0].status);
     expect(sqlText).toContain("needs_quantity");
     expect(sqlText).toContain("pending");
+
+    // THE TRANSITION IS IN THE AUDIT TRAIL. Approve and reject record their status changes; an edit
+    // that silently requeues a row would leave the history unable to explain why it started being
+    // priced again. `after` is read off the UPDATED row because the reset is a SQL CASE resolved under
+    // the row lock — the database is the only thing that knows what it became.
+    expect(eventValues[0].beforeJson.status).toBe("needs_quantity");
+    expect("status" in eventValues[0].afterJson).toBe(true);
   });
 
   it("does NOT requeue while the quantity is still missing", async () => {

@@ -779,6 +779,12 @@ export async function buildEstimatingWorkbenchState(
     approved: activeExtractionRows.filter((row) => row.status === "approved").length,
     rejected: activeExtractionRows.filter((row) => row.status === "rejected").length,
     unmatched: activeExtractionRows.filter((row) => row.status === "unmatched").length,
+    // A HUMAN-ACTION-REQUIRED BUCKET, without which these counts stop reconciling with `total`. The
+    // generation job now parks a quantity-less row at `needs_quantity` instead of pricing it as one
+    // unit, and such a row belongs to none of the four buckets above — so a consumer summing them
+    // silently loses rows, and the one state that actually needs somebody to act is the one it cannot
+    // show.
+    needsQuantity: activeExtractionRows.filter((row) => row.status === "needs_quantity").length,
   };
 
   const matchesSummary = {

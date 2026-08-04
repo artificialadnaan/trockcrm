@@ -86,9 +86,10 @@ const WORKER_QUANTITY_GUARDS = [
   // 2. The flag is written, which is what keeps the row visible instead of dropped.
   'status: "needs_quantity"',
   // 3. The claim re-checks BOTH facts in the WHERE, so a row that gained a quantity between the
-  //    select and the write is not stamped and stranded by a concurrent run.
+  //    select and the write is not stamped and stranded by a concurrent run — and it pins the STATUS
+  //    it observed, so a reviewer who approved or rejected the row in that window is not overwritten.
   "is null",
-  "<> 'needs_quantity'",
+  "= ${extraction.status}",
 ];
 
 const WORKER_ESTIMATE_GENERATION_PATH = path.resolve(

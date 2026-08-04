@@ -351,8 +351,16 @@ export async function runEstimateGeneration(
         // overlapping runs exactly one claims the row. Ordering the claim BEFORE the event is what makes
         // the event idempotent without a transaction: the run that loses the claim writes nothing.
         //
-        // Re-checks BOTH conditions rather than only the status, because "still has no quantity" is the
-        // fact being asserted and status is merely how it is recorded.
+        // CLAIMS ONLY IF NOTHING CHANGED SINCE THE READ, which is why the predicate pins the status to
+        // the one the snapshot saw rather than merely to "not already flagged". `status <> needs_quantity`
+        // matches `approved` and `rejected` too, so a reviewer who decided the row between the select and
+        // this update would have their decision overwritten with `needs_quantity` — and an event recorded
+        // claiming the row needs a number it may well now have. Pinning the observed status makes the
+        // claim lose that race instead of winning it wrongly, and it subsumes the not-already-flagged
+        // case: a row another run flagged no longer matches either.
+        //
+        // It also stays correct for measurement candidates, whose claimable status is whatever the
+        // candidate filter admitted rather than always `pending`.
         // ATOMIC WITH ITS EVENT, because the claim is not retryable once it commits. If the insert
         // fails after the row is flagged, the row is `needs_quantity` with no record of why — and a
         // later run cannot repair it, since an ordinary extraction is excluded by the `status =
@@ -370,7 +378,7 @@ export async function runEstimateGeneration(
               and(
                 eq(estimateExtractions.id, extraction.id),
                 sql`${estimateExtractions.quantity} is null`,
-                sql`${estimateExtractions.status} <> 'needs_quantity'`
+                sql`${estimateExtractions.status} = ${extraction.status}`
               )
             )
             .returning({ id: estimateExtractions.id });

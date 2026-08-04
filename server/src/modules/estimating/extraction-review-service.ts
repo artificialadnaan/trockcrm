@@ -158,12 +158,20 @@ export async function updateEstimateExtraction(args: {
     eventType: "edited",
     userId: args.userId,
     beforeJson: {
+      // STATUS IS PART OF THIS EDIT when it supplies a missing quantity — the row moves from
+      // `needs_quantity` back to `pending`, which is what makes it eligible for pricing again. The
+      // approve and reject paths in this service record their transitions; an edit that silently
+      // requeues a row leaves the history unable to explain why it started being priced.
+      status: existing.status,
       normalizedLabel: existing.normalizedLabel,
       quantity: existing.quantity,
       unit: existing.unit,
       divisionHint: existing.divisionHint,
     },
     afterJson: {
+      // Read off the UPDATED row rather than recomputed here: the reset is a SQL CASE evaluated under
+      // the row lock, so the database is the only thing that knows what it actually resolved to.
+      status: updated.status,
       normalizedLabel: updated.normalizedLabel,
       quantity: updated.quantity,
       unit: updated.unit,
