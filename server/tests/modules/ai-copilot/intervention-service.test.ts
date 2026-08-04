@@ -249,6 +249,28 @@ describe("AI intervention service", () => {
     disconnectRowsMock.mockReset();
   });
 
+  it("carries deals.is_change_order into the projected queue item (and never coerces absent to false)", async () => {
+    // Stands for components/ai/intervention-queue-table and components/ai/intervention-detail-panel,
+    // which both render the projected `deal.name`. projectQueueItem copies a fixed set of deal fields;
+    // dropping `isChangeOrder` from that copy sends both surfaces back to guessing from the name, and
+    // typecheck cannot see it because the field is optional by design.
+    const tenantDb = createTenantDb({
+      cases: [makeCase({ id: "case-co", dealId: "deal-co" }), makeCase({ id: "case-plain", businessKey: "office-1:missing_next_task:deal:deal-plain", scopeId: "deal-plain", dealId: "deal-plain" })],
+      deals: [
+        { id: "deal-co", dealNumber: "D-1", name: "Tides — Change Order 2", companyId: null, isChangeOrder: true } as never,
+        { id: "deal-plain", dealNumber: "D-2", name: "Lobby — Change Order 1", companyId: null } as never,
+      ],
+      companies: [],
+    });
+
+    const queue = await listInterventionCases(tenantDb as any, { officeId: "office-1" });
+    const byId = new Map(queue.items.map((item: any) => [item.id, item]));
+
+    expect(byId.get("case-co")?.deal?.isChangeOrder).toBe(true);
+    // Absent on the source row must stay absent — not false, which would assert "not a change order".
+    expect(byId.get("case-plain")?.deal?.isChangeOrder).toBeUndefined();
+  });
+
   it("upserts one case per office_id + business_key", async () => {
     disconnectRowsMock
       .mockResolvedValueOnce([
