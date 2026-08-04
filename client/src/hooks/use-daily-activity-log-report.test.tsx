@@ -175,6 +175,45 @@ describe("usePerformanceReport office scope (shared by 3 sibling reports)", () =
     });
     expect((hook.current.data as { kpis: { totalTouchpoints: number } } | null)?.kpis.totalTouchpoints).toBe(22);
   });
+
+  it("ignores the OLD office's response when it lands after the new one", async () => {
+    // Making these reports refetch on office change also gave them a race they did not have before:
+    // office A's request is still in flight when the scope switches, and if it resolves last it
+    // overwrites office B's rows — the same stale-data symptom the refetch was meant to fix, reached
+    // from the other side. A refetch trigger without an ordering guarantee is only half a fix.
+    const hook = await renderRepActivity("/reports/performance/rep-activity?officeId=office-a");
+    expect(pending).toHaveLength(1);
+
+    // Switch office BEFORE office A's response arrives.
+    await hook.setOffice("office-b");
+    expect(pending).toHaveLength(2);
+
+    // The newer request settles first, then the stale one lands late.
+    await act(async () => {
+      pending[1].resolve({ data: { kpis: { totalTouchpoints: 22 } } });
+    });
+    await act(async () => {
+      pending[0].resolve({ data: { kpis: { totalTouchpoints: 11 } } });
+    });
+
+    expect((hook.current.data as { kpis: { totalTouchpoints: number } } | null)?.kpis.totalTouchpoints).toBe(22);
+    expect(hook.current.loading).toBe(false);
+  });
+
+  it("ignores a superseded request's ERROR so a dead request cannot blank a good page", async () => {
+    const hook = await renderRepActivity("/reports/performance/rep-activity?officeId=office-a");
+    await hook.setOffice("office-b");
+
+    await act(async () => {
+      pending[1].resolve({ data: { kpis: { totalTouchpoints: 22 } } });
+    });
+    await act(async () => {
+      pending[0].reject(new Error("stale office request failed"));
+    });
+
+    expect(hook.current.error).toBeNull();
+    expect((hook.current.data as { kpis: { totalTouchpoints: number } } | null)?.kpis.totalTouchpoints).toBe(22);
+  });
 });
 
 describe("useDailyActivityLogReport superseded responses", () => {

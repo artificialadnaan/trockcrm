@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -8,17 +8,17 @@ import { MemoryRouter, useLocation } from "react-router-dom";
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 // The page resolves the report's ?office filter (id OR legacy slug) to a canonical office id for deal
-// links, so the accessible-office list has to be present.
+// links, so the accessible-office list has to be present. Held in a mutable cell so a test can put the
+// hook back into its LOADING state and inspect the frame before resolution completes.
+const OFFICES = [
+  { id: "office-dallas", name: "Dallas Office", slug: "dallas" },
+  { id: "office-atlanta", name: "Atlanta Office", slug: "atlanta" },
+];
+const officesState = vi.hoisted(() => ({
+  current: { offices: [] as Array<{ id: string; name: string; slug: string }>, loading: false, error: null as string | null, refetch: () => {} },
+}));
 vi.mock("@/hooks/use-accessible-offices", () => ({
-  useAccessibleOffices: () => ({
-    offices: [
-      { id: "office-dallas", name: "Dallas Office", slug: "dallas" },
-      { id: "office-atlanta", name: "Atlanta Office", slug: "atlanta" },
-    ],
-    loading: false,
-    error: null,
-    refetch: vi.fn(),
-  }),
+  useAccessibleOffices: () => officesState.current,
 }));
 
 vi.mock("@/components/reports/report-filter-bar", () => ({
@@ -148,6 +148,11 @@ vi.mock("@/hooks/use-reports", async () => {
 });
 
 const { DailyActivityLogPage } = await import("./daily-activity-log-page");
+
+beforeEach(() => {
+  // Default: office list already loaded. The pre-resolution test opts into the loading state.
+  officesState.current = { offices: OFFICES, loading: false, error: null, refetch: () => {} };
+});
 
 function htmlFor(entry = "/reports/performance/daily-activity-log") {
   return renderToStaticMarkup(
@@ -288,6 +293,41 @@ describe("DailyActivityLogPage", () => {
     // The dropdown can also write the id directly — that must pass through, not be dropped.
     const byId = htmlFor("/reports/performance/daily-activity-log?office=office-atlanta");
     expect(byId).toContain('href="/deals/deal-1?officeId=office-atlanta"');
+  });
+
+  it("renders the deal as plain text while office context is still resolving", () => {
+    // The accessible-office list arrives asynchronously, so the FIRST paint of a ?office=<slug> view
+    // cannot resolve the id yet. Emitting /deals/:id with no office during that window hands a
+    // fast-clicking user exactly the 404 this resolution exists to prevent.
+    officesState.current = { offices: [], loading: true, error: null, refetch: () => {} };
+
+    const html = htmlFor("/reports/performance/daily-activity-log?office=dallas");
+
+    // No navigable link at all for the deal row in this frame...
+    expect(html).not.toContain('href="/deals/deal-1"');
+    expect(html).not.toContain("href=\"/deals/deal-1?");
+    // ...but the deal is still named, marked busy, so the row is not blank.
+    expect(html).toContain("Roof Replacement - Tower A (D-1001)");
+    expect(html).toContain('aria-busy="true"');
+  });
+
+  it("links normally once the office list has resolved", () => {
+    // The same URL, one render later: the pending state must not be sticky.
+    officesState.current = { offices: OFFICES, loading: false, error: null, refetch: () => {} };
+    const html = htmlFor("/reports/performance/daily-activity-log?office=dallas");
+
+    expect(html).toContain('href="/deals/deal-1?officeId=office-dallas"');
+    expect(html).not.toContain('aria-busy="true"');
+  });
+
+  it("does not withhold links while loading when no office lookup is needed", () => {
+    // ?officeId is already explicit, so nothing has to resolve — a slow office list must not suppress
+    // links that were never going to depend on it.
+    officesState.current = { offices: [], loading: true, error: null, refetch: () => {} };
+    const html = htmlFor("/reports/performance/daily-activity-log?officeId=office-atlanta");
+
+    expect(html).toContain('href="/deals/deal-1?officeId=office-atlanta"');
+    expect(html).not.toContain('aria-busy="true"');
   });
 
   it("prefers the app-level ?officeId over the report's office filter", () => {

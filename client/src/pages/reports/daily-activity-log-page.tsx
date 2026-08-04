@@ -147,14 +147,21 @@ export function DailyActivityLogPage() {
   // the deal was actually read from; the filter only narrows what is displayed within that scope. When
   // ?officeId is absent we fall back to the filter, resolving a slug to its canonical id the same way
   // ReportFilterBar's canonicalOfficeId does (the deal route needs an id, not a slug).
-  const { offices } = useAccessibleOffices();
+  const { offices, loading: officesLoading } = useAccessibleOffices();
   const scopeOfficeId = searchParams.get("officeId");
   const filterOffice = searchParams.get("office");
+  const needsOfficeLookup = !scopeOfficeId && Boolean(filterOffice) && filterOffice !== "all";
+  // The accessible-office list arrives asynchronously, so on the FIRST paint of a ?office=<slug> view
+  // the lookup cannot succeed yet. Emitting a bare /deals/:id during that window is not a cosmetic
+  // gap -- it is precisely the 404 this resolution exists to prevent, handed to whoever clicks fast.
+  // So we distinguish "resolved to nothing" (a genuinely unknown office: bare link is correct) from
+  // "not resolvable YET", and withhold the link only for the latter.
+  const officeLinkPending = needsOfficeLookup && officesLoading;
   const linkOfficeId = useMemo(() => {
     if (scopeOfficeId) return scopeOfficeId;
-    if (!filterOffice || filterOffice === "all") return null;
+    if (!needsOfficeLookup) return null;
     return offices.find((office) => office.id === filterOffice || office.slug === filterOffice)?.id ?? null;
-  }, [scopeOfficeId, filterOffice, offices]);
+  }, [scopeOfficeId, needsOfficeLookup, filterOffice, offices]);
   const dealHref = (dealId: string) =>
     `/deals/${dealId}${linkOfficeId ? `?officeId=${encodeURIComponent(linkOfficeId)}` : ""}`;
 
@@ -312,7 +319,20 @@ export function DailyActivityLogPage() {
                           </div>
 
                           <div className="mt-1 text-sm text-slate-600">
-                            {entry.dealId ? (
+                            {entry.dealId && officeLinkPending ? (
+                              // Office context is still resolving. Render the deal as plain text
+                              // rather than a link that would navigate without it — a click here
+                              // would land on the 404 this resolution exists to prevent. It becomes
+                              // a link on the very next render, once the office list arrives.
+                              <span
+                                className="font-bold text-slate-500"
+                                title="Resolving office context…"
+                                aria-busy="true"
+                              >
+                                {entry.dealName || "Deal"}
+                                {entry.dealNumber ? ` (${entry.dealNumber})` : ""}
+                              </span>
+                            ) : entry.dealId ? (
                               <Link
                                 to={dealHref(entry.dealId)}
                                 className="font-bold text-slate-950 underline decoration-brand-red/40 underline-offset-4 hover:text-brand-red"

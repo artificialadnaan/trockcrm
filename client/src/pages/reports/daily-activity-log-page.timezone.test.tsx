@@ -8,9 +8,16 @@
 //
 // The whole file runs under America/Chicago on purpose: with TZ=UTC (how the suites normally run)
 // local and UTC coincide and the bug is invisible, so this fixture would prove nothing.
+//
+// The zone is process-GLOBAL and Vitest reuses a worker across spec files, so setting it without
+// putting it back would leak into whatever date-sensitive spec happens to run next in this worker --
+// a failure that depends on file ordering rather than on any code change. The previous value is
+// captured (not assumed to be "UTC") and restored in afterAll below; if TZ was unset originally it is
+// deleted rather than pinned to a string, so the process goes back to the host zone exactly.
+const PREVIOUS_TZ = process.env.TZ;
 process.env.TZ = "America/Chicago";
 
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 
@@ -93,7 +100,21 @@ function render() {
   ).replace(/\s+/g, " ");
 }
 
+afterAll(() => {
+  if (PREVIOUS_TZ === undefined) delete process.env.TZ;
+  else process.env.TZ = PREVIOUS_TZ;
+});
+
 describe("DailyActivityLogPage timezone consistency", () => {
+  it("restores the process timezone for whatever spec runs next in this worker", () => {
+    // Guards the cleanup itself. Inside this file the zone must still be Chicago (the assertions
+    // below depend on it); the afterAll above is what hands it back. Asserting the captured value is
+    // a real value here means a future edit cannot quietly drop the capture and leave the restore
+    // writing "undefined" into the environment.
+    expect(process.env.TZ).toBe("America/Chicago");
+    expect(PREVIOUS_TZ === undefined || typeof PREVIOUS_TZ === "string").toBe(true);
+  });
+
   it("confirms the fixture actually straddles a day boundary in this zone", () => {
     // Guards the test itself: if the runner's zone ever made these equal, the assertions below would
     // pass vacuously and stop protecting anything.

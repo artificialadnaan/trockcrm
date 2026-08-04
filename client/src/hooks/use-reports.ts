@@ -1390,18 +1390,27 @@ function usePerformanceReport<T>(path: string, options: PerformanceReportQueryOp
   // Shared with the Director Scorecard, Rep Activity and Forecast Accuracy reports: all three used to
   // keep the previous office's rows after a scope switch, for the reason described on useOfficeScopeKey.
   const officeScopeKey = useOfficeScopeKey();
+  // Monotonic request id. Adding the office-scope refetch trigger above without this would hand these
+  // three reports a race they did not previously have: switching office while an earlier request is
+  // still in flight lets the OLD office's response land last and overwrite the new one -- the very
+  // stale-rows symptom the refetch was added to fix, just arrived at from the other direction. A
+  // refetch trigger and an ordering guarantee belong in the same change.
+  const latestRequest = useRef(0);
 
   const fetchReport = useCallback(async () => {
+    const requestId = ++latestRequest.current;
     setLoading(true);
     setError(null);
     try {
       const result = await executePerformanceReport<T>(path, options);
+      if (requestId !== latestRequest.current) return; // superseded by a newer request
       setData(result.data);
     } catch (err: unknown) {
+      if (requestId !== latestRequest.current) return;
       setError(err instanceof Error ? err.message : errorMessage);
       setData(null);
     } finally {
-      setLoading(false);
+      if (requestId === latestRequest.current) setLoading(false);
     }
   }, [path, errorMessage, officeScopeKey, ...deps]);
 
