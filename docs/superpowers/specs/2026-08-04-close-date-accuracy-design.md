@@ -950,7 +950,11 @@ outcomes AS (
            JOIN public.pipeline_stage_config hp ON hp.id = h.to_stage_id
            WHERE h.deal_id = d.id
              AND (hp.slug IN (:won_slugs) OR hp.slug IN (:lost_slugs))
-             AND h.created_at >= :from AND h.created_at < business_day_end_exclusive(:to)
+             -- BOTH ends on the same basis: the CT calendar date of the stage entry, inclusive.
+             -- Matches ctDateInWindowSql (monday-showcase-service.ts:322-327), which already applies
+             -- this rule to THIS column. Do not mix a bare `>= :from` with a converted upper bound.
+             AND (h.created_at AT TIME ZONE 'America/Chicago')::date >= :from::date
+             AND (h.created_at AT TIME ZONE 'America/Chicago')::date <= :to::date
          )                          AS is_reopened_after_landing,
          -- NOTE: expected_close_date is deliberately NOT selected. State comes from §4.0.3.
          COALESCE(d.is_bid_board_owned, false) OR COALESCE(d.is_read_only_mirror, false) AS bid_board_owned
@@ -1002,6 +1006,18 @@ invariant `|D_landed| + |D_open| + |D_nodate| = |D|` was **false for every rep w
 so the test pinning it would fail on the first realistic dataset — or, worse, an implementer would "fix" the
 test rather than name the population. `D_outside` is excluded from every metric; it exists so the partition
 closes and the invariant is true as written.
+
+**`D_reopened`'s window is CT-anchored on both ends**, matching `ctDateInWindowSql`
+(`server/src/modules/reports/monday-showcase-service.ts:322-327`) — which already applies the
+business-timezone rule to `deal_stage_history.created_at`, the same column. That existing helper is the
+convention; a `business_day_start()` twin was not invented for it. Inclusive at both ends, consistent with
+`D_landed`'s `BETWEEN from AND to` (§4.0.5).
+
+An earlier draft compared `h.created_at >= :from` bare against a `business_day_end_exclusive(:to)` upper
+bound — one end session-timezone-dependent, the other explicit, in the same window. **Blast radius, worth
+stating because it is larger than it looks:** this boundary decides `is_reopened_after_landing`, which
+gates `D_cov`, `machine_dated_n` and `reopened_after_landing_n` — so a terminal stage entry near midnight
+moves a deal between three buckets *and* breaks the population tie-out in §4.0.6.
 
 **`D_reopened` is carved out of `D_open`, and it is a diagnostic, not a silent reclassification.** A deal
 won or lost *inside* the period and later reopened has no terminal stage today, and `stage-change.ts:357-362`
@@ -1126,6 +1142,11 @@ Invariants to pin as tests — they are the point of the table:
   landing in a bucket. The state enum in §4.0.3 is coalesced precisely so every downstream test is a
   positive equality against a non-null value. Where a negative test is unavoidable, write it as
   `<col> IS DISTINCT FROM x` or `<col> IS NOT TRUE`.
+- **Both ends of a window must share a basis.** A range with one timezone-explicit bound and one bare
+  bound is wrong by construction, whichever end is individually right — and unlike "is this bound correct?",
+  that question is answerable from the text alone, so it is mechanical (§7 audit inventory). Round 5 swept
+  bounds individually and found six; a seventh was introduced afterwards as a half-converted window and
+  survived until the asymmetry itself was checked.
 - **Never compare a `timestamptz` against a bare date, and never `::date` one without a timezone.** Both
   resolve in the *session* timezone, which is not guaranteed to be `America/Chicago`. Use
   `business_day_end_exclusive(d)` (§4.0.3) for an upper bound and
@@ -1273,7 +1294,8 @@ same way twice.
 | §4.0.7 **ordering** rule | no block consumes a name produced below it | **extraction** — walk rows top-down, accumulate produced names | mechanical |
 | §4.0.7 **contents** rule | a row's *Produces* matches what its SQL projects | **extraction** — `AS <name>` / `<name> =` per fence, diffed | mechanical |
 | §4.0.7 **completeness** rule | every name a block's SQL references appears in its *Consumes* | **extraction** — referenced identifiers per fence, diffed | mechanical *(added this round)* |
-| Duplicate definitions | no scalar is defined twice with different bodies | **extraction** — collect `<name> =` across all fences, compare bodies | mechanical *(added this round)* |
+| Duplicate definitions | no scalar is defined twice with different bodies | **extraction** — collect `<name> =` across all fences, compare bodies | mechanical |
+| Window both-ends basis | no range mixes an explicit bound with a bare one | **extraction** — pair comparisons on a shared left operand, classify each bound | mechanical *(added this round)* |
 | Convention restatement (§7) | no rule is half-amended across its copies | **extraction** — signature regex per convention, all hit lines listed | mechanical *(added this round)* |
 | Constants (§6.4) | every named constant has a value and every formula uses it | **extraction** — constant names vs assigned values; literal sweep | mechanical |
 | Rate casts / `NULLS LAST` | every rate casts, every ranked column sorts NULLs last | **extraction** — grep per pattern | mechanical |
@@ -2333,6 +2355,21 @@ complement of `futureDatedCloseDatePredicateSql`'s `>= today` (`foundations.ts:4
 unparked in both. One ordering — `percentile_cont`'s `WITHIN GROUP` — deliberately needs no tie-breaker,
 and §4.3 now says why.
 
+**Round 13 (a half-converted window, and the asymmetry check that finds them)**
+
+| # | Was | Now |
+|---|---|---|
+| 1 | `D_reopened` compared `h.created_at >= :from` bare against `business_day_end_exclusive(:to)` | One end session-timezone-dependent, the other explicit, in the same window — contradicting §4.0.6's own timezone rule. Both ends now CT-anchored, matching `ctDateInWindowSql` (`monday-showcase-service.ts:322-327`), which already applies this rule to `deal_stage_history.created_at`. Blast radius stated: the boundary gates `is_reopened_after_landing`, hence `D_cov`, `machine_dated_n`, `reopened_after_landing_n` **and** the §4.0.6 tie-out. |
+
+**The check added.** Round 5 swept boundary comparisons *individually* and found six; this was a seventh,
+introduced afterwards. Checking each bound for correctness needs judgement, but checking that **both ends of
+a window share a basis** is answerable from the text alone — a range with one explicit end and one bare end
+is wrong by construction, whichever end is individually right. Now mechanical: pair comparisons on a shared
+left operand, classify each bound as explicit or bare, flag mismatches. Three windows examined, one
+half-converted, zero after the fix. Building it also required fixing the checker's own regex, which
+truncated `<business today> + CONST` and reported a false positive — a checker that cries wolf gets ignored,
+which is its own failure mode.
+
 **Round 12 (defects in round 11's own fix, and the hole all three checks missed)**
 
 | # | Was | Now |
@@ -2475,6 +2512,15 @@ were themselves silently broken**, because `NOT <nullable>` inside `FILTER` coun
 failing loudly. A check that can fail open is not a check. That is why the state enum is coalesced and
 non-null by construction, and why "never negate a nullable" is now a stated SQL rule (§4.0.6) rather than
 something to remember at each site.
+
+**Round 13's lesson: check the property that is cheap to verify, not the one you actually care about.**
+What matters is whether each boundary is *correct*, which needs judgement about intent and timezone
+semantics. What is mechanically checkable is whether the two ends *agree* — a strictly weaker property, and
+one that would have caught this defect the moment it was introduced. Constants, populations and boundaries
+have each now had a second wave after their first sweep, and in every case the second wave was found by a
+structural property (a name with no value, a term that can overlap, a window with mismatched ends) rather
+than by re-reading for correctness. When a sweep finds N defects, the useful follow-up is not a more careful
+sweep but a structural invariant those N defects all violate.
 
 **Round 12's lesson: three checks can all pass and still share a blind spot.** The ordering, contents and
 three-table checks were each mechanical and each ran clean while `is_reopened_after_landing` sat in the SQL
