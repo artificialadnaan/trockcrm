@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowRight, Briefcase, Plus, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { MetricCard } from "@/components/shared/metric-card";
@@ -90,8 +91,11 @@ export type DashboardDealListFilter =
  */
 export type AtRiskRouteBucket = "all" | "service" | "non_service";
 
-/** The three at-risk KPI cards, in render order. Service + Non-service partition All exactly. */
+/** The three at-risk cohorts. Service + Non-service partition All exactly. */
 export const AT_RISK_ROUTE_BUCKETS = ["service", "non_service", "all"] as const satisfies readonly AtRiskRouteBucket[];
+
+/** The two ROUTE cohorts, in the order they read as sub-links under the At Risk headline. */
+export const AT_RISK_ROUTE_SUBLINK_BUCKETS = ["service", "non_service"] as const satisfies readonly AtRiskRouteBucket[];
 
 /** A deal is on the SERVICE side only when its route is literally "service"; null/absent is not. */
 export function isServiceRouteDeal(deal: Pick<Deal, "workflowRoute">): boolean {
@@ -128,11 +132,17 @@ export function atRiskRouteBucketForFilter(filter: DashboardDealListFilter): AtR
   return "all";
 }
 
-/** The KPI card copy per bucket — one source so the card, its aria-label, and the drill-down agree. */
-export const AT_RISK_CARD_LABELS: Record<AtRiskRouteBucket, { eyebrow: string; ariaLabel: string }> = {
-  service: { eyebrow: "Service at risk", ariaLabel: "View service at-risk deals" },
-  non_service: { eyebrow: "Non-service at risk", ariaLabel: "View non-service at-risk deals" },
-  all: { eyebrow: "All at risk", ariaLabel: "View at-risk deals" },
+/**
+ * Copy per cohort — one source so the visible sub-link text and the accessible name agree.
+ *
+ * `shortLabel` is what the reader sees ("Service 3"); `ariaLabel` is the accessible name and must name
+ * the COHORT, never just the number, so a screen-reader user hears which drill-down a link opens rather
+ * than a bare "3". The three names are distinct for the same reason.
+ */
+export const AT_RISK_CARD_LABELS: Record<AtRiskRouteBucket, { shortLabel: string; ariaLabel: string }> = {
+  service: { shortLabel: "Service", ariaLabel: "View service at-risk deals" },
+  non_service: { shortLabel: "Non-service", ariaLabel: "View non-service at-risk deals" },
+  all: { shortLabel: "All", ariaLabel: "View at-risk deals" },
 };
 
 /**
@@ -598,12 +608,27 @@ export function buildDealsPageKpiDrilldownPath(
       if (!value) continue;
       if (
         key === "assignedRepId" ||
+        // Office context is URL-driven: api() reads ?officeId from window.location.search and sends it as
+        // x-office-id. A KPI card that drops it silently returns a cross-office viewer to their ACTIVE
+        // office, so the drill-down lists a DIFFERENT office's deals than the card counted. Forward it on
+        // every drill-down (this was missing for all of them — Active Pipeline and Won too, not just the
+        // at-risk cards). Same-office users carry no ?officeId, so their links are unchanged.
+        key === "officeId" ||
         // Keep the header period scope through outcome-aware drill-downs (active pipeline / Won), but NOT
         // the SLA drill-downs (at_risk / at_risk_service / at_risk_non_service / stale): those are
         // CURRENT-STATE views where ?period is a deliberate no-op (getDashboardDealListView gives them no
         // updated-at window — period-filtering an SLA surface by updated_at would hide the stalest, most
-        // at-risk deals). So the link must NOT carry a period either — omitting it keeps the destination on
-        // the full current at-risk cohort, matching the card. All THREE at-risk route cards share this.
+        // at-risk deals). So the link must NOT carry a period either. All THREE at-risk route cards share
+        // this.
+        //
+        // KNOWN GAP (not fixed here): "omitting it keeps the destination matching the card" holds only
+        // while ENABLE_STAGE_ENTRY_DATE_FILTER is OFF (its default). With that flag ON *and* a ?period
+        // selected, getDealsForPipeline additionally bounds the OPEN columns by stage_entered_at, so the
+        // board this page counts from is period-scoped while the destination it links to is not — the
+        // destination can then hold MORE rows than the card shows. That affects the pre-existing "All at
+        // risk" card exactly as it affects the two new route cards. Closing it needs an unwindowed count
+        // source (a second board fetch, or dropping the board period), which changes what "All at risk"
+        // displays — a product decision, deliberately left out of this change.
         // won_*/lost_* are NOT forwarded — the Won drill-down inherits the single shared ?period (already
         // set above), not a collapsed per-column override.
         (key === "period" && !isCurrentStateDrilldownFilter(filter))
@@ -1229,6 +1254,15 @@ function DealListPageContent({
    *
    * On every non-route view the bucket is "all", so this IS `unsearchedColumns` and the "All at risk"
    * number is byte-identical to the single pre-split card's.
+   *
+   * KNOWN GAP (not fixed here): on a STAGE-SCOPED view — Won, Opportunities, Bid Board —
+   * `unsearchedColumns` is only that view's columns, while every at-risk link opens the ALL-STAGE
+   * cohort. On the Won drill-down the visible columns are terminal, so all three cards read 0 while
+   * their destinations hold rows. This is pre-existing behaviour of the single "At risk" card (it read 0
+   * there before this split too), not something the route split introduced. The fix is to count from
+   * `getAtRiskBoardColumns(boardColumns, "all")` unconditionally — one line — but that CHANGES the
+   * number "All at risk" displays on those three views (0 -> the real cohort size), so it is a product
+   * decision rather than a bug fix and is deliberately not taken here.
    */
   const kpiAtRiskColumns = useMemo(
     () => (atRiskRouteBucket === "all" ? unsearchedColumns : getAtRiskBoardColumns(boardColumns, "all")),
@@ -1555,7 +1589,7 @@ function DealListPageContent({
       </section>
 
       <>
-      <div className={`grid gap-4 sm:grid-cols-2 ${showWonKpiCard ? "xl:grid-cols-5" : "xl:grid-cols-4"}`}>
+      <div className={`grid gap-4 ${showWonKpiCard ? "md:grid-cols-3" : "md:grid-cols-2"}`}>
         <MetricCard
           eyebrow="Active pipeline"
           value={USD_COMPACT(totalValue)}
@@ -1578,24 +1612,104 @@ function DealListPageContent({
             ariaLabel="View won deals"
           />
         ) : null}
-        {/* The at-risk cohort split by workflow route: Service | Non-service | All. Rendered from one
-            bucket list so each card's number (atRiskCounts) and link (atRiskDestinations) are indexed by
-            the SAME bucket key — there is no per-card wiring that could pair one bucket's count with
-            another's destination. Non-service carries every route that is not "service", including a
-            null/absent one, so the first two always sum to the third. */}
-        {AT_RISK_ROUTE_BUCKETS.map((bucket) => (
-          <MetricCard
-            key={bucket}
-            eyebrow={AT_RISK_CARD_LABELS[bucket].eyebrow}
-            value={String(atRiskCounts[bucket])}
-            badge="Over SLA"
-            caption="Needs touch"
-            tone={atRiskCounts[bucket] > 0 ? "red" : "green"}
-            accent="red"
-            to={atRiskDestinations[bucket]}
-            ariaLabel={AT_RISK_CARD_LABELS[bucket].ariaLabel}
+        {/*
+          ONE At Risk card carrying THREE destinations.
+
+          The headline is All at risk, and the card body opens the all-at-risk drill-down — exactly the
+          pre-split number, behaviour, and destination. Service / Non-service are small sub-links to
+          their own route drill-downs, with their counts shown beside the total so the reader can SEE
+          Service + Non-service adding up to the headline; that is the reconciliation made self-evident.
+
+          ANCHORS ARE SIBLINGS, NEVER NESTED. MetricCard wraps its whole body in a Link, so it cannot
+          host sub-links — hence this bespoke card (MetricCard is left untouched for its other callers).
+          The All link is a stretched overlay (absolute inset-0) that sits FIRST in the DOM, so tab order
+          is All -> Service -> Non-service, matching the reading order. The card body is
+          pointer-events-none so clicks over the text fall through to that overlay, and the two route
+          links re-enable pointer events and sit above it (relative z-10) — so all three are separately
+          focusable, separately named, and their hit targets never overlap.
+
+          Counts and destinations are both indexed by the SAME bucket key, so no sub-link can end up
+          paired with another cohort's number or href.
+        */}
+        <Card
+          className={`group relative overflow-hidden transition-all duration-150 hover:-translate-y-0.5 hover:shadow-md ${
+            atRiskCounts.all > 0 ? "border-0 bg-brand-red text-white shadow-md" : "border-slate-200 bg-white shadow-none"
+          }`}
+        >
+          <Link
+            to={atRiskDestinations.all}
+            aria-label={AT_RISK_CARD_LABELS.all.ariaLabel}
+            // ring-INSET is load-bearing, not decoration. This link is `absolute inset-0`, so its box is
+            // exactly the card's box, and the Card is `overflow-hidden` — a default (outset) ring paints
+            // OUTSIDE that box and is clipped away entirely. Combined with `focus:outline-none` removing
+            // the browser fallback, a keyboard user tabbing to the first at-risk link would get NO visible
+            // focus state at all. Drawing the ring inside the box is what makes it survive the clip.
+            className={`absolute inset-0 z-0 rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-inset ${
+              atRiskCounts.all > 0 ? "focus-visible:ring-white" : "focus-visible:ring-brand-red"
+            }`}
           />
-        ))}
+          <CardContent className="pointer-events-none p-5">
+            <p
+              className={`text-[11px] font-bold uppercase tracking-[0.2em] ${
+                atRiskCounts.all > 0 ? "text-white/80" : "text-slate-500"
+              }`}
+            >
+              At risk
+            </p>
+            <p
+              data-testid="at-risk-total"
+              className={`mt-2 text-4xl font-black leading-none ${atRiskCounts.all > 0 ? "text-white" : "text-slate-950"}`}
+            >
+              {atRiskCounts.all}
+            </p>
+            <div className="mt-3 flex items-center gap-3">
+              <span
+                className={`rounded-full px-2.5 py-0.5 text-[11px] font-bold uppercase tracking-wide ${
+                  atRiskCounts.all > 0
+                    ? "bg-white/15 ring-1 ring-white/20"
+                    : "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"
+                }`}
+              >
+                Over SLA
+              </span>
+              <p
+                className={`text-[11px] font-semibold uppercase tracking-wide ${
+                  atRiskCounts.all > 0 ? "text-white/70" : "text-slate-500"
+                }`}
+              >
+                Needs touch
+              </p>
+            </div>
+            <div
+              className={`mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] font-semibold ${
+                atRiskCounts.all > 0 ? "text-white/90" : "text-slate-600"
+              }`}
+            >
+              {AT_RISK_ROUTE_SUBLINK_BUCKETS.map((bucket, index) => (
+                <Fragment key={bucket}>
+                  {index > 0 ? (
+                    <span aria-hidden="true" className={atRiskCounts.all > 0 ? "text-white/40" : "text-slate-300"}>
+                      ·
+                    </span>
+                  ) : null}
+                  <Link
+                    to={atRiskDestinations[bucket]}
+                    aria-label={AT_RISK_CARD_LABELS[bucket].ariaLabel}
+                    className={`pointer-events-auto relative z-10 rounded underline-offset-2 hover:underline focus:outline-none focus-visible:ring-2 ${
+                      atRiskCounts.all > 0 ? "focus-visible:ring-white" : "focus-visible:ring-brand-red"
+                    }`}
+                  >
+                    {AT_RISK_CARD_LABELS[bucket].shortLabel}{" "}
+                    <span className="font-black tabular-nums">{atRiskCounts[bucket]}</span>
+                  </Link>
+                </Fragment>
+              ))}
+            </div>
+          </CardContent>
+          {atRiskCounts.all > 0 ? null : (
+            <div className="absolute inset-x-0 bottom-0 h-1 bg-brand-red" aria-hidden="true" />
+          )}
+        </Card>
       </div>
 
       <label className="block">
