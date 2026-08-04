@@ -936,7 +936,7 @@ here. Adding a metric without adding a row is the defect re-entering.**
 
 | Metric | § | Numerator drawn from | Denominator | Same set? |
 |---|---|---|---|---|
-| `coverage_rate` | 4.1 | `D_cov` where `pnow_state = 'rep_prediction'` and date in `[today, today+90]` | `D_cov` | Yes |
+| `coverage_rate` | 4.1 | `D_cov` where `cov_state = 'rep_prediction'` and `cov_prediction` in `[today, today+90]` | `D_cov` | Yes |
 | `covered_n` / `parked_n` / `at_risk_n` | 4.1 | partition of `D_cov` | — | Sums to `\|D_cov\|` |
 | `machine_dated_n` | 4.1 | `D_open` \ `D_cov` | — | Complement, reported |
 | `hit_rate_14d`, `hit_rate_30d` | 4.2 | `D_score` within tolerance | `D_score` | Yes |
@@ -948,7 +948,7 @@ here. Adding a metric without adding a row is the defect re-entering.**
 | `overdue_open_n`, `median_days_overdue` | 2.4 | `D_open` past-due subset | — | Count |
 | `move_count` / `set_count` / `clear_count` | 4.4 | `E` | — | Event counts |
 | `moves_per_deal` | 4.4 | `E` (move events) | `\|D_book\|` | Yes — `E` is defined over `D_book` |
-| `total_days_slipped`, `days_pushed_out/pulled_in` | 4.5 | `E` | — | Event sums |
+| `total_days_slipped`, `days_pushed_out`, `days_pulled_in` | 4.5 | `E` | — | Event sums |
 | `chronic_mover_n` | 4.6 | deals in `D_book` meeting the flag | — | Count |
 | `chronic_mover_rate` | 4.6 | `chronic_mover_n` | `\|D_book\|` | Yes |
 | `silent_miss_n` | 4.7 | `D_score` with `move_count = 0` and `abs(err) > 14` | — | Count |
@@ -959,8 +959,9 @@ here. Adding a metric without adding a row is the defect re-entering.**
 | `prior_period_landed_n` | 4.0.5 | `D_prior` | — | Diagnostic; excluded from every other metric |
 | `provenance_unknown_n` | 4.0.6 | `D_open` with a non-null `expected_close_date` but `pnow_state = 'no_event'` | — | Integrity diagnostic |
 
-`provenance_unknown_n` is the **one** permitted reader of the raw `expected_close_date` column (convention
-10, §7), because its entire job is to compare the column against the timeline. A deal carrying a date with
+`provenance_unknown_n` is computed inside the **coverage provenance-resolution block** (§4.1), the single
+bounded place permitted to read the raw `expected_close_date` column — its entire job is to compare the
+column against the timeline. A deal carrying a date with
 no event behind it means the audit window does not reach as far back as §1.4 assumes. It should be
 near-zero; if it is not, the coverage numbers are resting on an assumption that does not hold, and this is
 the column that says so. Bucket such deals as `rep` for coverage purposes — the conservative choice, since
@@ -1008,7 +1009,8 @@ Coverage reads `pnow_state` from §4.0.3, **resolved for provenance first**:
 -- §4.0.6 promises that an open deal carrying a date whose event predates the audit window is bucketed as
 -- rep-authored, so an audit-window gap cannot quietly shrink a rep's denominator. This is the SQL that
 -- keeps that promise; without it every 'no_event' row fell into at_risk_n and the promise was prose only.
--- This is convention 10's single permitted read of the raw column, and it is confined to these two lines.
+-- THIS BLOCK IS CONVENTION 10'S BOUNDED EXCEPTION. It may read d.expected_close_date solely to produce
+-- cov_state, cov_prediction and provenance_unknown_n. Nothing downstream reads the column.
 cov_state      = CASE WHEN pnow_state = 'no_event' AND d.expected_close_date IS NOT NULL
                       THEN 'rep_prediction' ELSE pnow_state END
 cov_prediction = CASE WHEN pnow_state = 'no_event' AND d.expected_close_date IS NOT NULL
@@ -1024,16 +1026,16 @@ machine_dated_n = count(*) FILTER (WHERE open AND cov_state = 'machine')
 -- The remaining three partition D_cov (= D_open minus machine-dated).
 covered_n  = count(*) FILTER (WHERE in_d_cov AND cov_state = 'rep_prediction'
                                              AND cov_prediction >= <business today>
-                                             AND cov_prediction <= <business today> + 90)
+                                             AND cov_prediction <= <business today> + CLOSE_TARGET_HOLD_HORIZON_DAYS)
 parked_n   = count(*) FILTER (WHERE in_d_cov AND cov_state = 'rep_prediction'
-                                             AND cov_prediction >  <business today> + 90)
+                                             AND cov_prediction >  <business today> + CLOSE_TARGET_HOLD_HORIZON_DAYS)
 at_risk_n  = count(*) FILTER (WHERE in_d_cov AND (cov_state IN ('cleared','no_event')
                                               OR (cov_state = 'rep_prediction'
                                                   AND cov_prediction < <business today>)))
 
 coverage_rate = count(*) FILTER (WHERE in_d_cov AND cov_state = 'rep_prediction'
                                                 AND cov_prediction >= <business today>
-                                                AND cov_prediction <= <business today> + 90)::numeric
+                                                AND cov_prediction <= <business today> + CLOSE_TARGET_HOLD_HORIZON_DAYS)::numeric
               / NULLIF(count(*) FILTER (WHERE in_d_cov), 0)
 ```
 
@@ -1139,6 +1141,15 @@ and the four shortfall columns say which kind.
 **`hit_rate_14d_final` has its own denominator.**
 
 ```sql
+-- Defined exactly like its P30 twin -- same COALESCE (so the NOT is safe, convention 12), same explicit
+-- timezone, same strict `>`, same imported constant. An earlier draft used this identifier in `scoreable_final`
+-- without ever defining it, leaving the reader to assume the guarantees carried over.
+pfinal_parked_at_write =
+  COALESCE(
+    pfinal_prediction > (pfinal_changed_at AT TIME ZONE 'America/Chicago')::date
+                        + CLOSE_TARGET_HOLD_HORIZON_DAYS,
+    false)
+
 scoreable_final = landed
               AND pfinal_state = 'rep_prediction'
               AND NOT pfinal_parked_at_write
@@ -1418,7 +1429,7 @@ it true. **A claim with no construct is not a claim — it is either implemented
 | 6.1b | A rep with **no open deals at all** does not outrank one who forecasts badly | `|D_cov| = 0` → `NULLIF` → NULL. Requires `NULLS LAST` **and** exclusion from the ranked set (§6.6) | ✅ after §6.6 |
 | 6.1c | Hit rate never carries the ranking on its own | Default sort is `coverage_rate DESC NULLS LAST, hit_rate_14d DESC NULLS LAST`; plus the §6.4 volume gate | ✅ after §6.6 |
 | 6.1d | "Forecast reliability" is zero when coverage is zero | `COALESCE(coverage_rate,0) * COALESCE(hit_rate_14d,0)` — see §6.1, the bare product does **not** hold this | ✅ after §6.1 fix |
-| 6.2a | Parking the book cannot buy coverage | `parked_n` branch removes `cov_prediction > today + 90` from the `covered_n` numerator while leaving it in the denominator | ✅ |
+| 6.2a | Parking the book cannot buy coverage | `parked_n` branch removes `cov_prediction > today + CLOSE_TARGET_HOLD_HORIZON_DAYS` from the `covered_n` numerator while leaving it in the denominator | ✅ |
 | 6.2b | Parking cannot buy a hit rate | `p30_parked_at_write` conjunct in `scoreable` (§4.2) | ✅ |
 | 6.2c | Parked deals still count as churn | `E` filters on `source` and the event window only — it has no parked predicate, so parked writes remain in `move_count` / `days_pushed_out` / chronic-mover | ✅ |
 | 6.3a | Last-minute re-dating shows as weak P₃₀ | P₃₀ anchored 30 days out (§4.0.3); `D_score` requires a P₃₀ | ✅ |
@@ -1474,7 +1485,7 @@ This report applies the horizon in **two** places, and both are required:
    `(horizon) > CT_TODAY_SQL + INTERVAL '90 days'`. Same anchor, same strict `>`, so a deal exactly 90 days
    out is *not* parked in either world.
 2. **Scoring.** A prediction is **parked-at-write** when it was more than 90 days beyond **the date it was
-   written** — `new_date > (changed_at AT TIME ZONE 'America/Chicago')::date + 90`, the explicit-timezone
+   written** — `new_date > (changed_at AT TIME ZONE 'America/Chicago')::date + CLOSE_TARGET_HOLD_HORIZON_DAYS`, the explicit-timezone
    form required by §4.0.6. Such a prediction is excluded from `scoreable` (§4.2)
    and from every error statistic, while still counted in `move_count`, `days_pushed_out` and the
    chronic-mover flag. Without this the winning strategy is "push everything to 2028, then set an accurate
@@ -1600,44 +1611,86 @@ Small enough to build and review in one pass, and complete enough to answer the 
 query and it decides whether the machine-contamination problem is theoretical or live. Do not build the
 report without knowing the answer.
 
-**Per-rep columns (v1)**
+**Per-rep surface (v1) — every metric in §4.0.6, with its destination**
 
-| Column | Population (§4.0.6) | § |
+This table is an **equal set** with the §4.0.6 audit table, not a subset: every metric the report computes
+appears here with a stated destination. A metric that is computed but has nowhere to go is either dead
+work or an omission, and there is no way to tell which from a list that only names the survivors. The
+`Where` column carries the distinction a "v1 columns" heading used to hide.
+
+`Col` = a column on the rep row · `Drill` = shown in the evidence drawer, not the summary row ·
+`Diag` = diagnostic column, present so a silent distortion becomes visible.
+
+| Metric | Where | Population (§4.0.6) | § |
+|---|---|---|---|
+| `coverage_rate` | Col | `D_cov` | 4.1 |
+| `covered_n` | Drill | `D_cov` | 4.1 |
+| `parked_n` | Col | `D_cov` | 4.1 / 6.2 |
+| `at_risk_n` | Col | `D_cov` | 4.1 |
+| `machine_dated_n` | Col | `D_open` \ `D_cov` | 4.1 |
+| `landed_n` | Col | `D_landed` | 2.4 |
+| `scoreable_n` | Col | `D_score` | 4.2 |
+| `no_prediction_n`, `cleared_n`, `machine_superseded_n`, `parked_prediction_n` | Col (grouped) | `D_landed` \ `D_score` | 4.2 |
+| `hit_rate_14d` | Col | `D_score` | 4.2 |
+| `hit_rate_30d` | **Col** | `D_score` | 4.2 / 2.3 |
+| `hit_rate_14d_final` | Col | `D_score_final` | 4.2 |
+| `mean_signed_error_days` | Col | `D_score` | 4.3 |
+| `median_signed_error_days` | Col | `D_score` | 4.3 |
+| `p90_signed_error_days` | **Col** | `D_score` | 4.3 |
+| `overdue_open_n` | Col | `D_open` | 2.4 |
+| `median_days_overdue` | Col | `D_open` | 2.4 |
+| `move_count` | Drill | `E` | 4.4 |
+| `set_count` | Drill | `E` | 4.4 |
+| `clear_count` | Drill | `E` | 4.4 |
+| `moves_per_deal` | Col | `E` over `D_book` | 4.4 |
+| `total_days_slipped` | Col | `E` | 4.5 |
+| `days_pushed_out`, `days_pulled_in` | Drill | `E` | 4.5 |
+| `chronic_mover_n` | Col | `D_book` | 4.6 |
+| `chronic_mover_rate` | Col | `D_book` | 4.6 |
+| `silent_miss_n` | Col | `D_score` | 4.7 |
+| `moves_by_other_actor` | Drill | `E` | 3 |
+| `machine_written_events_n` → `hubspot_refresh_events_n`, `migration_seed_events_n` | Diag | `source='machine'` on `D_book` | 2.5(b) |
+| `mirror_terminal_no_date_n` | Diag | `D_nodate` | 4.0.5 |
+| `bid_board_owned_n` | Diag | `D_book` | 2.5(c) |
+| `prior_period_landed_n` | Diag | `D_prior` | 4.0.5 |
+| `provenance_unknown_n` | Diag | `D_open`, raw date with `pnow_state='no_event'` | 4.0.6 |
+
+`hit_rate_30d` and `p90_signed_error_days` are marked in bold because they were **missing from an earlier
+version of this table** while §2.3 and §4.3 promised them. Both are kept rather than dropped, for reasons
+the document already argues: §2.3's case for the ±30 band is that the right tolerance is *unknown* and
+open question 1 asks leadership to choose from real data — which requires both bands on screen. And §4.3
+justifies the mean by saying the long optimistic tail is where the problem lives, which is precisely what
+`p90` measures and what mean and median together still hide. Both come from the same query at no marginal
+cost.
+
+**Three tables enumerate metrics, and they must agree.** §4.0.6 (populations and numerator/denominator),
+§6.0 (fairness claims and enforcing constructs), and this one (destinations). The intended relationships,
+stated so a future reader can tell a deliberate omission from a missed one:
+
+| Relationship | Kind | Why |
 |---|---|---|
-| Coverage % (usable, non-parked, rep-authored date) | `D_cov` | 4.1 |
-| **Parked n** (open deals dated >90 days out) | `D_cov` | 4.1 / 6.2 |
-| At-risk n (open deals undated or past-due) | `D_cov` | 4.1 |
-| **Machine-dated n** (last write was HubSpot/migration) | `D_open` \ `D_cov` | 4.1 |
-| Landed n | `D_landed` | 2.4 |
-| **Scoreable n** (landed *and* carried a usable P₃₀) | `D_score` | 4.2 |
-| **No-prediction / cleared / machine-superseded / parked-prediction n** | `D_landed` \ `D_score` | 4.2 |
-| Hit rate ±14d (against P₃₀) | `D_score` | 4.2 |
-| **Hit rate ±14d (final call)** | **`D_score_final`** | 4.2 |
-| Median signed error (days) | `D_score` | 4.3 |
-| Mean signed error (days) | `D_score` | 4.3 |
-| Overdue-open n / median days overdue | `D_open` | 2.4 |
-| Moves per deal | `E` over `D_book` | 4.4 |
-| Chronic movers n / rate | `D_book` | 4.6 |
-| Silent misses n | `D_score` | 4.7 |
-| Moves by other actor | `E` | 3 |
-| **Machine-written events n** — split HubSpot-refresh / migration-seed | `source='machine'` events on `D_book` | 2.5(b) |
-| **Mirror-terminal-no-date n** (diagnostic) | **`D_nodate`** | 4.0.5 |
-| Bid-Board-owned n (diagnostic) | `D_book` | 2.5(c) |
-| Provenance-unknown n (integrity diagnostic) | `D_open` with a raw date but `pnow_state='no_event'` | 4.0.6 |
+| §4.0.6 ↔ this table | **Equal sets** | Every computed metric has a destination; every shipped column has a defined population |
+| §6.0 → §4.0.6 | **Strict subset**, by design | Only metrics involved in a fairness guarantee appear; most metrics are descriptive, not protective |
 
-Two columns carry a period label that differs from the rest of the row: **coverage and churn are "as of
-today"**, landed/error columns are period-scoped (§4.0.5). The UI must say so on the headers rather than
-letting a reader assume one time basis across the row.
+**Adding a metric means touching all three tables.** Both checks are mechanical because all three now name
+real identifiers in backticks rather than prose labels — the earlier version of this table used
+descriptions like "Coverage %", so a set-difference against §4.0.6 returned *every* metric as missing and
+the check could not run at all. That is why the ±30 and p90 gap survived: the table looked complete to a
+reader and was unverifiable to a script.
 
-Every column names the population it is drawn from. That is not documentation garnish — three separate
-review rounds found defects that were exactly a column drawn from one set and divided by another, and the
-column-to-population mapping is what makes the next one visible before it ships.
+**Time basis differs across the row and the UI must say so:** coverage and churn columns are "as of
+today"; landed and error columns are period-scoped (§4.0.5).
 
 Default sort:
 
 ```sql
-ORDER BY coverage_rate DESC NULLS LAST, hit_rate_14d DESC NULLS LAST, rep_name ASC
+ORDER BY coverage_rate DESC NULLS LAST, hit_rate_14d DESC NULLS LAST, rep_name ASC, rep_id ASC
 ```
+
+`rep_id` is the final tie-breaker, not decoration: two active users can share a `display_name`, and without
+it the ordering is not total — which makes row order vary between runs and, under pagination, lets a rep
+appear twice or not at all. Same rule as §4.0.6's total-order requirement, applied to the presentation
+query rather than to a `LIMIT 1` lookup.
 
 `NULLS LAST` is explicit and mandatory — `DESC` defaults to NULLS **first** in Postgres, which would put
 every unmeasurable rep at the top (§6.6). Reps below the volume floor (`scoreable_n >= MIN_RANKED_SCOREABLE`,
@@ -1668,10 +1721,14 @@ within a short window of the event (§1.7). Every number on the summary row is r
 8. "Open" means `outcome_kind = 'open'` from §4.0, never `pipeline_stage_config.is_terminal = false`.
 9. **Every rate casts before dividing** — `count(...)::numeric / NULLIF(count(...), 0)`. `bigint / bigint`
    truncates to 0 (§4.0.6).
-10. **No metric reads `d.expected_close_date` directly.** Every date — standing or historical — comes from
-    `state_at` (§4.0.3). A raw column read is how the exclusion leaked in round 3. The single permitted
-    exception is the `provenance_unknown_n` integrity diagnostic (§4.0.6), which exists precisely to
-    compare the column against the timeline and must be labelled as such.
+10. **No metric reads `d.expected_close_date` directly, with exactly one bounded exception.** Every date —
+    standing or historical — comes from `state_at` (§4.0.3); a raw column read is how the HubSpot
+    exclusion leaked in round 3. The exception is the **coverage provenance-resolution block** in §4.1,
+    which may read the raw column *solely* to derive `cov_state`, `cov_prediction` and
+    `provenance_unknown_n`, and nothing else. Those three outputs are the block's entire permitted
+    surface; every downstream metric consumes them, never the column. **Do not "fix" that block as a
+    convention violation** — it is what keeps §4.0.6's promise that an audit-window gap cannot shrink a
+    rep's coverage, and deleting it silently restores the defect (see the appendix, round 6).
 11. **Every metric appears in the §4.0.6 population table**, with its numerator and denominator drawn from
     the same named set. Add a metric, add a row. Pin the three invariants as tests.
 12. **Never negate a nullable** (§4.0.6). Prefer positive equality against the coalesced state enum.
@@ -1679,6 +1736,29 @@ within a short window of the event (§1.7). Every number on the summary row is r
     rows are excluded from the ranked set rather than sorted into it (§6.6).
 14. **Every protective claim in §6 names its enforcing construct** in the §6.0 table. A claim with no
     construct gets implemented or deleted — never left as prose.
+
+**A convention that forbids something the spec requires is worse than no convention, because it will be
+enforced.** Convention 10 was exactly that for one round: it banned every raw read of
+`expected_close_date` while §4.1 necessarily performed one, so an implementer obeying it would have deleted
+the coverage provenance resolution and silently restored the audit-window defect. Every convention above
+must therefore be stated with its exceptions, and each was checked against the sites it governs:
+
+| Convention | Sites it governs | Result |
+|---|---|---|
+| 1 canonical Won date | §4.0.5 outcome CASE | Obeyed |
+| 2 owner-only rep filter | §3, all populations | Obeyed |
+| 3 `period.ts` for slicing | §1.9, `D_landed` bounds | Obeyed |
+| 4 timeline never deleted | §4.0.1–4.0.3 | Obeyed — `E`'s `source='rep'` filter is a *metric population*, not a timeline deletion; the distinction is stated in §4.0.6 |
+| 5 coverage scope = At-Risk scope | §4.0.5 base CTE | Obeyed |
+| 6 stage slugs + mirror | §4.0.5 | Obeyed |
+| 7 import `CLOSE_TARGET_HOLD_HORIZON_DAYS` | §4.1, §4.2, §6.2 | **Was violated** — §4.1 hardcoded `+ 90` while §4.2 used the constant. Fixed |
+| 8 "open" = `outcome_kind` | §2.4, §4.1 | Obeyed |
+| 9 cast before dividing | 6 rate expressions | Obeyed |
+| 10 no raw column read | §4.1 resolution block | **Was self-contradictory** — now a bounded exception |
+| 11 every metric in the table | §4.0.6 / §7 / §6.0 | Obeyed (three-way check, §7) |
+| 12 never negate a nullable | `NOT p30_parked_at_write`, `NOT pfinal_parked_at_write` | **Was violated** — `pfinal_parked_at_write` was used but never defined, so its COALESCE guarantee was assumed rather than stated. Fixed |
+| 13 `NULLS LAST` + unranked | §6.6, default sort | Obeyed; default sort also needed `rep_id` for totality. Fixed |
+| 14 §6 claims name constructs | §6.0 | Obeyed |
 
 **One companion decision v1 must make, not defer.** The existing Forecast Variance report publishes
 `avg_close_drift_days` — unsigned, Won-only, and structurally frozen since 2026-04-23 (§1.5). Shipping a
@@ -1796,6 +1876,19 @@ complement of `futureDatedCloseDatePredicateSql`'s `>= today` (`foundations.ts:4
 unparked in both. One ordering — `percentile_cont`'s `WITHIN GROUP` — deliberately needs no tie-breaker,
 and §4.3 now says why.
 
+**Round 6 (three tables that must agree; a convention that forbade what the spec required)**
+
+| # | Was | Now |
+|---|---|---|
+| 1 | v1 column list omitted `hit_rate_30d` and `p90_signed_error_days` while §2.3 and §4.3 promised them | Both kept and added. §2.3's argument for the ±30 band is that the right tolerance is unknown and open question 1 asks leadership to choose from data — which needs both bands visible; §4.3 justifies the mean by the long tail, which is what `p90` measures and mean/median hide. Zero marginal cost, same query. |
+| 2 | The v1 table used prose labels ("Coverage %") | A set-difference against §4.0.6 returned *every* metric as missing, so the check could not run — which is why the gap survived. Rewritten with real identifiers plus a `Where` column (Col/Drill/Diag), making it an **equal set** with §4.0.6. |
+| 3 | Three metric tables could disagree pairwise | Relationships now stated: §4.0.6 ↔ v1 are **equal sets**; §6.0 → §4.0.6 is a **strict subset by design**. Adding a metric means touching all three. |
+| 4 | Convention 10 banned raw reads of `expected_close_date`; §4.1 requires one | A convention that forbids what the spec requires *will be enforced* — an implementer would have deleted the coverage provenance resolution and restored the round-6 defect. Now a **bounded exception**: the §4.1 block may read the column solely to derive `cov_state`, `cov_prediction`, `provenance_unknown_n`. |
+| 5 | §4.0.6's `coverage_rate` row named `pnow_state` | The SQL uses `cov_state` / `cov_prediction`. Row corrected so table and SQL agree. |
+| 6 | `pfinal_parked_at_write` used in `scoreable_final`, never defined | Its COALESCE and timezone guarantees were assumed to carry over from the P₃₀ twin. Defined explicitly. |
+| 7 | §4.1 hardcoded `+ 90` | Convention 7 says import `CLOSE_TARGET_HOLD_HORIZON_DAYS`, and §4.2 did. Both now use the constant. |
+| 8 | Default sort ended `rep_name ASC` | Not total — two users can share a display name, so row order varied between runs and pagination could duplicate or drop a rep. `rep_id` appended. |
+
 **Round 5b (unenforced guarantees, and the populations that did not close)**
 
 | # | Was | Now |
@@ -1839,6 +1932,14 @@ were themselves silently broken**, because `NOT <nullable>` inside `FILTER` coun
 failing loudly. A check that can fail open is not a check. That is why the state enum is coalesced and
 non-null by construction, and why "never negate a nullable" is now a stated SQL rule (§4.0.6) rather than
 something to remember at each site.
+
+**Round 6's lesson is that a rule can be as wrong as a metric.** Four of its eight findings were the
+document contradicting its *own* conventions — and convention 10 was self-contradictory within a single
+round of being written, under exactly the time pressure that makes a new rule feel like progress. The
+checks that catch this are the same mechanical extractions used everywhere else: enumerate the rule's
+governed sites, confirm each obeys or is a named exception. That audit is now in §7 as a table, because a
+convention list nobody can check is decoration — and, worse, a convention that is *wrong* gets enforced by
+the next reader against the working code.
 
 **Round 5b named the most dangerous class of all: a stated guarantee with no mechanism.** Findings 1, 4
 and 6 above were all prose promising protection that the SQL did not deliver — §6.1 promised a blank never
