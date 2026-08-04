@@ -59,5 +59,11 @@ describe("promoting approved recommendations into an estimate", () => {
     // Nonpositive is refused with null, for the same reason the worker refuses it:
     // `applyMarketRateAdjustment` cannot price it either.
     expect(sqlText).toContain("> 0");
+    // NaN is refused explicitly: Postgres orders numeric NaN ABOVE finite values, so `NaN > 0` is TRUE
+    // and the positive test alone would have admitted it into a client estimate.
+    expect(sqlText).toContain("NaN");
+    // …and a MANUAL row is exempt, because it promotes its own quantity and its extraction match is
+    // only an active-artifact anchor.
+    expect(sqlText).toContain("manual");
   });
 });

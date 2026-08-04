@@ -92,7 +92,23 @@ export async function loadApprovedRecommendationsForRun(
     // quantity can end up absent (a reconciliation, a rerun, a hand-written correction), and this is
     // the single point they all funnel through. Nonpositive is refused with null for the same reason
     // the worker refuses it: `applyMarketRateAdjustment` cannot price it either.
-    sql`${estimateExtractions.quantity} is not null and ${estimateExtractions.quantity} > 0`,
+    // MANUAL ROWS ARE EXEMPT. A manual recommendation carries its own `manualQuantity` and
+    // `manualUnitPrice`, and `resolvePromotionLineValues` promotes those; its extraction match exists
+    // only as an active-artifact anchor. Gating it on that extraction's quantity meant clearing an
+    // unrelated source row made a perfectly valid hand-entered line vanish as
+    // `recommendation_unavailable` — breaking a path this change had no business touching.
+    //
+    // NaN IS EXCLUDED EXPLICITLY, because Postgres orders numeric NaN ABOVE all finite values: `NaN > 0`
+    // is TRUE, so the positive test alone would have ADMITTED a NaN quantity into a client estimate.
+    // Same mistake, opposite direction, as the worker's claim predicate.
+    sql`(
+      ${estimatePricingRecommendations.selectedSourceType} = 'manual'
+      or (
+        ${estimateExtractions.quantity} is not null
+        and ${estimateExtractions.quantity} > 0
+        and ${estimateExtractions.quantity} <> 'NaN'::numeric
+      )
+    )`,
   ];
 
   if (recommendationIds) {

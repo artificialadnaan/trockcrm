@@ -415,18 +415,19 @@ export async function runEstimateGeneration(
             .where(
               and(
                 eq(estimateExtractions.id, extraction.id),
-                // MATCHES EVERY UNPRICEABLE QUANTITY, not only a null one. Widening the guard above to
-                // reject zero and negatives without widening this predicate meant such a row ENTERED the
-                // branch and then always lost the claim — so no event was written, the status stayed
-                // `pending`, and the row was silently skipped on every rerun while never appearing in the
-                // needs-quantity bucket either. Invisible in both directions, which is worse than the
-                // defect the guard was widened to catch.
-                // `NOT (quantity > 0)` rather than `<= 0`, because Postgres numeric NaN compares FALSE
-                // to everything — so `NaN <= 0` is false and a NaN quantity, which the guard above does
-                // reject, would never have claimed. Negating the positive test catches every value that
-                // is not a usable quantity in one predicate: zero, negatives and NaN alike. Null is
-                // still named separately, since `NOT (null > 0)` is null and matches nothing.
-                sql`(${estimateExtractions.quantity} is null or not (${estimateExtractions.quantity} > 0))`,
+                // MATCHES EVERY UNPRICEABLE QUANTITY, not only a null one. The guard above rejects
+                // zero, negatives and non-finite values; a claim that recognised fewer of them let such a
+                // row ENTER the branch and then always lose the claim — no event, status left `pending`,
+                // skipped invisibly on every rerun and absent from the needs-quantity bucket too.
+                //
+                // NaN IS NAMED EXPLICITLY, and two earlier attempts here were wrong about why. Postgres
+                // orders numeric NaN ABOVE all finite values — it is not "false against everything" as an
+                // earlier comment claimed — so `NaN <= 0` is false AND `not (NaN > 0)` is false. Neither
+                // form claims it. Checked against a real database rather than reasoned about:
+                //   not (q > 0)                        -> {-5, 0}
+                //   q is null or q <= 0                -> {null, -5, 0}
+                //   q is null or q <= 0 or q = 'NaN'   -> {null, -5, 0, NaN}
+                sql`(${estimateExtractions.quantity} is null or ${estimateExtractions.quantity} <= 0 or ${estimateExtractions.quantity} = 'NaN'::numeric)`,
                 sql`${estimateExtractions.status} = ${extraction.status}`
               )
             )
