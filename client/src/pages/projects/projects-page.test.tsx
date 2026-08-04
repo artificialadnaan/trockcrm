@@ -197,6 +197,36 @@ describe("ProjectsPage", () => {
     expect(card!.textContent).toContain("Service - In Production");
   });
 
+  it("does not describe the headline count as construction-only when it includes service", async () => {
+    mocks.api.mockResolvedValue(
+      boardResponse([], {
+        productionRollup: {
+          ...emptyRollup,
+          totalValue: 915000,
+          projectCount: 6,
+          construction: { ...emptyRollup.construction, projectCount: 4, totalValue: 875000 },
+          service: { ...emptyRollup.service, projectCount: 2, totalValue: 40000 },
+        },
+      }),
+    );
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <ProjectsPage />
+        </MemoryRouter>,
+      );
+    });
+
+    await vi.waitFor(() => expect(container.textContent).toContain("Production Revenue"));
+    const card = container.querySelector('[aria-label="Production revenue roll-up"]')!;
+
+    // 6 = 4 construction + 2 service, so the sentence next to it must not name only the
+    // construction stages — that reads the service projects as construction-stage work.
+    expect(card.textContent).toContain("6 projects across the construction and service production stages");
+    expect(card.textContent).not.toContain("6 projects in Buy Out, Pre-Construction and In Production");
+  });
+
   it("states the stale and not-synced caveat on the roll-up card", async () => {
     mocks.api.mockResolvedValue(
       boardResponse([], {
@@ -306,7 +336,7 @@ describe("ProjectsPage", () => {
 
     await vi.waitFor(() => expect(container.textContent).toContain("Production Revenue"));
     const card = container.querySelector('[aria-label="Production revenue roll-up"]');
-    expect(card!.textContent).toContain("No projects are in Buy Out, Pre-Construction or In Production");
+    expect(card!.textContent).toContain("No projects are in a construction or service production stage");
     expect(card!.textContent).not.toContain("All 0 projects");
   });
 

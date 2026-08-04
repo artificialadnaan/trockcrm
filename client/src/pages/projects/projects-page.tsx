@@ -139,7 +139,7 @@ function rollupCaveat(rollup: PortfolioProductionRollup) {
   if (rollup.projectCount === 0) {
     return {
       tone: "calm" as const,
-      body: <>No projects are in Buy Out, Pre-Construction or In Production right now.</>,
+      body: <>No projects are in a construction or service production stage right now.</>,
     };
   }
   return {
@@ -180,9 +180,16 @@ function ProductionRollupCard({ rollup }: { rollup: PortfolioProductionRollup })
           <p className="mt-2 text-4xl font-black tabular-nums leading-none text-slate-950">
             {formatCurrency(rollup.totalValue)}
           </p>
+          {/*
+            Track-NEUTRAL wording on purpose. This count includes the service stages as well as the
+            construction ones (the server rolls both into projectCount and totalValue), so naming only
+            "Buy Out, Pre-Construction and In Production" described service revenue as construction-stage
+            work — undercutting the split the card exists to show. The tiles below name the exact stages
+            per track, so the summary does not need to and must not contradict them.
+          */}
           <p className="mt-2 text-[11px] font-bold text-slate-500">
-            {rollup.projectCount} {rollup.projectCount === 1 ? "project" : "projects"} in Buy Out,
-            Pre-Construction and In Production
+            {rollup.projectCount} {rollup.projectCount === 1 ? "project" : "projects"} across the
+            construction and service production stages
           </p>
         </div>
         <div className="grid w-full gap-3 sm:grid-cols-2 lg:max-w-xl">

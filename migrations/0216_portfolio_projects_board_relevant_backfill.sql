@@ -44,18 +44,33 @@
 -- columns. That is pre-existing behaviour, called out here so the run is not a surprise.)
 -- In short: this migration closes the FLAG gap. It does not close the INGESTION gap.
 --
--- THE EXCLUSION LIST IS DUPLICATED FROM CODE, deliberately and with a comment, because SQL cannot import
--- `PORTFOLIO_PROJECT_OFF_BOARD_STAGES` (shared/src/types/portfolio-project-stages.ts). The two must agree:
--- a runtime test (server/tests/migrations/0216-...) reads THIS FILE and asserts the literals here are
--- exactly that constant, so the pair cannot drift silently.
---
 -- MATCHED ON `current_stage`, NOT `current_stage_normalized`. The normalized column holds whatever the
 -- normalizer produced when the row was written, and this release changed one of those outputs
 -- ("pre - construction" -> "pre-construction"), so the stored value is not reliably today's canonical form.
--- The RAW Procore string is what it has always been. `lower(btrim(...))` matches the normalizer's own first
--- two steps, which is all these two exclusion literals need (neither contains an underscore, a hyphen, or a
--- run of internal whitespace). Board placement itself needs no data fix: the board re-normalizes at READ
--- time, so a stale `current_stage_normalized` lands in the right column on its own.
+-- The RAW Procore string is what it has always been. Board PLACEMENT needs no data fix either way: the
+-- board re-normalizes at READ time, so a stale `current_stage_normalized` lands in the right column anyway.
+--
+-- ...WHICH IS WHY THE EXCLUSION HAS TO NORMALIZE, and an earlier draft of this file got that wrong.
+-- Matching raw text against the two CANONICAL strings 'hold (legacy)' / 'lost/cancelled (legacy)' missed
+-- every other spelling that the TypeScript classifier maps into those buckets — `Hold`, `Lost/Cancelled`,
+-- `Lost / Cancelled (Legacy)`, and any underscore or spacing variant. Those rows would have been flipped
+-- ONTO the board: genuinely dead work, visible until some later stage event happened to rewrite the flag.
+-- Choosing the raw column is what created that obligation, so the fix is to apply the SAME normalization
+-- here that `normalizePortfolioProjectStage` applies in TypeScript, rather than to enumerate spellings —
+-- enumerating spellings is precisely what went wrong.
+--
+-- `pg_temp.portfolio_stage_is_off_board` below mirrors that function step for step: the bare textual
+-- normalization, then the same three lookups (bare, hyphen-as-space, compact-hyphen) against the same
+-- alias keys. The one thing it does NOT reproduce is the `??` precedence — a string whose bare form hits a
+-- BOARD alias while a hyphen variant hits an OFF-BOARD one would classify differently. No such string
+-- exists: not one off-board alias key contains a hyphen, so the variants can only ever match the same
+-- bucket the bare form does.
+--
+-- THE ALIAS LIST IS STILL DUPLICATED FROM CODE, because SQL cannot import the module. It is pinned:
+-- a runtime test (server/tests/migrations/0216-...) reads THIS FILE and asserts the literals in EVERY copy
+-- of the function equal `PORTFOLIO_OFF_BOARD_STAGE_ALIASES` — the alias KEYS derived from the map itself,
+-- not the two canonical values. That is the test that would have caught the bug above; the previous one
+-- compared against the canonical list and passed happily while the migration was wrong.
 --
 -- IDEMPOTENT: the `is_board_relevant = false` predicate means a replay updates zero rows. Re-running this
 -- migration is a no-op, which the runner relies on.
@@ -68,6 +83,45 @@ DECLARE
   schema_name text;
   flipped bigint;
 BEGIN
+  -- `normalizePortfolioProjectStage` + `isPortfolioProjectOffBoardStage`, in SQL. `pg_temp` so it is
+  -- session-local and disappears on its own — a migration has no business leaving a helper behind in a
+  -- schema the application reads (same reasoning as 0214's timestamp helper).
+  --
+  -- POSIX classes rather than `\s`: `[[:space:]]` is the portable spelling in regexp_replace. The three
+  -- substitutions are the TypeScript ones in the same order — collapse underscores/whitespace, pad hyphens
+  -- to " - ", collapse whitespace again — and the padding survives the final collapse because it is
+  -- already single-spaced.
+  EXECUTE $fn$
+    CREATE OR REPLACE FUNCTION pg_temp.portfolio_stage_is_off_board(raw_stage text)
+    RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS $body$
+    DECLARE
+      off_board constant text[] := ARRAY[
+        'hold',
+        'hold (legacy)',
+        'lost / cancelled (legacy)',
+        'lost/cancelled',
+        'lost/cancelled (legacy)'
+      ];
+      bare text;
+      hyphen_as_space text;
+      compact_hyphen text;
+    BEGIN
+      bare := regexp_replace(
+                regexp_replace(
+                  regexp_replace(lower(btrim(coalesce(raw_stage, ''))), '[_[:space:]]+', ' ', 'g'),
+                  '[[:space:]]*-[[:space:]]*', ' - ', 'g'),
+                '[[:space:]]+', ' ', 'g');
+      hyphen_as_space := regexp_replace(
+                           regexp_replace(bare, '[[:space:]]*-[[:space:]]*', ' ', 'g'),
+                           '[[:space:]]+', ' ', 'g');
+      compact_hyphen := regexp_replace(bare, '[[:space:]]*-[[:space:]]*', '-', 'g');
+      RETURN bare = ANY(off_board)
+          OR hyphen_as_space = ANY(off_board)
+          OR compact_hyphen = ANY(off_board);
+    END;
+    $body$
+  $fn$;
+
   FOR schema_name IN
     SELECT nspname FROM pg_namespace WHERE nspname LIKE 'office\_%' ESCAPE '\' ORDER BY nspname
   LOOP
@@ -83,8 +137,8 @@ BEGIN
           SET is_board_relevant = true,
               updated_at = NOW()
         WHERE is_board_relevant = false
-          AND lower(btrim(current_stage)) NOT IN (%L, %L)',
-      schema_name, 'hold (legacy)', 'lost/cancelled (legacy)'
+          AND NOT pg_temp.portfolio_stage_is_off_board(current_stage)',
+      schema_name
     );
     GET DIAGNOSTICS flipped = ROW_COUNT;
 
@@ -103,10 +157,43 @@ END $tenant$;
 -- shape as every other tenant migration — the failure mode the markers exist to prevent is somebody
 -- adding a statement to the DO-loop later and not here, and a file with no block at all is where that
 -- omission is easiest to miss.
+--
+-- It re-creates the pg_temp helper because the provisioner runs this block STANDALONE, outside the DO
+-- block above, so the session it runs in has no such function. The alias array is therefore duplicated —
+-- the drift test asserts EVERY copy in this file carries the same list, so the two cannot diverge.
 -- TENANT_SCHEMA_START
+CREATE OR REPLACE FUNCTION pg_temp.portfolio_stage_is_off_board(raw_stage text)
+RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS $body$
+DECLARE
+  off_board constant text[] := ARRAY[
+    'hold',
+    'hold (legacy)',
+    'lost / cancelled (legacy)',
+    'lost/cancelled',
+    'lost/cancelled (legacy)'
+  ];
+  bare text;
+  hyphen_as_space text;
+  compact_hyphen text;
+BEGIN
+  bare := regexp_replace(
+            regexp_replace(
+              regexp_replace(lower(btrim(coalesce(raw_stage, ''))), '[_[:space:]]+', ' ', 'g'),
+              '[[:space:]]*-[[:space:]]*', ' - ', 'g'),
+            '[[:space:]]+', ' ', 'g');
+  hyphen_as_space := regexp_replace(
+                       regexp_replace(bare, '[[:space:]]*-[[:space:]]*', ' ', 'g'),
+                       '[[:space:]]+', ' ', 'g');
+  compact_hyphen := regexp_replace(bare, '[[:space:]]*-[[:space:]]*', '-', 'g');
+  RETURN bare = ANY(off_board)
+      OR hyphen_as_space = ANY(off_board)
+      OR compact_hyphen = ANY(off_board);
+END;
+$body$;
+
 UPDATE office_dallas.portfolio_projects
    SET is_board_relevant = true,
        updated_at = NOW()
  WHERE is_board_relevant = false
-   AND lower(btrim(current_stage)) NOT IN ('hold (legacy)', 'lost/cancelled (legacy)');
+   AND NOT pg_temp.portfolio_stage_is_off_board(current_stage);
 -- TENANT_SCHEMA_END

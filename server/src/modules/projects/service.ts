@@ -5,6 +5,7 @@ import {
   PORTFOLIO_PROJECT_BOARD_STAGES,
   PORTFOLIO_UNMAPPED_BOARD_STAGE,
   PORTFOLIO_VALUE_STALE_AFTER_DAYS,
+  isPortfolioProjectBoardRelevantStage,
   normalizePortfolioProjectStage,
   type PortfolioProjectBoardStage,
 } from "@trock-crm/shared/types";
@@ -675,7 +676,20 @@ function toPortfolioStageEntry(row: any): PortfolioProjectStageEntry {
     previousStageNormalized: row.previous_stage_normalized,
     stage: row.stage,
     stageNormalized: row.stage_normalized,
-    isBoardRelevant: row.is_board_relevant,
+    // DERIVED, not read from `is_board_relevant` on the row.
+    //
+    // That column is a cached classification stamped by whatever the classifier said the day the
+    // event was relayed. The detail page renders it as "Board stage" / "Legacy stage", so after this
+    // release a backfilled Pre-Construction or Service project was reachable but its whole history
+    // still read "Legacy stage" — until some unrelated future stage event happened to rewrite it.
+    //
+    // Chosen over updating the rows in migration 0216 because a stage entry's flag is DISPLAY-ONLY:
+    // nothing filters or indexes on it (unlike portfolio_projects.is_board_relevant, which both read
+    // paths do filter on and which therefore genuinely needs the backfill). Deriving costs a function
+    // call and leaves nothing to keep in step with the alias map — which is exactly the class of bug
+    // that made 0216 necessary in the first place. The stored column is left alone deliberately: it
+    // remains an honest audit record of what the relay believed at the time.
+    isBoardRelevant: isPortfolioProjectBoardRelevantStage(row.stage_normalized ?? row.stage),
     enteredAt: new Date(row.entered_at).toISOString(),
     relayDetectedAt: row.relay_detected_at ? new Date(row.relay_detected_at).toISOString() : null,
     webhookTimestamp: row.webhook_timestamp ? new Date(row.webhook_timestamp).toISOString() : null,

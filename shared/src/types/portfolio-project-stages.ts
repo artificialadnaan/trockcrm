@@ -129,6 +129,21 @@ const STAGE_ALIASES: Record<string, PortfolioProjectBoardStage | PortfolioProjec
 };
 
 /**
+ * EVERY spelling that classifies as off-board — the alias keys, not just the two canonical
+ * values. Derived from the map rather than hand-listed, so it cannot fall behind it.
+ *
+ * Exists because SQL cannot call this module. Migration 0216 has to decide the same question
+ * ("does this raw stage belong to a dead legacy bucket?") against raw `current_stage` text, and
+ * excluding only the two CANONICAL strings missed `Hold`, `Lost/Cancelled` and
+ * `Lost / Cancelled (Legacy)` — flipping genuinely dead work onto the board. A drift test pins
+ * the migration's list against this constant.
+ */
+export const PORTFOLIO_OFF_BOARD_STAGE_ALIASES: readonly string[] = Object.entries(STAGE_ALIASES)
+  .filter(([, canonical]) => (PORTFOLIO_PROJECT_OFF_BOARD_STAGES as readonly string[]).includes(canonical))
+  .map(([alias]) => alias)
+  .sort();
+
+/**
  * Purely TEXTUAL normalization — case, underscores, whitespace, hyphen spacing — with NO alias
  * table consulted. Exported because it is the one form that is stable across alias-map edits.
  *

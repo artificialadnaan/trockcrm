@@ -20,7 +20,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
-import { PORTFOLIO_PROJECT_OFF_BOARD_STAGES } from "@trock-crm/shared/types";
+import {
+  PORTFOLIO_OFF_BOARD_STAGE_ALIASES,
+  PORTFOLIO_PROJECT_OFF_BOARD_STAGES,
+  isPortfolioProjectOffBoardStage,
+} from "@trock-crm/shared/types";
 
 const MIGRATION_PATH = join(__dirname, "../../../migrations/0216_portfolio_projects_board_relevant_backfill.sql");
 const MIGRATION_SQL = readFileSync(MIGRATION_PATH, "utf-8");
@@ -80,37 +84,13 @@ async function flagsFor(pg: PGlite, schema: string): Promise<Record<string, bool
 }
 
 /**
- * Every single-quoted literal inside a `NOT IN ( ... )` clause, found by scanning with quote
- * awareness. A regex cannot do this: the stage literals contain parentheses of their own.
- *
- * The DO-loop passes its two stages as `format()` arguments rather than inline, so its clause is
- * `NOT IN (%L, %L)` and contributes no literals here — the argument list is picked up because the
- * scan continues past the clause to the end of the `format(...)` call it sits in.
+ * The stage literals from EVERY `off_board constant text[] := ARRAY[ ... ]` in the file — one per
+ * copy of the classifier helper (the DO-loop's and the TENANT_SCHEMA block's standalone copy).
+ * Returned per-copy so the test can assert both are complete AND identical to each other.
  */
-function notInClauseLiterals(sql: string): string[] {
-  const literals: string[] = [];
-  for (const match of sql.matchAll(/NOT IN \(/g)) {
-    let depth = 1;
-    let inQuote = false;
-    let current: string | null = null;
-    for (let i = match.index! + match[0].length; i < sql.length && depth > 0; i += 1) {
-      const char = sql[i];
-      if (inQuote) {
-        if (char === "'") {
-          inQuote = false;
-          if (current !== null) literals.push(current);
-          current = null;
-        } else if (current !== null) {
-          current += char;
-        }
-        continue;
-      }
-      if (char === "'") { inQuote = true; current = ""; continue; }
-      if (char === "(") depth += 1;
-      else if (char === ")") depth -= 1;
-    }
-  }
-  return literals;
+function offBoardArrayLiteralsPerCopy(sql: string): string[][] {
+  return [...sql.matchAll(/off_board constant text\[\] := ARRAY\[([\s\S]*?)\]/g)]
+    .map((match) => [...match[1].matchAll(/'((?:[^']|'')*)'/g)].map((m) => m[1].replace(/''/g, "'")));
 }
 
 describe("migration 0216 — portfolio_projects board-relevant backfill", () => {
@@ -213,14 +193,75 @@ describe("migration 0216 — portfolio_projects board-relevant backfill", () => 
     expect((await flagsFor(pg, "office_newtenant")).np).toBe(true);
   });
 
-  it("excludes exactly PORTFOLIO_PROJECT_OFF_BOARD_STAGES — the duplicated list cannot drift", () => {
-    // SQL cannot import the constant, so this pairing is what keeps the migration honest.
-    for (const stage of PORTFOLIO_PROJECT_OFF_BOARD_STAGES) {
-      expect(MIGRATION_SQL).toContain(`'${stage}'`);
+  it("excludes every off-board ALIAS spelling, not just the two canonical values", () => {
+    // THE TEST THAT WOULD HAVE CAUGHT THE BUG. The previous version compared the SQL literals against
+    // PORTFOLIO_PROJECT_OFF_BOARD_STAGES — the two CANONICAL strings — and passed happily while the
+    // migration was missing 'hold', 'lost/cancelled' and 'lost / cancelled (legacy)', every one of
+    // which the classifier maps into a legacy bucket. Pinned against the alias KEYS instead, derived
+    // from the map itself, so adding an off-board spelling in TypeScript fails here until the
+    // migration covers it too.
+    const copies = offBoardArrayLiteralsPerCopy(MIGRATION_SQL);
+    expect(copies.length).toBe(2); // DO-loop + standalone TENANT_SCHEMA copy
+
+    const expected = [...PORTFOLIO_OFF_BOARD_STAGE_ALIASES].sort();
+    expect(expected).toEqual(expect.arrayContaining([...PORTFOLIO_PROJECT_OFF_BOARD_STAGES]));
+    for (const copy of copies) {
+      expect([...copy].sort()).toEqual(expected);
     }
-    // ...and nothing BEYOND that list is excluded. Scanned rather than regexed: the literals
-    // themselves contain parentheses ('hold (legacy)'), so a `[^)]*` match stops inside the string.
-    expect([...new Set(notInClauseLiterals(MIGRATION_SQL))].sort())
-      .toEqual([...PORTFOLIO_PROJECT_OFF_BOARD_STAGES].sort());
+    // ...and the two copies are identical to each other, not merely each valid.
+    expect(copies[0]).toEqual(copies[1]);
+  });
+
+  it("leaves every raw legacy SPELLING off the board, not just the canonical two", async () => {
+    // The real hazard: rows carry RAW Procore text, and the classifier maps all of these into the
+    // dead buckets. Flipping any of them puts genuinely dead work on the board.
+    const rawLegacySpellings = [
+      "Hold (LEGACY)",
+      "Hold",
+      "hold",
+      "  HOLD  ",
+      "Lost/Cancelled (Legacy)",
+      "Lost / Cancelled (Legacy)",
+      "Lost/Cancelled",
+      "LOST/CANCELLED (LEGACY)",
+      "lost_cancelled (legacy)".replace("_", "/"), // underscore/spacing variants normalize in
+    ];
+    for (const [index, stage] of rawLegacySpellings.entries()) {
+      await insertProject(pg, "office_dallas", {
+        id: `raw-legacy-${index}`,
+        stage,
+        normalized: "whatever-the-old-normalizer-wrote",
+        boardRelevant: false,
+      });
+    }
+
+    await pg.exec(MIGRATION_SQL);
+    const flags = await flagsFor(pg, "office_dallas");
+    for (const [index, stage] of rawLegacySpellings.entries()) {
+      expect({ stage, relevant: flags[`raw-legacy-${index}`] }).toEqual({ stage, relevant: false });
+    }
+  });
+
+  it("agrees with the TypeScript classifier on every off-board alias spelling", async () => {
+    // Drive the SQL helper directly with each alias key and require it to say off-board, which is what
+    // isPortfolioProjectOffBoardStage says for the same input.
+    await pg.exec(MIGRATION_SQL); // defines pg_temp.portfolio_stage_is_off_board
+    for (const alias of PORTFOLIO_OFF_BOARD_STAGE_ALIASES) {
+      const sqlSays = await pg.query<{ off: boolean }>(
+        `SELECT pg_temp.portfolio_stage_is_off_board($1) AS off`,
+        [alias],
+      );
+      expect({ alias, off: sqlSays.rows[0].off }).toEqual({ alias, off: isPortfolioProjectOffBoardStage(alias) });
+      expect(sqlSays.rows[0].off).toBe(true);
+    }
+
+    // ...and does NOT over-match: board stages and unknown stages are both "not off-board".
+    for (const stage of ["Pre-Construction", "Service - In Production", "Closed", "Buy Out", "Warranty - Punch List", ""]) {
+      const sqlSays = await pg.query<{ off: boolean }>(
+        `SELECT pg_temp.portfolio_stage_is_off_board($1) AS off`,
+        [stage],
+      );
+      expect({ stage, off: sqlSays.rows[0].off }).toEqual({ stage, off: isPortfolioProjectOffBoardStage(stage) });
+    }
   });
 });

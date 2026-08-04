@@ -96,6 +96,50 @@ describe("portfolio project board service", () => {
     expect(board.stages.find((stage) => stage.stage === "closed")?.projects).toHaveLength(1);
   });
 
+  it("derives a stage entry's board-relevance from its stage, not the cached column", async () => {
+    // The stored is_board_relevant is whatever the classifier said the day the event was relayed, and
+    // the detail page renders it as "Board stage" / "Legacy stage". After this release a backfilled
+    // Pre-Construction / Service project was reachable but every history row still read "Legacy stage".
+    const staleRows = [
+      // Newly-mapped stages, stamped false by the OLD classifier -> must now read as board stages.
+      { id: "e1", stage: "Pre-Construction", stage_normalized: "pre - construction", is_board_relevant: false, expected: true },
+      { id: "e2", stage: "Service - In Production", stage_normalized: "service - in production", is_board_relevant: false, expected: true },
+      // Genuinely dead work stays "Legacy stage" whatever the column says.
+      { id: "e3", stage: "Hold (LEGACY)", stage_normalized: "hold (legacy)", is_board_relevant: true, expected: false },
+      // A stage nobody anticipated is not a decision to exclude.
+      { id: "e4", stage: "Warranty - Punch List", stage_normalized: "warranty - punch list", is_board_relevant: false, expected: true },
+    ];
+
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("FROM portfolio_projects")) {
+        return { rows: [{ ...boardRows[0], is_board_relevant: true, last_stage_event_key: null, raw_snapshot: {}, created_at: "2026-05-18T12:00:00.000Z" }] };
+      }
+      if (sql.includes("FROM portfolio_project_stage_entries")) {
+        return {
+          rows: staleRows.map((row) => ({
+            id: row.id,
+            event_key: `key-${row.id}`,
+            previous_stage: null,
+            previous_stage_normalized: null,
+            stage: row.stage,
+            stage_normalized: row.stage_normalized,
+            is_board_relevant: row.is_board_relevant,
+            entered_at: "2026-05-20T12:00:00.000Z",
+            relay_detected_at: null,
+            webhook_timestamp: null,
+            created_at: "2026-05-20T12:01:05.000Z",
+          })),
+        };
+      }
+      return { rows: [] };
+    });
+
+    const detail = await getPortfolioProjectDetail({ query } as any, "00000000-0000-4000-8000-000000000001");
+
+    expect(detail!.stageHistory.map((entry) => ({ id: entry.id, isBoardRelevant: entry.isBoardRelevant })))
+      .toEqual(staleRows.map((row) => ({ id: row.id, isBoardRelevant: row.expected })));
+  });
+
   it("returns portfolio project detail with stage history using sequential tenant queries", async () => {
     const query = vi.fn(async (sql: string, _params?: unknown[]) => {
       if (sql.includes("FROM portfolio_projects")) {
