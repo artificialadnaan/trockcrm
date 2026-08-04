@@ -418,6 +418,75 @@ export interface RepActivityReport {
   repSummary: Array<{ repName: string; touchpoints: number; activeDeals: number; stalledAccounts: number }>;
 }
 
+/**
+ * Daily Activity Log — the readable entries behind the Rep Activity counts.
+ *
+ * `days[].entryCount` is the FULL-window count for that day, not the number of entries on the
+ * current page, so a day section can legitimately show fewer rows than it claims. The page range in
+ * `pagination` is what makes that honest — render it.
+ */
+export interface DailyActivityLogEntry {
+  id: string;
+  type: string;
+  typeLabel: string;
+  occurredAt: string;
+  occurredDate: string;
+  loggedAt: string;
+  loggedDate: string;
+  loggedSameDay: boolean;
+  /** loggedDate - occurredDate in whole days: positive = written up late, negative = dated ahead. */
+  loggedDaysDiff: number;
+  responsibleUserId: string;
+  responsibleName: string;
+  performedByName: string | null;
+  subject: string | null;
+  body: string | null;
+  outcome: string | null;
+  nextStep: string | null;
+  nextStepDueAt: string | null;
+  /** Someone else's email activity: the row still counts, but its content is withheld. Label it. */
+  contentRestricted: boolean;
+  durationMinutes: number | null;
+  targetType: string | null;
+  targetName: string | null;
+  dealId: string | null;
+  dealName: string | null;
+  dealNumber: string | null;
+}
+
+export interface DailyActivityLogReport {
+  kpis: {
+    totalEntries: number;
+    notes: number;
+    daysCovered: number;
+    repsLogging: number;
+    offDayLogged: number;
+  };
+  days: Array<{
+    date: string;
+    entryCount: number;
+    noteCount: number;
+    repCount: number;
+    offDayLoggedCount: number;
+    entries: DailyActivityLogEntry[];
+  }>;
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    returned: number;
+    totalPages: number;
+    hasMore: boolean;
+  };
+  appliedTypes: string[];
+}
+
+export interface DailyActivityLogQueryOptions extends PerformanceReportQueryOptions {
+  types?: string[];
+  page?: number;
+  limit?: number;
+}
+
 export interface ForecastAccuracyReport {
   kpis: {
     commit: number;
@@ -1333,6 +1402,62 @@ export function useRepActivityReport(options: PerformanceReportQueryOptions = {}
     options,
     "Failed to load rep activity"
   );
+}
+
+/**
+ * Daily Activity Log. Not routed through usePerformanceReport because it carries three params that
+ * report does not know about (types/page/limit) and they must take part in the refetch deps —
+ * otherwise turning a type filter on or paging forward would leave the previous page on screen.
+ */
+export function useDailyActivityLogReport(options: DailyActivityLogQueryOptions = {}) {
+  const [data, setData] = useState<DailyActivityLogReport | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const typeKey = options.types?.join(",") ?? "";
+  // Monotonic request id -- the same guard useMondayShowcase uses. This report has MANY controls that
+  // can fire in quick succession (13 type chips, paging, owner/office/date), so a slower earlier
+  // response can land after a newer one and repaint the page with the previous filter's entries. Only
+  // the latest request may write state; a superseded response is dropped, and a superseded `finally`
+  // must not clear the loading flag while the current request is still in flight.
+  const latestRequest = useRef(0);
+
+  const fetchReport = useCallback(async () => {
+    const requestId = ++latestRequest.current;
+    setLoading(true);
+    setError(null);
+    try {
+      const params = new URLSearchParams();
+      appendPerformanceReportQueryOptions(params, options);
+      if (options.types?.length) params.set("types", options.types.join(","));
+      if (options.page && options.page > 1) params.set("page", String(options.page));
+      if (options.limit) params.set("limit", String(options.limit));
+      const qs = params.toString();
+      const result = await api<{ data: DailyActivityLogReport }>(`/reports/daily-activity-log${qs ? `?${qs}` : ""}`);
+      if (requestId !== latestRequest.current) return; // superseded by a newer request
+      setData(result.data);
+    } catch (err: unknown) {
+      if (requestId !== latestRequest.current) return;
+      setError(err instanceof Error ? err.message : "Failed to load the daily activity log");
+      setData(null);
+    } finally {
+      if (requestId === latestRequest.current) setLoading(false);
+    }
+  }, [
+    options.dateFrom,
+    options.dateTo,
+    options.office,
+    options.ownerIds?.join(","),
+    options.ownerNames?.join(","),
+    typeKey,
+    options.page,
+    options.limit,
+  ]);
+
+  useEffect(() => {
+    fetchReport();
+  }, [fetchReport]);
+
+  return { data, loading, error, refetch: fetchReport };
 }
 
 export function useForecastAccuracyReport(options: PerformanceReportQueryOptions = {}) {
