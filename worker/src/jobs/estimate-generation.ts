@@ -396,7 +396,21 @@ export async function runEstimateGeneration(
         };
 
         if (!lockedClient && typeof tenantDb.transaction === "function") {
-          await tenantDb.transaction(async (tx: any) => flagQuantitylessRow(tx));
+          await tenantDb.transaction(async (tx: any) => {
+            // SET LOCAL FIRST, because this transaction is on a DIFFERENT CONNECTION.
+            //
+            // On the deal-wide path `tenantDb` wraps the shared pool, and the `SET search_path` above
+            // ran as one statement on whichever connection happened to serve it. Opening a transaction
+            // checks out a connection of its own, which carries the default search_path — so without
+            // this the claim and its event would address `public`, or another office's schema entirely
+            // while several tenants have jobs in flight. Wrapping these two statements for atomicity
+            // introduced that exposure; this closes it rather than trading one defect for another.
+            //
+            // LOCAL, so it reverts when the transaction ends and cannot leak the tenant onto a pooled
+            // connection that some later, unrelated statement borrows.
+            await tx.execute(sql.raw(`SET LOCAL search_path TO ${schemaName}, public`));
+            await flagQuantitylessRow(tx);
+          });
         } else {
           await flagQuantitylessRow(tenantDb);
         }
