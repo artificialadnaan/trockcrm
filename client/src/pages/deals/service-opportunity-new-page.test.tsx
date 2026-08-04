@@ -10,13 +10,19 @@ import dealListPageSource from "./deal-list-page.tsx?raw";
 
 const mocks = vi.hoisted(() => ({
   formProps: {
-    value: null as { initialValues?: Record<string, string>; officeId?: string | null } | null,
+    value: null as
+      | { initialValues?: Record<string, string>; officeId?: string | null; cancelTo?: string }
+      | null,
   },
 }));
 
-// The form has its own suite; here we only care WHICH prefill and office reach it.
+// The form has its own suite; here we only care WHICH prefill, office and cancel target reach it.
 vi.mock("@/components/deals/service-opportunity-form", () => ({
-  ServiceOpportunityForm: (props: { initialValues?: Record<string, string>; officeId?: string | null }) => {
+  ServiceOpportunityForm: (props: {
+    initialValues?: Record<string, string>;
+    officeId?: string | null;
+    cancelTo?: string;
+  }) => {
     mocks.formProps.value = props;
     return <div data-testid="service-opportunity-form" />;
   },
@@ -104,6 +110,24 @@ describe("ServiceOpportunityNewPage", () => {
 
     // null, not "" — the form treats only a real id as an override.
     expect(mocks.formProps.value?.officeId).toBeNull();
+  });
+
+  it("gives Cancel the same target as Back, from both entry points", () => {
+    // Two controls two inches apart must not disagree. The form's own navigate(-1) no-ops on a fresh tab.
+    const fromProperty = renderPage(
+      "/deals/service-opportunity/new?propertyId=property-1&returnPropertyId=property-1&officeId=office-atlanta"
+    );
+    containers.push(fromProperty.container);
+    roots.push(fromProperty.root);
+    expect(mocks.formProps.value?.cancelTo).toBe("/properties/property-1?officeId=office-atlanta");
+    expect(mocks.formProps.value?.cancelTo).toBe(backLink(fromProperty.container)?.getAttribute("href"));
+
+    // The deals-list entry has the same no-history defect, so it gets the same explicit target.
+    const fromDeals = renderPage("/deals/service-opportunity/new");
+    containers.push(fromDeals.container);
+    roots.push(fromDeals.root);
+    expect(mocks.formProps.value?.cancelTo).toBe("/deals");
+    expect(mocks.formProps.value?.cancelTo).toBe(backLink(fromDeals.container)?.getAttribute("href"));
   });
 
   it("sends Back to the originating property, carrying office context", () => {

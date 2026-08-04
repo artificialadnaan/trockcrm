@@ -3,6 +3,7 @@ import { useMemo } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { buttonVariants } from "@/components/ui/button";
 import { ServiceOpportunityForm } from "@/components/deals/service-opportunity-form";
+import { appendOfficeIdSearch } from "@/lib/office-selection";
 import { cn } from "@/lib/utils";
 
 export function ServiceOpportunityNewPage() {
@@ -25,10 +26,10 @@ export function ServiceOpportunityNewPage() {
   // Office context is URL-driven platform-wide (lib/api reads ?officeId and sends it as x-office-id), so it
   // has to survive the hop back as well — silently dropping it here is how cross-office context gets lost.
   const officeId = searchParams.get("officeId")?.trim() ?? "";
-  const officeQuery = officeId ? `?officeId=${encodeURIComponent(officeId)}` : "";
-  const backTo = returnPropertyId
-    ? `/properties/${encodeURIComponent(returnPropertyId)}${officeQuery}`
-    : `/deals${officeQuery}`;
+  const backTo = appendOfficeIdSearch(
+    returnPropertyId ? `/properties/${encodeURIComponent(returnPropertyId)}` : "/deals",
+    officeId
+  );
   const backLabel = returnPropertyId ? "Property" : "Deals";
 
   return (
@@ -46,7 +47,10 @@ export function ServiceOpportunityNewPage() {
           office's schema, and lib/api's URL fallback is overridden the moment the form sends its own
           x-office-id. Without this a rep whose home office differs resolves the property in the wrong tenant
           and creates the deal there too. Empty (deals-page entry) leaves the home-office behaviour alone. */}
-      <ServiceOpportunityForm initialValues={initialValues} officeId={officeId || null} />
+      {/* Cancel gets the SAME target as Back. The form's own navigate(-1) no-ops on a fresh tab or a shared
+          link, so the two controls would disagree — and that is true of the deals-list entry too, which is
+          why this is passed unconditionally rather than only for the property path. */}
+      <ServiceOpportunityForm initialValues={initialValues} officeId={officeId || null} cancelTo={backTo} />
     </div>
   );
 }

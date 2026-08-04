@@ -24,7 +24,15 @@ const mocks = vi.hoisted(() => ({
   // fires it later via the "Resolve property" button, standing in for the async /properties/:id lookup.
   deferPropertyResolution: { value: false },
   useTaskAssignees: vi.fn(),
+  navigate: vi.fn(),
 }));
+
+// Real Router (Link/MemoryRouter still render), but navigation is observable — the success redirect and
+// Cancel are the two exits that don't go through an anchor.
+vi.mock("react-router-dom", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-router-dom")>();
+  return { ...actual, useNavigate: () => mocks.navigate };
+});
 
 vi.mock("@/hooks/use-deals", () => ({
   createServiceOpportunity: mocks.createServiceOpportunity,
@@ -172,7 +180,8 @@ function setupCommonMocks() {
 
 async function renderForm(
   initialValues?: { name?: string; companyId?: string; propertyId?: string },
-  officeId?: string | null
+  officeId?: string | null,
+  options: { omitOnSuccess?: boolean; cancelTo?: string } = {}
 ) {
   const container = document.createElement("div");
   document.body.appendChild(container);
@@ -181,7 +190,13 @@ async function renderForm(
   await act(async () => {
     root.render(
       <MemoryRouter>
-        <ServiceOpportunityForm onSuccess={vi.fn()} initialValues={initialValues} officeId={officeId} />
+        <ServiceOpportunityForm
+          // Omitting onSuccess is what exercises the built-in success REDIRECT.
+          onSuccess={options.omitOnSuccess ? undefined : vi.fn()}
+          initialValues={initialValues}
+          officeId={officeId}
+          cancelTo={options.cancelTo}
+        />
       </MemoryRouter>
     );
   });
@@ -519,6 +534,101 @@ describe("ServiceOpportunityForm", () => {
     });
     expect(mocks.createServiceOpportunity).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Company and property are required");
+  });
+
+  function leadEscapeHref(container: HTMLElement) {
+    return (
+      Array.from(container.querySelectorAll("a")).find((anchor) =>
+        anchor.getAttribute("href")?.startsWith("/leads/new")
+      ) ?? null
+    )?.getAttribute("href");
+  }
+
+  it("hands the prefill to the non-Service Lead escape instead of dumping the rep on an empty form", async () => {
+    // The escape is an EXIT from the flow. A bare /leads/new drops company, property and name, so the rep
+    // retypes the address and creates a second property for the same building — the precise failure this
+    // entry point exists to prevent.
+    mocks.selectedProperty.value = { id: "property-9", state: "TX" };
+    const { container, root } = await renderForm(
+      { name: "Cedar Springs opportunity", companyId: "company-7", propertyId: "property-9" },
+      "office-atlanta"
+    );
+    containers.push(container);
+    roots.push(root);
+
+    expect(leadEscapeHref(container)).toBe(
+      "/leads/new?propertyId=property-9&companyId=company-7&name=Cedar+Springs+opportunity&officeId=office-atlanta"
+    );
+
+    // Built from LIVE state, so an edit made before taking the escape travels with it.
+    await act(async () => {
+      setInputValue(container.querySelector("#name") as HTMLInputElement, "Cedar Springs re-roof");
+    });
+    expect(leadEscapeHref(container)).toContain("name=Cedar+Springs+re-roof");
+  });
+
+  it("leaves the Lead escape bare when there is nothing to carry", async () => {
+    const { container, root } = await renderForm();
+    containers.push(container);
+    roots.push(root);
+
+    // No prefill, no office: no invented params.
+    expect(leadEscapeHref(container)).toBe("/leads/new");
+  });
+
+  it("redirects to the new deal in the office it was created in", async () => {
+    // DealDetailPage derives its tenant from ?officeId. Without it a cross-office deal that saved perfectly
+    // loads from the viewer's default office and reads as not-found — so the rep creates it again.
+    mocks.selectedProperty.value = { id: "property-9", state: "TX" };
+    const { container, root } = await renderForm(
+      { name: "Cedar Springs opportunity", companyId: "company-7", propertyId: "property-9" },
+      "office-atlanta",
+      { omitOnSuccess: true }
+    );
+    containers.push(container);
+    roots.push(root);
+
+    await act(async () => {
+      container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+
+    expect(mocks.navigate).toHaveBeenCalledWith("/deals/deal-service?officeId=office-atlanta");
+  });
+
+  it("adds no office to the redirect when the entry point had none", async () => {
+    const { container, root } = await renderForm(undefined, undefined, { omitOnSuccess: true });
+    containers.push(container);
+    roots.push(root);
+
+    await selectAndSubmit(container);
+
+    expect(mocks.navigate).toHaveBeenCalledWith("/deals/deal-service");
+  });
+
+  it("sends Cancel to the explicit target so it agrees with Back", async () => {
+    const { container, root } = await renderForm(undefined, undefined, {
+      cancelTo: "/properties/property-9?officeId=office-atlanta",
+    });
+    containers.push(container);
+    roots.push(root);
+
+    await act(async () => {
+      clickButton(container, "Cancel");
+    });
+
+    expect(mocks.navigate).toHaveBeenCalledWith("/properties/property-9?officeId=office-atlanta");
+  });
+
+  it("falls back to history for Cancel when no target was supplied", async () => {
+    const { container, root } = await renderForm();
+    containers.push(container);
+    roots.push(root);
+
+    await act(async () => {
+      clickButton(container, "Cancel");
+    });
+
+    expect(mocks.navigate).toHaveBeenCalledWith(-1);
   });
 
   it("is unchanged for the deals-list entry point that passes no prefill", async () => {

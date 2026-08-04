@@ -23,6 +23,7 @@ import { applyDealRegionAutoSelection } from "./deal-region-auto-select";
 import { getSelectedOptionLabel } from "./deal-form.helpers";
 import { useAuth } from "@/lib/auth";
 import {
+  appendOfficeIdSearch,
   buildOfficeCodePrefixOptions,
   resolveDefaultOfficeCode,
 } from "@/lib/office-selection";
@@ -44,13 +45,22 @@ interface ServiceOpportunityFormProps {
   // creates in the wrong tenant. Omitted (the deals-page entry point) keeps the historical behaviour: the
   // rep's stable home office.
   officeId?: string | null;
+  // Where Cancel goes. Supplied by an entry point that knows where the rep came from, because the form's own
+  // navigate(-1) has nowhere to go on a fresh tab or a shared link — and then Cancel would sit two inches
+  // from a Back link that works, doing nothing. Omitted keeps the historical navigate(-1).
+  cancelTo?: string;
 }
 
 function normalizeServiceCandidate(value: string | null | undefined) {
   return String(value ?? "").trim().toLowerCase().replace(/[-_]+/g, " ").replace(/\s+/g, " ");
 }
 
-export function ServiceOpportunityForm({ onSuccess, initialValues, officeId }: ServiceOpportunityFormProps) {
+export function ServiceOpportunityForm({
+  onSuccess,
+  initialValues,
+  officeId,
+  cancelTo,
+}: ServiceOpportunityFormProps) {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { offices } = useAccessibleOffices();
@@ -122,6 +132,20 @@ export function ServiceOpportunityForm({ onSuccess, initialValues, officeId }: S
   // reports. Prefill is what made that reachable (nobody could click Create that fast before), so prefill
   // has to hold the door: no submit until the record behind the id is in hand.
   const propertyResolutionPending = Boolean(formData.propertyId) && resolvedPropertyId !== formData.propertyId;
+  // The non-Service escape hatch has to leave with everything the rep already has. A bare /leads/new drops
+  // the company, the property and the name, so the rep lands on an empty form and retypes the address —
+  // a second property record for one building, which is the exact failure this entry point exists to
+  // prevent. Same param shape as the property page's New lead link, read from LIVE state so it keeps up
+  // with edits rather than replaying a stale prefill.
+  const leadEscapeHref = (() => {
+    const params = new URLSearchParams();
+    if (formData.propertyId) params.set("propertyId", formData.propertyId);
+    if (formData.companyId) params.set("companyId", formData.companyId);
+    const trimmedName = formData.name.trim();
+    if (trimmedName) params.set("name", trimmedName);
+    const query = params.toString();
+    return appendOfficeIdSearch(query ? `/leads/new?${query}` : "/leads/new", officeId);
+  })();
 
   // Region auto-detects from the selected property's state (same rule + columns as the deal form), but a
   // manual pick wins.
@@ -292,7 +316,10 @@ export function ServiceOpportunityForm({ onSuccess, initialValues, officeId }: S
       if (onSuccess) {
         onSuccess(resp.deal);
       } else {
-        navigate(`/deals/${resp.deal.id}`);
+        // The deal was created in effectiveOfficeId, and DealDetailPage derives its tenant from ?officeId —
+        // so a redirect without it loads a cross-office deal from the viewer's default office and shows
+        // "not found" for a record that saved perfectly. The rep then creates it a second time.
+        navigate(appendOfficeIdSearch(`/deals/${resp.deal.id}`, officeId));
       }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to create service opportunity");
@@ -317,7 +344,7 @@ export function ServiceOpportunityForm({ onSuccess, initialValues, officeId }: S
             </div>
             <p className="mt-2 text-sm text-slate-600">
               Direct-create is only available for Service projects. For other project types,{" "}
-              <Link to="/leads/new" className="font-semibold text-brand-red underline-offset-4 hover:underline">
+              <Link to={leadEscapeHref} className="font-semibold text-brand-red underline-offset-4 hover:underline">
                 start a new Lead
               </Link>
               .
@@ -549,7 +576,7 @@ export function ServiceOpportunityForm({ onSuccess, initialValues, officeId }: S
           {submitting || regionPending || propertyResolutionPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
           Create Service Opportunity
         </Button>
-        <Button type="button" variant="outline" onClick={() => navigate(-1)}>
+        <Button type="button" variant="outline" onClick={() => (cancelTo ? navigate(cancelTo) : navigate(-1))}>
           Cancel
         </Button>
       </div>
