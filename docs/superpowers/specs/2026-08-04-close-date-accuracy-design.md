@@ -424,7 +424,8 @@ are +40 and +40, and `ABS` erases the distinction. That erasure is the concrete 
 
 ### 2.3 What counts as accurate
 
-**Proposed tolerance: ±14 days.** A landed deal is a *hit* when `|signed_error_days| <= 14`.
+**Proposed tolerance: ±14 days** (`TOLERANCE_DAYS`, §6.4). A landed deal is a *hit* when
+`|signed_error_days| <= TOLERANCE_DAYS`.
 
 Justification, such as it is:
 
@@ -453,7 +454,8 @@ Two conventions govern this whole section, both defined once in §4 and referenc
   deal already won or lost in the mirror as an open deal with a rotting forecast, and charge its rep for a
   coverage failure on a deal that has closed.
 - **"The date" for any *current-open* bucket means `cov_state` / `cov_prediction`** (§4.1) — the
-  provenance-**resolved** pair, never the raw column and never the pre-resolution `pnow_state`. The state
+  provenance-**resolved** pair — never the pre-resolution `pnow_state`, and never the raw column *directly*
+  (`coverage_resolution` reads it once, on everyone's behalf, per convention 10's carve-out). The state
   distinguishes a rep's date from a machine's, from a deliberate clear, from no record at all, and those
   four cases belong in four different buckets. Keying some buckets on `pnow_state` and others on
   `cov_state` splits one population in two: an audit-gap deal with a past raw date resolves to
@@ -850,7 +852,9 @@ Evaluated at three anchors:
 | `pnow` | `now()` | coverage (§4.1) |
 
 Coverage reads `pnow` — the same timeline as everything else. There is no separate "standing date" concept
-and **no metric reads `d.expected_close_date` directly**; that raw read is how the exclusion leaked in
+and **no metric reads `d.expected_close_date` directly — with the single bounded exception of the
+`coverage_resolution` CTE (§4.1), which needs it to resolve provenance and is convention 10's stated
+carve-out. Do not delete that join as a violation.** Any other raw read is how the exclusion leaked in
 round 3, and the unified state function removes the need for it entirely.
 
 #### 4.0.4 The P₃₀ fallback, gated on the deal's life
@@ -1088,7 +1092,10 @@ excluding them would let an unverifiable gap quietly shrink a rep's denominator.
 
 Invariants to pin as tests — they are the point of the table:
 
-1. `covered_n + parked_n + at_risk_n = |D_cov|`, and `|D_cov| + machine_dated_n = |D_open|`.
+1. `covered_n + parked_n + at_risk_n = |D_cov|`, and
+   `|D_cov| + machine_dated_n + reopened_after_landing_n = |D_open|`. **Three terms on the right**, because
+   `D_cov` now excludes both machine-dated and reopened deals; the two-term form was false the moment
+   `D_reopened` was carved out.
 2. `scoreable_n + no_prediction_n + cleared_n + machine_superseded_n + parked_prediction_n = landed_n`.
 3. `|D_landed| + |D_open| + |D_nodate| + |D_outside| = |D|`. **Four terms, not three** — `D_outside`
    (deals that closed outside the selected period, in either direction) is the remainder that made the
@@ -1159,6 +1166,16 @@ in_d_cov   = (open AND cov_state <> 'machine')                             -- §
 signed_error_p30    = (outcome_date - p30_prediction)
 signed_error_pfinal = (outcome_date - pfinal_prediction)
 
+-- Parked-at-write flags. Row-level, so they belong here and not in §4.2 -- `scoreable` consumes them,
+-- and §4.0.7 lists them as Block A output. COALESCE keeps them non-null so the `NOT` in `scoreable` is
+-- safe (§4.0.6); the AT TIME ZONE and the strict `>` match the platform rule (§6.2).
+p30_parked_at_write =
+  COALESCE(p30_prediction > (p30_changed_at AT TIME ZONE 'America/Chicago')::date
+                            + CLOSE_TARGET_HOLD_HORIZON_DAYS, false)
+pfinal_parked_at_write =
+  COALESCE(pfinal_prediction > (pfinal_changed_at AT TIME ZONE 'America/Chicago')::date
+                               + CLOSE_TARGET_HOLD_HORIZON_DAYS, false)
+
 -- Per-deal event cutoff. Consumed by E's definition, so it MUST be available before E exists.
 event_window_end = CASE WHEN open THEN now()
                         ELSE business_day_end_exclusive(
@@ -1192,23 +1209,62 @@ column. Re-run this check whenever a name is added:
 | `raw_close_date_events` (§4.0.1) | `audit_log_id`, `deal_id`, `changed_at`, `actor_user_id`, `event_kind`, `old_date`, `new_date` | `audit_log`: `id`, `record_id`, `created_at`, `changed_by`, `table_name`, `action`, `changes`, `full_row` — all real columns (§1.2) |
 | `close_date_timeline` (§4.0.2) | all of the above **passed through**, plus `source`, `machine_source` | `raw_close_date_events.*`; `deals.hubspot_deal_id`; `public.hubspot_refresh_log.*` (§0064) |
 | `outcomes` (§4.0.5) | `deal_id`, `rep_id`, `deal_created_at`, `outcome_kind`, `outcome_date`, **`terminal_entry_date`**, `bid_board_owned` | `deals.stage_entered_at`, `deals.bid_board_stage_entered_at`, `deals.created_at`, `deals.won_closed_date`, `deals.lost_at`, `deals.assigned_rep_id`, flags; `public.pipeline_stage_config.slug/is_terminal` |
-| `state_at` ×3 (§4.0.3) | `p30_state`, `p30_prediction`, `p30_changed_at`, `p30_source`; `pfinal_state`, `pfinal_prediction`, `pfinal_changed_at`, `pfinal_source`; `pnow_state`, `pnow_prediction`, `pnow_changed_at`, `pnow_source` — all `*_state` coalesced (§4.0.3) | `close_date_timeline`: `deal_id`, `changed_at`, **`audit_log_id`**, `source`, `new_date`; `outcomes.outcome_date` |
-| `coverage_resolution` (§4.1) | `cov_state`, `cov_prediction`, `is_provenance_unknown`, `cov_n` | `outcomes.deal_id`; `state_at(deal, now())`; **`deals.expected_close_date`** — the only block that joins `deals` for it, and the whole reason convention 10's exception is buildable |
+| `state_at` ×3 (§4.0.3) *(contents: **convention-derived** — the block projects `state`, `prediction`, `changed_at`, `source`; the prefixes come from the three aliased instances in §4.0.7's anchor table, so an extractor sees a mismatch that is expected)* | `p30_state`, `p30_prediction`, `p30_changed_at`, `p30_source`; `pfinal_state`, `pfinal_prediction`, `pfinal_changed_at`, `pfinal_source`; `pnow_state`, `pnow_prediction`, `pnow_changed_at`, `pnow_source` — all `*_state` coalesced (§4.0.3) | `close_date_timeline`: `deal_id`, `changed_at`, **`audit_log_id`**, `source`, `new_date`; `outcomes.outcome_date` |
+| `coverage_resolution` (§4.1) | `cov_state`, `cov_prediction`, `is_provenance_unknown` | `outcomes.deal_id`; `state_at(deal, now())`; **`deals.expected_close_date`** — the only block that joins `deals` for it, and the whole reason convention 10's exception is buildable |
 | Derived scalars **block A** (§4.0.7) | `open`, `landed`, `in_d_cov`, `signed_error_p30`, `signed_error_pfinal`, `p30_parked_at_write`, `pfinal_parked_at_write`, `event_window_end` | `outcomes.*`, `cov_state`, `cov_prediction`, `p30_*`, `pfinal_*` — deliberately nothing from the event set |
-| `E` (§4.0.5) | the event set for churn | `close_date_timeline`; `event_window_end` (block A) |
+| `E` (§4.0.5) *(contents: **unverifiable** — defined in prose, no literal SQL fence)* | the event set for churn | `close_date_timeline`; `event_window_end` (block A) |
 | Derived scalars **block B** (§4.0.7) | `deal_move_count`, `deal_days_pushed_out` | `E` |
-| Metrics (§4.1–4.7) | the report columns | everything above, by name only |
+| Metrics (§4.1–4.7) *(contents: **unverifiable** — many fences, no single block boundary)* | the report columns, incl. `cov_n`, `scoreable_n`, `scoreable_final_n` | everything above, by name only |
 
 The `audit_log_id` row is bolded because it is the one that broke: §4.0.3 ordered by it while §4.0.2 did not
 project it. The table makes that a one-line check instead of a review finding.
 
 **The table's ordering is part of the check, and is verifiable from the table alone.**
 
+> **Contents rule:** a row's *Produces* list must match the names its SQL block actually projects —
+> `AS <name>` in a `SELECT`, or `<name> =` for a scalar block. This is extractable: pull the projected
+> names from each ```sql fence and diff them against the column. Rows whose SQL is **prose-shaped rather
+> than literal** cannot be extracted from and are marked **unverifiable** below; treat their contents as
+> unchecked, not as checked.
+>
 > **Ordering rule:** a block may consume only names produced by blocks **strictly above** it. Read top to
 > bottom, maintaining the set of names produced so far; every backticked name in a row's *Consumes* column
 > must already be in that set, be a real table (`audit_log`, `deals`, `pipeline_stage_config`,
 > `hubspot_refresh_log`) or one of its columns, or be a CTE named in an earlier *Block* cell. A row that
 > fails is a cycle or a forward reference.
+
+**Audit inventory — which checks in this document derive their inputs from the text, and which are read.**
+
+Every audit here was added to catch a class of defect, and three of them have since certified something
+untrue. The difference between the ones that hold and the ones that don't is not care — it is whether the
+audit's inputs are *extracted* from the document or *recalled* by whoever last edited it. An audit checked
+by the author against their memory of what they just changed will pass whenever the author is wrong in the
+same way twice.
+
+| Audit | What it checks | Inputs derived by | Status |
+|---|---|---|---|
+| Three-table agreement (§4.0.6 / v1 / §6.0) | every metric appears in each table | **extraction** — backticked identifiers per table, set-differenced | mechanical |
+| §4.0.7 **ordering** rule | no block consumes a name produced below it | **extraction** — walk rows top-down, accumulate produced names | mechanical |
+| §4.0.7 **contents** rule | a row's *Produces* matches what its SQL projects | **extraction** — `AS <name>` / `<name> =` per fence, diffed | mechanical *(added this round)* |
+| Convention restatement (§7) | no rule is half-amended across its copies | **extraction** — signature regex per convention, all hit lines listed | mechanical *(added this round)* |
+| Constants (§6.4) | every named constant has a value and every formula uses it | **extraction** — constant names vs assigned values; literal sweep | mechanical |
+| Rate casts / `NULLS LAST` | every rate casts, every ranked column sorts NULLs last | **extraction** — grep per pattern | mechanical |
+| §6.0 falsifying inputs | each fairness claim names an input that would break it | **read** — a human must judge whether the input really falsifies | **memory-based** |
+| §4.0.7 contents for `E` and Metrics | those two rows' *Produces* lists | not derivable — prose-shaped SQL | **unverifiable** |
+| Population definitions (§4.0.5) | that each `D_*` predicate matches its prose | **read** | **memory-based** |
+| Everything against production | census, coverage floor, mirror-terminal counts | not derivable — needs a database | **unverified** |
+
+**Distrust the bottom four rows.** The §6.0 falsifying-input column makes a claim *checkable by a reader*,
+which is a real improvement over an unadorned ✅, but nothing verifies that the stated input actually
+falsifies the claim — that judgement is still a human one, and it is where a false ✅ could recur. The
+population definitions are prose next to SQL with no extraction tying them together. Both are candidates
+for the same treatment if this document takes another review round.
+
+**Extraction result at the time of writing:** of the nine rows, six are verified by extraction, one
+(`state_at`) is convention-derived and expected to differ, and two (`E`, Metrics) are unverifiable because
+their SQL is prose-shaped. The extraction found three genuine overclaims that reading had not:
+`coverage_resolution` claimed `cov_n` (an aggregate it cannot project, being per-deal) and Block A claimed
+both parked flags (defined in §4.2 at the time). Both are now produced where the table says they are.
 
 This rule is what the table was missing. An earlier version listed one combined "derived scalars" block
 that both produced `event_window_end` (consumed by `E`) and consumed `E` (for `deal_move_count`) — a cycle
@@ -1261,6 +1317,11 @@ provenance_unknown_n = count(*) FILTER (WHERE open AND is_provenance_unknown)
 -- write, counting it as covered credits them for one.
 machine_dated_n = count(*) FILTER (WHERE open AND cov_state = 'machine')
 
+-- The coverage denominator, as a named metric: it is the §6.4 volume floor for coverage_rate and
+-- forecast_reliability, so it must exist as a column rather than only as an inline NULLIF operand.
+-- Aggregate, therefore produced HERE (Metrics) -- not by coverage_resolution, which is per-deal.
+cov_n = count(*) FILTER (WHERE in_d_cov)
+
 -- The remaining three partition D_cov (= D_open minus machine-dated).
 covered_n  = count(*) FILTER (WHERE in_d_cov AND cov_state = 'rep_prediction'
                                              AND cov_prediction >= <business today>
@@ -1278,7 +1339,16 @@ coverage_rate = count(*) FILTER (WHERE in_d_cov AND cov_state = 'rep_prediction'
 ```
 
 `open` is `outcome_kind = 'open'` (§4.0.5) — the mirror-aware test. `in_d_cov` is
-`open AND cov_state <> 'machine'`; safe because the state enum is coalesced and never NULL (§4.0.6). After
+
+```sql
+in_d_cov = open AND cov_state <> 'machine' AND NOT is_reopened_after_landing
+```
+
+— all three conjuncts. The `is_reopened_after_landing` term is what the populations table has always
+claimed for `D_cov` and the scalar previously omitted, so a deal that landed in-period and was later
+reopened was counted as ordinary coverage anyway, *and* reported as a diagnostic: double-counted, and the
+tie-out below silently false. Safe against NULLs because the state enum is coalesced (§4.0.6) and
+`is_reopened_after_landing` is a non-null boolean from `D_reopened` membership. After
 resolution, `cov_state = 'no_event'` means the deal genuinely has no date at all, which is the at-risk
 reading intended all along.
 
@@ -1334,20 +1404,13 @@ scoreable = landed
         AND p30_state = 'rep_prediction'
         AND NOT p30_parked_at_write            -- p30_parked_at_write is a non-null boolean, see below
 
-hit_rate_14d = count(*) FILTER (WHERE scoreable AND abs(signed_error_p30) <= 14)::numeric
+hit_rate_14d = count(*) FILTER (WHERE scoreable AND abs(signed_error_p30) <= TOLERANCE_DAYS)::numeric
              / NULLIF(count(*) FILTER (WHERE scoreable), 0)
 ```
 
-`p30_parked_at_write` is computed as:
-
-```sql
-COALESCE(
-  p30_prediction > (p30_changed_at AT TIME ZONE 'America/Chicago')::date
-                   + CLOSE_TARGET_HOLD_HORIZON_DAYS,
-  false)
-```
-
-Three things are load-bearing in that one line. The `COALESCE` makes it a non-null boolean so the `NOT` in
+`p30_parked_at_write` is defined in §4.0.7 Block A, not here — it is a row-level scalar and §4.0.7's chain
+table lists it as Block A output, so defining it in §4.2 would make that table wrong. Three things are
+load-bearing in it. The `COALESCE` makes it a non-null boolean so the `NOT` in
 `scoreable` is safe — as a bare comparison it would be NULL whenever there is no P₃₀ row, taking the whole
 conjunct NULL rather than false (§4.0.6). The **explicit `AT TIME ZONE`** is required because
 `p30_changed_at` is a `timestamptz` and a bare `::date` cast resolves in the *session* timezone, not the
@@ -1395,15 +1458,23 @@ scoreable_final = landed
               AND pfinal_state = 'rep_prediction'
               AND NOT pfinal_parked_at_write
 
-hit_rate_14d_final = count(*) FILTER (WHERE scoreable_final AND abs(signed_error_pfinal) <= 14)::numeric
+hit_rate_14d_final = count(*) FILTER (WHERE scoreable_final
+                                          AND abs(signed_error_pfinal) <= TOLERANCE_DAYS)::numeric
                    / NULLIF(count(*) FILTER (WHERE scoreable_final), 0)
 ```
 
 It must **not** reuse `D_score`. That population requires a usable P₃₀, which excludes exactly the case
 §6.3 says the final rate exists to reveal: a rep with no month-ahead forecast who set a correct date in the
 final week would be dropped rather than shown as strong-final / weak-P₃₀. `D_score_final` is its own row in
-§4.0.6 for that reason. `hit_rate_30d` uses `D_score` (it is the same P₃₀ measurement at a wider
-tolerance), so only the `_final` variant needs the separate population.
+§4.0.6 for that reason. `hit_rate_30d` uses `D_score` with `<= WIDE_TOLERANCE_DAYS` (the same P₃₀
+measurement at a wider tolerance), so only the `_final` variant needs the separate population.
+
+**Every threshold in these formulas is a named constant from the §6.4 table, never a literal.** The column
+*names* keep their numbers — `hit_rate_14d` reads better than `hit_rate_tolerance` — but the *comparisons*
+must reference the constants. An implementation copied from a snippet with `14` hardcoded keeps scoring
+with a stale number after leadership re-tunes the tolerance (open question 1 invites exactly that), and the
+constants table becomes decoration. If a re-tune makes a column name misleading, rename the column in the
+same change.
 
 ### 4.3 Mean and median signed error
 
@@ -1487,7 +1558,8 @@ Signed total plus the two one-sided sums, so a rep who pushes 200 days and pulls
 - **Deal-level flag**, computed per deal over that deal's events in `E`:
 
   ```sql
-  chronic_mover = deal_move_count >= 3 AND deal_days_pushed_out >= 60   -- per-deal names, §4.0.7
+  chronic_mover = deal_move_count      >= CHRONIC_MIN_MOVES
+              AND deal_days_pushed_out >= CHRONIC_MIN_PUSHED_DAYS   -- per-deal names, §4.0.7
   ```
 
   Both conditions, because three ±2-day adjustments is diligence and one 200-day push is a single
@@ -1522,7 +1594,7 @@ table so they can be re-tuned in one place once the first real distribution is v
 ```sql
 silent_miss_n = count(*) FILTER (WHERE scoreable
                                    AND deal_move_count = 0        -- per-deal, §4.0.7 (already COALESCEd)
-                                   AND abs(signed_error_p30) > 14)
+                                   AND abs(signed_error_p30) > TOLERANCE_DAYS)
 ```
 
 Without this, "never moves the date" reads as stability on every other column. It is often the opposite:
@@ -2067,6 +2139,13 @@ within a short window of the event (§1.7). Every number on the summary row is r
     was marked ✅ against a construct that did not deliver it, which is a false negative in the check built
     to prevent false negatives. When adding an audit row, write the falsifying input first — if none can be
     named, the claim is too vague to enforce.
+18. **A rule stated in more than one place must name the canonical statement.** Seventeen conventions are
+    each restated across the document — the largest is repeated in thirty places — and a rule restated is
+    a rule that can be half-amended. Convention 10 was given a bounded exception in round 9 and a second
+    blanket copy survived four rounds, so an implementer reconciling the two could have deleted the
+    `coverage_resolution` join as a violation and reopened the provenance hole. Every restatement must
+    either carry the exception or point at the canonical section. Verified by the grep in the audit
+    inventory below, not by reading.
 
 **A convention that forbids something the spec requires is worse than no convention, because it will be
 enforced.** Convention 10 was exactly that for one round: it banned every raw read of
@@ -2210,6 +2289,15 @@ complement of `futureDatedCloseDatePredicateSql`'s `>= today` (`foundations.ts:4
 unparked in both. One ordering — `percentile_cont`'s `WITHIN GROUP` — deliberately needs no tie-breaker,
 and §4.3 now says why.
 
+**Round 11 (fixes that reached one site and not the others)**
+
+| # | Was | Now |
+|---|---|---|
+| 1 | Populations table said `D_cov` excludes `D_reopened`; the `in_d_cov` scalar didn't | A deal that landed in-period and was reopened was counted as ordinary coverage *and* reported as a diagnostic — double-counted, and the tie-out silently false. Scalar gains the conjunct; tie-out gains `reopened_after_landing_n` as a third term. |
+| 2 | §4.0.7 claimed `coverage_resolution` produces `cov_n` and Block A produces both parked flags | Neither was true of the SQL: `coverage_resolution` is per-deal and projects no aggregate; the flags were defined in §4.2. `cov_n` is now produced in Metrics, the flags in Block A. **Third time §4.0.7 certified something untrue** — so the *contents* rule and its extractor were added, mirroring the ordering rule. |
+| 3 | A second, blanket "no metric reads `d.expected_close_date`" survived at §4.0.0 | Convention 10's bounded exception existed only in §7, so an implementer reconciling the two could delete the `coverage_resolution` join and reopen the provenance hole. Both restatements now carry the carve-out; convention 18 requires every restatement to point at the canonical rule. |
+| 4 | Formulas hardcoded `14`, `3`, `60` after the constants were named | An implementation copied from a snippet keeps scoring with a stale threshold after a re-tune, making the constants table decoration. All comparisons now reference `TOLERANCE_DAYS`, `WIDE_TOLERANCE_DAYS`, `CHRONIC_MIN_MOVES`, `CHRONIC_MIN_PUSHED_DAYS`. |
+
 **Round 10 (a chain that cannot execute, and an ordering guarantee that was false)**
 
 | # | Was | Now |
@@ -2327,6 +2415,20 @@ were themselves silently broken**, because `NOT <nullable>` inside `FILTER` coun
 failing loudly. A check that can fail open is not a check. That is why the state enum is coalesced and
 non-null by construction, and why "never negate a nullable" is now a stated SQL rule (§4.0.6) rather than
 something to remember at each site.
+
+**Round 11's lesson: an audit is only as good as where its inputs come from.** All four findings were a
+correction applied where it was noticed and not where it also applied — and the two audits built to catch
+exactly that (§4.0.7 and the convention list) both failed at it again, because each was verified by the
+author against their memory of what they had just changed. An author who is wrong in the same way twice
+passes their own review every time.
+
+The fix is not more diligence. It is to derive each audit's inputs *from the text*: the contents rule now
+extracts projected names from every SQL fence and diffs them against the *Produces* column, and the
+convention check now greps a signature per rule and lists every line that restates it. Both found real
+defects on their first run that reading had missed three times. The §7 audit inventory added this round
+states plainly which checks are mechanical and which remain read-and-recalled, so a reader knows which
+results to distrust — the honest answer is that §6.0's falsifying inputs and the population definitions
+still are.
 
 **Round 10's lesson: a check can be structurally sound and still not check anything.** §4.0.7 listed the
 right blocks with the right contents and certified a chain that cannot run, because *row order* was never
