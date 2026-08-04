@@ -45,6 +45,12 @@
 // disagree with this one on any activity logged in the CT/UTC overlap. Matching the existing report
 // is worth more than matching an ideal. If Rep Activity's timeline ever moves to a business-tz
 // bucket, move this with it in the SAME change.
+//
+// The CLIENT renders row clocks in UTC to match this bucket (daily-activity-log-page.tsx). That is not
+// cosmetic: rendered in browser-local time, an activity at 2026-06-02T00:30:00Z appears under the
+// "Jun 2" header showing "7:30 PM" to a Central reader, i.e. a row contradicting its own day heading.
+// If this bucket ever changes zone, the page's UTC_TIME formatter and its "times UTC" marker have to
+// change with it.
 
 import { sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
