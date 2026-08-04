@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowRight, Briefcase, Plus, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { MetricCard } from "@/components/shared/metric-card";
@@ -90,8 +91,11 @@ export type DashboardDealListFilter =
  */
 export type AtRiskRouteBucket = "all" | "service" | "non_service";
 
-/** The three at-risk KPI cards, in render order. Service + Non-service partition All exactly. */
+/** The three at-risk cohorts. Service + Non-service partition All exactly. */
 export const AT_RISK_ROUTE_BUCKETS = ["service", "non_service", "all"] as const satisfies readonly AtRiskRouteBucket[];
+
+/** The two ROUTE cohorts, in the order they read as sub-links under the At Risk headline. */
+export const AT_RISK_ROUTE_SUBLINK_BUCKETS = ["service", "non_service"] as const satisfies readonly AtRiskRouteBucket[];
 
 /** A deal is on the SERVICE side only when its route is literally "service"; null/absent is not. */
 export function isServiceRouteDeal(deal: Pick<Deal, "workflowRoute">): boolean {
@@ -128,11 +132,17 @@ export function atRiskRouteBucketForFilter(filter: DashboardDealListFilter): AtR
   return "all";
 }
 
-/** The KPI card copy per bucket — one source so the card, its aria-label, and the drill-down agree. */
-export const AT_RISK_CARD_LABELS: Record<AtRiskRouteBucket, { eyebrow: string; ariaLabel: string }> = {
-  service: { eyebrow: "Service at risk", ariaLabel: "View service at-risk deals" },
-  non_service: { eyebrow: "Non-service at risk", ariaLabel: "View non-service at-risk deals" },
-  all: { eyebrow: "All at risk", ariaLabel: "View at-risk deals" },
+/**
+ * Copy per cohort — one source so the visible sub-link text and the accessible name agree.
+ *
+ * `shortLabel` is what the reader sees ("Service 3"); `ariaLabel` is the accessible name and must name
+ * the COHORT, never just the number, so a screen-reader user hears which drill-down a link opens rather
+ * than a bare "3". The three names are distinct for the same reason.
+ */
+export const AT_RISK_CARD_LABELS: Record<AtRiskRouteBucket, { shortLabel: string; ariaLabel: string }> = {
+  service: { shortLabel: "Service", ariaLabel: "View service at-risk deals" },
+  non_service: { shortLabel: "Non-service", ariaLabel: "View non-service at-risk deals" },
+  all: { shortLabel: "All", ariaLabel: "View at-risk deals" },
 };
 
 /**
@@ -1579,7 +1589,7 @@ function DealListPageContent({
       </section>
 
       <>
-      <div className={`grid gap-4 sm:grid-cols-2 ${showWonKpiCard ? "xl:grid-cols-5" : "xl:grid-cols-4"}`}>
+      <div className={`grid gap-4 ${showWonKpiCard ? "md:grid-cols-3" : "md:grid-cols-2"}`}>
         <MetricCard
           eyebrow="Active pipeline"
           value={USD_COMPACT(totalValue)}
@@ -1602,24 +1612,99 @@ function DealListPageContent({
             ariaLabel="View won deals"
           />
         ) : null}
-        {/* The at-risk cohort split by workflow route: Service | Non-service | All. Rendered from one
-            bucket list so each card's number (atRiskCounts) and link (atRiskDestinations) are indexed by
-            the SAME bucket key — there is no per-card wiring that could pair one bucket's count with
-            another's destination. Non-service carries every route that is not "service", including a
-            null/absent one, so the first two always sum to the third. */}
-        {AT_RISK_ROUTE_BUCKETS.map((bucket) => (
-          <MetricCard
-            key={bucket}
-            eyebrow={AT_RISK_CARD_LABELS[bucket].eyebrow}
-            value={String(atRiskCounts[bucket])}
-            badge="Over SLA"
-            caption="Needs touch"
-            tone={atRiskCounts[bucket] > 0 ? "red" : "green"}
-            accent="red"
-            to={atRiskDestinations[bucket]}
-            ariaLabel={AT_RISK_CARD_LABELS[bucket].ariaLabel}
+        {/*
+          ONE At Risk card carrying THREE destinations.
+
+          The headline is All at risk, and the card body opens the all-at-risk drill-down — exactly the
+          pre-split number, behaviour, and destination. Service / Non-service are small sub-links to
+          their own route drill-downs, with their counts shown beside the total so the reader can SEE
+          Service + Non-service adding up to the headline; that is the reconciliation made self-evident.
+
+          ANCHORS ARE SIBLINGS, NEVER NESTED. MetricCard wraps its whole body in a Link, so it cannot
+          host sub-links — hence this bespoke card (MetricCard is left untouched for its other callers).
+          The All link is a stretched overlay (absolute inset-0) that sits FIRST in the DOM, so tab order
+          is All -> Service -> Non-service, matching the reading order. The card body is
+          pointer-events-none so clicks over the text fall through to that overlay, and the two route
+          links re-enable pointer events and sit above it (relative z-10) — so all three are separately
+          focusable, separately named, and their hit targets never overlap.
+
+          Counts and destinations are both indexed by the SAME bucket key, so no sub-link can end up
+          paired with another cohort's number or href.
+        */}
+        <Card
+          className={`group relative overflow-hidden transition-all duration-150 hover:-translate-y-0.5 hover:shadow-md ${
+            atRiskCounts.all > 0 ? "border-0 bg-brand-red text-white shadow-md" : "border-slate-200 bg-white shadow-none"
+          }`}
+        >
+          <Link
+            to={atRiskDestinations.all}
+            aria-label={AT_RISK_CARD_LABELS.all.ariaLabel}
+            className={`absolute inset-0 z-0 rounded-xl focus:outline-none focus-visible:ring-2 ${
+              atRiskCounts.all > 0 ? "focus-visible:ring-white" : "focus-visible:ring-brand-red"
+            }`}
           />
-        ))}
+          <CardContent className="pointer-events-none p-5">
+            <p
+              className={`text-[11px] font-bold uppercase tracking-[0.2em] ${
+                atRiskCounts.all > 0 ? "text-white/80" : "text-slate-500"
+              }`}
+            >
+              At risk
+            </p>
+            <p
+              data-testid="at-risk-total"
+              className={`mt-2 text-4xl font-black leading-none ${atRiskCounts.all > 0 ? "text-white" : "text-slate-950"}`}
+            >
+              {atRiskCounts.all}
+            </p>
+            <div className="mt-3 flex items-center gap-3">
+              <span
+                className={`rounded-full px-2.5 py-0.5 text-[11px] font-bold uppercase tracking-wide ${
+                  atRiskCounts.all > 0
+                    ? "bg-white/15 ring-1 ring-white/20"
+                    : "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"
+                }`}
+              >
+                Over SLA
+              </span>
+              <p
+                className={`text-[11px] font-semibold uppercase tracking-wide ${
+                  atRiskCounts.all > 0 ? "text-white/70" : "text-slate-500"
+                }`}
+              >
+                Needs touch
+              </p>
+            </div>
+            <div
+              className={`mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] font-semibold ${
+                atRiskCounts.all > 0 ? "text-white/90" : "text-slate-600"
+              }`}
+            >
+              {AT_RISK_ROUTE_SUBLINK_BUCKETS.map((bucket, index) => (
+                <Fragment key={bucket}>
+                  {index > 0 ? (
+                    <span aria-hidden="true" className={atRiskCounts.all > 0 ? "text-white/40" : "text-slate-300"}>
+                      ·
+                    </span>
+                  ) : null}
+                  <Link
+                    to={atRiskDestinations[bucket]}
+                    aria-label={AT_RISK_CARD_LABELS[bucket].ariaLabel}
+                    className={`pointer-events-auto relative z-10 rounded underline-offset-2 hover:underline focus:outline-none focus-visible:ring-2 ${
+                      atRiskCounts.all > 0 ? "focus-visible:ring-white" : "focus-visible:ring-brand-red"
+                    }`}
+                  >
+                    {AT_RISK_CARD_LABELS[bucket].shortLabel}{" "}
+                    <span className="font-black tabular-nums">{atRiskCounts[bucket]}</span>
+                  </Link>
+                </Fragment>
+              ))}
+            </div>
+          </CardContent>
+          {atRiskCounts.all > 0 ? null : (
+            <div className="absolute inset-x-0 bottom-0 h-1 bg-brand-red" aria-hidden="true" />
+          )}
+        </Card>
       </div>
 
       <label className="block">
