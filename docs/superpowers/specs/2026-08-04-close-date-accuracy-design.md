@@ -652,7 +652,16 @@ arbitrarily-but-repeatably, which is all that is required: `state_at` must be a 
 
 ```sql
 close_date_timeline AS (
-  SELECT e.deal_id, e.changed_at, e.actor_user_id, e.event_kind, e.old_date, e.new_date,
+  SELECT e.audit_log_id,          -- REQUIRED downstream: §4.0.3's total order. Do not drop this.
+         e.deal_id, e.changed_at, e.actor_user_id, e.event_kind, e.old_date, e.new_date,
+         -- machine_source names WHICH arm matched; `source` is the coarse rep/machine split every
+         -- consumer reads. Both are projected because the §4.0.6 diagnostics must tell the two
+         -- machine writers apart AFTER this block has collapsed them to one `source`.
+         CASE
+           WHEN <arm (a) matched> THEN 'hubspot_refresh'
+           WHEN <arm (b) matched> THEN 'migration_seed'
+           ELSE NULL
+         END AS machine_source,
          CASE
            -- (a) HubSpot refresh overwrite (§1.1.1). Matched against the purpose-built ledger.
            WHEN EXISTS (
@@ -676,8 +685,17 @@ close_date_timeline AS (
 ),
 ```
 
-Arm (a) is the HubSpot refresh; arm (b) is the migration promotion. Both are `'machine'`, and both now flow
-through the *same* downstream logic instead of each needing its own exclusion.
+In the real query the two arm predicates are written once and reused (a `LATERAL` or a repeated `CASE`);
+they are shown as `<arm (a) matched>` above only to keep the two projections readable. The invariant that
+matters: **`machine_source IS NOT NULL` exactly when `source = 'machine'`**, and it names which arm. Pin
+that as a test — if the two ever disagree, the contamination census reads the wrong number.
+
+Arm (a) is the HubSpot refresh; arm (b) is the migration promotion. Both collapse to `source = 'machine'`
+so all downstream logic is uniform, while `machine_source` preserves the distinction the diagnostics need.
+An earlier draft projected only `source`, which made the §4.0.6 split **unimplementable**: once both arms
+had been collapsed there was nothing left to split on, and a book carrying migration seeds but no refresh
+writes would have reported HubSpot contamination that did not exist — sending someone to chase a problem
+they do not have, or to dismiss one they do (§1.1.1).
 
 On arm (b)'s three conjuncts: `event_kind = 'insert'` is what stops it catching the spreadsheet re-import,
 which writes UPDATEs and is rep-sourced (§5.4); `actor_user_id IS NULL` distinguishes
@@ -797,7 +815,7 @@ p30 = CASE
           THEN state_at(deal, business_day_end_exclusive(o.outcome_date - 30))
         -- The DEAL is younger than the anchor: its whole life sits inside the window, so its earliest
         -- recorded state is all there is. Same tz-explicit boundary as everywhere else (§4.0.3).
-        WHEN d.created_at >= business_day_end_exclusive(o.outcome_date - 31)
+        WHEN o.deal_created_at >= business_day_end_exclusive(o.outcome_date - 31)
           THEN <earliest event state, see below>
         ELSE 'no_event'                        -- long-lived, forecast late: NOT scoreable
       END
@@ -953,7 +971,7 @@ here. Adding a metric without adding a row is the defect re-entering.**
 | `chronic_mover_rate` | 4.6 | `chronic_mover_n` | `\|D_book\|` | Yes |
 | `silent_miss_n` | 4.7 | `D_score` with `move_count = 0` and `abs(err) > 14` | — | Count |
 | `moves_by_other_actor` | 3 | `E` where `actor_user_id` is a user other than the owner (NULL ≠ "other") | — | Event count |
-| `machine_written_events_n`, split into `hubspot_refresh_events_n` / `migration_seed_events_n` | 2.5(b) | `close_date_timeline` where `source='machine'`, deals in `D_book`, **split by which classifier arm matched** | — | Diagnostic |
+| `machine_written_events_n`, `hubspot_refresh_events_n`, `migration_seed_events_n` | 2.5(b) | `close_date_timeline` on `D_book`: `source='machine'` for the total, `machine_source='hubspot_refresh'` / `='migration_seed'` for the two arms | — | Diagnostic |
 | `mirror_terminal_no_date_n` | 4.0.5 | **`D_nodate`** | — | Diagnostic |
 | `bid_board_owned_n` | 2.5(c) | `D_book` | — | Diagnostic |
 | `prior_period_landed_n` | 4.0.5 | `D_prior` | — | Diagnostic; excluded from every other metric |
@@ -996,6 +1014,77 @@ Invariants to pin as tests — they are the point of the table:
 - **State the precision you actually have.** `outcome_date` is a `DATE`; the data does not record what time
   a deal was won. Where a bound is derived from it, say in prose which end of the day is meant rather than
   letting `<` versus `<=` carry a definition the reader has to reverse-engineer.
+
+#### 4.0.7 Derived names, and the producer/consumer chain
+
+Every round of review has fixed a defect by adding a name, and twice the name referred to something no
+earlier block produced. Those are not logic errors — the query simply does not run, and the likely "fix" is
+to delete the reference rather than add the projection, which silently reinstates the defect the name was
+added for. This section exists so that class is checkable.
+
+**The three anchor prefixes.** §4.0.3's `state_at` lateral is joined **three times**, once per anchor, and
+each instance is aliased with a prefix. The lateral produces `state`, `prediction`, `changed_at`, `source`;
+the prefixed names used throughout §4 are those columns qualified by the instance:
+
+| Instance | Alias | Produces |
+|---|---|---|
+| `state_at(deal, business_day_end_exclusive(outcome_date - 30))` | `p30` | `p30_state`, `p30_prediction`, `p30_changed_at`, `p30_source` |
+| `state_at(deal, business_day_end_exclusive(outcome_date))` | `pfinal` | `pfinal_state`, `pfinal_prediction`, `pfinal_changed_at`, `pfinal_source` |
+| `state_at(deal, now())` | `pnow` | `pnow_state`, `pnow_prediction`, `pnow_changed_at`, `pnow_source` |
+
+Each `*_state` is the **coalesced** form (§4.0.3) — `COALESCE(p.state, 'no_event')`, never the raw lateral
+column. The convention was implicit for three rounds; stated here because otherwise every `p30_*` name in
+§4 is formally unproduced.
+
+**Derived scalars**, defined once here and consumed by name everywhere else:
+
+```sql
+-- Row-level predicates (per deal)
+open       = (outcome_kind = 'open')                                       -- §4.0.5, mirror-aware
+landed     = (outcome_kind IN ('won','lost') AND outcome_date IS NOT NULL
+              AND outcome_date BETWEEN :from AND :to)                      -- membership in D_landed
+in_d_cov   = (open AND cov_state <> 'machine')                             -- §4.1
+
+-- Signed error, in whole days. Positive = closed LATER than predicted (optimistic). Never ABS (§4.3).
+signed_error_p30    = (outcome_date - p30_prediction)
+signed_error_pfinal = (outcome_date - pfinal_prediction)
+
+-- Per-deal churn aggregates over that deal's rows in E. DISTINCT from the rep-level totals in §4.4/§4.5.
+deal_move_count       = count(*) FILTER (WHERE old_date IS NOT NULL AND new_date IS NOT NULL
+                                           AND new_date IS DISTINCT FROM old_date)
+deal_days_pushed_out  = COALESCE(sum(greatest(new_date - old_date, 0)), 0)
+
+-- Per-deal event cutoff (§4.0.5)
+event_window_end = CASE WHEN open THEN now()
+                        ELSE business_day_end_exclusive(COALESCE(outcome_date, stage_entry_date)) END
+```
+
+`signed_error_pfinal` and `landed` had **no definition at all** before this section; `signed_error_p30` was
+defined only as prose in §2.2. All three were consumed by SQL in §4.2 and §4.7.
+
+**`deal_move_count` / `deal_days_pushed_out` are new names for an old ambiguity.** §4.4 and §4.5 define
+`move_count` and `days_pushed_out` as **rep-level** aggregates over all of `E`; §4.6's chronic-mover flag
+and §4.7's silent-miss filter need the **per-deal** values. Both were previously written `move_count`, so
+one identifier meant two different granularities depending on which section you read — a rep with 40 moves
+across 20 deals would have tripped the `>= 3` chronic threshold on every one of them. §4.6 and §4.7 use the
+`deal_`-prefixed names.
+
+**The producer/consumer chain.** Every consumed name must be produced by an earlier row or be a real table
+column. Re-run this check whenever a name is added:
+
+| Block | Produces | Consumes (and from where) |
+|---|---|---|
+| `raw_close_date_events` (§4.0.1) | `audit_log_id`, `deal_id`, `changed_at`, `actor_user_id`, `event_kind`, `old_date`, `new_date` | `audit_log`: `id`, `record_id`, `created_at`, `changed_by`, `table_name`, `action`, `changes`, `full_row` — all real columns (§1.2) |
+| `close_date_timeline` (§4.0.2) | all of the above **passed through**, plus `source`, `machine_source` | `raw_close_date_events.*`; `deals.hubspot_deal_id`; `public.hubspot_refresh_log.*` (§0064) |
+| `outcomes` (§4.0.5) | `deal_id`, `rep_id`, `deal_created_at`, `outcome_kind`, `outcome_date`, `bid_board_owned` | `deals.*`, `public.pipeline_stage_config.slug/is_terminal` |
+| `state_at` ×3 (§4.0.3) | `p30_*`, `pfinal_*`, `pnow_*` | `close_date_timeline`: `deal_id`, `changed_at`, **`audit_log_id`**, `source`, `new_date`; `outcomes.outcome_date` |
+| `cov_state` / `cov_prediction` (§4.1) | `cov_state`, `cov_prediction`, `provenance_unknown_n` | `pnow_state`, `pnow_prediction`, `deals.expected_close_date` (convention 10's bounded exception) |
+| Derived scalars (this section) | `open`, `landed`, `in_d_cov`, `signed_error_*`, `deal_move_count`, `deal_days_pushed_out`, `event_window_end` | `outcomes.*`, `cov_*`, `p30_*`, `pfinal_*`, `E` |
+| `E` (§4.0.6) | the event set for churn | `close_date_timeline` filtered by `source='rep'` and `event_window_end` |
+| Metrics (§4.1–4.7) | the report columns | everything above, by name only |
+
+The `audit_log_id` row is bolded because it is the one that broke: §4.0.3 ordered by it while §4.0.2 did not
+project it. The table makes that a one-line check instead of a review finding.
 
 ### 4.1 Coverage rate
 
@@ -1210,7 +1299,8 @@ moves_per_deal = move_count::numeric / NULLIF(count(DISTINCT deal_id in D_book),
 ```
 
 **The denominator is `|D_book|` — every in-scope deal, landed and open alike.** `move_count` is summed over
-`E`, which is defined over `D_book` (§4.0.6), so this is the only denominator that describes the same set.
+`E`, which is defined over `D_book` (§4.0.5's populations table), so this is the only denominator that
+describes the same set.
 
 This is the second time this metric has been wrong, in two different ways, which is why the audit table now
 exists. The first draft divided by `landed_n`. The fix changed it to `landed_n + overdue_open_n` — still
@@ -1245,15 +1335,18 @@ Signed total plus the two one-sided sums, so a rep who pushes 200 days and pulls
 - **Deal-level flag**, computed per deal over that deal's events in `E`:
 
   ```sql
-  chronic_mover = COALESCE(move_count, 0) >= 3 AND COALESCE(days_pushed_out, 0) >= 60
+  chronic_mover = deal_move_count >= 3 AND deal_days_pushed_out >= 60   -- per-deal names, §4.0.7
   ```
 
   Both conditions, because three ±2-day adjustments is diligence and one 200-day push is a single
-  decision; the pattern worth naming is repeated, substantial, one-directional pushing. The COALESCEs
-  matter even though a deal with `move_count >= 3` necessarily has a non-null `days_pushed_out`: without
-  them the expression is NULL-safe only *by accident of evaluation order*, and `NULL >= 60` inside a
-  `FILTER` counts nothing rather than reading as false (§4.0.6). Per-deal aggregates reached through a
-  `LEFT JOIN` are NULL, not 0, for a deal with no events.
+  decision; the pattern worth naming is repeated, substantial, one-directional pushing.
+
+  NULL-safety lives in the §4.0.7 definitions, not here: `deal_days_pushed_out` is `COALESCE(...,0)` at
+  source and `deal_move_count` is a `count(*)`, which returns 0 rather than NULL. That matters because a
+  per-deal aggregate reached through a `LEFT JOIN` **is** NULL for a deal with no events, and `NULL >= 60`
+  inside a `FILTER` counts nothing rather than reading as false (§4.0.6). Defining the guard once at the
+  producer is what stops every consumer having to remember it — the same reasoning as the coalesced state
+  enum in §4.0.3.
 - **Rep-level:**
 
   ```sql
@@ -1276,7 +1369,7 @@ distribution is visible.
 
 ```sql
 silent_miss_n = count(*) FILTER (WHERE scoreable
-                                   AND COALESCE(move_count, 0) = 0
+                                   AND deal_move_count = 0        -- per-deal, §4.0.7 (already COALESCEd)
                                    AND abs(signed_error_p30) > 14)
 ```
 
@@ -1663,7 +1756,7 @@ justifies the mean by saying the long optimistic tail is where the problem lives
 `p90` measures and what mean and median together still hide. Both come from the same query at no marginal
 cost.
 
-**Three tables enumerate metrics, and they must agree.** §4.0.6 (populations and numerator/denominator),
+**Three tables enumerate metrics, and they must agree.** §4.0.6 (numerator/denominator),
 §6.0 (fairness claims and enforcing constructs), and this one (destinations). The intended relationships,
 stated so a future reader can tell a deliberate omission from a missed one:
 
@@ -1736,6 +1829,11 @@ within a short window of the event (§1.7). Every number on the summary row is r
     rows are excluded from the ranked set rather than sorted into it (§6.6).
 14. **Every protective claim in §6 names its enforcing construct** in the §6.0 table. A claim with no
     construct gets implemented or deleted — never left as prose.
+15. **Every identifier a SQL block consumes is produced by an earlier block or is a real table column**,
+    per the §4.0.7 producer/consumer chain. Adding a name means adding its producer in the same edit. When
+    a reference does not resolve, **add the projection — never delete the reference**: twice now the
+    dangling name was the load-bearing half of a defect fix, and dropping it would have reinstated the
+    defect (non-deterministic ordering; the unimplementable machine-source split).
 
 **A convention that forbids something the spec requires is worse than no convention, because it will be
 enforced.** Convention 10 was exactly that for one round: it banned every raw read of
@@ -1876,6 +1974,23 @@ complement of `futureDatedCloseDatePredicateSql`'s `>= today` (`foundations.ts:4
 unparked in both. One ordering — `percentile_cont`'s `WITHIN GROUP` — deliberately needs no tie-breaker,
 and §4.3 now says why.
 
+**Round 7 (dangling references — names used where nothing produces them)**
+
+| # | Was | Now |
+|---|---|---|
+| 1 | §4.0.3 ordered by `t.audit_log_id`; §4.0.2 never projected it | The query does not run — and the likely "fix" is dropping the tie-breaker, reinstating round 5's non-determinism. Projected, with a do-not-drop comment. |
+| 2 | §4.0.6 required split HubSpot/migration counts; the classifier emitted only `source='machine'` for both arms | The split was **unimplementable**: the discriminator had been collapsed upstream. Added `machine_source` (`hubspot_refresh` / `migration_seed` / NULL) with a pinned invariant that it is non-null exactly when `source='machine'`. |
+| 3 | `p30_*` / `pfinal_*` / `pnow_*` used throughout §4; the aliasing convention never stated | ~9 identifiers formally unproduced. §4.0.7 states the three lateral instances and their prefixes. |
+| 4 | `signed_error_p30` defined only as prose in §2.2; `signed_error_pfinal` **never defined at all** | Both defined in §4.0.7, signed, never `ABS`. |
+| 5 | `landed` consumed by §4.2 and §4.7; never defined | Defined in §4.0.7 as the `D_landed` membership predicate. |
+| 6 | `move_count` / `days_pushed_out` meant **rep-level** in §4.4–4.5 and **per-deal** in §4.6–4.7 | One identifier, two granularities: a rep with 40 moves across 20 deals would have tripped the `>= 3` chronic threshold on every deal. Renamed the per-deal forms `deal_move_count` / `deal_days_pushed_out`. |
+| 7 | `event_window_end` described in a comment, not defined | Defined in §4.0.7. |
+| 8 | §4.0.4 consumed `d.created_at`; `outcomes` produces `deal_created_at` | Aligned to the produced name. |
+
+Nine dangling references across ~15 identifiers, two reported and seven found by the sweep. New §4.0.7
+carries the derived-name definitions and a producer/consumer table for the whole CTE chain, and convention
+15 requires that adding a name adds its producer in the same edit.
+
 **Round 6 (three tables that must agree; a convention that forbade what the spec required)**
 
 | # | Was | Now |
@@ -1932,6 +2047,17 @@ were themselves silently broken**, because `NOT <nullable>` inside `FILTER` coun
 failing loudly. A check that can fail open is not a check. That is why the state enum is coalesced and
 non-null by construction, and why "never negate a nullable" is now a stated SQL rule (§4.0.6) rather than
 something to remember at each site.
+
+**Round 7's lesson: the dangerous fix is the one that adds a name.** Both reported findings were a defect
+fix from the previous round referring to something no block produced — and in both cases the *natural*
+repair (delete the unresolvable reference) would have silently restored the original defect. That is a
+worse failure mode than the defect itself, because it looks like cleanup. Hence convention 15's explicit
+instruction: **add the projection, never delete the reference.** The producer/consumer table makes the
+whole class a one-pass mechanical check rather than something review has to notice.
+
+Worth noting how thin the reported findings turned out to be relative to the class: two were reported,
+seven more were sitting in the same document, including one (`move_count` at two granularities) that would
+have silently mis-flagged every deal belonging to an active rep.
 
 **Round 6's lesson is that a rule can be as wrong as a metric.** Four of its eight findings were the
 document contradicting its *own* conventions — and convention 10 was self-contradictory within a single
