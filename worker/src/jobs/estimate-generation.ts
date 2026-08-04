@@ -111,7 +111,11 @@ function buildSourceRowIdentity(input: {
  * check and the write it guards. Returns false for absent, non-finite and nonpositive alike, which is
  * the same definition of priceable the loop's own guard uses.
  */
-async function stillPriceable(db: any, extractionId: string): Promise<boolean> {
+async function stillPriceable(
+  db: any,
+  extractionId: string,
+  snapshotQuantity: unknown
+): Promise<boolean> {
   const [row] = await db
     .select({ quantity: estimateExtractions.quantity })
     .from(estimateExtractions)
@@ -120,7 +124,14 @@ async function stillPriceable(db: any, extractionId: string): Promise<boolean> {
     .for("update");
   if (!row || row.quantity === null || row.quantity === undefined) return false;
   const value = Number(row.quantity);
-  return Number.isFinite(value) && value > 0;
+  if (!Number.isFinite(value) || value <= 0) return false;
+
+  // AND IT MUST BE THE SAME NUMBER THE RECOMMENDATION WAS BUILT FROM. Checking only that the row is
+  // still priceable let a positive-to-positive edit through: an estimator correcting 700 to 500 while
+  // the run was in flight got a recommendation priced on 700, persisted and marked `processed` — a
+  // wrong number that looks exactly like a right one, and harder to notice than a missing one.
+  const snapshot = Number(snapshotQuantity);
+  return Number.isFinite(snapshot) && snapshot === value;
 }
 
 export async function runEstimateGeneration(
@@ -623,7 +634,7 @@ export async function runEstimateGeneration(
           // connection some later, unrelated statement borrows.
           await tx.execute(sql.raw(`SET LOCAL search_path TO ${schemaName}, public`));
           // Re-asked under the row lock: the quantity may have been cleared since the snapshot.
-          if (!(await stillPriceable(tx, extraction.id))) return;
+          if (!(await stillPriceable(tx, extraction.id, extraction.quantity))) return;
           await persistPricingRecommendationBundle({
             tenantDb: tx,
             generationRunId,
@@ -658,7 +669,7 @@ export async function runEstimateGeneration(
         // transaction, so the row lock holds until it commits exactly as it does above; skipping the
         // check here would leave the document-scoped run — the common one — with the stale-quantity
         // hole this closes.
-        if (!(await stillPriceable(tenantDb, extraction.id))) continue;
+        if (!(await stillPriceable(tenantDb, extraction.id, extraction.quantity))) continue;
         await persistPricingRecommendationBundle({
           tenantDb: tenantDb as any,
           generationRunId,

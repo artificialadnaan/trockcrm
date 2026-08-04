@@ -493,7 +493,7 @@ describe("estimate generation job", () => {
           // value so these tests exercise the pricing they are about; the skip path has its own test.
           return {
             where: vi.fn(() => ({
-              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700" }]) })),
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "1" }]) })),
             })),
           };
         }),
@@ -564,6 +564,113 @@ describe("estimate generation job", () => {
     expect(rankedExtractionIds).not.toContain("ext-unconfirmed");
     expect(buildPricingRecommendationMock).toHaveBeenCalledTimes(2);
     expect(lockedClient.query).toHaveBeenLastCalledWith("COMMIT");
+  });
+
+  it("does NOT persist when the quantity CHANGED since the snapshot, even to another valid one", async () => {
+    // Checking only that the row is still priceable let a positive-to-positive edit through: an
+    // estimator correcting 700 to 500 mid-run got a recommendation priced on 700, persisted and marked
+    // `processed`. A wrong number that looks exactly like a right one, and far harder to notice than a
+    // missing one.
+    const statusWrites: any[] = [];
+    const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
+    const extractionWhere = vi.fn().mockResolvedValue([
+      {
+        id: "ext-drift",
+        dealId: "deal-1",
+        projectId: null,
+        documentId: "doc-1",
+        extractionType: "scope_line",
+        status: "pending",
+        quantity: "700",
+        unit: "SF",
+        normalizedLabel: "Install laminate",
+        metadataJson: { sourceParseRunId: "parse-run-1", activeArtifact: true },
+      },
+    ]);
+    const appDb = {
+      select: vi.fn(() => ({ from: vi.fn(() => ({ where: vi.fn(() => ({ limit: sourceLimit })) })) })),
+    } as any;
+    const lockedClient = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: "doc-1", active_parse_run_id: "parse-run-1" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    } as any;
+    let tenantSelectCallCount = 0;
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => {
+          tenantSelectCallCount += 1;
+          if (tenantSelectCallCount === 1) {
+            return { where: vi.fn(() => ({ limit: vi.fn().mockResolvedValue([]) })) };
+          }
+          if (tenantSelectCallCount === 2) return { where: extractionWhere };
+          // Corrected to 500 while the run was in flight — still perfectly priceable.
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "500" }]) })),
+            })),
+          };
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn(() => ({ returning: vi.fn().mockResolvedValue([{ id: "generated-id" }]) })),
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn((values: unknown) => {
+          statusWrites.push(values);
+          return { where: vi.fn(() => ({ returning: vi.fn().mockResolvedValue([{ id: "claimed" }]) })) };
+        }),
+      })),
+    } as any;
+
+    getHistoricalPricingSignalsMock.mockResolvedValue({
+      historicalItems: [],
+      vendorQuotes: [],
+      currentDeal: null,
+    });
+    resolveActiveCatalogSnapshotVersionIdMock.mockResolvedValue("snapshot-1");
+    listCatalogCandidatesForMatchingMock.mockResolvedValue([]);
+    rankExtractionMatchesMock.mockImplementation(async ({ extraction }: any) => [
+      {
+        catalogItemId: `catalog-${extraction.id}`,
+        matchScore: 99,
+        reasons: {},
+        historicalLineItemIds: [],
+        catalogBaselinePrice: 100,
+        historicalUnitPrices: [],
+        vendorQuotePrice: null,
+        awardedOutcomeAdjustmentPercent: 0,
+        internalAdjustmentPercent: 0,
+      },
+    ]);
+    buildPricingRecommendationMock.mockImplementation(() => ({
+      quantity: 700,
+      priceBasis: "mock",
+      recommendedUnitPrice: 10,
+      recommendedTotalPrice: 7000,
+      comparableHistoricalPrices: [],
+      historicalMedianPrice: null,
+      catalogBaselinePrice: null,
+      marketAdjustmentPercent: 0,
+      assumptions: {},
+      confidence: 1,
+    }));
+    poolConnectMock.mockResolvedValue(lockedClient);
+    drizzleMock.mockReturnValueOnce(appDb).mockReturnValueOnce(tenantDb);
+
+    const { runEstimateGeneration } = await import("../../src/jobs/estimate-generation.js");
+    await runEstimateGeneration(
+      { documentId: "doc-1", dealId: "deal-1", parseRunId: "parse-run-1" },
+      "office-1"
+    );
+
+    expect(buildPricingRecommendationMock).toHaveBeenCalledTimes(1);
+    expect(statusWrites.some((write) => write?.status === "processed")).toBe(false);
   });
 
   it("does NOT persist a recommendation for a quantity cleared since the snapshot", async () => {
@@ -970,7 +1077,7 @@ describe("estimate generation job", () => {
           // value so these tests exercise the pricing they are about; the skip path has its own test.
           return {
             where: vi.fn(() => ({
-              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700" }]) })),
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "1" }]) })),
             })),
           };
         }),
@@ -1401,7 +1508,7 @@ describe("estimate generation job", () => {
           // value so these tests exercise the pricing they are about; the skip path has its own test.
           return {
             where: vi.fn(() => ({
-              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700" }]) })),
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "2" }]) })),
             })),
           };
         }),
@@ -1664,7 +1771,7 @@ describe("estimate generation job", () => {
           // value so these tests exercise the pricing they are about; the skip path has its own test.
           return {
             where: vi.fn(() => ({
-              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700" }]) })),
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "2" }]) })),
             })),
           };
         }),

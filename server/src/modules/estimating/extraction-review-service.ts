@@ -170,6 +170,16 @@ export async function updateEstimateExtraction(args: {
   const becomesUnpriceable =
     "quantity" in args.input && isPriceable(existing.quantity) && !suppliesQuantity;
 
+  // `processed` REQUEUES TOO, not just `needs_quantity`. Rows priced BEFORE this branch existed were
+  // priced with a null quantity treated as one unit, and they sit at `processed`. Supplying the real
+  // quantity for one of those left it `processed` — excluded from the worker's ordinary-row filter, so
+  // never re-priced — while the promote predicate now sees a live positive quantity and would happily
+  // admit the OLD recommendation, the one computed from a quantity of 1. Correcting the number would
+  // have made the wrong price MORE likely to ship, not less.
+  //
+  // Requeuing on any quantity change is right beyond that legacy case: a priced row whose quantity
+  // moved needs re-pricing, and `pending` is how this system says so.
+  //
   // AND IT DOES NOT OVERWRITE A HUMAN DECISION. `approved`, `rejected` and `overridden` are somebody's
   // judgement about this row; making a quantity unpriceable is a reason to stop PRICING it, never a
   // reason to silently undo a review. Those rows are held out of the promote by the quantity predicate
@@ -179,7 +189,7 @@ export async function updateEstimateExtraction(args: {
   // statement takes its own lock, and the CASE is evaluated when the row is held.
   const statusAfterEdit = becomesUnpriceable
     ? sql`case when ${estimateExtractions.status} in ('pending', 'needs_quantity', 'processed', 'unmatched') then 'needs_quantity' else ${estimateExtractions.status} end`
-    : sql`case when ${estimateExtractions.status} = 'needs_quantity' then 'pending' else ${estimateExtractions.status} end`;
+    : sql`case when ${estimateExtractions.status} in ('needs_quantity', 'processed') then 'pending' else ${estimateExtractions.status} end`;
 
   const [updated] = await args.tenantDb
     .update(estimateExtractions)
