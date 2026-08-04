@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import { estimateExtractions, estimateReviewEvents } from "@trock-crm/shared/schema";
@@ -119,15 +119,26 @@ export async function updateEstimateExtraction(args: {
   // somebody else's state machine — `approved`, `unmatched`, `overridden` all mean things this edit has
   // no business rewriting — and a null quantity would send the row back to be flagged again on the next
   // run, which is a loop rather than a fix.
-  const clearsNeedsQuantity =
-    existing.status === "needs_quantity" && nextQuantity !== null && nextQuantity !== undefined;
+  //
+  // DECIDED IN SQL, UNDER THE UPDATE'S OWN ROW LOCK, not from the snapshot read above. `existing` is
+  // read before this statement takes its lock, so the generation job can claim the row in between:
+  // the read sees `pending`, the worker commits `needs_quantity`, and this update then writes the
+  // quantity while leaving the flag in place. The row ends up corrected AND excluded from every later
+  // candidate query — the same permanent stranding, reached through the opposite interleaving. A
+  // JavaScript boolean computed from a stale row cannot see that; a CASE evaluated when the row is
+  // locked can.
+  //
+  // Whether a quantity EXISTS is still decided here, because that is a fact about this request's own
+  // input rather than about the stored row.
+  const suppliesQuantity = nextQuantity !== null && nextQuantity !== undefined;
+  const statusAfterEdit = sql`case when ${estimateExtractions.status} = 'needs_quantity' then 'pending' else ${estimateExtractions.status} end`;
 
   const [updated] = await args.tenantDb
     .update(estimateExtractions)
     .set({
       normalizedLabel: args.input.normalizedLabel ?? existing.normalizedLabel,
       quantity: nextQuantity,
-      ...(clearsNeedsQuantity ? { status: "pending" as const } : {}),
+      ...(suppliesQuantity ? { status: statusAfterEdit } : {}),
       unit: args.input.unit ?? existing.unit,
       divisionHint: args.input.divisionHint ?? existing.divisionHint,
       metadataJson: buildUpdatedPricingScopeMetadata({

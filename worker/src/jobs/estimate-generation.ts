@@ -353,28 +353,45 @@ export async function runEstimateGeneration(
         //
         // Re-checks BOTH conditions rather than only the status, because "still has no quantity" is the
         // fact being asserted and status is merely how it is recorded.
-        const claimed = await tenantDb
-          .update(estimateExtractions)
-          .set({ status: "needs_quantity" })
-          .where(
-            and(
-              eq(estimateExtractions.id, extraction.id),
-              sql`${estimateExtractions.quantity} is null`,
-              sql`${estimateExtractions.status} <> 'needs_quantity'`
+        // ATOMIC WITH ITS EVENT, because the claim is not retryable once it commits. If the insert
+        // fails after the row is flagged, the row is `needs_quantity` with no record of why — and a
+        // later run cannot repair it, since an ordinary extraction is excluded by the `status =
+        // 'pending'` candidate filter. The event is gone for good rather than merely late.
+        //
+        // Only the deal-wide path needs this. When `payload.documentId` is present the whole run is
+        // already inside the locked client's transaction (BEGIN/COMMIT around this loop), so the two
+        // statements commit or roll back together there without any help. This mirrors the same
+        // `!lockedClient && typeof tenantDb.transaction === "function"` test the persist path below uses.
+        const flagQuantitylessRow = async (db: any): Promise<void> => {
+          const claimed = await db
+            .update(estimateExtractions)
+            .set({ status: "needs_quantity" })
+            .where(
+              and(
+                eq(estimateExtractions.id, extraction.id),
+                sql`${estimateExtractions.quantity} is null`,
+                sql`${estimateExtractions.status} <> 'needs_quantity'`
+              )
             )
-          )
-          .returning({ id: estimateExtractions.id });
+            .returning({ id: estimateExtractions.id });
 
-        if (claimed.length === 0) continue;
+          if (claimed.length === 0) return;
 
-        await tenantDb.insert(estimateReviewEvents).values({
-          dealId: extraction.dealId,
-          projectId: extraction.projectId,
-          subjectType: "estimate_extraction",
-          subjectId: extraction.id,
-          eventType: "needs_quantity",
-          afterJson: { normalizedLabel: extraction.normalizedLabel },
-        });
+          await db.insert(estimateReviewEvents).values({
+            dealId: extraction.dealId,
+            projectId: extraction.projectId,
+            subjectType: "estimate_extraction",
+            subjectId: extraction.id,
+            eventType: "needs_quantity",
+            afterJson: { normalizedLabel: extraction.normalizedLabel },
+          });
+        };
+
+        if (!lockedClient && typeof tenantDb.transaction === "function") {
+          await tenantDb.transaction(async (tx: any) => flagQuantitylessRow(tx));
+        } else {
+          await flagQuantitylessRow(tenantDb);
+        }
         continue;
       }
 

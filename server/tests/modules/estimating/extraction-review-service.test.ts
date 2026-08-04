@@ -6,6 +6,15 @@ import {
 } from "../../../src/modules/estimating/extraction-review-service.js";
 
 describe("extraction-review-service", () => {
+  /** The literal text of a drizzle `sql` expression. Its query chunks interleave string fragments with
+   *  column references, and the column objects are circular (table -> column -> table), so the whole
+   *  thing cannot simply be stringified. */
+  function sqlTextOf(expression: any): string {
+    return (expression?.queryChunks ?? [])
+      .flatMap((chunk: any) => (chunk && typeof chunk === "object" && "value" in chunk ? chunk.value : []))
+      .join(" ");
+  }
+
   function editHarness(existing: Record<string, unknown>) {
     const selectLimit = vi.fn().mockResolvedValue([existing]);
     const updateSetCalls: any[] = [];
@@ -48,7 +57,14 @@ describe("extraction-review-service", () => {
       input: { quantity: "120.000", unit: "SF" },
     });
 
-    expect(updateSetCalls[0].status).toBe("pending");
+    // The status is now a SQL CASE evaluated under the update's own row lock, not a literal decided
+    // from the snapshot read beforehand — so what this asserts is that a reset is ATTEMPTED, and that
+    // the expression it sends is the intended one. The lock semantics themselves are a property of
+    // Postgres and cannot be proven against a mock.
+    expect(updateSetCalls[0].status).toBeDefined();
+    const sqlText = sqlTextOf(updateSetCalls[0].status);
+    expect(sqlText).toContain("needs_quantity");
+    expect(sqlText).toContain("pending");
   });
 
   it("does NOT requeue while the quantity is still missing", async () => {
@@ -73,6 +89,7 @@ describe("extraction-review-service", () => {
       input: { unit: "SF" },
     });
 
+    // No quantity supplied ⇒ status is not touched at all, so there is nothing to race over.
     expect(updateSetCalls[0].status).toBeUndefined();
   });
 
@@ -98,7 +115,11 @@ describe("extraction-review-service", () => {
       input: { quantity: "9.000" },
     });
 
-    expect(updateSetCalls[0].status).toBeUndefined();
+    // The expression IS sent — it has to be, since only the database can decide safely — but it is a
+    // no-op for any status other than `needs_quantity`: the CASE writes the column back to itself.
+    // `approved`, `unmatched` and `overridden` are somebody else's state machine.
+    const sqlText = sqlTextOf(updateSetCalls[0].status);
+    expect(sqlText).toContain("else");
   });
 
   it("marks an extraction approved and writes a review event", async () => {
