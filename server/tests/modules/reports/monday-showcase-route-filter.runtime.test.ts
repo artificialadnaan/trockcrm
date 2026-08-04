@@ -356,6 +356,31 @@ describe("the payload names what the filter could not reach", () => {
     expect(data.notes.some((note) => note.includes("Filtered to Service only"))).toBe(true);
   });
 
+  it("keeps the routeFilter field and the source notes describing the SAME state", async () => {
+    // The notes are the mechanism that discloses "Active leads are not route-filtered". If the payload
+    // could declare one filter state while its own notes described another, that disclosure would be
+    // unreliable exactly when it matters. Both are derived from ONE resolved descriptor; this pins that.
+    for (const routes of [undefined, BOTH, SERVICE, OTHER]) {
+      const data = await showcase(routes);
+      const notesClaimNarrowing = data.notes.some((note) => note.includes("Filtered to"));
+      expect(`routes=${routes ?? "absent"} notesNarrow=${notesClaimNarrowing}`).toBe(
+        `routes=${routes ?? "absent"} notesNarrow=${data.routeFilter.active}`
+      );
+      if (data.routeFilter.active) {
+        // The note names the SAME bucket the field carries, and repeats the same unfilterable list.
+        // Matched on the bucket WORD, not the full label ("Other (non-service)"), so the copy can be
+        // reworded without this becoming a wording test -- what is pinned is that they agree.
+        const bucketWord = data.routeFilter.selected[0] === "service" ? "Service" : "Other";
+        expect(data.notes.some((note) => note.includes(`Filtered to ${bucketWord}`))).toBe(true);
+        const otherWord = bucketWord === "Service" ? "Other" : "Service";
+        expect(data.notes.some((note) => note.includes(`Filtered to ${otherWord}`))).toBe(false);
+        for (const figure of data.routeFilter.unfilterable) {
+          expect(data.notes.some((note) => note.includes(figure))).toBe(true);
+        }
+      }
+    }
+  });
+
   it("marks the leads DRILL as not-applied while every deal drill is applied", async () => {
     const leads = await getMondayShowcaseEvidence(tdb, { metric: "leads", mode: "to_date", now: NOW, routes: SERVICE });
     expect(leads.routeFilter).toEqual({ selected: ["service"], active: true, applied: false });

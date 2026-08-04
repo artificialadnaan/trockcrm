@@ -286,6 +286,11 @@ export function assembleMondayShowcase(input: AssembleInput): MondayShowcaseData
   const wonValue: ValueWithBasis = { amount: input.won.value, basisLabel: WON_BASIS_LABEL };
   const sentValue: ValueWithBasis = { amount: input.sent.value, basisLabel: OPEN_BASIS_LABEL };
   const estimatedValue: ValueWithBasis = { amount: input.estimated.value, basisLabel: OPEN_BASIS_LABEL };
+  // Resolve the filter descriptor ONCE. It feeds two outputs -- the payload's own routeFilter field and
+  // the source notes derived from it -- and those two must never be able to disagree: the notes are the
+  // mechanism that tells a reader Active leads are NOT route-filtered, so a payload declaring one state
+  // while its notes describe another would undermine exactly the disclosure this filter depends on.
+  const routeFilter = input.routeFilter ?? describeRouteFilter();
 
   const departments: DepartmentMetric[] = [
     {
@@ -366,10 +371,10 @@ export function assembleMondayShowcase(input: AssembleInput): MondayShowcaseData
     officeProjection: ladderFrom(input.officeProjection),
     weeklyTrend: input.weeklyTrend,
     valueBases: { won_awarded_first: WON_BASIS_LABEL, open_best_estimate: OPEN_BASIS_LABEL },
-    routeFilter: input.routeFilter ?? describeRouteFilter(),
+    routeFilter,
     // When the selection narrows, the source notes carry the caveat too -- so a printed/exported copy of
-    // this report still states which figures the filter could not reach.
-    notes: [...DEPARTMENT_NOTES, ...routeFilterNotes(input.routeFilter ?? describeRouteFilter())],
+    // this report still states which figures the filter could not reach. Same object as the field above.
+    notes: [...DEPARTMENT_NOTES, ...routeFilterNotes(routeFilter)],
   };
 }
 

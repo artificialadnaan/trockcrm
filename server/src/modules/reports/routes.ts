@@ -1186,9 +1186,24 @@ router.post(
  * empty case matters as much as the typo one: "neither bucket" has no honest payload, and answering it with
  * the unfiltered report (or with zeros) is exactly the lie this endpoint must not tell. The client renders
  * its own "select at least one" state and does not call the server at all in that state.
+ *
+ * TAKES THE RAW QUERY VALUE, deliberately NOT a pickQueryValue()-normalized string. pickQueryValue drops
+ * empty and whitespace-only values, so `?routes=` and `?routes=%20` would arrive here as `undefined` and be
+ * read as ABSENT — i.e. as "both buckets", the silent full-report fallback this contract forbids. Present
+ * but unusable is NOT the same as absent, and only the raw value can tell them apart. Owning the extraction
+ * here (rather than at each handler) is also what keeps the two showcase endpoints symmetric by
+ * construction: a card and its drill cannot disagree about whether a value was rejected.
  */
-export function parseShowcaseRouteBuckets(raw: string | undefined): WorkflowRouteBucket[] | undefined {
-  if (raw === undefined) return undefined;
+export function parseShowcaseRouteBuckets(raw: unknown): WorkflowRouteBucket[] | undefined {
+  if (raw === undefined) return undefined; // the param is genuinely absent -> no narrowing
+  if (Array.isArray(raw)) {
+    // A repeated ?routes=a&routes=b. Which one wins is a guess, and guessing is how a filtered-looking
+    // page shows a different slice than the one asked for — reject rather than silently pick.
+    throw new AppError(400, "routes must be given once, as a comma-separated list");
+  }
+  if (typeof raw !== "string") {
+    throw new AppError(400, `routes must be a comma-separated list of: ${WORKFLOW_ROUTE_BUCKETS.join(", ")}`);
+  }
   const parts = raw.split(",").map((p) => p.trim()).filter((p) => p.length > 0);
   if (parts.length === 0) {
     throw new AppError(400, `routes must select at least one of: ${WORKFLOW_ROUTE_BUCKETS.join(", ")}`);
@@ -1206,11 +1221,26 @@ export function parseShowcaseRouteBuckets(raw: string | undefined): WorkflowRout
   return WORKFLOW_ROUTE_BUCKETS.filter((b) => seen.has(b));
 }
 
+/**
+ * THE single reader of `?routes`, shared by both showcase endpoints. Its whole reason to exist is that the
+ * two must accept and reject identically: if the data endpoint accepted a value the evidence endpoint
+ * rejected (or the reverse), a card and the drill behind it could disagree about whether the page is
+ * filtered — the one property this feature exists to guarantee. Going through one function makes that
+ * symmetry structural rather than a convention two call sites have to keep remembering, and gives the
+ * symmetry test a single real code path to exercise from both entry points.
+ */
+export function readShowcaseRouteParam(query: Record<string, unknown>): WorkflowRouteBucket[] | undefined {
+  return parseShowcaseRouteBuckets(query.routes);
+}
+
 router.get("/monday-showcase", requireAnyRole, async (req, res, next) => {
   try {
     const modeRaw = pickQueryValue(req.query.mode);
     const mode = parseWeekMode(modeRaw);
-    const routes = parseShowcaseRouteBuckets(pickQueryValue(req.query.routes));
+    // Raw, NOT pickQueryValue: an empty/whitespace ?routes must reach the parser to be rejected, not be
+    // normalized away into "absent" and silently answered with the unfiltered report. Read through the
+    // SHARED reader so this endpoint and the evidence one cannot drift apart.
+    const routes = readShowcaseRouteParam(req.query as Record<string, unknown>);
     const data = await getMondayShowcaseData(req.tenantDb!, { mode, routes });
     await req.commitTransaction!();
     res.json({ data });
@@ -1313,7 +1343,9 @@ export function parseShowcaseEvidenceParams(query: Record<string, unknown>): Mon
   // metric — including `leads`, whose source table has no workflow_route: rejecting it there would force the
   // client to special-case which metrics may carry the page's filter, and the service reports
   // routeFilter.applied=false so the drawer states plainly that this one list ignores the selection.
-  const routes = parseShowcaseRouteBuckets(pickQueryValue(query.routes));
+  // The SAME shared reader the data endpoint uses — the two MUST reject the same inputs, or a card and
+  // the drill behind it could disagree about whether the page is filtered at all.
+  const routes = readShowcaseRouteParam(query);
 
   return { metric, mode, repId, band, leadStage, stageSlug, regionName, from, to, routes };
 }
