@@ -1,5 +1,10 @@
 import { sql, type SQL } from "drizzle-orm";
-import { reportableDealSqlPredicate, closeTargetFarOutSqlPredicate } from "@trock-crm/shared/types";
+import {
+  reportableDealSqlPredicate,
+  closeTargetFarOutSqlPredicate,
+  SHOWCASE_ROUTE_BUCKETS,
+  type ShowcaseRouteBucket,
+} from "@trock-crm/shared/types";
 import { TERMINAL_STAGE_SLUGS } from "./pipeline-terminal-stages.js";
 
 type DealValueTable = {
@@ -536,9 +541,12 @@ export function aliasedWonHsClosedWonDateSql(alias: string): SQL {
  * EVERYTHING else. Same meaning as the deals dashboard's Service / Non-service At Risk cards (#1035) —
  * one definition of "service" across the platform, so a director comparing the two surfaces is comparing
  * the same population.
+ *
+ * RE-EXPORTED, not redeclared: the vocabulary lives in shared/ so the client's URL codec and this SQL layer
+ * cannot drift to different bucket names. The alias keeps this module's existing SQL-side naming.
  */
-export const WORKFLOW_ROUTE_BUCKETS = ["service", "other"] as const;
-export type WorkflowRouteBucket = (typeof WORKFLOW_ROUTE_BUCKETS)[number];
+export const WORKFLOW_ROUTE_BUCKETS = SHOWCASE_ROUTE_BUCKETS;
+export type WorkflowRouteBucket = ShowcaseRouteBucket;
 
 /**
  * Service-vs-Other narrowing on deals.workflow_route, as a LEADING-` AND ` fragment (the same composition

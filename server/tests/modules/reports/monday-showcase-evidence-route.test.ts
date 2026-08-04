@@ -186,9 +186,17 @@ describe("parseShowcaseRouteBuckets", () => {
     }
   });
 
-  it("rejects a repeated ?routes param instead of guessing which one wins", () => {
+  it("rejects a REPEATED ?routes param instead of guessing which one wins", () => {
     expect(() => parseShowcaseRouteBuckets(["service", "other"])).toThrow(/once/);
-    expect(() => parseShowcaseRouteBuckets(["service"])).toThrow(/once/);
+    expect(() => parseShowcaseRouteBuckets(["service", "service"])).toThrow(/once/);
+  });
+
+  it("accepts a ONE-element list as a single occurrence, not as a repeat", () => {
+    // Required for client/server agreement: the page parses searchParams.getAll(), which returns a
+    // one-element array for a singly-specified param. Rejecting that shape here would mean the server
+    // refused the very selection the chips produce.
+    expect(parseShowcaseRouteBuckets(["service"])).toEqual(["service"]);
+    expect(parseShowcaseRouteBuckets(["service,other"])).toEqual(["service", "other"]);
   });
 
   it("rejects a non-string value (e.g. ?routes[a]=b) rather than reading it as absent", () => {

@@ -20,6 +20,15 @@ import { DEFAULT_WEEK_MODE } from "./week-mode";
 // Every call the page makes to the showcase hook, in order — the request contract under test.
 const calls: Array<{ mode: string; routes: readonly RouteBucket[] | undefined; enabled: boolean }> = [];
 
+/** When set, the mocked hook returns this instead — used to stage an in-flight refetch holding the
+ *  PREVIOUS payload, which is the exact window where a stale caveat can contradict the chips. */
+let hookOverride: {
+  data: MondayShowcaseData | null;
+  loading: boolean;
+  error: string | null;
+  refetch: () => void;
+} | null = null;
+
 const payload: MondayShowcaseData = {
   period: { from: "2026-06-08", to: "2026-06-12", mode: DEFAULT_WEEK_MODE, label: "2026-06-08 → 2026-06-12" },
   // A distinctive count (rendered as "4,242") so "did the page render figures at all?" is unambiguous in
@@ -65,6 +74,7 @@ vi.mock("@/hooks/use-reports", async () => {
       calls.push({ mode, routes, enabled });
       // Mirror the real hook's contract: a disabled selection yields NO data, so the page cannot render
       // stale numbers under an empty or broken chip state even if it tried.
+      if (hookOverride) return hookOverride;
       return { data: enabled ? payload : null, loading: false, error: null, refetch: () => {} };
     },
     useShowcaseEvidence: () => ({ data: null, loading: false, error: null, refetch: () => {} }),
@@ -105,6 +115,7 @@ function chip(label: string): HTMLButtonElement {
 
 beforeEach(() => {
   calls.length = 0;
+  hookOverride = null;
   currentSearch = "";
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -217,5 +228,66 @@ describe("an invalid ?routes value", () => {
     });
     expect(currentSearch).not.toContain("routes");
     expect(calls[calls.length - 1].enabled).toBe(true);
+  });
+});
+
+describe("a repeated ?routes param", () => {
+  // URLSearchParams.get() returns only the first value, so this URL used to render a confident
+  // Service-only page while the SERVER rejected the same link as ambiguous. Client and server now consult
+  // one parser, so both call it invalid.
+  it("renders the invalid state instead of guessing the first value", () => {
+    renderAt("/reports/monday-showcase?routes=service&routes=other");
+    expect(container.textContent).toContain("isn’t valid");
+    expect(container.textContent).not.toContain("4,242");
+    expect(chip("Service").getAttribute("aria-pressed")).toBe("false");
+    expect(chip("Other").getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("does not fetch a slice the server would refuse to produce", () => {
+    renderAt("/reports/monday-showcase?routes=service&routes=other");
+    expect(calls.every((c) => c.enabled === false)).toBe(true);
+  });
+
+  it("still honours a SINGLE occurrence — the negative case alone would pass on broken parsing", () => {
+    renderAt("/reports/monday-showcase?routes=service");
+    expect(calls[0]).toEqual({ mode: DEFAULT_WEEK_MODE, routes: ["service"], enabled: true });
+    expect(container.textContent).not.toContain("isn’t valid");
+    expect(container.textContent).toContain("4,242");
+  });
+});
+
+describe("the caveat never contradicts the chips", () => {
+  const serviceOnlyPayload: MondayShowcaseData = {
+    ...payload,
+    routeFilter: {
+      selected: ["service"],
+      active: true,
+      unfilterable: ["Active leads (the leads table has no workflow route)"],
+    },
+  };
+
+  it("shows the server caveat once the payload matches the chips", () => {
+    hookOverride = { data: serviceOnlyPayload, loading: false, error: null, refetch: () => {} };
+    renderAt("/reports/monday-showcase?routes=service");
+    expect(container.textContent).toContain("Showing Service only");
+    expect(container.textContent).toContain("Active leads");
+  });
+
+  it("drops the stale caveat during an in-flight refetch to a NEW selection", () => {
+    // The window this guards: chips already say All departments, the previous Service-only payload is
+    // still in hand. Rendering its caveat would print "All departments" and "Showing Service only" side
+    // by side — and that caveat is the only disclosure the unfilterable figures have.
+    hookOverride = { data: serviceOnlyPayload, loading: true, error: null, refetch: () => {} };
+    renderAt("/reports/monday-showcase");
+    expect(container.textContent).toContain("All departments");
+    expect(container.textContent).not.toContain("Showing Service only");
+  });
+
+  it("drops it even when the request has settled but the payload describes another selection", () => {
+    // Belt and braces: loading already false, yet the payload is for a different slice than the chips.
+    hookOverride = { data: serviceOnlyPayload, loading: false, error: null, refetch: () => {} };
+    renderAt("/reports/monday-showcase");
+    expect(container.textContent).toContain("All departments");
+    expect(container.textContent).not.toContain("Showing Service only");
   });
 });

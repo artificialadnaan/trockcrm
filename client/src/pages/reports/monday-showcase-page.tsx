@@ -16,6 +16,7 @@ import {
   isBucketSelected,
   isFetchableSelection,
   parseRouteSelection,
+  payloadDescribesSelection,
   routesForRequest,
   serializeRouteSelection,
   toggleRouteBucket,
@@ -49,8 +50,14 @@ export function MondayShowcasePage() {
   // the link a director pastes into Slack reproduces the exact slice they were looking at. `variant` and
   // `mode` stay local -- they are already ephemeral view controls and moving them is out of scope here.
   const [searchParams, setSearchParams] = useSearchParams();
-  const rawRoutes = searchParams.get(ROUTES_PARAM);
-  const selection = useMemo(() => parseRouteSelection(rawRoutes), [rawRoutes]);
+  // getAll, NOT get: .get() returns only the FIRST occurrence, so a repeated ?routes=service&routes=other
+  // would read as a confident Service-only selection here while the server rejects the same URL as
+  // ambiguous — the page would show a slice the server would refuse to produce. The shared parser needs to
+  // SEE the repetition to reject it.
+  const rawRoutes = searchParams.getAll(ROUTES_PARAM);
+  const rawRoutesKey = JSON.stringify(rawRoutes); // value-, not identity-keyed: getAll returns a new array each render
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the joined value, see above
+  const selection = useMemo(() => parseRouteSelection(rawRoutes), [rawRoutesKey]);
   const setSelection = useCallback(
     (next: typeof selection) => {
       const params = new URLSearchParams(searchParams);
@@ -72,6 +79,15 @@ export function MondayShowcasePage() {
   const requestRoutes: RouteBucket[] | undefined = fetchable ? routesForRequest(selection) : undefined;
   const { data, loading, error, refetch } = useMondayShowcase(mode, requestRoutes, fetchable);
   const Active = VARIANT_COMPONENT[variant];
+
+  // The server-sourced caveat, but ONLY while it describes the payload actually on screen. A refetch keeps
+  // the previous payload in hand, so reading routeFilter straight off `data` can print "Showing Service
+  // only" next to chips that now say All departments. That caveat is the only disclosure the unfilterable
+  // figures (Active leads) have — a version of it that can contradict the chips is worse than none.
+  const settledFilter =
+    !loading && data && payloadDescribesSelection(data.routeFilter.selected, selection)
+      ? data.routeFilter
+      : null;
 
   // Deliberately NOT wrapped in ReportShell: this is a fixed weekly Monday view whose only control is the
   // WTD / last-full-week toggle below. It does not take a date range / office / owner filter, so it must
@@ -128,10 +144,10 @@ export function MondayShowcasePage() {
         {selection.kind === "selection" && selection.buckets.length === ROUTE_BUCKETS.length ? (
           <span className="text-xs text-muted-foreground">All departments — the full report.</span>
         ) : null}
-        {data?.routeFilter.active ? (
+        {settledFilter?.active ? (
           <span className="text-xs text-amber-700">
-            Showing {ROUTE_BUCKET_LABEL[data.routeFilter.selected[0]]} only. Not filtered:{" "}
-            {data.routeFilter.unfilterable.join("; ")}.
+            Showing {ROUTE_BUCKET_LABEL[settledFilter.selected[0]]} only. Not filtered:{" "}
+            {settledFilter.unfilterable.join("; ")}.
           </span>
         ) : null}
       </div>

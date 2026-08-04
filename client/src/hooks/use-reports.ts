@@ -1525,6 +1525,11 @@ export function useMondayShowcase(
     }
     setLoading(true);
     setError(null);
+    // Drop the previous payload BEFORE the new one lands. While it sits here every consumer deriving copy
+    // from it -- notably the chip-row caveat naming which figures are filtered -- describes a request that
+    // is no longer the current one. The numbers are already hidden behind `loading`; this closes the same
+    // gap for anything rendered outside that switch.
+    setData(null);
     try {
       const params = new URLSearchParams({ mode });
       if (routesKey) params.set("routes", routesKey);

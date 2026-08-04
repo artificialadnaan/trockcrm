@@ -95,6 +95,9 @@ import {
   WORKFLOW_ROUTE_BUCKETS,
   type WorkflowRouteBucket,
 } from "../shared/deal-value-sql.js";
+// The verdict on `?routes` is decided ONCE, in shared/, so the two server endpoints and the client page
+// cannot disagree about what a given URL means.
+import { parseShowcaseRouteValues, showcaseRouteValuesFromQuery } from "@trock-crm/shared/types";
 import { getAtRiskWatchlist } from "./at-risk-service.js";
 import { getRepPackData } from "./rep-pack-service.js";
 import { getRegionReport } from "./region-report-service.js";
@@ -1182,52 +1185,39 @@ router.post(
  * `?routes=service,other`). ABSENT = both = no narrowing at all, so every pre-existing caller and bookmark
  * keeps today's numbers exactly.
  *
- * An unrecognised bucket, a duplicate, or an EMPTY selection is a 400 — never a silently-full result. The
- * empty case matters as much as the typo one: "neither bucket" has no honest payload, and answering it with
- * the unfiltered report (or with zeros) is exactly the lie this endpoint must not tell. The client renders
- * its own "select at least one" state and does not call the server at all in that state.
+ * The VERDICT is not decided here — it comes from parseShowcaseRouteValues in shared/, the one function the
+ * report endpoint, the evidence endpoint AND the client page all consult. This wrapper only maps that shared
+ * verdict onto HTTP: anything not `absent`/`selection` is a 400, never a silently-full result. An empty
+ * selection matters as much as a typo: "neither bucket" has no honest payload, and answering it with the
+ * unfiltered report (or with zeros) is exactly the lie this endpoint must not tell.
  *
  * TAKES THE RAW QUERY VALUE, deliberately NOT a pickQueryValue()-normalized string. pickQueryValue drops
- * empty and whitespace-only values, so `?routes=` and `?routes=%20` would arrive here as `undefined` and be
- * read as ABSENT — i.e. as "both buckets", the silent full-report fallback this contract forbids. Present
- * but unusable is NOT the same as absent, and only the raw value can tell them apart. Owning the extraction
- * here (rather than at each handler) is also what keeps the two showcase endpoints symmetric by
- * construction: a card and its drill cannot disagree about whether a value was rejected.
+ * empty and whitespace-only values, so `?routes=` and `?routes=%20` would arrive as `undefined` and be read
+ * as ABSENT — the silent full-report fallback this contract forbids. Present-but-unusable is not absent, and
+ * only the raw value can tell them apart. It also preserves a REPEATED param as a list, which is what lets
+ * the shared parser reject it instead of guessing which occurrence wins.
  */
 export function parseShowcaseRouteBuckets(raw: unknown): WorkflowRouteBucket[] | undefined {
-  if (raw === undefined) return undefined; // the param is genuinely absent -> no narrowing
-  if (Array.isArray(raw)) {
-    // A repeated ?routes=a&routes=b. Which one wins is a guess, and guessing is how a filtered-looking
-    // page shows a different slice than the one asked for — reject rather than silently pick.
-    throw new AppError(400, "routes must be given once, as a comma-separated list");
+  const parsed = parseShowcaseRouteValues(showcaseRouteValuesFromQuery(raw));
+  switch (parsed.kind) {
+    case "absent":
+      return undefined; // the param is genuinely absent -> no narrowing
+    case "selection":
+      return parsed.buckets;
+    case "empty":
+      throw new AppError(400, `routes must select at least one of: ${WORKFLOW_ROUTE_BUCKETS.join(", ")}`);
+    case "invalid":
+      throw new AppError(400, parsed.reason);
   }
-  if (typeof raw !== "string") {
-    throw new AppError(400, `routes must be a comma-separated list of: ${WORKFLOW_ROUTE_BUCKETS.join(", ")}`);
-  }
-  const parts = raw.split(",").map((p) => p.trim()).filter((p) => p.length > 0);
-  if (parts.length === 0) {
-    throw new AppError(400, `routes must select at least one of: ${WORKFLOW_ROUTE_BUCKETS.join(", ")}`);
-  }
-  const seen = new Set<string>();
-  for (const part of parts) {
-    if (!(WORKFLOW_ROUTE_BUCKETS as readonly string[]).includes(part)) {
-      throw new AppError(400, `routes must be a comma-separated list of: ${WORKFLOW_ROUTE_BUCKETS.join(", ")}`);
-    }
-    if (seen.has(part)) throw new AppError(400, `routes contains a duplicate bucket: ${part}`);
-    seen.add(part);
-  }
-  // Normalize to the canonical order so the SQL helper's both-buckets short-circuit is order-independent
-  // ("other,service" must be as inert as "service,other").
-  return WORKFLOW_ROUTE_BUCKETS.filter((b) => seen.has(b));
 }
 
 /**
- * THE single reader of `?routes`, shared by both showcase endpoints. Its whole reason to exist is that the
- * two must accept and reject identically: if the data endpoint accepted a value the evidence endpoint
- * rejected (or the reverse), a card and the drill behind it could disagree about whether the page is
- * filtered — the one property this feature exists to guarantee. Going through one function makes that
- * symmetry structural rather than a convention two call sites have to keep remembering, and gives the
- * symmetry test a single real code path to exercise from both entry points.
+ * THE single reader of `?routes` on the server, used by both showcase endpoints. The two must accept and
+ * reject identically: if the data endpoint accepted a value the evidence endpoint rejected (or the reverse),
+ * a card and the drill behind it could disagree about whether the page is filtered — the one property this
+ * feature exists to guarantee. Going through one function makes that symmetry structural rather than a
+ * convention two call sites have to remember, and gives the symmetry test one real code path to exercise
+ * from both entry points. (The CLIENT is kept in agreement a layer up, by sharing the parser itself.)
  */
 export function readShowcaseRouteParam(query: Record<string, unknown>): WorkflowRouteBucket[] | undefined {
   return parseShowcaseRouteBuckets(query.routes);
