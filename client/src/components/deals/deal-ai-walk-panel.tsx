@@ -263,7 +263,14 @@ function ScopeItemRow({ item, reviewUrl }: { item: GlassesWalkthroughScopeItem; 
         {/* THE CITATION. Rendered under the row rather than behind a click because it is the reason to
             trust or distrust the line, and a panel that hides its evidence one interaction away is a
             panel whose evidence nobody reads. */}
-        {item.evidence.map((mention, index) => (
+        {item.evidence.map((mention, index) => {
+          // Resolved per mention rather than per row: a merged row's mentions can sit in different
+          // clips, and only some of them may have landed a proxy transcode yet.
+          const watchHref =
+            reviewUrl && mention.timelineMs !== null
+              ? `${reviewUrl}?t=${Math.round(mention.timelineMs)}`
+              : mention.clipUrl;
+          return (
           <div key={`${item.id}-${index}`} className="mt-2 border-l-2 border-muted pl-2">
             <p className="text-xs italic text-muted-foreground">“{mention.quote}”</p>
             {mention.mentionedQuantity !== null ? (
@@ -288,21 +295,27 @@ function ScopeItemRow({ item, reviewUrl }: { item: GlassesWalkthroughScopeItem; 
                 ))}
               </div>
             ) : null}
-            {/* Straight to the moment, not merely to the walkthrough. Absent when TROCK Scope's origin is
-                not configured for this build — see lib/trock-scope.ts. */}
-            {reviewUrl && mention.timelineMs !== null ? (
+            {/* Straight to the moment, not merely to the walkthrough.
+                PREFERS THE REVIEW SCREEN, FALLS BACK TO THE CLIP ITSELF. The review screen is the better
+                destination — it has the transcript, the neighbouring rows and the controls to correct
+                what is wrong. But its origin is a build-time variable that is legitimately unset (see
+                lib/trock-scope.ts), and the evidence response already carries a presigned URL for the
+                clip. Requiring the origin meant an estimator could see the stills and not watch the
+                footage they were cut from, with a working link sitting unused in the payload. */}
+            {watchHref ? (
               <a
-                href={`${reviewUrl}?t=${Math.round(mention.timelineMs)}`}
+                href={watchHref}
                 target="_blank"
                 rel="noreferrer"
                 className="mt-1 inline-flex items-center gap-1 text-xs text-primary hover:underline"
               >
                 <PlayCircle className="h-3 w-3" aria-hidden="true" />
-                Watch this moment
+                {reviewUrl && mention.timelineMs !== null ? "Watch this moment" : "Watch the clip"}
               </a>
             ) : null}
           </div>
-        ))}
+          );
+        })}
       </div>
       <div className="flex shrink-0 items-center gap-3">
         <span className={`text-sm ${quantity ? "text-foreground" : "italic text-muted-foreground"}`}>
@@ -347,6 +360,11 @@ export function AiWalkCard({
   const badge = STATE_BADGE[walkthrough.state] ?? UNKNOWN_STATE_BADGE;
   const items = walkthrough.scope?.items ?? [];
   const summary = summarizeScopeItems(items);
+  // Whether anything on this card is behind a short-lived signature. Frames and clips both are; a card
+  // whose citations are text-only has nothing that can rot, so it gets no control it does not need.
+  const hasSignedMedia = items.some((item) =>
+    item.evidence.some((mention) => mention.frames.length > 0 || mention.clipUrl !== null)
+  );
 
   return (
     <div className="rounded-lg border bg-background p-4">
@@ -442,6 +460,17 @@ export function AiWalkCard({
               {summary.total} {summary.total === 1 ? "line item" : "line items"}
               {summary.needsVerification > 0 ? ` · ${summary.needsVerification} to verify` : ""}
             </p>
+            {/* PRESIGNED URLS EXPIRE, and a deal page is left open for hours. TROCK Scope signs the
+                frame and clip URLs with a short TTL, and the images are lazy — so an estimator who
+                scrolls to a later citation after the TTL lapses gets broken stills even though the
+                evidence is perfectly healthy. There is no per-walk refresh route, so this re-reads the
+                deal's walks exactly as the other retry controls do, which re-signs everything.
+                Offered only when there is something signed to go stale. */}
+            {hasSignedMedia ? (
+              <div className="flex justify-end">
+                <RetryButton label="Refresh evidence" onRetry={onRetry} retrying={retrying} />
+              </div>
+            ) : null}
             <ul className="divide-y">
               {items.map((item) => (
                 <ScopeItemRow key={item.id} item={item} reviewUrl={reviewUrl} />

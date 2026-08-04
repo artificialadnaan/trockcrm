@@ -321,31 +321,33 @@ function toPanelScopeItem(raw: unknown): GlassesWalkthroughScopeItem | null {
  * than `undefined` reaching the page — the same rule the item mapper above follows.
  */
 /**
- * Runs `work` over `items` with at most `limit` in flight.
+ * A limiter shared by every caller that holds it: at most `limit` of its tasks run at once.
  *
- * Its own tiny helper rather than `Promise.all`, because the evidence pass is one request per scope row
- * and a forty-row walk would otherwise open forty sockets against TROCK Scope at once — from an endpoint
- * the deal page POLLS. Never rejects: `work` is expected to absorb its own failures, and one row's
- * missing pictures must not abort the others.
+ * A FACTORY rather than a helper that pools per call, because the evidence work is nested inside a
+ * pool that is already running several walks concurrently. A per-call pool multiplies — six walks times
+ * six items is thirty-six sockets against TROCK Scope from one render of one deal page, from an
+ * endpoint that polls. One limiter created per REQUEST and closed over by every walk makes the
+ * documented ceiling the real one however the rows divide between walks.
+ *
+ * Never rejects: each task is expected to absorb its own failures, and one row's missing pictures must
+ * not abort another's.
  */
-async function mapWithConcurrency<T>(
-  items: T[],
-  limit: number,
-  work: (item: T) => Promise<void>
-): Promise<void> {
-  let cursor = 0;
-  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (cursor < items.length) {
-      const item = items[cursor++]!;
-      try {
-        await work(item);
-      } catch {
-        // Deliberately swallowed. `work` already returns null on failure; this is the backstop for an
-        // unexpected throw, and the cost of it is one row without citations.
-      }
+function createLimiter(limit: number): (task: () => Promise<void>) => Promise<void> {
+  let active = 0;
+  const waiting: Array<() => void> = [];
+
+  return async (task) => {
+    if (active >= limit) await new Promise<void>((resolve) => waiting.push(resolve));
+    active += 1;
+    try {
+      await task();
+    } catch {
+      // Backstop only; `task` already absorbs its own failures. The cost is one row without citations.
+    } finally {
+      active -= 1;
+      waiting.shift()?.();
     }
-  });
-  await Promise.all(runners);
+  };
 }
 
 function toPanelFrames(raw: unknown): GlassesWalkthroughScopeFrame[] {
@@ -426,6 +428,9 @@ export async function resolveGlassesWalkthroughScope(
 ): Promise<GlassesWalkthroughPanelEntry[]> {
   const timeoutMs = deps.timeoutMs ?? GLASSES_WALKTHROUGH_SCOPE_TIMEOUT_MS;
   const warn = deps.warn ?? ((message: string) => console.warn(message));
+  // Created once PER REQUEST and closed over by every walk, so the ceiling holds across walks rather
+  // than per walk. See `createLimiter`.
+  const evidenceLimiter = createLimiter(GLASSES_WALKTHROUGH_SCOPE_CONCURRENCY);
 
   const entries: GlassesWalkthroughPanelEntry[] = rows.map((row) => ({
     id: row.id,
@@ -518,32 +523,40 @@ export async function resolveGlassesWalkthroughScope(
           );
           continue;
         }
-        // THE CITATIONS, fetched only once the row set is known to be usable.
-        //
-        // One request per item, which is why it is bounded and why it happens here rather than inside
-        // the item mapper: a walk with forty rows must not open forty sockets, and a walk whose scope
-        // could not be read must not pay for evidence it will never show. The same abort signal covers
-        // these, so the whole phase still ends at one deadline.
-        //
-        // FAILURES ARE INVISIBLE BY DESIGN — `fetchScopeItemEvidence` returns null rather than throwing,
-        // and a null simply leaves that row with no citations. The line items are the panel; the frames
-        // corroborate them. Degrading the whole walk to `unavailable` because a thumbnail could not be
-        // signed would hide work TROCK Scope did perfectly well.
-        await mapWithConcurrency(items, GLASSES_WALKTHROUGH_SCOPE_CONCURRENCY, async (item) => {
-          const raw = await deps.scopeReader.fetchScopeItemEvidence(
-            entry.scopeWalkthroughId!,
-            item.id,
-            abort.signal
-          );
-          if (raw === null) return;
-          const withFrames = toPanelEvidence(raw);
-          // Only REPLACE when the evidence call actually said something. `/scope-items` already carries
-          // the quotes; this call adds pictures to them. An empty answer must not delete the words.
-          if (withFrames.length > 0) item.evidence = withFrames;
-        });
-
+        // THE SCOPE IS COMMITTED TO THE ENTRY *BEFORE* THE CITATIONS ARE FETCHED, and the order is the
+        // whole point. The evidence pass shares this phase's deadline; assigning after it meant a walk
+        // whose `/scope-items` read succeeded could still be reported `unavailable` with no items,
+        // because a slow thumbnail lost the race to the timeout. That hides a scope we already hold, in
+        // order to wait for pictures that only corroborate it. Now the walk is `ready` the instant its
+        // rows are known, and the citations decorate rows already on the entry.
         entry.state = "ready";
         entry.scope = { status: "ready", items };
+
+        // ONE LIMITER FOR THE WHOLE REQUEST, not one per walk. The outer pool already runs several walks
+        // at once, so a per-walk pool multiplied: six walks each opening six sockets is thirty-six
+        // concurrent GETs against TROCK Scope from a single deal page — and this endpoint POLLS. The
+        // shared limiter makes the documented ceiling the real one no matter how the walks divide up.
+        //
+        // FAILURES ARE INVISIBLE BY DESIGN — `fetchScopeItemEvidence` returns null rather than throwing,
+        // and a null simply leaves that row with no citations. Degrading a walk because a thumbnail
+        // could not be signed would hide work TROCK Scope did perfectly well.
+        await Promise.all(
+          items.map((item) =>
+            evidenceLimiter(async () => {
+              const raw = await deps.scopeReader.fetchScopeItemEvidence(
+                entry.scopeWalkthroughId!,
+                item.id,
+                abort.signal
+              );
+              if (raw === null) return;
+              const withFrames = toPanelEvidence(raw);
+              // Only REPLACE when the evidence call actually said something. `/scope-items` already
+              // carries the quotes; this call adds pictures to them. An empty answer must not delete
+              // the words.
+              if (withFrames.length > 0) item.evidence = withFrames;
+            })
+          )
+        );
       } catch (err) {
         // Left at `unavailable`, with `scope` still null. The message names the WALKTHROUGH, never the
         // reader's error object — see the store for why the underlying rejection is not safe to log.

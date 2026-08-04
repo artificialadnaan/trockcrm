@@ -278,6 +278,114 @@ describe("AiWalkCard states", () => {
     expect(moment?.getAttribute("href")).toBe("https://scope.test/review?t=254800");
   });
 
+  it("offers a refresh when the citations carry signed media, and not otherwise", async () => {
+    // TROCK Scope signs frame and clip URLs with a short TTL and the images are lazy, so a tab left
+    // open past the TTL shows broken stills for evidence that is perfectly healthy. A card whose
+    // citations are text-only has nothing that can rot and gets no control it does not need.
+    const withMedia = makeWalk({
+      id: "w1",
+      state: "ready",
+      scope: {
+        status: "ready",
+        items: [
+          makeItem({
+            id: "i1",
+            evidence: [
+              {
+                clipId: "c1",
+                timelineMs: 1000,
+                quote: "paint this wall",
+                mentionedQuantity: null,
+                mentionedUnit: null,
+                frames: [{ url: "https://scope.test/f.jpg?sig=1", timelineMs: 1000 }],
+                clipUrl: null,
+              },
+            ],
+          }),
+        ],
+      },
+    });
+    const shown = await render(<AiWalkCard walkthrough={withMedia} onRetry={vi.fn()} />);
+    expect(buttonLabelled(shown.container, "Refresh evidence")).toBeDefined();
+
+    const textOnly = makeWalk({
+      id: "w2",
+      state: "ready",
+      scope: { status: "ready", items: [makeItem({ id: "i2" })] },
+    });
+    const plain = await render(<AiWalkCard walkthrough={textOnly} onRetry={vi.fn()} />);
+    expect(buttonLabelled(plain.container, "Refresh evidence")).toBeUndefined();
+  });
+
+  it("falls back to the presigned clip when the review origin is not configured", async () => {
+    // `VITE_TROCK_SCOPE_URL` being unset is a supported build. Without this an estimator could see the
+    // stills and not watch the footage they were cut from, with a working URL sitting unused in the
+    // payload the server already fetched.
+    const walkthrough = makeWalk({
+      id: "w1",
+      state: "ready",
+      scope: {
+        status: "ready",
+        items: [
+          makeItem({
+            id: "i1",
+            evidence: [
+              {
+                clipId: "c1",
+                timelineMs: 4200,
+                quote: "paint this wall",
+                mentionedQuantity: null,
+                mentionedUnit: null,
+                frames: [],
+                clipUrl: "https://scope.test/clip.mp4?sig=1",
+              },
+            ],
+          }),
+        ],
+      },
+    });
+    const { container } = await render(
+      <AiWalkCard walkthrough={walkthrough} onRetry={vi.fn()} reviewUrl={null} />
+    );
+    const link = Array.from(container.querySelectorAll("a")).find((a) =>
+      (a.textContent ?? "").includes("Watch")
+    );
+    expect(link?.getAttribute("href")).toBe("https://scope.test/clip.mp4?sig=1");
+    expect(link?.textContent).toContain("Watch the clip");
+  });
+
+  it("offers no watch link when there is neither a review origin nor a clip", async () => {
+    const walkthrough = makeWalk({
+      id: "w1",
+      state: "ready",
+      scope: {
+        status: "ready",
+        items: [
+          makeItem({
+            id: "i1",
+            evidence: [
+              {
+                clipId: null,
+                timelineMs: null,
+                quote: "paint this wall",
+                mentionedQuantity: null,
+                mentionedUnit: null,
+                frames: [],
+                clipUrl: null,
+              },
+            ],
+          }),
+        ],
+      },
+    });
+    const { container } = await render(
+      <AiWalkCard walkthrough={walkthrough} onRetry={vi.fn()} reviewUrl={null} />
+    );
+    expect(
+      Array.from(container.querySelectorAll("a")).some((a) => (a.textContent ?? "").includes("Watch"))
+    ).toBe(false);
+  });
+
   it("marks a quantity nobody actually said as inferred", async () => {
     // A number somebody spoke and a number the model derived are different claims, and pricing them
     // alike is how a guess becomes a line item.

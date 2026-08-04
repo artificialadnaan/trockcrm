@@ -143,6 +143,26 @@ describe("resolveGlassesWalkthroughScope — the four states", () => {
     expect(item!.evidence[0]!.mentionedQuantity).toBe(700);
   });
 
+  it("KEEPS the scope when the evidence pass runs out the deadline", async () => {
+    // The regression: `entry.scope` used to be assigned AFTER awaiting the citations, so a slow
+    // thumbnail could lose the race to the phase timeout and the walk was reported `unavailable` with
+    // no items — hiding a scope we had already successfully read, in order to wait for pictures that
+    // only corroborate it. The rows are committed first now; citations decorate what is already there.
+    const [entry] = await resolveGlassesWalkthroughScope([row()], {
+      scopeReader: reader({
+        fetchScopeItems: async () => ({ outcome: "found", pipeline: "finished", items: [scopeItem()] }),
+        // Never settles on its own: only the deadline ends it.
+        fetchScopeItemEvidence: () => new Promise(() => {}),
+      }),
+      timeoutMs: 20,
+      warn: collectWarnings().warn,
+    });
+
+    expect(entry!.state).toBe("ready");
+    expect(entry!.scope!.items).toHaveLength(1);
+    expect(entry!.scope!.items[0]!.description).toBe("Paint wall red");
+  });
+
   it("still renders the scope when the citations cannot be fetched", async () => {
     // THE WHOLE POINT OF THE BEST-EFFORT CONTRACT. The line items are the panel; the pictures
     // corroborate them. A signing failure or a timeout on a thumbnail must not collapse the walk to
