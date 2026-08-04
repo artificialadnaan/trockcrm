@@ -23,8 +23,12 @@ import { PGlite } from "@electric-sql/pglite";
 import {
   PORTFOLIO_OFF_BOARD_STAGE_ALIASES,
   PORTFOLIO_PROJECT_OFF_BOARD_STAGES,
+  isPortfolioProjectBoardRelevantStage,
   isPortfolioProjectOffBoardStage,
+  normalizePortfolioProjectStage,
 } from "@trock-crm/shared/types";
+import { toPortfolioSeedCandidate } from "../../src/modules/synchub/portfolio-projects-sync.js";
+import { validateSyncHubProjectStageChangedPayload } from "../../src/modules/synchub/procore-project-stage-relay-service.js";
 
 const MIGRATION_PATH = join(__dirname, "../../../migrations/0216_portfolio_projects_board_relevant_backfill.sql");
 const MIGRATION_SQL = readFileSync(MIGRATION_PATH, "utf-8");
@@ -337,6 +341,132 @@ describe("migration 0216 — portfolio_projects board-relevant backfill", () => 
     // stages must genuinely not.
     expect(tsVerdicts.filter(Boolean).length).toBeGreaterThanOrEqual(15);
     expect(tsVerdicts.filter((verdict) => !verdict).length).toBeGreaterThanOrEqual(10);
+  });
+
+  /**
+   * LOCALE-INDEPENDENCE GUARD — and the only kind of check that can cover this class of bug.
+   *
+   * PostgreSQL evaluates POSIX character classes per the active collation/locale; JS \s is a fixed set
+   * of code points. So a POSIX class in the mirror is correct-under-the-locale-we-tested rather than
+   * correct. The parity test above CANNOT catch that: both sides run against the same backend, so they
+   * agree in CI on every possible input and would diverge only in production.
+   *
+   * There is therefore no behavioural test to write. What is testable is the decision itself: the SQL
+   * must not reach for a locale-defined class at all.
+   */
+  it("uses no POSIX character class — the mirror must not depend on the server locale", () => {
+    // Executable SQL only: the header discusses [:space:] at length, and prose is not a dependency.
+    const executableSql = MIGRATION_SQL.split("\n")
+      .filter((line) => !line.trimStart().startsWith("--"))
+      .join("\n");
+    const posixClasses = [...executableSql.matchAll(/\[:[a-z]+:\]/g)].map((m) => m[0]);
+    expect(posixClasses).toEqual([]);
+  });
+
+  it("defines `ws` as exactly JS \\s, in explicit code points, in every copy", async () => {
+    // Pinned literally so a well-meaning "simplify" back to [:space:], or to the tempting
+    // U+0009-U+0020 range (which swallows the C0 controls U+000E-U+001F that JS \s excludes),
+    // fails here rather than in production.
+    const expected = "'\\u0009-\\u000d\\u0020\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff'";
+    const declarations = [...MIGRATION_SQL.matchAll(/ws constant text := ('[^']*')/g)].map((m) => m[1]);
+    expect(declarations.length).toBe(2);
+    for (const declaration of declarations) expect(declaration).toBe(expected);
+
+    // ...and the class the SQL actually applies matches JS \s character for character.
+    await pg.exec(MIGRATION_SQL);
+    const jsWhitespace = [
+      0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x20, 0xa0, 0x1680,
+      0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007,
+      0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff,
+    ].map((code) => String.fromCodePoint(code));
+    // Not whitespace in JS. NUL is omitted: Postgres text cannot store it.
+    const notJsWhitespace = [0x0e, 0x1f, 0x61, 0x2d, 0x5f, 0x200b, 0x2060, 0x180e]
+      .map((code) => String.fromCodePoint(code));
+
+    for (const char of jsWhitespace) {
+      expect({ cp: char.codePointAt(0), js: /\s/.test(char) }).toEqual({ cp: char.codePointAt(0), js: true });
+      // Wrapping a legacy stage in it must still normalize away to the alias.
+      expect(await sqlIsOffBoard(`${char}Hold${char}`)).toBe(true);
+    }
+    for (const char of notJsWhitespace) {
+      expect({ cp: char.codePointAt(0), js: /\s/.test(char) }).toEqual({ cp: char.codePointAt(0), js: false });
+      // ...and a non-whitespace wrapper must NOT be stripped, so it stays unrecognised.
+      expect(await sqlIsOffBoard(`${char}Hold${char}`)).toBe(false);
+    }
+  });
+
+  /**
+   * THREE-WAY WRITER PARITY.
+   *
+   * `is_board_relevant` has three writers — the seed CLI, the webhook relay, and this migration —
+   * and until now only the migration had been checked against the classifier. The relay had drifted:
+   * it classified from the ALREADY-NORMALIZED stage, and normalizePortfolioProjectStage is not
+   * idempotent for every input. `_Hold` normalizes to " hold" (JS trims before collapsing, so the
+   * underscore becomes a leading space); feed that back in and the second pass trims it to "hold",
+   * which IS a legacy alias. So the relay wrote false — the project vanished — while the seed and
+   * the migration both called the same raw value unknown-but-relevant.
+   *
+   * The assertion is AGREEMENT, not correctness against a fourth opinion. Any input where the three
+   * disagree is a defect whichever one is "right", and that is what catches the next one.
+   */
+  const WRITER_PARITY_INPUTS = [
+    "Hold (LEGACY)", "Hold", "hold", "  Hold  ", "\tHold\t", " Hold ",
+    "Lost/Cancelled (Legacy)", "Lost / Cancelled (Legacy)", "Lost/Cancelled",
+    "_Hold",            // -> " hold": NOT off-board. The regression.
+    "Hold_",            // -> "hold ": likewise not off-board.
+    "_Lost/Cancelled",
+    "Pre-Construction", "Estimating ", "Service - In Production",
+    "Service - Close Out Final Invoice", "Closed", "Buy Out", "Bidding",
+    "Warranty - Punch List", "",
+  ];
+
+  it("seed, relay and migration agree on is_board_relevant for every input", async () => {
+    await pg.exec(MIGRATION_SQL);
+
+    const disagreements: Array<Record<string, unknown>> = [];
+    for (const rawStage of WRITER_PARITY_INPUTS) {
+      // 1. SEED — a stage is relevant iff it is not excluded as non_board_relevant_stage.
+      const seeded = toPortfolioSeedCandidate({
+        procore_id: "p1", project_number: "PN-1", name: "P", display_name: null,
+        stage: null, project_stage_name: rawStage, active: true,
+        company_id: "598134325683880", company_name: "T", estimated_value: null, total_value: null,
+        last_synced_at: null, procore_updated_at: null, updated_at: null, properties: {},
+      } as any);
+      const seedRelevant = !("reason" in seeded && seeded.reason === "non_board_relevant_stage");
+
+      // 2. RELAY — the flag it writes onto the row.
+      const relayRelevant = validateSyncHubProjectStageChangedPayload({
+        eventType: "procore.project.stage_changed",
+        procore: { companyId: "598134325683880", portfolioProjectId: "1", currentStage: rawStage || "x" },
+        stageChange: { previousStage: null, newStage: rawStage || "x" },
+      }).stage.current.isBoardRelevant;
+
+      // 3. MIGRATION — relevant iff the SQL classifier does not call it off-board.
+      const migrationRelevant = !(await sqlIsOffBoard(rawStage));
+
+      // ...and the shared classifier, for context in the failure output.
+      const classifier = isPortfolioProjectBoardRelevantStage(rawStage);
+
+      if (rawStage === "") continue; // the relay rejects an empty stage at validation, not here
+      if (new Set([seedRelevant, relayRelevant, migrationRelevant]).size > 1) {
+        disagreements.push({ rawStage, seedRelevant, relayRelevant, migrationRelevant, classifier });
+      }
+    }
+    expect(disagreements).toEqual([]);
+  });
+
+  it("a `_Hold` webhook stays board-relevant, matching the seed and the migration", async () => {
+    // The regression in its own right: normalize -> " hold" -> re-normalize -> "hold" -> legacy.
+    expect(normalizePortfolioProjectStage("_Hold")).toBe(" hold");
+    expect(isPortfolioProjectOffBoardStage(normalizePortfolioProjectStage("_Hold"))).toBe(true); // the trap
+    expect(isPortfolioProjectBoardRelevantStage("_Hold")).toBe(true);                            // the truth
+
+    const relayed = validateSyncHubProjectStageChangedPayload({
+      eventType: "procore.project.stage_changed",
+      procore: { companyId: "598134325683880", portfolioProjectId: "1", currentStage: "_Hold" },
+      stageChange: { previousStage: "Closed", newStage: "_Hold" },
+    });
+    expect(relayed.stage.current.isBoardRelevant).toBe(true);
   });
 
   it("keeps a tab-wrapped legacy stage OFF the board end to end", async () => {

@@ -73,22 +73,46 @@
 --      Trimming happens FIRST, exactly as in JS, and there is deliberately NO trailing trim — JS trims
 --      before collapsing, so `_Hold` normalizes to " hold" WITH a leading space (the underscore becomes
 --      one) and is therefore NOT off-board. A tidy final trim would make SQL say "hold" and disagree.
---   3. .toLowerCase()               <-> lower()                          similar, not identical: lower() is
---      collation-dependent while JS is full Unicode. Bounded and harmless here — every off-board alias key
---      is ASCII, and no non-ASCII character lowercases INTO one of them — but it is a real difference, so
---      the parity test drives non-ASCII input rather than assuming.
---   4. /[_\s]+/g -> " "             <-> '[_' || ws || ']+'               identical with `ws`; NOT with bare
---      POSIX [[:space:]], which matches only the ASCII six and lets U+00A0 and the U+2000 block through.
+--   3. .toLowerCase()               <-> lower()                          COLLATION-SENSITIVE, see below.
+--   4. /[_\s]+/g -> " "             <-> '[_' || ws || ']+'               identical with `ws`.
 --   5. /\s*-\s*/g -> " - "          <-> '[ws]*-[ws]*'                    identical, greediness included:
---      both engines leave "a--b" as "a -  - b" (verified, not assumed).
+--      both engines leave "a--b" as "a -  - b" (verified against a live backend, not assumed).
 --   6. /\s+/g -> " "                <-> '[' || ws || ']+'                identical with `ws`.
--- `ws` is JS's \s spelled out: POSIX [[:space:]] for the ASCII six, plus U+00A0, U+1680, U+2000-U+200A,
--- U+2028, U+2029, U+202F, U+205F, U+3000 and U+FEFF.
+--
+-- `ws` IS SPELLED OUT IN EXPLICIT CODE POINTS AND MUST STAY THAT WAY. It used to begin with POSIX
+-- `[:space:]`, and that was a latent repeat of the same bug: PostgreSQL evaluates POSIX character classes
+-- per the ACTIVE COLLATION/LOCALE, whereas JS \s is a fixed set of code points. A production locale whose
+-- [:space:] covers a character JS \s does not would put the two classifiers back out of step — the
+-- migration holding a wrapped legacy stage off-board while isPortfolioProjectOffBoardStage calls the same
+-- value board-relevant. The explicit list removes the dependency instead of being right under one locale.
+-- It is exactly JS's \s: U+0009-U+000D, U+0020, U+00A0, U+1680, U+2000-U+200A, U+2028, U+2029, U+202F,
+-- U+205F, U+3000, U+FEFF — verified character by character against JS \s (33 probes, no disagreement).
+-- NOTE it is NOT the tempting range U+0009-U+0020: that swallows the C0 controls U+000E-U+001F, which JS
+-- \s does not match (also verified). Requires a UTF-8 server encoding, which this install has.
+--
+-- WHY THE PARITY TEST CANNOT COVER THAT. Both sides of the test run against the SAME backend, so a
+-- collation-driven difference is invisible to it on every possible input — it would agree in CI and
+-- diverge in production. Anything collation-sensitive here has to be removed or argued structurally;
+-- a green parity test is not evidence about this class of bug.
+--
+-- Remaining collation-sensitive constructs, re-checked against exactly that question:
+--   * lower() (step 3) — kept, because the alternative (an ASCII-only translate) would be a DELIBERATE
+--     divergence from JS's full-Unicode .toLowerCase(). It is bounded by the KEY SET, not by the test:
+--     every off-board alias key is pure ASCII, so a locale difference can only change the verdict if some
+--     non-ASCII character lower-cases INTO one of those keys. The only Unicode mapping that produces a
+--     bare ASCII letter is U+212A KELVIN SIGN -> 'k', and no off-board key contains a 'k'. That argument
+--     rests on the key set alone; if an off-board alias ever gains a non-ASCII character or a 'k', it
+--     stops holding and lower() must be revisited.
+--   * `= ANY(off_board)` — text equality uses the database default collation, which PostgreSQL does not
+--     permit to be nondeterministic, so it is byte-exact like JS `===` ('HOLD' = 'hold' is false, verified).
+--     Were that ever to change, a case-insensitive equality would match MORE strings and therefore exclude
+--     MORE rows — the safe direction here, since the failure being guarded against is dead work flipped
+--     ONTO the board.
 --
 -- One divergence remains BY CONSTRUCTION: the `??` precedence of the three alias lookups. A string whose
 -- bare form hit a BOARD alias while a hyphen variant hit an OFF-BOARD one would classify differently. No
 -- such string exists — not one off-board alias key contains a hyphen, so the variants can only ever match
--- the same bucket the bare form does. This is argued, not tested, and is the only claim here that is.
+-- the same bucket the bare form does. Argued, not tested, like the lower() bound above.
 --
 -- THE ALIAS LIST IS STILL DUPLICATED FROM CODE, because SQL cannot import the module. It is pinned:
 -- a runtime test (server/tests/migrations/0216-...) reads THIS FILE and asserts the literals in EVERY copy
@@ -126,7 +150,7 @@ BEGIN
         'lost/cancelled',
         'lost/cancelled (legacy)'
       ];
-      ws constant text := '[:space:]\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff';
+      ws constant text := '\u0009-\u000d\u0020\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff';
       bare text;
       hyphen_as_space text;
       compact_hyphen text;
@@ -197,7 +221,7 @@ DECLARE
     'lost/cancelled',
     'lost/cancelled (legacy)'
   ];
-  ws constant text := '[:space:]\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff';
+  ws constant text := '\u0009-\u000d\u0020\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff';
   bare text;
   hyphen_as_space text;
   compact_hyphen text;

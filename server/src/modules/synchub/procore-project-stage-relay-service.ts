@@ -371,7 +371,17 @@ export function validateSyncHubProjectStageChangedPayload(input: unknown): SyncH
         normalized: normalizedCurrentStage,
         // Relevance, not column membership: a stage with no column is still relayed onto the
         // board (into "Other / No Column"). Only the explicit off-board legacy stages are false.
-        isBoardRelevant: isPortfolioProjectBoardRelevantStage(normalizedCurrentStage),
+        //
+        // Classified from the RAW `newStage`, never from `normalizedCurrentStage`, because
+        // normalizePortfolioProjectStage is NOT IDEMPOTENT for every input and this predicate
+        // normalizes again internally. `_Hold` is the case: JS trims BEFORE collapsing, so the
+        // underscore becomes a leading space and the raw value normalizes to " hold" — which
+        // matches no alias and is therefore unknown-but-relevant, exactly as the seed and
+        // migration 0216 treat it. Feed " hold" back in and the second pass trims it to "hold",
+        // hits the legacy alias, and the project is written is_board_relevant = false — it
+        // disappears from the board instead of landing in "Other / No Column". Same input, same
+        // question, two answers, purely because of which string was handed to the classifier.
+        isBoardRelevant: isPortfolioProjectBoardRelevantStage(newStage),
       },
     },
     synchub: payload.synchub && typeof payload.synchub === "object"

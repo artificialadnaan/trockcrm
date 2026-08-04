@@ -651,6 +651,14 @@ function toApiProject(row: any) {
  * puts it in the "Other / No Column" column.
  */
 function toPortfolioProjectSummary(row: any): PortfolioProjectSummary {
+  // The ONE intentional re-normalization of an already-normalized value, and it is safe where the
+  // relevance predicates are not, because this asks a different question. It decides COLUMN
+  // PLACEMENT, and every canonical stage is a fixed point of the normalizer (asserted by the
+  // double-normalization test), so a second pass can only move a stale stored value TOWARD its
+  // canonical form — which is exactly the self-healing that lets "pre - construction" rows written
+  // before this release land in the Pre-Construction column with no data migration. Contrast
+  // is_board_relevant, which must be classified from RAW text: there a second pass can change the
+  // answer (`_Hold` -> " hold" -> "hold" -> legacy) and make a project vanish.
   const stage = normalizePortfolioProjectStage(row.current_stage_normalized ?? row.current_stage);
   return {
     id: row.id,
@@ -689,7 +697,12 @@ function toPortfolioStageEntry(row: any): PortfolioProjectStageEntry {
     // call and leaves nothing to keep in step with the alias map — which is exactly the class of bug
     // that made 0216 necessary in the first place. The stored column is left alone deliberately: it
     // remains an honest audit record of what the relay believed at the time.
-    isBoardRelevant: isPortfolioProjectBoardRelevantStage(row.stage_normalized ?? row.stage),
+    // RAW `stage` first, not `stage_normalized`. The predicate normalizes internally, and
+    // normalizePortfolioProjectStage is not idempotent for every input (`_Hold` -> " hold" ->
+    // "hold" -> legacy), so feeding it an already-normalized value can flip the answer. Raw is
+    // what the seed, the relay and migration 0216 all classify from; `stage_normalized` is only
+    // the fallback for a row whose raw text is somehow absent.
+    isBoardRelevant: isPortfolioProjectBoardRelevantStage(row.stage ?? row.stage_normalized),
     enteredAt: new Date(row.entered_at).toISOString(),
     relayDetectedAt: row.relay_detected_at ? new Date(row.relay_detected_at).toISOString() : null,
     webhookTimestamp: row.webhook_timestamp ? new Date(row.webhook_timestamp).toISOString() : null,

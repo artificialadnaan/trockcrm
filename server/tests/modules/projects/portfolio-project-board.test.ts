@@ -108,6 +108,12 @@ describe("portfolio project board service", () => {
       { id: "e3", stage: "Hold (LEGACY)", stage_normalized: "hold (legacy)", is_board_relevant: true, expected: false },
       // A stage nobody anticipated is not a decision to exclude.
       { id: "e4", stage: "Warranty - Punch List", stage_normalized: "warranty - punch list", is_board_relevant: false, expected: true },
+      // DOUBLE-NORMALIZATION GUARD. The predicate normalizes internally, and the normalizer is not
+      // idempotent here: raw `_Hold` normalizes to " hold" (JS trims before collapsing, so the
+      // underscore becomes a leading space), and normalizing THAT trims it to "hold" — a legacy
+      // alias. Classifying from stage_normalized would therefore label this "Legacy stage" while
+      // the seed, relay and migration 0216 all call the same project board-relevant.
+      { id: "e5", stage: "_Hold", stage_normalized: " hold", is_board_relevant: false, expected: true },
     ];
 
     const query = vi.fn(async (sql: string) => {
