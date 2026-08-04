@@ -130,6 +130,40 @@ function readSqlText(query: any) {
     .join("");
 }
 
+/**
+ * The bound scalar out of an `eq(column, value)` condition.
+ *
+ * `eq` compiles to chunks [StringChunk, Column, StringChunk, Param, StringChunk]; the Param is the only
+ * one carrying a plain string, because a StringChunk holds an ARRAY of SQL text and a Column holds no
+ * `value` at all. That is what lets the stub below answer for the row actually being asked about.
+ */
+function whereParamValue(condition: any): string | undefined {
+  return (condition?.queryChunks ?? []).find((chunk: any) => typeof chunk?.value === "string")?.value;
+}
+
+/**
+ * The `stillPriceable` re-read, standing in for rows NOBODY TOUCHED since the snapshot.
+ *
+ * The guard compares the live quantity against the one the recommendation was priced from and refuses
+ * ANY difference, so a stub answering with a fixed literal reads as a concurrent edit against every test
+ * whose rows carry some other number. That failure is worse than loud: most of these tests assert on
+ * matching and pricing, which both happen BEFORE the write, so they would keep passing while quietly
+ * exercising none of the persistence they were written for. Answering out of the same rows the run
+ * snapshotted keeps "unchanged" meaning unchanged; the drift cases stub their own reply.
+ */
+function unchangedQuantityRead(rows: Array<{ id: string; quantity: unknown }>) {
+  return {
+    where: vi.fn((condition: any) => {
+      const row = rows.find((candidate) => candidate.id === whereParamValue(condition));
+      return {
+        limit: vi.fn(() => ({
+          for: vi.fn().mockResolvedValue(row ? [{ quantity: row.quantity }] : []),
+        })),
+      };
+    }),
+  };
+}
+
 describe("estimate generation job", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -293,7 +327,8 @@ describe("estimate generation job", () => {
 
   it("filters eligible extractions to the still-active parse run before processing", async () => {
     const sourceLimit = vi.fn().mockResolvedValue([]);
-    const extractionWhere = vi.fn().mockResolvedValue([]);
+    const extractionRows: Array<{ id: string; quantity: unknown }> = [];
+    const extractionWhere = vi.fn().mockResolvedValue(extractionRows);
     const appDb = {
       select: vi.fn(() => ({
         from: vi.fn(() => ({
@@ -334,13 +369,9 @@ describe("estimate generation job", () => {
           }
 
           // Every later select is `stillPriceable`, the re-read the persist path does under the row
-          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
-          // value so these tests exercise the pricing they are about; the skip path has its own test.
-          return {
-            where: vi.fn(() => ({
-              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700" }]) })),
-            })),
-          };
+          // lock to confirm the quantity is still the one it priced. Answered from the snapshot itself,
+          // so these tests exercise the pricing they are about; the drift paths have their own tests.
+          return unchangedQuantityRead(extractionRows);
         }),
       })),
       insert: vi.fn(() => ({
@@ -403,7 +434,7 @@ describe("estimate generation job", () => {
 
   it("processes confirmed measurement candidates but skips unconfirmed ones", async () => {
     const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
-    const extractionWhere = vi.fn().mockResolvedValue([
+    const extractionRows = [
       {
         id: "ext-normal",
         dealId: "deal-1",
@@ -451,7 +482,8 @@ describe("estimate generation job", () => {
           measurementConfirmationState: "pending",
         },
       },
-    ]);
+    ];
+    const extractionWhere = vi.fn().mockResolvedValue(extractionRows);
     const appDb = {
       select: vi.fn(() => ({
         from: vi.fn(() => ({
@@ -489,13 +521,9 @@ describe("estimate generation job", () => {
             };
           }
           // Every later select is `stillPriceable`, the re-read the persist path does under the row
-          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
-          // value so these tests exercise the pricing they are about; the skip path has its own test.
-          return {
-            where: vi.fn(() => ({
-              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700" }]) })),
-            })),
-          };
+          // lock to confirm the quantity is still the one it priced. Answered from the snapshot itself,
+          // so these tests exercise the pricing they are about; the drift paths have their own tests.
+          return unchangedQuantityRead(extractionRows);
         }),
       })),
       insert: vi.fn(() => ({
@@ -681,6 +709,148 @@ describe("estimate generation job", () => {
     expect(lockedClient.query).toHaveBeenLastCalledWith("COMMIT");
   });
 
+  /**
+   * One run over one row the snapshot saw at 10 SF, with whatever the row says by the time the persist
+   * path re-reads it under the lock.
+   *
+   * The two cases below differ only in that live value and in what must happen, so they share this. A
+   * guard that refuses a corrected quantity but also refuses an untouched one passes the drift test and
+   * silently stops the feature — only the pair can tell those apart.
+   */
+  async function runWithLiveQuantity(liveQuantity: unknown) {
+    const statusWrites: any[] = [];
+    const insertPayloads: any[] = [];
+    const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
+    const extractionRows = [
+      {
+        id: "ext-remeasured",
+        dealId: "deal-1",
+        projectId: null,
+        documentId: "doc-1",
+        extractionType: "scope_line",
+        status: "pending",
+        // What the snapshot saw, and therefore what the recommendation is priced from.
+        quantity: "10",
+        unit: "SF",
+        normalizedLabel: "Install laminate",
+        metadataJson: { sourceParseRunId: "parse-run-1", activeArtifact: true },
+      },
+    ];
+    const extractionWhere = vi.fn().mockResolvedValue(extractionRows);
+    const appDb = {
+      select: vi.fn(() => ({ from: vi.fn(() => ({ where: vi.fn(() => ({ limit: sourceLimit })) })) })),
+    } as any;
+    const lockedClient = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: "doc-1", active_parse_run_id: "parse-run-1" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    } as any;
+    let tenantSelectCallCount = 0;
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => {
+          tenantSelectCallCount += 1;
+          if (tenantSelectCallCount === 1) {
+            return { where: vi.fn(() => ({ limit: vi.fn().mockResolvedValue([]) })) };
+          }
+          if (tenantSelectCallCount === 2) return { where: extractionWhere };
+          // The re-read under the row lock, answering with what the row says NOW.
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: liveQuantity }]) })),
+            })),
+          };
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn((payload: any) => {
+          insertPayloads.push(payload);
+          return { returning: vi.fn().mockResolvedValue([{ id: "generated-id" }]) };
+        }),
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn((values: unknown) => {
+          statusWrites.push(values);
+          return { where: vi.fn(() => ({ returning: vi.fn().mockResolvedValue([{ id: "claimed" }]) })) };
+        }),
+      })),
+    } as any;
+
+    getHistoricalPricingSignalsMock.mockResolvedValue({
+      historicalItems: [],
+      vendorQuotes: [],
+      currentDeal: null,
+    });
+    resolveActiveCatalogSnapshotVersionIdMock.mockResolvedValue("snapshot-1");
+    listCatalogCandidatesForMatchingMock.mockResolvedValue([]);
+    rankExtractionMatchesMock.mockImplementation(async ({ extraction }: any) => [
+      {
+        catalogItemId: `catalog-${extraction.id}`,
+        matchScore: 99,
+        reasons: {},
+        historicalLineItemIds: [],
+        catalogBaselinePrice: 100,
+        historicalUnitPrices: [],
+        vendorQuotePrice: null,
+        awardedOutcomeAdjustmentPercent: 0,
+        internalAdjustmentPercent: 0,
+      },
+    ]);
+    poolConnectMock.mockResolvedValue(lockedClient);
+    drizzleMock.mockReturnValueOnce(appDb).mockReturnValueOnce(tenantDb);
+
+    const { runEstimateGeneration } = await import("../../src/jobs/estimate-generation.js");
+    await runEstimateGeneration(
+      { documentId: "doc-1", dealId: "deal-1", parseRunId: "parse-run-1" },
+      "office-1"
+    );
+
+    return {
+      lockedClient,
+      pricedQuantities: buildPricingRecommendationMock.mock.calls.map(([input]: any) => input.quantity),
+      markedProcessed: statusWrites.some((write) => write?.status === "processed"),
+      // The recommendation row is the one persistence payload carrying a source row identity.
+      recommendationInserts: insertPayloads.filter(
+        (payload) => payload && typeof payload === "object" && "sourceRowIdentity" in payload
+      ),
+    };
+  }
+
+  it("does NOT persist a recommendation for a quantity CHANGED to another positive value since the snapshot", async () => {
+    // THE HOLE A RE-VALIDATING GUARD LEAVES. Re-asking "is the live quantity priceable?" only catches
+    // the estimator who CLEARED it. The edit that actually happens is a correction: 10 SF re-measured
+    // as 40 SF is positive at both ends, so the check passed, the row was marked `processed` — leaving
+    // the pending queue — and it now reads 40 SF beside a price computed from 10. A quarter of the
+    // cost, and nothing on the row says so.
+    const result = await runWithLiveQuantity("40");
+
+    // Matched and priced from the stale 10; that work is wasted, not wrong.
+    expect(result.pricedQuantities).toEqual([10]);
+    // What must not survive is the write. The next run re-reads the row and prices the 40.
+    expect(result.recommendationInserts).toHaveLength(0);
+    expect(result.markedProcessed).toBe(false);
+    expect(result.lockedClient.query).toHaveBeenLastCalledWith("COMMIT");
+  });
+
+  it("STILL persists when nobody touched the quantity, even at a different numeric scale", async () => {
+    // THE OTHER DIRECTION, and the reason the comparison is numeric rather than a string equality.
+    // `quantity` is `numeric`, and Postgres hands back the scale it was stored at — the same 10 arrives
+    // as "10" or "10.00" depending on how it was written. A guard that called that an edit would refuse
+    // every row it was asked about and take the whole feature down while the drift test above still
+    // passed.
+    const result = await runWithLiveQuantity("10.00");
+
+    expect(result.pricedQuantities).toEqual([10]);
+    expect(result.recommendationInserts).toHaveLength(1);
+    expect(result.markedProcessed).toBe(true);
+    expect(result.lockedClient.query).toHaveBeenLastCalledWith("COMMIT");
+  });
+
   it("REFUSES to price a row with no quantity, and marks it needs_quantity instead of billing one unit", async () => {
     // THE DEFECT. `Number(extraction.quantity ?? 1)` stood at three sites — the recommendation and both
     // persist branches — and turned "nobody said how much" into "one of them". One unit of anything has
@@ -692,7 +862,7 @@ describe("estimate generation job", () => {
     // refuses at the door today and will stop refusing once null quantities are accepted. Testing only
     // the walkthrough path would leave the parsed path silently inheriting this change.
     const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
-    const extractionWhere = vi.fn().mockResolvedValue([
+    const extractionRows = [
       {
         id: "ext-priced",
         dealId: "deal-1",
@@ -733,7 +903,8 @@ describe("estimate generation job", () => {
           sourceType: "walkthrough",
         },
       },
-    ]);
+    ];
+    const extractionWhere = vi.fn().mockResolvedValue(extractionRows);
     const appDb = {
       select: vi.fn(() => ({
         from: vi.fn(() => ({ where: vi.fn(() => ({ limit: sourceLimit })) })),
@@ -763,13 +934,9 @@ describe("estimate generation job", () => {
           }
           if (tenantSelectCallCount === 2) return { where: extractionWhere };
           // Every later select is `stillPriceable`, the re-read the persist path does under the row
-          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
-          // value so these tests exercise the pricing they are about; the skip path has its own test.
-          return {
-            where: vi.fn(() => ({
-              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700" }]) })),
-            })),
-          };
+          // lock to confirm the quantity is still the one it priced. Answered from the snapshot itself,
+          // so these tests exercise the pricing they are about; the drift paths have their own tests.
+          return unchangedQuantityRead(extractionRows);
         }),
       })),
       insert: vi.fn(() => ({
@@ -888,7 +1055,7 @@ describe("estimate generation job", () => {
 
   it("assigns distinct source row identities to inferred rows that share section and normalized intent", async () => {
     const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
-    const extractionWhere = vi.fn().mockResolvedValue([
+    const extractionRows = [
       {
         id: "ext-inferred-1",
         dealId: "deal-1",
@@ -927,7 +1094,8 @@ describe("estimate generation job", () => {
           dependencySupportCount: 1,
         },
       },
-    ]);
+    ];
+    const extractionWhere = vi.fn().mockResolvedValue(extractionRows);
     const appDb = {
       select: vi.fn(() => ({
         from: vi.fn(() => ({
@@ -966,13 +1134,9 @@ describe("estimate generation job", () => {
             };
           }
           // Every later select is `stillPriceable`, the re-read the persist path does under the row
-          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
-          // value so these tests exercise the pricing they are about; the skip path has its own test.
-          return {
-            where: vi.fn(() => ({
-              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700" }]) })),
-            })),
-          };
+          // lock to confirm the quantity is still the one it priced. Answered from the snapshot itself,
+          // so these tests exercise the pricing they are about; the drift paths have their own tests.
+          return unchangedQuantityRead(extractionRows);
         }),
       })),
       insert: vi.fn(() => ({
@@ -1050,7 +1214,8 @@ describe("estimate generation job", () => {
 
   it("derives and filters by the active parse run when payload.parseRunId is missing", async () => {
     const sourceLimit = vi.fn().mockResolvedValue([]);
-    const extractionWhere = vi.fn().mockResolvedValue([]);
+    const extractionRows: Array<{ id: string; quantity: unknown }> = [];
+    const extractionWhere = vi.fn().mockResolvedValue(extractionRows);
     const appDb = {
       select: vi.fn(() => ({
         from: vi.fn(() => ({
@@ -1088,13 +1253,9 @@ describe("estimate generation job", () => {
             };
           }
           // Every later select is `stillPriceable`, the re-read the persist path does under the row
-          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
-          // value so these tests exercise the pricing they are about; the skip path has its own test.
-          return {
-            where: vi.fn(() => ({
-              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700" }]) })),
-            })),
-          };
+          // lock to confirm the quantity is still the one it priced. Answered from the snapshot itself,
+          // so these tests exercise the pricing they are about; the drift paths have their own tests.
+          return unchangedQuantityRead(extractionRows);
         }),
       })),
       insert: vi.fn(() => ({
@@ -1141,7 +1302,8 @@ describe("estimate generation job", () => {
 
   it("marks the persisted generation run failed when locked generation work throws", async () => {
     const sourceLimit = vi.fn().mockResolvedValue([]);
-    const extractionWhere = vi.fn().mockResolvedValue([]);
+    const extractionRows: Array<{ id: string; quantity: unknown }> = [];
+    const extractionWhere = vi.fn().mockResolvedValue(extractionRows);
     const appDb = {
       select: vi.fn(() => ({
         from: vi.fn(() => ({
@@ -1186,13 +1348,9 @@ describe("estimate generation job", () => {
           }
 
           // Every later select is `stillPriceable`, the re-read the persist path does under the row
-          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
-          // value so these tests exercise the pricing they are about; the skip path has its own test.
-          return {
-            where: vi.fn(() => ({
-              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700" }]) })),
-            })),
-          };
+          // lock to confirm the quantity is still the one it priced. Answered from the snapshot itself,
+          // so these tests exercise the pricing they are about; the drift paths have their own tests.
+          return unchangedQuantityRead(extractionRows);
         }),
       })),
       insert: vi.fn(() => ({
@@ -1241,7 +1399,8 @@ describe("estimate generation job", () => {
 
   it("clones manual rows from the latest completed generation run before processing a rerun", async () => {
     const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
-    const extractionWhere = vi.fn().mockResolvedValue([]);
+    const extractionRows: Array<{ id: string; quantity: unknown }> = [];
+    const extractionWhere = vi.fn().mockResolvedValue(extractionRows);
     const appDb = {
       select: vi.fn(() => ({
         from: vi.fn(() => ({
@@ -1284,13 +1443,9 @@ describe("estimate generation job", () => {
           }
 
           // Every later select is `stillPriceable`, the re-read the persist path does under the row
-          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
-          // value so these tests exercise the pricing they are about; the skip path has its own test.
-          return {
-            where: vi.fn(() => ({
-              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700" }]) })),
-            })),
-          };
+          // lock to confirm the quantity is still the one it priced. Answered from the snapshot itself,
+          // so these tests exercise the pricing they are about; the drift paths have their own tests.
+          return unchangedQuantityRead(extractionRows);
         }),
       })),
       insert: vi.fn(() => ({
@@ -1339,7 +1494,7 @@ describe("estimate generation job", () => {
 
   it("passes deal and property geography into market resolution and persists rerun request ids", async () => {
     const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
-    const extractionWhere = vi.fn().mockResolvedValue([
+    const extractionRows = [
       {
         id: "ext-1",
         dealId: "deal-1",
@@ -1358,7 +1513,8 @@ describe("estimate generation job", () => {
           pricingScopeKey: "roofing",
         },
       },
-    ]);
+    ];
+    const extractionWhere = vi.fn().mockResolvedValue(extractionRows);
     const appDb = {
       select: vi.fn(() => ({
         from: vi.fn(() => ({
@@ -1397,13 +1553,9 @@ describe("estimate generation job", () => {
             };
           }
           // Every later select is `stillPriceable`, the re-read the persist path does under the row
-          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
-          // value so these tests exercise the pricing they are about; the skip path has its own test.
-          return {
-            where: vi.fn(() => ({
-              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700" }]) })),
-            })),
-          };
+          // lock to confirm the quantity is still the one it priced. Answered from the snapshot itself,
+          // so these tests exercise the pricing they are about; the drift paths have their own tests.
+          return unchangedQuantityRead(extractionRows);
         }),
       })),
       insert: vi.fn((table: any) => ({
@@ -1605,7 +1757,7 @@ describe("estimate generation job", () => {
 
   it("falls back to trade scope from legacy extraction text when pricing-scope metadata is absent", async () => {
     const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
-    const extractionWhere = vi.fn().mockResolvedValue([
+    const extractionRows = [
       {
         id: "ext-legacy",
         dealId: "deal-1",
@@ -1622,7 +1774,8 @@ describe("estimate generation job", () => {
           activeArtifact: true,
         },
       },
-    ]);
+    ];
+    const extractionWhere = vi.fn().mockResolvedValue(extractionRows);
     const appDb = {
       select: vi.fn(() => ({
         from: vi.fn(() => ({
@@ -1660,13 +1813,9 @@ describe("estimate generation job", () => {
             };
           }
           // Every later select is `stillPriceable`, the re-read the persist path does under the row
-          // lock to confirm the quantity was not cleared since the snapshot. Answers with a priceable
-          // value so these tests exercise the pricing they are about; the skip path has its own test.
-          return {
-            where: vi.fn(() => ({
-              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: "700" }]) })),
-            })),
-          };
+          // lock to confirm the quantity is still the one it priced. Answered from the snapshot itself,
+          // so these tests exercise the pricing they are about; the drift paths have their own tests.
+          return unchangedQuantityRead(extractionRows);
         }),
       })),
       insert: vi.fn(() => ({

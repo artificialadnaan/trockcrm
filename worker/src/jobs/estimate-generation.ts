@@ -98,20 +98,35 @@ function buildSourceRowIdentity(input: {
 }
 
 /**
- * Whether this extraction still carries a priceable quantity, asked again immediately before the write.
+ * Whether this extraction still carries THE SAME priceable quantity the recommendation was computed
+ * from, asked again immediately before the write.
  *
  * THE SNAPSHOT IS STALE BY CONSTRUCTION. `pendingExtractions` is read once at the top of the run and a
- * generation can take a while; an estimator clearing a quantity in that window leaves the guard above
- * looking at the OLD positive value. The worker then prices it and
- * `persistPricingRecommendationBundle` sets the row `processed` unconditionally — overwriting the
- * `needs_quantity` the edit had just written, and publishing a recommendation built on a number the
- * estimator explicitly removed.
+ * generation can take a while; an estimator editing a quantity in that window leaves the guard above
+ * looking at the OLD value. The worker then prices it and
+ * `persistPricingRecommendationBundle` sets the row `processed` unconditionally — overwriting whatever
+ * the edit had just written, and publishing a recommendation built on a number that is no longer there.
+ *
+ * THE PRICED QUANTITY IS COMPARED, not merely re-validated. Asking only "is the live value priceable?"
+ * caught the estimator who CLEARED the number and waved through the far more common one who CORRECTED
+ * it: 10 SF re-measured as 40 SF is positive at both ends, so the check passed and a price computed
+ * from 10 was stamped onto a row that reads 40 — a quarter of the cost, marked `processed` so it leaves
+ * the pending queue, and by then indistinguishable from a figure somebody chose. ANY drift loses the
+ * row instead; the next run re-reads it and prices the number the estimator actually wrote.
+ *
+ * COMPARED AS NUMBERS because `quantity` is `numeric` and Postgres preserves scale — the same 700 comes
+ * back as "700" or "700.00" depending on how it was written, and a string compare would read that as an
+ * edit and refuse to persist a row nobody touched.
  *
  * Asked INSIDE the persistence transaction and `FOR UPDATE`, so the answer cannot go stale between this
  * check and the write it guards. Returns false for absent, non-finite and nonpositive alike, which is
  * the same definition of priceable the loop's own guard uses.
  */
-async function stillPriceable(db: any, extractionId: string): Promise<boolean> {
+async function stillPriceable(
+  db: any,
+  extractionId: string,
+  pricedQuantity: unknown
+): Promise<boolean> {
   const [row] = await db
     .select({ quantity: estimateExtractions.quantity })
     .from(estimateExtractions)
@@ -120,7 +135,10 @@ async function stillPriceable(db: any, extractionId: string): Promise<boolean> {
     .for("update");
   if (!row || row.quantity === null || row.quantity === undefined) return false;
   const value = Number(row.quantity);
-  return Number.isFinite(value) && value > 0;
+  if (!Number.isFinite(value) || value <= 0) return false;
+  // An absent or non-numeric priced quantity becomes NaN and loses this comparison, so it needs no
+  // guard of its own — NaN is equal to nothing, including the value it was read from.
+  return Number(pricedQuantity) === value;
 }
 
 export async function runEstimateGeneration(
@@ -622,8 +640,10 @@ export async function runEstimateGeneration(
           // LOCAL, so it reverts at transaction end rather than leaking the tenant onto a pooled
           // connection some later, unrelated statement borrows.
           await tx.execute(sql.raw(`SET LOCAL search_path TO ${schemaName}, public`));
-          // Re-asked under the row lock: the quantity may have been cleared since the snapshot.
-          if (!(await stillPriceable(tx, extraction.id))) return;
+          // Re-asked under the row lock: the quantity may have been changed since the snapshot. The
+          // value passed is the one `buildPricingRecommendation` was given above and the one the
+          // bundle below writes, so what is compared is exactly what this write would publish.
+          if (!(await stillPriceable(tx, extraction.id, extraction.quantity))) return;
           await persistPricingRecommendationBundle({
             tenantDb: tx,
             generationRunId,
@@ -654,11 +674,12 @@ export async function runEstimateGeneration(
           });
         });
       } else {
-        // The SAME re-check on the locked path. That path runs inside the locked client's own
-        // transaction, so the row lock holds until it commits exactly as it does above; skipping the
-        // check here would leave the document-scoped run — the common one — with the stale-quantity
-        // hole this closes.
-        if (!(await stillPriceable(tenantDb, extraction.id))) continue;
+        // The SAME re-check on the locked path, with the SAME priced quantity. That path runs inside
+        // the locked client's own transaction, so the row lock holds until it commits exactly as it
+        // does above; skipping the check here — or passing it a different quantity than the one priced
+        // — would leave the document-scoped run, the common one, with the stale-quantity hole this
+        // closes.
+        if (!(await stillPriceable(tenantDb, extraction.id, extraction.quantity))) continue;
         await persistPricingRecommendationBundle({
           tenantDb: tenantDb as any,
           generationRunId,
