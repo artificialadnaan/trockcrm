@@ -119,7 +119,7 @@ describe("report route role guards", () => {
     expect(runReportBuilder).toHaveBeenCalledOnce();
   });
 
-  it("lets every CRM role — not just directors — load the At-Risk watchlist, unscoped", async () => {
+  it("lets every REPORT-CAPABLE CRM role — not just directors — load the At-Risk watchlist, unscoped", async () => {
     vi.mocked(atRiskService.getAtRiskWatchlist).mockResolvedValue({ summary: {}, records: [] } as any);
 
     const repResponse = await request(buildApp("rep")).get("/api/reports/at-risk");
@@ -134,6 +134,19 @@ describe("report route role guards", () => {
     expect(atRiskService.getAtRiskWatchlist).toHaveBeenCalledTimes(2);
     expect(atRiskService.getAtRiskWatchlist).toHaveBeenNthCalledWith(1, {}, { repId: undefined });
     expect(atRiskService.getAtRiskWatchlist).toHaveBeenNthCalledWith(2, {}, { repId: undefined });
+  });
+
+  it("does NOT hand the At-Risk watchlist to construction while widening it to reps", async () => {
+    vi.mocked(atRiskService.getAtRiskWatchlist).mockResolvedValue({ summary: {}, records: [] } as any);
+
+    const response = await request(buildApp("construction")).get("/api/reports/at-risk");
+
+    // `construction` is NOT a report-capable role, but it IS a CRM role: the upstream requireCrmUser
+    // mount only turns away field_contractor, so an UNGATED route would have handed this account
+    // office-wide deal names, owners and values. Widening by one role must not widen by two.
+    expect(response.status).toBe(403);
+    expect(response.body).toEqual({ error: { message: "Requires one of: admin, director, rep" } });
+    expect(atRiskService.getAtRiskWatchlist).not.toHaveBeenCalled();
   });
 
   it("still treats ?repId on the At-Risk watchlist as a filter, and still validates it", async () => {
