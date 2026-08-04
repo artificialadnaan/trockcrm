@@ -147,6 +147,15 @@ describe("GET /api/deals/:id/glasses-walkthroughs", () => {
                 quantity: 700,
                 unit: "SF",
                 confidence: 0.78,
+                // The citation fields, at their documented defaults: this fixture's TROCK Scope answer
+                // carries none of them, and the contract is that silence degrades to blanks rather than
+                // to a confident-looking claim.
+                locationLabel: null,
+                evidence: [],
+                quantitySource: null,
+                status: null,
+                lowVisualConfidence: false,
+                hasOpenConflict: false,
               },
             ],
           },

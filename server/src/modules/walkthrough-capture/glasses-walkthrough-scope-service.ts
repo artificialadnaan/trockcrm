@@ -66,6 +66,49 @@ export interface GlassesWalkthroughScopeItem {
   quantity: number | null;
   unit: string | null;
   confidence: number | null;
+  /** Where on site this was said — TROCK Scope's own label, never inferred here. */
+  locationLabel: string | null;
+  /**
+   * WHAT WAS ACTUALLY SAID, verbatim, and the single most useful field on this row.
+   *
+   * `description` is the model's reading of an utterance; this is the utterance. An estimator deciding
+   * whether to trust a line is really asking "what did they say?", and until now the answer lived only
+   * in TROCK Scope. A merged row has several mentions, so this is a list in walk order rather than one
+   * string.
+   */
+  evidence: GlassesWalkthroughScopeEvidence[];
+  /**
+   * Whether the quantity was SPOKEN or inferred. A number somebody said out loud and a number the model
+   * derived are not the same claim, and pricing them alike is how a guess becomes a line item.
+   */
+  quantitySource: string | null;
+  /** TROCK Scope's own review state for the row — `pending` until a human has looked at it. */
+  status: string | null;
+  /** TROCK Scope's flag that the footage behind this row was too poor to read confidently. */
+  lowVisualConfidence: boolean;
+  /** True when TROCK Scope recorded a disagreement on this row that nobody has resolved yet. */
+  hasOpenConflict: boolean;
+}
+
+/** One still from the walk, presigned by TROCK Scope and valid only briefly. */
+export interface GlassesWalkthroughScopeFrame {
+  url: string;
+  timelineMs: number | null;
+}
+
+/** One thing said on site that produced a scope row. */
+export interface GlassesWalkthroughScopeEvidence {
+  /** The clip and offset the review screen seeks to, so a citation can be a link rather than a note. */
+  clipId: string | null;
+  timelineMs: number | null;
+  quote: string;
+  /** The number as SPOKEN, which can differ from the row's resolved quantity. */
+  mentionedQuantity: number | null;
+  mentionedUnit: string | null;
+  /** Stills from the moment this was said. Empty when the frames are not extracted yet. */
+  frames: GlassesWalkthroughScopeFrame[];
+  /** Presigned video for the clip, so a citation can be watched rather than only read. */
+  clipUrl: string | null;
 }
 
 export interface GlassesWalkthroughPanelEntry {
@@ -126,6 +169,18 @@ export interface GlassesWalkthroughScopeReader {
    *        per abandoned read for the life of the process, and this endpoint is polled — each slow render
    *        would strand another batch on top of the last.
    */
+  /**
+   * The citations for ONE row — quotes, presigned still frames, and the clip — or null.
+   *
+   * NULL RATHER THAN THROWING, unlike every other method here. The line items are the panel; the
+   * pictures corroborate them. A walk whose evidence read fails must still render its scope with the
+   * citations absent, rather than collapsing to `unavailable` and hiding work TROCK Scope did.
+   */
+  fetchScopeItemEvidence: (
+    scopeWalkthroughId: string,
+    scopeItemId: string,
+    signal: AbortSignal
+  ) => Promise<unknown[] | null>;
   fetchScopeItems: (
     scopeWalkthroughId: string,
     signal: AbortSignal
@@ -243,7 +298,90 @@ function toPanelScopeItem(raw: unknown): GlassesWalkthroughScopeItem | null {
     quantity: finiteNumberOrNull(item.quantity),
     unit: nonEmptyStringOrNull(item.unit),
     confidence: finiteNumberOrNull(item.confidence),
+    locationLabel: nonEmptyStringOrNull(item.locationLabel),
+    evidence: toPanelEvidence(item.evidence),
+    quantitySource: nonEmptyStringOrNull(item.quantitySource),
+    status: nonEmptyStringOrNull(item.status),
+    // Defaulted FALSE rather than null on an absent field: these two drive warnings, and a warning that
+    // fires because a field was missing is worse than one that never fires. TROCK Scope is on its own
+    // release cadence, so an older build simply says nothing rather than raising a flag we invented.
+    lowVisualConfidence: item.lowVisualConfidence === true,
+    hasOpenConflict:
+      typeof item.conflict === "object" &&
+      item.conflict !== null &&
+      (item.conflict as Record<string, unknown>).resolvedAt == null,
   };
+}
+
+/**
+ * The mentions behind one row, defensively.
+ *
+ * Every field is re-validated rather than trusted: this crosses a service boundary, and the panel
+ * renders a quote directly. A non-array, a non-object entry, or a missing quote yields nothing rather
+ * than `undefined` reaching the page — the same rule the item mapper above follows.
+ */
+/**
+ * A limiter shared by every caller that holds it: at most `limit` of its tasks run at once.
+ *
+ * A FACTORY rather than a helper that pools per call, because the evidence work is nested inside a
+ * pool that is already running several walks concurrently. A per-call pool multiplies — six walks times
+ * six items is thirty-six sockets against TROCK Scope from one render of one deal page, from an
+ * endpoint that polls. One limiter created per REQUEST and closed over by every walk makes the
+ * documented ceiling the real one however the rows divide between walks.
+ *
+ * Never rejects: each task is expected to absorb its own failures, and one row's missing pictures must
+ * not abort another's.
+ */
+function createLimiter(limit: number): (task: () => Promise<void>) => Promise<void> {
+  let active = 0;
+  const waiting: Array<() => void> = [];
+
+  return async (task) => {
+    if (active >= limit) await new Promise<void>((resolve) => waiting.push(resolve));
+    active += 1;
+    try {
+      await task();
+    } catch {
+      // Backstop only; `task` already absorbs its own failures. The cost is one row without citations.
+    } finally {
+      active -= 1;
+      waiting.shift()?.();
+    }
+  };
+}
+
+function toPanelFrames(raw: unknown): GlassesWalkthroughScopeFrame[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const frame = entry as Record<string, unknown>;
+    const url = nonEmptyStringOrNull(frame.url);
+    // A frame with no URL is not a picture. Dropped rather than rendered as a broken image, which
+    // reads to an estimator as evidence that failed to load rather than evidence that never existed.
+    if (!url) return [];
+    return [{ url, timelineMs: finiteNumberOrNull(frame.timelineMs) }];
+  });
+}
+
+function toPanelEvidence(raw: unknown): GlassesWalkthroughScopeEvidence[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const row = entry as Record<string, unknown>;
+    const quote = typeof row.quote === "string" ? row.quote.trim() : "";
+    if (quote === "") return [];
+    return [
+      {
+        clipId: nonEmptyStringOrNull(row.clipId),
+        timelineMs: finiteNumberOrNull(row.timelineMs),
+        quote,
+        mentionedQuantity: finiteNumberOrNull(row.mentionedQuantity),
+        mentionedUnit: nonEmptyStringOrNull(row.mentionedUnit),
+        frames: toPanelFrames(row.frames),
+        clipUrl: nonEmptyStringOrNull(row.clipProxyUrl),
+      },
+    ];
+  });
 }
 
 /**
@@ -290,6 +428,11 @@ export async function resolveGlassesWalkthroughScope(
 ): Promise<GlassesWalkthroughPanelEntry[]> {
   const timeoutMs = deps.timeoutMs ?? GLASSES_WALKTHROUGH_SCOPE_TIMEOUT_MS;
   const warn = deps.warn ?? ((message: string) => console.warn(message));
+  // Created once PER REQUEST and closed over by every walk, so the ceiling holds across walks rather
+  // than per walk. See `createLimiter`.
+  const evidenceLimiter = createLimiter(GLASSES_WALKTHROUGH_SCOPE_CONCURRENCY);
+  // Citations in flight, collected across every walk and awaited once the scope reads are all done.
+  const evidenceWork: Array<Promise<void>> = [];
 
   const entries: GlassesWalkthroughPanelEntry[] = rows.map((row) => ({
     id: row.id,
@@ -382,8 +525,50 @@ export async function resolveGlassesWalkthroughScope(
           );
           continue;
         }
+        // THE SCOPE IS COMMITTED TO THE ENTRY *BEFORE* THE CITATIONS ARE FETCHED, and the order is the
+        // whole point. The evidence pass shares this phase's deadline; assigning after it meant a walk
+        // whose `/scope-items` read succeeded could still be reported `unavailable` with no items,
+        // because a slow thumbnail lost the race to the timeout. That hides a scope we already hold, in
+        // order to wait for pictures that only corroborate it. Now the walk is `ready` the instant its
+        // rows are known, and the citations decorate rows already on the entry.
         entry.state = "ready";
         entry.scope = { status: "ready", items };
+
+        // ONE LIMITER FOR THE WHOLE REQUEST, not one per walk. The outer pool already runs several walks
+        // at once, so a per-walk pool multiplied: six walks each opening six sockets is thirty-six
+        // concurrent GETs against TROCK Scope from a single deal page — and this endpoint POLLS. The
+        // shared limiter makes the documented ceiling the real one no matter how the walks divide up.
+        //
+        // FAILURES ARE INVISIBLE BY DESIGN — `fetchScopeItemEvidence` returns null rather than throwing,
+        // and a null simply leaves that row with no citations. Degrading a walk because a thumbnail
+        // could not be signed would hide work TROCK Scope did perfectly well.
+        // NOT AWAITED BY THIS WALK'S WORKER, and that is the last coupling to remove.
+        //
+        // The walks run through a pool of six. Awaiting citations here kept a worker occupied on
+        // best-effort media, so on a deal with more than six walks the seventh could not even START its
+        // `/scope-items` read until someone else's thumbnails finished — best-effort work suppressing
+        // primary data for a different walk. The promise is collected and awaited once, after every
+        // walk has had its scope read, so the citations still land before the response is built and no
+        // walk waits on another walk's pictures to be told what its own scope is.
+        evidenceWork.push(
+          Promise.all(
+            items.map((item) =>
+              evidenceLimiter(async () => {
+                const raw = await deps.scopeReader.fetchScopeItemEvidence(
+                  entry.scopeWalkthroughId!,
+                  item.id,
+                  abort.signal
+                );
+                if (raw === null) return;
+                const withFrames = toPanelEvidence(raw);
+              // Only REPLACE when the evidence call actually said something. `/scope-items` already
+              // carries the quotes; this call adds pictures to them. An empty answer must not delete
+              // the words.
+                if (withFrames.length > 0) item.evidence = withFrames;
+              })
+            )
+          ).then(() => undefined)
+        );
       } catch (err) {
         // Left at `unavailable`, with `scope` still null. The message names the WALKTHROUGH, never the
         // reader's error object — see the store for why the underlying rejection is not safe to log.
@@ -401,9 +586,19 @@ export async function resolveGlassesWalkthroughScope(
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
-      Promise.all(
-        Array.from({ length: Math.min(GLASSES_WALKTHROUGH_SCOPE_CONCURRENCY, pending.length) }, () => worker())
-      ),
+      (async () => {
+        // SCOPE READS FIRST, FOR EVERY WALK, then the citations they queued. Splitting the wait this
+        // way is what stops best-effort media from starving primary data: no walk can be left
+        // `unavailable` because an earlier walk's thumbnails were slow, and the citations still land
+        // before the response is assembled.
+        await Promise.all(
+          Array.from({ length: Math.min(GLASSES_WALKTHROUGH_SCOPE_CONCURRENCY, pending.length) }, () =>
+            worker()
+          )
+        );
+        // Cannot reject: each task absorbs its own failures and the limiter is a further backstop.
+        await Promise.all(evidenceWork);
+      })(),
       new Promise<void>((resolve) => {
         timer = setTimeout(() => {
           stopDispatchingAt = 0;

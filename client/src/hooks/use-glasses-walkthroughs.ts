@@ -30,6 +30,37 @@ export interface GlassesWalkthroughScopeItem {
   unit: string | null;
   /** 0–1, or null for "TROCK Scope did not score this item" — which is NOT the same as a low score. */
   confidence: number | null;
+  /** Where on site this was said. TROCK Scope's own label; never inferred here. */
+  locationLabel: string | null;
+  /** WHAT WAS ACTUALLY SAID. `description` is the model's reading of an utterance; this is the
+   *  utterance, with the stills it was said over. A merged row carries several. */
+  evidence: GlassesWalkthroughScopeEvidence[];
+  /** Whether the quantity was SPOKEN or inferred — not the same claim, and not priced alike. */
+  quantitySource: string | null;
+  /** TROCK Scope's review state for the row: `pending` until a human has looked at it. */
+  status: string | null;
+  /** TROCK Scope judged the footage behind this row too poor to read confidently. */
+  lowVisualConfidence: boolean;
+  /** TROCK Scope recorded a disagreement on this row that nobody has resolved. */
+  hasOpenConflict: boolean;
+}
+
+/** One still from the walk. Presigned by TROCK Scope and short-lived, so never cached or stored. */
+export interface GlassesWalkthroughScopeFrame {
+  url: string;
+  timelineMs: number | null;
+}
+
+/** One thing said on site that produced a scope row, with the footage it was said over. */
+export interface GlassesWalkthroughScopeEvidence {
+  clipId: string | null;
+  timelineMs: number | null;
+  quote: string;
+  /** The number as SPOKEN, which can differ from the row's resolved quantity. */
+  mentionedQuantity: number | null;
+  mentionedUnit: string | null;
+  frames: GlassesWalkthroughScopeFrame[];
+  clipUrl: string | null;
 }
 
 export interface GlassesWalkthrough {

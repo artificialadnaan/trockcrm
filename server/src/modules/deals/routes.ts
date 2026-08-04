@@ -3548,6 +3548,12 @@ router.get("/:id/glasses-walkthroughs", async (req, res, next) => {
     const walkthroughs = await resolveGlassesWalkthroughScope(rows, {
       scopeReader: createGlassesWalkthroughScopeReader(),
     });
+    // NO-STORE, because this body now carries PRESIGNED URLs. Frame and clip links are
+    // bearer-equivalent for as long as they are valid, and an ordinary cacheable JSON response leaves
+    // them in the browser's HTTP cache — and in any intermediary — after the render that needed them.
+    // It also defeats the panel's refresh control, which exists precisely to re-sign expired media: a
+    // cache hit would hand back the same stale signatures it is trying to replace.
+    res.setHeader("Cache-Control", "no-store, private");
     res.status(200).json({ walkthroughs });
   } catch (err) {
     next(err);
