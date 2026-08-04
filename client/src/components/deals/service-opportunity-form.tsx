@@ -137,6 +137,16 @@ export function ServiceOpportunityForm({
   // a second property record for one building, which is the exact failure this entry point exists to
   // prevent. Same param shape as the property page's New lead link, read from LIVE state so it keeps up
   // with edits rather than replaying a stale prefill.
+  // NO officeId here, deliberately, and unlike the success redirect below. LeadForm in CREATE mode pins every
+  // picker and createLead to the rep's HOME office (`isCreate ? homeOfficeId : null`, ~13 sites), overriding
+  // lib/api's ?officeId fallback — while the calls that DON'T set an explicit header (stages, project types,
+  // questionnaire template) would still follow the query. Appending an office therefore buys nothing and
+  // splits one form across two tenants. Home office for everything is at least coherent, and it is exactly
+  // what the property page's own New lead link already does (it sends propertyId + companyId + name and no
+  // office). Threading office through LeadForm is a real feature — cross-office lead creation, 13 call sites
+  // in a component with four callers — and belongs in its own PR, not smuggled into a service-opportunity
+  // entry point. The test below pins LeadForm's create-mode behaviour so this stays honest: if someone
+  // teaches it to honour an office, that pin fails and points back here.
   const leadEscapeHref = (() => {
     const params = new URLSearchParams();
     if (formData.propertyId) params.set("propertyId", formData.propertyId);
@@ -144,7 +154,7 @@ export function ServiceOpportunityForm({
     const trimmedName = formData.name.trim();
     if (trimmedName) params.set("name", trimmedName);
     const query = params.toString();
-    return appendOfficeIdSearch(query ? `/leads/new?${query}` : "/leads/new", officeId);
+    return query ? `/leads/new?${query}` : "/leads/new";
   })();
 
   // Region auto-detects from the selected property's state (same rule + columns as the deal form), but a

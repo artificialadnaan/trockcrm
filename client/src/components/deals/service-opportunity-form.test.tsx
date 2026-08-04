@@ -7,6 +7,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ServiceOpportunityForm } from "./service-opportunity-form";
 import serviceOpportunityFormSource from "./service-opportunity-form.tsx?raw";
+import leadFormSource from "@/components/leads/lead-form.tsx?raw";
 
 const mocks = vi.hoisted(() => ({
   createServiceOpportunity: vi.fn(),
@@ -557,14 +558,28 @@ describe("ServiceOpportunityForm", () => {
     roots.push(root);
 
     expect(leadEscapeHref(container)).toBe(
-      "/leads/new?propertyId=property-9&companyId=company-7&name=Cedar+Springs+opportunity&officeId=office-atlanta"
+      "/leads/new?propertyId=property-9&companyId=company-7&name=Cedar+Springs+opportunity"
     );
+    // No office, even though this form HAS one — see the next test for why.
+    expect(leadEscapeHref(container)).not.toContain("officeId");
 
     // Built from LIVE state, so an edit made before taking the escape travels with it.
     await act(async () => {
       setInputValue(container.querySelector("#name") as HTMLInputElement, "Cedar Springs re-roof");
     });
     expect(leadEscapeHref(container)).toContain("name=Cedar+Springs+re-roof");
+  });
+
+  it("omits office from the Lead escape for as long as LeadForm pins create to the home office", async () => {
+    // A cross-file assumption, pinned in both directions rather than left as a comment.
+    // LeadForm create mode overrides lib/api's ?officeId fallback with the rep's HOME office, so an office
+    // on that href is ignored by the pickers and the create while the header-less calls still follow it —
+    // one form, two tenants. Sending no office keeps it coherent (and matches the property page's own New
+    // lead link). If this assertion ever fails, LeadForm has learned to honour an office: revisit
+    // leadEscapeHref and thread it through, because then dropping it becomes the bug.
+    expect(leadFormSource).toContain("{ officeId: homeOfficeId }");
+    expect(leadFormSource).toContain("officeId: isCreate ? homeOfficeId : null");
+    expect(leadFormSource).not.toContain("effectiveOfficeId");
   });
 
   it("leaves the Lead escape bare when there is nothing to carry", async () => {
