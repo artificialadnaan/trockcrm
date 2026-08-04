@@ -482,7 +482,10 @@ Every deal in scope lands in exactly one bucket:
 7. **Terminal-no-date** — won or lost with no usable outcome date (`D_nodate`, §4.0.5). Not scoreable and
    not open; surfaced as a diagnostic so the drop is visible rather than silent.
 
-Buckets 2–6 partition `D_open`; buckets 1 and 7 are `D_landed` and `D_nodate`.
+Buckets 2–5 partition `D_cov`; bucket 6 is `D_open` \ (`D_cov` ∪ `D_reopened`); the reopened carve-out
+is the remaining slice of `D_open`. Buckets 1 and 7 are `D_landed` and `D_nodate`. In set terms this is
+`D_cov ⊎ machine-dated-not-reopened ⊎ (D_reopened ∩ D_open) = D_open`, the §4.0.6 tie-out — see the
+canonical RELATIONS block (§4.0.5), which is where that relation is declared.
 
 Buckets 2 and 3 together are §4.1's `at_risk_n`, and correspond to the `stale_dated` and `no_date` reasons
 produced by `server/src/modules/reports/at-risk-service.ts:63`. They do **not** equal that watchlist's
@@ -978,18 +981,41 @@ outcomes AS (
              JOIN public.pipeline_stage_config rf ON rf.id = reo.from_stage_id
              JOIN public.pipeline_stage_config rt ON rt.id = reo.to_stage_id
              WHERE reo.deal_id = d.id
-               AND reo.created_at > h.created_at
+               -- CT DATE granularity, not a raw timestamp comparison. deal_stage_history has NO
+               -- monotonic write-order column (its PK is gen_random_uuid(), 0001_initial.sql:465) --
+               -- unlike audit_log.id, there is no BIGSERIAL to fall back on -- and created_at is NOW(),
+               -- i.e. transaction-START time, so two overlapping stage changes can carry timestamps in
+               -- the opposite order to their writes (§4.0.1). Comparing at day granularity absorbs that
+               -- inversion entirely, since it is bounded by transaction duration (seconds).
+               AND (reo.created_at AT TIME ZONE 'America/Chicago')::date
+                     >= (h.created_at AT TIME ZONE 'America/Chicago')::date
                AND (rf.slug IN (:won_slugs) OR rf.slug IN (:lost_slugs))
                AND rt.slug NOT IN (:won_slugs) AND rt.slug NOT IN (:lost_slugs)
            )
-         )
-         AND NOT (
-           -- ...and that landing is NOT already represented in D_landed for this period. A deal that
+         )                          AS is_reopened_after_landing_raw,
+         -- Reopen evidence ALONE, with no window or landing condition: consumed by event_window_end
+         -- (§4.0.7 Block A) to keep closed-interval edits out of E for every reopened deal, including
+         -- those that re-closed inside the window and so remain in D_landed.
+         EXISTS (
+           SELECT 1
+           FROM deal_stage_history rev
+           JOIN public.pipeline_stage_config rvf ON rvf.id = rev.from_stage_id
+           JOIN public.pipeline_stage_config rvt ON rvt.id = rev.to_stage_id
+           WHERE rev.deal_id = d.id
+             AND (rvf.slug IN (:won_slugs) OR rvf.slug IN (:lost_slugs))
+             AND rvt.slug NOT IN (:won_slugs) AND rvt.slug NOT IN (:lost_slugs)
+         )                          AS has_reopen_evidence,
+         -- is_reopened_after_landing = the raw flag AND the landing is not represented in D_landed.
+         is_reopened_after_landing_raw AND NOT (
+           -- A deal that
            -- reopened and RE-CLOSED inside the window has its landing represented by the reclose date,
            -- so it is not a lost landing and is not flagged.
            (psc.slug IN (:won_slugs) OR COALESCE(d.bid_board_stage_slug,'') IN (:won_slugs)
             OR psc.slug IN (:lost_slugs) OR COALESCE(d.bid_board_stage_slug,'') IN (:lost_slugs))
-           AND <outcome_date> BETWEEN :from::date AND :to::date
+           -- COALESCE, not a bare comparison: a terminal deal with no usable outcome_date makes
+           -- BETWEEN return NULL, so `AND NOT (... NULL)` is NULL and the whole conjunct fails OPEN --
+           -- silently admitting exactly the D_nodate rows this predicate was rewritten to exclude.
+           AND COALESCE(<outcome_date> BETWEEN :from::date AND :to::date, false)
          )                          AS is_reopened_after_landing,
          -- NOTE: expected_close_date is deliberately NOT selected. State comes from §4.0.3.
          COALESCE(d.is_bid_board_owned, false) OR COALESCE(d.is_read_only_mirror, false) AS bid_board_owned
@@ -1018,7 +1044,7 @@ It excludes only **stored** `on_hold` deals — the far-out auto-park leg is del
 | `D_landed` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NOT NULL` ∩ `outcome_date BETWEEN from AND to` (both inclusive) | period |
 | `D_nodate` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NULL` | — |
 | `D_open` | `D` ∩ `outcome_kind = 'open'` | **today** (see below) |
-| `D_reopened` | `D` ∩ a `deal_stage_history` row into a Won or Lost stage whose CT date is inside `[from, to]` ∩ **that landing is not represented in `D_landed`**. An **overlay**, not a partition member: it intersects `D_open` (reopened, still open) and `D_outside` (reopened, re-closed after `to`) | period |
+| `D_reopened` | `D` ∩ a `deal_stage_history` row **into** a Won/Lost stage whose CT date is in `[from, to]` ∩ a later row **out of** a terminal stage (`from_stage_id` terminal, `to_stage_id` not) — the positive reopen evidence ∩ that landing is not represented in `D_landed`. An **overlay**, not a partition member (see RELATIONS) | period |
 | `D_outside` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NOT NULL` ∩ `outcome_date` **outside** `[from, to]` — before `from` **or** after `to` | out of period |
 | `D_book` | `(D_landed ∪ D_open) \ D_reopened` — the rep's book *for this period*. Denominator for churn rates. | mixed, stated |
 | `D_score` | `D_landed` ∩ `p30_state = 'rep_prediction'` ∩ P₃₀ not parked-at-write (§6.2) | period |
@@ -1077,6 +1103,19 @@ reported as a diagnostic across both, while only its `D_open` slice participates
 
 - `reopened_after_landing_n` = `|D_reopened|` — the full diagnostic, the number leadership should see.
 - `reopened_open_n` = `|D_reopened ∩ D_open|` — the term in §4.0.6's `D_open` identity.
+
+**The exclusion covers same-window reopens as well.** A deal that lands, reopens and re-closes all inside
+`[from, to]` is *not* in `D_reopened` — its landing is represented by the reclose date, so it stays in
+`D_landed`. But its `event_window_end` is computed from the **current** outcome date, so the window still
+spans the interval during which it was closed, and closed-interval edits still reach `E`. The
+`event_window_end` scalar therefore excludes any deal with reopen evidence, independently of `D_reopened`
+membership:
+
+The `event_window_end` scalar in §4.0.7 Block A carries that branch — it is defined once, there, and not
+restated here. A NULL window excludes every event for that deal from `E`, and the deal from `D_book`. That is the same
+trade as below: less informative, but it does not silently count closed-interval edits as forecast churn.
+`reopened_after_landing_n` reports the subset whose landing was also lost; a deal excluded for reopen
+evidence alone is counted in `out_of_period_landed_n` or `landed_n` as its outcome dictates.
 
 **Excluded from `E` and `D_book` too.** `D_book` previously included all of `D_open`, and the `open → now()`
 branch of `event_window_end` runs the event window right through the interval when the deal was *closed* —
@@ -1169,14 +1208,14 @@ here. Adding a metric without adding a row is the defect re-entering.**
 |---|---|---|---|---|
 | `coverage_rate` | 4.1 | `D_cov` where `cov_state = 'rep_prediction'` and `cov_prediction` in `[today, today + CLOSE_TARGET_HOLD_HORIZON_DAYS]` | `D_cov` | Yes |
 | `covered_n` / `parked_n` / `at_risk_n` | 4.1 | partition of `D_cov` | — | Sums to `\|D_cov\|` |
-| `machine_dated_n` | 4.1 | `D_open` \ `D_cov` | — | Complement, reported |
+| `machine_dated_n` | 4.1 | `D_open` \ (`D_cov` ∪ `D_reopened`) — machine-dated **and not reopened**, matching the SQL's precedence and the RELATIONS block | — | Disjoint from `reopened_open_n` |
 | `hit_rate_14d`, `hit_rate_30d` | 4.2 | `D_score` within tolerance | `D_score` | Yes |
 | `hit_rate_14d_final` | 4.2 | `D_score_final` within tolerance | **`D_score_final`** | Yes |
 | `mean_signed_error_days`, `median_signed_error_days`, `p90_signed_error_days` | 4.3 | `D_score` | `D_score` | Yes |
 | `landed_n` | 2.4 | `D_landed` | — | Count |
 | `scoreable_n` | 4.2 | `D_score` | — | Count; `D_score ⊆ D_landed` |
 | `no_prediction_n` / `cleared_n` / `machine_superseded_n` / `parked_prediction_n` | 4.2 | `D_landed` \ `D_score`, partitioned by `p30_state` | — | Partition of the shortfall |
-| `overdue_open_n`, `median_days_overdue` | 2.4 | `D_open` past-due subset | — | Count |
+| `overdue_open_n`, `median_days_overdue` | 2.4 | `D_cov` where `cov_state = 'rep_prediction'` and `cov_prediction < today` — the **resolved** coverage set, same as every other current-open metric (§4.1) | — | Count |
 | `move_count` / `set_count` / `clear_count` | 4.4 | `E` | — | Event counts |
 | `moves_per_deal` | 4.4 | `E` (move events) | `\|D_book\|` | Yes — `E` is defined over `D_book` |
 | `total_days_slipped`, `days_pushed_out`, `days_pulled_in` | 4.5 | `E` | — | Event sums |
@@ -1305,7 +1344,13 @@ pfinal_parked_at_write =
                                + CLOSE_TARGET_HOLD_HORIZON_DAYS, false)
 
 -- Per-deal event cutoff. Consumed by E's definition, so it MUST be available before E exists.
-event_window_end = CASE WHEN open THEN now()
+-- The has_reopen_evidence branch is FIRST: a deal that ever left a terminal stage has a closed interval
+-- inside its window, and edits made while it was closed are not forecasting (§4.0.5). NULL excludes the
+-- deal from E and D_book entirely. This is broader than is_reopened_after_landing, which additionally
+-- requires an in-window landing that D_landed lost -- a deal that lands, reopens and re-closes inside
+-- the window stays in D_landed and would otherwise keep contributing closed-interval churn.
+event_window_end = CASE WHEN has_reopen_evidence THEN NULL
+                        WHEN open THEN now()
                         ELSE business_day_end_exclusive(
                                COALESCE(outcome_date, terminal_entry_date)) END
 ```
@@ -1336,10 +1381,10 @@ column. Re-run this check whenever a name is added:
 |---|---|---|
 | `raw_close_date_events` (§4.0.1) | `audit_log_id`, `deal_id`, `changed_at`, `actor_user_id`, `event_kind`, `old_date`, `new_date` | `audit_log`: `id`, `record_id`, `created_at`, `changed_by`, `table_name`, `action`, `changes`, `full_row` — all real columns (§1.2) |
 | `close_date_timeline` (§4.0.2) | `audit_log_id`, `deal_id`, `changed_at`, `actor_user_id`, `event_kind`, `old_date`, `new_date` **passed through**, plus `source`, `machine_source` | `raw_close_date_events.*`; `deals.hubspot_deal_id`; `public.hubspot_refresh_log.*` (§0064) |
-| `outcomes` (§4.0.5) | `deal_id`, `rep_id`, `deal_created_at`, `outcome_kind`, `outcome_date`, `terminal_entry_date`, **`is_reopened_after_landing`**, `bid_board_owned` | `deals`: `stage_entered_at`, `bid_board_stage_entered_at`, `created_at`, `won_closed_date`, `lost_at`, `assigned_rep_id`, `stage_id`, `bid_board_stage_slug`, `is_active`, `is_test_data`, `is_bid_board_owned`, `is_read_only_mirror`, `on_hold`; `pipeline_stage_config`: `slug`, `is_terminal`; `deal_stage_history`: `deal_id`, `to_stage_id`, `created_at` |
+| `outcomes` (§4.0.5) | `deal_id`, `rep_id`, `deal_created_at`, `outcome_kind`, `outcome_date`, `terminal_entry_date`, `is_reopened_after_landing`, **`has_reopen_evidence`**, `bid_board_owned` | `deals`: `stage_entered_at`, `bid_board_stage_entered_at`, `created_at`, `won_closed_date`, `lost_at`, `assigned_rep_id`, `stage_id`, `bid_board_stage_slug`, `is_active`, `is_test_data`, `is_bid_board_owned`, `is_read_only_mirror`, `on_hold`; `pipeline_stage_config`: `slug`, `is_terminal`; `deal_stage_history`: `deal_id`, `to_stage_id`, **`from_stage_id`**, `created_at` |
 | `state_at` ×3 (§4.0.3) *(contents: **convention-derived** — the block projects `state`, `prediction`, `changed_at`, `source`; the prefixes come from the three aliased instances in §4.0.7's anchor table, so an extractor sees a mismatch that is expected)* | `p30_state`, `p30_prediction`, `p30_changed_at`, `p30_source`; `pfinal_state`, `pfinal_prediction`, `pfinal_changed_at`, `pfinal_source`; `pnow_state`, `pnow_prediction`, `pnow_changed_at`, `pnow_source` — all `*_state` coalesced (§4.0.3) | `close_date_timeline`: `deal_id`, `changed_at`, **`audit_log_id`**, `source`, `new_date`; `outcomes.outcome_date` |
 | `coverage_resolution` (§4.1) | `cov_state`, `cov_prediction`, `is_provenance_unknown` | `outcomes.deal_id`; `state_at(deal, now())`; **`deals.expected_close_date`** — the only block that joins `deals` for it, and the whole reason convention 10's exception is buildable |
-| Derived scalars **block A** (§4.0.7) | `open`, `landed`, `in_d_cov`, `signed_error_p30`, `signed_error_pfinal`, `p30_parked_at_write`, `pfinal_parked_at_write`, `event_window_end` | `outcome_kind`, `outcome_date`, `terminal_entry_date`, `is_reopened_after_landing`, `deal_created_at`, `cov_state`, `cov_prediction`, `p30_prediction`, `p30_changed_at`, `pfinal_prediction`, `pfinal_changed_at` — deliberately nothing from the event set |
+| Derived scalars **block A** (§4.0.7) | `open`, `landed`, `in_d_cov`, `signed_error_p30`, `signed_error_pfinal`, `p30_parked_at_write`, `pfinal_parked_at_write`, `event_window_end` | `outcome_kind`, `outcome_date`, `terminal_entry_date`, `is_reopened_after_landing`, `has_reopen_evidence`, `deal_created_at`, `cov_state`, `cov_prediction`, `p30_prediction`, `p30_changed_at`, `pfinal_prediction`, `pfinal_changed_at` — deliberately nothing from the event set |
 | `E` (§4.0.5) *(contents: **unverifiable** — defined in prose, no literal SQL fence)* | the event set for churn | `close_date_timeline`; `event_window_end` (block A) |
 | Derived scalars **block B** (§4.0.7) | `deal_move_count`, `deal_days_pushed_out` | `E`: `old_date`, `new_date` |
 | Metrics (§4.1–4.7) *(contents: **unverifiable** — many fences, no single block boundary)* | the report columns, incl. `cov_n`, `scoreable_n`, `scoreable_final_n` | everything above, by name only |
@@ -1395,7 +1440,9 @@ lines of P₃₀ date arithmetic it never scanned.
 | Rate casts / `NULLS LAST` | every rate casts, every ranked column sorts NULLs last | **extraction** — grep per pattern | mechanical · misses rates written in prose and sorts specified outside a fence |
 | §6.0 falsifying inputs | each fairness claim names an input that would break it | **read** — a human must judge whether the input really falsifies | **memory-based** |
 | §4.0.7 contents for `E` and Metrics | those two rows' *Produces* lists | not derivable — prose-shaped SQL | **unverifiable** |
-| Population **names** (§4.0.5) | every `D_*` used anywhere has a table row, and every declared row is referenced by a fence or a table | **extraction** — name sets differenced across the normative body | mechanical *(added this round)* · checks NAMES only; a row whose set-notation definition drifts from its SQL predicate while the name stays put is invisible |
+| Population **names** (§4.0.5) | every `D_*` used anywhere has a table row, and every declared row is referenced by a fence or a table | **extraction** — name sets differenced across the normative body | mechanical · checks NAMES only; a row whose set-notation definition drifts from its SQL predicate while the name stays put is invisible |
+| Set relations (§4.0.5 RELATIONS block) | every set assertion in the document appears in the canonical block | **extraction** — grep set symbols and stock phrases, assert each cites a declared relation | mechanical · matches symbols and the phrases "subset of" / "carved out of"; a relation asserted in freeform English is invisible |
+| Population-change obligations | when a `D_*` predicate changes, every site mentioning it is enumerated for review | **extraction** — group all mentions by site type (table row / RELATIONS / metric row / partition / producer-consumer / SQL / prose) | mechanical *(added this round)* · **enumerates sites, does not verify agreement** — it produces the list convention 16 depended on recalling; judging each site is still human |
 | Population **definitions** (§4.0.5) | that each `D_*` predicate matches the SQL implementing it | **read** — set notation is not an extractable expression | **memory-based** (residual of the row above) |
 | Disjointness of tie-out terms | that summed buckets cannot overlap | **read** — set arithmetic a human must do | **memory-based** |
 | Everything against production | census, coverage floor, mirror-terminal counts | not derivable — needs a database | **unverified** |
@@ -2325,6 +2372,13 @@ surface it.
     `coverage_resolution` join as a violation and reopened the provenance hole. Every restatement must
     either carry the exception or point at the canonical section. Verified by the grep in the audit
     inventory below, not by reading.
+19. **Changing a population's defining predicate obliges a fixed, enumerable list of sites.** Run the
+    obligation enumerator (§7 audit inventory) for that population name before calling the change done. It
+    derives the list from the document rather than from recall: the populations table row, the RELATIONS
+    block, every metric row naming it, every partition statement containing it, the producer/consumer row
+    for any column it newly consumes, and every SQL fence mentioning it. The enumeration is mechanical;
+    **the review of each site is not.** Six of round 17's eight findings were obligations of a single
+    predicate change that convention 16 asked me to recall and I did not.
 
 **A convention that forbids something the spec requires is worse than no convention, because it will be
 enforced.** Convention 10 was exactly that for one round: it banned every raw read of
@@ -2467,6 +2521,39 @@ complement of `futureDatedCloseDatePredicateSql`'s `>= today` (`foundations.ts:4
 `>` matches `closeTargetFarOutSqlPredicate` (`deal-reporting.ts:137`), so a deal exactly 90 days out is
 unparked in both. One ordering — `percentile_cont`'s `WITHIN GROUP` — deliberately needs no tie-breaker,
 and §4.3 now says why.
+
+**Round 17 (one predicate change, six unfulfilled obligations)**
+
+Six of eight findings were consequences of round 16's reopen-predicate rewrite. Two — the `machine_dated_n`
+and `overdue_open_n` audit rows — were worse than unpropagated: I had *reported them fixed* in round 16.
+The asserting helper aborted that batch on an unrelated non-match, correctly leaving the file untouched, and
+when I re-ran I rebuilt only part of the batch. All-or-nothing protects the file; it does not protect
+against a partial re-run, and I did not re-verify the specific rows.
+
+| # | Was | Now |
+|---|---|---|
+| 1 | Populations row did not state the reopen requirement | Row now carries the full three-part predicate. |
+| 2 | §2.4 partition statement listed only the ordinary open buckets | Restated over `D_cov`, machine-dated-not-reopened, and the reopened slice, citing RELATIONS. |
+| 3 | §4.1 `machine_dated_n` did not exclude reopened | Contradicted the RELATIONS block written the round before. Fixed. |
+| 4 | Overdue buckets not on the coverage population | Now `D_cov` with `cov_state` / `cov_prediction`, in both tables. |
+| 5 | Represented-landing test compared a possibly-NULL `outcome_date` | `BETWEEN` on NULL is NULL, so `AND NOT (NULL)` is NULL and the conjunct **failed open** — silently readmitting the `D_nodate` rows the rewrite existed to exclude. Coalesced. |
+| 6 | Same-window reopens excluded from coverage but not churn | A deal that lands, reopens and re-closes inside the window stays in `D_landed`, but its event window still spans the closed interval. `event_window_end` now returns NULL on any reopen evidence, independent of `D_reopened`. |
+| 7 | `reo.from_stage_id` consumed, not listed | Added to the `outcomes` consumers row. |
+| 8 | The later-reopen test ordered by `changed_at` | See below — the table has no faithful write order at all. |
+
+**`deal_stage_history` has no write-order column.** `audit_log.id` is `BIGSERIAL` and records insert
+sequence; `deal_stage_history.id` is `UUID DEFAULT gen_random_uuid()` (`0001_initial.sql:465`) — **random,
+carrying no ordering information** — and `created_at` is `NOW()`, transaction-start, with the same
+inversion exposure §4.0.1 established. There is no third column. So the test compares at **CT date
+granularity**: `stage-change.ts:147` takes `FOR UPDATE` on the deal, so same-deal changes are serialised
+and inversion is bounded by transaction duration, which day granularity absorbs. **Residual stated, not
+engineered away:** two stage changes on one deal on one business day cannot be ordered by this data.
+
+**Did the obligation enumeration become mechanical?** Partly, and the boundary matters. A new enumerator
+groups every mention of a population by site type and reports the count — 18 sites for `D_reopened`. That
+is the list convention 16 depended on my recalling, now derived from the text. **It enumerates sites; it
+does not verify agreement.** Judging whether each site is consistent remains human, so "population
+predicate changes" stays on the memory-based list with its blast radius written out.
 
 **Round 16 (a diagnostic that inferred a workflow event from an absence, and table prose no check reads)**
 
@@ -2679,6 +2766,18 @@ were themselves silently broken**, because `NOT <nullable>` inside `FILTER` coun
 failing loudly. A check that can fail open is not a check. That is why the state enum is coalesced and
 non-null by construction, and why "never negate a nullable" is now a stated SQL rule (§4.0.6) rather than
 something to remember at each site.
+
+**Round 17's lesson: "what else does this oblige?" is not a question memory can answer.** Convention 16
+has been in force for six rounds and this round produced six violations of it from a single change. The
+instruction was never wrong; it was unexecutable, because it asks an author to enumerate consequences
+across a 2,400-line document from recall, immediately after making the change that created them. The
+enumerator does not make the judgement mechanical — it makes the *list* mechanical, which is the half that
+was failing. Where a procedure depends on recall, the useful move is to mechanise the recall and leave the
+judgement, rather than restating the procedure more firmly.
+
+A second, smaller lesson: an all-or-nothing edit helper protects the file from a partial write, and offers
+no protection at all against a partial *re-run*. Two rows I reported fixed last round were never written.
+Re-running a batch after an abort now means re-running the whole batch.
 
 **Round 16's lesson: prose adjacent to a checked column inherits its credibility without earning it.** The
 audit table has now been wrong about three distinct things — its ordering, its *Produces* contents, and now
