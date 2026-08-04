@@ -721,6 +721,8 @@ export async function buildEstimatingWorkbenchState(
     isActiveParseArtifact(row, activeParseRunIdByDocumentId)
   );
   const extractionById = new Map(activeExtractionRows.map((row) => [row.id, row]));
+  // Recommendation -> match -> extraction, so promotability can ask about the live quantity.
+  const matchById = new Map(matchRows.map((row) => [row.id, row]));
   const activeExtractionIds = new Set(activeExtractionRows.map((row) => row.id));
   const activeMatchRows = matchRows.filter((row) => activeExtractionIds.has(row.extractionId));
   const activeMatchIds = new Set(activeMatchRows.map((row) => row.id));
@@ -765,7 +767,37 @@ export async function buildEstimatingWorkbenchState(
   const derivedPricingRows = deriveEstimatePricingWorkbenchRows(
     pricingRowsWithOptions as EstimatePricingRecommendationRow[]
   );
-  const promotablePricingRows = derivedPricingRows.filter((row) => row.promotable);
+  /**
+   * The SAME rule the promote query enforces, applied to what the workbench calls promotable.
+   *
+   * `loadApprovedRecommendationsForRun` refuses a recommendation whose extraction no longer carries a
+   * priceable quantity. Without mirroring that here, the workbench went on reporting the row as ready
+   * and `canPromote` stayed true — so the button was live, the estimator pressed it, and promotion
+   * silently dropped the row and answered `recommendation_unavailable`. A readiness signal that
+   * disagrees with the thing it gates is worse than no signal.
+   *
+   * Manual rows are exempt for the same reason they are exempt there: they promote their own
+   * `manualQuantity`, and their extraction match is only an active-artifact anchor.
+   */
+  const hasPriceableExtraction = (row: (typeof derivedPricingRows)[number]): boolean => {
+    if (row.sourceType === "manual") return true;
+    const matchRow = row.extractionMatchId ? matchById.get(row.extractionMatchId) : null;
+    const extraction = matchRow?.extractionId ? extractionById.get(matchRow.extractionId) : null;
+    // No extraction in hand is not a claim that the quantity is gone — the promote query does its own
+    // join and will decide. Withholding readiness on a lookup miss would invent a failure.
+    if (!extraction) return true;
+    // An ABSENT column is not a claim either. The extraction read is a full `select()`, so `quantity` is
+    // always present in production — but treating an undefined field as unpriceable would mean a future
+    // narrowing of that select silently marked every row unpromotable, which is a far worse failure than
+    // the mismatch this function exists to fix. Null IS a claim, and is refused.
+    if (extraction.quantity === undefined) return true;
+    const quantity = Number(extraction.quantity);
+    return extraction.quantity !== null && Number.isFinite(quantity) && quantity > 0;
+  };
+
+  const promotablePricingRows = derivedPricingRows.filter(
+    (row) => row.promotable && hasPriceableExtraction(row)
+  );
 
   const documentsSummary = {
     total: documents.length,
