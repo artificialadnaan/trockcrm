@@ -59,12 +59,36 @@
 -- here that `normalizePortfolioProjectStage` applies in TypeScript, rather than to enumerate spellings —
 -- enumerating spellings is precisely what went wrong.
 --
--- `pg_temp.portfolio_stage_is_off_board` below mirrors that function step for step: the bare textual
--- normalization, then the same three lookups (bare, hyphen-as-space, compact-hyphen) against the same
--- alias keys. The one thing it does NOT reproduce is the `??` precedence — a string whose bare form hits a
--- BOARD alias while a hyphen variant hits an OFF-BOARD one would classify differently. No such string
--- exists: not one off-board alias key contains a hyphen, so the variants can only ever match the same
--- bucket the bare form does.
+-- `pg_temp.portfolio_stage_is_off_board` below mirrors that function step for step. A MIRROR IS ONLY WORTH
+-- ANYTHING IF IT IS EXACT, and an earlier draft of it was not: it used `btrim`, whose one-argument form
+-- strips SPACES ONLY. JS `.trim()` strips all whitespace, so a stage stored as E'\tHold\t' survived the
+-- trim, became " hold " after the collapse, matched no alias key, and got flipped onto the board — the
+-- very bug this exclusion exists to prevent, reintroduced through a whitespace variant.
+--
+-- Derivation, operation by operation. "identical" means the two primitives agree on the FULL input domain;
+-- anything less is spelled out.
+--   1. String(stage ?? "")          <-> coalesce(raw_stage, '')          identical.
+--   2. .trim()                      <-> regexp_replace ^[ws]+ / [ws]+$   identical ONLY with the `ws` class
+--      below. NOT btrim(): btrim(text) is btrim(text, ' ') and leaves tabs, newlines and NBSP in place.
+--      Trimming happens FIRST, exactly as in JS, and there is deliberately NO trailing trim — JS trims
+--      before collapsing, so `_Hold` normalizes to " hold" WITH a leading space (the underscore becomes
+--      one) and is therefore NOT off-board. A tidy final trim would make SQL say "hold" and disagree.
+--   3. .toLowerCase()               <-> lower()                          similar, not identical: lower() is
+--      collation-dependent while JS is full Unicode. Bounded and harmless here — every off-board alias key
+--      is ASCII, and no non-ASCII character lowercases INTO one of them — but it is a real difference, so
+--      the parity test drives non-ASCII input rather than assuming.
+--   4. /[_\s]+/g -> " "             <-> '[_' || ws || ']+'               identical with `ws`; NOT with bare
+--      POSIX [[:space:]], which matches only the ASCII six and lets U+00A0 and the U+2000 block through.
+--   5. /\s*-\s*/g -> " - "          <-> '[ws]*-[ws]*'                    identical, greediness included:
+--      both engines leave "a--b" as "a -  - b" (verified, not assumed).
+--   6. /\s+/g -> " "                <-> '[' || ws || ']+'                identical with `ws`.
+-- `ws` is JS's \s spelled out: POSIX [[:space:]] for the ASCII six, plus U+00A0, U+1680, U+2000-U+200A,
+-- U+2028, U+2029, U+202F, U+205F, U+3000 and U+FEFF.
+--
+-- One divergence remains BY CONSTRUCTION: the `??` precedence of the three alias lookups. A string whose
+-- bare form hit a BOARD alias while a hyphen variant hit an OFF-BOARD one would classify differently. No
+-- such string exists — not one off-board alias key contains a hyphen, so the variants can only ever match
+-- the same bucket the bare form does. This is argued, not tested, and is the only claim here that is.
 --
 -- THE ALIAS LIST IS STILL DUPLICATED FROM CODE, because SQL cannot import the module. It is pinned:
 -- a runtime test (server/tests/migrations/0216-...) reads THIS FILE and asserts the literals in EVERY copy
@@ -102,19 +126,20 @@ BEGIN
         'lost/cancelled',
         'lost/cancelled (legacy)'
       ];
+      ws constant text := '[:space:]\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff';
       bare text;
       hyphen_as_space text;
       compact_hyphen text;
     BEGIN
-      bare := regexp_replace(
-                regexp_replace(
-                  regexp_replace(lower(btrim(coalesce(raw_stage, ''))), '[_[:space:]]+', ' ', 'g'),
-                  '[[:space:]]*-[[:space:]]*', ' - ', 'g'),
-                '[[:space:]]+', ' ', 'g');
-      hyphen_as_space := regexp_replace(
-                           regexp_replace(bare, '[[:space:]]*-[[:space:]]*', ' ', 'g'),
-                           '[[:space:]]+', ' ', 'g');
-      compact_hyphen := regexp_replace(bare, '[[:space:]]*-[[:space:]]*', '-', 'g');
+      bare := regexp_replace(coalesce(raw_stage, ''), '^[' || ws || ']+', '');
+      bare := regexp_replace(bare, '[' || ws || ']+$', '');
+      bare := lower(bare);
+      bare := regexp_replace(bare, '[_' || ws || ']+', ' ', 'g');
+      bare := regexp_replace(bare, '[' || ws || ']*-[' || ws || ']*', ' - ', 'g');
+      bare := regexp_replace(bare, '[' || ws || ']+', ' ', 'g');
+      hyphen_as_space := regexp_replace(bare, '[' || ws || ']*-[' || ws || ']*', ' ', 'g');
+      hyphen_as_space := regexp_replace(hyphen_as_space, '[' || ws || ']+', ' ', 'g');
+      compact_hyphen := regexp_replace(bare, '[' || ws || ']*-[' || ws || ']*', '-', 'g');
       RETURN bare = ANY(off_board)
           OR hyphen_as_space = ANY(off_board)
           OR compact_hyphen = ANY(off_board);
@@ -172,19 +197,20 @@ DECLARE
     'lost/cancelled',
     'lost/cancelled (legacy)'
   ];
+  ws constant text := '[:space:]\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff';
   bare text;
   hyphen_as_space text;
   compact_hyphen text;
 BEGIN
-  bare := regexp_replace(
-            regexp_replace(
-              regexp_replace(lower(btrim(coalesce(raw_stage, ''))), '[_[:space:]]+', ' ', 'g'),
-              '[[:space:]]*-[[:space:]]*', ' - ', 'g'),
-            '[[:space:]]+', ' ', 'g');
-  hyphen_as_space := regexp_replace(
-                       regexp_replace(bare, '[[:space:]]*-[[:space:]]*', ' ', 'g'),
-                       '[[:space:]]+', ' ', 'g');
-  compact_hyphen := regexp_replace(bare, '[[:space:]]*-[[:space:]]*', '-', 'g');
+  bare := regexp_replace(coalesce(raw_stage, ''), '^[' || ws || ']+', '');
+  bare := regexp_replace(bare, '[' || ws || ']+$', '');
+  bare := lower(bare);
+  bare := regexp_replace(bare, '[_' || ws || ']+', ' ', 'g');
+  bare := regexp_replace(bare, '[' || ws || ']*-[' || ws || ']*', ' - ', 'g');
+  bare := regexp_replace(bare, '[' || ws || ']+', ' ', 'g');
+  hyphen_as_space := regexp_replace(bare, '[' || ws || ']*-[' || ws || ']*', ' ', 'g');
+  hyphen_as_space := regexp_replace(hyphen_as_space, '[' || ws || ']+', ' ', 'g');
+  compact_hyphen := regexp_replace(bare, '[' || ws || ']*-[' || ws || ']*', '-', 'g');
   RETURN bare = ANY(off_board)
       OR hyphen_as_space = ANY(off_board)
       OR compact_hyphen = ANY(off_board);

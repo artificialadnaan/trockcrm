@@ -96,6 +96,15 @@ function offBoardArrayLiteralsPerCopy(sql: string): string[][] {
 describe("migration 0216 — portfolio_projects board-relevant backfill", () => {
   let pg: PGlite;
 
+  /** The migration's own SQL classifier, driven directly. */
+  async function sqlIsOffBoard(value: string | null): Promise<boolean> {
+    const result = await pg.query<{ off: boolean }>(
+      `SELECT pg_temp.portfolio_stage_is_off_board($1) AS off`,
+      [value],
+    );
+    return result.rows[0].off;
+  }
+
   beforeEach(async () => {
     pg = new PGlite();
     await createPortfolioTable(pg, "office_dallas");
@@ -243,25 +252,111 @@ describe("migration 0216 — portfolio_projects board-relevant backfill", () => 
   });
 
   it("agrees with the TypeScript classifier on every off-board alias spelling", async () => {
-    // Drive the SQL helper directly with each alias key and require it to say off-board, which is what
-    // isPortfolioProjectOffBoardStage says for the same input.
     await pg.exec(MIGRATION_SQL); // defines pg_temp.portfolio_stage_is_off_board
     for (const alias of PORTFOLIO_OFF_BOARD_STAGE_ALIASES) {
-      const sqlSays = await pg.query<{ off: boolean }>(
-        `SELECT pg_temp.portfolio_stage_is_off_board($1) AS off`,
-        [alias],
-      );
-      expect({ alias, off: sqlSays.rows[0].off }).toEqual({ alias, off: isPortfolioProjectOffBoardStage(alias) });
-      expect(sqlSays.rows[0].off).toBe(true);
+      expect({ alias, off: await sqlIsOffBoard(alias) })
+        .toEqual({ alias, off: isPortfolioProjectOffBoardStage(alias) });
+      expect(await sqlIsOffBoard(alias)).toBe(true);
     }
 
     // ...and does NOT over-match: board stages and unknown stages are both "not off-board".
     for (const stage of ["Pre-Construction", "Service - In Production", "Closed", "Buy Out", "Warranty - Punch List", ""]) {
-      const sqlSays = await pg.query<{ off: boolean }>(
-        `SELECT pg_temp.portfolio_stage_is_off_board($1) AS off`,
-        [stage],
-      );
-      expect({ stage, off: sqlSays.rows[0].off }).toEqual({ stage, off: isPortfolioProjectOffBoardStage(stage) });
+      expect({ stage, off: await sqlIsOffBoard(stage) })
+        .toEqual({ stage, off: isPortfolioProjectOffBoardStage(stage) });
     }
+  });
+
+  /**
+   * THE PARITY TEST — the one that would have caught `btrim`, and the one that will catch the next
+   * near-miss. Every entry is driven through BOTH implementations and required to agree; the assertion
+   * is agreement, not a hardcoded expectation, so it stays honest as either side changes.
+   *
+   * Each input targets a specific primitive where a SQL spelling merely RESEMBLES the JS one:
+   * whitespace character classes (POSIX [[:space:]] omits U+00A0 and the U+2000 block that JS \s
+   * matches), trim semantics (btrim strips spaces only), lower() collation vs full-Unicode
+   * toLowerCase, and hyphen-padding greediness.
+   */
+  const ADVERSARIAL_INPUTS: Array<[label: string, value: string | null]> = [
+    ["plain canonical", "Hold (LEGACY)"],
+    ["bare alias", "Hold"],
+    ["upper", "HOLD"],
+    ["surrounding spaces", "  Hold  "],
+    ["TABS around", "\tHold\t"],                       // btrim leaves these -> the shipped bug
+    ["newlines around", "\nHold\n"],
+    ["CR around", "\rHold\r"],
+    ["vertical tab / form feed", "\v\fHold\f\v"],
+    ["NBSP around", " Hold "],               // POSIX [[:space:]] does NOT match NBSP
+    ["ogham space mark", " Hold "],
+    ["en/em quad block", " Hold "],
+    ["line/para separator", " Hold "],
+    ["narrow NBSP", " Hold "],
+    ["medium mathematical space", " Hold "],
+    ["ideographic space", "　Hold　"],
+    ["BOM / zero-width nbsp", "﻿Hold﻿"],
+    ["mixed leading+trailing", "\t  Hold　 \n"],
+    ["internal tab", "Lost/Cancelled\t(Legacy)"],
+    ["internal NBSP", "Lost/Cancelled (Legacy)"],
+    ["internal doubled space", "Hold  (LEGACY)"],
+    ["underscore separated", "LOST_CANCELLED (Legacy)"],
+    ["LEADING underscore (becomes a space, so NOT off-board)", "_Hold"],
+    ["TRAILING underscore", "Hold_"],
+    ["spaced slash variant", "Lost / Cancelled (Legacy)"],
+    ["tabbed slash variant", "Lost\t/\tCancelled (Legacy)"],
+    ["bare lost/cancelled", "Lost/Cancelled"],
+    ["doubled hyphen", "Pre--Construction"],
+    ["spaced hyphen", "Pre - Construction"],
+    ["tabbed hyphen", "Pre\t-\tConstruction"],
+    ["hyphen with NBSP padding", "Pre - Construction"],
+    ["board stage", "Closed"],
+    ["service stage", "Service - In Production"],
+    ["service final invoice", "Service - Close Out Final Invoice"],
+    ["unknown stage", "Warranty - Punch List"],
+    ["non-ASCII (lower() collation vs toLowerCase)", "HÖLD (LEGACY)"],
+    ["turkish dotted capital I", "HOLDİ"],
+    ["kelvin sign", "HOLK"],
+    ["empty", ""],
+    ["only whitespace", " \t  "],
+    ["null", null],
+  ];
+
+  it("matches isPortfolioProjectOffBoardStage on every adversarial whitespace/unicode input", async () => {
+    await pg.exec(MIGRATION_SQL);
+
+    const disagreements: Array<{ label: string; value: string | null; sql: boolean; ts: boolean }> = [];
+    const tsVerdicts: boolean[] = [];
+    for (const [label, value] of ADVERSARIAL_INPUTS) {
+      const sql = await sqlIsOffBoard(value);
+      const ts = isPortfolioProjectOffBoardStage(value);
+      tsVerdicts.push(ts);
+      if (sql !== ts) disagreements.push({ label, value, sql, ts });
+    }
+    expect(disagreements).toEqual([]);
+
+    // NOT VACUOUS: "they agree" is worthless if every input lands on the same answer. The whitespace
+    // and unicode wrappers must genuinely still resolve to the legacy buckets, and the board/unknown
+    // stages must genuinely not.
+    expect(tsVerdicts.filter(Boolean).length).toBeGreaterThanOrEqual(15);
+    expect(tsVerdicts.filter((verdict) => !verdict).length).toBeGreaterThanOrEqual(10);
+  });
+
+  it("keeps a tab-wrapped legacy stage OFF the board end to end", async () => {
+    // The regression in its actual shape: a row, through the real migration, not just the helper.
+    await insertProject(pg, "office_dallas", {
+      id: "tabbed-hold",
+      stage: "\tHold\t",
+      normalized: "hold (legacy)",
+      boardRelevant: false,
+    });
+    await insertProject(pg, "office_dallas", {
+      id: "nbsp-lost",
+      stage: " Lost/Cancelled (Legacy) ",
+      normalized: "lost/cancelled (legacy)",
+      boardRelevant: false,
+    });
+
+    await pg.exec(MIGRATION_SQL);
+    const flags = await flagsFor(pg, "office_dallas");
+    expect(flags["tabbed-hold"]).toBe(false);
+    expect(flags["nbsp-lost"]).toBe(false);
   });
 });
