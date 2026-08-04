@@ -7,6 +7,20 @@ import { MemoryRouter, useLocation } from "react-router-dom";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+// The page resolves the report's ?office filter (id OR legacy slug) to a canonical office id for deal
+// links, so the accessible-office list has to be present.
+vi.mock("@/hooks/use-accessible-offices", () => ({
+  useAccessibleOffices: () => ({
+    offices: [
+      { id: "office-dallas", name: "Dallas Office", slug: "dallas" },
+      { id: "office-atlanta", name: "Atlanta Office", slug: "atlanta" },
+    ],
+    loading: false,
+    error: null,
+    refetch: vi.fn(),
+  }),
+}));
+
 vi.mock("@/components/reports/report-filter-bar", () => ({
   ReportFilterBar: () => <div>Report Filters</div>,
   useReportFilters: () => ({
@@ -262,6 +276,32 @@ describe("DailyActivityLogPage", () => {
     const html = htmlFor();
     expect(html).toContain("logged by Dana Director");
     expect(html.match(/logged by/g)).toHaveLength(1);
+  });
+
+  it("resolves the report's office FILTER to an officeId when no app scope is set", () => {
+    // ReportFilterBar's dropdown writes ?office=<id|slug>, never ?officeId. Reading only ?officeId
+    // meant choosing an office in the report's own dropdown produced a bare /deals/:id, which resolves
+    // under the viewer's default office and 404s an off-office deal.
+    const bySlug = htmlFor("/reports/performance/daily-activity-log?office=dallas");
+    expect(bySlug).toContain('href="/deals/deal-1?officeId=office-dallas"');
+
+    // The dropdown can also write the id directly — that must pass through, not be dropped.
+    const byId = htmlFor("/reports/performance/daily-activity-log?office=office-atlanta");
+    expect(byId).toContain('href="/deals/deal-1?officeId=office-atlanta"');
+  });
+
+  it("prefers the app-level ?officeId over the report's office filter", () => {
+    // ?officeId is the scope the rows were actually READ under (api() sends it as x-office-id); the
+    // filter only narrows what is displayed within that scope. So the scope wins for the link target.
+    const html = htmlFor("/reports/performance/daily-activity-log?officeId=office-atlanta&office=dallas");
+    expect(html).toContain('href="/deals/deal-1?officeId=office-atlanta"');
+    expect(html).not.toContain("officeId=office-dallas");
+  });
+
+  it("emits no office param for an unresolvable or all-offices filter", () => {
+    expect(htmlFor("/reports/performance/daily-activity-log?office=all")).toContain('href="/deals/deal-1"');
+    // A slug that is not in the accessible list must not be pasted through as if it were an id.
+    expect(htmlFor("/reports/performance/daily-activity-log?office=nonexistent")).toContain('href="/deals/deal-1"');
   });
 
   it("links the deal and keeps the office scope on the link", () => {
