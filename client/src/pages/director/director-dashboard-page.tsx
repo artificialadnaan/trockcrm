@@ -1094,7 +1094,7 @@ export function DirectorDashboardPage() {
                       <div className="min-w-0">
                         {/* A change-order child is STORED "<Parent> — Change Order N" and these rows
                             truncate; move the label to the front for DISPLAY only. */}
-                        <p className="truncate text-sm font-bold text-gray-950">{formatDealDisplayName(deal.dealName)}</p>
+                        <p className="truncate text-sm font-bold text-gray-950">{formatDealDisplayName(deal.dealName, deal.dealIsChangeOrder)}</p>
                         <p className="text-xs text-gray-500">
                           {repName}
                           {deal.regionClassification ? ` · ${deal.regionClassification}` : ""}
@@ -1271,7 +1271,7 @@ export function DirectorDashboardPage() {
                   <Link key={close.dealId} to={`/deals/${close.dealId}`} className="grid grid-cols-[24px_1fr_auto] gap-3 rounded-lg border border-gray-100 p-3 hover:bg-gray-50">
                     <Icon className={`mt-0.5 h-4 w-4 ${color}`} />
                     <div className="min-w-0">
-                      <p className="truncate text-sm font-bold text-gray-950">{formatDealDisplayName(close.dealName)}</p>
+                      <p className="truncate text-sm font-bold text-gray-950">{formatDealDisplayName(close.dealName, close.dealIsChangeOrder)}</p>
                       <p className="text-xs text-gray-500">{close.repName}</p>
                     </div>
                     <div className="text-right">

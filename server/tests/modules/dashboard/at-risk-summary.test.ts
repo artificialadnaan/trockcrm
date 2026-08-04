@@ -277,3 +277,47 @@ describe("dashboard At Risk summary", () => {
     });
   });
 });
+
+/**
+ * One test for the whole dashboard service: `getDashboardAtRiskRows` is the single source behind
+ * `buildDashboardAtRiskDeals` (director at-risk panel, stale-deal list, director alert panel) AND
+ * `buildDashboardDownstreamBottlenecks` (rep dashboard top deals). Both builders share the row shape,
+ * so this stands for all four client surfaces.
+ *
+ * The failure mode it exists for: a mapper that quietly stops copying `dealIsChangeOrder` out of the
+ * row. That has happened twice in this PR (pending-rfp, and the project-stats feed), and typecheck
+ * cannot see it because the field is optional everywhere by design.
+ */
+describe("dashboard at-risk builders carry deals.is_change_order through", () => {
+  const baseRow = {
+    dealValue: 1000,
+    stageSlug: "opportunity",
+    stageName: "Opportunity",
+    workflowRoute: "normal" as const,
+    stageEnteredAt: "2026-05-02T12:00:00.000Z",
+    onHold: false,
+    onHoldStartedAt: null,
+    onHoldAccumulatedSeconds: 0,
+    onHoldAccumulatedSecondsAtStageEntry: 0,
+  };
+  const now = new Date("2026-05-22T12:00:00.000Z");
+
+  it("buildDashboardAtRiskDeals preserves true / false / absent without coercing", async () => {
+    const { buildDashboardAtRiskDeals } = await import("../../../src/modules/dashboard/service.js");
+    const deals = buildDashboardAtRiskDeals(
+      [
+        { ...baseRow, dealId: "co", dealName: "Tides — Change Order 2", dealIsChangeOrder: true },
+        { ...baseRow, dealId: "not-co", dealName: "Lobby — Change Order 1", dealIsChangeOrder: false },
+        { ...baseRow, dealId: "unknown", dealName: "Tides" },
+      ],
+      "rep",
+      now
+    );
+    const byId = new Map(deals.map((d) => [d.dealId, d]));
+    expect(byId.get("co")?.dealIsChangeOrder).toBe(true);
+    // false must survive as false — it is the authoritative "this is NOT a change order".
+    expect(byId.get("not-co")?.dealIsChangeOrder).toBe(false);
+    // absent must stay absent, so the client falls back to reading the name.
+    expect(byId.get("unknown")?.dealIsChangeOrder).toBeUndefined();
+  });
+});

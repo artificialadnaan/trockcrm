@@ -9,6 +9,7 @@ interface StaleDeal {
   dealId: string;
   dealNumber: string;
   dealName: string;
+  dealIsChangeOrder?: boolean | null;
   stageName: string;
   repName: string;
   daysInStage: number;
@@ -63,7 +64,7 @@ export function StaleDealList({ deals }: StaleDealListProps) {
               <div className="min-w-0 flex-1">
                 {/* A change-order child is STORED "<Parent> — Change Order N" and this row truncates;
                     move the label to the front for DISPLAY only. */}
-                <p className="text-sm font-medium truncate">{formatDealDisplayName(deal.dealName)}</p>
+                <p className="text-sm font-medium truncate">{formatDealDisplayName(deal.dealName, deal.dealIsChangeOrder)}</p>
                 <p className="text-xs text-muted-foreground">
                   {deal.repName} &mdash; {deal.stageName}
                 </p>

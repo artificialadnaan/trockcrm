@@ -70,6 +70,8 @@ export type DashboardAtRiskSummaryRow = {
   repId?: string | null;
   repName?: string | null;
   dealName?: string | null;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   stageName?: string | null;
   regionClassification?: string | null;
   dealValue: number;
@@ -196,6 +198,7 @@ export function buildDashboardAtRiskDeals(
       repId: row.repId ? String(row.repId) : null,
       repName: String(row.repName ?? "Unassigned"),
       dealName: String(row.dealName ?? "Deal"),
+      dealIsChangeOrder: row.dealIsChangeOrder ?? undefined,
       stageName: resolveMirroredStageLabel(row.stageSlug, row.stageName ?? "Stage"),
       mirroredStageStatus: row.mirroredStageStatus ?? null,
       workflowRoute: row.workflowRoute === "service" ? "service" : "normal",
@@ -227,6 +230,7 @@ export function buildDashboardAtRiskStaleDeals(
       dealId: String(row.dealId ?? ""),
       dealNumber: String(row.dealNumber ?? ""),
       dealName: String(row.dealName ?? "Deal"),
+      dealIsChangeOrder: row.dealIsChangeOrder ?? undefined,
       stageId: String(row.stageId ?? ""),
       stageName: resolveMirroredStageLabel(row.stageSlug, row.stageName ?? "Stage"),
       assignedRepId: String(row.repId ?? ""),
@@ -269,6 +273,7 @@ export function buildDashboardDownstreamBottlenecks(
       repId: row.repId ? String(row.repId) : null,
       repName: String(row.repName ?? "Unassigned"),
       dealName: String(row.dealName ?? "Deal"),
+      dealIsChangeOrder: row.dealIsChangeOrder ?? undefined,
       stageName: resolveMirroredStageLabel(row.stageSlug, row.stageName ?? "Stage"),
       mirroredStageStatus: row.mirroredStageStatus ?? null,
       workflowRoute: row.workflowRoute === "service" ? "service" : "normal",
@@ -623,6 +628,8 @@ export interface DashboardDownstreamBottleneckRow {
   repId: string | null;
   repName: string;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   stageName: string;
   mirroredStageStatus: string | null;
   workflowRoute: "normal" | "service";
@@ -1193,6 +1200,7 @@ async function getCommissionDealRollups(
       d.id AS deal_id,
       d.deal_number AS deal_number,
       d.name AS deal_name,
+      d.is_change_order AS deal_is_change_order,
       c.name AS company_name,
       p.name AS property_name,
       dsc.source_value_amount::numeric AS paid_revenue,
@@ -2081,6 +2089,8 @@ export interface RecentClose {
   dealId: string;
   dealNumber: string | null;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   repId: string | null;
   repName: string;
   outcome: "won" | "lost";
@@ -2612,6 +2622,7 @@ async function getRecentCloses(
       d.id AS deal_id,
       d.deal_number,
       d.name AS deal_name,
+      d.is_change_order AS deal_is_change_order,
       d.assigned_rep_id AS rep_id,
       COALESCE(u.display_name, 'Unassigned') AS rep_name,
       CASE
@@ -2637,6 +2648,7 @@ async function getRecentCloses(
     dealId: String(row.deal_id),
     dealNumber: row.deal_number ? String(row.deal_number) : null,
     dealName: String(row.deal_name ?? "Deal"),
+    dealIsChangeOrder: row.deal_is_change_order ?? undefined,
     repId: row.rep_id ? String(row.rep_id) : null,
     repName: String(row.rep_name ?? "Unassigned"),
     outcome: row.outcome === "won" ? "won" : "lost",
@@ -2844,6 +2856,7 @@ export async function getDashboardAtRiskRows(
     repId: row.rep_id ? String(row.rep_id) : null,
     repName: row.rep_name ? String(row.rep_name) : null,
     dealName: row.deal_name ? String(row.deal_name) : null,
+    dealIsChangeOrder: row.deal_is_change_order ?? undefined,
     dealValue: Number(row.deal_value ?? 0),
     stageSlug: row.stage_slug ? String(row.stage_slug) : null,
     stageName: resolveMirroredStageLabel(row.stage_slug, row.stage_name),
