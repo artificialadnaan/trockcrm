@@ -6,6 +6,101 @@ import {
 } from "../../../src/modules/estimating/extraction-review-service.js";
 
 describe("extraction-review-service", () => {
+  function editHarness(existing: Record<string, unknown>) {
+    const selectLimit = vi.fn().mockResolvedValue([existing]);
+    const updateSetCalls: any[] = [];
+    const updateSet = vi.fn((values: any) => {
+      updateSetCalls.push(values);
+      return { where: vi.fn(() => ({ returning: vi.fn().mockResolvedValue([{ id: existing.id }]) })) };
+    });
+    const tenantDb = {
+      select: vi.fn(() => ({ from: vi.fn(() => ({ where: vi.fn(() => ({ limit: selectLimit })) })) })),
+      update: vi.fn(() => ({ set: updateSet })),
+      insert: vi.fn(() => ({
+        values: vi.fn(() => ({ returning: vi.fn().mockResolvedValue([{ id: "evt", eventType: "edited" }]) })),
+      })),
+    } as any;
+    return { tenantDb, updateSetCalls };
+  }
+
+  it("REQUEUES a needs_quantity row once the missing quantity is supplied", async () => {
+    // THE TRAP THIS CLOSES. The generation job flags a quantity-less row `needs_quantity` and skips
+    // pricing it. The candidate query then re-selects non-measurement rows ONLY at `status = 'pending'`,
+    // so without this the estimator does exactly what the flag asks, the row keeps the flag, and it is
+    // never priced again — silently, and permanently. Worse than the mispricing the flag replaced,
+    // because that at least produced a number somebody could argue with.
+    const { tenantDb, updateSetCalls } = editHarness({
+      id: "ext-nq",
+      status: "needs_quantity",
+      normalizedLabel: "Paint one wall",
+      quantity: null,
+      unit: null,
+      divisionHint: null,
+      rawLabel: "Paint one wall",
+      metadataJson: {},
+    });
+
+    await updateEstimateExtraction({
+      tenantDb,
+      dealId: "deal-1",
+      extractionId: "ext-nq",
+      userId: "user-1",
+      input: { quantity: "120.000", unit: "SF" },
+    });
+
+    expect(updateSetCalls[0].status).toBe("pending");
+  });
+
+  it("does NOT requeue while the quantity is still missing", async () => {
+    // Clearing the flag with no number sends the row straight back to be flagged on the next run — a
+    // loop, not a fix.
+    const { tenantDb, updateSetCalls } = editHarness({
+      id: "ext-nq2",
+      status: "needs_quantity",
+      normalizedLabel: "Paint one wall",
+      quantity: null,
+      unit: null,
+      divisionHint: null,
+      rawLabel: "Paint one wall",
+      metadataJson: {},
+    });
+
+    await updateEstimateExtraction({
+      tenantDb,
+      dealId: "deal-1",
+      extractionId: "ext-nq2",
+      userId: "user-1",
+      input: { unit: "SF" },
+    });
+
+    expect(updateSetCalls[0].status).toBeUndefined();
+  });
+
+  it("leaves any OTHER status alone when a quantity is edited", async () => {
+    // `approved`, `unmatched` and `overridden` are somebody else's state machine; an edit here has no
+    // business rewriting them.
+    const { tenantDb, updateSetCalls } = editHarness({
+      id: "ext-app",
+      status: "approved",
+      normalizedLabel: "Roofing tearoff",
+      quantity: "1.000",
+      unit: "ea",
+      divisionHint: "05",
+      rawLabel: "Roofing tearoff",
+      metadataJson: {},
+    });
+
+    await updateEstimateExtraction({
+      tenantDb,
+      dealId: "deal-1",
+      extractionId: "ext-app",
+      userId: "user-1",
+      input: { quantity: "9.000" },
+    });
+
+    expect(updateSetCalls[0].status).toBeUndefined();
+  });
+
   it("marks an extraction approved and writes a review event", async () => {
     const existingRow = {
       id: "ext-1",

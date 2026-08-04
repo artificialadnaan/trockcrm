@@ -338,6 +338,35 @@ export async function runEstimateGeneration(
         // repetitions of a fact already recorded. The row still skips pricing either way.
         if (extraction.status === "needs_quantity") continue;
 
+        // THE CLAIM IS THE CONDITIONAL UPDATE, and it comes FIRST.
+        //
+        // The read above is a fast path, not a guarantee: `eligibleExtractions` was selected earlier, so
+        // by now another run may have flagged this row and — the case that actually hurts — an estimator
+        // may have supplied the missing quantity. An unconditional `set({status:'needs_quantity'})` would
+        // stamp the flag onto a row that now HAS a number, and since the candidate query only re-selects
+        // non-measurement rows at `status = 'pending'`, that row would never be priced again. The lost
+        // update recreates, through a race, exactly the trap this flag is supposed to avoid.
+        //
+        // A single UPDATE ... WHERE takes a row lock and either matches or does not, so of two
+        // overlapping runs exactly one claims the row. Ordering the claim BEFORE the event is what makes
+        // the event idempotent without a transaction: the run that loses the claim writes nothing.
+        //
+        // Re-checks BOTH conditions rather than only the status, because "still has no quantity" is the
+        // fact being asserted and status is merely how it is recorded.
+        const claimed = await tenantDb
+          .update(estimateExtractions)
+          .set({ status: "needs_quantity" })
+          .where(
+            and(
+              eq(estimateExtractions.id, extraction.id),
+              sql`${estimateExtractions.quantity} is null`,
+              sql`${estimateExtractions.status} <> 'needs_quantity'`
+            )
+          )
+          .returning({ id: estimateExtractions.id });
+
+        if (claimed.length === 0) continue;
+
         await tenantDb.insert(estimateReviewEvents).values({
           dealId: extraction.dealId,
           projectId: extraction.projectId,
@@ -346,10 +375,6 @@ export async function runEstimateGeneration(
           eventType: "needs_quantity",
           afterJson: { normalizedLabel: extraction.normalizedLabel },
         });
-        await tenantDb
-          .update(estimateExtractions)
-          .set({ status: "needs_quantity" })
-          .where(eq(estimateExtractions.id, extraction.id));
         continue;
       }
 

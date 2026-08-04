@@ -104,11 +104,30 @@ export async function updateEstimateExtraction(args: {
     throw new AppError(404, "Estimate extraction not found");
   }
 
+  const nextQuantity = args.input.quantity ?? existing.quantity;
+
+  // SUPPLYING THE MISSING NUMBER MUST PUT THE ROW BACK IN THE QUEUE, or `needs_quantity` is a trap
+  // rather than a flag.
+  //
+  // The generation job marks a quantity-less row `needs_quantity` and skips pricing it. The candidate
+  // query then selects non-measurement rows ONLY when `status = 'pending'` — so a row corrected here
+  // would keep the flag, never be re-selected, and never produce a pricing recommendation again. The
+  // estimator does exactly what the flag asks and the row silently stays dead: worse than the
+  // mispricing the flag replaced, because that at least produced a number somebody could challenge.
+  //
+  // Reset only from `needs_quantity`, and only once a quantity actually exists. Any other status is
+  // somebody else's state machine — `approved`, `unmatched`, `overridden` all mean things this edit has
+  // no business rewriting — and a null quantity would send the row back to be flagged again on the next
+  // run, which is a loop rather than a fix.
+  const clearsNeedsQuantity =
+    existing.status === "needs_quantity" && nextQuantity !== null && nextQuantity !== undefined;
+
   const [updated] = await args.tenantDb
     .update(estimateExtractions)
     .set({
       normalizedLabel: args.input.normalizedLabel ?? existing.normalizedLabel,
-      quantity: args.input.quantity ?? existing.quantity,
+      quantity: nextQuantity,
+      ...(clearsNeedsQuantity ? { status: "pending" as const } : {}),
       unit: args.input.unit ?? existing.unit,
       divisionHint: args.input.divisionHint ?? existing.divisionHint,
       metadataJson: buildUpdatedPricingScopeMetadata({

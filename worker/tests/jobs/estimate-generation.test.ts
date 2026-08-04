@@ -623,6 +623,8 @@ describe("estimate generation job", () => {
     let tenantSelectCallCount = 0;
     const statusUpdates: unknown[] = [];
     const reviewEvents: any[] = [];
+    // The claim matches by default; a test flips this to [] to make the row already-claimed.
+    let claimedRows: Array<{ id: string }> = [{ id: "claimed" }];
     const tenantDb = {
       select: vi.fn(() => ({
         from: vi.fn(() => {
@@ -643,7 +645,13 @@ describe("estimate generation job", () => {
       update: vi.fn(() => ({
         set: vi.fn((values: unknown) => {
           statusUpdates.push(values);
-          return { where: vi.fn().mockResolvedValue(undefined) };
+          // Serves both callers: the `unmatched` path awaits `where(...)` directly, the needs_quantity
+          // claim calls `.returning()` on it. `claimedRows` lets a test make the claim lose.
+          return {
+            where: vi.fn(() => ({
+              returning: vi.fn().mockResolvedValue(claimedRows),
+            })),
+          };
         }),
       })),
     } as any;
@@ -713,6 +721,32 @@ describe("estimate generation job", () => {
       .map((event) => event.subjectId)
       .sort();
     expect(flagged).toEqual(["ext-ocr-null", "ext-walk-null"]);
+
+    // A SECOND RUN OVER THE SAME STATE RECORDS NOTHING FURTHER. A measurement candidate is re-selected
+    // regardless of status, so without both the read guard and the conditional claim, one unmeasured row
+    // would emit a fresh event on every generation run for as long as it lacked a number. Here the claim
+    // is made to lose — which is what a row someone else already flagged looks like.
+    claimedRows = [];
+    const eventsAfterFirstRun = reviewEvents.length;
+    tenantSelectCallCount = 0;
+    drizzleMock.mockReturnValueOnce(appDb).mockReturnValueOnce(tenantDb);
+    poolConnectMock.mockResolvedValue({
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: "doc-1", active_parse_run_id: "parse-run-1" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    } as any);
+
+    await runEstimateGeneration(
+      { documentId: "doc-1", dealId: "deal-1", parseRunId: "parse-run-1" },
+      "office-1"
+    );
+
+    expect(reviewEvents).toHaveLength(eventsAfterFirstRun);
     expect(lockedClient.query).toHaveBeenLastCalledWith("COMMIT");
   });
 
