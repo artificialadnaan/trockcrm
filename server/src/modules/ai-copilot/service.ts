@@ -94,6 +94,7 @@ export interface AiReviewQueueEntry {
   packetId: string;
   dealId: string | null;
   dealName: string | null;
+  dealIsChangeOrder?: boolean | null;
   dealNumber: string | null;
   status: string;
   summaryText: string | null;
@@ -128,9 +129,11 @@ export interface AiReviewPacketDetail {
     modelName: string | null;
     generatedAt: Date | null;
     dealName: string | null;
+    dealIsChangeOrder?: boolean | null;
     dealNumber: string | null;
   } & {
     dealName: string | null;
+    dealIsChangeOrder?: boolean | null;
     dealNumber: string | null;
   }) | null;
   suggestedTasks: Array<typeof aiTaskSuggestions.$inferSelect>;
@@ -150,6 +153,8 @@ export interface CompanyCopilotView {
     id: string;
     dealNumber: string;
     name: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    isChangeOrder?: boolean | null;
     lastActivityAt: Date | null;
     updatedAt: Date;
     latestPacketSummary: string | null;
@@ -164,6 +169,7 @@ export interface AiActionQueueEntry {
   id: string;
   dealId: string | null;
   dealName: string | null;
+  dealIsChangeOrder?: boolean | null;
   dealNumber: string | null;
   title: string;
   details: string | null;
@@ -201,6 +207,7 @@ export interface SalesProcessDisconnectRow {
   scopeId?: string;
   dealNumber: string;
   dealName: string;
+  dealIsChangeOrder?: boolean | null;
   companyId: string | null;
   companyName: string | null;
   stageKey?: string | null;
@@ -334,6 +341,7 @@ type SalesProcessDisconnectBaseRow = {
   id: string;
   deal_number: string;
   deal_name: string;
+  deal_is_change_order?: boolean | null;
   company_id: string | null;
   company_name: string | null;
   stage_key: string | null;
@@ -968,6 +976,7 @@ function buildSalesProcessDisconnectRow(
     }),
     dealNumber: row.deal_number,
     dealName: row.deal_name,
+    dealIsChangeOrder: row.deal_is_change_order ?? undefined,
     companyId: row.company_id ?? null,
     companyName: row.company_name ?? null,
     stageKey: row.stage_key ?? null,
@@ -1257,6 +1266,7 @@ export async function listCurrentSalesProcessDisconnectRows(
       d.id,
       d.deal_number,
       d.name AS deal_name,
+      d.is_change_order AS deal_is_change_order,
       c.id AS company_id,
       c.name AS company_name,
       COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_key,
@@ -1511,6 +1521,7 @@ export async function getCompanyCopilotView(
       id: deals.id,
       dealNumber: deals.dealNumber,
       name: deals.name,
+      isChangeOrder: deals.isChangeOrder,
       lastActivityAt: deals.lastActivityAt,
       updatedAt: deals.updatedAt,
     })
@@ -1672,6 +1683,7 @@ export async function getDirectorBlindSpots(tenantDb: TenantDb) {
       details: aiRiskFlags.details,
       createdAt: aiRiskFlags.createdAt,
       dealName: deals.name,
+      dealIsChangeOrder: deals.isChangeOrder,
       dealNumber: deals.dealNumber,
     })
     .from(aiRiskFlags)
@@ -1696,6 +1708,7 @@ export async function getAiActionQueue(
         rf.id::text AS id,
         rf.deal_id::text AS deal_id,
         d.name::text AS deal_name,
+        d.is_change_order AS deal_is_change_order,
         d.deal_number::text AS deal_number,
         rf.title::text AS title,
         rf.details::text AS details,
@@ -1739,6 +1752,7 @@ export async function getAiActionQueue(
         ts.id::text AS id,
         ts.scope_id::text AS deal_id,
         d.name::text AS deal_name,
+        d.is_change_order AS deal_is_change_order,
         d.deal_number::text AS deal_number,
         ts.title::text AS title,
         ts.description::text AS details,
@@ -1786,6 +1800,7 @@ export async function getAiActionQueue(
     id: String(row.id),
     dealId: row.deal_id ? String(row.deal_id) : null,
     dealName: row.deal_name ? String(row.deal_name) : null,
+    dealIsChangeOrder: row.deal_is_change_order ?? undefined,
     dealNumber: row.deal_number ? String(row.deal_number) : null,
     title: String(row.title),
     details: row.details ? String(row.details) : null,
@@ -2341,6 +2356,7 @@ export async function getAiReviewQueue(
       p.id AS packet_id,
       p.deal_id,
       d.name AS deal_name,
+      d.is_change_order AS deal_is_change_order,
       d.deal_number,
       p.status,
       p.summary_text,
@@ -2367,6 +2383,7 @@ export async function getAiReviewQueue(
     packetId: row.packet_id,
     dealId: row.deal_id ?? null,
     dealName: row.deal_name ?? null,
+    dealIsChangeOrder: row.deal_is_change_order ?? undefined,
     dealNumber: row.deal_number ?? null,
     status: row.status,
     summaryText: row.summary_text ?? null,
@@ -2390,6 +2407,7 @@ export async function getAiReviewPacketDetail(
       SELECT
         p.*,
         d.name AS deal_name,
+        d.is_change_order AS deal_is_change_order,
         d.deal_number
       FROM ai_copilot_packets p
       LEFT JOIN deals d ON d.id = p.deal_id

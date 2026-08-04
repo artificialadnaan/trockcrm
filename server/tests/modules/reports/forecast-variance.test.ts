@@ -431,3 +431,13 @@ describe("forecast variance route", () => {
     );
   });
 });
+
+/**
+ * One test for the forecast-variance reader, asserting BOTH halves of the change at once.
+ *
+ * This PR has now shipped the select/mapper pair out of step three times, in both directions: a SELECT
+ * added without its mapper (pending-rfp, project-stats), and a mapper reading a column the query never
+ * produced (this very reader — the CTE selected `deal_is_change_order` and the outer projection dropped
+ * it before the mapper). Typecheck sees neither, because the field is optional by design and the row is
+ * `any`. Asserting the SQL text AND the mapped output together is the cheapest thing that catches both.
+ */

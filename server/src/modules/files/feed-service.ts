@@ -668,7 +668,7 @@ export async function getProjectPhotoStats(
 export async function getPhotoFeedFacets(tenantDb: TenantDb): Promise<{
   uploaders: Array<{ id: string; name: string }>;
   photoCategories: string[];
-  projects: Array<{ id: string; name: string }>;
+  projects: Array<{ id: string; name: string; isChangeOrder?: boolean | null }>;
 }> {
   // Literally the feed's own row predicate, with no filters applied — not a re-statement of it. An
   // option that cannot match a feed row (or a feed row whose uploader has no option) is exactly what
@@ -700,7 +700,7 @@ export async function getPhotoFeedFacets(tenantDb: TenantDb): Promise<{
   // could drop out of its own dropdown the moment they applied a date range — the select would render
   // blank while still sending its dealId to the feed, leaving no way to undo the selection.
   const projectRows = await tenantDb
-    .selectDistinct({ id: files.dealId, name: deals.name })
+    .selectDistinct({ id: files.dealId, name: deals.name, isChangeOrder: deals.isChangeOrder })
     .from(files)
     .innerJoin(deals, eq(deals.id, files.dealId))
     .where(projectScope);
@@ -714,7 +714,9 @@ export async function getPhotoFeedFacets(tenantDb: TenantDb): Promise<{
       .filter((value): value is string => Boolean(value))
       .sort(),
     projects: projectRows
-      .filter((row): row is { id: string; name: string } => Boolean(row.id))
+      // flatMap rather than a narrowing predicate: `id` is nullable on the row, and stating the
+      // predicate's shape with the extra column in it is more noise than the null-drop is worth.
+      .flatMap((row) => (row.id ? [{ id: row.id, name: row.name, isChangeOrder: row.isChangeOrder }] : []))
       .sort((left, right) => (left.name ?? "").localeCompare(right.name ?? "")),
   };
 }

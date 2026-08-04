@@ -48,6 +48,8 @@ export interface RegionMover {
   deltaWon: number;
 }
 export interface RegionMoverDeal {
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  isChangeOrder?: boolean | null;
   id: string;
   dealNumber: string | null;
   name: string;

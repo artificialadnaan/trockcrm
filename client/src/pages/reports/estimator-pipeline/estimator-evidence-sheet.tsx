@@ -99,7 +99,7 @@ function ProjectLink({
       to={{ pathname: `/deals/${record.dealId}`, search }}
       className="break-words font-black leading-5 text-slate-950 underline decoration-slate-300 underline-offset-2 hover:text-brand-red hover:decoration-brand-red focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-red"
     >
-      {formatDealDisplayName(record.dealName)}
+      {formatDealDisplayName(record.dealName, false)}
     </Link>
   );
   return (

@@ -121,7 +121,7 @@ export function InterventionDetailPanel(props: {
                       {formatDealDisplayNumber(detail.crm.deal).label === "Pending" ? "" : `${formatDealDisplayNumber(detail.crm.deal).label} `}
                       {/* A change-order child is STORED "<Parent> — Change Order N"; lead with the
                           label so it isn't read as its parent. Display-only, stored name unchanged. */}
-                      {formatDealDisplayName(detail.crm.deal.name)}
+                      {formatDealDisplayName(detail.crm.deal.name, detail.crm.deal.isChangeOrder)}
                     </Link>
                   ) : (
                     <div className="text-base font-semibold">Unlinked disconnect case</div>

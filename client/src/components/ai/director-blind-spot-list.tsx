@@ -67,7 +67,7 @@ export function DirectorBlindSpotList() {
                       {/* A change-order child is STORED "<Parent> — Change Order N"; lead with the
                           label so it isn't read as its parent. Display-only, stored name unchanged. */}
                       <p className="text-sm font-semibold text-gray-900">
-                        {formatDealDisplayName(blindSpot.dealName) ?? "Unlinked deal"}
+                        {formatDealDisplayName(blindSpot.dealName, blindSpot.dealIsChangeOrder) ?? "Unlinked deal"}
                       </p>
                       {blindSpot.dealNumber && (
                         <span className="text-[11px] font-mono text-gray-400">

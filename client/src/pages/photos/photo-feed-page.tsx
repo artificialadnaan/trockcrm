@@ -62,7 +62,7 @@ interface ProjectStat {
 interface FeedFacets {
   uploaders: Array<{ id: string; name: string }>;
   photoCategories: string[];
-  projects: Array<{ id: string; name: string }>;
+  projects: Array<{ id: string; name: string; isChangeOrder?: boolean | null }>;
 }
 
 /**
@@ -553,6 +553,8 @@ interface CompanyCamProjectStat {
 interface DealSearchOption {
   id: string;
   name: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  isChangeOrder?: boolean | null;
   dealNumber: string;
   projectNumber?: string | null;
 }
@@ -691,7 +693,7 @@ function AssignToDealPopover({
                   <Check className="h-3.5 w-3.5 shrink-0 text-transparent" />
                 )}
                 <span className="font-mono text-xs text-gray-500">{formatDealDisplayNumber(d).label}</span>
-                <span className="truncate text-gray-900">{formatDealDisplayName(d.name)}</span>
+                <span className="truncate text-gray-900">{formatDealDisplayName(d.name, d.isChangeOrder)}</span>
               </button>
             ))
           )}
@@ -1553,7 +1555,7 @@ export function PhotoFeedPage() {
                       its dealId was still being sent to the feed, with no way to undo it. */}
                   {facets.projects.map((p) => (
                     <option key={p.id} value={p.id}>
-                      {formatDealDisplayName(p.name)}
+                      {formatDealDisplayName(p.name, p.isChangeOrder)}
                     </option>
                   ))}
                 </select>

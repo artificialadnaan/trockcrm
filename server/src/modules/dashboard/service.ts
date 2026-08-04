@@ -1601,6 +1601,8 @@ export interface RepDashboardData {
   dealSnapshot: Array<{
     dealId: string;
     dealName: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
     companyName: string | null;
     propertyName: string | null;
     stageName: string;
@@ -1843,6 +1845,7 @@ export async function getRepDashboard(
       SELECT
         d.id AS deal_id,
         d.name AS deal_name,
+        d.is_change_order AS deal_is_change_order,
         c.name AS company_name,
         p.name AS property_name,
         psc.slug AS stage_slug,
@@ -1959,6 +1962,7 @@ export async function getRepDashboard(
     dealSnapshot: dsRows.map((row: any) => ({
       dealId: row.deal_id,
       dealName: row.deal_name,
+      dealIsChangeOrder: row.deal_is_change_order ?? undefined,
       companyName: row.company_name ?? null,
       propertyName: row.property_name ?? null,
       stageName: resolveDealSnapshotStageLabel(

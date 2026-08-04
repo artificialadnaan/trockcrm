@@ -82,10 +82,10 @@ export function AiPacketReviewPage() {
                       {formatDealDisplayNumber(packet).label === "Pending" ? "" : `${formatDealDisplayNumber(packet).label} `}
                       {/* A change-order child is STORED "<Parent> — Change Order N"; lead with the
                           label so it isn't read as its parent. Display-only, stored name unchanged. */}
-                      {formatDealDisplayName(packet.dealName) ?? "Unnamed deal"}
+                      {formatDealDisplayName(packet.dealName, packet.dealIsChangeOrder) ?? "Unnamed deal"}
                     </Link>
                   ) : (
-                    <span>{formatDealDisplayName(packet?.dealName) ?? "No deal attached"}</span>
+                    <span>{formatDealDisplayName(packet?.dealName, packet?.dealIsChangeOrder) ?? "No deal attached"}</span>
                   )}
                 </CardDescription>
               </CardHeader>

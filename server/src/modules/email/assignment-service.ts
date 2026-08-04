@@ -14,6 +14,8 @@ export interface EmailAssignmentDealCandidate {
   id: string;
   dealNumber: string;
   name: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  isChangeOrder?: boolean | null;
   companyId?: string | null;
   stageSlug?: string | null;
   stageDisplayOrder?: number | null;

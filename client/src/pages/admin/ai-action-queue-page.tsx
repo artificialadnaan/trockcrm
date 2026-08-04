@@ -189,10 +189,10 @@ export function AiActionQueuePage() {
                             {formatDealDisplayNumber(entry).label === "Pending" ? "" : `${formatDealDisplayNumber(entry).label} `}
                             {/* A change-order child is STORED "<Parent> — Change Order N"; lead with the
                                 label so it isn't read as its parent. Display-only, stored name unchanged. */}
-                            {formatDealDisplayName(entry.dealName) ?? "Unnamed deal"}
+                            {formatDealDisplayName(entry.dealName, entry.dealIsChangeOrder) ?? "Unnamed deal"}
                           </Link>
                         ) : (
-                          <div className="text-sm font-semibold">{formatDealDisplayName(entry.dealName) ?? "Unlinked deal"}</div>
+                          <div className="text-sm font-semibold">{formatDealDisplayName(entry.dealName, entry.dealIsChangeOrder) ?? "Unlinked deal"}</div>
                         )}
                         <div className="text-base font-semibold text-foreground">{entry.title}</div>
                         {entry.details && (

@@ -180,6 +180,7 @@ function buildCaseMetadata(row: SalesProcessDisconnectRow) {
     disconnectDetails: row.disconnectDetails,
     dealNumber: row.dealNumber,
     dealName: row.dealName,
+    dealIsChangeOrder: row.dealIsChangeOrder ?? undefined,
     companyName: row.companyName,
     stageKey: row.stageKey ?? null,
     stageName: row.stageName,
@@ -347,7 +348,9 @@ function matchesQueueFilters(row: DisconnectCaseRow, filters: InterventionQueueF
 function projectQueueItem(input: {
   row: DisconnectCaseRow;
   task: TaskRow | null;
-  deal: Pick<DealRow, "id" | "dealNumber" | "name" | "companyId"> | null;
+  // `isChangeOrder` as an intersection rather than another Pick key: the queue builder is also driven
+  // by an in-memory test double whose deal shape is narrower, and an optional member accepts both.
+  deal: (Pick<DealRow, "id" | "dealNumber" | "name" | "companyId"> & { isChangeOrder?: boolean | null }) | null;
   company: Pick<CompanyRow, "id" | "name"> | null;
   history: DisconnectCaseHistoryRow | null;
   usersMap: Map<string, string>;
@@ -387,6 +390,7 @@ function projectQueueItem(input: {
           id: input.deal.id,
           dealNumber: input.deal.dealNumber,
           name: input.deal.name,
+          isChangeOrder: input.deal.isChangeOrder,
         }
       : null,
     company: input.company

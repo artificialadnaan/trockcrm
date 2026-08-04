@@ -5,6 +5,8 @@ import { formatDealDisplayName } from "@/lib/deal-utils";
 import { EmailManualAssignmentDialog, type EmailAssociationTarget } from "./email-manual-assignment-dialog";
 
 export interface EmailAssignmentQueueDealCandidate {
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  isChangeOrder?: boolean | null;
   id: string;
   dealNumber: string;
   name: string;
@@ -80,7 +82,7 @@ function buildSafeAssignmentOptions(item: EmailAssignmentQueueItem): Array<{ lab
   // before the suffix, so a CO reads exactly like its parent. Display-only -- nothing persisted.
   for (const deal of item.candidateDeals) {
     options.push({
-      label: `Deal · ${deal.dealNumber} · ${formatDealDisplayName(deal.name)}`,
+      label: `Deal · ${deal.dealNumber} · ${formatDealDisplayName(deal.name, deal.isChangeOrder)}`,
       value: {
         assignedEntityType: "deal",
         assignedEntityId: deal.id,

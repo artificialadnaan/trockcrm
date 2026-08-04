@@ -101,7 +101,7 @@ export function CompanyCopilotPanel({ companyId }: CompanyCopilotPanelProps) {
                       <Link to={`/deals/${deal.id}`} className="text-sm font-medium text-brand-red hover:underline">
                         {/* A change-order child is STORED "<Parent> — Change Order N"; lead with the
                             label so it isn't read as its parent. Display-only, stored name unchanged. */}
-                        {deal.dealNumber} {formatDealDisplayName(deal.name)}
+                        {deal.dealNumber} {formatDealDisplayName(deal.name, deal.isChangeOrder)}
                       </Link>
                       {deal.latestPacketSummary && (
                         <p className="text-sm text-muted-foreground line-clamp-2">{deal.latestPacketSummary}</p>

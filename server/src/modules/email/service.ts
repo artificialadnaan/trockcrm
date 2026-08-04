@@ -576,6 +576,7 @@ async function getEmailCandidateDeals(
             id: deals.id,
             dealNumber: deals.dealNumber,
             name: deals.name,
+            isChangeOrder: deals.isChangeOrder,
             companyId: deals.companyId,
             stageSlug: pipelineStageConfig.slug,
             stageDisplayOrder: pipelineStageConfig.displayOrder,

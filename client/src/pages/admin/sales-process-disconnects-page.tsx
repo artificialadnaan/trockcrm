@@ -569,7 +569,7 @@ export function SalesProcessDisconnectsPage() {
                         {formatDealDisplayNumber(row).label === "Pending" ? "" : `${formatDealDisplayNumber(row).label} `}
                         {/* A change-order child is STORED "<Parent> — Change Order N"; lead with the
                             label so it isn't read as its parent. Display-only, stored name unchanged. */}
-                        {formatDealDisplayName(row.dealName)}
+                        {formatDealDisplayName(row.dealName, row.dealIsChangeOrder)}
                         <ArrowUpRight className="h-3.5 w-3.5" />
                       </Link>
                       <div className="text-base font-semibold text-foreground">{row.disconnectSummary}</div>

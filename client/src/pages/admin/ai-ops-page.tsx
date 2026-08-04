@@ -284,7 +284,7 @@ export function AiOpsPage() {
                           {formatDealDisplayNumber(row).label === "Pending" ? "" : `${formatDealDisplayNumber(row).label} `}
                           {/* A change-order child is STORED "<Parent> — Change Order N"; lead with the
                               label so it isn't read as its parent. Display-only, stored name unchanged. */}
-                          {formatDealDisplayName(row.dealName) ?? "Unnamed deal"}
+                          {formatDealDisplayName(row.dealName, row.dealIsChangeOrder) ?? "Unnamed deal"}
                         </Link>
                         {row.summaryText && (
                           <p className="text-xs text-muted-foreground truncate">{row.summaryText}</p>

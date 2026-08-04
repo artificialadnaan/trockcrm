@@ -87,7 +87,7 @@ export function InterventionQueueTable(props: {
                           {formatDealDisplayNumber(item.deal).label === "Pending" ? "" : `${formatDealDisplayNumber(item.deal).label} `}
                           {/* A change-order child is STORED "<Parent> — Change Order N"; lead with the
                               label so it isn't read as its parent. Display-only, stored name unchanged. */}
-                          {formatDealDisplayName(item.deal.name)}
+                          {formatDealDisplayName(item.deal.name, item.deal.isChangeOrder)}
                         </Link>
                       ) : (
                         <div className="text-sm font-semibold">Unlinked disconnect case</div>

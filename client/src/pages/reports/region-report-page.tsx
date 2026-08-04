@@ -107,8 +107,8 @@ function MoverDealChip({
         <div className="mt-1">
           {/* A change-order child is STORED "<Parent> — Change Order N" and this chip truncates; the
               label moves to the front for DISPLAY only, stored name unchanged. */}
-          <div className="truncate text-sm font-medium text-slate-800" title={formatDealDisplayName(deal.name)}>
-            {formatDealDisplayName(deal.name)}
+          <div className="truncate text-sm font-medium text-slate-800" title={formatDealDisplayName(deal.name, deal.isChangeOrder)}>
+            {formatDealDisplayName(deal.name, deal.isChangeOrder)}
           </div>
           <div className="text-xs tabular-nums text-slate-500">
             {usd(deal.value)} · <span className="text-slate-400">{deal.region}</span>

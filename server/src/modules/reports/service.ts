@@ -438,7 +438,6 @@ export async function getForecastVarianceOverview(
       SELECT
         d.id AS deal_id,
         d.name AS deal_name,
-        d.is_change_order AS deal_is_change_order,
         cw.workflow_route,
         cw.assigned_rep_id,
         u.display_name AS rep_name,
@@ -525,6 +524,7 @@ export async function getForecastVarianceOverview(
       SELECT
         d.id AS deal_id,
         d.name AS deal_name,
+        d.is_change_order AS deal_is_change_order,
         cw.workflow_route,
         cw.assigned_rep_id,
         u.display_name AS rep_name,
@@ -555,6 +555,9 @@ export async function getForecastVarianceOverview(
     SELECT
       deal_id,
       deal_name,
+      -- Projected out of forecast_base explicitly: the CTE selected it and this outer SELECT dropped it,
+      -- so the mapper below was reading a column that never reached it.
+      deal_is_change_order,
       rep_name,
       workflow_route,
       initial_forecast,
