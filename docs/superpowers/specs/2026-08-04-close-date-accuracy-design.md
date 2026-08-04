@@ -627,13 +627,16 @@ outcomes AS (
              THEN d.lost_at::date
            ELSE NULL
          END                        AS outcome_date,
-         d.expected_close_date      AS current_close_date,
+         -- NOTE: expected_close_date is deliberately NOT selected here. The standing value is only ever
+         -- read together with its provenance, in the `standing` CTE (§4.0.1). Exposing a bare
+         -- `current_close_date` on this CTE is what let the HubSpot exclusion leak into coverage.
          COALESCE(d.is_bid_board_owned, false) OR COALESCE(d.is_read_only_mirror, false) AS bid_board_owned,
          psc.is_terminal            AS crm_stage_terminal
   FROM deals d
   JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
   WHERE d.is_active = true
     AND COALESCE(d.is_test_data, false) = false
+    AND ${aliasedReportableDealFilterSql('d')}   -- COALESCE(d.on_hold,false) = false
 ),
 ```
 
@@ -641,6 +644,13 @@ outcomes AS (
 (`server/src/modules/shared/pipeline-terminal-stages.ts`), which is also where
 `aliasedTerminalDealBySlugSql` gets its list — reuse that helper rather than re-deriving the OR by hand if
 the query shape allows it.
+
+The reportable filter (`server/src/modules/shared/deal-value-sql.ts:464`) belongs in the **base** CTE, not
+bolted onto the coverage metric. `at-risk-service.ts:69` applies it to the population this report claims to
+reconcile with; if it is applied in one metric and not another, the §4.1 reconciliation cannot hold and two
+columns on the same row will describe different books. Note this excludes only **stored** `on_hold` deals —
+the far-out auto-park leg is deliberately *not* part of this predicate (§6.2), which is why `parked_n`
+deals remain in scope and must be bucketed explicitly rather than silently filtered.
 
 **Consequence to carry through the whole report:** "open / non-terminal" everywhere below means
 `outcome_kind = 'open'`, **not** `crm_stage_terminal = false`. A mirror-terminal deal has a CRM stage that
@@ -679,9 +689,141 @@ The first two both mean "no prediction in force at T" for scoring purposes, and 
 the hit-rate *denominator* (§4.2). They are reported separately because they are different failures: the
 first is a data-coverage hole, the second is rep behaviour.
 
-Applied twice per deal: `T = outcome_date` (P_final) and `T = outcome_date - interval '30 days'` (P₃₀),
-with the documented fallback that when no event precedes `outcome_date − 30d`, P₃₀ takes the **earliest**
-event's `new_date` instead (still honouring a clear: if that earliest event is a clear, P₃₀ is NULL).
+Applied three times per deal: `T = outcome_date` (P_final), `T = outcome_date - interval '30 days'` (P₃₀),
+and `T = now()` (the **standing** date, used by coverage — see §4.0.2).
+
+**The P₃₀ fallback is narrow.** §2.1 allows falling back to the deal's first recorded prediction *only when
+the deal's whole recorded life was shorter than 30 days*. Expressed as a guard:
+
+```sql
+p30 = CASE
+        WHEN <event exists strictly before outcome_date - 30>  THEN prediction_at(deal, outcome_date - 30)
+        WHEN (SELECT min(changed_at) FROM close_date_events e WHERE e.deal_id = o.deal_id)
+               > o.outcome_date - interval '30 days'           THEN <earliest event's new_date>
+        ELSE NULL   -- long-lived deal, first forecast late: NOT scoreable
+      END
+```
+
+Without the `min(changed_at)` guard the fallback fires for *any* deal with no event before the anchor,
+including a deal that lived for a year and whose rep first typed a date ten days before it closed. That
+late date would become P₃₀ and the deal would score as a confident, accurate forecast — the exact opposite
+of what happened. A long-lived deal first forecast inside the anchor window has **no** standing prediction
+and belongs in `no_prediction_n`, not in the hit rate.
+
+#### 4.0.1 Provenance of the standing date
+
+Coverage (§4.1) asks about the date **as it stands now**, so it cannot read the filtered event timeline
+alone — it needs the deal's current value *and* whether that value is a rep's or a machine's. Reading
+`d.expected_close_date` raw would re-import the very contamination §4.0 step 2 removes: a HubSpot-written
+date on an open deal would be credited to the rep as coverage, or charged against them as at-risk.
+
+Classify each open deal's standing date by the provenance of the **latest** event in the *unfiltered*
+timeline (`raw_close_date_events`, before the HubSpot anti-join):
+
+```sql
+standing AS (
+  SELECT o.deal_id,
+         d.expected_close_date AS standing_date,
+         CASE
+           WHEN last_raw.deal_id IS NULL          THEN 'predates_audit'
+           WHEN last_raw.is_hubspot               THEN 'machine'
+           WHEN last_raw.is_machine_seed          THEN 'machine'
+           ELSE 'rep'
+         END AS standing_source
+  FROM outcomes o
+  JOIN deals d ON d.id = o.deal_id
+  LEFT JOIN LATERAL (
+    SELECT r.deal_id,
+           <matches hubspot_refresh_log per §4.0 step 2> AS is_hubspot,
+           (r.old_date IS NULL AND r.actor_user_id IS NULL
+            AND d.hubspot_deal_id IS NOT NULL)            AS is_machine_seed
+    FROM raw_close_date_events r
+    WHERE r.deal_id = o.deal_id
+    ORDER BY r.changed_at DESC
+    LIMIT 1
+  ) last_raw ON TRUE
+)
+```
+
+- **`machine`** — the standing value was written by the HubSpot refresh, or seeded by
+  `scripts/migration-promote.ts`. The rep neither made nor endorsed this forecast. Own bucket
+  (`machine_dated_n`), **excluded from the coverage rate entirely** — numerator *and* denominator. Charging
+  it as `at_risk_n` would blame the rep for a machine write; counting it as `covered_n` would credit them
+  for one.
+- **`predates_audit`** — the deal carries a date but no event exists for it. Treated as **`rep`** for
+  bucketing, and counted in a `provenance_unknown_n` diagnostic. Rationale: the `audit_deals` trigger has
+  existed since the schema was created (§1.4), so this should be near-empty; if it is not, the audit-window
+  assumption is wrong and the diagnostic is how that surfaces. Chosen deliberately over excluding, because
+  excluding would let an unverifiable gap quietly shrink a rep's denominator.
+- **`rep`** — bucket normally.
+
+On the machine-seed test: an insert-seeded prediction with a **NULL actor** on a deal carrying a
+`hubspot_deal_id` is a `migration-promote` import — that script never calls
+`set_config('app.current_user_id', ...)`, whereas every API deal-create does
+(`server/src/middleware/tenant.ts:101`). An insert-seeded prediction **with** an actor is a rep who set the
+close date when creating the deal, which is a genuine forecast path (§1.1) and is kept. An earlier draft
+excluded *all* insert-only predictions as a proxy for migration seeds; that also discarded the cleanest
+first-call forecasts and the silent misses (§4.7) most worth measuring.
+
+#### 4.0.2 Populations, and the numerator/denominator audit
+
+Most defects found in review of this document were the same error: a numerator and a denominator that
+described different sets of deals. This table exists so that error is visible on the page rather than
+discovered later. **Every metric in §4 must appear here.** Adding a metric without adding a row is the
+defect re-entering.
+
+Named populations, all scoped to one rep (owner, §3) and one period `[from, to]`:
+
+| Name | Definition |
+|---|---|
+| `D` | Base: `is_active`, not test data, reportable (`on_hold = false`), from the `outcomes` CTE |
+| `D_landed` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NOT NULL` ∩ `outcome_date ∈ [from, to]` |
+| `D_open` | `D` ∩ `outcome_kind = 'open'`, evaluated **as of `to`** (no date filter — an open deal has no outcome date to filter on) |
+| `D_book` | `D_landed ∪ D_open` — the rep's whole book for this period. The denominator for churn rates. |
+| `D_score` | `D_landed` ∩ P₃₀ exists ∩ P₃₀ non-null ∩ P₃₀ not parked-at-write (§6.2) |
+| `D_cov` | `D_open` ∩ `standing_source <> 'machine'` — the coverage-rate denominator (§4.0.1) |
+| `E` | Close-date events on deals in `D_book`, HubSpot-filtered and machine-seed-filtered, `changed_at <= to` |
+
+`D_landed` and `D_open` are period-scoped differently and that is deliberate: a landed deal belongs to the
+period it landed in; an open deal belongs to the snapshot. They are disjoint by construction
+(`outcome_kind`), so `D_book` is a clean union and `|D_book| = |D_landed| + |D_open|`.
+
+| Metric | § | Numerator drawn from | Denominator | Same set? |
+|---|---|---|---|---|
+| `coverage_rate` | 4.1 | `D_cov` where standing date in `[today, today+90]` | `D_cov` | Yes |
+| `covered_n` / `parked_n` / `at_risk_n` | 4.1 | partition of `D_cov` | — | Sums to `\|D_cov\|` |
+| `machine_dated_n` | 4.1 | `D_open` \ `D_cov` | — | Complement, reported |
+| `hit_rate_14d` | 4.2 | `D_score` where `abs(err) <= 14` | `D_score` | Yes |
+| `hit_rate_30d`, `hit_rate_14d_final` | 4.2 | `D_score` | `D_score` | Yes |
+| `mean/median/p90_signed_error` | 4.3 | `D_score` | `D_score` | Yes |
+| `landed_n` | 2.4 | `D_landed` | — | Count |
+| `scoreable_n` | 4.2 | `D_score` | — | Count; `D_score ⊆ D_landed` |
+| `no_prediction_n` / `cleared_n` / `parked_prediction_n` | 4.2 | `D_landed` \ `D_score` | — | Partition of the shortfall |
+| `overdue_open_n`, `median_days_overdue` | 2.4 | `D_open` past-due subset | — | Count |
+| `move_count` / `set_count` / `clear_count` | 4.4 | `E` | — | Event counts |
+| `moves_per_deal` | 4.4 | `E` (move events) | `\|D_book\|` | Yes — `E` is defined over `D_book` |
+| `total_days_slipped`, `days_pushed_out/pulled_in` | 4.5 | `E` | — | Event sums |
+| `chronic_mover_n` | 4.6 | deals in `D_book` meeting the flag | — | Count |
+| `chronic_mover_rate` | 4.6 | `chronic_mover_n` | `\|D_book\|` | Yes |
+| `silent_miss_n` | 4.7 | `D_score` with `move_count = 0` and `abs(err) > 14` | — | Count |
+| `moves_by_other_actor` | 3 | `E` where `actor_user_id` is not the deal's current owner (NULL actors counted separately, never as "other") | — | Event count |
+| `hubspot_written_events_n` | 2.5(b) | events excluded at §4.0 step 2, deals in `D_book` | — | Diagnostic |
+| `bid_board_owned_n`, `mirror_terminal_no_date_n`, `provenance_unknown_n` | 2.5(c), 4.0, 4.0.1 | `D_book` subsets | — | Diagnostics |
+
+`moves_by_other_actor` was promised in §3 and had no row here until the round-3 audit — which is the table
+working as intended. Note its actor test must treat a NULL `changed_by` as *unattributed*, not as "someone
+other than the owner": after the HubSpot filter the remaining NULL-actor events are mostly the spreadsheet
+campaign (§5.4), and counting those as third-party interference would misread a rep's own submitted dates.
+
+Two invariants the implementation should assert in tests, because they are what the table is protecting:
+
+1. `covered_n + parked_n + at_risk_n = |D_cov|` and `|D_cov| + machine_dated_n = |D_open|`.
+2. `scoreable_n + no_prediction_n + cleared_n + parked_prediction_n = landed_n`.
+
+**Integer division.** `count(*)` returns `bigint`, and `bigint / bigint` truncates in Postgres — `3 / 4` is
+`0`, not `0.75`. **Every rate in this document must cast before dividing.** The pattern used throughout is
+`count(...)::numeric / NULLIF(count(...), 0)`. This is called out once here and applied in §4.1, §4.2,
+§4.4 and §4.6; a rate added later without the cast will silently report 0% or 100%.
 
 ### 4.1 Coverage rate
 
@@ -694,17 +836,34 @@ scorecard sorts by first. A date beyond the platform's own 90-day hold horizon i
 coverage must not accept it as one.
 
 ```sql
--- Three mutually exclusive buckets over the rep's open deals; they sum to open_n.
-covered_n  = count(*) FILTER (WHERE open AND current_close_date >= <business today>
-                                       AND current_close_date <= <business today> + 90)
-parked_n   = count(*) FILTER (WHERE open AND current_close_date >  <business today> + 90)
-at_risk_n  = count(*) FILTER (WHERE open AND (current_close_date IS NULL
-                                           OR current_close_date < <business today>))
+-- Buckets over D_open, using the PROVENANCE-CLASSIFIED standing date from §4.0.1 -- never the raw
+-- d.expected_close_date column, which would re-admit HubSpot-written values the timeline excludes.
+machine_dated_n = count(*) FILTER (WHERE open AND standing_source = 'machine')
 
-coverage_rate = covered_n / NULLIF(covered_n + parked_n + at_risk_n, 0)
+-- The remaining three partition D_cov (= D_open minus machine-dated).
+covered_n  = count(*) FILTER (WHERE in_d_cov AND standing_date >= <business today>
+                                            AND standing_date <= <business today> + 90)
+parked_n   = count(*) FILTER (WHERE in_d_cov AND standing_date >  <business today> + 90)
+at_risk_n  = count(*) FILTER (WHERE in_d_cov AND (standing_date IS NULL
+                                               OR standing_date < <business today>))
+
+coverage_rate = count(*) FILTER (WHERE in_d_cov AND standing_date >= <business today>
+                                                AND standing_date <= <business today> + 90)::numeric
+              / NULLIF(count(*) FILTER (WHERE in_d_cov), 0)
 ```
 
 `open` means `outcome_kind = 'open'` per §4.0 — the mirror-aware test, not `crm_stage_terminal = false`.
+`in_d_cov` is `open AND standing_source <> 'machine'` (§4.0.2).
+
+Note the `::numeric` cast on the numerator. Without it Postgres does `bigint / bigint` and a rep with 3 of
+4 deals covered scores **0**, not 0.75 (§4.0.2).
+
+**The hole this closes.** An earlier draft bucketed straight off `d.expected_close_date`. The HubSpot
+anti-join in §4.0 removed machine-written *events* from the timeline, but coverage never consulted the
+timeline — it read the raw column. So a HubSpot-written date on an open deal still landed in `covered_n`
+or `parked_n` or `at_risk_n` and still drove the report's primary sort key, crediting or charging a rep for
+a value they never entered. The exclusion had been applied in one place and not the other. §4.0.1 exists so
+there is exactly one definition of "the standing date and whose it is", and every metric reads it.
 
 90 days is `CLOSE_TARGET_HOLD_HORIZON_DAYS` (`shared/src/types/deal-hold-risk.ts:137`), reused rather than
 reinvented so this report and the effective-value chains agree about what "parked" means. Import the
@@ -713,12 +872,23 @@ constant; do not hardcode 90.
 `parked_n` is a **first-class column on the rep row**, not a footnote — it is the tell for the specific
 gaming strategy the metric is most vulnerable to, and it is invisible in every other number.
 
-Reconciliation: `at_risk_n` is exactly the At-Risk watchlist count (`no_date` + `stale_dated`) from
-`at-risk-service.ts:53-75`, so the two surfaces tie out. Build it on the same scope — including
-`aliasedReportableDealFilterSql('d')` (`server/src/modules/shared/deal-value-sql.ts:464`, which resolves to
-`COALESCE(d.on_hold, false) = false`) — or the numbers will differ and one of them will be wrong. Note that
-`parked_n` deals still satisfy that predicate: the far-out rule zeroes a deal's *value*, it does not set
-the stored `on_hold` flag (§6.2). They remain in the denominator, which is the point.
+**Reconciliation with the At-Risk watchlist**, stated as an exact identity rather than a claim of equality,
+because the machine bucket makes it conditional:
+
+```
+at_risk_n + (machine-dated open deals that are undated or past-due)
+  = At-Risk watchlist count (no_date + stale_dated) for the same rep
+```
+
+The watchlist (`at-risk-service.ts:53-75`) knows nothing about provenance, so it counts machine-dated
+past-due deals that `at_risk_n` deliberately sets aside. **If the §1.1.1 census returns zero HubSpot
+close-date writes, `machine_dated_n` is zero and the identity collapses to plain equality.** The reportable
+filter is now carried in the base CTE (§4.0) so both sides share it. `parked_n` deals still satisfy that
+predicate — the far-out rule zeroes a deal's *value*, it does not set the stored `on_hold` flag (§6.2) — so
+they remain in the coverage denominator, which is the point, and they are correctly absent from the
+watchlist, which only flags undated and past-due.
+
+Write this identity as a test. It is the cheapest possible detector for the two surfaces drifting apart.
 
 ### 4.2 Hit rate within tolerance
 
@@ -733,21 +903,36 @@ forecasting is a **coverage** failure (§4.1), measured there, and double-counti
 same behaviour twice and make the two columns disagree about the same deal.
 
 ```sql
--- `scoreable` = landed AND a prediction actually stood 30 days out.
-scoreable   = landed AND p30.had_event AND p30.prediction IS NOT NULL
+-- `scoreable` = D_score: landed, a prediction stood 30 days out, and it wasn't parked when written.
+scoreable = landed
+        AND p30.had_event
+        AND p30.prediction IS NOT NULL
+        AND NOT p30.was_parked_at_write          -- §6.2
 
-hit_rate_14d = count(*) FILTER (WHERE scoreable AND abs(signed_error_p30) <= 14)
+hit_rate_14d = count(*) FILTER (WHERE scoreable AND abs(signed_error_p30) <= 14)::numeric
              / NULLIF(count(*) FILTER (WHERE scoreable), 0)
 ```
 
-Report `landed_n` and `scoreable_n` as separate columns. A rep whose `scoreable_n` is far below their
-`landed_n` is closing deals they never forecast — a real finding, and one that a single blended percentage
-would hide. Every other error metric in §4.3 uses the same `scoreable` filter.
+`::numeric` on the numerator — see §4.0.2. Without it every hit rate is 0% or 100%.
 
-Also exclude parked predictions from `scoreable` — see §6.2 — so "park it in 2028, then set a real date the
-week it closes" cannot buy a perfect hit rate.
+Report `landed_n` and `scoreable_n` as separate columns, and break the shortfall out so it sums:
 
-Also emit `hit_rate_30d` (same shape, `<= 30`) and `hit_rate_14d_final` (same shape against P_final).
+```sql
+no_prediction_n     = count(*) FILTER (WHERE landed AND NOT p30.had_event)
+cleared_n           = count(*) FILTER (WHERE landed AND p30.had_event AND p30.prediction IS NULL)
+parked_prediction_n = count(*) FILTER (WHERE landed AND p30.prediction IS NOT NULL
+                                             AND p30.was_parked_at_write)
+-- invariant: scoreable_n + no_prediction_n + cleared_n + parked_prediction_n = landed_n
+```
+
+A rep whose `scoreable_n` is far below their `landed_n` is closing deals they never forecast — a real
+finding, and one a single blended percentage would hide. The three shortfall columns say *why*, and the
+invariant is what stops a future filter change from silently dropping deals out of both sides.
+
+Every error metric in §4.3 uses the same `scoreable` filter.
+
+Also emit `hit_rate_30d` (same shape, `<= 30`) and `hit_rate_14d_final` (same shape against P_final), both
+with the same cast and the same denominator.
 
 ### 4.3 Mean and median signed error
 
@@ -785,15 +970,20 @@ behaviour that deserves its own column — see §5.5 and §6.5.
 Report a rate so a rep with a big book is not penalised for volume:
 
 ```sql
-moves_per_deal = move_count / NULLIF(landed_n + overdue_open_n, 0)
+moves_per_deal = move_count::numeric / NULLIF(count(DISTINCT deal_id in D_book), 0)
 ```
 
-The denominator is `landed_n + overdue_open_n`, **not** `landed_n` — the same denominator §4.6 uses for
-`chronic_mover_rate`, and for the same reason. `move_count` is summed over every event on every one of the
-rep's in-scope deals, including deals still open. Dividing that numerator by landed deals alone would count
-moves on open deals in the numerator while excluding those deals from the denominator, inflating the rate
-for exactly the reps carrying the most unresolved forecasts. The two rate metrics must share a denominator
-or they will disagree about the same book.
+**The denominator is `|D_book|` — every in-scope deal, landed and open alike.** `move_count` is summed over
+`E`, which is defined over `D_book` (§4.0.2), so this is the only denominator that describes the same set.
+
+This is the second time this metric has been wrong, in two different ways, which is why the audit table now
+exists. The first draft divided by `landed_n`. The fix changed it to `landed_n + overdue_open_n` — still
+wrong, because `E` also contains events on live-open, parked and undated deals, so those moves counted in
+the numerator while their deals were absent from the denominator. Worse, a rep all of whose moved deals are
+still live would divide by zero and render NULL, which reads as "no churn" — the exact opposite of the
+truth. Matching `E`'s own population is the fix that closes the class of error, not just this instance.
+
+`::numeric` on the numerator (§4.0.2).
 
 ### 4.5 Total days slipped
 
@@ -814,10 +1004,21 @@ Signed total plus the two one-sided sums, so a rep who pushes 200 days and pulls
 
 **Plain English:** a deal whose close date keeps moving, and a rep who has a lot of them.
 
-- **Deal-level flag:** `move_count >= 3 AND days_pushed_out >= 60`. Both conditions, because three
-  ±2-day adjustments is diligence and one 200-day push is a single decision; the pattern worth naming is
-  repeated, substantial, one-directional pushing.
-- **Rep-level:** `chronic_mover_rate = chronic_mover_deals / (landed_n + overdue_open_n)`.
+- **Deal-level flag:** `move_count >= 3 AND days_pushed_out >= 60`, computed per deal over that deal's
+  events in `E`. Both conditions, because three ±2-day adjustments is diligence and one 200-day push is a
+  single decision; the pattern worth naming is repeated, substantial, one-directional pushing.
+- **Rep-level:**
+
+  ```sql
+  chronic_mover_rate = count(*) FILTER (WHERE chronic_mover)::numeric
+                     / NULLIF(count(*), 0)          -- both over D_book
+  ```
+
+Same denominator as `moves_per_deal` (§4.4) — `|D_book|` — because the flag is evaluated over every
+in-scope deal, open ones included. A deal does not need to have closed to have been moved five times. Both
+rate metrics now describe the same book, so a reader can compare them.
+
+`::numeric` on the numerator (§4.0.2).
 
 3 and 60 are proposals. Make them constants in one place so they can be tuned after the first real
 distribution is visible.
@@ -904,15 +1105,30 @@ durable per-field ledger of exactly these writes, so §4.0 anti-joins them out o
 - **Unverified: whether the reported 2026-07-30 "service deleted, damage reversed from `audit_log`" event
   touched close dates.** I found no such deletion and no reversal script in this repository. If a reversal
   ran, it was a write, and unless it also logged to `hubspot_refresh_log` the anti-join will not catch it.
-- **Not closeable:** `scripts/migration-promote.ts` seeds `expected_close_date` at INSERT time with no
-  distinguishing ledger. Those land as the deal's `insert` seed event in §4.0's UNION branch. They are
-  probably confined to migration/promotion runs rather than the live tenant, but I could not confirm that
-  from the code. Treat a deal whose *only* prediction is its insert-time seed as unscoreable until this is
-  settled.
+- **`scripts/migration-promote.ts` seeds — narrowly identifiable, not perfectly.** It seeds
+  `expected_close_date` in the deal INSERT (`:372, :462`) with no dedicated ledger, and its `source` value
+  is `lead.mappedSourceStage ?? "HubSpot"` — not a distinctive marker like the reimport's
+  `hubspot_deals_reimport_2026_05_14`, so `source` cannot carry the test. The usable discriminator is the
+  **actor**: that script never calls `set_config('app.current_user_id', ...)` (verified), so its INSERT
+  audit row has `changed_by = NULL`, whereas every API deal-create runs through
+  `server/src/middleware/tenant.ts:101` and always has a real actor. §4.0.1 therefore treats
+  *insert-seeded + NULL actor + `hubspot_deal_id` present* as a machine seed and everything else as a rep
+  forecast.
+
+  An earlier draft used "insert-only prediction" as the proxy and excluded all of them. That was too broad:
+  a rep who sets the close date when creating a deal and never moves it is using a genuine forecast path
+  (§1.1), and those deals are precisely the clean first-call predictions and the silent misses (§4.7) most
+  worth measuring. The narrowed test keeps them.
+
+  **Residual risk, unverified:** a migration-promoted deal could in principle be re-created through the API
+  later, or a rep could create a deal while the actor is somehow unset. Neither is reachable from the code
+  I read, but I could not rule them out without production data. The `provenance_unknown_n` diagnostic
+  (§4.0.1) is where any such surprise would show up.
 
 **Guidance for the evidence column:** surface NULL actors as "Unattributed" rather than dropping the
 event — a NULL actor is a fact about the write, not a reason to hide it. But never infer "machine" from a
-NULL actor, and never infer "rep" from a non-NULL one.
+NULL actor alone, and never infer "rep" from a non-NULL one. The machine tests in §4.0.1 are conjunctions
+for exactly this reason.
 
 ### 5.4 Bulk campaign writes are indistinguishable from thoughtful edits
 
@@ -978,13 +1194,32 @@ flag only. The deal is still on the board with a $0 value.
 
 This report applies the horizon in **two** places, and both are required:
 
-1. **Coverage (§4.1).** An open deal whose current date is more than 90 days out is `parked_n`, not
-   `covered_n`. Without this, parking the book scores 100% coverage on the column the scorecard sorts by.
-2. **Scoring.** A prediction more than 90 days beyond the deal's `stage_entered_at` at the moment it was
-   made is a **parked prediction**: excluded from `scoreable` (§4.2) and therefore from hit rate and every
-   error statistic, while still counted in `move_count`, `days_pushed_out` and the chronic-mover flag.
-   Without this the winning strategy is "push everything to 2028, then set an accurate date the week it
-   closes" — a perfect hit rate on a forecast nobody could plan with.
+1. **Coverage (§4.1).** An open deal whose standing date is more than 90 days out is `parked_n`, not
+   `covered_n`. Anchor: **business today**, matching `closeTargetFarOutSqlPredicate`
+   (`shared/src/types/deal-reporting.ts:125-139`), which emits
+   `(horizon) > CT_TODAY_SQL + INTERVAL '90 days'`. Same anchor, same strict `>`, so a deal exactly 90 days
+   out is *not* parked in either world.
+2. **Scoring.** A prediction is **parked-at-write** when it was more than 90 days beyond **the date it was
+   written** — `new_date > changed_at::date + 90`. Such a prediction is excluded from `scoreable` (§4.2)
+   and from every error statistic, while still counted in `move_count`, `days_pushed_out` and the
+   chronic-mover flag. Without this the winning strategy is "push everything to 2028, then set an accurate
+   date the week it closes" — a perfect hit rate on a forecast nobody could plan with.
+
+**The anchor for (2) is the write date, not `stage_entered_at`.** An earlier draft used `stage_entered_at`,
+which is wrong in both directions. A deal that had sat in one stage for six months would have *every* new
+prediction judged against a stale anchor: a forecast written on 1 Aug for 15 Aug — two weeks out, as
+maintained as a forecast can be — would measure as 200+ days past a January stage entry and be discarded as
+parked. Conversely a freshly re-entered stage would let a genuinely far-out date pass. The platform's own
+rule compares the horizon to *now* (`deal-hold-risk.ts:233-237`, `deal-reporting.ts:137`); the faithful
+historical translation of "is this more than 90 days out" is "was it more than 90 days out **when it was
+written**", which is `changed_at`.
+
+One deliberate divergence from the platform predicate, worth stating so nobody reads it as a bug: the
+platform's `holdHorizonDateSql` uses `bid_due_date` instead of `expected_close_date` while a deal sits in
+the genuine `estimating` stage (`deal-reporting.ts:110-113`). This report always uses
+`expected_close_date`, because it is measuring the *close-date* forecast specifically. So a deal in
+estimating can be "parked" here while the platform's value chain is looking at its bid date. That is
+correct for this metric and wrong to copy anywhere else.
 
 `parked_n` and `parked_prediction_n` are both columns on the rep row. Neither is a footnote: they are the
 only visible trace of the single most effective way to game this metric.
@@ -997,10 +1232,16 @@ are on the row.
 
 ### 6.4 Small denominators do not rank
 
-A rep with two landed deals and two hits is not the best forecaster in the company. Require a minimum
-denominator — proposed **5 landed deals in the period** — to appear in the ranking. Below it, show the row
-with the real numbers and an "insufficient volume" marker, excluded from sort order. This is the same
-discipline `at-risk-service.ts` applies by making every row its own evidence.
+A rep with two scored deals and two hits is not the best forecaster in the company. Require a minimum
+denominator — proposed **5 deals in `D_score`** — to appear in the ranking. Below it, show the row with the
+real numbers and an "insufficient volume" marker, excluded from sort order. This is the same discipline
+`at-risk-service.ts` applies by making every row its own evidence.
+
+**The floor gates on `scoreable_n`, not `landed_n`.** Once the hit rate's denominator became `D_score`
+(§4.2), a `landed_n >= 5` floor stopped protecting anything: a rep could land 20 deals, have forecast only
+one of them, hit that one, and rank first on a 100% hit rate computed over a single deal. The floor must
+count the same set the rate is computed over — the same numerator/denominator discipline as §4.0.2, applied
+to the ranking gate.
 
 ### 6.5 Clearing a date does not reset history — and does not leave the old date standing
 
@@ -1038,26 +1279,33 @@ report without knowing the answer.
 
 **Per-rep columns (v1)**
 
-| Column | §  |
-|---|---|
-| Coverage % (open deals with a usable, non-parked date) | 4.1 |
-| **Parked n** (open deals dated >90 days out) | 4.1 / 6.2 |
-| At-risk n (open deals undated or past-due) | 4.1 |
-| Landed n | 2.4 |
-| **Scoreable n** (landed *and* carried a prediction) | 4.2 |
-| Hit rate ±14d (against P₃₀) | 4.2 |
-| Median signed error (days) | 4.3 |
-| Mean signed error (days) | 4.3 |
-| Overdue-open n / median days overdue | 2.4 |
-| Moves per landed deal | 4.4 |
-| Chronic movers n | 4.6 |
-| Silent misses n | 4.7 |
-| **HubSpot-written events n** (diagnostic) | 2.5(b) |
-| Bid-Board-owned n (diagnostic) | 2.5(c) |
+| Column | Population (§4.0.2) | § |
+|---|---|---|
+| Coverage % (usable, non-parked, rep-authored date) | `D_cov` | 4.1 |
+| **Parked n** (open deals dated >90 days out) | `D_cov` | 4.1 / 6.2 |
+| At-risk n (open deals undated or past-due) | `D_cov` | 4.1 |
+| **Machine-dated n** (standing date written by HubSpot/migration) | `D_open` \ `D_cov` | 4.0.1 |
+| Landed n | `D_landed` | 2.4 |
+| **Scoreable n** (landed *and* carried a usable prediction) | `D_score` | 4.2 |
+| **No-prediction / cleared / parked-prediction n** | `D_landed` \ `D_score` | 4.2 |
+| Hit rate ±14d (against P₃₀) | `D_score` | 4.2 |
+| Median signed error (days) | `D_score` | 4.3 |
+| Mean signed error (days) | `D_score` | 4.3 |
+| Overdue-open n / median days overdue | `D_open` | 2.4 |
+| Moves per deal | `E` over `D_book` | 4.4 |
+| Chronic movers n / rate | `D_book` | 4.6 |
+| Silent misses n | `D_score` | 4.7 |
+| Moves by other actor | `E` | 3 |
+| **HubSpot-written events n** (diagnostic) | `E` excluded set | 2.5(b) |
+| Bid-Board-owned n, provenance-unknown n (diagnostics) | `D_book` | 2.5(c), 4.0.1 |
 
-Sorted by coverage, then hit rate. Reps below the volume floor shown but unranked (§6.4). The four columns
-in bold were added after review: each one is the only visible trace of a specific way the report could
-otherwise mislead, and dropping them for width is not a cosmetic decision.
+Every column names the population it is drawn from. That is not documentation garnish — three separate
+review rounds found defects that were exactly a column drawn from one set and divided by another, and the
+column-to-population mapping is what makes the next one visible before it ships.
+
+Sorted by coverage, then hit rate. Reps below the volume floor (`scoreable_n >= 5`, §6.4) shown but
+unranked. The columns in bold were added after review: each is the only visible trace of a specific way the
+report could otherwise mislead, and dropping them for width is not a cosmetic decision.
 
 **Evidence drill.** Clicking any cell opens the deal list behind it. Per deal: the full close-date timeline
 from `audit_log` — `changed_at`, `old_date → new_date`, actor (display name, or "Unattributed"), whether
@@ -1076,8 +1324,16 @@ within a short window of the event (§1.7). Every number on the summary row is r
 6. Stage membership from `WON_STAGE_SLUGS` / `LOST_STAGE_SLUGS`, never hand-written slug lists (§1.8), and
    the terminal test must consult `bid_board_stage_slug` as well as the CRM stage (§4.0).
 7. The 90-day horizon comes from `CLOSE_TARGET_HOLD_HORIZON_DAYS` (`shared/src/types/deal-hold-risk.ts:137`),
-   imported, never hardcoded (§4.1).
+   imported, never hardcoded (§4.1). Coverage anchors it to **business today**; scoring anchors it to the
+   **event's own `changed_at`** (§6.2).
 8. "Open" means `outcome_kind = 'open'` from §4.0, never `pipeline_stage_config.is_terminal = false`.
+9. **Every rate casts before dividing** — `count(...)::numeric / NULLIF(count(...), 0)`. `bigint / bigint`
+   truncates to 0 (§4.0.2).
+10. **No metric reads `d.expected_close_date` directly.** The standing date and its provenance come from
+    §4.0.1; historical predictions come from the filtered timeline. A raw column read is how the HubSpot
+    exclusion leaked the first time.
+11. **Every metric appears in the §4.0.2 population table**, with its numerator and denominator drawn from
+    the same named set. Add a metric, add a row. Pin the two invariants at the end of §4.0.2 as tests.
 
 **One companion decision v1 must make, not defer.** The existing Forecast Variance report publishes
 `avg_close_drift_days` — unsigned, Won-only, and structurally frozen since 2026-04-23 (§1.5). Shipping a
@@ -1116,7 +1372,7 @@ things. Doing neither is not an option.
 3. **Lost deals** — in or out of the accuracy number?
 4. **Bid-Board-owned deals** — proposal is include-and-flag, with the outcome resolved from
    `bid_board_stage_slug` as well as the CRM stage (§2.5(c), §4.0). Confirm.
-5. **Volume floor of 5 landed deals** for ranking — right number for a team this size?
+5. **Volume floor of 5 scoreable deals** for ranking (§6.4) — right number for a team this size?
 6. **Has `scripts/refresh-from-hubspot.ts` ever run with `DRY_RUN=false` against production, and is it
    still expected to?** (§1.1.1) If it is part of an ongoing operational routine, the anti-join is
    permanent infrastructure rather than a one-off cleanup, and that should be stated on the report itself
@@ -1128,21 +1384,47 @@ things. Doing neither is not an option.
 
 ## Appendix: review corrections
 
-This document was revised on 2026-08-04 after review found one premise-level error and five design
-defects. Recording them because each was a case where the spec read as confident and was wrong, and the
-pattern is worth remembering.
+Three review rounds. Recording every correction because the pattern across them matters more than any
+individual fix.
+
+**Round 1 → 2 (one premise error, five design defects)**
 
 | # | Was | Now |
 |---|---|---|
 | P1 | "`expected_close_date` has no machine writer; every value was typed by a person" (§1.1) | False. `scripts/refresh-from-hubspot.ts` overwrites it from HubSpot. Rewritten §1.1 with the corrected writer inventory, plus §1.1.1/§1.1.2 on distinguishability and §4.0's `hubspot_refresh_log` anti-join. |
 | P2-1 | Outcome CASE tested only `pipeline_stage_config.slug` | Also tests `bid_board_stage_slug`; mirror-terminal deals no longer fall into "open" (§4.0, §2.5(c)). |
-| P2-2 | Coverage counted any today-or-future date | Parked dates (>90d) are excluded from the numerator and reported as `parked_n` (§4.1, §6.2). |
+| P2-2 | Coverage counted any today-or-future date | Parked dates (>90d) excluded from the numerator, reported as `parked_n` (§4.1, §6.2). |
 | P2-3 | Prose said "last **non-null** value before T" | The LATERAL returns the latest event's `new_date` *including* NULL, so a cleared date no longer stands (§4.0, §6.5). |
-| P2-4 | Hit-rate denominator was all landed deals | Denominator is `scoreable` — landed *and* a prediction stood (§4.2). "No prediction" is a coverage failure, counted once, in §4.1. |
-| P2-5 | "`deal_history` reason capture requires no migration" | False: `changed_by` is `NOT NULL REFERENCES public.users(id)` (`0067:85`). Two explicit options, one of which is a migration (§5.1). |
+| P2-4 | Hit-rate denominator was all landed deals | Denominator is `D_score` (§4.2). "No prediction" is a coverage failure, counted once. |
+| P2-5 | "`deal_history` reason capture requires no migration" | False: `changed_by` is `NOT NULL REFERENCES public.users(id)` (`0067:85`). Two explicit options, one a migration (§5.1). |
 
-The P1 was found by review, not by me, and the reason is worth stating: my original sweep grepped for
-write-shaped SQL (`INSERT`/`UPDATE`/`SET` near the column name). The HubSpot refresh builds its assignment
-dynamically, so the column name appears only in an allowlist and the grep could not match it. The corrected
+**Round 2 → 3 (one premise error, seven defects)**
+
+| # | Was | Now |
+|---|---|---|
+| P1 | HubSpot events removed from the timeline, but coverage bucketed off raw `d.expected_close_date` | §4.0.1 defines the standing date *and its provenance* once; coverage reads that. Machine-dated open deals get their own bucket, excluded from the rate (§4.1). |
+| P2-1 | `count(*) / NULLIF(count(*), 0)` in four rate expressions | `bigint / bigint` truncates to 0. All rates now cast `::numeric` first; called out as a standing rule (§4.0.2, convention 9). |
+| P2-2 | `moves_per_deal` divided `E`-wide numerator by `landed_n + overdue_open_n` | Denominator is `\|D_book\|`, the population `E` is defined over (§4.4). Second fix to this metric — the first moved the mismatch rather than closing it. |
+| P2-3 | P₃₀ fallback fired whenever no event preceded the anchor | Guarded on `min(changed_at) > outcome_date − 30d`, so a long-lived deal first forecast late is *not* scoreable (§4.0). |
+| P2-4 | "Insert-only prediction" used as the migration-seed proxy | Too broad — discarded genuine rep forecasts set at deal creation. Narrowed to insert-seed **+ NULL actor + `hubspot_deal_id`** (§4.0.1, §5.3). |
+| P2-5 | Base `outcomes` CTE omitted `aliasedReportableDealFilterSql` | Carried in the base CTE so the At-Risk reconciliation can hold (§4.0). |
+| P2-6 | Parked-at-write anchored to `stage_entered_at` | Anchored to the event's own `changed_at`, matching the platform's today-anchored rule (`deal-reporting.ts:125-139`). Divergence on `bid_due_date` stated explicitly (§6.2). |
+| P2-7 | Ranking floor gated on `landed_n >= 5` | Gates on `scoreable_n >= 5`, the set the rate is computed over (§6.4). |
+
+**The pattern.** Almost every round-2 and round-3 defect is one error: *a numerator and a denominator that
+describe different sets of deals*. `moves_per_deal` (twice), the coverage hole, the ranking floor, the
+hit-rate denominator, the reportable filter — all the same shape. Fixing them individually is what let the
+same defect reappear in a new place each round. §4.0.2 is the structural answer: named populations, one
+row per metric, numerator and denominator both stated, and two invariants pinned as tests. A metric added
+without a row in that table is the defect re-entering.
+
+**On how the round-2 P1 slipped through:** my round-1 sweep grepped for write-shaped SQL
+(`INSERT`/`UPDATE`/`SET` near the column name). The HubSpot refresh builds its assignment dynamically, so
+the column name appears only in an allowlist and no grep for write syntax could match it. The corrected
 inventory was built by listing every file that mentions the field at all and reading each one — which is
-also how `scripts/migration-promote.ts` turned up as a second, previously unnoticed machine writer.
+also how `scripts/migration-promote.ts` surfaced as a second machine writer.
+
+**On how the round-3 P1 slipped through:** I applied the exclusion where I had been thinking about it (the
+event timeline) and never asked which *other* expressions read the same underlying data by a different
+route. The general lesson, now encoded as convention 10: when a filter is introduced to exclude a class of
+data, grep for every remaining raw read of the source column, not just the one the fix was written against.
