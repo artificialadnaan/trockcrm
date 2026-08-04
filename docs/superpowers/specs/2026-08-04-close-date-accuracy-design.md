@@ -1410,9 +1410,9 @@ column. Re-run this check whenever a name is added:
 |---|---|---|
 | `raw_close_date_events` (§4.0.1) | `audit_log_id`, `deal_id`, `changed_at`, `actor_user_id`, `event_kind`, `old_date`, `new_date` | `audit_log`: `id`, `record_id`, `created_at`, `changed_by`, `table_name`, `action`, `changes`, `full_row` — all real columns (§1.2) |
 | `close_date_timeline` (§4.0.2) | `audit_log_id`, `deal_id`, `changed_at`, `actor_user_id`, `event_kind`, `old_date`, `new_date` **passed through**, plus `source`, `machine_source` | `raw_close_date_events.*`; `deals.hubspot_deal_id`; `public.hubspot_refresh_log.*` (§0064) |
-| `outcomes` (§4.0.5) | `deal_id`, `rep_id`, `deal_created_at`, `outcome_kind`, `outcome_date`, `terminal_entry_date`, `is_reopened_after_landing`, **`has_reopen_evidence`**, `bid_board_owned` | `deals`: `stage_entered_at`, `bid_board_stage_entered_at`, `created_at`, `won_closed_date`, `lost_at`, `assigned_rep_id`, `stage_id`, `bid_board_stage_slug`, `is_active`, `is_test_data`, `is_bid_board_owned`, `is_read_only_mirror`, `on_hold`; `pipeline_stage_config`: `slug`, `is_terminal`; `deal_stage_history`: `deal_id`, `to_stage_id`, **`from_stage_id`**, `created_at` |
+| `deal_facts` (§4.0.5) | `deal_id`, `rep_id`, `deal_created_at`, `outcome_kind`, `outcome_date`, `terminal_entry_date`, `landed_in_window_and_reopened`, `has_reopen_evidence`, `bid_board_owned` | `deals`: `stage_entered_at`, `bid_board_stage_entered_at`, `created_at`, `won_closed_date`, `lost_at`, `assigned_rep_id`, `stage_id`, `bid_board_stage_slug`, `is_active`, `is_test_data`, `is_bid_board_owned`, `is_read_only_mirror`, `on_hold`; `pipeline_stage_config`: `slug`, `is_terminal`; `deal_stage_history`: `deal_id`, `to_stage_id`, **`from_stage_id`**, `created_at` |
 | `outcomes` (§4.0.5) | all of `deal_facts` passed through, plus **`is_reopened_after_landing`** | `deal_facts`: `outcome_kind`, `outcome_date`, `landed_in_window_and_reopened` |
-| `state_at` ×3 (§4.0.3) *(contents: **convention-derived** — the block projects `state`, `prediction`, `changed_at`, `source`; the prefixes come from the three aliased instances in §4.0.7's anchor table, so an extractor sees a mismatch that is expected)* | `p30_state`, `p30_prediction`, `p30_changed_at`, `p30_source`; `pfinal_state`, `pfinal_prediction`, `pfinal_changed_at`, `pfinal_source`; `pnow_state`, `pnow_prediction`, `pnow_changed_at`, `pnow_source` — all `*_state` coalesced (§4.0.3) | `close_date_timeline`: `deal_id`, `changed_at`, **`audit_log_id`**, `source`, `new_date`; `outcomes.outcome_date` |
+| `state_at` ×3 **(LATERAL, not a CTE)** (§4.0.3) *(contents: **convention-derived** — the block projects `state`, `prediction`, `changed_at`, `source`; the prefixes come from the three aliased instances in §4.0.7's anchor table, so an extractor sees a mismatch that is expected)* | `p30_state`, `p30_prediction`, `p30_changed_at`, `p30_source`; `pfinal_state`, `pfinal_prediction`, `pfinal_changed_at`, `pfinal_source`; `pnow_state`, `pnow_prediction`, `pnow_changed_at`, `pnow_source` — all `*_state` coalesced (§4.0.3) | `close_date_timeline`: `deal_id`, `changed_at`, **`audit_log_id`**, `source`, `new_date`; `outcomes.outcome_date` |
 | `coverage_resolution` (§4.1) | `cov_state`, `cov_prediction`, `is_provenance_unknown` | `outcomes.deal_id`; `state_at(deal, now())`; **`deals.expected_close_date`** — the only block that joins `deals` for it, and the whole reason convention 10's exception is buildable |
 | Derived scalars **block A** (§4.0.7) | `open`, `landed`, `in_d_cov`, `signed_error_p30`, `signed_error_pfinal`, `p30_parked_at_write`, `pfinal_parked_at_write`, `event_window_end` | `outcome_kind`, `outcome_date`, `terminal_entry_date`, `is_reopened_after_landing`, `has_reopen_evidence`, `deal_created_at`, `cov_state`, `cov_prediction`, `p30_prediction`, `p30_changed_at`, `pfinal_prediction`, `pfinal_changed_at` — deliberately nothing from the event set |
 | `E` (§4.0.5) *(contents: **unverifiable** — defined in prose, no literal SQL fence)* | the event set for churn | `close_date_timeline`; `event_window_end` (block A) |
@@ -1438,6 +1438,11 @@ project it. The table makes that a one-line check instead of a review finding.
 > than literal** cannot be extracted from and are marked **unverifiable** below; treat their contents as
 > unchecked, not as checked.
 >
+> **Block-set rule:** the set of block names in this table must equal the set of CTEs the SQL defines —
+> no CTE missing, no row naming a CTE that does not exist, no name appearing twice. Rows that are not CTEs
+> (`state_at`, which is a LATERAL; Blocks A and B; `E`; Metrics) are labelled as such. Every other rule
+> here reasons *within* the table; this one asks whether the table describes the right chain at all.
+>
 > **Ordering rule:** a block may consume only names produced by blocks **strictly above** it. Read top to
 > bottom, maintaining the set of names produced so far; every backticked name in a row's *Consumes* column
 > must already be in that set, be a real table (`audit_log`, `deals`, `pipeline_stage_config`,
@@ -1462,7 +1467,7 @@ lines of P₃₀ date arithmetic it never scanned.
 | Three-table agreement (§4.0.6 / v1 / §6.0) | every metric appears in each table | **extraction** — backticked identifiers per table, set-differenced | mechanical · misses names not in backticks; says nothing about whether a row's *content* is right |
 | §4.0.7 **ordering** rule | no block consumes a name produced below it | **extraction** — walk rows top-down, accumulate produced names | mechanical · misses names absent from the table entirely (that is the completeness rule's job) |
 | §4.0.7 **contents** rule | a row's *Produces* matches what its SQL projects | **extraction** — `AS <name>` / `<name> =` per fence, diffed | mechanical · cannot read prose-shaped blocks (`E`, Metrics); flags convention-derived aliases (`state_at`) as expected mismatches |
-| §4.0.7 **completeness** rule | every name a block's SQL references appears in its *Consumes* | **extraction** — referenced identifiers per fence, diffed | mechanical · defeated by glob entries; the §4.1 fence mixes a CTE with metrics so its boundary is approximate |
+| §4.0.7 **completeness** rule | every name a block's SQL references appears in its *Consumes* | **extraction** — referenced identifiers per fence, diffed | mechanical · defeated by glob entries. Three standing artifacts, all benign and all named so a non-zero count is still readable: `pnow` (a LATERAL alias), `in_d_cov` (the §4.1 fence mixes a CTE with metric expressions, so its block boundary is approximate), and `public` (a schema qualifier, not a column). The count moves as blocks split — it was 2 before `deal_facts` was carved out — so read the *names*, not the number |
 | Duplicate definitions | no scalar is defined twice | **extraction** — collect `<name> =` across fences, **following multi-line bodies until parens balance**, compare | mechanical · until round 18 it required the body to start on the same line as `=`, so **every multi-line definition was invisible**; still misses definitions split between prose and SQL, and two names for one concept |
 | Window both-ends basis | no range mixes an explicit bound with a bare one | **extraction** — pair comparisons on a shared left operand, classify each bound | mechanical · paired comparisons inside SQL fences only; a single-sided bound whose partner lives elsewhere is invisible |
 | Convention restatement (§7) | no rule is half-amended across its copies | **extraction** — signature regex per convention, all hit lines listed | mechanical · a restatement that avoids the signature words is invisible |
@@ -1471,6 +1476,7 @@ lines of P₃₀ date arithmetic it never scanned.
 | §6.0 falsifying inputs | each fairness claim names an input that would break it | **read** — a human must judge whether the input really falsifies | **memory-based** |
 | §4.0.7 contents for `E` and Metrics | those two rows' *Produces* lists | not derivable — prose-shaped SQL | **unverifiable** |
 | Population **names** (§4.0.5) | every `D_*` used anywhere has a table row, and every declared row is referenced by a fence or a table | **extraction** — name sets differenced across the normative body | mechanical · checks NAMES only; a row whose set-notation definition drifts from its SQL predicate while the name stays put is invisible |
+| Chain **block set** | the table's block names equal the CTEs the SQL defines — none missing, none invented, none duplicated | **extraction** — `name AS (` per fence vs the first backticked name per table row, set-compared | mechanical *(added this round)* · **known-positive validated against `f4d139879`**, where it reports the missing `deal_facts`, the duplicated `outcomes` and the non-CTE `state_at`; non-CTE rows (block A/B, Metrics, `E`, LATERALs marked "not a CTE") are matched by label, so a rename *there* is unseen |
 | SELECT-list alias scope | no expression references a name its own SELECT list defines | **extraction** — per fence, split each SELECT at its depth-0 `FROM`, diff aliases against references | mechanical *(added this round)* · **known-positive validated against `d5bf7efb9`**, where it reports the three real cases; correlated subqueries legitimately referencing an outer column are not distinguished, so a hit needs a human look |
 | Per-metric population agreement | the audit table and the v1 table cite the same set for each metric | **extraction** — population column of both tables, keyed by metric, compared | mechanical *(added this round)* · compares SET NAMES; a row naming the same set with a different predicate, or citing none, is invisible |
 | Set relations (§4.0.5 RELATIONS block) | every set assertion in the document appears in the canonical block | **extraction** — grep set symbols and stock phrases, assert each cites a declared relation | mechanical · matches symbols and the phrases "subset of" / "carved out of"; a relation asserted in freeform English is invisible |
@@ -2551,6 +2557,24 @@ complement of `futureDatedCloseDatePredicateSql`'s `>= today` (`foundations.ts:4
 unparked in both. One ordering — `percentile_cont`'s `WITHIN GROUP` — deliberately needs no tie-breaker,
 and §4.3 now says why.
 
+**Round 20 (fifteen checks passing on a table that described a chain that did not exist)**
+
+| # | Was | Now |
+|---|---|---|
+| 1 | The chain table named `outcomes` **twice** and omitted `deal_facts` | Round 19 split the CTE and updated the table in the same edit — with the wrong name on one row. The first row's projections and source-table dependencies described `deal_facts`; its label said `outcomes`. Renamed. A third discrepancy surfaced that the review had not named: `state_at` was listed as though it were a CTE when it is a LATERAL, now labelled. |
+
+**Why every existing check passed.** Ordering, contents, completeness and consumed-names all reason
+*within* the table — do these rows agree with the SQL, are they in dependency order, is every referenced
+name listed. **None asked whether the table's set of blocks matches the set of CTEs the SQL defines.** That
+is a set-equality question one level up, the same shape as the three-table metric check. Added, with a
+known-positive against `f4d139879` where it reports all three discrepancies.
+
+**The uncomfortable part.** The SQL and its documentation were changed in the *same edit*, by the same
+author, in the same minute — and still diverged, because a rename is invisible to someone who knows what
+they meant. "Update the table when you change the SQL" is not a discipline that can be relied on; only a
+derived check catches a renamed block. Every other propagation lesson in this appendix assumed the failure
+was distance in time or attention. This one had neither.
+
 **Round 19 (an alias-scope fix that fixed one alias)**
 
 | # | Was | Now |
@@ -2826,6 +2850,13 @@ were themselves silently broken**, because `NOT <nullable>` inside `FILTER` coun
 failing loudly. A check that can fail open is not a check. That is why the state enum is coalesced and
 non-null by construction, and why "never negate a nullable" is now a stated SQL rule (§4.0.6) rather than
 something to remember at each site.
+
+**Round 20's lesson: checks that reason inside a structure cannot validate the structure.** Fifteen
+mechanical checks passed on a chain table that duplicated one CTE and omitted another. Not one was broken
+and not one had a scope gap — they were all answering questions *about rows*, and the defect was in *which
+rows existed*. Whenever a check verifies the contents of a list, ask separately whether the list itself is
+the right list; that second question is usually a cheap set-equality against whatever the list is supposed
+to mirror, and it is the one nobody writes.
 
 **Round 19's lesson: the known-positive test is now load-bearing, not a nicety.** Two rounds running, a new
 or existing checker returned 0 on a file containing the very defect it exists to find — and this round the
