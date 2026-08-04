@@ -66,6 +66,49 @@ export interface GlassesWalkthroughScopeItem {
   quantity: number | null;
   unit: string | null;
   confidence: number | null;
+  /** Where on site this was said — TROCK Scope's own label, never inferred here. */
+  locationLabel: string | null;
+  /**
+   * WHAT WAS ACTUALLY SAID, verbatim, and the single most useful field on this row.
+   *
+   * `description` is the model's reading of an utterance; this is the utterance. An estimator deciding
+   * whether to trust a line is really asking "what did they say?", and until now the answer lived only
+   * in TROCK Scope. A merged row has several mentions, so this is a list in walk order rather than one
+   * string.
+   */
+  evidence: GlassesWalkthroughScopeEvidence[];
+  /**
+   * Whether the quantity was SPOKEN or inferred. A number somebody said out loud and a number the model
+   * derived are not the same claim, and pricing them alike is how a guess becomes a line item.
+   */
+  quantitySource: string | null;
+  /** TROCK Scope's own review state for the row — `pending` until a human has looked at it. */
+  status: string | null;
+  /** TROCK Scope's flag that the footage behind this row was too poor to read confidently. */
+  lowVisualConfidence: boolean;
+  /** True when TROCK Scope recorded a disagreement on this row that nobody has resolved yet. */
+  hasOpenConflict: boolean;
+}
+
+/** One still from the walk, presigned by TROCK Scope and valid only briefly. */
+export interface GlassesWalkthroughScopeFrame {
+  url: string;
+  timelineMs: number | null;
+}
+
+/** One thing said on site that produced a scope row. */
+export interface GlassesWalkthroughScopeEvidence {
+  /** The clip and offset the review screen seeks to, so a citation can be a link rather than a note. */
+  clipId: string | null;
+  timelineMs: number | null;
+  quote: string;
+  /** The number as SPOKEN, which can differ from the row's resolved quantity. */
+  mentionedQuantity: number | null;
+  mentionedUnit: string | null;
+  /** Stills from the moment this was said. Empty when the frames are not extracted yet. */
+  frames: GlassesWalkthroughScopeFrame[];
+  /** Presigned video for the clip, so a citation can be watched rather than only read. */
+  clipUrl: string | null;
 }
 
 export interface GlassesWalkthroughPanelEntry {
@@ -126,6 +169,18 @@ export interface GlassesWalkthroughScopeReader {
    *        per abandoned read for the life of the process, and this endpoint is polled — each slow render
    *        would strand another batch on top of the last.
    */
+  /**
+   * The citations for ONE row — quotes, presigned still frames, and the clip — or null.
+   *
+   * NULL RATHER THAN THROWING, unlike every other method here. The line items are the panel; the
+   * pictures corroborate them. A walk whose evidence read fails must still render its scope with the
+   * citations absent, rather than collapsing to `unavailable` and hiding work TROCK Scope did.
+   */
+  fetchScopeItemEvidence: (
+    scopeWalkthroughId: string,
+    scopeItemId: string,
+    signal: AbortSignal
+  ) => Promise<unknown[] | null>;
   fetchScopeItems: (
     scopeWalkthroughId: string,
     signal: AbortSignal
@@ -243,7 +298,88 @@ function toPanelScopeItem(raw: unknown): GlassesWalkthroughScopeItem | null {
     quantity: finiteNumberOrNull(item.quantity),
     unit: nonEmptyStringOrNull(item.unit),
     confidence: finiteNumberOrNull(item.confidence),
+    locationLabel: nonEmptyStringOrNull(item.locationLabel),
+    evidence: toPanelEvidence(item.evidence),
+    quantitySource: nonEmptyStringOrNull(item.quantitySource),
+    status: nonEmptyStringOrNull(item.status),
+    // Defaulted FALSE rather than null on an absent field: these two drive warnings, and a warning that
+    // fires because a field was missing is worse than one that never fires. TROCK Scope is on its own
+    // release cadence, so an older build simply says nothing rather than raising a flag we invented.
+    lowVisualConfidence: item.lowVisualConfidence === true,
+    hasOpenConflict:
+      typeof item.conflict === "object" &&
+      item.conflict !== null &&
+      (item.conflict as Record<string, unknown>).resolvedAt == null,
   };
+}
+
+/**
+ * The mentions behind one row, defensively.
+ *
+ * Every field is re-validated rather than trusted: this crosses a service boundary, and the panel
+ * renders a quote directly. A non-array, a non-object entry, or a missing quote yields nothing rather
+ * than `undefined` reaching the page — the same rule the item mapper above follows.
+ */
+/**
+ * Runs `work` over `items` with at most `limit` in flight.
+ *
+ * Its own tiny helper rather than `Promise.all`, because the evidence pass is one request per scope row
+ * and a forty-row walk would otherwise open forty sockets against TROCK Scope at once — from an endpoint
+ * the deal page POLLS. Never rejects: `work` is expected to absorb its own failures, and one row's
+ * missing pictures must not abort the others.
+ */
+async function mapWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  work: (item: T) => Promise<void>
+): Promise<void> {
+  let cursor = 0;
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const item = items[cursor++]!;
+      try {
+        await work(item);
+      } catch {
+        // Deliberately swallowed. `work` already returns null on failure; this is the backstop for an
+        // unexpected throw, and the cost of it is one row without citations.
+      }
+    }
+  });
+  await Promise.all(runners);
+}
+
+function toPanelFrames(raw: unknown): GlassesWalkthroughScopeFrame[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const frame = entry as Record<string, unknown>;
+    const url = nonEmptyStringOrNull(frame.url);
+    // A frame with no URL is not a picture. Dropped rather than rendered as a broken image, which
+    // reads to an estimator as evidence that failed to load rather than evidence that never existed.
+    if (!url) return [];
+    return [{ url, timelineMs: finiteNumberOrNull(frame.timelineMs) }];
+  });
+}
+
+function toPanelEvidence(raw: unknown): GlassesWalkthroughScopeEvidence[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const row = entry as Record<string, unknown>;
+    const quote = typeof row.quote === "string" ? row.quote.trim() : "";
+    if (quote === "") return [];
+    return [
+      {
+        clipId: nonEmptyStringOrNull(row.clipId),
+        timelineMs: finiteNumberOrNull(row.timelineMs),
+        quote,
+        mentionedQuantity: finiteNumberOrNull(row.mentionedQuantity),
+        mentionedUnit: nonEmptyStringOrNull(row.mentionedUnit),
+        frames: toPanelFrames(row.frames),
+        clipUrl: nonEmptyStringOrNull(row.clipProxyUrl),
+      },
+    ];
+  });
 }
 
 /**
@@ -382,6 +518,30 @@ export async function resolveGlassesWalkthroughScope(
           );
           continue;
         }
+        // THE CITATIONS, fetched only once the row set is known to be usable.
+        //
+        // One request per item, which is why it is bounded and why it happens here rather than inside
+        // the item mapper: a walk with forty rows must not open forty sockets, and a walk whose scope
+        // could not be read must not pay for evidence it will never show. The same abort signal covers
+        // these, so the whole phase still ends at one deadline.
+        //
+        // FAILURES ARE INVISIBLE BY DESIGN — `fetchScopeItemEvidence` returns null rather than throwing,
+        // and a null simply leaves that row with no citations. The line items are the panel; the frames
+        // corroborate them. Degrading the whole walk to `unavailable` because a thumbnail could not be
+        // signed would hide work TROCK Scope did perfectly well.
+        await mapWithConcurrency(items, GLASSES_WALKTHROUGH_SCOPE_CONCURRENCY, async (item) => {
+          const raw = await deps.scopeReader.fetchScopeItemEvidence(
+            entry.scopeWalkthroughId!,
+            item.id,
+            abort.signal
+          );
+          if (raw === null) return;
+          const withFrames = toPanelEvidence(raw);
+          // Only REPLACE when the evidence call actually said something. `/scope-items` already carries
+          // the quotes; this call adds pictures to them. An empty answer must not delete the words.
+          if (withFrames.length > 0) item.evidence = withFrames;
+        });
+
         entry.state = "ready";
         entry.scope = { status: "ready", items };
       } catch (err) {

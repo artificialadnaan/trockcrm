@@ -47,6 +47,12 @@ function makeItem(
     quantity: null,
     unit: null,
     confidence: null,
+    locationLabel: null,
+    evidence: [],
+    quantitySource: null,
+    status: null,
+    lowVisualConfidence: false,
+    hasOpenConflict: false,
     ...over,
   };
 }
@@ -221,6 +227,143 @@ describe("AiWalkCard states", () => {
     expect(text).toContain("Walk captured");
     expect(text).not.toContain("by ");
     expect(text.toLowerCase()).not.toContain("unknown");
+  });
+
+  it("CITES what was said, and shows the stills it was said over", async () => {
+    // The reason to open this panel at all. `description` is the model's reading of an utterance; the
+    // quote is the utterance, and the frames are what the estimator was looking at when they said it.
+    const walkthrough = makeWalk({
+      id: "w1",
+      state: "ready",
+      scopeWalkthroughId: SCOPE_ID,
+      scope: {
+        status: "ready",
+        items: [
+          makeItem({
+            id: "i1",
+            description: "Paint wall red",
+            locationLabel: "Unit 12B — living area",
+            evidence: [
+              {
+                clipId: "c1",
+                timelineMs: 254800,
+                quote: "paint this whole wall red",
+                mentionedQuantity: 700,
+                mentionedUnit: "SF",
+                frames: [{ url: "https://scope.test/frame-1.jpg?sig=1", timelineMs: 254800 }],
+                clipUrl: "https://scope.test/clip.mp4?sig=1",
+              },
+            ],
+          }),
+        ],
+      },
+    });
+    const { container } = await render(
+      <AiWalkCard walkthrough={walkthrough} onRetry={vi.fn()} reviewUrl="https://scope.test/review" />
+    );
+    const text = container.textContent ?? "";
+    expect(text).toContain("paint this whole wall red");
+    expect(text).toContain("Unit 12B — living area");
+    expect(text).toContain("700 SF");
+
+    const image = container.querySelector("img");
+    expect(image?.getAttribute("src")).toBe("https://scope.test/frame-1.jpg?sig=1");
+    // Named by what it IS and WHEN, because nothing here knows what the photo shows and inventing a
+    // description of a jobsite would be worse than naming the artefact.
+    expect(image?.getAttribute("alt")).toContain("4:14");
+
+    const moment = Array.from(container.querySelectorAll("a")).find((a) =>
+      (a.textContent ?? "").includes("Watch this moment")
+    );
+    expect(moment?.getAttribute("href")).toBe("https://scope.test/review?t=254800");
+  });
+
+  it("marks a quantity nobody actually said as inferred", async () => {
+    // A number somebody spoke and a number the model derived are different claims, and pricing them
+    // alike is how a guess becomes a line item.
+    const walkthrough = makeWalk({
+      id: "w1",
+      state: "ready",
+      scope: {
+        status: "ready",
+        items: [makeItem({ id: "i1", quantity: 700, unit: "SF", quantitySource: "inferred" })],
+      },
+    });
+    const { container } = await render(<AiWalkCard walkthrough={walkthrough} onRetry={vi.fn()} />);
+    expect(container.textContent ?? "").toContain("inferred quantity");
+  });
+
+  it("treats a MISSING quantitySource as inferred, never as spoken", async () => {
+    // An older TROCK Scope build that does not send the field must not have its silence read as
+    // "somebody said it" — the whole point of the flag is that it is a claim about provenance.
+    const walkthrough = makeWalk({
+      id: "w1",
+      state: "ready",
+      scope: {
+        status: "ready",
+        items: [makeItem({ id: "i1", quantity: 700, unit: "SF", quantitySource: null })],
+      },
+    });
+    const { container } = await render(<AiWalkCard walkthrough={walkthrough} onRetry={vi.fn()} />);
+    expect(container.textContent ?? "").toContain("inferred quantity");
+  });
+
+  it("does NOT call a spoken quantity inferred", async () => {
+    const walkthrough = makeWalk({
+      id: "w1",
+      state: "ready",
+      scope: {
+        status: "ready",
+        items: [makeItem({ id: "i1", quantity: 700, unit: "SF", quantitySource: "spoken" })],
+      },
+    });
+    const { container } = await render(<AiWalkCard walkthrough={walkthrough} onRetry={vi.fn()} />);
+    expect(container.textContent ?? "").not.toContain("inferred quantity");
+  });
+
+  it("surfaces an unresolved conflict and low visual confidence", async () => {
+    const walkthrough = makeWalk({
+      id: "w1",
+      state: "ready",
+      scope: {
+        status: "ready",
+        items: [makeItem({ id: "i1", hasOpenConflict: true, lowVisualConfidence: true })],
+      },
+    });
+    const { container } = await render(<AiWalkCard walkthrough={walkthrough} onRetry={vi.fn()} />);
+    const text = container.textContent ?? "";
+    expect(text).toContain("unresolved conflict");
+    expect(text).toContain("low visual confidence");
+  });
+
+  it("renders a citation with no stills, rather than a broken image", async () => {
+    // Frames are extracted after transcription, so a fresh walk legitimately has quotes and no pictures.
+    const walkthrough = makeWalk({
+      id: "w1",
+      state: "ready",
+      scope: {
+        status: "ready",
+        items: [
+          makeItem({
+            id: "i1",
+            evidence: [
+              {
+                clipId: "c1",
+                timelineMs: null,
+                quote: "replace the vinyl",
+                mentionedQuantity: null,
+                mentionedUnit: null,
+                frames: [],
+                clipUrl: null,
+              },
+            ],
+          }),
+        ],
+      },
+    });
+    const { container } = await render(<AiWalkCard walkthrough={walkthrough} onRetry={vi.fn()} />);
+    expect(container.textContent ?? "").toContain("replace the vinyl");
+    expect(container.querySelector("img")).toBeNull();
   });
 
   it("ready: renders each line item's code, description, quantity + unit and confidence", async () => {

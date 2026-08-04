@@ -43,6 +43,15 @@ function walkthroughPath(scopeWalkthroughId: string): string {
   return `/api/walkthroughs/${encodeURIComponent(scopeWalkthroughId)}`;
 }
 
+/** The mentions behind ONE scope row, with presigned frame stills and clip video. Both ids are encoded
+ *  for the same reason the paths above encode theirs: they cross a service boundary and are opaque. */
+function scopeItemEvidencePath(scopeWalkthroughId: string, scopeItemId: string): string {
+  return (
+    `/api/walkthroughs/${encodeURIComponent(scopeWalkthroughId)}` +
+    `/scope-items/${encodeURIComponent(scopeItemId)}/evidence`
+  );
+}
+
 /**
  * The statuses that mean TROCK Scope has STOPPED working on a walkthrough.
  *
@@ -178,10 +187,11 @@ export function createGlassesWalkthroughScopeReader(): GlassesWalkthroughScopeRe
       if (!response.ok) {
         // STATUS ONLY, never the body. TROCK Scope's error envelope is its own to shape and this text is
         // logged by the caller; the status is what distinguishes "it is unhealthy" (5xx) from "it refused
-        // our credential" (401/403) from "it does not serve this to a machine principal" — which is today's
-        // real case, since GET scope-items is not in that service's SERVICE_ALLOWED_ROUTES allowlist and so
-        // answers 403 to the CRM's service token. All three are `unavailable` to the panel; the number is
-        // what tells an operator which one they are looking at.
+        // our credential" (401/403) from "it does not serve this to a machine principal". All three are
+        // `unavailable` to the panel; the number is what tells an operator which one they are looking at.
+        // (An earlier note here claimed GET scope-items is not on that service's SERVICE_ALLOWED_ROUTES
+        // allowlist and answers 403. It is on the list, `ownNamespaceOnly`, and answers 200 — checked
+        // against production rather than reasoned about.)
         throw new Error(`TROCK Scope answered ${response.status} for walkthrough ${scopeWalkthroughId}.`);
       }
 
@@ -215,6 +225,52 @@ export function createGlassesWalkthroughScopeReader(): GlassesWalkthroughScopeRe
         items,
         pipeline: await pipelineOutcome(baseUrl, token, scopeWalkthroughId, signal),
       };
+    },
+
+    /**
+     * The citations for one row: what was said, the still frames it was said over, and the clip.
+     *
+     * BEST-EFFORT BY CONTRACT — this returns null rather than throwing on every failure, which is the
+     * opposite of `fetchScopeItems` and deliberately so. The line items ARE the panel; the pictures are
+     * corroboration. A walk whose evidence read times out should still render its scope with the
+     * citations missing, not collapse to `unavailable` and hide work TROCK Scope did successfully.
+     *
+     * The URLs inside are PRESIGNED and short-lived (TROCK Scope sets the TTL). They are therefore
+     * fetched per render rather than stored anywhere: a cached frame URL is a broken image later, and
+     * persisting one would put a bearer-equivalent secret in our database.
+     */
+    fetchScopeItemEvidence: async (scopeWalkthroughId, scopeItemId, signal) => {
+      const baseUrl = (process.env.TROCK_SCOPE_BASE_URL ?? "").trim().replace(/\/+$/, "");
+      const token = (process.env.TROCK_SCOPE_SERVICE_TOKEN ?? "").trim();
+      if (!baseUrl || !token) return null;
+
+      let response: Response;
+      try {
+        response = await fetch(`${baseUrl}${scopeItemEvidencePath(scopeWalkthroughId, scopeItemId)}`, {
+          method: "GET",
+          headers: { accept: "application/json", authorization: `Bearer ${token}` },
+          signal,
+        });
+      } catch {
+        // Dropped rather than re-thrown, for the reason the sibling above records: the rejection is the
+        // only object still holding the request, and therefore the Authorization header.
+        return null;
+      }
+
+      if (!response.ok) {
+        await response.text().catch(() => "");
+        return null;
+      }
+
+      let json: unknown;
+      try {
+        json = JSON.parse((await response.text()) || "{}");
+      } catch {
+        return null;
+      }
+
+      const evidence = (json as { evidence?: unknown } | null)?.evidence;
+      return Array.isArray(evidence) ? evidence : null;
     },
   };
 }

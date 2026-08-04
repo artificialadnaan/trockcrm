@@ -49,6 +49,7 @@ function scopeItem(overrides: Record<string, unknown> = {}) {
 function reader(overrides: Partial<GlassesWalkthroughScopeReader> = {}): GlassesWalkthroughScopeReader {
   return {
     isConfigured: () => true,
+    fetchScopeItemEvidence: overrides.fetchScopeItemEvidence ?? (async () => null),
     fetchScopeItems: async () => ({ outcome: "found", items: [scopeItem()], pipeline: "finished" }),
     ...overrides,
   };
@@ -89,10 +90,92 @@ describe("resolveGlassesWalkthroughScope — the four states", () => {
             quantity: 700,
             unit: "SF",
             confidence: 0.78,
+            // The detail the panel is built on. Absent from this fixture's response, so each one is the
+            // documented default rather than a value — which is the point: an older TROCK Scope build
+            // that says nothing about location or provenance must degrade to blanks, never to a
+            // confident-looking claim the estimator would act on.
+            locationLabel: null,
+            evidence: [],
+            quantitySource: null,
+            status: null,
+            lowVisualConfidence: false,
+            hasOpenConflict: false,
           },
         ],
       },
     });
+  });
+
+  it("attaches the CITATIONS — quote, stills and clip — to each row", async () => {
+    // The reason the panel is worth opening. `description` is the model's reading of an utterance;
+    // the quote is the utterance, and the frames are what it was said over. An estimator deciding
+    // whether to trust a line is really asking "what did they say, and what were they looking at".
+    const [entry] = await resolveGlassesWalkthroughScope([row()], {
+      scopeReader: reader({
+        fetchScopeItems: async () => ({ outcome: "found", pipeline: "finished", items: [scopeItem()] }),
+        fetchScopeItemEvidence: async () => [
+          {
+            quote: "paint this whole wall red",
+            clipId: "861159f0-c048-4441-8489-85f31bfd3276",
+            timelineMs: 4200,
+            mentionedQuantity: 700,
+            mentionedUnit: "SF",
+            clipProxyUrl: "https://example.test/clip.mp4?sig=1",
+            frames: [
+              { url: "https://example.test/frame-1.jpg?sig=1", timelineMs: 4200 },
+              { url: "https://example.test/frame-2.jpg?sig=1", timelineMs: 4800 },
+            ],
+          },
+        ],
+      }),
+      warn: collectWarnings().warn,
+    });
+
+    const [item] = entry!.scope!.items;
+    expect(item!.evidence).toHaveLength(1);
+    expect(item!.evidence[0]!.quote).toBe("paint this whole wall red");
+    expect(item!.evidence[0]!.frames.map((frame) => frame.url)).toEqual([
+      "https://example.test/frame-1.jpg?sig=1",
+      "https://example.test/frame-2.jpg?sig=1",
+    ]);
+    expect(item!.evidence[0]!.clipUrl).toBe("https://example.test/clip.mp4?sig=1");
+    // The number as SPOKEN, which is not always the row's resolved quantity.
+    expect(item!.evidence[0]!.mentionedQuantity).toBe(700);
+  });
+
+  it("still renders the scope when the citations cannot be fetched", async () => {
+    // THE WHOLE POINT OF THE BEST-EFFORT CONTRACT. The line items are the panel; the pictures
+    // corroborate them. A signing failure or a timeout on a thumbnail must not collapse the walk to
+    // `unavailable` and hide work TROCK Scope did perfectly well.
+    const [entry] = await resolveGlassesWalkthroughScope([row()], {
+      scopeReader: reader({
+        fetchScopeItems: async () => ({ outcome: "found", pipeline: "finished", items: [scopeItem()] }),
+        fetchScopeItemEvidence: async () => null,
+      }),
+      warn: collectWarnings().warn,
+    });
+
+    expect(entry!.state).toBe("ready");
+    expect(entry!.scope!.items).toHaveLength(1);
+    expect(entry!.scope!.items[0]!.evidence).toEqual([]);
+  });
+
+  it("does NOT let an empty evidence answer delete the quotes /scope-items already gave", async () => {
+    // The two responses overlap: `/scope-items` carries the quotes, and the evidence call adds pictures
+    // to them. An evidence call that answers with nothing is not a statement that nothing was said.
+    const [entry] = await resolveGlassesWalkthroughScope([row()], {
+      scopeReader: reader({
+        fetchScopeItems: async () => ({
+          outcome: "found",
+          pipeline: "finished",
+          items: [scopeItem({ evidence: [{ quote: "paint this whole wall red", clipId: null, timelineMs: null }] })],
+        }),
+        fetchScopeItemEvidence: async () => [],
+      }),
+      warn: collectWarnings().warn,
+    });
+
+    expect(entry!.scope!.items[0]!.evidence.map((e) => e.quote)).toEqual(["paint this whole wall red"]);
   });
 
   it('PROCESSING: a walk with no scope id is answered from our own table, with NO request at all', async () => {
@@ -382,6 +465,12 @@ describe("resolveGlassesWalkthroughScope — what TROCK Scope sends is not trust
       quantity: null,
       unit: null,
       confidence: null,
+      locationLabel: null,
+      evidence: [],
+      quantitySource: null,
+      status: null,
+      lowVisualConfidence: false,
+      hasOpenConflict: false,
     });
   });
 

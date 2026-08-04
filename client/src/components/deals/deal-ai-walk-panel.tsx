@@ -1,4 +1,4 @@
-import { AlertTriangle, ExternalLink, Glasses, Loader2 } from "lucide-react";
+import { AlertTriangle, ExternalLink, Glasses, Loader2, MapPin, PlayCircle } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -129,6 +129,21 @@ export function describeConfidence(confidence: number | null): ConfidenceDescrip
  * A unit with no quantity still renders ("SF"), because it tells the estimator what the line is measured in
  * even before anyone has measured it.
  */
+/**
+ * A timeline offset as `m:ss`, for naming the moment a still was taken.
+ *
+ * Minutes-and-seconds rather than a raw millisecond count because it is read next to a "watch this
+ * moment" link, and `254800` tells an estimator nothing about where in a four-minute walk to look.
+ * Hours are deliberately not handled: these are walk-length clips, and a clip long enough to need them
+ * would be a different problem than formatting.
+ */
+export function formatWalkOffset(timelineMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(timelineMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
 export function formatWalkQuantity(quantity: number | null, unit: string | null): string | null {
   const amount =
     quantity === null || !Number.isFinite(quantity)
@@ -188,10 +203,13 @@ const STATE_BADGE: Record<GlassesWalkthrough["state"], { label: string; classNam
 
 /** One extracted line item. Every field except the description is optional on the wire, and each one that is
  *  absent is rendered as absent rather than as a placeholder value — see formatWalkQuantity. */
-function ScopeItemRow({ item }: { item: GlassesWalkthroughScopeItem }) {
+function ScopeItemRow({ item, reviewUrl }: { item: GlassesWalkthroughScopeItem; reviewUrl: string | null }) {
   const confidence = describeConfidence(item.confidence);
   const quantity = formatWalkQuantity(item.quantity, item.unit);
   const description = item.description.trim();
+  // Anything that is not explicitly "spoken" is treated as inferred, INCLUDING an absent value. An older
+  // TROCK Scope build that does not send the field must not have its silence read as "somebody said it".
+  const inferredQuantity = item.quantity !== null && item.quantitySource !== "spoken";
 
   return (
     <li
@@ -214,7 +232,77 @@ function ScopeItemRow({ item }: { item: GlassesWalkthroughScopeItem }) {
             {description || "No description extracted"}
           </span>
         </div>
-        {item.trade ? <p className="mt-0.5 text-xs text-muted-foreground">{item.trade}</p> : null}
+        {/* WHERE, WHAT TRADE, AND HOW THE NUMBER WAS ARRIVED AT — one line, because on a list of a dozen
+            rows these are scanned rather than read. `quantitySource` is the one an estimator acts on: a
+            number somebody said out loud and a number the model inferred are different claims. */}
+        <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+          {item.locationLabel ? (
+            <span className="inline-flex items-center gap-1">
+              <MapPin className="h-3 w-3" aria-hidden="true" />
+              {item.locationLabel}
+            </span>
+          ) : null}
+          {item.trade ? <span>{item.trade}</span> : null}
+          {inferredQuantity ? (
+            <span className="text-amber-700" title="TROCK Scope inferred this quantity; nobody stated it.">
+              inferred quantity
+            </span>
+          ) : null}
+          {item.lowVisualConfidence ? (
+            <span className="text-amber-700" title="The footage behind this line was hard to read.">
+              low visual confidence
+            </span>
+          ) : null}
+          {item.hasOpenConflict ? (
+            <span className="text-red-700" title="TROCK Scope recorded a disagreement nobody has resolved.">
+              unresolved conflict
+            </span>
+          ) : null}
+        </div>
+
+        {/* THE CITATION. Rendered under the row rather than behind a click because it is the reason to
+            trust or distrust the line, and a panel that hides its evidence one interaction away is a
+            panel whose evidence nobody reads. */}
+        {item.evidence.map((mention, index) => (
+          <div key={`${item.id}-${index}`} className="mt-2 border-l-2 border-muted pl-2">
+            <p className="text-xs italic text-muted-foreground">“{mention.quote}”</p>
+            {mention.mentionedQuantity !== null ? (
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                said: {formatWalkQuantity(mention.mentionedQuantity, mention.mentionedUnit) ?? "—"}
+              </p>
+            ) : null}
+            {mention.frames.length > 0 ? (
+              <div className="mt-1 flex flex-wrap gap-1">
+                {mention.frames.map((frame) => (
+                  <img
+                    key={frame.url}
+                    src={frame.url}
+                    // Described by what it IS rather than what it shows: nothing here knows the latter,
+                    // and inventing a description of a jobsite photo would be worse than naming it.
+                    alt={`Still from the walk${
+                      frame.timelineMs !== null ? ` at ${formatWalkOffset(frame.timelineMs)}` : ""
+                    }`}
+                    loading="lazy"
+                    className="h-16 w-24 rounded border object-cover"
+                  />
+                ))}
+              </div>
+            ) : null}
+            {/* Straight to the moment, not merely to the walkthrough. Absent when TROCK Scope's origin is
+                not configured for this build — see lib/trock-scope.ts. */}
+            {reviewUrl && mention.timelineMs !== null ? (
+              <a
+                href={`${reviewUrl}?t=${Math.round(mention.timelineMs)}`}
+                target="_blank"
+                rel="noreferrer"
+                className="mt-1 inline-flex items-center gap-1 text-xs text-primary hover:underline"
+              >
+                <PlayCircle className="h-3 w-3" aria-hidden="true" />
+                Watch this moment
+              </a>
+            ) : null}
+          </div>
+        ))}
       </div>
       <div className="flex shrink-0 items-center gap-3">
         <span className={`text-sm ${quantity ? "text-foreground" : "italic text-muted-foreground"}`}>
@@ -356,7 +444,7 @@ export function AiWalkCard({
             </p>
             <ul className="divide-y">
               {items.map((item) => (
-                <ScopeItemRow key={item.id} item={item} />
+                <ScopeItemRow key={item.id} item={item} reviewUrl={reviewUrl} />
               ))}
             </ul>
           </div>
