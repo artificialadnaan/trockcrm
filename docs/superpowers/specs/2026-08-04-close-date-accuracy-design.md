@@ -332,6 +332,15 @@ event. It is **not** a reliable denominator and must never be used as one.
 - **Lost.** `deals.lost_at` (timestamptz), stamped at `server/src/modules/deals/stage-change.ts:410`.
   `server/src/modules/shared/deal-date-scope.ts:54` uses `deals.lost_at::date` as the canonical `lostDate`.
   Use that expression.
+- **One inherited caveat, stated as a deliberate choice rather than silently carried.** `lost_at` is a
+  `timestamptz` and `deal-date-scope.ts:54` casts it with a bare `::date`, which resolves in the *session*
+  timezone rather than `America/Chicago`. **Concrete consequence:** a loss stamped after 19:00 CT reads as
+  the next calendar day under a UTC session, so the deal can land in the wrong reporting period and both
+  its P₃₀ and P_final anchors (§4.0.3) shift by a day. This spec **keeps the canonical expression anyway** —
+  deviating would put it on a different Lost basis from every other surface and break the reconciliation
+  §4.1 depends on, which is a worse problem than a rare one-day shift. It is recorded here so the
+  inconsistency with §4.0.6's timezone rule reads as a *choice*: that rule governs expressions this report
+  introduces, and correcting the canonical helper is its own change with its own blast radius.
 - **Never `actual_close_date`.** Migration `0141_won_closed_date_reporting_column.sql` records that it is
   reseed-contaminated (mass-stamped by a Bid Board reseed) and must never be used for period gating. The
   existing forecast-variance report's use of `cw.captured_at::date` under the alias `actual_close_date`
@@ -815,7 +824,7 @@ p30 = CASE
           THEN state_at(deal, business_day_end_exclusive(o.outcome_date - 30))
         -- The DEAL is younger than the anchor: its whole life sits inside the window, so its earliest
         -- recorded state is all there is. Same tz-explicit boundary as everywhere else (§4.0.3).
-        WHEN o.deal_created_at >= business_day_end_exclusive(o.outcome_date - 31)
+        WHEN o.deal_created_at >= business_day_end_exclusive(o.outcome_date - 30)
           THEN <earliest event state, see below>
         ELSE 'no_event'                        -- long-lived, forecast late: NOT scoreable
       END
@@ -836,6 +845,14 @@ An earlier draft gated on `min(changed_at)` over the deal's *events*. That is ci
 January and first forecast on 20 July, closing on 30 July, has `min(changed_at)` after the anchor, so the
 guard passed and the ten-day-old date became P₃₀ — scoring a last-minute guess as a confident month-ahead
 forecast. The deal's `created_at` is the honest measure of how long the rep had to form a view.
+
+**The gate compares against the anchor itself, not one day earlier.** An intermediate draft used
+`outcome_date - 31`, which is the *start* of day `outcome_date - 30` rather than its end. A deal created
+during the P₃₀ business date, carrying no close date, and first forecast after that day ended would slip
+through: it demonstrably existed at the anchor with no prediction — precisely the `no_event` case — yet
+the fallback fired and promoted the late forecast. Both arms use the identical
+`business_day_end_exclusive(outcome_date - 30)` expression; two spellings of "the anchor" is how the
+off-by-one got in.
 
 #### 4.0.5 Outcomes and populations
 
@@ -890,7 +907,7 @@ It excludes only **stored** `on_hold` deals — the far-out auto-park leg is del
 | `D_landed` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NOT NULL` ∩ `outcome_date BETWEEN from AND to` (both inclusive) | period |
 | `D_nodate` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NULL` | — |
 | `D_open` | `D` ∩ `outcome_kind = 'open'` | **today** (see below) |
-| `D_prior` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NOT NULL` ∩ `outcome_date` **outside** `[from, to]` | out of period |
+| `D_outside` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NOT NULL` ∩ `outcome_date` **outside** `[from, to]` — before `from` **or** after `to` | out of period |
 | `D_book` | `D_landed ∪ D_open` — the rep's book *for this period*. Denominator for churn rates. | mixed, stated |
 | `D_score` | `D_landed` ∩ `p30_state = 'rep_prediction'` ∩ P₃₀ not parked-at-write (§6.2) | period |
 | `D_score_final` | `D_landed` ∩ `pfinal_state = 'rep_prediction'` ∩ P_final not parked-at-write | period |
@@ -904,16 +921,22 @@ inclusive `YYYY-MM-DD` strings (§1.9), so `BETWEEN from AND to` is correct and 
 intraday values, and applying it to a date column is harmless only by luck. Two different boundary
 conventions in one query is how an off-by-one day enters.
 
-**`D_prior` is why the partition is four-way, not three.** For any period narrower than all-time, a rep's
+**`D_outside` is why the partition is four-way, not three.** For any period narrower than all-time, a rep's
 deals that closed *before* `from` are still in the base `outcomes` CTE — they are active, reportable, and
 terminal — but they match neither `D_landed` (outcome date out of range), nor `D_open` (not open), nor
 `D_nodate` (they have a date). Under the earlier three-way statement they were an unnamed remainder: the
 invariant `|D_landed| + |D_open| + |D_nodate| = |D|` was **false for every rep with any older closed deal**,
 so the test pinning it would fail on the first realistic dataset — or, worse, an implementer would "fix" the
-test rather than name the population. `D_prior` is excluded from every metric; it exists so the partition
+test rather than name the population. `D_outside` is excluded from every metric; it exists so the partition
 closes and the invariant is true as written.
 
-`D_landed ⊎ D_open ⊎ D_nodate ⊎ D_prior = D` — a four-way partition. `D_nodate` exists because a mirror-won deal can
+`D_landed ⊎ D_open ⊎ D_nodate ⊎ D_outside = D` — a four-way partition.
+
+**The name is `D_outside`, not `D_prior`.** `D` reflects current row state, so for any completed-period
+view ("last week", "last month") the set contains deals that closed *after* `to` as well as before
+`from` — a deal that landed yesterday is outside a period that ended last Saturday. Calling the count
+`prior_period_landed_n` told the reader it meant one thing while it counted both. If the before/after
+split is ever wanted it is a trivial extra `FILTER`, but the honest default is one correctly-named bucket. `D_nodate` exists because a mirror-won deal can
 have a NULL `won_closed_date` (nothing stamps it while the CRM stage stays open): it is terminal, so not in
 `D_open`, and has no outcome date, so not in `D_landed`. Without naming it, those deals fall out of every
 population and the `mirror_terminal_no_date_n` diagnostic that is supposed to make the drop visible would
@@ -970,11 +993,13 @@ here. Adding a metric without adding a row is the defect re-entering.**
 | `chronic_mover_n` | 4.6 | deals in `D_book` meeting the flag | — | Count |
 | `chronic_mover_rate` | 4.6 | `chronic_mover_n` | `\|D_book\|` | Yes |
 | `silent_miss_n` | 4.7 | `D_score` with `move_count = 0` and `abs(err) > 14` | — | Count |
+| `forecast_reliability` | 6.1 | `COALESCE(coverage_rate,0) * COALESCE(hit_rate_14d,0)` | — | Composite; both operands coalesced so zero coverage yields zero |
+| `scoreable_final_n` | 4.2 | `D_score_final` | — | Count; the `hit_rate_14d_final` volume floor (§6.4) |
 | `moves_by_other_actor` | 3 | `E` where `actor_user_id` is a user other than the owner (NULL ≠ "other") | — | Event count |
 | `machine_written_events_n`, `hubspot_refresh_events_n`, `migration_seed_events_n` | 2.5(b) | `close_date_timeline` on `D_book`: `source='machine'` for the total, `machine_source='hubspot_refresh'` / `='migration_seed'` for the two arms | — | Diagnostic |
 | `mirror_terminal_no_date_n` | 4.0.5 | **`D_nodate`** | — | Diagnostic |
 | `bid_board_owned_n` | 2.5(c) | `D_book` | — | Diagnostic |
-| `prior_period_landed_n` | 4.0.5 | `D_prior` | — | Diagnostic; excluded from every other metric |
+| `out_of_period_landed_n` | 4.0.5 | `D_outside` | — | Diagnostic; excluded from every other metric |
 | `provenance_unknown_n` | 4.0.6 | `D_open` with a non-null `expected_close_date` but `pnow_state = 'no_event'` | — | Integrity diagnostic |
 
 `provenance_unknown_n` is computed inside the **coverage provenance-resolution block** (§4.1), the single
@@ -989,9 +1014,9 @@ Invariants to pin as tests — they are the point of the table:
 
 1. `covered_n + parked_n + at_risk_n = |D_cov|`, and `|D_cov| + machine_dated_n = |D_open|`.
 2. `scoreable_n + no_prediction_n + cleared_n + machine_superseded_n + parked_prediction_n = landed_n`.
-3. `|D_landed| + |D_open| + |D_nodate| + |D_prior| = |D|`. **Four terms, not three** — `D_prior` (deals
-   that closed outside the selected period) is the remainder that made the three-term form false for every
-   rep with an older closed deal.
+3. `|D_landed| + |D_open| + |D_nodate| + |D_outside| = |D|`. **Four terms, not three** — `D_outside`
+   (deals that closed outside the selected period, in either direction) is the remainder that made the
+   three-term form false for every rep with any closed deal outside the window.
 
 **Two SQL rules that apply to every expression in this document:**
 
@@ -1078,7 +1103,7 @@ column. Re-run this check whenever a name is added:
 | `close_date_timeline` (§4.0.2) | all of the above **passed through**, plus `source`, `machine_source` | `raw_close_date_events.*`; `deals.hubspot_deal_id`; `public.hubspot_refresh_log.*` (§0064) |
 | `outcomes` (§4.0.5) | `deal_id`, `rep_id`, `deal_created_at`, `outcome_kind`, `outcome_date`, `bid_board_owned` | `deals.*`, `public.pipeline_stage_config.slug/is_terminal` |
 | `state_at` ×3 (§4.0.3) | `p30_*`, `pfinal_*`, `pnow_*` | `close_date_timeline`: `deal_id`, `changed_at`, **`audit_log_id`**, `source`, `new_date`; `outcomes.outcome_date` |
-| `cov_state` / `cov_prediction` (§4.1) | `cov_state`, `cov_prediction`, `provenance_unknown_n` | `pnow_state`, `pnow_prediction`, `deals.expected_close_date` (convention 10's bounded exception) |
+| `coverage_resolution` (§4.1) | `cov_state`, `cov_prediction`, `is_provenance_unknown` | `outcomes.deal_id`; `state_at(deal, now())`; **`deals.expected_close_date`** — the only block that joins `deals` for it, and the whole reason convention 10's exception is buildable |
 | Derived scalars (this section) | `open`, `landed`, `in_d_cov`, `signed_error_*`, `deal_move_count`, `deal_days_pushed_out`, `event_window_end` | `outcomes.*`, `cov_*`, `p30_*`, `pfinal_*`, `E` |
 | `E` (§4.0.6) | the event set for churn | `close_date_timeline` filtered by `source='rep'` and `event_window_end` |
 | Metrics (§4.1–4.7) | the report columns | everything above, by name only |
@@ -1091,22 +1116,34 @@ project it. The table makes that a one-line check instead of a review finding.
 **Plain English:** of the rep's open deals, what share carry a rep-authored close date that is usable —
 in the future, but not parked so far out that it forecasts nothing.
 
-Coverage reads `pnow_state` from §4.0.3, **resolved for provenance first**:
+Coverage reads `pnow_state` from §4.0.3, **resolved for provenance first — in its own CTE**:
 
 ```sql
--- Provenance resolution, applied BEFORE the partition.
+-- coverage_resolution: THE bounded exception to convention 10, and the ONLY block that joins deals for
+-- the raw forecast column. It exists as a named CTE precisely so the exception has somewhere to live:
+-- the base `outcomes` CTE (§4.0.5) deliberately does NOT project expected_close_date, so without this
+-- join the raw date is simply not in scope where the permission applies, and an implementer would be
+-- forced into exactly the ad-hoc raw read convention 10 forbids.
+--
 -- §4.0.6 promises that an open deal carrying a date whose event predates the audit window is bucketed as
--- rep-authored, so an audit-window gap cannot quietly shrink a rep's denominator. This is the SQL that
--- keeps that promise; without it every 'no_event' row fell into at_risk_n and the promise was prose only.
--- THIS BLOCK IS CONVENTION 10'S BOUNDED EXCEPTION. It may read d.expected_close_date solely to produce
--- cov_state, cov_prediction and provenance_unknown_n. Nothing downstream reads the column.
-cov_state      = CASE WHEN pnow_state = 'no_event' AND d.expected_close_date IS NOT NULL
-                      THEN 'rep_prediction' ELSE pnow_state END
-cov_prediction = CASE WHEN pnow_state = 'no_event' AND d.expected_close_date IS NOT NULL
-                      THEN d.expected_close_date ELSE pnow_prediction END
+-- rep-authored, so an audit-window gap cannot quietly shrink a rep's denominator. This CTE is the SQL
+-- that keeps that promise; without it every 'no_event' row fell into at_risk_n and the promise was prose.
+coverage_resolution AS (
+  SELECT o.deal_id,
+         CASE WHEN pnow.state = 'no_event' AND d.expected_close_date IS NOT NULL
+              THEN 'rep_prediction' ELSE pnow.state END          AS cov_state,
+         CASE WHEN pnow.state = 'no_event' AND d.expected_close_date IS NOT NULL
+              THEN d.expected_close_date ELSE pnow.prediction END  AS cov_prediction,
+         (pnow.state = 'no_event' AND d.expected_close_date IS NOT NULL) AS is_provenance_unknown
+  FROM outcomes o
+  JOIN deals d ON d.id = o.deal_id            -- the ONLY join to deals for expected_close_date
+  LEFT JOIN LATERAL <state_at(o.deal_id, now())> pnow ON TRUE
+)
+-- Downstream reads cov_state / cov_prediction / is_provenance_unknown by name. Nothing else touches
+-- d.expected_close_date. `pnow_state` elsewhere in this section means `coverage_resolution.cov_state`'s
+-- input, exposed here only for the diagnostic below.
 
-provenance_unknown_n = count(*) FILTER (WHERE open AND pnow_state = 'no_event'
-                                                  AND d.expected_close_date IS NOT NULL)
+provenance_unknown_n = count(*) FILTER (WHERE open AND is_provenance_unknown)
 
 -- machine_dated_n leaves the rate on BOTH sides: charging it as at-risk blames the rep for a machine
 -- write, counting it as covered credits them for one.
@@ -1154,7 +1191,7 @@ effective way to game this metric (§6.2).
 ```
 at_risk_n
   + (machine-dated open deals that are undated or past-due)     -- provenance: this report excludes, watchlist doesn't
-  + (mirror-terminal deals with an open CRM stage and no usable date)  -- see below
+  + (mirror-terminal deals with an open CRM stage that are undated OR past-due)  -- see below
   = At-Risk watchlist count (no_date + stale_dated) for the same rep
 ```
 
@@ -1162,7 +1199,10 @@ The second term is a genuine divergence and worth raising as a finding **about t
 not as a caveat here. `at-risk-service.ts:71` filters `psc.is_terminal = false` and never inspects
 `bid_board_stage_slug` (verified: zero occurrences in that file). So a Bid-Board-owned deal that is won or
 lost in the mirror while its CRM stage is still open is **counted by the watchlist as an open deal with a
-rotting forecast**, when the codebase's own terminal-aware value logic
+rotting forecast** — and it is counted under *either* watchlist reason, `no_date` **or** `stale_dated`,
+since `futureDatedCloseDatePredicateSql` is negated over the raw column with no terminal awareness. The
+correction term therefore covers both; an earlier draft named only the no-date case and would have left the
+identity failing by exactly the mirror-terminal deals that still carry an old close date, when the codebase's own terminal-aware value logic
 (`aliasedTerminalDealBySlugSql`, `deal-value-sql.ts:389-393`) treats it as realized. Whether that is
 intentional in the watchlist is **unverified** — it may be deliberate, given the Bid Board dual-record
 model. Raise it separately; do not silently adopt either behaviour to make a tie-out pass.
@@ -1528,7 +1568,7 @@ it true. **A claim with no construct is not a claim — it is either implemented
 | 6.3a | Last-minute re-dating shows as weak P₃₀ | P₃₀ anchored 30 days out (§4.0.3); `D_score` requires a P₃₀ | ✅ |
 | 6.3b | …and still shows a strong final call rather than vanishing | `D_score_final` is a separate population (§4.2) — reusing `D_score` would have dropped exactly this rep | ✅ |
 | 6.3c | A short-lived deal's fallback cannot be gamed by a late re-date | Fallback selects the **earliest** state, `ORDER BY changed_at ASC, audit_log_id ASC` (§4.0.4) | ✅ |
-| 6.4 | Tiny denominators do not rank | `scoreable_n >= MIN_RANKED_SCOREABLE` gate applied to the ranked set (§6.6) | ✅ after §6.6 |
+| 6.4 | Tiny denominators do not rank | Each rate gates on **its own** denominator: `scoreable_n`, `scoreable_final_n`, or `\|D_cov\| > 0` — all `>= MIN_RANKED_SCOREABLE` where a count applies (§6.4, §6.6) | ✅ |
 | 6.5a | Clearing a date does not erase prior churn | `E` is not truncated at a clear; `clear_count` is its own counter | ✅ |
 | 6.5b | A cleared date does not keep counting as standing | `state_at` returns `'cleared'` from the latest event's NULL `new_date` (§4.0.3) | ✅ |
 | 6.5c | Coverage treats a cleared deal as uncovered | `cov_state IN ('cleared','no_event')` → `at_risk_n` (§4.1) | ✅ |
@@ -1615,6 +1655,13 @@ A rep with two scored deals and two hits is not the best forecaster in the compa
 denominator — proposed **5 deals in `D_score`** — to appear in the ranking. Below it, show the row with the
 real numbers and an "insufficient volume" marker, excluded from sort order. This is the same discipline
 `at-risk-service.ts` applies by making every row its own evidence.
+
+**Each ranked rate is gated on its own denominator.** `hit_rate_14d` and `hit_rate_30d` gate on
+`scoreable_n`; `hit_rate_14d_final` gates on `scoreable_final_n`; `coverage_rate` gates on `|D_cov| > 0`.
+Round 7 gave the final hit rate its own population (`D_score_final`) without giving it its own floor, so a
+rep with a single scoreable-final deal who hit it could rank first on a one-deal sample — §6.4's exact
+failure, reintroduced by the very fix that made the metric correct. A floor that keys on a *different*
+population than the rate it guards is not a floor.
 
 Name the constant `MIN_RANKED_SCOREABLE = 5` and apply it as an explicit predicate on the ranked set, not
 as a rendering convention — §6.0 row 6.4 points at that predicate as the enforcing construct, and a floor
@@ -1727,6 +1774,8 @@ work or an omission, and there is no way to tell which from a list that only nam
 | `hit_rate_14d` | Col | `D_score` | 4.2 |
 | `hit_rate_30d` | **Col** | `D_score` | 4.2 / 2.3 |
 | `hit_rate_14d_final` | Col | `D_score_final` | 4.2 |
+| `scoreable_final_n` | Col | `D_score_final` | 4.2 |
+| `forecast_reliability` | Col | composite of `D_cov` + `D_score` | 6.1 |
 | `mean_signed_error_days` | Col | `D_score` | 4.3 |
 | `median_signed_error_days` | Col | `D_score` | 4.3 |
 | `p90_signed_error_days` | **Col** | `D_score` | 4.3 |
@@ -1745,7 +1794,7 @@ work or an omission, and there is no way to tell which from a list that only nam
 | `machine_written_events_n` → `hubspot_refresh_events_n`, `migration_seed_events_n` | Diag | `source='machine'` on `D_book` | 2.5(b) |
 | `mirror_terminal_no_date_n` | Diag | `D_nodate` | 4.0.5 |
 | `bid_board_owned_n` | Diag | `D_book` | 2.5(c) |
-| `prior_period_landed_n` | Diag | `D_prior` | 4.0.5 |
+| `out_of_period_landed_n` | Diag | `D_outside` | 4.0.5 |
 | `provenance_unknown_n` | Diag | `D_open`, raw date with `pnow_state='no_event'` | 4.0.6 |
 
 `hit_rate_30d` and `p90_signed_error_days` are marked in bold because they were **missing from an earlier
@@ -1786,9 +1835,9 @@ appear twice or not at all. Same rule as §4.0.6's total-order requirement, appl
 query rather than to a `LIMIT 1` lookup.
 
 `NULLS LAST` is explicit and mandatory — `DESC` defaults to NULLS **first** in Postgres, which would put
-every unmeasurable rep at the top (§6.6). Reps below the volume floor (`scoreable_n >= MIN_RANKED_SCOREABLE`,
-§6.4) or with a zero denominator are shown **below** the ranked rows with an em dash and an
-"insufficient data" marker, not merely sorted last. The columns in bold were added after review: each is the only visible trace of a specific way the
+every unmeasurable rep at the top (§6.6). A rep below the floor **for the column being sorted** — each rate
+gates on its own denominator (§6.4) — or with a zero denominator is shown **below** the ranked rows with an
+em dash and an "insufficient data" marker, not merely sorted last. The columns in bold were added after review: each is the only visible trace of a specific way the
 report could otherwise mislead, and dropping them for width is not a cosmetic decision.
 
 **Evidence drill.** Clicking any cell opens the deal list behind it. Per deal: the full close-date timeline
@@ -1834,6 +1883,14 @@ within a short window of the event (§1.7). Every number on the summary row is r
     a reference does not resolve, **add the projection — never delete the reference**: twice now the
     dangling name was the load-bearing half of a defect fix, and dropping it would have reinstated the
     defect (non-deterministic ordering; the unimplementable machine-source split).
+16. **Every fix must be propagated, not just applied.** Before calling a correction done, ask what else it
+    obliges: a new metric needs rows in §4.0.6 *and* the v1 table; a new population needs a partition
+    invariant; a new denominator needs its own volume floor; a new name needs a producer; a new permission
+    needs the column in scope where the permission applies. Three consecutive review rounds were dominated
+    not by errors in the original design but by **incomplete propagation of the previous round's fixes** —
+    a metric given its own population but not its own floor, a ranked column in neither table, an exception
+    granted to a block that could not reach the data. Re-run the §7 convention audit and the three
+    table-agreement checks **after** a change, never before.
 
 **A convention that forbids something the spec requires is worse than no convention, because it will be
 enforced.** Convention 10 was exactly that for one round: it banned every raw read of
@@ -1857,6 +1914,8 @@ must therefore be stated with its exceptions, and each was checked against the s
 | 12 never negate a nullable | `NOT p30_parked_at_write`, `NOT pfinal_parked_at_write` | **Was violated** — `pfinal_parked_at_write` was used but never defined, so its COALESCE guarantee was assumed rather than stated. Fixed |
 | 13 `NULLS LAST` + unranked | §6.6, default sort | Obeyed; default sort also needed `rep_id` for totality. Fixed |
 | 14 §6 claims name constructs | §6.0 | Obeyed |
+| 15 no dangling identifiers | §4.0.7 producer/consumer chain | Obeyed — re-run after round 8; `coverage_resolution` added as a producer |
+| 16 fixes fully propagated | every round-8 change | **Was the round-8 finding class itself** — three of seven were round 7's fixes leaving new gaps. Audits re-run after this round, not before |
 
 **One companion decision v1 must make, not defer.** The existing Forecast Variance report publishes
 `avg_close_drift_days` — unsigned, Won-only, and structurally frozen since 2026-04-23 (§1.5). Shipping a
@@ -1974,6 +2033,22 @@ complement of `futureDatedCloseDatePredicateSql`'s `>= today` (`foundations.ts:4
 unparked in both. One ordering — `percentile_cont`'s `WITHIN GROUP` — deliberately needs no tie-breaker,
 and §4.3 now says why.
 
+**Round 8 (incomplete propagation — round 7's own fixes leaving new gaps)**
+
+| # | Was | Now |
+|---|---|---|
+| 1 | Convention 10 granted §4.1 permission to read `d.expected_close_date`, but the base `outcomes` CTE deliberately does not project it | A *permission* granted to a block with no access to the thing it permits — the referential-integrity class one level up. The only escape was the ad-hoc raw read convention 10 forbids. Now a named `coverage_resolution` CTE that joins `deals` itself, with a producer/consumer row. |
+| 2 | P₃₀ fallback gate compared `created_at` against `outcome_date - 31` | That is the *start* of the anchor day, not its end. A deal created during the P₃₀ business date with no close date, first forecast after that day, slipped through and had its late forecast promoted to P₃₀. Both arms now use the identical `business_day_end_exclusive(outcome_date - 30)`. |
+| 3 | The `lost_at::date` deliberate-exception note | **Was never actually in the document.** A round-5 replacement silently failed to match and the script's aggregate success flag hid it. Added, now naming the concrete consequence (a loss after 19:00 CT can shift period and both anchors by a day). |
+| 4 | Mirror-terminal watchlist correction named only no-date deals | The watchlist counts `no_date` **and** `stale_dated` with no terminal awareness, so a mirror-terminal deal with a past raw date was counted there and excluded here. Correction widened to undated-or-past-due. |
+| 5 | `hit_rate_14d_final` ranked, but the volume floor keyed on `D_score` | Round 7 gave the metric its own population without its own floor, so one scoreable-final deal could rank first — §6.4's exact failure, reintroduced by the fix that made the metric correct. Each rate now gates on its own denominator; `scoreable_final_n` added to both metric tables. |
+| 6 | `forecast_reliability` presented as a ranked column, absent from both metric tables | Broke the equal-set check established in round 6. Added to §4.0.6 and the v1 table. |
+| 7 | `D_prior` / `prior_period_landed_n` | `D` reflects current row state, so a completed-period view includes deals closed *after* `to`. The name asserted "prior" while the count meant "outside". Renamed `D_outside` / `out_of_period_landed_n`. |
+
+Findings 1, 5 and 6 are all round 7's corrections leaving a new gap — the dominant failure mode for three
+rounds running. Convention 16 now requires asking what else a fix obliges (table rows, floors, producers,
+invariants, cross-references) and re-running the audits **after** a change rather than before.
+
 **Round 7 (dangling references — names used where nothing produces them)**
 
 | # | Was | Now |
@@ -2010,7 +2085,7 @@ carries the derived-name definitions and a producer/consumer table for the whole
 |---|---|---|
 | 1 | Ranked columns had no `NULLS LAST` | `DESC` defaults to NULLS **first** in Postgres, so a rep with no `D_cov` denominator sorted to the top of the column the scorecard ranks by — the exact failure §6.1 exists to prevent. New §6.6 sweeps all ten NULL-capable columns, mandates explicit `NULLS LAST` in both directions, and excludes zero-denominator rows from the ranked set rather than sorting them last. |
 | 2 | `E` ran to `now()` for every deal | `expected_close_date` stays editable after close (`stage-change.ts` clears the terminal fields but deliberately not the forecast), so cleanup edits were counted as churn against a forecast no longer standing. `E` is now capped per deal by `event_window_end`, sharing the P_final boundary helper. |
-| 3 | `D_landed ⊎ D_open ⊎ D_nodate = D` | False for any period narrower than all-time: deals closed before `from` matched no population. New `D_prior`; the partition and its invariant are now four-way. |
+| 3 | `D_landed ⊎ D_open ⊎ D_nodate = D` | False for any period narrower than all-time: deals closed before `from` matched no population. New population (named `D_prior` at the time, renamed `D_outside` in round 8 — it also contains deals closed *after* `to`); the partition and its invariant are now four-way. |
 | 4 | §4.0.6 promised provenance-unknown deals bucket as rep-authored; §4.1 sent every `no_event` to `at_risk_n` | Provenance is resolved into `cov_state` / `cov_prediction` **before** the partition. The scoring anchors deliberately do not apply the same resolution, and §4.1 now says why. |
 | 5 | `hubspot_written_events_n` counted migration seeds too | Both classifier arms map to `source='machine'`, so a book with seeds and no refresh writes looked contaminated — corrupting the §1.1.1 census that gates the whole build. Split into `hubspot_refresh_events_n` and `migration_seed_events_n` via a `machine_source` label. |
 | 6 | "Forecast reliability = coverage × hit rate; zero coverage yields zero" | False in SQL: `0 * NULL` is `NULL`, so the composite went blank for exactly the rep it should score zero — then sorted first. Both operands coalesced. |
@@ -2047,6 +2122,14 @@ were themselves silently broken**, because `NOT <nullable>` inside `FILTER` coun
 failing loudly. A check that can fail open is not a check. That is why the state enum is coalesced and
 non-null by construction, and why "never negate a nullable" is now a stated SQL rule (§4.0.6) rather than
 something to remember at each site.
+
+**Round 8's lesson is about tooling, not design.** Finding 3 was not a judgement error: the note had been
+written and I reported it as landed, but the scripted replacement silently did not match — I had targeted
+`WON_STAGE_SLUGS / LOST_STAGE_SLUGS` where the document said `WON_STAGE_SLUGS / LOST_STAGE_SLUGS /
+TERMINAL_STAGE_SLUGS` — and the script printed one aggregate success for the batch. Every subsequent edit
+in this document now goes through a helper that asserts each individual replacement matched exactly once
+and refuses to write the file otherwise. An edit tool that can fail silently makes every other check in
+this document unreliable, because they all run against whatever actually landed.
 
 **Round 7's lesson: the dangerous fix is the one that adds a name.** Both reported findings were a defect
 fix from the previous round referring to something no block produced — and in both cases the *natural*
