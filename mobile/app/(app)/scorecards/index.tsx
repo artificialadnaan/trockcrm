@@ -23,6 +23,9 @@ import {
   deleteScorecardDraft,
   type LocatedScorecardDraft,
 } from "../../../src/scorecards/draft-store";
+// Display-only change-order prefix. A change-order child deal is stored "<Parent> — Change Order N";
+// applied where a draft's dealName is SHOWN, never where it is created/persisted.
+import { formatDealDisplayName } from "../../../src/projects/field-projects";
 import { newClientUploadId, removeQueuedUploadsAndWait, uploadOwnerKey } from "../../../src/capture/upload-queue";
 import { registerUploadBackgroundTask } from "../../../src/capture/upload-background-task";
 import { newSubmissionId } from "../../../src/scorecards/ids";
@@ -201,9 +204,9 @@ export default function ScorecardsScreen() {
       editingSubmitted ? "Discard changes?" : "Discard scorecard?",
       editingSubmitted
         ? cleanupIds.length > 0
-          ? `This removes your local changes to ${draft.dealName}. New photos uploaded only for this edit will also be removed from the project gallery. The submitted scorecard will remain unchanged.`
-          : `This removes your local changes to ${draft.dealName}. The submitted scorecard will remain unchanged.`
-        : `This permanently removes the in-progress ${draft.kind === "leadership" ? "Leadership " : ""}Scorecard for ${draft.dealName}.`,
+          ? `This removes your local changes to ${formatDealDisplayName(draft.dealName)}. New photos uploaded only for this edit will also be removed from the project gallery. The submitted scorecard will remain unchanged.`
+          : `This removes your local changes to ${formatDealDisplayName(draft.dealName)}. The submitted scorecard will remain unchanged.`
+        : `This permanently removes the in-progress ${draft.kind === "leadership" ? "Leadership " : ""}Scorecard for ${formatDealDisplayName(draft.dealName)}.`,
       [
         { text: "Keep editing", style: "cancel" },
         {
@@ -267,10 +270,10 @@ export default function ScorecardsScreen() {
                   onPress={() => router.push(draftPath(d, draftOfficeId))}
                   style={({ pressed }) => [styles.draftResume, pressed && { opacity: 0.7 }]}
                   accessibilityRole="button"
-                  accessibilityLabel={`${isEditingScorecardDraft(d) ? "Resume editing submitted" : "Resume"} ${d.kind === "leadership" ? "Leadership " : ""}Scorecard for ${d.dealName}`}
+                  accessibilityLabel={`${isEditingScorecardDraft(d) ? "Resume editing submitted" : "Resume"} ${d.kind === "leadership" ? "Leadership " : ""}Scorecard for ${formatDealDisplayName(d.dealName)}`}
                 >
                 <View style={{ flex: 1 }}>
-                  <Text style={styles.rowTitle} numberOfLines={1}>{d.dealName}</Text>
+                  <Text style={styles.rowTitle} numberOfLines={1}>{formatDealDisplayName(d.dealName)}</Text>
                   <Text style={styles.rowSub}>
                     {isEditingScorecardDraft(d) ? "Editing submitted · " : ""}{d.kind === "leadership" ? "Leadership · " : ""}Week of {shortDate(d.weekOf)} · {scorecardDraftSectionsAnswered(d)}/{d.kind === "leadership" ? LEADERSHIP_SECTION_COUNT : SECTION_COUNT} scored
                   </Text>

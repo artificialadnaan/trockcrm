@@ -1,5 +1,13 @@
 import { LEGACY_PHOTO_CATEGORY_ITEMS, PHOTO_CATEGORY_OPTION_ITEMS, photoCategoryLabel } from "@trock-crm/shared/types";
 
+// The deal-NAME resolver is the single source of truth in @trock-crm/shared/types. A change order is a
+// real CHILD deal stored as "<Parent> — Change Order N", and every row on this app truncates to one line,
+// so the suffix is exactly the part a phone never shows. Re-exported here so the field pages reach for one
+// `../lib/field-projects` import. DISPLAY-ONLY: apply it at the JSX render site, NEVER to a value that is
+// sent back to the server — CapturePage seeds its target SEARCH box from `target.name`, and the server
+// matches that text against the STORED name (`d.name ILIKE …`).
+export { formatDealDisplayName } from "@trock-crm/shared/types";
+
 export type FieldProject = {
   id: string;
   name: string;

@@ -34,7 +34,7 @@ import {
   getOwnerInitialColor,
 } from "@trock-crm/shared/types";
 import { cn } from "@/lib/utils";
-import { formatCurrency, parseDisplayDate } from "@/lib/deal-utils";
+import { formatCurrency, formatDealDisplayName, parseDisplayDate } from "@/lib/deal-utils";
 import { getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
 import { listPaginationIconButtonClassName } from "@/components/shared/list-pagination";
 import { AtRiskBadge } from "@/components/deals/at-risk-badge";
@@ -1068,11 +1068,14 @@ export function DealsListSection({
       cellClassName: "md:w-[13.5rem] md:!px-2 lg:w-[15rem] lg:!px-3",
       render: (deal) => {
         const displayNumber = getDealDisplayNumber(deal);
+        // A change-order child is STORED as "<Parent> — Change Order N", so this truncating cell reads as
+        // its parent. Display-only reorder; the stored name still feeds sort/search/CSV untouched.
+        const displayName = formatDealDisplayName(deal.name);
         const propertyLabel = getDealPropertyLabel(deal);
         return (
           <div className="min-w-0 space-y-1">
-            <p className="truncate whitespace-nowrap font-black text-slate-950" aria-label={deal.name} title={deal.name}>
-              {deal.name}
+            <p className="truncate whitespace-nowrap font-black text-slate-950" aria-label={displayName} title={displayName}>
+              {displayName}
             </p>
             <p
               className={cn(
@@ -1400,6 +1403,7 @@ export function DealsListSection({
             <div className="space-y-3 md:hidden" aria-label="Deals list cards">
               {deals.map((deal) => {
                 const displayNumber = getDealDisplayNumber(deal);
+                const displayName = formatDealDisplayName(deal.name);
                 const ownerName = deal.assignedRepName ?? assigneeNameById.get(deal.assignedRepId) ?? "Unassigned";
                 const ownerColor = getOwnerInitialColor(deal.assignedRepId ?? ownerName);
                 const propertyLabel = getDealPropertyLabel(deal);
@@ -1410,12 +1414,12 @@ export function DealsListSection({
                     type="button"
                     className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-50/60 p-4 text-left transition hover:border-brand-red/30 hover:bg-white focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red"
                     onClick={() => navigate(`/deals/${deal.id}`)}
-                    aria-label={`Open deal ${deal.name}`}
+                    aria-label={`Open deal ${displayName}`}
                   >
                     <div className="space-y-3">
                       <div className="space-y-1">
-                        <p className="line-clamp-2 text-sm font-black leading-5 text-slate-950" aria-label={deal.name} title={deal.name}>
-                          {deal.name}
+                        <p className="line-clamp-2 text-sm font-black leading-5 text-slate-950" aria-label={displayName} title={displayName}>
+                          {displayName}
                         </p>
                         <p
                           className={cn(

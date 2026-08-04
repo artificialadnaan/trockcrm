@@ -4,6 +4,7 @@ import { ChevronLeft, ChevronRight, Download, FileText, MapPin, X } from "lucide
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { api } from "@/lib/api";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 
 // Mirrors the locked public payload (server: public-photo-tokens). The public surface
 // exposes ONLY the photos and the property name/address — never the uploader, category,
@@ -78,7 +79,9 @@ export function PublicPhotoViewerPage() {
     <main className="min-h-screen bg-slate-50 text-slate-950">
       <header className="border-b border-slate-200 bg-white px-4 py-4 sm:px-6">
         <p className="text-xs font-semibold uppercase tracking-wide text-red-700">T Rock Photos</p>
-        <h1 className="mt-1 text-2xl font-semibold">{data.deal.name}</h1>
+        {/* A change-order child deal is STORED as "<Parent> — Change Order N"; lead with the label so
+            a shared CO link is not mistaken for its parent. Display-only; the stored name is unchanged. */}
+        <h1 className="mt-1 text-2xl font-semibold">{formatDealDisplayName(data.deal.name)}</h1>
         {data.deal.propertyAddress && (
           <p className="mt-1 flex items-center gap-1 text-sm text-slate-600">
             <MapPin className="h-4 w-4" />

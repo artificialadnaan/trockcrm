@@ -1,6 +1,7 @@
 import React from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import type { FieldScorecardSummary } from "../api/types";
+import { formatDealDisplayName } from "../projects/field-projects";
 import { formatShortDate } from "../scorecards/detail-view";
 import { theme } from "../theme/theme";
 import { RatingBadge } from "./RatingBadge";
@@ -16,7 +17,9 @@ export function SubmittedScorecardRow({
   const scoreText = isLeadership
     ? `${(scorecard.averageScore ?? scorecard.totalScore / 10).toFixed(1)}/10`
     : `${scorecard.totalScore}/100`;
-  const canonicalProjectName = scorecard.projectName?.trim();
+  // A change-order child deal is stored "<Parent> — Change Order N"; this row clamps to two lines, so
+  // move the label to the front. Display-only — `scorecard.projectName` itself is untouched.
+  const canonicalProjectName = formatDealDisplayName(scorecard.projectName?.trim());
   const projectName =
     canonicalProjectName || (scorecard.projectNumber ? `Project ${scorecard.projectNumber}` : "Untitled project");
   const metadata = [

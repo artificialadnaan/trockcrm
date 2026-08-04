@@ -11,6 +11,7 @@ import {
   categoryLabel,
   correctiveAffordance,
   filterPhotos,
+  formatDealDisplayName,
   groupPhotos,
   isProjectOffOffice,
   projectNumberLabel,
@@ -514,7 +515,9 @@ export default function ProjectDetailScreen() {
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <ScreenHeader onBack={() => router.back()} title={toStr(params.name) || "Project"} />
+      {/* Display-only change-order prefix. The `params.name` value itself stays RAW — it is forwarded on
+          to /capture and then /walk, where it becomes a walk title PERSISTED to the server. */}
+      <ScreenHeader onBack={() => router.back()} title={formatDealDisplayName(toStr(params.name)) || "Project"} />
 
       {/* The gallery is VIRTUALIZED. It used to be a ScrollView rendering every photo of every group,
           which on a project with thousands of photos mounted thousands of native image views and held

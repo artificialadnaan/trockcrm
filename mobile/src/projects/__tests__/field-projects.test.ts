@@ -2,6 +2,7 @@ import {
   categoryLabel,
   correctiveAffordance,
   filterPhotos,
+  formatDealDisplayName,
   formatDistanceMiles,
   groupPhotos,
   isProjectOffOffice,
@@ -342,5 +343,47 @@ describe("correctiveAffordance", () => {
     // workflow had simply ended. Never tappable — there is nothing for the responder to do until it returns.
     expect(correctiveAffordance("corrective_action_submitted", true)).toBe("awaiting_status");
     expect(correctiveAffordance("corrective_action_submitted", false)).toBe("awaiting_status");
+  });
+});
+
+// This helper is a deliberate MIRROR of shared/src/types/deal-display-name.ts (the Expo bundle cannot
+// import @trock-crm/shared). These cases are the same contract that suite asserts — keep them in step.
+describe("formatDealDisplayName", () => {
+  it("moves the generated change-order suffix to the front", () => {
+    expect(formatDealDisplayName("Tides Park Lane — Change Order 1")).toBe("Change Order 1 — Tides Park Lane");
+    expect(formatDealDisplayName("Tides Park Lane — Change Order 12")).toBe("Change Order 12 — Tides Park Lane");
+  });
+
+  it("keeps em-dashes belonging to the parent's own name — only the LAST segment is ours", () => {
+    expect(formatDealDisplayName("Tides — Phase 2 — Change Order 3")).toBe("Change Order 3 — Tides — Phase 2");
+  });
+
+  it("tolerates surrounding whitespace and a suffix-only name", () => {
+    expect(formatDealDisplayName("Tides   —   Change Order 4   ")).toBe("Change Order 4 — Tides");
+    expect(formatDealDisplayName(" — Change Order 1")).toBe("Change Order 1");
+  });
+
+  it("is idempotent — an already-prefixed name is never double-prefixed", () => {
+    const once = formatDealDisplayName("Tides Park Lane — Change Order 1");
+    expect(formatDealDisplayName(once)).toBe(once);
+    expect(formatDealDisplayName("Change Order 1")).toBe("Change Order 1");
+  });
+
+  it("leaves every other name byte for byte", () => {
+    expect(formatDealDisplayName("Tides Park Lane")).toBe("Tides Park Lane");
+    // "Change Order" mid-string is not the generated suffix.
+    expect(formatDealDisplayName("Change Order Backlog Review")).toBe("Change Order Backlog Review");
+    expect(formatDealDisplayName("Tides — Change Order 1 Addendum")).toBe("Tides — Change Order 1 Addendum");
+    // A hyphen/en-dash separator, a missing ordinal, or the wrong casing is a name someone typed.
+    expect(formatDealDisplayName("Tides - Change Order 1")).toBe("Tides - Change Order 1");
+    expect(formatDealDisplayName("Tides — Change Order")).toBe("Tides — Change Order");
+    expect(formatDealDisplayName("Tides — change order 1")).toBe("Tides — change order 1");
+  });
+
+  it("handles empty and nullish without throwing", () => {
+    expect(formatDealDisplayName("")).toBe("");
+    expect(formatDealDisplayName("   ")).toBe("   ");
+    expect(formatDealDisplayName(null)).toBeNull();
+    expect(formatDealDisplayName(undefined)).toBeUndefined();
   });
 });

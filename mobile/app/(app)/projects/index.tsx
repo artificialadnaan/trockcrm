@@ -7,7 +7,7 @@ import { useDebouncedValue } from "../../../src/hooks/useDebouncedValue";
 import { useDeviceLocation } from "../../../src/hooks/useDeviceLocation";
 import { useNearbyProjects, useProjects, useStarredProjects, useToggleStar } from "../../../src/query/hooks";
 import { useAuth } from "../../../src/auth/AuthContext";
-import { formatDistanceMiles, isProjectOffOffice, partitionProjectSections, projectNumberLabel, relativeDate, selectNearbySource, type FieldProject } from "../../../src/projects/field-projects";
+import { formatDealDisplayName, formatDistanceMiles, isProjectOffOffice, partitionProjectSections, projectNumberLabel, relativeDate, selectNearbySource, type FieldProject } from "../../../src/projects/field-projects";
 import { Badge, EmptyState, LoadingState, TextInput } from "../../../src/components/ui";
 import { Banner } from "../../../src/components/Banner";
 import { ScreenHeader } from "../../../src/components/ScreenHeader";
@@ -187,6 +187,10 @@ function ProjectRow({
   // Cross-office projects are view-only until cross-office writes ship — suppress the star (its
   // single-office write would 404) and show a view-only badge so the row is clearly read-only.
   const offOffice = isProjectOffOffice(project, writableOfficeId);
+  // A change-order child is stored "<Parent> — Change Order N" and this row is a single truncated line,
+  // so the suffix is precisely the part a phone never shows. Display-only — the nav param below still
+  // carries `project.name`, and the server still matches the STORED name for search.
+  const displayName = formatDealDisplayName(project.name);
   // The star is a SIBLING of the row's tappable area (not nested inside it), so
   // tapping the star toggles only — it can never bubble into opening the project.
   return (
@@ -195,11 +199,11 @@ function ProjectRow({
         onPress={onPress}
         style={({ pressed }) => [{ flex: 1, gap: 4 }, pressed && { opacity: 0.6 }]}
         accessibilityRole="button"
-        accessibilityLabel={`Open ${project.name}, ${project.projectNumber ? `project number ${project.projectNumber}` : "project pending"}, ${project.stage}`}
+        accessibilityLabel={`Open ${displayName}, ${project.projectNumber ? `project number ${project.projectNumber}` : "project pending"}, ${project.stage}`}
       >
         {/* Full-width name on its own line — the stage badge no longer competes for width (#1). */}
         <Text style={styles.rowName} numberOfLines={1}>
-          {project.name}
+          {displayName}
         </Text>
         {/* Project # is promoted to a prominent, non-truncating element so rows that differ
             only by project # stay distinguishable; the stage badge wraps beside it (#2). Shows the
@@ -229,7 +233,7 @@ function ProjectRow({
           hitSlop={12}
           style={styles.starButton}
           accessibilityRole="button"
-          accessibilityLabel={project.starred ? `Unstar ${project.name}` : `Star ${project.name}`}
+          accessibilityLabel={project.starred ? `Unstar ${displayName}` : `Star ${displayName}`}
         >
           <Text style={[styles.star, project.starred && { color: theme.color.brandRed }]}>
             {project.starred ? "★" : "☆"}

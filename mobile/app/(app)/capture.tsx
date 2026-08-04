@@ -13,6 +13,9 @@ import { qk } from "../../src/query/keys";
 import { assignPhotoTarget, getTranscriptionConfig, type Fetcher } from "../../src/api/endpoints";
 import { apiFetch } from "../../src/api/client";
 import type { FieldCaptureTarget } from "../../src/api/types";
+// Display-only change-order prefix. Applied at the RENDER sites below and nowhere else: `target.name`
+// is forwarded raw into the /walk nav param, where it becomes a walk title persisted to the server.
+import { formatDealDisplayName } from "../../src/projects/field-projects";
 import { extractExifMetadata, getLiveGps, type PhotoMetadata } from "../../src/capture/metadata";
 import { type CaptureTargetRef, type CaptureUploadInput } from "../../src/capture/upload";
 import {
@@ -995,7 +998,7 @@ export default function CaptureScreen() {
       );
       void pendingQuery.refetch();
       if (t.type === "deal") invalidateDealPhotos(t.id);
-      setNotice({ tone: "success", text: `Photo assigned to ${t.name}.` });
+      setNotice({ tone: "success", text: `Photo assigned to ${formatDealDisplayName(t.name)}.` });
     } catch {
       setNotice({ tone: "error", text: "Couldn't assign that photo." });
     }
@@ -1022,7 +1025,7 @@ export default function CaptureScreen() {
           <View style={{ flex: 1 }}>
             <Text style={styles.targetLabel}>Project</Text>
             <Text style={styles.targetName} numberOfLines={1}>
-              {target ? target.name : "No project — uploads to Pending"}
+              {target ? formatDealDisplayName(target.name) : "No project — uploads to Pending"}
             </Text>
           </View>
           <View style={styles.targetActions}>
@@ -1180,7 +1183,7 @@ export default function CaptureScreen() {
               title={target ? "Ready to capture" : "No project selected"}
               subtitle={
                 target
-                  ? `Every photo uploads to ${target.name} the moment you take it.`
+                  ? `Every photo uploads to ${formatDealDisplayName(target.name)} the moment you take it.`
                   : "Choose a project above, or shoot now — photos upload to Pending and you can assign them after."
               }
             />

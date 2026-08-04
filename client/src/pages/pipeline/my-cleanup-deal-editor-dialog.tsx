@@ -3,6 +3,7 @@ import { DealForm } from "@/components/deals/deal-form";
 import { ForecastEditor } from "@/components/shared/forecast-editor";
 import { NextStepEditor } from "@/components/shared/next-step-editor";
 import { useDealDetail, updateDeal } from "@/hooks/use-deals";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 
 interface MyCleanupDealEditorDialogProps {
   dealId: string | null;
@@ -33,7 +34,9 @@ export function MyCleanupDealEditorDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-5xl max-h-[92vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>{deal ? `Edit Deal: ${deal.name}` : "Edit Deal"}</DialogTitle>
+          {/* A change-order child is STORED as "<Parent> — Change Order N"; lead the title with the label.
+              Display-only — the DealForm below still edits the stored name. */}
+          <DialogTitle>{deal ? `Edit Deal: ${formatDealDisplayName(deal.name)}` : "Edit Deal"}</DialogTitle>
           <DialogDescription>
             Update the deal directly from your cleanup queue. The item will disappear automatically once the
             underlying cleanup issue is resolved.

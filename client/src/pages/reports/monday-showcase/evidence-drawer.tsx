@@ -11,7 +11,7 @@ import {
 import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { resolveDealDisplayNumber } from "@/lib/deal-utils";
+import { formatDealDisplayName, resolveDealDisplayNumber } from "@/lib/deal-utils";
 import { useShowcaseEvidence } from "@/hooks/use-reports";
 import { MoveCloseDateDialog } from "@/components/deals/move-close-date-dialog";
 import { useAuth } from "@/lib/auth";
@@ -93,7 +93,9 @@ const RENDERERS: Record<SortKey, (r: EvidenceRecord) => ReactNode> = {
     return (
       <div className="flex min-w-0 items-center gap-1.5">
         <div className="min-w-0">
-          <div className="max-w-[260px] truncate font-medium text-sky-700 group-hover:underline">{r.name}</div>
+          {/* A change-order child is STORED "<Parent> — Change Order N" and this cell truncates at
+              260px, so the label moves to the front. Display only — the CSV keeps the stored name. */}
+          <div className="max-w-[260px] truncate font-medium text-sky-700 group-hover:underline">{formatDealDisplayName(r.name)}</div>
           {displayNumber ? <div className="text-xs text-slate-400">#{displayNumber}</div> : null}
         </div>
         <ExternalLink className="h-3.5 w-3.5 shrink-0 text-slate-300 opacity-0 transition group-hover:opacity-100" />

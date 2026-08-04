@@ -6,7 +6,7 @@ import { useDeals, type Deal } from "@/hooks/use-deals";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { formatCurrency } from "@/lib/deal-utils";
+import { formatCurrency, formatDealDisplayName } from "@/lib/deal-utils";
 
 type Period = "ytd" | "mtd";
 
@@ -171,7 +171,9 @@ export function ContractsSignedPage() {
               >
                 <div className="min-w-0">
                   <div className="flex items-center gap-2">
-                    <p className="truncate text-sm font-semibold text-slate-950">{deal.name}</p>
+                    {/* A change-order child is STORED "<Parent> — Change Order N" and this row truncates;
+                        move the label to the front for DISPLAY only. */}
+                    <p className="truncate text-sm font-semibold text-slate-950">{formatDealDisplayName(deal.name)}</p>
                     <span className="text-xs text-slate-500">{deal.dealNumber}</span>
                   </div>
                   <p className="mt-1 truncate text-sm text-slate-600">{buildPropertyLine(deal)}</p>

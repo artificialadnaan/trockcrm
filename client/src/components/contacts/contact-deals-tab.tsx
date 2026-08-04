@@ -5,7 +5,7 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { DealStageBadge } from "@/components/deals/deal-stage-badge";
 import { ChangeOrderBadge } from "@/components/deals/change-order-badge";
-import { formatDealDisplayNumber } from "@/lib/deal-utils";
+import { formatDealDisplayName, formatDealDisplayNumber } from "@/lib/deal-utils";
 import type { Contact } from "@/hooks/use-contacts";
 import { useContactDeals, removeContactDealAssociation } from "@/hooks/use-contacts";
 
@@ -86,7 +86,9 @@ export function ContactDealsTab({ contactId, contact }: ContactDealsTabProps) {
                   <Badge variant="outline" className="text-xs">Primary</Badge>
                 )}
               </div>
-              <p className="font-medium truncate">{assoc.deal.name}</p>
+              {/* A change-order child is STORED "<Parent> — Change Order N"; this line truncates the
+                  suffix away, so a CO reads as its parent. Display-only; the stored name is unchanged. */}
+              <p className="font-medium truncate">{formatDealDisplayName(assoc.deal.name)}</p>
               {assoc.role && (
                 <p className="text-xs text-muted-foreground">Role: {assoc.role}</p>
               )}

@@ -15,7 +15,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useDeals } from "@/hooks/use-deals";
-import { formatDealDisplayNumber } from "@/lib/deal-utils";
+import { formatDealDisplayName, formatDealDisplayNumber } from "@/lib/deal-utils";
 import {
   associateEmailToEntity,
   assignEmailThread,
@@ -123,7 +123,9 @@ function ThreadAssignmentDialog({
                     onClick={() => setSelectedDealId(deal.id)}
                   >
                     <div className="min-w-0">
-                      <p className="truncate text-sm font-medium">{deal.name}</p>
+                      {/* A change-order child is STORED "<Parent> — Change Order N" and this line
+                          truncates the suffix off. Display-only; the stored name is untouched. */}
+                      <p className="truncate text-sm font-medium">{formatDealDisplayName(deal.name)}</p>
                       <p className="text-xs text-muted-foreground">
                         {formatDealDisplayNumber(deal).label}
                         {deal.propertyAddress ? ` · ${deal.propertyAddress}` : ""}
@@ -143,7 +145,7 @@ function ThreadAssignmentDialog({
           {selectedDeal ? (
             <div className="rounded-lg border bg-muted/30 p-3 text-sm">
               <p className="font-medium">Selected deal</p>
-              <p>{selectedDeal.name}</p>
+              <p>{formatDealDisplayName(selectedDeal.name)}</p>
               <p className="text-muted-foreground">
                 {formatDealDisplayNumber(selectedDeal).label}
                 {selectedDeal.propertyAddress ? ` · ${selectedDeal.propertyAddress}` : ""}

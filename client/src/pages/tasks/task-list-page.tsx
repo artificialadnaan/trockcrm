@@ -34,7 +34,7 @@ import { TaskEditDialog } from "@/components/tasks/task-edit-dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
-import { formatDealDisplayNumber, sanitizeHubspotDealIdentifiers } from "@/lib/deal-utils";
+import { formatDealDisplayName, formatDealDisplayNumber, sanitizeHubspotDealIdentifiers } from "@/lib/deal-utils";
 import { toast } from "sonner";
 
 type GroupKey = "overdue" | "today" | "this_week" | "later" | "completed";
@@ -120,7 +120,10 @@ export function getTaskProjectContext(task: Pick<Task, "dealId" | "dealName" | "
   if (!task.dealId) return null;
   const displayNumber = formatDealDisplayNumber(task).label;
   if (task.dealName) {
-    return displayNumber === "Pending" ? task.dealName : `${displayNumber} - ${task.dealName}`;
+    // A change-order child deal is STORED as "<Parent> — Change Order N" and this context line renders
+    // truncated, so the suffix is the first thing lost. Display-only -- the stored name is unchanged.
+    const dealName = formatDealDisplayName(task.dealName);
+    return displayNumber === "Pending" ? dealName : `${displayNumber} - ${dealName}`;
   }
   if (displayNumber !== "Pending") return displayNumber;
   return "Project linked";

@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import { usePipelineVelocityReport } from "@/hooks/use-reports";
 import { useReportFilters } from "@/components/reports/report-filter-bar";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import {
   CountBarChart,
   DataTable,
@@ -80,8 +81,10 @@ export function PipelineVelocityPage() {
                     <TableCell className="text-right tabular-nums">{stage.medianDaysInStage}</TableCell>
                     <TableCell>
                       {stage.oldestDeal.dealId ? (
+                        // A change-order child is STORED "<Parent> — Change Order N"; the label moves to
+                        // the front for DISPLAY only, so a CO is not mistaken for its parent here.
                         <Link to={`/deals/${stage.oldestDeal.dealId}`} className="font-semibold text-brand-red hover:underline">
-                          {stage.oldestDeal.dealName} ({stage.oldestDeal.daysInStage}d)
+                          {formatDealDisplayName(stage.oldestDeal.dealName)} ({stage.oldestDeal.daysInStage}d)
                         </Link>
                       ) : "None"}
                     </TableCell>
@@ -108,7 +111,7 @@ export function PipelineVelocityPage() {
                 ) : data.stuckDeals.map((deal) => (
                   <TableRow key={deal.dealId}>
                     <TableCell>
-                      <Link to={`/deals/${deal.dealId}`} className="font-semibold text-brand-red hover:underline">{deal.dealName}</Link>
+                      <Link to={`/deals/${deal.dealId}`} className="font-semibold text-brand-red hover:underline">{formatDealDisplayName(deal.dealName)}</Link>
                     </TableCell>
                     <TableCell>{deal.ownerName}</TableCell>
                     <TableCell>{deal.stageName}</TableCell>

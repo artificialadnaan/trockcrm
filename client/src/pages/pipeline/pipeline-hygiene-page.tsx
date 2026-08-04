@@ -3,6 +3,7 @@ import { useSalesReview } from "@/hooks/use-sales-review";
 import { Badge } from "@/components/ui/badge";
 import { useAuth } from "@/lib/auth";
 import { usePipelineStages } from "@/hooks/use-pipeline-config";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 
 function prettifyIssue(issue: string) {
   return issue.replace(/_/g, " ");
@@ -38,7 +39,9 @@ export function PipelineHygienePage() {
           <div key={`${row.entityType}-${row.id}`} className="rounded-lg border bg-white p-4">
             <div className="flex items-start justify-between gap-4">
               <div>
-                <p className="font-medium">{row.name}</p>
+                {/* A change-order child deal is STORED as "<Parent> — Change Order N"; lead with the label.
+                    Display-only, and safe for the lead rows here — non-CO names pass through unchanged. */}
+                <p className="font-medium">{formatDealDisplayName(row.name)}</p>
                 <p className="text-xs text-muted-foreground">
                   {row.assignedRepName ?? "Unassigned"} • {row.entityType} • {stageNameById.get(row.stageId) ?? "Unknown stage"}
                 </p>

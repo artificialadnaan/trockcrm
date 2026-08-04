@@ -45,6 +45,7 @@ import {
   type PropertySurface,
 } from "@/hooks/use-properties";
 import { cn } from "@/lib/utils";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import { getEffectiveDealValue } from "@trock-crm/shared/types";
 
 type PropertyTab = "overview" | "photos" | "contacts" | "deals" | "leads" | "activity" | "files" | "companycam";
@@ -635,7 +636,9 @@ function RelatedDealsList({ deals }: { deals: PropertyDeal[] }) {
               className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 px-3 py-2 transition-colors hover:bg-slate-50"
             >
               <div className="min-w-0">
-                <p className="truncate text-sm font-black text-slate-950">{deal.name}</p>
+                {/* A change-order child is STORED "<Parent> — Change Order N" and this line truncates
+                    the suffix off. Display-only re-order; the stored name is untouched. */}
+                <p className="truncate text-sm font-black text-slate-950">{formatDealDisplayName(deal.name)}</p>
                 <p className="font-mono text-xs text-slate-500">{deal.dealNumber}</p>
               </div>
               <div className="flex items-center gap-2">

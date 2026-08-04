@@ -19,7 +19,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { photoCategoryLabel } from "@trock-crm/shared/types";
-import { formatDealDisplayNumber } from "@/lib/deal-utils";
+import { formatDealDisplayName, formatDealDisplayNumber } from "@/lib/deal-utils";
 import { api } from "@/lib/api";
 import { endOfCalendarDayIso, startOfCalendarDayIso } from "@/lib/calendar-day-range";
 import { usePhotoFeed, type FeedFilters, type FeedPhoto, type FeedSource } from "@/hooks/use-photo-feed";
@@ -351,7 +351,7 @@ function ProjectRow({
         {/* Feature thumbnail */}
         <div className="h-16 w-16 rounded-lg overflow-hidden bg-gray-100 shrink-0">
           {featurePhoto ? (
-            <ProjectRecentMediaThumb photo={featurePhoto} alt={project.dealName} size="feature" />
+            <ProjectRecentMediaThumb photo={featurePhoto} alt={formatDealDisplayName(project.dealName)} size="feature" />
           ) : (
             <div className="h-full w-full flex items-center justify-center">
               <ImageIcon className="h-6 w-6 text-gray-300" />
@@ -360,8 +360,10 @@ function ProjectRow({
         </div>
 
         <div className="min-w-0">
+          {/* A change-order child deal is STORED as "<Parent> — Change Order N" and every one of these
+              titles/captions truncates, hiding the suffix. Display-only; the stored name is unchanged. */}
           <p className="font-semibold text-gray-900 truncate text-sm">
-            {project.dealName}
+            {formatDealDisplayName(project.dealName)}
           </p>
           {location && (
             <p className="text-xs text-gray-500 truncate">{location}</p>
@@ -479,7 +481,7 @@ function PhotoGridCard({
         ) : thumbUrl ? (
           <img
             src={thumbUrl}
-            alt={photo.dealName || photo.displayName}
+            alt={formatDealDisplayName(photo.dealName) || photo.displayName}
             loading="lazy"
             className="w-full h-full object-cover group-hover:opacity-90 transition-opacity"
           />
@@ -497,7 +499,7 @@ function PhotoGridCard({
       {/* Caption */}
       <div className="mt-1.5 px-0.5">
         <p className="text-xs font-medium text-gray-900 truncate">
-          {truncate(photo.dealName || "Unassigned", 22)}
+          {truncate(formatDealDisplayName(photo.dealName) || "Unassigned", 22)}
         </p>
         <p className="text-[11px] text-gray-500 truncate">
           {timeStr} &bull; {truncate(photo.uploaderName || "Unknown", 16)}
@@ -687,7 +689,7 @@ function AssignToDealPopover({
                   <Check className="h-3.5 w-3.5 shrink-0 text-transparent" />
                 )}
                 <span className="font-mono text-xs text-gray-500">{formatDealDisplayNumber(d).label}</span>
-                <span className="truncate text-gray-900">{d.name}</span>
+                <span className="truncate text-gray-900">{formatDealDisplayName(d.name)}</span>
               </button>
             ))
           )}
@@ -1549,7 +1551,7 @@ export function PhotoFeedPage() {
                       its dealId was still being sent to the feed, with no way to undo it. */}
                   {facets.projects.map((p) => (
                     <option key={p.id} value={p.id}>
-                      {p.name}
+                      {formatDealDisplayName(p.name)}
                     </option>
                   ))}
                 </select>

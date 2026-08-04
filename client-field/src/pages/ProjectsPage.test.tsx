@@ -99,6 +99,28 @@ describe("ProjectsPage", () => {
     expect(node.textContent).not.toContain("HS-303033014984");
   });
 
+  it("puts 'Change Order N' at the FRONT of a change-order child's row, where truncation can't eat it", async () => {
+    // The stored name is what change-order-service.ts writes: "<Parent> — Change Order N". This row is a
+    // single truncating line, so the suffix is exactly the part a phone never shows. Display-only — the
+    // API payload still carries the stored name, which is what the server matches on for search.
+    apiMock
+      .mockResolvedValueOnce({ projects: [
+        { id: "deal-4", name: "Tides Park Lane — Change Order 2", dealNumber: "TR-4", projectNumber: "TR-4", propertyName: "Tides Park Lane", propertyAddress: "12 Tides", stage: "Contract", lastActivityAt: null, photoCount: 3, starred: false, officeId: "office-1", officeSlug: "dallas" },
+        { id: "deal-5", name: "Tides Park Lane", dealNumber: "TR-5", projectNumber: "TR-5", propertyName: "Tides Park Lane", propertyAddress: "12 Tides", stage: "Contract", lastActivityAt: null, photoCount: 1, starred: false, officeId: "office-1", officeSlug: "dallas" },
+      ] })
+      .mockResolvedValueOnce({ projects: [] });
+
+    const node = renderPage();
+
+    await vi.waitFor(() => expect(node.textContent).toContain("Change Order 2 — Tides Park Lane"));
+    // The stored, suffix-last form is gone from the row.
+    expect(node.textContent).not.toContain("Tides Park Lane — Change Order 2");
+    // The a11y label carries the same distinguishing prefix a sighted user gets.
+    expect(node.querySelector('a[aria-label="Open Change Order 2 — Tides Park Lane (TR-4)"]')).not.toBeNull();
+    // The ordinary parent deal beside it is untouched.
+    expect(node.querySelector('a[aria-label="Open Tides Park Lane (TR-5)"]')).not.toBeNull();
+  });
+
   it("shows empty state when no active projects exist", async () => {
     apiMock.mockResolvedValueOnce({ projects: [] }).mockResolvedValueOnce({ projects: [] });
     const node = renderPage();

@@ -6,6 +6,7 @@ import { useKeepPreviousData } from "@/hooks/use-keep-previous-data";
 import { ActivityRangeSelect } from "@/components/dashboard/activity-range-select";
 import { type ActivityRange } from "@trock-crm/shared/types";
 import { cn } from "@/lib/utils";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import { buttonVariants, Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -359,7 +360,10 @@ function TopDealsTable({ deals, onOpen }: { deals: TopDealRow[]; onOpen: (id: st
                   {deal.initials}
                 </span>
                 <div className="min-w-0">
-                  <p className="truncate text-sm font-bold text-slate-950">{deal.name}</p>
+                  {/* A change-order child is STORED "<Parent> — Change Order N" and this row truncates;
+                      relabel at the RENDER site only — the buildTopDeals/buildBlindSpots mappings above
+                      keep the stored name. */}
+                  <p className="truncate text-sm font-bold text-slate-950">{formatDealDisplayName(deal.name)}</p>
                   {deal.sla == null ? null : (
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">SLA {deal.sla}d</p>
                   )}
@@ -434,7 +438,7 @@ function AiBlindSpotsPanel({ items }: { items: BlindSpot[] }) {
             >
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
-                  <p className="truncate text-sm font-bold text-slate-950">{item.name}</p>
+                  <p className="truncate text-sm font-bold text-slate-950">{formatDealDisplayName(item.name)}</p>
                   <span className="font-mono text-[10px] text-slate-400">{item.ref}</span>
                 </div>
                 <p className="mt-1 text-sm font-semibold text-slate-700">{item.issue}</p>

@@ -11,6 +11,7 @@ import { ZoomableImage } from "../components/ZoomableImage";
 import {
   categoryLabel,
   filterPhotos,
+  formatDealDisplayName,
   groupPhotos,
   isProjectOffOffice,
   LEGACY_PHOTO_CATEGORIES,
@@ -217,7 +218,7 @@ export function ProjectDetailPage() {
             <ArrowLeft className="h-5 w-5" />
           </button>
           <div className="min-w-0 flex-1">
-            <h1 className="truncate text-2xl font-black">{project?.name ?? "Project"}</h1>
+            <h1 className="truncate text-2xl font-black">{formatDealDisplayName(project?.name) ?? "Project"}</h1>
             <p className="truncate text-sm text-muted-foreground">{project?.propertyAddress ?? "No address on file"}</p>
           </div>
           {offOffice ? (
@@ -511,7 +512,7 @@ export function ProjectDetailPage() {
       <ReportBuilder
         isOpen={reportBuilderOpen}
         projectId={id}
-        projectName={project?.name ?? project?.projectNumber ?? "Project"}
+        projectName={formatDealDisplayName(project?.name) ?? project?.projectNumber ?? "Project"}
         creatorName={[user?.firstName, user?.lastName].filter(Boolean).join(" ") || user?.email || "Field User"}
         photos={photos}
         onClose={() => setReportBuilderOpen(false)}

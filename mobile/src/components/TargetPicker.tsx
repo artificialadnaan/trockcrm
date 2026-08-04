@@ -6,6 +6,7 @@ import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { getLiveGps } from "../capture/metadata";
 import { useCaptureTargets, useNearbyCaptureTargets } from "../query/hooks";
 import type { FieldCaptureTarget } from "../api/types";
+import { formatDealDisplayName } from "../projects/field-projects";
 import { Badge, EmptyState, LoadingState, TextInput } from "./ui";
 
 const TYPE_LABEL: Record<FieldCaptureTarget["type"], string> = {
@@ -106,8 +107,10 @@ export function TargetPicker({
             style={({ pressed }) => [styles.row, pressed && { opacity: 0.7 }]}
           >
             <View style={{ flex: 1, gap: 2 }}>
+              {/* A change-order child is stored "<Parent> — Change Order N"; on a one-line row the suffix
+                  is the first thing lost. Display-only — `onSelect` still hands back the raw target. */}
               <Text style={styles.rowTitle} numberOfLines={1}>
-                {item.name}
+                {formatDealDisplayName(item.name)}
               </Text>
               <Text style={styles.rowSub} numberOfLines={1}>
                 {targetSubtitle(item)}

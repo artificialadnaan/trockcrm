@@ -1,5 +1,6 @@
 import type { SalesReviewForecastRow } from "@/hooks/use-sales-review";
 import { Card, CardContent } from "@/components/ui/card";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 
 export function SalesReviewSupportCard({ rows }: { rows: SalesReviewForecastRow[] }) {
   return (
@@ -12,7 +13,9 @@ export function SalesReviewSupportCard({ rows }: { rows: SalesReviewForecastRow[
         <div className="space-y-2">
           {rows.map((row) => (
             <div key={`${row.entityType}-${row.id}`} className="rounded-md border p-3">
-              <div className="font-medium">{row.name}</div>
+              {/* A change-order child deal is STORED as "<Parent> — Change Order N"; lead with the label.
+                  Display-only, and safe for the lead rows here — non-CO names pass through unchanged. */}
+              <div className="font-medium">{formatDealDisplayName(row.name)}</div>
               <div className="text-xs text-muted-foreground">{row.assignedRepName}</div>
               <div className="mt-1 text-xs">{row.supportNeededType}</div>
             </div>

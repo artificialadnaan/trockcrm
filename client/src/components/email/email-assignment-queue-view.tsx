@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { EyeOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import { EmailManualAssignmentDialog, type EmailAssociationTarget } from "./email-manual-assignment-dialog";
 
 export interface EmailAssignmentQueueDealCandidate {
@@ -75,9 +76,11 @@ function formatDateTime(value: string) {
 function buildSafeAssignmentOptions(item: EmailAssignmentQueueItem): Array<{ label: string; value: EmailAssociationTarget }> {
   const options: Array<{ label: string; value: EmailAssociationTarget }> = [];
 
+  // A change-order child deal is STORED as "<Parent> — Change Order N"; this option label truncates
+  // before the suffix, so a CO reads exactly like its parent. Display-only -- nothing persisted.
   for (const deal of item.candidateDeals) {
     options.push({
-      label: `Deal · ${deal.dealNumber} · ${deal.name}`,
+      label: `Deal · ${deal.dealNumber} · ${formatDealDisplayName(deal.name)}`,
       value: {
         assignedEntityType: "deal",
         assignedEntityId: deal.id,

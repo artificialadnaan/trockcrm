@@ -14,6 +14,7 @@ import {
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/lib/auth";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import { buildFieldCaptureUrl } from "@/lib/field-app";
 import { searchPhotoUploadTargets, uploadFile, type PhotoUploadTarget } from "@/hooks/use-files";
 import { PHOTO_CATEGORY_OPTION_ITEMS } from "@trock-crm/shared/types";
@@ -307,7 +308,9 @@ export function PhotoCapturePage() {
               <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <p className="truncate text-sm font-semibold text-emerald-100">{selectedTarget.name}</p>
+                    {/* A change-order child deal is STORED "<Parent> — Change Order N" and these lines
+                        truncate. DISPLAY only -- the dealName search param below keeps the raw name. */}
+                    <p className="truncate text-sm font-semibold text-emerald-100">{formatDealDisplayName(selectedTarget.name)}</p>
                     <p className="mt-0.5 truncate text-xs text-emerald-200/70">
                       {selectedTarget.recordNumber ? `${selectedTarget.recordNumber} · ` : ""}
                       {selectedTarget.stageName ?? "No stage"}
@@ -354,7 +357,7 @@ export function PhotoCapturePage() {
                             }}
                             className="w-full px-3 py-2 text-left transition-colors hover:bg-white/10"
                           >
-                            <p className="truncate text-sm font-medium text-white">{target.name}</p>
+                            <p className="truncate text-sm font-medium text-white">{formatDealDisplayName(target.name)}</p>
                             <p className="mt-0.5 truncate text-xs text-white/45">
                               {target.recordNumber ? `${target.recordNumber} · ` : ""}
                               {target.stageName ?? "No stage"}
@@ -563,7 +566,7 @@ export function PhotoCapturePage() {
               </div>
               {selectedTarget && (
                 <p className="text-xs text-white/30 truncate max-w-[180px]">
-                  {selectedTarget.name}
+                  {formatDealDisplayName(selectedTarget.name)}
                 </p>
               )}
             </div>

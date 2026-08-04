@@ -19,6 +19,9 @@ import { getScorecard, getTranscriptionConfig, type Fetcher } from "../../../../
 import { apiFetch } from "../../../../src/api/client";
 import { uploadOwnerKey, newClientUploadId, removeQueuedUploads } from "../../../../src/capture/upload-queue";
 import { qk } from "../../../../src/query/keys";
+// Display-only change-order prefix. `draft.dealName` holds the RAW stored deal name (and stays raw in the
+// persisted draft); only the places that SHOW it are transformed.
+import { formatDealDisplayName } from "../../../../src/projects/field-projects";
 import { extractExifMetadata, getLiveGps, type PhotoMetadata } from "../../../../src/capture/metadata";
 import type { CapturedShot } from "../../../../src/capture/CameraCapture";
 import {
@@ -582,7 +585,7 @@ function LeadershipForm(props: {
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <ScreenHeader onBack={goBack} title={draft.dealName} />
+      <ScreenHeader onBack={goBack} title={formatDealDisplayName(draft.dealName)} />
 
       {/* Freeze the whole form once submit begins: pointerEvents="none" makes every mutation control (scores,
           text, dictation, photo add/remove/caption) a no-op so a mid-submit edit can't be silently lost when
@@ -606,7 +609,7 @@ function LeadershipForm(props: {
         ) : null}
 
         <View style={{ gap: theme.space.md }}>
-          <Field label="Project"><Text style={styles.readonly}>{draft.dealName}</Text></Field>
+          <Field label="Project"><Text style={styles.readonly}>{formatDealDisplayName(draft.dealName)}</Text></Field>
           {draft.projectNumber ? <Field label="Project number"><Text style={styles.readonly}>{draft.projectNumber}</Text></Field> : null}
           <Field label="Evaluator">
             {/* Display-only: the Evaluator IS whoever submits (the server stamps submittedByName from the

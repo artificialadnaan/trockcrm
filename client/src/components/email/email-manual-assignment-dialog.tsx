@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Search } from "lucide-react";
 import { api } from "@/lib/api";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { EmailAssociationTarget } from "@/hooks/use-emails";
@@ -171,9 +172,11 @@ async function searchManualTargets(type: ManualSearchType, query: string): Promi
   const data = await api<{ deals: DealSearchRow[]; pagination?: unknown }>(
     `/deals?search=${encodeURIComponent(trimmed)}&limit=10`
   );
+  // A change-order child deal is STORED as "<Parent> — Change Order N", so both of these labels
+  // truncate before the suffix. formatDealDisplayName is DISPLAY-ONLY -- the stored name is unchanged.
   return data.deals.map((deal) => ({
     id: deal.id,
-    title: `${deal.dealNumber} · ${deal.name}`,
+    title: `${deal.dealNumber} · ${formatDealDisplayName(deal.name)}`,
     subtitle: formatLocation([
       deal.propertyAddress,
       [deal.propertyCity, deal.propertyState].filter(Boolean).join(", "),
@@ -182,7 +185,7 @@ async function searchManualTargets(type: ManualSearchType, query: string): Promi
       assignedEntityType: "deal",
       assignedEntityId: deal.id,
       assignedDealId: deal.id,
-      displayLabel: `${deal.dealNumber} · ${deal.name}`,
+      displayLabel: `${deal.dealNumber} · ${formatDealDisplayName(deal.name)}`,
     },
   }));
 }

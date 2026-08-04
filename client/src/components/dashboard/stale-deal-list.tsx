@@ -1,6 +1,7 @@
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/components/charts/chart-colors";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import { AlertTriangle } from "lucide-react";
 import { Link } from "react-router-dom";
 
@@ -60,7 +61,9 @@ export function StaleDealList({ deals }: StaleDealListProps) {
               className="flex items-center justify-between p-2 rounded-md hover:bg-slate-50 transition-colors"
             >
               <div className="min-w-0 flex-1">
-                <p className="text-sm font-medium truncate">{deal.dealName}</p>
+                {/* A change-order child is STORED "<Parent> — Change Order N" and this row truncates;
+                    move the label to the front for DISPLAY only. */}
+                <p className="text-sm font-medium truncate">{formatDealDisplayName(deal.dealName)}</p>
                 <p className="text-xs text-muted-foreground">
                   {deal.repName} &mdash; {deal.stageName}
                 </p>

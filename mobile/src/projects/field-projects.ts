@@ -167,6 +167,37 @@ export function projectNumberLabel(projectNumber: string | null | undefined): st
   return trimmed ? `#${trimmed}` : "Project pending";
 }
 
+// Kept in sync with the shared source of truth (shared/src/types/deal-display-name.ts); the Expo bundle
+// can't import the workspace `shared` package, so this is a deliberate mirror — update both together.
+// A drift guard lives in shared/src/types/deal-display-name.test.ts, which reads this file.
+const EM_DASH = "—";
+const CHANGE_ORDER_NAME_SUFFIX = /\s*—\s*Change Order\s+(\d+)\s*$/;
+const CHANGE_ORDER_NAME_PREFIX = /^\s*Change Order\s+\d+\s*(?:—|$)/;
+
+/**
+ * The display form of a deal/project name. A change order is a real CHILD deal whose stored name is
+ * built by APPENDING "<parent> — Change Order N" (server/src/modules/deals/change-order-service.ts), so in
+ * the project list — where a row is one truncated line — a change order is indistinguishable from its
+ * parent. Move the label to the FRONT, where truncation can't eat it.
+ *
+ *     "Tides Park Lane — Change Order 1"  ->  "Change Order 1 — Tides Park Lane"
+ *
+ * DISPLAY-ONLY: the stored `deals.name` is unchanged, so this must never be applied to a value that gets
+ * written back (a walk title, a scorecard draft's dealName, a report cover, a nav param) — only to the
+ * text a screen renders. Idempotent, total, and it leaves every non-generated name byte for byte.
+ */
+export function formatDealDisplayName(name: string): string;
+export function formatDealDisplayName(name: string | null | undefined): string | null | undefined;
+export function formatDealDisplayName(name: string | null | undefined): string | null | undefined {
+  if (typeof name !== "string" || name.length === 0) return name;
+  if (CHANGE_ORDER_NAME_PREFIX.test(name)) return name;
+  const match = CHANGE_ORDER_NAME_SUFFIX.exec(name);
+  if (!match) return name;
+  const label = `Change Order ${match[1]}`;
+  const base = name.slice(0, match.index).trim();
+  return base.length === 0 ? label : `${label} ${EM_DASH} ${base}`;
+}
+
 /**
  * Split the three project sources into non-overlapping display sections with precedence
  * Nearby > Starred > All: a project shown in Nearby is removed from Starred and All; a starred project

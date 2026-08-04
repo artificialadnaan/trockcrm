@@ -22,6 +22,8 @@ import {
   type CorrectiveResponsePhoto,
 } from "../../../../src/scorecards/corrective-action";
 import { formatShortDate } from "../../../../src/scorecards/detail-view";
+// Display-only change-order prefix: a change-order child deal is stored "<Parent> — Change Order N".
+import { formatDealDisplayName } from "../../../../src/projects/field-projects";
 import type { CorrectiveActionItem, CorrectiveActionResponsePhoto } from "../../../../src/api/types";
 import { Badge, Button, EmptyState, LoadingState, SectionLabel, TextInput } from "../../../../src/components/ui";
 import { Banner } from "../../../../src/components/Banner";
@@ -139,7 +141,7 @@ export default function CorrectiveActionScreen() {
           <>
             <View style={{ gap: theme.space.xs }}>
               <Text style={styles.projectName} numberOfLines={2}>
-                {scorecard?.projectName ?? scorecard?.projectNumber ?? "Project"}
+                {formatDealDisplayName(scorecard?.projectName) ?? scorecard?.projectNumber ?? "Project"}
               </Text>
               <Text style={styles.meta}>
                 {allApproved

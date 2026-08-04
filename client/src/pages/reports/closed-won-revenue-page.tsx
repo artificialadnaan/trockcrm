@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import { useClosedWonRevenueReport } from "@/hooks/use-reports";
 import { useReportFilters } from "@/components/reports/report-filter-bar";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import {
   DataTable,
   formatCurrency,
@@ -77,8 +78,10 @@ export function ClosedWonRevenuePage() {
                     <TableCell className="text-right tabular-nums">{formatCurrency(owner.avgDealSize)}</TableCell>
                     <TableCell>
                       {owner.largestWonDeal.dealId ? (
+                        // A change-order child is STORED "<Parent> — Change Order N"; the label moves to
+                        // the front for DISPLAY only — the stored name and the Excel export are unchanged.
                         <Link to={`/deals/${owner.largestWonDeal.dealId}`} className="font-semibold text-brand-red hover:underline">
-                          {owner.largestWonDeal.dealName} ({formatCurrency(owner.largestWonDeal.value)})
+                          {formatDealDisplayName(owner.largestWonDeal.dealName)} ({formatCurrency(owner.largestWonDeal.value)})
                         </Link>
                       ) : "None"}
                     </TableCell>
@@ -146,7 +149,7 @@ export function ClosedWonRevenuePage() {
               <TableBody>
                 {data.topDeals.map((deal) => (
                   <TableRow key={deal.dealId}>
-                    <TableCell><Link to={`/deals/${deal.dealId}`} className="font-semibold text-brand-red hover:underline">{deal.dealName}</Link></TableCell>
+                    <TableCell><Link to={`/deals/${deal.dealId}`} className="font-semibold text-brand-red hover:underline">{formatDealDisplayName(deal.dealName)}</Link></TableCell>
                     <TableCell>{deal.ownerName}</TableCell>
                     <TableCell className="text-right">{formatCurrency(deal.value)}</TableCell>
                     <TableCell>{formatDate(deal.wonAt)}</TableCell>

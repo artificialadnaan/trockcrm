@@ -18,6 +18,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { useAuth } from "@/lib/auth";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import {
   FIELD_RESPONDER_ROLE_LABELS,
   FIELD_RESPONDER_ROLES,
@@ -484,7 +485,9 @@ function AssignmentsSheet({
                         href={dealHref(d.dealId)}
                         className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3.5 py-3 hover:border-slate-300 hover:bg-slate-50"
                       >
-                        <span className="min-w-0 flex-1 truncate text-[13.5px] font-semibold text-slate-900">{d.dealName}</span>
+                        {/* A change-order child is STORED "<Parent> — Change Order N" and this row
+                            truncates; move the label to the front for DISPLAY only. */}
+                        <span className="min-w-0 flex-1 truncate text-[13.5px] font-semibold text-slate-900">{formatDealDisplayName(d.dealName)}</span>
                         <Badge variant="outline" className={`${ROLE_BADGE[d.role]} shrink-0 whitespace-nowrap text-[10px] font-bold uppercase tracking-wide`}>
                           {roleLabel(d.role)}
                         </Badge>

@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import { AlertTriangle, Loader2 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 
 export function formatCurrency(value: number | null | undefined) {
   return new Intl.NumberFormat("en-US", {
@@ -70,6 +71,9 @@ export function ErrorState({ message }: { message: string }) {
   );
 }
 
+// Every caller passes the deal name as a bare string child, so the change-order relabel happens here
+// once instead of at each table. A CO child is STORED "<Parent> — Change Order N" and truncates to look
+// like its parent; this is display-only — exports and the stored name are untouched.
 export function DealLink({ dealId, children }: { dealId: string; children: React.ReactNode }) {
-  return <Link className="font-bold text-slate-950 underline decoration-brand-red/40 underline-offset-4 hover:text-brand-red" to={`/deals/${dealId}`}>{children}</Link>;
+  return <Link className="font-bold text-slate-950 underline decoration-brand-red/40 underline-offset-4 hover:text-brand-red" to={`/deals/${dealId}`}>{typeof children === "string" ? formatDealDisplayName(children) : children}</Link>;
 }

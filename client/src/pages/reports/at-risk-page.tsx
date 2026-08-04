@@ -4,6 +4,7 @@ import { useNavigate, useLocation } from "react-router-dom";
 import { useAtRiskWatchlist } from "@/hooks/use-reports";
 import { PipelineStageTable, type PipelineStageTableColumn } from "@/components/pipeline/pipeline-stage-table";
 import { useTableSort, SortHeaderButton, type SortColumn } from "@/components/reports/sortable";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import { usd, int, formatDayShort } from "./evidence-kit";
 import type { AtRiskRecord } from "./part4-types";
 
@@ -100,9 +101,11 @@ export function AtRiskPage() {
     {
       key: "deal",
       header: sortHeader("deal", "Deal"),
+      // A change-order child is STORED "<Parent> — Change Order N" and this cell truncates, so the label
+      // moves to the front for DISPLAY only — the sort accessor above still reads the stored name.
       render: (r) => (
         <div className="min-w-0">
-          <div className="truncate font-medium text-slate-800">{r.name}</div>
+          <div className="truncate font-medium text-slate-800">{formatDealDisplayName(r.name)}</div>
           {r.dealNumber ? <div className="text-xs text-slate-400">#{r.dealNumber}</div> : null}
         </div>
       ),

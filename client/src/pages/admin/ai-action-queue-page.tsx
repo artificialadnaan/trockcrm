@@ -6,7 +6,7 @@ import { triageAiActionQueueEntry, useAiActionQueue } from "@/hooks/use-ai-ops";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { formatDealDisplayNumber } from "@/lib/deal-utils";
+import { formatDealDisplayName, formatDealDisplayNumber } from "@/lib/deal-utils";
 
 function formatDate(value: string | null) {
   if (!value) return "Pending";
@@ -187,10 +187,12 @@ export function AiActionQueuePage() {
                         {entry.dealId ? (
                           <Link to={`/deals/${entry.dealId}`} className="text-sm font-semibold text-brand-red hover:underline">
                             {formatDealDisplayNumber(entry).label === "Pending" ? "" : `${formatDealDisplayNumber(entry).label} `}
-                            {entry.dealName ?? "Unnamed deal"}
+                            {/* A change-order child is STORED "<Parent> — Change Order N"; lead with the
+                                label so it isn't read as its parent. Display-only, stored name unchanged. */}
+                            {formatDealDisplayName(entry.dealName) ?? "Unnamed deal"}
                           </Link>
                         ) : (
-                          <div className="text-sm font-semibold">{entry.dealName ?? "Unlinked deal"}</div>
+                          <div className="text-sm font-semibold">{formatDealDisplayName(entry.dealName) ?? "Unlinked deal"}</div>
                         )}
                         <div className="text-base font-semibold text-foreground">{entry.title}</div>
                         {entry.details && (

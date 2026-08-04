@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { api } from "@/lib/api";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -310,7 +311,9 @@ export function CompanyCamPage() {
                     {mapping.ccCity && <span>{mapping.ccCity}</span>}
                     {mapping.dealName && (
                       <span className="truncate">
-                        → <span className="font-medium text-foreground">{mapping.dealNumber}</span> {mapping.dealName}
+                        {/* A change-order child is STORED "<Parent> — Change Order N"; lead with the
+                            label so it isn't read as its parent. Display-only, stored name unchanged. */}
+                        → <span className="font-medium text-foreground">{mapping.dealNumber}</span> {formatDealDisplayName(mapping.dealName)}
                       </span>
                     )}
                   </div>

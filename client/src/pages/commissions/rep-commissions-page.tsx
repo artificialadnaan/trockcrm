@@ -4,6 +4,7 @@ import { CheckCircle2, ChevronRight, Download, Target, User as UserIcon, Users }
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import { buildReportExportFilename, downloadTextFile, serializeRowsToCsv } from "@/lib/report-export";
 
 type Period = "mtd" | "qtd" | "ytd" | "all";
@@ -584,9 +585,12 @@ export function RepCommissionsPage() {
                             className="grid grid-cols-[minmax(0,1fr)_130px_80px_170px_24px] items-center gap-x-4 px-5 py-3 text-left transition-colors hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-brand-red/30"
                           >
                             <div className="min-w-0">
+                              {/* A change-order child is STORED "<Parent> — Change Order N" and this
+                                  row truncates; move the label to the front for DISPLAY only — the CSV
+                                  export above keeps the stored name. */}
                               <p className="truncate font-bold text-slate-950">
                                 {deal.dealNumber ? `${deal.dealNumber} · ` : ""}
-                                {deal.dealName}
+                                {formatDealDisplayName(deal.dealName)}
                               </p>
                               <p className="mt-0.5 truncate text-xs text-slate-500">
                                 {[deal.companyName, deal.propertyName ?? deal.propertyAddress].filter(Boolean).join(" · ")}

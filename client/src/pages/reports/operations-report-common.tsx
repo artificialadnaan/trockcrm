@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { ExportExcelButton } from "@/components/reports/export-excel-button";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import type { ExcelSheet } from "@/lib/excel-export";
 export { sheetsFromReport } from "@/lib/excel-export";
 
@@ -149,10 +150,13 @@ export function ActiveWorkNote() {
   );
 }
 
+// Every caller passes the deal name as a bare string child, so the change-order relabel happens here
+// once instead of at each table. A CO child is STORED "<Parent> — Change Order N" and truncates to look
+// like its parent; this is display-only — exports and the stored name are untouched.
 export function DealLink({ dealId, children }: { dealId: string; children: ReactNode }) {
   return (
     <Link to={`/deals/${dealId}`} className="font-semibold text-slate-950 hover:text-brand-red hover:underline">
-      {children}
+      {typeof children === "string" ? formatDealDisplayName(children) : children}
     </Link>
   );
 }
