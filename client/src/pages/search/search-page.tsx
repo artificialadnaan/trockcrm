@@ -52,8 +52,12 @@ function ResultCard({ result }: { result: SearchResult }) {
       <Icon className="h-5 w-5 text-gray-400 flex-shrink-0" />
       <div className="flex-1 min-w-0">
         {/* A change-order child deal is STORED as "<Parent> — Change Order N" and this label truncates,
-            so the suffix is the first thing lost. Display-only re-order; the stored name is untouched. */}
-        <div className="font-medium text-gray-900 truncate">{formatDealDisplayName(result.primaryLabel)}</div>
+            so the suffix is the first thing lost. Display-only re-order; the stored name is untouched.
+            GATED on entityType: this same card renders companies, contacts, leads, properties and FILES,
+            and a file legitimately named "Proposal — Change Order 1" is NOT a generated deal name. */}
+        <div className="font-medium text-gray-900 truncate">
+          {result.entityType === "deal" ? formatDealDisplayName(result.primaryLabel) : result.primaryLabel}
+        </div>
         {(() => {
           // Deal-only assignedRepName appended to the number/location meta line; falsy parts drop
           // out (no dangling separator), and non-deal results are unchanged.

@@ -40,8 +40,11 @@ export function PipelineHygienePage() {
             <div className="flex items-start justify-between gap-4">
               <div>
                 {/* A change-order child deal is STORED as "<Parent> — Change Order N"; lead with the label.
-                    Display-only, and safe for the lead rows here — non-CO names pass through unchanged. */}
-                <p className="font-medium">{formatDealDisplayName(row.name)}</p>
+                    Display-only, and GATED on entityType — this queue mixes deals and LEADS, and a lead a
+                    human named "Lobby — Change Order 1" is not a generated child name. */}
+                <p className="font-medium">
+                  {row.entityType === "deal" ? formatDealDisplayName(row.name) : row.name}
+                </p>
                 <p className="text-xs text-muted-foreground">
                   {row.assignedRepName ?? "Unassigned"} • {row.entityType} • {stageNameById.get(row.stageId) ?? "Unknown stage"}
                 </p>

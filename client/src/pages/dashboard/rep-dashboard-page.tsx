@@ -438,7 +438,11 @@ function AiBlindSpotsPanel({ items }: { items: BlindSpot[] }) {
             >
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
-                  <p className="truncate text-sm font-bold text-slate-950">{formatDealDisplayName(item.name)}</p>
+                  {/* GATED on `type` — this list mixes stale DEALS and stale LEADS, and only a deal can
+                      be a generated change-order child. */}
+                  <p className="truncate text-sm font-bold text-slate-950">
+                    {item.type === "deal" ? formatDealDisplayName(item.name) : item.name}
+                  </p>
                   <span className="font-mono text-[10px] text-slate-400">{item.ref}</span>
                 </div>
                 <p className="mt-1 text-sm font-semibold text-slate-700">{item.issue}</p>

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Camera, Check, FolderOpen, ImagePlus, Search, X } from "lucide-react";
 import { api } from "../lib/api";
-import { formatDealDisplayName, groupCaptureTargets, PHOTO_CATEGORIES, type FieldCaptureTarget, type FieldPhoto } from "../lib/field-projects";
+import { captureTargetDisplayName, groupCaptureTargets, PHOTO_CATEGORIES, type FieldCaptureTarget, type FieldPhoto } from "../lib/field-projects";
 import {
   extractPhotoMetadata,
   fileToDataUrl,
@@ -396,7 +396,7 @@ export function CapturePage() {
           className="min-h-11 min-w-0 flex-1 rounded-full bg-white/15 px-4 text-left font-bold backdrop-blur"
           onClick={() => setPickerOpen(true)}
         >
-          {validatingInitialTarget ? "Validating target..." : activeTarget ? formatDealDisplayName(activeTarget.name) : "Choose target"}
+          {validatingInitialTarget ? "Validating target..." : activeTarget ? captureTargetDisplayName(activeTarget) : "Choose target"}
         </button>
         <button
           type="button"
@@ -642,7 +642,7 @@ function TargetPicker(input: {
                   >
                     <FolderOpen className="h-5 w-5 text-primary" />
                     <span className="min-w-0">
-                      <span className="block truncate font-black">{formatDealDisplayName(target.name)}</span>
+                      <span className="block truncate font-black">{captureTargetDisplayName(target)}</span>
                       <span className="block truncate text-sm text-muted-foreground">
                         {target.recordNumber ? `${target.recordNumber} · ` : ""}
                         {target.stageName ?? "No stage"}

@@ -57,13 +57,29 @@ function makeRecord(overrides: Partial<PipelineRecordCardData> = {}): PipelineRe
   };
 }
 
-function render(record: PipelineRecordCardData) {
+function render(record: PipelineRecordCardData, entity: "deal" | "lead" = "deal") {
   return renderToStaticMarkup(
     <MemoryRouter>
-      <PipelineRecordCard entity="deal" record={record} />
+      <PipelineRecordCard entity={entity} record={record} />
     </MemoryRouter>
   );
 }
+
+describe("PipelineRecordCard — the change-order relabel is gated on `entity`", () => {
+  it("moves 'Change Order N' to the front on the DEAL board", () => {
+    const html = render(makeRecord({ name: "Tides Park Lane — Change Order 2" }));
+    expect(html).toContain("Change Order 2 — Tides Park Lane");
+    expect(html).not.toContain("Tides Park Lane — Change Order 2");
+  });
+
+  it("leaves a LEAD's name byte for byte on the lead board", () => {
+    // This card backs both boards. Only a deal can be a generated change-order child; a lead a human
+    // named "Lobby — Change Order 1" must render exactly as typed.
+    const html = render(makeRecord({ name: "Lobby — Change Order 1" }), "lead");
+    expect(html).toContain("Lobby — Change Order 1");
+    expect(html).not.toContain("Change Order 1 — Lobby");
+  });
+});
 
 describe("PipelineRecordCard", () => {
   afterEach(() => {

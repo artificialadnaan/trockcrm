@@ -97,9 +97,9 @@ export function PipelineRecordCard({
   const effectivelyHeld = isDealValueEffectivelyOnHold(record, now);
   const value = formatValue(record, now);
   // A change-order child deal is STORED as "<Parent> — Change Order N", so this clamped title reads as its
-  // parent. Display-only reorder to "Change Order N — <Parent>"; the stored name is untouched. Applied for
-  // BOTH entities — the helper only rewrites that exact generated suffix, so lead names pass through as-is.
-  const displayName = formatDealDisplayName(record.name);
+  // parent. Display-only reorder to "Change Order N — <Parent>"; the stored name is untouched. GATED on
+  // `entity` — this card also backs the LEAD board, and only a deal can be a generated change-order child.
+  const displayName = entity === "deal" ? formatDealDisplayName(record.name) : record.name;
   const location = [record.propertyCity, record.propertyState].filter(Boolean).join(", ");
   const contextLine = record.companyName ?? record.source ?? null;
   const ageLabel = `${record.atRisk?.effectiveStageAgeDays ?? getEffectiveStageAgeDays(getEffectiveStageAgeDeal(record))}d in stage`;

@@ -90,6 +90,19 @@ export type FieldCaptureTarget = {
   distanceMiles?: number | null;
 };
 
+/**
+ * The display name for a capture target, with the change-order relabel GATED on the target being a deal.
+ *
+ * A picker row mixes all three types, and only a `deal` can be a generated change-order child: a `lead` is
+ * a leads-table row named by a human, and the server explicitly excludes opportunities from the `deal`
+ * type (`d.pipeline_disposition IS DISTINCT FROM 'opportunity'` in field/projects-service.ts) while a CO
+ * child is always Won. Rewriting every type would mangle a lead someone legitimately called
+ * "Lobby — Change Order 1".
+ */
+export function captureTargetDisplayName(target: Pick<FieldCaptureTarget, "type" | "name">): string {
+  return target.type === "deal" ? formatDealDisplayName(target.name) : target.name;
+}
+
 export type FieldPhoto = {
   id: string;
   category: "photo";
@@ -172,7 +185,6 @@ export function projectNumberLabel(projectNumber: string | null | undefined): st
 // A drift guard lives in shared/src/types/deal-display-name.test.ts, which reads this file.
 const EM_DASH = "—";
 const CHANGE_ORDER_NAME_SUFFIX = /\s*—\s*Change Order\s+(\d+)\s*$/;
-const CHANGE_ORDER_NAME_PREFIX = /^\s*Change Order\s+\d+\s*(?:—|$)/;
 
 /**
  * The display form of a deal/project name. A change order is a real CHILD deal whose stored name is
@@ -182,20 +194,29 @@ const CHANGE_ORDER_NAME_PREFIX = /^\s*Change Order\s+\d+\s*(?:—|$)/;
  *
  *     "Tides Park Lane — Change Order 1"  ->  "Change Order 1 — Tides Park Lane"
  *
+ * Idempotent BY CONSTRUCTION: it peels every generated trailing suffix rather than short-circuiting on a
+ * name that merely looks already-formatted, so a parent a human named "Change Order 7 — Lobby" still gets
+ * its child's real label moved to the front. The result never ends in a generated suffix.
+ *
  * DISPLAY-ONLY: the stored `deals.name` is unchanged, so this must never be applied to a value that gets
  * written back (a walk title, a scorecard draft's dealName, a report cover, a nav param) — only to the
- * text a screen renders. Idempotent, total, and it leaves every non-generated name byte for byte.
+ * text a screen renders. Total, and it leaves every non-generated name byte for byte.
  */
 export function formatDealDisplayName(name: string): string;
 export function formatDealDisplayName(name: string | null | undefined): string | null | undefined;
 export function formatDealDisplayName(name: string | null | undefined): string | null | undefined {
   if (typeof name !== "string" || name.length === 0) return name;
-  if (CHANGE_ORDER_NAME_PREFIX.test(name)) return name;
-  const match = CHANGE_ORDER_NAME_SUFFIX.exec(name);
-  if (!match) return name;
-  const label = `Change Order ${match[1]}`;
-  const base = name.slice(0, match.index).trim();
-  return base.length === 0 ? label : `${label} ${EM_DASH} ${base}`;
+  const labels: string[] = [];
+  let rest = name;
+  for (;;) {
+    const match = CHANGE_ORDER_NAME_SUFFIX.exec(rest);
+    if (!match) break;
+    labels.push(`Change Order ${match[1]}`);
+    rest = rest.slice(0, match.index);
+  }
+  if (labels.length === 0) return name;
+  const base = rest.trim();
+  return (base.length === 0 ? labels : [...labels, base]).join(` ${EM_DASH} `);
 }
 
 /**

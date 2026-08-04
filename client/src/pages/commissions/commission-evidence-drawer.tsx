@@ -75,9 +75,11 @@ function columnsFor(ev: CommissionEvidence): DrillColumn[] {
     key: "name", header: ev.kind === "activity" ? "Activity" : ev.kind === "lead" ? "Lead" : "Name", numeric: false,
     sort: { key: "name", type: "text", accessor: (r) => r.name },
     // A change-order child deal is STORED "<Parent> — Change Order N"; move the label to the front for
-    // DISPLAY only. Applied unconditionally (this column is mixed deal/lead/activity) — the helper only
-    // rewrites that exact generated suffix and the CSV below still writes the stored name.
-    cell: (r) => <span className="text-slate-800">{formatDealDisplayName(r.name)}</span>,
+    // DISPLAY only. GATED on `ev.kind` — this same column renders LEADS and ACTIVITIES, whose names are
+    // typed by humans and can legitimately end in that text. The CSV below still writes the stored name.
+    cell: (r) => (
+      <span className="text-slate-800">{ev.kind === "deal" ? formatDealDisplayName(r.name) : r.name}</span>
+    ),
   });
   cols.push({
     key: "stage", header: ev.kind === "activity" ? "Linked to" : ev.kind === "deal" && ev.metric === "earned" ? "Role" : "Stage", numeric: false,

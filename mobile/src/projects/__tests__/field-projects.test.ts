@@ -1,5 +1,6 @@
 import {
   categoryLabel,
+  captureTargetDisplayName,
   correctiveAffordance,
   filterPhotos,
   formatDealDisplayName,
@@ -363,10 +364,33 @@ describe("formatDealDisplayName", () => {
     expect(formatDealDisplayName(" — Change Order 1")).toBe("Change Order 1");
   });
 
-  it("is idempotent — an already-prefixed name is never double-prefixed", () => {
-    const once = formatDealDisplayName("Tides Park Lane — Change Order 1");
-    expect(formatDealDisplayName(once)).toBe(once);
-    expect(formatDealDisplayName("Change Order 1")).toBe("Change Order 1");
+  it("REGRESSION: still moves the child's label when the PARENT's own name is prefix-shaped", () => {
+    // A deal a human named "Change Order 7 — Lobby" gets a child stored with BOTH parts. An earlier
+    // "does this already look formatted?" prefix guard fired on it and returned it unchanged, stranding
+    // the child's real "Change Order 1" at the end — the very truncation this helper exists to prevent.
+    expect(formatDealDisplayName("Change Order 7 — Lobby — Change Order 1"))
+      .toBe("Change Order 1 — Change Order 7 — Lobby");
+    expect(formatDealDisplayName("A — Change Order 1 — Change Order 2"))
+      .toBe("Change Order 2 — Change Order 1 — A");
+    // A human-typed prefix-shaped name with NO generated suffix is still left alone.
+    expect(formatDealDisplayName("Change Order 5 — Lobby")).toBe("Change Order 5 — Lobby");
+  });
+
+  it("is idempotent for EVERY case above — applying twice equals applying once", () => {
+    // Structural, not guarded: the output never ends in a generated suffix, so there is nothing left to
+    // move on a second pass. Asserted over the whole set rather than a hand-picked input.
+    const inputs = [
+      "Tides Park Lane — Change Order 1", "Tides Park Lane — Change Order 12",
+      "Tides — Phase 2 — Change Order 3", "Tides   —   Change Order 4   ", " — Change Order 1",
+      "Change Order 7 — Lobby — Change Order 1", "A — Change Order 1 — Change Order 2",
+      "Change Order 5 — Lobby", "Change Order 1", "Change Order 1 — Tides Park Lane",
+      "Tides Park Lane", "Change Order Backlog Review", "Tides — Change Order 1 Addendum",
+      "Tides - Change Order 1", "Tides — Change Order", "Tides — change order 1", "", "   ",
+    ];
+    for (const input of inputs) {
+      const once = formatDealDisplayName(input);
+      expect(formatDealDisplayName(once)).toBe(once);
+    }
   });
 
   it("leaves every other name byte for byte", () => {
@@ -385,5 +409,25 @@ describe("formatDealDisplayName", () => {
     expect(formatDealDisplayName("   ")).toBe("   ");
     expect(formatDealDisplayName(null)).toBeNull();
     expect(formatDealDisplayName(undefined)).toBeUndefined();
+  });
+});
+
+describe("captureTargetDisplayName", () => {
+  it("moves the generated change-order label to the front for a DEAL target", () => {
+    expect(captureTargetDisplayName({ type: "deal", name: "Tides Park Lane — Change Order 2" }))
+      .toBe("Change Order 2 — Tides Park Lane");
+  });
+
+  it("leaves a LEAD or OPPORTUNITY name byte for byte", () => {
+    // The picker mixes all three types. Only a deal can be a generated change-order child — a lead is a
+    // human-named leads row, and the server excludes opportunities from the `deal` type entirely.
+    expect(captureTargetDisplayName({ type: "lead", name: "Lobby — Change Order 1" }))
+      .toBe("Lobby — Change Order 1");
+    expect(captureTargetDisplayName({ type: "opportunity", name: "Lobby — Change Order 1" }))
+      .toBe("Lobby — Change Order 1");
+  });
+
+  it("leaves an ordinary deal name alone", () => {
+    expect(captureTargetDisplayName({ type: "deal", name: "Tides Park Lane" })).toBe("Tides Park Lane");
   });
 });

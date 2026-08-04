@@ -1,5 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { filterPhotos, groupPhotos, isProjectOffOffice, relativeDate, type FieldPhoto } from "./field-projects";
+import { captureTargetDisplayName, filterPhotos, groupPhotos, isProjectOffOffice, relativeDate, type FieldPhoto } from "./field-projects";
+
+describe("captureTargetDisplayName", () => {
+  it("moves the generated change-order label to the front for a DEAL target", () => {
+    expect(captureTargetDisplayName({ type: "deal", name: "Tides Park Lane — Change Order 2" }))
+      .toBe("Change Order 2 — Tides Park Lane");
+  });
+
+  it("leaves a LEAD or OPPORTUNITY name byte for byte", () => {
+    // The picker mixes all three types. Only a deal can be a generated change-order child — a lead is a
+    // human-named leads row, and the server excludes opportunities from the `deal` type entirely.
+    expect(captureTargetDisplayName({ type: "lead", name: "Lobby — Change Order 1" }))
+      .toBe("Lobby — Change Order 1");
+    expect(captureTargetDisplayName({ type: "opportunity", name: "Lobby — Change Order 1" }))
+      .toBe("Lobby — Change Order 1");
+  });
+
+  it("leaves an ordinary deal name alone", () => {
+    expect(captureTargetDisplayName({ type: "deal", name: "Tides Park Lane" })).toBe("Tides Park Lane");
+  });
+});
 
 describe("isProjectOffOffice", () => {
   it("is false (writable) when the project's office matches the writable office", () => {

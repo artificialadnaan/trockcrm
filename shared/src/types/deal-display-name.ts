@@ -28,18 +28,23 @@ const EM_DASH = "—";
 // is left alone. A hyphen or en-dash separator is likewise not ours and is left alone.
 const CHANGE_ORDER_NAME_SUFFIX = /\s*—\s*Change Order\s+(\d+)\s*$/;
 
-// An already-prefixed name — i.e. this helper's own output, or a name that is nothing but the label.
-// Guards idempotency directly rather than relying on the suffix pattern happening not to match again.
-const CHANGE_ORDER_NAME_PREFIX = /^\s*Change Order\s+\d+\s*(?:—|$)/;
-
 /**
  * The display form of a deal name: for a generated change-order child, "Change Order N" is moved from
  * the end of the stored name to the front; every other name is returned byte for byte.
  *
- *     "Tides Park Lane — Change Order 1"  ->  "Change Order 1 — Tides Park Lane"
- *     "Tides Park Lane"                   ->  "Tides Park Lane"          (untouched)
- *     "Change Order 1 — Tides Park Lane"  ->  "Change Order 1 — Tides Park Lane"  (idempotent)
- *     "Change Order Backlog Review"       ->  "Change Order Backlog Review"       (mid-string, untouched)
+ *     "Tides Park Lane — Change Order 1"        ->  "Change Order 1 — Tides Park Lane"
+ *     "Tides Park Lane"                         ->  "Tides Park Lane"                    (untouched)
+ *     "Change Order 1 — Tides Park Lane"        ->  "Change Order 1 — Tides Park Lane"   (idempotent)
+ *     "Change Order Backlog Review"             ->  "Change Order Backlog Review"        (mid-string)
+ *     "Change Order 7 — Lobby — Change Order 1" ->  "Change Order 1 — Change Order 7 — Lobby"
+ *
+ * IDEMPOTENT BY CONSTRUCTION, not by a guard. This peels every generated trailing suffix off the end
+ * rather than short-circuiting when the name merely LOOKS already-formatted, because prefix-shaped text
+ * cannot identify this function's own output. A parent deal a human named "Change Order 7 — Lobby" gets
+ * a child stored "Change Order 7 — Lobby — Change Order 1": a prefix test fires on it and returns it
+ * unchanged, leaving the child's real "Change Order 1" stranded at the end — exactly the truncation this
+ * helper exists to prevent. Peeling has no such blind spot: the result never ENDS in a generated suffix,
+ * so re-applying it finds nothing left to move.
  *
  * Total and non-throwing: null/undefined pass straight through, and an empty or whitespace-only name is
  * returned exactly as given. Nullish is preserved rather than coerced to "" so call sites that supply
@@ -50,18 +55,22 @@ export function formatDealDisplayName(name: string | null | undefined): string |
 export function formatDealDisplayName(name: string | null | undefined): string | null | undefined {
   if (typeof name !== "string" || name.length === 0) return name;
 
-  // Already in display form (or a bare "Change Order 3") — nothing to move. Checked FIRST so a
-  // hypothetical double-suffixed name can never be rotated a second time into a different string.
-  if (CHANGE_ORDER_NAME_PREFIX.test(name)) return name;
+  // Peel generated suffixes off the tail, outermost first. Each match consumes at least "—Change Order N",
+  // so `rest` strictly shrinks and the loop always terminates.
+  const labels: string[] = [];
+  let rest = name;
+  for (;;) {
+    const match = CHANGE_ORDER_NAME_SUFFIX.exec(rest);
+    if (!match) break;
+    labels.push(`Change Order ${match[1]}`);
+    rest = rest.slice(0, match.index);
+  }
+  // Nothing we generated — return the caller's string untouched, byte for byte.
+  if (labels.length === 0) return name;
 
-  const match = CHANGE_ORDER_NAME_SUFFIX.exec(name);
-  if (!match) return name;
-
-  const label = `Change Order ${match[1]}`;
-  // Everything before the suffix. Trimmed because the suffix pattern already absorbed the whitespace
-  // that ran up to the em-dash, and a stored name may carry its own leading padding.
-  const base = name.slice(0, match.index).trim();
-  // A name that is ONLY the suffix (" — Change Order 1") has no parent part left: show the bare label
-  // rather than emitting a dangling separator.
-  return base.length === 0 ? label : `${label} ${EM_DASH} ${base}`;
+  // Whatever is left is the parent part. Trimmed because a stored name may carry its own padding.
+  // A name that is ONLY the suffix (" — Change Order 1") leaves nothing, so we emit the bare label(s)
+  // rather than a dangling separator.
+  const base = rest.trim();
+  return (base.length === 0 ? labels : [...labels, base]).join(` ${EM_DASH} `);
 }

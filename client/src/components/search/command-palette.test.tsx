@@ -84,6 +84,48 @@ afterEach(() => {
   container = null;
 });
 
+describe("CommandPalette — the change-order relabel is gated on entityType", () => {
+  it("moves 'Change Order N' to the front for a DEAL result", () => {
+    setSearchState({
+      results: {
+        ...fullResults(),
+        deals: [r("deal", "d1", "Tides Park Lane — Change Order 2", "/deals/d1")],
+      },
+      loading: false,
+    });
+    render();
+    const text = container!.textContent ?? "";
+    expect(text).toContain("Change Order 2 — Tides Park Lane");
+    expect(text).not.toContain("Tides Park Lane — Change Order 2");
+  });
+
+  it("leaves a FILE, company, contact, lead or property label byte for byte", () => {
+    // This one row renders every entity type. A file a human named "Proposal — Change Order 1" is not a
+    // generated deal name, and rewriting it to "Change Order 1 — Proposal" would be a lie about the file.
+    setSearchState({
+      results: {
+        deals: [],
+        companies: [r("company", "c1", "Acme — Change Order 1", "/companies/c1")],
+        contacts: [],
+        leads: [r("lead", "l1", "Lobby — Change Order 1", "/leads/l1")],
+        properties: [],
+        files: [r("file", "f1", "Proposal — Change Order 1", "/files/f1")],
+        total: 3,
+        query: "change order",
+      },
+      loading: false,
+    });
+    render();
+    const text = container!.textContent ?? "";
+    expect(text).toContain("Proposal — Change Order 1");
+    expect(text).toContain("Acme — Change Order 1");
+    expect(text).toContain("Lobby — Change Order 1");
+    expect(text).not.toContain("Change Order 1 — Proposal");
+    expect(text).not.toContain("Change Order 1 — Acme");
+    expect(text).not.toContain("Change Order 1 — Lobby");
+  });
+});
+
 describe("CommandPalette — unified grouped, no-blank search UX", () => {
   it("groups results by entity type and marks won deals", () => {
     setSearchState({ results: fullResults(), loading: false });

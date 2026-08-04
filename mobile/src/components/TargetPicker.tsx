@@ -6,7 +6,7 @@ import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { getLiveGps } from "../capture/metadata";
 import { useCaptureTargets, useNearbyCaptureTargets } from "../query/hooks";
 import type { FieldCaptureTarget } from "../api/types";
-import { formatDealDisplayName } from "../projects/field-projects";
+import { captureTargetDisplayName } from "../projects/field-projects";
 import { Badge, EmptyState, LoadingState, TextInput } from "./ui";
 
 const TYPE_LABEL: Record<FieldCaptureTarget["type"], string> = {
@@ -108,9 +108,10 @@ export function TargetPicker({
           >
             <View style={{ flex: 1, gap: 2 }}>
               {/* A change-order child is stored "<Parent> — Change Order N"; on a one-line row the suffix
-                  is the first thing lost. Display-only — `onSelect` still hands back the raw target. */}
+                  is the first thing lost. Gated on the target's type (this list mixes leads/opportunities/
+                  deals). Display-only — `onSelect` still hands back the raw target. */}
               <Text style={styles.rowTitle} numberOfLines={1}>
-                {formatDealDisplayName(item.name)}
+                {captureTargetDisplayName(item)}
               </Text>
               <Text style={styles.rowSub} numberOfLines={1}>
                 {targetSubtitle(item)}

@@ -34,6 +34,18 @@ interface QueuedPhoto {
   progress: number;
 }
 
+/**
+ * The display name for an upload target, with the change-order relabel GATED on the target being a deal.
+ *
+ * These pickers mix all three types, and only a `deal` can be a generated change-order child: a `lead` is
+ * a leads-table row named by a human, and the server excludes opportunities from the `deal` type while a
+ * CO child is always Won. Rewriting every type would mangle a lead legitimately called
+ * "Lobby — Change Order 1". Display-only — the `dealName` search param still carries the stored name.
+ */
+function targetDisplayName(target: Pick<PhotoUploadTarget, "type" | "name">): string {
+  return target.type === "deal" ? formatDealDisplayName(target.name) : target.name;
+}
+
 export function groupPhotoUploadTargets(targets: PhotoUploadTarget[]) {
   return {
     lead: targets.filter((target) => target.type === "lead"),
@@ -310,7 +322,7 @@ export function PhotoCapturePage() {
                   <div className="min-w-0">
                     {/* A change-order child deal is STORED "<Parent> — Change Order N" and these lines
                         truncate. DISPLAY only -- the dealName search param below keeps the raw name. */}
-                    <p className="truncate text-sm font-semibold text-emerald-100">{formatDealDisplayName(selectedTarget.name)}</p>
+                    <p className="truncate text-sm font-semibold text-emerald-100">{targetDisplayName(selectedTarget)}</p>
                     <p className="mt-0.5 truncate text-xs text-emerald-200/70">
                       {selectedTarget.recordNumber ? `${selectedTarget.recordNumber} · ` : ""}
                       {selectedTarget.stageName ?? "No stage"}
@@ -357,7 +369,7 @@ export function PhotoCapturePage() {
                             }}
                             className="w-full px-3 py-2 text-left transition-colors hover:bg-white/10"
                           >
-                            <p className="truncate text-sm font-medium text-white">{formatDealDisplayName(target.name)}</p>
+                            <p className="truncate text-sm font-medium text-white">{targetDisplayName(target)}</p>
                             <p className="mt-0.5 truncate text-xs text-white/45">
                               {target.recordNumber ? `${target.recordNumber} · ` : ""}
                               {target.stageName ?? "No stage"}
@@ -566,7 +578,7 @@ export function PhotoCapturePage() {
               </div>
               {selectedTarget && (
                 <p className="text-xs text-white/30 truncate max-w-[180px]">
-                  {formatDealDisplayName(selectedTarget.name)}
+                  {targetDisplayName(selectedTarget)}
                 </p>
               )}
             </div>

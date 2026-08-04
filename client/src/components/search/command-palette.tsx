@@ -78,9 +78,11 @@ function ResultItem({
       <Icon className="h-4 w-4 text-gray-400 flex-shrink-0" />
       <div className="flex-1 min-w-0">
         {/* A change-order child deal is STORED as "<Parent> — Change Order N" and this label truncates,
-            so the suffix is the first thing lost. Display-only re-order; the stored name is untouched. */}
+            so the suffix is the first thing lost. Display-only re-order; the stored name is untouched.
+            GATED on entityType: this same row renders companies, contacts, leads, properties and FILES,
+            and a file legitimately named "Proposal — Change Order 1" is NOT a generated deal name. */}
         <div className="font-medium text-sm text-gray-900 truncate">
-          {formatDealDisplayName(result.primaryLabel)}
+          {result.entityType === "deal" ? formatDealDisplayName(result.primaryLabel) : result.primaryLabel}
         </div>
         {(() => {
           // Deal-only assignedRepName is appended to the number/location meta line; falsy parts drop
