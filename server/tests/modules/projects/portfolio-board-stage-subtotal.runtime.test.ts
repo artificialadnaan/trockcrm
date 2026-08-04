@@ -1,5 +1,6 @@
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { PORTFOLIO_PROJECT_BOARD_STAGES } from "@trock-crm/shared/types";
 import {
   groupPortfolioProjectsForBoard,
   listPortfolioProjectBoard,
@@ -39,7 +40,14 @@ const SQL_ROWS: SqlRow[] = [
   { id: "p1", stage: "in production", total_value: "500000.00", synced: "2026-05-25T09:34:15.318Z" },
   // "contract executed": a genuine $0
   { id: "e1", stage: "contract executed", total_value: "0.00", synced: "2026-05-25T09:34:15.318Z" },
-  // "bidding" / "buyout" / "close out" / "close out - final invoice": intentionally EMPTY
+  // --- the three production roll-up stages, construction track ---
+  { id: "b1", stage: "buyout", total_value: "250000.00", synced: "2026-05-25T09:34:15.318Z" },
+  { id: "pc1", stage: "pre-construction", total_value: "125000.00", synced: "2026-05-25T09:34:15.318Z" },
+  { id: "pc2", stage: "pre-construction", total_value: null, synced: null }, // never synced -> $0
+  // --- service track: split out, never folded into "in production" ---
+  { id: "s1", stage: "service - in production", total_value: "40000.00", synced: "2020-01-01T00:00:00.000Z" }, // STALE
+  { id: "s2", stage: "service - in production", total_value: null, synced: "2026-05-25T09:34:15.318Z" }, // synced, but no value
+  // remaining board stages: intentionally EMPTY
 ];
 
 // Board-irrelevant row: must NOT appear in the count nor the subtotal even though it
@@ -51,24 +59,29 @@ const IRRELEVANT_ROW: SqlRow = {
   synced: null,
 };
 
+// Every board stage defaults to an empty column; the entries below are the populated ones.
+// Derived from the shared stage list so adding a column cannot leave a hole in this table.
+const emptyByStage = () =>
+  Object.fromEntries(PORTFOLIO_PROJECT_BOARD_STAGES.map((stage) => [stage, 0])) as Record<string, number>;
+
 const EXPECTED_TOTAL: Record<string, number> = {
-  bidding: 0,
-  buyout: 0,
-  "close out": 0,
-  "close out - final invoice": 0,
+  ...emptyByStage(),
   closed: 9716.67 + 100000 + 250.33 + 0, // 109,967.00 (irrelevant 999,999.99 excluded)
-  "contract executed": 0,
   "in production": 500000,
+  "contract executed": 0,
+  buyout: 250000,
+  "pre-construction": 125000,
+  "service - in production": 40000, // service value is NOT folded into "in production"
 };
 
 const EXPECTED_COUNT: Record<string, number> = {
-  bidding: 0,
-  buyout: 0,
-  "close out": 0,
-  "close out - final invoice": 0,
+  ...emptyByStage(),
   closed: 4,
   "contract executed": 1,
   "in production": 1,
+  buyout: 1,
+  "pre-construction": 2,
+  "service - in production": 2,
 };
 
 let db: PGlite;
@@ -147,6 +160,58 @@ describe("portfolio board stage subtotal — real SQL", () => {
     expect(closed!.projects.some((project) => project.id === "x1")).toBe(false);
     // 999,999.99 of the irrelevant row is NOT folded into the subtotal
     expect(closed!.totalValue).toBeCloseTo(109967.0, 2);
+  });
+});
+
+describe("portfolio board — unmapped stages never vanish", () => {
+  it("keeps a stage nobody anticipated in the board's project list and in an Other column", () => {
+    const board = groupPortfolioProjectsForBoard([
+      {
+        id: "known",
+        procore_project_id: "pj-known",
+        procore_company_id: "co",
+        project_number: null,
+        name: "Known",
+        current_stage: "Closed",
+        current_stage_normalized: "closed",
+        current_stage_entered_at: null,
+        total_value: 1000,
+        value_synced_at: null,
+        first_seen_at: "2026-05-18T12:00:00.000Z",
+        updated_at: "2026-05-21T12:00:00.000Z",
+      },
+      {
+        id: "surprise",
+        procore_project_id: "pj-surprise",
+        procore_company_id: "co",
+        project_number: null,
+        name: "Brand New Procore Stage",
+        current_stage: "Warranty - Punch List",
+        current_stage_normalized: "warranty - punch list",
+        current_stage_entered_at: null,
+        total_value: 777,
+        value_synced_at: null,
+        first_seen_at: "2026-05-18T12:00:00.000Z",
+        updated_at: "2026-05-21T12:00:00.000Z",
+      },
+    ]);
+
+    // Present in the flat list (the board header's "N projects" count).
+    expect(board.projects.map((project) => project.id).sort()).toEqual(["known", "surprise"]);
+
+    // AND visible in a column, with its money counted.
+    const other = board.stages.find((column) => column.stage === "unmapped");
+    expect(other).toBeDefined();
+    expect(other!.label).toBe("Other / No Column");
+    expect(other!.projects.map((project) => project.id)).toEqual(["surprise"]);
+    expect(other!.totalValue).toBe(777);
+    expect(other!.projects[0].currentStageNormalized).toBe("warranty - punch list");
+  });
+
+  it("omits the Other column entirely when every stage maps to a real column", () => {
+    const board = groupPortfolioProjectsForBoard([]);
+    expect(board.stages.some((column) => column.stage === "unmapped")).toBe(false);
+    expect(board.stages.map((column) => column.stage)).toEqual([...PORTFOLIO_PROJECT_BOARD_STAGES]);
   });
 });
 

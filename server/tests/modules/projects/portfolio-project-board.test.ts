@@ -37,19 +37,36 @@ const boardRows = [
 ];
 
 describe("portfolio project board service", () => {
-  it("groups projects into the shared seven board stages in order", () => {
+  it("groups projects into the shared board stages in construction-then-service order", () => {
     const board = groupPortfolioProjectsForBoard(boardRows);
 
+    // Construction lifecycle first, then the service track, then the catch-all column (present
+    // here only because the "hold (legacy)" fixture row has no column of its own).
     expect(board.stages.map((stage) => stage.stage)).toEqual([
       "bidding",
+      "estimating",
+      "pre-construction",
       "buyout",
+      "contract executed",
+      "in production",
       "close out",
       "close out - final invoice",
       "closed",
-      "contract executed",
-      "in production",
+      "service - estimating",
+      "service - in production",
+      "service - close out",
+      "service - close out final invoice",
+      "service - lost",
+      "unmapped",
     ]);
-    expect(board.projects).toHaveLength(1);
+    // BOTH rows survive now. The legacy-stage row used to be dropped from this array entirely.
+    expect(board.projects).toHaveLength(2);
+    expect(board.stages.find((stage) => stage.stage === "unmapped")?.projects).toEqual([
+      expect.objectContaining({
+        id: "00000000-0000-4000-8000-000000000002",
+        currentStageNormalized: "hold (legacy)",
+      }),
+    ]);
     expect(board.stages.find((stage) => stage.stage === "closed")?.projects).toEqual([
       expect.objectContaining({
         id: "00000000-0000-4000-8000-000000000001",

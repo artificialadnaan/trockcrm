@@ -386,7 +386,7 @@ describe("SyncHub Procore project stage-change relay service", () => {
     expect(sqlText).toContain("INSERT INTO \"office_main\".portfolio_project_stage_entries");
   });
 
-  it("records non-relevant stages without crashing or dropping the event", async () => {
+  it("keeps a stage nobody anticipated BOARD-RELEVANT so it surfaces instead of disappearing", async () => {
     const { client } = createRecordingClient();
 
     const result = await processSyncHubProcoreProjectStageChanged(
@@ -409,6 +409,37 @@ describe("SyncHub Procore project stage-change relay service", () => {
       { client: client as any }
     );
 
+    // "Warranty" has no alias and no column. It is NOT a decision to exclude, so the row stays
+    // is_board_relevant = true and the board shows it under "Other / No Column". Writing false
+    // here is what used to make such a project invisible: filtered out by the board query, and
+    // (before the grouping fix) dropped from the project list as well.
+    expect(result).toMatchObject({ status: "recorded", isBoardRelevant: true });
+  });
+
+  it("marks the explicitly off-board legacy stages as NOT board-relevant", async () => {
+    const { client } = createRecordingClient();
+
+    const result = await processSyncHubProcoreProjectStageChanged(
+      validPayload({
+        procore: {
+          companyId: "598134325683880",
+          portfolioProjectId: "987654321",
+          projectNumber: "DFW-1-02326-ad",
+          projectName: "T Rock Portfolio Project",
+          previousStage: "Closed",
+          currentStage: "Hold (LEGACY)",
+        },
+        stageChange: {
+          previousStage: "Closed",
+          newStage: "Hold (LEGACY)",
+          detectedAt: "2026-05-20T14:15:00.000Z",
+          webhookTimestamp: null,
+        },
+      }),
+      { client: client as any }
+    );
+
+    // The event is still recorded — exclusion is a deliberate, auditable decision, not a drop.
     expect(result).toMatchObject({ status: "recorded", isBoardRelevant: false });
   });
 

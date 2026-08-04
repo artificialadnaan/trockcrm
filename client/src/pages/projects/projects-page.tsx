@@ -9,6 +9,9 @@ import {
 } from "@/hooks/use-projects";
 import { formatCurrency } from "@/lib/deal-utils";
 
+/** Synthetic column key the server uses for projects whose stage matches no board column. */
+const UNMAPPED_STAGE = "unmapped";
+
 function formatSyncDate(value: string | null | undefined) {
   if (!value) return null;
   return new Intl.DateTimeFormat("en-US", {
@@ -65,9 +68,14 @@ function ProjectCard({ project }: { project: PortfolioProjectSummary }) {
 }
 
 function StageColumn({ column }: { column: PortfolioProjectBoardColumn }) {
+  const unmapped = column.stage === UNMAPPED_STAGE;
+
   return (
     <section
-      className="flex h-full min-h-[32rem] w-[20rem] shrink-0 flex-col overflow-hidden rounded-lg border border-slate-200 bg-slate-50"
+      className={cn(
+        "flex h-full min-h-[32rem] w-[20rem] shrink-0 flex-col overflow-hidden rounded-lg border",
+        unmapped ? "border-amber-300 bg-amber-50/60" : "border-slate-200 bg-slate-50"
+      )}
       aria-label={`${column.label} projects`}
     >
       <div className="border-b border-slate-200 bg-white p-4">
@@ -80,10 +88,20 @@ function StageColumn({ column }: { column: PortfolioProjectBoardColumn }) {
               {column.projects.length}
             </p>
           </div>
-          <span className="rounded-full bg-brand-red px-2.5 py-0.5 text-xs font-black text-white">
-            Portfolio
+          <span
+            className={cn(
+              "rounded-full px-2.5 py-0.5 text-xs font-black text-white",
+              unmapped ? "bg-amber-600" : "bg-brand-red"
+            )}
+          >
+            {unmapped ? "Unmapped" : "Portfolio"}
           </span>
         </div>
+        {unmapped ? (
+          <p className="mt-2 text-[11px] font-bold text-amber-800">
+            Stages with no board column of their own. Shown here so no project is ever dropped.
+          </p>
+        ) : null}
         <div className="mt-3">
           <p className="text-lg font-black tabular-nums text-slate-950">
             {formatCurrency(column.totalValue)}

@@ -1,6 +1,6 @@
 import { createHash } from "crypto";
 import type { PoolClient } from "pg";
-import { normalizePortfolioProjectStage, isPortfolioProjectBoardStage } from "@trock-crm/shared/types";
+import { normalizePortfolioProjectStage, isPortfolioProjectBoardRelevantStage } from "@trock-crm/shared/types";
 import { pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 
@@ -306,7 +306,9 @@ export function validateSyncHubProjectStageChangedPayload(input: unknown): SyncH
       current: {
         raw: newStage,
         normalized: normalizedCurrentStage,
-        isBoardRelevant: isPortfolioProjectBoardStage(normalizedCurrentStage),
+        // Relevance, not column membership: a stage with no column is still relayed onto the
+        // board (into "Other / Unmapped"). Only the explicit off-board legacy stages are false.
+        isBoardRelevant: isPortfolioProjectBoardRelevantStage(normalizedCurrentStage),
       },
     },
     synchub: payload.synchub && typeof payload.synchub === "object"

@@ -1,6 +1,7 @@
 import type { PoolClient } from "pg";
 import {
   PORTFOLIO_PROJECT_BOARD_STAGES,
+  PORTFOLIO_UNMAPPED_BOARD_STAGE,
   normalizePortfolioProjectStage,
   type PortfolioProjectBoardStage,
 } from "@trock-crm/shared/types";
@@ -86,7 +87,13 @@ export interface PortfolioProjectSummary {
   projectNumber: string | null;
   name: string;
   currentStage: string;
-  currentStageNormalized: PortfolioProjectBoardStage;
+  /**
+   * The normalized stage. Usually a `PortfolioProjectBoardStage`, but deliberately typed
+   * as a plain string: a project whose Procore stage matches no board column is still
+   * returned (grouped under "Other / Unmapped") rather than dropped, so this can hold a
+   * stage nobody has written an alias for yet.
+   */
+  currentStageNormalized: string;
   currentStageEnteredAt: string | null;
   totalValue: number | null;
   valueSyncedAt: string | null;
@@ -108,8 +115,12 @@ export interface PortfolioProjectStageEntry {
   createdAt: string;
 }
 
+export type PortfolioProjectBoardColumnStage =
+  | PortfolioProjectBoardStage
+  | typeof PORTFOLIO_UNMAPPED_BOARD_STAGE;
+
 export interface PortfolioProjectBoardColumn {
-  stage: PortfolioProjectBoardStage;
+  stage: PortfolioProjectBoardColumnStage;
   label: string;
   /** Sum of every project's contract value (total_value) in this stage column. */
   totalValue: number;
@@ -134,15 +145,9 @@ const SORT_COLUMNS: Record<string, string> = {
   lastSyncedAt: "p.last_synced_at",
 };
 
-function stageLabel(stage: PortfolioProjectBoardStage): string {
+function stageLabel(stage: PortfolioProjectBoardColumnStage): string {
+  if (stage === PORTFOLIO_UNMAPPED_BOARD_STAGE) return "Other / No Column";
   return stage.replace(/\b\w/g, (char) => char.toUpperCase());
-}
-
-function normalizeBoardStage(value: string | null | undefined): PortfolioProjectBoardStage | null {
-  const normalized = normalizePortfolioProjectStage(value);
-  return PORTFOLIO_PROJECT_BOARD_STAGES.includes(normalized as PortfolioProjectBoardStage)
-    ? normalized as PortfolioProjectBoardStage
-    : null;
 }
 
 export function quoteIdent(identifier: string): string {
@@ -610,9 +615,15 @@ function toApiProject(row: any) {
   };
 }
 
-function toPortfolioProjectSummary(row: any): PortfolioProjectSummary | null {
-  const stage = normalizeBoardStage(row.current_stage_normalized ?? row.current_stage);
-  if (!stage) return null;
+/**
+ * Build a summary for EVERY row. Deliberately total (never null): a stage that matches no
+ * board column used to make this return null, which dropped the project from the board's
+ * columns AND from its `projects` array — the project simply ceased to exist as far as the
+ * UI was concerned. Now an unrecognised stage keeps its normalized value and the grouping
+ * puts it in the "Other / Unmapped" column.
+ */
+function toPortfolioProjectSummary(row: any): PortfolioProjectSummary {
+  const stage = normalizePortfolioProjectStage(row.current_stage_normalized ?? row.current_stage);
   return {
     id: row.id,
     procoreProjectId: row.procore_project_id,
@@ -662,27 +673,41 @@ export function groupPortfolioProjectsForBoard(rows: any[]) {
     totalValue: 0,
     projects: [],
   }));
-  const columnByStage = new Map(columns.map((column) => [column.stage, column]));
+  // Catch-all for stages nobody anticipated. Appended to the board only when it actually has
+  // projects, so the normal board does not carry a permanently-empty column — but a project
+  // with an unknown stage is now visible and counted instead of vanishing.
+  const unmapped: PortfolioProjectBoardColumn = {
+    stage: PORTFOLIO_UNMAPPED_BOARD_STAGE,
+    label: stageLabel(PORTFOLIO_UNMAPPED_BOARD_STAGE),
+    totalValue: 0,
+    projects: [],
+  };
+  const columnByStage = new Map<PortfolioProjectBoardColumnStage, PortfolioProjectBoardColumn>(
+    columns.map((column) => [column.stage, column]),
+  );
   const projects: PortfolioProjectSummary[] = [];
 
   for (const row of rows) {
     const project = toPortfolioProjectSummary(row);
-    if (!project) continue;
     projects.push(project);
-    columnByStage.get(project.currentStageNormalized)?.projects.push(project);
+    // The cast is the whole point: currentStageNormalized may be a stage with no column, and
+    // the Map miss is what routes it to the unmapped bucket instead of dropping it.
+    const column = columnByStage.get(project.currentStageNormalized as PortfolioProjectBoardColumnStage);
+    (column ?? unmapped).projects.push(project);
   }
+
+  const allColumns = unmapped.projects.length > 0 ? [...columns, unmapped] : columns;
 
   // Subtotal each column from its own projects so the dollar total and the project
   // count always describe the exact same set (stale/unsynced values still included;
   // null / non-numeric values count as 0).
-  for (const column of columns) {
+  for (const column of allColumns) {
     column.totalValue = column.projects.reduce(
       (sum, project) => sum + coercePortfolioContractValue(project.totalValue),
       0,
     );
   }
-
-  return { stages: columns, projects };
+  return { stages: allColumns, projects };
 }
 
 export async function listPortfolioProjectBoard(client: QueryExecutor) {
@@ -712,8 +737,9 @@ export async function getPortfolioProjectDetail(client: QueryExecutor, projectId
   const row = projectResult.rows[0];
   if (!row) return null;
 
+  // No stage-based null here: a board-relevant project whose stage has no column is still a
+  // real project, so its detail page must open rather than 404 the way it used to.
   const summary = toPortfolioProjectSummary(row);
-  if (!summary) return null;
 
   const historyResult = await client.query(
     `SELECT id, event_key, previous_stage, previous_stage_normalized,

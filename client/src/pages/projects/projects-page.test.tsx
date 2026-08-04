@@ -17,19 +17,30 @@ vi.mock("@/lib/api", () => ({
 
 const stageNames = [
   "bidding",
+  "estimating",
+  "pre-construction",
   "buyout",
+  "contract executed",
+  "in production",
   "close out",
   "close out - final invoice",
   "closed",
-  "contract executed",
-  "in production",
+  "service - estimating",
+  "service - in production",
+  "service - close out",
+  "service - close out final invoice",
+  "service - lost",
 ];
 
-function boardResponse(projects: Array<Record<string, unknown>> = []) {
+function boardResponse(
+  projects: Array<Record<string, unknown>> = [],
+  overrides: { stages?: Array<Record<string, unknown>> } = {},
+) {
   return {
-    stages: stageNames.map((stage) => ({
+    stages: overrides.stages ?? stageNames.map((stage) => ({
       stage,
       label: stage.replace(/\b\w/g, (char) => char.toUpperCase()),
+      totalValue: 0,
       projects: projects.filter((project) => project.currentStageNormalized === stage),
     })),
     projects,
@@ -113,6 +124,52 @@ describe("ProjectsPage", () => {
     expect(container.querySelector("[draggable]")).toBeNull();
   });
 
+  it("renders the Other / No Column bucket so unmapped projects stay visible", async () => {
+    const surprise = {
+      id: "00000000-0000-4000-8000-000000000009",
+      procoreProjectId: "9",
+      procoreCompanyId: "co",
+      projectNumber: "PN-9",
+      name: "Brand New Procore Stage",
+      currentStage: "Warranty - Punch List",
+      currentStageNormalized: "warranty - punch list",
+      currentStageEnteredAt: null,
+      totalValue: 777,
+      valueSyncedAt: null,
+      firstSeenAt: "2026-05-18T12:00:00.000Z",
+      updatedAt: "2026-05-21T12:00:00.000Z",
+    };
+    mocks.api.mockResolvedValue(
+      boardResponse([surprise], {
+        stages: [
+          ...stageNames.map((stage) => ({
+            stage,
+            label: stage.replace(/\b\w/g, (char) => char.toUpperCase()),
+            totalValue: 0,
+            projects: [],
+          })),
+          { stage: "unmapped", label: "Other / No Column", totalValue: 777, projects: [surprise] },
+        ],
+      }),
+    );
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <ProjectsPage />
+        </MemoryRouter>,
+      );
+    });
+
+    await vi.waitFor(() => expect(container.textContent).toContain("Brand New Procore Stage"));
+    const column = container.querySelector('[aria-label="Other / No Column projects"]');
+    expect(column).not.toBeNull();
+    expect(column!.textContent).toContain("Unmapped");
+    expect(column!.textContent).toContain("Stages with no board column of their own");
+    // Counted in the board header total too, not just shown.
+    expect(container.textContent).toContain("1 project");
+  });
+
   it("renders project value absence without showing a fake zero", async () => {
     mocks.api.mockResolvedValue(
       boardResponse([
@@ -142,7 +199,11 @@ describe("ProjectsPage", () => {
     });
 
     await vi.waitFor(() => expect(container.textContent).toContain("Portfolio Roof Replacement"));
-    expect(container.textContent).toContain("Value not synced");
-    expect(container.textContent).not.toContain("$0");
+    // Scoped to the project CARD: stage/summary totals elsewhere on the page legitimately render
+    // "$0", but a project whose value never synced must never be dressed up as a real $0.
+    const card = container.querySelector('a[href="/projects/00000000-0000-4000-8000-000000000001"]');
+    expect(card).not.toBeNull();
+    expect(card!.textContent).toContain("Value not synced");
+    expect(card!.textContent).not.toContain("$0");
   });
 });
