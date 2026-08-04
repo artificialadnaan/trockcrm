@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import { useClosedWonRevenueReport } from "@/hooks/use-reports";
 import { useReportFilters } from "@/components/reports/report-filter-bar";
+import { useDealHref } from "@/hooks/use-office-scope";
 import {
   DataTable,
   formatCurrency,
@@ -22,6 +23,8 @@ import {
 } from "./sales-report-ui";
 
 export function ClosedWonRevenuePage() {
+  // Rows follow the URL office scope (useScopedReport), so their links must carry it too.
+  const dealHref = useDealHref();
   const { query } = useReportFilters();
   const { data, loading, error, refetch } = useClosedWonRevenueReport(query);
   const hasRows = Boolean(data && (data.kpis.wonDealCount > 0 || data.topDeals.length > 0 || data.byOwner.length > 0));
@@ -77,7 +80,7 @@ export function ClosedWonRevenuePage() {
                     <TableCell className="text-right tabular-nums">{formatCurrency(owner.avgDealSize)}</TableCell>
                     <TableCell>
                       {owner.largestWonDeal.dealId ? (
-                        <Link to={`/deals/${owner.largestWonDeal.dealId}`} className="font-semibold text-brand-red hover:underline">
+                        <Link to={dealHref(owner.largestWonDeal.dealId)} className="font-semibold text-brand-red hover:underline">
                           {owner.largestWonDeal.dealName} ({formatCurrency(owner.largestWonDeal.value)})
                         </Link>
                       ) : "None"}
@@ -146,7 +149,7 @@ export function ClosedWonRevenuePage() {
               <TableBody>
                 {data.topDeals.map((deal) => (
                   <TableRow key={deal.dealId}>
-                    <TableCell><Link to={`/deals/${deal.dealId}`} className="font-semibold text-brand-red hover:underline">{deal.dealName}</Link></TableCell>
+                    <TableCell><Link to={dealHref(deal.dealId)} className="font-semibold text-brand-red hover:underline">{deal.dealName}</Link></TableCell>
                     <TableCell>{deal.ownerName}</TableCell>
                     <TableCell className="text-right">{formatCurrency(deal.value)}</TableCell>
                     <TableCell>{formatDate(deal.wonAt)}</TableCell>

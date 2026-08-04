@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { ExportExcelButton } from "@/components/reports/export-excel-button";
+import { useDealHref } from "@/hooks/use-office-scope";
 import type { ExcelSheet } from "@/lib/excel-export";
 export { sheetsFromReport } from "@/lib/excel-export";
 
@@ -150,8 +151,12 @@ export function ActiveWorkNote() {
 }
 
 export function DealLink({ dealId, children }: { dealId: string; children: ReactNode }) {
+  // Same rule and same helper as the performance-report-ui DealLink: ?officeId verbatim, or nothing.
+  // These are two separately-defined components with the same name; keeping the href in one shared
+  // hook is what stops them drifting apart again.
+  const dealHref = useDealHref();
   return (
-    <Link to={`/deals/${dealId}`} className="font-semibold text-slate-950 hover:text-brand-red hover:underline">
+    <Link to={dealHref(dealId)} className="font-semibold text-slate-950 hover:text-brand-red hover:underline">
       {children}
     </Link>
   );

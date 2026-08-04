@@ -12,6 +12,7 @@ import { PageHeader } from "@/components/layout/page-header";
 import { ReportFilterBar, useReportFilters } from "@/components/reports/report-filter-bar";
 import { ExportExcelButton } from "@/components/reports/export-excel-button";
 import { useDailyActivityLogReport, type DailyActivityLogEntry } from "@/hooks/use-reports";
+import { useDealHref } from "@/hooks/use-office-scope";
 import { parseDisplayDate } from "@/lib/deal-utils";
 import { EmptyState, ErrorState, KpiCard, LoadingState, ReportPanel, formatNumber } from "./performance-report-ui";
 
@@ -39,12 +40,27 @@ function formatDayShort(date: string) {
   return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric" }).format(parseDisplayDate(date));
 }
 
+// Row clocks render in UTC — the SAME zone the server buckets days in (`a.occurred_at::date` resolves
+// against the Postgres session TimeZone, which the API never sets, so UTC in practice).
+//
+// This has to match the bucket or the row contradicts its own heading: rendered in browser-local time,
+// an activity at 2026-06-02T00:30:00Z sits under the "Jun 2" header while displaying "7:30 PM", so a
+// Central manager reads Tuesday-evening work that actually happened Monday. Since this report exists to
+// answer "what did this person do on this day", a row disagreeing with its day header defeats the
+// point. The bucket cannot move to local/business time without desyncing the per-day counts from Rep
+// Activity (the reconciliation property), so the CLOCK moves to the bucket's zone instead. The day
+// header carries a visible "times UTC" marker so a time is never mistaken for local.
+const UTC_TIME = { hour: "numeric", minute: "2-digit", timeZone: "UTC" } as const;
+
 function formatClock(iso: string) {
   if (!iso) return "";
-  return new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit" }).format(new Date(iso));
+  return new Intl.DateTimeFormat("en-US", UTC_TIME).format(new Date(iso));
 }
 
-/** Full local date + time for the Excel export, which cannot carry a time in a "date" column. */
+/**
+ * Full date + time for the Excel export, which cannot carry a time in a "date" column. Also UTC, for
+ * the same reason and so an exported row matches what the page showed.
+ */
 function formatDateTime(iso: string) {
   if (!iso) return "";
   return new Intl.DateTimeFormat("en-US", {
@@ -53,6 +69,7 @@ function formatDateTime(iso: string) {
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
+    timeZone: "UTC",
   }).format(new Date(iso));
 }
 
@@ -117,10 +134,31 @@ export function DailyActivityLogPage() {
     setParam("types", next.length ? next.join(",") : null);
   }
 
-  // Preserve the cross-office scope on deal links; a bare /deals/:id resolves against the user's
-  // default office and 404s an off-office deal.
-  const officeId = searchParams.get("officeId");
-  const dealHref = (dealId: string) => `/deals/${dealId}${officeId ? `?officeId=${encodeURIComponent(officeId)}` : ""}`;
+  // Deal links carry the TENANT SCOPE only — ?officeId, never ?office.
+  //
+  // The two params look interchangeable and are not:
+  //   ?officeId — the app-level cross-office SCOPE. api() turns it into the x-office-id header, which
+  //               is what tenantMiddleware resolves into a search_path (`office_<slug>`). It selects
+  //               WHICH SCHEMA the request reads.
+  //   ?office   — ReportFilterBar's display FILTER. It is a query param this report passes to its own
+  //               endpoint and nothing else; it never reaches tenantMiddleware and never changes the
+  //               schema. Rows are read from the viewer's CURRENT tenant either way.
+  //
+  // An earlier revision resolved ?office into an officeId for these links. That was wrong, and
+  // actively harmful: it promoted a report predicate into a tenant switch. The office filter matches
+  // on the activity's RESPONSIBLE USER (activities are tenant tables; users/offices are PUBLIC, so
+  // the join crosses schemas), and the activity route lets an elevated caller set responsibleUserId
+  // freely. So a Dallas-schema deal can carry an activity whose responsible user is Atlanta; under
+  // ?office=atlanta that row is shown, and linking it as ?officeId=<atlanta> pointed the detail
+  // request at Atlanta's schema, where that deal id does not exist — reintroducing exactly the 404
+  // this link logic exists to prevent.
+  //
+  // With only ?office set, the deal lives in the viewer's current tenant, which is precisely where a
+  // bare /deals/:id resolves. So the correct fallback is NO officeId at all. The genuinely complete
+  // fix is a per-row office/scope from the server (deals.office_code determines a deal's schema, not
+  // the responsible user's office) — that remains an open follow-up, deliberately not faked here.
+  // Shared with both report DealLink components so this rule is stated once, not three times.
+  const dealHref = useDealHref();
 
   const pagination = data?.pagination;
   const rangeStart = pagination && pagination.returned > 0 ? (pagination.page - 1) * pagination.limit + 1 : 0;
@@ -179,8 +217,8 @@ export function DailyActivityLogPage() {
               // which keeps only the UTC calendar day and formats it m/d/yyyy. In a log about what
               // people did THROUGHOUT the day, a column called "Occurred At" that silently drops the
               // time is worse than useless. Exported as a preformatted local date-time string.
-              { key: "occurredAtDisplay", header: "Occurred At", type: "text" },
-              { key: "loggedAtDisplay", header: "Logged At", type: "text" },
+              { key: "occurredAtDisplay", header: "Occurred At (UTC)", type: "text" },
+              { key: "loggedAtDisplay", header: "Logged At (UTC)", type: "text" },
               { key: "loggedDate", header: "Logged On", type: "date" },
               { key: "loggedDaysDiff", header: "Logged Days After", type: "number" },
               { key: "typeLabel", header: "Type", type: "text" },
@@ -243,6 +281,9 @@ export function DailyActivityLogPage() {
                         {formatNumber(day.entryCount)} {day.entryCount === 1 ? "entry" : "entries"}
                         {" · "}{formatNumber(day.noteCount)} notes
                         {" · "}{formatNumber(day.repCount)} {day.repCount === 1 ? "rep" : "reps"}
+                        {/* The day boundary and the row clocks are both UTC — say so, so a time is
+                            never read as local and made to contradict this heading. */}
+                        {" · "}times UTC
                       </span>
                       {day.offDayLoggedCount > 0 ? (
                         <span className="text-xs font-semibold text-amber-700">
@@ -360,7 +401,8 @@ export function DailyActivityLogPage() {
             <Link to={{ pathname: "/reports/performance/rep-activity", search }} className="underline underline-offset-2">
               Rep Activity
             </Link>{" "}
-            timeline. Entries written up on a different day carry a badge showing when they were actually logged.
+            timeline. Days and times are both UTC, so a row's clock never contradicts the day it is filed under.
+            Entries written up on a different day carry a badge showing when they were actually logged.
             Rep Activity caches for 5 minutes, so just after something is logged it can appear here first.
             Email entries you do not own are counted but their content is not shown.
           </p>

@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import { usePipelineVelocityReport } from "@/hooks/use-reports";
 import { useReportFilters } from "@/components/reports/report-filter-bar";
+import { useDealHref } from "@/hooks/use-office-scope";
 import {
   CountBarChart,
   DataTable,
@@ -20,6 +21,8 @@ import {
 } from "./sales-report-ui";
 
 export function PipelineVelocityPage() {
+  // Rows follow the URL office scope (useScopedReport), so their links must carry it too.
+  const dealHref = useDealHref();
   const { query } = useReportFilters();
   const { data, loading, error, refetch } = usePipelineVelocityReport(query);
   const hasRows = Boolean(data && (data.kpis.openDealCount > 0 || data.stages.length > 0 || data.stuckDeals.length > 0));
@@ -80,7 +83,7 @@ export function PipelineVelocityPage() {
                     <TableCell className="text-right tabular-nums">{stage.medianDaysInStage}</TableCell>
                     <TableCell>
                       {stage.oldestDeal.dealId ? (
-                        <Link to={`/deals/${stage.oldestDeal.dealId}`} className="font-semibold text-brand-red hover:underline">
+                        <Link to={dealHref(stage.oldestDeal.dealId)} className="font-semibold text-brand-red hover:underline">
                           {stage.oldestDeal.dealName} ({stage.oldestDeal.daysInStage}d)
                         </Link>
                       ) : "None"}
@@ -108,7 +111,7 @@ export function PipelineVelocityPage() {
                 ) : data.stuckDeals.map((deal) => (
                   <TableRow key={deal.dealId}>
                     <TableCell>
-                      <Link to={`/deals/${deal.dealId}`} className="font-semibold text-brand-red hover:underline">{deal.dealName}</Link>
+                      <Link to={dealHref(deal.dealId)} className="font-semibold text-brand-red hover:underline">{deal.dealName}</Link>
                     </TableCell>
                     <TableCell>{deal.ownerName}</TableCell>
                     <TableCell>{deal.stageName}</TableCell>
