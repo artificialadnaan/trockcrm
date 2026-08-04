@@ -745,12 +745,18 @@ export async function getRepActivityReport(db: TenantDb, filters: PerformanceRep
         WHERE ${activityScope}
       `);
     const timeline = await db.execute(sql`
-        SELECT a.occurred_at::date::text AS day, COUNT(*)::int AS touchpoints
+        -- Bucket pinned to UTC rather than left to the session TimeZone. A bare occurred_at::date
+        -- follows whatever zone the connection carries, which made this timeline non-deterministic
+        -- across server configurations AND let it silently diverge from the Daily Activity Log,
+        -- whose day sections must equal these bars. Both are pinned in the same change so they agree
+        -- by construction; under a UTC session (the expected production configuration) this is a
+        -- no-op. See daily-activity-log-service.ts OCCURRED_DAY_UTC for the full reasoning.
+        SELECT (a.occurred_at AT TIME ZONE 'UTC')::date::text AS day, COUNT(*)::int AS touchpoints
         FROM activities a
         JOIN users u ON u.id = a.responsible_user_id
           JOIN offices o ON o.id = u.office_id
         WHERE ${activityScope}
-        GROUP BY a.occurred_at::date
+        GROUP BY (a.occurred_at AT TIME ZONE 'UTC')::date
         ORDER BY day ASC
       `);
     const types = await db.execute(sql`

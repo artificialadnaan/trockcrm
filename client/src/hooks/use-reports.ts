@@ -1335,6 +1335,12 @@ function useOfficeScopeKey() {
  * │ useCustomerConcentrationReport, useExecutiveTrendsReport, useUnifiedWorkflowOverview,          │
  * │ useDataMiningOverview, useRegionalOwnershipOverview) and the showcase family                   │
  * │ (useMondayShowcase, useShowcaseEvidence, useRepPack, useAtRiskWatchlist, useRegionReport).     │
+ * │                                                                                               │
+ * │ ALSO OPEN, one hop further out: the scope now survives report -> entity detail, but company    │
+ * │ and property DETAIL pages emit bare onward links of their own (related deals, properties), so  │
+ * │ it dies on the second hop. Same rule, different surface — auditing every onward link on        │
+ * │ client/src/pages/companies/company-detail-page.tsx and                                         │
+ * │ client/src/pages/properties/property-detail-page.tsx is its own change, not a report fix.      │
  * └───────────────────────────────────────────────────────────────────────────────────────────────┘
  *
  * The office-scope plumbing every report hook needs, in one place.
@@ -1362,6 +1368,13 @@ function useOfficeScopeKey() {
  */
 function useScopedReport<T>(
   fetcher: () => Promise<T>,
+  /**
+   * The values that change the request. MUST be CONSTANT-LENGTH across renders for a given call site
+   * — it is spread into a useCallback dependency array, and React requires those to be stable in size.
+   * A caller building this conditionally (`[...base, ...(x ? [x] : [])]`) would break subtly: React
+   * warns, then compares mismatched positions, so the hook can refetch when nothing changed or fail to
+   * refetch when something did. Pass a fixed-shape array and let entries be `undefined` instead.
+   */
   deps: readonly unknown[],
   errorMessage: string
 ) {

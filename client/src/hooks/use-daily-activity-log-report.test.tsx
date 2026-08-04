@@ -5,7 +5,7 @@
 // in flight. Without a request-generation guard a slower earlier response lands last and repaints the
 // page with the previous filter's entries -- the user sees "Note" selected over unfiltered data.
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { MemoryRouter, useSearchParams } from "react-router-dom";
@@ -33,24 +33,55 @@ const {
  * Generic harness: mount any report hook inside a router and switch ?officeId IN PLACE (no remount —
  * a remount would refetch trivially and prove nothing about the dependency).
  */
-async function renderScopedHook<T>(useHook: () => T, initialEntry: string) {
+// ONE harness for every case in this file. It mounts a hook inside a MemoryRouter and captures the
+// live setSearchParams, so a test can change the URL WITHOUT remounting — a remount would refetch
+// trivially and prove nothing about the dependency key, which is the property most of these tests
+// exist to pin.
+//
+// `props` lets a case re-render with different hook arguments (the type-filter cases) without losing
+// component state. Every mount is tracked and unmounted in afterEach: these tests deliberately mutate
+// shared module state (`pending`), so a tree left mounted from an earlier case can resolve into the
+// next one's assertions.
+const mounted: Array<() => void> = [];
+
+async function renderScopedHook<T, P extends object = Record<string, never>>(
+  useHook: (props: P) => T,
+  initialEntry: string,
+  initialProps: P = {} as P
+) {
   const container = document.createElement("div");
+  document.body.appendChild(container);
   const root = createRoot(container);
+  mounted.push(() => {
+    act(() => root.unmount());
+    container.remove();
+  });
+
   let current: T;
   let setParams: ReturnType<typeof useSearchParams>[1];
-  function Probe() {
+  function Probe(props: P) {
     const [, setSearchParams] = useSearchParams();
     setParams = setSearchParams;
-    current = useHook();
+    current = useHook(props);
     return null;
   }
+  const Tree = (props: P) =>
+    createElement(MemoryRouter, { initialEntries: [initialEntry] }, createElement(Probe, props));
+
   await act(async () => {
-    root.render(createElement(MemoryRouter, { initialEntries: [initialEntry] }, createElement(Probe)));
+    root.render(Tree(initialProps));
   });
+
   return {
     get current() {
       return current;
     },
+    async rerenderWith(props: P) {
+      await act(async () => {
+        root.render(Tree(props));
+      });
+    },
+    /** Change the app-level office scope in place, as the office switcher does. */
     async setOffice(officeId: string) {
       await act(async () => {
         setParams(new URLSearchParams({ officeId }));
@@ -70,47 +101,22 @@ function payload(tag: string) {
   };
 }
 
-// The hook reads ?officeId (the app-level cross-office scope) via useSearchParams, so it has to run
-// inside a router. setParams is captured from the live tree so a test can change the URL WITHOUT
-// remounting — a remount would refetch trivially and prove nothing about the dependency key.
+/** The Daily Activity Log, with `types` re-renderable. */
 async function renderLog(initialEntry = "/reports/performance/daily-activity-log") {
-  const container = document.createElement("div");
-  const root = createRoot(container);
-  let current: ReturnType<typeof useDailyActivityLogReport>;
-  let setParams: ReturnType<typeof useSearchParams>[1];
-  function Probe({ types }: { types: string[] }) {
-    const [, setSearchParams] = useSearchParams();
-    setParams = setSearchParams;
-    current = useDailyActivityLogReport({ dateFrom: "2026-06-01", dateTo: "2026-06-30", types });
-    return null;
-  }
-  function Tree({ types }: { types: string[] }) {
-    return createElement(
-      MemoryRouter,
-      { initialEntries: [initialEntry] },
-      createElement(Probe, { types })
-    );
-  }
-  await act(async () => {
-    root.render(createElement(Tree, { types: [] }));
+  const hook = await renderScopedHook(
+    ({ types }: { types: string[] }) =>
+      useDailyActivityLogReport({ dateFrom: "2026-06-01", dateTo: "2026-06-30", types }),
+    initialEntry,
+    { types: [] as string[] }
+  );
+  return Object.assign(hook, {
+    rerender: (types: string[]) => hook.rerenderWith({ types }),
   });
-  return {
-    get current() {
-      return current;
-    },
-    async rerender(types: string[]) {
-      await act(async () => {
-        root.render(createElement(Tree, { types }));
-      });
-    },
-    /** Change the app-level office scope in place, as the office switcher does. */
-    async setOffice(officeId: string) {
-      await act(async () => {
-        setParams(new URLSearchParams({ officeId }));
-      });
-    },
-  };
 }
+
+afterEach(() => {
+  while (mounted.length) mounted.pop()!();
+});
 
 beforeEach(() => {
   pending.length = 0;
@@ -165,33 +171,9 @@ describe("usePerformanceReport office scope (shared by 3 sibling reports)", () =
   // Forecast Accuracy. The fix lives in that shared hook, so it needs its own guard — otherwise a
   // future edit could restore the bug for all three while the Daily Activity Log tests stayed green.
   // Rep Activity stands in for the three; they share one code path.
-  async function renderRepActivity(initialEntry: string) {
-    const container = document.createElement("div");
-    const root = createRoot(container);
-    let current: ReturnType<typeof useRepActivityReport>;
-    let setParams: ReturnType<typeof useSearchParams>[1];
-    function Probe() {
-      const [, setSearchParams] = useSearchParams();
-      setParams = setSearchParams;
-      current = useRepActivityReport({ dateFrom: "2026-06-01", dateTo: "2026-06-30" });
-      return null;
-    }
-    await act(async () => {
-      root.render(
-        createElement(MemoryRouter, { initialEntries: [initialEntry] }, createElement(Probe))
-      );
-    });
-    return {
-      get current() {
-        return current;
-      },
-      async setOffice(officeId: string) {
-        await act(async () => {
-          setParams(new URLSearchParams({ officeId }));
-        });
-      },
-    };
-  }
+  const renderRepActivity = (initialEntry: string) =>
+    renderScopedHook(() => useRepActivityReport({ dateFrom: "2026-06-01", dateTo: "2026-06-30" }), initialEntry);
+
 
   it("refetches Rep Activity when the office scope changes", async () => {
     const hook = await renderRepActivity("/reports/performance/rep-activity?officeId=office-a");

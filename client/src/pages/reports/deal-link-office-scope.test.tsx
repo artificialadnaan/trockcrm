@@ -55,4 +55,17 @@ describe.each(COMPONENTS)("%s DealLink office scope", (_name, Component) => {
   it("encodes an officeId that needs escaping rather than emitting it raw", () => {
     expect(hrefFor(Component, "?officeId=a%20b%26c")).toBe("/deals/deal-9?officeId=a%20b%26c");
   });
+
+  it("trims a padded officeId the same way api() does", () => {
+    // api()'s readOfficeIdFromLocation trims before setting x-office-id, so a padded value still
+    // FETCHES correctly. If the link kept the padding, DealDetailPage would read it raw and pass it
+    // to getOfficeRequestOptions — which sets the header itself and bypasses api()'s trim — and auth
+    // rejects an office id with spaces. Rows load, every link 401s: a symptom pointing nowhere near
+    // the cause.
+    expect(hrefFor(Component, "?officeId=%20office-b%20")).toBe("/deals/deal-9?officeId=office-b");
+  });
+
+  it("treats a whitespace-only officeId as absent, not as a scope", () => {
+    expect(hrefFor(Component, "?officeId=%20%20")).toBe("/deals/deal-9");
+  });
 });

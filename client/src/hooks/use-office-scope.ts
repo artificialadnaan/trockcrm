@@ -22,7 +22,14 @@ import { useSearchParams } from "react-router-dom";
  */
 export function useOfficeScopeId(): string | null {
   const [searchParams] = useSearchParams();
-  return searchParams.get("officeId");
+  // TRIMMED, exactly as api()'s readOfficeIdFromLocation does (`.get("officeId")?.trim()`, empty
+  // string treated as absent). Without this the two disagree on a padded ?officeId=%20office-b%20:
+  // api() trims before setting x-office-id, so the ROWS load correctly, while this hook returned the
+  // padded value and useDealHref emitted a padded param. DealDetailPage then reads it raw and passes
+  // it through getOfficeRequestOptions, which sets the header itself and so BYPASSES api()'s trim —
+  // and auth rejects an office id containing spaces. Rows fine, every link broken: a symptom that
+  // points nowhere near the cause.
+  return searchParams.get("officeId")?.trim() || null;
 }
 
 /**

@@ -36,21 +36,27 @@
 // `offDayLoggedCount` so a day that was entirely reconstructed after the fact is visible at a glance
 // without opening every entry.
 //
-// Bucketing detail: the day bucket is `a.occurred_at::date`, the SAME expression Rep Activity's
-// timeline uses. That cast resolves against the Postgres session TimeZone (the API sets none, so in
-// practice UTC), NOT the America/Chicago business timezone from server/src/lib/period.ts. That is a
-// conscious call: period.ts is canonical for the period WINDOW (dateFrom/dateTo, which arrive via the
-// shared ReportFilterBar and are applied by buildActivityScopeSql), but re-bucketing the days in
-// business time here while Rep Activity buckets in session time would make the neighbouring report
-// disagree with this one on any activity logged in the CT/UTC overlap. Matching the existing report
-// is worth more than matching an ideal. If Rep Activity's timeline ever moves to a business-tz
-// bucket, move this with it in the SAME change.
+// Bucketing detail: the day bucket is EXPLICITLY UTC -- `(a.occurred_at AT TIME ZONE 'UTC')::date`
+// (see OCCURRED_DAY_UTC below), and Rep Activity's timeline is pinned identically in the same change
+// so the two still agree by construction. It is deliberately NOT the America/Chicago business
+// timezone from server/src/lib/period.ts: period.ts is canonical for the period WINDOW (dateFrom/
+// dateTo, applied by buildActivityScopeSql), but re-bucketing the days in business time while Rep
+// Activity buckets elsewhere would make the neighbouring report disagree with this one. If Rep
+// Activity's timeline ever moves to a business-tz bucket, move this with it in the SAME change.
 //
-// The CLIENT renders row clocks in UTC to match this bucket (daily-activity-log-page.tsx). That is not
-// cosmetic: rendered in browser-local time, an activity at 2026-06-02T00:30:00Z appears under the
-// "Jun 2" header showing "7:30 PM" to a Central reader, i.e. a row contradicting its own day heading.
-// If this bucket ever changes zone, the page's UTC_TIME formatter and its "times UTC" marker have to
-// change with it.
+// The CLIENT renders row clocks in UTC to match (daily-activity-log-page.tsx). That is not cosmetic:
+// rendered in browser-local time, an activity at 2026-06-02T00:30:00Z appears under the "Jun 2"
+// header showing "7:30 PM" to a Central reader, i.e. a row contradicting its own day heading. The
+// pinned bucket is what makes the page's "times UTC" label true BY CONSTRUCTION rather than true only
+// while the database session happens to be UTC. If this bucket ever changes zone, the page's
+// UTC_TIME formatter and its "times UTC" marker have to change with it.
+//
+// RESIDUAL, stated rather than hidden: the window bounds in buildActivityScopeSql still compare
+// `a.occurred_at >= '<date>'::date`, which promotes the date using the SESSION timezone. That is
+// shared with Rep Activity, so the two reports still agree with each other; but on a non-UTC session
+// the edges of the range are session-relative while the buckets are UTC, so a boundary day can fall
+// just outside the requested range. Pinning the window too would change WHICH ROWS both reports
+// return, which is a wider behavioural change than this fix -- left as a deliberate follow-up.
 
 import { sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
@@ -273,6 +279,23 @@ const LOG_BASE_JOINS = sql`
   JOIN offices o ON o.id = u.office_id
 `;
 
+// The day bucket, pinned to UTC rather than left to the Postgres SESSION timezone.
+//
+// A bare `a.occurred_at::date` casts a timestamptz using whatever TimeZone the session happens to
+// carry. The API sets none, so it inherits the server default — which is why the runtime suite has to
+// `SET TimeZone='UTC'` to get deterministic buckets. That made the client's "times UTC" label a claim
+// about the DATA that the QUERY did not guarantee: on an America/Chicago session, 2026-06-02T04:30Z
+// files under Jun 1 while the page renders it as 4:30 AM "times UTC" (a Jun 2 time under a Jun 1
+// heading) — the exact row/header contradiction the UTC rendering was introduced to remove.
+//
+// Pinning the SQL removes the dependency instead of tracking it, so the label is true by construction
+// on any server. Rep Activity's timeline bucket is pinned identically in the same change: the two
+// reports must agree, and they only do so by construction if they bucket in the same zone. (Under a
+// UTC session — the expected production configuration — this is a no-op; it is the non-UTC case that
+// silently diverged before.)
+const OCCURRED_DAY_UTC = sql.raw("(a.occurred_at AT TIME ZONE 'UTC')::date");
+const LOGGED_DAY_UTC = sql.raw("(a.created_at AT TIME ZONE 'UTC')::date");
+
 export async function getDailyActivityLogReport(
   db: TenantDb,
   filters: PerformanceReportFilters,
@@ -319,14 +342,14 @@ export async function getDailyActivityLogReport(
   //    how many entries that day really has, otherwise paging would silently restate the day totals
   //    and break the reconcile to Rep Activity's timeline.
   const dayCounts = await db.execute(sql`
-    SELECT a.occurred_at::date::text AS day,
+    SELECT ${OCCURRED_DAY_UTC}::text AS day,
       COUNT(*)::int AS entries,
       COUNT(*) FILTER (WHERE a.type = 'note')::int AS notes,
       COUNT(DISTINCT a.responsible_user_id)::int AS reps,
-      COUNT(*) FILTER (WHERE a.created_at::date <> a.occurred_at::date)::int AS off_day_logged
+      COUNT(*) FILTER (WHERE ${LOGGED_DAY_UTC} <> ${OCCURRED_DAY_UTC})::int AS off_day_logged
     ${LOG_BASE_JOINS}
     WHERE ${scope}
-    GROUP BY a.occurred_at::date
+    GROUP BY ${OCCURRED_DAY_UTC}
     ORDER BY day DESC
   `);
 
@@ -335,9 +358,9 @@ export async function getDailyActivityLogReport(
   const totals = await db.execute(sql`
     SELECT COUNT(*)::int AS total,
       COUNT(*) FILTER (WHERE a.type = 'note')::int AS notes,
-      COUNT(DISTINCT a.occurred_at::date)::int AS days_covered,
+      COUNT(DISTINCT ${OCCURRED_DAY_UTC})::int AS days_covered,
       COUNT(DISTINCT a.responsible_user_id)::int AS reps_logging,
-      COUNT(*) FILTER (WHERE a.created_at::date <> a.occurred_at::date)::int AS off_day_logged
+      COUNT(*) FILTER (WHERE ${LOGGED_DAY_UTC} <> ${OCCURRED_DAY_UTC})::int AS off_day_logged
     ${LOG_BASE_JOINS}
     WHERE ${scope}
   `);
@@ -361,10 +384,10 @@ export async function getDailyActivityLogReport(
     SELECT a.id::text AS id,
       a.type::text AS type,
       a.occurred_at,
-      a.occurred_at::date::text AS occurred_day,
+      ${OCCURRED_DAY_UTC}::text AS occurred_day,
       a.created_at,
-      a.created_at::date::text AS logged_day,
-      (a.created_at::date - a.occurred_at::date)::int AS logged_days_diff,
+      ${LOGGED_DAY_UTC}::text AS logged_day,
+      (${LOGGED_DAY_UTC} - ${OCCURRED_DAY_UTC})::int AS logged_days_diff,
       a.responsible_user_id::text AS responsible_user_id,
       u.display_name AS responsible_name,
       -- Surface the performer ONLY when it differs from the responsible rep; when an assistant or an
