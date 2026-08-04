@@ -923,7 +923,7 @@ anchor" is how the off-by-one got in.
 -- The terminal test consults the Bid Board mirror as well as the CRM stage, because a BB-owned deal can
 -- be won/lost in bid_board_stage_slug while its CRM stage_id is still open
 -- (server/src/modules/shared/deal-value-sql.ts:383-393).
-outcomes AS (
+deal_facts AS (
   SELECT d.id                       AS deal_id,
          d.assigned_rep_id          AS rep_id,
          d.created_at               AS deal_created_at,      -- §4.0.4 gate
@@ -1003,7 +1003,7 @@ outcomes AS (
                AND (rf.slug IN (:won_slugs) OR rf.slug IN (:lost_slugs))
                AND rt.slug NOT IN (:won_slugs) AND rt.slug NOT IN (:lost_slugs)
            )
-         )                          AS is_reopened_after_landing_raw,
+         )                          AS landed_in_window_and_reopened,
          -- Reopen evidence ALONE, with no window or landing condition: consumed by event_window_end
          -- (§4.0.7 Block A) to keep closed-interval edits out of E for every reopened deal, including
          -- those that re-closed inside the window and so remain in D_landed.
@@ -1016,24 +1016,6 @@ outcomes AS (
              AND (rvf.slug IN (:won_slugs) OR rvf.slug IN (:lost_slugs))
              AND rvt.slug NOT IN (:won_slugs) AND rvt.slug NOT IN (:lost_slugs)
          )                          AS has_reopen_evidence,
-         -- is_reopened_after_landing = the raw flag AND the landing is not represented in D_landed.
-         is_reopened_after_landing_raw AND NOT (
-           -- A deal that
-           -- reopened and RE-CLOSED inside the window has its landing represented by the reclose date,
-           -- so it is not a lost landing and is not flagged.
-           (psc.slug IN (:won_slugs) OR COALESCE(d.bid_board_stage_slug,'') IN (:won_slugs)
-            OR psc.slug IN (:lost_slugs) OR COALESCE(d.bid_board_stage_slug,'') IN (:lost_slugs))
-           -- COALESCE, not a bare comparison: a terminal deal with no usable outcome_date makes
-           -- BETWEEN return NULL, so `AND NOT (... NULL)` is NULL and the whole conjunct fails OPEN --
-           -- silently admitting exactly the D_nodate rows this predicate was rewritten to exclude.
-           AND COALESCE(<outcome_date> BETWEEN :from::date AND :to::date, false)
-         )
-         -- ...and the deal is not simply a terminal row with no usable outcome date. D_nodate deals have
-         -- no landing to lose from D_landed -- they were never in it -- so folding them in here would
-         -- report a missing Won date as a reopen, the same conflation the reopen-evidence requirement
-         -- was added to end. They are surfaced by mirror_terminal_no_date_n instead.
-         AND NOT (outcome_kind IN ('won','lost') AND <outcome_date> IS NULL)
-                                    AS is_reopened_after_landing,
          -- NOTE: expected_close_date is deliberately NOT selected. State comes from §4.0.3.
          COALESCE(d.is_bid_board_owned, false) OR COALESCE(d.is_read_only_mirror, false) AS bid_board_owned
   FROM deals d
@@ -1041,6 +1023,33 @@ outcomes AS (
   WHERE d.is_active = true
     AND COALESCE(d.is_test_data, false) = false
     AND ${aliasedReportableDealFilterSql('d')}   -- COALESCE(d.on_hold,false) = false
+),
+
+-- outcomes: derives the flags that DEPEND on deal_facts' columns. A separate CTE is structural, not
+-- stylistic: Postgres does not expose a SELECT-list alias to a sibling expression in the same list, so
+-- deriving is_reopened_after_landing beside outcome_kind / outcome_date / landed_in_window_and_reopened
+-- fails at PARSE time. Reading them from a preceding CTE is legal, and it retires the <outcome_date>
+-- placeholder in favour of a real column reference.
+outcomes AS (
+  SELECT b.*,
+         b.landed_in_window_and_reopened
+         -- ...AND the landing is not already represented in D_landed. A deal that reopened and RE-CLOSED
+         -- inside the window has its landing represented by the reclose date, so it is not a lost
+         -- landing and is not flagged.
+         AND NOT (
+           b.outcome_kind IN ('won','lost')
+           -- COALESCE, not a bare comparison: a terminal deal with no usable outcome_date makes BETWEEN
+           -- return NULL, so `AND NOT (... NULL)` is NULL and the whole conjunct fails OPEN -- silently
+           -- admitting exactly the D_nodate rows this predicate was rewritten to exclude.
+           AND COALESCE(b.outcome_date BETWEEN :from::date AND :to::date, false)
+         )
+         -- ...and the deal is not simply a terminal row with no usable outcome date. D_nodate deals have
+         -- no landing to lose from D_landed -- they were never in it -- so folding them in here would
+         -- report a missing Won date as a reopen, the same conflation the reopen-evidence requirement
+         -- was added to end. They are surfaced by mirror_terminal_no_date_n instead.
+         AND NOT (b.outcome_kind IN ('won','lost') AND b.outcome_date IS NULL)
+                                    AS is_reopened_after_landing
+  FROM deal_facts b
 ),
 ```
 
@@ -1402,6 +1411,7 @@ column. Re-run this check whenever a name is added:
 | `raw_close_date_events` (§4.0.1) | `audit_log_id`, `deal_id`, `changed_at`, `actor_user_id`, `event_kind`, `old_date`, `new_date` | `audit_log`: `id`, `record_id`, `created_at`, `changed_by`, `table_name`, `action`, `changes`, `full_row` — all real columns (§1.2) |
 | `close_date_timeline` (§4.0.2) | `audit_log_id`, `deal_id`, `changed_at`, `actor_user_id`, `event_kind`, `old_date`, `new_date` **passed through**, plus `source`, `machine_source` | `raw_close_date_events.*`; `deals.hubspot_deal_id`; `public.hubspot_refresh_log.*` (§0064) |
 | `outcomes` (§4.0.5) | `deal_id`, `rep_id`, `deal_created_at`, `outcome_kind`, `outcome_date`, `terminal_entry_date`, `is_reopened_after_landing`, **`has_reopen_evidence`**, `bid_board_owned` | `deals`: `stage_entered_at`, `bid_board_stage_entered_at`, `created_at`, `won_closed_date`, `lost_at`, `assigned_rep_id`, `stage_id`, `bid_board_stage_slug`, `is_active`, `is_test_data`, `is_bid_board_owned`, `is_read_only_mirror`, `on_hold`; `pipeline_stage_config`: `slug`, `is_terminal`; `deal_stage_history`: `deal_id`, `to_stage_id`, **`from_stage_id`**, `created_at` |
+| `outcomes` (§4.0.5) | all of `deal_facts` passed through, plus **`is_reopened_after_landing`** | `deal_facts`: `outcome_kind`, `outcome_date`, `landed_in_window_and_reopened` |
 | `state_at` ×3 (§4.0.3) *(contents: **convention-derived** — the block projects `state`, `prediction`, `changed_at`, `source`; the prefixes come from the three aliased instances in §4.0.7's anchor table, so an extractor sees a mismatch that is expected)* | `p30_state`, `p30_prediction`, `p30_changed_at`, `p30_source`; `pfinal_state`, `pfinal_prediction`, `pfinal_changed_at`, `pfinal_source`; `pnow_state`, `pnow_prediction`, `pnow_changed_at`, `pnow_source` — all `*_state` coalesced (§4.0.3) | `close_date_timeline`: `deal_id`, `changed_at`, **`audit_log_id`**, `source`, `new_date`; `outcomes.outcome_date` |
 | `coverage_resolution` (§4.1) | `cov_state`, `cov_prediction`, `is_provenance_unknown` | `outcomes.deal_id`; `state_at(deal, now())`; **`deals.expected_close_date`** — the only block that joins `deals` for it, and the whole reason convention 10's exception is buildable |
 | Derived scalars **block A** (§4.0.7) | `open`, `landed`, `in_d_cov`, `signed_error_p30`, `signed_error_pfinal`, `p30_parked_at_write`, `pfinal_parked_at_write`, `event_window_end` | `outcome_kind`, `outcome_date`, `terminal_entry_date`, `is_reopened_after_landing`, `has_reopen_evidence`, `deal_created_at`, `cov_state`, `cov_prediction`, `p30_prediction`, `p30_changed_at`, `pfinal_prediction`, `pfinal_changed_at` — deliberately nothing from the event set |
@@ -1461,6 +1471,7 @@ lines of P₃₀ date arithmetic it never scanned.
 | §6.0 falsifying inputs | each fairness claim names an input that would break it | **read** — a human must judge whether the input really falsifies | **memory-based** |
 | §4.0.7 contents for `E` and Metrics | those two rows' *Produces* lists | not derivable — prose-shaped SQL | **unverifiable** |
 | Population **names** (§4.0.5) | every `D_*` used anywhere has a table row, and every declared row is referenced by a fence or a table | **extraction** — name sets differenced across the normative body | mechanical · checks NAMES only; a row whose set-notation definition drifts from its SQL predicate while the name stays put is invisible |
+| SELECT-list alias scope | no expression references a name its own SELECT list defines | **extraction** — per fence, split each SELECT at its depth-0 `FROM`, diff aliases against references | mechanical *(added this round)* · **known-positive validated against `d5bf7efb9`**, where it reports the three real cases; correlated subqueries legitimately referencing an outer column are not distinguished, so a hit needs a human look |
 | Per-metric population agreement | the audit table and the v1 table cite the same set for each metric | **extraction** — population column of both tables, keyed by metric, compared | mechanical *(added this round)* · compares SET NAMES; a row naming the same set with a different predicate, or citing none, is invisible |
 | Set relations (§4.0.5 RELATIONS block) | every set assertion in the document appears in the canonical block | **extraction** — grep set symbols and stock phrases, assert each cites a declared relation | mechanical · matches symbols and the phrases "subset of" / "carved out of"; a relation asserted in freeform English is invisible |
 | Population-change obligations | when a `D_*` predicate changes, every site mentioning it is enumerated for review | **extraction** — group all mentions by site type (table row / RELATIONS / metric row / partition / producer-consumer / SQL / prose) | mechanical *(added this round)* · **enumerates sites, does not verify agreement** — it produces the list convention 16 depended on recalling; judging each site is still human |
@@ -2540,6 +2551,23 @@ complement of `futureDatedCloseDatePredicateSql`'s `>= today` (`foundations.ts:4
 unparked in both. One ordering — `percentile_cont`'s `WITHIN GROUP` — deliberately needs no tie-breaker,
 and §4.3 now says why.
 
+**Round 19 (an alias-scope fix that fixed one alias)**
+
+| # | Was | Now |
+|---|---|---|
+| 1 | `is_reopened_after_landing` referenced **three** sibling SELECT-list aliases — `is_reopened_after_landing_raw`, `outcome_kind`, `outcome_date` — so the query still failed to parse | Round 18 repeated the predicate for *one* alias and reported the class fixed. Fixed **structurally**: `outcomes` is split into `deal_facts` (all base columns and both EXISTS flags) and a derived `outcomes` that reads them from the preceding CTE. Legal, and it retires the `<outcome_date>` placeholder for a real column reference. |
+
+**The check, and its known-positive.** Within one SELECT list, no expression may reference a name that list
+defines — a text-level property. New checker splits each SELECT at its depth-0 `FROM`, diffs the aliases
+against the references, and reports hits.
+
+**Its first version returned 0 on a file that demonstrably contained the defect**, exactly like the
+duplicate checker one round earlier: its FROM-detection had an operator-precedence bug that never found the
+outer `FROM`, so every top-level SELECT list came back empty. Caught only because round 18's lesson —
+validate against a known-positive — was applied *before* trusting the zero. After the parser was rewritten
+it reports all three aliases at `d5bf7efb9`. **Run over every fence in the document, `outcomes` was the only
+SELECT list with the problem.**
+
 **Round 18 (a checker blind to the commonest definition form)**
 
 | # | Was | Now |
@@ -2798,6 +2826,19 @@ were themselves silently broken**, because `NOT <nullable>` inside `FILTER` coun
 failing loudly. A check that can fail open is not a check. That is why the state enum is coalesced and
 non-null by construction, and why "never negate a nullable" is now a stated SQL rule (§4.0.6) rather than
 something to remember at each site.
+
+**Round 19's lesson: the known-positive test is now load-bearing, not a nicety.** Two rounds running, a new
+or existing checker returned 0 on a file containing the very defect it exists to find — and this round the
+broken checker was written *in response to* last round's lesson about broken checkers. What caught it was
+not care but procedure: point the checker at a commit known to contain the defect, and refuse to trust a
+zero until it has produced a one. That step costs a single command and has now caught two instrument
+failures that reasoning did not.
+
+The other half is narrower and worth naming: **a fix reported by instance rather than by class.** Round 18
+saw one illegal alias reference, repeated the predicate to remove it, and reported the alias-scope problem
+solved while two more references sat in the same expression. The structural repair — move the dependencies
+into a preceding CTE — was available and would have retired all three at once. When a defect has a shape,
+fix the shape.
 
 **Round 18's lesson: a zero is a measurement, and measurements have instruments.** The earlier false cleans
 were scope gaps — the constants check genuinely never looked at markdown. This one was different and worse:
