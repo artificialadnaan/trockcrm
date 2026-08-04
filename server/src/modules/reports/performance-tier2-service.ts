@@ -166,7 +166,12 @@ function buildResponsibleUserScopeSql(filters: PerformanceReportFilters, alias: 
   return sql.join(clauses, sql` AND `);
 }
 
-function buildActivityScopeSql(filters: PerformanceReportFilters, ownerIds = filters.ownerIds) {
+// EXPORTED so the Daily Activity Log report (daily-activity-log-service.ts) can bind the SAME
+// activity predicate rather than restating it. That report is the readable-log companion to Rep
+// Activity, and its per-day entry counts are meant to EQUAL this report's `timeline` when no type
+// filter is applied -- which only holds if both sides share this exact date basis (occurred_at),
+// this exact half-open window, and this exact office/owner scoping. Do NOT fork a second copy.
+export function buildActivityScopeSql(filters: PerformanceReportFilters, ownerIds = filters.ownerIds) {
   const clauses = [
     sql`a.occurred_at >= ${filters.dateFrom}::date`,
     sql`a.occurred_at < (${filters.dateTo}::date + INTERVAL '1 day')`,

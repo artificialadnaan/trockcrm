@@ -65,6 +65,10 @@ import {
   type ForecastEvidenceMetric,
 } from "./performance-tier2-service.js";
 import {
+  getDailyActivityLogReport,
+  normalizeDailyActivityLogOptions,
+} from "./daily-activity-log-service.js";
+import {
   getAnalyticsEvidence,
   getCustomerConcentrationReport,
   getExecutiveTrendsReport,
@@ -725,6 +729,25 @@ router.get("/rep-activity", requireAnyRole, async (req, res, next) => {
       normalizePerformanceReportFilters(req.query as Record<string, unknown>),
       { role: req.user!.role, userId: req.user!.id, displayName: req.user!.displayName },
       req.officeSlug ?? req.user!.activeOfficeId
+    );
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/daily-activity-log?dateFrom=2026-02-01&dateTo=2026-05-01&office=dallas&types=note,call&page=1&limit=200
+// The readable day-by-day log of notes and updates behind the Rep Activity counts. Same guard as
+// rep-activity (requireAnyRole) and the same in-service scoping (resolveRepActivityScope), so a rep
+// hitting this endpoint directly still only reads their own entries.
+router.get("/daily-activity-log", requireAnyRole, async (req, res, next) => {
+  try {
+    const data = await getDailyActivityLogReport(
+      req.tenantDb!,
+      normalizePerformanceReportFilters(req.query as Record<string, unknown>),
+      normalizeDailyActivityLogOptions(req.query as Record<string, unknown>),
+      { role: req.user!.role, userId: req.user!.id, displayName: req.user!.displayName }
     );
     await req.commitTransaction!();
     res.json({ data });
