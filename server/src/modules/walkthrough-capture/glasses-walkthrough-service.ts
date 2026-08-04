@@ -27,10 +27,10 @@
 //     derives its keys from (walkId, kind) and reuses them across deals by design. See
 //     `deriveGlassesWalkthroughClientUploadId` for what that costs and why the stored id is deal-scoped.
 import { createHash } from "node:crypto";
-import { and, desc, eq, inArray, isNotNull, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import { files, jobQueue, photoAuditLog } from "@trock-crm/shared/schema";
+import { files, glassesWalkthroughs, jobQueue, photoAuditLog } from "@trock-crm/shared/schema";
 import { DOMAIN_EVENTS, type FileCategory } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 
@@ -1501,6 +1501,84 @@ async function recordCreatedGlassesWalkthroughStills(
   // emit from here would announce a walk a rollback can still erase.
 }
 
+/**
+ * Records — once per (deal, walk) — that this walk EXISTS, which is a different fact from any of the
+ * three this module already writes and the only one the CRM deal page can be built on.
+ *
+ * The `files` rows say "these artifacts are in the project folder"; the `job_queue` row says "a forward is
+ * scheduled". Neither answers "which glasses walks does this deal have, and which TROCK Scope walkthrough
+ * did each become". Before this table that question was answerable only by scanning job payloads by
+ * `payload->>'dealId'` — and a queue is the wrong source for it in three separate ways: rows are
+ * dead-lettered, superseded and hand-edited during reconciliation; a walk that is filed but not yet
+ * claimed has no payload state to read at all; and a walk whose forward permanently failed would simply
+ * vanish from the deal page, which is exactly the walk an estimator most needs to see. See migration 0214.
+ *
+ * `scope_walkthrough_id` is deliberately NOT written here. This module never calls TROCK Scope — that is
+ * the whole basis of the crew's copy being independent of the engine — so at this point the id genuinely
+ * does not exist. The forward job stamps it when it learns it (worker/src/jobs/
+ * glasses-walkthrough-forward.ts), and NULL until then is what the panel renders as "processing".
+ *
+ * `onConflictDoNothing` on (deal_id, walk_id), for the same reason and with the same shape as the `files`
+ * insert above: a completion is retried as a matter of course — a response lost in flight, or a recovered
+ * walk re-filed from an on-disk directory scan — and a second row per retry would put a duplicate panel
+ * entry on the deal page and fan a duplicate request out to TROCK Scope for it. DO NOTHING rather than DO
+ * UPDATE because every column here is a fact about the WALK and the first completion's copy is the one to
+ * keep: `capturedAt` is the phone's end-of-walk clock and `capturedByUserId` is whoever recorded it, and a
+ * later retry — potentially from a different session on a recovered walk — has no better information about
+ * either. (The unique index is what actually arbitrates; a SELECT-then-INSERT would not, for the same
+ * reason 0213 exists.)
+ *
+ * NOT reported in the response. `IngestGlassesWalkthroughResult` is the contract mobile parses to retire
+ * its upload-queue entries, and this row is a CRM-side read model the phone has no use for; widening that
+ * shape would make a mobile change a prerequisite for a server-only feature.
+ */
+async function recordGlassesWalkthrough(
+  tenantDb: TenantDb,
+  input: IngestGlassesWalkthroughInput
+): Promise<void> {
+  await tenantDb
+    .insert(glassesWalkthroughs)
+    .values({
+      dealId: input.dealId,
+      walkId: input.walkId,
+      // Already validated ISO-8601 by `validateGlassesWalkthroughCompleteInput`, so this is a real Date and
+      // never an Invalid Date the INSERT would reject — see that validator's ISO_8601_UTC comment for why
+      // a bare `Date.parse` check was not enough.
+      capturedAt: new Date(input.capturedAt),
+      capturedByUserId: input.userId,
+    })
+    .onConflictDoNothing({ target: [glassesWalkthroughs.dealId, glassesWalkthroughs.walkId] });
+}
+
+/**
+ * Fill in the TROCK Scope id on a read-model row that has none.
+ *
+ * `IS NULL` in the predicate rather than a blind SET: the forward job is the authority on this value,
+ * and a row that already carries one is carrying the id its own forward learned. Overwriting that with
+ * an id inherited from an older job is how a walk ends up pointed at a different walkthrough than the
+ * one holding its clips.
+ */
+/** The shape the `uuid` column accepts. Mirrors the worker's guard — see that one for why neither side
+ *  may assume the id is well-formed. */
+const SCOPE_WALKTHROUGH_ID_RE = /^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/;
+
+async function stampScopeWalkthroughId(
+  tenantDb: TenantDb,
+  input: IngestGlassesWalkthroughInput,
+  scopeWalkthroughId: string
+): Promise<void> {
+  await tenantDb
+    .update(glassesWalkthroughs)
+    .set({ scopeWalkthroughId, updatedAt: new Date() })
+    .where(
+      and(
+        eq(glassesWalkthroughs.dealId, input.dealId),
+        eq(glassesWalkthroughs.walkId, input.walkId),
+        isNull(glassesWalkthroughs.scopeWalkthroughId)
+      )
+    );
+}
+
 export interface IngestGlassesWalkthroughResult {
   walkId: string;
   files: GlassesWalkthroughFileResult[];
@@ -1693,6 +1771,14 @@ export async function ingestGlassesWalkthrough(
     officeId: input.officeId,
   });
 
+  // BEFORE the forward-job branches below, and the position is load-bearing for exactly the reason the
+  // stills emit above states: the live-forward branch RETURNS EARLY. A completion retry for a walk whose
+  // forward is already queued is the single most common shape of second call this endpoint receives, and
+  // written past that return the row would exist only for walks whose FIRST completion reached this line —
+  // so a walk whose first attempt died after its `files` write would be filed, forwarded, scoped, and
+  // invisible on the deal page forever. Cheap to keep here: the insert is a no-op on every retry.
+  await recordGlassesWalkthrough(tenantDb, input);
+
   // Keyed by idempotency key, never by array position. `fileResults` and `input.artifacts` line up today
   // only because one loop happens to preserve order; positional lookup silently forwards every artifact
   // under a NEIGHBOUR's mimeType and filename the moment that stops being true, and TROCK Scope has no way
@@ -1718,6 +1804,44 @@ export async function ingestGlassesWalkthrough(
   });
 
   const knownJobState = await findGlassesWalkthroughForwardJobState(tenantDb, input.walkId, input.dealId);
+
+  // STAMP AN INHERITED SCOPE ID BEFORE ANY EARLY RETURN, or a re-completed walk shows "processing"
+  // for ever on the deal page.
+  //
+  // The row above is inserted with a null `scope_walkthrough_id`, because the forward job is what
+  // learns it. That is right for a first completion. It is WRONG for a walk that predates 0214 and is
+  // completed again after its forward already finished: the read model row is created here for the
+  // first time, the branch below treats every non-dead job as live and returns without enqueueing
+  // anything, and so nothing ever comes back to fill the column. The panel then reports "still
+  // processing" on a walk whose scope has been sitting in TROCK Scope for weeks.
+  //
+  // The id is already in hand — `knownJobState` carries the completed job's checkpoint, which is the
+  // same value line 1837 inherits onto a replacement payload. Written only into a row that has none,
+  // so a live forward that later learns a different id cannot be overwritten by a stale one.
+  // VALIDATED, not merely attempted. The id crosses two systems with no constraint on it — TROCK Scope
+  // returns any string, the checkpoint is jsonb, and a human repairing a dead letter edits that payload by
+  // hand — while this column is `uuid`. Relying on the catch below to absorb 22P02 would also absorb a
+  // real database failure, and those are not the same event. The worker's `stampGlassesWalkthroughScopeId`
+  // applies the identical rule for the identical reason.
+  if (knownJobState?.scopeWalkthroughId && !SCOPE_WALKTHROUGH_ID_RE.test(knownJobState.scopeWalkthroughId)) {
+    console.warn(
+      `[glasses-walkthrough] Inherited TROCK Scope id ${JSON.stringify(knownJobState.scopeWalkthroughId)} ` +
+        `for walk ${input.walkId} is not a uuid; the deal's AI Walk panel will read as still processing ` +
+        `until it is repaired.`
+    );
+  } else if (knownJobState?.scopeWalkthroughId) {
+    // NO try/catch, deliberately, and an earlier draft had one that was worse than nothing.
+    //
+    // Catching 22P02 does not restore the transaction — Postgres leaves it ABORTED, so the next
+    // statement fails with 25P02 or, on the path where nothing else runs, `runInOfficeTransaction`
+    // issues a COMMIT that silently rolls back. The route would then answer 201 for a completion whose
+    // `files` rows had been discarded: the one outcome this endpoint must never produce. Swallowing a
+    // database error to protect a read model trades a stale panel for lost filing.
+    //
+    // Validating above is what makes the catch unnecessary: the only failure this write can now raise
+    // is a genuine database failure, and that one SHOULD abort the completion.
+    await stampScopeWalkthroughId(tenantDb, input, knownJobState.scopeWalkthroughId);
+  }
 
   if (knownJobState?.isLive) {
     // A live forward job is not proof the forward covers this walk, and treating it as one is how a walk
@@ -1777,6 +1901,10 @@ export async function ingestGlassesWalkthrough(
   // that already landed); an inherited pending marker makes it dead-letter immediately with the same
   // reconciliation instructions the original earned, which is the correct outcome — "a create may have
   // happened" is not information a retry can improve on, and guessing costs a duplicate scope extraction.
+  // The PAYLOAD inherits the checkpoint whatever shape it is in. This is jsonb with no constraint, and
+  // the id is what the forward addresses TROCK Scope with — withholding a malformed one here would not
+  // repair it, it would buy a SECOND scope extraction for a walk that already has one. Only the `uuid`
+  // read-model column is guarded, above.
   if (knownJobState?.scopeWalkthroughId) {
     jobPayload.scopeWalkthroughId = knownJobState.scopeWalkthroughId;
     jobPayload.checkpointInheritedFromJobId = knownJobState.jobId;

@@ -64,7 +64,7 @@ import { deadJob, type JobAttemptContext, type JobHandlerResult } from "../queue
 import { pool } from "../db.js";
 import { getObjectRangeBuffer, R2_RANGE_READ_TIMEOUT_MS } from "../lib/r2-client.js";
 import { sendSystemEmailWithMetadata, type SendSystemEmailResult } from "../lib/system-email.js";
-import { escapeHtml, normalizeText } from "../lib/email-format.js";
+import { escapeHtml, isSafeTenantSchema, normalizeText } from "../lib/email-format.js";
 import { resolveFrontendUrl, TROCK_LOGO_EMAIL_URL } from "./project-number-email.js";
 import { timedPoolClientQuery, type TimedPoolLike } from "../lib/timed-pool-query.js";
 
@@ -950,6 +950,105 @@ function buildUnconfirmedCreateDeadLetterMessage(payload: JobPayload, externalRe
   );
 }
 
+/**
+ * Publish the walkthrough id to the CRM's own read model — `office_<slug>.glasses_walkthroughs`, migration
+ * 0214 — so the deal page can stop saying "processing" and start showing the extracted scope.
+ *
+ * The payload checkpoint above is this JOB's memory and is deliberately private to it. This is the same
+ * value in the place a HUMAN reads it from, and it is not a duplicate of the checkpoint any more than the
+ * `files` rows are a duplicate of the artifact list: `job_queue` is a queue whose rows are dead-lettered,
+ * superseded and hand-edited during reconciliation, so it can record what this delivery knows but it
+ * cannot be the deal page's source of truth for what a walk became.
+ *
+ * RUN ON EVERY ATTEMPT, not only the one that performed the create, and that placement is the whole
+ * failure story:
+ *   • it sits AFTER the create block but BEFORE the clip loop, so if it fails the attempt fails having
+ *     moved no bytes. The queue retries; the retry reads `scopeWalkthroughId` back out of the payload,
+ *     skips the create entirely, and lands here again. That is what makes a hard failure safe.
+ *   • inside the create block it would run exactly once, on the one attempt that could not retry it — a
+ *     stamp that failed there would leave the panel reading "processing" for a walk that has a full scope,
+ *     permanently, with nothing anywhere saying so.
+ *   • it therefore also covers the DEPLOY WINDOW. The worker does not run migrations (only the API does),
+ *     so a worker build that knows about this table can briefly outrun the API that creates it. The
+ *     resulting 42P01 costs one of ten attempts and self-heals on the next tick, which is strictly better
+ *     than swallowing the error and going dark.
+ *
+ * MATCHES ZERO ROWS WITHOUT COMPLAINING, and that is not the same as failing quietly. A forward enqueued
+ * BEFORE 0214 shipped — production has one such row today — has no `glasses_walkthroughs` row to stamp,
+ * and refusing to forward it would strand a walk over a read model it predates. Every forward enqueued
+ * since is written by `ingestGlassesWalkthrough` in the SAME transaction as the row, so "the job exists and
+ * the row does not" is not a reachable state going forward.
+ *
+ * KEYED ON (dealId, walkId) like every other write in this seam, never walkId alone — see
+ * `markScopeCreatePending` for what an unscoped key costs when one physical walk is filed against two
+ * deals. The schema name cannot be a bind parameter, so it is guarded to `office_<slug>` before it is
+ * interpolated; the walk and deal ids stay bound.
+ *
+ * Rides the same bounded writer as the payload checkpoints (`JobQueueWrite`) despite writing a different
+ * table: what that helper actually provides is a deadline plus destroy-the-connection-on-timeout, and this
+ * statement holds the dedicated poller's reentrancy guard exactly as hard as those do.
+ */
+/**
+ * TROCK Scope's id, as this seam is actually allowed to assume it looks.
+ *
+ * Nothing upstream constrains it. `createScopeWalkthrough` takes `json.walkthrough.id` as any string,
+ * and `assertPayload` accepts any inherited `scopeWalkthroughId` — the checkpoint lives in jsonb, which
+ * holds anything, and a human reconciling a dead letter edits that payload by hand. The CRM column is
+ * `uuid`.
+ */
+const SCOPE_WALKTHROUGH_ID_RE = /^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$/;
+
+async function stampGlassesWalkthroughScopeId(
+  write: JobQueueWrite,
+  payload: JobPayload,
+  scopeWalkthroughId: string
+): Promise<void> {
+  // A MALFORMED ID MUST NOT BLOCK THE FORWARD, and unguarded it did so permanently.
+  //
+  // The statement below casts `$1::uuid`. An id that is not one raises 22P02, and because this runs
+  // BEFORE the clip loop the whole attempt fails — so the job retries, re-derives the SAME bad id from
+  // its own checkpoint, and fails identically until the queue gives up. Not one clip is ever uploaded.
+  // The doc above says failing here costs nothing but a retry; that is true of a transient failure and
+  // false of a permanent one, which is exactly the case this guard exists for.
+  //
+  // Skipped, not thrown, and the ordering is the argument: the walk's clips reaching TROCK Scope is the
+  // job; the CRM read model catching up is a convenience. Losing the second to protect the first is the
+  // right trade, and the panel then shows "processing" — recoverable, and visibly wrong to anyone
+  // looking — rather than the walk never being forwarded at all.
+  //
+  // ONLY this shape is tolerated. A database or transport failure still throws, because those are the
+  // failures a retry can actually fix.
+  if (!SCOPE_WALKTHROUGH_ID_RE.test(scopeWalkthroughId)) {
+    console.warn(
+      `[Worker:glasses_walkthrough_forward] TROCK Scope walkthrough id ${JSON.stringify(scopeWalkthroughId)} ` +
+        `for walk ${payload.walkId} is not a uuid, so the CRM read model cannot record it. Forwarding ` +
+        `continues; the deal's AI Walk panel will read as still processing until it is repaired.`
+    );
+    return;
+  }
+
+  const schemaName = `office_${payload.officeSlug}`;
+  if (!isSafeTenantSchema(schemaName)) {
+    throw new Error(
+      `Refusing to stamp the TROCK Scope walkthrough id for walk ${payload.walkId}: payload.officeSlug ` +
+        `does not resolve to an office_<slug> schema, so there is no tenant table to write it to.`
+    );
+  }
+  await write(
+    `UPDATE ${schemaName}.glasses_walkthroughs
+        SET scope_walkthrough_id = $1::uuid,
+            updated_at = now()
+      WHERE deal_id = $2::uuid
+        AND walk_id = $3
+        -- Idempotent by predicate, not by luck: this runs on every attempt of every retry, and a walk that
+        -- re-forwards after a dead-letter repair must not keep bumping updated_at for a value that has not
+        -- changed. IS DISTINCT FROM (not <>) because the interesting case is precisely NULL -> id.
+        AND scope_walkthrough_id IS DISTINCT FROM $1::uuid`,
+    [scopeWalkthroughId, payload.dealId, payload.walkId],
+    `the CRM walkthrough-id stamp for walk ${payload.walkId} on deal ${payload.dealId}`
+  );
+}
+
 export async function handleGlassesWalkthroughForward(
   payload: unknown,
   _officeId: string | null,
@@ -1048,6 +1147,11 @@ export async function handleGlassesWalkthroughForward(
     scopeWalkthroughId = created.id;
     await checkpointScopeWalkthroughId(writeJobQueue, p.walkId, p.dealId, scopeWalkthroughId, claimedAttempt);
   }
+
+  // OUTSIDE the block above on purpose — see this function's own doc for why running it only on the
+  // creating attempt would make a single failed stamp permanent, and why running it before the clip loop
+  // is what makes failing here cost nothing but a retry.
+  await stampGlassesWalkthroughScopeId(writeJobQueue, p, scopeWalkthroughId);
 
   for (const artifact of p.artifacts) {
     await uploadClip(scopeDeps, scopeWalkthroughId, artifact, downloadRange);

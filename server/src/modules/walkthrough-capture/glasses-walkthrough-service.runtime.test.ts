@@ -7,7 +7,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { and, eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { files, jobQueue, photoAuditLog } from "@trock-crm/shared/schema";
+import { files, glassesWalkthroughs, jobQueue, photoAuditLog } from "@trock-crm/shared/schema";
 import { migrationSql } from "../../../tests/helpers/migration-sql.js";
 import { tenantSchemaSql } from "../../../tests/helpers/tenant-schema-from-drizzle.js";
 import { AppError } from "../../middleware/error-handler.js";
@@ -42,13 +42,26 @@ beforeAll(async () => {
   // `photo_audit_log` is here because a filed STILL is an ordinary photo as far as the rest of the app is
   // concerned: the ingress writes the same "uploaded" audit row the field-photo path writes, and an
   // island table (no FKs — see tenantSchemaSql's docblock) is enough to prove it.
-  await pg.exec(tenantSchemaSql("public", [files, jobQueue, photoAuditLog]));
+  await pg.exec(tenantSchemaSql("public", [files, jobQueue, photoAuditLog, glassesWalkthroughs]));
   // `tenantSchemaSql` deliberately omits indexes/unique constraints (see its own docblock) — but
   // `ingestGlassesWalkthrough`'s idempotency relies on the REAL partial unique index migration 0170
   // creates (`files_client_upload_id_key`), so it has to be added by hand here for the
   // `onConflictDoNothing` path to mean anything against this schema.
   await pg.exec(
     "CREATE UNIQUE INDEX files_client_upload_id_key ON files (client_upload_id) WHERE client_upload_id IS NOT NULL"
+  );
+  // Same reason, one table over: `tenantSchemaSql` omits indexes, and migration 0214's
+  // `glasses_walkthroughs_deal_walk_uidx` is what makes the walkthrough-row write idempotent across a
+  // re-ingest. Without it the `onConflictDoNothing` below arbitrates against nothing and a retried
+  // completion silently writes a second row.
+  //
+  // Hand-written here (rather than executed from disk like 0213's) only because 0214 is a per-schema
+  // DO-loop and a TENANT_SCHEMA block naming `office_dallas`, neither of which addresses the `public`
+  // schema this island suite builds. The file that actually ships is executed, against both of its blocks,
+  // in server/tests/migrations/0214-glasses-walkthroughs.runtime.test.ts — so the risk this hand copy
+  // normally carries (a suite passing against an index the migration no longer creates) is covered there.
+  await pg.exec(
+    "CREATE UNIQUE INDEX glasses_walkthroughs_deal_walk_uidx ON glasses_walkthroughs (deal_id, walk_id)"
   );
   // Migration 0213's index, read FROM DISK rather than retyped here. It is the arbiter the enqueue's `ON
   // CONFLICT DO NOTHING` resolves against — without it the overlapping-completion test below writes two
@@ -71,6 +84,7 @@ beforeEach(async () => {
   await pg.exec("DELETE FROM files");
   await pg.exec("DELETE FROM job_queue");
   await pg.exec("DELETE FROM photo_audit_log");
+  await pg.exec("DELETE FROM glasses_walkthroughs");
 });
 
 /** A healthy store that agrees with whatever the payload declares — every happy-path test runs THROUGH
@@ -640,6 +654,108 @@ const blindStore = () => healthyStore({ head: async () => ({}) });
 
 const domainEvents = () =>
   tenantDb.select().from(jobQueue).where(eq(jobQueue.jobType, "domain_event"));
+
+// The CRM's own record that this walk EXISTS (migration 0214), which is what the deal page's AI-walk panel
+// reads. Distinct from everything else this module writes: the `files` rows say the artifacts are in the
+// project folder, and the `job_queue` row says a forward is scheduled — neither answers "which glasses
+// walks does this deal have, and which TROCK Scope walkthrough did each become".
+describe("ingestGlassesWalkthrough — the glasses_walkthroughs read model", () => {
+  it("writes ONE row carrying the deal, the walk, the capture time and the capturing user", async () => {
+    await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+
+    const rows = await tenantDb.select().from(glassesWalkthroughs);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.dealId).toBe(DEAL);
+    expect(rows[0]!.walkId).toBe(WALK);
+    expect(rows[0]!.capturedByUserId).toBe(USER);
+    // The WALK's own capture time, not this request's clock — those differ by however long the upload took,
+    // which over jobsite cellular is routinely hours.
+    expect(rows[0]!.capturedAt.toISOString()).toBe("2026-07-30T15:04:00.000Z");
+    // NULL, and it must be: this module never calls TROCK Scope (that independence is the whole basis of
+    // the crew's copy surviving an outage), so at this point the remote walkthrough genuinely does not
+    // exist. NULL is exactly what the panel renders as "processing"; the forward job stamps it later.
+    expect(rows[0]!.scopeWalkthroughId).toBeNull();
+  });
+
+  it("REGRESSION: retrying the WHOLE completion does not write a second row", async () => {
+    // Mobile retries a completion whose response timed out in flight, and a recovered walk is re-filed from
+    // an on-disk directory scan. A second row per retry is a duplicate walk on the deal page and a
+    // duplicate TROCK Scope request per poll, for one site visit.
+    const input = baseInput();
+    await ingestGlassesWalkthrough(tenantDb, input, { artifactStore: healthyStore() });
+    await ingestGlassesWalkthrough(tenantDb, input, { artifactStore: healthyStore() });
+    await ingestGlassesWalkthrough(tenantDb, input, { artifactStore: healthyStore() });
+
+    expect(await tenantDb.select().from(glassesWalkthroughs)).toHaveLength(1);
+  });
+
+  it("REGRESSION: two OVERLAPPING completions of one walk still leave exactly ONE row", async () => {
+    // The sequential retry above is the easy half. Two completions in flight at once both reach the insert,
+    // and it is the unique index — not a prior read — that decides. Interleaved rather than parallel for
+    // the reason the forward-job version of this test gives: PGlite is a single connection, so this lane
+    // demonstrates the ARBITER, which is the part that has to exist.
+    const input = baseInput();
+    await Promise.all([
+      ingestGlassesWalkthrough(tenantDb, input, { artifactStore: healthyStore() }),
+      ingestGlassesWalkthrough(tenantDb, input, { artifactStore: healthyStore() }),
+    ]);
+
+    expect(await tenantDb.select().from(glassesWalkthroughs)).toHaveLength(1);
+  });
+
+  it("REGRESSION: writes the row on a retry whose forward is ALREADY LIVE, which returns early", async () => {
+    // The placement of this write is load-bearing. The live-forward branch RETURNS EARLY, and a completion
+    // retry for a walk whose forward is already queued is the most common second call this endpoint gets —
+    // so a write placed after that return would exist only for walks whose FIRST completion reached it. A
+    // walk whose first attempt died after its `files` write, or one enqueued before 0214 shipped (there is
+    // such a row in production), would then be filed, forwarded, scoped, and invisible on the deal page
+    // forever.
+    //
+    // Modelled by removing the row the first completion wrote, leaving the live forward job exactly as
+    // those two cases leave it: a scheduled forward with no read-model row behind it.
+    const input = baseInput();
+    const first = await ingestGlassesWalkthrough(tenantDb, input, { artifactStore: healthyStore() });
+    await pg.exec("DELETE FROM glasses_walkthroughs");
+
+    const second = await ingestGlassesWalkthrough(tenantDb, input, { artifactStore: healthyStore() });
+    expect(second.forwarding).toEqual({ status: "already_queued", jobId: first.forwarding.jobId });
+
+    const rows = await tenantDb.select().from(glassesWalkthroughs);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.walkId).toBe(WALK);
+  });
+
+  it("GUARD: the same walkId filed against a SECOND deal gets its OWN row", async () => {
+    // walkId is minted on the phone and identifies a physical walk, not a piece of work. Re-filing one walk
+    // against a second deal is a supported correction; scoped to walk_id alone, the second deal would be
+    // refused and its panel would stay empty forever.
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ dealId: DEAL }), { artifactStore: healthyStore() });
+    await ingestGlassesWalkthrough(tenantDb, baseInput({ dealId: OTHER_DEAL }), {
+      artifactStore: healthyStore(),
+    });
+
+    const rows = await tenantDb.select().from(glassesWalkthroughs);
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r: { dealId: string }) => r.dealId).sort()).toEqual([DEAL, OTHER_DEAL].sort());
+  });
+
+  it("GUARD: keeps the FIRST completion's capture facts when a retry reports different ones", async () => {
+    // DO NOTHING, not DO UPDATE. Every column here is a fact about the WALK, and a later retry — plausibly
+    // from a different session on a recovered walk, where nothing on disk records who captured it — has no
+    // better information than the completion that was actually there.
+    await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+    await ingestGlassesWalkthrough(
+      tenantDb,
+      baseInput({ capturedAt: "2026-08-01T09:00:00.000Z", userId: U("22223") }),
+      { artifactStore: healthyStore() }
+    );
+
+    const rows = await tenantDb.select().from(glassesWalkthroughs);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.capturedAt.toISOString()).toBe("2026-07-30T15:04:00.000Z");
+    expect(rows[0]!.capturedByUserId).toBe(USER);
+  });
+});
 
 describe("ingestGlassesWalkthrough — the stills enter the photo pipeline", () => {
   it("REGRESSION: enqueues a file.uploaded domain event for each still it files", async () => {
@@ -1688,5 +1804,36 @@ describe("ingestGlassesWalkthrough — bounded object verification", () => {
     // is handed the means to release the socket rather than merely being left alone.
     expect(signals.length).toBeGreaterThan(0);
     expect(signals.every((signal) => signal.aborted)).toBe(true);
+  });
+});
+
+describe("recording an inherited TROCK Scope id", () => {
+  it("REGRESSION: a re-completed walk whose forward already FINISHED is not stuck processing", async () => {
+    // A walk that predates 0214 has no read-model row. Completed again after its forward finished, the
+    // row is created for the first time with a null scope id — and the live-job branch treats every
+    // non-dead job as still live and returns without enqueueing anything, so nothing ever comes back to
+    // fill it. The panel then reports "still processing" on a walk whose scope has been sitting in TROCK
+    // Scope for weeks, and no amount of retrying changes it, because the id was already known.
+    //
+    // A REAL uuid, because the column is `uuid` — the payload it comes from has no such constraint,
+    // which is why the stamp is also wrapped against 22P02 rather than trusted.
+    const scopeId = "b91a5bfd-eca9-4dbd-bde4-06528658b2b6";
+    const first = await ingestGlassesWalkthrough(tenantDb, baseInput(), {
+      artifactStore: healthyStore(),
+    });
+    await tenantDb
+      .update(jobQueue)
+      .set({
+        status: "completed",
+        payload: sql`jsonb_set(${jobQueue.payload}, '{scopeWalkthroughId}', ${JSON.stringify(scopeId)}::jsonb, true)`,
+      })
+      .where(eq(jobQueue.id, first.forwarding.jobId));
+    // The read model predates the migration for this walk.
+    await tenantDb.delete(glassesWalkthroughs);
+
+    await ingestGlassesWalkthrough(tenantDb, baseInput(), { artifactStore: healthyStore() });
+
+    const [row] = await tenantDb.select().from(glassesWalkthroughs);
+    expect(row!.scopeWalkthroughId).toBe(scopeId);
   });
 });
