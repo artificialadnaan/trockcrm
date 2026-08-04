@@ -148,17 +148,38 @@ export async function updateEstimateExtraction(args: {
   // JavaScript boolean computed from a stale row cannot see that; a CASE evaluated when the row is
   // locked can.
   //
-  // Whether a quantity EXISTS is still decided here, because that is a fact about this request's own
-  // input rather than about the stored row.
-  const suppliesQuantity = nextQuantity !== null && nextQuantity !== undefined;
-  const statusAfterEdit = sql`case when ${estimateExtractions.status} = 'needs_quantity' then 'pending' else ${estimateExtractions.status} end`;
+  // A PRICEABLE quantity, not merely a present one — decided here because it is a fact about this
+  // request's own input rather than about the stored row.
+  //
+  // Zero and negatives are refused for the same reason null is: they cannot be priced.
+  // `applyMarketRateAdjustment` already treats a quantity at or below zero as invalid, but the worker
+  // still persists the zero-valued recommendation and marks the row `processed` — so accepting "0" as
+  // a correction would stop the row asking for human attention without ever giving it a number anybody
+  // can bid. A row that still needs a number must keep saying so.
+  const suppliesQuantity =
+    nextQuantity !== null && nextQuantity !== undefined && Number.isFinite(Number(nextQuantity)) &&
+    Number(nextQuantity) > 0;
+
+  // CLEARING a quantity on a row that was already priced has to send it BACK to `needs_quantity`.
+  //
+  // Otherwise the row keeps whatever status it had — `processed`, typically — and the worker admits
+  // ordinary rows only at `pending`, so no later run ever reaches the null-quantity guard. The
+  // recommendation computed from the OLD quantity stays visible and priceable while the quantity
+  // behind it is gone: a number on the estimate that no longer has anything supporting it, and nothing
+  // anywhere asking a human to look.
+  const clearsQuantity =
+    "quantity" in args.input && (nextQuantity === null || nextQuantity === undefined);
+
+  const statusAfterEdit = clearsQuantity
+    ? sql`'needs_quantity'`
+    : sql`case when ${estimateExtractions.status} = 'needs_quantity' then 'pending' else ${estimateExtractions.status} end`;
 
   const [updated] = await args.tenantDb
     .update(estimateExtractions)
     .set({
       normalizedLabel: args.input.normalizedLabel ?? existing.normalizedLabel,
       quantity: nextQuantity,
-      ...(suppliesQuantity ? { status: statusAfterEdit } : {}),
+      ...(suppliesQuantity || clearsQuantity ? { status: statusAfterEdit } : {}),
       unit: args.input.unit ?? existing.unit,
       divisionHint: args.input.divisionHint ?? existing.divisionHint,
       metadataJson: buildUpdatedPricingScopeMetadata({

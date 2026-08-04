@@ -85,6 +85,59 @@ describe("extraction-review-service", () => {
     expect(eventValues[0].afterJson.status).toBe("pending");
   });
 
+  it("REFUSES zero as a correction — it is unpriceable, not a number", async () => {
+    // `applyMarketRateAdjustment` already treats a quantity at or below zero as invalid, but the worker
+    // still persists the zero-valued recommendation and marks the row `processed`. Accepting "0" would
+    // therefore stop the row asking for attention without ever giving it a number anybody can bid.
+    const { tenantDb, updateSetCalls } = editHarness({
+      id: "ext-zero",
+      status: "needs_quantity",
+      normalizedLabel: "Paint one wall",
+      quantity: null,
+      unit: null,
+      divisionHint: null,
+      rawLabel: "Paint one wall",
+      metadataJson: {},
+    });
+
+    await updateEstimateExtraction({
+      tenantDb,
+      dealId: "deal-1",
+      extractionId: "ext-zero",
+      userId: "user-1",
+      input: { quantity: "0" },
+    });
+
+    expect(updateSetCalls[0].status).toBeUndefined();
+  });
+
+  it("sends a PRICED row back to needs_quantity when its quantity is cleared", async () => {
+    // The other direction, and the one that leaves a live number with nothing behind it. Without this
+    // the row keeps `processed`, the worker admits ordinary rows only at `pending`, and the
+    // recommendation computed from the OLD quantity stays visible and priceable while the quantity it
+    // came from is gone — with nothing anywhere asking a human to look.
+    const { tenantDb, updateSetCalls } = editHarness({
+      id: "ext-priced",
+      status: "processed",
+      normalizedLabel: "Install laminate",
+      quantity: "700.000",
+      unit: "SF",
+      divisionHint: null,
+      rawLabel: "Install laminate",
+      metadataJson: {},
+    });
+
+    await updateEstimateExtraction({
+      tenantDb,
+      dealId: "deal-1",
+      extractionId: "ext-priced",
+      userId: "user-1",
+      input: { quantity: null },
+    });
+
+    expect(sqlTextOf(updateSetCalls[0].status)).toContain("needs_quantity");
+  });
+
   it("does NOT requeue while the quantity is still missing", async () => {
     // Clearing the flag with no number sends the row straight back to be flagged on the next run — a
     // loop, not a fix.
