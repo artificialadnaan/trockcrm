@@ -219,7 +219,7 @@ export function toPortfolioSeedCandidate(row: SyncHubProcoreProjectRow): Portfol
     return { ...baseSkipped, reason: "inactive" };
   }
   // Only the EXPLICITLY off-board stages (Procore's two legacy buckets) are skipped. A stage
-  // we have no alias for is still seeded — it lands in the board's "Other / Unmapped" column,
+  // we have no alias for is still seeded — it lands in the board's "Other / No Column" column,
   // where somebody can see it, rather than being silently left out of the CRM entirely.
   if (!rawStage || !isPortfolioProjectBoardRelevantStage(rawStage)) {
     return { ...baseSkipped, reason: "non_board_relevant_stage" };

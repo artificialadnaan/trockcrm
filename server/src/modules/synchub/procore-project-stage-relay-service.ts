@@ -307,7 +307,7 @@ export function validateSyncHubProjectStageChangedPayload(input: unknown): SyncH
         raw: newStage,
         normalized: normalizedCurrentStage,
         // Relevance, not column membership: a stage with no column is still relayed onto the
-        // board (into "Other / Unmapped"). Only the explicit off-board legacy stages are false.
+        // board (into "Other / No Column"). Only the explicit off-board legacy stages are false.
         isBoardRelevant: isPortfolioProjectBoardRelevantStage(normalizedCurrentStage),
       },
     },

@@ -1,9 +1,11 @@
 import { Link } from "react-router-dom";
-import { Building2, RefreshCw } from "lucide-react";
+import { AlertTriangle, Building2, RefreshCw, Wrench } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
   usePortfolioProjectBoard,
+  type PortfolioProductionRollup,
+  type PortfolioProductionRollupGroup,
   type PortfolioProjectBoardColumn,
   type PortfolioProjectSummary,
 } from "@/hooks/use-projects";
@@ -11,6 +13,10 @@ import { formatCurrency } from "@/lib/deal-utils";
 
 /** Synthetic column key the server uses for projects whose stage matches no board column. */
 const UNMAPPED_STAGE = "unmapped";
+
+function titleCaseStage(stage: string) {
+  return stage.replace(/\b\w/g, (char) => char.toUpperCase());
+}
 
 function formatSyncDate(value: string | null | undefined) {
   if (!value) return null;
@@ -64,6 +70,116 @@ function ProjectCard({ project }: { project: PortfolioProjectSummary }) {
         )}
       </div>
     </Link>
+  );
+}
+
+function RollupGroupTile({
+  title,
+  icon,
+  group,
+}: {
+  title: string;
+  icon: React.ReactNode;
+  group: PortfolioProductionRollupGroup;
+}) {
+  return (
+    <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+      <div className="flex items-center gap-2 text-[11px] font-black uppercase tracking-[0.18em] text-slate-500">
+        {icon}
+        {title}
+      </div>
+      <p className="mt-2 text-2xl font-black tabular-nums text-slate-950">
+        {formatCurrency(group.totalValue)}
+      </p>
+      <p className="mt-1 text-[11px] font-bold text-slate-500">
+        {group.projectCount} {group.projectCount === 1 ? "project" : "projects"}
+        {" · "}
+        {group.stages.map(titleCaseStage).join(", ")}
+      </p>
+    </div>
+  );
+}
+
+/**
+ * Production Revenue roll-up.
+ *
+ * Every dollar here is the sum of the board's OWN stage-column subtotals (the server rolls up
+ * column.totalValue, it does not re-sum the rows), so the card and the columns underneath it
+ * reconcile by construction.
+ *
+ * The caveat is not optional decoration: a project with no synced value counts as $0, so the
+ * headline can only ever UNDERSTATE. The card says how much of it is unreliable and why.
+ */
+function ProductionRollupCard({ rollup }: { rollup: PortfolioProductionRollup }) {
+  const hasCaveat = rollup.unsyncedValueCount > 0 || rollup.staleValueCount > 0;
+
+  return (
+    <section
+      className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm"
+      aria-label="Production revenue roll-up"
+    >
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <p className="text-[11px] font-black uppercase tracking-[0.2em] text-brand-red">
+            Production Revenue
+          </p>
+          <p className="mt-2 text-4xl font-black tabular-nums leading-none text-slate-950">
+            {formatCurrency(rollup.totalValue)}
+          </p>
+          <p className="mt-2 text-[11px] font-bold text-slate-500">
+            {rollup.projectCount} {rollup.projectCount === 1 ? "project" : "projects"} in Buy Out,
+            Pre-Construction and In Production
+          </p>
+        </div>
+        <div className="grid w-full gap-3 sm:grid-cols-2 lg:max-w-xl">
+          <RollupGroupTile
+            title="Construction"
+            icon={<Building2 className="h-4 w-4 text-brand-red" />}
+            group={rollup.construction}
+          />
+          <RollupGroupTile
+            title="Service"
+            icon={<Wrench className="h-4 w-4 text-brand-red" />}
+            group={rollup.service}
+          />
+        </div>
+      </div>
+
+      <div
+        className={cn(
+          "mt-4 flex items-start gap-2 rounded-lg border p-3 text-[11px] font-bold",
+          hasCaveat
+            ? "border-amber-300 bg-amber-50 text-amber-900"
+            : "border-slate-200 bg-slate-50 text-slate-600"
+        )}
+      >
+        <AlertTriangle
+          className={cn("mt-px h-3.5 w-3.5 shrink-0", hasCaveat ? "text-amber-700" : "text-slate-400")}
+        />
+        <p>
+          {hasCaveat ? (
+            <>
+              Total is a floor, not a final number:{" "}
+              <span className="tabular-nums">{rollup.unsyncedValueCount}</span>{" "}
+              {rollup.unsyncedValueCount === 1 ? "project has" : "projects have"} no synced value and
+              {rollup.unsyncedValueCount === 1 ? " counts" : " count"} as $0;{" "}
+              <span className="tabular-nums">{rollup.staleValueCount}</span>{" "}
+              {rollup.staleValueCount === 1 ? "value is" : "values are"} counted at a figure Procore
+              last synced more than {rollup.staleAfterDays} days ago.
+            </>
+          ) : rollup.projectCount === 0 ? (
+            <>
+              No projects are in Buy Out, Pre-Construction or In Production right now.
+            </>
+          ) : (
+            <>
+              All {rollup.projectCount} {rollup.projectCount === 1 ? "project" : "projects"} have a
+              value synced from Procore within the last {rollup.staleAfterDays} days.
+            </>
+          )}
+        </p>
+      </div>
+    </section>
   );
 }
 
@@ -125,7 +241,7 @@ function StageColumn({ column }: { column: PortfolioProjectBoardColumn }) {
 }
 
 export function ProjectsPage() {
-  const { stages, projects, loading, error, refetch } = usePortfolioProjectBoard();
+  const { stages, projects, productionRollup, loading, error, refetch } = usePortfolioProjectBoard();
 
   return (
     <div className="space-y-6">
@@ -144,6 +260,10 @@ export function ProjectsPage() {
           Refresh
         </Button>
       </section>
+
+      {!loading && !error && productionRollup ? (
+        <ProductionRollupCard rollup={productionRollup} />
+      ) : null}
 
       <section
         className="relative flex h-[min(74vh,58rem)] min-h-[42rem] flex-col overflow-hidden rounded-lg border border-slate-200 bg-white"

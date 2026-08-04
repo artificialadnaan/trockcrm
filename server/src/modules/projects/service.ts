@@ -1,7 +1,10 @@
 import type { PoolClient } from "pg";
 import {
+  PORTFOLIO_PRODUCTION_ROLLUP_CONSTRUCTION_STAGES,
+  PORTFOLIO_PRODUCTION_ROLLUP_SERVICE_STAGES,
   PORTFOLIO_PROJECT_BOARD_STAGES,
   PORTFOLIO_UNMAPPED_BOARD_STAGE,
+  PORTFOLIO_VALUE_STALE_AFTER_DAYS,
   normalizePortfolioProjectStage,
   type PortfolioProjectBoardStage,
 } from "@trock-crm/shared/types";
@@ -90,7 +93,7 @@ export interface PortfolioProjectSummary {
   /**
    * The normalized stage. Usually a `PortfolioProjectBoardStage`, but deliberately typed
    * as a plain string: a project whose Procore stage matches no board column is still
-   * returned (grouped under "Other / Unmapped") rather than dropped, so this can hold a
+   * returned (grouped under "Other / No Column") rather than dropped, so this can hold a
    * stage nobody has written an alias for yet.
    */
   currentStageNormalized: string;
@@ -125,6 +128,30 @@ export interface PortfolioProjectBoardColumn {
   /** Sum of every project's contract value (total_value) in this stage column. */
   totalValue: number;
   projects: PortfolioProjectSummary[];
+}
+
+/** One track's slice of the production roll-up (construction or service). */
+export interface PortfolioProductionRollupGroup {
+  /** The board columns this group sums — the card and those columns must reconcile. */
+  stages: PortfolioProjectBoardStage[];
+  projectCount: number;
+  totalValue: number;
+  /** Projects whose value IS included but was last synced > 7 days ago. */
+  staleValueCount: number;
+  /** Projects with no usable synced value; they contribute $0 and understate the total. */
+  unsyncedValueCount: number;
+}
+
+export interface PortfolioProductionRollup {
+  /** construction.totalValue + service.totalValue. */
+  totalValue: number;
+  projectCount: number;
+  construction: PortfolioProductionRollupGroup;
+  service: PortfolioProductionRollupGroup;
+  /** Whole-rollup caveat counts (construction + service). */
+  staleValueCount: number;
+  unsyncedValueCount: number;
+  staleAfterDays: number;
 }
 
 export interface PortfolioProjectDetail extends PortfolioProjectSummary {
@@ -620,7 +647,7 @@ function toApiProject(row: any) {
  * board column used to make this return null, which dropped the project from the board's
  * columns AND from its `projects` array — the project simply ceased to exist as far as the
  * UI was concerned. Now an unrecognised stage keeps its normalized value and the grouping
- * puts it in the "Other / Unmapped" column.
+ * puts it in the "Other / No Column" column.
  */
 function toPortfolioProjectSummary(row: any): PortfolioProjectSummary {
   const stage = normalizePortfolioProjectStage(row.current_stage_normalized ?? row.current_stage);
@@ -666,7 +693,60 @@ function coercePortfolioContractValue(value: unknown): number {
   return Number.isFinite(numeric) ? numeric : 0;
 }
 
-export function groupPortfolioProjectsForBoard(rows: any[]) {
+/**
+ * A project has no usable synced value when Procore never gave us one (`value_synced_at`
+ * is null) or the value itself is not a finite number. These are exactly the projects that
+ * `coercePortfolioContractValue` turns into $0 — i.e. the ones that make a total understate.
+ */
+function hasUnsyncedPortfolioValue(project: PortfolioProjectSummary): boolean {
+  if (!project.valueSyncedAt) return true;
+  // Checked BEFORE the numeric coercion on purpose: Number(null) is 0, which is finite, so a
+  // null value would otherwise read as a real $0 and quietly drop out of the caveat count —
+  // the same coercion trap that makes the headline total understate in the first place.
+  if (project.totalValue == null) return true;
+  const numeric = typeof project.totalValue === "number" ? project.totalValue : Number(project.totalValue);
+  return !Number.isFinite(numeric);
+}
+
+/**
+ * Stale = we DO have a value, but Procore last synced it more than 7 days ago. The value is
+ * still counted (at its last-known number); the card just has to admit it might have moved.
+ * Deliberately disjoint from "unsynced" so the two caveat counts never double-count a project.
+ */
+function hasStalePortfolioValue(project: PortfolioProjectSummary, now: number): boolean {
+  if (hasUnsyncedPortfolioValue(project)) return false;
+  const syncedAt = new Date(project.valueSyncedAt as string).getTime();
+  if (Number.isNaN(syncedAt)) return true;
+  return now - syncedAt > PORTFOLIO_VALUE_STALE_AFTER_DAYS * 24 * 60 * 60 * 1000;
+}
+
+/**
+ * Roll a set of board columns up into one production-revenue group.
+ *
+ * Sums `column.totalValue` — the SAME subtotals rendered on the columns underneath — rather
+ * than re-summing the rows. There is therefore exactly one summation path, and the card can
+ * never disagree with the columns it claims to summarise.
+ */
+function rollupGroup(
+  columnByStage: Map<PortfolioProjectBoardColumnStage, PortfolioProjectBoardColumn>,
+  stages: readonly PortfolioProjectBoardStage[],
+  now: number,
+): PortfolioProductionRollupGroup {
+  const columns = stages
+    .map((stage) => columnByStage.get(stage))
+    .filter((column): column is PortfolioProjectBoardColumn => Boolean(column));
+  const projects = columns.flatMap((column) => column.projects);
+
+  return {
+    stages: [...stages],
+    projectCount: projects.length,
+    totalValue: columns.reduce((sum, column) => sum + column.totalValue, 0),
+    staleValueCount: projects.filter((project) => hasStalePortfolioValue(project, now)).length,
+    unsyncedValueCount: projects.filter(hasUnsyncedPortfolioValue).length,
+  };
+}
+
+export function groupPortfolioProjectsForBoard(rows: any[], now: Date = new Date()) {
   const columns: PortfolioProjectBoardColumn[] = PORTFOLIO_PROJECT_BOARD_STAGES.map((stage) => ({
     stage,
     label: stageLabel(stage),
@@ -707,10 +787,26 @@ export function groupPortfolioProjectsForBoard(rows: any[]) {
       0,
     );
   }
-  return { stages: allColumns, projects };
+  columnByStage.set(unmapped.stage, unmapped);
+
+  const nowMs = now.getTime();
+  const construction = rollupGroup(columnByStage, PORTFOLIO_PRODUCTION_ROLLUP_CONSTRUCTION_STAGES, nowMs);
+  const service = rollupGroup(columnByStage, PORTFOLIO_PRODUCTION_ROLLUP_SERVICE_STAGES, nowMs);
+  const productionRollup: PortfolioProductionRollup = {
+    totalValue: construction.totalValue + service.totalValue,
+    projectCount: construction.projectCount + service.projectCount,
+    construction,
+    service,
+    staleValueCount: construction.staleValueCount + service.staleValueCount,
+    unsyncedValueCount: construction.unsyncedValueCount + service.unsyncedValueCount,
+    staleAfterDays: PORTFOLIO_VALUE_STALE_AFTER_DAYS,
+  };
+
+  return { stages: allColumns, projects, productionRollup };
 }
 
-export async function listPortfolioProjectBoard(client: QueryExecutor) {
+/** `now` is injectable so the roll-up's staleness cutoff is deterministic under test. */
+export async function listPortfolioProjectBoard(client: QueryExecutor, now: Date = new Date()) {
   const result = await client.query(
     `SELECT id, procore_company_id, procore_project_id, project_number, name,
             current_stage, current_stage_normalized, current_stage_entered_at,
@@ -719,7 +815,7 @@ export async function listPortfolioProjectBoard(client: QueryExecutor) {
       WHERE is_board_relevant = true
       ORDER BY current_stage_entered_at DESC NULLS LAST, name ASC`
   );
-  return groupPortfolioProjectsForBoard(result.rows);
+  return groupPortfolioProjectsForBoard(result.rows, now);
 }
 
 export async function getPortfolioProjectDetail(client: QueryExecutor, projectId: string): Promise<PortfolioProjectDetail | null> {

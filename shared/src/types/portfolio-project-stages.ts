@@ -12,7 +12,7 @@
  *      are not ingested and never reach the board.
  *   3. Everything else — a stage nobody anticipated. It is NOT excluded: it stays
  *      board-relevant (so it is still ingested) and the board groups it into an
- *      "Other / Unmapped" column. See `isPortfolioProjectBoardRelevantStage`.
+ *      "Other / No Column" column. See `isPortfolioProjectBoardRelevantStage`.
  *
  * The reason class 3 exists at all: before this, an unrecognised stage fell through the
  * alias map and the project was dropped from the board AND from the board's project list
@@ -60,6 +60,20 @@ export type PortfolioProjectOffBoardStage = typeof PORTFOLIO_PROJECT_OFF_BOARD_S
  * stage — it only ever exists in the board grouping, never in the database.
  */
 export const PORTFOLIO_UNMAPPED_BOARD_STAGE = "unmapped";
+
+/** Stages whose contract value rolls up into "production revenue", split by track. */
+export const PORTFOLIO_PRODUCTION_ROLLUP_CONSTRUCTION_STAGES = [
+  "buyout",
+  "pre-construction",
+  "in production",
+] as const satisfies readonly PortfolioProjectBoardStage[];
+
+export const PORTFOLIO_PRODUCTION_ROLLUP_SERVICE_STAGES = [
+  "service - in production",
+] as const satisfies readonly PortfolioProjectBoardStage[];
+
+/** A project's value is "stale" once its last sync from Procore is older than this. */
+export const PORTFOLIO_VALUE_STALE_AFTER_DAYS = 7;
 
 const STAGE_ALIASES: Record<string, PortfolioProjectBoardStage | PortfolioProjectOffBoardStage> = {
   "bid": "bidding",
@@ -149,7 +163,7 @@ export function isPortfolioProjectOffBoardStage(stage: string | null | undefined
  * Drives the `is_board_relevant` column written by the seed and the webhook relay.
  *
  * Fails OPEN on purpose: an unrecognised stage stays relevant so it is still ingested and
- * still shows up (in the board's "Other / Unmapped" column) instead of disappearing. Only
+ * still shows up (in the board's "Other / No Column" column) instead of disappearing. Only
  * the explicitly-listed off-board stages are filtered out. An empty/absent stage is not a
  * decision either, so it too stays relevant rather than being silently discarded.
  */

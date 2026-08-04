@@ -32,9 +32,31 @@ const stageNames = [
   "service - lost",
 ];
 
+const emptyRollup = {
+  totalValue: 0,
+  projectCount: 0,
+  construction: {
+    stages: ["buyout", "pre-construction", "in production"],
+    projectCount: 0,
+    totalValue: 0,
+    staleValueCount: 0,
+    unsyncedValueCount: 0,
+  },
+  service: {
+    stages: ["service - in production"],
+    projectCount: 0,
+    totalValue: 0,
+    staleValueCount: 0,
+    unsyncedValueCount: 0,
+  },
+  staleValueCount: 0,
+  unsyncedValueCount: 0,
+  staleAfterDays: 7,
+};
+
 function boardResponse(
   projects: Array<Record<string, unknown>> = [],
-  overrides: { stages?: Array<Record<string, unknown>> } = {},
+  overrides: { stages?: Array<Record<string, unknown>>; productionRollup?: unknown } = {},
 ) {
   return {
     stages: overrides.stages ?? stageNames.map((stage) => ({
@@ -44,6 +66,7 @@ function boardResponse(
       projects: projects.filter((project) => project.currentStageNormalized === stage),
     })),
     projects,
+    productionRollup: overrides.productionRollup ?? emptyRollup,
   };
 }
 
@@ -124,6 +147,133 @@ describe("ProjectsPage", () => {
     expect(container.querySelector("[draggable]")).toBeNull();
   });
 
+  it("renders the production roll-up card with service split out from construction", async () => {
+    mocks.api.mockResolvedValue(
+      boardResponse([], {
+        productionRollup: {
+          ...emptyRollup,
+          totalValue: 915000,
+          projectCount: 6,
+          construction: {
+            stages: ["buyout", "pre-construction", "in production"],
+            projectCount: 4,
+            totalValue: 875000,
+            staleValueCount: 0,
+            unsyncedValueCount: 1,
+          },
+          service: {
+            stages: ["service - in production"],
+            projectCount: 2,
+            totalValue: 40000,
+            staleValueCount: 1,
+            unsyncedValueCount: 1,
+          },
+          staleValueCount: 1,
+          unsyncedValueCount: 2,
+        },
+      }),
+    );
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <ProjectsPage />
+        </MemoryRouter>,
+      );
+    });
+
+    await vi.waitFor(() => expect(container.textContent).toContain("Production Revenue"));
+    const card = container.querySelector('[aria-label="Production revenue roll-up"]');
+    expect(card).not.toBeNull();
+
+    // Combined headline...
+    expect(card!.textContent).toContain("$915,000");
+    expect(card!.textContent).toContain("6 projects");
+    // ...with both tracks still individually readable, not merged into the one number.
+    expect(card!.textContent).toContain("Construction");
+    expect(card!.textContent).toContain("$875,000");
+    expect(card!.textContent).toContain("Service");
+    expect(card!.textContent).toContain("$40,000");
+    expect(card!.textContent).toContain("Service - In Production");
+  });
+
+  it("states the stale and not-synced caveat on the roll-up card", async () => {
+    mocks.api.mockResolvedValue(
+      boardResponse([], {
+        productionRollup: {
+          ...emptyRollup,
+          totalValue: 915000,
+          projectCount: 6,
+          construction: { ...emptyRollup.construction, projectCount: 4, totalValue: 875000, unsyncedValueCount: 1 },
+          service: { ...emptyRollup.service, projectCount: 2, totalValue: 40000, staleValueCount: 1, unsyncedValueCount: 1 },
+          staleValueCount: 1,
+          unsyncedValueCount: 2,
+        },
+      }),
+    );
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <ProjectsPage />
+        </MemoryRouter>,
+      );
+    });
+
+    await vi.waitFor(() => expect(container.textContent).toContain("Production Revenue"));
+    const card = container.querySelector('[aria-label="Production revenue roll-up"]');
+
+    // The card must NOT present the total as complete when it isn't.
+    expect(card!.textContent).toContain("Total is a floor, not a final number");
+    expect(card!.textContent).toContain("2 projects have no synced value");
+    expect(card!.textContent).toContain("count as $0");
+    expect(card!.textContent).toContain("1 value is counted");
+    expect(card!.textContent).toContain("more than 7 days ago");
+  });
+
+  it("does not claim 'all 0 projects are synced' when the roll-up stages are empty", async () => {
+    mocks.api.mockResolvedValue(boardResponse());
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <ProjectsPage />
+        </MemoryRouter>,
+      );
+    });
+
+    await vi.waitFor(() => expect(container.textContent).toContain("Production Revenue"));
+    const card = container.querySelector('[aria-label="Production revenue roll-up"]');
+    expect(card!.textContent).toContain("No projects are in Buy Out, Pre-Construction or In Production");
+    expect(card!.textContent).not.toContain("All 0 projects");
+  });
+
+  it("says so plainly when nothing is stale or unsynced", async () => {
+    mocks.api.mockResolvedValue(
+      boardResponse([], {
+        productionRollup: {
+          ...emptyRollup,
+          totalValue: 875000,
+          projectCount: 4,
+          construction: { ...emptyRollup.construction, projectCount: 4, totalValue: 875000 },
+        },
+      }),
+    );
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <ProjectsPage />
+        </MemoryRouter>,
+      );
+    });
+
+    await vi.waitFor(() => expect(container.textContent).toContain("Production Revenue"));
+    const card = container.querySelector('[aria-label="Production revenue roll-up"]');
+    expect(card!.textContent).toContain("have a value synced from Procore within the last 7 days");
+    expect(card!.textContent).not.toContain("Total is a floor");
+  });
+
   it("renders the Other / No Column bucket so unmapped projects stay visible", async () => {
     const surprise = {
       id: "00000000-0000-4000-8000-000000000009",
@@ -199,8 +349,8 @@ describe("ProjectsPage", () => {
     });
 
     await vi.waitFor(() => expect(container.textContent).toContain("Portfolio Roof Replacement"));
-    // Scoped to the project CARD: stage/summary totals elsewhere on the page legitimately render
-    // "$0", but a project whose value never synced must never be dressed up as a real $0.
+    // Scoped to the project CARD: empty stage columns and the roll-up card legitimately render
+    // "$0" totals, but a project whose value never synced must never be dressed up as a real $0.
     const card = container.querySelector('a[href="/projects/00000000-0000-4000-8000-000000000001"]');
     expect(card).not.toBeNull();
     expect(card!.textContent).toContain("Value not synced");
