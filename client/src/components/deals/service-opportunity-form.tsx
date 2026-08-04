@@ -29,13 +29,22 @@ import {
 
 interface ServiceOpportunityFormProps {
   onSuccess?: (deal: Deal) => void;
+  // Prefill from whichever entry point sent the rep here (today: the property page). The POINT is that the
+  // property is ALREADY chosen, so nobody retypes an address and mints a duplicate property record. These
+  // are seeded straight into the initial state below and NEVER replayed through handleChange — replaying a
+  // company change is exactly what would clear the prefilled property on mount.
+  initialValues?: {
+    name?: string;
+    companyId?: string;
+    propertyId?: string;
+  };
 }
 
 function normalizeServiceCandidate(value: string | null | undefined) {
   return String(value ?? "").trim().toLowerCase().replace(/[-_]+/g, " ").replace(/\s+/g, " ");
 }
 
-export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProps) {
+export function ServiceOpportunityForm({ onSuccess, initialValues }: ServiceOpportunityFormProps) {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { offices } = useAccessibleOffices();
@@ -62,9 +71,9 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
   }, [projectTypeHierarchy]);
 
   const [formData, setFormData] = useState({
-    name: "",
-    companyId: "",
-    propertyId: "",
+    name: initialValues?.name ?? "",
+    companyId: initialValues?.companyId ?? "",
+    propertyId: initialValues?.propertyId ?? "",
     description: "",
     assignedRepId: user?.role === "rep" ? user.id : "",
     salesSourceUserId: "",
@@ -78,6 +87,22 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
     propertyState: "",
   });
   const [regionManuallyOverridden, setRegionManuallyOverridden] = useState(false);
+  // The company/property pair we were opened with, frozen at first render (lazy init — never recomputed, so
+  // a re-render can neither resurrect nor lose it). Two jobs: explain a property that has no owner company,
+  // and make a cleared prefill recoverable in one click.
+  const [preloaded] = useState(() => ({
+    companyId: initialValues?.companyId ?? "",
+    propertyId: initialValues?.propertyId ?? "",
+  }));
+  // A company change has dropped the property we were opened with. Correct behaviour (a property belongs to
+  // exactly one company) but never a dead end — losing the prefill is how a rep ends up at "Add New Property"
+  // typing an address that already exists.
+  const preloadedPropertyCleared =
+    Boolean(preloaded.propertyId) && formData.propertyId !== preloaded.propertyId;
+  // The property arrived with no owner company. The server requires property.companyId === companyId, so no
+  // company choice can make this pair valid — say so up front rather than let the rep fill the whole form
+  // and eat a 400 (or go mint the property a second time under some other company).
+  const preloadedPropertyHasNoCompany = Boolean(preloaded.propertyId) && !preloaded.companyId;
 
   // Region auto-detects from the selected property's state (same rule + columns as the deal form), but a
   // manual pick wins.
@@ -138,7 +163,11 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
   const handleChange = (field: keyof typeof formData, value: string) => {
     setFormData((prev) => {
       const next = { ...prev, [field]: value };
-      if (field === "companyId") {
+      // Switching companies must drop the property — a property belongs to exactly one company and the
+      // server rejects a mismatched pair. Guarded on an ACTUAL change: a picker that re-emits the company it
+      // is already showing (value resolution / remount) would otherwise silently wipe a prefilled property,
+      // which is precisely the duplicate-address failure the prefill exists to prevent.
+      if (field === "companyId" && value !== prev.companyId) {
         next.propertyId = "";
         next.propertyState = "";
       }
@@ -156,6 +185,20 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
       }
       return next;
     });
+    setError(null);
+  };
+
+  // Puts BOTH ids back in a single update. Routing this through handleChange would set the company and then
+  // immediately clear the property again, which is the whole bug this restore exists to undo.
+  const restorePreloadedSelection = () => {
+    setFormData((prev) => ({
+      ...prev,
+      companyId: preloaded.companyId,
+      propertyId: preloaded.propertyId,
+      // PropertySelector re-emits the resolved record whenever its value changes, so the state (and with it
+      // the auto-detected region) refills on its own — blanking it here just avoids a frame of stale region.
+      propertyState: "",
+    }));
     setError(null);
   };
 
@@ -264,6 +307,35 @@ export function ServiceOpportunityForm({ onSuccess }: ServiceOpportunityFormProp
               onChange={(event) => handleChange("name", event.target.value)}
             />
           </div>
+
+          {preloadedPropertyHasNoCompany ? (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900">
+              <p className="font-semibold">This property has no owner company yet.</p>
+              <p className="mt-1">
+                A service opportunity is created for the company that owns the property, so this one can&apos;t be
+                saved until the property is linked.{" "}
+                <Link
+                  to={`/properties/${preloaded.propertyId}/edit`}
+                  className="font-semibold underline underline-offset-4"
+                >
+                  Set the owner company on the property
+                </Link>{" "}
+                first — do that instead of adding the address again here.
+              </p>
+            </div>
+          ) : null}
+
+          {preloadedPropertyCleared ? (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900">
+              <p>
+                Changing the company cleared the property this page was opened with. Restore it if that
+                wasn&apos;t intentional — re-adding the address would create a duplicate property.
+              </p>
+              <Button type="button" size="sm" variant="outline" onClick={restorePreloadedSelection}>
+                Restore property
+              </Button>
+            </div>
+          ) : null}
 
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="space-y-2">
