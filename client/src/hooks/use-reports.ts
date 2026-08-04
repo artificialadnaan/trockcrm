@@ -444,6 +444,8 @@ export interface DailyActivityLogEntry {
   outcome: string | null;
   nextStep: string | null;
   nextStepDueAt: string | null;
+  /** Someone else's email activity: the row still counts, but its content is withheld. Label it. */
+  contentRestricted: boolean;
   durationMinutes: number | null;
   targetType: string | null;
   targetName: string | null;
@@ -1412,8 +1414,15 @@ export function useDailyActivityLogReport(options: DailyActivityLogQueryOptions 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const typeKey = options.types?.join(",") ?? "";
+  // Monotonic request id -- the same guard useMondayShowcase uses. This report has MANY controls that
+  // can fire in quick succession (13 type chips, paging, owner/office/date), so a slower earlier
+  // response can land after a newer one and repaint the page with the previous filter's entries. Only
+  // the latest request may write state; a superseded response is dropped, and a superseded `finally`
+  // must not clear the loading flag while the current request is still in flight.
+  const latestRequest = useRef(0);
 
   const fetchReport = useCallback(async () => {
+    const requestId = ++latestRequest.current;
     setLoading(true);
     setError(null);
     try {
@@ -1424,12 +1433,14 @@ export function useDailyActivityLogReport(options: DailyActivityLogQueryOptions 
       if (options.limit) params.set("limit", String(options.limit));
       const qs = params.toString();
       const result = await api<{ data: DailyActivityLogReport }>(`/reports/daily-activity-log${qs ? `?${qs}` : ""}`);
+      if (requestId !== latestRequest.current) return; // superseded by a newer request
       setData(result.data);
     } catch (err: unknown) {
+      if (requestId !== latestRequest.current) return;
       setError(err instanceof Error ? err.message : "Failed to load the daily activity log");
       setData(null);
     } finally {
-      setLoading(false);
+      if (requestId === latestRequest.current) setLoading(false);
     }
   }, [
     options.dateFrom,

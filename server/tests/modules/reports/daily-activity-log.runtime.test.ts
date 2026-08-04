@@ -50,6 +50,11 @@ const A4 = U("ac04"); // Alice  note     06-02 14:00, logged 06-05  -> +3    BAC
 const A5 = U("ac05"); // Bob    meeting  06-03 16:00, logged same day, performed by Dana (deal)
 const A6 = U("ac06"); // Alice  note     06-04 10:00, logged 06-02  -> -2    FUTURE-DATED
 
+// Email-privacy fixtures, deliberately in July so they cannot disturb the June assertions.
+const E1 = U("e0a1"); // Alice  email    07-01 10:00  (Alice's mailbox)
+const E2 = U("e0b2"); // Bob    email    07-01 11:00  (Bob's mailbox)
+const E3 = U("e0c3"); // Alice  note     07-01 12:00  (control: never redacted)
+
 const FILTERS = {
   dateFrom: "2026-06-01",
   dateTo: "2026-06-30",
@@ -106,6 +111,24 @@ beforeAll(async () => {
         'Scope review', 'Dana logged this on Bob''s behalf.', '2026-06-03T16:00:00Z', '2026-06-03T16:00:00Z'),
       ('${A6}', 'note', 'deal', '${DEAL1}', '${ALICE}', NULL, '${DEAL1}', NULL, NULL,
         'Pre-dated plan note', 'Entered ahead of the visit.', '2026-06-04T10:00:00Z', '2026-06-02T10:00:00Z');
+  `);
+
+  // Email-privacy fixtures live in their OWN month so the June assertions above stay untouched.
+  // E1/E2 are two different reps' mailbox rows; E3 is a NOTE by Alice, present to prove the redaction
+  // is scoped to email and does not blank ordinary entries for other viewers.
+  await pg.exec(`
+    INSERT INTO public.activities
+      (id, type, source_entity_type, source_entity_id, responsible_user_id, deal_id,
+       subject, body, outcome, next_step, occurred_at, created_at) VALUES
+      ('${E1}', 'email', 'deal', '${DEAL1}', '${ALICE}', '${DEAL1}',
+        'Re: Roof proposal', 'Alice mailbox body.', 'replied', 'Send revised pricing',
+        '2026-07-01T10:00:00Z', '2026-07-01T10:00:00Z'),
+      ('${E2}', 'email', 'deal', '${DEAL1}', '${BOB}', '${DEAL1}',
+        'Re: Scope questions', 'Bob mailbox body.', 'replied', 'Book the walk',
+        '2026-07-01T11:00:00Z', '2026-07-01T11:00:00Z'),
+      ('${E3}', 'note', 'deal', '${DEAL1}', '${ALICE}', '${DEAL1}',
+        'Ordinary note', 'Not an email, so never redacted.', NULL, NULL,
+        '2026-07-01T12:00:00Z', '2026-07-01T12:00:00Z');
   `);
 
   tdb = drizzle(pg);
@@ -246,6 +269,26 @@ describe("daily activity log — rep scoping", () => {
     expect(report.days.some((d) => d.date === "2026-06-04")).toBe(false);
   });
 
+  it("ignores ownerNames without ownerIds — the SAME way Rep Activity does", async () => {
+    // Owner scoping is by id only, in both reports. Display names are not unique, so scoping
+    // activities by name would leak one rep's entries to a namesake (there is a tier-2 test pinning
+    // exactly that). The client resolves names to ids before calling, so this only arises from a
+    // hand-written or legacy URL -- and when it does, BOTH reports must fall back the same way, or
+    // they would disagree on that URL. This test fails if either side grows a display-name arm alone.
+    const namesOnly = { ...FILTERS, ownerIds: [] as string[], ownerNames: ["Alice Rep"] };
+
+    const log = await getDailyActivityLogReport(tdb, namesOnly, opts(), DIRECTOR);
+    const repActivity = await getRepActivityReport(tdb, namesOnly, DIRECTOR, "daily-log-names-only");
+
+    // Office-wide, not Alice-only: all 6 June entries from both reps.
+    expect(log.kpis.totalEntries).toBe(6);
+    expect(log.kpis.repsLogging).toBe(2);
+    expect(log.kpis.totalEntries).toBe(repActivity.kpis.totalTouchpoints);
+    const logByDay = Object.fromEntries(log.days.map((d) => [d.date, d.entryCount]));
+    const repByDay = Object.fromEntries(repActivity.timeline.map((t) => [t.date, t.touchpoints]));
+    expect(logByDay).toEqual(repByDay);
+  });
+
   it("lets a director target one rep through the owner filter", async () => {
     const report = await getDailyActivityLogReport(tdb, { ...FILTERS, ownerIds: [ALICE] }, opts(), DIRECTOR);
 
@@ -280,16 +323,107 @@ describe("daily activity log — pagination", () => {
     expect(new Set(seen).size).toBe(6);
   });
 
-  it("returns an empty page past the end without claiming there is more", async () => {
+  it("clamps an out-of-range page to the last real page instead of rendering as empty", async () => {
+    // A bookmarked ?page=9 (or a page that fell off the end after deletions) must not come back with
+    // total>0 and zero rows -- that renders as "nothing was logged" under a footer reading
+    // "0-0 of 6 - page 9 of 3". The response reports the page it actually served.
     const past = await getDailyActivityLogReport(tdb, FILTERS, opts({ page: 9, limit: 2 }), DIRECTOR);
-    expect(past.days).toEqual([]);
-    expect(past.pagination).toMatchObject({ total: 6, returned: 0, hasMore: false });
+
+    expect(past.pagination).toMatchObject({ page: 3, limit: 2, total: 6, returned: 2, totalPages: 3, hasMore: false });
+    expect(past.days.flatMap((d) => d.entries).map((e) => e.id)).toEqual([A2, A1]);
+  });
+
+  it("still reports page 1 when the window genuinely has no entries", async () => {
+    const empty = await getDailyActivityLogReport(
+      tdb,
+      { ...FILTERS, dateFrom: "2026-01-01", dateTo: "2026-01-31" },
+      opts({ page: 4, limit: 2 }),
+      DIRECTOR
+    );
+    expect(empty.days).toEqual([]);
+    expect(empty.pagination).toMatchObject({ page: 1, total: 0, returned: 0, totalPages: 0, hasMore: false });
   });
 
   it("clamps an oversized limit instead of pulling the table through the API", () => {
     expect(normalizeDailyActivityLogOptions({ limit: "100000" }).limit).toBe(500);
     expect(normalizeDailyActivityLogOptions({ limit: "0" }).limit).toBe(200);
     expect(normalizeDailyActivityLogOptions({ page: "-3" }).page).toBe(1);
+  });
+});
+
+describe("daily activity log — email content privacy", () => {
+  // Email activities carry synced mailbox content. server/src/modules/activities/service.ts restricts
+  // them to the mailbox owner for every viewer; this report must not become the way around that.
+  // The row is REDACTED rather than dropped, so it still counts and the Rep Activity reconcile holds.
+  const JULY = { ...FILTERS, dateFrom: "2026-07-01", dateTo: "2026-07-31" };
+
+  it("shows a rep their OWN email content in full", async () => {
+    const alice = { role: "rep" as const, userId: ALICE, displayName: "Alice Rep" };
+    const report = await getDailyActivityLogReport(tdb, JULY, opts(), alice);
+    const byId = new Map(report.days.flatMap((d) => d.entries).map((e) => [e.id, e]));
+
+    const own = byId.get(E1)!;
+    expect(own.contentRestricted).toBe(false);
+    expect(own.subject).toBe("Re: Roof proposal");
+    expect(own.body).toBe("Alice mailbox body.");
+    expect(own.outcome).toBe("replied");
+    expect(own.nextStep).toBe("Send revised pricing");
+  });
+
+  it("withholds another user's email content from a director while KEEPING the row", async () => {
+    const report = await getDailyActivityLogReport(tdb, JULY, opts(), DIRECTOR);
+    const byId = new Map(report.days.flatMap((d) => d.entries).map((e) => [e.id, e]));
+
+    // Both mailbox rows are present and countable...
+    expect(report.kpis.totalEntries).toBe(3);
+    expect(byId.has(E1)).toBe(true);
+    expect(byId.has(E2)).toBe(true);
+
+    // ...but neither director-readable row carries content.
+    for (const id of [E1, E2]) {
+      const entry = byId.get(id)!;
+      expect(entry.contentRestricted).toBe(true);
+      expect(entry.subject).toBeNull();
+      expect(entry.body).toBeNull();
+      expect(entry.outcome).toBeNull();
+      expect(entry.nextStep).toBeNull();
+      expect(entry.nextStepDueAt).toBeNull();
+      // The countable, non-content fields survive so the entry still explains the day's volume.
+      expect(entry.type).toBe("email");
+      expect(entry.responsibleName).not.toBe("");
+      expect(entry.occurredDate).toBe("2026-07-01");
+    }
+
+    // A NOTE by the same rep is untouched -- the redaction is scoped to email, not to "not mine".
+    const note = byId.get(E3)!;
+    expect(note.contentRestricted).toBe(false);
+    expect(note.subject).toBe("Ordinary note");
+    expect(note.body).toBe("Not an email, so never redacted.");
+  });
+
+  it("does not leak one rep's email to another rep", async () => {
+    const bob = { role: "rep" as const, userId: BOB, displayName: "Bob Rep" };
+    const report = await getDailyActivityLogReport(tdb, JULY, opts(), bob);
+    const all = report.days.flatMap((d) => d.entries);
+
+    // Rep scoping already limits Bob to his own rows; his own email is readable.
+    expect(all.map((e) => e.id)).toEqual([E2]);
+    expect(all[0].contentRestricted).toBe(false);
+    expect(all[0].body).toBe("Bob mailbox body.");
+  });
+
+  it("keeps the Rep Activity reconcile intact despite redaction", async () => {
+    // The whole reason redaction was chosen over exclusion: Rep Activity counts email activities for
+    // every viewer, so dropping them here would have desynced the two reports.
+    const log = await getDailyActivityLogReport(tdb, JULY, opts(), DIRECTOR);
+    const repActivity = await getRepActivityReport(tdb, JULY, DIRECTOR, "daily-log-email-reconcile");
+
+    expect(log.kpis.totalEntries).toBe(repActivity.kpis.totalTouchpoints);
+    const logByDay = Object.fromEntries(log.days.map((d) => [d.date, d.entryCount]));
+    const repByDay = Object.fromEntries(repActivity.timeline.map((t) => [t.date, t.touchpoints]));
+    expect(logByDay).toEqual(repByDay);
+    // Two of the three July rows are emails, and Rep Activity counts them in its own breakdown.
+    expect(repActivity.kpis.emails).toBe(2);
   });
 });
 

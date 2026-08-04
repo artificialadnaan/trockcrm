@@ -17,6 +17,9 @@ import { EmptyState, ErrorState, KpiCard, LoadingState, ReportPanel, formatNumbe
 
 const PAGE_SIZE = 200;
 
+/** The narrow union from the shared enum — keeps the sanitised URL list and the chips on one type. */
+type LogActivityType = (typeof ACTIVITY_TYPES)[number];
+
 function labelForType(type: string) {
   return type.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
@@ -39,6 +42,18 @@ function formatDayShort(date: string) {
 function formatClock(iso: string) {
   if (!iso) return "";
   return new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit" }).format(new Date(iso));
+}
+
+/** Full local date + time for the Excel export, which cannot carry a time in a "date" column. */
+function formatDateTime(iso: string) {
+  if (!iso) return "";
+  return new Intl.DateTimeFormat("en-US", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(iso));
 }
 
 /**
@@ -68,8 +83,17 @@ export function DailyActivityLogPage() {
   // The type filter and the page live in the URL, not local state: ReportFilterBar's Apply rewrites
   // the query string from a copy of the current params, so URL-held filters survive an Apply while
   // component state would be silently dropped. It also makes a filtered day shareable as a link.
+  //
+  // Sanitised against ACTIVITY_TYPES -- the same list the server validates against. A stale bookmark
+  // like ?types=retired_type is dropped server-side and the response covers ALL types, so keeping it
+  // here would light up a chip and print "counts cover only this type" over data that is not filtered
+  // at all. The controls must describe the data shown, not the data requested.
   const selectedTypes = useMemo(
-    () => (searchParams.get("types") ?? "").split(",").map((value) => value.trim()).filter(Boolean),
+    () =>
+      (searchParams.get("types") ?? "")
+        .split(",")
+        .map((value) => value.trim())
+        .filter((value): value is LogActivityType => (ACTIVITY_TYPES as readonly string[]).includes(value)),
     [searchParams]
   );
   const page = Math.max(1, Number(searchParams.get("page") ?? "1") || 1);
@@ -86,7 +110,7 @@ export function DailyActivityLogPage() {
     setSearchParams(next);
   }
 
-  function toggleType(type: string) {
+  function toggleType(type: LogActivityType) {
     const next = selectedTypes.includes(type)
       ? selectedTypes.filter((value) => value !== type)
       : [...selectedTypes, type];
@@ -132,10 +156,12 @@ export function DailyActivityLogPage() {
             </button>
           ))}
         </div>
-        {selectedTypes.length > 0 ? (
+        {/* Describes what the SERVER actually applied, not what the URL asked for — the two differ if a
+            stale bookmark carries a type the server no longer accepts. */}
+        {data && data.appliedTypes.length > 0 ? (
           <p className="mt-2 text-xs text-slate-500">
-            Filtered to {selectedTypes.map(labelForType).join(", ")}. Counts below cover only these types, so they will
-            not match the Rep Activity totals until you clear the filter.
+            Filtered to {data.appliedTypes.map(labelForType).join(", ")}. Counts below cover only these types, so they
+            will not match the Rep Activity totals until you clear the filter.
           </p>
         ) : null}
       </div>
@@ -149,7 +175,12 @@ export function DailyActivityLogPage() {
             name: "Entries",
             columns: [
               { key: "occurredDate", header: "Day", type: "date" },
-              { key: "occurredAt", header: "Occurred At", type: "date" },
+              // TEXT, not "date": normalizeCellValue routes a date column through excelDateSerial,
+              // which keeps only the UTC calendar day and formats it m/d/yyyy. In a log about what
+              // people did THROUGHOUT the day, a column called "Occurred At" that silently drops the
+              // time is worse than useless. Exported as a preformatted local date-time string.
+              { key: "occurredAtDisplay", header: "Occurred At", type: "text" },
+              { key: "loggedAtDisplay", header: "Logged At", type: "text" },
               { key: "loggedDate", header: "Logged On", type: "date" },
               { key: "loggedDaysDiff", header: "Logged Days After", type: "number" },
               { key: "typeLabel", header: "Type", type: "text" },
@@ -164,7 +195,17 @@ export function DailyActivityLogPage() {
               { key: "nextStep", header: "Next Step", type: "text" },
               { key: "durationMinutes", header: "Duration (min)", type: "number" },
             ],
-            rows: data.days.flatMap((day) => day.entries as unknown as Array<Record<string, unknown>>),
+            rows: data.days.flatMap((day) =>
+              day.entries.map((entry) => ({
+                ...entry,
+                occurredAtDisplay: formatDateTime(entry.occurredAt),
+                loggedAtDisplay: formatDateTime(entry.loggedAt),
+                // The export is a file that leaves the app — the redaction has to hold here too,
+                // otherwise "Export to Excel" becomes the way around it.
+                subject: entry.contentRestricted ? "(content private)" : entry.subject,
+                body: entry.contentRestricted ? "(content private)" : entry.body,
+              })) as unknown as Array<Record<string, unknown>>
+            ),
           }] : []}
           disabled={loading || !data}
         />
@@ -252,12 +293,23 @@ export function DailyActivityLogPage() {
                             )}
                           </div>
 
-                          {entry.subject ? (
-                            <p className="mt-1 text-sm font-semibold text-slate-900">{entry.subject}</p>
-                          ) : null}
-                          {entry.body ? (
-                            <p className="mt-1 whitespace-pre-wrap text-sm text-slate-700">{entry.body}</p>
-                          ) : null}
+                          {/* Someone else's email: the row is counted but its content is withheld.
+                              Say so explicitly — a silently blank entry reads as missing data. */}
+                          {entry.contentRestricted ? (
+                            <p className="mt-1 text-sm italic text-slate-500">
+                              Content private — email is only readable by its mailbox owner. This entry is still
+                              counted in the totals above.
+                            </p>
+                          ) : (
+                            <>
+                              {entry.subject ? (
+                                <p className="mt-1 text-sm font-semibold text-slate-900">{entry.subject}</p>
+                              ) : null}
+                              {entry.body ? (
+                                <p className="mt-1 whitespace-pre-wrap text-sm text-slate-700">{entry.body}</p>
+                              ) : null}
+                            </>
+                          )}
 
                           <div className="mt-1 flex flex-wrap gap-x-4 text-xs text-slate-500">
                             {entry.outcome ? <span>Outcome: {entry.outcome}</span> : null}
@@ -309,6 +361,8 @@ export function DailyActivityLogPage() {
               Rep Activity
             </Link>{" "}
             timeline. Entries written up on a different day carry a badge showing when they were actually logged.
+            Rep Activity caches for 5 minutes, so just after something is logged it can appear here first.
+            Email entries you do not own are counted but their content is not shown.
           </p>
         </>
       ) : null}

@@ -48,6 +48,7 @@ vi.mock("@/hooks/use-reports", async () => {
                 outcome: null,
                 nextStep: "Send the scope",
                 nextStepDueAt: null,
+                contentRestricted: false,
                 durationMinutes: 45,
                 targetType: "company",
                 targetName: "Acme Property Group",
@@ -82,6 +83,34 @@ vi.mock("@/hooks/use-reports", async () => {
                 outcome: "connected",
                 nextStep: null,
                 nextStepDueAt: null,
+                contentRestricted: false,
+                durationMinutes: null,
+                targetType: "deal",
+                targetName: "Roof Replacement - Tower A",
+                dealId: "deal-1",
+                dealName: "Roof Replacement - Tower A",
+                dealNumber: "D-1001",
+              },
+              {
+                // Another user's email: server has already nulled the content and flagged the row.
+                id: "act-email",
+                type: "email",
+                typeLabel: "Email",
+                occurredAt: "2026-06-01T16:00:00.000Z",
+                occurredDate: "2026-06-01",
+                loggedAt: "2026-06-01T16:00:00.000Z",
+                loggedDate: "2026-06-01",
+                loggedSameDay: true,
+                loggedDaysDiff: 0,
+                responsibleUserId: "user-carol",
+                responsibleName: "Carol Rep",
+                performedByName: null,
+                subject: null,
+                body: null,
+                outcome: null,
+                nextStep: null,
+                nextStepDueAt: null,
+                contentRestricted: true,
                 durationMinutes: null,
                 targetType: "deal",
                 targetName: "Roof Replacement - Tower A",
@@ -161,6 +190,32 @@ describe("DailyActivityLogPage", () => {
     // A non-deal entry names its target with the entity type instead of a link.
     expect(html).toContain("Acme Property Group");
     expect(html).toContain("company");
+  });
+
+  it("labels a redacted email instead of rendering a blank entry", () => {
+    const html = htmlFor();
+
+    // The row is visible and attributed (so the counts make sense) but says why it has no content.
+    expect(html).toContain("Carol Rep");
+    expect(html).toContain("Email");
+    expect(html).toContain("Content private");
+    expect(html).toContain("still counted in the totals");
+  });
+
+  it("describes the filter from the server's appliedTypes, not the raw URL", () => {
+    // A retired type in the URL is dropped by the server, which then returns ALL types. The page must
+    // not claim the counts are filtered -- no chip lights up and no "Filtered to" caption appears.
+    const html = htmlFor("/reports/performance/daily-activity-log?types=not_a_real_type");
+
+    expect(html).not.toContain("Filtered to");
+    // "All types" stays selected (dark chip) because nothing valid was requested.
+    expect(html).toContain("border-slate-950 bg-slate-950 text-white\">All types");
+  });
+
+  it("discloses the Rep Activity cache window and the email redaction in the footnote", () => {
+    const html = htmlFor();
+    expect(html).toContain("caches for 5 minutes");
+    expect(html).toContain("Email entries you do not own are counted but their content is not shown.");
   });
 
   it("states the pagination range and total so a partial page cannot read as everything", () => {

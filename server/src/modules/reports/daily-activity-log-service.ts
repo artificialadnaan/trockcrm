@@ -9,9 +9,13 @@
 // service imports buildActivityScopeSql and resolveRepActivityScope from the tier-2 service instead
 // of restating either. With no type filter applied, `days[].entryCount` here is produced by a query
 // that is the same shape as Rep Activity's `timeline` over the same predicate, so the two reconcile
-// row-for-row. (Proven, not asserted: see the cross-service reconciliation case in
-// server/tests/modules/reports/daily-activity-log.runtime.test.ts, which calls BOTH services against
-// one seeded database and compares their per-day numbers.)
+// row-for-row ON THE SAME DATA. (Proven, not asserted: see the cross-service reconciliation cases in
+// server/tests/modules/reports/daily-activity-log.runtime.test.ts, which call BOTH services against
+// one seeded database and compare their per-day numbers.)
+//
+// Two documented caveats on that claim, both below in full: (a) Rep Activity is cached for 5 minutes
+// and this report is not, so they can disagree transiently right after an activity is logged; (b) a
+// type filter narrows this report only -- the reconcile is an UNFILTERED property.
 //
 // ---------------------------------------------------------------------------------------------
 // DATE BASIS -- occurred_at, deliberately.
@@ -88,6 +92,11 @@ export interface DailyActivityLogEntry {
   outcome: string | null;
   nextStep: string | null;
   nextStepDueAt: string | null;
+  /**
+   * True when this is someone ELSE'S email activity: the row still counts, but subject/body/outcome/
+   * nextStep are withheld. The UI must label it rather than render an entry that looks empty.
+   */
+  contentRestricted: boolean;
   durationMinutes: number | null;
   targetType: string | null;
   targetName: string | null;
@@ -157,6 +166,7 @@ interface EntryRow {
   outcome: string | null;
   next_step: string | null;
   next_step_due_at: string | Date | null;
+  content_restricted: boolean | null;
   duration_minutes: number | string | null;
   target_type: string | null;
   target_name: string | null;
@@ -226,6 +236,22 @@ function buildTypeFilterSql(types: ActivityType[]): SQL | null {
   return sql`a.type::text IN (${sql.join(types.map((type) => sql`${type}`), sql`, `)})`;
 }
 
+/**
+ * Owner scoping is by ID ONLY -- filters.ownerNames is deliberately not part of the predicate.
+ *
+ * This matches Rep Activity exactly: buildActivityScopeSql emits `u.id IN (...)` and
+ * performance-tier2-service never puts ownerNames into an activity predicate either. That is a
+ * security decision, not an oversight -- display names are not unique, and scoping activities by name
+ * leaks one rep's entries to another rep who happens to share a display name. There is a test pinning
+ * it (performance-tier2-service.test.ts, "scopes rep activity by user id so duplicate display names
+ * cannot leak another rep's deals"), so adding a display_name arm here would reverse a guarded call
+ * AND diverge from the report this one must reconcile with.
+ *
+ * The client already resolves names to ids before calling: useReportFilters looks each owner name up
+ * in the sales-rep list and sends ownerIds. A hand-written or legacy URL carrying only ownerNames
+ * therefore yields an office-wide log rather than a filtered one -- the same behaviour Rep Activity
+ * has for the same input. Fixing that belongs in a change that moves BOTH reports together.
+ */
 function buildLogScopeSql(filters: PerformanceReportFilters, ownerIds: string[], types: ActivityType[]) {
   const scope = buildActivityScopeSql(filters, ownerIds);
   const typeClause = buildTypeFilterSql(types);
@@ -255,10 +281,33 @@ export async function getDailyActivityLogReport(
   const scopedFilters = { ...filters, ownerIds };
   const scope = buildLogScopeSql(scopedFilters, ownerIds, options.types);
 
+  // PRIVACY: email activities carry synced mailbox content. The activities list endpoint
+  // (server/src/modules/activities/service.ts) restricts them to the mailbox owner for every viewer:
+  //   or(type <> 'email', responsible_user_id = viewerUserId)
+  // That rule has to hold here too, or an admin/director selecting the Email chip would read other
+  // people's mail. But EXCLUDING those rows would break the reconcile to Rep Activity, which counts
+  // email activities in total_touchpoints, its `emails` breakdown and its timeline for every viewer
+  // (verified: there is no viewerUserId predicate anywhere in the reports module). A count is not a
+  // disclosure; the subject line is.
+  //
+  // So we REDACT instead of exclude: the row stays, keeps its type/time/rep/target so it still counts
+  // and still explains the day's volume, and only the free-text content fields are nulled. Reconcile
+  // and privacy both hold. The row is flagged so the UI can say "content private" rather than render a
+  // blank entry that reads like a data bug.
+  const contentRestricted = sql`(a.type = 'email' AND a.responsible_user_id <> ${user.userId})`;
+
   // Deliberately NOT wrapped in the tier-2 withReportCache. That cache exists to spare repeated
   // aggregate scans for chart-shaped reports with a 5-minute TTL; this is a live log a manager
   // refreshes to see what the team just did, and serving five-minute-old entries as "today" would
   // misread as "nobody has logged anything".
+  //
+  // KNOWN TRADE-OFF (be honest about it): Rep Activity IS cached for 5 minutes, so for up to 5 minutes
+  // after a new activity is logged this log shows it and Rep Activity's timeline does not. The two
+  // reconcile EXACTLY on the same underlying data -- same predicate, same date basis, proven by the
+  // cross-service runtime tests -- but they can disagree transiently while that cache is warm.
+  // The alternative, clearing the report cache on every activity write, would effectively disable
+  // caching for every tier-2 report (activities are written constantly) to fix a 5-minute display
+  // skew, so it was not taken. The UI states the window rather than pretending it does not exist.
 
   // 1) Per-day counts over the FULL result set -- NOT over the current page. A day header must state
   //    how many entries that day really has, otherwise paging would silently restate the day totals
@@ -290,7 +339,18 @@ export async function getDailyActivityLogReport(
   // 3) The page of readable entries. Ordered newest-first with id as a tiebreak so the ordering is
   //    total -- without it, two activities sharing an occurred_at could swap between pages and a row
   //    would be shown twice or skipped.
-  const offset = (options.page - 1) * options.limit;
+  //
+  //    The requested page is CLAMPED to the last page that actually exists. A bookmarked ?page=9, or a
+  //    page that fell off the end after activities were deleted, would otherwise return total>0 with
+  //    zero rows -- which the UI renders as "nothing was logged in this window" while the footer reads
+  //    "0-0 of 6 - page 9 of 3". Clamping server-side means the response always describes the page it
+  //    really served, so the client needs no special case.
+  const totalsRows = rowsFromExecute<TotalsRow>(totals);
+  const totalMatching = numberValue(totalsRows[0]?.total);
+  const lastPage = totalMatching === 0 ? 1 : Math.ceil(totalMatching / options.limit);
+  const effectivePage = Math.min(options.page, lastPage);
+  const servedOptions = { ...options, page: effectivePage };
+  const offset = (effectivePage - 1) * options.limit;
   const entries = await db.execute(sql`
     SELECT a.id::text AS id,
       a.type::text AS type,
@@ -305,7 +365,16 @@ export async function getDailyActivityLogReport(
       -- integration logged on someone's behalf a manager needs to know the rep did not type it.
       CASE WHEN a.performed_by_user_id IS NOT NULL AND a.performed_by_user_id <> a.responsible_user_id
         THEN pu.display_name END AS performed_by_name,
-      a.subject, a.body, a.outcome, a.next_step, a.next_step_due_at, a.duration_minutes,
+      -- Content fields are nulled for other people's email activities (see contentRestricted above).
+      -- next_step_due_at goes with next_step: a due date without its step is noise, and it is still
+      -- mailbox-derived. Type, time, rep, target and duration stay so the row remains countable.
+      CASE WHEN ${contentRestricted} THEN NULL ELSE a.subject END AS subject,
+      CASE WHEN ${contentRestricted} THEN NULL ELSE a.body END AS body,
+      CASE WHEN ${contentRestricted} THEN NULL ELSE a.outcome END AS outcome,
+      CASE WHEN ${contentRestricted} THEN NULL ELSE a.next_step END AS next_step,
+      CASE WHEN ${contentRestricted} THEN NULL ELSE a.next_step_due_at END AS next_step_due_at,
+      ${contentRestricted} AS content_restricted,
+      a.duration_minutes,
       -- Deal-attached entries are the priority, so deal wins the target slot; the rest fall through
       -- in descending usefulness. source_entity_type is the last resort for an entry with no FK set.
       CASE
@@ -339,9 +408,9 @@ export async function getDailyActivityLogReport(
 
   return buildDailyActivityLogFromRows({
     dayRows: rowsFromExecute<DayCountRow>(dayCounts),
-    totalsRows: rowsFromExecute<TotalsRow>(totals),
+    totalsRows,
     entryRows: rowsFromExecute<EntryRow>(entries),
-    options,
+    options: servedOptions,
   });
 }
 
@@ -387,6 +456,7 @@ export function buildDailyActivityLogFromRows(input: {
       outcome: row.outcome,
       nextStep: row.next_step,
       nextStepDueAt: isoOrNull(row.next_step_due_at),
+      contentRestricted: row.content_restricted === true,
       durationMinutes: nullableNumber(row.duration_minutes),
       targetType: row.target_type,
       targetName: row.target_name,
