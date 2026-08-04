@@ -42,7 +42,11 @@ export function ServiceOpportunityNewPage() {
         </Link>
         <h2 className="text-2xl font-bold">New Service Opportunity</h2>
       </div>
-      <ServiceOpportunityForm initialValues={initialValues} />
+      {/* The office goes to the form as well, not just onto the back link: a prefilled property lives in one
+          office's schema, and lib/api's URL fallback is overridden the moment the form sends its own
+          x-office-id. Without this a rep whose home office differs resolves the property in the wrong tenant
+          and creates the deal there too. Empty (deals-page entry) leaves the home-office behaviour alone. */}
+      <ServiceOpportunityForm initialValues={initialValues} officeId={officeId || null} />
     </div>
   );
 }

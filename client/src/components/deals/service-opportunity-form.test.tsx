@@ -20,6 +20,9 @@ const mocks = vi.hoisted(() => ({
   // When true the CompanySelector mock echoes the company it is ALREADY showing back through onChange on
   // mount — what the real picker effectively does when it resolves a controlled value (or on a remount).
   companySelectorEchoesOnMount: { value: false },
+  // When true the PropertySelector mock does NOT auto-emit the record for a value it was handed — the test
+  // fires it later via the "Resolve property" button, standing in for the async /properties/:id lookup.
+  deferPropertyResolution: { value: false },
   useTaskAssignees: vi.fn(),
 }));
 
@@ -45,7 +48,15 @@ vi.mock("@/hooks/use-task-assignees", () => ({
 }));
 
 vi.mock("@/components/companies/company-selector", () => ({
-  CompanySelector: ({ value, onChange }: { value: string | null; onChange: (companyId: string) => void }) => {
+  CompanySelector: ({
+    value,
+    onChange,
+    officeId,
+  }: {
+    value: string | null;
+    onChange: (companyId: string) => void;
+    officeId?: string;
+  }) => {
     useEffect(() => {
       if (mocks.companySelectorEchoesOnMount.value && value) {
         onChange(value);
@@ -55,6 +66,7 @@ vi.mock("@/components/companies/company-selector", () => ({
       <div>
         {/* The controlled value, so a test can see whether a prefilled selection survived. */}
         <span data-testid="company-value">{value ?? ""}</span>
+        <span data-testid="company-office">{officeId ?? ""}</span>
         <button type="button" onClick={() => onChange("company-1")}>
           Select company
         </button>
@@ -71,14 +83,18 @@ vi.mock("@/components/properties/property-selector", () => ({
     value,
     onChange,
     onPropertySelected,
+    officeId,
   }: {
     value: string | null;
     onChange: (propertyId: string) => void;
     onPropertySelected?: (property: { id: string; state: string }) => void;
+    officeId?: string;
   }) => {
     // Mirror the real selector's value-resolution effect: a property set from OUTSIDE the dropdown (a
-    // prefill, or a restore) is resolved and re-emitted, which is what feeds region auto-detect.
+    // prefill, or a restore) is resolved and re-emitted, which is what feeds region auto-detect. The real
+    // one does that behind an async /properties/:id fetch — deferPropertyResolution models that latency.
     useEffect(() => {
+      if (mocks.deferPropertyResolution.value) return;
       if (value && value === mocks.selectedProperty.value.id) {
         onPropertySelected?.(mocks.selectedProperty.value);
       }
@@ -86,6 +102,7 @@ vi.mock("@/components/properties/property-selector", () => ({
     return (
       <div>
         <span data-testid="property-value">{value ?? ""}</span>
+        <span data-testid="property-office">{officeId ?? ""}</span>
         <button
           type="button"
           onClick={() => {
@@ -95,6 +112,9 @@ vi.mock("@/components/properties/property-selector", () => ({
           }}
         >
           Select property
+        </button>
+        <button type="button" onClick={() => onPropertySelected?.(mocks.selectedProperty.value)}>
+          Resolve property
         </button>
       </div>
     );
@@ -134,6 +154,7 @@ function setupCommonMocks() {
   // Default: a property with NO state (region won't auto-derive unless a test sets a state).
   mocks.selectedProperty.value = { id: "property-1", state: "" };
   mocks.companySelectorEchoesOnMount.value = false;
+  mocks.deferPropertyResolution.value = false;
   mocks.useTaskAssignees.mockReturnValue({
     assignees: [{ id: "rep-1", displayName: "Sales Rep" }],
     loading: false,
@@ -149,7 +170,10 @@ function setupCommonMocks() {
   });
 }
 
-async function renderForm(initialValues?: { name?: string; companyId?: string; propertyId?: string }) {
+async function renderForm(
+  initialValues?: { name?: string; companyId?: string; propertyId?: string },
+  officeId?: string | null
+) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -157,7 +181,7 @@ async function renderForm(initialValues?: { name?: string; companyId?: string; p
   await act(async () => {
     root.render(
       <MemoryRouter>
-        <ServiceOpportunityForm onSuccess={vi.fn()} initialValues={initialValues} />
+        <ServiceOpportunityForm onSuccess={vi.fn()} initialValues={initialValues} officeId={officeId} />
       </MemoryRouter>
     );
   });
@@ -210,9 +234,12 @@ describe("ServiceOpportunityForm", () => {
     const source = serviceOpportunityFormSource.replace(/\s+/g, " ");
     // Office Select offers the fixed prefix options (both DFW and ATL) rather than only accessible offices.
     expect(source).toContain("buildOfficeCodePrefixOptions");
-    // The opportunity is created on the rep's HOME (active) office, NOT the picked office — the prefix is
-    // cosmetic. (Pre-fix this passed the picked office's id, scoping create/pickers to it.)
-    expect(source).toContain("{ officeId: homeOfficeId }");
+    // The opportunity is created on the effective DATA office, never the picked prefix — that is still
+    // cosmetic. (Pre-fix this passed the picked office's id, scoping create/pickers to it.) The effective
+    // office is the caller's when an entry point supplied one and the rep's home office otherwise, so a
+    // prefilled property is resolved and created in the SAME office; the picked DFW/ATL code changes neither.
+    expect(source).toContain("{ officeId: effectiveOfficeId }");
+    expect(source).toContain("const effectiveOfficeId = officeId ?? homeOfficeId;");
     expect(source).not.toContain("selectedOffice?.officeId");
     expect(source).not.toContain("selectedOffice.officeId");
   });
@@ -371,6 +398,104 @@ describe("ServiceOpportunityForm", () => {
     expect(container.textContent).not.toContain("Changing the company cleared the property");
   });
 
+  it("blocks Create until a PREFILLED property's record actually arrives (no region-less fast create)", async () => {
+    // Prefill hands us both required ids and the name instantly, so Create is clickable long before the
+    // async /properties/:id lookup returns. Until it does, propertyState is "" and the existing region guard
+    // sees nothing pending — a fast rep would save a TX property with regionId: null.
+    mocks.deferPropertyResolution.value = true;
+    mocks.selectedProperty.value = { id: "property-9", state: "TX" };
+    const { container, root } = await renderForm({
+      name: "Cedar Springs opportunity",
+      companyId: "company-7",
+      propertyId: "property-9",
+    });
+    containers.push(container);
+    roots.push(root);
+
+    await act(async () => {
+      container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    // Without the guard this submit succeeds and saves regionId: null for a TX property.
+    expect(mocks.createServiceOpportunity).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Loading the property");
+    const submitButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Create Service Opportunity")
+    ) as HTMLButtonElement;
+    expect(submitButton.disabled).toBe(true);
+
+    // The lookup lands AFTER that submit attempt — now the region can be derived and Create may proceed.
+    await act(async () => {
+      clickButton(container, "Resolve property");
+    });
+    await act(async () => {
+      container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    expect(mocks.createServiceOpportunity).toHaveBeenCalledWith(
+      expect.objectContaining({ propertyId: "property-9", regionId: "region-central" }),
+      { officeId: "office-dallas" }
+    );
+  });
+
+  it("re-arms that block after a restore, whose blanked state is un-resolved again", async () => {
+    mocks.selectedProperty.value = { id: "property-9", state: "TX" };
+    const { container, root } = await renderForm({
+      name: "Cedar Springs opportunity",
+      companyId: "company-7",
+      propertyId: "property-9",
+    });
+    containers.push(container);
+    roots.push(root);
+
+    // Resolution is instant here, so pin the restore path specifically: defer, then bounce the property out
+    // and back. The restored id is un-held until the selector re-emits, exactly like a fresh prefill.
+    mocks.deferPropertyResolution.value = true;
+    await act(async () => {
+      clickButton(container, "Select other company");
+    });
+    await act(async () => {
+      clickButton(container, "Restore property");
+    });
+
+    await act(async () => {
+      container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    expect(mocks.createServiceOpportunity).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Loading the property");
+  });
+
+  it("works in the office the entry point supplied, not the rep's home office", async () => {
+    // The property page threads ?officeId. A prefilled property lives in THAT office's schema, so the
+    // pickers and the create must target it — the form's own x-office-id overrides lib/api's URL fallback,
+    // so passing the home office here would resolve nothing and create the deal in the wrong tenant.
+    mocks.selectedProperty.value = { id: "property-9", state: "TX" };
+    const { container, root } = await renderForm(
+      { name: "Cedar Springs opportunity", companyId: "company-7", propertyId: "property-9" },
+      "office-atlanta"
+    );
+    containers.push(container);
+    roots.push(root);
+
+    expect(container.querySelector('[data-testid="company-office"]')?.textContent).toBe("office-atlanta");
+    expect(container.querySelector('[data-testid="property-office"]')?.textContent).toBe("office-atlanta");
+
+    await act(async () => {
+      container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    expect(mocks.createServiceOpportunity).toHaveBeenCalledWith(expect.objectContaining({ propertyId: "property-9" }), {
+      officeId: "office-atlanta",
+    });
+  });
+
+  it("still uses the home office when no entry point supplied one", async () => {
+    const { container, root } = await renderForm();
+    containers.push(container);
+    roots.push(root);
+
+    expect(container.querySelector('[data-testid="company-office"]')?.textContent).toBe("office-dallas");
+    await selectAndSubmit(container);
+    expect(mocks.createServiceOpportunity).toHaveBeenCalledWith(expect.anything(), { officeId: "office-dallas" });
+  });
+
   it("tells the rep up front when the prefilled property has no owner company, and still requires one", async () => {
     // Property page link for a company-less property: propertyId only. The server requires
     // property.companyId === companyId, so NO company choice can save this pair — say so instead of
@@ -382,8 +507,12 @@ describe("ServiceOpportunityForm", () => {
 
     expect(selectorValue(container, "property")).toBe("property-9");
     expect(selectorValue(container, "company")).toBe("");
-    expect(container.textContent).toContain("This property has no owner company yet.");
-    expect(container.querySelector('a[href="/properties/property-9/edit"]')).toBeTruthy();
+    expect(container.textContent).toContain("This property has no owner company.");
+    expect(container.textContent).toContain("can't be changed from the app");
+    // No recovery link: nothing in the app can set an existing property's company (the PATCH allowlist
+    // excludes companyId and the edit page has no such field), so offering one would be a round trip to a
+    // page that cannot help. Property edit in particular must NOT be advertised as the fix.
+    expect(container.querySelector('a[href="/properties/property-9/edit"]')).toBeNull();
 
     await act(async () => {
       container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
@@ -401,7 +530,7 @@ describe("ServiceOpportunityForm", () => {
     expect(selectorValue(container, "property")).toBe("");
     expect((container.querySelector("#name") as HTMLInputElement).value).toBe("");
     // No prefill means neither prefill notice can appear.
-    expect(container.textContent).not.toContain("This property has no owner company yet.");
+    expect(container.textContent).not.toContain("This property has no owner company.");
     expect(container.textContent).not.toContain("Changing the company cleared the property");
   });
 

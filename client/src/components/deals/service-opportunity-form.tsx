@@ -38,13 +38,19 @@ interface ServiceOpportunityFormProps {
     companyId?: string;
     propertyId?: string;
   };
+  // The office whose data this form works in, for an entry point that arrives WITH one (the property page
+  // threads ?officeId). A prefilled property lives in that office's Postgres schema, so its lookup and the
+  // create must target the same office — otherwise a rep whose home office differs resolves nothing and
+  // creates in the wrong tenant. Omitted (the deals-page entry point) keeps the historical behaviour: the
+  // rep's stable home office.
+  officeId?: string | null;
 }
 
 function normalizeServiceCandidate(value: string | null | undefined) {
   return String(value ?? "").trim().toLowerCase().replace(/[-_]+/g, " ").replace(/\s+/g, " ");
 }
 
-export function ServiceOpportunityForm({ onSuccess, initialValues }: ServiceOpportunityFormProps) {
+export function ServiceOpportunityForm({ onSuccess, initialValues, officeId }: ServiceOpportunityFormProps) {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { offices } = useAccessibleOffices();
@@ -54,10 +60,14 @@ export function ServiceOpportunityForm({ onSuccess, initialValues }: ServiceOppo
   // The STABLE home office (primary office), NOT the switchable active office — the cosmetic office prefix
   // is decoupled from any session office switch, so pickers + create always use the rep's home data office.
   const homeOfficeId = user?.officeId ?? null;
+  // Every office-scoped read and the create below use THIS id: the caller's office when it supplied one,
+  // the home office otherwise. Nothing else in the form may reach for homeOfficeId directly, or the two
+  // would drift and we would resolve a property in one office and create the deal in another.
+  const effectiveOfficeId = officeId ?? homeOfficeId;
   const officeOptions = buildOfficeCodePrefixOptions();
   const initialOfficeCode = resolveDefaultOfficeCode({
     offices,
-    homeOfficeId,
+    homeOfficeId: effectiveOfficeId,
     currentOfficeCode: "",
   });
 
@@ -103,6 +113,15 @@ export function ServiceOpportunityForm({ onSuccess, initialValues }: ServiceOppo
   // company choice can make this pair valid — say so up front rather than let the rep fill the whole form
   // and eat a 400 (or go mint the property a second time under some other company).
   const preloadedPropertyHasNoCompany = Boolean(preloaded.propertyId) && !preloaded.companyId;
+  // The id of the property whose RECORD we actually hold (emitted by PropertySelector on pick and on
+  // resolution of an externally-set value).
+  const [resolvedPropertyId, setResolvedPropertyId] = useState("");
+  // A picked property resolves synchronously, but a PREFILLED one is just an id until an async
+  // /properties/:id lookup returns. In that window propertyState is still "" — so regionPending sees nothing
+  // pending and Create is live, and a fast rep saves a region-less deal that falls out of the region
+  // reports. Prefill is what made that reachable (nobody could click Create that fast before), so prefill
+  // has to hold the door: no submit until the record behind the id is in hand.
+  const propertyResolutionPending = Boolean(formData.propertyId) && resolvedPropertyId !== formData.propertyId;
 
   // Region auto-detects from the selected property's state (same rule + columns as the deal form), but a
   // manual pick wins.
@@ -139,11 +158,11 @@ export function ServiceOpportunityForm({ onSuccess, initialValues }: ServiceOppo
   // opportunity is created — only the deal_number prefix.
   const selectedOfficeLabel =
     officeOptions.find((office) => office.code === formData.officeCode)?.label ?? "Select office";
-  const { assignees, loading: assigneesLoading } = useTaskAssignees({ officeId: homeOfficeId });
+  const { assignees, loading: assigneesLoading } = useTaskAssignees({ officeId: effectiveOfficeId });
   // "sales-source" scopes the feed to the office's internal CRM roster (any role except field_contractor —
   // reps, directors like Chase Kelly, etc., matching assertSalesSourceIsCrmUser), so a plain rep sees real
   // source choices (not just themselves) and no pick 422s on submit.
-  const { salesReps, loading: salesRepsLoading } = useSalesReps(homeOfficeId ?? undefined, {
+  const { salesReps, loading: salesRepsLoading } = useSalesReps(effectiveOfficeId ?? undefined, {
     purpose: "sales-source",
   });
   const [submitting, setSubmitting] = useState(false);
@@ -153,12 +172,12 @@ export function ServiceOpportunityForm({ onSuccess, initialValues }: ServiceOppo
     setFormData((prev) => {
       const officeCode = resolveDefaultOfficeCode({
         offices,
-        homeOfficeId,
+        homeOfficeId: effectiveOfficeId,
         currentOfficeCode: prev.officeCode,
       });
       return officeCode === prev.officeCode ? prev : { ...prev, officeCode };
     });
-  }, [homeOfficeId, offices]);
+  }, [effectiveOfficeId, offices]);
 
   const handleChange = (field: keyof typeof formData, value: string) => {
     setFormData((prev) => {
@@ -199,6 +218,9 @@ export function ServiceOpportunityForm({ onSuccess, initialValues }: ServiceOppo
       // the auto-detected region) refills on its own — blanking it here just avoids a frame of stale region.
       propertyState: "",
     }));
+    // …and because the state is blank again, the record counts as un-held until that re-emit arrives, or a
+    // Create fired in between would slip through the region guard exactly as it would on a fresh prefill.
+    setResolvedPropertyId("");
     setError(null);
   };
 
@@ -217,7 +239,7 @@ export function ServiceOpportunityForm({ onSuccess, initialValues }: ServiceOppo
       setError("Assigned sales rep is required");
       return;
     }
-    if (!homeOfficeId || !formData.officeCode) {
+    if (!effectiveOfficeId || !formData.officeCode) {
       setError("Cannot create opportunity: no active office. Contact admin.");
       return;
     }
@@ -232,6 +254,12 @@ export function ServiceOpportunityForm({ onSuccess, initialValues }: ServiceOppo
         setError("Win probability must be a whole number between 0 and 100");
         return;
       }
+    }
+    // Same safety net one step earlier: a prefilled property is an id until its record arrives, and until
+    // then we cannot even tell whether a region is owed.
+    if (propertyResolutionPending) {
+      setError("Loading the property — one moment, then Create so the deal lands in the right region report.");
+      return;
     }
     // Safety net for the button guard: don't create while a region is still resolving for the selected
     // property, or the deal would save region-less and miss the region reports.
@@ -254,11 +282,11 @@ export function ServiceOpportunityForm({ onSuccess, initialValues }: ServiceOppo
           expectedCloseDate: formData.expectedCloseDate || null,
           winProbability: formData.winProbability !== "" ? Number(formData.winProbability) : null,
           regionId: formData.regionId || null,
-          officeCode: formData.officeCode, // cosmetic prefix; the record is created on the home office below
+          officeCode: formData.officeCode, // cosmetic prefix; the record is created on the office below
           projectType: "service",
           projectTypeId: serviceProjectType.id,
         },
-        { officeId: homeOfficeId }
+        { officeId: effectiveOfficeId }
       );
 
       if (onSuccess) {
@@ -308,19 +336,21 @@ export function ServiceOpportunityForm({ onSuccess, initialValues }: ServiceOppo
             />
           </div>
 
+          {/* A property record with no owner company should not exist — properties.company_id is NOT NULL —
+              so this is a data fault, not a state the rep can walk out of. Nothing in the app can set an
+              existing property's company either: the PATCH allowlist excludes it, the edit page has no such
+              field, and the only writer is the director-gated company MERGE (which repoints one company to
+              another and cannot fill an empty one). So this says what is true and stops, rather than sending
+              the rep to a page that cannot help — the one thing it must never do is imply "make a new
+              property", which is how the duplicate address gets created. */}
           {preloadedPropertyHasNoCompany ? (
             <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-3 text-sm text-amber-900">
-              <p className="font-semibold">This property has no owner company yet.</p>
+              <p className="font-semibold">This property has no owner company.</p>
               <p className="mt-1">
                 A service opportunity is created for the company that owns the property, so this one can&apos;t be
-                saved until the property is linked.{" "}
-                <Link
-                  to={`/properties/${preloaded.propertyId}/edit`}
-                  className="font-semibold underline underline-offset-4"
-                >
-                  Set the owner company on the property
-                </Link>{" "}
-                first — do that instead of adding the address again here.
+                saved — and a property&apos;s company can&apos;t be changed from the app. Ask an admin to fix the
+                property record. Don&apos;t re-enter the address here: that creates a second property for the same
+                building.
               </p>
             </div>
           ) : null}
@@ -343,7 +373,7 @@ export function ServiceOpportunityForm({ onSuccess, initialValues }: ServiceOppo
               <CompanySelector
                 value={formData.companyId || null}
                 onChange={(companyId) => handleChange("companyId", companyId)}
-                officeId={homeOfficeId ?? undefined}
+                officeId={effectiveOfficeId ?? undefined}
                 required
               />
             </div>
@@ -355,10 +385,13 @@ export function ServiceOpportunityForm({ onSuccess, initialValues }: ServiceOppo
                 onChange={(propertyId) => handleChange("propertyId", propertyId)}
                 // Capture the picked property's state synchronously (fires on click + on value resolution
                 // for search-selected properties) so region auto-detect never races a separate fetch.
-                onPropertySelected={(property) =>
-                  setFormData((prev) => ({ ...prev, propertyState: property.state ?? "" }))
-                }
-                officeId={homeOfficeId ?? undefined}
+                // Recording WHICH property this record was for is what lets a prefilled id — resolved
+                // asynchronously, long after Create becomes clickable — hold submit until its state lands.
+                onPropertySelected={(property) => {
+                  setFormData((prev) => ({ ...prev, propertyState: property.state ?? "" }));
+                  setResolvedPropertyId(property.id);
+                }}
+                officeId={effectiveOfficeId ?? undefined}
                 required
               />
             </div>
@@ -508,8 +541,12 @@ export function ServiceOpportunityForm({ onSuccess, initialValues }: ServiceOppo
       ) : null}
 
       <div className="flex items-center gap-3">
-        <Button type="submit" disabled={submitting || regionPending} title={regionPending ? "Loading regions…" : undefined}>
-          {submitting || regionPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+        <Button
+          type="submit"
+          disabled={submitting || regionPending || propertyResolutionPending}
+          title={propertyResolutionPending ? "Loading property…" : regionPending ? "Loading regions…" : undefined}
+        >
+          {submitting || regionPending || propertyResolutionPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
           Create Service Opportunity
         </Button>
         <Button type="button" variant="outline" onClick={() => navigate(-1)}>

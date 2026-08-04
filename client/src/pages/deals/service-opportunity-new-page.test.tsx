@@ -9,12 +9,14 @@ import { ServiceOpportunityNewPage } from "./service-opportunity-new-page";
 import dealListPageSource from "./deal-list-page.tsx?raw";
 
 const mocks = vi.hoisted(() => ({
-  formProps: { value: null as { initialValues?: Record<string, string> } | null },
+  formProps: {
+    value: null as { initialValues?: Record<string, string>; officeId?: string | null } | null,
+  },
 }));
 
-// The form has its own suite; here we only care WHICH prefill reaches it.
+// The form has its own suite; here we only care WHICH prefill and office reach it.
 vi.mock("@/components/deals/service-opportunity-form", () => ({
-  ServiceOpportunityForm: (props: { initialValues?: Record<string, string> }) => {
+  ServiceOpportunityForm: (props: { initialValues?: Record<string, string>; officeId?: string | null }) => {
     mocks.formProps.value = props;
     return <div data-testid="service-opportunity-form" />;
   },
@@ -80,6 +82,28 @@ describe("ServiceOpportunityNewPage", () => {
       propertyId: "property-1",
       name: "Building A opportunity",
     });
+  });
+
+  it("hands the office to the FORM, not just to the back link", () => {
+    // The form sends its own x-office-id, which overrides lib/api's ?officeId fallback. If it kept using the
+    // rep's home office, a cross-office rep would resolve the prefilled property in the wrong schema and
+    // create the deal there — so the URL office has to reach the form itself.
+    const { container, root } = renderPage(
+      "/deals/service-opportunity/new?propertyId=property-1&companyId=company-1&returnPropertyId=property-1&officeId=office-atlanta"
+    );
+    containers.push(container);
+    roots.push(root);
+
+    expect(mocks.formProps.value?.officeId).toBe("office-atlanta");
+  });
+
+  it("leaves the form on its home office when the URL carries none", () => {
+    const { container, root } = renderPage("/deals/service-opportunity/new");
+    containers.push(container);
+    roots.push(root);
+
+    // null, not "" — the form treats only a real id as an override.
+    expect(mocks.formProps.value?.officeId).toBeNull();
   });
 
   it("sends Back to the originating property, carrying office context", () => {

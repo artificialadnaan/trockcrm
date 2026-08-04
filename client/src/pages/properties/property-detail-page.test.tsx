@@ -390,6 +390,28 @@ describe("PropertyDetailPage", () => {
     );
   });
 
+  it("hides the service opportunity action on a soft-deleted property", () => {
+    // The create endpoint only accepts an ACTIVE property, so leaving the action here would hand the rep a
+    // fully prefilled form that can only fail with "Property not found" after they've filled it in.
+    mocks.usePropertyDetailMock.mockReturnValue({
+      property: makeProperty({ isActive: false }),
+      leads: [],
+      deals: [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = normalize(renderPage());
+
+    expect(html).not.toContain("New service opportunity");
+    expect(html).not.toContain("/deals/service-opportunity/new");
+    // NOTE: "New lead" is still rendered here. Lead create validates the property with the same
+    // isActive = true predicate (server/src/modules/leads/service.ts), so it has the identical gap — left
+    // as-is deliberately rather than silently changing an existing control in this PR.
+    expect(html).toContain("New lead");
+  });
+
   it("still links a company-less property, with no companyId param to prefill", () => {
     mocks.usePropertyDetailMock.mockReturnValue({
       property: makeProperty({ companyId: null, companyName: null }),
