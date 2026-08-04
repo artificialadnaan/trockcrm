@@ -26,6 +26,7 @@ function walk(id: string): GlassesWalkthrough {
     scopeWalkthroughId: null,
     capturedAt: "2026-08-02T22:21:47.702Z",
     capturedByUserId: null,
+    capturedByName: null,
     state: "processing",
     scope: null,
   };

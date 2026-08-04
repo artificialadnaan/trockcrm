@@ -57,6 +57,7 @@ function makeWalk(over: Partial<GlassesWalkthrough> & Pick<GlassesWalkthrough, "
     scopeWalkthroughId: null,
     capturedAt: CAPTURED_AT,
     capturedByUserId: null,
+    capturedByName: null,
     state: "processing",
     scope: null,
     ...over,
@@ -203,6 +204,23 @@ describe("AiWalkCard states", () => {
     expect(container.textContent).toContain(formatCapturedAt(CAPTURED_AT));
     // The answer genuinely changes over time and the panel does not poll, so there has to be a way to ask again.
     expect(buttonLabelled(container, "Check again")).toBeDefined();
+  });
+
+  it("NAMES the capturer in the heading when one resolved", async () => {
+    const walkthrough = makeWalk({ id: "w1", capturedByName: "Dana Reyes" });
+    const { container } = await render(<AiWalkCard walkthrough={walkthrough} onRetry={vi.fn()} />);
+    expect(container.textContent ?? "").toContain("by Dana Reyes");
+  });
+
+  it("omits the capturer clause entirely when nobody resolved, rather than saying 'Unknown'", async () => {
+    // A deleted user is an ABSENCE, not a data error — the FK is ON DELETE SET NULL on purpose. Rendering
+    // a placeholder there would read as something having gone wrong with a walk that is perfectly fine.
+    const walkthrough = makeWalk({ id: "w1", capturedByName: null });
+    const { container } = await render(<AiWalkCard walkthrough={walkthrough} onRetry={vi.fn()} />);
+    const text = container.textContent ?? "";
+    expect(text).toContain("Walk captured");
+    expect(text).not.toContain("by ");
+    expect(text.toLowerCase()).not.toContain("unknown");
   });
 
   it("ready: renders each line item's code, description, quantity + unit and confidence", async () => {

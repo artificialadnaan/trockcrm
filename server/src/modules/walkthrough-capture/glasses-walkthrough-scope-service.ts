@@ -31,7 +31,7 @@
 import { desc, eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import { glassesWalkthroughs } from "@trock-crm/shared/schema";
+import { glassesWalkthroughs, users } from "@trock-crm/shared/schema";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -75,6 +75,16 @@ export interface GlassesWalkthroughPanelEntry {
   scopeWalkthroughId: string | null;
   capturedAt: string;
   capturedByUserId: string | null;
+  /**
+   * Who walked the site, resolved for display, or null when nobody can be named.
+   *
+   * SEPARATE FROM the id rather than replacing it: the id is the durable fact and survives a rename,
+   * while this is a label that is correct only at read time. Null has TWO causes the panel renders the
+   * same way and which are not the same thing — `captured_by_user_id` is null because the user was
+   * deleted (the column is ON DELETE SET NULL, so provenance degrades rather than blocking the delete),
+   * or the join found no row. Neither is an error, and neither is worth a distinct badge.
+   */
+  capturedByName: string | null;
   state: GlassesWalkthroughState;
   scope: { status: "ready"; items: GlassesWalkthroughScopeItem[] } | null;
 }
@@ -87,6 +97,7 @@ export interface GlassesWalkthroughRow {
   scopeWalkthroughId: string | null;
   capturedAt: Date;
   capturedByUserId: string | null;
+  capturedByName: string | null;
 }
 
 /**
@@ -163,8 +174,14 @@ export async function loadDealGlassesWalkthroughRows(
       scopeWalkthroughId: glassesWalkthroughs.scopeWalkthroughId,
       capturedAt: glassesWalkthroughs.capturedAt,
       capturedByUserId: glassesWalkthroughs.capturedByUserId,
+      capturedByName: users.displayName,
     })
     .from(glassesWalkthroughs)
+    // LEFT, not inner: `captured_by_user_id` is nullable AND ON DELETE SET NULL, so an inner join would
+    // silently drop a walk whose capturer has since been deleted — losing the walk itself to hide a name.
+    // `users` is a PUBLIC table joined from a tenant-schema one, which is the same shape as every other
+    // deal read here (deals/service.ts joins it for estimator and assigned-rep names).
+    .leftJoin(users, eq(users.id, glassesWalkthroughs.capturedByUserId))
     .where(eq(glassesWalkthroughs.dealId, dealId))
     .orderBy(desc(glassesWalkthroughs.capturedAt), desc(glassesWalkthroughs.id));
 
@@ -174,6 +191,7 @@ export async function loadDealGlassesWalkthroughRows(
     scopeWalkthroughId: row.scopeWalkthroughId ?? null,
     capturedAt: row.capturedAt,
     capturedByUserId: row.capturedByUserId ?? null,
+    capturedByName: nonEmptyStringOrNull(row.capturedByName),
   }));
 }
 
@@ -279,6 +297,7 @@ export async function resolveGlassesWalkthroughScope(
     scopeWalkthroughId: row.scopeWalkthroughId,
     capturedAt: row.capturedAt.toISOString(),
     capturedByUserId: row.capturedByUserId,
+    capturedByName: row.capturedByName,
     // The starting value is the one state that needs no evidence: a row with no scope walkthrough id is
     // "processing" as a fact about our own table, and a row WITH one has not been read yet, so anything
     // that prevents the read from happening at all — an unconfigured reader, the deadline firing before a

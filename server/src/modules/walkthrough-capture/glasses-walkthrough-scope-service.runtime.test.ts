@@ -24,6 +24,11 @@ beforeAll(async () => {
   // not stood up here. The FKs themselves are exercised against the shipped DDL in
   // server/tests/migrations/0214-glasses-walkthroughs.runtime.test.ts.
   await pg.exec(tenantSchemaSql("public", [glassesWalkthroughs]));
+  // `users` IS stood up, unlike `deals`, because the read now LEFT JOINs it for the capturer's display
+  // name — without it every case here fails on a missing relation rather than on its own subject. Only the
+  // two columns the join touches, so this stays a stand-in for the real table rather than a copy of it that
+  // would need its role enum and its offices FK; the shipped DDL is exercised in the migration suite.
+  await pg.exec(`CREATE TABLE users (id uuid PRIMARY KEY, display_name varchar(255) NOT NULL);`);
   tenantDb = drizzle(pg);
 });
 
@@ -33,6 +38,8 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await pg.exec("DELETE FROM glasses_walkthroughs");
+  await pg.exec("DELETE FROM users");
+  await pg.query(`INSERT INTO users (id, display_name) VALUES ($1, $2)`, [USER, "Dana Reyes"]);
 });
 
 async function seed(args: {
@@ -104,7 +111,33 @@ describe("loadDealGlassesWalkthroughRows", () => {
       scopeWalkthroughId: "b91a5bfd-1111-4222-8333-444455556666",
       capturedAt: new Date("2026-08-02T22:21:47.702Z"),
       capturedByUserId: USER,
+      capturedByName: "Dana Reyes",
     });
+  });
+
+  it("RESOLVES the capturer's display name, which is what the panel heading shows", async () => {
+    // The id alone cannot be rendered. On a deal carrying several walks the capturer is how an estimator
+    // tells them apart, so this join is the difference between a list of timestamps and a list of walks.
+    await seed({ dealId: DEAL, walkId: "walk-named", capturedAt: "2026-08-02T12:00:00.000Z" });
+
+    const [row] = await loadDealGlassesWalkthroughRows(tenantDb, DEAL);
+    expect(row!.capturedByName).toBe("Dana Reyes");
+  });
+
+  it("still returns the WALK when its capturer's user row is gone — a LEFT join, not an inner one", async () => {
+    // The regression this guards is losing the walk itself in order to hide a name. `capturedByUserId`
+    // survives here on purpose: the row points at a user id that no longer resolves, which is exactly the
+    // state a hard-deleted user leaves behind in an install where the FK was not the one enforcing it.
+    await seed({
+      dealId: DEAL,
+      walkId: "walk-ghost",
+      capturedAt: "2026-08-02T12:00:00.000Z",
+      capturedByUserId: U("99999"),
+    });
+
+    const rows = await loadDealGlassesWalkthroughRows(tenantDb, DEAL);
+    expect(rows.map((row) => row.walkId)).toEqual(["walk-ghost"]);
+    expect(rows[0]!.capturedByName).toBeNull();
   });
 
   it("reports an unstamped walk's scope id as null, which is the panel's `processing` state", async () => {
@@ -126,6 +159,7 @@ describe("loadDealGlassesWalkthroughRows", () => {
 
     const [row] = await loadDealGlassesWalkthroughRows(tenantDb, DEAL);
     expect(row!.capturedByUserId).toBeNull();
+    expect(row!.capturedByName).toBeNull();
   });
 
   it("returns an empty list for a deal with no walks, rather than failing", async () => {

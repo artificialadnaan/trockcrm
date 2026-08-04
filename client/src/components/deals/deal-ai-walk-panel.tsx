@@ -266,7 +266,13 @@ export function AiWalkCard({
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <Glasses className="h-4 w-4 shrink-0 text-muted-foreground" />
-            <span className="text-sm font-semibold">Walk captured {formatCapturedAt(walkthrough.capturedAt)}</span>
+            {/* The capturer is appended to the SAME sentence rather than given its own line: on a deal with
+                several walks, "who" is how an estimator tells them apart, and a second line would push the
+                badge out of the heading row. Omitted entirely when unresolved — see the hook's type. */}
+            <span className="text-sm font-semibold">
+              Walk captured {formatCapturedAt(walkthrough.capturedAt)}
+              {walkthrough.capturedByName ? ` by ${walkthrough.capturedByName}` : ""}
+            </span>
             <Badge variant="outline" className={badge.className}>
               {badge.label}
             </Badge>

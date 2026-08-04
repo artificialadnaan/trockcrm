@@ -27,6 +27,7 @@ function row(overrides: Partial<GlassesWalkthroughRow> = {}): GlassesWalkthrough
     scopeWalkthroughId: SCOPE_ID,
     capturedAt: new Date("2026-08-02T22:21:47.702Z"),
     capturedByUserId: USER,
+    capturedByName: "Dana Reyes",
     ...overrides,
   };
 }
@@ -70,6 +71,10 @@ describe("resolveGlassesWalkthroughScope — the four states", () => {
       scopeWalkthroughId: SCOPE_ID,
       capturedAt: "2026-08-02T22:21:47.702Z",
       capturedByUserId: USER,
+      // Carried through the network phase untouched. The name is resolved once, in the DB read that
+      // happens BEFORE the commit; nothing out here re-reads a user, so a TROCK Scope outage cannot cost
+      // the heading its capturer.
+      capturedByName: "Dana Reyes",
       state: "ready",
       scope: {
         status: "ready",

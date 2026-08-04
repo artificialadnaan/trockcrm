@@ -39,6 +39,10 @@ export interface GlassesWalkthrough {
   scopeWalkthroughId: string | null;
   capturedAt: string;
   capturedByUserId: string | null;
+  /** The capturer's display name, resolved server-side at read time. Null when nobody can be named —
+   *  either the walk carries no user or that user has since been deleted. The panel omits the clause
+   *  entirely rather than rendering "by Unknown", which reads as a data error rather than an absence. */
+  capturedByName: string | null;
   /**
    * What the panel is allowed to claim about this walk:
    *   processing   the forward has not confirmed a remote walkthrough yet. No scope, and none was asked for.
