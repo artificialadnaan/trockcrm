@@ -77,8 +77,19 @@ const CATALOG_ITEM = U("c4444");
 const WORKER_QUANTITY_COERCION = "Number(extraction.quantity ?? 1)";
 // REPAIRED. Was 3 — see the test below, which was written to notice exactly this.
 const WORKER_QUANTITY_COERCION_SITES = 0;
-// What replaced it: the job skips a quantity-less row before matching and flags it instead.
-const WORKER_QUANTITY_GUARD = 'status: "needs_quantity"';
+// What replaced it, pinned as the PREDICATES rather than as the write they lead to. Asserting only
+// `status: "needs_quantity"` would still pass if the test deciding WHEN to reach it were deleted —
+// the write is the consequence, and a lock on a consequence is not a lock on the behaviour.
+const WORKER_QUANTITY_GUARDS = [
+  // 1. The row is skipped for having no quantity, before any matching work.
+  "extraction.quantity === null",
+  // 2. The flag is written, which is what keeps the row visible instead of dropped.
+  'status: "needs_quantity"',
+  // 3. The claim re-checks BOTH facts in the WHERE, so a row that gained a quantity between the
+  //    select and the write is not stamped and stranded by a concurrent run.
+  "is null",
+  "<> 'needs_quantity'",
+];
 
 const WORKER_ESTIMATE_GENERATION_PATH = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -239,8 +250,10 @@ describe("DEFECT 1 — a walkthrough row with no spoken quantity is priced as on
     expect(occurrences).toBe(WORKER_QUANTITY_COERCION_SITES);
     // ABSENCE IS NOT ENOUGH. Deleting the coercion without putting anything in its place would also
     // satisfy the count above while leaving `Number(null)` = 0 to price the row at zero — a different
-    // wrong answer wearing the same clothes. The guard has to be positively present.
-    expect(code).toContain(WORKER_QUANTITY_GUARD);
+    // wrong answer wearing the same clothes. Each guard has to be positively present.
+    for (const guard of WORKER_QUANTITY_GUARDS) {
+      expect(code).toContain(guard);
+    }
   });
 });
 
