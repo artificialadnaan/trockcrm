@@ -158,6 +158,24 @@ export async function updateEstimateExtraction(args: {
 
   const suppliesQuantity = isPriceable(nextQuantity);
 
+  /** Numeric where both sides are numbers, so "700" and "700.000" are the same quantity rather than a
+   *  spurious edit; identity otherwise, which is what compares two nulls. */
+  const sameQuantity = (left: unknown, right: unknown): boolean => {
+    const a = Number(left);
+    const b = Number(right);
+    if (Number.isFinite(a) && Number.isFinite(b)) return a === b;
+    return (left ?? null) === (right ?? null);
+  };
+
+  // A REAL CHANGE TO THE QUANTITY, which is not the same as the request carrying one.
+  //
+  // `nextQuantity` falls back to `existing.quantity` when the field is omitted, so on a `processed` row
+  // with a valid quantity `suppliesQuantity` is true for EVERY edit — and the requeue added for legacy
+  // rows then fired on a label, unit or division change, sending the row back to `pending` and buying a
+  // whole generation run for an edit that did not touch pricing at all.
+  const quantityProvided = "quantity" in args.input;
+  const quantityChanged = quantityProvided && !sameQuantity(nextQuantity, existing.quantity);
+
   // ANY MOVE FROM PRICEABLE TO UNPRICEABLE, not only a move to null.
   //
   // Restricting this to null left the worst version of the original bug in place: changing a
@@ -168,7 +186,10 @@ export async function updateEstimateExtraction(args: {
   //
   // `existing` is read `FOR UPDATE`, so the "was priceable" half is authoritative rather than a guess.
   const becomesUnpriceable =
-    "quantity" in args.input && isPriceable(existing.quantity) && !suppliesQuantity;
+    quantityProvided && isPriceable(existing.quantity) && !suppliesQuantity;
+
+  /** A quantity that is both NEW and usable — the only thing that should re-open a priced row. */
+  const requeuesForPricing = quantityChanged && suppliesQuantity;
 
   // `processed` REQUEUES TOO, not just `needs_quantity`. Rows priced BEFORE this branch existed were
   // priced with a null quantity treated as one unit, and they sit at `processed`. Supplying the real
@@ -196,7 +217,7 @@ export async function updateEstimateExtraction(args: {
     .set({
       normalizedLabel: args.input.normalizedLabel ?? existing.normalizedLabel,
       quantity: nextQuantity,
-      ...(suppliesQuantity || becomesUnpriceable ? { status: statusAfterEdit } : {}),
+      ...(requeuesForPricing || becomesUnpriceable ? { status: statusAfterEdit } : {}),
       unit: args.input.unit ?? existing.unit,
       divisionHint: args.input.divisionHint ?? existing.divisionHint,
       metadataJson: buildUpdatedPricingScopeMetadata({

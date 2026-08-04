@@ -85,6 +85,81 @@ describe("extraction-review-service", () => {
     expect(eventValues[0].afterJson.status).toBe("pending");
   });
 
+  it("does NOT requeue a processed row for an edit that never touched the quantity", async () => {
+    // `nextQuantity` falls back to the stored value when the field is omitted, so on a priced row
+    // `suppliesQuantity` is true for EVERY edit. Without an actual-change test the legacy requeue fired
+    // on a label, unit or division edit — sending the row back to `pending` and buying a whole
+    // generation run for a change that did not touch pricing.
+    const { tenantDb, updateSetCalls } = editHarness({
+      id: "ext-labelled",
+      status: "processed",
+      normalizedLabel: "Install laminate",
+      quantity: "700.000",
+      unit: "SF",
+      divisionHint: "09",
+      rawLabel: "Install laminate",
+      metadataJson: {},
+    });
+
+    await updateEstimateExtraction({
+      tenantDb,
+      dealId: "deal-1",
+      extractionId: "ext-labelled",
+      userId: "user-1",
+      input: { normalizedLabel: "Install laminate flooring" },
+    });
+
+    expect(updateSetCalls[0].status).toBeUndefined();
+  });
+
+  it("treats a re-sent identical quantity as no change", async () => {
+    // A full-form save resubmits every field. "700" against a stored "700.000" is the same quantity,
+    // and re-pricing on it would be a run bought by a no-op.
+    const { tenantDb, updateSetCalls } = editHarness({
+      id: "ext-same",
+      status: "processed",
+      normalizedLabel: "Install laminate",
+      quantity: "700.000",
+      unit: "SF",
+      divisionHint: null,
+      rawLabel: "Install laminate",
+      metadataJson: {},
+    });
+
+    await updateEstimateExtraction({
+      tenantDb,
+      dealId: "deal-1",
+      extractionId: "ext-same",
+      userId: "user-1",
+      input: { quantity: "700" },
+    });
+
+    expect(updateSetCalls[0].status).toBeUndefined();
+  });
+
+  it("DOES requeue a processed row when the quantity genuinely changes", async () => {
+    const { tenantDb, updateSetCalls } = editHarness({
+      id: "ext-moved",
+      status: "processed",
+      normalizedLabel: "Install laminate",
+      quantity: "700.000",
+      unit: "SF",
+      divisionHint: null,
+      rawLabel: "Install laminate",
+      metadataJson: {},
+    });
+
+    await updateEstimateExtraction({
+      tenantDb,
+      dealId: "deal-1",
+      extractionId: "ext-moved",
+      userId: "user-1",
+      input: { quantity: "500" },
+    });
+
+    expect(sqlTextOf(updateSetCalls[0].status)).toContain("pending");
+  });
+
   it("flags a PROCESSED row when its quantity becomes zero, not only when it is cleared", async () => {
     // The worst surviving version of the original bug. Changing 700 to "0" satisfied neither branch, so
     // the status went untouched: the row kept `processed`, the worker only reselects ordinary rows at
