@@ -1,7 +1,20 @@
--- Migration 0215: re-flag `office_*.portfolio_projects.is_board_relevant` for the stages that only
+-- Migration 0216: re-flag `office_*.portfolio_projects.is_board_relevant` for the stages that only
 -- became board stages in this release.
 --
--- 0214 is the highest number on disk, so this is the next free one.
+-- NUMBERING PROVENANCE, recorded because "the highest number on disk" is the WRONG TEST and this file
+-- learned that the expensive way.
+--   • Authored on `feat/portfolio-production-rollup` (PR #1040), branched from `main`.
+--   • Highest migration on `main` at the time: 0214 (0214_glasses_walkthroughs.sql).
+--   • Originally numbered 0215 on that basis — and 0215 was ALREADY TAKEN, by
+--     `0215_backfill_needs_quantity.sql` on `fix/null-quantity-not-one` (PR #1029, open, unmerged).
+--     Invisible from this worktree: neither file is on `main`, so nothing local could have shown it.
+--   • Renumbered to 0216 (#1029 claimed 0215 first). 0216 verified free across ALL 947 remote heads, not
+--     just `main`, with:
+--         git fetch origin --prune
+--         git log --all --diff-filter=AM --name-only --format= -- 'migrations/021*' 'migrations/022*'
+-- The API auto-runs migrations on deploy (server startup), so a duplicate number is not a merge-time
+-- annoyance — it is a production-deploy problem. If you are adding a migration from a branch, run the
+-- --all search above rather than trusting `ls migrations/`.
 --
 -- WHY THIS IS A MIGRATION AND NOT A LINE IN A PR DESCRIPTION.
 -- `is_board_relevant` is a CACHED CLASSIFICATION, not a fact about the project. It is written at ingest
@@ -33,7 +46,7 @@
 --
 -- THE EXCLUSION LIST IS DUPLICATED FROM CODE, deliberately and with a comment, because SQL cannot import
 -- `PORTFOLIO_PROJECT_OFF_BOARD_STAGES` (shared/src/types/portfolio-project-stages.ts). The two must agree:
--- a runtime test (server/tests/migrations/0215-...) reads THIS FILE and asserts the literals here are
+-- a runtime test (server/tests/migrations/0216-...) reads THIS FILE and asserts the literals here are
 -- exactly that constant, so the pair cannot drift silently.
 --
 -- MATCHED ON `current_stage`, NOT `current_stage_normalized`. The normalized column holds whatever the
@@ -60,7 +73,7 @@ BEGIN
   LOOP
     -- Half-provisioned schemas are skipped rather than assumed. `portfolio_projects` arrives in 0135, so
     -- on a real migration run it is always there; this keeps a partially-built tenant from being the thing
-    -- that decides whether 0215 can run at all for every OTHER office in the same DO block.
+    -- that decides whether 0216 can run at all for every OTHER office in the same DO block.
     IF to_regclass(format('%I.portfolio_projects', schema_name)) IS NULL THEN
       CONTINUE;
     END IF;
@@ -77,7 +90,7 @@ BEGIN
 
     -- Per-office count in the deploy log, so the operator can tell "nothing needed flipping" apart from
     -- "the loop never reached this office" — the two look identical in a silent migration.
-    RAISE NOTICE '0215: % — % portfolio project(s) flipped to board-relevant', schema_name, flipped;
+    RAISE NOTICE '0216: % — % portfolio project(s) flipped to board-relevant', schema_name, flipped;
   END LOOP;
 END $tenant$;
 

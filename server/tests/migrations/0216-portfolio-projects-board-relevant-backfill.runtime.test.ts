@@ -1,6 +1,6 @@
-// Executes Migration 0215 FROM DISK against a real Postgres (PGlite).
+// Executes Migration 0216 FROM DISK against a real Postgres (PGlite).
 //
-// 0215 re-flags `is_board_relevant` for rows the OLD stage classifier wrote as false but whose stage is a
+// 0216 re-flags `is_board_relevant` for rows the OLD stage classifier wrote as false but whose stage is a
 // board stage in this release. Both portfolio read paths filter `WHERE is_board_relevant = true`, so an
 // un-flipped row is invisible on the board AND 404s on its detail page.
 //
@@ -11,7 +11,7 @@
 //   3. rows already true are untouched (updated_at is not churned for every row on every deploy);
 //   4. running it TWICE changes nothing, which the migration runner relies on;
 //   5. it loops over EVERY office_% schema, and skips a half-provisioned one instead of aborting the whole
-//      DO block (which would take 0215 down for every other office too);
+//      DO block (which would take 0216 down for every other office too);
 //   6. the file carries both the DO-loop and the TENANT_SCHEMA markers; and
 //   7. the exclusion literals in the SQL are EXACTLY PORTFOLIO_PROJECT_OFF_BOARD_STAGES. SQL cannot import
 //      the constant, so this is the only thing stopping the duplicated list from drifting out of sync with
@@ -22,7 +22,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { PORTFOLIO_PROJECT_OFF_BOARD_STAGES } from "@trock-crm/shared/types";
 
-const MIGRATION_PATH = join(__dirname, "../../../migrations/0215_portfolio_projects_board_relevant_backfill.sql");
+const MIGRATION_PATH = join(__dirname, "../../../migrations/0216_portfolio_projects_board_relevant_backfill.sql");
 const MIGRATION_SQL = readFileSync(MIGRATION_PATH, "utf-8");
 
 const START_MARKER = "-- TENANT_SCHEMA_START";
@@ -37,7 +37,7 @@ function tenantBlockFor(schema: string): string {
     .replaceAll("office_dallas", schema);
 }
 
-/** Only the columns 0215 reads or writes; 0135 owns the real shape. */
+/** Only the columns 0216 reads or writes; 0135 owns the real shape. */
 async function createPortfolioTable(pg: PGlite, schema: string) {
   await pg.exec(`
     CREATE SCHEMA IF NOT EXISTS ${schema};
@@ -55,7 +55,7 @@ async function createPortfolioTable(pg: PGlite, schema: string) {
 
 /**
  * `stage` is the RAW Procore string and `normalized` is what the OLD normalizer stored for it —
- * deliberately including "pre - construction", the one canonical form this release changed. 0215 must
+ * deliberately including "pre - construction", the one canonical form this release changed. 0216 must
  * match on the raw column, so a stale normalized value cannot affect the outcome.
  */
 async function insertProject(
@@ -113,7 +113,7 @@ function notInClauseLiterals(sql: string): string[] {
   return literals;
 }
 
-describe("migration 0215 — portfolio_projects board-relevant backfill", () => {
+describe("migration 0216 — portfolio_projects board-relevant backfill", () => {
   let pg: PGlite;
 
   beforeEach(async () => {
