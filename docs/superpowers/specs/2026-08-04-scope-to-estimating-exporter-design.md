@@ -18,8 +18,13 @@ This spec covers the sender, plus the one CRM-side change the quantity decision 
 
 Worth stating, because it removes most of the hard problems from this design:
 
-- **Idempotent on `walkthroughId`.** A retry after a lost response replays the ids of the chain the
-  first call committed rather than building a second one. The sender does not need its own dedup.
+- **Idempotent on `(dealId, projectId, contentHash)`**, where `contentHash` is the namespaced
+  walkthrough id — NOT on `walkthroughId` alone. A retry after a lost response replays the ids of the
+  chain the first call committed rather than building a second one, so the sender needs no dedup of its
+  own. The distinction is load-bearing: the same walkthrough ingested onto two deals, or onto two
+  projects within one deal, is deliberately **two documents**. For the deal-level flow decided below,
+  `projectId` is always `null`, so the tuple degenerates to (deal, walkthrough) — but the sender must
+  not assume the walkthrough id alone identifies anything.
 - **One transaction.** The `files → estimate_source_documents → estimate_document_parse_runs →
   estimate_extractions` chain either all lands or none of it does.
 - **Status codes are already meaningful** and the sender must distinguish them: `400` = "your upload
@@ -51,6 +56,15 @@ Consequences the sender must honour:
 
 Scope must therefore **write into the CRM's R2 bucket**, which it does not do today and has no
 credentials for. That is a new trust edge and the single biggest piece of this work.
+
+**The credential must be scoped, or "direct write" becomes "Scope can read the CRM's files".** The
+requirement is: write-only (no `list`, no `delete`, no `get`), confined to the `walkthroughs/` key
+prefix, with an object-size ceiling and the two accepted content types enforced at the boundary rather
+than trusted from the sender. Rotation on a fixed schedule, and the credential never reachable from
+Scope's request path — only its export worker. **If R2's token model cannot express prefix-scoped
+write-only access, this decision inverts** and the fallback is CRM-issued presigned upload URLs (or the
+upload-proxy endpoint), because an unscoped bucket credential held by a second service is a worse trade
+than the extra hop it was chosen to avoid.
 
 Nothing in Scope currently composes a contact sheet. It has evidence frames per clip; turning them into
 one `image/jpeg` is new work (sharp is already a CRM dependency; Scope would need its own).
@@ -96,8 +110,19 @@ Sequence:
 2. Compose the contact sheet from evidence frames → one `image/jpeg`.
 3. `HEAD` the derived key. If absent, `PUT` it. If present, **do not re-upload** — this is a retry.
 4. `POST` the payload with the service token.
-5. On `503`, retry with backoff. On `400` / `409`, dead-letter with the response body — these are not
-   retryable and a silent retry loop would bury the reason.
+5. Retry policy, per operation rather than one rule for all three:
+   - **Timeouts**: HEAD 5s, PUT 60s (it carries the sheet), POST 30s. Bounded attempts — 5 for HEAD/PUT,
+     5 for POST — with exponential backoff and full jitter, so a Scope-wide retry storm cannot
+     synchronise against the CRM.
+   - **Retryable**: connection errors, timeouts, `408`, `429` (honour `Retry-After` when present), and
+     `500`/`502`/`503`/`504`.
+   - **Never retryable**: `400`, `409`, and any `401`/`403`. Auth failures dead-letter immediately —
+     retrying a refused credential cannot succeed and only advances a lockout.
+   - **A 403 on HEAD is NOT "absent".** This is the one that matters: treating an unauthorized or
+     otherwise non-404 HEAD as "no object" leads straight to a PUT that overwrites evidence the deal has
+     already committed. Only an explicit `404` means absent. Anything else aborts the export and
+     dead-letters.
+   - Every dead-letter carries the operation, the derived key, and the response body.
 6. Record the returned `documentId` / `parseRunId` on the Scope walkthrough so the review UI can say
    "exported" and link back.
 
@@ -130,11 +155,31 @@ one unit. The estimator would have no signal at all.
 Order of work, therefore:
 
 1. Fix the three `?? 1` sites so a null quantity is carried as *unknown* — excluded from the priced
-   total and surfaced as a row needing input, not defaulted.
+   total and surfaced as a row needing input, not defaulted. **These sites are shared**: they serve
+   OCR-parsed document extractions as well as walkthrough ones, so the change alters behaviour for a
+   path this project does not otherwise touch. Regression coverage is required for BOTH inputs, not
+   only the walkthrough one, or the parsed-document path silently inherits a pricing change nobody
+   reviewed.
 2. Give the estimating UI a visible "needs quantity" state for those rows.
 3. Only then relax `validateWalkthroughIngressPayload` to accept null, and delete the refusal's
    now-obsolete error path.
 4. The exporter can then send every row, confirmed or not.
+
+### Re-export after the source changes
+
+The receiver is idempotent, so a SECOND export of a walkthrough whose scope was edited afterwards is
+deduplicated and the CRM keeps the FIRST export's rows. The edit silently does not arrive. Three ways
+to answer this, and the spec should not leave it undecided:
+
+- **Freeze the walkthrough on export** — simplest, and honest: the CRM document is a snapshot, and
+  Scope says so. Later corrections happen in estimating, which is where an estimator already works.
+- **Version the export** so a re-export lands as a new document rather than a duplicate. More faithful,
+  and it makes the deal accumulate documents the estimator must reconcile.
+- **Leave it** — the current implicit behaviour, and the one to avoid, because "your correction was
+  accepted and discarded" is indistinguishable from success at the sender.
+
+Recommended: **freeze on export**, with the review UI showing an exported walkthrough as read-only and
+naming where to make further changes.
 
 Done in that order this is strictly better than the original design: the walk's full scope reaches the
 estimator, unconfirmed lines are visibly unconfirmed, and nothing is priced off a guess. Done in the
