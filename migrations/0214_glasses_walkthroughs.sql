@@ -194,7 +194,14 @@ BEGIN
               WHERE q.job_type = 'glasses_walkthrough_forward'
                 AND q.payload->>'officeSlug' = %L
                 AND q.payload->>'dealId' ~* '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$'
+                -- BOUNDED TO THE COLUMN, not merely non-null. `walk_id` is varchar(100) and a payload is
+                -- unconstrained jsonb, so a repaired 101-character id raises 22001 (value too long) —
+                -- and, like every other guard here, that aborts the single tenant-wide DO block and takes
+                -- 0214 down for EVERY office rather than dropping one row. Empty is excluded for the same
+                -- reason it would be meaningless: a walk with no id addresses nothing.
                 AND q.payload->>'walkId' IS NOT NULL
+                AND q.payload->>'walkId' <> ''
+                AND length(q.payload->>'walkId') <= 100
                 AND q.payload->>'capturedAt' IS NOT NULL
            ) candidates
           WHERE captured_at IS NOT NULL

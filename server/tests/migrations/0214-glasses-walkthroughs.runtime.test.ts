@@ -166,7 +166,12 @@ describe("migration 0214 — glasses_walkthroughs", () => {
         -- A capturer that LOOKS like a uuid but names no live user — the row this column's ON DELETE SET
         -- NULL exists to tolerate. Must land WITHOUT an actor rather than violating the FK, which would
         -- abort the single DO block for every office.
-        ('glasses_walkthrough_forward', '{"officeSlug":"dallas","dealId":"${deal}","walkId":"walk-ghostuser","capturedAt":"2026-08-02T21:00:00.000Z","capturedByUserId":"00000000-0000-4000-8000-0000000000bb"}');
+        ('glasses_walkthrough_forward', '{"officeSlug":"dallas","dealId":"${deal}","walkId":"walk-ghostuser","capturedAt":"2026-08-02T21:00:00.000Z","capturedByUserId":"00000000-0000-4000-8000-0000000000bb"}'),
+        -- 101 characters against a varchar(100) column: 22001, which aborts the whole DO block for every
+        -- office. Length is a property of the COLUMN, so "is not null" was never the right check.
+        ('glasses_walkthrough_forward', '{"officeSlug":"dallas","dealId":"${deal}","walkId":"${"w".repeat(101)}","capturedAt":"2026-08-02T20:00:00.000Z"}'),
+        -- The empty id, which addresses nothing and would otherwise land as a blank row.
+        ('glasses_walkthrough_forward', '{"officeSlug":"dallas","dealId":"${deal}","walkId":"","capturedAt":"2026-08-02T19:00:00.000Z"}');
     `);
 
     await pg.exec(MIGRATION_SQL);
