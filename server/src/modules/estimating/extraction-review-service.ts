@@ -148,44 +148,36 @@ export async function updateEstimateExtraction(args: {
   // JavaScript boolean computed from a stale row cannot see that; a CASE evaluated when the row is
   // locked can.
   //
-  // A PRICEABLE quantity, not merely a present one — decided here because it is a fact about this
-  // request's own input rather than about the stored row.
-  //
-  // Zero and negatives are refused for the same reason null is: they cannot be priced.
-  // `applyMarketRateAdjustment` already treats a quantity at or below zero as invalid, but the worker
-  // still persists the zero-valued recommendation and marks the row `processed` — so accepting "0" as
-  // a correction would stop the row asking for human attention without ever giving it a number anybody
-  // can bid. A row that still needs a number must keep saying so.
-  const suppliesQuantity =
-    nextQuantity !== null && nextQuantity !== undefined && Number.isFinite(Number(nextQuantity)) &&
-    Number(nextQuantity) > 0;
+  /** The one definition of "can be priced", shared by every decision below. Mirrors the worker's own
+   *  guard and `applyMarketRateAdjustment`: absent, non-finite and nonpositive are all unpriceable. */
+  const isPriceable = (value: unknown): boolean => {
+    if (value === null || value === undefined) return false;
+    const numeric = Number(value);
+    return Number.isFinite(numeric) && numeric > 0;
+  };
 
-  // CLEARING a quantity on a row that was already priced has to send it BACK to `needs_quantity`.
+  const suppliesQuantity = isPriceable(nextQuantity);
+
+  // ANY MOVE FROM PRICEABLE TO UNPRICEABLE, not only a move to null.
   //
-  // Otherwise the row keeps whatever status it had — `processed`, typically — and the worker admits
-  // ordinary rows only at `pending`, so no later run ever reaches the null-quantity guard. The
-  // recommendation computed from the OLD quantity stays visible and priceable while the quantity
-  // behind it is gone: a number on the estimate that no longer has anything supporting it, and nothing
-  // anywhere asking a human to look.
+  // Restricting this to null left the worst version of the original bug in place: changing a
+  // `processed` row's quantity from 700 to "0" — or to a negative, or to "NaN" — satisfied neither
+  // branch, so the status was untouched. The row kept `processed`, the worker only reselects ordinary
+  // rows at `pending`, and the promote predicate now rejects its stale recommendation. Stranded, unable
+  // to be priced, and absent from the needs-quantity bucket that exists to surface exactly that.
   //
-  // A REAL TRANSITION, not merely a field that is present. `"quantity" in args.input` alone fires when a
-  // full-form edit resubmits a null that was already null — reopening a row nobody changed. `existing`
-  // is read `FOR UPDATE`, so the stored value here is authoritative rather than a guess.
-  const clearsQuantity =
-    "quantity" in args.input &&
-    (nextQuantity === null || nextQuantity === undefined) &&
-    existing.quantity !== null &&
-    existing.quantity !== undefined;
+  // `existing` is read `FOR UPDATE`, so the "was priceable" half is authoritative rather than a guess.
+  const becomesUnpriceable =
+    "quantity" in args.input && isPriceable(existing.quantity) && !suppliesQuantity;
 
   // AND IT DOES NOT OVERWRITE A HUMAN DECISION. `approved`, `rejected` and `overridden` are somebody's
-  // judgement about this row; clearing a quantity is a reason to stop PRICING it, never a reason to
-  // silently undo a review. Those rows are held out of the promote by the quantity predicate in
-  // draft-estimate-service.ts, which is where the harm actually was — so the flag adds nothing here
-  // except the erasure of a decision.
+  // judgement about this row; making a quantity unpriceable is a reason to stop PRICING it, never a
+  // reason to silently undo a review. Those rows are held out of the promote by the quantity predicate
+  // in draft-estimate-service.ts, which is where the harm actually was.
   //
   // Decided in SQL for the same reason the requeue is: `existing` is authoritative only until this
   // statement takes its own lock, and the CASE is evaluated when the row is held.
-  const statusAfterEdit = clearsQuantity
+  const statusAfterEdit = becomesUnpriceable
     ? sql`case when ${estimateExtractions.status} in ('pending', 'needs_quantity', 'processed', 'unmatched') then 'needs_quantity' else ${estimateExtractions.status} end`
     : sql`case when ${estimateExtractions.status} = 'needs_quantity' then 'pending' else ${estimateExtractions.status} end`;
 
@@ -194,7 +186,7 @@ export async function updateEstimateExtraction(args: {
     .set({
       normalizedLabel: args.input.normalizedLabel ?? existing.normalizedLabel,
       quantity: nextQuantity,
-      ...(suppliesQuantity || clearsQuantity ? { status: statusAfterEdit } : {}),
+      ...(suppliesQuantity || becomesUnpriceable ? { status: statusAfterEdit } : {}),
       unit: args.input.unit ?? existing.unit,
       divisionHint: args.input.divisionHint ?? existing.divisionHint,
       metadataJson: buildUpdatedPricingScopeMetadata({

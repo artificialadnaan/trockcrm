@@ -85,6 +85,35 @@ describe("extraction-review-service", () => {
     expect(eventValues[0].afterJson.status).toBe("pending");
   });
 
+  it("flags a PROCESSED row when its quantity becomes zero, not only when it is cleared", async () => {
+    // The worst surviving version of the original bug. Changing 700 to "0" satisfied neither branch, so
+    // the status went untouched: the row kept `processed`, the worker only reselects ordinary rows at
+    // `pending`, and the promote predicate now rejects its stale recommendation. Stranded, unpriceable,
+    // and absent from the very bucket that exists to surface it.
+    for (const unpriceable of ["0", "-5", "NaN"]) {
+      const { tenantDb, updateSetCalls } = editHarness({
+        id: "ext-processed",
+        status: "processed",
+        normalizedLabel: "Install laminate",
+        quantity: "700.000",
+        unit: "SF",
+        divisionHint: null,
+        rawLabel: "Install laminate",
+        metadataJson: {},
+      });
+
+      await updateEstimateExtraction({
+        tenantDb,
+        dealId: "deal-1",
+        extractionId: "ext-processed",
+        userId: "user-1",
+        input: { quantity: unpriceable },
+      });
+
+      expect(sqlTextOf(updateSetCalls[0].status)).toContain("needs_quantity");
+    }
+  });
+
   it("does NOT reopen an APPROVED row when its quantity is cleared", async () => {
     // Clearing a quantity is a reason to stop pricing a row, never a reason to silently undo somebody's
     // review. The harm this branch was added for — a stale price reaching a client estimate — is held

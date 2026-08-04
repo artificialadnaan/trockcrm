@@ -92,7 +92,13 @@ export async function loadApprovedRecommendationsForRun(
     // quantity can end up absent (a reconciliation, a rerun, a hand-written correction), and this is
     // the single point they all funnel through. Nonpositive is refused with null for the same reason
     // the worker refuses it: `applyMarketRateAdjustment` cannot price it either.
-    // MANUAL ROWS ARE EXEMPT. A manual recommendation carries its own `manualQuantity` and
+    // MANUAL ROWS ARE EXEMPT, keyed on `sourceType` and NOT on `selectedSourceType`. The creation path
+    // sets `sourceType: 'manual'` while persisting `selectedSourceType: null`, and a catalog-backed
+    // manual row selects `catalog_option` — so keying on the selection missed the ordinary case
+    // entirely and left those rows failing as `recommendation_unavailable`, which is the very bug this
+    // exemption was added to fix.
+    //
+    // A manual recommendation carries its own `manualQuantity` and
     // `manualUnitPrice`, and `resolvePromotionLineValues` promotes those; its extraction match exists
     // only as an active-artifact anchor. Gating it on that extraction's quantity meant clearing an
     // unrelated source row made a perfectly valid hand-entered line vanish as
@@ -102,7 +108,7 @@ export async function loadApprovedRecommendationsForRun(
     // is TRUE, so the positive test alone would have ADMITTED a NaN quantity into a client estimate.
     // Same mistake, opposite direction, as the worker's claim predicate.
     sql`(
-      ${estimatePricingRecommendations.selectedSourceType} = 'manual'
+      ${estimatePricingRecommendations.sourceType} = 'manual'
       or (
         ${estimateExtractions.quantity} is not null
         and ${estimateExtractions.quantity} > 0
