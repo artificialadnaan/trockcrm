@@ -2583,6 +2583,27 @@ describe("DealListPage", () => {
     ]);
   });
 
+  it("keeps a visible focus ring on the full-card at-risk link despite the card clipping overflow", () => {
+    mockRouteMixedAtRiskBoard();
+    const html = renderPage("/deals?scope=all", "director");
+
+    // The All link is `absolute inset-0`, so its box IS the card's box, and the card is
+    // `overflow-hidden`. A default (outset) ring paints outside that box and is clipped away entirely;
+    // with `focus:outline-none` also removing the browser fallback, a keyboard user tabbing to the first
+    // at-risk link would land on it with NO visible focus state. `ring-inset` draws inside the box, which
+    // is the only reason the indicator survives the clip.
+    const overlay = /<a aria-label="View at-risk deals"[^>]*class="([^"]*)"/.exec(html);
+    expect(overlay).not.toBeNull();
+    const overlayClass = overlay![1];
+
+    expect(overlayClass).toContain("absolute inset-0");
+    expect(overlayClass).toContain("focus-visible:ring-2");
+    // The assertion that actually matters: outset would be invisible here.
+    expect(overlayClass).toContain("focus-visible:ring-inset");
+    // And a ring colour must still be applied, or "visible" is only nominally true.
+    expect(overlayClass).toMatch(/focus-visible:ring-(white|brand-red)/);
+  });
+
   it("gives each at-risk link a distinct accessible name that says WHICH cohort it opens", () => {
     mockRouteMixedAtRiskBoard();
     const html = renderPage("/deals?scope=all", "director");

@@ -1639,7 +1639,12 @@ function DealListPageContent({
           <Link
             to={atRiskDestinations.all}
             aria-label={AT_RISK_CARD_LABELS.all.ariaLabel}
-            className={`absolute inset-0 z-0 rounded-xl focus:outline-none focus-visible:ring-2 ${
+            // ring-INSET is load-bearing, not decoration. This link is `absolute inset-0`, so its box is
+            // exactly the card's box, and the Card is `overflow-hidden` — a default (outset) ring paints
+            // OUTSIDE that box and is clipped away entirely. Combined with `focus:outline-none` removing
+            // the browser fallback, a keyboard user tabbing to the first at-risk link would get NO visible
+            // focus state at all. Drawing the ring inside the box is what makes it survive the clip.
+            className={`absolute inset-0 z-0 rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-inset ${
               atRiskCounts.all > 0 ? "focus-visible:ring-white" : "focus-visible:ring-brand-red"
             }`}
           />
