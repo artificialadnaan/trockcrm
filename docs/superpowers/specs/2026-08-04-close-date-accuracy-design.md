@@ -2428,7 +2428,10 @@ a speculative CTE.
 
 Until then the exposure is visible rather than hidden: a repair is an unpaired large **pull-in**, so
 `days_pulled_in` is where it shows, and §4.5 reports pushed and pulled separately for exactly this kind of
-reason. A rep with an anomalous `days_pulled_in` and a non-zero `hubspot_refresh_events_n` is the signature.
+reason. A rep with an anomalous `days_pulled_in` and a non-zero `hubspot_refresh_events_n` is the
+signature — **a signal, not an identity**: `days_pulled_in` is summed over `E`, which is `D_book`-scoped
+and rep-only, while the counter spans `D_landed` ∪ `D_open` (§4.0.6), so a repair on a reopen-evidence
+deal shows in the counter and not in the sum.
 
 Report a rate so a rep with a big book is not penalised for volume — the denominator first, as its own
 column, then the rate over it:
@@ -2712,7 +2715,7 @@ it true. **A claim with no construct is not a claim — it is either implemented
 | 6.3a | Last-minute re-dating is visible, not hidden | P₃₀ anchored 30 days out (§4.0.3); `D_score` requires a P₃₀; the deal lands in `no_prediction_n` and depresses `scoreable_n` vs `landed_n` | Dropping the shortfall columns, leaving only a hit rate over a shrunken denominator | ✅ |
 | 6.3b | …and still shows a strong final call rather than vanishing | `D_score_final` is a separate population (§4.2) | Computing `hit_rate_14d_final` over `D_score` | ✅ |
 | 6.3c | A short-lived deal's fallback cannot be gamed by a late re-date | Fallback selects the **earliest** state, `ORDER BY audit_log_id ASC`, capped below the outcome boundary (§4.0.4) | Reverting to the latest state, or removing the outcome cap so a post-close edit becomes P₃₀ | ✅ |
-| 6.4 | **No rate ranks on fewer than `MIN_RANKED_SCOREABLE` underlying deals** | Every ranked rate gates on its own denominator count: `scoreable_n`, `scoreable_final_n`, `cov_n`; a **composite** gates on *all* its operands' denominators (§6.4) | A rate whose floor keys on a different population than its denominator — or a composite gated on neither operand | ✅ *(was ✗ — see below)* |
+| 6.4 | **No rate ranks on fewer than `MIN_RANKED_SCOREABLE` underlying deals** | Every ranked rate gates on its own denominator count: `scoreable_n`, `scoreable_final_n`, `cov_n`, **`book_n`** (the churn rates, §4.4); a **composite** gates on *all* its operands' denominators (§6.4) | A rate whose floor keys on a different population than its denominator — or a composite gated on neither operand — or **a ranked rate whose denominator is not one of the counts named here**, which is how the churn pair sat under a `\|D_book\|` floor with no column to gate on | ✅ *(was ✗ — see below)* |
 | 6.5a | Clearing a date does not erase prior churn | `E` is not truncated at a clear; `clear_count` is its own counter | Capping `event_window_end` at the clear instead of the outcome | ✅ |
 | 6.5b | A cleared date does not keep counting as standing | `state_at` returns `'cleared'` from the latest event's NULL `new_date` (§4.0.3) | Adding `AND new_date IS NOT NULL` inside the `state_at` lateral | ✅ |
 | 6.5c | Coverage treats a cleared deal as uncovered | `cov_state IN ('cleared','no_event')` → `at_risk_n` (§4.1) | `coverage_resolution` testing `pnow.state` un-coalesced, taking every branch NULL | ✅ *(was ✗ for the `no_event` arm)* |
