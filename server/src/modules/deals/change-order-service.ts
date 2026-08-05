@@ -2,7 +2,11 @@ import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { dealChangeOrders, deals, pipelineStageConfig, tasks } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
-import { isGenuineWonDealStageSlug, type WorkflowRoute } from "@trock-crm/shared/types";
+import {
+  deriveChangeOrderScopeTitle,
+  isGenuineWonDealStageSlug,
+  type WorkflowRoute,
+} from "@trock-crm/shared/types";
 import { WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import { generateDealNumberForProject } from "../../services/projectNumber.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
@@ -135,9 +139,8 @@ async function loadParentForChildCreate(
       propertyId: deals.propertyId,
       assignedRepId: deals.assignedRepId,
       projectNumber: deals.projectNumber,
-      // A CO child SHARES the parent's project_number, so in QuickBooks it is the same project — it must
-      // carry the same project title. The CO's own specific change lives in `description`; leaving
-      // scope_title null here would hand accounting exactly the untitled row this field exists to remove.
+      // Only a FALLBACK for the child's own scope title — see deriveChangeOrderScopeTitle. The child's
+      // title is independent once created; this is not propagated on later parent edits, deliberately.
       scopeTitle: deals.scopeTitle,
       officeCode: deals.officeCode,
       projectType: deals.projectType,
@@ -306,6 +309,15 @@ export async function createChangeOrderChildDeal(
   const childName = `${parent.name}${childNameSuffix}`.length > 500
     ? `${parent.name.slice(0, 500 - childNameSuffix.length)}${childNameSuffix}`
     : `${parent.name}${childNameSuffix}`;
+  // The child's OWN scope title, seeded once at creation and independent thereafter. A CO is separately
+  // billable work with its own scope ("Panel Relocation" under a full exterior job), so this is a
+  // convenience default, not inheritance: a later edit to either deal is expected to make them differ,
+  // and nothing propagates. The ordering rationale (and the production census behind it) lives on
+  // deriveChangeOrderScopeTitle.
+  const childScopeTitle = deriveChangeOrderScopeTitle({
+    changeOrderDescription: description,
+    parentScopeTitle: parent.scopeTitle,
+  });
   // Suppress the project-number-first-set email (migration 0138 trigger) for this insert: a CO child
   // shares the parent's project_number, so it is NOT a first project-number assignment. Transaction-local
   // (the per-request connection runs in one transaction — middleware/tenant.ts), reset right after the
@@ -324,7 +336,7 @@ export async function createChangeOrderChildDeal(
       ${parent.companyId}, ${parent.propertyId}, ${amount}, ${signedDate}, ${signedDate},
       ${parent.projectNumber}, ${parent.officeCode}, ${parent.projectType}, ${parent.projectTypeId},
       ${parent.regionId}, ${parent.pipelineTypeSnapshot}, ${parent.estimatorUserId}, ${parent.salesSourceUserId}, 'change_order',
-      ${parent.scopeTitle}, ${description}, ${input.createdBy ?? null},
+      ${childScopeTitle}, ${description}, ${input.createdBy ?? null},
       ${parent.workflowRoute ?? "normal"}, true, false, ${parent.isTestData}, ${createdAt}, ${createdAt}, ${createdAt}
     )
     RETURNING id, deal_number, created_at, updated_at

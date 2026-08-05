@@ -23,6 +23,57 @@ export const DEAL_SCOPE_TITLE_EXAMPLES = [
   "Balcony Repair",
 ] as const;
 
+/**
+ * The scope title a CHANGE-ORDER child deal is created with.
+ *
+ * A CO child is a real deal row, so it has its own scope_title column and its own detail page and export
+ * row. The question this answers is what that column starts as — and it is a SEED, not inheritance. The
+ * child's title is independent from that moment on: editing it is normal, and drift from the parent is
+ * correct behaviour, not a bug to propagate away.
+ *
+ * That is settled by the production data, not by preference. Across all 36 change-order children in the
+ * live tenant (2026-08-05):
+ *   - 0 of 36 had a description matching their parent's;
+ *   - 34 of 36 described work plainly distinct from the parent's ("Return unused allowances" under an
+ *     exterior-reclad job; "Drill holes and complete moisture reading" under "50 stucco hole patches");
+ *   - those descriptions are ALREADY title-shaped: min 15 chars, median 33, and 33 of 34 within the cap.
+ * So showing the parent's title on the child would mislabel every real change order, and the best
+ * available default is the CO's own description — which is, in practice, exactly the short scope name
+ * accounting would have typed ("CE#001 Stucco Repairs", "Panel Relocation", "Tile & Plumbing Alt").
+ *
+ * Order:
+ *   1. the CO's own description, when it is single-line and already fits the cap — the 97% case;
+ *   2. else the parent's scope title, so a CO with no usable description of its own is still named by
+ *      its project rather than left blank in accounting's export;
+ *   3. else null.
+ *
+ * Multi-line is excluded deliberately: a description with a "Scope of Work:" block below it is a notes
+ * field again, and squeezing its first 120 characters into a title is how the wall-of-text problem gets
+ * re-created one field over.
+ */
+export function deriveChangeOrderScopeTitle(
+  input: { changeOrderDescription?: string | null; parentScopeTitle?: string | null },
+  maxLength: number = DEAL_SCOPE_TITLE_MAX_LENGTH
+): string | null {
+  const ownDescription = (input.changeOrderDescription ?? "").trim();
+  if (
+    ownDescription !== "" &&
+    ownDescription.length <= maxLength &&
+    !/[\r\n]/.test(ownDescription)
+  ) {
+    return ownDescription;
+  }
+
+  const inherited = (input.parentScopeTitle ?? "").trim();
+  // Cannot exceed the cap in practice (the column is varchar(maxLength)) — guarded so a hand-widened or
+  // imported parent value can never make the CO insert fail with a 22001 the user cannot act on.
+  if (inherited !== "" && inherited.length <= maxLength) {
+    return inherited;
+  }
+
+  return null;
+}
+
 export type DealScopeTitleValidation =
   | { ok: true; value: string | null }
   | { ok: false; error: string };

@@ -214,6 +214,28 @@ describe("buildFilterBarCsvRows (export uses the canonical outcome-aware date ax
     expect(cell(absent, "Scope Title")).toBe("");
   });
 
+  it("exports a change-order child's OWN scope title — the export and the detail card read one column", () => {
+    // A CO child is a real deal row and appears in this list like any other, so the column it exports is
+    // the same `deal.scopeTitle` the Stage & Status card renders. That is what keeps the two surfaces from
+    // disagreeing: there is no derived-at-read title anywhere, in either place.
+    const rows = buildFilterBarCsvRows(
+      [
+        makeDeal({ id: "parent", name: "Tides at Highland Meadows", scopeTitle: "Exterior Renovation" }),
+        makeDeal({
+          id: "child",
+          name: "Tides at Highland Meadows — Change Order 1",
+          isChangeOrder: true,
+          parentDealId: "parent",
+          scopeTitle: "Building 5 Sheathing Replacement",
+        }),
+      ],
+      noMaps()
+    );
+
+    expect(cell(rows, "Scope Title", 1)).toBe("Exterior Renovation");
+    expect(cell(rows, "Scope Title", 2)).toBe("Building 5 Sheathing Replacement");
+  });
+
   it("neutralizes a scope title that would execute as a spreadsheet formula", () => {
     // escapeCsvCell already guards this class of value; the assertion is that the NEW column goes
     // through it rather than being concatenated in raw somewhere else.

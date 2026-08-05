@@ -3,7 +3,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { sql } from "drizzle-orm";
 import { dealSignedCommissions, users } from "@trock-crm/shared/schema";
-import { isGenuineWonDealStageSlug } from "@trock-crm/shared/types";
+import { DEAL_SCOPE_TITLE_MAX_LENGTH, isGenuineWonDealStageSlug } from "@trock-crm/shared/types";
 import {
   addDealChangeOrder,
   createChangeOrderChildDeal,
@@ -169,31 +169,90 @@ describe("createChangeOrderChildDeal — a change order is its own Won child dea
     expect(String(row.name)).toContain("Acme Tower Reroof");
   });
 
-  it("inherits the parent's scope_title — the CO shares the parent's project_number, so it is the same project", async () => {
-    // Accounting keys the CO into QuickBooks under the SAME project number as the parent, so it needs the
-    // same project title. A null here would hand them exactly the untitled row scope_title exists to
-    // remove, on a record with no create form to fill it in from. The CO's own specific change is in
-    // `description`, which is why inheriting the title is not lossy.
+  // scope_title on a CO child is the child's OWN, seeded at creation and INDEPENDENT thereafter. Settled
+  // by the production census, not preference: of the 36 change-order children in the live tenant, 0 had a
+  // description matching their parent's and 34 described plainly different work, at a median of 33
+  // characters. So the parent's title is the fallback, not the answer — deriving or propagating it would
+  // mislabel every real change order.
+  it("seeds the child's scope_title from the CO's OWN description, not the parent's title", async () => {
     const child = await createChangeOrderChildDeal(tdb, {
-      parentDealId: PARENT,
+      parentDealId: PARENT, // parent scope_title = 'Balcony Repair'
       signedDate: "2026-03-20",
       amount: "5000",
-      description: "Extra railing on the south face",
+      description: "Panel Relocation",
+      createdBy: REP,
+    });
+    const row = await fetchDeal(child.id);
+    expect(row.scope_title).toBe("Panel Relocation");
+    expect(row.scope_title).not.toBe("Balcony Repair");
+    expect(row.description).toBe("Panel Relocation"); // description is untouched by the seed
+  });
+
+  it("falls back to the parent's title when the CO has no description of its own", async () => {
+    // 2 of the 36 real children have no description. Blank in accounting's export is the outcome this
+    // whole field exists to remove, so the project's own title is the better of the two answers.
+    const child = await createChangeOrderChildDeal(tdb, {
+      parentDealId: PARENT,
+      signedDate: "2026-03-22",
+      amount: "2500",
+      createdBy: REP,
+    });
+    expect((await fetchDeal(child.id)).scope_title).toBe("Balcony Repair");
+  });
+
+  it("falls back to the parent's title when the CO description is a notes blob, not a title", async () => {
+    // The one real multi-line child reads "CO-001 Batch 1 Additional Units\nScope of Work:\nUnit 302, ...".
+    // Truncating that into a title is how the wall-of-text problem gets recreated one field over.
+    const child = await createChangeOrderChildDeal(tdb, {
+      parentDealId: PARENT,
+      signedDate: "2026-03-23",
+      amount: "3500",
+      description: "CO-001 Batch 1 Additional Units\nScope of Work:\nUnit 302, 314, 511, 604",
+      createdBy: REP,
+    });
+    expect((await fetchDeal(child.id)).scope_title).toBe("Balcony Repair");
+  });
+
+  it("falls back to the parent's title when the CO description is over the cap", async () => {
+    const child = await createChangeOrderChildDeal(tdb, {
+      parentDealId: PARENT,
+      signedDate: "2026-03-24",
+      amount: "4500",
+      description: "x".repeat(DEAL_SCOPE_TITLE_MAX_LENGTH + 1),
       createdBy: REP,
     });
     const row = await fetchDeal(child.id);
     expect(row.scope_title).toBe("Balcony Repair");
-    expect(row.description).toBe("Extra railing on the south face"); // the CO's own scope, not overwritten
+    // The seed never writes a value the column would reject, whatever the description holds.
+    expect(String(row.scope_title).length).toBeLessThanOrEqual(DEAL_SCOPE_TITLE_MAX_LENGTH);
   });
 
-  it("leaves the child's scope_title null when the parent has none, rather than inventing one", async () => {
+  it("leaves the child's scope_title null when neither the CO nor the parent supplies one", async () => {
     const parentless = await createChangeOrderChildDeal(tdb, {
-      parentDealId: BBO_PARENT,
+      parentDealId: BBO_PARENT, // parent scope_title IS NULL
       signedDate: "2026-03-21",
       amount: "1500",
       createdBy: REP,
     });
     expect((await fetchDeal(parentless.id)).scope_title).toBeNull();
+  });
+
+  it("does NOT follow a later parent scope-title edit — the child's title is its own", async () => {
+    // The independence half of the decision, pinned. If this ever starts failing because someone added
+    // propagation, the census above is the argument to re-read first: the child is separately billable
+    // work, so a parent retitle must not silently rewrite what accounting already keyed for the CO.
+    const child = await createChangeOrderChildDeal(tdb, {
+      parentDealId: PARENT,
+      signedDate: "2026-03-25",
+      amount: "6500",
+      description: "Step Repair and Re-coat",
+      createdBy: REP,
+    });
+    await tdb.execute(sql`UPDATE deals SET scope_title = 'Exterior Renovation' WHERE id = ${PARENT}`);
+
+    expect((await fetchDeal(child.id)).scope_title).toBe("Step Repair and Re-coat");
+
+    await tdb.execute(sql`UPDATE deals SET scope_title = 'Balcony Repair' WHERE id = ${PARENT}`);
   });
 
   it("silent-vanish invariant: the child always has Won stage + won_closed_date + awarded_amount + not on-hold/test", async () => {
