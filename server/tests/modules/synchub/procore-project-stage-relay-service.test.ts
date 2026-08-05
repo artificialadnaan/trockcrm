@@ -508,6 +508,78 @@ describe("SyncHub Procore project stage-change relay service", () => {
     ]);
   });
 
+  /**
+   * THE SAME HAZARD, FOR THE SLASH FIX — the one thing a "just make the classifier smarter" change can
+   * break that has nothing to do with classification.
+   *
+   * Adding the `compactSlash` lookup form changed "Lost / Cancelled"'s canonical form from
+   * "lost / cancelled" (the bare textual form the old code fell through to) to the alias target
+   * "lost/cancelled (legacy)". That is structurally identical to the Pre-Construction case above, so the
+   * legacy-candidate set must cover it: the old key's stage part was the BARE form, which is exactly the
+   * second candidate `legacyEventKeysForPayload` enumerates. Proven, not assumed, because the guarantee
+   * documented there holds for ADDING aliases and explicitly does not hold for RETARGETING one — and a
+   * new lookup FORM is a third thing the note never considered.
+   */
+  function spacedLegacyPayload() {
+    return validPayload({
+      procore: {
+        companyId: "598134325683880",
+        portfolioProjectId: "987654321",
+        projectNumber: "DFW-1-02326-ad",
+        projectName: "T Rock Portfolio Project",
+        previousStage: "Bidding",
+        currentStage: "Lost / Cancelled",
+      },
+      stageChange: {
+        previousStage: "Bidding",
+        newStage: "Lost / Cancelled",
+        detectedAt: "2026-05-20T14:15:00.000Z",
+        webhookTimestamp: "2026-05-20T14:14:55.000Z",
+      },
+    });
+  }
+
+  /** The key the PRE-FIX code produced: the bare form, before the slash lookup existed. */
+  const LEGACY_SPACED_CANCELLED_KEY =
+    "synchub-stage:webhook-123:598134325683880:987654321:lost / cancelled:2026-05-20T14:15:00.000Z";
+  const CURRENT_SPACED_CANCELLED_KEY =
+    "synchub-stage:webhook-123:598134325683880:987654321:lost/cancelled (legacy):2026-05-20T14:15:00.000Z";
+
+  it("adopts the pre-fix bare key for a slash-spaced legacy stage instead of minting a second receipt", async () => {
+    const { client, query, getStageEntryCount } = createStatefulRecordingClient({
+      seedReceipts: { [LEGACY_SPACED_CANCELLED_KEY]: "unresolved" },
+    });
+
+    const result = await processSyncHubProcoreProjectStageChanged(spacedLegacyPayload(), {
+      client: client as any,
+      receivedAt: new Date("2026-05-20T14:15:05.000Z"),
+    });
+
+    expect(result.status).toBe("recorded");
+    const receiptWrites = query.mock.calls
+      .filter((call) => String(call[0]).includes("INSERT INTO public.portfolio_project_stage_event_receipts"))
+      .map((call) => String((call[1] as unknown[])?.[0]));
+    expect(receiptWrites).toEqual([LEGACY_SPACED_CANCELLED_KEY]);
+    expect(receiptWrites).not.toContain(CURRENT_SPACED_CANCELLED_KEY);
+    expect(getStageEntryCount()).toBe(1);
+  });
+
+  it("mints the current-format key for a slash-spaced legacy stage when there is nothing to adopt", async () => {
+    const { client, query } = createStatefulRecordingClient();
+
+    const result = await processSyncHubProcoreProjectStageChanged(spacedLegacyPayload(), {
+      client: client as any,
+      receivedAt: new Date("2026-05-20T14:15:05.000Z"),
+    });
+
+    // ...and the whole point of the fix: the relay now files it as dead work, not as a live project.
+    expect(result).toMatchObject({ status: "recorded", isBoardRelevant: false });
+    const receiptWrites = query.mock.calls
+      .filter((call) => String(call[0]).includes("INSERT INTO public.portfolio_project_stage_event_receipts"))
+      .map((call) => String((call[1] as unknown[])?.[0]));
+    expect(receiptWrites).toEqual([CURRENT_SPACED_CANCELLED_KEY]);
+  });
+
   it("is still idempotent for a stage whose canonical form did NOT change", async () => {
     // Buy Out was aliased before and after, so old and new keys are identical; the legacy-candidate
     // lookup must not change behaviour here.
