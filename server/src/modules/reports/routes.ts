@@ -759,7 +759,15 @@ router.get("/daily-activity-log", requireAnyRole, async (req, res, next) => {
       req.tenantDb!,
       normalizePerformanceReportFilters(req.query as Record<string, unknown>),
       normalizeDailyActivityLogOptions(req.query as Record<string, unknown>),
-      { role: req.user!.role, userId: req.user!.id, displayName: req.user!.displayName }
+      {
+        role: req.user!.role,
+        // The HOME role, NOT the per-office effective one. Email-content visibility is gated on both
+        // so a `rep` holding a director role_override on an office cannot read that office's mailboxes
+        // (the #740 escalation shape). Row scoping still uses the effective `role`.
+        baseRole: req.user!.baseRole,
+        userId: req.user!.id,
+        displayName: req.user!.displayName,
+      }
     );
     await req.commitTransaction!();
     res.json({ data });

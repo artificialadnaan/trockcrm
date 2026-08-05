@@ -304,12 +304,12 @@ describe("Daily Activity Log KPI cards — the counts never move", () => {
     const page = mountLog();
     page.clickCard("Logged Off-Day");
 
-    const text = page.container.textContent ?? "";
-    expect(text).toContain("Log narrowed to Logged off-day");
-    // Both numbers are on screen: 2 matched out of 4 in the window.
-    expect(text).toContain("2");
-    expect(text).toContain("of");
-    expect(text).toContain("entries in this window");
+    // Asserted as ONE contiguous string, not as three separate toContain calls: "2", "of" and
+    // "entries" each match in a dozen places on this page (the Notes card value is literally 2), so
+    // checking them individually would pass even if the caption printed the same number twice.
+    // 2 matched (narrowed) out of 4 in the window.
+    const text = (page.container.textContent ?? "").replace(/\s+/g, " ");
+    expect(text).toContain("Log narrowed to Logged off-day — 2 of 4 entries in this window");
   });
 });
 

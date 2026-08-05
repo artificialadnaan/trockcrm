@@ -108,11 +108,35 @@ export const DAILY_ACTIVITY_LOG_MAX_LIMIT = 500;
  * Roles that may read the CONTENT (subject/body/outcome/next step) of an email activity they do not
  * own, in THIS report only. Everything about why this exists is in the PRIVACY block inside
  * getDailyActivityLogReport -- including why it is an allowlist rather than a deleted predicate.
- *
- * Exported so tests can assert the membership itself rather than re-typing the role names, which is
- * what lets a revert-check on this line fail loudly instead of quietly.
  */
 export const EMAIL_CONTENT_READER_ROLES: ReadonlySet<UserRole> = new Set<UserRole>(["admin", "director"]);
+
+/**
+ * Whether this viewer may read the content of an email activity they do not own.
+ *
+ * BOTH roles must be allowlisted, and that is the whole point of this function existing.
+ *
+ * `role` is the EFFECTIVE office role: authMiddleware rewrites it from `user_office_access
+ * .role_override` whenever the request carries an `x-office-id` the user holds a grant on, and an
+ * admin can set that override to admin/director/rep. Gating a capability on it alone is the #740
+ * escalation: an account whose `users.role` is `rep` but who holds a `director` override on office X
+ * would arrive here as a director -- which simultaneously stops resolveRepActivityScope collapsing
+ * them to their own rows AND would have put them inside this allowlist, handing them every mailbox in
+ * that tenant. `baseRole` is the HOME role straight from `users.role`, never elevated by an override;
+ * requireGlobalAdmin (rbac.ts) exists for exactly this reason and reads exactly this field.
+ *
+ * Requiring both is deliberately the STRICTER reading in the other direction too: a real admin who has
+ * been scoped DOWN to `rep` for an office does not get elevated content there -- and would only be
+ * seeing their own rows anyway, since resolveRepActivityScope reads the effective role.
+ *
+ * Absent `baseRole` => DENY, matching requireGlobalAdmin. /api/reports is mounted behind
+ * authMiddleware, which sets it on every request, so this only bites a caller that forgot to pass it
+ * -- and the safe answer for "I don't know who this is" is to redact.
+ */
+export function canReadOthersEmailContent(user: { role: UserRole; baseRole?: UserRole | null }): boolean {
+  if (!user.baseRole) return false;
+  return EMAIL_CONTENT_READER_ROLES.has(user.role) && EMAIL_CONTENT_READER_ROLES.has(user.baseRole);
+}
 
 export interface DailyActivityLogOptions {
   types: ActivityType[];
@@ -297,7 +321,13 @@ export function normalizeDailyActivityLogOptions(input: Record<string, unknown> 
   return { types: [...types], loggedOffDay: parseFlag(input.loggedOffDay), page, limit };
 }
 
-/** Express hands a repeated query param back as an array; take the last value, as Express itself does. */
+/**
+ * Express hands a repeated query param (`?loggedOffDay=0&loggedOffDay=1`) back as an ARRAY -- it has
+ * no last-wins rule of its own. Last-wins is this function's choice, picked because it is what a user
+ * editing the tail of a URL expects. Note it differs from the `types` handling above, which JOINS a
+ * repeated param: there, every value is a legitimate member of a set; here they are contradictory
+ * answers to one yes/no question.
+ */
 function parseFlag(value: unknown): boolean {
   const raw = Array.isArray(value) ? value[value.length - 1] : value;
   if (typeof raw === "boolean") return raw;
@@ -366,7 +396,7 @@ export async function getDailyActivityLogReport(
   db: TenantDb,
   filters: PerformanceReportFilters,
   options: DailyActivityLogOptions,
-  user: { role: UserRole; userId: string; displayName?: string | null }
+  user: { role: UserRole; baseRole?: UserRole | null; userId: string; displayName?: string | null }
 ): Promise<DailyActivityLogReport> {
   // Same scoping rule as Rep Activity, via the same function: role "rep" collapses the owner filter
   // to the caller's own id, so a rep reading this log sees only their own entries no matter what
@@ -401,7 +431,10 @@ export async function getDailyActivityLogReport(
   //   activities list (server/src/modules/activities/service.ts) -- STRICTER. Restricts email content
   //     to the mailbox owner for EVERY viewer, admins included:
   //       or(type <> 'email', responsible_user_id = viewerUserId)
-  //   this report -- email content is READABLE by admin and director; withheld from everyone else.
+  //   this report -- email content is READABLE by a viewer who is admin/director BOTH as their home
+  //     role and as their effective office role (canReadOthersEmailContent); withheld from everyone
+  //     else. The two-role check is not belt-and-braces, it is the fix for a real escalation path --
+  //     see that function's doc.
   //
   // That divergence is intentional and owner-approved, not drift: the product owner asked for email
   // content to be visible in the Daily Activity Log, whose entire purpose is that a manager can read
@@ -417,9 +450,10 @@ export async function getDailyActivityLogReport(
   //   mailbox leak the day that scoping rule changes. The allowlist keeps the two decisions
   //   independent: WHICH ROWS you get is resolveRepActivityScope's call, WHOSE CONTENT you can read is
   //   this one's, and a rep cannot read someone else's mail through this endpoint under any filter
-  //   even if the first decision is loosened. requireAnyRole gates the route to admin/director/rep, so
-  //   `construction` and `field_contractor` cannot reach it -- but they are outside the allowlist too,
-  //   so a widened route guard does not silently widen this.
+  //   even if the first decision is loosened. requireAnyRole gates the route to the three CRM roles by
+  //   EFFECTIVE role, so a `construction` account cannot reach it without an office override -- and if
+  //   one is ever granted, its home role is still outside the allowlist, so the route guard and this
+  //   decision cannot be widened by the same act.
   //
   // Redaction still REDACTS rather than EXCLUDES for the restricted case: the row stays, keeps its
   // type/time/rep/target so it still counts, and only the free-text content fields are nulled.
@@ -427,7 +461,7 @@ export async function getDailyActivityLogReport(
   // total_touchpoints, its `emails` breakdown and its timeline for every viewer. A count is not a
   // disclosure; the subject line is. The row is flagged so the UI can say "content private" rather
   // than render a blank entry that reads like a data bug.
-  const contentRestricted = EMAIL_CONTENT_READER_ROLES.has(user.role)
+  const contentRestricted = canReadOthersEmailContent(user)
     ? sql`false`
     : sql`(a.type = 'email' AND a.responsible_user_id <> ${user.userId})`;
 

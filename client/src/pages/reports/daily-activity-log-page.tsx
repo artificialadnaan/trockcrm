@@ -369,8 +369,15 @@ export function DailyActivityLogPage() {
                 useful (a per-day or per-rep breakdown) is a different report — Rep Activity already
                 has the per-rep cut, and the log below already IS the per-day cut. So they render as
                 plain cards: no handler, no pointer cursor, no hover, and no tab stop, because a
-                keyboard user landing on a dead control is the worst version of a fake affordance.
-                The helper line says which cards do what so the difference is not left to hover. */}
+                keyboard user landing on a permanently dead control is the worst kind of fake
+                affordance. The helper line says which cards do what so the difference is not left
+                to hover.
+
+                Note the lit Entries card is NOT the same thing, even though clicking it also does
+                nothing: it is a control whose condition is currently SATISFIED, exactly like the
+                selected "All types" chip below, and it announces that with aria-pressed="true". It
+                stays in the tab order because a keyboard user needs to reach it to learn the state
+                and to return to it once a narrowing is on. These two cards can never do anything. */}
             <KpiCard
               label="Days With Activity"
               value={formatNumber(data.kpis.daysCovered)}

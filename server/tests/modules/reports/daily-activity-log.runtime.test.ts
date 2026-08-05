@@ -24,9 +24,11 @@ import {
   properties,
   users,
 } from "@trock-crm/shared/schema";
+import { USER_ROLES } from "@trock-crm/shared/types";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 import {
   EMAIL_CONTENT_READER_ROLES,
+  canReadOthersEmailContent,
   getDailyActivityLogReport,
   normalizeDailyActivityLogOptions,
 } from "../../../src/modules/reports/daily-activity-log-service.js";
@@ -64,7 +66,9 @@ const FILTERS = {
   ownerNames: [] as string[],
 };
 
-const DIRECTOR = { role: "director" as const, userId: DANA, displayName: "Dana Director" };
+// baseRole is the HOME role from users.role; `role` is the per-office EFFECTIVE role. For a normal
+// director with no office override the two coincide, which is what this fixture represents.
+const DIRECTOR = { role: "director" as const, baseRole: "director" as const, userId: DANA, displayName: "Dana Director" };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let tdb: any;
@@ -453,12 +457,12 @@ describe("daily activity log — email content visibility", () => {
   // while "a non-allowlisted viewer does not" fails, which is the direction that matters.
   const JULY = { ...FILTERS, dateFrom: "2026-07-01", dateTo: "2026-07-31" };
 
-  const ADMIN = { role: "admin" as const, userId: DANA, displayName: "Dana Director" };
+  const ADMIN = { role: "admin" as const, baseRole: "admin" as const, userId: DANA, displayName: "Dana Director" };
   // A viewer whose role is NOT on the allowlist AND is not collapsed to their own rows by
   // resolveRepActivityScope. requireAnyRole keeps this role off the route today; the point of testing
   // it is that the CONTENT decision must not depend on the ROW decision -- widen either guard and the
   // other still holds. This is the case that would fail if the predicate were simply deleted.
-  const OUTSIDER = { role: "construction" as const, userId: DANA, displayName: "Dana Director" };
+  const OUTSIDER = { role: "construction" as const, baseRole: "construction" as const, userId: DANA, displayName: "Dana Director" };
 
   it("shows a rep their OWN email content in full", async () => {
     const alice = { role: "rep" as const, userId: ALICE, displayName: "Alice Rep" };
@@ -478,6 +482,64 @@ describe("daily activity log — email content visibility", () => {
     for (const role of ["rep", "construction", "field_contractor"] as const) {
       expect(EMAIL_CONTENT_READER_ROLES.has(role)).toBe(false);
     }
+  });
+
+  // The effective/home role split, decided in one pure function so it can be enumerated exhaustively
+  // rather than sampled. `role` is what authMiddleware rewrites from user_office_access.role_override;
+  // `baseRole` is users.role. Gating on the effective role alone is the #740 escalation.
+  it("requires BOTH the effective office role and the home role to be allowlisted", () => {
+    for (const role of USER_ROLES) {
+      for (const baseRole of USER_ROLES) {
+        const allowed = canReadOthersEmailContent({ role, baseRole });
+        const bothAllowlisted =
+          EMAIL_CONTENT_READER_ROLES.has(role) && EMAIL_CONTENT_READER_ROLES.has(baseRole);
+        expect({ role, baseRole, allowed }).toEqual({ role, baseRole, allowed: bothAllowlisted });
+      }
+    }
+
+    // The escalation itself, named: a rep handed a director override on an office.
+    expect(canReadOthersEmailContent({ role: "director", baseRole: "rep" })).toBe(false);
+    expect(canReadOthersEmailContent({ role: "admin", baseRole: "construction" })).toBe(false);
+    // And the other direction: a real admin scoped DOWN to rep for an office gets no elevation there.
+    expect(canReadOthersEmailContent({ role: "rep", baseRole: "admin" })).toBe(false);
+    // Absent baseRole fails CLOSED, the same way requireGlobalAdmin does.
+    expect(canReadOthersEmailContent({ role: "admin" })).toBe(false);
+    expect(canReadOthersEmailContent({ role: "admin", baseRole: null })).toBe(false);
+  });
+
+  it("withholds content from a rep who holds a DIRECTOR override on this office", async () => {
+    // authMiddleware would hand the service role=director (from user_office_access.role_override) with
+    // baseRole=rep. The effective role is what stops resolveRepActivityScope collapsing them to their
+    // own rows -- so they DO receive Alice's and Bob's rows. The home role is what must stop them
+    // reading the mail in those rows. If this endpoint gated on `role` alone, this test returns
+    // "Alice mailbox body." to a rep.
+    const escalated = { role: "director" as const, baseRole: "rep" as const, userId: DANA, displayName: "Dana Director" };
+    const report = await getDailyActivityLogReport(tdb, JULY, opts(), escalated);
+    const byId = new Map(report.days.flatMap((d) => d.entries).map((e) => [e.id, e]));
+
+    // They are NOT scope-collapsed -- every row is here, which is precisely what makes this dangerous.
+    expect(report.kpis.totalEntries).toBe(3);
+    expect(byId.has(E1)).toBe(true);
+    expect(byId.has(E2)).toBe(true);
+
+    for (const id of [E1, E2]) {
+      expect(byId.get(id)!.contentRestricted).toBe(true);
+      expect(byId.get(id)!.subject).toBeNull();
+      expect(byId.get(id)!.body).toBeNull();
+    }
+    expect(JSON.stringify(report)).not.toContain("Alice mailbox body.");
+    expect(JSON.stringify(report)).not.toContain("Bob mailbox body.");
+  });
+
+  it("withholds content from a caller that omits baseRole entirely", async () => {
+    // Fail-closed. /api/reports always runs behind authMiddleware, which sets baseRole -- but a future
+    // caller that forgets it must get redaction, not the admin view.
+    const noBaseRole = { role: "admin" as const, userId: DANA, displayName: "Dana Director" };
+    const report = await getDailyActivityLogReport(tdb, JULY, opts(), noBaseRole);
+    const byId = new Map(report.days.flatMap((d) => d.entries).map((e) => [e.id, e]));
+
+    expect(byId.get(E1)!.contentRestricted).toBe(true);
+    expect(byId.get(E1)!.body).toBeNull();
   });
 
   for (const viewer of [ADMIN, DIRECTOR]) {

@@ -86,8 +86,10 @@ export function KpiCard({
       aria-pressed={active}
       onClick={onClick}
       className={cn(
-        // Matches the static card's shape (rounded-xl, white, ring-as-border) so an interactive card
-        // sits in the same grid without looking like a different component.
+        // Mirrors the static card's shape — rounded-xl, white, ring-as-border — so the two sit in one
+        // grid as the same component. Not pixel-identical: `Card` adds py-4 on top of CardContent's
+        // p-4, so a static card carries more vertical padding. Grid `align-items: stretch` equalises
+        // the heights anyway, and the interactive card spends that room on its affordance line.
         "flex cursor-pointer flex-col rounded-xl bg-white p-4 text-left transition",
         "focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red focus-visible:ring-offset-2",
         active

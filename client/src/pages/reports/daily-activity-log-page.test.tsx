@@ -312,13 +312,29 @@ describe("DailyActivityLogPage", () => {
   });
 
   it("describes the filter from the server's appliedTypes, not the raw URL", () => {
-    // A retired type in the URL is dropped by the server, which then returns ALL types. The page must
-    // not claim the counts are filtered -- no chip lights up and no "Filtered to" caption appears.
+    // A retired type in the URL is dropped by the server, which then returns ALL types (this file's
+    // mock has appliedTypes: []). The page must not claim the log is narrowed -- no chip lights up
+    // and no narrowing caption appears.
+    //
+    // The caption assertion names the CURRENT wording on purpose. It was "Filtered to" once; leaving
+    // the stale string here would have made this half of the test unfalsifiable the moment the copy
+    // changed, since a string that appears nowhere can never be "not contained".
     const html = htmlFor("/reports/performance/daily-activity-log?types=not_a_real_type");
 
-    expect(html).not.toContain("Filtered to");
+    expect(html).not.toContain("Log narrowed to");
     // "All types" stays selected (dark chip) because nothing valid was requested.
     expect(html).toContain("border-slate-950 bg-slate-950 text-white\">All types");
+
+    // The discriminating case. This mock always answers appliedTypes: [] -- so with a VALID type in
+    // the URL the request and the response disagree, which is the only state in which "reads the echo"
+    // and "reads the URL" produce different output. A caption built from the URL would print
+    // "Log narrowed to Note" here. Without this line the case above passes either way, because the
+    // sanitiser drops `not_a_real_type` from the URL list too.
+    const validButUnapplied = htmlFor("/reports/performance/daily-activity-log?types=note");
+    expect(validButUnapplied).not.toContain("Log narrowed to");
+    // ...while the CHIP does follow the URL (it echoes the request), so the two are genuinely wired to
+    // different sources and this is not just "nothing renders".
+    expect(validButUnapplied).toContain("border-brand-red bg-brand-red text-white\">Note");
   });
 
   it("discloses the Rep Activity cache window and the email redaction in the footnote", () => {

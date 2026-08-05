@@ -1490,9 +1490,9 @@ export function useRepActivityReport(options: PerformanceReportQueryOptions = {}
 }
 
 /**
- * Daily Activity Log. Not routed through usePerformanceReport because it carries three params that
- * report does not know about (types/page/limit) and they must take part in the refetch deps —
- * otherwise turning a type filter on or paging forward would leave the previous page on screen.
+ * Daily Activity Log. Not routed through usePerformanceReport because it carries four params that
+ * report does not know about (types/loggedOffDay/page/limit) and they must take part in the refetch
+ * deps — otherwise turning a filter on or paging forward would leave the previous page on screen.
  */
 export function useDailyActivityLogReport(options: DailyActivityLogQueryOptions = {}) {
   const typeKey = options.types?.join(",") ?? "";
