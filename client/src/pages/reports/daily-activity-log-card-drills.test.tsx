@@ -360,6 +360,18 @@ describe("Daily Activity Log KPI cards — toggling and the chip row", () => {
     expect(page.cardFor("Entries").getAttribute("aria-pressed")).toBe("true");
   });
 
+  it("does nothing at all when the lit Entries card is clicked", () => {
+    // It reads "Showing every entry" -- so it must not quietly reset the page offset underneath a
+    // reader who is three pages into an unnarrowed log.
+    const page = mountLog("/reports/performance/daily-activity-log?page=3&dateFrom=2026-06-01");
+
+    expect(page.cardFor("Entries").getAttribute("aria-pressed")).toBe("true");
+    page.clickCard("Entries");
+
+    expect(page.search()).toContain("page=3");
+    expect(page.search()).toContain("dateFrom=2026-06-01");
+  });
+
   it("lights Entries whenever nothing is narrowed, including via the chip row", () => {
     const page = mountLog("/reports/performance/daily-activity-log?types=call");
 

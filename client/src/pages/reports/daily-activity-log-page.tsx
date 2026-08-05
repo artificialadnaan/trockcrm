@@ -170,7 +170,13 @@ export function DailyActivityLogPage() {
 
   // Entries is the "show everything" card, the same role "All types" plays in the chip row: it is lit
   // when nothing is narrowed and clicking it clears every narrowing at once.
+  //
+  // Lit, it is a STATUS and does nothing when clicked. The early return is the whole point: without
+  // it, setParams would still drop `page`, so clicking a card that reads "Showing every entry" would
+  // silently throw a reader on page 3 back to page 1 — a control that says it is doing nothing while
+  // moving you.
   function clearNarrowing() {
+    if (!narrowed) return;
     setParams({ types: null, loggedOffDay: null });
   }
 
