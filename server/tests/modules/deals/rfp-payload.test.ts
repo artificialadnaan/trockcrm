@@ -3,6 +3,7 @@ import {
   buildNormalizedRfpRequestBody,
   buildRfpAttachmentsFromFiles,
   buildRfpRequestDeliveryPayload,
+  resolveRfpDealAmount,
 } from "../../../src/modules/deals/rfp-payload.js";
 
 describe("RFP normalized payload builder", () => {
@@ -240,5 +241,49 @@ describe("RFP normalized payload builder", () => {
     expect(payload.dealId).toBe("deal-3");
     expect(payload.syncHubUrl).toBe("https://synchub.example.com/api/rfp-requests");
     expect(payload.body.sourceSystem).toBe("trock_crm");
+  });
+});
+
+describe("resolveRfpDealAmount", () => {
+  it("walks awarded > bid > dd > forecast", () => {
+    expect(
+      resolveRfpDealAmount({
+        awardedAmount: "925000",
+        bidEstimate: "800000",
+        ddEstimate: "700000",
+        forecastRevenue: "600000",
+      })
+    ).toBe(925000);
+    expect(
+      resolveRfpDealAmount({ awardedAmount: null, bidEstimate: "800000", ddEstimate: "700000" })
+    ).toBe(800000);
+    expect(resolveRfpDealAmount({ ddEstimate: "700000", forecastRevenue: "600000" })).toBe(700000);
+    expect(resolveRfpDealAmount({ forecastRevenue: "600000" })).toBe(600000);
+  });
+
+  it("treats blank, absent and non-numeric columns as no value", () => {
+    expect(resolveRfpDealAmount({})).toBeNull();
+    expect(resolveRfpDealAmount({ awardedAmount: "", bidEstimate: null, ddEstimate: undefined })).toBeNull();
+    expect(resolveRfpDealAmount({ awardedAmount: "not a number" })).toBeNull();
+    // 0 is a real answer, not "missing" — it must not fall through to the next column.
+    expect(resolveRfpDealAmount({ awardedAmount: 0, bidEstimate: "800000" })).toBe(0);
+  });
+
+  it("is the SAME precedence the send-time payload uses", () => {
+    const deal = {
+      id: "deal-precedence",
+      name: "Precedence",
+      dealNumber: "dfw-4-12345-aa",
+      awardedAmount: null,
+      bidEstimate: "248500",
+      ddEstimate: "100000",
+      forecastRevenue: "95000",
+    };
+
+    // If these two ever diverge, the number in the RFP email and the number on the RFP report
+    // are computed by different rules for the same deal.
+    expect(buildNormalizedRfpRequestBody({ deal, sourceEventId: "e" }).deal.amount).toBe(
+      resolveRfpDealAmount(deal)
+    );
   });
 });
