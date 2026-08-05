@@ -158,7 +158,12 @@ assigned-rep fallback existed in the **`deal_stage_history` backstop trigger**
 two production investigations. So a HubSpot-written close date is recorded with a **NULL** actor, not
 falsely attributed to the rep. That is materially better — a gap, not a lie — but still not self-evident,
 because plenty of legitimate rows also carry a NULL actor. **The exclusion must key on
-`hubspot_refresh_log`, never on `changed_by IS NULL`.**
+`hubspot_refresh_log`, never on `changed_by IS NULL` alone.** "Alone" is load-bearing in both directions:
+actorlessness cannot select the population, and the ledger cannot select the *row* — a ledger entry
+records the write the script planned, and when a rep lands the identical change first the script's own
+trigger row is never written while the ledger row is. §4.0.2 arm (a) therefore carries actorlessness as a
+**conjunct** that narrows a ledger match, and the reasoning is stated there rather than restated here
+(convention 18).
 
 The stage-advance writer is additionally guarded (`stage-change.ts:290-314`): it persists the date only
 when the target stage's gate checklist actually lists `expectedCloseDate` as a required field *and* the
@@ -662,6 +667,12 @@ migration seeds would corrupt exactly that decision. So emit `hubspot_refresh_ev
 `machine_source` label alongside `source`. If both are zero across the board — the likely outcome if the
 refresh has only ever run dry (§1.1.1) — the columns cost nothing and prove the report is clean.
 
+**All three counters are drawn from `D_landed` ∪ `D_open`** — the union of the populations of the two
+metrics that attribute a standing value to a machine (`machine_superseded_n`, `machine_dated_n`), and
+deliberately **not** `D_book`, whose reopen-evidence subtraction belongs to churn and would let the
+counters read zero on a book whose scored deals were machine-dated. The argument is made once, in §4.0.6,
+and not restated here (convention 18).
+
 **(c) Bid-Board-owned deals — include, but flag.** `d.is_bid_board_owned` / `d.is_read_only_mirror`. The
 existing close-date campaign deliberately includes them: `scripts/lib/close-date-workflow.ts:311-316`
 records that BB-owned deals *"ARE included (they count toward coverage and a close-date write on them
@@ -835,8 +846,12 @@ close_date_timeline AS (
            ELSE NULL
          END AS machine_source,
          CASE
-           -- (a) HubSpot refresh overwrite (§1.1.1). Matched against the purpose-built ledger.
-           WHEN EXISTS (
+           -- (a) HubSpot refresh overwrite (§1.1.1). Matched against the purpose-built ledger,
+           -- AND actorless. The ledger match alone identifies the WRITE THE SCRIPT PLANNED, not
+           -- the trigger row that carried it out -- see below; the actor conjunct is what ties the
+           -- match to a row only the script could have written.
+           WHEN e.actor_user_id IS NULL
+            AND EXISTS (
              SELECT 1 FROM public.hubspot_refresh_log l
              WHERE l.tenant_schema = :tenant_schema
                AND l.deal_id       = e.deal_id
@@ -881,6 +896,39 @@ On the ±1 minute window in arm (a): both rows are written inside `applyDealChan
 `NOW()`-derived timestamps are identical. The window is slack for the case where they do not; the match is
 really carried by `(deal_id, old_value, new_value)`. Verify against real data before shipping. If the
 §1.1.1 census returns no rows, arm (a) is inert.
+
+**And `actor_user_id IS NULL` is a conjunct of arm (a), because without it the classifier can take a
+rep's own edit and call it the machine's.** The ledger row records **the write the script planned**, not
+the trigger row that carried it out, and the two are not the same thing. `buildDealUpdatePlan` reads the
+CRM value (call it A), sees HubSpot's B, and queues `old=A, new=B`; `applyDealChanges` then issues
+`UPDATE … SET expected_close_date = $n WHERE id = $m` — **no old-value guard**
+(`refresh-from-hubspot.ts:697-700`) — and writes the ledger row **unconditionally**, guarded only by the
+row existing (`:704`, `:709-716`). If a rep makes the same A→B change in the seconds between the plan and
+the apply, the script's `UPDATE` writes B over B: `audit_trigger_func()` compares `OLD` and `NEW` per
+column, `expected_close_date` is unchanged, and **no trigger row carrying that key is produced at all**
+(only `updated_at` / `last_synced_from_hubspot_at` change, and `changes ? 'expected_close_date'` is false).
+The ledger row exists anyway. So in that window there is exactly **one** `expected_close_date` trigger row
+with `(deal, A, B)` — the **rep's**, carrying the rep's actor — and the un-conjuncted arm matched it. The
+rep's forecast was classified `machine`, dropped from `D_score`, dropped from `E`, and counted in
+`machine_superseded_n`. This is not the two-rows-one-stolen case it looks like: the machine row the
+classifier believes it found was never written.
+
+**Why this does not contradict §1.1.2's "key on `hubspot_refresh_log`, never on `changed_by IS NULL`".**
+The ledger is still the key: actorlessness alone marks nothing, and every legitimate NULL-actor rep write
+(the spreadsheet campaign without `--attribute`, §5.4) stays `'rep'` because no ledger row matches it. The
+conjunct only *narrows* a ledger match, and it narrows it by the one property the script's own trigger row
+always has and a rep's never does: the script writes on its own `Client` and never calls
+`set_config('app.current_user_id', …)` (verified — the string does not appear in the file), while every
+API edit runs through `server/src/middleware/tenant.ts:101`. Arm (b) has carried the same conjunct for the
+same reason since round 4; arm (a) simply never had it.
+
+**Convention 20 — what the old form guaranteed, and whether this one still does.** *Completeness over the
+script's writes*: preserved, since every real refresh write is actorless. *Precision*: strictly improved —
+this is the property that was missing. *Non-emptiness*: unchanged, arm (a) remains gated on the §1.1.1
+census. **The residual, stated rather than assumed away:** if the refresh is ever run through a connection
+that has `app.current_user_id` set — a wrapper, a future in-process port — its writes acquire an actor and
+arm (a) silently stops matching them, which is under-detection in the same direction as arm (b)'s. The
+real-data obligation below counts both sides of the split so neither failure is invisible.
 
 Index note: `hubspot_refresh_log`'s only usable index is
 `hubspot_refresh_log_run_idx (run_id, tenant_schema, deal_id)` — leading on `run_id`, so a per-deal probe
@@ -1128,11 +1176,44 @@ deal_facts AS (
              -- invented one is a wrong story.
              AND hsrc.slug IS NOT NULL
              AND hsrc.slug NOT IN (:won_slugs) AND hsrc.slug NOT IN (:lost_slugs)
-             -- BOTH ends on the same basis: the CT calendar date of the stage entry, inclusive.
-             -- Matches ctDateInWindowSql (monday-showcase-service.ts:322-327), which already applies
-             -- this rule to THIS column. Do not mix a bare `>= :from` with a converted upper bound.
-             AND (h.created_at AT TIME ZONE 'America/Chicago')::date >= :from::date
-             AND (h.created_at AT TIME ZONE 'America/Chicago')::date <= :to::date
+             -- THE WINDOW IS ON THE CANONICAL OUTCOME DATE, RECONSTRUCTED -- not on the stage-entry
+             -- date, which is a DIFFERENT BASIS from the one D_landed is cut on. D_landed uses
+             -- outcome_date; for a Won deal that is won_closed_date, and the write-through at
+             -- stage-change.ts:387 sets won_closed_date to the CONTRACT-SIGNED date whenever one is
+             -- present (§1.8, "always-when-present"), which can precede the Won stage move by weeks.
+             -- Keyed on the stage entry alone, a deal whose contract was signed inside [from, to],
+             -- moved to Won after `to`, and then reopened has its in-window landing missing from
+             -- D_landed AND failing this window -- so the disappearance this diagnostic exists to
+             -- report is the one case it cannot see. The two halves of the test must agree on what
+             -- "landed in this period" means or the diagnostic does not describe D_landed's loss.
+             --
+             -- RECONSTRUCTED, because won_closed_date is gone by the time this runs: the reopen
+             -- clears it (stage-change.ts:357-362). It does NOT clear contract_signed_at /
+             -- contract_signed_date, so the write-through's own input survives, and the expression
+             -- below is effectiveContractSignedDate's verbatim -- COALESCE(contract_signed_at::date,
+             -- contract_signed_date). Its bare ::date is that helper's documented UTC basis (§1.8)
+             -- and is the SECOND deliberate exception to §4.0.6's timezone rule, for the same reason
+             -- as d.lost_at::date above: converting it here would reconstruct the write-through on a
+             -- basis the write-through does not use (convention 18 -- cite, never restate).
+             --
+             -- Won only. A Lost landing's canonical date is lost_at, which the reopen also clears and
+             -- which nothing else records, so the fallback carries it.
+             --
+             -- FALLBACK, and its residual: with no contract-signed date the canonical Won date was
+             -- the stage-driven stamp, and the CT date of the stage entry stands in for it -- matching
+             -- ctDateInWindowSql (monday-showcase-service.ts:322-327), which already applies the
+             -- business-timezone rule to THIS column. stage-change.ts writes that stamp as a UTC date
+             -- (new Date().toISOString()), so the two can differ by a day for a transition after
+             -- 19:00 CT. A one-day residual on a diagnostic, disclosed rather than engineered away
+             -- (§8); the basis error it replaces was measured in weeks.
+             --
+             -- BETWEEN rather than two comparisons: one left operand cannot carry two bases, so the
+             -- both-ends property (§4.0.6) holds by construction instead of by inspection.
+             AND COALESCE(
+                   CASE WHEN hp.slug IN (:won_slugs)
+                        THEN COALESCE(d.contract_signed_at::date, d.contract_signed_date) END,
+                   (h.created_at AT TIME ZONE 'America/Chicago')::date
+                 ) BETWEEN :from::date AND :to::date
            -- ...AND a later row moving OUT of a terminal stage. This is the positive evidence that a
            -- REOPEN happened. Without it the predicate proved only "landed in-window, and the landing
            -- is missing from D_landed", which a NULL outcome_date or a corrected out-of-window date
@@ -1273,7 +1354,7 @@ It excludes only **stored** `on_hold` deals — the far-out auto-park leg is del
 | `D_precrm` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NOT NULL` ∩ `hubspot_linked` ∩ `outcome_date` **before `crm_arrival_at`'s CT date** — landed before it existed in the CRM (§2.5(a)). **Not** `deals.created_at`, which the importer sets from HubSpot. **An overlay in v1, not a partition member** (`PRECRM_CARVEOUT_ENABLED` = false, §6.4): the deals stay in `D_landed` / `D_outside` and are counted by `precrm_landed_n` and `precrm_outside_n` respectively (§4.0.6) — this population itself carries **no period bound**, which is why the bias caveat reads only its in-period slice. Flipping the flag makes it a partition member taking precedence over both, and **the two diagnostics keep counting**, because they cut this population by the period predicate rather than by the two gated populations (§4.0.6) | — (unbounded; its two diagnostic slices apply the period predicate directly) |
 | `D_nodate` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NULL` | — |
 | `D_open` | `D` ∩ `outcome_kind = 'open'` | **today** (see below) |
-| `D_reopened` | `D` ∩ a `deal_stage_history` row **into** a Won/Lost stage whose CT date is in `[from, to]` ∩ a later row **out of** a terminal stage (`from_stage_id` terminal, `to_stage_id` not) — the positive reopen evidence ∩ that landing is not represented in `D_landed`. An **overlay**, not a partition member (see RELATIONS) | period |
+| `D_reopened` | `D` ∩ a `deal_stage_history` row **into** a Won/Lost stage whose **reconstructed canonical outcome date** is in `[from, to]` — the contract-signed date for a Won landing that has one, else the CT date of the stage entry (§4.0.5, the same basis `D_landed` is cut on) ∩ a later row **out of** a terminal stage (`from_stage_id` terminal, `to_stage_id` not) — the positive reopen evidence ∩ that landing is not represented in `D_landed`. An **overlay**, not a partition member (see RELATIONS) | period |
 | `D_outside` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NOT NULL` ∩ **not `D_precrm`, on the same `PRECRM_CARVEOUT_ENABLED` gate as `D_landed`** ∩ `outcome_date` **outside** `[from, to]` — before `from` **or** after `to` | out of period |
 | `D_book` | `(D_landed ∪ D_open)` minus every deal with **reopen evidence** (broader than `D_reopened`: it also drops land-reopen-reclose-in-window deals, which stay in `D_landed`). Denominator for churn rates. | mixed, stated |
 | `D_score` | `D_landed` ∩ `p30_state = 'rep_prediction'` ∩ P₃₀ not parked-at-write (§6.2) | period |
@@ -1312,25 +1393,49 @@ makes it a member — at which point §4.0.6's invariant 3 must be re-pinned wit
 change. **A population you are not yet willing to remove is an overlay with a diagnostic, not a member
 with a hole where the deals used to be.**
 
-**`D_reopened`'s window is CT-anchored on both ends**, matching `ctDateInWindowSql`
+**`D_reopened`'s window is on the same date basis as `D_landed`'s, reconstructed** — inclusive at both
+ends, consistent with `D_landed`'s `BETWEEN from AND to`. The two are one question asked twice ("did a
+landing fall in this period?"), so they cannot be asked on two bases: `D_landed` cuts on `outcome_date`,
+which for a Won deal is `won_closed_date` and therefore the **contract-signed date whenever one is
+present** (§1.8's write-through), while a stage-history date is when the *stage* moved. The reconstruction
+is stated at the SQL and not restated here (convention 18): contract-signed for a Won landing that has
+one, else the CT date of the stage entry, matching `ctDateInWindowSql`
 (`server/src/modules/reports/monday-showcase-service.ts:322-327`) — which already applies the
-business-timezone rule to `deal_stage_history.created_at`, the same column. That existing helper is the
-convention; a `business_day_start()` twin was not invented for it. Inclusive at both ends, consistent with
-`D_landed`'s `BETWEEN from AND to` (§4.0.5).
+business-timezone rule to `deal_stage_history.created_at`, the same column, so no `business_day_start()`
+twin was invented for it.
 
-An earlier draft compared `h.created_at >= :from` bare against a `business_day_end_exclusive(:to)` upper
-bound — one end session-timezone-dependent, the other explicit, in the same window. **Blast radius, worth
-stating because it is larger than it looks:** this boundary decides `is_reopened_after_landing`, which
-gates `D_cov`, `machine_dated_n` and `reopened_after_landing_n` — so a terminal stage entry near midnight
-moves a deal between three buckets *and* breaks the population tie-out in §4.0.6.
+**Convention 20 — what the two-comparison CT form guaranteed, and whether the `BETWEEN` still does.**
+*Both ends on one basis*: now structural rather than inspected, since a single left operand cannot carry
+two. *Inclusivity*: unchanged. *Timezone-explicitness on the stage-entry leg*: unchanged. What it did
+**not** carry, and the reason for the change, is *agreement with `D_landed`'s own basis* — the property
+nobody had named, because the earlier rounds on this window were about the timezone of one column rather
+than about which column answers the question.
+
+Two earlier drafts of this same boundary are why it is worth spelling out. One compared
+`h.created_at >= :from` bare against a `business_day_end_exclusive(:to)` upper bound — one end
+session-timezone-dependent, the other explicit, in the same window. **Blast radius, worth stating because
+it is larger than it looks:** this boundary decides `is_reopened_after_landing`, which gates `D_cov`,
+`machine_dated_n` and `reopened_after_landing_n` — so a landing date that moves by a day moves a deal
+between three buckets *and* breaks the population tie-out in §4.0.6. A landing date that moves by a
+contract-signed correction moves it by weeks.
 
 **What counts as a reopen.** Two pieces of positive evidence, both from `deal_stage_history`: a row
-*into* a Won/Lost stage whose CT date falls in `[from, to]` (the landing), and a **later** row whose
+*into* a Won/Lost stage whose reconstructed canonical outcome date falls in `[from, to]` (the landing —
+the basis above), and a **later** row whose
 `from_stage_id` is a Won/Lost stage and whose `to_stage_id` is not (the reopen). An earlier draft required
 only the landing plus "the landing is absent from `D_landed`" — but absence has other causes. A deal whose
 `outcome_date` is NULL (`D_nodate`, a mirror-terminal with no Won date) or whose Won date was later
 corrected to fall outside the window both satisfy that predicate without ever having reopened, so a
 data-quality problem was reported as a workflow event in a diagnostic people would act on.
+
+**The reopen's *ordering* test stays on `deal_stage_history.created_at`, and that is not the mixed basis
+it can look like beside the window above.** They answer different questions. "Was the landing inside the
+reporting period" is a question about the *outcome date*, which is what `D_landed` is cut on and what the
+reconstruction supplies. "Did the reopen row come after the landing row" is a question about two rows in
+one table, and the only ordering that table has is its own timestamps — a contract-signed date is not an
+ordering over stage history and using it as one would compare a correction against a transition. One
+predicate legitimately reads two columns when it asks two questions; what it may not do is answer *one*
+question two ways, which is what the window was doing.
 
 **"Later" means strictly later, and the timezone correction had quietly stopped guaranteeing it.** The
 comparison started as a raw `reo.created_at > h.created_at`, which was strict but inverted under
@@ -1513,8 +1618,9 @@ here. Adding a metric without adding a row is the defect re-entering.**
 | `forecast_reliability` | 6.1 | `COALESCE(coverage_rate,0) * COALESCE(hit_rate_14d,0)` | — | Composite; both operands coalesced so zero coverage yields zero |
 | `scoreable_final_n` | 4.2 | `D_score_final` | — | Count; the `hit_rate_14d_final` volume floor (§6.4) |
 | `cov_n` | 4.1 | `D_cov` | — | Count; the `coverage_rate` volume floor (§6.4) |
+| `book_n` | 4.4 | `D_book` | — | Count; the `moves_per_deal` and `chronic_mover_rate` denominator **and** their volume floor (§6.4). Named for the same reason as `cov_n`: a floor an `ORDER BY` cannot reference is not enforced by it (§7) |
 | `moves_by_other_actor` | 3 | `E` where `actor_user_id` is a user other than the owner (NULL ≠ "other") | — | Event count |
-| `machine_written_events_n`, `hubspot_refresh_events_n`, `migration_seed_events_n` | 2.5(b) | `close_date_timeline` on `D_book`: `source='machine'` for the total, `machine_source='hubspot_refresh'` / `='migration_seed'` for the two arms | — | Diagnostic |
+| `machine_written_events_n`, `hubspot_refresh_events_n`, `migration_seed_events_n` | 2.5(b) | `close_date_timeline` on `D_landed` ∪ `D_open` — **the union of every population a machine-provenance metric is drawn from, which is not `D_book`** (see below): `source='machine'` for the total, `machine_source='hubspot_refresh'` / `='migration_seed'` for the two arms. No event-window cap: contamination is a fact about the write, not about whether the edit was still forecasting | — | Diagnostic |
 | `mirror_terminal_no_date_n` | 4.0.5 | **`D_nodate`** | — | Diagnostic |
 | `bid_board_owned_n` | 2.5(c) | `D_book` | — | Diagnostic |
 | `out_of_period_landed_n` | 4.0.5 | `D_outside` | — | Diagnostic; excluded from every other metric |
@@ -1536,6 +1642,29 @@ period predicate partitions the population in both flag states, is identical to 
 the flag is false, and keeps measuring after it is flipped. **A diagnostic defined by subtracting the thing
 it measures measures nothing** — the same shape as `D_precrm`'s own two wrong versions, which were also
 well-formed, also cascaded correctly, and also inert.
+
+**Why the three machine-event diagnostics are drawn from `D_landed` ∪ `D_open` and not from `D_book`.**
+They exist to explain the machine-provenance *metrics*, and a diagnostic drawn from a smaller population
+than the metric it explains can read zero while the metric reads non-zero. Two metrics attribute a
+standing value to a machine: `machine_superseded_n` over `D_landed` (§4.2) and `machine_dated_n` over
+`D_open` (§4.1). `D_book` is **neither** — it is `(D_landed ∪ D_open)` minus every deal with reopen
+evidence, and that subtraction was made for churn, where a closed interval inside the event window is a
+real problem (§4.0.5). Contamination has no such interval: a machine write is not the rep's forecast
+whether or not the deal later reopened. So the deals the churn exclusion removes are exactly the ones
+that break the diagnostic. A deal that lands, reopens and re-closes inside `[from, to]` **stays in
+`D_landed`** — its landing is represented by the reclose date — and if a machine write was the standing
+value at its P₃₀ anchor it increments `machine_superseded_n`; but it carries reopen evidence, so `D_book`
+drops it and all three counters stay at zero. The reader is then told the book is clean by the columns
+whose whole job is to say it is not. The same shape reaches `machine_dated_n`, one step out: an open deal
+with reopen evidence but **no** in-window landing is not `is_reopened_after_landing`, so it is counted
+there, while `D_book` excludes it on the broader `has_reopen_evidence` test.
+
+The population is the union of the two and no wider: `D_outside` and `D_nodate` carry no
+machine-provenance metric, so counting their events would inflate the contamination number with events
+that distort nothing this report publishes. **A diagnostic's population is the union of the populations
+of the metrics it explains** — stated generally because this is the third population-mismatch defect in
+this table's register, after `moves_per_deal`'s denominator and the two `D_precrm` slices, and all three
+were a numerator and a denominator describing different sets one level up.
 
 `provenance_unknown_n` is computed inside the **coverage provenance-resolution block** (§4.1), the single
 bounded place permitted to read the raw `expected_close_date` column — its entire job is to compare the
@@ -1662,6 +1791,15 @@ sit beside their inputs. They are a second projection, not a later line of the f
 > and the binding rule sees no qualifier. Block B2's own comment describes that failure from the other
 > side — an unqualified `deal_id` binding to the inner scope and making the correlation `e.deal_id =
 > e.deal_id`. No check here reads it.
+>
+> **And neither rule ever asked whether the fence is grammatical, which is a different property again.**
+> Name-level rules cannot: `count(DISTINCT deal_id in D_book)` names only `deal_id`, which was duly
+> listed, and qualifies nothing, so nothing the completeness, contents, block-set, alias-scope or
+> alias-binding rules test is violated by it — and Postgres rejects the line outright (§4.4). **Fenced SQL is now
+> parsed by Postgres itself** (§7 audit inventory, *fenced SQL parses*), which closes grammar and closes
+> nothing else: it is deliberately blind to whether a name resolves, because in a design document almost
+> none of them do. Grammar, bindedness, name-presence and ambiguity are four properties; three now have a
+> check and the fourth is disclosed above.
 
 **Block A1 — independent row-level scalars (before `E`; consume only `outcomes` and the state anchors):**
 
@@ -1818,17 +1956,17 @@ column. Re-run this check whenever a name is added:
 | Block | Produces | Consumes (and from where) |
 |---|---|---|
 | `raw_close_date_events` (§4.0.1) | `audit_log_id`, `deal_id`, `changed_at`, `actor_user_id`, `event_kind`, `old_date`, `new_date` | `audit_log`: `id`, `record_id`, `created_at`, `changed_by`, `table_name`, `action`, `changes`, `full_row` — all real columns (§1.2) |
-| `close_date_timeline` (§4.0.2) | `audit_log_id`, `deal_id`, `changed_at`, `actor_user_id`, `event_kind`, `old_date`, `new_date` **passed through**, plus `source`, `machine_source` | `raw_close_date_events.*`; `deals.hubspot_deal_id`; `public.hubspot_refresh_log.*` (§0064) |
-| `deal_facts` (§4.0.5) | `deal_id`, `rep_id`, `outcome_kind`, `outcome_date`, `terminal_entry_date`, `landed_in_window_and_reopened`, `has_reopen_evidence`, `hubspot_linked`, `crm_arrival_at`, `deal_life_start`, `bid_board_owned` | `deals`: `stage_entered_at`, `bid_board_stage_entered_at`, `created_at`, `won_closed_date`, `lost_at`, `assigned_rep_id`, `stage_id`, `bid_board_stage_slug`, `is_active`, `is_test_data`, `is_bid_board_owned`, `is_read_only_mirror`, `on_hold`, **`hubspot_deal_id`**; `audit_log`: `table_name`, `record_id`, `created_at`, `id`, `action`, `full_row`; `pipeline_stage_config`: `slug`, `is_terminal`; `deal_stage_history`: `deal_id`, `to_stage_id`, **`from_stage_id`**, `created_at` |
+| `close_date_timeline` (§4.0.2) | `audit_log_id`, `deal_id`, `changed_at`, `actor_user_id`, `event_kind`, `old_date`, `new_date` **passed through**, plus `source`, `machine_source` | `raw_close_date_events`: `audit_log_id`, `deal_id`, `changed_at`, `actor_user_id`, `event_kind`, `old_date`, `new_date`; `deals`: `id`, `hubspot_deal_id`; `public.hubspot_refresh_log` (§0064): `tenant_schema`, `deal_id`, `field_name`, `old_value`, `new_value`, `created_at` |
+| `deal_facts` (§4.0.5) | `deal_id`, `rep_id`, `outcome_kind`, `outcome_date`, `terminal_entry_date`, `landed_in_window_and_reopened`, `has_reopen_evidence`, `hubspot_linked`, `crm_arrival_at`, `deal_life_start`, `bid_board_owned` | `deals`: `stage_entered_at`, `bid_board_stage_entered_at`, `created_at`, `won_closed_date`, `lost_at`, `assigned_rep_id`, `stage_id`, `bid_board_stage_slug`, `is_active`, `is_test_data`, `is_bid_board_owned`, `is_read_only_mirror`, `on_hold`, **`hubspot_deal_id`**, **`contract_signed_at`**, **`contract_signed_date`**; `audit_log`: `table_name`, `record_id`, `created_at`, `id`, `action`, `full_row`; `pipeline_stage_config`: `slug`, `is_terminal`; `deal_stage_history`: `deal_id`, `to_stage_id`, **`from_stage_id`**, `created_at` |
 | `outcomes` (§4.0.5) | all of `deal_facts` passed through, plus **`is_reopened_after_landing`** | `deal_facts`: `outcome_kind`, `outcome_date`, `landed_in_window_and_reopened` |
 | `state_at` ×3 **(LATERAL, not a CTE)** (§4.0.3) *(contents: **convention-derived** — the block projects `state`, `prediction`, `changed_at`, `source`; the prefixes come from the three aliased instances in §4.0.7's anchor table, so an extractor sees a mismatch that is expected)* | `p30_state`, `p30_prediction`, `p30_changed_at`, `p30_source`; `pfinal_state`, `pfinal_prediction`, `pfinal_changed_at`, `pfinal_source`; `pnow_state`, `pnow_prediction`, `pnow_changed_at`, `pnow_source` — all `*_state` coalesced (§4.0.3) | `close_date_timeline`: `deal_id`, `changed_at`, **`audit_log_id`**, `source`, `new_date`; `outcomes.outcome_date`; `outcomes.deal_life_start` (the §4.0.4 fallback gate) |
-| `coverage_resolution` (§4.1) | `cov_state`, `cov_prediction`, `is_provenance_unknown` | `outcomes.deal_id`; `state_at(deal, now())`; **`deals.expected_close_date`** — the only block that joins `deals` for it, and the whole reason convention 10's exception is buildable |
+| `coverage_resolution` (§4.1) | `cov_state`, `cov_prediction`, `is_provenance_unknown` | `outcomes.deal_id`; `state_at(deal, now())`; `deals`: `id` (the join key), **`expected_close_date`** — the only block that joins `deals` for it, and the whole reason convention 10's exception is buildable |
 | Derived scalars **block A1** **(not a CTE)** (§4.0.7) | `open`, `precrm_landed`, `precrm_arrival_unknown`, `signed_error_p30`, `signed_error_pfinal`, `p30_parked_at_write`, `pfinal_parked_at_write` | `outcome_kind`, `outcome_date`, `hubspot_linked`, `crm_arrival_at`, `p30_prediction`, `p30_changed_at`, `pfinal_prediction`, `pfinal_changed_at` — deliberately nothing from the event set |
 | Derived scalars **block A2** **(not a CTE)** (§4.0.7) | `landed`, `in_d_cov`, `event_window_end` | `open`, `precrm_landed` (block A1); `outcome_kind`, `outcome_date`, `terminal_entry_date`, `is_reopened_after_landing`, `has_reopen_evidence`, `cov_state` |
 | `E` **(not a CTE)** (§4.0.5) *(contents: **unverifiable** — defined in prose, no literal SQL fence)* | the event set for churn | `close_date_timeline`; `event_window_end` (block A) |
 | Derived scalars **block B** **(not a CTE)** (§4.0.7) | `deal_move_count`, `deal_days_pushed_out` | `D_book`; `E`: `old_date`, `new_date` |
 | Derived scalars **block B2** **(not a CTE)** (§4.0.7) | `deal_touch_count` | `D_score`; `close_date_timeline`: `audit_log_id`, `deal_id`, `source`, `changed_at`; `outcome_date` |
-| Metrics (§4.1–4.7) **(not a CTE)** *(contents: **unverifiable** — many fences, no single block boundary)* | the report columns, incl. `cov_n`, `scoreable_n`, `scoreable_final_n` | everything above, by name only |
+| Metrics (§4.1–4.7) **(not a CTE)** *(contents: **unverifiable** — many fences, no single block boundary)* | the report columns, incl. `cov_n`, `scoreable_n`, `scoreable_final_n`, `book_n` | everything above, by name only |
 
 The `audit_log_id` row is bolded because it is the one that broke: §4.0.3 ordered by it while §4.0.2 did not
 project it. The table makes that a one-line check instead of a review finding.
@@ -1918,9 +2056,9 @@ that phrase and nothing narrower.** `18/18` was not a healthy check; it was the 
 | Three-table agreement (§4.0.6 / v1 / §6.0) | every metric appears in each table | **extraction** — backticked identifiers per table, set-differenced | mechanical · misses names not in backticks; says nothing about whether a row's *content* is right |
 | §4.0.7 **ordering** rule | no block consumes a name produced below it, **and the SQL fences define the CTEs in an order the table's chain permits** | **extraction** — walk rows top-down accumulating produced names; then walk the `name AS (` definitions in fence order and assert none appears after a CTE the table places below it | mechanical · misses names absent from the table entirely (that is the completeness rule's job). The second half was added this round: until then the rule validated the *table's* row order and never looked at the order the fences actually define the CTEs in, so a correctly-documented chain that could not run was passable. Known-positive: swap the `deal_facts` and `outcomes` definitions inside the §4.0.5 fence and it reports the inversion |
 | §4.0.7 **contents** rule | a row's *Produces* matches what its SQL projects | **extraction** — `AS <name>` / `<name> =` per fence, diffed | mechanical · cannot read prose-shaped blocks (`E`, Metrics); flags convention-derived aliases (`state_at`) as expected mismatches |
-| §4.0.7 **completeness** rule | every name a block's SQL references appears in its *Consumes* | **extraction** — referenced identifiers per fence, diffed | mechanical · defeated by glob entries. Three standing artifacts, all benign and all named so a non-zero count is still readable: `pnow` (a LATERAL alias), `in_d_cov` (the §4.1 fence mixes a CTE with metric expressions, so its block boundary is approximate), and `public` (a schema qualifier, not a column). The count moves as blocks split — it was 2 before `deal_facts` was carved out — so read the *names*, not the number. **It compares bare names with the qualifier stripped**, so `s.outcome_date` and `outcomes.outcome_date` are one input to it and a qualifier bound by *nothing* is indistinguishable from one bound correctly — this is a name-presence check, never a parse. That is precisely how Block B2's unbound `s` passed for a round (appendix, round 26); the alias-binding row below is what covers it. It is also **one-directional**: a name listed in *Consumes* that the SQL never references is invisible, which is how `D_score` sat in B2's row while appearing nowhere in B2's fence |
+| §4.0.7 **completeness** rule | every name a block's SQL references appears in its *Consumes* | **extraction** — **governed set derived, not listed**: every row of the chain table, which is the property the rule is stated over. Each row's SQL is **that block's own unit**, not the fence containing it — §4.0.5 defines two CTEs in one fence and §4.1 mixes a CTE with metric expressions, so a fence is not a block. A **qualified** reference is resolved through the alias's `FROM`/`JOIN` to its source and checked against *that source's* column list in the cell; an unqualified one is checked against the union | mechanical · **measured: 12 chain rows governed, 9 reached.** The three not reached are the three the table already marks not-a-CTE with no literal SQL (`state_at`, `E`, Metrics), and a row that is unreachable *and* unmarked is reported rather than skipped. **Reach was the standing defect here and it went unstated for eleven rounds:** a rebuild that selects its inputs by the `**Block A1/A2/B2/B**` prose marker — the obvious reading of "per fence" — reaches **4** of the 12, which is the identical marker-selection defect round 27 found in the alias-binding check, in the check that was supposed to be the backstop. **Glob entries still defeat it**, now demonstrably: resolving qualified names per source is what made `public.hubspot_refresh_log.*` fail to license the six columns arm (a) reads, and `deals.id` fail in two rows — all expanded this round, the fifth grouped label to blind a check here. Standing artifacts, benign and named so a non-zero count stays readable: `pnow` (a LATERAL alias no `FROM` binds), `in_d_cov` and `public`. **It is still not a parse** — it checks that a name is licensed, never that the statement is grammatical; the *fenced SQL parses* row below is what covers that, and the alias-binding row covers whether a qualifier is bound at all (appendix, round 26). It is also **one-directional**: a name listed in *Consumes* that the SQL never references is invisible, which is how `D_score` sat in B2's row while appearing nowhere in B2's fence |
 | Duplicate definitions | no scalar is defined twice | **extraction** — collect `<name> =` across fences, **following multi-line bodies until parens balance**, compare | mechanical · until round 18 it required the body to start on the same line as `=`, so **every multi-line definition was invisible**; still misses definitions split between prose and SQL, and two names for one concept |
-| Window both-ends basis | no range mixes an explicit bound with a bare one | **extraction** — pair comparisons on a shared left operand, classify each bound | mechanical · paired comparisons inside SQL fences only; a single-sided bound whose partner lives elsewhere is invisible |
+| Window both-ends basis | no range mixes an explicit bound with a bare one | **extraction** — pair comparisons on a shared left operand, classify each bound | mechanical · paired comparisons inside SQL fences only; a single-sided bound whose partner lives elsewhere is invisible. **A `BETWEEN` is invisible to it too**, and that is not a gap worth closing: one left operand cannot carry two bases, so a `BETWEEN` holds the property structurally rather than by inspection — which is why the reopen window was rewritten as one (§4.0.5). Stated because "the check reports nothing about it" and "there is nothing to report" look identical from the outside |
 | Convention restatement (§7) | no rule is half-amended across its copies | **extraction** — signature regex per convention, all hit lines listed | mechanical · a restatement that avoids the signature words is invisible |
 | Constants (§6.4) — **inverted** | for each named constant, its literal value appears nowhere except its own definition row | **extraction** — value → literal search across SQL fences **and `code spans` in markdown table cells** | mechanical · ignores plain prose and identifier-embedded digits (`hit_rate_14d`); excludes the appendix, which quotes superseded literals on purpose; two constants sharing a value are reported against both names and a human assigns the right one. **Numeric constants only** — a boolean tunable like `PRECRM_CARVEOUT_ENABLED` has no literal to hunt for, so this check says nothing about whether its gate is honoured; that is the population definitions' job (§4.0.5) |
 | Rate casts / `NULLS LAST` | every rate casts, every ranked column sorts NULLs last | **extraction** — grep per pattern | mechanical · misses rates written in prose and sorts specified outside a fence |
@@ -1932,6 +2070,7 @@ that phrase and nothing narrower.** `18/18` was not a healthy check; it was the 
 | **Convention audit coverage** (§7) | every numbered convention has a row in the convention audit table | **extraction** — convention numbers from the ordered list vs the leading integer of each audit row | mechanical *(added this round)* · **known-positive validated against `de593c375`**, where it reports conventions **18 and 19** as having no audit row — the exact drift this check exists to stop — and against `3fcf449f7`, where it reports 15. Checks that a row EXISTS, never that its verdict is true: a row saying "Obeyed" about a violated convention passes |
 | SELECT-list alias scope | no expression reads a name defined **beside it in the same block**, in either block form | **extraction** — per fence, (a) split each `SELECT` at its depth-0 `FROM` and diff aliases against references, **and (b) parse derived-scalar fences (`name = …`, bodies followed until parens balance) and diff each body against its siblings** | mechanical · **known-positive `d5bf7efb9`**: 6 hits — the 3 SELECT-list cases it was built for, plus 3 derived-scalar ones it could not see until this round. **Form (b) was missing entirely until round 24.** Measured on `c2980c307`: of 28 SQL fences, **13 could contain a sibling-alias defect** (two or more names defined side by side) and the parser reached **5** of them — every derived-scalar block, Blocks A and B, §4.2 and §4.4–4.7, was invisible. It now reaches all of them (12 of 12 on the current text; the other **20** fences define at most one name, so there is no sibling to check — the denominator read 19 for a round, because round 25 added Block B2's fence and the figure beside it was hand-maintained). Codex found two live cases in Block A; repairing the reach found four. **The denominator that matters is fences-that-could-carry-the-defect, not fences** — the latter counts `CREATE TRIGGER` examples as covered and flatters the check. Correlated subqueries legitimately referencing an outer column are not distinguished, so a hit needs a human look |
 | **Alias binding** | every `alias.` qualifier a ```sql fence writes is bound by a `FROM`/`JOIN` inside that fence or by its `-- ANCHOR:` line | **extraction** — **governed set derived, not listed**: every ```sql fence that **writes a qualifier**, which is the property the rule is stated over. Per fence, collect the qualifiers used, collect the aliases bound by `FROM`/`JOIN` in the body **and in its `-- ANCHOR:` lines**, report the difference. Reach is asserted twice: the inspected set must equal the governed set, **and every fence the governing predicate did *not* select is re-scanned with an independent, looser qualifier detector** — anything it sees there is reported as a `REACH GAP` in the derivation itself | mechanical · **known-positives, all run**: against `6c0611f92` it reports Block B2's `s.` as bound by nothing — the defect the completeness, contents, block-set and alias-scope checks all read and passed; against `e4aa30003` it reports **three more** fences (§4.0.4's `o.`, §4.4's and §4.5's `e.`), which that round's version could not see because it selected fences by a `**Block A1/A2/B/B2**` prose marker and therefore governed 18 while reaching **4**; delete any `-- ANCHOR:` line from the current text and the fence beneath it is reported; splice a whitespace-separated qualifier (`t . id`) into a fence that writes none and the **second** reach assertion fires. **The governed set changed this round and the numbers moved with it: 18 governed / 18 reached became fourteen and fourteen, with five findings on first run.** The old predicate — *fences defining a scalar* — was not the property the rule is about, which is *fences using a qualifier*; the two **merely overlap, neither subsumes the other**: 13 derived-scalar fences write no qualifier (they cannot fail, and inflated the reach figure to look maximally healthy), 9 qualifier-writing fences are not derived-scalar, and **4 of those 9 were unbound** — §4.0.1's `ORDER BY` fragment, §4.0.3's `state_at` lateral, its coalescing consumer, and §4.0.4's fallback. `18/18` was the wrong 18. Standing gaps, all real: a fence whose ANCHOR names the **wrong** source (`FROM D_book b` under a fence that means `D_score`) is *bound*, therefore green — the ANCHOR's content is a read, not a check; **unqualified** outer references are outside this rule entirely and covered only at name level by the completeness rule, so an ambiguous bare column is invisible to both; and the binder must recognise every source form Postgres accepts. Three binder gaps found so far, each a **false positive on correct SQL**, which is how a reach-checking audit gets quietly narrowed again: `LEFT JOIN LATERAL <…> pnow ON TRUE` unrecognised (§4.1); a single consuming regex whose `(...)` swallowed a subquery's inner `FROM`, losing §4.0.3's bound `t.` and §4.1's `c.` — the binder now scans forward from each `FROM`/`JOIN` independently; and string literals left in the text, so `current_setting('app.current_user_id', true)` in §1.2's trigger read as an unbindable qualifier `app.` — literals are now stripped before any qualifier scan |
+| **Fenced SQL parses** | every ```sql fence is **runnable Postgres** under its own fragment kind — the property no audit here had, and the one an implementer relies on most | **extraction + a real parser**, **governed set derived, not listed**: every ```sql fence, which is the phrase the rule quantifies over. Each fence is segmented into units — a CTE body, a derived scalar, a whole statement, a clause fragment — each unit is wrapped into the smallest complete statement its kind admits (a fragment's `-- ANCHOR:` line supplies the outer `FROM`, so that convention is now load-bearing twice), and each wrapped statement is handed to **Postgres itself**: PGlite (`@electric-sql/pglite`, already a repo dependency), which raw-parses before it resolves anything. **`42601` `syntax_error` is a finding; `42P01` / `42703` / `42883` — undefined table, column, function — are a pass**, because unresolvable names are exactly what a design document's fences are made of | mechanical *(added this round)* · **measured: 33 fences, 59 units, 31 fences inspected.** **Does not cover:** name resolution, types or ambiguity — a fence naming a column that does not exist is green here **by design**, and stays the completeness and alias-binding rows' business. **Placeholders are substituted before parsing** — `<…>`, `${…}` and `:params` — so an error *at a placeholder site* is untested; each `<…>` is tried both as a bare name and as `(SELECT 1)` and the unit passes if **either** reading parses, because a placeholder stands for an unspecified expression and the check may not assume one shape. Reach is asserted twice: every governed fence must yield an inspected unit **or** appear in the disclosed not-inspected list — currently **two comment-only fences** (§4.0.3's `business_day_end_exclusive`, §4.0.5's `event_window_end`), and a fence that yields neither is a reported gap — **and** comment-only is decided by *line shape*, independently of the comment stripper, with any disagreement between the two reported. A unit containing an **elided** clause (`FILTER (…)`) is reported as a reach gap, never passed: that is how §4.5's two elisions were found. **Known-positives, all five run:** restore `count(DISTINCT deal_id in D_book)` and it reports the syntax error at `D_book` — the defect this round fixed; restore either §4.5 elision and it reports the gap; unbalance a paren in §4.0.5's CTE and it reports `syntax error at or near "WHERE"`; double a keyword in §4.2's `scoreable` and it reports it; turn one line of a comment-only fence into SQL and the fence leaves that class and is parsed |
 | Per-metric population agreement | the audit table and the v1 table cite the same set for each metric | **extraction** — population column of both tables, keyed by metric, compared | mechanical *(added this round)* · compares SET NAMES; a row naming the same set with a different predicate, or citing none, is invisible |
 | Set relations (§4.0.5 RELATIONS block) | every set assertion in the document appears in the canonical block | **extraction** — grep set symbols and stock phrases, assert each cites a declared relation | mechanical · matches symbols and the phrases "subset of" / "carved out of"; a relation asserted in freeform English is invisible |
 | Population-change obligations | when a `D_*` predicate changes, every site mentioning it is enumerated for review | **extraction** — **targets derived, not listed**: every population the §4.0.5 table declares (ten of them), each one's mentions grouped by site type (table row / RELATIONS / metric row / partition / producer-consumer / SQL / prose). Until round 28 the target was the single hand-written name `D_precrm` — the same hand-written-selection defect as the `**Block A1/A2/B/B2**` marker, in another costume | mechanical · **it is an enumerator, not a check: it has no failing state at all** — stated here because a row in this table that can never report is the one thing a reader would otherwise assume it can. It **enumerates sites, does not verify agreement**; it produces the list convention 16 depended on recalling, and judging each site is still human. Round 28's §8 census defect is what that costs: the enumerator listed §8's line as a site and nothing more, which is all it can do. **It keys on the population's NAME**, so a claim *about* a population that never names it is invisible: §2.5(a)'s "they enter the metric only if a human later typed a date" survived the round that retired it and two sweeps afterwards, because the sentence names neither `D_precrm` nor `D_landed`. A name-keyed enumerator cannot find a claim written in pronouns |
@@ -1960,8 +2099,10 @@ and for others it is the alarm.
 | `D_precrm` (§2.5(a)) | `count(*)` over `hubspot_deal_id IS NOT NULL` ∩ terminal ∩ dated ∩ `outcome_date < ((SELECT al.created_at FROM audit_log al WHERE al.table_name='deals' AND al.record_id = d.id AND al.action='insert' AND al.full_row IS NOT NULL ORDER BY al.id ASC LIMIT 1) AT TIME ZONE 'America/Chicago')::date` — **the same predicate the report runs**, insert row and CT cast included | **Alarm, probably.** Either the office holds no imported already-closed deals, or the arrival marker is wrong again. Cross-check against `count(*) WHERE source = 'hubspot_deals_reimport_2026_05_14' AND` terminal — if *that* is non-zero and this is zero, the test is still broken |
 | `precrm_unknown_n` (§2.5(a)) | `count(*)` over HubSpot-linked terminal dated deals with no `audit_log` row | **Good.** A large number means audit does not reach the import and the carve-out is blind for those deals |
 | Arm (a), HubSpot refresh (§4.0.2) | the §1.1.1 `hubspot_refresh_log` census | **Good** — the classifier arm is inert because the refresh never wrote. §7 already makes this the prerequisite for building the report at all |
+| Arm (a)'s actor conjunct (§4.0.2) | for every `expected_close_date` row of that census, the count of `audit_log` trigger rows on the same deal with the same `(old, new)` within ±1 minute, **split by `changed_by IS NULL`** | **Good** for the non-NULL side — no rep edit collides with a planned refresh write, so the conjunct removes nothing. Non-zero there is the steal the conjunct exists to stop, and each one is a rep forecast that would otherwise have been scored as the machine's. A ledger row with **no** matching actorless trigger row is the other side: either a no-op write (expected) or a refresh that ran with an actor set, in which case arm (a) is now under-matching |
 | Arm (b), migration seeds (§4.0.2) | `count(*)` over `event_kind='insert'` ∩ `actor_user_id IS NULL` ∩ `hubspot_deal_id IS NOT NULL` in the timeline | **Good** — no seeded forecasts to exclude |
 | `D_reopened` (§4.0.5) | `count(*)` over `deal_stage_history` with a NULL `from_stage_id`, and the reopen-row count itself | A NULL-heavy result means the reopen test is blind; a zero reopen count means the diagnostic is inert and `reopened_after_landing_n` will always read 0 |
+| `D_reopened`'s landing basis (§4.0.5) | over Won deals that still have one, `count(*)` where `won_closed_date <> (stage_entered_at AT TIME ZONE 'America/Chicago')::date`, and the distribution of the gap in days | **Good** — the contract-signed write-through never moves a Won date off its stage transition here, so the reconstruction and the stage-entry date agree and the old form was right by accident. Non-zero, and the gap's spread is the size of the landings the stage-entry basis was putting in the wrong period. Run it on **live** Won deals: a reopened deal no longer has the column to compare |
 | Mirror-only reopens (§4.0.5) | not answerable — there is no mirror stage history | Stated as unsupported; `bid_board_owned_n` is the exposure proxy |
 | `D_nodate` (§4.0.5) | `count(*)` over mirror-terminal deals with a NULL `won_closed_date` | **Good** — no silent drops |
 | Machine-repair churn (§4.4) | `count(*)` over rep events whose `new_date` restores the immediately preceding **machine** event's `old_date` | **Good** — no repairs to exclude, and the §7 follow-up should not be built. Non-zero means reps are being charged for the refresh's churn |
@@ -1989,10 +2130,14 @@ neither. The duplicate-definition check was validated by running it against the 
 correctly reports `in_d_cov` defined at two lines with different bodies.
 
 Known extractor limits, stated rather than hidden: the §4.1 fence mixes a CTE with metric expressions, so
-its block boundary is approximate and two names (`in_d_cov`, `pnow`) read as unlisted consumers; **glob
-entries in the table defeat all three checks**, which is why `outcomes.*`, `p30_*`, `pfinal_*` and `flags`
-were expanded to explicit lists this round — the fourth time a grouped label has blinded a mechanical check
-here.
+a *fence* is not a *block* and the chain checks segment each fence into its units rather than reading it
+whole — two names (`in_d_cov`, `pnow`) still read as unlisted consumers there; **glob entries in the table
+defeat all three checks**, which is why `outcomes.*`, `p30_*`, `pfinal_*` and `flags` were expanded to
+explicit lists, and why `raw_close_date_events.*` and `public.hubspot_refresh_log.*` were expanded this
+round — the fifth time a grouped label has blinded a mechanical check here. That last pair was found by
+the completeness rule only *after* its reach was repaired, which is the general lesson of this round: a
+disclosed limit ("globs defeat it") is not the same as a demonstrated one, and until the check reaches the
+rows carrying the globs, nothing tells you which globs are costing coverage.
 
 **Distrust the bottom five rows.** The §6.0 falsifying-input column makes a claim *checkable by a reader*,
 which is a real improvement over an unadorned ✅, but nothing verifies that the stated input actually
@@ -2288,12 +2433,37 @@ reason. A rep with an anomalous `days_pulled_in` and a non-zero `hubspot_refresh
 Report a rate so a rep with a big book is not penalised for volume:
 
 ```sql
-moves_per_deal = move_count::numeric / NULLIF(count(DISTINCT deal_id in D_book), 0)
+-- ANCHOR: FROM D_book b
+-- The churn denominator, as a named metric. Same reason cov_n is a column (§4.1) and not an inline
+-- NULLIF operand: it is the §6.4 volume floor for BOTH churn rates, and a floor a sort clause cannot
+-- name is a floor the sort does not honour (§7, default sort).
+--
+-- DISTINCT is redundant under this anchor alone, and deliberate. The rep-level scan that also computes
+-- move_count is D_book LEFT JOINed to E (Block B's anchor, §4.0.7), where a deal with four events
+-- contributes four rows -- so a bare count(*) means |D_book| in one scan and |E| in the other. A
+-- denominator whose value depends on which scan it lands in is exactly what this metric got wrong twice.
+book_n = count(DISTINCT b.deal_id)
+```
+
+```sql
+moves_per_deal = move_count::numeric / NULLIF(book_n, 0)
 ```
 
 **The denominator is `|D_book|` — every in-scope deal, landed and open alike.** `move_count` is summed over
 `E`, which is defined over `D_book` (§4.0.5's populations table), so this is the only denominator that
 describes the same set.
+
+**It is written as `book_n`, and the previous spelling could not have run.** This fence read
+`NULLIF(count(DISTINCT deal_id in D_book), 0)`, which is not SQL: `IN` takes a parenthesised list or a
+subquery, `D_book` is a population name with no binding anywhere in the fence, and Postgres rejects the
+line at `D_book` with a syntax error — so the v1 report query, copied from the formula an implementer
+copies, fails to parse at the churn-rate column. Naming the count makes the denominator a real scalar and
+puts the set membership where the document already declares it, in the `D_book` anchor, instead of inside
+an operator that cannot express it. **The class, not the instance:** every audit in §7 that inspects
+fenced SQL passed this line, and none of them could have done otherwise — they compare names, projections,
+block sets, sibling aliases and qualifier bindings, and this line's only name is `deal_id`, duly listed,
+with no qualifier at all. "Would this run" is now its own check (§7 audit inventory, *fenced SQL parses*).
+It found this line, the two elided `FILTER (…)` in §4.5, and nothing else.
 
 This is the second time this metric has been wrong, in two different ways, which is why the audit table now
 exists. The first draft divided by `landed_n`. The fix changed it to `landed_n + overdue_open_n` — still
@@ -2313,10 +2483,14 @@ book accumulate.
 -- ANCHOR: FROM E e   -- rep-level, same granularity as §4.4
 -- COALESCE is required: sum() over an empty set returns NULL, not 0, so a rep who moved nothing would
 -- render blank rather than zero -- and any arithmetic downstream would go NULL with it (§4.0.6).
+-- The FILTER is written out on all three rather than elided on the last two. `FILTER (…)` is not SQL,
+-- and an ellipsis standing for a clause is exactly the kind of fragment an implementer pastes.
 total_days_slipped = COALESCE(sum(e.new_date - e.old_date)
                        FILTER (WHERE e.old_date IS NOT NULL AND e.new_date IS NOT NULL), 0)
-days_pushed_out    = COALESCE(sum(greatest(e.new_date - e.old_date, 0)) FILTER (…), 0)
-days_pulled_in     = COALESCE(sum(least(e.new_date - e.old_date, 0))    FILTER (…), 0)
+days_pushed_out    = COALESCE(sum(greatest(e.new_date - e.old_date, 0))
+                       FILTER (WHERE e.old_date IS NOT NULL AND e.new_date IS NOT NULL), 0)
+days_pulled_in     = COALESCE(sum(least(e.new_date - e.old_date, 0))
+                       FILTER (WHERE e.old_date IS NOT NULL AND e.new_date IS NOT NULL), 0)
 ```
 
 Signed total plus the two one-sided sums, so a rep who pushes 200 days and pulls 190 back is not shown as
@@ -2346,12 +2520,14 @@ Signed total plus the two one-sided sums, so a rep who pushes 200 days and pulls
 
   ```sql
   chronic_mover_rate = count(*) FILTER (WHERE chronic_mover)::numeric
-                     / NULLIF(count(*), 0)          -- both over D_book
+                     / NULLIF(book_n, 0)            -- the named |D_book| count, §4.4
   ```
 
 Same denominator as `moves_per_deal` (§4.4) — `|D_book|` — because the flag is evaluated over every
 in-scope deal, open ones included. A deal does not need to have closed to have been moved five times. Both
-rate metrics now describe the same book, so a reader can compare them.
+rate metrics now describe the same book, so a reader can compare them, and both spell it the same way:
+`book_n`, the column §4.4 names. A bare `count(*)` said "whatever this scan is over", which is the same
+under-specification `moves_per_deal`'s denominator carried in a different form.
 
 `::numeric` on the numerator (§4.0.6).
 
@@ -2649,7 +2825,7 @@ real numbers and an "insufficient volume" marker, excluded from sort order. This
 | `hit_rate_14d_final` | `scoreable_final_n >= MIN_RANKED_SCOREABLE` |
 | `coverage_rate` | `cov_n >= MIN_RANKED_COVERAGE` where `cov_n = \|D_cov\|` |
 | `forecast_reliability` | **both** `cov_n >= MIN_RANKED_COVERAGE` **and** `scoreable_n >= MIN_RANKED_SCOREABLE` |
-| `moves_per_deal`, `chronic_mover_rate` | `\|D_book\| >= MIN_RANKED_SCOREABLE` |
+| `moves_per_deal`, `chronic_mover_rate` | `book_n >= MIN_RANKED_SCOREABLE` where `book_n = \|D_book\|` |
 | `mean_signed_error_days`, `median_signed_error_days`, `p90_signed_error_days` | `scoreable_n >= MIN_RANKED_SCOREABLE` |
 
 The signed-error row **names its three columns** rather than saying "signed-error columns". A grouped
@@ -2813,6 +2989,7 @@ work or an omission, and there is no way to tell which from a list that only nam
 | `move_count` | Drill | `E` | 4.4 |
 | `set_count` | Drill | `E` | 4.4 |
 | `clear_count` | Drill | `E` | 4.4 |
+| `book_n` | Col | `D_book` | 4.4 |
 | `moves_per_deal` | Col | `E` over `D_book` | 4.4 |
 | `total_days_slipped` | Col | `E` | 4.5 |
 | `days_pushed_out`, `days_pulled_in` | Drill | `E` | 4.5 |
@@ -2820,7 +2997,7 @@ work or an omission, and there is no way to tell which from a list that only nam
 | `chronic_mover_rate` | Col | `D_book` | 4.6 |
 | `silent_miss_n` | Col | `D_score` | 4.7 |
 | `moves_by_other_actor` | Drill | `E` | 3 |
-| `machine_written_events_n` → `hubspot_refresh_events_n`, `migration_seed_events_n` | Diag | `source='machine'` on `D_book` | 2.5(b) |
+| `machine_written_events_n` → `hubspot_refresh_events_n`, `migration_seed_events_n` | Diag | `source='machine'` on `D_landed` ∪ `D_open` | 2.5(b) |
 | `mirror_terminal_no_date_n` | Diag | `D_nodate` | 4.0.5 |
 | `bid_board_owned_n` | Diag | `D_book` | 2.5(c) |
 | `out_of_period_landed_n` | Diag | `D_outside` | 4.0.5 |
@@ -3125,9 +3302,9 @@ two specific places yes.
 | `coverage_rate`, `covered_n`, `parked_n`, `at_risk_n`, `cov_n`, `machine_dated_n`, `overdue_open_n`, `median_days_overdue` | the current deal row + the timeline as of now | **Sound.** No history reconstruction, no as-of question. Ship |
 | `landed_n`, `out_of_period_landed_n`, `mirror_terminal_no_date_n`, `bid_board_owned_n` | current row state | **Sound.** Ship |
 | `hit_rate_*`, signed errors, `scoreable_n`, the shortfall partition | a rep-authored date standing at a past instant, from `audit_log` | **Sound *if* §1.4's census clears.** The whole family rests on audit reaching back past the period. Unverified. Run the census before publishing any period the audit does not cover — this is the single most load-bearing unrun query in the document |
-| `move_count`, `set_count`, `clear_count`, slip sums, `moves_per_deal`, `chronic_mover_*` | rep events inside a per-deal window | **Sound with two stated biases**: reopened deals are excluded entirely rather than windowed (§4.0.5), and a rep repairing a machine overwrite is charged for it (§4.4). Both visible, both census-gated |
+| `move_count`, `set_count`, `clear_count`, slip sums, `book_n`, `moves_per_deal`, `chronic_mover_*` | rep events inside a per-deal window | **Sound with two stated biases**: reopened deals are excluded entirely rather than windowed (§4.0.5), and a rep repairing a machine overwrite is charged for it (§4.4). Both visible, both census-gated |
 | `silent_miss_n` | per-deal touch count | **Sound.** Ship |
-| `reopened_after_landing_n`, `reopened_open_n` | `deal_stage_history` | **Partial and it must say so on the column.** Blind to mirror-only reopens, blind to NULL `from_stage_id`, best-effort on same-day ordering. It is a floor, not a count |
+| `reopened_after_landing_n`, `reopened_open_n` | `deal_stage_history`, plus the surviving contract-signed columns | **Partial and it must say so on the column.** Blind to mirror-only reopens, blind to NULL `from_stage_id`, best-effort on same-day ordering, and its landing date is a **reconstruction** of a canonical Won date the reopen deleted — exact where a contract-signed date survives, otherwise the CT stage-entry date standing in for a UTC-written stamp, so one day out for an evening transition. It is a floor, not a count |
 | `precrm_landed_n`, `precrm_outside_n` / `D_precrm` | the insert audit row | **The carve-out is cut from v1; both diagnostics ship.** `precrm_landed_n` is on the rep row (§7) sizing the bias. **The census for `D_precrm` is `precrm_landed_n + precrm_outside_n`, not `precrm_landed_n` alone**: in a period whose only pre-CRM imports landed outside `[from, to]` the first is *intentionally* zero while the second is not, and reading the bias number as the census is how round 22 concluded the carve-out "matches nothing" from the wrong number. See below |
 | `provenance_unknown_n`, `precrm_unknown_n`, `machine_written_events_n` and its two arms | integrity diagnostics | **Sound, and they are how the above is monitored.** Ship |
 
@@ -3155,11 +3332,21 @@ landings are counted: a known bias with a number beside it rather than an unveri
 - **A reason code for a slip** — needs the `deal_history.changed_by` migration (§5.1). Already deferred.
 - **Forecast snapshots at stage entry** — `deal_forecast_milestones` is built and dead (§1.5, §5.2).
 
-**The honest summary for the approver.** Roughly 30 of the 38 metrics rest on data that supports them
-today. Four more are sound conditional on one unrun query (§1.4). One should be held back. The rest are
-already deferred and labelled. The document is not over-specified as a whole — but it has twice been
-over-specified in exactly the place where a construct's correctness depends on production facts nobody has
-checked, and that is a category the review process here cannot close on its own.
+**The honest summary for the approver, by family rather than by tally.** Every family in the table above
+is shippable today except in three named places: the whole hit-rate and signed-error family is sound
+**only if** §1.4's one unrun query clears, the churn family carries two stated biases, and the reopen
+diagnostics are a floor rather than a count. One construct is held back — the `D_precrm` carve-out, gated
+off in §6.4 with both its diagnostics still shipping. The rest are already deferred and labelled.
+
+**This paragraph used to open "roughly 30 of the 38 metrics", and that is the failure it now avoids.**
+The two metric tables hold **46** distinct names today; 38 was written when they held fewer and nothing
+ever compared it to them, so a reader was being given a precision the document could not support in the
+sentence about not over-specifying. It is the same hand-maintained-tally defect round 26 found in the
+audit inventory's "all eighteen audits" and round 28 found in `18/18` — a number about a growing artifact,
+with no construct behind it. Restated over the families, which the §7 three-table check does compare.
+The document is not over-specified as a whole — but it has twice been over-specified in exactly the place
+where a construct's correctness depends on production facts nobody has checked, and that is a category the
+review process here cannot close on its own.
 
 ---
 
@@ -3249,6 +3436,26 @@ complement of `futureDatedCloseDatePredicateSql`'s `>= today` (`foundations.ts:4
 `>` matches `closeTargetFarOutSqlPredicate` (`deal-reporting.ts:137`), so a deal exactly 90 days out is
 unparked in both. One ordering — `percentile_cont`'s `WITHIN GROUP` — deliberately needs no tie-breaker,
 and §4.3 now says why.
+
+**Round 29 (a fence no check could read as SQL, a contamination signal that could not explain its own metric, and a classifier that took a rep's edit)**
+
+| # | Was | Now |
+|---|---|---|
+| 1 | The three machine-write diagnostics scanned `close_date_timeline` on **`D_book`** | `D_book` is `(D_landed ∪ D_open)` **minus every deal with reopen evidence**, and that subtraction was made for *churn*. The metrics these counters exist to explain are not on it: `machine_superseded_n` is over `D_landed` and `machine_dated_n` over `D_open`. A deal that lands, reopens and re-closes inside `[from, to]` stays in `D_landed` and in the scoring-shortfall partition, so a machine write standing at its P₃₀ anchor increments `machine_superseded_n` — while `D_book` drops it and all three counters read zero. **The contamination signal could not explain the metric it exists to explain**, and reported a clean book to whoever went looking. The same shape reaches `machine_dated_n` one step out: an open deal with reopen evidence but no in-window landing is counted there and excluded from `D_book` on the broader test. Population is now `D_landed ∪ D_open` — the union of the populations of the metrics it explains, and no wider, since `D_outside` and `D_nodate` carry no machine-provenance metric. |
+| 2 | §4.0.2 arm (a) matched a `hubspot_refresh_log` row on deal + `old_value` + `new_value` + ±1 minute, with **no actor condition** | **It could classify a rep's own forecast as the machine's, and the machine row it thought it had found was never written.** The ledger records the write the script *planned*; the trigger row records what the `UPDATE` *changed*. `applyDealChanges` writes the ledger row unconditionally (`refresh-from-hubspot.ts:709-716`) and the `UPDATE` carries no old-value guard (`:697-700`), so when a rep lands the identical A→B change between plan and apply, the script writes B over B, the trigger's `IS DISTINCT FROM` comparison drops `expected_close_date` from `changes`, and **no machine trigger row exists at all** — leaving the rep's actorful row as the only `(deal, A, B)` match in the window. It was marked `machine`, dropped from `D_score` and from `E`, and counted in `machine_superseded_n`. Arm (a) now requires `e.actor_user_id IS NULL`, the property the script's own writes always have and an API edit never does — a **conjunct** that narrows a ledger match, not a key, so §1.1.2's "never on `changed_by IS NULL`" still holds and is now stated with the "alone" it always needed. Arm (b) has carried the same conjunct since round 4. |
+| 3 | The reopen diagnostic's landing window was the **CT date of the terminal stage entry** | A different basis from the one `D_landed` is cut on. `D_landed` uses `outcome_date`; for a Won deal that is `won_closed_date`, which the write-through sets to the **contract-signed date whenever one is present** (`stage-change.ts:387`, §1.8) — weeks earlier, routinely. So a deal whose contract was signed inside `[from, to]`, moved to Won after `to`, and then reopened is missing from `D_landed` **and** fails the reopen window: the disappearance the diagnostic exists to report is the one case it could not see. The window now runs on the **reconstructed canonical outcome date** — `COALESCE(contract_signed_at::date, contract_signed_date)` for a Won landing, `effectiveContractSignedDate`'s expression verbatim and reconstructible because the reopen clears `won_closed_date` and **not** the contract-signed columns — falling back to the CT stage-entry date, and written as a `BETWEEN` so the both-ends property is structural rather than inspected. Residual disclosed on §8's row and in a new real-data obligation: with no contract-signed date the fallback stands in for a **UTC-written** stamp, so it can be a day out; the basis error it replaces was measured in weeks. |
+| 4 | `moves_per_deal = move_count::numeric / NULLIF(count(DISTINCT deal_id in D_book), 0)` | **Not SQL.** `IN` takes a parenthesised list or a subquery, `D_book` is bound by nothing in that fence, and Postgres rejects the line at `D_book` — so the v1 report query fails to parse at the churn-rate column, in the formula an implementer copies. Denominator is now `book_n`, a named count of `D_book` anchored on it, which also gives `chronic_mover_rate` a denominator better than a bare `count(*)` and gives §6.4's churn floor a **column** to gate on, the same argument that made `cov_n` a column. |
+| 5 | **The class behind #4: no check asked whether a fence would run.** Every audit that inspects fenced SQL passed that line | And none could have done otherwise — the line names one identifier, `deal_id`, which was listed, and qualifies nothing, so it violates nothing the name-level, projection-level and binding-level rules test. **Fenced SQL is now parsed by Postgres**, via PGlite: each fence is segmented into units, each unit wrapped into the smallest complete statement its kind admits (its `-- ANCHOR:` line supplying the outer `FROM`), and a `42601` is a finding while `42P01`/`42703` are a pass — grammar checked, resolution deliberately not. **33 fences, 59 units, 31 inspected, 2 comment-only and disclosed.** It found #4 and **two more**: §4.5's `days_pushed_out` and `days_pulled_in` were written `FILTER (…)`, an elided clause that is not SQL either, now written out. Five known-positives run. |
+| 6 | The completeness rule's own reach, never measured, and **4 of 12** | Found while mutation-testing #3: removing `contract_signed_at` from `deal_facts`' *Consumes* was **not caught**, because a rebuild keyed on the `**Block A1/A2/B2/B**` prose marker reaches four rows — the identical marker-selection defect round 27 found in the alias-binding check, sitting undetected in the check that was supposed to be its backstop, and disclosed nowhere. Governed set is now every chain-table row with its **own** SQL unit rather than the fence containing it, and a **qualified** reference resolves through its `FROM` to a source and is checked against *that source's* column list: 12 governed, 9 reached, the three unreached being the three already marked not-a-CTE. That immediately failed on two globs the row had *described* as a limit for four rounds without ever demonstrating one — `public.hubspot_refresh_log.*` licensing none of the six columns arm (a) reads, and `deals.id` in two rows — both expanded. **A disclosed limit is not a demonstrated one**, and a check that never reaches the rows carrying a glob cannot tell you what the glob costs. |
+
+| 7 | §8 summarised the design as "roughly 30 of the **38** metrics" | The two metric tables hold **46** distinct names. 38 was written when they held fewer, nothing compares it to them, and it sat in the paragraph warning against specifying more precision than the data supports. Third hand-maintained tally of a growing artifact found in four rounds, after "all eighteen audits" (round 26) and `18/18` (round 28), and the third resolved the same way: restated over the **families** in §8's own table, which the §7 three-table check does compare. Found by enumerating this round's own obligations rather than by review — adding one metric obliges every count *of* metrics. |
+
+**Refuted: nothing this round.** All four reported findings were verified against the source before being
+acted on — the ledger's unconditional write and the missing old-value guard at
+`refresh-from-hubspot.ts:697-716`, the contract-signed write-through at `stage-change.ts:387` against the
+terminal-field clearing at `:357-362` that spares the contract-signed columns, and the `42601` Postgres
+returns for the churn denominator. Findings 5 and 6 are this round's own, found by building the check
+finding 4 asked for and by mutation-testing the fix for finding 3.
 
 **Round 28 (a check reporting 18/18 while missing four, and two diagnostics that empty themselves when switched on)**
 
