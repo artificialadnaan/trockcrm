@@ -744,17 +744,30 @@ router.get("/rep-activity", requireAnyRole, async (req, res, next) => {
   }
 });
 
-// GET /api/reports/daily-activity-log?dateFrom=2026-02-01&dateTo=2026-05-01&office=dallas&types=note,call&page=1&limit=200
+// GET /api/reports/daily-activity-log?dateFrom=2026-02-01&dateTo=2026-05-01&office=dallas&types=note,call&loggedOffDay=1&page=1&limit=200
 // The readable day-by-day log of notes and updates behind the Rep Activity counts. Same guard as
 // rep-activity (requireAnyRole) and the same in-service scoping (resolveRepActivityScope), so a rep
 // hitting this endpoint directly still only reads their own entries.
+//
+// `types` and `loggedOffDay` narrow the LISTED ROWS (and pagination.total) only; the response's `kpis`
+// always describe the whole date/office/owner window, because the client renders them on cards that
+// are themselves these filters. Email CONTENT is readable here by admin/director -- deliberately more
+// permissive than GET /activities, see the PRIVACY block in daily-activity-log-service.ts.
 router.get("/daily-activity-log", requireAnyRole, async (req, res, next) => {
   try {
     const data = await getDailyActivityLogReport(
       req.tenantDb!,
       normalizePerformanceReportFilters(req.query as Record<string, unknown>),
       normalizeDailyActivityLogOptions(req.query as Record<string, unknown>),
-      { role: req.user!.role, userId: req.user!.id, displayName: req.user!.displayName }
+      {
+        role: req.user!.role,
+        // The HOME role, NOT the per-office effective one. Email-content visibility is gated on both
+        // so a `rep` holding a director role_override on an office cannot read that office's mailboxes
+        // (the #740 escalation shape). Row scoping still uses the effective `role`.
+        baseRole: req.user!.baseRole,
+        userId: req.user!.id,
+        displayName: req.user!.displayName,
+      }
     );
     await req.commitTransaction!();
     res.json({ data });

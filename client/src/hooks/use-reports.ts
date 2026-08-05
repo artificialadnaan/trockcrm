@@ -460,6 +460,11 @@ export interface DailyActivityLogEntry {
 }
 
 export interface DailyActivityLogReport {
+  /**
+   * WINDOW-scoped: dates/office/owner only, NEVER the entry-type or logged-off-day narrowing. The KPI
+   * cards render these and are themselves the narrowing controls, so a card must not rewrite its own
+   * number when it is clicked. `pagination.total` is the narrowed count — render both.
+   */
   kpis: {
     totalEntries: number;
     notes: number;
@@ -478,16 +483,21 @@ export interface DailyActivityLogReport {
   pagination: {
     page: number;
     limit: number;
+    /** The NARROWED row count — how many entries the current type/off-day selection matches. */
     total: number;
     returned: number;
     totalPages: number;
     hasMore: boolean;
   };
   appliedTypes: string[];
+  /** Echoes the off-day narrowing the SERVER applied, the same way appliedTypes echoes the types. */
+  appliedLoggedOffDay: boolean;
 }
 
 export interface DailyActivityLogQueryOptions extends PerformanceReportQueryOptions {
   types?: string[];
+  /** Narrow to entries logged on a different day than they occurred — the "Logged Off-Day" drill. */
+  loggedOffDay?: boolean;
   page?: number;
   limit?: number;
 }
@@ -1480,9 +1490,9 @@ export function useRepActivityReport(options: PerformanceReportQueryOptions = {}
 }
 
 /**
- * Daily Activity Log. Not routed through usePerformanceReport because it carries three params that
- * report does not know about (types/page/limit) and they must take part in the refetch deps —
- * otherwise turning a type filter on or paging forward would leave the previous page on screen.
+ * Daily Activity Log. Not routed through usePerformanceReport because it carries four params that
+ * report does not know about (types/loggedOffDay/page/limit) and they must take part in the refetch
+ * deps — otherwise turning a filter on or paging forward would leave the previous page on screen.
  */
 export function useDailyActivityLogReport(options: DailyActivityLogQueryOptions = {}) {
   const typeKey = options.types?.join(",") ?? "";
@@ -1491,6 +1501,7 @@ export function useDailyActivityLogReport(options: DailyActivityLogQueryOptions 
       const params = new URLSearchParams();
       appendPerformanceReportQueryOptions(params, options);
       if (options.types?.length) params.set("types", options.types.join(","));
+      if (options.loggedOffDay) params.set("loggedOffDay", "1");
       if (options.page && options.page > 1) params.set("page", String(options.page));
       if (options.limit) params.set("limit", String(options.limit));
       const qs = params.toString();
@@ -1503,6 +1514,9 @@ export function useDailyActivityLogReport(options: DailyActivityLogQueryOptions 
       options.ownerIds?.join(","),
       options.ownerNames?.join(","),
       typeKey,
+      // The off-day drill is a SERVER filter, so it has to be a dependency: without it the toggle
+      // would repaint the same rows and read as "the filter does nothing".
+      options.loggedOffDay,
       options.page,
       options.limit,
     ],

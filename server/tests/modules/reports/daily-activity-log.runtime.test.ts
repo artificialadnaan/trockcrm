@@ -24,8 +24,11 @@ import {
   properties,
   users,
 } from "@trock-crm/shared/schema";
+import { USER_ROLES } from "@trock-crm/shared/types";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 import {
+  EMAIL_CONTENT_READER_ROLES,
+  canReadOthersEmailContent,
   getDailyActivityLogReport,
   normalizeDailyActivityLogOptions,
 } from "../../../src/modules/reports/daily-activity-log-service.js";
@@ -63,7 +66,9 @@ const FILTERS = {
   ownerNames: [] as string[],
 };
 
-const DIRECTOR = { role: "director" as const, userId: DANA, displayName: "Dana Director" };
+// baseRole is the HOME role from users.role; `role` is the per-office EFFECTIVE role. For a normal
+// director with no office override the two coincide, which is what this fixture represents.
+const DIRECTOR = { role: "director" as const, baseRole: "director" as const, userId: DANA, displayName: "Dana Director" };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let tdb: any;
@@ -231,7 +236,9 @@ describe("daily activity log — type filtering", () => {
     const report = await getDailyActivityLogReport(tdb, FILTERS, opts({ types: ["note"] }), DIRECTOR);
     const all = report.days.flatMap((d) => d.entries);
 
-    expect(report.kpis.totalEntries).toBe(4);
+    // The NARROWED count is pagination.total. kpis stays on the window scope -- see the two-scope
+    // cases below for why, and for the proof that it does not move.
+    expect(report.pagination.total).toBe(4);
     expect(all.map((e) => e.id).sort()).toEqual([A1, A3, A4, A6].sort());
     expect(all.every((e) => e.type === "note")).toBe(true);
     // The 06-01 day header must drop to the note-only count too, not keep the unfiltered 3.
@@ -241,12 +248,101 @@ describe("daily activity log — type filtering", () => {
 
   it("supports a multi-type selection and drops unknown types instead of erroring", async () => {
     const report = await getDailyActivityLogReport(tdb, FILTERS, opts({ types: ["call", "meeting"] }), DIRECTOR);
-    expect(report.kpis.totalEntries).toBe(2);
+    expect(report.pagination.total).toBe(2);
     expect(report.days.flatMap((d) => d.entries).map((e) => e.type).sort()).toEqual(["call", "meeting"]);
 
     // A stale bookmark carrying a type that no longer exists must widen, not 400.
     const normalized = normalizeDailyActivityLogOptions({ types: "note,not_a_real_type" });
     expect(normalized.types).toEqual(["note"]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// The KPI cards are the narrowing controls, so the numbers on them must survive being clicked.
+//
+// The failure this guards against is specific and easy to reintroduce: compute `kpis` over the same
+// predicate as the rows, and clicking "Notes" rewrites the Entries card from 6 to 4 -- the user loses
+// the denominator they were comparing against and a filtered view becomes indistinguishable from a
+// quiet week. Every case here asserts the WHOLE kpis object is byte-for-byte the unfiltered one.
+// ---------------------------------------------------------------------------------------------
+describe("daily activity log — window-scoped KPIs vs narrowed rows", () => {
+  it("keeps every KPI identical under a type narrowing while the row count follows it", async () => {
+    const unfiltered = await getDailyActivityLogReport(tdb, FILTERS, opts(), DIRECTOR);
+    const notesOnly = await getDailyActivityLogReport(tdb, FILTERS, opts({ types: ["note"] }), DIRECTOR);
+
+    expect(notesOnly.kpis).toEqual(unfiltered.kpis);
+    // ...and the card that was clicked still states the number the drill returned.
+    expect(notesOnly.pagination.total).toBe(unfiltered.kpis.notes);
+    expect(notesOnly.pagination.total).not.toBe(unfiltered.pagination.total);
+  });
+
+  it("keeps every KPI identical under the logged-off-day drill and returns exactly those rows", async () => {
+    const unfiltered = await getDailyActivityLogReport(tdb, FILTERS, opts(), DIRECTOR);
+    const offDay = await getDailyActivityLogReport(tdb, FILTERS, opts({ loggedOffDay: true }), DIRECTOR);
+
+    expect(offDay.kpis).toEqual(unfiltered.kpis);
+    // The drill returns exactly as many rows as the card it was clicked from claims. This is the
+    // property that breaks the moment "off-day" is re-derived somewhere instead of shared.
+    expect(offDay.pagination.total).toBe(unfiltered.kpis.offDayLogged);
+    expect(offDay.pagination.total).toBe(2);
+
+    const rows = offDay.days.flatMap((d) => d.entries);
+    expect(rows.map((e) => e.id).sort()).toEqual([A4, A6].sort());
+    expect(rows.every((e) => e.loggedSameDay === false)).toBe(true);
+    expect(offDay.appliedLoggedOffDay).toBe(true);
+    // Both directions of "off-day" count: A4 was written up late, A6 was dated ahead.
+    expect(rows.map((e) => e.loggedDaysDiff).sort((a, b) => a - b)).toEqual([-2, 3]);
+  });
+
+  it("composes the two narrowings without touching the KPIs", async () => {
+    const unfiltered = await getDailyActivityLogReport(tdb, FILTERS, opts(), DIRECTOR);
+    const both = await getDailyActivityLogReport(
+      tdb,
+      FILTERS,
+      opts({ types: ["note"], loggedOffDay: true }),
+      DIRECTOR
+    );
+
+    expect(both.kpis).toEqual(unfiltered.kpis);
+    // A4 and A6 are both notes, so notes+off-day is the same two rows here; the point is that the
+    // clauses AND together rather than one silently replacing the other.
+    expect(both.days.flatMap((d) => d.entries).map((e) => e.id).sort()).toEqual([A4, A6].sort());
+
+    const callsOffDay = await getDailyActivityLogReport(
+      tdb,
+      FILTERS,
+      opts({ types: ["call"], loggedOffDay: true }),
+      DIRECTOR
+    );
+    // The only call (A2) was logged the same day, so the intersection is genuinely empty -- proof the
+    // second clause is applied and not dropped.
+    expect(callsOffDay.pagination.total).toBe(0);
+    expect(callsOffDay.days).toEqual([]);
+    expect(callsOffDay.kpis).toEqual(unfiltered.kpis);
+  });
+
+  it("pages against the NARROWED total, not the window total", async () => {
+    // 2 off-day rows in a window of 6. Clamping against the window total would let ?page=2 through
+    // and serve an empty page under a footer reading "page 2 of 3".
+    const offDay = await getDailyActivityLogReport(tdb, FILTERS, opts({ loggedOffDay: true, page: 2, limit: 2 }), DIRECTOR);
+
+    expect(offDay.pagination).toMatchObject({ page: 1, total: 2, returned: 2, totalPages: 1, hasMore: false });
+  });
+
+  it("treats loggedOffDay as opt-in and echoes what it applied", () => {
+    for (const raw of ["1", "true", "TRUE", " yes ", "on", true]) {
+      expect(normalizeDailyActivityLogOptions({ loggedOffDay: raw }).loggedOffDay).toBe(true);
+    }
+    // Anything unrecognised must WIDEN (show everything), never silently hide rows. A NUMBER is in
+    // this list on purpose: Express query values are only ever string | string[], so a numeric 1
+    // cannot arrive from a URL and is deliberately not given a special case.
+    for (const raw of ["0", "false", "", "maybe", undefined, null, 1]) {
+      expect(normalizeDailyActivityLogOptions({ loggedOffDay: raw }).loggedOffDay).toBe(false);
+    }
+    expect(normalizeDailyActivityLogOptions({}).loggedOffDay).toBe(false);
+    // A repeated query param arrives as an array; Express's own last-wins rule applies.
+    expect(normalizeDailyActivityLogOptions({ loggedOffDay: ["0", "1"] }).loggedOffDay).toBe(true);
+    expect(normalizeDailyActivityLogOptions({ loggedOffDay: ["1", "0"] }).loggedOffDay).toBe(false);
   });
 });
 
@@ -351,11 +447,22 @@ describe("daily activity log — pagination", () => {
   });
 });
 
-describe("daily activity log — email content privacy", () => {
-  // Email activities carry synced mailbox content. server/src/modules/activities/service.ts restricts
-  // them to the mailbox owner for every viewer; this report must not become the way around that.
-  // The row is REDACTED rather than dropped, so it still counts and the Rep Activity reconcile holds.
+describe("daily activity log — email content visibility", () => {
+  // Email activities carry synced mailbox content. Who may READ that content is decided per viewer
+  // role, by EMAIL_CONTENT_READER_ROLES, and this report DELIBERATELY DIVERGES from the activities
+  // list endpoint (which still restricts email content to the mailbox owner for every viewer). The
+  // divergence is owner-approved: this report exists so a manager can read down a salesperson's day.
+  //
+  // These cases pin BOTH halves. Delete the allowlist check and "admin sees content" still passes
+  // while "a non-allowlisted viewer does not" fails, which is the direction that matters.
   const JULY = { ...FILTERS, dateFrom: "2026-07-01", dateTo: "2026-07-31" };
+
+  const ADMIN = { role: "admin" as const, baseRole: "admin" as const, userId: DANA, displayName: "Dana Director" };
+  // A viewer whose role is NOT on the allowlist AND is not collapsed to their own rows by
+  // resolveRepActivityScope. requireAnyRole keeps this role off the route today; the point of testing
+  // it is that the CONTENT decision must not depend on the ROW decision -- widen either guard and the
+  // other still holds. This is the case that would fail if the predicate were simply deleted.
+  const OUTSIDER = { role: "construction" as const, baseRole: "construction" as const, userId: DANA, displayName: "Dana Director" };
 
   it("shows a rep their OWN email content in full", async () => {
     const alice = { role: "rep" as const, userId: ALICE, displayName: "Alice Rep" };
@@ -370,16 +477,110 @@ describe("daily activity log — email content privacy", () => {
     expect(own.nextStep).toBe("Send revised pricing");
   });
 
-  it("withholds another user's email content from a director while KEEPING the row", async () => {
-    const report = await getDailyActivityLogReport(tdb, JULY, opts(), DIRECTOR);
+  it("pins exactly which roles may read someone else's email content", () => {
+    expect([...EMAIL_CONTENT_READER_ROLES].sort()).toEqual(["admin", "director"]);
+    for (const role of ["rep", "construction", "field_contractor"] as const) {
+      expect(EMAIL_CONTENT_READER_ROLES.has(role)).toBe(false);
+    }
+  });
+
+  // The effective/home role split, decided in one pure function so it can be enumerated exhaustively
+  // rather than sampled. `role` is what authMiddleware rewrites from user_office_access.role_override;
+  // `baseRole` is users.role. Gating on the effective role alone is the #740 escalation.
+  it("requires BOTH the effective office role and the home role to be allowlisted", () => {
+    for (const role of USER_ROLES) {
+      for (const baseRole of USER_ROLES) {
+        const allowed = canReadOthersEmailContent({ role, baseRole });
+        const bothAllowlisted =
+          EMAIL_CONTENT_READER_ROLES.has(role) && EMAIL_CONTENT_READER_ROLES.has(baseRole);
+        expect({ role, baseRole, allowed }).toEqual({ role, baseRole, allowed: bothAllowlisted });
+      }
+    }
+
+    // The escalation itself, named: a rep handed a director override on an office.
+    expect(canReadOthersEmailContent({ role: "director", baseRole: "rep" })).toBe(false);
+    expect(canReadOthersEmailContent({ role: "admin", baseRole: "construction" })).toBe(false);
+    // And the other direction: a real admin scoped DOWN to rep for an office gets no elevation there.
+    expect(canReadOthersEmailContent({ role: "rep", baseRole: "admin" })).toBe(false);
+    // Absent baseRole fails CLOSED, the same way requireGlobalAdmin does.
+    expect(canReadOthersEmailContent({ role: "admin" })).toBe(false);
+    expect(canReadOthersEmailContent({ role: "admin", baseRole: null })).toBe(false);
+  });
+
+  it("withholds content from a rep who holds a DIRECTOR override on this office", async () => {
+    // authMiddleware would hand the service role=director (from user_office_access.role_override) with
+    // baseRole=rep. The effective role is what stops resolveRepActivityScope collapsing them to their
+    // own rows -- so they DO receive Alice's and Bob's rows. The home role is what must stop them
+    // reading the mail in those rows. If this endpoint gated on `role` alone, this test returns
+    // "Alice mailbox body." to a rep.
+    const escalated = { role: "director" as const, baseRole: "rep" as const, userId: DANA, displayName: "Dana Director" };
+    const report = await getDailyActivityLogReport(tdb, JULY, opts(), escalated);
     const byId = new Map(report.days.flatMap((d) => d.entries).map((e) => [e.id, e]));
 
-    // Both mailbox rows are present and countable...
+    // They are NOT scope-collapsed -- every row is here, which is precisely what makes this dangerous.
     expect(report.kpis.totalEntries).toBe(3);
     expect(byId.has(E1)).toBe(true);
     expect(byId.has(E2)).toBe(true);
 
-    // ...but neither director-readable row carries content.
+    for (const id of [E1, E2]) {
+      expect(byId.get(id)!.contentRestricted).toBe(true);
+      expect(byId.get(id)!.subject).toBeNull();
+      expect(byId.get(id)!.body).toBeNull();
+    }
+    expect(JSON.stringify(report)).not.toContain("Alice mailbox body.");
+    expect(JSON.stringify(report)).not.toContain("Bob mailbox body.");
+  });
+
+  it("withholds content from a caller that omits baseRole entirely", async () => {
+    // Fail-closed. /api/reports always runs behind authMiddleware, which sets baseRole -- but a future
+    // caller that forgets it must get redaction, not the admin view.
+    const noBaseRole = { role: "admin" as const, userId: DANA, displayName: "Dana Director" };
+    const report = await getDailyActivityLogReport(tdb, JULY, opts(), noBaseRole);
+    const byId = new Map(report.days.flatMap((d) => d.entries).map((e) => [e.id, e]));
+
+    expect(byId.get(E1)!.contentRestricted).toBe(true);
+    expect(byId.get(E1)!.body).toBeNull();
+  });
+
+  for (const viewer of [ADMIN, DIRECTOR]) {
+    it(`shows a ${viewer.role} the full content of email they do not own`, async () => {
+      const report = await getDailyActivityLogReport(tdb, JULY, opts(), viewer);
+      const byId = new Map(report.days.flatMap((d) => d.entries).map((e) => [e.id, e]));
+
+      expect(report.kpis.totalEntries).toBe(3);
+
+      // Neither mailbox belongs to the viewer (E1 is Alice's, E2 is Bob's) and both are readable.
+      const alicesEmail = byId.get(E1)!;
+      expect(alicesEmail.responsibleName).toBe("Alice Rep");
+      expect(alicesEmail.contentRestricted).toBe(false);
+      expect(alicesEmail.subject).toBe("Re: Roof proposal");
+      expect(alicesEmail.body).toBe("Alice mailbox body.");
+      expect(alicesEmail.outcome).toBe("replied");
+      expect(alicesEmail.nextStep).toBe("Send revised pricing");
+
+      const bobsEmail = byId.get(E2)!;
+      expect(bobsEmail.responsibleName).toBe("Bob Rep");
+      expect(bobsEmail.contentRestricted).toBe(false);
+      expect(bobsEmail.subject).toBe("Re: Scope questions");
+      expect(bobsEmail.body).toBe("Bob mailbox body.");
+
+      // Ordinary entries are unaffected either way.
+      const note = byId.get(E3)!;
+      expect(note.contentRestricted).toBe(false);
+      expect(note.subject).toBe("Ordinary note");
+    });
+  }
+
+  it("still withholds content from a viewer outside the allowlist while KEEPING the row", async () => {
+    const report = await getDailyActivityLogReport(tdb, JULY, opts(), OUTSIDER);
+    const byId = new Map(report.days.flatMap((d) => d.entries).map((e) => [e.id, e]));
+
+    // The rows are all present and countable...
+    expect(report.kpis.totalEntries).toBe(3);
+    expect(byId.has(E1)).toBe(true);
+    expect(byId.has(E2)).toBe(true);
+
+    // ...but neither email carries content, because redaction REDACTS rather than excludes.
     for (const id of [E1, E2]) {
       const entry = byId.get(id)!;
       expect(entry.contentRestricted).toBe(true);
@@ -394,36 +595,63 @@ describe("daily activity log — email content privacy", () => {
       expect(entry.occurredDate).toBe("2026-07-01");
     }
 
-    // A NOTE by the same rep is untouched -- the redaction is scoped to email, not to "not mine".
+    // A NOTE is untouched -- the redaction is scoped to email, not to "not mine".
     const note = byId.get(E3)!;
     expect(note.contentRestricted).toBe(false);
-    expect(note.subject).toBe("Ordinary note");
     expect(note.body).toBe("Not an email, so never redacted.");
   });
 
-  it("does not leak one rep's email to another rep", async () => {
+  it("does not leak one rep's email to another rep under ANY filter", async () => {
     const bob = { role: "rep" as const, userId: BOB, displayName: "Bob Rep" };
-    const report = await getDailyActivityLogReport(tdb, JULY, opts(), bob);
-    const all = report.days.flatMap((d) => d.entries);
 
-    // Rep scoping already limits Bob to his own rows; his own email is readable.
-    expect(all.map((e) => e.id)).toEqual([E2]);
-    expect(all[0].contentRestricted).toBe(false);
-    expect(all[0].body).toBe("Bob mailbox body.");
+    // Every shape of request Bob could construct by hand, including asking for Alice by id and
+    // selecting the email type explicitly. Rep scoping must collapse all of them to Bob's own rows,
+    // and no response may carry a byte of Alice's mailbox.
+    const attempts = [
+      { filters: JULY, options: opts() },
+      { filters: JULY, options: opts({ types: ["email"] }) },
+      { filters: JULY, options: opts({ loggedOffDay: true }) },
+      { filters: { ...JULY, ownerIds: [ALICE] }, options: opts() },
+      { filters: { ...JULY, ownerIds: [ALICE] }, options: opts({ types: ["email"] }) },
+      { filters: { ...JULY, ownerIds: [ALICE, BOB] }, options: opts({ types: ["email"] }) },
+      { filters: { ...JULY, ownerNames: ["Alice Rep"] }, options: opts({ types: ["email"] }) },
+      { filters: { ...JULY, dateFrom: "2026-01-01", dateTo: "2026-12-31" }, options: opts({ types: ["email"] }) },
+    ];
+
+    for (const attempt of attempts) {
+      const report = await getDailyActivityLogReport(tdb, attempt.filters, attempt.options, bob);
+      const all = report.days.flatMap((d) => d.entries);
+
+      expect(all.every((e) => e.responsibleUserId === BOB)).toBe(true);
+      expect(all.some((e) => e.id === E1)).toBe(false);
+      // Belt and braces: the mailbox text itself must not appear in ANY field of ANY row.
+      expect(JSON.stringify(report)).not.toContain("Alice mailbox body.");
+      expect(JSON.stringify(report)).not.toContain("Re: Roof proposal");
+    }
+
+    // ...and Bob's OWN email is still fully readable to him.
+    const own = await getDailyActivityLogReport(tdb, JULY, opts({ types: ["email"] }), bob);
+    const rows = own.days.flatMap((d) => d.entries);
+    expect(rows.map((e) => e.id)).toEqual([E2]);
+    expect(rows[0].contentRestricted).toBe(false);
+    expect(rows[0].body).toBe("Bob mailbox body.");
   });
 
-  it("keeps the Rep Activity reconcile intact despite redaction", async () => {
-    // The whole reason redaction was chosen over exclusion: Rep Activity counts email activities for
-    // every viewer, so dropping them here would have desynced the two reports.
-    const log = await getDailyActivityLogReport(tdb, JULY, opts(), DIRECTOR);
-    const repActivity = await getRepActivityReport(tdb, JULY, DIRECTOR, "daily-log-email-reconcile");
+  it("keeps the Rep Activity reconcile intact for every viewer", async () => {
+    // Redaction was chosen over exclusion because Rep Activity counts email activities for every
+    // viewer; relaxing WHO can read the content does not change WHICH rows are returned, so this
+    // still has to hold -- for the allowlisted viewer and the restricted one alike.
+    for (const viewer of [ADMIN, DIRECTOR, OUTSIDER]) {
+      const log = await getDailyActivityLogReport(tdb, JULY, opts(), viewer);
+      const repActivity = await getRepActivityReport(tdb, JULY, viewer, `daily-log-email-reconcile-${viewer.role}`);
 
-    expect(log.kpis.totalEntries).toBe(repActivity.kpis.totalTouchpoints);
-    const logByDay = Object.fromEntries(log.days.map((d) => [d.date, d.entryCount]));
-    const repByDay = Object.fromEntries(repActivity.timeline.map((t) => [t.date, t.touchpoints]));
-    expect(logByDay).toEqual(repByDay);
-    // Two of the three July rows are emails, and Rep Activity counts them in its own breakdown.
-    expect(repActivity.kpis.emails).toBe(2);
+      expect(log.kpis.totalEntries).toBe(repActivity.kpis.totalTouchpoints);
+      const logByDay = Object.fromEntries(log.days.map((d) => [d.date, d.entryCount]));
+      const repByDay = Object.fromEntries(repActivity.timeline.map((t) => [t.date, t.touchpoints]));
+      expect(logByDay).toEqual(repByDay);
+      // Two of the three July rows are emails, and Rep Activity counts them in its own breakdown.
+      expect(repActivity.kpis.emails).toBe(2);
+    }
   });
 });
 

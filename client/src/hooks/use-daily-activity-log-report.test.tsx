@@ -325,6 +325,40 @@ describe("synchronous invalidation on scope change", () => {
   });
 });
 
+describe("useDailyActivityLogReport logged-off-day drill", () => {
+  // The "Logged Off-Day" KPI card narrows the log SERVER-SIDE (the page is paginated, so filtering a
+  // page client-side would show 3 off-day rows out of 200 and call it the answer). That makes the flag
+  // a request parameter AND a dependency: leave it out of the key and the card repaints identical rows,
+  // which reads as a control that does nothing.
+  const renderDrill = () =>
+    renderScopedHook(
+      ({ loggedOffDay }: { loggedOffDay: boolean }) =>
+        useDailyActivityLogReport({ dateFrom: "2026-06-01", dateTo: "2026-06-30", loggedOffDay }),
+      "/reports/performance/daily-activity-log",
+      { loggedOffDay: false }
+    );
+
+  it("sends loggedOffDay=1 and refetches both when the drill is applied and when it is cleared", async () => {
+    const hook = await renderDrill();
+    expect(pending).toHaveLength(1);
+    expect(pending[0].url).not.toContain("loggedOffDay");
+
+    await hook.rerenderWith({ loggedOffDay: true });
+    expect(pending).toHaveLength(2);
+    expect(pending[1].url).toContain("loggedOffDay=1");
+
+    await act(async () => {
+      pending[1].resolve(payload("off-day-rows"));
+    });
+    expect(hook.current.data?.appliedTypes).toEqual(["off-day-rows"]);
+
+    // Clearing it must widen again rather than leaving the narrowed rows on screen.
+    await hook.rerenderWith({ loggedOffDay: false });
+    expect(pending).toHaveLength(3);
+    expect(pending[2].url).not.toContain("loggedOffDay");
+  });
+});
+
 describe("useDailyActivityLogReport superseded responses", () => {
   it("drops a slow earlier response that resolves after a newer one", async () => {
     const hook = await renderLog();
