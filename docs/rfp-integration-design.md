@@ -388,8 +388,11 @@ Response:
 - Ids that are not castable UUIDs are dropped rather than failing the batch (a HubSpot-sourced RFP
   carries a numeric id, and one of those in `= ANY($1::uuid[])` is a `22P02` that would lose every
   other row's amount).
-- Response keys come from `deals.id`, so they are always Postgres's canonical lower-case rendering
-  regardless of the casing the caller sent.
+- Request ids are lower-cased to Postgres's canonical form before the lookup, and response keys come
+  from `deals.id`, so both sides are always lower-case regardless of what the caller sent. This is
+  load-bearing, not cosmetic: the per-schema loop prunes already-found ids by comparing request ids
+  against `row.id`, so an upper-case request id would never match its own result, never be pruned,
+  and every later tenant schema would be swept for a deal already found.
 - Over `maxDealIds` the request is refused with `422 too_many_deal_ids` rather than silently
   truncated. 500 is comfortably above the 100 rows a SyncHub report page can hold, so a whole report
   resolves in one round trip.

@@ -580,11 +580,19 @@ internalRfpRoutes.post(
 
       // Only real UUIDs are addressable here. A HubSpot-sourced RFP carries a numeric deal id, and
       // feeding one to `= ANY($1::uuid[])` is a 22P02 that would fail the WHOLE batch — so drop the
-      // unusable ids rather than let one poison every other row's amount. Casing is deliberately
-      // left alone: Postgres normalizes it inside the `::uuid` cast, and the response is keyed on
-      // `row.id`, which always comes back canonically lower-cased whatever the caller sent.
+      // unusable ids rather than let one poison every other row's amount.
+      //
+      // Lower-cased to Postgres's canonical form BEFORE the lookup. This is not cosmetic: the lookup
+      // prunes `remaining` by comparing request ids against `row.id`, which always comes back
+      // lower-cased. An upper-case request id would therefore never match its own result, so it would
+      // never be pruned, the early-stop would never fire, and every later tenant schema would be
+      // queried for a deal already found. Normalizing here also dedupes ids that differ only in case.
       const dealIds = [
-        ...new Set(payload.dealIds.map((value: unknown) => asStringOrNull(value)).filter(isCastableUuid)),
+        ...new Set(
+          payload.dealIds
+            .map((value: unknown) => asStringOrNull(value)?.toLowerCase() ?? null)
+            .filter(isCastableUuid)
+        ),
       ] as string[];
 
       if (dealIds.length === 0) {

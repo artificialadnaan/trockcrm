@@ -45,6 +45,27 @@ function sign(body: string, secret = SECRET) {
   return `sha256=${crypto.createHmac("sha256", secret).update(body).digest("hex")}`;
 }
 
+/**
+ * A second tenant schema so the early-stop can actually be observed. With one schema every
+ * implementation looks identical — the loop ends because it ran out of schemas, not because it
+ * pruned correctly. The name must sort AFTER office_test (listTenantSchemas orders nspname ASC),
+ * or it would be searched before the deal is found and prove nothing.
+ */
+async function seedSecondSchema() {
+  await holder.pg.exec(`
+    CREATE SCHEMA office_zzz;
+    CREATE TABLE office_zzz.deals (
+      id uuid PRIMARY KEY,
+      name text,
+      awarded_amount numeric(14,2),
+      bid_estimate numeric(14,2),
+      dd_estimate numeric(14,2),
+      forecast_revenue numeric(14,2),
+      is_active boolean NOT NULL DEFAULT true
+    );
+  `);
+}
+
 async function seed() {
   const db = new PGlite();
   holder.pg = db;
@@ -175,6 +196,33 @@ describe("POST /api/internal/deals/current-values", () => {
     expect(res.status).toBe(200);
     // Postgres renders `uuid` lower-case; echoing the caller's casing back would produce a key
     // that does not match the row it describes.
+    expect(res.body.values).toEqual([{ dealId: BID_ONLY, amount: 248500 }]);
+  });
+
+  it("stops searching once an upper-case uuid has been found, instead of sweeping every schema", async () => {
+    await seed();
+    await seedSecondSchema();
+    const app = await buildApp();
+    holder.queries = [];
+
+    const res = await post(app, { dealIds: [BID_ONLY.toUpperCase()] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.values).toEqual([{ dealId: BID_ONLY, amount: 248500 }]);
+    // The deal lives in office_test, which is searched first. The pruning compares request ids
+    // against `row.id`, which comes back lower-cased — so an un-normalized upper-case id never
+    // matches its own result, is never pruned, and office_zzz gets swept for an already-found deal.
+    const secondSchemaQueries = holder.queries.filter((q) => q.includes("office_zzz"));
+    expect(secondSchemaQueries).toHaveLength(0);
+  });
+
+  it("treats two spellings of the same uuid as one id", async () => {
+    await seed();
+    const app = await buildApp();
+
+    const res = await post(app, { dealIds: [BID_ONLY, BID_ONLY.toUpperCase()] });
+
+    expect(res.status).toBe(200);
     expect(res.body.values).toEqual([{ dealId: BID_ONLY, amount: 248500 }]);
   });
 
