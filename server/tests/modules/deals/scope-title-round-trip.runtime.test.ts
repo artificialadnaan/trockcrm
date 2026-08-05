@@ -195,6 +195,50 @@ describe("scope_title round trip (real SQL): create -> read -> edit -> read", ()
     expect(listed.deals[0]).toHaveProperty("scopeTitle", "Balcony Repair");
   });
 
+  it("persists the title on the SERVICE-OPPORTUNITY create shape too, not just the standard one", async () => {
+    // POST /deals/service-opportunity is a second, independent create path with its own explicit field
+    // list on the route — it does NOT spread the body like POST /deals does, so a field can be accepted
+    // by the validator and still be dropped on the way to createDeal. The route-level forwarding is
+    // pinned in scope-title-api-cap.runtime.test.ts; this is the DB half of that same chain.
+    const created = await createDeal(tdb, {
+      name: "SMOKE TEST DELETE service opportunity scope title",
+      stageId: STAGE_ID,
+      assignedRepId: REP_ID,
+      actorUserId: REP_ID,
+      actorRole: "rep",
+      officeId: OFFICE_ID,
+      officeCode: "dfw",
+      migrationMode: true,
+      workflowRoute: "service",
+      scopeTitle: "Clear backup clog from bathroom toilet unit 4350-201b",
+    });
+
+    expect(created.workflowRoute).toBe("service");
+    expect((await read(created.id))?.scopeTitle).toBe(
+      "Clear backup clog from bathroom toilet unit 4350-201b",
+    );
+  });
+
+  it("stays editable on a BID-BOARD-OWNED deal — the only way a synced deal ever gets a title", async () => {
+    // SyncHub/Procore ingest inserts deals directly and Procore has no scope-title equivalent, so every
+    // bid-board-owned deal arrives with scope_title = NULL. The edit path is therefore the ONLY way one
+    // ever gets a title. If scopeTitle were ever added to BID_BOARD_OWNED_UPDATE_FIELD_LABELS this would
+    // 403 and the feature would be dead for the whole synced portfolio.
+    const created = await create(null);
+    await tdb.update(deals).set({ isBidBoardOwned: true }).where(eq(deals.id, created.id));
+
+    const updated = await updateDeal(
+      tdb,
+      created.id,
+      { scopeTitle: "Exterior Renovation" },
+      "rep",
+      REP_ID,
+      OFFICE_ID,
+    );
+
+    expect(updated.scopeTitle).toBe("Exterior Renovation");
+  });
+
   it("records the change in the deal's audit trail", async () => {
     // scope_title is a field accounting relies on; a silent overwrite has to be traceable to whoever
     // did it, the same as name/description/awarded_amount.

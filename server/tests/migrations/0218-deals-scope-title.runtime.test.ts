@@ -29,9 +29,17 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PGlite } from "@electric-sql/pglite";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEAL_SCOPE_TITLE_MAX_LENGTH } from "@trock-crm/shared/types";
 import { migrationSql } from "../helpers/migration-sql.js";
+
+// One PGlite boot for the whole file, not one per test. Booting the WASM Postgres eight times was ~8x the
+// dominant cost here and pushed a single case past the 15s per-test limit when this suite ran alongside
+// the other new scope-title suites under maxWorkers=4 (Codex #1051). Isolation is preserved by dropping
+// every office schema between tests — the migration acts on ALL office_% schemas, so a schema left behind
+// by one test would be visible to the next. The headroom below is belt-and-braces for a cold CI runner:
+// the file is fast now, and a limit this generous still fails a genuine hang, just not a slow start.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 
 const MIGRATION_SQL = migrationSql("0218_deals_scope_title");
 
@@ -91,22 +99,38 @@ const PUBLIC_PREREQUISITES = `
 const STAGE = "00000000-0000-4000-8000-000000000001";
 const REP = "00000000-0000-4000-8000-000000000002";
 
-let pg: PGlite | null = null;
+let pg: PGlite;
 
-afterEach(async () => {
-  await pg?.close();
-  pg = null;
-});
-
-async function freshDb(): Promise<PGlite> {
-  const db = new PGlite();
-  await db.exec(PUBLIC_PREREQUISITES);
-  await db.exec(`
+beforeAll(async () => {
+  pg = new PGlite();
+  await pg.exec(PUBLIC_PREREQUISITES);
+  await pg.exec(`
     INSERT INTO public.pipeline_stage_config (id) VALUES ('${STAGE}');
     INSERT INTO public.users (id) VALUES ('${REP}');
   `);
-  return db;
-}
+});
+
+afterAll(async () => {
+  await pg?.close();
+});
+
+/**
+ * Drop every schema this file could have created, so each test starts from "no office exists yet".
+ *
+ * Driven off pg_namespace rather than a hard-coded list: a test that adds a new schema name and forgets
+ * to register it here would otherwise leak into the next test's DO-loop, and the failure would look like
+ * a bug in the migration rather than in the fixture.
+ */
+beforeEach(async () => {
+  const res = await pg.query<{ nspname: string }>(
+    `SELECT nspname FROM pg_namespace
+      WHERE nspname NOT IN ('public', 'information_schema', 'pg_catalog', 'pg_toast')
+        AND nspname NOT LIKE 'pg\\_%' ESCAPE '\\'`,
+  );
+  for (const { nspname } of res.rows) {
+    await pg.exec(`DROP SCHEMA IF EXISTS "${nspname}" CASCADE;`);
+  }
+});
 
 /** An office schema as it exists TODAY: the real 0001 deals table, no scope_title. */
 async function createOfficeSchema(db: PGlite, schema: string) {
@@ -142,7 +166,6 @@ async function scopeTitleColumn(db: PGlite, schema: string): Promise<ColumnShape
 
 describe("migration 0218 — deals.scope_title", () => {
   it("adds a nullable varchar(120) to an EXISTING office schema and leaves its rows intact", async () => {
-    pg = await freshDb();
     await createOfficeSchema(pg, "office_dallas");
     await seedDeal(pg, "office_dallas", "TR-1001");
 
@@ -165,7 +188,6 @@ describe("migration 0218 — deals.scope_title", () => {
   });
 
   it("reaches EVERY office_% schema, not just the first", async () => {
-    pg = await freshDb();
     await createOfficeSchema(pg, "office_dallas");
     await createOfficeSchema(pg, "office_atlanta");
 
@@ -176,7 +198,6 @@ describe("migration 0218 — deals.scope_title", () => {
   });
 
   it("SKIPS a half-provisioned office schema instead of aborting the whole DO block", async () => {
-    pg = await freshDb();
     await createOfficeSchema(pg, "office_dallas");
     // Schema exists, `deals` was never cloned into it — the drifted-office case the guard exists for.
     await pg.exec(`CREATE SCHEMA IF NOT EXISTS office_halfbaked;`);
@@ -188,7 +209,6 @@ describe("migration 0218 — deals.scope_title", () => {
   });
 
   it("matches a LITERAL underscore only — `officex_thing` is left alone", async () => {
-    pg = await freshDb();
     await createOfficeSchema(pg, "office_dallas");
     // Without `ESCAPE '\'`, the `_` in `office_%` is a single-character wildcard and this schema matches.
     await createOfficeSchema(pg, "officex_thing");
@@ -200,7 +220,6 @@ describe("migration 0218 — deals.scope_title", () => {
   });
 
   it("is idempotent — a replay neither errors nor resets a value written in between", async () => {
-    pg = await freshDb();
     await createOfficeSchema(pg, "office_dallas");
     await seedDeal(pg, "office_dallas", "TR-1002");
 
@@ -222,7 +241,6 @@ describe("migration 0218 — deals.scope_title", () => {
     expect(MIGRATION_SQL).toContain(START_MARKER);
     expect(MIGRATION_SQL).toContain(END_MARKER);
 
-    pg = await freshDb();
     await createOfficeSchema(pg, "office_dallas");
     await pg.exec(MIGRATION_SQL);
     const viaDoLoop = await scopeTitleColumn(pg, "office_dallas");
@@ -243,7 +261,6 @@ describe("migration 0218 — deals.scope_title", () => {
     // The API rejects an over-length title with a 400 before the column ever sees it. This asserts the
     // backstop under that: a writer that skips the route (a script, a future importer) still cannot
     // widen the field by accident, and the column's width is the SAME number the form and API read.
-    pg = await freshDb();
     await createOfficeSchema(pg, "office_dallas");
     await pg.exec(MIGRATION_SQL);
 
@@ -271,14 +288,13 @@ describe("migration 0218 — deals.scope_title", () => {
   });
 
   it("round-trips a real title at the column: NULL -> set -> read -> cleared", async () => {
-    pg = await freshDb();
     await createOfficeSchema(pg, "office_dallas");
     await pg.exec(MIGRATION_SQL);
     await seedDeal(pg, "office_dallas", "TR-3001");
 
     const read = async () =>
       (
-        await pg!.query<{ scope_title: string | null }>(
+        await pg.query<{ scope_title: string | null }>(
           `SELECT scope_title FROM office_dallas.deals WHERE deal_number = 'TR-3001'`,
         )
       ).rows[0]?.scope_title ?? null;

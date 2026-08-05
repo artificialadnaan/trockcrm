@@ -5,6 +5,7 @@ import { act, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DEAL_SCOPE_TITLE_MAX_LENGTH } from "@trock-crm/shared/types";
 import { ServiceOpportunityForm } from "./service-opportunity-form";
 import serviceOpportunityFormSource from "./service-opportunity-form.tsx?raw";
 import leadFormSource from "@/components/leads/lead-form.tsx?raw";
@@ -315,6 +316,93 @@ describe("ServiceOpportunityForm", () => {
       container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
   }
+
+  // deals.scope_title, migration 0218. The API for this route accepts and persists the field; a client
+  // that cannot SEND it means every service opportunity created here is born with scope_title = NULL and
+  // accounting has to add the title by editing the deal afterwards. Server-accepts / client-cannot-send is
+  // silent — nothing errors — so it is pinned here.
+  it("sends the scope title through the direct-create endpoint", async () => {
+    const { container, root } = await renderForm();
+    containers.push(container);
+    roots.push(root);
+
+    await act(async () => {
+      setInputValue(container.querySelector("#scopeTitle") as HTMLInputElement, "  Plumbing Renovations  ");
+    });
+    await selectAndSubmit(container);
+
+    expect(mocks.createServiceOpportunity).toHaveBeenCalledWith(
+      // Trimmed, exactly as the API normalizes it, so the two never disagree about what was stored.
+      expect.objectContaining({ scopeTitle: "Plumbing Renovations" }),
+      expect.anything()
+    );
+  });
+
+  it("sends null for a blank scope title rather than an empty string", async () => {
+    const { container, root } = await renderForm();
+    containers.push(container);
+    roots.push(root);
+
+    await selectAndSubmit(container);
+
+    expect(mocks.createServiceOpportunity).toHaveBeenCalledWith(
+      expect.objectContaining({ scopeTitle: null }),
+      expect.anything()
+    );
+  });
+
+  it("renders the scope-title input with the accounting examples, above Description", async () => {
+    const { container, root } = await renderForm();
+    containers.push(container);
+    roots.push(root);
+
+    const input = container.querySelector("#scopeTitle") as HTMLInputElement;
+    expect(input).toBeTruthy();
+    expect(container.querySelector('label[for="scopeTitle"]')?.textContent).toContain("Scope Title");
+    expect(input.placeholder).toContain("Unit Build Back");
+    expect(input.placeholder).toContain("Plumbing Renovations");
+    expect(input.placeholder).toContain("Balcony Repair");
+
+    const description = container.querySelector("#description");
+    expect(description).not.toBeNull();
+    expect(input.compareDocumentPosition(description!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("blocks Create with an error when the scope title is over the cap, and never calls the endpoint", async () => {
+    const { container, root } = await renderForm();
+    containers.push(container);
+    roots.push(root);
+
+    await act(async () => {
+      setInputValue(
+        container.querySelector("#scopeTitle") as HTMLInputElement,
+        "A".repeat(DEAL_SCOPE_TITLE_MAX_LENGTH + 1)
+      );
+    });
+    await selectAndSubmit(container);
+
+    expect(mocks.createServiceOpportunity).not.toHaveBeenCalled();
+    expect(container.textContent).toContain(
+      `Scope title must be ${DEAL_SCOPE_TITLE_MAX_LENGTH} characters or fewer`
+    );
+  });
+
+  it("accepts a scope title at exactly the cap", async () => {
+    const atLimit = "A".repeat(DEAL_SCOPE_TITLE_MAX_LENGTH);
+    const { container, root } = await renderForm();
+    containers.push(container);
+    roots.push(root);
+
+    await act(async () => {
+      setInputValue(container.querySelector("#scopeTitle") as HTMLInputElement, atLimit);
+    });
+    await selectAndSubmit(container);
+
+    expect(mocks.createServiceOpportunity).toHaveBeenCalledWith(
+      expect.objectContaining({ scopeTitle: atLimit }),
+      expect.anything()
+    );
+  });
 
   it("captures region synchronously from the selected property so an immediate Create still includes it", async () => {
     // PropertySelector emits the picked property's state via onPropertySelected at click time (no async

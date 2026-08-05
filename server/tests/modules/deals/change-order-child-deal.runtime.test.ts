@@ -67,7 +67,7 @@ beforeAll(async () => {
       is_change_order boolean NOT NULL DEFAULT false, parent_deal_id uuid,
       is_bid_board_owned boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
       is_test_data boolean NOT NULL DEFAULT false, is_active boolean NOT NULL DEFAULT true,
-      stage_entered_at timestamptz NOT NULL DEFAULT now(), description text,
+      stage_entered_at timestamptz NOT NULL DEFAULT now(), scope_title varchar(120), description text,
       created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now()
     );
     CREATE UNIQUE INDEX deals_project_number_uidx ON deals (project_number)
@@ -118,9 +118,9 @@ beforeAll(async () => {
     INSERT INTO pipeline_stage_config (id, name, slug, display_order, is_terminal) VALUES
       ('${ST.won}','Won','${WON_SLUG}', 90, true), ('${ST.open}','Opportunity','opportunity', 30, false);
     INSERT INTO users (id, email, display_name, role, office_id) VALUES ('${REP}','alice@t.test','Alice','rep','${OFFICE}');
-    INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, company_id, property_id, awarded_amount, won_closed_date, project_number, office_code, project_type, workflow_route, is_bid_board_owned) VALUES
-      ('${PARENT}','DFW-9-10001-aa','Acme Tower Reroof','${ST.won}','${REP}','${CO_NS}','${PROP}', 500000, '2025-06-01', 'DFW-9-10001-aa', 'DFW', 'Roofing', 'normal', false),
-      ('${BBO_PARENT}','DFW-9-10002-aa','Globex (Bid Board)','${ST.open}','${REP}','${CO_NS}','${PROP}', 250000, NULL, 'DFW-9-10002-aa', 'DFW', 'Roofing', 'normal', true);
+    INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, company_id, property_id, awarded_amount, won_closed_date, project_number, office_code, project_type, workflow_route, is_bid_board_owned, scope_title) VALUES
+      ('${PARENT}','DFW-9-10001-aa','Acme Tower Reroof','${ST.won}','${REP}','${CO_NS}','${PROP}', 500000, '2025-06-01', 'DFW-9-10001-aa', 'DFW', 'Roofing', 'normal', false, 'Balcony Repair'),
+      ('${BBO_PARENT}','DFW-9-10002-aa','Globex (Bid Board)','${ST.open}','${REP}','${CO_NS}','${PROP}', 250000, NULL, 'DFW-9-10002-aa', 'DFW', 'Roofing', 'normal', true, NULL);
   `);
   // deal_signed_commissions from the REAL Drizzle table, so its DB CHECK constraints are present. The
   // hand-rolled version this replaces carried the columns but NONE of migration 0062's CHECKs, which is
@@ -167,6 +167,33 @@ describe("createChangeOrderChildDeal — a change order is its own Won child dea
     expect(row.deal_number).not.toBe("DFW-9-10001-aa"); // but has its OWN unique deal_number
     expect(String(row.name)).toContain("Change Order");
     expect(String(row.name)).toContain("Acme Tower Reroof");
+  });
+
+  it("inherits the parent's scope_title — the CO shares the parent's project_number, so it is the same project", async () => {
+    // Accounting keys the CO into QuickBooks under the SAME project number as the parent, so it needs the
+    // same project title. A null here would hand them exactly the untitled row scope_title exists to
+    // remove, on a record with no create form to fill it in from. The CO's own specific change is in
+    // `description`, which is why inheriting the title is not lossy.
+    const child = await createChangeOrderChildDeal(tdb, {
+      parentDealId: PARENT,
+      signedDate: "2026-03-20",
+      amount: "5000",
+      description: "Extra railing on the south face",
+      createdBy: REP,
+    });
+    const row = await fetchDeal(child.id);
+    expect(row.scope_title).toBe("Balcony Repair");
+    expect(row.description).toBe("Extra railing on the south face"); // the CO's own scope, not overwritten
+  });
+
+  it("leaves the child's scope_title null when the parent has none, rather than inventing one", async () => {
+    const parentless = await createChangeOrderChildDeal(tdb, {
+      parentDealId: BBO_PARENT,
+      signedDate: "2026-03-21",
+      amount: "1500",
+      createdBy: REP,
+    });
+    expect((await fetchDeal(parentless.id)).scope_title).toBeNull();
   });
 
   it("silent-vanish invariant: the child always has Won stage + won_closed_date + awarded_amount + not on-hold/test", async () => {

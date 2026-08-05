@@ -27,6 +27,10 @@ import {
   buildOfficeCodePrefixOptions,
   resolveDefaultOfficeCode,
 } from "@/lib/office-selection";
+import {
+  DEAL_SCOPE_TITLE_EXAMPLES,
+  DEAL_SCOPE_TITLE_MAX_LENGTH,
+} from "@trock-crm/shared/types";
 
 interface ServiceOpportunityFormProps {
   onSuccess?: (deal: Deal) => void;
@@ -94,6 +98,7 @@ export function ServiceOpportunityForm({
     name: initialValues?.name ?? "",
     companyId: initialValues?.companyId ?? "",
     propertyId: initialValues?.propertyId ?? "",
+    scopeTitle: "",
     description: "",
     assignedRepId: user?.role === "rep" ? user.id : "",
     salesSourceUserId: "",
@@ -281,6 +286,12 @@ export function ServiceOpportunityForm({
       setError("Cannot create opportunity: Service project type is unavailable. Contact admin.");
       return;
     }
+    // Same cap the API enforces on this route (validateDealPayload -> validateScopeTitlePayload); trim
+    // first, exactly as the server does, so whitespace cannot fail a title the server would accept.
+    if (formData.scopeTitle.trim().length > DEAL_SCOPE_TITLE_MAX_LENGTH) {
+      setError(`Scope title must be ${DEAL_SCOPE_TITLE_MAX_LENGTH} characters or fewer`);
+      return;
+    }
     if (formData.winProbability !== "") {
       // Number() (not parseInt) so exponent input like "1e2" is read as 100, not 1; require a whole 0-100.
       const wp = Number(formData.winProbability);
@@ -312,6 +323,7 @@ export function ServiceOpportunityForm({
           propertyId: formData.propertyId,
           assignedRepId: formData.assignedRepId,
           salesSourceUserId: formData.salesSourceUserId || null,
+          scopeTitle: formData.scopeTitle.trim() || null,
           description: formData.description.trim() || null,
           expectedCloseDate: formData.expectedCloseDate || null,
           winProbability: formData.winProbability !== "" ? Number(formData.winProbability) : null,
@@ -546,6 +558,25 @@ export function ServiceOpportunityForm({
                 </p>
               )}
             </div>
+          </div>
+
+          {/* Above Description for the same reason as the main deal form: the short title is the
+              primary answer, the notes field is the overflow. */}
+          <div className="space-y-2">
+            <Label htmlFor="scopeTitle">Scope Title</Label>
+            <Input
+              id="scopeTitle"
+              placeholder={`Short title for the scope of work \u2014 e.g. ${DEAL_SCOPE_TITLE_EXAMPLES.join(", ")}`}
+              value={formData.scopeTitle}
+              onChange={(event) => handleChange("scopeTitle", event.target.value)}
+              aria-describedby="scopeTitle-help"
+            />
+            <p id="scopeTitle-help" className="text-xs text-muted-foreground">
+              A few words naming the overall scope. Accounting uses this as the project title.{" "}
+              <span className={formData.scopeTitle.trim().length > DEAL_SCOPE_TITLE_MAX_LENGTH ? "text-red-600" : undefined}>
+                {formData.scopeTitle.length}/{DEAL_SCOPE_TITLE_MAX_LENGTH}
+              </span>
+            </p>
           </div>
 
           <div className="space-y-2">
