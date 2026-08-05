@@ -44,13 +44,24 @@ listing every file that mentions the field at all and reading each one.
 | **HubSpot refresh** | `scripts/refresh-from-hubspot.ts:326-338`, applied at `:686-699` | **Overwrites** the CRM date with HubSpot's `closedate` whenever the two differ |
 | Migration promotion | `scripts/migration-promote.ts:372, 462` | Seeds `expected_close_date` in the deal INSERT from migration data (`ON CONFLICT (hubspot_deal_id)`) |
 | Bulk export / re-import campaign | `scripts/lib/close-date-workflow.ts:485` | Applies dates reps filled into a spreadsheet — rep-sourced values, machine-applied (§5.4) |
-| Dev/test seed — **`is_test_data` is NOT set** | `server/src/modules/auth/service.ts:521-530` (`ensureDevDemoWorkspace`), `scripts/seedTestUsersAndData.ts` | Seeds `expected_close_date` on four `TR-DEMO-*` deals. The `INSERT` column list **omits `is_test_data`**, so it defaults to false and the §2.5 base filter admits them — see below |
+| Dev/test seed — **`is_test_data` is NOT set** | `server/src/modules/auth/service.ts:521-530` (`ensureDevDemoWorkspace`), `scripts/seedTestUsersAndData.ts` | Seeds `expected_close_date` on four `TR-DEMO-*` deals, of which **three** reach the base population. The `INSERT` column list **omits `is_test_data`**, so it defaults to false; `TR-DEMO-004` is separately excluded by `is_active = false` — see below |
 
 **The dev-seed row used to say "excluded anyway via `is_test_data`", and that was false.** The claim was
 never checked against the insert. `ensureDevDemoWorkspace` builds its `INSERT INTO deals (…)` column list
 at `service.ts:521-530` and `is_test_data` is not in it, so the column takes its default of false and
-`COALESCE(d.is_test_data, false) = false` lets all four `TR-DEMO-*` deals — each carrying a seeded
-`expected_close_date` and assigned to `rep@trock.dev` — straight into the base population.
+`COALESCE(d.is_test_data, false) = false` does not stop these rows.
+
+**Three of the four reach the base population, not four.** `TR-DEMO-001`/`-002`/`-003` are inserted with
+`is_active = true`; **`TR-DEMO-004` is inserted with `is_active = false`** (`service.ts:530` — it is the
+seeded Lost deal), and §2.5's base filter requires `d.is_active = true`. So three demo deals carrying a
+seeded `expected_close_date` and assigned to `rep@trock.dev` enter the scored population, and the fourth
+is already excluded — by a different predicate than the one this row was about.
+
+That correction matters more than the number. The first version of this paragraph said "all four" after
+reading the very insert that contains the `false`: a claim made at the level of *"these rows are
+affected"* without evaluating the predicate row by row. It is the same mechanism that made `D_precrm`
+inert and that let the obligations table encode a superseded definition — and it is the cheapest of all
+of them to avoid.
 
 **How exposed this actually is, stated precisely rather than alarmingly.** Three gates must all be open:
 `ENABLE_AUTH_DEMO_BOOTSTRAP=true` (`server/src/config/feature-flags.ts:13`), the authenticating user's
@@ -1837,7 +1848,7 @@ and for others it is the alarm.
 | `D_nodate` (§4.0.5) | `count(*)` over mirror-terminal deals with a NULL `won_closed_date` | **Good** — no silent drops |
 | Machine-repair churn (§4.4) | `count(*)` over rep events whose `new_date` restores the immediately preceding **machine** event's `old_date` | **Good** — no repairs to exclude, and the §7 follow-up should not be built. Non-zero means reps are being charged for the refresh's churn |
 | Deal insert audit rows (§2.5(a)) | `count(*)` over deals with **no** `audit_log` row where `action='insert'` | **Good** — every deal's arrival is datable. Non-zero is the population `crm_arrival_at` cannot serve, and it must equal `precrm_unknown_n`'s HubSpot-linked slice |
-| Demo-seed contamination (§1.1) | `count(*) FROM deals WHERE deal_number LIKE 'TR-DEMO-%'` in every office schema | **Good** — the auth demo bootstrap has never run here. Non-zero means demo forecasts are in the scored population and `is_test_data` must be set at `auth/service.ts`, not filtered in this report |
+| Demo-seed contamination (§1.1) | `count(*) FROM deals WHERE deal_number LIKE 'TR-DEMO-%' AND is_active = true AND COALESCE(is_test_data,false) = false` — **the base predicates, not a bare name match**, or the number does not mean what the verdict says | **Good** — the auth demo bootstrap has never run here. Non-zero means demo forecasts are in the scored population and `is_test_data` must be set at `auth/service.ts`, not filtered in this report. Expect **3**, not 4, if it has run: `TR-DEMO-004` is `is_active = false`. A bare `LIKE 'TR-DEMO-%'` count would report 4 and overstate the contamination by exactly the row the base filter already removes |
 | Audit coverage floor (§1.4) | `SELECT min(created_at) FROM audit_log WHERE table_name='deals'` | n/a — this is the number every period claim rests on, and it is still unrun |
 
 **Convention 20 makes this a step rather than a virtue.** Non-emptiness is the last of the properties a
@@ -3095,7 +3106,7 @@ and §4.3 now says why.
 |---|---|---|
 | 1 | §8 said `D_precrm` was held back; the algebra subtracted it unconditionally | **§8 was itself the fix for "the document specifies more than the data supports", and it immediately created a claim nothing honoured.** Resolved in the algebra, not by softening §8: `PRECRM_CARVEOUT_ENABLED` (§6.4, **false** in v1) gates the subtraction in Block A2, and `D_precrm` is an **overlay** in v1 — the document's own `D_reopened` pattern — so the partition is four-way again, invariant 3 has four terms, and bucket 10 is gone. Pre-CRM landings stay in `landed_n` as a **known bias sized by `precrm_landed_n`**, which is the option §8 recommends. Flipping one flag makes it a partition member; nothing else changes, which is the test of whether a gate is real. |
 | 2 | `deal_touch_count` was anchored on `D_score` and joined to churn-capped `E` | Last round moved the anchor and left the join — and the comment I wrote *asserted* that reopen-evidence deals "correctly show zero touches". `E` is filtered by `event_window_end`, NULL for every reopen-evidence deal, so a deal that lands, reopens and re-closes in-window is scored but contributes no rows at all: a heavily-maintained forecast reported as "set once and never touched". Moved to **Block B2**, reading `close_date_timeline` on the **scoring** window (`< business_day_end_exclusive(outcome_date)`), with every consumer of `event_window_end` enumerated and each NULL classified load-bearing or fatal. |
-| 3 | §1.1 said the dev seed was "excluded anyway via `is_test_data`" | **False, and never checked against the insert.** `ensureDevDemoWorkspace`'s `INSERT INTO deals (…)` column list (`auth/service.ts:521-530`) omits `is_test_data`, so it defaults to false and the base filter admits four `TR-DEMO-*` deals carrying seeded `expected_close_date` values. Three gates must all be open for it to run (`ENABLE_AUTH_DEMO_BOOTSTRAP`, an `@trock.dev` login, three demo users) — but it writes into the **real tenant schema**. Inventory corrected to say what the code does; no filter added, because filtering would hide the misconfiguration. New real-data obligation counts the rows. |
+| 3 | §1.1 said the dev seed was "excluded anyway via `is_test_data`" | **False, and never checked against the insert.** `ensureDevDemoWorkspace`'s `INSERT INTO deals (…)` column list (`auth/service.ts:521-530`) omits `is_test_data`, so it defaults to false and the base filter admits **three** of the four `TR-DEMO-*` deals carrying seeded `expected_close_date` values (`TR-DEMO-004` is `is_active = false`, so a *different* predicate excludes it). Three gates must all be open for it to run (`ENABLE_AUTH_DEMO_BOOTSTRAP`, an `@trock.dev` login, three demo users) — but it writes into the **real tenant schema**. Inventory corrected to say what the code does; no filter added, because filtering would hide the misconfiguration. New real-data obligation counts the rows. |
 
 **Round 24 (a check that reached 5 of 13 eligible fences, and one definition that reached 1 of 5 sites)**
 
