@@ -83,7 +83,11 @@ type InMemoryTenantDb = {
   state: {
     cases: DisconnectCaseRow[];
     tasks: TaskRow[];
-    deals: Array<Pick<DealRow, "id" | "dealNumber" | "name" | "companyId">>;
+    // `isChangeOrder` as an OPTIONAL intersection rather than another Pick key: it is optional on the
+    // response type too (an absent flag must degrade to the name-shape fallback, never assert `false`),
+    // and making it a Pick key would force every existing in-memory fixture to state a value it does
+    // not care about.
+    deals: Array<Pick<DealRow, "id" | "dealNumber" | "name" | "companyId"> & { isChangeOrder?: boolean | null }>;
     companies: Array<Pick<CompanyRow, "id" | "name">>;
     users?: Array<Pick<UserRow, "id" | "displayName">>;
     history: DisconnectCaseHistoryRow[];
@@ -3490,6 +3494,10 @@ export async function getInterventionCaseDetail(
               id: deal.id,
               dealNumber: deal.dealNumber,
               name: deal.name,
+              // The row is loaded with a full `.select()`, so the flag is right there; omitting it sent
+              // the detail panel `undefined` while the QUEUE panel beside it (projectQueueItem) had the
+              // real value — the same deal, labelled two different ways depending on which panel.
+              isChangeOrder: deal.isChangeOrder,
             }
           : null,
         company: company
@@ -3600,6 +3608,7 @@ export async function getInterventionCaseDetail(
             id: dealRow.id,
             dealNumber: dealRow.dealNumber,
             name: dealRow.name,
+            isChangeOrder: dealRow.isChangeOrder,
           }
         : null,
       company: companyRow

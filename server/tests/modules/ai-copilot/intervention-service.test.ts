@@ -271,6 +271,38 @@ describe("AI intervention service", () => {
     expect(byId.get("case-plain")?.deal?.isChangeOrder).toBeUndefined();
   });
 
+  it("carries deals.is_change_order into the case DETAIL too, not just the queue", async () => {
+    // The queue item and the detail panel are two different builders over the same deal, and only the
+    // queue one copied the flag. The result was a deal labelled one way in the list and another way in
+    // the panel you open from it — and the panel was the wrong one, guessing from the name.
+    //
+    // "deal-plain" is the discriminating row: an ordinary deal a human named change-order-shaped, so a
+    // name-parsing fallback gets it wrong and only the flag gets it right.
+    const tenantDb = createTenantDb({
+      cases: [
+        makeCase({ id: "case-co", dealId: "deal-co" }),
+        makeCase({
+          id: "case-plain",
+          businessKey: "office-1:missing_next_task:deal:deal-plain",
+          scopeId: "deal-plain",
+          dealId: "deal-plain",
+        }),
+      ],
+      deals: [
+        { id: "deal-co", dealNumber: "D-1", name: "Tides — Change Order 2", companyId: null, isChangeOrder: true } as never,
+        { id: "deal-plain", dealNumber: "D-2", name: "Lobby — Change Order 1", companyId: null, isChangeOrder: false } as never,
+      ],
+      companies: [],
+    });
+
+    const co = await getInterventionCaseDetail(tenantDb as any, { officeId: "office-1", caseId: "case-co" });
+    const plain = await getInterventionCaseDetail(tenantDb as any, { officeId: "office-1", caseId: "case-plain" });
+
+    expect(co.crm.deal?.isChangeOrder).toBe(true);
+    expect(plain.crm.deal?.name).toBe("Lobby — Change Order 1");
+    expect(plain.crm.deal?.isChangeOrder).toBe(false);
+  });
+
   it("upserts one case per office_id + business_key", async () => {
     disconnectRowsMock
       .mockResolvedValueOnce([

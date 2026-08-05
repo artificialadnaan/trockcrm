@@ -538,6 +538,8 @@ export interface RepCommissionDealEarning {
   dealId: string;
   dealNumber: string | null;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   companyName: string | null;
   propertyName: string | null;
   paidRevenue: number;
@@ -556,6 +558,13 @@ export interface RepWonMissingContractDeal {
   dealId: string;
   dealNumber: string | null;
   dealName: string;
+  /**
+   * `deals.is_change_order` — always `false` here, and that is a guarantee of the query rather than a
+   * value read off the row: the WHERE clause carries `COALESCE(d.is_change_order, false) = false`
+   * because setDealContractSignedDate rejects change orders outright. Sent anyway so the client never
+   * has to fall back to parsing the name's shape on this worklist.
+   */
+  dealIsChangeOrder?: boolean | null;
   companyName: string | null;
   propertyName: string | null;
   value: number;
@@ -1076,6 +1085,8 @@ type CommissionDealRollup = {
   dealId: string;
   dealNumber: string | null;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   companyName: string | null;
   propertyName: string | null;
   paidRevenue: number;
@@ -1229,6 +1240,7 @@ async function getCommissionDealRollups(
     dealId: String(row.deal_id),
     dealNumber: row.deal_number ? String(row.deal_number) : null,
     dealName: String(row.deal_name ?? "Deal"),
+    dealIsChangeOrder: row.deal_is_change_order ?? undefined,
     companyName: row.company_name ? String(row.company_name) : null,
     propertyName: row.property_name ? String(row.property_name) : null,
     paidRevenue: Number(row.paid_revenue ?? 0),
@@ -2128,6 +2140,8 @@ export interface DirectorDashboardData {
     dealId: string;
     dealNumber: string;
     dealName: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
     stageName: string;
     repName: string;
     daysInStage: number;
@@ -2824,6 +2838,7 @@ export async function getDashboardAtRiskRows(
       d.assigned_rep_id AS rep_id,
       COALESCE(u.display_name, 'Unassigned') AS rep_name,
       d.name AS deal_name,
+      d.is_change_order AS deal_is_change_order,
       ${dealValueSql()}::numeric AS deal_value,
       COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
       psc.name AS stage_name,
@@ -3594,6 +3609,9 @@ export async function getDirectorDashboard(
       dealId: s.dealId,
       dealNumber: s.dealNumber,
       dealName: s.dealName,
+      // The source row carries the flag; this re-map used to drop it, so StaleDealList got `undefined`
+      // and guessed from the name even once the query below started projecting the column.
+      dealIsChangeOrder: s.dealIsChangeOrder,
       stageName: s.stageName,
       repName: s.repName,
       daysInStage: s.daysInStage,
@@ -3837,6 +3855,9 @@ export async function getRepWonMissingContractDate(
     dealId: String(row.deal_id),
     dealNumber: row.deal_number ? String(row.deal_number) : null,
     dealName: String(row.deal_name ?? "Deal"),
+    // Asserted from the WHERE clause above (`COALESCE(d.is_change_order, false) = false`), not read off
+    // the row — every deal this worklist can contain is provably not a change-order child.
+    dealIsChangeOrder: false,
     companyName: row.company_name ? String(row.company_name) : null,
     propertyName: row.property_name ? String(row.property_name) : null,
     value: Number(row.value ?? 0),

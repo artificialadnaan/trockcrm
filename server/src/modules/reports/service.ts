@@ -956,6 +956,15 @@ export interface StaleDealRow {
   dealId: string;
   dealNumber: string;
   dealName: string;
+  /**
+   * `deals.is_change_order` — the AUTHORITY for the change-order display relabel.
+   *
+   * Optional because this row has TWO producers and only one can answer: the dashboard's
+   * buildDashboardAtRiskStaleDeals carries the column out of its query, while this module's
+   * staleDealRowsFromEngine reads a candidate row that does not select it. `undefined` there is the
+   * honest answer — it degrades to the name-shape fallback rather than asserting "not a change order".
+   */
+  dealIsChangeOrder?: boolean | null;
   stageId: string;
   stageName: string;
   assignedRepId: string;
@@ -2584,6 +2593,10 @@ export async function getUnifiedWorkflowOverview(
       dealId: row.dealId,
       dealNumber: row.dealNumber,
       dealName: row.dealName,
+      // Carried rather than dropped. staleDealRowsFromEngine's candidate query does not select the
+      // column today, so this forwards `undefined` — the documented "unknown" state, not a false
+      // claim — and the chain is already complete the day that query starts projecting it.
+      dealIsChangeOrder: row.dealIsChangeOrder,
       stageName: row.stageName,
       workflowRoute: row.workflowRoute ?? "normal",
       repName: row.repName,

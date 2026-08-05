@@ -557,6 +557,10 @@ async function getEmailCandidateDeals(
       id: deals.id,
       dealNumber: deals.dealNumber,
       name: deals.name,
+      // MUST match the companyDeals projection below. The dedupe keeps the FIRST occurrence, and
+      // contactDeals is spread first, so a deal reachable through the email's contact — the primary
+      // path for this queue — used to win with the flag missing even when the company query had it.
+      isChangeOrder: deals.isChangeOrder,
       companyId: deals.companyId,
       stageSlug: pipelineStageConfig.slug,
       stageDisplayOrder: pipelineStageConfig.displayOrder,

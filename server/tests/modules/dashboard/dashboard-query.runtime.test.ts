@@ -68,6 +68,8 @@ const USER_OFFICE_ACCESS_COLUMNS = "id uuid PRIMARY KEY, user_id uuid, office_id
 const STAGE_ID = "11111111-1111-1111-1111-111111111111";
 const REP_ID = "22222222-2222-2222-2222-222222222222";
 const DEAL_ID = "33333333-3333-3333-3333-333333333333";
+const DEAL_CO_ID = "33333333-3333-3333-3333-333333333334";
+const DEAL_LOOKALIKE_ID = "33333333-3333-3333-3333-333333333335";
 const OFFICE_ID = "44444444-4444-4444-4444-444444444444";
 
 beforeAll(async () => {
@@ -92,6 +94,13 @@ beforeAll(async () => {
     -- took prod down — making that lateral load-bearing for the assertion below.
     INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, office_code, workflow_route, is_active, is_test_data, on_hold, bid_board_total_sales, bid_estimate, created_at, updated_at)
       VALUES ('${DEAL_ID}', 'D-1', 'Deal One', '${STAGE_ID}', '${REP_ID}', NULL, 'normal', true, false, false, 100000, 90000, now(), now());
+    -- Two deals whose NAMES are the same shape and whose FLAGS differ, so the at-risk rows can only get
+    -- the label right by carrying deals.is_change_order rather than parsing the suffix.
+    -- assigned_rep_id stays NULL so they do not join the rep-filtered listDealStagePage page below,
+    -- whose totalCount assertion is exact.
+    INSERT INTO deals (id, deal_number, name, is_change_order, stage_id, assigned_rep_id, office_code, workflow_route, is_active, is_test_data, on_hold, bid_board_total_sales, bid_estimate, created_at, updated_at)
+      VALUES ('${DEAL_CO_ID}', 'D-2', 'Tides Park Lane — Change Order 2', true, '${STAGE_ID}', NULL, NULL, 'normal', true, false, false, 100000, 90000, now(), now()),
+             ('${DEAL_LOOKALIKE_ID}', 'D-3', 'Lobby — Change Order 1', false, '${STAGE_ID}', NULL, NULL, 'normal', true, false, false, 100000, 90000, now(), now());
     INSERT INTO deal_stage_history (id, deal_id, to_stage_id, created_at)
       VALUES (gen_random_uuid(), '${DEAL_ID}', '${STAGE_ID}', '2026-05-01 12:00:00+00');
   `);
@@ -122,6 +131,23 @@ describe("dashboard + pipeline SQL — real execution against a faithful schema"
     // makes the dropped-join construct that broke prod load-bearing: drop/rename it and this fails.
     expect(seeded?.stageEnteredAt).not.toBeNull();
     expect(new Date(seeded?.stageEnteredAt as string | Date).toISOString()).toMatch(/^2026-05-01/);
+  });
+
+  it("getDashboardAtRiskRows carries deals.is_change_order, rather than mapping a column it never selected", async () => {
+    // HALF-WIRED REGRESSION. The mapper read `row.deal_is_change_order` while the SELECT above it never
+    // projected the column, so every dashboard / stale-deal / at-risk row got `undefined` and fell back
+    // to parsing the name — the exact behaviour this PR exists to remove. The symptom is silent: no
+    // error, no failing test, and the `true` case still looks right by syntax coincidence.
+    //
+    // So the load-bearing assertion is the flag-FALSE deal whose NAME is change-order-shaped. It can
+    // only pass if the value came from the column.
+    const rows = await getDashboardAtRiskRows(testDb, {});
+    const co = rows.find((r) => r.dealId === DEAL_CO_ID);
+    const lookalike = rows.find((r) => r.dealId === DEAL_LOOKALIKE_ID);
+    expect(co).toBeDefined();
+    expect(lookalike).toBeDefined();
+    expect(co?.dealIsChangeOrder).toBe(true);
+    expect(lookalike?.dealIsChangeOrder).toBe(false);
   });
 
   it("listDealStagePage executes — guards the pipeline count + row queries and the estimator predicate", async () => {
