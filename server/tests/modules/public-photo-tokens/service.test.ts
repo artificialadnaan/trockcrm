@@ -259,6 +259,46 @@ describe("public photo token service", () => {
     expect(releaseMock).toHaveBeenCalled();
   });
 
+  it("sends deals.is_change_order so a customer-facing name is not relabelled by guesswork", async () => {
+    // A DELIBERATE addition to the exposure lock above, not an oversight. The flag is not an identifier
+    // and reveals strictly less than the name it labels — a generated child's name already ends in
+    // "— Change Order N". Sending it is what stops this page, the only one visible OUTSIDE the company,
+    // rewriting an ordinary deal a customer named "Lobby — Change Order 1" into
+    // "Change Order 1 — Lobby". Reverse this if the exposure rule is meant to be absolute.
+    //
+    // Note the sibling lock test cannot police this either way: it uses toEqual, which ignores an
+    // `undefined` property, so only a REAL value (as here) actually pins the payload shape.
+    const { getPublicPhotoViewer } = await import("../../../src/modules/public-photo-tokens/service.js");
+    executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1" }] });
+    queryMock.mockResolvedValueOnce({ rows: [{ id: "tenant-1", slug: "dallas" }] });
+    tenantQueryMock
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{ id: "deal-1", name: "Lobby — Change Order 1", is_change_order: false, property_address: "100 Main St" }],
+      })
+      .mockResolvedValueOnce({ rows: [] });
+    getDealPhotoTimelineMock.mockResolvedValue({ photos: [] });
+
+    const result = await getPublicPhotoViewer("raw-token");
+
+    expect(result.deal).toEqual({
+      name: "Lobby — Change Order 1",
+      isChangeOrder: false,
+      propertyAddress: "100 Main St",
+    });
+    // Still locked: the added field is the ONLY new one.
+    for (const leaked of ["id", "dealNumber", "contractAmount", "tenantId"]) {
+      expect(result.deal).not.toHaveProperty(leaked);
+    }
+    // The payload assertion above cannot prove the SELECT projects the column — the mock hands back the
+    // row either way — so pin the query TEXT too. Drizzle passes an SQL object, not a string.
+    const dealSql = tenantQueryMock.mock.calls
+      .map((c: unknown[]) => JSON.stringify(c[0] ?? ""))
+      .join("\n");
+    expect(dealSql).toContain("is_change_order");
+  });
+
   it("does not sign non-image records for public viewer image URLs", async () => {
     const { getPublicPhotoViewer } = await import("../../../src/modules/public-photo-tokens/service.js");
     executeMock.mockResolvedValueOnce({ rows: [{ id: "token-1", deal_id: "deal-1", tenant_id: "tenant-1", created_by_user_id: "user-1" }] });

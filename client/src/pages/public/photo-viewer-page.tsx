@@ -17,6 +17,8 @@ interface PublicPhoto {
 interface PublicViewerResponse {
   deal: {
     name: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    isChangeOrder?: boolean | null;
     propertyAddress: string | null;
   };
   photos: PublicPhoto[];
@@ -81,7 +83,7 @@ export function PublicPhotoViewerPage() {
         <p className="text-xs font-semibold uppercase tracking-wide text-red-700">T Rock Photos</p>
         {/* A change-order child deal is STORED as "<Parent> — Change Order N"; lead with the label so
             a shared CO link is not mistaken for its parent. Display-only; the stored name is unchanged. */}
-        <h1 className="mt-1 text-2xl font-semibold">{formatDealDisplayName(data.deal.name)}</h1>
+        <h1 className="mt-1 text-2xl font-semibold">{formatDealDisplayName(data.deal.name, data.deal.isChangeOrder)}</h1>
         {data.deal.propertyAddress && (
           <p className="mt-1 flex items-center gap-1 text-sm text-slate-600">
             <MapPin className="h-4 w-4" />

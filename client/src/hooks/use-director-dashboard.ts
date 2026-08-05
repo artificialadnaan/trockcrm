@@ -481,6 +481,9 @@ export interface CommissionEvidenceRecord {
   value: number | null;
   date: string | null;
   companyName: string | null;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. Absent on lead /
+   *  activity / manager-override rows, whose `name` is not a deal name (see server CommissionEvidenceRecord). */
+  dealIsChangeOrder?: boolean | null;
   // Won·unsigned ("missing contract date") reconciliation fields (see server CommissionEvidenceRecord).
   projectNumber?: string | null;
   wonClosedDate?: string | null;

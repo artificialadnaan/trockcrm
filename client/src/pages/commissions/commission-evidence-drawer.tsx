@@ -77,8 +77,10 @@ function columnsFor(ev: CommissionEvidence): DrillColumn[] {
     // A change-order child deal is STORED "<Parent> — Change Order N"; move the label to the front for
     // DISPLAY only. GATED on `ev.kind` — this same column renders LEADS and ACTIVITIES, whose names are
     // typed by humans and can legitimately end in that text. The CSV below still writes the stored name.
+    // `dealIsChangeOrder` is `deals.is_change_order` and OUTRANKS the name: without it a deal a human named
+    // "Lobby — Change Order 1" was relabelled "Change Order 1 — Lobby" purely on the name's shape.
     cell: (r) => (
-      <span className="text-slate-800">{ev.kind === "deal" ? formatDealDisplayName(r.name) : r.name}</span>
+      <span className="text-slate-800">{ev.kind === "deal" ? formatDealDisplayName(r.name, r.dealIsChangeOrder) : r.name}</span>
     ),
   });
   cols.push({

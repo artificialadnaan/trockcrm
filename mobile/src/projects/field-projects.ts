@@ -108,8 +108,12 @@ export function captureTargetDisplayName(
 ): string {
   // The type gate stays: only a deal can be a generated change-order child, and a lead a human named
   // "Lobby — Change Order 1" must render as typed. `isChangeOrder` then makes the DEAL branch
-  // authoritative instead of syntactic — when the caller has it. Capture-target search does not carry
-  // it, so most picker rows pass undefined and fall back to reading the name.
+  // authoritative instead of syntactic.
+  //
+  // Capture-target search DOES carry the flag (files/service.ts mapDealRow projects
+  // `isChangeOrder: row.isChangeOrder === true`), so picker rows are authoritative, not guesses. The
+  // parameter stays optional only for callers holding a partial target; when it is absent the name
+  // fallback is the documented degradation, not the normal path.
   return target.type === "deal" ? formatDealDisplayName(target.name, target.isChangeOrder) : target.name;
 }
 

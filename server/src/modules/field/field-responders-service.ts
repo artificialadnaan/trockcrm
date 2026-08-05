@@ -321,6 +321,7 @@ export async function listFieldResponderAssignments(
     SELECT DISTINCT
       dtm.deal_id AS "dealId",
       d.name AS "dealName",
+      d.is_change_order AS "dealIsChangeOrder",
       dtm.role AS "role",
       MAX(dtm.created_at) AS "assignedAt"
       FROM deal_team_members dtm
@@ -329,14 +330,23 @@ export async function listFieldResponderAssignments(
        AND dtm.is_active = TRUE
        AND dtm.role IN ${RESPONDER_ASSIGNMENT_ROLES}
        AND d.is_active = TRUE
-     GROUP BY dtm.deal_id, d.name, dtm.role
+     GROUP BY dtm.deal_id, d.name, d.is_change_order, dtm.role
      ORDER BY MAX(dtm.created_at) DESC, d.name
   `);
-  const rows = (result.rows ?? []) as unknown as Array<{ dealId: string; dealName: string; role: string }>;
+  const rows = (result.rows ?? []) as unknown as Array<{
+    dealId: string;
+    dealName: string;
+    dealIsChangeOrder: boolean | null;
+    role: string;
+  }>;
   return {
     deals: rows.map((r) => ({
       dealId: r.dealId,
       dealName: r.dealName,
+      // The AUTHORITY for the change-order relabel the sheet renders. `?? undefined` and never `?? false`:
+      // a NULL flag means "unknown", and formatDealDisplayName must be free to fall back to the name's
+      // shape rather than be told, wrongly and authoritatively, that this is not a change order.
+      dealIsChangeOrder: r.dealIsChangeOrder ?? undefined,
       role: r.role as FieldResponderRole,
     })),
   };

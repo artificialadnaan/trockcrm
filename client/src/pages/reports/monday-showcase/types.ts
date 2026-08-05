@@ -130,6 +130,8 @@ export interface EvidenceRecord {
   dealNumber: string | null;
   projectNumber: string | null;
   name: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel; `false` for leads. */
+  dealIsChangeOrder?: boolean | null;
   repId: string | null;
   repName: string;
   stageLabel: string;

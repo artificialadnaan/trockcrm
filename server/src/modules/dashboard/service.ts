@@ -3074,6 +3074,13 @@ export interface CommissionEvidenceRecord {
   value: number | null;             // $ contribution (deal value / earned $); null for count-only metrics
   date: string | null;              // ISO cohort date (stage entered / signed / occurred)
   companyName: string | null;
+  /**
+   * `deals.is_change_order` — the AUTHORITY for the change-order display relabel, carried so the drawer
+   * never has to guess from `name`. Absent (undefined) on the lead + activity + manager-override rows,
+   * whose `name` is a lead name / activity subject / literal and is not a deal name at all; the drawer
+   * gates the formatter on `kind === "deal"`, so those rows never reach it.
+   */
+  dealIsChangeOrder?: boolean | null;
   // Won·unsigned ("missing contract date") reconciliation fields — populated for deal metrics, surfaced by the
   // Team Commissions drill-down so accounting can look a deal up in QuickBooks without drilling into it.
   projectNumber?: string | null;      // deals.project_number (e.g. dfw-1-02932-aa)
@@ -3174,8 +3181,12 @@ export async function getDirectorCommissionEvidence(
     const notBooked = excludeBooked
       ? sql` AND NOT EXISTS (SELECT 1 FROM ${dealSignedCommissions} dsc WHERE dsc.deal_id = d.id AND dsc.rep_user_id = ${repId})`
       : sql``;
-    const res = await tenantDb.execute(sql`
+    // Named apart from the lead / activity branches' `res`/`rows` below: this is the only one of the three
+    // that carries a deal row (and therefore the change-order flag), and sharing the name made it
+    // ambiguous which mapper consumed which query.
+    const dealRes = await tenantDb.execute(sql`
       SELECT d.id, d.deal_number, d.name, COALESCE(psc.name, '') AS stage_label,
+        d.is_change_order AS is_change_order,
         ${dealValueSql}::numeric AS value, (d.stage_entered_at)::date AS cohort_date,
         COALESCE(c.name, '') AS company_name,
         d.project_number,
@@ -3192,14 +3203,17 @@ export async function getDirectorCommissionEvidence(
         AND psc.slug IN (${commissionSlugList(stageSlugs)})${involvementGate}
       ORDER BY value DESC NULLS LAST, d.name ASC
     `);
-    const rows = (res as any).rows ?? res;
-    return rows.map((r: any) => ({
+    const dealRows = (dealRes as any).rows ?? dealRes;
+    return dealRows.map((r: any) => ({
       id: String(r.id),
       navKind: "deal" as const,
       navId: String(r.id),
       primary: r.deal_number ? String(r.deal_number) : null,
       name: String(r.name ?? "Deal"),
       stageLabel: String(r.stage_label ?? ""),
+      // `?? undefined`, never `?? false`: a NULL column is "unknown", and claiming `false` would tell the
+      // formatter authoritatively that a real change-order child is not one.
+      dealIsChangeOrder: r.is_change_order ?? undefined,
       value: Number(r.value ?? 0),
       date: r.cohort_date ? String(r.cohort_date).slice(0, 10) : null,
       companyName: r.company_name ? String(r.company_name) : null,
@@ -3315,6 +3329,9 @@ export async function getDirectorCommissionEvidence(
       navId: r.dealId,
       primary: r.dealNumber,
       name: r.dealName,
+      // The rollup already carries the authoritative flag (getCommissionDealRollups projects
+      // d.is_change_order); this hand-off is the link that used to drop it, leaving the drawer to guess.
+      dealIsChangeOrder: r.dealIsChangeOrder ?? undefined,
       stageLabel:
         r.attributionRole === "estimator"
           ? "Estimator cut"

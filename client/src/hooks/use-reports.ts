@@ -391,6 +391,8 @@ export interface DirectorScorecardReport {
   topAtRiskDeals: Array<{
     dealId: string;
     dealName: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
     ownerName: string;
     stageName: string;
     daysInStage: number;
@@ -502,6 +504,8 @@ export interface ForecastAccuracyReport {
   pipelineAtRisk: Array<{
     dealId: string;
     dealName: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
     ownerName: string;
     stageName: string;
     value: number;
@@ -650,6 +654,8 @@ export interface WorkflowBottleneckStage {
 export interface WorkflowBottleneckDeal {
   dealId: string;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   ownerName: string;
   stageName: string;
   daysInStage: number;
@@ -689,6 +695,8 @@ export interface ProjectReadinessReport {
   missingReadiness: Array<{
     dealId: string;
     dealName: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
     ownerName: string;
     stageName: string;
     daysInStage: number;

@@ -784,6 +784,13 @@ export interface EvidenceRecord {
   /** the canonical DFW/ATL project number when present (null for leads / when unset). */
   projectNumber: string | null;
   name: string;
+  /**
+   * `deals.is_change_order` — the AUTHORITY for the change-order display relabel, so the drawer never has
+   * to infer it from `name`. `false` for leads (a lead is never a generated change-order child).
+   * `undefined` only if the column ever arrives NULL — deliberately NOT coerced to `false`, which would be
+   * a confident wrong claim about a real change-order child.
+   */
+  dealIsChangeOrder?: boolean | null;
   repId: string | null;
   repName: string;
   /** the record's current pipeline/lead stage. */
@@ -881,6 +888,10 @@ function regionScopeSql(regionName?: string): SQL {
  * Company + region come from additive LEFT JOINs (companies c, region_config rc) the callers add; both are
  * FK->PK 1:1, so they never change the cohort row set -- COUNT(rows) and SUM(value) stay exactly the
  * aggregate's, and the reconciliation guarantee holds.
+ *
+ * `deal_is_change_order` is deals.is_change_order, the AUTHORITY for the change-order display relabel.
+ * The name alone cannot answer it: a deal a human named "Lobby — Change Order 1" is byte-identical to a
+ * generated child, and without this column the drawer relabelled it "Change Order 1 — Lobby".
  */
 function dealEvidenceSelectSql(valueSql: SQL, cohortDateExpr: string): SQL {
   return sql`
@@ -888,6 +899,7 @@ function dealEvidenceSelectSql(valueSql: SQL, cohortDateExpr: string): SQL {
     d.deal_number AS deal_number,
     d.project_number AS project_number,
     d.name AS name,
+    d.is_change_order AS deal_is_change_order,
     d.assigned_rep_id AS rep_id,
     COALESCE(u.display_name, '') AS rep_name,
     COALESCE(psc.name, '') AS stage_label,
@@ -1105,6 +1117,11 @@ export function buildPipelineEvidenceSql(
  * workflow_route. Crucially the aggregate and THIS query are unfiltered TOGETHER, so the badge count still
  * equals the drilled record count under every selection -- the drawer just has to SAY that this one metric
  * ignores the Service/Other choice (MondayShowcaseEvidence.routeFilter.applied === false).
+ *
+ * deal_is_change_order is FALSE here, not NULL: the leads table has no such column and a lead can never BE
+ * a generated change-order child (those are created as DEALS, by change-order-service.ts). So false is the
+ * authoritative answer rather than an unknown, and it stops the drawer -- which renders lead rows through
+ * the same name cell as deal rows -- relabelling a lead a human named "<Something> — Change Order 1".
  */
 export function buildLeadEvidenceSql(repId?: string | null, leadStage?: string): SQL {
   const stageFilter = leadStage ? sql` AND psc.name = ${leadStage}` : sql``;
@@ -1113,6 +1130,7 @@ export function buildLeadEvidenceSql(repId?: string | null, leadStage?: string):
            NULL AS deal_number,
            NULL AS project_number,
            l.name AS name,
+           FALSE AS deal_is_change_order,
            l.assigned_rep_id AS rep_id,
            COALESCE(u.display_name, '') AS rep_name,
            COALESCE(psc.name, '') AS stage_label,
@@ -1197,6 +1215,7 @@ interface EvidenceRow {
   deal_number: string | null;
   project_number: string | null;
   name: string;
+  deal_is_change_order: boolean | null;
   rep_id: string | null;
   rep_name: string;
   stage_label: string;
@@ -1285,6 +1304,9 @@ export async function getMondayShowcaseEvidence(
     dealNumber: r.deal_number == null ? null : String(r.deal_number),
     projectNumber: r.project_number == null ? null : String(r.project_number),
     name: r.name,
+    // `?? undefined`, never `?? false`: an absent flag is unknown, and asserting `false` would tell the
+    // formatter a real change-order child is not one.
+    dealIsChangeOrder: r.deal_is_change_order ?? undefined,
     repId: r.rep_id == null ? null : String(r.rep_id),
     repName: r.rep_name || (r.rep_id ? "Unknown rep" : "Unassigned"),
     stageLabel: r.stage_label,

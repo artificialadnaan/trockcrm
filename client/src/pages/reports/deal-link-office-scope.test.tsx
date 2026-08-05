@@ -24,11 +24,47 @@ const COMPONENTS = [
 function hrefFor(Component: (typeof COMPONENTS)[number][1], search: string) {
   const html = renderToStaticMarkup(
     <MemoryRouter initialEntries={[`/reports/whatever${search}`]}>
-      <Component dealId="deal-9">Some Deal</Component>
+      <Component dealId="deal-9" dealName="Some Deal" dealIsChangeOrder={false} />
     </MemoryRouter>
   );
   return /href="([^"]*)"/.exec(html)?.[1] ?? "";
 }
+
+function labelFor(
+  Component: (typeof COMPONENTS)[number][1],
+  dealName: string,
+  dealIsChangeOrder: boolean | null | undefined
+) {
+  const html = renderToStaticMarkup(
+    <MemoryRouter initialEntries={["/reports/whatever"]}>
+      <Component dealId="deal-9" dealName={dealName} dealIsChangeOrder={dealIsChangeOrder} />
+    </MemoryRouter>
+  );
+  return /<a[^>]*>([\s\S]*?)<\/a>/.exec(html)?.[1] ?? "";
+}
+
+describe.each(COMPONENTS)("%s DealLink label authority", (_name, Component) => {
+  it("leaves an ordinary deal alone when the flag says it is not a change order", () => {
+    // THE case this contract exists for. Both components used to take `children: ReactNode` and rewrite
+    // any string child through the formatter, with nowhere to pass the flag — so a real deal a human
+    // named this way was relabelled in every report that routed through the component.
+    expect(labelFor(Component, "Lobby — Change Order 1", false)).toBe("Lobby — Change Order 1");
+  });
+
+  it("moves the label to the front for a real change-order child", () => {
+    expect(labelFor(Component, "Tides Park Lane — Change Order 2", true)).toBe(
+      "Change Order 2 — Tides Park Lane"
+    );
+  });
+
+  it("falls back to the name's shape only when the flag is genuinely unknown", () => {
+    // `undefined` is the documented degradation, NOT a default anyone should reach for — the prop is
+    // required precisely so a caller has to choose it rather than omit the argument.
+    expect(labelFor(Component, "Tides Park Lane — Change Order 2", undefined)).toBe(
+      "Change Order 2 — Tides Park Lane"
+    );
+  });
+});
 
 describe.each(COMPONENTS)("%s DealLink office scope", (_name, Component) => {
   it("carries an explicit ?officeId verbatim", () => {

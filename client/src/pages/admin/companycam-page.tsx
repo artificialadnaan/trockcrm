@@ -24,6 +24,8 @@ interface ProjectMapping {
   dealId: string | null;
   dealNumber: string | null;
   dealName: string | null;
+  /** `deals.is_change_order` from the server — absent means "unknown", not false. */
+  dealIsChangeOrder?: boolean | null;
   matchType: "linked" | "auto" | "unmatched";
 }
 
@@ -312,8 +314,9 @@ export function CompanyCamPage() {
                     {mapping.dealName && (
                       <span className="truncate">
                         {/* A change-order child is STORED "<Parent> — Change Order N"; lead with the
-                            label so it isn't read as its parent. Display-only, stored name unchanged. */}
-                        → <span className="font-medium text-foreground">{mapping.dealNumber}</span> {formatDealDisplayName(mapping.dealName)}
+                            label so it isn't read as its parent. Display-only, stored name unchanged.
+                            The flag decides: a deal a human named "Lobby — Change Order 1" must not move. */}
+                        → <span className="font-medium text-foreground">{mapping.dealNumber}</span> {formatDealDisplayName(mapping.dealName, mapping.dealIsChangeOrder)}
                       </span>
                     )}
                   </div>

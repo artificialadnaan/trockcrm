@@ -114,6 +114,92 @@ function anyReadKeys(fn: ts.FunctionLikeDeclaration, sf: ts.SourceFile): Set<str
 
 const FLAG_KEYS = /^(deal_is_change_order|is_change_order|isChangeOrder|dealIsChangeOrder)$/;
 
+/**
+ * Local variables that hold RAW ROWS of a query, with the flag keys that query projects.
+ *
+ * Follows one hop of aliasing, because the common shape is two statements:
+ *   const result = await tenantDb.execute(sql`... d.is_change_order AS deal_is_change_order ...`);
+ *   const rows = (result as any).rows ?? result;
+ */
+function queryBackedRowVars(
+  fn: ts.FunctionLikeDeclaration,
+  sf: ts.SourceFile
+): Array<{ receiver: string; keys: Set<string> }> {
+  const byName = new Map<string, Set<string>>();
+  const visit = (n: ts.Node): void => {
+    if (ts.isVariableDeclaration(n) && n.initializer && ts.isIdentifier(n.name)) {
+      const init = n.initializer.getText(sf);
+      let sqlText = "";
+      const collect = (x: ts.Node): void => {
+        if (ts.isTemplateExpression(x) || ts.isNoSubstitutionTemplateLiteral(x)) sqlText += x.getFullText(sf);
+        ts.forEachChild(x, collect);
+      };
+      collect(n.initializer);
+      if (sqlText) {
+        const keys = projectedKeys(sqlText, init);
+        if (keys.size) byName.set(n.name.getText(sf), keys);
+      } else if (!/\.\s*map\s*\(/.test(init)) {
+        // `const rows = (result as any).rows ?? result` — a pure ALIAS inherits the query's keys.
+        // A `.map(...)` initializer is excluded on purpose: its result holds MAPPED objects, not raw
+        // rows, and treating it as another handle on the query made the detector accuse the very
+        // mapper that reads the column correctly.
+        for (const [known, keys] of [...byName]) {
+          if (new RegExp(`\\b${known}\\b`).test(init)) byName.set(n.name.getText(sf), keys);
+        }
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(fn.body!);
+  return [...byName].map(([receiver, keys]) => ({ receiver, keys }));
+}
+
+/**
+ * The row keys an inline `<receiver>.map(row => ({ ... }))` READS off its callback parameter, or null
+ * when `receiver` is not consumed by such a map here (so its rows escape to a consumer elsewhere).
+ *
+ * Reads, not writes. The output property is frequently renamed — `isChangeOrder: row.is_change_order`
+ * — so comparing the projected column against the emitted property name reports a mapper that is
+ * plainly correct. The question this rule asks is whether the mapper ever LOOKED at the column.
+ */
+function inlineMapReadKeys(
+  fn: ts.FunctionLikeDeclaration,
+  sf: ts.SourceFile,
+  receiver: string
+): Set<string> | null {
+  let read: Set<string> | null = null;
+  const visit = (n: ts.Node): void => {
+    if (
+      ts.isCallExpression(n) &&
+      ts.isPropertyAccessExpression(n.expression) &&
+      n.expression.name.getText(sf) === "map" &&
+      n.expression.expression.getText(sf) === receiver &&
+      n.arguments.length === 1
+    ) {
+      const cb = n.arguments[0]!;
+      if (ts.isArrowFunction(cb) || ts.isFunctionExpression(cb)) {
+        let buildsObject = false;
+        const found = new Set<string>();
+        const scan = (x: ts.Node): void => {
+          if (ts.isObjectLiteralExpression(x)) buildsObject = true;
+          if (ts.isPropertyAccessExpression(x)) found.add(x.name.getText(sf));
+          if (ts.isElementAccessExpression(x) && x.argumentExpression && ts.isStringLiteral(x.argumentExpression)) {
+            found.add(x.argumentExpression.text);
+          }
+          ts.forEachChild(x, scan);
+        };
+        scan(cb.body);
+        // No object literal means this is not the response-shaping mapper (a filter/side-effect
+        // callback, say), so it says nothing about whether the column survives.
+        if (buildsObject) read = found;
+      }
+    }
+    ts.forEachChild(n, visit);
+  };
+  visit(fn.body!);
+  return read;
+}
+
 type Problem = { kind: string; where: string; key: string; detail: string };
 
 /**
@@ -195,18 +281,27 @@ function scanServerSrc(): Problem[] {
         }
       }
 
-      // Does this function consume its rows with an inline `.map(row => ({ ... }))`? If so the raw row
-      // does not escape, and a projected-but-unmapped column is dead weight the UI can never see.
-      const inlineMaps = /\.\s*map\s*\(\s*\(?\s*(?:row|r)\b[^)]*\)?\s*(?::[^=]*)?=>\s*\(?\s*\{/.test(body);
-      if (!inlineMaps) continue;
-      for (const key of projected) {
-        if (!readAnyhow.has(key)) {
-          problems.push({
-            kind: "PROJECTION_DROPPED_BY_INLINE_MAP",
-            where,
-            key,
-            detail: `query projects '${key}' but the inline mapper never copies it (reads [${[...readAnyhow].join(", ") || "nothing"}])`,
-          });
+      // Now the "fetched then thrown away" direction, PER QUERY rather than per function.
+      //
+      // Associating each `.map()` with the query whose rows it actually consumes is the whole accuracy
+      // of this rule. A function-wide comparison reports a false positive the moment one function runs
+      // two queries and maps only one of them inline — real shape, hit immediately in
+      // getWorkflowBottlenecksReport, where a stage-aggregate `.map()` has nothing to do with the deal
+      // rows that carry the flag.
+      for (const { receiver, keys } of queryBackedRowVars(fn, sf)) {
+        const mapped = inlineMapReadKeys(fn, sf, receiver);
+        if (!mapped) continue; // rows escape this function; a typed consumer elsewhere may read them
+        for (const key of keys) {
+          if (!mapped.has(key)) {
+            problems.push({
+              kind: "PROJECTION_DROPPED_BY_INLINE_MAP",
+              where,
+              key,
+              detail:
+                `\`${receiver}\` comes from a query projecting '${key}', and the inline mapper over ` +
+                `it never reads it (reads [${[...mapped].join(", ") || "nothing"}])`,
+            });
+          }
         }
       }
     }
@@ -223,23 +318,28 @@ function scanServerSrc(): Problem[] {
 function scanRemapDrops(): string[] {
   const program = getProgram();
   const checker = program.getTypeChecker();
-  const FLAG = /^(dealIsChangeOrder|isChangeOrder)$/;
+  const FLAG = /^(dealIsChangeOrder|isChangeOrder|deal_is_change_order|is_change_order)$/;
   const out: string[] = [];
 
   for (const sf of program.getSourceFiles()) {
     if (sf.isDeclarationFile) continue;
     const rel = path.relative(path.resolve(__dirname, "../../.."), sf.fileName);
     if (!rel.startsWith(`src${path.sep}`) || rel.includes(".test.")) continue;
-    if (!sf.text.includes("dealName")) continue;
+    if (!/dealName|deal_name/.test(sf.text)) continue;
 
     const visit = (n: ts.Node): void => {
       if (ts.isObjectLiteralExpression(n)) {
         const names = n.properties.filter((p) => p.name).map((p) => p.name!.getText(sf));
-        const dealNameProp = n.properties.find((p) => p.name && p.name.getText(sf) === "dealName");
+        // Both spellings: a snake_case re-map (`deal_name: row.deal_name`) is the same hand-off, and
+        // the narrowing re-maps inside the report services are written that way.
+        const dealNameProp = n.properties.find(
+          (p) => p.name && (p.name.getText(sf) === "dealName" || p.name.getText(sf) === "deal_name")
+        );
         if (dealNameProp && ts.isPropertyAssignment(dealNameProp) && !names.some((x) => FLAG.test(x))) {
           let source: ts.Expression | null = null;
           const findSource = (x: ts.Node): void => {
-            if (!source && ts.isPropertyAccessExpression(x) && x.name.getText(sf) === "dealName") {
+            const wanted = dealNameProp.name!.getText(sf);
+            if (!source && ts.isPropertyAccessExpression(x) && x.name.getText(sf) === wanted) {
               source = x.expression;
             }
             ts.forEachChild(x, findSource);

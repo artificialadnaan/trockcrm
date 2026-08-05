@@ -486,8 +486,9 @@ function AssignmentsSheet({
                         className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 bg-white px-3.5 py-3 hover:border-slate-300 hover:bg-slate-50"
                       >
                         {/* A change-order child is STORED "<Parent> — Change Order N" and this row
-                            truncates; move the label to the front for DISPLAY only. */}
-                        <span className="min-w-0 flex-1 truncate text-[13.5px] font-semibold text-slate-900">{formatDealDisplayName(d.dealName)}</span>
+                            truncates; move the label to the front for DISPLAY only. The flag decides —
+                            without it a deal a human named "Lobby — Change Order 1" gets relabelled too. */}
+                        <span className="min-w-0 flex-1 truncate text-[13.5px] font-semibold text-slate-900">{formatDealDisplayName(d.dealName, d.dealIsChangeOrder)}</span>
                         <Badge variant="outline" className={`${ROLE_BADGE[d.role]} shrink-0 whitespace-nowrap text-[10px] font-bold uppercase tracking-wide`}>
                           {roleLabel(d.role)}
                         </Badge>

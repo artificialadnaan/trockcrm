@@ -151,17 +151,28 @@ export function ActiveWorkNote() {
   );
 }
 
-// Every caller passes the deal name as a bare string child, so the change-order relabel happens here
-// once instead of at each table. A CO child is STORED "<Parent> — Change Order N" and truncates to look
-// like its parent; this is display-only — exports and the stored name are untouched.
-export function DealLink({ dealId, children }: { dealId: string; children: ReactNode }) {
+// Takes the deal NAME and its FLAG, rather than reformatting whatever child it is handed — same contract
+// change, and for the same reason, as the performance-report-ui DealLink: rewriting an arbitrary string
+// child applies the relabel invisibly with nowhere to pass the flag that decides it, so every caller got
+// the syntax guess. `dealIsChangeOrder` is REQUIRED so tsc refuses a caller that has not answered.
+// A CO child is STORED "<Parent> — Change Order N" and truncates to look like its parent; this is
+// display-only — exports and the stored name are untouched.
+export function DealLink({
+  dealId,
+  dealName,
+  dealIsChangeOrder,
+}: {
+  dealId: string;
+  dealName: string;
+  dealIsChangeOrder: boolean | null | undefined;
+}) {
   // Same rule and same helper as the performance-report-ui DealLink: ?officeId verbatim, or nothing.
   // These are two separately-defined components with the same name; keeping the href in one shared
   // hook is what stops them drifting apart again.
   const dealHref = useDealHref();
   return (
     <Link to={dealHref(dealId)} className="font-semibold text-slate-950 hover:text-brand-red hover:underline">
-      {typeof children === "string" ? formatDealDisplayName(children) : children}
+      {formatDealDisplayName(dealName, dealIsChangeOrder)}
     </Link>
   );
 }

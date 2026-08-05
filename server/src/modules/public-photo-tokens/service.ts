@@ -411,6 +411,7 @@ export async function getPublicPhotoViewer(
       SELECT
         id,
         name,
+        is_change_order,
         NULLIF(CONCAT_WS(', ', NULLIF(property_address, ''), NULLIF(property_city, ''), NULLIF(property_state, ''), NULLIF(property_zip, '')), '') AS property_address
       FROM deals
       WHERE id = ${token.dealId}::uuid
@@ -434,6 +435,12 @@ export async function getPublicPhotoViewer(
       // no deal number (the deal number is also hidden by the image proxy).
       deal: {
         name: deal.name,
+        // Not an identifier, so it does not widen the exposure lock above: a boolean saying "this name
+        // is a generated change-order child" reveals strictly less than the name it labels, which
+        // already ends in "— Change Order N" whenever it is true. Sending it is what stops the viewer
+        // relabelling an ORDINARY deal a customer named "Lobby — Change Order 1" — the one surface
+        // where getting that wrong is visible outside the company.
+        isChangeOrder: deal.is_change_order ?? undefined,
         propertyAddress: deal.property_address ?? null,
       },
       photos,

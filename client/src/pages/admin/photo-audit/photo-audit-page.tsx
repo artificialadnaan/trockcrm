@@ -103,6 +103,8 @@ interface AdminPhotoAuditEvent extends PhotoAuditEvent {
     id: string;
     name: string;
     dealNumber: string;
+    /** `deals.is_change_order` from the server — absent means "unknown", not false. */
+    isChangeOrder?: boolean | null;
   } | null;
 }
 
@@ -467,8 +469,9 @@ export function PhotoAuditPage() {
                           <Link className="text-sm text-brand-red hover:underline" to={`/deals/${event.deal.id}`}>
                             {formatDealDisplayNumber(event.deal).label === "Pending" ? "" : `${formatDealDisplayNumber(event.deal).label} `}
                             {/* A change-order child is STORED "<Parent> — Change Order N"; lead with the
-                                label so it isn't read as its parent. Display-only, stored name unchanged. */}
-                            {formatDealDisplayName(event.deal.name)}
+                                label so it isn't read as its parent. Display-only, stored name unchanged.
+                                The flag decides: a deal a human named "Lobby — Change Order 1" must not move. */}
+                            {formatDealDisplayName(event.deal.name, event.deal.isChangeOrder)}
                           </Link>
                         ) : <span className="text-muted-foreground">No deal</span>}
                       </TableCell>
