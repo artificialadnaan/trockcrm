@@ -3,6 +3,7 @@ import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
+import { formatDealDisplayName } from "@trock-crm/shared/types";
 import { db, pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getDealPhotoTimeline } from "../files/service.js";
@@ -434,13 +435,12 @@ export async function getPublicPhotoViewer(
       // Public exposure lock: property name + address only — no deal id, no token id,
       // no deal number (the deal number is also hidden by the image proxy).
       deal: {
-        name: deal.name,
-        // Not an identifier, so it does not widen the exposure lock above: a boolean saying "this name
-        // is a generated change-order child" reveals strictly less than the name it labels, which
-        // already ends in "— Change Order N" whenever it is true. Sending it is what stops the viewer
-        // relabelling an ORDINARY deal a customer named "Lobby — Change Order 1" — the one surface
-        // where getting that wrong is visible outside the company.
-        isChangeOrder: deal.is_change_order ?? undefined,
+        // Formatted HERE, on purpose. The relabel needs `is_change_order` to decide, and this is the one
+        // payload that crosses to an unauthenticated external viewer — so the flag is consumed
+        // server-side and never leaves. Shipping the boolean would have been the smaller change, but it
+        // adds a field to a payload whose whole contract is that it carries two, and "it reveals little"
+        // is the argument every future field will also make. Formatting keeps the lock literally true.
+        name: formatDealDisplayName(deal.name, deal.is_change_order),
         propertyAddress: deal.property_address ?? null,
       },
       photos,
