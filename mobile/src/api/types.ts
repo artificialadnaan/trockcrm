@@ -298,6 +298,18 @@ export type CorrectiveActionResponsePhoto = {
   url?: string | null;
   caption: string | null;
 };
+// One entry in a corrective-action item's thread. Matches the server's CorrectiveActionEventView
+// (corrective-action-api.ts:35). `eventType` stays a broad string for the same reason `status` does.
+export type CorrectiveActionEvent = {
+  id: string;
+  eventType: string;
+  actorName: string | null;
+  actorEmail: string | null;
+  comment: string | null;
+  createdAt: string | null;
+  /** Photos filed with THIS attempt. Empty for approvals and rejections. */
+  photos: CorrectiveActionResponsePhoto[];
+};
 // One flagged corrective-action item (an action item or critical deficiency) with its inline response.
 // Matches the server's CorrectiveActionItemView field-for-field. `itemType`/`status` are kept as broad
 // strings (the server column is a varchar) so an unknown future value never breaks the parse.
@@ -313,6 +325,16 @@ export type CorrectiveActionItem = {
   responderEmail: string | null;
   respondedAt: string | null;
   photos: CorrectiveActionResponsePhoto[];
+  /**
+   * The full thread, oldest first. The columns above hold only the LATEST attempt — a resubmission
+   * overwrites them — so this is the only place a rejection and what it asked for survives.
+   *
+   * The server has emitted this since the thread shipped (corrective-action-api.ts:64, populated at
+   * :162 with `?? []`, so it is always an array). It was missing here, and because `mobile/` is not in
+   * the root `workspaces` array nothing in CI compiles this file — the corrective-action detail screen
+   * has been reading `item.events` against a type that never declared it.
+   */
+  events: CorrectiveActionEvent[];
 };
 // GET /field/scorecards/:id/corrective-actions and the POST response both wrap the items in `{ items }`
 // (corrective-action-routes.ts) — there is no top-level scorecardId/status on the wire.
