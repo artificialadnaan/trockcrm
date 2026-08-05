@@ -488,7 +488,7 @@ construction, since every date is on exactly one side of two boundaries.
 | 7 | **Terminal-no-date** | `class=nodate` | `D_nodate` | Won or lost with no usable outcome date. Not scoreable and not open; surfaced as a diagnostic so the drop is visible rather than silent. |
 | 8 | **Out-of-period landed** | `class=outside` | `D_outside` | Won or lost with a usable outcome date **outside** `[from, to]`, in either direction. Excluded from every metric; counted by `out_of_period_landed_n`. Bucket 10 takes precedence. |
 | 9 | **Reopened-open** | `class=open, reopened=yes` | `D_reopened-and-open` | Open today, carrying an in-window landing that `D_landed` does not represent. Held out of the coverage rate for the same reason as bucket 6, and counted by `reopened_open_n`. It claims the reopened-open deal **whatever its `cov` is**, which is why bucket 6 must exclude it rather than the other way round — the precedence is `reopened` first, matching §4.1's SQL and the RELATIONS tie-out. |
-| 10 | **Pre-CRM landed** | `class=precrm` | `D_precrm` | Imported with its outcome already recorded: terminal with a usable outcome date falling **before the deal existed in the CRM** (§2.5(a)). Excluded from every metric including `landed_n`; counted by `precrm_landed_n`. Its forecast history was never imported, so charging its rep a `no_prediction_n` would charge them for records the CRM never held. |
+| 10 | **Pre-CRM landed** | `class=precrm` | `D_precrm` | Imported with its outcome already recorded: terminal with a usable outcome date falling **before the deal arrived in this database** — `crm_arrival_at`, the earliest `audit_log` row, never `created_at` (§2.5(a)). Excluded from every metric including `landed_n`; counted by `precrm_landed_n`, with `precrm_unknown_n` counting the deals whose arrival audit cannot date. Its forecast history was never imported, so charging its rep a `no_prediction_n` would charge them for records the CRM never held. |
 
 **Why this is exhaustive and non-overlapping, and how that is checked.** The §7 **bucket-partition** check
 enumerates every world the atom domains admit — `class` from the RELATIONS partition line, `cov` from
@@ -543,15 +543,41 @@ invariant while looking like compliance. So it is narrowed to the case it was ac
 
 > **A terminal deal whose outcome date precedes its arrival in the CRM is not scoreable, not landed, and
 > not a coverage failure — it is `D_precrm`.** Test: `hubspot_deal_id IS NOT NULL` **and**
-> `outcome_date < (created_at AT TIME ZONE 'America/Chicago')::date`. Both are real columns
-> (`shared/src/schema/tenant/deals.ts:248`), and neither is a `source` string match.
+> `outcome_date < (crm_arrival_at AT TIME ZONE 'America/Chicago')::date`, where `crm_arrival_at` is the
+> earliest `audit_log` row for the deal (§4.0.5). Neither half is a `source` string match.
 
-`hubspot_deal_id` rather than `source` because the refresh writer keys on the same column (§1.1.1), so the
-two HubSpot problems are tested on one basis. The strict `<` is deliberate: a deal created and closed on
-the same CRM day is an ordinary landing, not an import. A deal imported and closed *afterwards* stays in
-`D_landed` and, if never forecast, is counted in `no_prediction_n` — correctly, since the rep had it in
-the CRM and did not forecast it. `D_precrm` is a member of the §4.0.5 partition and takes precedence over
-both `D_landed` and `D_outside`, so the carve-out cannot silently shrink `|D|`.
+**`crm_arrival_at`, and why `deals.created_at` is the wrong column — a premise error, recorded rather than
+quietly corrected.** The first version of this test used `deals.created_at` on the assumption that it means
+"when the deal arrived here". For imported deals it does not. `scripts/hubspot-deals-reimport.ts:783`
+computes `const createdAt = parseDate(row.createDate) ?? new Date()` — HubSpot's own creation date — and
+binds it to the `created_at` column of its `INSERT` (`:808` in the column list, `:829` in the values).
+So a deal created in HubSpot in January, closed in February and imported in May carries
+`created_at = January`, and `outcome_date < created_at` is **false**.
+
+The carve-out was therefore **inert on precisely the population it was built for**: every imported
+already-closed deal fell straight back into `landed_n` and `no_prediction_n`, which is the original defect,
+unfixed. It would have matched only deals whose HubSpot outcome predates their HubSpot creation — a data
+error, not a population. A construct that is correct in form and empty in fact is indistinguishable from no
+construct at all, and nothing in this document would have said so (§7 audit inventory, "real-data
+obligations").
+
+`crm_arrival_at` is the earliest `audit_log` row for the deal. The `audit_deals` trigger fires
+`AFTER INSERT` (§1.2), so that row's `created_at` is the wall-clock instant the deal entered this schema —
+a timestamp the importer does not control and cannot backdate. `hubspot_deal_id` rather than `source`
+because the refresh writer keys on the same column (§1.1.1), so the two HubSpot problems are tested on one
+basis. The strict `<` is deliberate: a deal created and closed on the same CRM day is an ordinary landing,
+not an import. A deal imported and closed *afterwards* stays in `D_landed` and, if never forecast, is
+counted in `no_prediction_n` — correctly, since the rep had it in the CRM and did not forecast it.
+`D_precrm` is a member of the §4.0.5 partition and takes precedence over both `D_landed` and `D_outside`,
+so the carve-out cannot silently shrink `|D|`.
+
+**The residual, which is `audit_log`'s reach (§1.4).** If audit does not go back as far as a deal's insert,
+`crm_arrival_at` is NULL and arrival cannot be proven. Those deals **stay in `D_landed`** — never carve out
+what you cannot demonstrate — and are counted by `precrm_unknown_n` so the decision is visible rather than
+silent. The reimport ran 2026-05-14 and the `audit_deals` trigger has shipped since `0001` (2026-04-01), so
+the rows *should* exist; §1.4 records that the earliest actual `audit_log.created_at` is unverified against
+production, and `precrm_unknown_n` is the column that answers it. If it is large, this carve-out is not
+working and the number says so.
 
 **(b) HubSpot-written *dates on ordinary deals* — a different set, and it must be excluded explicitly.**
 This is the population the deal-level rule in (a) does **not** catch. `scripts/refresh-from-hubspot.ts`
@@ -971,6 +997,11 @@ deal_facts AS (
              THEN <aliasedWonHsClosedWonDateSql('d')>
            WHEN psc.slug IN (:lost_slugs)
              OR COALESCE(d.bid_board_stage_slug,'') IN (:lost_slugs)
+             -- Bare ::date, and it is the ONE deliberate exception to §4.0.6's timezone rule. The
+             -- canonical Lost expression is deal-date-scope.ts:54 and this spec does not deviate from
+             -- it; §1.8 states the trade and the one-day blast radius. Do not "fix" this cast in
+             -- isolation -- it would put this report on a different Lost basis from every other
+             -- surface and break the §4.1 reconciliation (convention 18: cite, never restate).
              THEN d.lost_at::date
            ELSE NULL
          END                        AS outcome_date,
@@ -1023,14 +1054,27 @@ deal_facts AS (
              JOIN public.pipeline_stage_config rf ON rf.id = reo.from_stage_id
              JOIN public.pipeline_stage_config rt ON rt.id = reo.to_stage_id
              WHERE reo.deal_id = d.id
-               -- CT DATE granularity, not a raw timestamp comparison. deal_stage_history has NO
-               -- monotonic write-order column (its PK is gen_random_uuid(), 0001_initial.sql:465) --
-               -- unlike audit_log.id, there is no BIGSERIAL to fall back on -- and created_at is NOW(),
-               -- i.e. transaction-START time, so two overlapping stage changes can carry timestamps in
-               -- the opposite order to their writes (§4.0.1). Comparing at day granularity absorbs that
-               -- inversion entirely, since it is bounded by transaction duration (seconds).
-               AND (reo.created_at AT TIME ZONE 'America/Chicago')::date
-                     >= (h.created_at AT TIME ZONE 'America/Chicago')::date
+               -- STRICTLY LATER, on the coarsest basis that is still an ordering. Two properties are
+               -- needed at once and an earlier form had only one of them.
+               --   * Inversion-tolerance: deal_stage_history has NO monotonic write-order column (its PK
+               --     is gen_random_uuid(), 0001_initial.sql:465) -- unlike audit_log.id there is no
+               --     BIGSERIAL to fall back on -- and created_at is NOW(), i.e. transaction-START time,
+               --     so two overlapping stage changes can carry timestamps in the opposite order to
+               --     their writes (§4.0.1). Day granularity absorbs that, since the inversion is bounded
+               --     by transaction duration (seconds) and cannot cross a day except at midnight.
+               --   * Strictness: "a LATER row" is the definition. A bare `>=` on dates is satisfied by
+               --     EQUAL dates, so a reopen that happened in the morning FROM AN EARLIER TERMINAL
+               --     STATE, followed by a fresh landing that afternoon, matched -- reporting a reopen
+               --     that preceded the landing it was matched against.
+               -- Different days -> the date comparison, which is inversion-immune. Same day -> the raw
+               -- timestamps, which is all the data has; the residual is a same-day overlapping-write
+               -- inversion, bounded by seconds and strictly better than a comparison that is vacuous
+               -- whenever the dates are equal.
+               AND ( (reo.created_at AT TIME ZONE 'America/Chicago')::date
+                       > (h.created_at AT TIME ZONE 'America/Chicago')::date
+                     OR ( (reo.created_at AT TIME ZONE 'America/Chicago')::date
+                            = (h.created_at AT TIME ZONE 'America/Chicago')::date
+                          AND reo.created_at > h.created_at ) )
                AND (rf.slug IN (:won_slugs) OR rf.slug IN (:lost_slugs))
                AND rt.slug NOT IN (:won_slugs) AND rt.slug NOT IN (:lost_slugs)
            )
@@ -1051,6 +1095,19 @@ deal_facts AS (
          -- column the refresh writer keys on (§1.1.1), so both HubSpot problems are tested on one basis
          -- rather than on a `source` string. Non-null boolean, so `NOT` on it downstream is safe (§4.0.6).
          (d.hubspot_deal_id IS NOT NULL)                     AS hubspot_linked,
+         -- WHEN THE DEAL ARRIVED IN THIS DATABASE -- deliberately NOT d.created_at. The reimport sets
+         -- created_at from HubSpot's OWN createDate: `parseDate(row.createDate)`
+         -- (hubspot-deals-reimport.ts:783), bound to the created_at column of its INSERT (:808 in the
+         -- column list, :829 in the values). So for an imported deal created_at is when the deal was
+         -- created IN HUBSPOT, months before it reached this schema, and it is under the importer's
+         -- control rather than the database's.
+         --
+         -- The audit_deals trigger (0001_initial.sql:757) fires AFTER INSERT, so the earliest audit_log
+         -- row for the deal is the wall-clock instant the row entered this schema -- a timestamp no
+         -- importer sets. NULL when audit does not reach back that far (§1.4); see precrm_unknown_n,
+         -- which is why that NULL cannot pass silently.
+         (SELECT min(al.created_at) FROM audit_log al
+           WHERE al.table_name = 'deals' AND al.record_id = d.id)  AS crm_arrival_at,
          -- NOTE: expected_close_date is deliberately NOT selected. State comes from §4.0.3.
          COALESCE(d.is_bid_board_owned, false) OR COALESCE(d.is_read_only_mirror, false) AS bid_board_owned
   FROM deals d
@@ -1103,7 +1160,7 @@ It excludes only **stored** `on_hold` deals — the far-out auto-park leg is del
 |---|---|---|
 | `D` | The base `outcomes` CTE above | current row state |
 | `D_landed` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NOT NULL` ∩ **not `D_precrm`** ∩ `outcome_date BETWEEN from AND to` (both inclusive) | period |
-| `D_precrm` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NOT NULL` ∩ `hubspot_linked` ∩ `outcome_date` **before** the deal's CT creation date — landed before it existed in the CRM (§2.5(a)). Takes precedence over `D_landed` **and** `D_outside` | — |
+| `D_precrm` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NOT NULL` ∩ `hubspot_linked` ∩ `outcome_date` **before `crm_arrival_at`'s CT date** — landed before it existed in the CRM (§2.5(a)). **Not** `deal_created_at`, which the importer sets from HubSpot. Takes precedence over `D_landed` **and** `D_outside` | — |
 | `D_nodate` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NULL` | — |
 | `D_open` | `D` ∩ `outcome_kind = 'open'` | **today** (see below) |
 | `D_reopened` | `D` ∩ a `deal_stage_history` row **into** a Won/Lost stage whose CT date is in `[from, to]` ∩ a later row **out of** a terminal stage (`from_stage_id` terminal, `to_stage_id` not) — the positive reopen evidence ∩ that landing is not represented in `D_landed`. An **overlay**, not a partition member (see RELATIONS) | period |
@@ -1152,6 +1209,18 @@ only the landing plus "the landing is absent from `D_landed`" — but absence ha
 `outcome_date` is NULL (`D_nodate`, a mirror-terminal with no Won date) or whose Won date was later
 corrected to fall outside the window both satisfy that predicate without ever having reopened, so a
 data-quality problem was reported as a workflow event in a diagnostic people would act on.
+
+**"Later" means strictly later, and the timezone correction had quietly stopped guaranteeing it.** The
+comparison started as a raw `reo.created_at > h.created_at`, which was strict but inverted under
+concurrent writes; converting it to a CT-date comparison fixed the inversion and, in the same edit,
+weakened `>` to `>=`, because at day granularity a strict `>` would have thrown away every genuine
+same-day reopen. What that traded away was the ordering itself: on equal dates `>=` is satisfied by *any*
+reopen row, including one that happened **before** the landing. A deal reopened in the morning from an
+earlier terminal state, landing again that afternoon, with the afternoon outcome later corrected outside
+the window, was reported in `D_reopened` on the strength of a reopen that preceded the landing entirely.
+The predicate now takes the date comparison across days and the raw timestamps within a day, so it is
+strict everywhere and inversion-tolerant everywhere it can be. **This is the pattern convention 20 exists
+for:** the timezone fix was right, and it silently dropped a property the form it replaced had carried.
 
 **Residual:** `deal_stage_history.from_stage_id` is nullable (`0001_initial.sql:467`), and the
 `0143`/`0207` backstop populates it only on the UPDATE branch. A reopen recorded with a NULL
@@ -1323,6 +1392,7 @@ here. Adding a metric without adding a row is the defect re-entering.**
 | `bid_board_owned_n` | 2.5(c) | `D_book` | — | Diagnostic |
 | `out_of_period_landed_n` | 4.0.5 | `D_outside` | — | Diagnostic; excluded from every other metric |
 | `precrm_landed_n` | 2.5(a) | `D_precrm` | — | Diagnostic; excluded from every other metric, `landed_n` included |
+| `precrm_unknown_n` | 2.5(a) | `D_landed` ∪ `D_outside` where `precrm_arrival_unknown` — HubSpot-linked terminal deals with no audit row to date their arrival | — | Integrity diagnostic; they stay in their bucket, so this is the size of the carve-out's blind spot |
 | `reopened_after_landing_n` | 4.0.5 | `D_reopened` (all of it, `D_open` ∪ `D_outside` slices) | — | Diagnostic |
 | `reopened_open_n` | 4.0.5 | `D_reopened ∩ D_open` | — | The `D_open` tie-out term; excluded from `D_cov`, `D_book`, `E` |
 | `provenance_unknown_n` | 4.0.6 | `D_open` with a non-null `expected_close_date` but `pnow_state = 'no_event'` | — | Integrity diagnostic |
@@ -1422,9 +1492,16 @@ open       = (outcome_kind = 'open')                                       -- §
 -- because it takes precedence over both D_landed and D_outside -- the carve-out has to happen before
 -- either claims the row, or the partition overlaps. The outcome_date IS NOT NULL conjunct keeps D_nodate
 -- out. COALESCE keeps it non-null so the `NOT` below is safe (§4.0.6), and the cast is timezone-explicit.
+-- crm_arrival_at, NOT deal_created_at: see the projection in §4.0.5 for why the latter is the HubSpot
+-- creation date on exactly the deals this carve-out exists for.
 precrm_landed = COALESCE(outcome_kind IN ('won','lost') AND outcome_date IS NOT NULL AND hubspot_linked
                          AND outcome_date
-                               < (deal_created_at AT TIME ZONE 'America/Chicago')::date, false)
+                               < (crm_arrival_at AT TIME ZONE 'America/Chicago')::date, false)
+-- The deals whose arrival cannot be PROVEN: HubSpot-linked, terminal, dated, and no audit row to date
+-- their arrival from. They stay in D_landed (never carve out what you cannot demonstrate), and this flag
+-- is what stops that decision being invisible -- the same shape as is_provenance_unknown in §4.1.
+precrm_arrival_unknown = COALESCE(outcome_kind IN ('won','lost') AND outcome_date IS NOT NULL
+                                  AND hubspot_linked AND crm_arrival_at IS NULL, false)
 landed     = (outcome_kind IN ('won','lost') AND outcome_date IS NOT NULL
               AND NOT precrm_landed
               AND outcome_date BETWEEN :from AND :to)                      -- membership in D_landed
@@ -1498,11 +1575,11 @@ column. Re-run this check whenever a name is added:
 |---|---|---|
 | `raw_close_date_events` (§4.0.1) | `audit_log_id`, `deal_id`, `changed_at`, `actor_user_id`, `event_kind`, `old_date`, `new_date` | `audit_log`: `id`, `record_id`, `created_at`, `changed_by`, `table_name`, `action`, `changes`, `full_row` — all real columns (§1.2) |
 | `close_date_timeline` (§4.0.2) | `audit_log_id`, `deal_id`, `changed_at`, `actor_user_id`, `event_kind`, `old_date`, `new_date` **passed through**, plus `source`, `machine_source` | `raw_close_date_events.*`; `deals.hubspot_deal_id`; `public.hubspot_refresh_log.*` (§0064) |
-| `deal_facts` (§4.0.5) | `deal_id`, `rep_id`, `deal_created_at`, `outcome_kind`, `outcome_date`, `terminal_entry_date`, `landed_in_window_and_reopened`, `has_reopen_evidence`, `hubspot_linked`, `bid_board_owned` | `deals`: `stage_entered_at`, `bid_board_stage_entered_at`, `created_at`, `won_closed_date`, `lost_at`, `assigned_rep_id`, `stage_id`, `bid_board_stage_slug`, `is_active`, `is_test_data`, `is_bid_board_owned`, `is_read_only_mirror`, `on_hold`, **`hubspot_deal_id`**; `pipeline_stage_config`: `slug`, `is_terminal`; `deal_stage_history`: `deal_id`, `to_stage_id`, **`from_stage_id`**, `created_at` |
+| `deal_facts` (§4.0.5) | `deal_id`, `rep_id`, `deal_created_at`, `outcome_kind`, `outcome_date`, `terminal_entry_date`, `landed_in_window_and_reopened`, `has_reopen_evidence`, `hubspot_linked`, `crm_arrival_at`, `bid_board_owned` | `deals`: `stage_entered_at`, `bid_board_stage_entered_at`, `created_at`, `won_closed_date`, `lost_at`, `assigned_rep_id`, `stage_id`, `bid_board_stage_slug`, `is_active`, `is_test_data`, `is_bid_board_owned`, `is_read_only_mirror`, `on_hold`, **`hubspot_deal_id`**; `audit_log`: `table_name`, `record_id`, `created_at`; `pipeline_stage_config`: `slug`, `is_terminal`; `deal_stage_history`: `deal_id`, `to_stage_id`, **`from_stage_id`**, `created_at` |
 | `outcomes` (§4.0.5) | all of `deal_facts` passed through, plus **`is_reopened_after_landing`** | `deal_facts`: `outcome_kind`, `outcome_date`, `landed_in_window_and_reopened` |
 | `state_at` ×3 **(LATERAL, not a CTE)** (§4.0.3) *(contents: **convention-derived** — the block projects `state`, `prediction`, `changed_at`, `source`; the prefixes come from the three aliased instances in §4.0.7's anchor table, so an extractor sees a mismatch that is expected)* | `p30_state`, `p30_prediction`, `p30_changed_at`, `p30_source`; `pfinal_state`, `pfinal_prediction`, `pfinal_changed_at`, `pfinal_source`; `pnow_state`, `pnow_prediction`, `pnow_changed_at`, `pnow_source` — all `*_state` coalesced (§4.0.3) | `close_date_timeline`: `deal_id`, `changed_at`, **`audit_log_id`**, `source`, `new_date`; `outcomes.outcome_date` |
 | `coverage_resolution` (§4.1) | `cov_state`, `cov_prediction`, `is_provenance_unknown` | `outcomes.deal_id`; `state_at(deal, now())`; **`deals.expected_close_date`** — the only block that joins `deals` for it, and the whole reason convention 10's exception is buildable |
-| Derived scalars **block A** **(not a CTE)** (§4.0.7) | `open`, `precrm_landed`, `landed`, `in_d_cov`, `signed_error_p30`, `signed_error_pfinal`, `p30_parked_at_write`, `pfinal_parked_at_write`, `event_window_end` | `outcome_kind`, `outcome_date`, `terminal_entry_date`, `is_reopened_after_landing`, `has_reopen_evidence`, `hubspot_linked`, `deal_created_at`, `cov_state`, `cov_prediction`, `p30_prediction`, `p30_changed_at`, `pfinal_prediction`, `pfinal_changed_at` — deliberately nothing from the event set |
+| Derived scalars **block A** **(not a CTE)** (§4.0.7) | `open`, `precrm_landed`, `precrm_arrival_unknown`, `landed`, `in_d_cov`, `signed_error_p30`, `signed_error_pfinal`, `p30_parked_at_write`, `pfinal_parked_at_write`, `event_window_end` | `outcome_kind`, `outcome_date`, `terminal_entry_date`, `is_reopened_after_landing`, `has_reopen_evidence`, `hubspot_linked`, `crm_arrival_at`, `deal_created_at`, `cov_state`, `cov_prediction`, `p30_prediction`, `p30_changed_at`, `pfinal_prediction`, `pfinal_changed_at` — deliberately nothing from the event set |
 | `E` **(not a CTE)** (§4.0.5) *(contents: **unverifiable** — defined in prose, no literal SQL fence)* | the event set for churn | `close_date_timeline`; `event_window_end` (block A) |
 | Derived scalars **block B** **(not a CTE)** (§4.0.7) | `deal_move_count`, `deal_days_pushed_out` | `D_book`; `E`: `old_date`, `new_date` |
 | Metrics (§4.1–4.7) **(not a CTE)** *(contents: **unverifiable** — many fences, no single block boundary)* | the report columns, incl. `cov_n`, `scoreable_n`, `scoreable_final_n` | everything above, by name only |
@@ -1589,7 +1666,36 @@ lines of P₃₀ date arithmetic it never scanned.
 | Population-change obligations | when a `D_*` predicate changes, every site mentioning it is enumerated for review | **extraction** — group all mentions by site type (table row / RELATIONS / metric row / partition / producer-consumer / SQL / prose) | mechanical *(added this round)* · **enumerates sites, does not verify agreement** — it produces the list convention 16 depended on recalling; judging each site is still human |
 | Population **definitions** (§4.0.5) | that each `D_*` predicate matches the SQL implementing it | **read** — set notation is not an extractable expression | **memory-based** (residual of the row above) |
 | Disjointness of tie-out terms | that summed buckets cannot overlap | **read** — set arithmetic a human must do | **memory-based** |
-| Everything against production | census, coverage floor, mirror-terminal counts | not derivable — needs a database | **unverified** |
+| Everything against production | census, coverage floor, mirror-terminal counts, **and every carve-out's non-emptiness** | not derivable — needs a database | **unverified** · enumerated below rather than left as a category |
+
+
+**Real-data obligations — the class of defect no check in this document can reach.** All eighteen audits
+above read *the text*. Not one of them can tell whether a construct that is correct in form matches
+anything in production. `D_precrm` proved that the expensive way: it was well-formed, cascaded correctly
+through the partition, the invariants and both metric tables, passed every check twice — and its predicate
+was false for **every** deal it existed to protect, because `deals.created_at` on an imported deal is the
+HubSpot creation date. A carve-out with an empty intersection with its target population is
+indistinguishable, on the page, from a carve-out that works.
+
+**No check here should pretend to close that.** The honest form is an obligation on whoever implements
+this, with the query written out so it cannot be waved through. Each row names the number that would
+reveal the construct is inert, and what a zero means — because for some of these zero is the good answer
+and for others it is the alarm.
+
+| Construct | Query to run | A zero means |
+|---|---|---|
+| `D_precrm` (§2.5(a)) | `count(*)` over `hubspot_deal_id IS NOT NULL` ∩ terminal ∩ dated ∩ `outcome_date < (SELECT min(created_at) FROM audit_log WHERE table_name='deals' AND record_id = d.id)::date` | **Alarm, probably.** Either the office holds no imported already-closed deals, or the arrival marker is wrong again. Cross-check against `count(*) WHERE source = 'hubspot_deals_reimport_2026_05_14' AND` terminal — if *that* is non-zero and this is zero, the test is still broken |
+| `precrm_unknown_n` (§2.5(a)) | `count(*)` over HubSpot-linked terminal dated deals with no `audit_log` row | **Good.** A large number means audit does not reach the import and the carve-out is blind for those deals |
+| Arm (a), HubSpot refresh (§4.0.2) | the §1.1.1 `hubspot_refresh_log` census | **Good** — the classifier arm is inert because the refresh never wrote. §7 already makes this the prerequisite for building the report at all |
+| Arm (b), migration seeds (§4.0.2) | `count(*)` over `event_kind='insert'` ∩ `actor_user_id IS NULL` ∩ `hubspot_deal_id IS NOT NULL` in the timeline | **Good** — no seeded forecasts to exclude |
+| `D_reopened` (§4.0.5) | `count(*)` over `deal_stage_history` with a NULL `from_stage_id`, and the reopen-row count itself | A NULL-heavy result means the reopen test is blind; a zero reopen count means the diagnostic is inert and `reopened_after_landing_n` will always read 0 |
+| Mirror-only reopens (§4.0.5) | not answerable — there is no mirror stage history | Stated as unsupported; `bid_board_owned_n` is the exposure proxy |
+| `D_nodate` (§4.0.5) | `count(*)` over mirror-terminal deals with a NULL `won_closed_date` | **Good** — no silent drops |
+| Audit coverage floor (§1.4) | `SELECT min(created_at) FROM audit_log WHERE table_name='deals'` | n/a — this is the number every period claim rests on, and it is still unrun |
+
+**Convention 20 makes this a step rather than a virtue.** Non-emptiness is the last of the properties a
+predicate change has to preserve, and the only one that cannot be checked from the document — so it is
+discharged by a row in this table, not by an audit.
 
 **The constants check now runs the other direction.** It previously grepped the specific literals it knew
 about — 14, 3, 60 — inside *comparisons*, so it could not see a named constant used as a literal in **date
@@ -2223,7 +2329,11 @@ real numbers and an "insufficient volume" marker, excluded from sort order. This
 | `coverage_rate` | `cov_n >= MIN_RANKED_COVERAGE` where `cov_n = \|D_cov\|` |
 | `forecast_reliability` | **both** `cov_n >= MIN_RANKED_COVERAGE` **and** `scoreable_n >= MIN_RANKED_SCOREABLE` |
 | `moves_per_deal`, `chronic_mover_rate` | `\|D_book\| >= MIN_RANKED_SCOREABLE` |
-| signed-error columns | `scoreable_n >= MIN_RANKED_SCOREABLE` |
+| `mean_signed_error_days`, `median_signed_error_days`, `p90_signed_error_days` | `scoreable_n >= MIN_RANKED_SCOREABLE` |
+
+The signed-error row **names its three columns** rather than saying "signed-error columns". A grouped
+label reads as complete and is invisible to a set comparison — the fifth time one has blinded a
+mechanical check here, and the reason §6.6's sweep and this table can now be diffed at all.
 
 `coverage_rate` previously had only a `> 0` guard, which is not a floor — a rep with one open dated deal
 scored 100% and ranked first. And `forecast_reliability` inherited *neither* operand's floor: coalescing
@@ -2302,14 +2412,14 @@ The sweep — every column a user can sort, and whether it can be NULL:
 
 | Column | NULL when | Ranked? |
 |---|---|---|
-| `coverage_rate` | `\|D_cov\| = 0` (no open deals, or all machine-dated) | Yes — `NULLS LAST` + unranked |
-| `hit_rate_14d`, `hit_rate_30d` | `\|D_score\| = 0` | Yes — `NULLS LAST` + §6.4 volume gate |
-| `hit_rate_14d_final` | `\|D_score_final\| = 0` | Yes — `NULLS LAST` + unranked |
-| `forecast_reliability` | never, once coalesced (§6.1) | Yes |
-| `mean_signed_error_days` | `\|D_score\| = 0` | **See the sign caveat below** |
-| `median_signed_error_days`, `p90_signed_error_days` | `\|D_score\| = 0` (`percentile_cont` over an empty set) | Same |
-| `moves_per_deal` | `\|D_book\| = 0` | Yes — `NULLS LAST` |
-| `chronic_mover_rate` | `\|D_book\| = 0` | Yes — `NULLS LAST` |
+| `coverage_rate` | `\|D_cov\| = 0` (no open deals, or all machine-dated) | Yes — `NULLS LAST`, zero-denominator unranked, **volume-gated per §6.4** |
+| `hit_rate_14d`, `hit_rate_30d` | `\|D_score\| = 0` | Yes — `NULLS LAST`, zero-denominator unranked, **volume-gated per §6.4** |
+| `hit_rate_14d_final` | `\|D_score_final\| = 0` | Yes — `NULLS LAST`, zero-denominator unranked, **volume-gated per §6.4** |
+| `forecast_reliability` | never, once coalesced (§6.1) | Yes — **volume-gated per §6.4** (both operands' floors) |
+| `mean_signed_error_days` | `\|D_score\| = 0` | **See the sign caveat below**; **volume-gated per §6.4** |
+| `median_signed_error_days`, `p90_signed_error_days` | `\|D_score\| = 0` (`percentile_cont` over an empty set) | Same; **volume-gated per §6.4** |
+| `moves_per_deal` | `\|D_book\| = 0` | Yes — `NULLS LAST`, **volume-gated per §6.4** |
+| `chronic_mover_rate` | `\|D_book\| = 0` | Yes — `NULLS LAST`, **volume-gated per §6.4** |
 | `median_days_overdue` | no overdue-open deals | Yes — `NULLS LAST` |
 | every `*_n` count | never — `count()` returns 0 | Yes |
 | `total_days_slipped`, `days_pushed_out`, `days_pulled_in` | never — coalesced at §4.5 | Yes |
@@ -2393,6 +2503,7 @@ work or an omission, and there is no way to tell which from a list that only nam
 | `bid_board_owned_n` | Diag | `D_book` | 2.5(c) |
 | `out_of_period_landed_n` | Diag | `D_outside` | 4.0.5 |
 | `precrm_landed_n` | Diag | `D_precrm` | 2.5(a) |
+| `precrm_unknown_n` | Diag | `D_landed` ∪ `D_outside`, arrival undatable | 2.5(a) |
 | `reopened_after_landing_n` | Diag | `D_reopened` | 4.0.5 |
 | `reopened_open_n` | Diag | `D_reopened ∩ D_open` | 4.0.5 |
 | `provenance_unknown_n` | Diag | `D_open`, raw date with `pnow_state='no_event'` | 4.0.6 |
@@ -2520,6 +2631,19 @@ surface it.
     **the review of each site is not.** Six of round 17's eight findings were obligations of a single
     predicate change that convention 16 asked me to recall and I did not.
 
+20. **Changing a predicate obliges naming what the old form guaranteed.** Before replacing any comparison,
+    join or filter, state the properties the previous form carried — **ordering, strictness, uniqueness,
+    disjointness, and non-emptiness against real data** — and check the replacement still carries each.
+    Three defects on this document were a locally-correct fix that silently dropped one: the reopen
+    window's timezone correction traded strict ordering for a `>=` that is vacuous on equal dates
+    (§4.0.5); `D_precrm` keyed on `deals.created_at`, which the importer sets from HubSpot, making the
+    carve-out empty on exactly its target population (§2.5(a)); and the machine-provenance re-model had to
+    be undone twice before deletion was recognised as dropping supersession (§4.0.0). None was wrong where
+    it was written; each broke something one level away. **Non-emptiness is the one no check here can
+    reach** — every audit in this document reads the text, so a construct that is correct in form and
+    matches nothing in production passes all of them. That is why each carve-out carries a real-data
+    obligation in the §7 audit inventory.
+
 **A convention that forbids something the spec requires is worse than no convention, because it will be
 enforced.** Convention 10 was exactly that for one round: it banned every raw read of
 `expected_close_date` while §4.1 necessarily performed one, so an implementer obeying it would have deleted
@@ -2556,6 +2680,7 @@ read.
 | 17 audit rows state their falsifier | §6.0, §4.0.7 | Added round 9; extended round 10 with §4.0.7's ordering rule after the chain table certified a cycle |
 | 18 restatements cite the canonical rule | every convention's restatement sites | Added round 16 after convention 10's blanket copy survived four rounds. **Was itself omitted from this table until round 18** — the same defect the table guards |
 | 19 population changes run the enumerator | every `D_*` predicate change | Added round 17 after one predicate change produced six unfulfilled obligations. Also omitted from this table until round 18 |
+| 20 predicate changes name what the old form guaranteed | every comparison, join or filter this document replaces | Added round 22 after the third such defect. **Two live violations found on adoption** — the reopen `>=` and `D_precrm`'s `created_at` — both fixed in the same round; the non-emptiness half is discharged by the real-data obligations, not by a check |
 
 **One companion decision v1 must make, not defer.** The existing Forecast Variance report publishes
 `avg_close_drift_days` — unsigned, Won-only, and structurally frozen since 2026-04-23 (§1.5). Shipping a
@@ -2676,6 +2801,27 @@ complement of `futureDatedCloseDatePredicateSql`'s `>= today` (`foundations.ts:4
 `>` matches `closeTargetFarOutSqlPredicate` (`deal-reporting.ts:137`), so a deal exactly 90 days out is
 unparked in both. One ordering — `percentile_cont`'s `WITHIN GROUP` — deliberately needs no tie-breaker,
 and §4.3 now says why.
+
+**Round 22 (a carve-out that matched nothing, and a comparison that had stopped being one)**
+
+| # | Was | Now |
+|---|---|---|
+| 1 | `D_precrm` keyed on `deals.created_at` | **The construct was inert.** `hubspot-deals-reimport.ts:783` sets `createdAt` from HubSpot's own `row.createDate` and binds it to the `created_at` column of its `INSERT` (`:808` / `:829`), so an imported deal's `created_at` is when it was created *in HubSpot* — months before it reached this schema. `outcome_date < created_at` was false for **every** deal the carve-out existed to protect; they fell back into `landed_n` and `no_prediction_n`, i.e. the original §2.5 defect, unfixed. Re-keyed on `crm_arrival_at`, the earliest `audit_log` row, whose timestamp the importer cannot set. Deals whose arrival audit cannot date stay in `D_landed` and are counted by the new `precrm_unknown_n`. |
+| 2 | The reopen row had to be `>=` the landing, on CT dates | `>=` on equal dates is not an ordering. A deal reopened in the morning **from an earlier terminal state**, landing again that afternoon, matched — reporting a reopen that preceded its own landing. The date comparison came in as a timezone fix and silently weakened `>` to `>=`. Now: date comparison across days, raw timestamps within a day — strict everywhere, inversion-tolerant everywhere it can be. |
+| 3 | §6.6's *Ranked?* column restated §6.4's floors and disagreed with them | `coverage_rate` and `hit_rate_14d_final` were marked merely "unranked" while §6.4 gives both a volume floor. The same duplicate-restatement shape as round 21's bucket list. §6.6 now **cites** §6.4 instead of restating it, and a new check diffs the two column sets. |
+| 4 | §6.4's floor table said "signed-error columns" | A grouped label, invisible to a set comparison — the fifth time one has blinded a check here. Expanded to the three names, which is what made §6.6 and §6.4 diffable at all. |
+| 5 | The bare `::date` on `d.lost_at` carried no justification at its own site | §1.8 records it as a deliberate exception with its blast radius; the SQL did not say so, so an implementer reading §4.0.5 saw an unexplained violation of §4.0.6's timezone rule. Cited at the site (convention 18). |
+| 6 | Nothing recorded that a construct can be correct and empty | Added the **real-data obligations** table: per carve-out, the query that reveals it is inert and what a zero means. Also **convention 20**, which makes "state what the old predicate guaranteed" a step — ordering, strictness, uniqueness, disjointness, non-emptiness. Both live violations were found by applying it. |
+
+**Fifteen of the nineteen findings this round were refuted**, each read against the current text rather
+than dismissed for being old: the parked-coverage numerator already excludes parked dates (round 1→2), the
+base CTE already carries `aliasedReportableDealFilterSql` (round 2→3), the classifier already projects
+`machine_source` (`AS machine_source` in the §4.0.2 fence), `MIN_RANKED_COVERAGE` already has a value,
+`hit_rate_14d_final` already has its own §6.4 floor, `forecast_reliability` is already in both metric
+tables, `coverage_resolution` already joins `deals`, the P₃₀ fallback is already capped at the outcome
+boundary, the landing half already requires a non-terminal `from_stage_id`, Block B is already anchored on
+`D_book`, and conventions 18 and 19 already have audit rows. GitHub re-anchors an unresolved comment to
+each new tip; that is not evidence it is live.
 
 **Round 21 (three rules that no mechanism enforced, found by three independent reviewers)**
 
@@ -2989,6 +3135,25 @@ were themselves silently broken**, because `NOT <nullable>` inside `FILTER` coun
 failing loudly. A check that can fail open is not a check. That is why the state enum is coalesced and
 non-null by construction, and why "never negate a nullable" is now a stated SQL rule (§4.0.6) rather than
 something to remember at each site.
+
+**Round 22's lesson: a predicate can be correct, checked, and match nothing.** `D_precrm` was built to a
+reported defect, cascaded through the partition, the invariants, both metric tables and the chain, and
+passed all seventeen checks twice — while being false for every deal it existed to protect, because
+`deals.created_at` does not mean what its name says on the rows that matter. Nothing in the document could
+have caught it: every audit here reads the text, and the text was consistent. The failure was in a premise
+about production data, which is the one place this document's entire apparatus cannot see.
+
+That is not an argument for another check — it is an argument for knowing where the checks stop. The
+answer is the **real-data obligations** table: for each carve-out, the query that would show it is inert
+and what a zero means. It cannot be run from here, so it is recorded as an obligation on whoever
+implements this rather than dressed up as verification. **Do not invent a check you cannot validate**;
+write down the measurement someone else has to take.
+
+The narrower lesson generalises better. Both live findings were a fix that dropped a property one level
+away: the timezone correction traded strict ordering for a `>=`, and the carve-out traded a real arrival
+marker for a column that shares its name. Neither was wrong where it was written. Hence convention 20 —
+before replacing a predicate, name what the old form guaranteed and check the new one still does. Applied
+once, it found both.
 
 **Round 21's lesson: a rule with no failing input is decoration, and that includes the checks.** Three
 findings this round were one defect — the block-set marker, §2.5(a)'s pre-CRM rule, and the convention
