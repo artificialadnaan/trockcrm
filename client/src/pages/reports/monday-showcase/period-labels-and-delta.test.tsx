@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { VariantExecHero } from "./variants";
 import { DrillProvider } from "./drill";
 import { periodWord, shouldShowWowDelta, type WeekMode } from "../week-mode";
+import { UNFILTERED_ROUTE_FILTER } from "./types";
 import type { MondayShowcaseData, DepartmentMetric } from "./types";
 
 // CodeRabbit downstream FIX 2 (labels) + FIX 3 (WoW delta chips), now asserted on the consolidated Hybrid
@@ -37,6 +38,7 @@ const dataFor = (mode: WeekMode): MondayShowcaseData => ({
   officeProjection: { bands: [], coverage: { n: 0, m: 0, undatedValue: 0 }, coverageCaption: "" },
   weeklyTrend: [],
   valueBases: { won_awarded_first: "Awarded-first won value", open_best_estimate: "Best current estimate" },
+  routeFilter: UNFILTERED_ROUTE_FILTER,
   notes: [],
 });
 

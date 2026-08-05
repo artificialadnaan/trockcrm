@@ -2,6 +2,7 @@ import { Link } from "react-router-dom";
 import { useClosedWonRevenueReport } from "@/hooks/use-reports";
 import { useReportFilters } from "@/components/reports/report-filter-bar";
 import { formatDealDisplayName } from "@/lib/deal-utils";
+import { useDealHref } from "@/hooks/use-office-scope";
 import {
   DataTable,
   formatCurrency,
@@ -23,6 +24,8 @@ import {
 } from "./sales-report-ui";
 
 export function ClosedWonRevenuePage() {
+  // Rows follow the URL office scope (useScopedReport), so their links must carry it too.
+  const dealHref = useDealHref();
   const { query } = useReportFilters();
   const { data, loading, error, refetch } = useClosedWonRevenueReport(query);
   const hasRows = Boolean(data && (data.kpis.wonDealCount > 0 || data.topDeals.length > 0 || data.byOwner.length > 0));
@@ -80,7 +83,7 @@ export function ClosedWonRevenuePage() {
                       {owner.largestWonDeal.dealId ? (
                         // A change-order child is STORED "<Parent> — Change Order N"; the label moves to
                         // the front for DISPLAY only — the stored name and the Excel export are unchanged.
-                        <Link to={`/deals/${owner.largestWonDeal.dealId}`} className="font-semibold text-brand-red hover:underline">
+                        <Link to={dealHref(owner.largestWonDeal.dealId)} className="font-semibold text-brand-red hover:underline">
                           {formatDealDisplayName(owner.largestWonDeal.dealName, owner.largestWonDeal.dealIsChangeOrder)} ({formatCurrency(owner.largestWonDeal.value)})
                         </Link>
                       ) : "None"}
@@ -149,7 +152,7 @@ export function ClosedWonRevenuePage() {
               <TableBody>
                 {data.topDeals.map((deal) => (
                   <TableRow key={deal.dealId}>
-                    <TableCell><Link to={`/deals/${deal.dealId}`} className="font-semibold text-brand-red hover:underline">{formatDealDisplayName(deal.dealName, deal.dealIsChangeOrder)}</Link></TableCell>
+                    <TableCell><Link to={dealHref(deal.dealId)} className="font-semibold text-brand-red hover:underline">{formatDealDisplayName(deal.dealName, deal.dealIsChangeOrder)}</Link></TableCell>
                     <TableCell>{deal.ownerName}</TableCell>
                     <TableCell className="text-right">{formatCurrency(deal.value)}</TableCell>
                     <TableCell>{formatDate(deal.wonAt)}</TableCell>

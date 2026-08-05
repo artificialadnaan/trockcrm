@@ -166,7 +166,12 @@ function buildResponsibleUserScopeSql(filters: PerformanceReportFilters, alias: 
   return sql.join(clauses, sql` AND `);
 }
 
-function buildActivityScopeSql(filters: PerformanceReportFilters, ownerIds = filters.ownerIds) {
+// EXPORTED so the Daily Activity Log report (daily-activity-log-service.ts) can bind the SAME
+// activity predicate rather than restating it. That report is the readable-log companion to Rep
+// Activity, and its per-day entry counts are meant to EQUAL this report's `timeline` when no type
+// filter is applied -- which only holds if both sides share this exact date basis (occurred_at),
+// this exact half-open window, and this exact office/owner scoping. Do NOT fork a second copy.
+export function buildActivityScopeSql(filters: PerformanceReportFilters, ownerIds = filters.ownerIds) {
   const clauses = [
     sql`a.occurred_at >= ${filters.dateFrom}::date`,
     sql`a.occurred_at < (${filters.dateTo}::date + INTERVAL '1 day')`,
@@ -740,12 +745,18 @@ export async function getRepActivityReport(db: TenantDb, filters: PerformanceRep
         WHERE ${activityScope}
       `);
     const timeline = await db.execute(sql`
-        SELECT a.occurred_at::date::text AS day, COUNT(*)::int AS touchpoints
+        -- Bucket pinned to UTC rather than left to the session TimeZone. A bare occurred_at::date
+        -- follows whatever zone the connection carries, which made this timeline non-deterministic
+        -- across server configurations AND let it silently diverge from the Daily Activity Log,
+        -- whose day sections must equal these bars. Both are pinned in the same change so they agree
+        -- by construction; under a UTC session (the expected production configuration) this is a
+        -- no-op. See daily-activity-log-service.ts OCCURRED_DAY_UTC for the full reasoning.
+        SELECT (a.occurred_at AT TIME ZONE 'UTC')::date::text AS day, COUNT(*)::int AS touchpoints
         FROM activities a
         JOIN users u ON u.id = a.responsible_user_id
           JOIN offices o ON o.id = u.office_id
         WHERE ${activityScope}
-        GROUP BY a.occurred_at::date
+        GROUP BY (a.occurred_at AT TIME ZONE 'UTC')::date
         ORDER BY day ASC
       `);
     const types = await db.execute(sql`

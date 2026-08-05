@@ -2,6 +2,7 @@ import { Link } from "react-router-dom";
 import { AlertTriangle, Loader2 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { formatDealDisplayName } from "@/lib/deal-utils";
+import { useDealHref } from "@/hooks/use-office-scope";
 
 export function formatCurrency(value: number | null | undefined) {
   return new Intl.NumberFormat("en-US", {
@@ -75,5 +76,8 @@ export function ErrorState({ message }: { message: string }) {
 // once instead of at each table. A CO child is STORED "<Parent> — Change Order N" and truncates to look
 // like its parent; this is display-only — exports and the stored name are untouched.
 export function DealLink({ dealId, children }: { dealId: string; children: React.ReactNode }) {
-  return <Link className="font-bold text-slate-950 underline decoration-brand-red/40 underline-offset-4 hover:text-brand-red" to={`/deals/${dealId}`}>{typeof children === "string" ? formatDealDisplayName(children) : children}</Link>;
+  // Carries ?officeId when the URL has one. Without it a row read under a cross-office scope links
+  // into the viewer's default schema and 404s — see useDealHref for why ?office must NOT be used here.
+  const dealHref = useDealHref();
+  return <Link className="font-bold text-slate-950 underline decoration-brand-red/40 underline-offset-4 hover:text-brand-red" to={dealHref(dealId)}>{typeof children === "string" ? formatDealDisplayName(children) : children}</Link>;
 }

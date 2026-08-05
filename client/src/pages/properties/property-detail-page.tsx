@@ -16,6 +16,7 @@ import {
   MoreHorizontal,
   Plus,
   Users,
+  Wrench,
 } from "lucide-react";
 import { buttonVariants } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -188,6 +189,21 @@ export function PropertyDetailPage() {
     newLeadParams.set("companyId", property.companyId);
   }
   newLeadParams.set("name", `${property.name} opportunity`);
+  // Service-opportunity prefill — same convention as the New lead link above (propertyId + companyId + name)
+  // so the property is already chosen on the deal side and nobody retypes the address into a second property
+  // record. `returnPropertyId` sends Back here instead of the deals list, and ?officeId rides along because
+  // office context is URL-driven (lib/api turns it into the x-office-id header for every call on that page).
+  const officeIdParam = new URLSearchParams(location.search).get("officeId")?.trim();
+  const serviceOpportunityParams = new URLSearchParams();
+  serviceOpportunityParams.set("propertyId", property.id);
+  if (property.companyId) {
+    serviceOpportunityParams.set("companyId", property.companyId);
+  }
+  serviceOpportunityParams.set("name", `${property.name} opportunity`);
+  serviceOpportunityParams.set("returnPropertyId", property.id);
+  if (officeIdParam) {
+    serviceOpportunityParams.set("officeId", officeIdParam);
+  }
   const activePipelineValue =
     formatCurrencyCompact(property.activePipelineValue) ??
     formatCurrencyCompact(activeDeals.reduce((sum, deal) => sum + getEffectiveDealValue(deal), 0));
@@ -309,6 +325,22 @@ export function PropertyDetailPage() {
               <Camera className="h-4 w-4" />
               CompanyCam
             </a>
+          ) : null}
+          {/* Kept as a visible action rather than an overflow entry: the ask is "much faster, and it keeps us
+              from creating duplicate addresses", and an action nobody finds prevents no duplicates. Outline
+              (not brand-red) so New lead stays the single dominant CTA, and the actions row already wraps at
+              mobile width with the same 44px touch target as its neighbours.
+              Hidden on a soft-deleted property (like Add photo above): the create endpoint only accepts an
+              ACTIVE property, so offering it here would hand the rep a fully prefilled form that can only
+              fail with "Property not found" at submit. */}
+          {property.isActive ? (
+            <Link
+              to={`/deals/service-opportunity/new?${serviceOpportunityParams.toString()}`}
+              className={cn(buttonVariants({ variant: "outline", size: "sm" }), "min-h-[44px] md:min-h-0")}
+            >
+              <Wrench className="h-4 w-4" />
+              New service opportunity
+            </Link>
           ) : null}
           <Link
             to={`/leads/new?${newLeadParams.toString()}`}
