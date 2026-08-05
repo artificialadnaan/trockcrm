@@ -221,7 +221,7 @@ function ThreadAssignmentCard({
           <div>
             {/* Same relabel as the deal picker above it — without this, a thread showed the front-loaded
                 name while choosing and then REVERTED to "<Parent> — Change Order N" once assigned. */}
-            <p className="text-sm font-semibold">{formatDealDisplayName(binding.dealName) ?? "Assigned deal"}</p>
+            <p className="text-sm font-semibold">{formatDealDisplayName(binding.dealName, binding.dealIsChangeOrder) ?? "Assigned deal"}</p>
             <p className="text-xs text-muted-foreground">
               Reason: {formatReason(binding.assignmentReason)}
             </p>

@@ -180,7 +180,7 @@ export function PhotoLightbox({ photo, initialUrl = null, onClose, onPrev, onNex
               the front so a CO is distinguishable here. Display-only -- the stored name is unchanged. */}
           {(photo.dealNumber || photo.dealName) && (
             <span className="text-white/50">
-              Deal: {photo.dealNumber}{photo.dealName ? ` — ${formatDealDisplayName(photo.dealName)}` : ""}
+              Deal: {photo.dealNumber}{photo.dealName ? ` — ${formatDealDisplayName(photo.dealName, photo.dealIsChangeOrder)}` : ""}
             </span>
           )}
 

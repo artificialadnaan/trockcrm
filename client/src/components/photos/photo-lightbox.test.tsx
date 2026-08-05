@@ -83,6 +83,29 @@ describe("PhotoLightbox", () => {
     expect(node.querySelector('img[alt="Bid package"]')).toBeNull();
   });
 
+  it("trusts dealIsChangeOrder over the name's shape for the deal label", async () => {
+    // An ORDINARY deal a human named "Lobby — Change Order 1". `false` is authoritative and must
+    // suppress the relabel; calling the formatter with only the name reads the suffix as generated and
+    // rewrites a real deal's title in front of the user. The feed cards behind this lightbox already
+    // pass the flag, so an unpassed one here also makes the label CHANGE when a photo is opened.
+    apiMock.mockResolvedValue({ url: "https://r2.test/roof-damage.jpg", filename: "Roof damage.jpg" });
+
+    const node = renderLightbox({ ...basePhoto, dealName: "Lobby — Change Order 1", dealIsChangeOrder: false });
+
+    await vi.waitFor(() => expect(node.textContent).toContain("DFW-1-00001"));
+    expect(node.textContent).toContain("Lobby — Change Order 1");
+    expect(node.textContent).not.toContain("Change Order 1 — Lobby");
+  });
+
+  it("relabels a real change-order child, whose flag is true", async () => {
+    apiMock.mockResolvedValue({ url: "https://r2.test/roof-damage.jpg", filename: "Roof damage.jpg" });
+
+    const node = renderLightbox({ ...basePhoto, dealName: "Lobby — Change Order 1", dealIsChangeOrder: true });
+
+    await vi.waitFor(() => expect(node.textContent).toContain("DFW-1-00001"));
+    expect(node.textContent).toContain("Change Order 1 — Lobby");
+  });
+
   it("renders image records and enables download from the resolved full-size URL", async () => {
     apiMock.mockResolvedValue({ url: "https://r2.test/roof-damage.jpg", filename: "Roof damage.jpg" });
 

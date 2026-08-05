@@ -51,7 +51,7 @@ function DealFacts({ review }: { review: RfpReviewDetail }) {
       <div className="px-4">
         {/* A change-order child deal is STORED as "<Parent> — Change Order N"; lead with the label so
             the row names the CO, not its parent. Display-only -- the stored name is unchanged. */}
-        <DetailRow label="Deal">{formatDealDisplayName(review.dealName)}</DetailRow>
+        <DetailRow label="Deal">{formatDealDisplayName(review.dealName, review.dealIsChangeOrder)}</DetailRow>
         <DetailRow label="Project number">{review.projectNumber ?? review.dealNumber ?? "Pending"}</DetailRow>
         <DetailRow label="Requested by">
           {review.requestedByName ?? review.requestedByEmail ?? "Unknown"}

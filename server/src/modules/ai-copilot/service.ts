@@ -2374,7 +2374,9 @@ export async function getAiReviewQueue(
     LEFT JOIN ai_task_suggestions s ON s.packet_id = p.id
     LEFT JOIN ai_risk_flags r ON r.packet_id = p.id
     LEFT JOIN ai_feedback f ON f.target_type = 'packet' AND f.target_id = p.id
-    GROUP BY p.id, d.name, d.deal_number
+    -- d.* columns must each be listed: GROUP BY p.id gives functional dependency for p only, not for
+    -- the LEFT JOINed deals row.
+    GROUP BY p.id, d.name, d.is_change_order, d.deal_number
     ORDER BY COALESCE(p.generated_at, p.created_at) DESC
     LIMIT ${limit}
   `);
@@ -2454,6 +2456,10 @@ export async function getAiReviewPacketDetail(
           generatedAt: (packetRow.generated_at as Date | null) ?? null,
           ...packetRow,
           dealName: packetRow.deal_name ?? null,
+          // The spread only carries the snake_case `deal_is_change_order`; the client reads
+          // `dealIsChangeOrder`, so without this the flag arrives undefined and the label falls back to
+          // guessing from the name's shape.
+          dealIsChangeOrder: packetRow.deal_is_change_order ?? undefined,
           dealNumber: packetRow.deal_number ?? null,
         }
       : null,
