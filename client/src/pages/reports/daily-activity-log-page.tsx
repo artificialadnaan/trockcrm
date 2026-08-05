@@ -115,16 +115,35 @@ export function DailyActivityLogPage() {
   );
   const page = Math.max(1, Number(searchParams.get("page") ?? "1") || 1);
 
-  const { data, loading, error } = useDailyActivityLogReport({ ...query, types: selectedTypes, page, limit: PAGE_SIZE });
+  // The off-day drill lives in the URL for the same reasons the type filter does: it survives the
+  // filter bar's Apply, and a "who wrote their week up on Friday" view is shareable as a link. Only
+  // the exact string the page writes counts as on, so a mangled param widens rather than hides.
+  const loggedOffDayOnly = searchParams.get("loggedOffDay") === "1";
 
-  function setParam(key: string, value: string | null) {
+  const { data, loading, error } = useDailyActivityLogReport({
+    ...query,
+    types: selectedTypes,
+    loggedOffDay: loggedOffDayOnly,
+    page,
+    limit: PAGE_SIZE,
+  });
+
+  // One writer for the URL so a control that changes TWO params (the Entries card clears both
+  // narrowings) cannot land as two renders with a half-cleared state in between.
+  function setParams(updates: Record<string, string | null>) {
     const next = new URLSearchParams(searchParams);
-    if (value) next.set(key, value);
-    else next.delete(key);
+    for (const [key, value] of Object.entries(updates)) {
+      if (value) next.set(key, value);
+      else next.delete(key);
+    }
     // Any filter change invalidates the current offset — page 4 of the unfiltered log is not page 4
     // of the note-only log.
-    if (key !== "page") next.delete("page");
+    if (!Object.prototype.hasOwnProperty.call(updates, "page")) next.delete("page");
     setSearchParams(next);
+  }
+
+  function setParam(key: string, value: string | null) {
+    setParams({ [key]: value });
   }
 
   function toggleType(type: LogActivityType) {
@@ -132,6 +151,38 @@ export function DailyActivityLogPage() {
       ? selectedTypes.filter((value) => value !== type)
       : [...selectedTypes, type];
     setParam("types", next.length ? next.join(",") : null);
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // The KPI cards as drills.
+  //
+  // Three of the five narrow the log; two cannot and therefore do not (see below). Every narrowing a
+  // card applies is written to the SAME URL params the chips below read, so the chip row always shows
+  // what a card did and offers a second way to clear it — a filter you can apply but not see is how a
+  // user ends up reading a subset as the whole window.
+  //
+  // The numbers on the cards come from `data.kpis`, which the server computes over the WINDOW scope
+  // and never over the narrowing. Clicking a card therefore cannot rewrite the number that was
+  // clicked; `pagination.total` under the log is the narrowed count.
+  // ---------------------------------------------------------------------------------------------
+  const notesOnly = selectedTypes.length === 1 && selectedTypes[0] === "note";
+  const narrowed = selectedTypes.length > 0 || loggedOffDayOnly;
+
+  // Entries is the "show everything" card, the same role "All types" plays in the chip row: it is lit
+  // when nothing is narrowed and clicking it clears every narrowing at once.
+  function clearNarrowing() {
+    setParams({ types: null, loggedOffDay: null });
+  }
+
+  // "Notes" matches the card's own subtitle — it counts `type = 'note'`, so the drill is exactly the
+  // note chip. Toggling it leaves the off-day drill alone; the two compose into "notes written up on
+  // another day", which is a question a manager actually asks.
+  function toggleNotesOnly() {
+    setParams({ types: notesOnly ? null : "note" });
+  }
+
+  function toggleLoggedOffDay() {
+    setParams({ loggedOffDay: loggedOffDayOnly ? null : "1" });
   }
 
   // Deal links carry the TENANT SCOPE only — ?officeId, never ?office.
@@ -164,6 +215,19 @@ export function DailyActivityLogPage() {
   const rangeStart = pagination && pagination.returned > 0 ? (pagination.page - 1) * pagination.limit + 1 : 0;
   const rangeEnd = pagination ? rangeStart + Math.max(pagination.returned - 1, 0) : 0;
 
+  // Built from the SERVER's echo (appliedTypes / appliedLoggedOffDay), never from the URL — for the
+  // same reason the type caption always was: a stale bookmark can ask for a narrowing the server
+  // drops, and a caption describing the REQUEST rather than the RESPONSE lies about the rows on screen.
+  const appliedNarrowing = [
+    ...(data?.appliedTypes ?? []).map(labelForType),
+    ...(data?.appliedLoggedOffDay ? ["Logged off-day"] : []),
+  ];
+
+  // The "content private" footnote is shown only when a row on this page actually carries the flag.
+  // Since the owner-approved relaxation an admin or director never sees one, and a standing note about
+  // a redaction that is not happening is just as misleading as a missing one.
+  const hasRestrictedContent = (data?.days ?? []).some((day) => day.entries.some((entry) => entry.contentRestricted));
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -194,12 +258,31 @@ export function DailyActivityLogPage() {
             </button>
           ))}
         </div>
+
+        {/* The off-day drill's home in the filter UI. The "Logged Off-Day" card writes the same param,
+            so whatever a card applies is visible — and clearable — here too. */}
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <span className="text-[11px] font-black uppercase tracking-[0.14em] text-slate-500">Logging</span>
+          <button
+            type="button"
+            aria-pressed={loggedOffDayOnly}
+            onClick={toggleLoggedOffDay}
+            className={`rounded-full border px-3 py-1 text-xs font-bold transition ${loggedOffDayOnly ? "border-brand-red bg-brand-red text-white" : "border-slate-200 bg-white text-slate-700 hover:border-slate-400"}`}
+          >
+            Logged off-day only
+          </button>
+        </div>
+
         {/* Describes what the SERVER actually applied, not what the URL asked for — the two differ if a
-            stale bookmark carries a type the server no longer accepts. */}
-        {data && data.appliedTypes.length > 0 ? (
+            stale bookmark carries a type the server no longer accepts. Both numbers are named on
+            purpose: the narrowed count belongs next to the log, the window count is what the cards
+            above show, and printing only one of them is how a subset gets read as the whole window. */}
+        {data && appliedNarrowing.length > 0 ? (
           <p className="mt-2 text-xs text-slate-500">
-            Filtered to {data.appliedTypes.map(labelForType).join(", ")}. Counts below cover only these types, so they
-            will not match the Rep Activity totals until you clear the filter.
+            Log narrowed to {appliedNarrowing.join(" + ")} —{" "}
+            <span className="font-bold text-slate-900">{formatNumber(data.pagination.total)}</span> of{" "}
+            <span className="font-bold text-slate-900">{formatNumber(data.kpis.totalEntries)}</span> entries in this
+            window. The cards above always cover the whole window, so they still line up with Rep Activity.
           </p>
         ) : null}
       </div>
@@ -255,20 +338,63 @@ export function DailyActivityLogPage() {
       {!loading && !error && data ? (
         <>
           <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
-            <KpiCard label="Entries" value={formatNumber(data.kpis.totalEntries)} helper="Across the selected window" />
-            <KpiCard label="Notes" value={formatNumber(data.kpis.notes)} helper="Type: note" />
-            <KpiCard label="Days With Activity" value={formatNumber(data.kpis.daysCovered)} />
-            <KpiCard label="Reps Logging" value={formatNumber(data.kpis.repsLogging)} />
+            <KpiCard
+              label="Entries"
+              value={formatNumber(data.kpis.totalEntries)}
+              helper="Across the selected window"
+              active={!narrowed}
+              onClick={clearNarrowing}
+              // This card's "on" state IS the cleared state, so the usual "click to clear" would be
+              // backwards: clicking it while lit does nothing because there is nothing left to clear.
+              actionHint={{ idle: "Click to show every entry", active: "Showing every entry" }}
+            />
+            <KpiCard
+              label="Notes"
+              value={formatNumber(data.kpis.notes)}
+              helper="Type: note"
+              active={notesOnly}
+              onClick={toggleNotesOnly}
+            />
+            {/* Days With Activity and Reps Logging are COUNT(DISTINCT ...) cards, and they are
+                deliberately NOT clickable — not as an omission, as the honest answer.
+                "Filter the log to days that have activity" and "to reps who logged something" are
+                both no-ops: every row already satisfies them, so the click would appear to do
+                nothing and teach the user that these cards are broken. The drill that WOULD be
+                useful (a per-day or per-rep breakdown) is a different report — Rep Activity already
+                has the per-rep cut, and the log below already IS the per-day cut. So they render as
+                plain cards: no handler, no pointer cursor, no hover, and no tab stop, because a
+                keyboard user landing on a dead control is the worst version of a fake affordance.
+                The helper line says which cards do what so the difference is not left to hover. */}
+            <KpiCard
+              label="Days With Activity"
+              value={formatNumber(data.kpis.daysCovered)}
+              helper="Distinct days — not a filter"
+            />
+            <KpiCard
+              label="Reps Logging"
+              value={formatNumber(data.kpis.repsLogging)}
+              helper="Distinct reps — not a filter"
+            />
             <KpiCard
               label="Logged Off-Day"
               value={formatNumber(data.kpis.offDayLogged)}
               helper="Written up on a different day than it happened"
+              active={loggedOffDayOnly}
+              onClick={toggleLoggedOffDay}
             />
           </section>
 
           <ReportPanel title="Activity Log">
             {data.days.length === 0 ? (
-              <EmptyState label="No notes or updates were logged in this window." />
+              // A card drill that empties the log must not read as "nobody logged anything" — the card
+              // it was clicked from is still showing a non-zero count right above.
+              <EmptyState
+                label={
+                  appliedNarrowing.length > 0
+                    ? "No entries in this window match the current narrowing. Clear it to see the whole log."
+                    : "No notes or updates were logged in this window."
+                }
+              />
             ) : (
               <div className="space-y-6">
                 {data.days.map((day) => (
@@ -404,7 +530,9 @@ export function DailyActivityLogPage() {
             timeline. Days and times are both UTC, so a row's clock never contradicts the day it is filed under.
             Entries written up on a different day carry a badge showing when they were actually logged.
             Rep Activity caches for 5 minutes, so just after something is logged it can appear here first.
-            Email entries you do not own are counted but their content is not shown.
+            {hasRestrictedContent
+              ? " Email entries you do not own are counted but their content is not shown."
+              : null}
           </p>
         </>
       ) : null}
