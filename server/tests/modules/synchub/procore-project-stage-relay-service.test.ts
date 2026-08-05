@@ -115,8 +115,13 @@ function createRecordingClient(options: {
   });
 }
 
-function createStatefulRecordingClient() {
-  const receipts = new Map<string, "processed" | "unresolved">();
+function createStatefulRecordingClient(options: {
+  /** Receipts that already exist — e.g. one written under a PRE-DEPLOY event key. */
+  seedReceipts?: Record<string, "processed" | "unresolved">;
+} = {}) {
+  const receipts = new Map<string, "processed" | "unresolved">(
+    Object.entries(options.seedReceipts ?? {}),
+  );
   let stageEntryCount = 0;
   const { client, query } = createClient((sql, params) => {
     if (sql.includes("FROM public.portfolio_project_stage_event_receipts")) {
@@ -386,7 +391,7 @@ describe("SyncHub Procore project stage-change relay service", () => {
     expect(sqlText).toContain("INSERT INTO \"office_main\".portfolio_project_stage_entries");
   });
 
-  it("records non-relevant stages without crashing or dropping the event", async () => {
+  it("keeps a stage nobody anticipated BOARD-RELEVANT so it surfaces instead of disappearing", async () => {
     const { client } = createRecordingClient();
 
     const result = await processSyncHubProcoreProjectStageChanged(
@@ -409,6 +414,143 @@ describe("SyncHub Procore project stage-change relay service", () => {
       { client: client as any }
     );
 
+    // "Warranty" has no alias and no column. It is NOT a decision to exclude, so the row stays
+    // is_board_relevant = true and the board shows it under "Other / No Column". Writing false
+    // here is what used to make such a project invisible: filtered out by the board query, and
+    // (before the grouping fix) dropped from the project list as well.
+    expect(result).toMatchObject({ status: "recorded", isBoardRelevant: true });
+  });
+
+  /**
+   * The alias-map/event-key hazard.
+   *
+   * Event keys embed the ALIAS-normalized stage. This release added a `pre-construction` alias, which
+   * changed Pre-Construction's canonical form from "pre - construction" (the bare textual form the old
+   * code fell through to) to "pre-construction". So a receipt written BEFORE the deploy carries the old
+   * key, and any re-delivery of the same webhook after the deploy — a SyncHub retry, or a replay of an
+   * unresolved receipt, which re-derives the payload from raw_payload and recomputes the key — would
+   * compute a DIFFERENT key: a second receipt, a second stage entry, and the original unresolved receipt
+   * orphaned where no future replay can ever reach it.
+   */
+  function preConstructionPayload() {
+    return validPayload({
+      procore: {
+        companyId: "598134325683880",
+        portfolioProjectId: "987654321",
+        projectNumber: "DFW-1-02326-ad",
+        projectName: "T Rock Portfolio Project",
+        previousStage: "Bidding",
+        currentStage: "Pre-Construction",
+      },
+      stageChange: {
+        previousStage: "Bidding",
+        newStage: "Pre-Construction",
+        detectedAt: "2026-05-20T14:15:00.000Z",
+        webhookTimestamp: "2026-05-20T14:14:55.000Z",
+      },
+    });
+  }
+
+  /** The key the PRE-DEPLOY code produced: the bare form, before the alias existed. */
+  const LEGACY_PRE_CONSTRUCTION_KEY =
+    "synchub-stage:webhook-123:598134325683880:987654321:pre - construction:2026-05-20T14:15:00.000Z";
+
+  it("adopts a pre-deploy event key instead of minting a second receipt for the same webhook", async () => {
+    const { client, query, getStageEntryCount } = createStatefulRecordingClient({
+      seedReceipts: { [LEGACY_PRE_CONSTRUCTION_KEY]: "unresolved" },
+    });
+
+    const result = await processSyncHubProcoreProjectStageChanged(preConstructionPayload(), {
+      client: client as any,
+      receivedAt: new Date("2026-05-20T14:15:05.000Z"),
+    });
+
+    expect(result.status).toBe("recorded");
+    // Resolved under the OLD key, so the stuck unresolved row is the one that gets completed
+    // rather than a fresh row being inserted alongside it.
+    const receiptWrites = query.mock.calls
+      .filter((call) => String(call[0]).includes("INSERT INTO public.portfolio_project_stage_event_receipts"))
+      .map((call) => String((call[1] as unknown[])?.[0]));
+    expect(receiptWrites).toEqual([LEGACY_PRE_CONSTRUCTION_KEY]);
+    expect(receiptWrites).not.toContain(
+      "synchub-stage:webhook-123:598134325683880:987654321:pre-construction:2026-05-20T14:15:00.000Z",
+    );
+    expect(getStageEntryCount()).toBe(1);
+  });
+
+  it("treats a replayed pre-deploy receipt as a DUPLICATE once it has been processed", async () => {
+    const { client, getStageEntryCount } = createStatefulRecordingClient({
+      seedReceipts: { [LEGACY_PRE_CONSTRUCTION_KEY]: "processed" },
+    });
+
+    const result = await processSyncHubProcoreProjectStageChanged(preConstructionPayload(), {
+      client: client as any,
+      receivedAt: new Date("2026-05-20T14:15:05.000Z"),
+    });
+
+    expect(result).toEqual({ status: "duplicate", eventKey: LEGACY_PRE_CONSTRUCTION_KEY });
+    expect(getStageEntryCount()).toBe(0); // no twin stage entry
+  });
+
+  it("mints the current-format key when there is no pre-deploy receipt to adopt", async () => {
+    const { client, query } = createStatefulRecordingClient();
+
+    await processSyncHubProcoreProjectStageChanged(preConstructionPayload(), {
+      client: client as any,
+      receivedAt: new Date("2026-05-20T14:15:05.000Z"),
+    });
+
+    const receiptWrites = query.mock.calls
+      .filter((call) => String(call[0]).includes("INSERT INTO public.portfolio_project_stage_event_receipts"))
+      .map((call) => String((call[1] as unknown[])?.[0]));
+    expect(receiptWrites).toEqual([
+      "synchub-stage:webhook-123:598134325683880:987654321:pre-construction:2026-05-20T14:15:00.000Z",
+    ]);
+  });
+
+  it("is still idempotent for a stage whose canonical form did NOT change", async () => {
+    // Buy Out was aliased before and after, so old and new keys are identical; the legacy-candidate
+    // lookup must not change behaviour here.
+    const { client, getStageEntryCount } = createStatefulRecordingClient();
+
+    const first = await processSyncHubProcoreProjectStageChanged(validPayload(), {
+      client: client as any,
+      receivedAt: new Date("2026-05-20T14:15:05.000Z"),
+    });
+    const second = await processSyncHubProcoreProjectStageChanged(validPayload(), {
+      client: client as any,
+      receivedAt: new Date("2026-05-20T14:16:05.000Z"),
+    });
+
+    expect(first.status).toBe("recorded");
+    expect(second.status).toBe("duplicate");
+    expect(getStageEntryCount()).toBe(1);
+  });
+
+  it("marks the explicitly off-board legacy stages as NOT board-relevant", async () => {
+    const { client } = createRecordingClient();
+
+    const result = await processSyncHubProcoreProjectStageChanged(
+      validPayload({
+        procore: {
+          companyId: "598134325683880",
+          portfolioProjectId: "987654321",
+          projectNumber: "DFW-1-02326-ad",
+          projectName: "T Rock Portfolio Project",
+          previousStage: "Closed",
+          currentStage: "Hold (LEGACY)",
+        },
+        stageChange: {
+          previousStage: "Closed",
+          newStage: "Hold (LEGACY)",
+          detectedAt: "2026-05-20T14:15:00.000Z",
+          webhookTimestamp: null,
+        },
+      }),
+      { client: client as any }
+    );
+
+    // The event is still recorded — exclusion is a deliberate, auditable decision, not a drop.
     expect(result).toMatchObject({ status: "recorded", isBoardRelevant: false });
   });
 
