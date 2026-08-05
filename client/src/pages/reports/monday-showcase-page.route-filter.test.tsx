@@ -2,9 +2,14 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryRouter, useLocation } from "react-router-dom";
-import { UNFILTERED_ROUTE_FILTER, type MondayShowcaseData, type RouteBucket } from "./monday-showcase/types";
-import { DEFAULT_WEEK_MODE } from "./week-mode";
+import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
+import {
+  UNFILTERED_ROUTE_FILTER,
+  type EvidenceRequest,
+  type MondayShowcaseData,
+  type RouteBucket,
+} from "./monday-showcase/types";
+import { DEFAULT_WEEK_MODE, WEEK_MODE_LABELS, type WeekMode } from "./week-mode";
 
 /**
  * The Monday-showcase Service / Other chips, at the PAGE level: what the page asks the server for, and
@@ -19,6 +24,14 @@ import { DEFAULT_WEEK_MODE } from "./week-mode";
 
 // Every call the page makes to the showcase hook, in order — the request contract under test.
 const calls: Array<{ mode: string; routes: readonly RouteBucket[] | undefined; enabled: boolean }> = [];
+
+// Every call the OPEN EVIDENCE DRAWER makes, in order. `metric: null` = the drawer is mounted but closed
+// (the page renders it unconditionally), so the assertions below look only at the calls with a request.
+const evidenceCalls: Array<{
+  metric: string | null;
+  mode: string;
+  routes: readonly RouteBucket[] | undefined;
+}> = [];
 
 /** When set, the mocked hook returns this instead — used to stage an in-flight refetch holding the
  *  PREVIOUS payload, which is the exact window where a stale caveat can contradict the chips. */
@@ -77,7 +90,16 @@ vi.mock("@/hooks/use-reports", async () => {
       if (hookOverride) return hookOverride;
       return { data: enabled ? payload : null, loading: false, error: null, refetch: () => {} };
     },
-    useShowcaseEvidence: () => ({ data: null, loading: false, error: null, refetch: () => {} }),
+    // Records what the DRAWER asks for. Mocking the fetch (not the page → drawer wiring) is deliberate:
+    // the selection a drill is fetched under is decided by the page, so a change there shows up here.
+    useShowcaseEvidence: (
+      request: EvidenceRequest | null,
+      mode: string,
+      routes?: readonly RouteBucket[]
+    ) => {
+      evidenceCalls.push({ metric: request?.metric ?? null, mode, routes });
+      return { data: null, loading: false, error: null, refetch: () => {} };
+    },
   };
 });
 
@@ -89,9 +111,17 @@ const { MondayShowcasePage } = await import("./monday-showcase-page");
 let container: HTMLDivElement;
 let root: Root;
 let currentSearch = "";
+/** Changes the URL WITHOUT remounting the page (the page is rendered directly under the router, not behind
+ *  a <Route>) — the only way a selection can change while an evidence drawer is open, since the drawer is
+ *  modal and the chips behind it are not clickable. */
+let navigateTo: (url: string) => void = () => {
+  throw new Error("LocationProbe has not rendered");
+};
 
 function LocationProbe() {
   currentSearch = useLocation().search;
+  const navigate = useNavigate();
+  navigateTo = (url) => navigate(url);
   return null;
 }
 
@@ -106,6 +136,13 @@ function renderAt(initialUrl: string) {
   });
 }
 
+/** The most recent recorded call. (`Array.prototype.at` is above this project's TS lib target.) */
+function last<T>(recorded: readonly T[]): T {
+  const value = recorded[recorded.length - 1];
+  if (value === undefined) throw new Error("no calls were recorded");
+  return value;
+}
+
 /** The chip buttons, by their visible label. */
 function chip(label: string): HTMLButtonElement {
   const found = [...container.querySelectorAll("button")].find((b) => b.textContent?.trim() === label);
@@ -115,6 +152,7 @@ function chip(label: string): HTMLButtonElement {
 
 beforeEach(() => {
   calls.length = 0;
+  evidenceCalls.length = 0;
   hookOverride = null;
   currentSearch = "";
   container = document.createElement("div");
@@ -289,5 +327,97 @@ describe("the caveat never contradicts the chips", () => {
     renderAt("/reports/monday-showcase");
     expect(container.textContent).toContain("All departments");
     expect(container.textContent).not.toContain("Showing Service only");
+  });
+});
+
+/**
+ * The same shape as the caveat above, one component further out: the drawer is UI derived from a selection
+ * that may have moved on since the number was clicked.
+ *
+ * The drawer's whole contract is that its total equals the figure that opened it. Reading the page's LIVE
+ * selection at fetch time breaks that in both directions: an unfetchable selection (?routes=none, a bad
+ * shared link) sends no ?routes at all, which the server reads as "all departments" — an unfiltered record
+ * list behind a page that says it has no numbers to show; and a switch to the other bucket silently swaps
+ * the records under an unchanged title. The request is therefore CAPTURED when the number is clicked.
+ */
+describe("an open evidence drawer is pinned to the selection its number was clicked under", () => {
+  /** Click the first drillable figure (the Exec hero's Won tile). */
+  function openDrill() {
+    const drill = [...container.querySelectorAll("button")].find(
+      (b) => b.getAttribute("title") === "Show the records behind this number"
+    );
+    if (!drill) throw new Error("no drillable number on screen");
+    act(() => {
+      (drill as HTMLButtonElement).click();
+    });
+  }
+  /** Only the calls made while a request was open — the drawer is mounted (closed) the rest of the time. */
+  const openCalls = () => evidenceCalls.filter((c) => c.metric !== null);
+
+  it("fetches the drill under the selection that produced the number", () => {
+    renderAt("/reports/monday-showcase?routes=service");
+    openDrill();
+    expect(openCalls().length).toBeGreaterThan(0);
+    expect(last(openCalls())).toEqual({ metric: "won", mode: DEFAULT_WEEK_MODE, routes: ["service"] });
+  });
+
+  it("keeps that selection when the page's own selection becomes unfetchable", () => {
+    renderAt("/reports/monday-showcase?routes=service");
+    openDrill();
+    act(() => navigateTo("/reports/monday-showcase?routes=none"));
+    // The page correctly stops fetching and shows its "select at least one" panel...
+    expect(last(calls).enabled).toBe(false);
+    expect(container.textContent).toContain("Select at least one department");
+    // ...and the open drawer must NOT drop its ?routes, which the server reads as every department.
+    expect(last(openCalls()).routes).toEqual(["service"]);
+  });
+
+  it("keeps it when an invalid link replaces the selection", () => {
+    renderAt("/reports/monday-showcase?routes=service");
+    openDrill();
+    act(() => navigateTo("/reports/monday-showcase?routes=banana"));
+    expect(last(calls).enabled).toBe(false);
+    expect(last(openCalls()).routes).toEqual(["service"]);
+  });
+
+  it("does not swap the records when the selection moves to the OTHER bucket", () => {
+    // The positive half of the same property: an unfetchable selection could be handled by sending nothing
+    // at all, which would pass the two cases above while still refetching a different slice here.
+    renderAt("/reports/monday-showcase?routes=service");
+    openDrill();
+    act(() => navigateTo("/reports/monday-showcase?routes=other"));
+    expect(last(calls).routes).toEqual(["other"]); // the PAGE follows the new selection
+    expect(last(openCalls()).routes).toEqual(["service"]); // the open drill does not
+  });
+
+  it("pins the PERIOD the same way — one rule, so the two cannot drift apart", () => {
+    // `mode` is the page's other live control, and reading it late has the identical failure: the drawer
+    // would refetch another period under the title of the number that was clicked. Captured together so a
+    // reader never has to ask why one is pinned and the other isn't. (A real browser's modal backdrop
+    // blocks this toggle while the drawer is open; jsdom does not enforce that, so the invariant is driven
+    // here directly rather than through an interaction that ships.)
+    renderAt("/reports/monday-showcase?routes=service");
+    openDrill();
+    // Derived, never hard-coded: clicking the toggle the page is ALREADY on is a no-op that would let this
+    // pass with the pinning removed (it did, until the revert-check caught it — DEFAULT_WEEK_MODE is
+    // "completed", so "Last full week" changed nothing).
+    const otherMode = (Object.keys(WEEK_MODE_LABELS) as WeekMode[]).find((m) => m !== DEFAULT_WEEK_MODE)!;
+    const toggle = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent?.trim() === WEEK_MODE_LABELS[otherMode]
+    );
+    if (!toggle) throw new Error(`no week-mode toggle labelled "${WEEK_MODE_LABELS[otherMode]}"`);
+    act(() => {
+      (toggle as HTMLButtonElement).click();
+    });
+    expect(last(calls).mode).toBe(otherMode); // the PAGE followed the toggle — the click landed
+    expect(last(openCalls()).mode).toBe(DEFAULT_WEEK_MODE); // the open drill did not
+  });
+
+  it("a drill opened under the default both-buckets selection still sends no ?routes", () => {
+    // Guards the other direction: capturing must not start sending an explicit both-buckets list, which
+    // would change the request every pre-filter bookmark issues.
+    renderAt("/reports/monday-showcase");
+    openDrill();
+    expect(last(openCalls())).toEqual({ metric: "won", mode: DEFAULT_WEEK_MODE, routes: undefined });
   });
 });

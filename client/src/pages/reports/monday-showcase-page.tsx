@@ -41,10 +41,30 @@ const VARIANT_COMPONENT: Record<ShowcaseVariantKey, ComponentType<{ data: Monday
   B4: VariantB4ForecastLadder,
 };
 
+/**
+ * An open drill: the clicked number AND the period + department selection it was computed under, captured
+ * at the moment of the click.
+ *
+ * The drawer's one contract is that its total equals the figure that opened it, so its request must not be
+ * re-derived from page state that has since moved on. Reading the page's LIVE selection broke that in both
+ * directions: an unfetchable selection (?routes=none, a bad shared link) yields NO ?routes, which the
+ * server reads as "all departments" — an unfiltered record list behind a page that says it has no numbers
+ * to show — and a switch to the other bucket silently swaps the records under an unchanged title.
+ *
+ * Capturing is sound because a drill can only be STARTED from a rendered number: DrillProvider is mounted
+ * inside the `data` branch, which requires a fetchable selection. So a captured request is always one the
+ * server will honour, whatever the chips do afterwards.
+ */
+interface OpenDrill {
+  request: EvidenceRequest;
+  mode: WeekMode;
+  routes: RouteBucket[] | undefined;
+}
+
 export function MondayShowcasePage() {
   const [mode, setMode] = useState<WeekMode>(DEFAULT_WEEK_MODE);
   const [variant, setVariant] = useState<ShowcaseVariantKey>("HERO");
-  const [evidence, setEvidence] = useState<EvidenceRequest | null>(null);
+  const [evidence, setEvidence] = useState<OpenDrill | null>(null);
 
   // The Service/Other selection lives in the URL (NOT component state): switching variants keeps it, and
   // the link a director pastes into Slack reproduces the exact slice they were looking at. `variant` and
@@ -79,6 +99,15 @@ export function MondayShowcasePage() {
   const requestRoutes: RouteBucket[] | undefined = fetchable ? routesForRequest(selection) : undefined;
   const { data, loading, error, refetch } = useMondayShowcase(mode, requestRoutes, fetchable);
   const Active = VARIANT_COMPONENT[variant];
+
+  // The ONE place a drill is opened, and therefore the one place the selection is stamped onto it. Doing it
+  // here rather than at each of the ~15 <DrillNumber> call sites means no variant can forget, and none of
+  // them needs to know the filter exists. `requestRoutes` is identity-stable while the URL is (it is
+  // `selection.buckets` from a memoized parse), so this callback is not rebuilt on every render.
+  const openDrill = useCallback(
+    (request: EvidenceRequest) => setEvidence({ request, mode, routes: requestRoutes }),
+    [mode, requestRoutes]
+  );
 
   // The server-sourced caveat, but ONLY while it describes the payload actually on screen. A refetch keeps
   // the previous payload in hand, so reading routeFilter straight off `data` can print "Showing Service
@@ -218,7 +247,7 @@ export function MondayShowcasePage() {
             ))}
           </div>
 
-          <DrillProvider open={setEvidence}>
+          <DrillProvider open={openDrill}>
             <div className="rounded-xl border bg-gray-50/50 p-4">
               <Active data={data} />
             </div>
@@ -243,12 +272,14 @@ export function MondayShowcasePage() {
         </div>
       )}
 
-      {/* The drawer gets the SAME selection the clicked number was rendered under, so its total equals
-          that figure. Without this a card reading 6 under "Service" would open the office's 10. */}
+      {/* The drawer gets the SAME period and selection the clicked number was rendered under, so its total
+          equals that figure. Without this a card reading 6 under "Service" would open the office's 10 —
+          and these come from the CAPTURED drill, not from `mode`/`requestRoutes`, so a selection that
+          changes while the drawer is open cannot re-point it at a slice the user never clicked. */}
       <EvidenceDrawer
-        request={evidence}
-        mode={mode}
-        routes={requestRoutes}
+        request={evidence?.request ?? null}
+        mode={evidence?.mode ?? mode}
+        routes={evidence?.routes}
         onClose={() => setEvidence(null)}
         onMutated={refetch}
       />
