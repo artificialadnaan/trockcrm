@@ -258,8 +258,15 @@ function rawRowReadKeys(fn: ts.FunctionLikeDeclaration, sf: ts.SourceFile): Set<
       if (n.initializer) walk(n.initializer); // the initializer is evaluated BEFORE the name is bound
       if (ts.isIdentifier(n.name)) {
         scopes.bind(n.name.getText(sf), n.initializer ? isRawRowExpr(n.initializer, sf, scopes) : false);
-      } else if (ts.isObjectBindingPattern(n.name) && n.initializer && isRawSqlCall(peel(n.initializer), sf)) {
-        //  `const { rows } = await client.query<...>(`SELECT ...`)`
+      } else if (
+        ts.isObjectBindingPattern(n.name) &&
+        n.initializer &&
+        isRawRowExpr(n.initializer, sf, scopes)
+      ) {
+        //  `const { rows } = await client.query<...>(`SELECT ...`)`, and equally `const { rows } =
+        //  result` one statement later. Asking `isRawRowExpr` rather than "is the initializer ITSELF a
+        //  raw-SQL call" is what makes the alias hop count — the direct-call form is already one of the
+        //  answers it gives, so this is strictly wider, never narrower.
         for (const el of n.name.elements) {
           if ((el.propertyName ?? el.name).getText(sf) === "rows" && ts.isIdentifier(el.name)) {
             scopes.bind(el.name.getText(sf), true);
@@ -460,7 +467,11 @@ function getTypelessProgram(): ts.Program {
   cachedTypelessProgram = ts.createProgram(parsed.fileNames, {
     ...parsed.options,
     noEmit: true,
-    moduleResolution: ts.ModuleResolutionKind.Classic,
+    //  `noResolve`, not `moduleResolution: Classic`: Classic is REJECTED against this repo's
+    //  `module: NodeNext` (TS5109, plus TS5070 for resolveJsonModule), so it configures the Program with
+    //  an option combination tsc itself reports as invalid. `noResolve` says the intended thing — follow
+    //  no imports — with no diagnostics, and produces the same `any` receivers over the same 47 files.
+    noResolve: true,
     baseUrl: undefined,
     paths: undefined,
     types: [],
@@ -617,7 +628,84 @@ function scanRemapDrops(): string[] {
   return out;
 }
 
+/**
+ * Flag keys READ_WITHOUT_PROJECTION would count in a snippet.
+ *
+ * No Program, no checker, no files on disk — which is the point. The rule is pure syntax now, so the
+ * shapes it must and must not recognise can be stated directly instead of being inferred from whatever
+ * `server/src` happens to contain today. A scan of existing code can only ever confirm the shapes that
+ * already exist in it.
+ */
+function readKeysIn(snippet: string): string[] {
+  const sf = ts.createSourceFile("snippet.ts", snippet, ts.ScriptTarget.ES2022, true);
+  let fn: ts.FunctionLikeDeclaration | undefined;
+  const visit = (n: ts.Node): void => {
+    if (!fn && ts.isFunctionDeclaration(n) && n.body) fn = n;
+    ts.forEachChild(n, visit);
+  };
+  visit(sf);
+  if (!fn) throw new Error("snippet has no function declaration");
+  return [...rawRowReadKeys(fn, sf)].sort();
+}
+
 describe("deals.is_change_order survives the query -> mapper hand-off in every raw-SQL reader", () => {
+  it("counts reads off raw rows however they were bound, and off nothing else", () => {
+    //  The alias hop this rule used to miss: `rows` destructured off an ALREADY-BOUND result, rather
+    //  than straight off the `query()` call. No service is written this way today, which is exactly why
+    //  scanning src could not have caught the gap.
+    expect(
+      readKeysIn(`
+        async function f(tenantDb: any) {
+          const result = await tenantDb.execute(sql\`SELECT d.name AS deal_name FROM deals d\`);
+          const { rows } = result;
+          return rows.map((row) => ({ dealName: row.deal_name, co: row.deal_is_change_order }));
+        }
+      `),
+      "`const { rows } = result` holds the same raw rows as `result.rows`"
+    ).toEqual(["deal_is_change_order"]);
+
+    //  A Drizzle table object handed to the query builder — the first site reported as a false positive.
+    expect(
+      readKeysIn(`
+        async function f(tenantDb: any) {
+          await tenantDb.execute(sql\`SELECT 1\`);
+          return tenantDb.select({ dealIsChangeOrder: deals.isChangeOrder }).from(deals)
+            .groupBy(deals.isChangeOrder);
+        }
+      `),
+      "a schema table object is an INPUT to the query, never a row of one"
+    ).toEqual([]);
+
+    //  A typed builder result indexed directly — the second site reported as a false positive.
+    expect(
+      readKeysIn(`
+        async function f(tenantDb: any) {
+          const currentDeal = await tenantDb.select().from(deals).limit(1).for("update");
+          if (currentDeal[0].isChangeOrder === true) throw new Error("locked");
+          await tenantDb.execute(sql\`select set_config('a', 'b', true)\`);
+        }
+      `),
+      "`.select()...` returns typed rows that tsc already covers, not raw execute() rows"
+    ).toEqual([]);
+
+    //  Two mappers, both calling their parameter `row`, one raw and one typed. Name-based tracking let
+    //  the raw one vouch for the typed one and reported correct code.
+    expect(
+      readKeysIn(`
+        async function f(tenantDb: any) {
+          const result = await tenantDb.execute(sql\`SELECT d.name AS deal_name FROM deals d\`);
+          const raw = (result as any).rows ?? result;
+          const typed = buildTypedRows(raw);
+          return {
+            a: raw.map((row) => ({ n: row.deal_name })),
+            b: typed.map((row) => ({ n: row.dealName, co: row.dealIsChangeOrder })),
+          };
+        }
+      `),
+      "a shadowing `row` in a sibling mapper does not inherit the raw one's scope"
+    ).toEqual([]);
+  });
+
   it("no mapper reads a change-order key its own query never produced", () => {
     const problems = scanServerSrc().filter((p) => p.kind === "READ_WITHOUT_PROJECTION");
     expect(
