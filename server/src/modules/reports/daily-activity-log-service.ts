@@ -7,7 +7,7 @@
 //
 // The two MUST agree on volume. To guarantee that structurally rather than by coincidence, this
 // service imports buildActivityScopeSql and resolveRepActivityScope from the tier-2 service instead
-// of restating either. With no type filter applied, `days[].entryCount` here is produced by a query
+// of restating either. With no narrowing applied, `days[].entryCount` here is produced by a query
 // that is the same shape as Rep Activity's `timeline` over the same predicate, so the two reconcile
 // row-for-row ON THE SAME DATA. (Proven, not asserted: see the cross-service reconciliation cases in
 // server/tests/modules/reports/daily-activity-log.runtime.test.ts, which call BOTH services against

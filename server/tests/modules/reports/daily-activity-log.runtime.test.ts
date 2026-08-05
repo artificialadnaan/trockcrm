@@ -329,7 +329,9 @@ describe("daily activity log — window-scoped KPIs vs narrowed rows", () => {
     for (const raw of ["1", "true", "TRUE", " yes ", "on", true]) {
       expect(normalizeDailyActivityLogOptions({ loggedOffDay: raw }).loggedOffDay).toBe(true);
     }
-    // Anything unrecognised must WIDEN (show everything), never silently hide rows.
+    // Anything unrecognised must WIDEN (show everything), never silently hide rows. A NUMBER is in
+    // this list on purpose: Express query values are only ever string | string[], so a numeric 1
+    // cannot arrive from a URL and is deliberately not given a special case.
     for (const raw of ["0", "false", "", "maybe", undefined, null, 1]) {
       expect(normalizeDailyActivityLogOptions({ loggedOffDay: raw }).loggedOffDay).toBe(false);
     }
