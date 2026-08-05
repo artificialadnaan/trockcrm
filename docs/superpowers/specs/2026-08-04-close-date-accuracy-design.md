@@ -488,7 +488,7 @@ construction, since every date is on exactly one side of two boundaries.
 | 7 | **Terminal-no-date** | `class=nodate` | `D_nodate` | Won or lost with no usable outcome date. Not scoreable and not open; surfaced as a diagnostic so the drop is visible rather than silent. |
 | 8 | **Out-of-period landed** | `class=outside` | `D_outside` | Won or lost with a usable outcome date **outside** `[from, to]`, in either direction. Excluded from every metric; counted by `out_of_period_landed_n`. Bucket 10 takes precedence. |
 | 9 | **Reopened-open** | `class=open, reopened=yes` | `D_reopened-and-open` | Open today, carrying an in-window landing that `D_landed` does not represent. Held out of the coverage rate for the same reason as bucket 6, and counted by `reopened_open_n`. It claims the reopened-open deal **whatever its `cov` is**, which is why bucket 6 must exclude it rather than the other way round — the precedence is `reopened` first, matching §4.1's SQL and the RELATIONS tie-out. |
-| 10 | **Pre-CRM landed** | `class=precrm` | `D_precrm` | Imported with its outcome already recorded: terminal with a usable outcome date falling **before the deal arrived in this database** — `crm_arrival_at`, the earliest `audit_log` row, never `created_at` (§2.5(a)). Excluded from every metric including `landed_n`; counted by `precrm_landed_n`, with `precrm_unknown_n` counting the deals whose arrival audit cannot date. Its forecast history was never imported, so charging its rep a `no_prediction_n` would charge them for records the CRM never held. |
+| 10 | **Pre-CRM landed** | `class=precrm` | `D_precrm` | Imported with its outcome already recorded: terminal with a usable outcome date falling **before the deal arrived in this database** — `crm_arrival_at`, the deal's **insert** `audit_log` row, never `created_at` (§2.5(a)). Excluded from every metric including `landed_n`; counted by `precrm_landed_n`, with `precrm_unknown_n` counting the deals whose arrival audit cannot date. Its forecast history was never imported, so charging its rep a `no_prediction_n` would charge them for records the CRM never held. |
 
 **Why this is exhaustive and non-overlapping, and how that is checked.** The §7 **bucket-partition** check
 enumerates every world the atom domains admit — `class` from the RELATIONS partition line, `cov` from
@@ -544,7 +544,8 @@ invariant while looking like compliance. So it is narrowed to the case it was ac
 > **A terminal deal whose outcome date precedes its arrival in the CRM is not scoreable, not landed, and
 > not a coverage failure — it is `D_precrm`.** Test: `hubspot_deal_id IS NOT NULL` **and**
 > `outcome_date < (crm_arrival_at AT TIME ZONE 'America/Chicago')::date`, where `crm_arrival_at` is the
-> earliest `audit_log` row for the deal (§4.0.5). Neither half is a `source` string match.
+> deal's **`action='insert'`** `audit_log` row (§4.0.5) — not the earliest row of any action. Neither half
+> is a `source` string match.
 
 **`crm_arrival_at`, and why `deals.created_at` is the wrong column — a premise error, recorded rather than
 quietly corrected.** The first version of this test used `deals.created_at` on the assumption that it means
@@ -561,9 +562,13 @@ error, not a population. A construct that is correct in form and empty in fact i
 construct at all, and nothing in this document would have said so (§7 audit inventory, "real-data
 obligations").
 
-`crm_arrival_at` is the earliest `audit_log` row for the deal. The `audit_deals` trigger fires
-`AFTER INSERT` (§1.2), so that row's `created_at` is the wall-clock instant the deal entered this schema —
-a timestamp the importer does not control and cannot backdate. `hubspot_deal_id` rather than `source`
+`crm_arrival_at` is the deal's **insert** `audit_log` row — `action='insert' AND full_row IS NOT NULL`,
+taken `ORDER BY id LIMIT 1`. The `audit_deals` trigger fires `AFTER INSERT` (§1.2), so that row's
+`created_at` is the wall-clock instant the deal entered this schema — a timestamp the importer does not
+control and cannot backdate. **The earliest row of *any* action will not do**: where the insert row has
+aged out, the earliest survivor is a later UPDATE, which would date a deal's "arrival" after its own
+outcome and carve it out as pre-CRM. Requiring the insert row makes that case NULL, and therefore
+counted, rather than silently wrong. `hubspot_deal_id` rather than `source`
 because the refresh writer keys on the same column (§1.1.1), so the two HubSpot problems are tested on one
 basis. The strict `<` is deliberate: a deal created and closed on the same CRM day is an ordinary landing,
 not an import. A deal imported and closed *afterwards* stays in `D_landed` and, if never forecast, is
@@ -932,7 +937,7 @@ p30 = CASE
           THEN state_at(deal, business_day_end_exclusive(o.outcome_date - STANDING_ANCHOR_DAYS))
         -- The DEAL is younger than the anchor: its whole life sits inside the window, so its earliest
         -- recorded state is all there is. Same tz-explicit boundary as everywhere else (§4.0.3).
-        -- deal_life_start, NOT deal_created_at: on a reimported deal created_at is HubSpot's creation
+        -- deal_life_start, NOT deals.created_at: on a reimported deal created_at is HubSpot's creation
         -- date (§2.5(a)), so a deal imported on 14 May, forecast by its rep on the 15th and closed on
         -- the 30th reads as many months old at the anchor, the gate fails, and a genuine short-life
         -- forecast is scored 'no_event' instead of being credited. The rep had it for sixteen days.
@@ -990,7 +995,6 @@ anchor" is how the off-by-one got in.
 deal_facts AS (
   SELECT d.id                       AS deal_id,
          d.assigned_rep_id          AS rep_id,
-         d.created_at               AS deal_created_at,      -- §4.0.4 gate
          CASE
            WHEN psc.slug IN (:won_slugs)
              OR COALESCE(d.bid_board_stage_slug,'') IN (:won_slugs)  THEN 'won'
@@ -1039,12 +1043,28 @@ deal_facts AS (
            LEFT JOIN public.pipeline_stage_config hsrc ON hsrc.id = h.from_stage_id
            WHERE h.deal_id = d.id
              AND (hp.slug IN (:won_slugs) OR hp.slug IN (:lost_slugs))
-             -- Source stage must be NON-terminal. A Won->Lost or Lost->Won correction is a terminal
-             -- RECLASSIFICATION, not a landing; counting it as one invents a landing that never
-             -- happened. from_stage_id is nullable, so a NULL source (INSERT-branch backstop) counts
-             -- as non-terminal -- a deal cannot be created already terminal-to-terminal.
-             AND (hsrc.slug IS NULL
-                  OR (hsrc.slug NOT IN (:won_slugs) AND hsrc.slug NOT IN (:lost_slugs)))
+             -- Source stage must be a KNOWN non-terminal stage. A Won->Lost or Lost->Won correction is
+             -- a terminal RECLASSIFICATION, not a landing; counting it as one invents a landing that
+             -- never happened.
+             --
+             -- A NULL from_stage_id is NOT evidence of a non-terminal source, and an earlier draft's
+             -- reasoning for allowing it ("a deal cannot be created already terminal") is false in this
+             -- repo. record_stage_history()'s INSERT branch writes (NULL, NEW.stage_id)
+             -- (0143_reenable_forward_stage_history.sql), the HubSpot reimport maps 'closed won'/'closed
+             -- lost' straight to the won/lost slugs (hubspot-deals-reimport.ts:162-164 via
+             -- resolveCreateStage:712) and never sets app.skip_stage_history_trigger -- so an imported
+             -- already-terminal deal DOES get a terminal history row with a NULL source, dated
+             -- stage_entered_at, which the importer sets to HubSpot's create date. If that date falls in
+             -- [from, to] and the deal later reopens, the old predicate called it an in-window landing
+             -- that vanished, dropped the deal from D_cov and D_book, and inflated
+             -- reopened_after_landing_n.
+             --
+             -- Requiring a known non-terminal source under-detects instead: a genuine reopen whose
+             -- history row carries a NULL source is missed (the residual below). That is the right
+             -- direction for a diagnostic people act on -- a missed reopen is a smaller number, an
+             -- invented one is a wrong story.
+             AND hsrc.slug IS NOT NULL
+             AND hsrc.slug NOT IN (:won_slugs) AND hsrc.slug NOT IN (:lost_slugs)
              -- BOTH ends on the same basis: the CT calendar date of the stage entry, inclusive.
              -- Matches ctDateInWindowSql (monday-showcase-service.ts:322-327), which already applies
              -- this rule to THIS column. Do not mix a bare `>= :from` with a converted upper bound.
@@ -1116,7 +1136,7 @@ deal_facts AS (
          -- over all actions is a proxy that is usually right and lies exactly when it matters: if audit
          -- does not reach back to the insert, the earliest row is a later UPDATE, and a deal that WAS in
          -- the CRM before closing gets an arrival stamp after its outcome and is carved out as pre-CRM.
-         -- That is the same shape of defect as the deal_created_at version this replaced -- a marker
+         -- That is the same shape of defect as the deals.created_at version this replaced -- a marker
          -- that cannot lie, or a proxy that usually does not. Filtering on action='insert' makes the
          -- absent case NULL and therefore countable (precrm_unknown_n) instead of silently wrong.
          -- ORDER BY id, not created_at: the §4.0.1 total-order rule, applied here too.
@@ -1187,7 +1207,7 @@ It excludes only **stored** `on_hold` deals — the far-out auto-park leg is del
 |---|---|---|
 | `D` | The base `outcomes` CTE above | current row state |
 | `D_landed` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NOT NULL` ∩ **not `D_precrm`** ∩ `outcome_date BETWEEN from AND to` (both inclusive) | period |
-| `D_precrm` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NOT NULL` ∩ `hubspot_linked` ∩ `outcome_date` **before `crm_arrival_at`'s CT date** — landed before it existed in the CRM (§2.5(a)). **Not** `deal_created_at`, which the importer sets from HubSpot. Takes precedence over `D_landed` **and** `D_outside` | — |
+| `D_precrm` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NOT NULL` ∩ `hubspot_linked` ∩ `outcome_date` **before `crm_arrival_at`'s CT date** — landed before it existed in the CRM (§2.5(a)). **Not** `deals.created_at`, which the importer sets from HubSpot. Takes precedence over `D_landed` **and** `D_outside` | — |
 | `D_nodate` | `D` ∩ `outcome_kind ∈ {won, lost}` ∩ `outcome_date IS NULL` | — |
 | `D_open` | `D` ∩ `outcome_kind = 'open'` | **today** (see below) |
 | `D_reopened` | `D` ∩ a `deal_stage_history` row **into** a Won/Lost stage whose CT date is in `[from, to]` ∩ a later row **out of** a terminal stage (`from_stage_id` terminal, `to_stage_id` not) — the positive reopen evidence ∩ that landing is not represented in `D_landed`. An **overlay**, not a partition member (see RELATIONS) | period |
@@ -1251,9 +1271,14 @@ for:** the timezone fix was right, and it silently dropped a property the form i
 
 **Residual:** `deal_stage_history.from_stage_id` is nullable (`0001_initial.sql:467`), and the
 `0143`/`0207` backstop populates it only on the UPDATE branch. A reopen recorded with a NULL
-`from_stage_id` is invisible to this test. Every reopen is an UPDATE so it should be populated, but this is
-**unverified against production** — count `deal_stage_history` rows with a NULL `from_stage_id` before
-trusting `reopened_after_landing_n` as complete.
+`from_stage_id` is invisible to this test — **by choice, since round 24**. The allowance that used to
+admit a NULL source rested on "a deal cannot be created already terminal", which this repo contradicts:
+the stage-history backstop writes `(NULL, NEW.stage_id)` on INSERT and the HubSpot reimport creates deals
+directly into the `won` / `lost` slugs, so imported already-closed deals carry a terminal history row with
+a NULL source, dated HubSpot's create date. Admitting those invented in-window landings. Every reopen is
+an UPDATE so its source should be populated, but this is **unverified against production** — count
+`deal_stage_history` rows with a NULL `from_stage_id` before trusting `reopened_after_landing_n` as
+complete.
 
 **Second residual, and a bigger one: a Bid-Board mirror-only reopen writes no stage-history row at all.**
 Both reopen tests read `deal_stage_history` exclusively, and the mirror does not always write to it.
@@ -1505,12 +1530,22 @@ column. The convention was implicit for three rounds; stated here because otherw
 
 **Derived scalars**, defined once here and consumed by name everywhere else:
 
-**Two blocks, not one — the row-level scalars come BEFORE `E`, the churn aggregates AFTER.** An earlier
-draft put all of these in a single block, which made the chain circular: `E` is filtered by
-`event_window_end`, while `deal_move_count` aggregates over `E`. Implemented literally, each needed the
-other. The split below is what makes the chain executable, and §4.0.7's table is ordered to match.
+**Three blocks, not one, and the boundaries are structural.** An earlier draft put all of these in a
+single block, which made the chain circular: `E` is filtered by `event_window_end`, while
+`deal_move_count` aggregates over `E`. Implemented literally, each needed the other. A second, subtler
+split follows from a rule this document already learned once, in the `deal_facts` / `outcomes` CTEs
+(§4.0.5): **Postgres does not expose a projection's alias to a sibling expression in the same projection.**
+`landed` reads `precrm_landed`, and `in_d_cov` and `event_window_end` read `open` — so those three cannot
+sit beside their inputs. They are a second projection, not a later line of the first.
 
-**Block A — row-level scalars (before `E`; consume only `outcomes` and the state anchors):**
+> **One fence, one query level.** Every ```sql fence of derived scalars in this document is a *single*
+> projection: no name it defines may be read by another name it defines. A dependent scalar goes in the
+> next block; an aggregate over a row-level scalar goes in its own fence because it is a different query
+> level. This is not formatting — it is the difference between a chain that runs and one that fails at
+> parse time, and it is now mechanically checked (§7, SELECT-list alias scope, which reads derived-scalar
+> fences as well as literal `SELECT` lists).
+
+**Block A1 — independent row-level scalars (before `E`; consume only `outcomes` and the state anchors):**
 
 ```sql
 -- Row-level predicates (per deal)
@@ -1519,7 +1554,7 @@ open       = (outcome_kind = 'open')                                       -- §
 -- because it takes precedence over both D_landed and D_outside -- the carve-out has to happen before
 -- either claims the row, or the partition overlaps. The outcome_date IS NOT NULL conjunct keeps D_nodate
 -- out. COALESCE keeps it non-null so the `NOT` below is safe (§4.0.6), and the cast is timezone-explicit.
--- crm_arrival_at, NOT deal_created_at: see the projection in §4.0.5 for why the latter is the HubSpot
+-- crm_arrival_at, NOT deals.created_at: see the projection in §4.0.5 for why the latter is the HubSpot
 -- creation date on exactly the deals this carve-out exists for.
 precrm_landed = COALESCE(outcome_kind IN ('won','lost') AND outcome_date IS NOT NULL AND hubspot_linked
                          AND outcome_date
@@ -1529,13 +1564,6 @@ precrm_landed = COALESCE(outcome_kind IN ('won','lost') AND outcome_date IS NOT 
 -- is what stops that decision being invisible -- the same shape as is_provenance_unknown in §4.1.
 precrm_arrival_unknown = COALESCE(outcome_kind IN ('won','lost') AND outcome_date IS NOT NULL
                                   AND hubspot_linked AND crm_arrival_at IS NULL, false)
-landed     = (outcome_kind IN ('won','lost') AND outcome_date IS NOT NULL
-              AND NOT precrm_landed
-              AND outcome_date BETWEEN :from AND :to)                      -- membership in D_landed
--- THE definition of in_d_cov. Three conjuncts. §4.1 references this and must not restate it:
--- an earlier draft carried a two-conjunct copy here and a three-conjunct one in §4.1, so an
--- implementation either left reopened deals in coverage or failed to resolve the third name.
-in_d_cov   = (open AND cov_state <> 'machine' AND NOT is_reopened_after_landing)
 
 -- Signed error, in whole days. Positive = closed LATER than predicted (optimistic). Never ABS (§4.3).
 signed_error_p30    = (outcome_date - p30_prediction)
@@ -1551,6 +1579,20 @@ pfinal_parked_at_write =
   COALESCE(pfinal_prediction > (pfinal_changed_at AT TIME ZONE 'America/Chicago')::date
                                + CLOSE_TARGET_HOLD_HORIZON_DAYS, false)
 
+```
+
+**Block A2 — row-level scalars that depend on Block A1 (still before `E`).** These read `open` and
+`precrm_landed`, which is exactly why they cannot live in the fence above:
+
+```sql
+landed     = (outcome_kind IN ('won','lost') AND outcome_date IS NOT NULL
+              AND NOT precrm_landed                                        -- A1
+              AND outcome_date BETWEEN :from AND :to)                      -- membership in D_landed
+-- THE definition of in_d_cov. Three conjuncts. §4.1 references this and must not restate it:
+-- an earlier draft carried a two-conjunct copy here and a three-conjunct one in §4.1, so an
+-- implementation either left reopened deals in coverage or failed to resolve the third name.
+in_d_cov   = (open AND cov_state <> 'machine' AND NOT is_reopened_after_landing)   -- `open` from A1
+
 -- Per-deal event cutoff. Consumed by E's definition, so it MUST be available before E exists.
 -- The has_reopen_evidence branch is FIRST: a deal that ever left a terminal stage has a closed interval
 -- inside its window, and edits made while it was closed are not forecasting (§4.0.5). NULL excludes the
@@ -1558,7 +1600,7 @@ pfinal_parked_at_write =
 -- requires an in-window landing that D_landed lost -- a deal that lands, reopens and re-closes inside
 -- the window stays in D_landed and would otherwise keep contributing closed-interval churn.
 event_window_end = CASE WHEN has_reopen_evidence THEN NULL
-                        WHEN open THEN now()
+                        WHEN open THEN now()                               -- `open` from A1
                         ELSE business_day_end_exclusive(
                                COALESCE(outcome_date, terminal_entry_date)) END
 ```
@@ -1573,12 +1615,20 @@ row per deal, and only then do the aggregates below mean what they say:
 
 ```sql
 -- DISTINCT from the rep-level totals in §4.4/§4.5 -- see the granularity note below.
--- FROM D_book b LEFT JOIN E e ON e.deal_id = b.deal_id GROUP BY b.deal_id
+-- FROM (D_book UNION D_score) b LEFT JOIN E e ON e.deal_id = b.deal_id GROUP BY b.deal_id
 deal_move_count       = count(*) FILTER (WHERE old_date IS NOT NULL AND new_date IS NOT NULL
                                            AND new_date IS DISTINCT FROM old_date)
 -- EVERY event on the deal -- moves, sets and clears alike. §4.7's silent-miss test needs "untouched",
 -- which deal_move_count does not mean: a forecast/clear/re-set deal has three events and zero moves.
 -- audit_log_id, not *, so an unmatched LEFT JOIN row counts 0 rather than 1.
+--
+-- ANCHORED ON D_book UNION D_score, not D_book alone. A deal that lands, reopens and re-closes inside
+-- the window stays in D_landed and D_score but is dropped from D_book by has_reopen_evidence (§4.0.5),
+-- so a D_book-only anchor emits no row for it, deal_touch_count is NULL, and §4.7's silent-miss test
+-- evaluates NULL -- a scored deal vanishing from a diagnostic rather than being counted by it. The
+-- churn METRICS still read D_book only; it is this per-deal aggregate whose anchor must cover every
+-- population that consumes it. Its events are still capped by event_window_end, which is NULL for a
+-- reopen-evidence deal, so such a deal correctly shows zero touches rather than closed-interval ones.
 deal_touch_count      = count(audit_log_id)
 deal_days_pushed_out  = COALESCE(sum(greatest(new_date - old_date, 0)), 0)
 ```
@@ -1606,13 +1656,14 @@ column. Re-run this check whenever a name is added:
 |---|---|---|
 | `raw_close_date_events` (§4.0.1) | `audit_log_id`, `deal_id`, `changed_at`, `actor_user_id`, `event_kind`, `old_date`, `new_date` | `audit_log`: `id`, `record_id`, `created_at`, `changed_by`, `table_name`, `action`, `changes`, `full_row` — all real columns (§1.2) |
 | `close_date_timeline` (§4.0.2) | `audit_log_id`, `deal_id`, `changed_at`, `actor_user_id`, `event_kind`, `old_date`, `new_date` **passed through**, plus `source`, `machine_source` | `raw_close_date_events.*`; `deals.hubspot_deal_id`; `public.hubspot_refresh_log.*` (§0064) |
-| `deal_facts` (§4.0.5) | `deal_id`, `rep_id`, `deal_created_at`, `outcome_kind`, `outcome_date`, `terminal_entry_date`, `landed_in_window_and_reopened`, `has_reopen_evidence`, `hubspot_linked`, `crm_arrival_at`, `deal_life_start`, `bid_board_owned` | `deals`: `stage_entered_at`, `bid_board_stage_entered_at`, `created_at`, `won_closed_date`, `lost_at`, `assigned_rep_id`, `stage_id`, `bid_board_stage_slug`, `is_active`, `is_test_data`, `is_bid_board_owned`, `is_read_only_mirror`, `on_hold`, **`hubspot_deal_id`**; `audit_log`: `table_name`, `record_id`, `created_at`, `id`, `action`, `full_row`; `pipeline_stage_config`: `slug`, `is_terminal`; `deal_stage_history`: `deal_id`, `to_stage_id`, **`from_stage_id`**, `created_at` |
+| `deal_facts` (§4.0.5) | `deal_id`, `rep_id`, `outcome_kind`, `outcome_date`, `terminal_entry_date`, `landed_in_window_and_reopened`, `has_reopen_evidence`, `hubspot_linked`, `crm_arrival_at`, `deal_life_start`, `bid_board_owned` | `deals`: `stage_entered_at`, `bid_board_stage_entered_at`, `created_at`, `won_closed_date`, `lost_at`, `assigned_rep_id`, `stage_id`, `bid_board_stage_slug`, `is_active`, `is_test_data`, `is_bid_board_owned`, `is_read_only_mirror`, `on_hold`, **`hubspot_deal_id`**; `audit_log`: `table_name`, `record_id`, `created_at`, `id`, `action`, `full_row`; `pipeline_stage_config`: `slug`, `is_terminal`; `deal_stage_history`: `deal_id`, `to_stage_id`, **`from_stage_id`**, `created_at` |
 | `outcomes` (§4.0.5) | all of `deal_facts` passed through, plus **`is_reopened_after_landing`** | `deal_facts`: `outcome_kind`, `outcome_date`, `landed_in_window_and_reopened` |
-| `state_at` ×3 **(LATERAL, not a CTE)** (§4.0.3) *(contents: **convention-derived** — the block projects `state`, `prediction`, `changed_at`, `source`; the prefixes come from the three aliased instances in §4.0.7's anchor table, so an extractor sees a mismatch that is expected)* | `p30_state`, `p30_prediction`, `p30_changed_at`, `p30_source`; `pfinal_state`, `pfinal_prediction`, `pfinal_changed_at`, `pfinal_source`; `pnow_state`, `pnow_prediction`, `pnow_changed_at`, `pnow_source` — all `*_state` coalesced (§4.0.3) | `close_date_timeline`: `deal_id`, `changed_at`, **`audit_log_id`**, `source`, `new_date`; `outcomes.outcome_date` |
+| `state_at` ×3 **(LATERAL, not a CTE)** (§4.0.3) *(contents: **convention-derived** — the block projects `state`, `prediction`, `changed_at`, `source`; the prefixes come from the three aliased instances in §4.0.7's anchor table, so an extractor sees a mismatch that is expected)* | `p30_state`, `p30_prediction`, `p30_changed_at`, `p30_source`; `pfinal_state`, `pfinal_prediction`, `pfinal_changed_at`, `pfinal_source`; `pnow_state`, `pnow_prediction`, `pnow_changed_at`, `pnow_source` — all `*_state` coalesced (§4.0.3) | `close_date_timeline`: `deal_id`, `changed_at`, **`audit_log_id`**, `source`, `new_date`; `outcomes.outcome_date`; `outcomes.deal_life_start` (the §4.0.4 fallback gate) |
 | `coverage_resolution` (§4.1) | `cov_state`, `cov_prediction`, `is_provenance_unknown` | `outcomes.deal_id`; `state_at(deal, now())`; **`deals.expected_close_date`** — the only block that joins `deals` for it, and the whole reason convention 10's exception is buildable |
-| Derived scalars **block A** **(not a CTE)** (§4.0.7) | `open`, `precrm_landed`, `precrm_arrival_unknown`, `landed`, `in_d_cov`, `signed_error_p30`, `signed_error_pfinal`, `p30_parked_at_write`, `pfinal_parked_at_write`, `event_window_end` | `outcome_kind`, `outcome_date`, `terminal_entry_date`, `is_reopened_after_landing`, `has_reopen_evidence`, `hubspot_linked`, `crm_arrival_at`, `deal_created_at`, `cov_state`, `cov_prediction`, `p30_prediction`, `p30_changed_at`, `pfinal_prediction`, `pfinal_changed_at` — deliberately nothing from the event set |
+| Derived scalars **block A1** **(not a CTE)** (§4.0.7) | `open`, `precrm_landed`, `precrm_arrival_unknown`, `signed_error_p30`, `signed_error_pfinal`, `p30_parked_at_write`, `pfinal_parked_at_write` | `outcome_kind`, `outcome_date`, `hubspot_linked`, `crm_arrival_at`, `p30_prediction`, `p30_changed_at`, `pfinal_prediction`, `pfinal_changed_at` — deliberately nothing from the event set |
+| Derived scalars **block A2** **(not a CTE)** (§4.0.7) | `landed`, `in_d_cov`, `event_window_end` | `open`, `precrm_landed` (block A1); `outcome_kind`, `outcome_date`, `terminal_entry_date`, `is_reopened_after_landing`, `has_reopen_evidence`, `cov_state` |
 | `E` **(not a CTE)** (§4.0.5) *(contents: **unverifiable** — defined in prose, no literal SQL fence)* | the event set for churn | `close_date_timeline`; `event_window_end` (block A) |
-| Derived scalars **block B** **(not a CTE)** (§4.0.7) | `deal_move_count`, `deal_touch_count`, `deal_days_pushed_out` | `D_book`; `E`: `audit_log_id`, `old_date`, `new_date` |
+| Derived scalars **block B** **(not a CTE)** (§4.0.7) | `deal_move_count`, `deal_touch_count`, `deal_days_pushed_out` | `D_book` ∪ `D_score` (the anchor; see §4.0.7); `E`: `audit_log_id`, `old_date`, `new_date` |
 | Metrics (§4.1–4.7) **(not a CTE)** *(contents: **unverifiable** — many fences, no single block boundary)* | the report columns, incl. `cov_n`, `scoreable_n`, `scoreable_final_n` | everything above, by name only |
 
 The `audit_log_id` row is bolded because it is the one that broke: §4.0.3 ordered by it while §4.0.2 did not
@@ -1691,7 +1742,7 @@ lines of P₃₀ date arithmetic it never scanned.
 | Chain **block set** | the table's block names equal the CTEs the SQL defines — none missing, none invented, none duplicated | **extraction** — `name AS (` per fence vs the first backticked name per table row, set-compared; rows are skipped **only** on the literal `(not a CTE)` marker | mechanical · **known-positive validated against `f4d139879`**, where it reports the missing `deal_facts`, the duplicated `outcomes` and the non-CTE `state_at`; **second known-positive**: delete any one `(not a CTE)` marker from the current table and the check reports that row. Non-CTE rows are *named* but nothing is compared for them, so a rename **there** is still unseen. Until this round the skip keyed on two proxies rather than the marker — see the block-set rule above |
 | §2.4 **bucket partition** | every deal lands in **exactly one** §2.4 bucket, and the buckets' terms reconstruct `D` | **extraction** — parse each bucket's *Predicate* cell; enumerate every world the atom domains admit (`class` from the RELATIONS partition line, `cov` from §4.0.3's state enum, `reopened` bounded by RELATIONS' `D_reopened subset of …`, `when` from §2.4's three declared values); assert exactly one bucket matches each. Separately, expand `D` through RELATIONS and diff the leaves against the *Term* column | mechanical · **known-positives, all four run**: drop `reopened=no` from bucket 6 and it reports `buckets ['6','9'] OVERLAP on [class=open, reopened=yes, cov=machine]` — the exact defect reported against `83b99aae4`; drop `when=parked` from bucket 4 and it reports two overlaps; delete bucket 3 and it reports the two uncovered `cov` worlds; add a population to RELATIONS and it reports both the uncovered world and the missing leaf. The predicate column postdates the commits where §2.4 was wrong, so the failing inputs are constructed rather than historical — said plainly, because a known-positive you cannot run is not one. **It reads the predicates a human implements from**, which the earlier term-only version did not: 17 worlds, 10 buckets. What it does not cover: whether a bucket's *prose* agrees with its own predicate — the predicate is normative and the prose explains it, so a wrong explanation beside a right predicate is invisible |
 | **Convention audit coverage** (§7) | every numbered convention has a row in the convention audit table | **extraction** — convention numbers from the ordered list vs the leading integer of each audit row | mechanical *(added this round)* · **known-positive validated against `de593c375`**, where it reports conventions **18 and 19** as having no audit row — the exact drift this check exists to stop — and against `3fcf449f7`, where it reports 15. Checks that a row EXISTS, never that its verdict is true: a row saying "Obeyed" about a violated convention passes |
-| SELECT-list alias scope | no expression references a name its own SELECT list defines | **extraction** — per fence, split each SELECT at its depth-0 `FROM`, diff aliases against references | mechanical *(added this round)* · **known-positive validated against `d5bf7efb9`**, where it reports the three real cases; correlated subqueries legitimately referencing an outer column are not distinguished, so a hit needs a human look |
+| SELECT-list alias scope | no expression reads a name defined **beside it in the same block**, in either block form | **extraction** — per fence, (a) split each `SELECT` at its depth-0 `FROM` and diff aliases against references, **and (b) parse derived-scalar fences (`name = …`, bodies followed until parens balance) and diff each body against its siblings** | mechanical · **known-positive `d5bf7efb9`**: 6 hits — the 3 SELECT-list cases it was built for, plus 3 derived-scalar ones it could not see until this round. **Form (b) was missing entirely until round 24**, so the check read 6 of 28 SQL fences and every derived-scalar block — Blocks A and B, §4.2, §4.4–4.7, §4.1's metrics — was invisible to it. Codex found two live cases in Block A; repairing the check found four. Correlated subqueries legitimately referencing an outer column are not distinguished, so a hit needs a human look |
 | Per-metric population agreement | the audit table and the v1 table cite the same set for each metric | **extraction** — population column of both tables, keyed by metric, compared | mechanical *(added this round)* · compares SET NAMES; a row naming the same set with a different predicate, or citing none, is invisible |
 | Set relations (§4.0.5 RELATIONS block) | every set assertion in the document appears in the canonical block | **extraction** — grep set symbols and stock phrases, assert each cites a declared relation | mechanical · matches symbols and the phrases "subset of" / "carved out of"; a relation asserted in freeform English is invisible |
 | Population-change obligations | when a `D_*` predicate changes, every site mentioning it is enumerated for review | **extraction** — group all mentions by site type (table row / RELATIONS / metric row / partition / producer-consumer / SQL / prose) | mechanical *(added this round)* · **enumerates sites, does not verify agreement** — it produces the list convention 16 depended on recalling; judging each site is still human |
@@ -1715,7 +1766,7 @@ and for others it is the alarm.
 
 | Construct | Query to run | A zero means |
 |---|---|---|
-| `D_precrm` (§2.5(a)) | `count(*)` over `hubspot_deal_id IS NOT NULL` ∩ terminal ∩ dated ∩ `outcome_date < (SELECT min(created_at) FROM audit_log WHERE table_name='deals' AND record_id = d.id)::date` | **Alarm, probably.** Either the office holds no imported already-closed deals, or the arrival marker is wrong again. Cross-check against `count(*) WHERE source = 'hubspot_deals_reimport_2026_05_14' AND` terminal — if *that* is non-zero and this is zero, the test is still broken |
+| `D_precrm` (§2.5(a)) | `count(*)` over `hubspot_deal_id IS NOT NULL` ∩ terminal ∩ dated ∩ `outcome_date < ((SELECT al.created_at FROM audit_log al WHERE al.table_name='deals' AND al.record_id = d.id AND al.action='insert' AND al.full_row IS NOT NULL ORDER BY al.id ASC LIMIT 1) AT TIME ZONE 'America/Chicago')::date` — **the same predicate the report runs**, insert row and CT cast included | **Alarm, probably.** Either the office holds no imported already-closed deals, or the arrival marker is wrong again. Cross-check against `count(*) WHERE source = 'hubspot_deals_reimport_2026_05_14' AND` terminal — if *that* is non-zero and this is zero, the test is still broken |
 | `precrm_unknown_n` (§2.5(a)) | `count(*)` over HubSpot-linked terminal dated deals with no `audit_log` row | **Good.** A large number means audit does not reach the import and the carve-out is blind for those deals |
 | Arm (a), HubSpot refresh (§4.0.2) | the §1.1.1 `hubspot_refresh_log` census | **Good** — the classifier arm is inert because the refresh never wrote. §7 already makes this the prerequisite for building the report at all |
 | Arm (b), migration seeds (§4.0.2) | `count(*)` over `event_kind='insert'` ∩ `actor_user_id IS NULL` ∩ `hubspot_deal_id IS NOT NULL` in the timeline | **Good** — no seeded forecasts to exclude |
@@ -1898,12 +1949,20 @@ correction terms explicit.
 **Plain English:** of the deals that landed in the period **and carried a real rep-authored prediction
 beforehand**, what share landed within ±14 days of it.
 
+`scoreable` is **row-level** and belongs with the Block A2 scalars; `hit_rate_14d` is an **aggregate over
+it** and is therefore a different query level. Two fences, per §4.0.7's one-fence-one-level rule — in a
+single projection `hit_rate_14d` could not see `scoreable` at all:
+
 ```sql
--- D_score. All four state values are tested positively; none is a negated nullable (§4.0.6).
+-- Row level (D_score membership). All four state values are tested positively; none is a negated
+-- nullable (§4.0.6).
 scoreable = landed
         AND p30_state = 'rep_prediction'
         AND NOT p30_parked_at_write            -- p30_parked_at_write is a non-null boolean, see below
+```
 
+```sql
+-- Aggregate level, over the rows above.
 hit_rate_14d = count(*) FILTER (WHERE scoreable AND abs(signed_error_p30) <= TOLERANCE_DAYS)::numeric
              / NULLIF(count(*) FILTER (WHERE scoreable), 0)
 ```
@@ -1949,10 +2008,14 @@ the `NOT` is safe, convention 12), same explicit timezone, same strict `>`, same
 not restated here.
 
 ```sql
+-- Row level (D_score_final membership).
 scoreable_final = landed
               AND pfinal_state = 'rep_prediction'
               AND NOT pfinal_parked_at_write
+```
 
+```sql
+-- Aggregate level, over the rows above.
 hit_rate_14d_final = count(*) FILTER (WHERE scoreable_final
                                           AND abs(signed_error_pfinal) <= TOLERANCE_DAYS)::numeric
                    / NULLIF(count(*) FILTER (WHERE scoreable_final), 0)
@@ -2599,8 +2662,28 @@ today"; landed and error columns are period-scoped (§4.0.5).
 Default sort:
 
 ```sql
-ORDER BY coverage_rate DESC NULLS LAST, hit_rate_14d DESC NULLS LAST, rep_name ASC, rep_id ASC
+-- The eligibility key comes FIRST, per sorted column. Without it this ORDER BY ranks raw percentages
+-- and a rep with cov_n = 1 and coverage_rate = 100% sorts above a rep with a real sample -- the exact
+-- small-denominator bug §6.4 exists to close, reintroduced by the clause that renders the table.
+-- The same rule applies to every USER-initiated sort: the eligibility key is the column's own floor
+-- (§6.4), not a single global one, because each rate gates on its own denominator.
+ORDER BY (cov_n >= MIN_RANKED_COVERAGE) DESC,          -- eligible rows first, ineligible below
+         coverage_rate DESC NULLS LAST,
+         (scoreable_n >= MIN_RANKED_SCOREABLE) DESC,
+         hit_rate_14d DESC NULLS LAST,
+         rep_name ASC, rep_id ASC
 ```
+
+**A floor stated in §6.4 and absent from the clause that orders the rows is not a floor.** This is the
+third finding of that shape on this document — the §6.6 sweep restating §6.4 and disagreeing with it, the
+`hit_rate_14d_final` gate marked "unranked", and now the sort itself — so the rule is worth stating
+generally: **§6.4 is the single declaration of every volume floor, and every surface that orders, filters
+or renders a ranked rate must consume it rather than re-describe it.** A boolean eligibility key is how a
+SQL `ORDER BY` consumes it; the UI's "insufficient data" treatment (§6.6) is how the render consumes it.
+
+The eligibility keys carry no `NULLS LAST` and need none: `cov_n` and `scoreable_n` are `count()`
+expressions, never NULL (§6.6), so the boolean is never NULL either. Convention 13 governs NULL-capable
+*columns*, and this is neither.
 
 `rep_id` is the final tie-breaker, not decoration: two active users can share a `display_name`, and without
 it the ordering is not total — which makes row order vary between runs and, under pagination, lets a rep
@@ -2924,6 +3007,18 @@ complement of `futureDatedCloseDatePredicateSql`'s `>= today` (`foundations.ts:4
 `>` matches `closeTargetFarOutSqlPredicate` (`deal-reporting.ts:137`), so a deal exactly 90 days out is
 unparked in both. One ordering — `percentile_cont`'s `WITHIN GROUP` — deliberately needs no tie-breaker,
 and §4.3 now says why.
+
+**Round 24 (a check that read 6 of 28 fences, and one definition that reached one of five sites)**
+
+| # | Was | Now |
+|---|---|---|
+| 1 | The alias-scope check parsed only literal `SELECT … FROM` lists | **It read 6 of this document's 28 SQL fences.** Every derived-scalar block — the `name = …` form that most of §4 is written in — was invisible, so Block A could read its own siblings (`landed` ← `precrm_landed`, `in_d_cov` ← `open`) while the check reported clean. This is a class, not an instance: the check was repaired to parse both block forms, its known-positive at `d5bf7efb9` went from 3 hits to 6, and on the then-current text it found **4** live cases where Codex had named 2. |
+| 2 | Block A was one projection with internal dependencies | Split into **A1** (independent) and **A2** (`landed`, `in_d_cov`, `event_window_end`, which read A1). §4.2's `scoreable` / `hit_rate_14d` pairs were split too — a row-level scalar and an aggregate over it are different query levels and cannot share a projection. New standing rule: **one fence, one query level**, now mechanically enforced. |
+| 3 | The `D_precrm` real-data obligation still used `min(created_at)` over any action | The obligations table was written **in the same commit** as the fix that superseded that definition, so the mechanism built to detect an inert construct encoded the rejected proxy and would have certified it. Fixed — and a sweep of every `created_at` / `deal_created_at` / `min(created_at)` site found the same staleness in **three more** places Codex had not named: the normative blockquote, the explanatory prose, and §2.4's bucket 10. Four sites for one definition; one was reported. |
+| 4 | `deal_created_at` was produced and listed as consumed, and read by nothing | Dead once §4.0.4 moved to `deal_life_start`. Removed from the projection and the chain table; `state_at`'s *Consumes* gained the `deal_life_start` it actually reads. |
+| 5 | The reopen predicate treated a NULL `from_stage_id` as a non-terminal source | Its stated reason — "a deal cannot be created already terminal-to-terminal" — is **false in this repo**. `record_stage_history()`'s INSERT branch writes `(NULL, NEW.stage_id)`, the reimport maps `closed won`/`closed lost` straight to the terminal slugs (`hubspot-deals-reimport.ts:162-164`, `resolveCreateStage:712`) and never sets `app.skip_stage_history_trigger`, so imported already-closed deals carry a terminal history row with a NULL source dated HubSpot's create date. Now requires a **known** non-terminal source; the cost is under-detection, which is the right direction for a diagnostic people act on. |
+| 6 | The default `ORDER BY` ranked raw percentages | §6.4's floors existed and the clause that orders the rows did not honour them, so `cov_n = 1` at 100% sorted first. Eligibility keys now lead the sort, per column. **Third finding of this shape**, so §6.4 is now stated as the single declaration every ordering, filter and render must consume rather than re-describe. |
+| 7 | `deal_touch_count` was anchored on `D_book` alone | A deal that lands, reopens and re-closes in-window stays in `D_score` but leaves `D_book`, so no row existed and §4.7's test evaluated NULL — a scored deal vanishing from the diagnostic. Anchored on `D_book ∪ D_score`; the churn *metrics* still read `D_book` only. |
 
 **Round 23 (a proxy replacing a proxy, and the point at which patching stops paying)**
 
@@ -3277,6 +3372,21 @@ were themselves silently broken**, because `NOT <nullable>` inside `FILTER` coun
 failing loudly. A check that can fail open is not a check. That is why the state enum is coalesced and
 non-null by construction, and why "never negate a nullable" is now a stated SQL rule (§4.0.6) rather than
 something to remember at each site.
+
+**Round 24's lesson: a check's blind spot is a property of its parser, not of its rule.** The alias-scope
+rule was right, its known-positive passed, and it had already been repaired once this session for cutting
+SELECT lists at the wrong `FROM`. It still read **6 of 28 fences**, because the document writes most of its
+SQL as `name = expression` and the parser only recognised `SELECT … FROM`. A rule that is correct and a
+parser that sees a fifth of the corpus produce a green check indistinguishable from a real one. The repair
+found twice what the reviewer reported — which is the only reliable signal that a checker's *reach* has
+been fixed rather than its logic. **Ask of every check not "is the rule right?" but "what fraction of the
+corpus does it actually parse?"** That number is measurable in one line and nobody had measured it.
+
+The round's other half is the consumer-enumeration discipline finally paying. Told to grep every site of a
+changed definition rather than fix the reported one, I found the `min(created_at)` staleness in **four**
+places where one was reported — including, pointedly, a real-data obligation written in the same commit as
+the fix that superseded it. A definition and its consumers drift fastest inside a single commit, because
+that is where the author is most certain they already agree.
 
 **Round 23's lesson: when the findings stop being about the document, stop editing the document.** Three
 of this round's five fixes were the same shape as round 22's, one of them in a site I had *identified* last
