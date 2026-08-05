@@ -1535,6 +1535,24 @@ stage-history row into a Won/Lost stage survives the reopen — reported as `reo
 **excluded from `D_cov`** so it is not silently counted as an ordinary open deal with a forecast obligation
 either. Reconstructing landed outcomes for reopened deals is a stated §7 follow-up.
 
+**Two things that sentence must not be read to forbid, because the window predicate above does one of
+them.** *Reconstructing a date for `D_landed` membership* is what is refused: it would put a deal into a
+scored population on a basis no other Won surface uses. *Reconstructing, for the diagnostic's own window,
+the value the canonical column held before the reopen deleted it* is a different act — the deal enters no
+population, nothing is scored, and the reconstruction is on the **canonical** basis (the contract-signed
+write-through, §1.8) rather than on the second one this paragraph rejects. Where that basis is
+unavailable the window falls back to the stage-entry date, which is exactly the unreconciled basis above
+and is therefore used only to place a diagnostic's landing in a period, never to admit a deal anywhere.
+The distinction is which question the date answers: *"is this deal scoreable and at what error"* — refused
+— versus *"was the landing this rep lost inside the period being reported"* — which the diagnostic cannot
+ask at all without a date, and had been asking on the wrong one.
+
+**And it is why `terminal_entry_date` is left alone.** That scalar stands in for a missing outcome date on
+`D_nodate` deals, whose `won_closed_date` was never written rather than deleted, and it feeds
+`event_window_end` — a churn cap, i.e. the scoring register, not the diagnostic one. Giving it a
+contract-signed reconstruction would be the refused act in a quieter place: a third basis reaching a
+number a rep is charged for.
+
 **Canonical relations block — the single declaration of how these populations relate.** Every set
 assertion anywhere in this document must appear here; nothing else may *state* a relation, only cite one.
 This exists because three separate audit-table cells asserted relations the SQL had already contradicted
