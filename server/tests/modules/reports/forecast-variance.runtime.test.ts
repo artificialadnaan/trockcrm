@@ -60,10 +60,13 @@ describe("getForecastVarianceOverview against real Postgres", () => {
 
   it("returns the real flag per deal rather than inferring it from the name", async () => {
     const result = await getForecastVarianceOverview(tdb, {});
-    if (result.deals.length === 0) return; // milestone shape may not qualify; the validity assertion above still stands
+    // Asserted, not guarded. An `if (result.deals.length === 0) return` here would let a reader that
+    // stopped returning rows at all pass silently, and the fixture above genuinely qualifies — both
+    // milestones and a won stage — so an empty result is a regression, not a shape the test tolerates.
+    expect(result.deals.length).toBeGreaterThan(0);
     const co = result.deals.find((d) => d.dealId === DEAL_CO);
     const plain = result.deals.find((d) => d.dealId === DEAL);
-    if (co) expect(co.dealIsChangeOrder).toBe(true);
-    if (plain) expect(plain.dealIsChangeOrder).toBe(false);
+    expect(co?.dealIsChangeOrder).toBe(true);
+    expect(plain?.dealIsChangeOrder).toBe(false);
   });
 });
