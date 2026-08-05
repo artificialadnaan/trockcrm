@@ -49,6 +49,21 @@ function targetDisplayName(target: Pick<PhotoUploadTarget, "type" | "name" | "is
   return target.type === "deal" ? formatDealDisplayName(target.name, target.isChangeOrder) : target.name;
 }
 
+/**
+ * `deals.is_change_order` as it arrives on THIS page's URL — the exact inverse of the `"1"`/`"0"`
+ * encoding buildUnifiedCaptureHref emits below.
+ *
+ * Three states, and the middle one is the whole point: only the literal `"1"` and `"0"` are assertions.
+ * Absent, empty, or junk is UNKNOWN and must decode to `undefined`, never to `false` — `false` is
+ * authoritative downstream and suppresses the relabel outright, so folding "not stated" into it would
+ * turn a missing param into a confident wrong answer about a real change-order child.
+ */
+export function parseChangeOrderParam(value: string | null | undefined): boolean | undefined {
+  if (value === "1") return true;
+  if (value === "0") return false;
+  return undefined;
+}
+
 export function groupPhotoUploadTargets(targets: PhotoUploadTarget[]) {
   return {
     lead: targets.filter((target) => target.type === "lead"),
@@ -126,6 +141,12 @@ export function PhotoCapturePage() {
       id: dealId,
       type: "deal",
       name: searchParams.get("dealName") ?? "Selected deal",
+      // The URL-seeded target has no search result behind it, so the param IS the only source for the
+      // flag — and it has to be carried, not dropped. Dropped, `targetDisplayName` falls back to reading
+      // the name's shape and relabels an ordinary deal a human named "Lobby — Change Order 1", and
+      // buildUnifiedCaptureHref (which reads this target, not the raw params) hands the same blind spot
+      // to the field app. Unknown stays unknown: a missing param is `undefined`, never `false`.
+      isChangeOrder: parseChangeOrderParam(searchParams.get("isChangeOrder")),
       recordNumber: null,
       stageName: null,
       companyName: null,
