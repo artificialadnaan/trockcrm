@@ -292,7 +292,7 @@ describe("DealsListSection", () => {
     expect(html).toContain("DFW-1-12826-aa");
   });
 
-  it("renders deal descriptions in a separate column with muted fallback and hover title", () => {
+  it("renders deal descriptions in the Scope column with muted fallback and hover title", () => {
     mocks.useDealsMock.mockReturnValue({
       deals: [
         makeDeal({
@@ -312,7 +312,11 @@ describe("DealsListSection", () => {
 
     const html = render();
 
-    expect(html).toContain(">Description<");
+    // Header renamed from "Description" to "Scope" (#1051): the column answers "what is this work?",
+    // and its first line is now the scope title when the deal has one. A deal with NO scope title —
+    // both fixtures here — must render exactly as it did before.
+    expect(html).toContain(">Scope<");
+    expect(html).not.toContain('data-testid="deals-list-scope-title"');
     expect(html).toContain('aria-label="Long deal description that should stay available on hover for the list view."');
     expect(html).toContain('title="Long deal description that should stay available on hover for the list view."');
     expect(html).toContain("Long deal description that should stay available on hover for the list view.");
@@ -320,6 +324,49 @@ describe("DealsListSection", () => {
     expect(html).toContain(">—<");
     expect(html).toContain("table-fixed");
     expect(html).toContain("hidden lg:table-cell lg:w-[11rem]");
+  });
+
+  it("leads the Scope column with the scope title, keeping the description beneath it", () => {
+    // The on-screen list and the CSV export must not disagree about a deal's scope: the export carries
+    // a Scope Title column, so a table that showed only the description would contradict the file the
+    // user just exported from it.
+    mocks.useDealsMock.mockReturnValue({
+      deals: [
+        makeDeal({
+          scopeTitle: "Balcony Repair",
+          description: "Remove and replace 4 sheets of decking and install additional underlayment.",
+        }),
+      ],
+      pagination: { page: 1, limit: 25, total: 1, totalPages: 1 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = render();
+
+    expect(html).toContain('data-testid="deals-list-scope-title"');
+    expect(html).toContain("Balcony Repair");
+    expect(html).toContain("Remove and replace 4 sheets of decking and install additional underlayment.");
+    // Title first, notes second — the same order as the deal-detail Stage & Status card.
+    expect(html.indexOf("Balcony Repair")).toBeLessThan(html.indexOf("Remove and replace 4 sheets"));
+  });
+
+  it("shows the scope title alone when a deal has one and no description", () => {
+    // The muted em-dash is the NO-INFORMATION marker. A deal that has a scope title has information,
+    // so rendering the dash next to it would read as a data bug.
+    mocks.useDealsMock.mockReturnValue({
+      deals: [makeDeal({ scopeTitle: "Plumbing Renovations", description: null })],
+      pagination: { page: 1, limit: 25, total: 1, totalPages: 1 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = render();
+
+    expect(html).toContain("Plumbing Renovations");
+    expect(html).not.toContain(">—<");
   });
 
   it("renders the selected owner filter label from assignees instead of the raw id", () => {

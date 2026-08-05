@@ -341,6 +341,40 @@ function DealsListPagination({
   );
 }
 
+/**
+ * The Scope column: the short accounting title first, the long notes preview underneath.
+ *
+ * Both, not one: the CSV export carries `scopeTitle` in its own column, and a screen that showed only
+ * the description would disagree with the file a user just exported from it. Leading with the title is
+ * the point of the field — a truncated 2658-character description (the real maximum in this tenant)
+ * tells a scanner nothing, and "Balcony Repair" tells them everything.
+ *
+ * A deal with no scope title renders exactly as it did before: the description preview alone, or the
+ * muted em-dash. Nothing was taken away to make room.
+ */
+function renderScopeCell(deal: Pick<Deal, "scopeTitle" | "description">) {
+  const scopeTitle = deal.scopeTitle?.trim() ?? "";
+  const description = deal.description?.trim() ?? "";
+
+  if (!scopeTitle) {
+    return renderDescriptionPreview(deal.description);
+  }
+
+  return (
+    <div className="min-w-0 space-y-0.5">
+      <span
+        className="block max-w-[18rem] truncate text-xs font-bold text-slate-800"
+        aria-label={scopeTitle}
+        title={scopeTitle}
+        data-testid="deals-list-scope-title"
+      >
+        {scopeTitle}
+      </span>
+      {description ? renderDescriptionPreview(description) : null}
+    </div>
+  );
+}
+
 function renderDescriptionPreview(description: string | null | undefined) {
   const value = description?.trim() ?? "";
   if (!value) {
@@ -1108,11 +1142,13 @@ export function DealsListSection({
       },
     },
     {
+      // "Scope", not "Description": the column answers "what is this work?", and since #1051 the best
+      // available answer is scope_title with the description as the supporting line beneath it.
       key: "description",
-      header: "Description",
+      header: "Scope",
       headClassName: "hidden lg:table-cell lg:w-[11rem] lg:!px-3",
       cellClassName: "hidden lg:table-cell lg:w-[11rem] lg:!px-3",
-      render: (deal) => renderDescriptionPreview(deal.description),
+      render: (deal) => renderScopeCell(deal),
     },
     {
       key: "owner",

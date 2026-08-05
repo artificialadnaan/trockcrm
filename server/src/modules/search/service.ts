@@ -376,7 +376,12 @@ export async function searchDeals(tenantDb: TenantDb, query: string, limit: numb
   // and the SearchResult.rank the cross-office merge re-ranks on -- so the merge can never demote or
   // drop a row on a field the SQL ranked it on. (The old JS scoreMatch covered fewer fields than the
   // builder/ORDER BY, so e.g. a zip/state/customer-only match got rank 0 and could be merged out.)
-  const relevance = relevanceOrder(query, [deals.name, deals.dealNumber, deals.projectNumber, deals.description, deals.propertyAddress, deals.propertyCity, deals.propertyState, deals.bidBoardCustomerName]);
+  // scope_title sits with description here for the reason the comment above gives: the ranked field set
+  // must not be NARROWER than the matched field set, or a scope-title-only hit (a change-order child
+  // whose name is "<Parent> — Change Order 1" and whose notes are blank) scores 0 and can be dropped by
+  // the per-entity LIMIT or demoted out of the cross-office merge — findable in principle, missing in
+  // practice. Placed AHEAD of description: a title match is a stronger signal than a notes match.
+  const relevance = relevanceOrder(query, [deals.name, deals.dealNumber, deals.projectNumber, deals.scopeTitle, deals.description, deals.propertyAddress, deals.propertyCity, deals.propertyState, deals.bidBoardCustomerName]);
   const rows = await tenantDb
     .select({
       id: deals.id,
