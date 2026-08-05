@@ -1661,7 +1661,11 @@ there, while `D_book` excludes it on the broader `has_reopen_evidence` test.
 
 The population is the union of the two and no wider: `D_outside` and `D_nodate` carry no
 machine-provenance metric, so counting their events would inflate the contamination number with events
-that distort nothing this report publishes. **A diagnostic's population is the union of the populations
+that distort nothing this report publishes. The two are **disjoint** (RELATIONS' four-way partition), so
+the union double-counts nothing, and its **time basis is the mixed one `D_book` already carried** —
+period-scoped on the landed side, today on the open side — because it is the same union minus a
+subtraction. The UI's "as of today" caveat on the churn and coverage columns (§4.0.5) covers these
+diagnostics for the same reason it covers those. **A diagnostic's population is the union of the populations
 of the metrics it explains** — stated generally because this is the third population-mismatch defect in
 this table's register, after `moves_per_deal`'s denominator and the two `D_precrm` slices, and all three
 were a numerator and a denominator describing different sets one level up.
