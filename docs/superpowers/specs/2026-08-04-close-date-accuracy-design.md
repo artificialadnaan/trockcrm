@@ -633,9 +633,12 @@ flag makes `D_precrm` a partition member taking precedence over both, at which p
 must be re-pinned with five terms. Nothing else changes — which is the test of whether a gate is real.
 
 **The residual, which is `audit_log`'s reach (§1.4).** If audit does not go back as far as a deal's insert,
-`crm_arrival_at` is NULL and arrival cannot be proven. Those deals **stay in `D_landed`** — never carve out
-what you cannot demonstrate — and are counted by `precrm_unknown_n` so the decision is visible rather than
-silent. The reimport ran 2026-05-14 and the `audit_deals` trigger has shipped since `0001` (2026-04-01), so
+`crm_arrival_at` is NULL and arrival cannot be proven. Those deals **stay in `D_landed` / `D_outside`**,
+whichever their outcome date puts them in — never carve out what you cannot demonstrate — and are counted
+by `precrm_unknown_n`, whose population is that same union (§4.0.6), so the decision is visible rather
+than silent. The pairing matters: naming only `D_landed` here while the counter spans both would describe
+a narrower set than the number reports, and an out-of-period import with an undatable arrival is exactly
+the case that falls in the gap. The reimport ran 2026-05-14 and the `audit_deals` trigger has shipped since `0001` (2026-04-01), so
 the rows *should* exist; §1.4 records that the earliest actual `audit_log.created_at` is unverified against
 production, and `precrm_unknown_n` is the column that answers it. If it is large, this carve-out is not
 working and the number says so.
@@ -909,9 +912,11 @@ column, `expected_close_date` is unchanged, and **no trigger row carrying that k
 (only `updated_at` / `last_synced_from_hubspot_at` change, and `changes ? 'expected_close_date'` is false).
 The ledger row exists anyway. So in that window there is exactly **one** `expected_close_date` trigger row
 with `(deal, A, B)` — the **rep's**, carrying the rep's actor — and the un-conjuncted arm matched it. The
-rep's forecast was classified `machine`, dropped from `D_score`, dropped from `E`, and counted in
-`machine_superseded_n`. This is not the two-rows-one-stolen case it looks like: the machine row the
-classifier believes it found was never written.
+rep's forecast was classified `machine`, which drops that **event** from `E` and, wherever it was the
+standing value at the deal's P₃₀ anchor, drops the **deal** from `D_score` into `machine_superseded_n` —
+a per-deal shortfall bucket over `D_landed`, not an event count, so the misclassified edit reaches it only
+through the anchor and only for a deal that landed in-period. This is not the two-rows-one-stolen case it
+looks like: the machine row the classifier believes it found was never written.
 
 **Why this does not contradict §1.1.2's "key on `hubspot_refresh_log`, never on `changed_by IS NULL`".**
 The ledger is still the key: actorlessness alone marks nothing, and every legitimate NULL-actor rep write
@@ -2489,9 +2494,17 @@ a speculative CTE.
 Until then the exposure is visible rather than hidden: a repair is an unpaired large **pull-in**, so
 `days_pulled_in` is where it shows, and §4.5 reports pushed and pulled separately for exactly this kind of
 reason. A rep with an anomalous `days_pulled_in` and a non-zero `hubspot_refresh_events_n` is the
-signature — **a signal, not an identity**: `days_pulled_in` is summed over `E`, which is `D_book`-scoped
-and rep-only, while the counter spans `D_landed` ∪ `D_open` (§4.0.6), so a repair on a reopen-evidence
-deal shows in the counter and not in the sum.
+signature — **a signal, not an identity, and the two halves count different events by different authors.**
+`hubspot_refresh_events_n` counts the **machine-authored overwrite** that preceded the repair
+(`source = 'machine'`, arm (a)); `days_pulled_in` sums the **rep-authored repair** itself. They also run
+over different populations: the counter spans `D_landed` ∪ `D_open` (§4.0.6), while `days_pulled_in` is
+summed over `E`, which is `D_book`-scoped and rep-only. So on a **reopen-evidence deal** the two come
+apart in a stated direction — the preceding machine overwrite **can still appear in
+`hubspot_refresh_events_n`**, because `D_book`'s reopen subtraction does not reach that counter, while the
+rep's repair is **absent from `days_pulled_in`**, because `D_book` excludes the deal and therefore `E`
+carries none of its events. Neither number is describing the other's event, and reading the pair as one
+would attribute a machine write to the rep in the very paragraph that exists to say the rep is being
+charged for one.
 
 Report a rate so a rep with a big book is not penalised for volume — the denominator first, as its own
 column, then the rate over it:
@@ -3530,6 +3543,9 @@ and §4.3 now says why.
 | 11 | The `lost_landing_date` prose told implementers to fall back to the stage-entry date | The predicate has no fallback: a missing audit row yields NULL and the landing goes undiagnosed, which is the under-detection the residuals describe. The sentence instructed the exact unreconciled basis the same commit removed — **prose overstepping its own SQL, in the register where the SQL is what ships**. Deleted, and the absence of a fallback is now stated positively. |
 | 12 | The `lost_landing_date` real-data obligation counted "canonical date went to NULL" as a reopen | It is not one. A Won→Lost correction clears `won_closed_date` and sets `lost_at` in the same `dealUpdates` object (`stage-change.ts:354-411`, a single `.set()` at `:428`), so its audit row is shape-identical to a reopen's while its stage row is terminal→**terminal**. An office holding only reclassifications would have reported a healthy count and zero pairs, and the stated verdict told the reader that meant the pairing was broken — **an obligation that manufactures its own false alarm**. The count now carries the reopen discriminator, with the undiscriminated count beside it so the reclassification population is visible rather than confusing. The predicate itself was never affected: it pairs to a terminal→non-terminal row, which a reclassification cannot supply. |
 | 13 | The `lost_landing_date` paragraph said reading the audit value means *"the deal enters no population"* | **False, and it is the value's whole purpose.** The `BETWEEN` on it produces `landed_in_window_and_reopened`, hence `is_reopened_after_landing`, hence membership of **`D_reopened`** — a named §4.0.5 population, reported as `reopened_after_landing_n`, which also gates `D_cov`, `machine_dated_n` and `D_book`. What the value must not do is admit the deal to a **scored** population, and that is now what the sentence says: two clauses where one overbroad one stood. Same class as most of this round — a claim wider than what it governs — and the remedy is a sentence, not a construct. **No check was added, because two already disclose this exact blind spot and were right to:** the set-relations row records that *"a relation asserted in freeform English is invisible"*, and the obligation enumerator's row records that it *"keys on the population's NAME, so a claim about a population that never names it is invisible"*. This sentence asserted a relation in English and named no population — both limits, live, in one clause. **Sweeping the same shape found two more**, both about `D_outside` and both stating "excluded from every metric" with a one-item exception list where there are two: §2.4's bucket 8 and §4.0.5's own paragraph. `precrm_unknown_n` draws on `D_landed` ∪ `D_outside`. Narrowed to "every **scored** metric" with both diagnostics named. |
+| 14 | §4.4's repair signature said *"a repair on a reopen-evidence deal shows in the counter and not in the sum"* | Two different events by two different authors, described as one. `hubspot_refresh_events_n` counts the **machine-authored overwrite**; `days_pulled_in` sums the **rep-authored repair**. Both halves are now stated: the preceding machine overwrite **can still appear in the counter**, because `D_book`'s reopen subtraction does not reach it, while the repair is **absent from the sum**, because `D_book` excludes the deal and `E` therefore carries none of its events. Read as one number the pair attributes a machine write to the rep — in the paragraph whose whole subject is the rep being charged for one. **Swept the shape across all ten diagnostic counters** — does the prose's subject match the counter's population *and its actor* — and found two more, both written this round. |
+| 15 | §4.0.2's stolen-edit paragraph said the rep's forecast was "counted in `machine_superseded_n`" | An **event** described as landing in a **per-deal** bucket, and unconditionally at that. Misclassifying the edit drops the event from `E`; it reaches `machine_superseded_n` only where that edit was the standing value at the deal's P₃₀ anchor and only for a deal in `D_landed`. Stated with both conditions. |
+| 16 | §2.5(a)'s audit-reach residual said undatable-arrival deals *"stay in `D_landed`"* while `precrm_unknown_n` spans `D_landed` ∪ `D_outside` | The **converse** of 14 and 15 — prose narrower than the counter rather than wider — which is why the sweep was run over the pairing in both directions rather than for overclaims alone. An out-of-period import with an undatable arrival sits in `D_outside`, is counted by the number, and was described by nothing. |
 
 **Refuted: one of nine.** Codex's `31 SQL fence openings` was a miscount — the document has **33**, and
 the parse row's `31` was its *inspected* figure, two fences being comment-only. The row no longer quotes
