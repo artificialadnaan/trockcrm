@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { Loader2, TrendingUp, TrendingDown, Sparkles, Trophy, XCircle } from "lucide-react";
 import { useRegionReport } from "@/hooks/use-reports";
 import { useAuth } from "@/lib/auth";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import { PresetSelect } from "@/components/filters/preset-select";
 import { usd, int, Sparkline } from "./evidence-kit";
 import {
@@ -104,8 +105,10 @@ function MoverDealChip({
       </div>
       {deal ? (
         <div className="mt-1">
-          <div className="truncate text-sm font-medium text-slate-800" title={deal.name}>
-            {deal.name}
+          {/* A change-order child is STORED "<Parent> — Change Order N" and this chip truncates; the
+              label moves to the front for DISPLAY only, stored name unchanged. */}
+          <div className="truncate text-sm font-medium text-slate-800" title={formatDealDisplayName(deal.name, deal.isChangeOrder)}>
+            {formatDealDisplayName(deal.name, deal.isChangeOrder)}
           </div>
           <div className="text-xs tabular-nums text-slate-500">
             {usd(deal.value)} · <span className="text-slate-400">{deal.region}</span>

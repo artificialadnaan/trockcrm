@@ -102,6 +102,39 @@ describe("field projects — canonical project-number resolution", () => {
   });
 });
 
+describe("field projects — is_change_order is selected and surfaced", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  // The field clients move "Change Order N" to the FRONT of a change-order child's name (it is STORED as
+  // "<Parent> — Change Order N", which truncates to look like its parent on a phone). `deals.is_change_order`
+  // is the AUTHORITY for that decision — without it the clients had to infer it from the name's shape,
+  // which mislabels a deal a human happened to name "Lobby — Change Order 1".
+  it("surfaces the flag as a real boolean, for both true and false rows", async () => {
+    expect((await resolveOne({ is_change_order: true })).isChangeOrder).toBe(true);
+    expect((await resolveOne({ is_change_order: false })).isChangeOrder).toBe(false);
+  });
+
+  it("defaults to false rather than undefined when the column is missing/null", async () => {
+    // Never `undefined`: on the client that would silently fall back to guessing from the name.
+    expect((await resolveOne({ is_change_order: null })).isChangeOrder).toBe(false);
+    expect((await resolveOne({})).isChangeOrder).toBe(false);
+  });
+
+  it("selects d.is_change_order in the list query", async () => {
+    const db = tenantDb([[{ total: 0 }], []]);
+    await listFieldProjects(db, access);
+    const sqlText = db.execute.mock.calls.map(([arg]: [unknown]) => extractSqlText(arg)).join("\n");
+    expect(sqlText).toContain("d.is_change_order");
+  });
+
+  it("selects d.is_change_order in the starred query too", async () => {
+    const db = tenantDb([[]]);
+    await listStarredFieldProjects(db, access);
+    const sqlText = db.execute.mock.calls.map(([arg]: [unknown]) => extractSqlText(arg)).join("\n");
+    expect(sqlText).toContain("d.is_change_order");
+  });
+});
+
 describe("field projects — project_number is selected and searchable", () => {
   beforeEach(() => vi.clearAllMocks());
 

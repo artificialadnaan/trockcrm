@@ -109,7 +109,7 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE TABLE public.pipeline_stage_config (id uuid PRIMARY KEY, name text, slug text, is_terminal boolean DEFAULT false);
     CREATE TABLE deals (
-      id uuid PRIMARY KEY, name text, deal_number text, project_number text, stage_id uuid,
+      id uuid PRIMARY KEY, name text, is_change_order boolean NOT NULL DEFAULT false, deal_number text, project_number text, stage_id uuid,
       is_active boolean DEFAULT true, bid_board_stage_slug text,
       property_address text, property_city text, property_state text, property_zip text,
       last_activity_at timestamptz, updated_at timestamptz, created_at timestamptz DEFAULT now()

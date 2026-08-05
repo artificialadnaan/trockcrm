@@ -155,12 +155,13 @@ export interface PipelineVelocityOverview {
     totalValue: number;
     avgDaysInStage: number;
     medianDaysInStage: number;
-    oldestDeal: { dealId: string | null; dealName: string; daysInStage: number };
+    oldestDeal: { dealId: string | null; dealName: string; dealIsChangeOrder?: boolean | null; daysInStage: number };
   }>;
   agingBuckets: Array<{ bucket: string; label: string; dealCount: number; totalValue: number }>;
   stuckDeals: Array<{
     dealId: string;
     dealName: string;
+    dealIsChangeOrder?: boolean | null;
     ownerName: string;
     stageName: string;
     daysInStage: number;
@@ -182,11 +183,11 @@ export interface ClosedWonRevenueOverview {
     wonDeals: number;
     totalRevenue: number;
     avgDealSize: number;
-    largestWonDeal: { dealId: string | null; dealName: string; value: number };
+    largestWonDeal: { dealId: string | null; dealName: string; dealIsChangeOrder?: boolean | null; value: number };
   }>;
   byRegion: Array<{ regionName: string; wonDeals: number; totalRevenue: number; percentOfTotal: number }>;
   byWorkflowFamily: Array<{ workflowFamily: string; workflowFamilyName: string; wonDeals: number; totalRevenue: number }>;
-  topDeals: Array<{ dealId: string; dealName: string; ownerName: string; value: number; wonAt: string }>;
+  topDeals: Array<{ dealId: string; dealName: string; dealIsChangeOrder?: boolean | null; ownerName: string; value: number; wonAt: string }>;
 }
 
 export interface LeadConversionOverview {
@@ -390,6 +391,8 @@ export interface DirectorScorecardReport {
   topAtRiskDeals: Array<{
     dealId: string;
     dealName: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
     ownerName: string;
     stageName: string;
     daysInStage: number;
@@ -501,6 +504,8 @@ export interface ForecastAccuracyReport {
   pipelineAtRisk: Array<{
     dealId: string;
     dealName: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
     ownerName: string;
     stageName: string;
     value: number;
@@ -549,6 +554,8 @@ export interface ForecastVarianceRepRollup {
 export interface ForecastVarianceDealRow {
   dealId: string;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   repName: string;
   workflowRoute: "estimating" | "service";
   initialForecast: number;
@@ -647,6 +654,8 @@ export interface WorkflowBottleneckStage {
 export interface WorkflowBottleneckDeal {
   dealId: string;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   ownerName: string;
   stageName: string;
   daysInStage: number;
@@ -686,6 +695,8 @@ export interface ProjectReadinessReport {
   missingReadiness: Array<{
     dealId: string;
     dealName: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
     ownerName: string;
     stageName: string;
     daysInStage: number;

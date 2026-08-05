@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Camera, Check, FolderOpen, ImagePlus, Search, X } from "lucide-react";
 import { api } from "../lib/api";
-import { groupCaptureTargets, PHOTO_CATEGORIES, type FieldCaptureTarget, type FieldPhoto } from "../lib/field-projects";
+import { captureTargetDisplayName, groupCaptureTargets, PHOTO_CATEGORIES, type FieldCaptureTarget, type FieldPhoto } from "../lib/field-projects";
 import {
   extractPhotoMetadata,
   fileToDataUrl,
@@ -52,10 +52,15 @@ function initialTargetFromParams(params: URLSearchParams): FieldCaptureTarget | 
 
   const dealId = getTrimmedParam(params, "dealId");
   if (!dealId) return null;
+  // `deals.is_change_order`, handed over by the CRM's "Open unified capture" link. Absent (older link,
+  // or a CRM target whose payload lacked it) stays UNDEFINED rather than false — false would assert
+  // "not a change order" and suppress the relabel for a project that is one.
+  const changeOrderParam = params.get("isChangeOrder");
   return {
     id: dealId,
     type: params.get("targetType") === "opportunity" ? "opportunity" : "deal",
     name: params.get("targetName") ?? params.get("dealName") ?? "Selected deal",
+    isChangeOrder: changeOrderParam === "1" ? true : changeOrderParam === "0" ? false : undefined,
     recordNumber: null,
     stageName: null,
     companyName: null,
@@ -396,7 +401,7 @@ export function CapturePage() {
           className="min-h-11 min-w-0 flex-1 rounded-full bg-white/15 px-4 text-left font-bold backdrop-blur"
           onClick={() => setPickerOpen(true)}
         >
-          {validatingInitialTarget ? "Validating target..." : activeTarget ? activeTarget.name : "Choose target"}
+          {validatingInitialTarget ? "Validating target..." : activeTarget ? captureTargetDisplayName(activeTarget) : "Choose target"}
         </button>
         <button
           type="button"
@@ -642,7 +647,7 @@ function TargetPicker(input: {
                   >
                     <FolderOpen className="h-5 w-5 text-primary" />
                     <span className="min-w-0">
-                      <span className="block truncate font-black">{target.name}</span>
+                      <span className="block truncate font-black">{captureTargetDisplayName(target)}</span>
                       <span className="block truncate text-sm text-muted-foreground">
                         {target.recordNumber ? `${target.recordNumber} · ` : ""}
                         {target.stageName ?? "No stage"}

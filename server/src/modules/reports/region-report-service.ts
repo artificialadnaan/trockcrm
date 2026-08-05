@@ -71,6 +71,8 @@ export interface RegionMover {
   deltaWon: number;
 }
 export interface RegionMoverDeal {
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  isChangeOrder?: boolean | null;
   id: string;
   dealNumber: string | null;
   name: string;
@@ -425,9 +427,9 @@ export async function getRegionReport(tenantDb: TenantDb, options: RegionReportO
 // The MONEY is untouched: deductive COs stay in the region/office Won totals, the sparklines and the
 // evidence drills. This floors the SUPERLATIVE only.
 async function topMoverDeal(tenantDb: TenantDb, whereSql: SQL, valueSql: SQL): Promise<RegionMoverDeal | null> {
-  const rows = rowsFromExecute<{ id: string; deal_number: string | null; name: string; region: string; val: string }>(
+  const rows = rowsFromExecute<{ id: string; deal_number: string | null; name: string; is_change_order?: boolean | null; region: string; val: string }>(
     await tenantDb.execute(sql`
-      SELECT d.id AS id, d.deal_number AS deal_number, d.name AS name, ${REGION_NAME} AS region, ${valueSql} AS val
+      SELECT d.id AS id, d.deal_number AS deal_number, d.name AS name, d.is_change_order AS is_change_order, ${REGION_NAME} AS region, ${valueSql} AS val
       ${COMMON_JOINS}
       WHERE ${whereSql} AND (${valueSql}) > 0
       ORDER BY val DESC NULLS LAST, d.created_at DESC, d.id DESC
@@ -435,5 +437,5 @@ async function topMoverDeal(tenantDb: TenantDb, whereSql: SQL, valueSql: SQL): P
   );
   const row = rows[0];
   if (!row) return null;
-  return { id: String(row.id), dealNumber: row.deal_number == null ? null : String(row.deal_number), name: row.name, value: n(row.val), region: row.region };
+  return { id: String(row.id), dealNumber: row.deal_number == null ? null : String(row.deal_number), name: row.name, isChangeOrder: row.is_change_order ?? undefined, value: n(row.val), region: row.region };
 }

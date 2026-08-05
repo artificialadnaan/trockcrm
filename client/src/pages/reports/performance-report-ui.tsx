@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import { AlertTriangle, Loader2 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import { useDealHref } from "@/hooks/use-office-scope";
 
 export function formatCurrency(value: number | null | undefined) {
@@ -71,9 +72,27 @@ export function ErrorState({ message }: { message: string }) {
   );
 }
 
-export function DealLink({ dealId, children }: { dealId: string; children: React.ReactNode }) {
+// Takes the deal NAME and its FLAG, rather than reformatting whatever child it is handed.
+//
+// It used to accept `children: ReactNode` and rewrite any string child through the formatter. That is a
+// syntax-fallback GENERATOR: the relabel is applied invisibly, at every call site at once, with nowhere
+// to put the one input that decides it correctly — so an ordinary deal a human named
+// "Lobby — Change Order 1" was relabelled in every report that routed through here, and adding a caller
+// silently opted it in too. `dealIsChangeOrder` is REQUIRED (not optional) on purpose: tsc now refuses a
+// caller that has not answered the question, which is the only way this stays closed as callers are added.
+// A CO child is STORED "<Parent> — Change Order N" and truncates to look like its parent; this is
+// display-only — exports and the stored name are untouched.
+export function DealLink({
+  dealId,
+  dealName,
+  dealIsChangeOrder,
+}: {
+  dealId: string;
+  dealName: string;
+  dealIsChangeOrder: boolean | null | undefined;
+}) {
   // Carries ?officeId when the URL has one. Without it a row read under a cross-office scope links
   // into the viewer's default schema and 404s — see useDealHref for why ?office must NOT be used here.
   const dealHref = useDealHref();
-  return <Link className="font-bold text-slate-950 underline decoration-brand-red/40 underline-offset-4 hover:text-brand-red" to={dealHref(dealId)}>{children}</Link>;
+  return <Link className="font-bold text-slate-950 underline decoration-brand-red/40 underline-offset-4 hover:text-brand-red" to={dealHref(dealId)}>{formatDealDisplayName(dealName, dealIsChangeOrder)}</Link>;
 }

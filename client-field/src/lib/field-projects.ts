@@ -1,8 +1,24 @@
-import { LEGACY_PHOTO_CATEGORY_ITEMS, PHOTO_CATEGORY_OPTION_ITEMS, photoCategoryLabel } from "@trock-crm/shared/types";
+import {
+  formatDealDisplayName,
+  LEGACY_PHOTO_CATEGORY_ITEMS,
+  PHOTO_CATEGORY_OPTION_ITEMS,
+  photoCategoryLabel,
+} from "@trock-crm/shared/types";
+
+// The deal-NAME resolver is the single source of truth in @trock-crm/shared/types. A change order is a
+// real CHILD deal stored as "<Parent> — Change Order N", and every row on this app truncates to one line,
+// so the suffix is exactly the part a phone never shows. Re-exported here so the field pages reach for one
+// `../lib/field-projects` import. DISPLAY-ONLY: apply it at the JSX render site, NEVER to a value that is
+// sent back to the server — CapturePage seeds its target SEARCH box from `target.name`, and the server
+// matches that text against the STORED name (`d.name ILIKE …`). For a capture target (which may be a lead
+// or an opportunity) use `captureTargetDisplayName` below, which gates on the target's type.
+export { formatDealDisplayName };
 
 export type FieldProject = {
   id: string;
   name: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel; never infer it from the name. */
+  isChangeOrder: boolean;
   /** RAW deals.deal_number — the HubSpot id ("HS-…") for HubSpot-imported deals. Never display this; render `projectNumber`. */
   dealNumber: string;
   /** The human-facing project number to display (canonical DFW/ATL), or null when pending. Server-resolved. */
@@ -37,11 +53,36 @@ export type FieldCaptureTarget = {
   id: string;
   type: "lead" | "opportunity" | "deal";
   name: string;
+  /** `deals.is_change_order` — deal rows only; the AUTHORITY for the change-order display relabel. */
+  isChangeOrder?: boolean | null;
   recordNumber: string | null;
   stageName: string | null;
   companyName: string | null;
   lastUpdatedAt: string;
 };
+
+/**
+ * The display name for a capture target, with the change-order relabel GATED on the target being a deal.
+ *
+ * A picker row mixes all three types, and only a `deal` can be a generated change-order child: a `lead` is
+ * a leads-table row named by a human, and the server explicitly excludes opportunities from the `deal`
+ * type (`d.pipeline_disposition IS DISTINCT FROM 'opportunity'` in field/projects-service.ts) while a CO
+ * child is always Won. Rewriting every type would mangle a lead someone legitimately called
+ * "Lobby — Change Order 1".
+ */
+export function captureTargetDisplayName(
+  target: Pick<FieldCaptureTarget, "type" | "name"> & { isChangeOrder?: boolean | null },
+): string {
+  // The type gate stays: only a deal can be a generated change-order child, and a lead a human named
+  // "Lobby — Change Order 1" must render as typed. `isChangeOrder` then makes the DEAL branch
+  // authoritative instead of syntactic.
+  //
+  // Capture-target search DOES carry the flag (files/service.ts mapDealRow projects
+  // `isChangeOrder: row.isChangeOrder === true`), so picker rows are authoritative, not guesses. The
+  // parameter stays optional only for callers holding a partial target; when it is absent the name
+  // fallback is the documented degradation, not the normal path.
+  return target.type === "deal" ? formatDealDisplayName(target.name, target.isChangeOrder) : target.name;
+}
 
 export type FieldPhoto = {
   id: string;

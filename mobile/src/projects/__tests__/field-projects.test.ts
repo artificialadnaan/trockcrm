@@ -1,7 +1,11 @@
 import {
   categoryLabel,
+  captureTargetDisplayName,
   correctiveAffordance,
+  decodeChangeOrderParam,
+  encodeChangeOrderParam,
   filterPhotos,
+  formatDealDisplayName,
   formatDistanceMiles,
   groupPhotos,
   isProjectOffOffice,
@@ -24,6 +28,11 @@ function fieldProject(id: string, overrides: Partial<FieldProject> = {}): FieldP
     dealNumber: id,
     projectNumber: id,
     name: id,
+    // Not a hole filled to satisfy the compiler: every field-project row is built by
+    // mapFieldProject (server/src/modules/field/projects-service.ts), which coerces
+    // `row.is_change_order === true` — so the wire value for a plainly-named project like this one
+    // IS `false`. A test that needs a change-order row passes `isChangeOrder: true` in `overrides`.
+    isChangeOrder: false,
     propertyName: null,
     propertyAddress: null,
     stage: "Active",
@@ -342,5 +351,216 @@ describe("correctiveAffordance", () => {
     // workflow had simply ended. Never tappable — there is nothing for the responder to do until it returns.
     expect(correctiveAffordance("corrective_action_submitted", true)).toBe("awaiting_status");
     expect(correctiveAffordance("corrective_action_submitted", false)).toBe("awaiting_status");
+  });
+});
+
+// This helper is a deliberate MIRROR of shared/src/types/deal-display-name.ts (the Expo bundle cannot
+// import @trock-crm/shared). These cases are the same contract that suite asserts — keep them in step.
+describe("formatDealDisplayName", () => {
+  it("moves the generated change-order suffix to the front", () => {
+    expect(formatDealDisplayName("Tides Park Lane — Change Order 1")).toBe("Change Order 1 — Tides Park Lane");
+    expect(formatDealDisplayName("Tides Park Lane — Change Order 12")).toBe("Change Order 12 — Tides Park Lane");
+  });
+
+  it("keeps em-dashes belonging to the parent's own name — only the LAST segment is ours", () => {
+    expect(formatDealDisplayName("Tides — Phase 2 — Change Order 3")).toBe("Change Order 3 — Tides — Phase 2");
+  });
+
+  it("tolerates surrounding whitespace and a suffix-only name", () => {
+    expect(formatDealDisplayName("Tides   —   Change Order 4   ")).toBe("Change Order 4 — Tides");
+    expect(formatDealDisplayName(" — Change Order 1")).toBe("Change Order 1");
+  });
+
+  it("REGRESSION: still moves the child's label when the PARENT's own name is prefix-shaped", () => {
+    // A deal a human named "Change Order 7 — Lobby" gets a child stored with BOTH parts. An earlier
+    // "does this already look formatted?" prefix guard fired on it and returned it unchanged, stranding
+    // the child's real "Change Order 1" at the end — the very truncation this helper exists to prevent.
+    expect(formatDealDisplayName("Change Order 7 — Lobby — Change Order 1"))
+      .toBe("Change Order 1 — Change Order 7 — Lobby");
+    expect(formatDealDisplayName("A — Change Order 1 — Change Order 2"))
+      .toBe("Change Order 2 — Change Order 1 — A");
+    // A human-typed prefix-shaped name with NO generated suffix is still left alone.
+    expect(formatDealDisplayName("Change Order 5 — Lobby")).toBe("Change Order 5 — Lobby");
+  });
+
+  it("REGRESSION: refuses a rejoin that would re-create a trailing suffix (would oscillate)", () => {
+    // Both of these peel to a candidate that itself ends in a generated suffix, so formatting them would
+    // flip between two spellings forever. Returned exactly as stored instead — trivially a fixed point.
+    expect(formatDealDisplayName(" — Change Order 1 — Change Order 2")).toBe(" — Change Order 1 — Change Order 2");
+    expect(formatDealDisplayName("Change Order 1 — Change Order 2")).toBe("Change Order 1 — Change Order 2");
+  });
+
+  it("leaves an ordinal the generator can never emit (zero / zero-padded)", () => {
+    // nextChildOrdinal() is `COUNT(*)::int + 1` — always a positive, unpadded decimal.
+    expect(formatDealDisplayName("Tides — Change Order 0")).toBe("Tides — Change Order 0");
+    expect(formatDealDisplayName("Tides — Change Order 01")).toBe("Tides — Change Order 01");
+  });
+
+  it("POST-CONDITION: a formatted name never ends in a generated suffix, over composed shapes", () => {
+    // Generated, not hand-picked — choosing the inputs myself is what let an oscillation through before.
+    const suffix = /\s*—\s*Change Order\s+[1-9]\d*\s*$/;
+    const bases = ["", "   ", "Tides", "Tides — Phase 2", "Change Order 1", "Change Order 7 — Lobby"];
+    const padding: Array<[string, string]> = [["", ""], ["   ", ""], ["", "   "], ["  ", "  "]];
+    const violations: string[] = [];
+    for (const base of bases) {
+      for (let depth = 0; depth <= 3; depth += 1) {
+        let composed = base;
+        for (let n = 1; n <= depth; n += 1) composed += ` — Change Order ${n}`;
+        for (const [lead, trail] of padding) {
+          const input = `${lead}${composed}${trail}`;
+          const once = formatDealDisplayName(input);
+          if (once !== input && suffix.test(once)) violations.push(input);
+          else if (formatDealDisplayName(once) !== once) violations.push(input);
+        }
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+
+  it("is idempotent for EVERY case above — applying twice equals applying once", () => {
+    // Structural, not guarded: the output never ends in a generated suffix, so there is nothing left to
+    // move on a second pass. Asserted over the whole set rather than a hand-picked input.
+    const inputs = [
+      "Tides Park Lane — Change Order 1", "Tides Park Lane — Change Order 12",
+      "Tides — Phase 2 — Change Order 3", "Tides   —   Change Order 4   ", " — Change Order 1",
+      "Change Order 7 — Lobby — Change Order 1", "A — Change Order 1 — Change Order 2",
+      "Change Order 5 — Lobby", "Change Order 1", "Change Order 1 — Tides Park Lane",
+      "Tides Park Lane", "Change Order Backlog Review", "Tides — Change Order 1 Addendum",
+      "Tides - Change Order 1", "Tides — Change Order", "Tides — change order 1", "", "   ",
+    ];
+    for (const input of inputs) {
+      const once = formatDealDisplayName(input);
+      expect(formatDealDisplayName(once)).toBe(once);
+    }
+  });
+
+  it("leaves every other name byte for byte", () => {
+    expect(formatDealDisplayName("Tides Park Lane")).toBe("Tides Park Lane");
+    // "Change Order" mid-string is not the generated suffix.
+    expect(formatDealDisplayName("Change Order Backlog Review")).toBe("Change Order Backlog Review");
+    expect(formatDealDisplayName("Tides — Change Order 1 Addendum")).toBe("Tides — Change Order 1 Addendum");
+    // A hyphen/en-dash separator, a missing ordinal, or the wrong casing is a name someone typed.
+    expect(formatDealDisplayName("Tides - Change Order 1")).toBe("Tides - Change Order 1");
+    expect(formatDealDisplayName("Tides — Change Order")).toBe("Tides — Change Order");
+    expect(formatDealDisplayName("Tides — change order 1")).toBe("Tides — change order 1");
+  });
+
+  it("handles empty and nullish without throwing", () => {
+    expect(formatDealDisplayName("")).toBe("");
+    expect(formatDealDisplayName("   ")).toBe("   ");
+    expect(formatDealDisplayName(null)).toBeNull();
+    expect(formatDealDisplayName(undefined)).toBeUndefined();
+  });
+});
+
+describe("change-order router params — unknown must never become an assertion", () => {
+  // `false` is AUTHORITATIVE downstream, so encoding an UNKNOWN flag as anything that decodes to `false`
+  // is worse than sending nothing. This is the bug that shipped twice: `toStr(undefined)` produced "",
+  // and `"" === "1"` is false — an unknown silently became "definitely not a change order".
+  it("round-trips a known flag in both directions", () => {
+    expect(decodeChangeOrderParam(encodeChangeOrderParam(true))).toBe(true);
+    expect(decodeChangeOrderParam(encodeChangeOrderParam(false))).toBe(false);
+    expect(encodeChangeOrderParam(true)).toBe("1");
+    expect(encodeChangeOrderParam(false)).toBe("0");
+  });
+
+  it("encodes UNKNOWN as undefined so the caller omits the key entirely", () => {
+    expect(encodeChangeOrderParam(undefined)).toBeUndefined();
+    expect(encodeChangeOrderParam(null)).toBeUndefined();
+  });
+
+  it("decodes anything that is not exactly 1/0 as UNKNOWN, never false", () => {
+    for (const value of [undefined, "", "  ", "true", "false", "2", "undefined", ["1"]] as const) {
+      expect(decodeChangeOrderParam(value as string | string[] | undefined)).toBeUndefined();
+    }
+  });
+
+  it("REGRESSION: an unknown flag survives a full emit -> decode round trip as unknown", () => {
+    // projects/[id] -> capture was doing toStr(undefined) === "" -> decoded false.
+    expect(decodeChangeOrderParam(encodeChangeOrderParam(undefined))).toBeUndefined();
+  });
+});
+
+describe("formatDealDisplayName — the is_change_order flag outranks the name", () => {
+  // `deals.is_change_order` is the AUTHORITY. createDeal stores a hand-typed name verbatim with the flag
+  // false, so syntax alone cannot tell a human's "Lobby — Change Order 1" from a generated child.
+  it("false NEVER rewrites, even on a perfect generated suffix", () => {
+    expect(formatDealDisplayName("Lobby — Change Order 1", false)).toBe("Lobby — Change Order 1");
+    expect(formatDealDisplayName("Tides Park Lane — Change Order 2", false)).toBe("Tides Park Lane — Change Order 2");
+  });
+
+  it("true peels, and undefined/null fall back to syntax", () => {
+    expect(formatDealDisplayName("Tides Park Lane — Change Order 2", true)).toBe("Change Order 2 — Tides Park Lane");
+    expect(formatDealDisplayName("Tides Park Lane — Change Order 2", undefined)).toBe("Change Order 2 — Tides Park Lane");
+    expect(formatDealDisplayName("Tides Park Lane — Change Order 2", null)).toBe("Change Order 2 — Tides Park Lane");
+  });
+
+  it("POST-CONDITION and idempotency hold in ALL flag states, over composed shapes", () => {
+    const suffix = /\s*—\s*Change Order\s+[1-9]\d*\s*$/;
+    const bases = ["", "   ", "Tides", "Tides — Phase 2", "Change Order 1", "Change Order 7 — Lobby"];
+    const padding: Array<[string, string]> = [["", ""], ["   ", ""], ["", "   "], ["  ", "  "]];
+    const violations: string[] = [];
+    for (const flag of [undefined, null, true, false] as const) {
+      for (const base of bases) {
+        for (let depth = 0; depth <= 3; depth += 1) {
+          let composed = base;
+          for (let n = 1; n <= depth; n += 1) composed += ` — Change Order ${n}`;
+          for (const [lead, trail] of padding) {
+            const input = `${lead}${composed}${trail}`;
+            const once = formatDealDisplayName(input, flag);
+            if (once !== input && suffix.test(once)) violations.push(`${String(flag)}:${input}`);
+            else if (formatDealDisplayName(once, flag) !== once) violations.push(`${String(flag)}:${input}`);
+            else if (flag === false && once !== input) violations.push(`false-rewrote:${input}`);
+          }
+        }
+      }
+    }
+    expect(violations).toEqual([]);
+  });
+});
+
+describe("captureTargetDisplayName", () => {
+  it("moves the generated change-order label to the front for a DEAL target", () => {
+    expect(captureTargetDisplayName({ type: "deal", name: "Tides Park Lane — Change Order 2" }))
+      .toBe("Change Order 2 — Tides Park Lane");
+  });
+
+  it("leaves a LEAD or OPPORTUNITY name byte for byte", () => {
+    // The picker mixes all three types. Only a deal can be a generated change-order child — a lead is a
+    // human-named leads row, and the server excludes opportunities from the `deal` type entirely.
+    expect(captureTargetDisplayName({ type: "lead", name: "Lobby — Change Order 1" }))
+      .toBe("Lobby — Change Order 1");
+    expect(captureTargetDisplayName({ type: "opportunity", name: "Lobby — Change Order 1" }))
+      .toBe("Lobby — Change Order 1");
+  });
+
+  it("obeys the DEAL branch's isChangeOrder flag over the name's shape", () => {
+    expect(captureTargetDisplayName({ type: "deal", name: "Lobby — Change Order 1", isChangeOrder: false }))
+      .toBe("Lobby — Change Order 1");
+    expect(captureTargetDisplayName({ type: "deal", name: "Tides — Change Order 2", isChangeOrder: true }))
+      .toBe("Change Order 2 — Tides");
+    // A LEAD is still never rewritten, flag or not.
+    expect(captureTargetDisplayName({ type: "lead", name: "Lobby — Change Order 1", isChangeOrder: true }))
+      .toBe("Lobby — Change Order 1");
+  });
+
+  it("REGRESSION: a selection that keeps the picker's flag suppresses a false-flagged relabel", () => {
+    // capture.tsx's onSelect used to store only { id, type, name }, dropping the flag the picker row had
+    // just used. Everything downstream — the target card, the /walk nav param, the AI-walk headline —
+    // then fell back to reading the name. This pins the shape the handler must preserve.
+    const picked = { id: "d1", type: "deal" as const, name: "Lobby — Change Order 1", isChangeOrder: false };
+    const stored = { id: picked.id, type: picked.type, name: picked.name, isChangeOrder: picked.isChangeOrder };
+    expect(captureTargetDisplayName(stored)).toBe("Lobby — Change Order 1");
+    // Dropping the flag (the old behaviour) silently changes what the user sees. Bound to a variable
+    // rather than written inline: the old handler stored a three-key object that really did carry
+    // `id`, and that is the shape under test. An inline literal would trip excess-property checking
+    // against the helper's `Pick<…, "type" | "name">` parameter, so deleting `id` to appease it would
+    // model a shape the bug never had.
+    const storedWithoutFlag = { id: picked.id, type: picked.type, name: picked.name };
+    expect(captureTargetDisplayName(storedWithoutFlag)).toBe("Change Order 1 — Lobby");
+  });
+
+  it("leaves an ordinary deal name alone", () => {
+    expect(captureTargetDisplayName({ type: "deal", name: "Tides Park Lane" })).toBe("Tides Park Lane");
   });
 });

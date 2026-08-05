@@ -41,12 +41,15 @@ export interface LeaderRow {
 }
 /** A deal Won today — canonical won_closed_date cohort + effective-won value, so it ties to Showcase/Region. */
 export interface WonDeal {
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   dealName: string;
   repName: string;
   value: number;
 }
 /** A non-terminal stage advance today (latest transition per deal). Excludes Won & Lost (both terminal). */
 export interface AdvancedMove {
+  dealIsChangeOrder?: boolean | null;
   dealName: string;
   repName: string;
   fromStage: string | null;
@@ -223,8 +226,8 @@ const WON_VALUE_SQL = `CASE WHEN COALESCE(d.on_hold, false) THEN 0 ELSE CASE WHE
  * "2 · $312K" header always reconciles to the named deals beneath it.
  */
 export async function readWonToday(client: QueryClient, schema: string, date: string): Promise<WonDeal[]> {
-  const { rows } = await client.query<{ deal_name: string | null; rep_name: string | null; value: string | number | null }>(
-    `SELECT d.name AS deal_name, u.display_name AS rep_name, (${WON_VALUE_SQL})::numeric AS value
+  const { rows } = await client.query<{ deal_name: string | null; deal_is_change_order?: boolean | null; rep_name: string | null; value: string | number | null }>(
+    `SELECT d.name AS deal_name, d.is_change_order AS deal_is_change_order, u.display_name AS rep_name, (${WON_VALUE_SQL})::numeric AS value
        FROM ${schema}.deals d
        JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
        LEFT JOIN public.users u ON u.id = d.assigned_rep_id
@@ -238,6 +241,7 @@ export async function readWonToday(client: QueryClient, schema: string, date: st
   );
   return rows.map((r) => ({
     dealName: r.deal_name ?? "(unnamed deal)",
+    dealIsChangeOrder: r.deal_is_change_order ?? undefined,
     repName: r.rep_name ?? "Unassigned",
     value: numberOr0(r.value),
   }));
@@ -262,12 +266,12 @@ export async function readWonToday(client: QueryClient, schema: string, date: st
  */
 export async function readAdvancedToday(client: QueryClient, schema: string, date: string): Promise<AdvancedMove[]> {
   const { rows } = await client.query<{
-    deal_name: string | null; rep_name: string | null; from_stage: string | null; to_stage: string | null;
+    deal_name: string | null; deal_is_change_order?: boolean | null; rep_name: string | null; from_stage: string | null; to_stage: string | null;
   }>(
-    `SELECT latest.deal_name, latest.rep_name, latest.from_stage, latest.to_stage
+    `SELECT latest.deal_name, latest.deal_is_change_order, latest.rep_name, latest.from_stage, latest.to_stage
        FROM (
          SELECT DISTINCT ON (sh.deal_id)
-                d.name AS deal_name, u.display_name AS rep_name,
+                d.name AS deal_name, d.is_change_order AS deal_is_change_order, u.display_name AS rep_name,
                 fs.name AS from_stage, ts.name AS to_stage,
                 COALESCE(ts.is_terminal, false) AS to_terminal,
                 COALESCE(sh.is_backward_move, false) AS is_backward,
@@ -292,6 +296,7 @@ export async function readAdvancedToday(client: QueryClient, schema: string, dat
   );
   return rows.map((r) => ({
     dealName: r.deal_name ?? "(unnamed deal)",
+    dealIsChangeOrder: r.deal_is_change_order ?? undefined,
     repName: r.rep_name ?? "Unassigned",
     fromStage: r.from_stage,
     toStage: r.to_stage,

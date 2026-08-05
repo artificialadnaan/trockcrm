@@ -146,6 +146,34 @@ describe("evidence drawer deal-number resolution (canonical, never the HubSpot i
   });
 });
 
+describe("evidence drawer change-order relabel is driven by the FLAG, not the name", () => {
+  // `deals.is_change_order` reaches the drawer as EvidenceRecord.dealIsChangeOrder and OUTRANKS the stored
+  // name. The DISCRIMINATING row is the deal a human named "Lobby — Change Order 1" with the flag FALSE: if
+  // the flag never reaches formatDealDisplayName the formatter parses the name instead and renders
+  // "Change Order 1 — Lobby". A true-only assertion passes even with the argument dropped entirely.
+  it("leaves a human-named 'X — Change Order N' alone and moves the label only for a real change order", () => {
+    mount("won", [
+      record({ id: "a", name: "Lobby — Change Order 1", dealNumber: "D-1", dealIsChangeOrder: false }),
+      record({ id: "b", name: "Tides Park Lane — Change Order 2", dealNumber: "D-2", dealIsChangeOrder: true }),
+    ]);
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("Lobby — Change Order 1");
+    expect(text).not.toContain("Change Order 1 — Lobby");
+    expect(text).toContain("Change Order 2 — Tides Park Lane");
+  });
+
+  it("leaves a LEAD named 'X — Change Order N' alone (the server answers false for leads)", () => {
+    // Lead rows render through this same name cell, so the leads query answers FALSE rather than leaving
+    // the flag unknown — otherwise the name-shape fallback relabels a lead nobody ever called a change order.
+    mount("leads", [
+      record({ id: "l1", name: "Lobby — Change Order 1", dealNumber: null, value: null, dealIsChangeOrder: false }),
+    ]);
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("Lobby — Change Order 1");
+    expect(text).not.toContain("Change Order 1 — Lobby");
+  });
+});
+
 describe("evidence drawer horizontal scroll + CSV export", () => {
   it("gives the table a min-width so wide column sets overflow (scroll) instead of compressing", () => {
     mount("projection", [record({ id: "a" })]);

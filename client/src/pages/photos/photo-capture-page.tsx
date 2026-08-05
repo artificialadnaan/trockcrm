@@ -14,6 +14,7 @@ import {
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/lib/auth";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import { buildFieldCaptureUrl } from "@/lib/field-app";
 import { searchPhotoUploadTargets, uploadFile, type PhotoUploadTarget } from "@/hooks/use-files";
 import { PHOTO_CATEGORY_OPTION_ITEMS } from "@trock-crm/shared/types";
@@ -31,6 +32,36 @@ interface QueuedPhoto {
   status: "pending" | "uploading" | "done" | "error";
   error?: string;
   progress: number;
+}
+
+/**
+ * The display name for an upload target, with the change-order relabel GATED on the target being a deal.
+ *
+ * These pickers mix all three types, and only a `deal` can be a generated change-order child: a `lead` is
+ * a leads-table row named by a human, and the server excludes opportunities from the `deal` type while a
+ * CO child is always Won. Rewriting every type would mangle a lead legitimately called
+ * "Lobby — Change Order 1". Display-only — the `dealName` search param still carries the stored name.
+ */
+function targetDisplayName(target: Pick<PhotoUploadTarget, "type" | "name" | "isChangeOrder">): string {
+  // The type gate stays — a lead a human named "Lobby — Change Order 1" must render as typed. Within the
+  // deal branch, `deals.is_change_order` (now returned by the photo-target search) is the AUTHORITY, so
+  // this no longer has to read the name's shape to decide.
+  return target.type === "deal" ? formatDealDisplayName(target.name, target.isChangeOrder) : target.name;
+}
+
+/**
+ * `deals.is_change_order` as it arrives on THIS page's URL — the exact inverse of the `"1"`/`"0"`
+ * encoding buildUnifiedCaptureHref emits below.
+ *
+ * Three states, and the middle one is the whole point: only the literal `"1"` and `"0"` are assertions.
+ * Absent, empty, or junk is UNKNOWN and must decode to `undefined`, never to `false` — `false` is
+ * authoritative downstream and suppresses the relabel outright, so folding "not stated" into it would
+ * turn a missing param into a confident wrong answer about a real change-order child.
+ */
+export function parseChangeOrderParam(value: string | null | undefined): boolean | undefined {
+  if (value === "1") return true;
+  if (value === "0") return false;
+  return undefined;
 }
 
 export function groupPhotoUploadTargets(targets: PhotoUploadTarget[]) {
@@ -55,6 +86,7 @@ export function buildUnifiedCaptureHref(
   fieldCaptureParams.delete("dealName");
   fieldCaptureParams.delete("leadName");
   fieldCaptureParams.delete("opportunityName");
+  fieldCaptureParams.delete("isChangeOrder");
 
   if (selectedTarget) {
     if (selectedTarget.type === "lead") {
@@ -69,6 +101,12 @@ export function buildUnifiedCaptureHref(
       fieldCaptureParams.set("dealName", selectedTarget.name);
     }
     fieldCaptureParams.set("targetName", selectedTarget.name);
+    // Hand the AUTHORITY across the app boundary too. Without it the field app receives only a name and
+    // has to re-derive "is this a change order?" from its shape — the one thing the flag exists to avoid.
+    // Omitted entirely when unknown: absent means "not stated", whereas "0" would assert NOT a CO.
+    if (selectedTarget.isChangeOrder != null) {
+      fieldCaptureParams.set("isChangeOrder", selectedTarget.isChangeOrder ? "1" : "0");
+    }
   }
 
   if (activeOfficeId && !fieldCaptureParams.get("officeId")) {
@@ -103,6 +141,12 @@ export function PhotoCapturePage() {
       id: dealId,
       type: "deal",
       name: searchParams.get("dealName") ?? "Selected deal",
+      // The URL-seeded target has no search result behind it, so the param IS the only source for the
+      // flag — and it has to be carried, not dropped. Dropped, `targetDisplayName` falls back to reading
+      // the name's shape and relabels an ordinary deal a human named "Lobby — Change Order 1", and
+      // buildUnifiedCaptureHref (which reads this target, not the raw params) hands the same blind spot
+      // to the field app. Unknown stays unknown: a missing param is `undefined`, never `false`.
+      isChangeOrder: parseChangeOrderParam(searchParams.get("isChangeOrder")),
       recordNumber: null,
       stageName: null,
       companyName: null,
@@ -307,7 +351,9 @@ export function PhotoCapturePage() {
               <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
-                    <p className="truncate text-sm font-semibold text-emerald-100">{selectedTarget.name}</p>
+                    {/* A change-order child deal is STORED "<Parent> — Change Order N" and these lines
+                        truncate. DISPLAY only -- the dealName search param below keeps the raw name. */}
+                    <p className="truncate text-sm font-semibold text-emerald-100">{targetDisplayName(selectedTarget)}</p>
                     <p className="mt-0.5 truncate text-xs text-emerald-200/70">
                       {selectedTarget.recordNumber ? `${selectedTarget.recordNumber} · ` : ""}
                       {selectedTarget.stageName ?? "No stage"}
@@ -354,7 +400,7 @@ export function PhotoCapturePage() {
                             }}
                             className="w-full px-3 py-2 text-left transition-colors hover:bg-white/10"
                           >
-                            <p className="truncate text-sm font-medium text-white">{target.name}</p>
+                            <p className="truncate text-sm font-medium text-white">{targetDisplayName(target)}</p>
                             <p className="mt-0.5 truncate text-xs text-white/45">
                               {target.recordNumber ? `${target.recordNumber} · ` : ""}
                               {target.stageName ?? "No stage"}
@@ -563,7 +609,7 @@ export function PhotoCapturePage() {
               </div>
               {selectedTarget && (
                 <p className="text-xs text-white/30 truncate max-w-[180px]">
-                  {selectedTarget.name}
+                  {targetDisplayName(selectedTarget)}
                 </p>
               )}
             </div>

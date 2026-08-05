@@ -230,6 +230,8 @@ export async function getPhotoFeed(
     uploadedBy: string;
     dealNumber: string | null;
     dealName: string | null;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder: boolean | null;
     uploaderName: string;
   }>;
   pagination: { page: number; limit: number; total: number; totalPages: number };
@@ -263,6 +265,7 @@ export async function getPhotoFeed(
       uploadedBy: files.uploadedBy,
       dealNumber: deals.dealNumber,
       dealName: deals.name,
+      dealIsChangeOrder: deals.isChangeOrder,
       uploaderName: sql<string>`COALESCE(${users.displayName}, 'Unknown')`.as("uploader_name"),
     })
     .from(files)
@@ -391,6 +394,8 @@ export interface ProjectPhotoStatsOptions extends PhotoFeedFilters {
 export interface ProjectPhotoStat {
   dealId: string;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder: boolean;
   dealNumber: string;
   /** Owner of the deal. Powers the "My Projects" pill, which had nothing to filter on before. */
   assignedRepId: string | null;
@@ -537,6 +542,7 @@ export async function getProjectPhotoStats(
     .select({
       dealId: files.dealId,
       dealName: deals.name,
+      dealIsChangeOrder: deals.isChangeOrder,
       dealNumber: deals.dealNumber,
       assignedRepId: deals.assignedRepId,
       propertyCity: deals.propertyCity,
@@ -551,7 +557,7 @@ export async function getProjectPhotoStats(
     .from(files)
     .innerJoin(deals, eq(deals.id, files.dealId))
     .where(where)
-    .groupBy(files.dealId, deals.name, deals.dealNumber, deals.assignedRepId, deals.propertyCity, deals.propertyState)
+    .groupBy(files.dealId, deals.name, deals.isChangeOrder, deals.dealNumber, deals.assignedRepId, deals.propertyCity, deals.propertyState)
     .having(havingCursor)
     // Tiebreaker is load-bearing, not cosmetic: on `most_photos` dozens of projects share a count, and
     // without a deterministic second key the cursor has no unique boundary to resume from.
@@ -628,6 +634,7 @@ export async function getProjectPhotoStats(
       return {
         dealId: row.dealId!,
         dealName: row.dealName,
+        dealIsChangeOrder: row.dealIsChangeOrder === true,
         dealNumber: row.dealNumber,
         assignedRepId: row.assignedRepId ?? null,
         propertyCity: row.propertyCity,
@@ -661,7 +668,7 @@ export async function getProjectPhotoStats(
 export async function getPhotoFeedFacets(tenantDb: TenantDb): Promise<{
   uploaders: Array<{ id: string; name: string }>;
   photoCategories: string[];
-  projects: Array<{ id: string; name: string }>;
+  projects: Array<{ id: string; name: string; isChangeOrder?: boolean | null }>;
 }> {
   // Literally the feed's own row predicate, with no filters applied — not a re-statement of it. An
   // option that cannot match a feed row (or a feed row whose uploader has no option) is exactly what
@@ -693,7 +700,7 @@ export async function getPhotoFeedFacets(tenantDb: TenantDb): Promise<{
   // could drop out of its own dropdown the moment they applied a date range — the select would render
   // blank while still sending its dealId to the feed, leaving no way to undo the selection.
   const projectRows = await tenantDb
-    .selectDistinct({ id: files.dealId, name: deals.name })
+    .selectDistinct({ id: files.dealId, name: deals.name, isChangeOrder: deals.isChangeOrder })
     .from(files)
     .innerJoin(deals, eq(deals.id, files.dealId))
     .where(projectScope);
@@ -707,7 +714,9 @@ export async function getPhotoFeedFacets(tenantDb: TenantDb): Promise<{
       .filter((value): value is string => Boolean(value))
       .sort(),
     projects: projectRows
-      .filter((row): row is { id: string; name: string } => Boolean(row.id))
+      // flatMap rather than a narrowing predicate: `id` is nullable on the row, and stating the
+      // predicate's shape with the extra column in it is more noise than the null-drop is worth.
+      .flatMap((row) => (row.id ? [{ id: row.id, name: row.name, isChangeOrder: row.isChangeOrder }] : []))
       .sort((left, right) => (left.name ?? "").localeCompare(right.name ?? "")),
   };
 }

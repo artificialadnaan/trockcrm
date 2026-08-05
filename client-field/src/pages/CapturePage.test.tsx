@@ -123,6 +123,25 @@ describe("CapturePage", () => {
     expect(input.hasAttribute("capture")).toBe(false);
   });
 
+  it("honours isChangeOrder from the capture URL over the name's shape", async () => {
+    // The CRM's "Open unified capture" link is an APP BOUNDARY. It knows deals.is_change_order; if it
+    // only hands over a name, this app has to re-derive the answer from the name's shape — exactly what
+    // the flag exists to prevent. "0" must SUPPRESS the relabel even though the name matches.
+    const node = renderPage("/capture?dealId=deal-1&targetName=Lobby%20%E2%80%94%20Change%20Order%201&isChangeOrder=0");
+    await vi.waitFor(() => expect(node.textContent).toContain("Lobby — Change Order 1"));
+    expect(node.textContent).not.toContain("Change Order 1 — Lobby");
+  });
+
+  it("relabels a URL-selected target the CRM flagged as a real change order", async () => {
+    const node = renderPage("/capture?dealId=deal-1&targetName=Tides%20%E2%80%94%20Change%20Order%202&isChangeOrder=1");
+    await vi.waitFor(() => expect(node.textContent).toContain("Change Order 2 — Tides"));
+  });
+
+  it("falls back to reading the name when the link omits the flag (older CRM build)", async () => {
+    const node = renderPage("/capture?dealId=deal-1&targetName=Tides%20%E2%80%94%20Change%20Order%203");
+    await vi.waitFor(() => expect(node.textContent).toContain("Change Order 3 — Tides"));
+  });
+
   it("keeps capture enabled while validating a URL-selected target", async () => {
     apiMock.mockImplementation((path: string) => {
       const url = new URL(path, "https://example.test");

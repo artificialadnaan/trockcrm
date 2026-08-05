@@ -2,7 +2,7 @@ import { useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { Search, FileText, User, Building2, Briefcase, Target, MapPin, Clock, X } from "lucide-react";
 import { useSearch, useRecentSearches, type SearchEntityType, type SearchResult } from "@/hooks/use-search";
-import { formatCurrencyCompact } from "@/lib/deal-utils";
+import { formatCurrencyCompact, formatDealDisplayName } from "@/lib/deal-utils";
 
 interface CommandPaletteProps {
   open: boolean;
@@ -77,8 +77,14 @@ function ResultItem({
     >
       <Icon className="h-4 w-4 text-gray-400 flex-shrink-0" />
       <div className="flex-1 min-w-0">
+        {/* A change-order child deal is STORED as "<Parent> — Change Order N" and this label truncates,
+            so the suffix is the first thing lost. Display-only re-order; the stored name is untouched.
+            GATED on entityType: this same row renders companies, contacts, leads, properties and FILES,
+            and a file legitimately named "Proposal — Change Order 1" is NOT a generated deal name. */}
         <div className="font-medium text-sm text-gray-900 truncate">
-          {result.primaryLabel}
+          {result.entityType === "deal"
+            ? formatDealDisplayName(result.primaryLabel, result.isChangeOrder)
+            : result.primaryLabel}
         </div>
         {(() => {
           // Deal-only assignedRepName is appended to the number/location meta line; falsy parts drop

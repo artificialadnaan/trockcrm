@@ -14,6 +14,11 @@ export {
 } from "@trock-crm/shared/types";
 export type { DealDisplayNumber } from "@trock-crm/shared/types";
 
+// The deal-NAME resolver lives beside it, for the same reason: a change-order child is stored as
+// "<Parent> — Change Order N" and every list truncates before the suffix. Display-only — the stored
+// name is unchanged. Re-exported here so deal render sites reach for one `@/lib/deal-utils` import.
+export { formatDealDisplayName } from "@trock-crm/shared/types";
+
 const VISIBLE_HUBSPOT_DEAL_NUMBER_PATTERN = /\bHS[-_ ]?\d{6,}\b/gi;
 
 export function sanitizeHubspotDealIdentifiers(

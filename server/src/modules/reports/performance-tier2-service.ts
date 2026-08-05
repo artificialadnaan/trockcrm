@@ -275,6 +275,7 @@ interface DirectorOfficeRow {
 interface AtRiskDealRow {
   deal_id: string;
   deal_name: string;
+  deal_is_change_order?: boolean | null;
   owner_name: string | null;
   stage_name: string | null;
   days_in_stage: string | number | null;
@@ -329,6 +330,8 @@ export interface DirectorScorecardReport {
   topAtRiskDeals: Array<{
     dealId: string;
     dealName: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
     ownerName: string;
     stageName: string;
     daysInStage: number;
@@ -378,6 +381,7 @@ export function buildDirectorScorecardFromRows(input: {
     topAtRiskDeals: input.atRiskRows.map((row) => ({
       dealId: row.deal_id,
       dealName: row.deal_name,
+      dealIsChangeOrder: row.deal_is_change_order ?? undefined,
       ownerName: row.owner_name || "Unassigned",
       stageName: row.stage_name || "Unassigned Stage",
       daysInStage: numberValue(row.days_in_stage),
@@ -431,6 +435,9 @@ function buildDirectorScorecardAtRiskRows(
     .map(({ row, atRisk }) => ({
       deal_id: row.deal_id,
       deal_name: row.deal_name,
+      // Carried through the narrowing re-map: dropping it here would strand the column the query
+      // selected one hand-off short of the mapper that needs it.
+      deal_is_change_order: row.deal_is_change_order,
       owner_name: row.owner_name,
       stage_name: row.stage_name,
       days_in_stage: atRisk.effectiveStageAgeDays,
@@ -594,7 +601,8 @@ export async function getDirectorScorecard(db: TenantDb, filters: PerformanceRep
         ORDER BY oo.office_name ASC
       `);
     const atRiskCandidates = await db.execute<AtRiskDealCandidateRow>(sql`
-        SELECT d.id AS deal_id, d.name AS deal_name, u.display_name AS owner_name, psc.name AS stage_name,
+        SELECT d.id AS deal_id, d.name AS deal_name, d.is_change_order AS deal_is_change_order,
+          u.display_name AS owner_name, psc.name AS stage_name,
           COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
           d.workflow_route,
           d.stage_entered_at,
@@ -846,6 +854,7 @@ interface ForecastMonthlyRow {
 interface ForecastAtRiskRow {
   deal_id: string;
   deal_name: string;
+  deal_is_change_order?: boolean | null;
   owner_name: string | null;
   stage_name: string | null;
   value: string | number | null;
@@ -864,6 +873,8 @@ export interface ForecastAccuracyReport {
   pipelineAtRisk: Array<{
     dealId: string;
     dealName: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
     ownerName: string;
     stageName: string;
     value: number;
@@ -897,6 +908,7 @@ export function buildForecastAccuracyFromRows(input: {
     pipelineAtRisk: input.atRiskRows.map((row) => ({
       dealId: row.deal_id,
       dealName: row.deal_name,
+      dealIsChangeOrder: row.deal_is_change_order ?? undefined,
       ownerName: row.owner_name || "Unassigned",
       stageName: row.stage_name || "Unassigned Stage",
       value: numberValue(row.value),
@@ -977,7 +989,8 @@ export async function getForecastAccuracyReport(db: TenantDb, filters: Performan
         ORDER BY m.month_start
       `);
     const atRisk = await db.execute(sql`
-        SELECT d.id AS deal_id, d.name AS deal_name, u.display_name AS owner_name, psc.name AS stage_name,
+        SELECT d.id AS deal_id, d.name AS deal_name, d.is_change_order AS deal_is_change_order,
+          u.display_name AS owner_name, psc.name AS stage_name,
           ${forecastValue} AS value,
           d.expected_close_date::text AS expected_close_date
         FROM deals d

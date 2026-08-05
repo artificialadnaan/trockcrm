@@ -13,6 +13,8 @@ export interface SearchResult {
   status?: DealLifecycle | null;
   deepLink: string;
   rank: number;
+  // `deals.is_change_order` (deal results only) — the AUTHORITY for the change-order name relabel.
+  isChangeOrder?: boolean | null;
   // Assigned rep display name + best-value deal amount (raw string). Deal results only.
   assignedRepName?: string | null;
   dealValue?: string | null;

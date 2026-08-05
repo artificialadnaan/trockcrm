@@ -78,6 +78,9 @@ describe("field projects service", () => {
       projects: [{
         id: "deal-1",
         name: "Roof Repair",
+        // `deals.is_change_order` — the AUTHORITY the field clients use to decide whether to move
+        // "Change Order N" to the front of the displayed name, instead of guessing from the name.
+        isChangeOrder: false,
         dealNumber: "TR-100",
         // No project_number on the row and a non-HubSpot deal_number → the display number falls back to it.
         projectNumber: "TR-100",
@@ -346,6 +349,8 @@ describe("field projects service", () => {
         id: "deal-1",
         type: "deal",
         name: "121 Preston Oaks",
+        // `deals.is_change_order` — the AUTHORITY the picker uses for the change-order display relabel.
+        isChangeOrder: false,
         recordNumber: "DFW-1-17426-aa",
         stageName: "Construction",
         companyName: "Preston Oaks HOA",

@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { ExportExcelButton } from "@/components/reports/export-excel-button";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import { useDealHref } from "@/hooks/use-office-scope";
 import type { ExcelSheet } from "@/lib/excel-export";
 export { sheetsFromReport } from "@/lib/excel-export";
@@ -150,14 +151,28 @@ export function ActiveWorkNote() {
   );
 }
 
-export function DealLink({ dealId, children }: { dealId: string; children: ReactNode }) {
+// Takes the deal NAME and its FLAG, rather than reformatting whatever child it is handed — same contract
+// change, and for the same reason, as the performance-report-ui DealLink: rewriting an arbitrary string
+// child applies the relabel invisibly with nowhere to pass the flag that decides it, so every caller got
+// the syntax guess. `dealIsChangeOrder` is REQUIRED so tsc refuses a caller that has not answered.
+// A CO child is STORED "<Parent> — Change Order N" and truncates to look like its parent; this is
+// display-only — exports and the stored name are untouched.
+export function DealLink({
+  dealId,
+  dealName,
+  dealIsChangeOrder,
+}: {
+  dealId: string;
+  dealName: string;
+  dealIsChangeOrder: boolean | null | undefined;
+}) {
   // Same rule and same helper as the performance-report-ui DealLink: ?officeId verbatim, or nothing.
   // These are two separately-defined components with the same name; keeping the href in one shared
   // hook is what stops them drifting apart again.
   const dealHref = useDealHref();
   return (
     <Link to={dealHref(dealId)} className="font-semibold text-slate-950 hover:text-brand-red hover:underline">
-      {children}
+      {formatDealDisplayName(dealName, dealIsChangeOrder)}
     </Link>
   );
 }

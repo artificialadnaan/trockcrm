@@ -13,7 +13,7 @@ beforeAll(async () => {
     CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, slug text, is_active_pipeline boolean DEFAULT true);
     CREATE TABLE users (id uuid PRIMARY KEY, display_name text);
     CREATE TABLE deals (
-      id uuid PRIMARY KEY, sales_source_user_id uuid, name text, project_number text, deal_number text, workflow_route text,
+      id uuid PRIMARY KEY, sales_source_user_id uuid, name text, is_change_order boolean NOT NULL DEFAULT false, project_number text, deal_number text, workflow_route text,
       stage_id uuid, is_bid_board_owned boolean DEFAULT false, is_active boolean DEFAULT true,
       is_test_data boolean DEFAULT false, assigned_rep_id uuid,
       rfp_approval_status text, rfp_approval_requested_at timestamptz, rfp_approval_requested_by uuid,
@@ -71,6 +71,20 @@ describe("getPendingRfpDeals", () => {
     // d002 is declined AND carries a lingering rfp_last_attempt_error="boom"; the reason must be the
     // status-specific decline note, not the stale send-failure error.
     expect(rows[1]).toMatchObject({ subState: "attention", reason: "missing docs" });
+  });
+
+  it("REGRESSION: surfaces deals.is_change_order, which the query selected and the mapper dropped", async () => {
+    // The SELECT has carried `deals.isChangeOrder` all along; the response mapper simply never copied it
+    // out. The client then had to guess from the name's shape — the exact thing the flag exists to
+    // prevent — on a queue where a change order and its parent read identically.
+    const rows = await getPendingRfpDeals(tdb);
+    const older = rows.find((r) => r.id === "00000000-0000-0000-0000-00000000d001");
+    expect(older?.isChangeOrder).toBe(false);
+    // ...and a real change order reports true rather than being inferred.
+    await tdb.execute(sql`UPDATE deals SET is_change_order = true WHERE id = '00000000-0000-0000-0000-00000000d001'`);
+    const after = await getPendingRfpDeals(tdb);
+    expect(after.find((r) => r.id === "00000000-0000-0000-0000-00000000d001")?.isChangeOrder).toBe(true);
+    await tdb.execute(sql`UPDATE deals SET is_change_order = false WHERE id = '00000000-0000-0000-0000-00000000d001'`);
   });
 
   it("surfaces a status-specific reason for conflict (rfp_conflict_reason) and send_failed (rfp_last_attempt_error)", async () => {

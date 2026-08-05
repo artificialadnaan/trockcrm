@@ -31,6 +31,8 @@ export interface QcScorecardRow {
   scorecardId: string;
   dealId: string;
   projectName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  isChangeOrder: boolean;
   projectNumber: string | null;
   regionName: string | null;
   superintendentName: string | null;
@@ -145,6 +147,7 @@ export async function getQcScorecardsReport(
       sc.id AS "scorecardId",
       sc.deal_id AS "dealId",
       d.name AS "projectName",
+      d.is_change_order AS "isChangeOrder",
       sc.project_number AS "projectNumber",
       rc.name AS "regionName",
       sc.superintendent_name AS "superintendentName",
@@ -180,6 +183,7 @@ export async function getQcScorecardsReport(
       scorecardId: String(r.scorecardId),
       dealId: String(r.dealId),
       projectName: r.projectName ?? "Untitled project",
+      isChangeOrder: r.isChangeOrder === true,
       projectNumber: r.projectNumber ?? null,
       regionName: r.regionName ?? null,
       superintendentName: r.superintendentName ?? null,

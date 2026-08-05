@@ -27,6 +27,7 @@ import {
 import { useLostReasons } from "@/hooks/use-pipeline-config";
 import { AlertTriangle, ArrowRight, ArrowLeft, Shield, Loader2 } from "lucide-react";
 import { getDealStageMetadata } from "@/hooks/use-deals";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import { toCanonicalDealStageSlug } from "@trock-crm/shared/types";
 
 // "Today" in the business timezone (America/Chicago), as YYYY-MM-DD. The expected-close-date cutoff
@@ -148,6 +149,8 @@ interface StageChangeDialogProps {
     name: string;
     stageId: string;
     workflowRoute?: "normal" | "service" | null;
+    /** `deals.is_change_order`. The sole caller passes a full DealDetail, so this is always present. */
+    isChangeOrder?: boolean | null;
   };
   targetStageId: string;
   officeId?: string | null;
@@ -356,7 +359,9 @@ export function StageChangeDialog({
             )}
           </DialogTitle>
           <DialogDescription>
-            {deal.name}
+            {/* A change-order child is STORED as "<Parent> — Change Order N"; lead with the label so the
+                dialog names the CO, not its parent. Display-only — the stage write is unaffected. */}
+            {formatDealDisplayName(deal.name, deal.isChangeOrder)}
           </DialogDescription>
         </DialogHeader>
 

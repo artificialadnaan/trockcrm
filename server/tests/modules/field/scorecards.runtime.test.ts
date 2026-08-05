@@ -14,6 +14,8 @@ import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 const DEAL = "11111111-1111-1111-1111-111111111111";
 const OTHER_DEAL = "22222222-2222-2222-2222-222222222222";
 const LOST_DEAL = "88888888-8888-8888-8888-888888888888";
+// A REAL change-order child: is_change_order = true, and the generated "<Parent> — Change Order N" name.
+const CO_DEAL = "77777777-7777-7777-7777-777777777777";
 const USER = "33333333-3333-3333-3333-333333333333";
 const FILE1 = "aaaaaaaa-0000-0000-0000-000000000001";
 const FILE2 = "aaaaaaaa-0000-0000-0000-000000000002";
@@ -74,7 +76,7 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE TABLE public.pipeline_stage_config (id uuid PRIMARY KEY, name text, slug text, is_terminal boolean DEFAULT false);
     CREATE TABLE deals (
-      id uuid PRIMARY KEY, name text, deal_number text, project_number text, stage_id uuid,
+      id uuid PRIMARY KEY, name text, is_change_order boolean NOT NULL DEFAULT false, deal_number text, project_number text, stage_id uuid,
       is_active boolean DEFAULT true, bid_board_stage_slug text,
       property_address text, property_city text, property_state text, property_zip text,
       last_activity_at timestamptz, updated_at timestamptz, created_at timestamptz DEFAULT now()
@@ -104,9 +106,11 @@ beforeAll(async () => {
       ('${STAGE_LOST}','Lost','lost',true);
     INSERT INTO deals (id, name, project_number, stage_id, is_active) VALUES
       ('${DEAL}','Maple St','DFW-10432','${STAGE_ACTIVE}', true),
+      ('${CO_DEAL}','Maple St — Change Order 2',NULL,'${STAGE_ACTIVE}', true),
       ('${OTHER_DEAL}','Oak Ave',NULL,'${STAGE_ACTIVE}', true),
       ('${RETRY_DEAL}','Retry Rd',NULL,'${STAGE_ACTIVE}', true),
       ('${LOST_DEAL}','Elm Rd',NULL,'${STAGE_LOST}', true);
+    UPDATE deals SET is_change_order = true WHERE id = '${CO_DEAL}';
     INSERT INTO files (id, deal_id, client_upload_id, uploaded_by, description, is_active, deleted_at) VALUES
       ('${FILE1}','${DEAL}','cu-1','${USER}','Slab crack', true, NULL),
       ('${FILE2}','${DEAL}','cu-2','${USER}','Rebar', true, NULL),
@@ -307,6 +311,36 @@ describe("reads", () => {
     expect(detail.items[0].sectionKey).toBe("planning_precon"); // canonical section order
     expect(detail.criticalDeficiencies).toEqual(["failed_inspection"]);
     expect(detail.actionItems).toEqual(["Fix it"]);
+  });
+
+  it("REGRESSION: a real change-order project's cards report isChangeOrder TRUE on every read path", async () => {
+    // toSummary used to serialize `row.isChangeOrder === true`. On the paths that resolve the project
+    // SEPARATELY — this list, the detail read, and the create/update responses — the row carries no flag
+    // at all, so that expression turned "unknown" into a hard `false`. On the client `false` is
+    // AUTHORITATIVE and suppresses the relabel, so a genuine change order kept its raw suffixed name on
+    // exactly the endpoints the app hits most. Absence must stay absent; a known true must survive.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      submission({ clientSubmissionId: csid(21), dealId: CO_DEAL }),
+    );
+    expect(scorecard.isChangeOrder).toBe(true);
+
+    const list = await listFieldScorecardsForProject(tdb, ACCESS, CO_DEAL);
+    expect(list.scorecards[0]?.projectName).toBe("Maple St — Change Order 2");
+    expect(list.scorecards[0]?.isChangeOrder).toBe(true);
+
+    const detail = await getFieldScorecardDetail(tdb, scorecard.id, ACCESS);
+    expect(detail.isChangeOrder).toBe(true);
+
+    const recent = await listRecentFieldScorecards(tdb, { limit: 10 });
+    expect(recent.scorecards.find((c) => c.id === scorecard.id)?.isChangeOrder).toBe(true);
+  });
+
+  it("a non-change-order project reports FALSE, not undefined, on the same paths", async () => {
+    const { scorecard } = await createFieldScorecard(tdb, submission({ clientSubmissionId: csid(22) }));
+    expect(scorecard.isChangeOrder).toBe(false);
+    const list = await listFieldScorecardsForProject(tdb, ACCESS, DEAL);
+    expect(list.scorecards.find((c) => c.id === scorecard.id)?.isChangeOrder).toBe(false);
   });
 
   it("recent list surfaces browsable-project cards and excludes Lost-project cards", async () => {

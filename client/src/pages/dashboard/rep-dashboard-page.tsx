@@ -6,6 +6,7 @@ import { useKeepPreviousData } from "@/hooks/use-keep-previous-data";
 import { ActivityRangeSelect } from "@/components/dashboard/activity-range-select";
 import { type ActivityRange } from "@trock-crm/shared/types";
 import { cn } from "@/lib/utils";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import { buttonVariants, Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -30,6 +31,8 @@ type RepDealsFilter = "active_pipeline" | "opportunities" | "bid_board";
 interface TopDealRow {
   id: string;
   name: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  isChangeOrder?: boolean | null;
   stage: string;
   stageVariant: StageVariant;
   days: number;
@@ -48,6 +51,8 @@ interface BlindSpot {
   id: string;
   type: "deal" | "lead";
   name: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  isChangeOrder?: boolean | null;
   ref: string;
   issue: string;
   hint: string;
@@ -147,6 +152,7 @@ function buildTopDeals(data: RepDashboardData, repName: string): TopDealRow[] {
   const bottlenecks = (data.downstreamBottlenecks ?? []).map((deal) => ({
     id: deal.dealId,
     name: deal.dealName,
+    isChangeOrder: deal.dealIsChangeOrder,
     stage: deal.stageName,
     stageVariant: stageVariant(deal.stageName, deal.daysInStage, deal.staleThresholdDays),
     days: deal.daysInStage,
@@ -160,6 +166,7 @@ function buildTopDeals(data: RepDashboardData, repName: string): TopDealRow[] {
     .map((deal) => ({
       id: deal.dealId,
       name: deal.dealName,
+      isChangeOrder: deal.dealIsChangeOrder,
       stage: deal.stageName,
       stageVariant: stageVariant(deal.stageName, 0, null),
       days: 0,
@@ -202,6 +209,7 @@ function buildBlindSpots(data: RepDashboardData): BlindSpot[] {
       id: deal.dealId,
       type: "deal" as const,
       name: deal.dealName,
+      isChangeOrder: deal.dealIsChangeOrder,
       ref: deal.regionClassification,
       issue: "Service stage is past SLA",
       hint: `${deal.daysInStage} days in ${deal.stageName}; SLA ${deal.staleThresholdDays} days`,
@@ -212,6 +220,7 @@ function buildBlindSpots(data: RepDashboardData): BlindSpot[] {
     id: lead.leadId,
     type: "lead" as const,
     name: lead.leadName,
+    isChangeOrder: undefined,
     ref: lead.locationLabel ?? lead.stageName,
     issue: "Lead has gone stale",
     hint: `${lead.daysInStage} days in ${lead.stageName}`,
@@ -359,7 +368,10 @@ function TopDealsTable({ deals, onOpen }: { deals: TopDealRow[]; onOpen: (id: st
                   {deal.initials}
                 </span>
                 <div className="min-w-0">
-                  <p className="truncate text-sm font-bold text-slate-950">{deal.name}</p>
+                  {/* A change-order child is STORED "<Parent> — Change Order N" and this row truncates;
+                      relabel at the RENDER site only — the buildTopDeals/buildBlindSpots mappings above
+                      keep the stored name. */}
+                  <p className="truncate text-sm font-bold text-slate-950">{formatDealDisplayName(deal.name, deal.isChangeOrder)}</p>
                   {deal.sla == null ? null : (
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">SLA {deal.sla}d</p>
                   )}
@@ -434,7 +446,11 @@ function AiBlindSpotsPanel({ items }: { items: BlindSpot[] }) {
             >
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
-                  <p className="truncate text-sm font-bold text-slate-950">{item.name}</p>
+                  {/* GATED on `type` — this list mixes stale DEALS and stale LEADS, and only a deal can
+                      be a generated change-order child. */}
+                  <p className="truncate text-sm font-bold text-slate-950">
+                    {item.type === "deal" ? formatDealDisplayName(item.name, item.isChangeOrder) : item.name}
+                  </p>
                   <span className="font-mono text-[10px] text-slate-400">{item.ref}</span>
                 </div>
                 <p className="mt-1 text-sm font-semibold text-slate-700">{item.issue}</p>

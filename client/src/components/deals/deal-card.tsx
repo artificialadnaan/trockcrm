@@ -6,6 +6,7 @@ import {
   bestEstimate,
   daysInStage,
   winProbabilityColor,
+  formatDealDisplayName,
   formatDealDisplayNumber,
 } from "@/lib/deal-utils";
 import { DealValue } from "@/components/deals/deal-value";
@@ -33,6 +34,9 @@ export function DealCard({ deal, isDragging }: DealCardProps) {
     : undefined;
 
   const days = daysInStage(deal.stageEnteredAt);
+  // A change-order child is STORED as "<Parent> — Change Order N", so this truncating title reads as its
+  // parent. Display-only reorder to "Change Order N — <Parent>"; the stored name is untouched.
+  const displayName = formatDealDisplayName(deal.name, deal.isChangeOrder);
 
   return (
     <Card
@@ -65,7 +69,7 @@ export function DealCard({ deal, isDragging }: DealCardProps) {
               className="text-sm font-semibold"
             />
           </div>
-          <p className="text-sm font-medium truncate" title={deal.name}>{deal.name}</p>
+          <p className="text-sm font-medium truncate" title={displayName}>{displayName}</p>
           <AtRiskBadge atRisk={deal.atRisk} compact className="mt-1" />
           <div className="flex items-center gap-2 mt-1.5 text-[11px] text-muted-foreground">
             <span className="flex items-center gap-0.5">

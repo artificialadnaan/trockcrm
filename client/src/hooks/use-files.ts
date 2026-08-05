@@ -89,6 +89,8 @@ export interface PhotoUploadTarget {
   id: string;
   type: "lead" | "opportunity" | "deal";
   name: string;
+  /** `deals.is_change_order` — deal/opportunity rows only; a lead can never be a change-order child. */
+  isChangeOrder?: boolean | null;
   recordNumber: string | null;
   stageName: string | null;
   companyName: string | null;

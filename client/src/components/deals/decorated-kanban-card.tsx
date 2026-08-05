@@ -1,6 +1,7 @@
 import { AlertCircle, Clock, GripVertical, MapPin } from "lucide-react";
 import { DealValue } from "@/components/deals/deal-value";
 import type { Deal } from "@/hooks/use-deals";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import { cn } from "@/lib/utils";
 import { getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
 import { isTerminalStage } from "@/lib/pipeline-terminal-filters";
@@ -53,6 +54,9 @@ export function DecoratedKanbanCard({
   onClick,
 }: DecoratedKanbanCardProps) {
   const displayNumber = getDealDisplayNumber(deal);
+  // A change-order child is STORED as "<Parent> — Change Order N", so a truncated card title reads as
+  // its parent. Display-only reorder to "Change Order N — <Parent>"; the stored name is untouched.
+  const displayName = formatDealDisplayName(deal.name, deal.isChangeOrder);
   const days = getEffectiveStageAgeDays(getEffectiveStageAgeDeal(deal));
   const slaDays = resolveKanbanSlaThresholdDays(stageSlug);
   const showSla = !isTerminalStage(stageSlug) && slaDays !== null;
@@ -75,8 +79,8 @@ export function DecoratedKanbanCard({
   // showing it). Appended after any billing alert; omitted when there is no description.
   const descriptionSuffix = description ? `. ${description}` : "";
   const accessibleName = billingAttentionRequired
-    ? `Open deal ${deal.name}: billing contact missing${descriptionSuffix}`
-    : `Open deal ${deal.name}${descriptionSuffix}`;
+    ? `Open deal ${displayName}: billing contact missing${descriptionSuffix}`
+    : `Open deal ${displayName}${descriptionSuffix}`;
 
   return (
     <button
@@ -128,7 +132,7 @@ export function DecoratedKanbanCard({
         <AtRiskBadge atRisk={effectivelyHeld ? null : deal.atRisk} compact />
         <ChangeOrderBadge isChangeOrder={deal.isChangeOrder} compact />
 
-        <p className="line-clamp-2 text-sm font-black leading-5 text-slate-950">{deal.name}</p>
+        <p className="line-clamp-2 text-sm font-black leading-5 text-slate-950">{displayName}</p>
 
         {description ? (
           <p
