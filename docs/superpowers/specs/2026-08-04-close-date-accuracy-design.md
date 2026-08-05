@@ -464,60 +464,41 @@ Two conventions govern this whole section, both defined once in §4 and referenc
   anchors (P₃₀, P_final) still use their own `p30_*` / `pfinal_*` state; resolution applies to *now* only,
   for the reason given in §4.1.
 
-Every deal in scope lands in exactly one bucket. **The list is derived, not asserted** — it is the
-partition of `D` declared in the canonical RELATIONS block (§4.0.5), with `D_open` expanded by its own
-tie-out and `D_cov` expanded by the four `cov_state` cases. The bucket→term table after the list is what
-makes that derivation checkable; the §7 audit inventory carries the mechanical check. This claim has been
-wrong twice — first missing `D_outside`, then missing `D_reopened ∩ D_open` — and both times because
-"exhaustive" was prose. Each bucket keys on a *population membership* test or on `cov_state` /
-`cov_prediction`; no bucket introduces a third way of asking "what date does this deal have".
+Every deal in scope lands in **exactly one** bucket. There is one table below and nothing else: the
+numbered prose list that used to sit beside it was a second hand-maintained copy of the same partition, and
+the third defect found on this list was an overlap that existed *only* in that copy — bucket 6's prose
+dropped the "not reopened" conjunct that its term, `machine_dated_n`'s SQL, and the RELATIONS tie-out all
+carry. A partition stated twice is a partition that disagrees with itself.
 
-1. **Landed** — Won or Lost with a usable outcome date in `[from, to]`, **and not a pre-CRM import**
-   (`D_landed`; bucket 10 takes precedence, §4.0.5). Contributes to hit rate and error statistics *if* it
-   also carried a usable rep prediction — `D_score`, defined in §4.2.
-2. **Overdue-open** — open, `cov_state = 'rep_prediction'`, `cov_prediction` earlier than business today. The
-   error is **right-censored**: at least `today − prediction` days, and it will only grow. Own columns
-   (`overdue_open_n`, `median_days_overdue`), **never** folded into the landed mean — doing so would let a
-   rep improve their average by leaving deals open — and never counted as hits.
-3. **Undated-open** — open, `cov_state ∈ {cleared, no_event}`. Not an error; a **coverage** failure.
-4. **Parked-open** — open, `cov_state = 'rep_prediction'`, `cov_prediction` more than 90 days out (§4.1). Not
-   yet judgeable *and* not covered: a date beyond the platform's own hold horizon forecasts nothing.
-5. **Live-open** — open, `cov_state = 'rep_prediction'`, `cov_prediction` between today and +90 days. Counted in
-   coverage favourably, excluded from error metrics until it lands.
-6. **Machine-dated open** — open, `cov_state = 'machine'`. Held out of the coverage rate entirely
-   (§4.1): the standing value is not the rep's, so it can neither credit nor charge them.
-7. **Terminal-no-date** — won or lost with no usable outcome date (`D_nodate`, §4.0.5). Not scoreable and
-   not open; surfaced as a diagnostic so the drop is visible rather than silent.
-8. **Out-of-period landed** — won or lost with a usable outcome date **outside** `[from, to]`, in either
-   direction, **and not a pre-CRM import** (`D_outside`; bucket 10 takes precedence, §4.0.5). Excluded
-   from every metric; counted by `out_of_period_landed_n`.
-9. **Reopened-open** — open today, and carrying an in-window landing that `D_landed` does not represent
-   (`D_reopened ∩ D_open`, §4.0.5). Held out of the coverage rate for the same reason as bucket 6 — the
-   deal's forecast obligation is not an ordinary one — and counted by `reopened_open_n`. It is the third
-   term of the `D_open` tie-out, and buckets 2–6 cannot absorb it: 2–5 are `D_cov` only, and 6 subtracts
-   `D_reopened` by construction.
-10. **Pre-CRM landed** — imported with its outcome already recorded, i.e. terminal with a usable outcome
-    date that falls **before the deal existed in the CRM** (`D_precrm`, §4.0.5). Excluded from every
-    metric including `landed_n`; counted by `precrm_landed_n`. Its forecast history was never imported
-    (§2.5(a)), so charging its rep a `no_prediction_n` would be charging them for records the CRM never
-    held.
+The **Predicate** column is normative and machine-readable; the prose explains it and never extends it.
+`class` is the deal's member of the `D` partition (RELATIONS, §4.0.5), `reopened` is
+`is_reopened_after_landing`, `cov` is the resolved `cov_state` (§4.1), and `when` places `cov_prediction`
+relative to business today: **`past`** (before today), **`live`** (today through
+`+ CLOSE_TARGET_HOLD_HORIZON_DAYS`), **`parked`** (beyond it) — three values, exhaustive and disjoint by
+construction, since every date is on exactly one side of two boundaries.
 
-**The derivation, one substitution per step, each citing the RELATIONS line it uses:**
+| # | Bucket | Predicate | Term (RELATIONS leaf) | What it means |
+|---|---|---|---|---|
+| 1 | **Landed** | `class=landed` | `D_landed` | Won or Lost with a usable outcome date in `[from, to]`. Contributes to hit rate and error statistics *if* it also carried a usable rep prediction — `D_score`, §4.2. Bucket 10 takes precedence, so a pre-CRM import is never landed. |
+| 2 | **Overdue-open** | `class=open, reopened=no, cov=rep_prediction, when=past` | `D_cov` | The error is **right-censored**: at least `today − prediction` days, and it will only grow. Own columns (`overdue_open_n`, `median_days_overdue`), **never** folded into the landed mean — that would let a rep improve their average by leaving deals open — and never counted as hits. |
+| 3 | **Undated-open** | `class=open, reopened=no, cov∈{cleared,no_event}` | `D_cov` | Not an error; a **coverage** failure. |
+| 4 | **Parked-open** | `class=open, reopened=no, cov=rep_prediction, when=parked` | `D_cov` | Not yet judgeable *and* not covered: a date beyond the platform's own hold horizon forecasts nothing (§4.1). |
+| 5 | **Live-open** | `class=open, reopened=no, cov=rep_prediction, when=live` | `D_cov` | Counted in coverage favourably, excluded from error metrics until it lands. |
+| 6 | **Machine-dated open** | `class=open, reopened=no, cov=machine` | `machine-dated-and-not-reopened` | Held out of the coverage rate entirely (§4.1): the standing value is not the rep's, so it can neither credit nor charge them. **`reopened=no` is load-bearing** — without it this bucket and bucket 9 both claim a reopened-open deal carrying a machine date, and §4.0.6's `D_open` tie-out double-counts it. `machine_dated_n`'s SQL has always carried the conjunct; only this row's prose lost it. |
+| 7 | **Terminal-no-date** | `class=nodate` | `D_nodate` | Won or lost with no usable outcome date. Not scoreable and not open; surfaced as a diagnostic so the drop is visible rather than silent. |
+| 8 | **Out-of-period landed** | `class=outside` | `D_outside` | Won or lost with a usable outcome date **outside** `[from, to]`, in either direction. Excluded from every metric; counted by `out_of_period_landed_n`. Bucket 10 takes precedence. |
+| 9 | **Reopened-open** | `class=open, reopened=yes` | `D_reopened-and-open` | Open today, carrying an in-window landing that `D_landed` does not represent. Held out of the coverage rate for the same reason as bucket 6, and counted by `reopened_open_n`. It claims the reopened-open deal **whatever its `cov` is**, which is why bucket 6 must exclude it rather than the other way round — the precedence is `reopened` first, matching §4.1's SQL and the RELATIONS tie-out. |
+| 10 | **Pre-CRM landed** | `class=precrm` | `D_precrm` | Imported with its outcome already recorded: terminal with a usable outcome date falling **before the deal existed in the CRM** (§2.5(a)). Excluded from every metric including `landed_n`; counted by `precrm_landed_n`. Its forecast history was never imported, so charging its rep a `no_prediction_n` would charge them for records the CRM never held. |
 
-| Bucket | Term | From |
-|---|---|---|
-| 1 | `D_landed` | the partition of `D` |
-| 7 | `D_nodate` | the partition of `D` |
-| 8 | `D_outside` | the partition of `D` |
-| 10 | `D_precrm` | the partition of `D` |
-| 2–5 | `D_cov` | the `D_open` tie-out, then the four `cov_state` cases (§4.1) |
-| 6 | `machine-dated-and-not-reopened` | the `D_open` tie-out |
-| 9 | `D_reopened-and-open` | the `D_open` tie-out |
-
-Expanding `D` by those two RELATIONS lines yields exactly the seven terms in the middle column, and buckets
-2–5 exhaust `cov_state`'s four values (§4.1) — so the list is exhaustive **because** the table reconstructs
-`D`, not because anyone counted. Add a population to RELATIONS without a bucket, or a bucket whose term is
-not a RELATIONS leaf, and the §7 bucket-partition check fails.
+**Why this is exhaustive and non-overlapping, and how that is checked.** The §7 **bucket-partition** check
+enumerates every world the atom domains admit — `class` from the RELATIONS partition line, `cov` from
+§4.0.3's four-value state enum, `reopened` constrained by RELATIONS' `D_reopened subset of (D_open union
+D_outside)`, `when` from the three values above — and asserts that **exactly one** bucket's predicate
+matches each. It also asserts the *Term* column's distinct values equal the leaf expansion of `D` through
+RELATIONS. So both halves of "exactly one bucket" are mechanical: coverage and disjointness from the
+predicates a human actually reads, and the tie to the population algebra from the terms. Drop a conjunct
+and the check reports the overlapping pair; add a population to RELATIONS without a bucket and it reports
+the uncovered world.
 
 Buckets 2 and 3 together are §4.1's `at_risk_n`, and correspond to the `stale_dated` and `no_date` reasons
 produced by `server/src/modules/reports/at-risk-service.ts:63`. They do **not** equal that watchlist's
@@ -1588,7 +1569,7 @@ lines of P₃₀ date arithmetic it never scanned.
 | Audit | What it checks | Inputs derived by | Status · **does NOT cover** |
 |---|---|---|---|
 | Three-table agreement (§4.0.6 / v1 / §6.0) | every metric appears in each table | **extraction** — backticked identifiers per table, set-differenced | mechanical · misses names not in backticks; says nothing about whether a row's *content* is right |
-| §4.0.7 **ordering** rule | no block consumes a name produced below it | **extraction** — walk rows top-down, accumulate produced names | mechanical · misses names absent from the table entirely (that is the completeness rule's job) |
+| §4.0.7 **ordering** rule | no block consumes a name produced below it, **and the SQL fences define the CTEs in an order the table's chain permits** | **extraction** — walk rows top-down accumulating produced names; then walk the `name AS (` definitions in fence order and assert none appears after a CTE the table places below it | mechanical · misses names absent from the table entirely (that is the completeness rule's job). The second half was added this round: until then the rule validated the *table's* row order and never looked at the order the fences actually define the CTEs in, so a correctly-documented chain that could not run was passable. Known-positive: swap the `deal_facts` and `outcomes` definitions inside the §4.0.5 fence and it reports the inversion |
 | §4.0.7 **contents** rule | a row's *Produces* matches what its SQL projects | **extraction** — `AS <name>` / `<name> =` per fence, diffed | mechanical · cannot read prose-shaped blocks (`E`, Metrics); flags convention-derived aliases (`state_at`) as expected mismatches |
 | §4.0.7 **completeness** rule | every name a block's SQL references appears in its *Consumes* | **extraction** — referenced identifiers per fence, diffed | mechanical · defeated by glob entries. Three standing artifacts, all benign and all named so a non-zero count is still readable: `pnow` (a LATERAL alias), `in_d_cov` (the §4.1 fence mixes a CTE with metric expressions, so its block boundary is approximate), and `public` (a schema qualifier, not a column). The count moves as blocks split — it was 2 before `deal_facts` was carved out — so read the *names*, not the number |
 | Duplicate definitions | no scalar is defined twice | **extraction** — collect `<name> =` across fences, **following multi-line bodies until parens balance**, compare | mechanical · until round 18 it required the body to start on the same line as `=`, so **every multi-line definition was invisible**; still misses definitions split between prose and SQL, and two names for one concept |
@@ -1600,7 +1581,7 @@ lines of P₃₀ date arithmetic it never scanned.
 | §4.0.7 contents for `E` and Metrics | those two rows' *Produces* lists | not derivable — prose-shaped SQL | **unverifiable** |
 | Population **names** (§4.0.5) | every `D_*` used anywhere has a table row, and every declared row is referenced by a fence or a table | **extraction** — name sets differenced across the normative body | mechanical · checks NAMES only; a row whose set-notation definition drifts from its SQL predicate while the name stays put is invisible |
 | Chain **block set** | the table's block names equal the CTEs the SQL defines — none missing, none invented, none duplicated | **extraction** — `name AS (` per fence vs the first backticked name per table row, set-compared; rows are skipped **only** on the literal `(not a CTE)` marker | mechanical · **known-positive validated against `f4d139879`**, where it reports the missing `deal_facts`, the duplicated `outcomes` and the non-CTE `state_at`; **second known-positive**: delete any one `(not a CTE)` marker from the current table and the check reports that row. Non-CTE rows are *named* but nothing is compared for them, so a rename **there** is still unseen. Until this round the skip keyed on two proxies rather than the marker — see the block-set rule above |
-| §2.4 **bucket partition** | the §2.4 bucket→term table's distinct terms equal the leaf expansion of `D` through the RELATIONS block | **extraction** — expand `D` by every `X = A + B + …` line in RELATIONS until no term expands further, diff against the bucket table's *Term* column | mechanical *(added this round)* · **known-positives, both run**: delete the bucket 9 row and it reports `D_reopened-and-open` has no bucket; add a population to the RELATIONS partition line and it reports that one. The table postdates the commits where §2.4 was actually wrong, so the failing input is constructed rather than historical — stated plainly because a known-positive you cannot run is not one. Compares SET NAMES only: a bucket whose *prose* drifts from its term is invisible, and the four `cov_state` cases under `D_cov` rest on §4.1's enum-exhaustiveness argument, not on this check |
+| §2.4 **bucket partition** | every deal lands in **exactly one** §2.4 bucket, and the buckets' terms reconstruct `D` | **extraction** — parse each bucket's *Predicate* cell; enumerate every world the atom domains admit (`class` from the RELATIONS partition line, `cov` from §4.0.3's state enum, `reopened` bounded by RELATIONS' `D_reopened subset of …`, `when` from §2.4's three declared values); assert exactly one bucket matches each. Separately, expand `D` through RELATIONS and diff the leaves against the *Term* column | mechanical · **known-positives, all four run**: drop `reopened=no` from bucket 6 and it reports `buckets ['6','9'] OVERLAP on [class=open, reopened=yes, cov=machine]` — the exact defect reported against `83b99aae4`; drop `when=parked` from bucket 4 and it reports two overlaps; delete bucket 3 and it reports the two uncovered `cov` worlds; add a population to RELATIONS and it reports both the uncovered world and the missing leaf. The predicate column postdates the commits where §2.4 was wrong, so the failing inputs are constructed rather than historical — said plainly, because a known-positive you cannot run is not one. **It reads the predicates a human implements from**, which the earlier term-only version did not: 17 worlds, 10 buckets. What it does not cover: whether a bucket's *prose* agrees with its own predicate — the predicate is normative and the prose explains it, so a wrong explanation beside a right predicate is invisible |
 | **Convention audit coverage** (§7) | every numbered convention has a row in the convention audit table | **extraction** — convention numbers from the ordered list vs the leading integer of each audit row | mechanical *(added this round)* · **known-positive validated against `de593c375`**, where it reports conventions **18 and 19** as having no audit row — the exact drift this check exists to stop — and against `3fcf449f7`, where it reports 15. Checks that a row EXISTS, never that its verdict is true: a row saying "Obeyed" about a violated convention passes |
 | SELECT-list alias scope | no expression references a name its own SELECT list defines | **extraction** — per fence, split each SELECT at its depth-0 `FROM`, diff aliases against references | mechanical *(added this round)* · **known-positive validated against `d5bf7efb9`**, where it reports the three real cases; correlated subqueries legitimately referencing an outer column are not distinguished, so a hit needs a human look |
 | Per-metric population agreement | the audit table and the v1 table cite the same set for each metric | **extraction** — population column of both tables, keyed by metric, compared | mechanical *(added this round)* · compares SET NAMES; a row naming the same set with a different predicate, or citing none, is invisible |
@@ -2701,11 +2682,13 @@ and §4.3 now says why.
 | # | Was | Now |
 |---|---|---|
 | 1 | The block-set rule said "rows that are not CTEs are labelled as such" while only `state_at` carried a label | The extractor was skipping on two proxies instead: **a Block cell with no backticks** (Blocks A and B, Metrics) and **the word "unverifiable"** (`E`), which is the *contents* rule's label for prose-shaped SQL and says nothing about CTE-ness. All four rows now carry `(not a CTE)`, the extractor skips on that marker and nothing else, and a row with neither a marker nor a backticked name is an error rather than a silent skip. Verified by removing each of the five markers in turn: every one is reported. |
-| 2 | §2.4's bucket list claimed exhaustiveness and omitted `D_reopened ∩ D_open` | The second such omission in two rounds — `D_outside` was the first. Patching bucket-by-bucket was the defect: the claim was prose. The list is now *derived* from RELATIONS via a bucket→term table, and the **bucket-partition check** fails if the terms stop reconstructing `D`. |
+| 2 | §2.4's bucket list claimed exhaustiveness and omitted `D_reopened ∩ D_open` | The second such omission in two rounds — `D_outside` was the first. Patching bucket-by-bucket was the defect: the claim was prose. Fixed by deriving a bucket→term table from RELATIONS and checking it — **which was not enough, and finding 7 below is the consequence.** |
 | 3 | §2.5(a) stated the pre-CRM import rule in bold and nothing implemented it | `D_landed` counted imported pre-CRM outcomes regardless, charging reps `landed_n` **and** `no_prediction_n` for deals whose forecast history was never imported. Worse, the rule as worded ("only if it has at least one non-HubSpot prediction before its outcome date") would have deleted `no_prediction_n` and broken invariant 2 if implemented literally. Narrowed to the pre-CRM case and given a construct: `D_precrm`, a fifth partition member with precedence over `D_landed` and `D_outside`. |
 | 4 | Both reopen tests read `deal_stage_history` only | A Bid Board mirror-only land-and-reopen writes no history row at all (`bidboard-mirror-service.ts:383`, `:537` — verified in the repo, not assumed), so exactly the BB-owned population §2.5(c) includes is invisible to `D_reopened` and `has_reopen_evidence`. There is no mirror stage history to read, so the slice is stated as **unsupported** with its blast radius named, and mirror stage history is a §7 follow-up. |
 | 5 | The convention audit table drifted silently every time a convention was added | Its own rows record 18 and 19 being "omitted from this table until round 18", with nothing that would have said so. The **convention audit coverage** check diffs the numbered list against the table. |
 | 6 | Block B's prose said "the `COALESCE`s below" | Only one exists. `count(*) FILTER` over an unmatched LEFT JOIN row returns 0, not NULL, so it needs none — and writing one anyway would hide the fact that the `D_book` anchoring, not the coalescing, is what makes the zero-event case correct. |
+| 7 | Bucket 6 read "open, `cov_state = 'machine'`" — no reopened exclusion — so it and bucket 9 both claimed a reopened-open deal carrying a machine date | **The third finding on this list, and the first structural one.** Fixing #2 had left *two* copies of the partition: a bucket→term table, which the new check read, and the numbered prose list, which nothing compared against anything — so the overlap lived in the copy an implementer actually follows. The two are now **one table** with a normative, machine-readable *Predicate* column, and the check enumerates all 17 worlds the atom domains admit and asserts exactly one bucket matches each. Coverage *and* disjointness are now mechanical, from the artifact a human reads. |
+| 8 | The ordering rule never looked at the order the SQL fences define the CTEs in | It validated the table's row order only, so a chain documented in a runnable order but *written* in an unrunnable one passed. Extended to walk the fences. |
 
 **Two findings were refuted rather than fixed**, both re-reported against the current tip after being fixed
 in an earlier commit: that the landing half of the reopen test does not require a non-terminal
@@ -3016,10 +2999,26 @@ reads as settled and produces a wrong implementation with no signal. The test fo
 answer is "nothing", either the rule gets a check that can fail, or the population is changed so violating
 it is impossible, or the rule is demoted to non-normative guidance so nobody implements against it.
 
+**The sharper half arrived when the round's own fix reintroduced the defect one layer over.** §2.4's
+exhaustiveness claim was closed by deriving a bucket→term table and checking it — and the numbered prose
+list was left standing beside it as a second, unchecked copy of the same partition. The next finding landed
+in the copy nobody was checking, which is where it was always going to land: given two statements of one
+fact and a check pointed at one of them, the defect appears in the other. So the question a new check has
+to answer is not "is this structure internally consistent?" but **"what artifact does this read, and is it
+the artifact someone implements from?"** The same question, asked of every other check in the inventory,
+found that the ordering rule had never read the SQL fences' definition order — the thing that decides
+whether the query runs — only the table's row order.
+
+The general rule, and it is cheap: **do not add a check beside a duplicate; delete the duplicate.** One
+table with a normative predicate column beats two artifacts and a checker, because there is nothing left to
+drift. Where a duplicate genuinely has to survive, the check must read the human-facing copy, not the
+derived one.
+
 The same standard turned inward finished the round's real work. Round 19 established the known-positive;
 round 21 makes it universal: **every check was run against a deliberately broken copy of the current
-document** — a marker deleted, a bucket row removed, a `::numeric` dropped, a constant hardcoded, an alias
-self-referenced. Sixteen of the seventeen produced an error. The seventeenth, the population-change
+document** — a marker deleted, a bucket predicate weakened, a `::numeric` dropped, a constant hardcoded, an
+alias self-referenced, two CTE definitions swapped. Sixteen of the seventeen produced an error, across 25
+mutations. The seventeenth, the population-change
 enumerator, produced none — correctly, because it enumerates sites and does not judge them, which is what
 its inventory row already says. That is the difference between a check that is honestly non-failing and one
 that is accidentally so, and it is only visible if you try to break it. The block-set check had passed
