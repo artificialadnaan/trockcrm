@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  PORTFOLIO_OFF_BOARD_STAGE_ALIASES,
   PORTFOLIO_PROJECT_BOARD_STAGES,
   PORTFOLIO_PROJECT_OFF_BOARD_STAGES,
+  bareNormalizePortfolioProjectStage,
   isPortfolioProjectBoardRelevantStage,
   isPortfolioProjectBoardStage,
   isPortfolioProjectOffBoardStage,
@@ -138,6 +140,96 @@ describe("stages nobody anticipated", () => {
     for (const stage of PORTFOLIO_PROJECT_OFF_BOARD_STAGES) {
       expect(isPortfolioProjectBoardRelevantStage(stage)).toBe(false);
       expect(isPortfolioProjectBoardStage(stage)).toBe(false);
+    }
+  });
+});
+
+/**
+ * SLASH SPACING — the shipped defect.
+ *
+ * The normalizer absorbed hyphen spacing ("Pre-Construction" / "Pre - Construction" / "Pre Construction"
+ * are one stage) but not SLASH spacing, and the alias map's bare legacy key is written WITHOUT spaces.
+ * So "Lost / Cancelled" matched nothing, and `isPortfolioProjectBoardRelevantStage` fails OPEN by
+ * design — unrecognised means "surface it anyway", never "exclude it". A project deliberately parked in
+ * a dead Procore bucket was therefore ingested by the seed AND the webhook relay and shown on the board
+ * under "Other / No Column", presented as live work. Measured on the code that shipped in PR #1040:
+ *
+ *   "Lost / Cancelled"   bare="lost / cancelled"  norm="lost / cancelled"        boardRelevant=TRUE
+ *   "Lost  /  Cancelled" bare="lost / cancelled"  norm="lost / cancelled"        boardRelevant=TRUE
+ *   "Lost/Cancelled"     bare="lost/cancelled"    norm="lost/cancelled (legacy)" boardRelevant=false
+ */
+describe("legacy Lost/Cancelled bucket, whatever the slash spacing", () => {
+  const SPACED_SPELLINGS = [
+    "Lost / Cancelled",
+    "Lost  /  Cancelled", // doubled spaces: the bare normalizer collapses them, the lookup must not care
+    "Lost /Cancelled",    // one-sided
+    "Lost/ Cancelled",    // one-sided, the other way
+    "LOST / CANCELLED",
+    "  Lost / Cancelled  ",
+    "Lost\t/\tCancelled",
+    "Lost_/_Cancelled",   // underscores become spaces before the slash is compacted
+    "Lost / Cancelled (Legacy)",
+    "Lost  /  Cancelled  (Legacy)",
+  ];
+
+  it.each(SPACED_SPELLINGS)("%j is off-board and NOT ingested", (raw) => {
+    expect(normalizePortfolioProjectStage(raw)).toBe("lost/cancelled (legacy)");
+    expect(isPortfolioProjectOffBoardStage(raw)).toBe(true);
+    expect(isPortfolioProjectBoardRelevantStage(raw)).toBe(false);
+    expect(isPortfolioProjectBoardStage(raw)).toBe(false);
+  });
+
+  /**
+   * The spellings that ALREADY worked before the fix, pinned so a later "simplification" of the lookup
+   * chain cannot trade one class of failure for another. Every one of these is a real Procore string or
+   * a documented alias key.
+   */
+  it.each([
+    ["Lost/Cancelled", "lost/cancelled (legacy)"],
+    ["Lost/Cancelled (Legacy)", "lost/cancelled (legacy)"],
+    ["LOST/CANCELLED (LEGACY)", "lost/cancelled (legacy)"],
+    ["Hold", "hold (legacy)"],
+    ["Hold (LEGACY)", "hold (legacy)"],
+    ["  HOLD  ", "hold (legacy)"],
+  ])("%j still normalizes to %j and stays off-board", (raw, expected) => {
+    expect(normalizePortfolioProjectStage(raw)).toBe(expected);
+    expect(isPortfolioProjectBoardRelevantStage(raw)).toBe(false);
+  });
+
+  it("leaves the BARE normalized form untouched, so persisted idempotency keys do not move", () => {
+    // `bareNormalizePortfolioProjectStage` feeds `legacyEventKeysForPayload`, whose output is STORED on
+    // relayed stage events. Compacting the slash there instead of at lookup time would have re-keyed
+    // every historical event and re-delivered them. The fix therefore lives in the lookup chain only.
+    expect(bareNormalizePortfolioProjectStage("Lost / Cancelled")).toBe("lost / cancelled");
+    expect(bareNormalizePortfolioProjectStage("Lost  /  Cancelled")).toBe("lost / cancelled");
+    expect(bareNormalizePortfolioProjectStage("Lost/Cancelled")).toBe("lost/cancelled");
+  });
+
+  it("adds no alias key, so the derived off-board alias list migration 0216 is pinned against is unchanged", () => {
+    // The one-line fix — a 'lost / cancelled' entry in STAGE_ALIASES — was rejected precisely here.
+    // PORTFOLIO_OFF_BOARD_STAGE_ALIASES is derived from that map and pinned by a drift test against
+    // migration 0216, an ALREADY-APPLIED file the runner will never re-execute. Adding a key would
+    // break that test against a file that can no longer be corrected.
+    expect([...PORTFOLIO_OFF_BOARD_STAGE_ALIASES]).toEqual([
+      "hold",
+      "hold (legacy)",
+      "lost / cancelled (legacy)",
+      "lost/cancelled",
+      "lost/cancelled (legacy)",
+    ]);
+  });
+
+  it("cannot move an unrecognised slash stage ONTO the board", () => {
+    // The compact-slash lookup widens matching toward keys that already exist, and no BOARD alias key
+    // contains a slash — so the only verdict it can change is relevant -> off-board. Migration 0217
+    // relies on that: it only ever flips the flag true -> false.
+    for (const stage of ["Design / Build", "Service / Warranty", "Won / Signed"]) {
+      expect(isPortfolioProjectBoardStage(stage)).toBe(false);
+      expect(isPortfolioProjectOffBoardStage(stage)).toBe(false);
+      expect(isPortfolioProjectBoardRelevantStage(stage)).toBe(true);
+    }
+    for (const stage of PORTFOLIO_PROJECT_BOARD_STAGES) {
+      expect(stage).not.toContain("/");
     }
   });
 });

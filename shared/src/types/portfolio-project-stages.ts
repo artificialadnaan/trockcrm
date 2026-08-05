@@ -125,6 +125,10 @@ const STAGE_ALIASES: Record<string, PortfolioProjectBoardStage | PortfolioProjec
   "hold": "hold (legacy)",
   "lost/cancelled (legacy)": "lost/cancelled (legacy)",
   "lost / cancelled (legacy)": "lost/cancelled (legacy)",
+  // The bare bucket. Spaced spellings ("Lost / Cancelled", "Lost  /  Cancelled") reach this key
+  // through the compact-slash lookup in `normalizePortfolioProjectStage`, so they are NOT listed
+  // here — enumerating spacings is what this map is trying to avoid, and every key added here also
+  // lands in the derived `PORTFOLIO_OFF_BOARD_STAGE_ALIASES` that migration 0216 is pinned against.
   "lost/cancelled": "lost/cancelled (legacy)",
 };
 
@@ -162,15 +166,40 @@ export function bareNormalizePortfolioProjectStage(stage: string | null | undefi
     .replace(/\s+/g, " ");
 }
 
+/**
+ * The alias lookup, over the bare form plus punctuation-spacing VARIANTS of it.
+ *
+ * The variants exist because Procore's stage text is typed by humans and its spacing around
+ * punctuation is not stable: "Pre-Construction", "Pre - Construction" and "Pre Construction"
+ * are the same stage. `bareNormalizePortfolioProjectStage` deliberately does NOT collapse
+ * punctuation spacing — its output is persisted (idempotency keys), so it has to stay fixed —
+ * which is why the re-spacing happens here, on lookup, instead.
+ *
+ * `compactSlash` is the SLASH counterpart of `compactHyphen`, and its absence was a shipped bug:
+ * "Lost / Cancelled" is the same dead Procore bucket as "Lost/Cancelled", but with no slash
+ * variant it matched no alias, and `isPortfolioProjectBoardRelevantStage` fails OPEN — so a
+ * project deliberately parked in a legacy bucket was ingested by the seed and the relay and
+ * surfaced in the board's "Other / No Column". Compacting rather than enumerating spellings
+ * closes the whole class (any spacing, including doubled) WITHOUT touching STAGE_ALIASES —
+ * which matters: `PORTFOLIO_OFF_BOARD_STAGE_ALIASES` is derived from that map and pinned by a
+ * drift test against migration 0216, a file that has already run and can no longer be edited.
+ *
+ * The variants can only ever widen the match toward an EXISTING key, never invent a new stage,
+ * and no board alias key contains a slash — so `compactSlash` can only resolve to the two
+ * `lost/cancelled` keys. It is therefore incapable of moving a stage ONTO the board; the only
+ * reachable change of verdict is board-relevant -> off-board. Migration 0217 relies on that.
+ */
 export function normalizePortfolioProjectStage(stage: string | null | undefined): string {
   const normalized = bareNormalizePortfolioProjectStage(stage);
 
   const hyphenAsSpace = normalized.replace(/\s*-\s*/g, " ").replace(/\s+/g, " ");
   const compactHyphen = normalized.replace(/\s*-\s*/g, "-");
+  const compactSlash = normalized.replace(/\s*\/\s*/g, "/");
 
   return STAGE_ALIASES[normalized]
     ?? STAGE_ALIASES[hyphenAsSpace]
     ?? STAGE_ALIASES[compactHyphen]
+    ?? STAGE_ALIASES[compactSlash]
     ?? normalized;
 }
 
