@@ -80,7 +80,13 @@ beforeEach(async () => {
     VALUES ('m1', 'conv-assign-1', 'inbound', 'casey@example.com', '{}', ${CONTACT},
             'unassigned', 'multiple_candidate_deals', ${USER}, now())
   `);
-}, 30000); // PGlite cold-start can exceed the default 10s under parallel runtime suites
+// 60000, not the config-wide 30000: this hook boots a PGlite instance, and the first one in a worker
+// compiles the Postgres WASM module. Beside the detector and thread-binding suites on a 4-worker pool
+// that cold start has exceeded the 30s budget on its own, failing setup before the assertion ever ran.
+//
+// There is exactly ONE case in this file, so `beforeEach` already costs what `beforeAll` would — the
+// extra headroom buys nothing back except a suite that doesn't go red on scheduler latency.
+}, 60000);
 
 afterEach(async () => {
   await pg.close();

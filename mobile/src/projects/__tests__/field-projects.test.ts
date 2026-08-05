@@ -28,6 +28,11 @@ function fieldProject(id: string, overrides: Partial<FieldProject> = {}): FieldP
     dealNumber: id,
     projectNumber: id,
     name: id,
+    // Not a hole filled to satisfy the compiler: every field-project row is built by
+    // mapFieldProject (server/src/modules/field/projects-service.ts), which coerces
+    // `row.is_change_order === true` — so the wire value for a plainly-named project like this one
+    // IS `false`. A test that needs a change-order row passes `isChangeOrder: true` in `overrides`.
+    isChangeOrder: false,
     propertyName: null,
     propertyAddress: null,
     stage: "Active",
@@ -546,9 +551,13 @@ describe("captureTargetDisplayName", () => {
     const picked = { id: "d1", type: "deal" as const, name: "Lobby — Change Order 1", isChangeOrder: false };
     const stored = { id: picked.id, type: picked.type, name: picked.name, isChangeOrder: picked.isChangeOrder };
     expect(captureTargetDisplayName(stored)).toBe("Lobby — Change Order 1");
-    // Dropping the flag (the old behaviour) silently changes what the user sees.
-    expect(captureTargetDisplayName({ id: picked.id, type: picked.type, name: picked.name }))
-      .toBe("Change Order 1 — Lobby");
+    // Dropping the flag (the old behaviour) silently changes what the user sees. Bound to a variable
+    // rather than written inline: the old handler stored a three-key object that really did carry
+    // `id`, and that is the shape under test. An inline literal would trip excess-property checking
+    // against the helper's `Pick<…, "type" | "name">` parameter, so deleting `id` to appease it would
+    // model a shape the bug never had.
+    const storedWithoutFlag = { id: picked.id, type: picked.type, name: picked.name };
+    expect(captureTargetDisplayName(storedWithoutFlag)).toBe("Change Order 1 — Lobby");
   });
 
   it("leaves an ordinary deal name alone", () => {

@@ -69,7 +69,16 @@ beforeEach(async () => {
     VALUES (${MBX}, 'microsoft_graph', ${CONV_PLAIN}, ${DEAL_PLAIN}, 'manual', 'high'),
            (${MBX}, 'microsoft_graph', ${CONV_CO}, ${DEAL_CO}, 'manual', 'high')
   `);
-}, 30000); // PGlite cold-start can exceed the default 10s under parallel runtime suites
+// 60000, not the config-wide 30000: the FIRST PGlite instance in a worker compiles the Postgres WASM
+// module, and beside the other runtime suites on a 4-worker pool that cold start alone has blown the
+// 30s hook budget — later cases in this file then ran fine on the warm worker, which is the signature
+// of startup cost rather than a hanging query.
+//
+// This stays `beforeEach` deliberately. The third case UPDATEs the CONV_PLAIN binding, so a shared
+// `beforeAll` would leave cases 1-2 passing only by declaration order. Booting once and re-seeding per
+// test would recover most of the cost while keeping the isolation, but that is a refactor, not a
+// review fix.
+}, 60000);
 
 afterEach(async () => {
   await pg.close();

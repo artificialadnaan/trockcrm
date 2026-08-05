@@ -713,7 +713,13 @@ describe("deals.is_change_order survives the query -> mapper hand-off in every r
       "A raw-SQL row key IS the SQL output column name. Reading one the SELECT never produced yields " +
         "undefined forever, and formatDealDisplayName then silently guesses from the deal's name."
     ).toEqual([]);
-  });
+    // 60000 for the same reason the two tests below carry it, and this one is the one that actually
+    // pays: `getProgram()` memoises, so whichever test touches the real Program FIRST absorbs the whole
+    // `ts.createProgram` over 200+ files in server/src, and in declaration order that is this one. The
+    // later `scanServerSrc()` call runs against a warm cache and only walks the AST. Under the default
+    // 15s testTimeout a multi-file run has been seen to reach 18.7s here — a scheduler/load failure
+    // dressed up as a detector finding.
+  }, 60000);
 
   it("reports the same thing when no module type resolves", () => {
     // Filed twice as a P1 against this rule: that it counts `deals.isChangeOrder` in getProjectPhotoStats
