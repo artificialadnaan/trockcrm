@@ -4,7 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VariantExecHero, VariantB3LoadLane } from "./variants";
 import { DrillProvider } from "./drill";
-import { SHOWCASE_VARIANTS } from "./types";
+import { SHOWCASE_VARIANTS, UNFILTERED_ROUTE_FILTER } from "./types";
 import type { MondayShowcaseData, EvidenceRequest, DepartmentMetric } from "./types";
 
 // The hybrid Exec survivor (consolidation Group 1) reads data.departments (where deltaCountWoW + sparkline
@@ -75,6 +75,7 @@ const base: MondayShowcaseData = {
   officeProjection: { bands: [], coverage: { n: 0, m: 0, undatedValue: 0 }, coverageCaption: "" },
   weeklyTrend: [],
   valueBases: { won_awarded_first: "Awarded-first won value", open_best_estimate: "Best current estimate" },
+  routeFilter: UNFILTERED_ROUTE_FILTER,
   notes: [],
 };
 

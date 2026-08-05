@@ -91,6 +91,13 @@ import {
   type MondayShowcaseEvidenceOptions,
 } from "./monday-showcase-service.js";
 import type { ProjectionBand } from "./foundations.js";
+import {
+  WORKFLOW_ROUTE_BUCKETS,
+  type WorkflowRouteBucket,
+} from "../shared/deal-value-sql.js";
+// The verdict on `?routes` is decided ONCE, in shared/, so the two server endpoints and the client page
+// cannot disagree about what a given URL means.
+import { parseShowcaseRouteValues, showcaseRouteValuesFromQuery } from "@trock-crm/shared/types";
 import { getAtRiskWatchlist } from "./at-risk-service.js";
 import { getRepPackData } from "./rep-pack-service.js";
 import { getRegionReport } from "./region-report-service.js";
@@ -1173,11 +1180,58 @@ router.post(
 // the exec hero tile) render slices of THIS one response, so they reconcile by construction. Visible to
 // standard CRM sales roles so reps can review the same Monday visibility. ?mode=to_date (live WTD) |
 // completed (prior full Sun-Sat box).
+/**
+ * Page-local Service / Other selection, as a comma-separated bucket list (`?routes=service`,
+ * `?routes=service,other`). ABSENT = both = no narrowing at all, so every pre-existing caller and bookmark
+ * keeps today's numbers exactly.
+ *
+ * The VERDICT is not decided here — it comes from parseShowcaseRouteValues in shared/, the one function the
+ * report endpoint, the evidence endpoint AND the client page all consult. This wrapper only maps that shared
+ * verdict onto HTTP: anything not `absent`/`selection` is a 400, never a silently-full result. An empty
+ * selection matters as much as a typo: "neither bucket" has no honest payload, and answering it with the
+ * unfiltered report (or with zeros) is exactly the lie this endpoint must not tell.
+ *
+ * TAKES THE RAW QUERY VALUE, deliberately NOT a pickQueryValue()-normalized string. pickQueryValue drops
+ * empty and whitespace-only values, so `?routes=` and `?routes=%20` would arrive as `undefined` and be read
+ * as ABSENT — the silent full-report fallback this contract forbids. Present-but-unusable is not absent, and
+ * only the raw value can tell them apart. It also preserves a REPEATED param as a list, which is what lets
+ * the shared parser reject it instead of guessing which occurrence wins.
+ */
+export function parseShowcaseRouteBuckets(raw: unknown): WorkflowRouteBucket[] | undefined {
+  const parsed = parseShowcaseRouteValues(showcaseRouteValuesFromQuery(raw));
+  switch (parsed.kind) {
+    case "absent":
+      return undefined; // the param is genuinely absent -> no narrowing
+    case "selection":
+      return parsed.buckets;
+    case "empty":
+      throw new AppError(400, `routes must select at least one of: ${WORKFLOW_ROUTE_BUCKETS.join(", ")}`);
+    case "invalid":
+      throw new AppError(400, parsed.reason);
+  }
+}
+
+/**
+ * THE single reader of `?routes` on the server, used by both showcase endpoints. The two must accept and
+ * reject identically: if the data endpoint accepted a value the evidence endpoint rejected (or the reverse),
+ * a card and the drill behind it could disagree about whether the page is filtered — the one property this
+ * feature exists to guarantee. Going through one function makes that symmetry structural rather than a
+ * convention two call sites have to remember, and gives the symmetry test one real code path to exercise
+ * from both entry points. (The CLIENT is kept in agreement a layer up, by sharing the parser itself.)
+ */
+export function readShowcaseRouteParam(query: Record<string, unknown>): WorkflowRouteBucket[] | undefined {
+  return parseShowcaseRouteBuckets(query.routes);
+}
+
 router.get("/monday-showcase", requireAnyRole, async (req, res, next) => {
   try {
     const modeRaw = pickQueryValue(req.query.mode);
     const mode = parseWeekMode(modeRaw);
-    const data = await getMondayShowcaseData(req.tenantDb!, { mode });
+    // Raw, NOT pickQueryValue: an empty/whitespace ?routes must reach the parser to be rejected, not be
+    // normalized away into "absent" and silently answered with the unfiltered report. Read through the
+    // SHARED reader so this endpoint and the evidence one cannot drift apart.
+    const routes = readShowcaseRouteParam(req.query as Record<string, unknown>);
+    const data = await getMondayShowcaseData(req.tenantDb!, { mode, routes });
     await req.commitTransaction!();
     res.json({ data });
   } catch (err) {
@@ -1273,7 +1327,17 @@ export function parseShowcaseEvidenceParams(query: Record<string, unknown>): Mon
     throw new AppError(400, "from must be on or before to"); // ISO YYYY-MM-DD sorts chronologically
   }
 
-  return { metric, mode, repId, band, leadStage, stageSlug, regionName, from, to };
+  // routes: the SAME Service/Other selection the clicked number was computed under, so the drawer's total
+  // equals that number instead of an office-wide superset. Same validation as the data endpoint (an
+  // unrecognised or empty value is a 400, never a silently-unfiltered drill). It is accepted for EVERY
+  // metric — including `leads`, whose source table has no workflow_route: rejecting it there would force the
+  // client to special-case which metrics may carry the page's filter, and the service reports
+  // routeFilter.applied=false so the drawer states plainly that this one list ignores the selection.
+  // The SAME shared reader the data endpoint uses — the two MUST reject the same inputs, or a card and
+  // the drill behind it could disagree about whether the page is filtered at all.
+  const routes = readShowcaseRouteParam(query);
+
+  return { metric, mode, repId, band, leadStage, stageSlug, regionName, from, to, routes };
 }
 
 /**
