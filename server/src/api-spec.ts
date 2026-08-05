@@ -1058,6 +1058,14 @@ export const apiSpec = {
                   ddEstimate: { type: "string" },
                   bidEstimate: { type: "string" },
                   awardedAmount: { type: "string" },
+                  scopeTitle: {
+                    type: "string",
+                    nullable: true,
+                    maxLength: 120,
+                    example: "Balcony Repair",
+                    description:
+                      "Short scope-of-work title (the accounting/QuickBooks project title). Send null to CLEAR it; omit the key to leave it untouched. Trimmed on write; blank normalizes to null. Over 120 characters is rejected with 400 SCOPE_TITLE_INVALID.",
+                  },
                   description: { type: "string" },
                   propertyAddress: { type: "string" },
                   propertyCity: { type: "string" },
@@ -1088,6 +1096,7 @@ export const apiSpec = {
               },
             },
           },
+          400: { description: "Invalid field value — e.g. scopeTitle exceeded 120 characters (SCOPE_TITLE_INVALID)." },
           403: { description: "Access denied." },
           404: { description: "Deal not found." },
         },
