@@ -932,7 +932,11 @@ p30 = CASE
           THEN state_at(deal, business_day_end_exclusive(o.outcome_date - STANDING_ANCHOR_DAYS))
         -- The DEAL is younger than the anchor: its whole life sits inside the window, so its earliest
         -- recorded state is all there is. Same tz-explicit boundary as everywhere else (§4.0.3).
-        WHEN o.deal_created_at >= business_day_end_exclusive(o.outcome_date - STANDING_ANCHOR_DAYS)
+        -- deal_life_start, NOT deal_created_at: on a reimported deal created_at is HubSpot's creation
+        -- date (§2.5(a)), so a deal imported on 14 May, forecast by its rep on the 15th and closed on
+        -- the 30th reads as many months old at the anchor, the gate fails, and a genuine short-life
+        -- forecast is scored 'no_event' instead of being credited. The rep had it for sixteen days.
+        WHEN o.deal_life_start >= business_day_end_exclusive(o.outcome_date - STANDING_ANCHOR_DAYS)
           THEN <earliest event state, see below>
         ELSE 'no_event'                        -- long-lived, forecast late: NOT scoreable
       END
@@ -958,7 +962,10 @@ same-transaction writes.
 An earlier draft gated on `min(changed_at)` over the deal's *events*. That is circular: a deal created in
 January and first forecast on 20 July, closing on 30 July, has `min(changed_at)` after the anchor, so the
 guard passed and the ten-day-old date became P₃₀ — scoring a last-minute guess as a confident month-ahead
-forecast. The deal's `created_at` is the honest measure of how long the rep had to form a view.
+forecast. **How long the rep has had the deal in this CRM** is the honest measure — which is
+`deal_life_start`, not `deals.created_at`: for a reimported deal the latter is HubSpot's creation date
+(§2.5(a)) and describes a life the rep never had. The two coincide for every CRM-native deal, so this
+changes nothing except for imports, where it changes the answer completely.
 
 Both arms use `STANDING_ANCHOR_DAYS` (§6.4), not a literal `30`. Open question 2 invites the approver to
 move the anchor to 60; an implementation copied from a snippet with `30` baked in would keep scoring at 30
@@ -1102,12 +1109,32 @@ deal_facts AS (
          -- created IN HUBSPOT, months before it reached this schema, and it is under the importer's
          -- control rather than the database's.
          --
-         -- The audit_deals trigger (0001_initial.sql:757) fires AFTER INSERT, so the earliest audit_log
-         -- row for the deal is the wall-clock instant the row entered this schema -- a timestamp no
-         -- importer sets. NULL when audit does not reach back that far (§1.4); see precrm_unknown_n,
-         -- which is why that NULL cannot pass silently.
-         (SELECT min(al.created_at) FROM audit_log al
-           WHERE al.table_name = 'deals' AND al.record_id = d.id)  AS crm_arrival_at,
+         -- The audit_deals trigger (0001_initial.sql:757) fires AFTER INSERT, so the deal's INSERT row
+         -- carries the wall-clock instant it entered this schema -- a timestamp no importer sets.
+         --
+         -- THE INSERT ROW SPECIFICALLY, not the earliest surviving row of any action. min(created_at)
+         -- over all actions is a proxy that is usually right and lies exactly when it matters: if audit
+         -- does not reach back to the insert, the earliest row is a later UPDATE, and a deal that WAS in
+         -- the CRM before closing gets an arrival stamp after its outcome and is carved out as pre-CRM.
+         -- That is the same shape of defect as the deal_created_at version this replaced -- a marker
+         -- that cannot lie, or a proxy that usually does not. Filtering on action='insert' makes the
+         -- absent case NULL and therefore countable (precrm_unknown_n) instead of silently wrong.
+         -- ORDER BY id, not created_at: the §4.0.1 total-order rule, applied here too.
+         (SELECT al.created_at FROM audit_log al
+           WHERE al.table_name = 'deals' AND al.record_id = d.id
+             AND al.action = 'insert' AND al.full_row IS NOT NULL
+           ORDER BY al.id ASC LIMIT 1)                        AS crm_arrival_at,
+         -- How long the rep has actually had this deal, for §4.0.4's life gate. Falls back to created_at
+         -- when no insert audit row survives -- correct for a CRM-native deal, where the two coincide,
+         -- and the conservative direction for an imported one (it makes the deal look older, so the
+         -- short-life fallback does not fire). D_precrm deliberately does NOT use this fallback: a life
+         -- gate may guess, a carve-out may not.
+         COALESCE(
+           (SELECT al.created_at FROM audit_log al
+             WHERE al.table_name = 'deals' AND al.record_id = d.id
+               AND al.action = 'insert' AND al.full_row IS NOT NULL
+             ORDER BY al.id ASC LIMIT 1),
+           d.created_at)                                      AS deal_life_start,
          -- NOTE: expected_close_date is deliberately NOT selected. State comes from §4.0.3.
          COALESCE(d.is_bid_board_owned, false) OR COALESCE(d.is_read_only_mirror, false) AS bid_board_owned
   FROM deals d
@@ -1382,7 +1409,7 @@ here. Adding a metric without adding a row is the defect re-entering.**
 | `total_days_slipped`, `days_pushed_out`, `days_pulled_in` | 4.5 | `E` | — | Event sums |
 | `chronic_mover_n` | 4.6 | deals in `D_book` meeting the flag | — | Count |
 | `chronic_mover_rate` | 4.6 | `chronic_mover_n` | `\|D_book\|` | Yes |
-| `silent_miss_n` | 4.7 | `D_score` with `deal_move_count = 0` and `abs(signed_error_p30) > TOLERANCE_DAYS` | — | Count |
+| `silent_miss_n` | 4.7 | `D_score` with `deal_touch_count <= 1` and `abs(signed_error_p30) > TOLERANCE_DAYS` | — | Count |
 | `forecast_reliability` | 6.1 | `COALESCE(coverage_rate,0) * COALESCE(hit_rate_14d,0)` | — | Composite; both operands coalesced so zero coverage yields zero |
 | `scoreable_final_n` | 4.2 | `D_score_final` | — | Count; the `hit_rate_14d_final` volume floor (§6.4) |
 | `cov_n` | 4.1 | `D_cov` | — | Count; the `coverage_rate` volume floor (§6.4) |
@@ -1549,6 +1576,10 @@ row per deal, and only then do the aggregates below mean what they say:
 -- FROM D_book b LEFT JOIN E e ON e.deal_id = b.deal_id GROUP BY b.deal_id
 deal_move_count       = count(*) FILTER (WHERE old_date IS NOT NULL AND new_date IS NOT NULL
                                            AND new_date IS DISTINCT FROM old_date)
+-- EVERY event on the deal -- moves, sets and clears alike. §4.7's silent-miss test needs "untouched",
+-- which deal_move_count does not mean: a forecast/clear/re-set deal has three events and zero moves.
+-- audit_log_id, not *, so an unmatched LEFT JOIN row counts 0 rather than 1.
+deal_touch_count      = count(audit_log_id)
 deal_days_pushed_out  = COALESCE(sum(greatest(new_date - old_date, 0)), 0)
 ```
 
@@ -1575,13 +1606,13 @@ column. Re-run this check whenever a name is added:
 |---|---|---|
 | `raw_close_date_events` (§4.0.1) | `audit_log_id`, `deal_id`, `changed_at`, `actor_user_id`, `event_kind`, `old_date`, `new_date` | `audit_log`: `id`, `record_id`, `created_at`, `changed_by`, `table_name`, `action`, `changes`, `full_row` — all real columns (§1.2) |
 | `close_date_timeline` (§4.0.2) | `audit_log_id`, `deal_id`, `changed_at`, `actor_user_id`, `event_kind`, `old_date`, `new_date` **passed through**, plus `source`, `machine_source` | `raw_close_date_events.*`; `deals.hubspot_deal_id`; `public.hubspot_refresh_log.*` (§0064) |
-| `deal_facts` (§4.0.5) | `deal_id`, `rep_id`, `deal_created_at`, `outcome_kind`, `outcome_date`, `terminal_entry_date`, `landed_in_window_and_reopened`, `has_reopen_evidence`, `hubspot_linked`, `crm_arrival_at`, `bid_board_owned` | `deals`: `stage_entered_at`, `bid_board_stage_entered_at`, `created_at`, `won_closed_date`, `lost_at`, `assigned_rep_id`, `stage_id`, `bid_board_stage_slug`, `is_active`, `is_test_data`, `is_bid_board_owned`, `is_read_only_mirror`, `on_hold`, **`hubspot_deal_id`**; `audit_log`: `table_name`, `record_id`, `created_at`; `pipeline_stage_config`: `slug`, `is_terminal`; `deal_stage_history`: `deal_id`, `to_stage_id`, **`from_stage_id`**, `created_at` |
+| `deal_facts` (§4.0.5) | `deal_id`, `rep_id`, `deal_created_at`, `outcome_kind`, `outcome_date`, `terminal_entry_date`, `landed_in_window_and_reopened`, `has_reopen_evidence`, `hubspot_linked`, `crm_arrival_at`, `deal_life_start`, `bid_board_owned` | `deals`: `stage_entered_at`, `bid_board_stage_entered_at`, `created_at`, `won_closed_date`, `lost_at`, `assigned_rep_id`, `stage_id`, `bid_board_stage_slug`, `is_active`, `is_test_data`, `is_bid_board_owned`, `is_read_only_mirror`, `on_hold`, **`hubspot_deal_id`**; `audit_log`: `table_name`, `record_id`, `created_at`, `id`, `action`, `full_row`; `pipeline_stage_config`: `slug`, `is_terminal`; `deal_stage_history`: `deal_id`, `to_stage_id`, **`from_stage_id`**, `created_at` |
 | `outcomes` (§4.0.5) | all of `deal_facts` passed through, plus **`is_reopened_after_landing`** | `deal_facts`: `outcome_kind`, `outcome_date`, `landed_in_window_and_reopened` |
 | `state_at` ×3 **(LATERAL, not a CTE)** (§4.0.3) *(contents: **convention-derived** — the block projects `state`, `prediction`, `changed_at`, `source`; the prefixes come from the three aliased instances in §4.0.7's anchor table, so an extractor sees a mismatch that is expected)* | `p30_state`, `p30_prediction`, `p30_changed_at`, `p30_source`; `pfinal_state`, `pfinal_prediction`, `pfinal_changed_at`, `pfinal_source`; `pnow_state`, `pnow_prediction`, `pnow_changed_at`, `pnow_source` — all `*_state` coalesced (§4.0.3) | `close_date_timeline`: `deal_id`, `changed_at`, **`audit_log_id`**, `source`, `new_date`; `outcomes.outcome_date` |
 | `coverage_resolution` (§4.1) | `cov_state`, `cov_prediction`, `is_provenance_unknown` | `outcomes.deal_id`; `state_at(deal, now())`; **`deals.expected_close_date`** — the only block that joins `deals` for it, and the whole reason convention 10's exception is buildable |
 | Derived scalars **block A** **(not a CTE)** (§4.0.7) | `open`, `precrm_landed`, `precrm_arrival_unknown`, `landed`, `in_d_cov`, `signed_error_p30`, `signed_error_pfinal`, `p30_parked_at_write`, `pfinal_parked_at_write`, `event_window_end` | `outcome_kind`, `outcome_date`, `terminal_entry_date`, `is_reopened_after_landing`, `has_reopen_evidence`, `hubspot_linked`, `crm_arrival_at`, `deal_created_at`, `cov_state`, `cov_prediction`, `p30_prediction`, `p30_changed_at`, `pfinal_prediction`, `pfinal_changed_at` — deliberately nothing from the event set |
 | `E` **(not a CTE)** (§4.0.5) *(contents: **unverifiable** — defined in prose, no literal SQL fence)* | the event set for churn | `close_date_timeline`; `event_window_end` (block A) |
-| Derived scalars **block B** **(not a CTE)** (§4.0.7) | `deal_move_count`, `deal_days_pushed_out` | `D_book`; `E`: `old_date`, `new_date` |
+| Derived scalars **block B** **(not a CTE)** (§4.0.7) | `deal_move_count`, `deal_touch_count`, `deal_days_pushed_out` | `D_book`; `E`: `audit_log_id`, `old_date`, `new_date` |
 | Metrics (§4.1–4.7) **(not a CTE)** *(contents: **unverifiable** — many fences, no single block boundary)* | the report columns, incl. `cov_n`, `scoreable_n`, `scoreable_final_n` | everything above, by name only |
 
 The `audit_log_id` row is bolded because it is the one that broke: §4.0.3 ordered by it while §4.0.2 did not
@@ -1691,6 +1722,8 @@ and for others it is the alarm.
 | `D_reopened` (§4.0.5) | `count(*)` over `deal_stage_history` with a NULL `from_stage_id`, and the reopen-row count itself | A NULL-heavy result means the reopen test is blind; a zero reopen count means the diagnostic is inert and `reopened_after_landing_n` will always read 0 |
 | Mirror-only reopens (§4.0.5) | not answerable — there is no mirror stage history | Stated as unsupported; `bid_board_owned_n` is the exposure proxy |
 | `D_nodate` (§4.0.5) | `count(*)` over mirror-terminal deals with a NULL `won_closed_date` | **Good** — no silent drops |
+| Machine-repair churn (§4.4) | `count(*)` over rep events whose `new_date` restores the immediately preceding **machine** event's `old_date` | **Good** — no repairs to exclude, and the §7 follow-up should not be built. Non-zero means reps are being charged for the refresh's churn |
+| Deal insert audit rows (§2.5(a)) | `count(*)` over deals with **no** `audit_log` row where `action='insert'` | **Good** — every deal's arrival is datable. Non-zero is the population `crm_arrival_at` cannot serve, and it must equal `precrm_unknown_n`'s HubSpot-linked slice |
 | Audit coverage floor (§1.4) | `SELECT min(created_at) FROM audit_log WHERE table_name='deals'` | n/a — this is the number every period claim rests on, and it is still unrun |
 
 **Convention 20 makes this a step rather than a virtue.** Non-emptiness is the last of the properties a
@@ -1977,6 +2010,25 @@ clear_count = count(*) FILTER (WHERE e.old_date IS NOT NULL AND e.new_date IS NU
 Three counters, not one. A *set* (first time a date appears) is not a slip. A *clear* is a distinct
 behaviour that deserves its own column — see §5.5 and §6.5.
 
+**A rep who repairs a machine overwrite is charged for it, and v1 does not fix that.** `E` excludes
+machine events but takes every rep event at face value, without regard to *what it is replacing*. The
+refresh rewrites 2026-03-01 to 2026-09-01; the rep puts it back to 2026-03-01. The machine write is
+correctly excluded — and the repair lands in `E` as a move with 184 days of pull-in, charged to the rep,
+for churn the machine caused. §4.0.0's model says a machine write can end a rep's forecast without
+becoming one; it says nothing about the edit that undoes it, and this is that hole.
+
+The repair is **precisely identifiable** — its `new_date` restores the `old_date` of the immediately
+preceding machine event on the same deal, ordered by `audit_log_id` — so this is a well-specified fix, not
+a vague one. It is deferred for one reason only: **the whole population is conditional on the §1.1.1
+census.** Arm (a) matches nothing if the HubSpot refresh never wrote, in which case there are no machine
+overwrites to repair and the exclusion is machinery for an empty set — the `D_precrm` mistake, repeated
+knowingly. So it is a §7 follow-up **gated on a non-zero census**, and a real-data obligation rather than
+a speculative CTE.
+
+Until then the exposure is visible rather than hidden: a repair is an unpaired large **pull-in**, so
+`days_pulled_in` is where it shows, and §4.5 reports pushed and pulled separately for exactly this kind of
+reason. A rep with an anomalous `days_pulled_in` and a non-zero `hubspot_refresh_events_n` is the signature.
+
 Report a rate so a rep with a big book is not penalised for volume:
 
 ```sql
@@ -2055,12 +2107,22 @@ table so they can be re-tuned in one place once the first real distribution is v
 
 ```sql
 silent_miss_n = count(*) FILTER (WHERE scoreable
-                                   AND deal_move_count = 0        -- per-deal, §4.0.7 (already COALESCEd)
+                                   AND deal_touch_count <= 1      -- per-deal, §4.0.7 Block B
                                    AND abs(signed_error_p30) > TOLERANCE_DAYS)
 ```
 
 Without this, "never moves the date" reads as stability on every other column. It is often the opposite:
 nobody maintained the forecast at all. This column is what stops the report from rewarding neglect.
+
+**`deal_touch_count`, not `deal_move_count` — the plain-English sentence above is the specification and
+the two counts do not mean the same thing.** `deal_move_count` counts non-null → non-null changes only
+(§4.4), so it is **zero for a deal that was forecast, cleared, and set again** — three events, none of them
+a "move". Such a deal has been touched repeatedly, and calling it "set once and never touched" is exactly
+the false accusation this column exists to avoid making: it is a *maintained* forecast that turned out
+wrong, which is ordinary forecasting error, not neglect. `deal_touch_count` counts every event in `E` for
+the deal, so `<= 1` means "the initial set and nothing since", which is what the sentence says. This is the
+same defect shape as `move_count`'s two granularities in round 7 — one name doing two jobs — and the same
+fix: name the count you actually mean.
 
 ---
 
@@ -2707,6 +2769,9 @@ things. Doing neither is not an option.
 - Distinguishing spreadsheet-campaign writes from individual edits (§5.4).
 - Reconstructing `D_open` membership as of the period end rather than today (§4.0.5). v1 labels the
   coverage and churn columns "as of today" instead; a stage-history replay is the real fix.
+- **Excluding machine-repair edits from churn (§4.4), gated on the §1.1.1 census returning non-zero.**
+  Well-specified — a rep event whose `new_date` restores the preceding machine event's `old_date` —
+  and deliberately not built until the population is known to exist.
 - Raising the At-Risk watchlist's mirror-terminal blind spot as its own change (§4.1).
 - **Bid Board mirror stage history.** The mirror writes `deal_stage_history` only when the CRM `stage_id`
   changes (`bidboard-mirror-service.ts:383`, `:537`), so a mirror-only land-and-reopen cycle is
@@ -2715,7 +2780,65 @@ things. Doing neither is not an option.
 
 ---
 
-## 8. Open questions for the approver
+## 8. What this data can and cannot support
+
+**Read this before the open questions.** After twenty-three review rounds the structural defects have
+converged — the consistency checks in §7 now catch that class as it is introduced — and what keeps
+surfacing is a different thing: **places where this document specifies more precision than the underlying
+data can deliver.** Four schema facts generate almost every remaining finding, and no amount of SQL closes
+any of them:
+
+| Fact | Verified at | What it costs |
+|---|---|---|
+| `expected_close_date` stays editable after a deal closes | `service.ts:2912` sets it; `stage-change.ts:357-362` clears the terminal fields and deliberately **not** this one | Three separate defects, each found in a different round: post-close cleanup counted as churn (§4.0.5), a post-close edit becoming P₃₀ (§4.0.4), and the outcome cap needed at every historical lookup. Every date-at-a-past-instant question needs its own cap, and forgetting one is silent |
+| `deals.created_at` is set by the importer, not the database | `hubspot-deals-reimport.ts:783`, bound at `:829` | There is no column that means "arrived in the CRM". `crm_arrival_at` reconstructs it from the insert audit row, which works only as far back as `audit_log` reaches (§1.4, unverified) |
+| The Bid Board mirror writes no stage history for mirror-only moves | `bidboard-mirror-service.ts:383`, `:537` | Land-and-reopen cycles on BB-owned deals are **undetectable**. Not approximable — the history does not exist |
+| `deal_stage_history` has no monotonic write-order column | `0001_initial.sql:465` (PK is `gen_random_uuid()`) | Same-day stage orderings are best-effort. Unlike `audit_log`, there is no `BIGSERIAL` to fall back on |
+
+**The classification, per metric family.** This is the answer to "should v1 be narrower": mostly no, but in
+two specific places yes.
+
+| Family | Rests on | Verdict |
+|---|---|---|
+| `coverage_rate`, `covered_n`, `parked_n`, `at_risk_n`, `cov_n`, `machine_dated_n`, `overdue_open_n`, `median_days_overdue` | the current deal row + the timeline as of now | **Sound.** No history reconstruction, no as-of question. Ship |
+| `landed_n`, `out_of_period_landed_n`, `mirror_terminal_no_date_n`, `bid_board_owned_n` | current row state | **Sound.** Ship |
+| `hit_rate_*`, signed errors, `scoreable_n`, the shortfall partition | a rep-authored date standing at a past instant, from `audit_log` | **Sound *if* §1.4's census clears.** The whole family rests on audit reaching back past the period. Unverified. Run the census before publishing any period the audit does not cover — this is the single most load-bearing unrun query in the document |
+| `move_count`, `set_count`, `clear_count`, slip sums, `moves_per_deal`, `chronic_mover_*` | rep events inside a per-deal window | **Sound with two stated biases**: reopened deals are excluded entirely rather than windowed (§4.0.5), and a rep repairing a machine overwrite is charged for it (§4.4). Both visible, both census-gated |
+| `silent_miss_n` | per-deal touch count | **Sound.** Ship |
+| `reopened_after_landing_n`, `reopened_open_n` | `deal_stage_history` | **Partial and it must say so on the column.** Blind to mirror-only reopens, blind to NULL `from_stage_id`, best-effort on same-day ordering. It is a floor, not a count |
+| `precrm_landed_n` / `D_precrm` | the insert audit row | **Cut from v1 unless the census clears.** See below |
+| `provenance_unknown_n`, `precrm_unknown_n`, `machine_written_events_n` and its two arms | integrity diagnostics | **Sound, and they are how the above is monitored.** Ship |
+
+**The one thing I would cut.** `D_precrm` should not ship until the §7 real-data obligations for it return
+non-zero. It has now been specified wrongly **twice in two rounds** — first on `deals.created_at`, which
+the importer sets, then on the earliest audit row of any action, which is a later UPDATE whenever the
+insert row is missing. Both versions were internally consistent, cascaded correctly through the partition
+and the invariants, and passed every mechanical check. The third version may well be right; the point is
+that **nothing available here can tell me it is**, because the question is about production data and every
+audit in this document reads text. Two wrong versions in two rounds is the evidence. Ship the partition
+member and its two diagnostics, run the obligations, and turn the carve-out on when the numbers say the
+population exists — or delete it and accept that imported pre-CRM landings are counted, which is at least
+a known bias rather than an unverified correction.
+
+**What is genuinely unbuildable, and would need a schema change:**
+
+- **Mirror-only reopen detection** — needs Bid Board mirror stage history. No workaround exists.
+- **Reconstructing landed outcomes for reopened deals** — needs a terminal-date history the current
+  clearing behaviour destroys (§4.0.5). Already deferred.
+- **`D_open` as of the period end** — needs a stage-history replay (§4.0.5). Already deferred; v1 labels
+  the columns "as of today" instead.
+- **A reason code for a slip** — needs the `deal_history.changed_by` migration (§5.1). Already deferred.
+- **Forecast snapshots at stage entry** — `deal_forecast_milestones` is built and dead (§1.5, §5.2).
+
+**The honest summary for the approver.** Roughly 30 of the 38 metrics rest on data that supports them
+today. Four more are sound conditional on one unrun query (§1.4). One should be held back. The rest are
+already deferred and labelled. The document is not over-specified as a whole — but it has twice been
+over-specified in exactly the place where a construct's correctness depends on production facts nobody has
+checked, and that is a category the review process here cannot close on its own.
+
+---
+
+## 9. Open questions for the approver
 
 1. **±14 days** — is that the tolerance the business would manage to, or is "landed in the right month"
    (±30) the real bar? Both are computed; only one should be the headline.
@@ -2801,6 +2924,25 @@ complement of `futureDatedCloseDatePredicateSql`'s `>= today` (`foundations.ts:4
 `>` matches `closeTargetFarOutSqlPredicate` (`deal-reporting.ts:137`), so a deal exactly 90 days out is
 unparked in both. One ordering — `percentile_cont`'s `WITHIN GROUP` — deliberately needs no tie-breaker,
 and §4.3 now says why.
+
+**Round 23 (a proxy replacing a proxy, and the point at which patching stops paying)**
+
+| # | Was | Now |
+|---|---|---|
+| 1 | `crm_arrival_at` took `min(created_at)` over **any** audit action | The same class of defect as the `deals.created_at` version it replaced one round earlier: a proxy that is usually right and lies exactly when it matters. If audit does not reach the deal's insert, the earliest surviving row is a later UPDATE, so a deal that *was* in the CRM before closing gets an arrival stamp after its outcome and is carved out as pre-CRM. Filtered to the `action='insert'` row, `ORDER BY id LIMIT 1`; a missing insert is now NULL and therefore counted by `precrm_unknown_n` rather than silently wrong. |
+| 2 | §4.0.4's short-life gate used `deal_created_at` | The same premise error as round 22's, in the site I *qualified in prose last round instead of fixing*. A deal imported 14 May, forecast by its rep on the 15th and closed on the 30th reads as months old at the anchor, so the gate fails and a genuine sixteen-day forecast scores `no_event`. Now `deal_life_start` = the insert audit row, falling back to `created_at` (correct for CRM-native deals, conservative for imports). The carve-out deliberately does **not** take that fallback: a life gate may guess, a carve-out may not. |
+| 3 | `silent_miss_n` tested `deal_move_count = 0` | `deal_move_count` counts non-null→non-null changes only, so it is **zero for a forecast → cleared → re-set deal**. That deal has been touched three times and was being reported as "set once and never touched" — the exact false accusation the column exists to avoid. Now `deal_touch_count <= 1`, which is what the plain-English sentence says. |
+| 4 | Nothing said a rep repairing a machine overwrite is charged for it | `E` excludes machine events but takes rep events at face value regardless of what they replace, so undoing a refresh overwrite costs the rep a move and the full pull-in. Stated with a worked example, precisely specified as a fix, and **deliberately not built** — the population is conditional on the §1.1.1 census, and building machinery for a possibly-empty set is the `D_precrm` mistake made knowingly. §7 follow-up, census-gated, plus a real-data obligation. |
+| 5 | The document had no statement of what the data cannot support | New **§8**. Four schema facts generate almost every remaining finding; per metric family, whether it is sound, sound-conditional, partial, or unbuildable; and one recommendation to hold `D_precrm` back until its obligations return non-zero. |
+
+**Fifteen of the nineteen findings were re-raised ones, and all fifteen were resolved by quoting the
+current text** — not by asserting they were handled. Four had been relayed upward as refuted and were
+challenged on that basis, so each was re-checked against `1c68e398b` line by line: the coverage numerator's
+`<= today + CLOSE_TARGET_HOLD_HORIZON_DAYS` bound (`:1801`, `:1810`), `aliasedReportableDealFilterSql` in
+the base CTE's `WHERE` (`:1117`), `AS machine_source` **inside** `close_date_timeline AS (` — same CTE,
+opened at `:769`, projected at `:779`, `FROM` at `:798`, so there is no gap between the classifier and its
+consumer — and the `d.lost_at::date` exception now cited at its own site (`:1000-1005`). All four
+refutations stand.
 
 **Round 22 (a carve-out that matched nothing, and a comparison that had stopped being one)**
 
@@ -3135,6 +3277,22 @@ were themselves silently broken**, because `NOT <nullable>` inside `FILTER` coun
 failing loudly. A check that can fail open is not a check. That is why the state enum is coalesced and
 non-null by construction, and why "never negate a nullable" is now a stated SQL rule (§4.0.6) rather than
 something to remember at each site.
+
+**Round 23's lesson: when the findings stop being about the document, stop editing the document.** Three
+of this round's five fixes were the same shape as round 22's, one of them in a site I had *identified* last
+round and qualified in prose rather than fixed. That is the tell. The structural work has converged — the
+eighteen checks catch the consistency class as it is introduced, and fifteen of nineteen findings this
+round were already-fixed items re-anchored to a moving tip — and what is left is a small number of schema
+facts generating an unbounded supply of consequences: a column that stays editable after close, a
+`created_at` the importer owns, a mirror with no history, a table with no write order.
+
+Patching those one consequence at a time produces ever-finer proxies. `D_precrm` went `created_at` →
+earliest-audit-row → insert-audit-row in three rounds, each version internally consistent and passing every
+check, and I still cannot tell whether the third is right, because the question is about production and
+every audit here reads text. The useful output at that point is not round 24; it is **§8** — a plain
+statement of which metrics the data supports, which rest on an unrun query, which are partial and must say
+so on the column, and which are unbuildable without a schema change. A smaller spec that is true beats a
+complete one that is unverifiable, and the approver is the one who should get to make that trade.
 
 **Round 22's lesson: a predicate can be correct, checked, and match nothing.** `D_precrm` was built to a
 reported defect, cascaded through the partition, the invariants, both metric tables and the chain, and
