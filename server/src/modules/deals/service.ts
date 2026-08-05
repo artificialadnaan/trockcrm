@@ -457,6 +457,9 @@ export interface CreateDealInput {
   bidEstimate?: string;
   awardedAmount?: string;
   bidDueDate?: string | null;
+  // Short scope-of-work title (migration 0218). Length-checked at the route by validateDealPayload,
+  // which also trims and maps blank -> null, so anything reaching here is already normalized.
+  scopeTitle?: string | null;
   description?: string;
   propertyAddress?: string;
   propertyCity?: string;
@@ -487,6 +490,9 @@ export interface UpdateDealInput {
   ddEstimate?: string | null;
   bidEstimate?: string | null;
   awardedAmount?: string | null;
+  // Short scope-of-work title (migration 0218). Explicit null clears it — unlike the relationship ids,
+  // an empty scope title is a legitimate state (the field is optional and was never required).
+  scopeTitle?: string | null;
   description?: string | null;
   propertyAddress?: string | null;
   propertyCity?: string | null;
@@ -2600,6 +2606,7 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
       // deals.bid_due_date is timestamptz, but the business field is date-only.
       // Persist UTC midnight so every environment resolves the same calendar day.
       bidDueDate: normalizedBidDueDate,
+      scopeTitle: input.scopeTitle ?? null,
       description: input.description ?? null,
       propertyAddress: input.propertyAddress ?? null,
       propertyCity: input.propertyCity ?? null,
@@ -2899,6 +2906,7 @@ export async function updateDeal(
   // Procore mirror never overwrites it. Gated on touchesAwarded (the change-detected edit) — a no-op
   // re-save of the same value does NOT freeze sync, and the automatic seed never reaches this path.
   if (touchesAwarded) updates.awardedAmountOverridden = true;
+  if (input.scopeTitle !== undefined) updates.scopeTitle = input.scopeTitle;
   if (input.description !== undefined) updates.description = input.description;
   if (input.propertyAddress !== undefined) updates.propertyAddress = input.propertyAddress;
   if (input.propertyCity !== undefined) updates.propertyCity = input.propertyCity;
@@ -3105,6 +3113,7 @@ export async function updateDeal(
       "ddEstimate",
       "bidEstimate",
       "awardedAmount",
+      "scopeTitle",
       "description",
       "propertyAddress",
       "propertyCity",

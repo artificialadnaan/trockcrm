@@ -1246,5 +1246,52 @@ describe("DealsListSection", () => {
         await cleanup();
       }
     });
+
+    // There are TWO export paths on this component — buildFilterBarCsvRows (covered in
+    // deals-list-csv-export.test.ts) and this LEGACY inline one. They must not diverge, or which
+    // columns accounting gets depends on which surface they exported from.
+    it("includes the Scope Title column on the LEGACY export path too", async () => {
+      const csvParts: string[] = [];
+      const OriginalBlob = globalThis.Blob;
+      const originalCreate = URL.createObjectURL;
+      const originalRevoke = URL.revokeObjectURL;
+      Object.assign(URL, { createObjectURL: vi.fn(() => "blob:test"), revokeObjectURL: vi.fn() });
+      globalThis.Blob = class {
+        constructor(parts: unknown[]) {
+          csvParts.push(String((parts as unknown[])?.[0] ?? ""));
+        }
+      } as unknown as typeof Blob;
+      mocks.apiMock.mockResolvedValue({
+        deals: [makeDeal({ scopeTitle: "Balcony Repair" })],
+        pagination: { totalPages: 1 },
+      });
+      const { container, cleanup } = await renderDom({ enableExport: true, lockedOwnerId: "rep-1" });
+      try {
+        const exportButton = Array.from(container.querySelectorAll("button")).find((b) =>
+          b.textContent?.includes("Export")
+        );
+        expect(exportButton).toBeDefined();
+        await act(async () => {
+          exportButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        });
+        const csv = csvParts.join("");
+        const [header, firstRow] = csv.split("\n");
+        expect(header.split(",")).toEqual([
+          "Deal",
+          "Scope Title",
+          "Project Number",
+          "Owner",
+          "Stage",
+          "Days",
+          "Value",
+          "Last Touch",
+        ]);
+        expect(firstRow.split(",")[1]).toBe("Balcony Repair");
+      } finally {
+        globalThis.Blob = OriginalBlob;
+        Object.assign(URL, { createObjectURL: originalCreate, revokeObjectURL: originalRevoke });
+        await cleanup();
+      }
+    });
   });
 });

@@ -645,9 +645,13 @@ export function buildFilterBarCsvRows(
   maps: { stageNameById: Map<string, string>; assigneeNameById: Map<string, string> }
 ): (string | number)[][] {
   return [
-    ["Deal", "Project Number", "Owner", "Stage", "Days", "Value", "Date"],
+    ["Deal", "Scope Title", "Project Number", "Owner", "Stage", "Days", "Value", "Date"],
     ...deals.map((deal) => [
       deal.name,
+      // Accounting keys this into QuickBooks off the export, so a field they cannot export is half a
+      // field. Empty string (not "--") for an unset title: a CSV cell is data, and a placeholder glyph
+      // would have to be stripped again on the other side.
+      deal.scopeTitle ?? "",
       getDealDisplayNumber(deal).label,
       deal.assignedRepName ?? (deal.assignedRepId ? maps.assigneeNameById.get(deal.assignedRepId) : undefined) ?? "",
       deal.stageName ?? maps.stageNameById.get(deal.stageId) ?? "",
@@ -1032,11 +1036,14 @@ export function DealsListSection({
     // so the export's date column must match it (not the legacy "Last Touch"/updated axis),
     // or the CSV won't reconcile with the drill-down it was exported from.
     const rows = [
-      ["Deal", "Project Number", "Owner", "Stage", "Days", "Value", showOutcomeDate ? "Date" : "Last Touch"],
+      ["Deal", "Scope Title", "Project Number", "Owner", "Stage", "Days", "Value", showOutcomeDate ? "Date" : "Last Touch"],
       ...exportResult.deals.map((deal) => {
         const displayNumber = getDealDisplayNumber(deal);
         return [
           deal.name,
+          // Same column, same position as buildFilterBarCsvRows — the two export paths must not diverge
+          // or the CSV a user gets depends on which surface they exported from.
+          deal.scopeTitle ?? "",
           displayNumber.label,
           deal.assignedRepName ?? assigneeNameById.get(deal.assignedRepId) ?? "",
           deal.stageName ?? stageNameById.get(deal.stageId) ?? "",

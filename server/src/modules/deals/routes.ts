@@ -101,6 +101,7 @@ import {
   normalizeStagePageSort,
   pendingRfpSubStateForStatus,
   toCanonicalDealStageSlug,
+  validateDealScopeTitle,
   type DealOpportunityEnteredEventPayload,
   type RfpRequestDeliveryPayload,
 } from "@trock-crm/shared/types";
@@ -2156,7 +2157,30 @@ function validateDealPayload(body: Record<string, unknown>): void {
       throw new AppError(400, "bidDueDate must be an ISO date in YYYY-MM-DD format");
     }
   }
+  validateScopeTitlePayload(body);
   validateProjectNumberPayload(body);
+}
+
+/**
+ * scope_title is a SHORT title by definition — the field exists because `description` (5000 chars) is a
+ * notes field that keeps arriving as a wall of text. A cap the form alone enforces is not a cap: every
+ * non-form writer (a script, an importer, curl) would put the wall of text straight back, and the column
+ * would need widening within a release. So the length is rejected HERE, on the one validator all three
+ * write paths (POST /deals, POST /deals/service-opportunity, PATCH /deals/:id) already call.
+ *
+ * Normalizes in place as well as validates, mirroring validateProjectNumberPayload: trim, and blank ->
+ * null so a cleared form field clears the column instead of storing "". Only touches the body when the
+ * caller actually sent the key, so a partial PATCH that omits scopeTitle still omits it downstream
+ * (updateDeal keys on `!== undefined`) and cannot blank an existing title.
+ */
+function validateScopeTitlePayload(body: Record<string, unknown>): void {
+  if (!Object.prototype.hasOwnProperty.call(body, "scopeTitle")) return;
+
+  const result = validateDealScopeTitle(body.scopeTitle);
+  if (!result.ok) {
+    throw new AppError(400, result.error, "SCOPE_TITLE_INVALID");
+  }
+  body.scopeTitle = result.value;
 }
 
 function validateProjectNumberPayload(body: Record<string, unknown>): void {
@@ -2252,6 +2276,7 @@ router.post("/service-opportunity", async (req, res, next) => {
       companyId,
       propertyId,
       primaryContactId,
+      scopeTitle,
       description,
       source,
       winProbability,
@@ -2327,6 +2352,7 @@ router.post("/service-opportunity", async (req, res, next) => {
       primaryContactId,
       companyId,
       propertyId,
+      scopeTitle,
       description,
       source,
       winProbability,

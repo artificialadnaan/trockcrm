@@ -144,24 +144,46 @@ describe("escapeCsvCell (CSV-injection hardening + RFC-4180 quoting)", () => {
   });
 });
 
+/**
+ * Read a cell BY HEADER NAME rather than by position.
+ *
+ * Adding the Scope Title column shifted every index in this block by one, which is exactly the churn a
+ * positional assertion guarantees on any future column. The header row is asserted verbatim once below,
+ * so resolving through it is no weaker — a renamed or dropped column still fails, loudly, right here.
+ */
+function cell(rows: (string | number)[][], header: string, rowIndex = 1) {
+  const columnIndex = rows[0].indexOf(header);
+  if (columnIndex === -1) throw new Error(`No "${header}" column in ${JSON.stringify(rows[0])}`);
+  return rows[rowIndex][columnIndex];
+}
+
 describe("buildFilterBarCsvRows (export uses the canonical outcome-aware date axis)", () => {
   it("uses the server displayDate for the Date column (filter-axis == display-axis), not the close date", () => {
     const rows = buildFilterBarCsvRows(
       [makeDeal({ displayDate: "2026-05-20", actualCloseDate: "2026-08-15" })],
       noMaps()
     );
-    expect(rows[0]).toEqual(["Deal", "Project Number", "Owner", "Stage", "Days", "Value", "Date"]);
-    expect(rows[1][6]).toBe("2026-05-20"); // displayDate wins over the close date
+    expect(rows[0]).toEqual([
+      "Deal",
+      "Scope Title",
+      "Project Number",
+      "Owner",
+      "Stage",
+      "Days",
+      "Value",
+      "Date",
+    ]);
+    expect(cell(rows, "Date")).toBe("2026-05-20"); // displayDate wins over the close date
   });
 
   it("falls back to the close date when displayDate is absent, and empty when there is no date", () => {
     const fallback = buildFilterBarCsvRows([makeDeal({ displayDate: null, actualCloseDate: "2026-03-03" })], noMaps());
-    expect(fallback[1][6]).toBe("2026-03-03");
+    expect(cell(fallback, "Date")).toBe("2026-03-03");
     const none = buildFilterBarCsvRows(
       [makeDeal({ displayDate: null, actualCloseDate: null, expectedCloseDate: null })],
       noMaps()
     );
-    expect(none[1][6]).toBe("");
+    expect(cell(none, "Date")).toBe("");
   });
 
   it("resolves owner/stage names from the maps when the row omits them", () => {
@@ -169,7 +191,36 @@ describe("buildFilterBarCsvRows (export uses the canonical outcome-aware date ax
       [makeDeal({ assignedRepName: null, assignedRepId: "rep-9", stageName: null, stageId: "stage-9" })],
       { stageNameById: new Map([["stage-9", "Estimating"]]), assigneeNameById: new Map([["rep-9", "Dana"]]) }
     );
-    expect(rows[1][2]).toBe("Dana");
-    expect(rows[1][3]).toBe("Estimating");
+    expect(cell(rows, "Owner")).toBe("Dana");
+    expect(cell(rows, "Stage")).toBe("Estimating");
+  });
+
+  // Accounting keys the scope title into QuickBooks off this export. Without the column the field is
+  // half-shipped: readable on one deal at a time in the browser, and absent from the one artifact that
+  // leaves the CRM.
+  it("exports the scope title, in the column next to the deal name", () => {
+    const rows = buildFilterBarCsvRows([makeDeal({ scopeTitle: "Balcony Repair" })], noMaps());
+
+    expect(cell(rows, "Scope Title")).toBe("Balcony Repair");
+    expect(rows[0].indexOf("Scope Title")).toBe(rows[0].indexOf("Deal") + 1);
+  });
+
+  it("exports an EMPTY cell for a deal with no scope title, not a placeholder glyph", () => {
+    // A CSV cell is data on its way into another system. "--" would have to be stripped again there.
+    const missing = buildFilterBarCsvRows([makeDeal({ scopeTitle: null })], noMaps());
+    expect(cell(missing, "Scope Title")).toBe("");
+
+    const absent = buildFilterBarCsvRows([makeDeal({ scopeTitle: undefined })], noMaps());
+    expect(cell(absent, "Scope Title")).toBe("");
+  });
+
+  it("neutralizes a scope title that would execute as a spreadsheet formula", () => {
+    // escapeCsvCell already guards this class of value; the assertion is that the NEW column goes
+    // through it rather than being concatenated in raw somewhere else.
+    const rows = buildFilterBarCsvRows([makeDeal({ scopeTitle: "=cmd|'/c calc'!A1" })], noMaps());
+    expect(cell(rows, "Scope Title")).toBe("=cmd|'/c calc'!A1"); // the builder emits the raw value…
+    expect(escapeCsvCell(cell(rows, "Scope Title"))).toBe("'=cmd|'/c calc'!A1"); // …serialization guards it
+    // A title with a comma still has to survive as ONE cell.
+    expect(escapeCsvCell("Balcony Repair, Building C")).toBe('"Balcony Repair, Building C"');
   });
 });
