@@ -781,6 +781,17 @@ export async function buildEstimatingWorkbenchState(
    */
   const hasPriceableExtraction = (row: (typeof derivedPricingRows)[number]): boolean => {
     if (row.sourceType === "manual") return true;
+    // AN OVERRIDE WITH ITS OWN QUANTITY, mirroring the promote query's exemption exactly.
+    // `resolvePromotionLineValues` promotes `overrideQuantity` for these rows, so the anchor
+    // extraction's quantity is not what reaches the estimate — and an override's `sourceType` is
+    // ordinarily `'extracted'`, so it does not reach the manual exemption above. Held to the same
+    // standard as everything else here (NaN included), so exempting the row from the extraction's
+    // check does not exempt it from having a priceable number at all.
+    if (row.selectedSourceType === "override") {
+      if (row.overrideQuantity === undefined) return true;
+      const overrideQuantity = Number(row.overrideQuantity);
+      return row.overrideQuantity !== null && Number.isFinite(overrideQuantity) && overrideQuantity > 0;
+    }
     const matchRow = row.extractionMatchId ? matchById.get(row.extractionMatchId) : null;
     const extraction = matchRow?.extractionId ? extractionById.get(matchRow.extractionId) : null;
     // No extraction in hand is not a claim that the quantity is gone — the promote query does its own
@@ -795,9 +806,16 @@ export async function buildEstimatingWorkbenchState(
     return extraction.quantity !== null && Number.isFinite(quantity) && quantity > 0;
   };
 
-  const promotablePricingRows = derivedPricingRows.filter(
-    (row) => row.promotable && hasPriceableExtraction(row)
+  // THE ROW'S OWN FLAG IS THE ONE DECISION, so the count in the header and the flag each row carries
+  // cannot disagree. This used to filter into a separate collection while the response still returned
+  // `derivedPricingRows` untouched — so `readyToPromote` and `canPromote` were correct while every row
+  // kept `promotable: true`, and any consumer reading the per-row flag still offered a row that
+  // promotion rejects as `recommendation_unavailable`. Gating here and deriving the count from the
+  // result makes that divergence unrepresentable rather than merely fixed.
+  const gatedPricingRows = derivedPricingRows.map((row) =>
+    row.promotable && !hasPriceableExtraction(row) ? { ...row, promotable: false } : row
   );
+  const promotablePricingRows = gatedPricingRows.filter((row) => row.promotable);
 
   const documentsSummary = {
     total: documents.length,
@@ -864,7 +882,7 @@ export async function buildEstimatingWorkbenchState(
     documents,
     extractionRows: activeExtractionRows,
     matchRows: activeMatchRows,
-    pricingRows: derivedPricingRows,
+    pricingRows: gatedPricingRows,
     reviewEvents,
     summary: {
       documents: documentsSummary,

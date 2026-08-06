@@ -107,8 +107,24 @@ export async function loadApprovedRecommendationsForRun(
     // NaN IS EXCLUDED EXPLICITLY, because Postgres orders numeric NaN ABOVE all finite values: `NaN > 0`
     // is TRUE, so the positive test alone would have ADMITTED a NaN quantity into a client estimate.
     // Same mistake, opposite direction, as the worker's claim predicate.
+    // AN OVERRIDE IS EXEMPT ON THE SAME GROUNDS AS A MANUAL ROW, and for a reason the manual exemption
+    // above does not cover: `resolvePromotionLineValues` promotes `overrideQuantity` for these rows
+    // (`case "override"` below), so the anchor extraction's quantity is not the number that reaches the
+    // estimate. Gating on it dropped an otherwise complete override as `recommendation_unavailable` —
+    // and unlike the manual cases, an override row's `sourceType` is ordinarily `'extracted'`, so it
+    // missed the exemption above entirely.
+    //
+    // The override's OWN quantity is held to the identical standard, NaN included: exempting the row
+    // from the extraction's check must not exempt it from having a priceable number of its own,
+    // otherwise this widening reintroduces exactly the null-priced-as-one-unit bug the PR removes.
     sql`(
       ${estimatePricingRecommendations.sourceType} = 'manual'
+      or (
+        ${estimatePricingRecommendations.selectedSourceType} = 'override'
+        and ${estimatePricingRecommendations.overrideQuantity} is not null
+        and ${estimatePricingRecommendations.overrideQuantity} > 0
+        and ${estimatePricingRecommendations.overrideQuantity} <> 'NaN'::numeric
+      )
       or (
         ${estimateExtractions.quantity} is not null
         and ${estimateExtractions.quantity} > 0

@@ -496,6 +496,127 @@ describe("buildEstimatingWorkbenchState", () => {
     expect(state.marketContext?.fallbackSource).toBeNull();
   });
 
+  it("clears the ROW's promotable flag when the extraction has no priceable quantity, not just the count", async () => {
+    // The readiness gate used to filter into a separate collection while the response still returned
+    // the ungated rows — so `readyToPromote` and `canPromote` were right while the row itself still
+    // said `promotable: true`. Any consumer reading the per-row flag (which is what a button binds to)
+    // therefore offered a row that promotion rejects as `recommendation_unavailable`.
+    const { tenantDb } = makeDb({
+      documents: [{ id: "doc-1", activeParseRunId: "run-1", ocrStatus: "completed" }],
+      extractions: [
+        {
+          id: "ext-1",
+          documentId: "doc-1",
+          status: "approved",
+          // The claim this gate exists for: a quantity somebody explicitly cleared.
+          quantity: null,
+          metadataJson: { sourceParseRunId: "run-1", activeArtifact: true },
+        },
+      ],
+      matches: [{ id: "match-1", extractionId: "ext-1", status: "selected" }],
+      pricing: [
+        {
+          id: "rec-approved",
+          extractionMatchId: "match-1",
+          status: "approved",
+          createdByRunId: "run-1",
+          sourceType: "explicit",
+          normalizedIntent: "coping metal",
+          sourceRowIdentity: "roof:coping-1",
+          sectionName: "Roof",
+        },
+      ],
+    });
+
+    const state = await buildEstimatingWorkbenchState(tenantDb, "deal-1");
+
+    // The aggregate AND the row have to agree — asserting only the count is what let this ship.
+    expect(state.summary.pricing.readyToPromote).toBe(0);
+    expect(state.pricingRows).toEqual([
+      expect.objectContaining({ id: "rec-approved", promotable: false }),
+    ]);
+  });
+
+  it("keeps an OVERRIDE promotable on its own quantity when the extraction's is gone", async () => {
+    // Mirrors the promote query's exemption. `resolvePromotionLineValues` promotes `overrideQuantity`
+    // for these rows, so the anchor extraction's quantity is not what reaches the estimate — and an
+    // override's `sourceType` is ordinarily `'extracted'`, so it misses the manual exemption. Without
+    // this the workbench would call a perfectly complete override unpromotable.
+    const { tenantDb } = makeDb({
+      documents: [{ id: "doc-1", activeParseRunId: "run-1", ocrStatus: "completed" }],
+      extractions: [
+        {
+          id: "ext-1",
+          documentId: "doc-1",
+          status: "approved",
+          quantity: null,
+          metadataJson: { sourceParseRunId: "run-1", activeArtifact: true },
+        },
+      ],
+      matches: [{ id: "match-1", extractionId: "ext-1", status: "selected" }],
+      pricing: [
+        {
+          id: "rec-override",
+          extractionMatchId: "match-1",
+          status: "overridden",
+          createdByRunId: "run-1",
+          sourceType: "explicit",
+          selectedSourceType: "override",
+          overrideQuantity: "12",
+          normalizedIntent: "coping metal",
+          sourceRowIdentity: "roof:coping-1",
+          sectionName: "Roof",
+        },
+      ],
+    });
+
+    const state = await buildEstimatingWorkbenchState(tenantDb, "deal-1");
+
+    expect(state.summary.pricing.readyToPromote).toBe(1);
+    expect(state.pricingRows).toEqual([
+      expect.objectContaining({ id: "rec-override", promotable: true }),
+    ]);
+  });
+
+  it("does NOT exempt an override whose own quantity is unusable", async () => {
+    // The exemption must not become a hole. An override with a null quantity has no number of its own
+    // to promote, so it is exactly the case the gate exists for.
+    const { tenantDb } = makeDb({
+      documents: [{ id: "doc-1", activeParseRunId: "run-1", ocrStatus: "completed" }],
+      extractions: [
+        {
+          id: "ext-1",
+          documentId: "doc-1",
+          status: "approved",
+          quantity: null,
+          metadataJson: { sourceParseRunId: "run-1", activeArtifact: true },
+        },
+      ],
+      matches: [{ id: "match-1", extractionId: "ext-1", status: "selected" }],
+      pricing: [
+        {
+          id: "rec-override-empty",
+          extractionMatchId: "match-1",
+          status: "overridden",
+          createdByRunId: "run-1",
+          sourceType: "explicit",
+          selectedSourceType: "override",
+          overrideQuantity: null,
+          normalizedIntent: "coping metal",
+          sourceRowIdentity: "roof:coping-1",
+          sectionName: "Roof",
+        },
+      ],
+    });
+
+    const state = await buildEstimatingWorkbenchState(tenantDb, "deal-1");
+
+    expect(state.summary.pricing.readyToPromote).toBe(0);
+    expect(state.pricingRows).toEqual([
+      expect.objectContaining({ id: "rec-override-empty", promotable: false }),
+    ]);
+  });
+
   it("keeps promotion duplicate-blocking behavior intact", async () => {
     const { tenantDb } = makeDb({
       documents: [{ id: "doc-1", activeParseRunId: "run-1", ocrStatus: "completed" }],

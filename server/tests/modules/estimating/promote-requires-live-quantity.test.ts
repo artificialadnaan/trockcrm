@@ -66,4 +66,41 @@ describe("promoting approved recommendations into an estimate", () => {
     // only an active-artifact anchor.
     expect(sqlText).toContain("manual");
   });
+
+  it("EXEMPTS an override, which promotes its own quantity rather than the extraction's", async () => {
+    // `resolvePromotionLineValues` does `case "override": quantity = row.overrideQuantity ?? quantity`,
+    // so for these rows the anchor extraction's quantity is not the number that reaches the estimate.
+    // Gating on it dropped a complete override as `recommendation_unavailable` — and an override row's
+    // `sourceType` is ordinarily `'extracted'`, so it never reached the manual exemption above.
+    //
+    // The exemption is NOT unconditional: the override's own quantity is held to the same standard,
+    // NaN included, or this widening would reintroduce the null-priced-as-one-unit bug the PR removes.
+    let captured: unknown;
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          innerJoin: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              where: vi.fn((condition: unknown) => {
+                captured = condition;
+                return { for: vi.fn().mockResolvedValue([]) };
+              }),
+            })),
+          })),
+        })),
+      })),
+    } as any;
+
+    await loadApprovedRecommendationsForRun(tenantDb, "deal-1", "run-1");
+
+    const sqlText = extractSqlText(captured);
+    expect(sqlText).toContain("override_quantity");
+    expect(sqlText).toContain("selected_source_type");
+    // The override's own quantity gets the full triple, not just a presence check — otherwise an
+    // override carrying NaN or 0 would promote where an extraction carrying the same would not.
+    const overrideClause = sqlText.slice(sqlText.indexOf("selected_source_type"));
+    expect(overrideClause).toContain("is not null");
+    expect(overrideClause).toContain("> 0");
+    expect(overrideClause).toContain("NaN");
+  });
 });
