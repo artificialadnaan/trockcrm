@@ -74,6 +74,12 @@ export type DashboardAtRiskSummaryRow = {
   dealName?: string | null;
   /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
   dealIsChangeOrder?: boolean | null;
+  /**
+   * `deals.scope_title`. Travels WITH `dealIsChangeOrder`, always — the flag turns the name into
+   * "<Parent> — Change Order N", and this is the only field left that says which change order it is.
+   * Carrying the flag without the title is what makes two siblings render identically.
+   */
+  dealScopeTitle?: string | null;
   stageName?: string | null;
   regionClassification?: string | null;
   dealValue: number;
@@ -201,6 +207,7 @@ export function buildDashboardAtRiskDeals(
       repName: String(row.repName ?? "Unassigned"),
       dealName: String(row.dealName ?? "Deal"),
       dealIsChangeOrder: row.dealIsChangeOrder ?? undefined,
+      dealScopeTitle: row.dealScopeTitle ?? null,
       stageName: resolveMirroredStageLabel(row.stageSlug, row.stageName ?? "Stage"),
       mirroredStageStatus: row.mirroredStageStatus ?? null,
       workflowRoute: row.workflowRoute === "service" ? "service" : "normal",
@@ -233,6 +240,7 @@ export function buildDashboardAtRiskStaleDeals(
       dealNumber: String(row.dealNumber ?? ""),
       dealName: String(row.dealName ?? "Deal"),
       dealIsChangeOrder: row.dealIsChangeOrder ?? undefined,
+      dealScopeTitle: row.dealScopeTitle ?? null,
       stageId: String(row.stageId ?? ""),
       stageName: resolveMirroredStageLabel(row.stageSlug, row.stageName ?? "Stage"),
       assignedRepId: String(row.repId ?? ""),
@@ -276,6 +284,7 @@ export function buildDashboardDownstreamBottlenecks(
       repName: String(row.repName ?? "Unassigned"),
       dealName: String(row.dealName ?? "Deal"),
       dealIsChangeOrder: row.dealIsChangeOrder ?? undefined,
+      dealScopeTitle: row.dealScopeTitle ?? null,
       stageName: resolveMirroredStageLabel(row.stageSlug, row.stageName ?? "Stage"),
       mirroredStageStatus: row.mirroredStageStatus ?? null,
       workflowRoute: row.workflowRoute === "service" ? "service" : "normal",
@@ -641,6 +650,8 @@ export interface DashboardDownstreamBottleneckRow {
   dealName: string;
   /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
   dealIsChangeOrder?: boolean | null;
+  /** `deals.scope_title` — see DashboardAtRiskSummaryRow.dealScopeTitle; it travels with the flag. */
+  dealScopeTitle?: string | null;
   stageName: string;
   mirroredStageStatus: string | null;
   workflowRoute: "normal" | "service";
@@ -1089,6 +1100,10 @@ type CommissionDealRollup = {
   dealName: string;
   /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
   dealIsChangeOrder?: boolean | null;
+  // NO dealScopeTitle here, deliberately. The commission drill renders deal names through FOUR
+  // separate row types across three DTOs (rep-commission-drilldown.tsx), and carrying the column
+  // without rendering all four would reproduce exactly the carried-but-not-shown defect this change
+  // exists to remove. Tracked as a follow-up rather than half-built.
   companyName: string | null;
   propertyName: string | null;
   paidRevenue: number;
@@ -1617,6 +1632,8 @@ export interface RepDashboardData {
     dealName: string;
     /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
     dealIsChangeOrder?: boolean | null;
+    /** `deals.scope_title` — travels with the flag; see DashboardAtRiskSummaryRow.dealScopeTitle. */
+    dealScopeTitle?: string | null;
     companyName: string | null;
     propertyName: string | null;
     stageName: string;
@@ -1860,6 +1877,7 @@ export async function getRepDashboard(
         d.id AS deal_id,
         d.name AS deal_name,
         d.is_change_order AS deal_is_change_order,
+        d.scope_title AS deal_scope_title,
         c.name AS company_name,
         p.name AS property_name,
         psc.slug AS stage_slug,
@@ -1977,6 +1995,7 @@ export async function getRepDashboard(
       dealId: row.deal_id,
       dealName: row.deal_name,
       dealIsChangeOrder: row.deal_is_change_order ?? undefined,
+      dealScopeTitle: row.deal_scope_title ?? null,
       companyName: row.company_name ?? null,
       propertyName: row.property_name ?? null,
       stageName: resolveDealSnapshotStageLabel(
@@ -2109,6 +2128,8 @@ export interface RecentClose {
   dealName: string;
   /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
   dealIsChangeOrder?: boolean | null;
+  /** `deals.scope_title` — travels with the flag; see DashboardAtRiskSummaryRow.dealScopeTitle. */
+  dealScopeTitle?: string | null;
   repId: string | null;
   repName: string;
   outcome: "won" | "lost";
@@ -2643,6 +2664,7 @@ async function getRecentCloses(
       d.deal_number,
       d.name AS deal_name,
       d.is_change_order AS deal_is_change_order,
+      d.scope_title AS deal_scope_title,
       d.assigned_rep_id AS rep_id,
       COALESCE(u.display_name, 'Unassigned') AS rep_name,
       CASE
@@ -2669,6 +2691,7 @@ async function getRecentCloses(
     dealNumber: row.deal_number ? String(row.deal_number) : null,
     dealName: String(row.deal_name ?? "Deal"),
     dealIsChangeOrder: row.deal_is_change_order ?? undefined,
+    dealScopeTitle: row.deal_scope_title ?? null,
     repId: row.rep_id ? String(row.rep_id) : null,
     repName: String(row.rep_name ?? "Unassigned"),
     outcome: row.outcome === "won" ? "won" : "lost",
@@ -2848,6 +2871,7 @@ export async function getDashboardAtRiskRows(
       COALESCE(u.display_name, 'Unassigned') AS rep_name,
       d.name AS deal_name,
       d.is_change_order AS deal_is_change_order,
+      d.scope_title AS deal_scope_title,
       ${dealValueSql()}::numeric AS deal_value,
       COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
       psc.name AS stage_name,
@@ -2885,6 +2909,7 @@ export async function getDashboardAtRiskRows(
     repName: row.rep_name ? String(row.rep_name) : null,
     dealName: row.deal_name ? String(row.deal_name) : null,
     dealIsChangeOrder: row.deal_is_change_order ?? undefined,
+    dealScopeTitle: row.deal_scope_title ?? null,
     dealValue: Number(row.deal_value ?? 0),
     stageSlug: row.stage_slug ? String(row.stage_slug) : null,
     stageName: resolveMirroredStageLabel(row.stage_slug, row.stage_name),

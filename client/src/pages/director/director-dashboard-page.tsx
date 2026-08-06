@@ -1095,6 +1095,11 @@ export function DirectorDashboardPage() {
                         {/* A change-order child is STORED "<Parent> — Change Order N" and these rows
                             truncate; move the label to the front for DISPLAY only. */}
                         <p className="truncate text-sm font-bold text-gray-950">{formatDealDisplayName(deal.dealName, deal.dealIsChangeOrder)}</p>
+                        {/* The relabel above is what makes this line necessary: once the name reads
+                            "<Parent> — Change Order N", this is the only thing that says which one. */}
+                        {deal.dealScopeTitle ? (
+                          <p className="truncate text-xs font-medium text-gray-600">{deal.dealScopeTitle}</p>
+                        ) : null}
                         <p className="text-xs text-gray-500">
                           {repName}
                           {deal.regionClassification ? ` · ${deal.regionClassification}` : ""}
@@ -1272,6 +1277,11 @@ export function DirectorDashboardPage() {
                     <Icon className={`mt-0.5 h-4 w-4 ${color}`} />
                     <div className="min-w-0">
                       <p className="truncate text-sm font-bold text-gray-950">{formatDealDisplayName(close.dealName, close.dealIsChangeOrder)}</p>
+                      {/* Same reason as the at-risk rows above: a closed change order is otherwise
+                          indistinguishable from its parent and from its siblings. */}
+                      {close.dealScopeTitle ? (
+                        <p className="truncate text-xs font-medium text-gray-600">{close.dealScopeTitle}</p>
+                      ) : null}
                       <p className="text-xs text-gray-500">{close.repName}</p>
                     </div>
                     <div className="text-right">

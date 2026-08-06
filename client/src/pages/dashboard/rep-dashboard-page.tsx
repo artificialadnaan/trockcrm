@@ -33,6 +33,12 @@ interface TopDealRow {
   name: string;
   /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
   isChangeOrder?: boolean | null;
+  /**
+   * `deals.scope_title`. Once the relabel above fires, the row reads "<Parent> — Change Order N" and
+   * this is the only field left that says WHICH change order — two against one parent are otherwise
+   * the same string in a list sorted by value.
+   */
+  scopeTitle?: string | null;
   stage: string;
   stageVariant: StageVariant;
   days: number;
@@ -53,6 +59,8 @@ interface BlindSpot {
   name: string;
   /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
   isChangeOrder?: boolean | null;
+  /** `deals.scope_title`. Deal-only, exactly like the flag above — a lead has no scope title. */
+  scopeTitle?: string | null;
   ref: string;
   issue: string;
   hint: string;
@@ -153,6 +161,7 @@ function buildTopDeals(data: RepDashboardData, repName: string): TopDealRow[] {
     id: deal.dealId,
     name: deal.dealName,
     isChangeOrder: deal.dealIsChangeOrder,
+    scopeTitle: deal.dealScopeTitle,
     stage: deal.stageName,
     stageVariant: stageVariant(deal.stageName, deal.daysInStage, deal.staleThresholdDays),
     days: deal.daysInStage,
@@ -167,6 +176,7 @@ function buildTopDeals(data: RepDashboardData, repName: string): TopDealRow[] {
       id: deal.dealId,
       name: deal.dealName,
       isChangeOrder: deal.dealIsChangeOrder,
+      scopeTitle: deal.dealScopeTitle,
       stage: deal.stageName,
       stageVariant: stageVariant(deal.stageName, 0, null),
       days: 0,
@@ -210,6 +220,7 @@ function buildBlindSpots(data: RepDashboardData): BlindSpot[] {
       type: "deal" as const,
       name: deal.dealName,
       isChangeOrder: deal.dealIsChangeOrder,
+      scopeTitle: deal.dealScopeTitle,
       ref: deal.regionClassification,
       issue: "Service stage is past SLA",
       hint: `${deal.daysInStage} days in ${deal.stageName}; SLA ${deal.staleThresholdDays} days`,
@@ -372,6 +383,12 @@ function TopDealsTable({ deals, onOpen }: { deals: TopDealRow[]; onOpen: (id: st
                       relabel at the RENDER site only — the buildTopDeals/buildBlindSpots mappings above
                       keep the stored name. */}
                   <p className="truncate text-sm font-bold text-slate-950">{formatDealDisplayName(deal.name, deal.isChangeOrder)}</p>
+                  {/* Directly under the relabelled name, because the relabel is exactly what makes this
+                      line necessary: "<Parent> — Change Order 1" and "…Change Order 2" are the same
+                      row to a reader without it. */}
+                  {deal.scopeTitle ? (
+                    <p className="truncate text-xs font-medium text-slate-600">{deal.scopeTitle}</p>
+                  ) : null}
                   {deal.sla == null ? null : (
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">SLA {deal.sla}d</p>
                   )}
@@ -453,6 +470,12 @@ function AiBlindSpotsPanel({ items }: { items: BlindSpot[] }) {
                   </p>
                   <span className="font-mono text-[10px] text-slate-400">{item.ref}</span>
                 </div>
+                {/* GATED on `type` for the same reason as the name above: this list mixes deals and
+                    leads, and only a deal has a scope title. Sits between the name and the issue so
+                    the row still reads "which deal, then what is wrong with it". */}
+                {item.type === "deal" && item.scopeTitle ? (
+                  <p className="mt-0.5 truncate text-xs font-medium text-slate-600">{item.scopeTitle}</p>
+                ) : null}
                 <p className="mt-1 text-sm font-semibold text-slate-700">{item.issue}</p>
                 <p className="mt-1 text-xs text-slate-500">{item.hint}</p>
                 <div className="mt-2 flex flex-wrap items-center gap-2">

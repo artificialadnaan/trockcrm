@@ -60,6 +60,8 @@ export interface DirectorDashboardData {
     dealName: string;
     /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
     dealIsChangeOrder?: boolean | null;
+    /** `deals.scope_title` — the only field distinguishing two change orders once the relabel fires. */
+    dealScopeTitle?: string | null;
     stageName: string;
     repName: string;
     daysInStage: number;
@@ -95,6 +97,8 @@ export interface DirectorDashboardData {
     dealName: string;
     /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
     dealIsChangeOrder?: boolean | null;
+    /** `deals.scope_title` — the only field distinguishing two change orders once the relabel fires. */
+    dealScopeTitle?: string | null;
     stageName: string;
     mirroredStageStatus: string | null;
     workflowRoute: "normal" | "service";
@@ -110,6 +114,8 @@ export interface DirectorDashboardData {
     dealName: string;
     /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
     dealIsChangeOrder?: boolean | null;
+    /** `deals.scope_title` — the only field distinguishing two change orders once the relabel fires. */
+    dealScopeTitle?: string | null;
     stageName: string;
     mirroredStageStatus: string | null;
     workflowRoute: "normal" | "service";
@@ -148,6 +154,8 @@ export interface DirectorDashboardData {
     dealName: string;
     /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
     dealIsChangeOrder?: boolean | null;
+    /** `deals.scope_title` — the only field distinguishing two change orders once the relabel fires. */
+    dealScopeTitle?: string | null;
     repId: string | null;
     repName: string;
     outcome: "won" | "lost";

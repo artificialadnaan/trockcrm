@@ -965,6 +965,13 @@ export interface StaleDealRow {
    * honest answer — it degrades to the name-shape fallback rather than asserting "not a change order".
    */
   dealIsChangeOrder?: boolean | null;
+  /**
+   * `deals.scope_title` — travels with the flag above, and optional for the SAME reason: only the
+   * dashboard producer selects it. Once the relabel fires, this is the only field distinguishing one
+   * change order from another, so a surface that carries the flag and drops this renders siblings
+   * identically.
+   */
+  dealScopeTitle?: string | null;
   stageId: string;
   stageName: string;
   assignedRepId: string;
