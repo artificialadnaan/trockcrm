@@ -35,6 +35,18 @@ export type SearchResult = {
    */
   status?: DealLifecycle;
   /**
+   * A deal's short scope title (`deals.scope_title`), and frequently the REASON the row is in the
+   * results at all.
+   *
+   * The server searches and ranks on this field, not just on the name. So a rep who typed "Panel
+   * Relocation" can get back a row labelled "<Parent> — Change Order 1" — a change-order child's name
+   * carries no scope — with nothing on it that matches what they typed. Same failure the tertiaryLabel
+   * comment below describes: a result you cannot explain reads as a wrong result.
+   *
+   * Deal results only.
+   */
+  scopeTitle?: string | null;
+  /**
    * WHICH OFFICE the record lives in.
    *
    * Search is cross-office for an admin or director with multi-office access, and this is how a
