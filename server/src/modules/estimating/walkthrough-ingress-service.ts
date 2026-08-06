@@ -502,15 +502,18 @@ export function detectWalkthroughContactSheetArtifactDrift(
 export const MAX_WALKTHROUGH_SCOPE_ROWS = 1000;
 
 /**
- * The transcript quote grounding ONE scope row. Bounded for the same reason `rawLabel` is — an
- * unbounded field makes the payload's own size unbounded, and the sender learns that only as a
- * transport failure it cannot act on.
+ * The transcript quote grounding ONE scope row, in UTF-8 BYTES rather than characters.
+ *
+ * Bounded for the same reason `rawLabel` is — an unbounded field makes the payload's own size
+ * unbounded, and the sender learns that only as a transport failure it cannot act on. Measured in BYTES
+ * because a character cap does not bound size: 4000 CJK characters are ~12 KB, so a character-capped
+ * contract still admitted payloads three times over any byte ceiling derived from it.
  *
  * Generous on purpose: this is a spoken clause, not a document, and truncating evidence is worse than
  * refusing it (the clause that would be cut is usually the qualifying one — same argument as rawLabel).
  * It is NOT bounded by a column: `evidenceText` reaches `estimate_line_items.notes`, which is `text`.
  */
-export const MAX_WALKTHROUGH_EVIDENCE_TEXT_CHARS = 4000;
+export const MAX_WALKTHROUGH_EVIDENCE_TEXT_BYTES = 4000;
 
 /**
  * THE ONE SIZE LIMIT, read by both the contract and the transport.
@@ -527,6 +530,17 @@ export const MAX_WALKTHROUGH_EVIDENCE_TEXT_CHARS = 4000;
  * buffer an unauthenticated caller can force stays bounded.
  */
 export const MAX_WALKTHROUGH_PAYLOAD_BYTES = 8 * 1024 * 1024;
+
+/**
+ * What the DOOR accepts, as opposed to what the CONTRACT promises.
+ *
+ * Deliberately larger than the contract limit. The contract is measured on the CANONICAL serialization
+ * (`JSON.stringify` of the parsed body), while the transport sees the sender's actual bytes — which may
+ * be pretty-printed. Sizing the door to the contract exactly would 413 a contract-valid payload purely
+ * for its whitespace, which is the same class of mismatch this pair exists to remove. The headroom is
+ * what makes "valid by the contract" imply "accepted by the door" for any sane formatting.
+ */
+export const MAX_WALKTHROUGH_TRANSPORT_BYTES = 2 * MAX_WALKTHROUGH_PAYLOAD_BYTES;
 
 /**
  * Rows per INSERT. Each row binds 15 parameters and Postgres's protocol caps a single statement at
@@ -1253,11 +1267,13 @@ const LONE_SURROGATE_PATTERN =
  */
 function requireEvidenceText(value: unknown, field: string): string {
   const text = requireString(value, field);
-  if (text.length > MAX_WALKTHROUGH_EVIDENCE_TEXT_CHARS) {
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes > MAX_WALKTHROUGH_EVIDENCE_TEXT_BYTES) {
     throw new AppError(
       400,
-      `${field} is ${text.length} characters, over the ${MAX_WALKTHROUGH_EVIDENCE_TEXT_CHARS}-character ` +
-        `limit. evidenceText is the spoken clause this row is grounded in, not a document; an export ` +
+      `${field} is ${bytes} bytes, over the ${MAX_WALKTHROUGH_EVIDENCE_TEXT_BYTES}-byte ` +
+        `limit (measured in UTF-8 bytes, not characters, so the bound holds in every script). ` +
+        `evidenceText is the spoken clause this row is grounded in, not a document; an export ` +
         `this long is a segmentation bug upstream. It is not truncated, because the clause that would ` +
         `be cut is usually the qualifying one.`
     );
@@ -1703,6 +1719,27 @@ function validateScopeRow(value: unknown, index: number): WalkthroughScopeRow {
  */
 export function validateWalkthroughIngressPayload(input: unknown): WalkthroughIngressPayload {
   const raw = requireObject(input, "walkthrough ingress payload");
+
+  // THE AGGREGATE BYTE CEILING, checked HERE and not only at the door.
+  //
+  // Per-field caps cannot imply a total: this contract permits 1000 rows, and the fields it bounds are
+  // bounded in CHARACTERS against columns, not in bytes against a payload. So the only honest way for
+  // "valid by the contract" to imply "small enough to send" is for the contract to state the byte
+  // ceiling itself. Without this, a sender obeying every documented field rule could still be refused
+  // by the transport with a 413 — a rejection no field-level message could explain.
+  //
+  // Measured on the CANONICAL serialization so the number does not move with the sender's formatting.
+  // Cheap: the body has already been parsed, and the transport bounded it before that.
+  const canonicalBytes = Buffer.byteLength(JSON.stringify(raw), "utf8");
+  if (canonicalBytes > MAX_WALKTHROUGH_PAYLOAD_BYTES) {
+    throw new AppError(
+      400,
+      `Walkthrough payload is ${canonicalBytes} bytes, over the ${MAX_WALKTHROUGH_PAYLOAD_BYTES}-byte ` +
+        `limit. Split the export by walkthrough rather than trimming rows — a partial walkthrough is ` +
+        `worse than two complete ones, because the scope a crew spoke once would land split across ` +
+        `runs with no record that anything was dropped.`
+    );
+  }
 
   const rowsValue = raw.rows;
   if (!Array.isArray(rowsValue)) {

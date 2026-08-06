@@ -5,18 +5,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   getCrmFileBucket,
   MAX_WALKTHROUGH_PAYLOAD_BYTES,
+  MAX_WALKTHROUGH_TRANSPORT_BYTES,
 } from "../../../src/modules/estimating/walkthrough-ingress-service.js";
 
 const mocks = vi.hoisted(() => ({
   poolQuery: vi.fn(),
-  runInOfficeTransaction: vi.fn(),
+  runInOfficeAsUser: vi.fn(),
   ingestWalkthrough: vi.fn(),
   contactSheetStore: vi.fn(() => ({})),
 }));
 
 vi.mock("../../../src/db.js", () => ({ pool: { query: mocks.poolQuery } }));
 vi.mock("../../../src/modules/field/cross-office.js", () => ({
-  runInOfficeTransaction: mocks.runInOfficeTransaction,
+  runInOfficeAsUser: mocks.runInOfficeAsUser,
 }));
 // PARTIAL mock. `ingestWalkthrough` is replaced; everything else — the validator the route now runs as
 // a gate, and MAX_WALKTHROUGH_PAYLOAD_BYTES which sizes express.raw — stays REAL. A whole-module factory
@@ -104,7 +105,7 @@ beforeEach(() => {
   mocks.poolQuery.mockResolvedValue({ rows: [{ id: "office-1", slug: "dallas" }] });
   mocks.ingestWalkthrough.mockResolvedValue({ documentId: "doc-1", parseRunId: "run-1", fileId: "f-1", extractionIds: [] });
   // Runs the callback against a stub office db whose lookups succeed by default.
-  mocks.runInOfficeTransaction.mockImplementation(async (_office: unknown, _userId: string, run: any) =>
+  mocks.runInOfficeAsUser.mockImplementation(async (_office: unknown, _userId: string, run: any) =>
     run({
       select: () => ({
         from: () => ({ where: () => ({ limit: async () => [{ id: "found" }] }) }),
@@ -172,7 +173,7 @@ describe("the machine door into estimating", () => {
 
     expect(res.status).toBe(400);
     expect(mocks.poolQuery).not.toHaveBeenCalled();
-    expect(mocks.runInOfficeTransaction).not.toHaveBeenCalled();
+    expect(mocks.runInOfficeAsUser).not.toHaveBeenCalled();
   });
 
   it("validates the payload BEFORE it looks up an office or opens a transaction", async () => {
@@ -187,7 +188,27 @@ describe("the machine door into estimating", () => {
 
     expect(res.status).toBe(400);
     expect(mocks.poolQuery).not.toHaveBeenCalled();
-    expect(mocks.runInOfficeTransaction).not.toHaveBeenCalled();
+    expect(mocks.runInOfficeAsUser).not.toHaveBeenCalled();
+    expect(mocks.ingestWalkthrough).not.toHaveBeenCalled();
+  });
+
+  it("answers 400 naming the CONTRACT limit when the payload is over it but parseable", async () => {
+    // The aggregate byte ceiling is part of the contract, so the ordinary too-big export is refused by
+    // the validator with a message that names the limit — not by the transport with a bare 413. This is
+    // the case a sender actually hits, and the one that used to be unexplainable.
+    const oversized = "x".repeat(MAX_WALKTHROUGH_PAYLOAD_BYTES + 1024);
+    const body = JSON.stringify({ ...VALID, siteLabel: oversized });
+    const res = await request(await appWithRoute())
+      .post("/api/integrations/scope/walkthrough-extractions")
+      .set("content-type", "application/json")
+      .set("x-trock-scope-signature", sign(body))
+      .send(body);
+
+    expect(res.status).toBe(400);
+    // Asserted on `text`, not `body.error`: this app mounts the router alone, so an AppError reaches
+    // Express's finalhandler, which honours `statusCode` but renders HTML rather than the JSON envelope
+    // the real app's error handler produces. The status and the number are what this test is about.
+    expect(res.text).toContain(String(MAX_WALKTHROUGH_PAYLOAD_BYTES));
     expect(mocks.ingestWalkthrough).not.toHaveBeenCalled();
   });
 
@@ -196,7 +217,7 @@ describe("the machine door into estimating", () => {
     // 500 — and a 500 on THIS failure is how a sender concludes the endpoint is broken rather than
     // that its export is too big. Built just past the ceiling with filler in a field the contract
     // bounds, so the size is what is under test and nothing else.
-    const oversized = "x".repeat(MAX_WALKTHROUGH_PAYLOAD_BYTES + 1024);
+    const oversized = "x".repeat(MAX_WALKTHROUGH_TRANSPORT_BYTES + 1024);
     const body = JSON.stringify({ ...VALID, siteLabel: oversized });
     const res = await request(await appWithRoute())
       .post("/api/integrations/scope/walkthrough-extractions")
@@ -207,6 +228,57 @@ describe("the machine door into estimating", () => {
     expect(res.status).toBe(413);
     expect(res.body.error).toMatch(/limit/i);
     expect(mocks.ingestWalkthrough).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["no Content-Type at all", undefined],
+    ["a non-JSON Content-Type", "text/plain"],
+  ])("answers 415, not 500, when the raw parser is skipped because of %s", async (_label, contentType) => {
+    // `express.raw({ type: "application/json" })` parses NOTHING for any other content type, leaving
+    // `req.body` undefined. The route cast it to Buffer, so `Hmac.update(undefined)` threw and the
+    // catch-all reported a 500 — reachable without a signature, by omitting a header.
+    const body = JSON.stringify(VALID);
+    let req = request(await appWithRoute()).post("/api/integrations/scope/walkthrough-extractions");
+    if (contentType) req = req.set("content-type", contentType);
+    const res = await req.set("x-trock-scope-signature", sign(body)).send(body);
+
+    expect(res.status).toBe(415);
+    expect(mocks.ingestWalkthrough).not.toHaveBeenCalled();
+  });
+
+  it("answers 400, not a Postgres error, when officeSlug carries a NUL", async () => {
+    // `officeSlug` is NOT part of the canonical payload shape, so the route's trim was its only check —
+    // and it is bound straight into the office lookup. Postgres refuses a NUL in a text parameter, so
+    // the LOOKUP threw and the route reported 500 for a malformed field.
+    const body = JSON.stringify({ ...VALID, officeSlug: "dal\u0000las" });
+    const res = await request(await appWithRoute())
+      .post("/api/integrations/scope/walkthrough-extractions")
+      .set("content-type", "application/json")
+      .set("x-trock-scope-signature", sign(body))
+      .send(body);
+
+    expect(res.status).toBe(400);
+    expect(mocks.poolQuery).not.toHaveBeenCalled();
+  });
+
+  it("lets the ingress own the ONLY transaction", async () => {
+    // `runInOfficeTransaction` issues a raw BEGIN that drizzle cannot see, so `ingestWalkthrough`'s own
+    // `tenantDb.transaction(...)` emitted a nested BEGIN (a no-op) and a real COMMIT that closed the
+    // wrapper's transaction early — everything after ran unprotected and the wrapper's COMMIT was a
+    // no-op. Pinned structurally: the route must use the non-transactional office helper, because a
+    // mock cannot observe a BEGIN that Postgres merely warns about.
+    const source = await import("node:fs").then((fs) =>
+      fs.readFileSync(
+        new URL("../../../src/modules/estimating/scope-ingest-routes.ts", import.meta.url),
+        "utf8"
+      )
+    );
+
+    // Matched on the CALL, not the file text: the comment explaining this change necessarily names the
+    // old helper, and an assertion that trips over its own rationale is a test nobody keeps.
+    expect(source).toMatch(/await runInOfficeAsUser\(/);
+    expect(source).not.toMatch(/await runInOfficeTransaction\(/);
+    expect(source).toMatch(/import \{ runInOfficeAsUser[,\s]/);
   });
 
   it("REFUSES an unsigned request", async () => {
@@ -253,7 +325,7 @@ describe("the machine door into estimating", () => {
   it("REFUSES an actor it cannot prove", async () => {
     // `files.uploaded_by` is stamped from this id. An unverified value would put a person's name on a
     // machine's work, or a name that does not exist on a row whose foreign key says it must.
-    mocks.runInOfficeTransaction.mockImplementation(async (_o: unknown, _u: string, run: any) =>
+    mocks.runInOfficeAsUser.mockImplementation(async (_o: unknown, _u: string, run: any) =>
       run({ select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }) })
     );
     const body = JSON.stringify(VALID);
@@ -276,7 +348,7 @@ describe("the machine door into estimating", () => {
     // Asserted on the PREDICATE rather than on a 404, because a mock returning [] gives a 404 whether
     // or not the guard is there. Flattening the drizzle condition is the only way to see the guard.
     const wheres: unknown[] = [];
-    mocks.runInOfficeTransaction.mockImplementation(async (_o: unknown, _u: string, run: any) =>
+    mocks.runInOfficeAsUser.mockImplementation(async (_o: unknown, _u: string, run: any) =>
       run({
         select: () => ({
           from: () => ({

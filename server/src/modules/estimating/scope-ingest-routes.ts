@@ -3,12 +3,13 @@ import express, { Router } from "express";
 import { and, eq } from "drizzle-orm";
 import { deals, users } from "@trock-crm/shared/schema";
 import { pool } from "../../db.js";
-import { runInOfficeTransaction, type FieldOffice } from "../field/cross-office.js";
+import { runInOfficeAsUser, type FieldOffice } from "../field/cross-office.js";
 import { createWalkthroughContactSheetStore } from "./walkthrough-contact-sheet-store.js";
 import {
   ingestWalkthrough,
   validateWalkthroughIngressPayload,
   MAX_WALKTHROUGH_PAYLOAD_BYTES,
+  MAX_WALKTHROUGH_TRANSPORT_BYTES,
 } from "./walkthrough-ingress-service.js";
 
 /**
@@ -17,6 +18,12 @@ import {
  * transaction — a 500 for what is plainly a malformed request.
  */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * `public.offices.slug` is `varchar(100)`. Bounded and character-restricted here so nothing unstorable
+ * — a NUL above all — is ever bound into the lookup query.
+ */
+const OFFICE_SLUG_RE = /^[a-z0-9][a-z0-9_-]{0,99}$/i;
 
 /**
  * The ONE door a machine may use to file walkthrough scope into estimating.
@@ -76,10 +83,21 @@ scopeIngestRoutes.post(
   "/walkthrough-extractions",
   // The limit is the CONTRACT's, imported rather than restated — see MAX_WALKTHROUGH_PAYLOAD_BYTES.
   // A literal here is what let the door refuse payloads the validator next door called valid.
-  express.raw({ type: "application/json", limit: MAX_WALKTHROUGH_PAYLOAD_BYTES }),
+  express.raw({ type: "application/json", limit: MAX_WALKTHROUGH_TRANSPORT_BYTES }),
   async (req, res, next) => {
     try {
-      const rawBody = req.body as Buffer;
+      // `express.raw({ type: "application/json" })` SKIPS parsing for any other content type — and for a
+      // request with no Content-Type at all — leaving `req.body` as `undefined` (or `{}` once another
+      // parser has run). The cast below does not create a Buffer, so `Hmac.update(undefined)` THREW and
+      // reached the catch-all as a 500: an unsupported media type reported as a server fault, and one
+      // trivially reachable without a signature.
+      if (!Buffer.isBuffer(req.body)) {
+        res.status(415).json({
+          error: "Content-Type must be application/json; the body is read as raw bytes for signing.",
+        });
+        return;
+      }
+      const rawBody = req.body;
       if (!verifySignature(rawBody, req.headers["x-trock-scope-signature"] as string | undefined)) {
         // Uniform 401 with no detail: which half was wrong is not a machine's business to learn.
         res.status(401).json({ error: "Invalid signature" });
@@ -110,6 +128,15 @@ scopeIngestRoutes.post(
         return;
       }
 
+      // `officeSlug` is NOT part of `validateWalkthroughIngressPayload`'s canonical shape, so the trim
+      // above was its only check — and it reaches `resolveOfficeBySlug` as a bound text parameter.
+      // Postgres cannot accept a NUL in a text parameter, so `"dal\u0000las"` passed every check here
+      // and made the LOOKUP throw: a 500 for a malformed field. Checked against the column's own shape
+      // (`offices.slug` is varchar(100)) rather than only for NUL, so the whole class is closed.
+      if (!OFFICE_SLUG_RE.test(officeSlug)) {
+        res.status(400).json({ error: "officeSlug must be a slug of up to 100 characters" });
+        return;
+      }
       if (!UUID_RE.test(dealId) || !UUID_RE.test(userId)) {
         res.status(400).json({ error: "dealId and userId must be UUIDs" });
         return;
@@ -136,7 +163,17 @@ scopeIngestRoutes.post(
         return;
       }
 
-      const result = await runInOfficeTransaction(office, userId, async (officeDb) => {
+      // NOT `runInOfficeTransaction`. `ingestWalkthrough` opens its own transaction, and drizzle cannot
+      // see an ambient one opened by a raw `BEGIN` on the same client — so it would emit a nested BEGIN
+      // (a no-op) and a real COMMIT that closed the wrapper's transaction early, leaving the wrapper's
+      // atomicity guarantee false. The service owns the only transaction; this supplies the office
+      // search_path and the actor the audit triggers read.
+      //
+      // The two checks below therefore run OUTSIDE that transaction. They are reads whose job is to
+      // refuse a request, not to hold a state: the ingress re-reads the deal inside its own transaction,
+      // and the actor is a foreign key the write would fail on regardless. What they buy is a clean
+      // 404 instead of a constraint error.
+      const result = await runInOfficeAsUser(office, userId, async (officeDb) => {
         // THE ACTOR IS PROVED, not accepted. `files.uploaded_by` and the source document's uploader are
         // both stamped from this id, so an unverified value would put a person's name on a machine's
         // work — or a name that does not exist on a row with a foreign key that does.
@@ -196,9 +233,10 @@ scopeIngestRoutes.use(
     if (err && typeof err === "object" && (err as { type?: string }).type === "entity.too.large") {
       res.status(413).json({
         error:
-          `Body exceeds the ${MAX_WALKTHROUGH_PAYLOAD_BYTES}-byte walkthrough ingress limit. Split the ` +
-          `export by walkthrough; a single walkthrough is capped at ${"1000"} scope rows and this ` +
-          `ceiling is sized to hold that many bounded rows.`,
+          `Body exceeds the ${MAX_WALKTHROUGH_TRANSPORT_BYTES}-byte transport ceiling. The CONTRACT ` +
+          `limit is ${MAX_WALKTHROUGH_PAYLOAD_BYTES} bytes of canonical JSON (validated per payload, ` +
+          `so a conforming export is never refused here for its formatting alone) — split the export ` +
+          `by walkthrough.`,
       });
       return;
     }
