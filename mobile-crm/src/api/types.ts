@@ -115,6 +115,15 @@ export type PipelineStage = {
 export type DealListItem = {
   id: string;
   name: string | null;
+  /**
+   * The short accounting title (QuickBooks scope phrase), already on the wire — the deal list/detail
+   * queries select `...getTableColumns(deals)`, so this arrives whether or not the app declares it.
+   *
+   * Mirrored here despite the "keep these narrow" rule above because a change-order child's `name` is
+   * the generic "<Parent> — Change Order N": without this field two change orders on one parent are
+   * indistinguishable on every native screen, which is the specific thing the column was added for.
+   */
+  scopeTitle: string | null;
   description: string | null;
   dealNumber: string | null;
   stageId: string | null;

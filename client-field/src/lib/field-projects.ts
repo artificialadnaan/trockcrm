@@ -19,6 +19,12 @@ export type FieldProject = {
   name: string;
   /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel; never infer it from the name. */
   isChangeOrder: boolean;
+  /**
+   * `deals.scope_title`. Travels WITH the flag: the relabel above front-loads "Change Order N", and
+   * this is the only field left saying WHICH one. Also a SEARCHED column on the Projects page, so
+   * without it a crew can type the scope phrase, match, and see a row that cannot explain the hit.
+   */
+  scopeTitle: string | null;
   /** RAW deals.deal_number — the HubSpot id ("HS-…") for HubSpot-imported deals. Never display this; render `projectNumber`. */
   dealNumber: string;
   /** The human-facing project number to display (canonical DFW/ATL), or null when pending. Server-resolved. */
@@ -55,6 +61,8 @@ export type FieldCaptureTarget = {
   name: string;
   /** `deals.is_change_order` — deal rows only; the AUTHORITY for the change-order display relabel. */
   isChangeOrder?: boolean | null;
+  /** `deals.scope_title` — deal rows only, same gate as the flag above; a lead has no scope title. */
+  scopeTitle?: string | null;
   recordNumber: string | null;
   stageName: string | null;
   companyName: string | null;

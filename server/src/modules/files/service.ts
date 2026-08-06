@@ -271,6 +271,14 @@ export interface PhotoUploadTarget {
    * AUTHORITY for that, so the client stops inferring it from the name's shape.
    */
   isChangeOrder?: boolean;
+  /**
+   * `deals.scope_title`, on deal/opportunity rows only. Travels WITH the flag above: front-loading
+   * "Change Order N" is exactly what makes two children of one parent read alike, and this is the only
+   * field left that separates them. It is also a SEARCHED and RANKED column here (see
+   * buildPhotoTargetDealSearchCondition), so omitting it lets a user type a scope phrase, match on it,
+   * and get back a row with no visible reason for being there.
+   */
+  scopeTitle?: string | null;
   recordNumber: string | null;
   stageName: string | null;
   companyName: string | null;
@@ -1216,6 +1224,10 @@ export function buildPhotoTargetDealSearchCondition(search: string): SQL {
     // The picker DISPLAYS the canonical project_number, so it must be searchable too — otherwise a
     // HubSpot-imported deal (deal_number = HS-…) can't be found by the DFW/ATL number the user sees.
     sql`${deals.projectNumber} ILIKE ${term} ESCAPE '\\'`,
+    // The short accounting title, and an IDENTIFYING one (it is ranked below alongside name/number,
+    // not left in the free-text tier with description). A change-order child's name is the generic
+    // "<Parent> — Change Order N", so the scope phrase the user types is stored only here.
+    sql`${deals.scopeTitle} ILIKE ${term} ESCAPE '\\'`,
     sql`${deals.description} ILIKE ${term} ESCAPE '\\'`,
     sql`${deals.source} ILIKE ${term} ESCAPE '\\'`,
     sql`${companies.name} ILIKE ${term} ESCAPE '\\'`,
@@ -1359,6 +1371,9 @@ export async function searchPhotoUploadTargets(
           deals.name,
           deals.dealNumber,
           deals.projectNumber,
+          // Ranked, not merely matched: for a change order the title is the ONLY identifying phrase,
+          // so an exact hit on it must outrank a substring mention in someone else's description.
+          deals.scopeTitle,
           companies.name,
           properties.name,
           properties.address,
@@ -1404,6 +1419,7 @@ export async function searchPhotoUploadTargets(
         id: deals.id,
         name: deals.name,
         isChangeOrder: deals.isChangeOrder,
+        scopeTitle: deals.scopeTitle,
         dealNumber: deals.dealNumber,
         projectNumber: deals.projectNumber,
         pipelineDisposition: deals.pipelineDisposition,
@@ -1444,6 +1460,7 @@ export async function searchPhotoUploadTargets(
       type: row.pipelineDisposition === "opportunity" ? ("opportunity" as const) : ("deal" as const),
       name: row.name,
       isChangeOrder: row.isChangeOrder === true,
+      scopeTitle: row.scopeTitle ?? null,
       // Show the canonical DFW/ATL project number (resolver), never the raw deal_number — which is the
       // HubSpot import id for HubSpot deals and a change order's own generated number. Mirrors the field
       // project-list + nearby paths (projects-service.ts); this search path was the one PR #784 missed.

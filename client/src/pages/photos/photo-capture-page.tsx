@@ -401,6 +401,11 @@ export function PhotoCapturePage() {
                             className="w-full px-3 py-2 text-left transition-colors hover:bg-white/10"
                           >
                             <p className="truncate text-sm font-medium text-white">{targetDisplayName(target)}</p>
+                            {/* The row can be HERE because of this field — it is searched and ranked
+                                server-side — so showing it is what makes the match explicable. */}
+                            {target.scopeTitle ? (
+                              <p className="mt-0.5 truncate text-xs font-medium text-white/70">{target.scopeTitle}</p>
+                            ) : null}
                             <p className="mt-0.5 truncate text-xs text-white/45">
                               {target.recordNumber ? `${target.recordNumber} · ` : ""}
                               {target.stageName ?? "No stage"}

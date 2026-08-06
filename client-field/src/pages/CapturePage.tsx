@@ -648,6 +648,10 @@ function TargetPicker(input: {
                     <FolderOpen className="h-5 w-5 text-primary" />
                     <span className="min-w-0">
                       <span className="block truncate font-black">{captureTargetDisplayName(target)}</span>
+                      {/* Searched and ranked server-side, so it can be the sole reason this row matched. */}
+                      {target.scopeTitle ? (
+                        <span className="block truncate text-sm font-semibold text-foreground/80">{target.scopeTitle}</span>
+                      ) : null}
                       <span className="block truncate text-sm text-muted-foreground">
                         {target.recordNumber ? `${target.recordNumber} · ` : ""}
                         {target.stageName ?? "No stage"}

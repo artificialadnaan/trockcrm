@@ -105,6 +105,8 @@ export interface RepDashboardData {
     dealId: string;
     dealName: string;
     dealIsChangeOrder?: boolean | null;
+    /** `deals.scope_title` — the only field distinguishing two change orders once the relabel fires. */
+    dealScopeTitle?: string | null;
     stageName: string;
     mirroredStageStatus: string | null;
     workflowRoute: "normal" | "service";
@@ -126,6 +128,8 @@ export interface RepDashboardData {
     dealId: string;
     dealName: string;
     dealIsChangeOrder?: boolean | null;
+    /** `deals.scope_title` — the only field distinguishing two change orders once the relabel fires. */
+    dealScopeTitle?: string | null;
     companyName: string | null;
     propertyName: string | null;
     stageName: string;

@@ -219,6 +219,11 @@ export function ProjectDetailPage() {
           </button>
           <div className="min-w-0 flex-1">
             <h1 className="truncate text-2xl font-black">{formatDealDisplayName(project?.name, project?.isChangeOrder) ?? "Project"}</h1>
+            {/* The screen a Projects-page search result lands on. Without this, the phrase that matched
+                is gone one tap after it was shown, and the header reads as the parent deal. */}
+            {project?.scopeTitle ? (
+              <p className="truncate text-base font-bold text-foreground/80">{project.scopeTitle}</p>
+            ) : null}
             <p className="truncate text-sm text-muted-foreground">{project?.propertyAddress ?? "No address on file"}</p>
           </div>
           {offOffice ? (

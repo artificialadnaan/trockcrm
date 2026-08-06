@@ -41,6 +41,14 @@ export type FieldProject = {
    */
   isChangeOrder: boolean;
   /**
+   * `deals.scope_title`, the short accounting title. Travels WITH `isChangeOrder`: the flag is what
+   * front-loads "Change Order N" onto the displayed name, and once it does, this is the only field
+   * left saying WHICH change order — two children of one parent are otherwise the same row. It is
+   * also a SEARCHED column here (see activeProjectWhere), so without it a field user can type the
+   * scope phrase, match, and get back a row that cannot explain why it matched.
+   */
+  scopeTitle: string | null;
+  /**
    * RAW `deals.deal_number`. For HubSpot-imported deals this is the meaningless HubSpot id
    * ("HS-…") — do NOT display it. Kept raw because it is also a stable, unique, non-null key used
    * internally (e.g. the photo-report R2 storage path) and for record matching. Clients display
@@ -112,6 +120,7 @@ function mapFieldProject(row: any): FieldProject {
     // clients move "Change Order N" to the front of the displayed name, and without this they had to
     // infer it from the name's shape — which mislabels a deal a human happened to name that way.
     isChangeOrder: row.is_change_order === true,
+    scopeTitle: row.scope_title ?? null,
     // Raw deal_number stays raw (storage-path / matching key). The display number is resolved the
     // same way the CRM + global search do: project_number, else a non-HubSpot deal_number, else null
     // — so the HubSpot id in deal_number is never shown.
@@ -147,6 +156,10 @@ export function activeProjectWhere(search?: string) {
         -- For HubSpot-imported deals the canonical DFW/ATL number lives in project_number (deal_number
         -- holds the HS- id), so it must be searchable too.
         OR d.project_number ILIKE ${`%${normalizedSearch}%`}
+        -- The short accounting title. A change-order child's NAME is the generic "<Parent> — Change
+        -- Order N", so the scope phrase a field user actually remembers ("Panel Relocation") lives
+        -- only here; without this column that deal is unfindable from the Projects page.
+        OR d.scope_title ILIKE ${`%${normalizedSearch}%`}
         OR d.property_address ILIKE ${`%${normalizedSearch}%`}
         OR d.property_city ILIKE ${`%${normalizedSearch}%`}
       )
@@ -190,6 +203,7 @@ export async function listFieldProjects(
       d.id,
       d.name,
       d.is_change_order,
+      d.scope_title,
       d.deal_number,
       d.project_number,
       d.name AS property_name,
@@ -288,6 +302,7 @@ export async function listNearbyFieldProjects(
       d.id,
       d.name,
       d.is_change_order,
+      d.scope_title,
       d.deal_number,
       d.project_number,
       d.name AS property_name,
@@ -322,6 +337,7 @@ export async function listStarredFieldProjects(tenantDb: TenantDb, access: Field
       d.id,
       d.name,
       d.is_change_order,
+      d.scope_title,
       d.deal_number,
       d.project_number,
       d.name AS property_name,
@@ -377,6 +393,7 @@ export async function assertActiveFieldProject(tenantDb: TenantDb, _access: Fiel
       d.id,
       d.name,
       d.is_change_order,
+      d.scope_title,
       d.deal_number,
       d.project_number,
       d.name AS property_name,
@@ -414,6 +431,7 @@ export async function getFieldProject(
       d.id,
       d.name,
       d.is_change_order,
+      d.scope_title,
       d.deal_number,
       d.project_number,
       d.name AS property_name,
@@ -673,6 +691,7 @@ export async function listNearbyFieldCaptureTargets(
       d.id,
       d.name,
       d.is_change_order,
+      d.scope_title,
       d.deal_number,
       d.project_number,
       COALESCE(psc.name, d.bid_board_stage_slug, 'Active') AS stage_name,
@@ -697,6 +716,7 @@ export async function listNearbyFieldCaptureTargets(
       type: "deal" as const,
       name: row.name,
       isChangeOrder: row.is_change_order === true,
+      scopeTitle: row.scope_title ?? null,
       recordNumber: resolveDealDisplayNumber({ projectNumber: row.project_number, dealNumber: row.deal_number }),
       stageName: row.stage_name ?? null,
       companyName: row.company_name ?? null,

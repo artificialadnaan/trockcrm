@@ -214,6 +214,13 @@ export default function DealDetailScreen() {
         ) : null}
 
         <Text style={styles.name}>{deal.name ?? "Untitled deal"}</Text>
+        {/* Directly under the name, because for a change order the name is only the parent's: the
+            screen you land on after tapping a search result must still show what search matched on. */}
+        {deal.scopeTitle ? (
+          <Text testID="deal-scope-title" style={styles.scopeTitle}>
+            {deal.scopeTitle}
+          </Text>
+        ) : null}
         {deal.companyName ? <Text style={styles.company}>{deal.companyName}</Text> : null}
 
         <View style={styles.badgeRow}>
@@ -487,6 +494,9 @@ const styles = StyleSheet.create({
   body: { padding: theme.space.lg, gap: theme.space.sm, paddingBottom: theme.space.xxl },
   center: { flex: 1, alignItems: "center", justifyContent: "center", gap: theme.space.md },
   name: { fontFamily: theme.font.bold, fontSize: 24, color: theme.color.inkNavy, marginTop: theme.space.sm },
+  // 17 semibold: below the 24pt name, above the 15pt company — the scope outranks the company on a
+  // change order, where it is the only line that differs between siblings.
+  scopeTitle: { fontFamily: theme.font.semibold, fontSize: 17, color: theme.color.textPrimary },
   company: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textSecondary },
   badgeRow: { flexDirection: "row", alignItems: "center", gap: theme.space.sm, marginTop: theme.space.xs },
   amount: { fontFamily: theme.font.bold, fontSize: 20, color: theme.color.textPrimary },
