@@ -787,10 +787,24 @@ export async function buildEstimatingWorkbenchState(
     // ordinarily `'extracted'`, so it does not reach the manual exemption above. Held to the same
     // standard as everything else here (NaN included), so exempting the row from the extraction's
     // check does not exempt it from having a priceable number at all.
-    if (row.selectedSourceType === "override") {
-      if (row.overrideQuantity === undefined) return true;
+    // ONLY when the override actually carries a quantity. `resolvePromotionLineValues` does
+    // `quantity = row.overrideQuantity ?? quantity`, so an override with NO quantity of its own is a
+    // PRICE-ONLY override — `updateEstimatePricingRecommendationReviewState` sets `overrideUnitPrice`
+    // and `overrideNotes` without ever setting `overrideQuantity`, which makes that the ordinary case,
+    // not an edge one. Such a row falls through to the extraction check below, because the extraction's
+    // quantity is exactly what promotion will fall back to.
+    //
+    // Written as a fall-through rather than an early return for that reason: returning false here
+    // rejected every ordinary price-only override, and returning true would have waved through a row
+    // with no live quantity anywhere. It also matches the promote query, which is a DISJUNCTION — an
+    // override branch OR the extraction branch — so the two surfaces answer alike by construction.
+    if (
+      row.selectedSourceType === "override" &&
+      row.overrideQuantity !== undefined &&
+      row.overrideQuantity !== null
+    ) {
       const overrideQuantity = Number(row.overrideQuantity);
-      return row.overrideQuantity !== null && Number.isFinite(overrideQuantity) && overrideQuantity > 0;
+      return Number.isFinite(overrideQuantity) && overrideQuantity > 0;
     }
     const matchRow = row.extractionMatchId ? matchById.get(row.extractionMatchId) : null;
     const extraction = matchRow?.extractionId ? extractionById.get(matchRow.extractionId) : null;

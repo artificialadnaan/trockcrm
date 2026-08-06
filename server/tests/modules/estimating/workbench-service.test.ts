@@ -578,6 +578,51 @@ describe("buildEstimatingWorkbenchState", () => {
     ]);
   });
 
+  it("keeps a PRICE-ONLY override promotable on the extraction's quantity", async () => {
+    // THE ORDINARY OVERRIDE, and the regression a stricter override branch introduced.
+    // `updateEstimatePricingRecommendationReviewState` accepts `action: "override"` and sets
+    // `overrideUnitPrice` + `overrideNotes` WITHOUT ever setting `overrideQuantity` — so a null
+    // quantity here is the common case, not a broken row. `resolvePromotionLineValues` handles it
+    // (`quantity = row.overrideQuantity ?? quantity`), and the promote query admits it through its
+    // extraction branch, so the workbench must fall through to that same check rather than refuse.
+    const { tenantDb } = makeDb({
+      documents: [{ id: "doc-1", activeParseRunId: "run-1", ocrStatus: "completed" }],
+      extractions: [
+        {
+          id: "ext-1",
+          documentId: "doc-1",
+          status: "approved",
+          // LIVE quantity — this is what promotion falls back to, so the row is fully priceable.
+          quantity: "64",
+          metadataJson: { sourceParseRunId: "run-1", activeArtifact: true },
+        },
+      ],
+      matches: [{ id: "match-1", extractionId: "ext-1", status: "selected" }],
+      pricing: [
+        {
+          id: "rec-price-only",
+          extractionMatchId: "match-1",
+          status: "overridden",
+          createdByRunId: "run-1",
+          sourceType: "explicit",
+          selectedSourceType: "override",
+          overrideQuantity: null,
+          overrideUnitPrice: "12.50",
+          normalizedIntent: "coping metal",
+          sourceRowIdentity: "roof:coping-1",
+          sectionName: "Roof",
+        },
+      ],
+    });
+
+    const state = await buildEstimatingWorkbenchState(tenantDb, "deal-1");
+
+    expect(state.summary.pricing.readyToPromote).toBe(1);
+    expect(state.pricingRows).toEqual([
+      expect.objectContaining({ id: "rec-price-only", promotable: true }),
+    ]);
+  });
+
   it("does NOT exempt an override whose own quantity is unusable", async () => {
     // The exemption must not become a hole. An override with a null quantity has no number of its own
     // to promote, so it is exactly the case the gate exists for.
