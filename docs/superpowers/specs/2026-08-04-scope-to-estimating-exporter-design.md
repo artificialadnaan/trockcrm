@@ -40,27 +40,68 @@ issues one.
 
 `POST /api/deals/:id/estimating/walkthrough-extractions` is mounted on the CRM's `tenantRouter`
 (`app.ts`, `CRM_ONLY_TENANT_ROUTE_MOUNTS[0]`), which means it sits behind `authMiddleware`, per-user
-rate limiting, CSRF on unsafe methods, and tenant/office resolution from an authenticated user. Every
-one of those assumes a logged-in human.
+rate limiting, and tenant/office resolution from an authenticated user. Every one of those assumes a
+logged-in human.
 
-The CRM's only existing machine path is `field-login`, which serves the FIELD routes — TrockCam is its
-only caller — and it does not reach `/api/deals`. Searching the auth middleware for a service-token
-mechanism returns nothing.
+**CSRF is not among them, and an earlier draft of this section said it was.** The global middleware
+(`app.ts`, the `hasAuthCookie` guard) returns early unless a `token` COOKIE is present, so an
+`Authorization`-only bearer request never reaches a CSRF check at all. CSRF is a property of
+cookie-authenticated browser sessions here, not a universal constraint on unsafe methods — which
+matters, because "it inherits CSRF" was being used as an argument against a bearer credential and is
+simply not true of one.
+
+**Nor is `field-login` the CRM's only machine path**, which this section also claimed. `app.ts` mounts
+four HMAC-signed integration routers before `express.json()` precisely so raw bytes survive for
+signature verification — the Procore webhook, the SyncHub Procore relay, Bid Board sync, and the
+internal RFP callbacks — and `/api/integrations/synchub` authenticates on a shared-secret header. The
+accurate statement is narrower and still blocking: **no machine path reaches the tenant deal routes.**
+The distinction matters, because it means the CRM already has an established pattern for this problem
+rather than needing one invented.
 
 So the exporter is **not** Scope-side work plus configuration. It needs a CRM-side authentication path
-that does not exist. Two ways, and this is a decision before any code:
+that does not exist. Three ways:
 
-1. **A service principal for this route**, mirroring what TROCK Scope already built for its own
-   inbound service token: a bearer credential, an allow-list of exactly the routes it may reach, and a
-   provenance column so a machine-filed extraction is distinguishable from a human's. This is the
-   honest shape and the one that matches how the two systems already talk in the other direction.
-2. **Scope holds a CRM user's credentials** and logs in. Rejected here: it puts a human's session in a
-   machine, inherits CSRF and rate-limiting designed for a browser, and makes every row that machine
-   files indistinguishable from one that person typed.
+1. **A service principal for this route** — a bearer credential plus an allow-list of the routes it may
+   reach. Workable, but it does NOT fall out of route allow-listing alone: `tenantMiddleware` selects
+   the tenant schema exclusively from `req.user.activeOfficeId`, and the existing auth middleware
+   derives that from the user's home office or an authorized `x-office-id` override. A principal with
+   one fixed active office would look up every out-of-office walkthrough in the wrong schema and answer
+   404. Choosing this shape therefore requires specifying how `officeSlug` maps to a permitted office
+   context and how that context is authorized — a design question this spec previously left silent.
+2. **Scope holds a CRM user's credentials** and logs in. Rejected: it puts a human's session in a
+   machine, inherits browser rate-limiting, and makes every row that machine files indistinguishable
+   from one that person typed.
+3. **A separate HMAC-signed integration route, outside `tenantRouter`** — the pattern the four existing
+   integration routers already use. No user, no session, no office resolution from a principal: the
+   payload names the office and the route resolves it explicitly.
 
-Recommended: (1). Note it also decides what `userId` on the payload means — today the spec passes
-`capturedByExternalId`, which is the CRM user who captured the walk, and that stays correct as the
-*actor* even when the *caller* is a service.
+**Decided: (3), implemented in PR #1033** as `POST /api/integrations/scope/walkthrough-extractions`.
+It sidesteps the office problem in (1) by taking `officeSlug` on the payload and resolving the tenant
+itself, and it keeps the captured actor — see below.
+
+### What `userId` means, and why (3) preserves it
+
+An earlier draft said `capturedByExternalId` "stays correct as the actor even when the caller is a
+service". On the tenant deal route that is **false**: `deals/routes.ts` overwrites the body's `userId`
+with `req.user!.id` before validation, deliberately, so a caller cannot forge the uploader stamped on
+the contact-sheet file. Under a service principal the actor recorded on `files.uploadedBy` and
+`estimate_source_documents.uploadedByUserId` would therefore be the SERVICE, not the person who walked
+the site — the opposite of what the spec assumed.
+
+Option (3) is what makes the original intent achievable: with no `req.user` to overwrite it, the
+integration route takes the payload's `userId`, PROVES it against an active `users` row in the resolved
+office, and pins that proven value. The captured actor survives because it is verified rather than
+trusted — not because the field was left alone.
+
+### Provenance already exists
+
+The spec argued for a new provenance column so a machine-filed extraction is distinguishable from a
+human's. That distinction is **already recorded**: `insertWalkthroughExtractions` writes
+`extractionType: "scope_utterance"` and stamps `extractionProvider: "trock-scope"` and
+`extractionMethod: "walkthrough_grounding"` into `metadataJson`, and the source document carries the
+Scope parse provider and profile. A new field may still be justified to record which CREDENTIAL filed a
+row — that is an authentication fact, not an origin fact — but "there is no way to tell machine rows
+from human rows" was not true when this was written.
 
 ## The three things that make this non-trivial
 
@@ -119,10 +160,16 @@ way to see what was withheld.
 
 ### 3. Scope does not know the CRM's `projectId`
 
-The payload needs `dealId`, `projectId` and `userId`. Scope's `walkthroughs` row carries `dealUuid`,
-`officeSlug`, `siteId` and `capturedByExternalId`.
+The payload needs `dealId`, `projectId` and `userId` — and, on the integration route decided above,
+`officeSlug` too, since that route resolves the tenant from the payload rather than from a session.
+Scope's `walkthroughs` row carries `dealUuid`, `officeSlug`, `siteId` and `capturedByExternalId`.
 
-- `userId` — `capturedByExternalId` already holds the CRM user id. Fine.
+- `officeSlug` — held directly. It is what selects the tenant schema, so it is load-bearing rather than
+  informational.
+- `userId` — `capturedByExternalId` already holds the CRM user id. It is not merely passed through: the
+  receiver proves it against an active `users` row in the resolved office and refuses the request
+  otherwise, because this value is stamped on `files.uploadedBy` and the source document's uploader. An
+  id belonging to a departed or foreign user is a 404, not a row with a stranger's name on it.
 - `dealId` — `dealUuid`. Fine.
 - `projectId` — **not held.** `siteId` is Scope's own notion. Either the forward starts carrying the
   CRM project id (a change on the CRM's forward job, small), or every export goes in deal-level with
