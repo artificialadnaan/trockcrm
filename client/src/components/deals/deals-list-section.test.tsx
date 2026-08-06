@@ -292,7 +292,7 @@ describe("DealsListSection", () => {
     expect(html).toContain("DFW-1-12826-aa");
   });
 
-  it("renders deal descriptions in a separate column with muted fallback and hover title", () => {
+  it("renders deal descriptions in the Scope column with muted fallback and hover title", () => {
     mocks.useDealsMock.mockReturnValue({
       deals: [
         makeDeal({
@@ -312,7 +312,11 @@ describe("DealsListSection", () => {
 
     const html = render();
 
-    expect(html).toContain(">Description<");
+    // Header renamed from "Description" to "Scope" (#1051): the column answers "what is this work?",
+    // and its first line is now the scope title when the deal has one. A deal with NO scope title —
+    // both fixtures here — must render exactly as it did before.
+    expect(html).toContain(">Scope<");
+    expect(html).not.toContain('data-testid="deals-list-scope-title"');
     expect(html).toContain('aria-label="Long deal description that should stay available on hover for the list view."');
     expect(html).toContain('title="Long deal description that should stay available on hover for the list view."');
     expect(html).toContain("Long deal description that should stay available on hover for the list view.");
@@ -320,6 +324,87 @@ describe("DealsListSection", () => {
     expect(html).toContain(">—<");
     expect(html).toContain("table-fixed");
     expect(html).toContain("hidden lg:table-cell lg:w-[11rem]");
+  });
+
+  it("leads the Scope column with the scope title, keeping the description beneath it", () => {
+    // The on-screen list and the CSV export must not disagree about a deal's scope: the export carries
+    // a Scope Title column, so a table that showed only the description would contradict the file the
+    // user just exported from it.
+    mocks.useDealsMock.mockReturnValue({
+      deals: [
+        makeDeal({
+          scopeTitle: "Balcony Repair",
+          description: "Remove and replace 4 sheets of decking and install additional underlayment.",
+        }),
+      ],
+      pagination: { page: 1, limit: 25, total: 1, totalPages: 1 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = render();
+
+    expect(html).toContain('data-testid="deals-list-scope-title"');
+    expect(html).toContain("Balcony Repair");
+    expect(html).toContain("Remove and replace 4 sheets of decking and install additional underlayment.");
+    // Title first, notes second — the same order as the deal-detail Stage & Status card.
+    expect(html.indexOf("Balcony Repair")).toBeLessThan(html.indexOf("Remove and replace 4 sheets"));
+  });
+
+  it("shows the scope title alone when a deal has one and no description", () => {
+    // The muted em-dash is the NO-INFORMATION marker. A deal that has a scope title has information,
+    // so rendering the dash next to it would read as a data bug.
+    mocks.useDealsMock.mockReturnValue({
+      deals: [makeDeal({ scopeTitle: "Plumbing Renovations", description: null })],
+      pagination: { page: 1, limit: 25, total: 1, totalPages: 1 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = render();
+
+    expect(html).toContain("Plumbing Renovations");
+    expect(html).not.toContain(">—<");
+  });
+
+  // The Scope column is `hidden lg:table-cell`, so at phone width the table is not what renders — the
+  // card branch is, and it showed name/number/property/owner/value/stage and never read scopeTitle.
+  // A title-only deal was invisible on a phone until opened or exported (Codex #1051).
+  it("renders the scope title on the MOBILE card branch, not just the desktop table", () => {
+    mocks.useDealsMock.mockReturnValue({
+      deals: [makeDeal({ name: "Tides at Highland Meadows", scopeTitle: "Panel Relocation" })],
+      pagination: { page: 1, limit: 25, total: 1, totalPages: 1 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = render();
+
+    expect(html).toContain('data-testid="deals-list-card-scope-title"');
+    // The card branch is the md:hidden container — the title must be inside it, not only in the table.
+    const cardsStart = html.indexOf('aria-label="Deals list cards"');
+    expect(cardsStart).toBeGreaterThan(-1);
+    expect(html.indexOf('data-testid="deals-list-card-scope-title"')).toBeGreaterThan(cardsStart);
+    // The button's aria-label overrides descendant text, so the title has to be folded in too.
+    expect(html).toContain('aria-label="Open deal Tides at Highland Meadows. Panel Relocation"');
+  });
+
+  it("leaves the mobile card unchanged when a deal has no scope title", () => {
+    mocks.useDealsMock.mockReturnValue({
+      deals: [makeDeal({ name: "Palm Villas", scopeTitle: null })],
+      pagination: { page: 1, limit: 25, total: 1, totalPages: 1 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = render();
+
+    expect(html).not.toContain('data-testid="deals-list-card-scope-title"');
+    expect(html).toContain('aria-label="Open deal Palm Villas"');
   });
 
   it("renders the selected owner filter label from assignees instead of the raw id", () => {
@@ -1240,6 +1325,53 @@ describe("DealsListSection", () => {
         expect(csv).not.toContain("Last Touch"); // legacy axis header gone
         expect(csv).toContain("2026-05-20"); // the outcome displayDate
         expect(csv).not.toContain("2026-08-15"); // not lastActivityAt/updatedAt
+      } finally {
+        globalThis.Blob = OriginalBlob;
+        Object.assign(URL, { createObjectURL: originalCreate, revokeObjectURL: originalRevoke });
+        await cleanup();
+      }
+    });
+
+    // There are TWO export paths on this component — buildFilterBarCsvRows (covered in
+    // deals-list-csv-export.test.ts) and this LEGACY inline one. They must not diverge, or which
+    // columns accounting gets depends on which surface they exported from.
+    it("includes the Scope Title column on the LEGACY export path too", async () => {
+      const csvParts: string[] = [];
+      const OriginalBlob = globalThis.Blob;
+      const originalCreate = URL.createObjectURL;
+      const originalRevoke = URL.revokeObjectURL;
+      Object.assign(URL, { createObjectURL: vi.fn(() => "blob:test"), revokeObjectURL: vi.fn() });
+      globalThis.Blob = class {
+        constructor(parts: unknown[]) {
+          csvParts.push(String((parts as unknown[])?.[0] ?? ""));
+        }
+      } as unknown as typeof Blob;
+      mocks.apiMock.mockResolvedValue({
+        deals: [makeDeal({ scopeTitle: "Balcony Repair" })],
+        pagination: { totalPages: 1 },
+      });
+      const { container, cleanup } = await renderDom({ enableExport: true, lockedOwnerId: "rep-1" });
+      try {
+        const exportButton = Array.from(container.querySelectorAll("button")).find((b) =>
+          b.textContent?.includes("Export")
+        );
+        expect(exportButton).toBeDefined();
+        await act(async () => {
+          exportButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        });
+        const csv = csvParts.join("");
+        const [header, firstRow] = csv.split("\n");
+        expect(header.split(",")).toEqual([
+          "Deal",
+          "Scope Title",
+          "Project Number",
+          "Owner",
+          "Stage",
+          "Days",
+          "Value",
+          "Last Touch",
+        ]);
+        expect(firstRow.split(",")[1]).toBe("Balcony Repair");
       } finally {
         globalThis.Blob = OriginalBlob;
         Object.assign(URL, { createObjectURL: originalCreate, revokeObjectURL: originalRevoke });

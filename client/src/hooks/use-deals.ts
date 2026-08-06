@@ -137,6 +137,13 @@ export interface Deal {
   awardedAmount: string | null;
   awardedAmountOverridden?: boolean | null;
   changeOrderTotal: string | null;
+  /**
+   * deals.scope_title (migration 0218) — the SHORT scope-of-work title accounting reads to name a
+   * project in QuickBooks ("Balcony Repair", "Plumbing Renovations"). Optional and frequently null on
+   * historical deals; capped at DEAL_SCOPE_TITLE_MAX_LENGTH by both the form and the API. Distinct from
+   * `description` below, which is the long free-text notes field.
+   */
+  scopeTitle?: string | null;
   description: string | null;
   // deals.bid_due_date (timestamptz, nullable) — stamped at UTC midnight from the date-only source
   // value, so it arrives as e.g. "2026-07-03T00:00:00.000Z". Format in UTC for display (see
@@ -760,6 +767,7 @@ export type CreateServiceOpportunityInput = Partial<Pick<
   | "assignedRepId"
   | "companyId"
   | "description"
+  | "scopeTitle"
   | "expectedCloseDate"
   | "officeCode"
   | "projectNumber"

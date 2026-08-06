@@ -89,6 +89,18 @@ export function ContactDealsTab({ contactId, contact }: ContactDealsTabProps) {
               {/* A change-order child is STORED "<Parent> — Change Order N"; this line truncates the
                   suffix away, so a CO reads as its parent. Display-only; the stored name is unchanged. */}
               <p className="font-medium truncate">{formatDealDisplayName(assoc.deal.name, assoc.deal.isChangeOrder)}</p>
+              {/* The third of the three "entity detail → deals" lists (Company and Property are the other
+                  two, and both show it). A contact is attached to several jobs at one property, so the
+                  name repeats and the title is the only thing that tells them apart. */}
+              {assoc.deal.scopeTitle ? (
+                <p
+                  className="truncate text-xs font-medium text-muted-foreground"
+                  title={assoc.deal.scopeTitle}
+                  data-testid="contact-deal-scope-title"
+                >
+                  {assoc.deal.scopeTitle}
+                </p>
+              ) : null}
               {assoc.role && (
                 <p className="text-xs text-muted-foreground">Role: {assoc.role}</p>
               )}

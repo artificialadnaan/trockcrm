@@ -341,6 +341,40 @@ function DealsListPagination({
   );
 }
 
+/**
+ * The Scope column: the short accounting title first, the long notes preview underneath.
+ *
+ * Both, not one: the CSV export carries `scopeTitle` in its own column, and a screen that showed only
+ * the description would disagree with the file a user just exported from it. Leading with the title is
+ * the point of the field — a truncated 2658-character description (the real maximum in this tenant)
+ * tells a scanner nothing, and "Balcony Repair" tells them everything.
+ *
+ * A deal with no scope title renders exactly as it did before: the description preview alone, or the
+ * muted em-dash. Nothing was taken away to make room.
+ */
+function renderScopeCell(deal: Pick<Deal, "scopeTitle" | "description">) {
+  const scopeTitle = deal.scopeTitle?.trim() ?? "";
+  const description = deal.description?.trim() ?? "";
+
+  if (!scopeTitle) {
+    return renderDescriptionPreview(deal.description);
+  }
+
+  return (
+    <div className="min-w-0 space-y-0.5">
+      <span
+        className="block max-w-[18rem] truncate text-xs font-bold text-slate-800"
+        aria-label={scopeTitle}
+        title={scopeTitle}
+        data-testid="deals-list-scope-title"
+      >
+        {scopeTitle}
+      </span>
+      {description ? renderDescriptionPreview(description) : null}
+    </div>
+  );
+}
+
 function renderDescriptionPreview(description: string | null | undefined) {
   const value = description?.trim() ?? "";
   if (!value) {
@@ -645,9 +679,13 @@ export function buildFilterBarCsvRows(
   maps: { stageNameById: Map<string, string>; assigneeNameById: Map<string, string> }
 ): (string | number)[][] {
   return [
-    ["Deal", "Project Number", "Owner", "Stage", "Days", "Value", "Date"],
+    ["Deal", "Scope Title", "Project Number", "Owner", "Stage", "Days", "Value", "Date"],
     ...deals.map((deal) => [
       deal.name,
+      // Accounting keys this into QuickBooks off the export, so a field they cannot export is half a
+      // field. Empty string (not "--") for an unset title: a CSV cell is data, and a placeholder glyph
+      // would have to be stripped again on the other side.
+      deal.scopeTitle ?? "",
       getDealDisplayNumber(deal).label,
       deal.assignedRepName ?? (deal.assignedRepId ? maps.assigneeNameById.get(deal.assignedRepId) : undefined) ?? "",
       deal.stageName ?? maps.stageNameById.get(deal.stageId) ?? "",
@@ -1032,11 +1070,14 @@ export function DealsListSection({
     // so the export's date column must match it (not the legacy "Last Touch"/updated axis),
     // or the CSV won't reconcile with the drill-down it was exported from.
     const rows = [
-      ["Deal", "Project Number", "Owner", "Stage", "Days", "Value", showOutcomeDate ? "Date" : "Last Touch"],
+      ["Deal", "Scope Title", "Project Number", "Owner", "Stage", "Days", "Value", showOutcomeDate ? "Date" : "Last Touch"],
       ...exportResult.deals.map((deal) => {
         const displayNumber = getDealDisplayNumber(deal);
         return [
           deal.name,
+          // Same column, same position as buildFilterBarCsvRows — the two export paths must not diverge
+          // or the CSV a user gets depends on which surface they exported from.
+          deal.scopeTitle ?? "",
           displayNumber.label,
           deal.assignedRepName ?? assigneeNameById.get(deal.assignedRepId) ?? "",
           deal.stageName ?? stageNameById.get(deal.stageId) ?? "",
@@ -1101,11 +1142,13 @@ export function DealsListSection({
       },
     },
     {
+      // "Scope", not "Description": the column answers "what is this work?", and since #1051 the best
+      // available answer is scope_title with the description as the supporting line beneath it.
       key: "description",
-      header: "Description",
+      header: "Scope",
       headClassName: "hidden lg:table-cell lg:w-[11rem] lg:!px-3",
       cellClassName: "hidden lg:table-cell lg:w-[11rem] lg:!px-3",
-      render: (deal) => renderDescriptionPreview(deal.description),
+      render: (deal) => renderScopeCell(deal),
     },
     {
       key: "owner",
@@ -1408,13 +1451,20 @@ export function DealsListSection({
                 const ownerColor = getOwnerInitialColor(deal.assignedRepId ?? ownerName);
                 const propertyLabel = getDealPropertyLabel(deal);
                 const stageLabel = deal.stageName ?? stageNameById.get(deal.stageId) ?? deal.stageSlug ?? "Stage";
+                // The Scope column is `hidden lg:table-cell`, so at phone width the table is not what
+                // renders — this card is. Without it a title-only deal ("Panel Relocation") is invisible
+                // on a phone until it is opened or exported, which is most of how the list is read in
+                // the field.
+                const cardScopeTitle = deal.scopeTitle?.trim() ?? "";
                 return (
                   <button
                     key={deal.id}
                     type="button"
                     className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-50/60 p-4 text-left transition hover:border-brand-red/30 hover:bg-white focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red"
                     onClick={() => navigate(`/deals/${deal.id}`)}
-                    aria-label={`Open deal ${displayName}`}
+                    // The button's aria-label overrides its descendant text, so the title has to be
+                    // folded in or a screen-reader user loses the discriminator a sighted one just got.
+                    aria-label={cardScopeTitle ? `Open deal ${displayName}. ${cardScopeTitle}` : `Open deal ${displayName}`}
                   >
                     <div className="space-y-3">
                       <div className="space-y-1">
@@ -1431,6 +1481,16 @@ export function DealsListSection({
                         >
                           {displayNumber.label || "--"}
                         </p>
+                        {cardScopeTitle ? (
+                          <p
+                            className="line-clamp-2 text-xs font-bold leading-4 text-slate-700"
+                            aria-label={cardScopeTitle}
+                            title={cardScopeTitle}
+                            data-testid="deals-list-card-scope-title"
+                          >
+                            {cardScopeTitle}
+                          </p>
+                        ) : null}
                       </div>
 
                       <div className="space-y-3">

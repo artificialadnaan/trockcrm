@@ -671,6 +671,17 @@ function RelatedDealsList({ deals }: { deals: PropertyDeal[] }) {
                 {/* A change-order child is STORED "<Parent> — Change Order N" and this line truncates
                     the suffix off. Display-only re-order; the stored name is untouched. */}
                 <p className="truncate text-sm font-black text-slate-950">{formatDealDisplayName(deal.name, deal.isChangeOrder)}</p>
+                {/* Every deal on a property page tends to carry the SAME name (the property's), so the
+                    scope title is the only thing that distinguishes the rows. */}
+                {deal.scopeTitle ? (
+                  <p
+                    className="truncate text-xs font-bold text-slate-600"
+                    title={deal.scopeTitle}
+                    data-testid="property-deal-scope-title"
+                  >
+                    {deal.scopeTitle}
+                  </p>
+                ) : null}
                 <p className="font-mono text-xs text-slate-500">{deal.dealNumber}</p>
               </div>
               <div className="flex items-center gap-2">

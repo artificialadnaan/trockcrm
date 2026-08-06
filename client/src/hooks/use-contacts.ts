@@ -218,6 +218,9 @@ export interface ContactDealAssociation {
     // CO-child model (BLUE PR1); the association serializes the full deal row, so this rides the wire
     // once the column lands. Optional/undefined-tolerant until then.
     isChangeOrder?: boolean | null;
+    // `deals.scope_title` — on the wire for the same reason: getDealsForContact selects the whole `deals`
+    // row (server/src/modules/contacts/association-service.ts), it is not a hand-listed projection.
+    scopeTitle?: string | null;
   };
 }
 

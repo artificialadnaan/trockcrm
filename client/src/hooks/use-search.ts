@@ -15,6 +15,9 @@ export interface SearchResult {
   rank: number;
   // `deals.is_change_order` (deal results only) — the AUTHORITY for the change-order name relabel.
   isChangeOrder?: boolean | null;
+  // `deals.scope_title` (deal results only). scope_title is a SEARCHED field, so this is frequently the
+  // reason a row is in the results at all — a change-order child's name carries no scope.
+  scopeTitle?: string | null;
   // Assigned rep display name + best-value deal amount (raw string). Deal results only.
   assignedRepName?: string | null;
   dealValue?: string | null;

@@ -216,3 +216,39 @@ describe("PipelineRecordCard", () => {
     expect(html).not.toContain("0d in stage");
   });
 });
+
+// The rep dashboard and the director dashboard render their pipeline boards through THIS card, not
+// through the deals board's DecoratedKanbanCard. A scope title added only to the latter leaves both
+// dashboards showing name-only cards — the same structural blind spot that hid the deals-list mobile
+// card, one component over (Codex #1051 sweep).
+describe("PipelineRecordCard — scope title", () => {
+  it("renders the scope title on a DEAL card, under the name", () => {
+    const html = render(makeRecord({ name: "Palm Villas", scopeTitle: "Balcony Repair" }));
+
+    expect(html).toContain('data-testid="pipeline-record-card-scope-title"');
+    expect(html).toContain("Balcony Repair");
+    expect(html.indexOf("Palm Villas")).toBeLessThan(html.indexOf("Balcony Repair"));
+  });
+
+  it("renders nothing extra for a deal without one", () => {
+    const html = render(makeRecord({ scopeTitle: null }));
+
+    expect(html).not.toContain('data-testid="pipeline-record-card-scope-title"');
+    expect(html).toContain("Palm Villas"); // the card itself still renders
+  });
+
+  it("treats a whitespace-only title as absent rather than rendering a blank line", () => {
+    const html = render(makeRecord({ scopeTitle: "   " }));
+
+    expect(html).not.toContain('data-testid="pipeline-record-card-scope-title"');
+  });
+
+  it("does NOT render a scope title on the LEAD board", () => {
+    // This card backs the lead board too. A lead has no scope_title column, so a value arriving here is
+    // a caller passing the wrong record shape — render nothing rather than inventing a lead field.
+    const html = render(makeRecord({ scopeTitle: "Balcony Repair" }), "lead");
+
+    expect(html).not.toContain('data-testid="pipeline-record-card-scope-title"');
+    expect(html).not.toContain("Balcony Repair");
+  });
+});

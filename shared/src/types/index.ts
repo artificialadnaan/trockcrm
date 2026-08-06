@@ -12,6 +12,7 @@ export * from "./offices.js";
 export * from "./project-types.js";
 export * from "./sales-review.js";
 export * from "./deal-scope-lock.js";
+export * from "./deal-scope-title.js";
 export * from "./deal-display-number.js";
 export * from "./deal-display-name.js";
 export * from "./rfp-vote-invitation.js";

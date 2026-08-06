@@ -86,6 +86,20 @@ function ResultItem({
             ? formatDealDisplayName(result.primaryLabel, result.isChangeOrder)
             : result.primaryLabel}
         </div>
+        {/* Same reason as the search page's result card, and the same gate: scope_title is a MATCHED
+            field, so it is frequently WHY this row is in the list at all — and a change-order child's
+            name carries no scope. Without it the palette answers "here is a result" but not "here is why",
+            which reads as a wrong hit. Deal-only: this row also renders files, and a file's name is not
+            a scope. */}
+        {result.entityType === "deal" && result.scopeTitle ? (
+          <div
+            className="truncate text-xs font-semibold text-gray-700"
+            title={result.scopeTitle}
+            data-testid="command-palette-scope-title"
+          >
+            {result.scopeTitle}
+          </div>
+        ) : null}
         {(() => {
           // Deal-only assignedRepName is appended to the number/location meta line; falsy parts drop
           // out so there is never a dangling separator (and non-deal results are unchanged).

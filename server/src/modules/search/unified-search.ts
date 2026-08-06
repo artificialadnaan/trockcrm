@@ -22,6 +22,11 @@ export const DEAL_SEARCH_FIELDS = [
   "deals.name",
   "deals.deal_number",
   "deals.project_number",
+  // The short accounting title. It is frequently the ONLY place a deal's actual scope is written in
+  // title form — a change-order child reads "Panel Relocation" while its name is
+  // "<Parent> — Change Order 1" and its description may be blank — so omitting it here means the one
+  // phrase a user remembers about a deal does not find it.
+  "deals.scope_title",
   "deals.description",
   "deals.property_address",
   "deals.property_city",
@@ -62,6 +67,7 @@ export function buildDealSearchCondition(search: string, dealsTable: typeof deal
     ${dealsTable.name} ILIKE ${searchTerm} ESCAPE '\\'
     OR ${dealsTable.dealNumber} ILIKE ${searchTerm} ESCAPE '\\'
     OR ${dealsTable.projectNumber} ILIKE ${searchTerm} ESCAPE '\\'
+    OR ${dealsTable.scopeTitle} ILIKE ${searchTerm} ESCAPE '\\'
     OR ${dealsTable.description} ILIKE ${searchTerm} ESCAPE '\\'
     OR ${dealsTable.propertyAddress} ILIKE ${searchTerm} ESCAPE '\\'
     OR ${dealsTable.propertyCity} ILIKE ${searchTerm} ESCAPE '\\'

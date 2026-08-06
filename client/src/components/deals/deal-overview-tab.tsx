@@ -103,6 +103,20 @@ export function DealOverviewTab({ deal, officeId, onDealUpdated }: DealOverviewT
               )}
             </div>
 
+            {/* First thing after the stage chip and above the free-text description: the short scope
+                title is the answer accounting is looking for, and the description is the supporting
+                detail. Rendered only when set — an unset title collapses to nothing rather than leaving
+                a blank line, which is how every other optional field on this page behaves (see the
+                Property card, which does not render at all without an address). */}
+            {deal.scopeTitle && (
+              <p
+                className="text-base font-semibold text-slate-900 mb-2"
+                data-testid="deal-overview-scope-title"
+              >
+                {deal.scopeTitle}
+              </p>
+            )}
+
             {deal.description && (
               <p className="text-sm text-muted-foreground">{deal.description}</p>
             )}
