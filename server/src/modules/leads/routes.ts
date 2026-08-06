@@ -670,10 +670,6 @@ router.post("/:id/convert", async (req, res, next) => {
     // field threaded through here would otherwise reach the column uncapped — an over-length title would
     // surface as a Postgres 22001/500 instead of a 400. Validate + normalize the one field this route
     // forwards, using the SAME shared rule the deal routes use.
-    // The convert route builds a deal but does NOT run the deals module's validateDealPayload, so a
-    // field threaded through here would otherwise reach the column uncapped — an over-length title would
-    // surface as a Postgres 22001/500 instead of a 400. Validate + normalize the one field this route
-    // forwards, using the SAME shared rule the deal routes use.
     if (Object.prototype.hasOwnProperty.call(rest, "scopeTitle")) {
       const scopeTitle = validateDealScopeTitle(rest.scopeTitle);
       if (!scopeTitle.ok) {

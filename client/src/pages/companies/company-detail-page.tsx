@@ -1089,6 +1089,18 @@ function CompanyPortfolioTab({ companyId, companyName }: { companyId: string; co
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <p className="text-sm font-medium">{formatDealDisplayName(deal.name, deal.isChangeOrder)}</p>
+                      {/* The SECOND deal list on this page, off the same useCompanyDeals hook as the
+                          Deals tab above. Showing the title on one and not the other is the drift this
+                          sweep exists to close. */}
+                      {deal.scopeTitle ? (
+                        <p
+                          className="truncate text-xs font-medium text-muted-foreground"
+                          title={deal.scopeTitle}
+                          data-testid="company-portfolio-deal-scope-title"
+                        >
+                          {deal.scopeTitle}
+                        </p>
+                      ) : null}
                       <p className="text-xs text-muted-foreground font-mono">{deal.dealNumber}</p>
                     </div>
                     {opensLeadDetail ? (

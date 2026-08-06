@@ -46,6 +46,28 @@ async function renderDialog() {
   return document.body;
 }
 
+/**
+ * Render with a CONTROLLABLE `open`, so a close/reopen cycle runs against one continuously-mounted
+ * component instance — which is how the lead detail page really holds this dialog (it renders it
+ * unconditionally, not gated on `open`), and therefore the only way to catch state that survives a close.
+ */
+async function renderReopenable() {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  const setOpen = async (open: boolean) => {
+    await act(async () => {
+      root.render(
+        <LeadConvertDialog lead={LEAD} open={open} onOpenChange={vi.fn()} onSuccess={vi.fn()} />
+      );
+    });
+  };
+  await setOpen(true);
+  roots.push(root);
+  containers.push(container);
+  return setOpen;
+}
+
 async function type(value: string) {
   const input = document.querySelector<HTMLInputElement>("#convertScopeTitle");
   if (!input) throw new Error("scope title input not rendered");
@@ -132,5 +154,35 @@ describe("LeadConvertDialog — scope title", () => {
     await convert();
 
     expect(mocks.convertLeadToOpportunity).toHaveBeenCalledWith("lead-1", { scopeTitle: atLimit });
+  });
+
+  // The lead detail page renders this dialog UNCONDITIONALLY (lead-detail-page.tsx:497 — it is not
+  // wrapped in `open && …`), so closing it does not unmount it and nothing else clears its state. These
+  // two pin the reset that makes the "starts empty" contract above true on the SECOND open as well.
+  it("clears an abandoned draft title when the dialog is closed and reopened", async () => {
+    const setOpen = await renderReopenable();
+    await type("Balcony Repair");
+    expect(document.querySelector<HTMLInputElement>("#convertScopeTitle")!.value).toBe("Balcony Repair");
+
+    await setOpen(false);
+    await setOpen(true);
+
+    // A draft the rep backed out of must not be sitting in the field waiting to be committed as the
+    // deal's accounting title by someone who did not re-read the form.
+    expect(document.querySelector<HTMLInputElement>("#convertScopeTitle")!.value).toBe("");
+    await convert();
+    expect(mocks.convertLeadToOpportunity).toHaveBeenCalledWith("lead-1", { scopeTitle: null });
+  });
+
+  it("clears a stale validation error when the dialog is reopened", async () => {
+    const setOpen = await renderReopenable();
+    await type("A".repeat(DEAL_SCOPE_TITLE_MAX_LENGTH + 1));
+    await convert();
+    expect(document.body.textContent).toContain("Scope title must be");
+
+    await setOpen(false);
+    await setOpen(true);
+
+    expect(document.body.textContent).not.toContain("Scope title must be");
   });
 });

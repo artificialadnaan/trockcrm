@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowRight, Loader2 } from "lucide-react";
 import {
   Dialog,
@@ -31,6 +31,17 @@ export function LeadConvertDialog({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [scopeTitle, setScopeTitle] = useState("");
+
+  // This dialog is mounted UNCONDITIONALLY by the lead detail page — it is not gated on `open`, so it
+  // never unmounts and its state survives a close. Without this reset, a title typed and then cancelled
+  // is still sitting in the field the next time Convert is opened, and a rep who does not re-read the
+  // form commits an abandoned draft as the deal's accounting title. Reset on open, the same shape
+  // lead-stage-change-dialog in this directory already uses.
+  useEffect(() => {
+    if (!open) return;
+    setScopeTitle("");
+    setError(null);
+  }, [open]);
 
   const handleConvert = async () => {
     const trimmedScopeTitle = scopeTitle.trim();
