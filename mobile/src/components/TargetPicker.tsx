@@ -113,6 +113,14 @@ export function TargetPicker({
               <Text style={styles.rowTitle} numberOfLines={1}>
                 {captureTargetDisplayName(item)}
               </Text>
+              {/* Its own line rather than folded into the subtitle: this field is searched AND ranked
+                  server-side, so it is frequently the reason the row is in the list at all. Deal rows
+                  only — the server sets it nowhere else — so no extra type gate is needed. */}
+              {item.scopeTitle ? (
+                <Text style={styles.rowScopeTitle} numberOfLines={1}>
+                  {item.scopeTitle}
+                </Text>
+              ) : null}
               <Text style={styles.rowSub} numberOfLines={1}>
                 {targetSubtitle(item)}
               </Text>
@@ -185,5 +193,9 @@ const styles = StyleSheet.create({
     padding: theme.space.md,
   },
   rowTitle: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textPrimary },
+  // Between the 15pt name and the 13pt muted subtitle, on textPrimary so it reads as identity. This
+  // app's theme has only textPrimary/textMuted/textInverse; composed from an existing token, never
+  // re-pointing one by name — that shipped three P1s to the sibling app's design system.
+  rowScopeTitle: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textPrimary },
   rowSub: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted },
 });

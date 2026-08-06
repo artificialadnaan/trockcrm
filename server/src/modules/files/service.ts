@@ -271,6 +271,14 @@ export interface PhotoUploadTarget {
    * AUTHORITY for that, so the client stops inferring it from the name's shape.
    */
   isChangeOrder?: boolean;
+  /**
+   * `deals.scope_title`, on deal/opportunity rows only. Travels WITH the flag above: front-loading
+   * "Change Order N" is exactly what makes two children of one parent read alike, and this is the only
+   * field left that separates them. It is also a SEARCHED and RANKED column here (see
+   * buildPhotoTargetDealSearchCondition), so omitting it lets a user type a scope phrase, match on it,
+   * and get back a row with no visible reason for being there.
+   */
+  scopeTitle?: string | null;
   recordNumber: string | null;
   stageName: string | null;
   companyName: string | null;
@@ -1411,6 +1419,7 @@ export async function searchPhotoUploadTargets(
         id: deals.id,
         name: deals.name,
         isChangeOrder: deals.isChangeOrder,
+        scopeTitle: deals.scopeTitle,
         dealNumber: deals.dealNumber,
         projectNumber: deals.projectNumber,
         pipelineDisposition: deals.pipelineDisposition,
@@ -1451,6 +1460,7 @@ export async function searchPhotoUploadTargets(
       type: row.pipelineDisposition === "opportunity" ? ("opportunity" as const) : ("deal" as const),
       name: row.name,
       isChangeOrder: row.isChangeOrder === true,
+      scopeTitle: row.scopeTitle ?? null,
       // Show the canonical DFW/ATL project number (resolver), never the raw deal_number — which is the
       // HubSpot import id for HubSpot deals and a change order's own generated number. Mirrors the field
       // project-list + nearby paths (projects-service.ts); this search path was the one PR #784 missed.

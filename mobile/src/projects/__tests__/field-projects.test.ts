@@ -33,6 +33,10 @@ function fieldProject(id: string, overrides: Partial<FieldProject> = {}): FieldP
     // `row.is_change_order === true` — so the wire value for a plainly-named project like this one
     // IS `false`. A test that needs a change-order row passes `isChangeOrder: true` in `overrides`.
     isChangeOrder: false,
+    // Same reasoning as the flag above: mapFieldProject coerces `row.scope_title ?? null`, so the wire
+    // value for a project with no accounting title IS null, not absent. A test that needs one passes
+    // `scopeTitle` in `overrides`.
+    scopeTitle: null,
     propertyName: null,
     propertyAddress: null,
     stage: "Active",

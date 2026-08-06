@@ -11,6 +11,12 @@ export type FieldProject = {
   name: string;
   /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel; never infer it from the name. */
   isChangeOrder: boolean;
+  /**
+   * `deals.scope_title`. Travels WITH the flag: the relabel front-loads "Change Order N", and this is
+   * the only field left saying WHICH one. Also SEARCHED on the Projects list, so without it a crew can
+   * type the scope phrase, match, and get a row that cannot explain the hit.
+   */
+  scopeTitle: string | null;
   propertyName: string | null;
   propertyAddress: string | null;
   stage: string;
@@ -87,6 +93,8 @@ export type FieldCaptureTarget = {
   name: string;
   /** `deals.is_change_order` — deal rows only; the AUTHORITY for the change-order display relabel. */
   isChangeOrder?: boolean | null;
+  /** `deals.scope_title` — deal rows only, same gate as the flag above; a lead has no scope title. */
+  scopeTitle?: string | null;
   recordNumber: string | null;
   stageName: string | null;
   companyName: string | null;

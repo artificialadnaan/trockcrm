@@ -203,12 +203,22 @@ function ProjectRow({
         onPress={onPress}
         style={({ pressed }) => [{ flex: 1, gap: 4 }, pressed && { opacity: 0.6 }]}
         accessibilityRole="button"
-        accessibilityLabel={`Open ${displayName}, ${project.projectNumber ? `project number ${project.projectNumber}` : "project pending"}, ${project.stage}`}
+        // The scope title is IN the label, not only the JSX. This label REPLACES the descendant text on
+        // a Pressable, and for a change order the title is the one thing separating this row from its
+        // sibling — the same trap already sprung on the CRM app's deal card.
+        accessibilityLabel={`Open ${displayName}${project.scopeTitle ? `, ${project.scopeTitle}` : ""}, ${project.projectNumber ? `project number ${project.projectNumber}` : "project pending"}, ${project.stage}`}
       >
         {/* Full-width name on its own line — the stage badge no longer competes for width (#1). */}
         <Text style={styles.rowName} numberOfLines={1}>
           {displayName}
         </Text>
+        {/* Under the relabelled name: for a change order the name above is the parent's, and this row
+            is also reachable by searching this very field. */}
+        {project.scopeTitle ? (
+          <Text testID={`project-scope-title-${project.id}`} style={styles.rowScopeTitle} numberOfLines={1}>
+            {project.scopeTitle}
+          </Text>
+        ) : null}
         {/* Project # is promoted to a prominent, non-truncating element so rows that differ
             only by project # stay distinguishable; the stage badge wraps beside it (#2). Shows the
             canonical DFW/ATL number (never the HubSpot id); a muted "Project pending" when none. */}
@@ -264,6 +274,10 @@ const styles = StyleSheet.create({
     padding: theme.space.md,
   },
   rowName: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textPrimary },
+  // 13 semibold on textPrimary — the same step as rowDeal, so it reads as identity rather than as the
+  // muted address below it. This app's theme has only textPrimary/textMuted/textInverse; composed from
+  // an existing token, never re-pointing one by name (that shipped three P1s to the sibling app).
+  rowScopeTitle: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textPrimary },
   rowBadges: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: theme.space.sm },
   rowDeal: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textPrimary },
   rowDealPending: { color: theme.color.textMuted, fontStyle: "italic" },
