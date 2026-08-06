@@ -3,6 +3,7 @@ import { X, ChevronLeft, ChevronRight, Download, MapPin } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { api } from "@/lib/api";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import { getImmediatePhotoOpenUrl, hasR2PhotoSource, isPhotoImagePreviewable } from "@/lib/photo-url-resolution";
 import type { FeedPhoto } from "@/hooks/use-photo-feed";
 
@@ -175,9 +176,11 @@ export function PhotoLightbox({ photo, initialUrl = null, onClose, onPrev, onNex
             </Badge>
           )}
 
+          {/* A change-order child deal is STORED as "<Parent> — Change Order N"; the label is moved to
+              the front so a CO is distinguishable here. Display-only -- the stored name is unchanged. */}
           {(photo.dealNumber || photo.dealName) && (
             <span className="text-white/50">
-              Deal: {photo.dealNumber}{photo.dealName ? ` — ${photo.dealName}` : ""}
+              Deal: {photo.dealNumber}{photo.dealName ? ` — ${formatDealDisplayName(photo.dealName, photo.dealIsChangeOrder)}` : ""}
             </span>
           )}
 

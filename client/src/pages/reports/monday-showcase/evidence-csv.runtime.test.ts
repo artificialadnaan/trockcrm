@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildEvidenceCsv, buildEvidenceCsvFilename } from "./evidence-csv";
+import { UNFILTERED_EVIDENCE_ROUTE_FILTER } from "./types";
 import type {
   EvidenceMetric,
   EvidenceRecord,
@@ -40,6 +41,7 @@ function evidence(
     scope: { kind: "office" },
     band: null,
     leadStage: null,
+    routeFilter: UNFILTERED_EVIDENCE_ROUTE_FILTER,
     total: { count: records.length, value: records.reduce((s, r) => s + (r.value ?? 0), 0), basisLabel: "Best current estimate" },
     records,
     ...over,

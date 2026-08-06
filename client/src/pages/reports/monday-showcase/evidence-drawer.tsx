@@ -11,7 +11,7 @@ import {
 import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { resolveDealDisplayNumber } from "@/lib/deal-utils";
+import { formatDealDisplayName, resolveDealDisplayNumber } from "@/lib/deal-utils";
 import { useShowcaseEvidence } from "@/hooks/use-reports";
 import { MoveCloseDateDialog } from "@/components/deals/move-close-date-dialog";
 import { useAuth } from "@/lib/auth";
@@ -20,7 +20,8 @@ import { usd, int, winPct } from "../format";
 import { ScrollSyncX } from "../scroll-sync-x";
 import { EVIDENCE_COLUMNS, visibleEvidenceColumns, type SortKey } from "./evidence-columns";
 import { buildEvidenceCsv, buildEvidenceCsvFilename } from "./evidence-csv";
-import type { EvidenceRecord, EvidenceRequest, MondayShowcaseEvidence } from "./types";
+import { ROUTE_BUCKET_LABEL } from "./types";
+import type { EvidenceRecord, EvidenceRequest, MondayShowcaseEvidence, RouteBucket } from "./types";
 import type { WeekMode } from "../week-mode";
 
 // Literal-day formatting (no UTC-midnight off-by-one), matching the app's date-only rendering (#572).
@@ -93,7 +94,11 @@ const RENDERERS: Record<SortKey, (r: EvidenceRecord) => ReactNode> = {
     return (
       <div className="flex min-w-0 items-center gap-1.5">
         <div className="min-w-0">
-          <div className="max-w-[260px] truncate font-medium text-sky-700 group-hover:underline">{r.name}</div>
+          {/* A change-order child is STORED "<Parent> — Change Order N" and this cell truncates at
+              260px, so the label moves to the front. Display only — the CSV keeps the stored name.
+              `dealIsChangeOrder` is deals.is_change_order and OUTRANKS the name: this same column renders
+              LEADS too, and a deal (or lead) a human named "Lobby — Change Order 1" must be left alone. */}
+          <div className="max-w-[260px] truncate font-medium text-sky-700 group-hover:underline">{formatDealDisplayName(r.name, r.dealIsChangeOrder)}</div>
           {displayNumber ? <div className="text-xs text-slate-400">#{displayNumber}</div> : null}
         </div>
         <ExternalLink className="h-3.5 w-3.5 shrink-0 text-slate-300 opacity-0 transition group-hover:opacity-100" />
@@ -147,21 +152,37 @@ function SortIcon({ state, colKey }: { state: SortState; colKey: SortKey }) {
 }
 
 function ReconciliationBanner({ ev }: { ev: MondayShowcaseEvidence }) {
-  const { total } = ev;
+  const { total, routeFilter } = ev;
   return (
-    <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
-      <span className="font-semibold">{int(total.count)}</span> {total.count === 1 ? "record" : "records"}
-      {total.value != null && (
-        <>
-          {" · "}
-          <span className="font-semibold">{usd(total.value)}</span>
-        </>
-      )}
-      {total.basisLabel && <span className="text-emerald-700"> · {total.basisLabel}</span>}
-      <div className="mt-0.5 text-xs text-emerald-700">
-        These are the exact records behind the number — they reconcile to it by construction.
+    <>
+      <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
+        <span className="font-semibold">{int(total.count)}</span> {total.count === 1 ? "record" : "records"}
+        {total.value != null && (
+          <>
+            {" · "}
+            <span className="font-semibold">{usd(total.value)}</span>
+          </>
+        )}
+        {total.basisLabel && <span className="text-emerald-700"> · {total.basisLabel}</span>}
+        {/* Name the applied slice INSIDE the reconciliation banner: the count above is this slice's count,
+            and saying which slice is what lets a reader check it against the card they clicked. */}
+        {routeFilter.applied && (
+          <span className="text-emerald-700"> · {ROUTE_BUCKET_LABEL[routeFilter.selected[0]]} only</span>
+        )}
+        <div className="mt-0.5 text-xs text-emerald-700">
+          These are the exact records behind the number — they reconcile to it by construction.
+        </div>
       </div>
-    </div>
+      {/* The selection narrows the page but could NOT reach this metric's source. Said plainly, because the
+          alternative is a viewer reading an office-wide list as a filtered one. The card that opened this
+          drawer is unfiltered too, so the two still agree — they just answer a broader question. */}
+      {routeFilter.active && !routeFilter.applied && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          Not filtered by the {ROUTE_BUCKET_LABEL[routeFilter.selected[0]]} selection — leads carry no
+          workflow route, so this list (and the number that opened it) covers every department.
+        </div>
+      )}
+    </>
   );
 }
 
@@ -302,11 +323,16 @@ function EvidenceTable({
 export function EvidenceDrawer({
   request,
   mode,
+  routes,
   onClose,
   onMutated,
 }: {
   request: EvidenceRequest | null;
   mode: WeekMode;
+  /** The page's Service/Other selection — the SAME one the clicked number was computed under. Undefined =
+   *  both buckets = no narrowing. This is what makes the drawer's total equal the figure that was clicked
+   *  rather than an office-wide superset. */
+  routes?: readonly RouteBucket[];
   onClose: () => void;
   /** Called after an inline edit lands (a close-date move on the undated list) so the parent showcase
    *  can refetch — the edited deal then re-bands and leaves the "No future close date" card. */
@@ -315,7 +341,7 @@ export function EvidenceDrawer({
   const navigate = useNavigate();
   const { search } = useLocation();
   const { user } = useAuth();
-  const { data, loading, error, refetch } = useShowcaseEvidence(request, mode);
+  const { data, loading, error, refetch } = useShowcaseEvidence(request, mode, routes);
   // The row whose close date is being set inline (undated list only); null = the editor is closed.
   const [editing, setEditing] = useState<EvidenceRecord | null>(null);
   // The inline close-date editor writes through the OWNER-ONLY PATCH /deals/:id (the same gate the deal

@@ -92,6 +92,11 @@ export const deals = pgTable(
     // deal incl. bid-board-owned; unlike awarded_amount it is NOT role-gated. Migration 0164.
     ddEstimateOverridden: boolean("dd_estimate_overridden").notNull().default(false),
     changeOrderTotal: numeric("change_order_total", { precision: 14, scale: 2 }).default("0"),
+    // A SHORT title for the scope of work ("Balcony Repair", "Plumbing Renovations") — the field
+    // accounting reads to name a project in QuickBooks. Distinct from `description` below, which is the
+    // 5000-char notes field; the varchar(120) here is what stops this one becoming a second one. Cap is
+    // DEAL_SCOPE_TITLE_MAX_LENGTH in shared/types and must move with this column. Migration 0218.
+    scopeTitle: varchar("scope_title", { length: 120 }),
     description: text("description"),
     estimator: text("estimator"),
     propertyAddress: text("property_address"),

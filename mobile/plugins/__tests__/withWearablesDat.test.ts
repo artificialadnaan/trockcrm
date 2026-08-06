@@ -65,3 +65,35 @@ describe("resolveMetaAppId", () => {
     expect(resolveMetaAppId({ metaAppId: undefined })).toBe(DEVELOPER_MODE_APP_ID);
   });
 });
+
+/**
+ * The Swift Package requirement.
+ *
+ * `upToNextMajorVersion` from 0.8.0 reads as `>= 0.8.0 < 1.0.0`. Under SemVer a 0.x MINOR bump is
+ * the breaking axis, so that range silently accepts every future 0.y. Meta published 0.9.0, SPM
+ * resolved it on the next cloud build with no change on our side, and the Swift stopped compiling:
+ * `value of type 'DeviceSession' has no member 'addStream'` — WearablesBridge and WalkthroughRecorder
+ * both target the 0.8.0 API.
+ *
+ * Nothing in the repo could catch that: the failure is in a cloud Xcode build, after SPM resolution,
+ * against a dependency no local test resolves. This assertion is the only cheap guard, so it exists.
+ */
+const {
+  SPM_REQUIREMENT_KIND,
+  DEFAULT_VERSION,
+} = require("../withWearablesDat") as {
+  SPM_REQUIREMENT_KIND: string;
+  DEFAULT_VERSION: string;
+};
+
+describe("Meta Wearables SDK version pin", () => {
+  it("admits 0.8.x patches but NOT the next minor, which is the breaking axis at 0.x", () => {
+    expect(SPM_REQUIREMENT_KIND).toBe("upToNextMinorVersion");
+  });
+
+  it("still targets the SDK version the Swift bridge is written against", () => {
+    // Bumping this alone does not migrate the API. 0.9.0 removed DeviceSession.addStream, which both
+    // native files call — moving to it is a source change, not a version change.
+    expect(DEFAULT_VERSION).toBe("0.8.0");
+  });
+});

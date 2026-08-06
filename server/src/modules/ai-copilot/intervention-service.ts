@@ -83,7 +83,11 @@ type InMemoryTenantDb = {
   state: {
     cases: DisconnectCaseRow[];
     tasks: TaskRow[];
-    deals: Array<Pick<DealRow, "id" | "dealNumber" | "name" | "companyId">>;
+    // `isChangeOrder` as an OPTIONAL intersection rather than another Pick key: it is optional on the
+    // response type too (an absent flag must degrade to the name-shape fallback, never assert `false`),
+    // and making it a Pick key would force every existing in-memory fixture to state a value it does
+    // not care about.
+    deals: Array<Pick<DealRow, "id" | "dealNumber" | "name" | "companyId"> & { isChangeOrder?: boolean | null }>;
     companies: Array<Pick<CompanyRow, "id" | "name">>;
     users?: Array<Pick<UserRow, "id" | "displayName">>;
     history: DisconnectCaseHistoryRow[];
@@ -180,6 +184,7 @@ function buildCaseMetadata(row: SalesProcessDisconnectRow) {
     disconnectDetails: row.disconnectDetails,
     dealNumber: row.dealNumber,
     dealName: row.dealName,
+    dealIsChangeOrder: row.dealIsChangeOrder ?? undefined,
     companyName: row.companyName,
     stageKey: row.stageKey ?? null,
     stageName: row.stageName,
@@ -347,7 +352,9 @@ function matchesQueueFilters(row: DisconnectCaseRow, filters: InterventionQueueF
 function projectQueueItem(input: {
   row: DisconnectCaseRow;
   task: TaskRow | null;
-  deal: Pick<DealRow, "id" | "dealNumber" | "name" | "companyId"> | null;
+  // `isChangeOrder` as an intersection rather than another Pick key: the queue builder is also driven
+  // by an in-memory test double whose deal shape is narrower, and an optional member accepts both.
+  deal: (Pick<DealRow, "id" | "dealNumber" | "name" | "companyId"> & { isChangeOrder?: boolean | null }) | null;
   company: Pick<CompanyRow, "id" | "name"> | null;
   history: DisconnectCaseHistoryRow | null;
   usersMap: Map<string, string>;
@@ -387,6 +394,7 @@ function projectQueueItem(input: {
           id: input.deal.id,
           dealNumber: input.deal.dealNumber,
           name: input.deal.name,
+          isChangeOrder: input.deal.isChangeOrder,
         }
       : null,
     company: input.company
@@ -3486,6 +3494,10 @@ export async function getInterventionCaseDetail(
               id: deal.id,
               dealNumber: deal.dealNumber,
               name: deal.name,
+              // The row is loaded with a full `.select()`, so the flag is right there; omitting it sent
+              // the detail panel `undefined` while the QUEUE panel beside it (projectQueueItem) had the
+              // real value — the same deal, labelled two different ways depending on which panel.
+              isChangeOrder: deal.isChangeOrder,
             }
           : null,
         company: company
@@ -3596,6 +3608,7 @@ export async function getInterventionCaseDetail(
             id: dealRow.id,
             dealNumber: dealRow.dealNumber,
             name: dealRow.name,
+            isChangeOrder: dealRow.isChangeOrder,
           }
         : null,
       company: companyRow

@@ -1,6 +1,7 @@
 import { AlertCircle, Clock, GripVertical, MapPin } from "lucide-react";
 import { DealValue } from "@/components/deals/deal-value";
 import type { Deal } from "@/hooks/use-deals";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import { cn } from "@/lib/utils";
 import { getDealDisplayNumber } from "@/components/deals/kanban-deal-card";
 import { isTerminalStage } from "@/lib/pipeline-terminal-filters";
@@ -53,6 +54,9 @@ export function DecoratedKanbanCard({
   onClick,
 }: DecoratedKanbanCardProps) {
   const displayNumber = getDealDisplayNumber(deal);
+  // A change-order child is STORED as "<Parent> — Change Order N", so a truncated card title reads as
+  // its parent. Display-only reorder to "Change Order N — <Parent>"; the stored name is untouched.
+  const displayName = formatDealDisplayName(deal.name, deal.isChangeOrder);
   const days = getEffectiveStageAgeDays(getEffectiveStageAgeDeal(deal));
   const slaDays = resolveKanbanSlaThresholdDays(stageSlug);
   const showSla = !isTerminalStage(stageSlug) && slaDays !== null;
@@ -61,6 +65,10 @@ export function DecoratedKanbanCard({
   // Surface the deal description on the card so users can tell deals apart without drilling in (it is
   // already shown in the list view). Trimmed + clamped so long text can't inflate the card height.
   const description = deal.description?.trim() ?? "";
+  // Telling cards apart is EXACTLY what the scope title is for, and it does it better than two clamped
+  // lines of a notes field — so when a deal has one it leads, with the description still beneath it.
+  // A deal without a title is unchanged (#1051).
+  const scopeTitle = deal.scopeTitle?.trim() ?? "";
   const ownerColor = getOwnerInitialColor(deal.assignedRepId ?? deal.assignedRepName);
   // The column slug is authoritative (a board row may omit deal.stageSlug). Stamp it ONCE and use the
   // same object for the value AND the badge, so the won-aware hold check and the value can't disagree
@@ -73,10 +81,11 @@ export function DecoratedKanbanCard({
   // The button's aria-label overrides its descendant text, so fold the description into the accessible
   // name — otherwise screen-reader users can't use it to tell similar cards apart (the whole point of
   // showing it). Appended after any billing alert; omitted when there is no description.
-  const descriptionSuffix = description ? `. ${description}` : "";
+  // Both go into the accessible name, title first, in the same order they render.
+  const descriptionSuffix = [scopeTitle, description].filter(Boolean).map((part) => `. ${part}`).join("");
   const accessibleName = billingAttentionRequired
-    ? `Open deal ${deal.name}: billing contact missing${descriptionSuffix}`
-    : `Open deal ${deal.name}${descriptionSuffix}`;
+    ? `Open deal ${displayName}: billing contact missing${descriptionSuffix}`
+    : `Open deal ${displayName}${descriptionSuffix}`;
 
   return (
     <button
@@ -128,7 +137,17 @@ export function DecoratedKanbanCard({
         <AtRiskBadge atRisk={effectivelyHeld ? null : deal.atRisk} compact />
         <ChangeOrderBadge isChangeOrder={deal.isChangeOrder} compact />
 
-        <p className="line-clamp-2 text-sm font-black leading-5 text-slate-950">{deal.name}</p>
+        <p className="line-clamp-2 text-sm font-black leading-5 text-slate-950">{displayName}</p>
+
+        {scopeTitle ? (
+          <p
+            className="line-clamp-2 text-xs font-bold leading-4 text-slate-700"
+            title={scopeTitle}
+            data-testid="kanban-card-scope-title"
+          >
+            {scopeTitle}
+          </p>
+        ) : null}
 
         {description ? (
           <p

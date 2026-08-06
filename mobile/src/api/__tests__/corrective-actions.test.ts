@@ -32,6 +32,8 @@ describe("getCorrectiveActions", () => {
           responderEmail: null,
           respondedAt: null,
           photos: [],
+          // Nobody has responded yet, so the thread is genuinely empty.
+          events: [],
         },
         {
           id: "item-2",
@@ -46,6 +48,22 @@ describe("getCorrectiveActions", () => {
           respondedAt: "2026-07-22T18:00:00.000Z",
           photos: [
             { id: "scp-1", fileId: "file-1", clientUploadId: "cu-1", caption: "After cleanup" },
+          ],
+          // A responded item carries its attempt on the wire. The server puts the response photos BOTH
+          // on the item aggregate above and on the event that filed them (corrective-action-api.ts:162),
+          // so an empty thread here would be a shape the server never sends for a resolved item.
+          events: [
+            {
+              id: "cae-1",
+              eventType: "submitted",
+              actorName: "Sam Field",
+              actorEmail: "sam@example.com",
+              comment: "Done, see photos.",
+              createdAt: "2026-07-22T18:00:00.000Z",
+              photos: [
+                { id: "scp-1", fileId: "file-1", clientUploadId: "cu-1", caption: "After cleanup" },
+              ],
+            },
           ],
         },
       ],

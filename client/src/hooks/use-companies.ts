@@ -241,6 +241,10 @@ export interface CompanyDeal {
   id: string;
   dealNumber: string;
   name: string;
+  /** `deals.is_change_order` — on the wire already (getCompanyDeals returns the whole row). */
+  isChangeOrder: boolean;
+  /** `deals.scope_title` — on the wire already (the query returns the whole deal row). */
+  scopeTitle?: string | null;
   stageId: string;
   isActive: boolean;
   companyId: string | null;

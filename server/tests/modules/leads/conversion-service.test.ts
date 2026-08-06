@@ -2055,6 +2055,139 @@ describe("Lead Conversion Service", () => {
     expect(createDealInputs[0]?.bidDueDate).toBe("2026-06-01");
   });
 
+  // deals.scope_title through the CONVERT path. Lead conversion is how a large share of deals are born,
+  // and it is the one creation flow with no deal form behind it — so if the title is not captured here it
+  // is NULL on every converted deal until someone opens and edits it (Codex #1051).
+  it("forwards the scope title captured on the convert dialog to the successor deal", async () => {
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-sales-validation",
+          assignedRepId: "rep-1",
+          status: "open",
+          pipelineType: "normal",
+          officeCode: "dfw",
+          bidDueDate: null,
+          source: "Referral",
+          description: "Property manager requested pre-bid walk",
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+    const createDealInputs: Array<{ scopeTitle: string | null; description: string | null }> = [];
+    const service = createLeadConversionService({
+      getStageById: pipelineMocks.getStageById as never,
+      getStageBySlug: pipelineMocks.getStageBySlug as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+      createDeal: async (_tenantDb, input) => {
+        createDealInputs.push({ scopeTitle: input.scopeTitle ?? null, description: input.description ?? null });
+        const deal = {
+          id: "deal-1",
+          dealNumber: "DFW-3-10526-aa",
+          workflowRoute: input.workflowRoute ?? "normal",
+          officeCode: input.officeCode,
+          primaryContactId: input.primaryContactId ?? null,
+          companyId: input.companyId ?? null,
+          propertyId: input.propertyId ?? null,
+          sourceLeadId: input.sourceLeadId ?? null,
+          source: input.source ?? null,
+          assignedRepId: input.assignedRepId,
+          stageId: input.stageId,
+          name: input.name,
+        };
+        tenantDb.state.deals.push(deal);
+        return deal as never;
+      },
+    });
+
+    await service.convertLead(tenantDb as never, {
+      leadId: "lead-1",
+      userRole: "rep",
+      userId: "rep-1",
+      scopeTitle: "Exterior Renovation",
+    });
+
+    expect(createDealInputs[0]?.scopeTitle).toBe("Exterior Renovation");
+  });
+
+  it("does NOT fall back to the lead description for the scope title", async () => {
+    // Deliberate, and settled by the live data rather than taste: across the 180 leads that carry a
+    // description the field runs to a p90 of 200 characters and a max of 2658, with real values like
+    // "fsad", "summary" and "[Archived 2026-07-14 — test data]". Seeding those as QuickBooks project
+    // titles manufactures wrong titles that LOOK authoritative; a blank one prompts someone to fill it.
+    // (Contrast the change-order seed, where the census showed the description already IS a title.)
+    const tenantDb = createFakeTenantDb({
+      leads: [
+        {
+          id: "lead-1",
+          companyId: "company-1",
+          propertyId: "property-1",
+          primaryContactId: null,
+          name: "Palm Villas repaint",
+          stageId: "lead-stage-sales-validation",
+          assignedRepId: "rep-1",
+          status: "open",
+          pipelineType: "normal",
+          officeCode: "dfw",
+          bidDueDate: null,
+          source: "Referral",
+          description: "Property manager requested pre-bid walk and a full exterior condition assessment",
+          stageEnteredAt: new Date("2026-04-12T15:00:00.000Z"),
+          convertedAt: null,
+          isActive: true,
+          createdAt: new Date("2026-04-12T15:00:00.000Z"),
+          updatedAt: new Date("2026-04-12T15:00:00.000Z"),
+        },
+      ],
+    });
+    const createDealInputs: Array<{ scopeTitle: string | null; description: string | null }> = [];
+    const service = createLeadConversionService({
+      getStageById: pipelineMocks.getStageById as never,
+      getStageBySlug: pipelineMocks.getStageBySlug as never,
+      now: () => new Date("2026-04-15T15:00:00.000Z"),
+      createDeal: async (_tenantDb, input) => {
+        createDealInputs.push({ scopeTitle: input.scopeTitle ?? null, description: input.description ?? null });
+        const deal = {
+          id: "deal-1",
+          dealNumber: "DFW-3-10526-aa",
+          workflowRoute: input.workflowRoute ?? "normal",
+          officeCode: input.officeCode,
+          primaryContactId: input.primaryContactId ?? null,
+          companyId: input.companyId ?? null,
+          propertyId: input.propertyId ?? null,
+          sourceLeadId: input.sourceLeadId ?? null,
+          source: input.source ?? null,
+          assignedRepId: input.assignedRepId,
+          stageId: input.stageId,
+          name: input.name,
+        };
+        tenantDb.state.deals.push(deal);
+        return deal as never;
+      },
+    });
+
+    await service.convertLead(tenantDb as never, {
+      leadId: "lead-1",
+      userRole: "rep",
+      userId: "rep-1",
+    });
+
+    expect(createDealInputs[0]?.scopeTitle).toBeNull();
+    // …while the DESCRIPTION still carries over, so nothing was traded away for this.
+    expect(createDealInputs[0]?.description).toBe(
+      "Property manager requested pre-bid walk and a full exterior condition assessment"
+    );
+  });
+
   it("leaves successor deal bidDueDate null when the source lead has no bid due date", async () => {
     const tenantDb = createFakeTenantDb({
       leads: [

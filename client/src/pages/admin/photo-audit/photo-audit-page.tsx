@@ -38,7 +38,7 @@ import {
 import type { PhotoAuditEvent, PhotoAuditEventType } from "@/components/photos/photo-history-timeline";
 import { api } from "@/lib/api";
 import { displayNameOrFallback } from "@/lib/display-identifiers";
-import { formatDealDisplayNumber, sanitizeHubspotDealIdentifiers } from "@/lib/deal-utils";
+import { formatDealDisplayName, formatDealDisplayNumber, sanitizeHubspotDealIdentifiers } from "@/lib/deal-utils";
 import { getImmediatePhotoPreviewUrl, shouldFetchSignedPhotoUrl } from "@/lib/photo-url-resolution";
 
 const PHOTO_AUDIT_EVENTS: Array<{ value: PhotoAuditEventType; label: string; icon: React.ComponentType<{ className?: string }> }> = [
@@ -103,6 +103,8 @@ interface AdminPhotoAuditEvent extends PhotoAuditEvent {
     id: string;
     name: string;
     dealNumber: string;
+    /** `deals.is_change_order` from the server — absent means "unknown", not false. */
+    isChangeOrder?: boolean | null;
   } | null;
 }
 
@@ -466,7 +468,10 @@ export function PhotoAuditPage() {
                         {event.deal ? (
                           <Link className="text-sm text-brand-red hover:underline" to={`/deals/${event.deal.id}`}>
                             {formatDealDisplayNumber(event.deal).label === "Pending" ? "" : `${formatDealDisplayNumber(event.deal).label} `}
-                            {event.deal.name}
+                            {/* A change-order child is STORED "<Parent> — Change Order N"; lead with the
+                                label so it isn't read as its parent. Display-only, stored name unchanged.
+                                The flag decides: a deal a human named "Lobby — Change Order 1" must not move. */}
+                            {formatDealDisplayName(event.deal.name, event.deal.isChangeOrder)}
                           </Link>
                         ) : <span className="text-muted-foreground">No deal</span>}
                       </TableCell>

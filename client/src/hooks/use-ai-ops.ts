@@ -34,6 +34,7 @@ export interface AiReviewQueueEntry {
   packetId: string;
   dealId: string | null;
   dealName: string | null;
+  dealIsChangeOrder?: boolean | null;
   dealNumber: string | null;
   status: string;
   summaryText: string | null;
@@ -53,6 +54,7 @@ export interface AiActionQueueEntry {
   id: string;
   dealId: string | null;
   dealName: string | null;
+  dealIsChangeOrder?: boolean | null;
   dealNumber: string | null;
   title: string;
   details: string | null;
@@ -82,6 +84,7 @@ export interface AiReviewPacketDetail {
     generatedAt: string | null;
     expiresAt: string | null;
     dealName: string | null;
+    dealIsChangeOrder?: boolean | null;
     dealNumber: string | null;
   } | null;
   suggestedTasks: Array<{
@@ -134,6 +137,7 @@ export interface SalesProcessDisconnectRow {
   id: string;
   dealNumber: string;
   dealName: string;
+  dealIsChangeOrder?: boolean | null;
   companyId: string | null;
   companyName: string | null;
   stageName: string | null;

@@ -61,7 +61,7 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE TABLE users (id uuid PRIMARY KEY, display_name text, avatar_url text);
     CREATE TABLE deals (
-      id uuid PRIMARY KEY, name text, deal_number text, assigned_rep_id uuid,
+      id uuid PRIMARY KEY, name text, is_change_order boolean NOT NULL DEFAULT false, deal_number text, assigned_rep_id uuid,
       property_city text, property_state text, source_lead_id uuid
     );
     INSERT INTO users (id, display_name) VALUES
@@ -128,6 +128,21 @@ describe("getProjectPhotoStats sorting", () => {
     expect(pagination.total).toBe(9);
     // Keyset, not page numbers: a full page hands back a position to resume from.
     expect(pagination.nextCursor).toBeTypeOf("string");
+  });
+
+  it("REGRESSION: returns deals.is_change_order, which the SELECT had and the mapper dropped", async () => {
+    // The column was added to this query (and its GROUP BY) in one change and NOT copied into the
+    // response mapper in the same edit — the same half-done shape as pending-rfp-service. The client
+    // then falls back to guessing the change-order label from the name, on a Projects tab where a CO
+    // and its parent render identically.
+    const before = await getProjectPhotoStats(tdb as never, { sort: "most_photos", limit: 3 });
+    expect(before.projects.every((p) => p.dealIsChangeOrder === false)).toBe(true);
+
+    const target = before.projects[0]!.dealId;
+    await pg.exec(`UPDATE deals SET is_change_order = true WHERE id = '${target}';`);
+    const after = await getProjectPhotoStats(tdb as never, { sort: "most_photos", limit: 3 });
+    expect(after.projects.find((p) => p.dealId === target)?.dealIsChangeOrder).toBe(true);
+    await pg.exec(`UPDATE deals SET is_change_order = false WHERE id = '${target}';`);
   });
 
   it("orders by fewest photos across all projects", async () => {

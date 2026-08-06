@@ -79,6 +79,34 @@ export interface ShowcasePeriod {
   label: string;
 }
 
+/** The two buckets of the page-local Service / Other split. Mirrors WORKFLOW_ROUTE_BUCKETS on the server
+ *  (server/src/modules/shared/deal-value-sql.ts) — same meaning as the deals dashboard's Service /
+ *  Non-service At Risk cards: "service" is workflow_route = 'service', "other" is everything else. */
+export const ROUTE_BUCKETS = ["service", "other"] as const;
+export type RouteBucket = (typeof ROUTE_BUCKETS)[number];
+
+export const ROUTE_BUCKET_LABEL: Record<RouteBucket, string> = {
+  service: "Service",
+  other: "Other",
+};
+
+/** What the server says the route selection did to this payload — including which figures it could NOT
+ *  reach (`unfilterable`), so the UI marks those in place instead of letting an unfiltered number pass
+ *  for a filtered one. `active` is true only when the selection actually narrows (exactly one bucket). */
+export interface ShowcaseRouteFilter {
+  selected: RouteBucket[];
+  active: boolean;
+  unfilterable: string[];
+}
+
+/** The default (both buckets) descriptor: nothing narrowed, nothing to disclaim — what the server returns
+ *  when no ?routes is sent. Handy as the "unchanged report" baseline in fixtures. */
+export const UNFILTERED_ROUTE_FILTER: ShowcaseRouteFilter = {
+  selected: [...ROUTE_BUCKETS],
+  active: false,
+  unfilterable: [],
+};
+
 export interface MondayShowcaseData {
   period: ShowcasePeriod;
   departments: DepartmentMetric[];
@@ -87,6 +115,7 @@ export interface MondayShowcaseData {
   officeProjection: ProjectionLadder;
   weeklyTrend: ShowcaseWeek[];
   valueBases: Record<"won_awarded_first" | "open_best_estimate", string>;
+  routeFilter: ShowcaseRouteFilter;
   notes: string[];
 }
 
@@ -101,6 +130,8 @@ export interface EvidenceRecord {
   dealNumber: string | null;
   projectNumber: string | null;
   name: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel; `false` for leads. */
+  dealIsChangeOrder?: boolean | null;
   repId: string | null;
   repName: string;
   stageLabel: string;
@@ -125,6 +156,22 @@ export type EvidenceScope =
   | { kind: "rep"; repId: string | null; repName: string }
   | { kind: "region"; regionName: string };
 
+/** The route selection AS APPLIED TO THIS DRILL. `applied` is false for metrics whose source table has no
+ *  workflow route (leads) even when `active` is true — the drawer says so rather than presenting an
+ *  office-wide list under a filtered-looking header. */
+export interface EvidenceRouteFilter {
+  selected: RouteBucket[];
+  active: boolean;
+  applied: boolean;
+}
+
+/** The default (both buckets) drill descriptor — no narrowing, so nothing to apply and nothing to disclaim. */
+export const UNFILTERED_EVIDENCE_ROUTE_FILTER: EvidenceRouteFilter = {
+  selected: [...ROUTE_BUCKETS],
+  active: false,
+  applied: false,
+};
+
 export interface MondayShowcaseEvidence {
   metric: EvidenceMetric;
   metricLabel: string;
@@ -133,6 +180,7 @@ export interface MondayShowcaseEvidence {
   scope: EvidenceScope;
   band: ProjectionBand | null;
   leadStage: string | null;
+  routeFilter: EvidenceRouteFilter;
   total: EvidenceTotal;
   records: EvidenceRecord[];
 }

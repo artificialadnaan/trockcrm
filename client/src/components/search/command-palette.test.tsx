@@ -84,6 +84,48 @@ afterEach(() => {
   container = null;
 });
 
+describe("CommandPalette — the change-order relabel is gated on entityType", () => {
+  it("moves 'Change Order N' to the front for a DEAL result", () => {
+    setSearchState({
+      results: {
+        ...fullResults(),
+        deals: [r("deal", "d1", "Tides Park Lane — Change Order 2", "/deals/d1")],
+      },
+      loading: false,
+    });
+    render();
+    const text = container!.textContent ?? "";
+    expect(text).toContain("Change Order 2 — Tides Park Lane");
+    expect(text).not.toContain("Tides Park Lane — Change Order 2");
+  });
+
+  it("leaves a FILE, company, contact, lead or property label byte for byte", () => {
+    // This one row renders every entity type. A file a human named "Proposal — Change Order 1" is not a
+    // generated deal name, and rewriting it to "Change Order 1 — Proposal" would be a lie about the file.
+    setSearchState({
+      results: {
+        deals: [],
+        companies: [r("company", "c1", "Acme — Change Order 1", "/companies/c1")],
+        contacts: [],
+        leads: [r("lead", "l1", "Lobby — Change Order 1", "/leads/l1")],
+        properties: [],
+        files: [r("file", "f1", "Proposal — Change Order 1", "/files/f1")],
+        total: 3,
+        query: "change order",
+      },
+      loading: false,
+    });
+    render();
+    const text = container!.textContent ?? "";
+    expect(text).toContain("Proposal — Change Order 1");
+    expect(text).toContain("Acme — Change Order 1");
+    expect(text).toContain("Lobby — Change Order 1");
+    expect(text).not.toContain("Change Order 1 — Proposal");
+    expect(text).not.toContain("Change Order 1 — Acme");
+    expect(text).not.toContain("Change Order 1 — Lobby");
+  });
+});
+
 describe("CommandPalette — unified grouped, no-blank search UX", () => {
   it("groups results by entity type and marks won deals", () => {
     setSearchState({ results: fullResults(), loading: false });
@@ -168,5 +210,64 @@ describe("CommandPalette — unified grouped, no-blank search UX", () => {
     expect(text).toContain("$12.3K"); // formatCurrencyCompact(12322.86)
     expect(text).toContain("DFW-4-16326-af");
     expect(text).toContain("Atlanta, GA");
+  });
+});
+
+// The palette is the search page's twin — same `SearchResult` type, same server payload, and the more
+// heavily used of the two. scope_title is a MATCHED field, so a hit can be here entirely because of the
+// title; showing the name alone answers "here is a result" but never "here is why", which reads as a
+// wrong hit (Codex #1051 sweep — the search page got this, the palette did not).
+describe("CommandPalette — deal scope title", () => {
+  it("shows the scope title on a deal result whose NAME does not contain the match", () => {
+    setSearchState({
+      results: {
+        ...fullResults(),
+        deals: [
+          r("deal", "d1", "Tides at Highland Meadows — Change Order 1", "/deals/d1", {
+            secondaryLabel: "DFW-9-10001-aa",
+            isChangeOrder: true,
+            scopeTitle: "Panel Relocation",
+          }),
+        ],
+      },
+      loading: false,
+    });
+    render();
+
+    const html = container!.innerHTML;
+    expect(html).toContain('data-testid="command-palette-scope-title"');
+    expect(container!.textContent).toContain("Panel Relocation");
+    // The title sits between the name and the number/location meta line, matching the search page.
+    expect(html.indexOf("Panel Relocation")).toBeLessThan(html.indexOf("DFW-9-10001-aa"));
+  });
+
+  it("renders nothing extra for a deal with no scope title", () => {
+    setSearchState({ results: fullResults(), loading: false });
+    render();
+
+    expect(container!.innerHTML).not.toContain('data-testid="command-palette-scope-title"');
+    expect(container!.textContent).toContain("Acme Tower"); // the row still renders
+  });
+
+  it("does NOT render a scopeTitle that arrives on a non-deal result", () => {
+    // One row renders companies, contacts, leads, properties and FILES. The field is deal-only, so the
+    // render is gated on entityType exactly like the change-order relabel above it.
+    setSearchState({
+      results: {
+        deals: [],
+        companies: [r("company", "c1", "Acme Construction", "/companies/c1", { scopeTitle: "Panel Relocation" })],
+        contacts: [],
+        leads: [],
+        properties: [],
+        files: [],
+        total: 1,
+        query: "panel relocation",
+      },
+      loading: false,
+    });
+    render();
+
+    expect(container!.textContent).toContain("Acme Construction");
+    expect(container!.textContent).not.toContain("Panel Relocation");
   });
 });

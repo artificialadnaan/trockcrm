@@ -32,6 +32,9 @@ const REP_OTHER = U("c02"); // owns the deal REP_MIX estimated.
 const REP_WL = U("c03"); // worklist rep: Won-family deals, some missing a contract date.
 const REP_NEG = U("c04"); // owns a +5000 deal AND a -1000 adjustment row -> direct 4000 (negative-row reconcile).
 const REP_NETNEG = U("c05"); // +1000 and -3000 -> net direct -2000 (rows must still show; snapshot-skip probe).
+// Owns two earned deals with the SAME name shape and OPPOSITE is_change_order values — the pair that
+// makes the commission-breakdown label provable rather than a syntax guess.
+const REP_CO = U("c06");
 const DIRECTOR = U("c0d"); // a director — used to prove repId drill-down works for non-rep callers.
 
 const ST_OPEN = U("58001"); // 'opportunity' (signed earned rows)
@@ -53,6 +56,8 @@ const D = {
   wlOnHold: U("e14"), // REP_WL Won, on_hold, no contract date -> excluded (setting a date releases no commission)
   netNegOwn: U("e12"), // REP_NETNEG owner dsc +1000
   netNegAdj: U("e13"), // REP_NETNEG owner dsc -3000 -> net direct -2000
+  coChild: U("e15"), // REP_CO, is_change_order = true, generated child name
+  coLookalike: U("e16"), // REP_CO, is_change_order = FALSE, but a human named it change-order-shaped
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -134,7 +139,10 @@ beforeAll(async () => {
     -- REP_WL worklist fixtures.
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, is_test_data, contract_signed_at, contract_signed_date, won_closed_date, awarded_amount, created_at) VALUES
       ('${D.wlMissing}', 'WL-1', 'WL missing A', '${REP_WL}', '${ST_WON}', false, NULL, NULL, '2026-04-01', 70000, '2026-02-01T00:00:00Z'),
-      ('${D.wlMissing2}', 'WL-2', 'WL missing B', '${REP_WL}', '${ST_WON}', false, NULL, NULL, '2026-04-02', 40000, '2026-02-02T00:00:00Z'),
+      -- WL-2 is an ORDINARY deal a human named change-order-shaped. It is on the worklist precisely
+      -- because is_change_order is false (a real CO is excluded — see WL-6), so the label must not be
+      -- rewritten. Syntax alone cannot tell it apart from WL-6's name.
+      ('${D.wlMissing2}', 'WL-2', 'Lobby — Change Order 1', '${REP_WL}', '${ST_WON}', false, NULL, NULL, '2026-04-02', 40000, '2026-02-02T00:00:00Z'),
       ('${D.wlSigned}', 'WL-3', 'WL signed', '${REP_WL}', '${ST_WON}', false, '2026-04-03T00:00:00Z', NULL, '2026-04-03', 90000, '2026-02-03T00:00:00Z'),
       ('${D.wlLost}', 'WL-4', 'WL lost', '${REP_WL}', '${ST_LOST}', false, NULL, NULL, NULL, 90000, '2026-02-04T00:00:00Z'),
       ('${D.wlTest}', 'WL-5', 'WL test', '${REP_WL}', '${ST_WON}', true, NULL, NULL, '2026-04-05', 90000, '2026-02-05T00:00:00Z');
@@ -149,6 +157,15 @@ beforeAll(async () => {
     -- setting a date here would clear the row without releasing any commission.
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, on_hold, contract_signed_at, contract_signed_date, won_closed_date, awarded_amount, created_at) VALUES
       ('${D.wlOnHold}', 'WL-7', 'WL on hold', '${REP_WL}', '${ST_WON}', true, NULL, NULL, '2026-04-07', 80000, '2026-02-07T00:00:00Z');
+
+    -- REP_CO: two earned deals whose NAMES are the same shape and whose FLAGS differ. The commission
+    -- breakdown can only label both correctly by carrying deals.is_change_order out of the query.
+    INSERT INTO deals (id, deal_number, name, is_change_order, assigned_rep_id, stage_id, contract_signed_at, awarded_amount, created_at) VALUES
+      ('${D.coChild}', 'CO-1', 'Tides Park Lane — Change Order 2', true, '${REP_CO}', '${ST_OPEN}', '2026-03-20T00:00:00Z', 20000, '2026-01-20T00:00:00Z'),
+      ('${D.coLookalike}', 'CO-2', 'Lobby — Change Order 1', false, '${REP_CO}', '${ST_OPEN}', '2026-03-21T00:00:00Z', 10000, '2026-01-21T00:00:00Z');
+    INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_kind, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
+      ('${D.coChild}', '${REP_CO}', 'awarded_amount', 20000, 0.10, 2000, 'owner', '2026-03-20'),
+      ('${D.coLookalike}', '${REP_CO}', 'awarded_amount', 10000, 0.10, 1000, 'owner', '2026-03-21');
 
     -- REP_NEG: owner +5000 and a -1000 adjustment (clawback) -> direct = 4000. Proves the breakdown sum
     -- reconciles with directEarnedCommission even with a NEGATIVE row (which a >0 filter would drop).
@@ -284,6 +301,35 @@ describe("Won-but-missing-contract worklist", () => {
   it("a rep with no stuck Won deals returns an empty worklist", async () => {
     const rows = await getRepWonMissingContractDate(tdb, REP_MIX);
     expect(rows).toEqual([]);
+  });
+
+  it("sends dealIsChangeOrder=false, which the WHERE clause guarantees, instead of leaving it undefined", async () => {
+    // The query filters `COALESCE(d.is_change_order, false) = false`, so every row here is provably not
+    // a change-order child — WL-6 proves the filter bites. Leaving the field undefined made the client
+    // fall back to reading the name, and WL-2 is named "Lobby — Change Order 1", so that fallback
+    // actively mislabelled a row the SQL had already settled.
+    const rows = await getRepWonMissingContractDate(tdb, REP_WL);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.every((r) => r.dealIsChangeOrder === false)).toBe(true);
+    const lookalike = rows.find((r) => r.dealNumber === "WL-2");
+    expect(lookalike?.dealName).toBe("Lobby — Change Order 1");
+    expect(lookalike?.dealIsChangeOrder).toBe(false);
+  });
+});
+
+describe("commission breakdown carries deals.is_change_order", () => {
+  it("returns the flag the query already selected, per deal, rather than dropping it in the mapper", async () => {
+    // HALF-WIRED REGRESSION (the inverse of the at-risk one): getCommissionDealRollups' SELECT projected
+    // `d.is_change_order AS deal_is_change_order` and the mapper never copied it, so the director and rep
+    // commission drilldowns rendered `deal.dealIsChangeOrder` as undefined and fell back to the name.
+    const { deals } = await getRepCommissionSummary(tdb, REP_CO, RANGE.from, RANGE.to);
+    expect(deals).toHaveLength(2);
+    const child = deals.find((d) => d.dealNumber === "CO-1");
+    const lookalike = deals.find((d) => d.dealNumber === "CO-2");
+    expect(child?.dealIsChangeOrder).toBe(true);
+    // The discriminating one: same name shape, opposite flag. Only the column can answer it.
+    expect(lookalike?.dealName).toBe("Lobby — Change Order 1");
+    expect(lookalike?.dealIsChangeOrder).toBe(false);
   });
 });
 

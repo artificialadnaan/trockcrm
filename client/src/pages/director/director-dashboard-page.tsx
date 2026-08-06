@@ -8,7 +8,7 @@ import {
 } from "@/hooks/use-director-dashboard";
 import { useRepPerformance, type RepPerformancePeriodKind, type RepPerformanceSnapshotRow } from "@/hooks/use-rep-performance";
 import { useKeepPreviousData } from "@/hooks/use-keep-previous-data";
-import { formatCurrencyCompact, cents } from "@/lib/deal-utils";
+import { formatCurrencyCompact, formatDealDisplayName, cents } from "@/lib/deal-utils";
 import {
   Activity,
   AlertTriangle,
@@ -1092,7 +1092,14 @@ export function DirectorDashboardPage() {
                         {getInitials(repName)}
                       </div>
                       <div className="min-w-0">
-                        <p className="truncate text-sm font-bold text-gray-950">{deal.dealName}</p>
+                        {/* A change-order child is STORED "<Parent> — Change Order N" and these rows
+                            truncate; move the label to the front for DISPLAY only. */}
+                        <p className="truncate text-sm font-bold text-gray-950">{formatDealDisplayName(deal.dealName, deal.dealIsChangeOrder)}</p>
+                        {/* The relabel above is what makes this line necessary: once the name reads
+                            "<Parent> — Change Order N", this is the only thing that says which one. */}
+                        {deal.dealScopeTitle ? (
+                          <p className="truncate text-xs font-medium text-gray-600">{deal.dealScopeTitle}</p>
+                        ) : null}
                         <p className="text-xs text-gray-500">
                           {repName}
                           {deal.regionClassification ? ` · ${deal.regionClassification}` : ""}
@@ -1269,7 +1276,12 @@ export function DirectorDashboardPage() {
                   <Link key={close.dealId} to={`/deals/${close.dealId}`} className="grid grid-cols-[24px_1fr_auto] gap-3 rounded-lg border border-gray-100 p-3 hover:bg-gray-50">
                     <Icon className={`mt-0.5 h-4 w-4 ${color}`} />
                     <div className="min-w-0">
-                      <p className="truncate text-sm font-bold text-gray-950">{close.dealName}</p>
+                      <p className="truncate text-sm font-bold text-gray-950">{formatDealDisplayName(close.dealName, close.dealIsChangeOrder)}</p>
+                      {/* Same reason as the at-risk rows above: a closed change order is otherwise
+                          indistinguishable from its parent and from its siblings. */}
+                      {close.dealScopeTitle ? (
+                        <p className="truncate text-xs font-medium text-gray-600">{close.dealScopeTitle}</p>
+                      ) : null}
                       <p className="text-xs text-gray-500">{close.repName}</p>
                     </div>
                     <div className="text-right">

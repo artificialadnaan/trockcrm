@@ -106,6 +106,58 @@ afterEach(() => {
   container.remove();
 });
 
+describe("QcReportsPage — change-order display name", () => {
+  it("leads the row and its a11y label with 'Change Order N'", async () => {
+    // `projectName` on a QC row is the DEAL's name, and a change-order child is STORED
+    // "<Parent> — Change Order N". Display only — the scorecard snapshot and the PDF are unaffected.
+    const base = mocks.useQcScorecards.getMockImplementation?.() ?? null;
+    void base;
+    const existing = mocks.useQcScorecards();
+    mocks.useQcScorecards.mockReturnValue({
+      ...existing,
+      scorecards: [{ ...existing.scorecards[1], projectName: "Tides Park Lane — Change Order 2" }],
+    });
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/projects/qc-reports?officeId=office-dallas"]}>
+          <QcReportsPage />
+        </MemoryRouter>,
+      );
+    });
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("Change Order 2 — Tides Park Lane");
+    expect(text).not.toContain("Tides Park Lane — Change Order 2");
+    const row = container.querySelector('tr[aria-label^="Open project scorecard for"]');
+    expect(row?.getAttribute("aria-label")).toContain("Change Order 2 — Tides Park Lane");
+  });
+});
+
+describe("QcReportsPage — deals.is_change_order decides, not the name", () => {
+  it("leaves a hand-named deal alone when the server says it is not a change order", async () => {
+    // The QC query now returns d.is_change_order. A deal a human named "Lobby — Change Order 1" has the
+    // flag false and must render exactly as typed, even though its name matches the generated shape.
+    const existing = mocks.useQcScorecards();
+    mocks.useQcScorecards.mockReturnValue({
+      ...existing,
+      scorecards: [{ ...existing.scorecards[1], projectName: "Lobby — Change Order 1", isChangeOrder: false }],
+    });
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/projects/qc-reports?officeId=office-dallas"]}>
+          <QcReportsPage />
+        </MemoryRouter>,
+      );
+    });
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("Lobby — Change Order 1");
+    expect(text).not.toContain("Change Order 1 — Lobby");
+  });
+});
+
 describe("QcReportsPage", () => {
   it("shows project and leadership cards together with a report-type filter and kind-aware labels", async () => {
     await act(async () => {

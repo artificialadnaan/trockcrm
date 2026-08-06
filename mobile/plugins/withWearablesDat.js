@@ -39,6 +39,10 @@ const BRIDGE_FILES = [
 
 const PACKAGE_URL = "https://github.com/facebook/meta-wearables-dat-ios";
 const DEFAULT_VERSION = "0.8.0";
+// See the requirement block in withDatSwiftPackage for why this is MINOR and not MAJOR. Named and
+// exported so the choice is assertable — the failure it prevents is a green repo and a red cloud
+// build, which no local test would otherwise catch.
+const SPM_REQUIREMENT_KIND = "upToNextMinorVersion";
 // MWDATMockDevice supplies MockDeviceKit, which is how the integration is exercised with
 // no glasses and no registered app. The sample guards its import behind #if DEBUG; linking
 // it unconditionally is fine, and keeps the package list identical across configurations.
@@ -161,7 +165,14 @@ const withDatSwiftPackage = (config, opts) =>
     objects.XCRemoteSwiftPackageReference[refId] = {
       isa: "XCRemoteSwiftPackageReference",
       repositoryURL: `"${PACKAGE_URL}"`,
-      requirement: { kind: "upToNextMajorVersion", minimumVersion: opts.version },
+      // upToNextMINOR, not major. The SDK is 0.x, and under SemVer a 0.x MINOR bump is the breaking
+      // axis — "up to next major" reads as `>= 0.8.0 < 1.0.0`, which silently accepts every future
+      // 0.y. That is not hypothetical: Meta published 0.9.0, SPM resolved it on the next cloud build
+      // with no change on our side, and the Swift failed to compile with
+      // `value of type 'DeviceSession' has no member 'addStream'` — the bridge and the recorder both
+      // target the 0.8.0 API. A floating dependency turned a reproducible build into a dated one.
+      // This admits 0.8.x patches and stops at 0.9.0; moving to 0.9 is an API migration, not a bump.
+      requirement: { kind: SPM_REQUIREMENT_KIND, minimumVersion: opts.version },
     };
     objects.XCRemoteSwiftPackageReference[`${refId}_comment`] =
       "XCRemoteSwiftPackageReference \"meta-wearables-dat-ios\"";
@@ -319,3 +330,5 @@ module.exports = createRunOncePlugin(withWearablesDat, "withWearablesDat", "1.0.
 // from a unit test.
 module.exports.resolveMetaAppId = resolveMetaAppId;
 module.exports.DEVELOPER_MODE_APP_ID = DEVELOPER_MODE_APP_ID;
+module.exports.SPM_REQUIREMENT_KIND = SPM_REQUIREMENT_KIND;
+module.exports.DEFAULT_VERSION = DEFAULT_VERSION;

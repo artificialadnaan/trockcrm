@@ -23,6 +23,9 @@ import {
   aliasedEffectiveWonDealValueSql,
   aliasedActiveDealCountFilterSql,
   aliasedWonHsClosedWonDateSql,
+  aliasedWorkflowRouteFilterSql,
+  WORKFLOW_ROUTE_BUCKETS,
+  type WorkflowRouteBucket,
 } from "../shared/deal-value-sql.js";
 import { aliasedHasUsableWonDateSql } from "../deals/service.js";
 import { WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
@@ -146,6 +149,31 @@ export interface ShowcasePeriod {
   label: string;
 }
 
+/**
+ * What the page-local Service / Other filter did to THIS payload. It is reported back structurally, not
+ * just applied silently, because two of the showcase's figures live on sources that carry no workflow
+ * route and therefore CANNOT be narrowed:
+ *
+ *   - Active leads  -- the `leads` table has no workflow_route column at all (route is a DEAL concept; a
+ *                      lead has a workflow FAMILY instead). Both the lead badges and their drill-through
+ *                      stay unfiltered, so they still reconcile with each other -- they just answer a
+ *                      broader question than the deal figures beside them.
+ *   - Collected     -- already a deferred placeholder (no finance source is wired), so there is no number
+ *                      to filter in the first place.
+ *
+ * `unfilterable` names those figures so the UI can MARK them in place rather than let a viewer read an
+ * unfiltered number as a filtered one. When `active` is false (the default, both buckets) nothing was
+ * narrowed and there is nothing to disclaim.
+ */
+export interface ShowcaseRouteFilter {
+  /** The buckets that were applied, always in a stable order. Both = everything = today's numbers. */
+  selected: WorkflowRouteBucket[];
+  /** true only when the selection actually narrows (exactly one bucket). */
+  active: boolean;
+  /** Human labels of the figures in THIS payload the filter could not reach. Empty when !active. */
+  unfilterable: string[];
+}
+
 export interface MondayShowcaseData {
   period: ShowcasePeriod;
   departments: DepartmentMetric[];
@@ -154,7 +182,35 @@ export interface MondayShowcaseData {
   officeProjection: ProjectionLadder;
   weeklyTrend: ShowcaseWeek[];
   valueBases: Record<"won_awarded_first" | "open_best_estimate", string>;
+  routeFilter: ShowcaseRouteFilter;
   notes: string[];
+}
+
+/**
+ * The figures whose SOURCE carries no workflow route. Listed once, here, and reported on both the data and
+ * the evidence payloads -- so "what this filter cannot reach" is one fact with one owner, and adding a new
+ * unfilterable source means editing one list rather than hunting UI copy.
+ */
+const ROUTE_UNFILTERABLE_FIGURES = [
+  "Active leads (the leads table has no workflow route)",
+  "Collected (deferred -- no finance source wired yet)",
+];
+
+/**
+ * Normalize a requested bucket selection into the payload's routeFilter descriptor. `undefined` and a
+ * both-buckets selection collapse to the SAME thing: inactive, nothing disclaimed -- matching
+ * aliasedWorkflowRouteFilterSql, where both emit no predicate at all.
+ */
+export function describeRouteFilter(routes?: readonly WorkflowRouteBucket[]): ShowcaseRouteFilter {
+  const selected = WORKFLOW_ROUTE_BUCKETS.filter((b) => (routes === undefined ? true : routes.includes(b)));
+  // An empty selection has no payload. Rejecting it here (as aliasedWorkflowRouteFilterSql does) stops it
+  // degrading into `active: false`, which would describe "nothing selected" as "everything selected" and
+  // hand the client a full, unfiltered payload under an empty-looking filter.
+  if (selected.length === 0) {
+    throw new Error("workflow-route filter needs at least one bucket: service and/or other");
+  }
+  const active = selected.length === 1;
+  return { selected, active, unfilterable: active ? [...ROUTE_UNFILTERABLE_FIGURES] : [] };
 }
 
 // ===================== assembly inputs (raw, query-produced) =====================
@@ -189,6 +245,8 @@ export interface AssembleInput {
   /** last-completed-week counts per department, for the WoW delta chip. */
   lastWeek: Record<"estimating" | "sent" | "won", number>;
   repNames: Map<string | null, string>;
+  /** What the Service/Other selection did to these figures. Omitted = unfiltered (the default). */
+  routeFilter?: ShowcaseRouteFilter;
 }
 
 const WON_BASIS_LABEL = DEAL_VALUE_BASIS_LABEL.won_awarded_first;
@@ -228,6 +286,11 @@ export function assembleMondayShowcase(input: AssembleInput): MondayShowcaseData
   const wonValue: ValueWithBasis = { amount: input.won.value, basisLabel: WON_BASIS_LABEL };
   const sentValue: ValueWithBasis = { amount: input.sent.value, basisLabel: OPEN_BASIS_LABEL };
   const estimatedValue: ValueWithBasis = { amount: input.estimated.value, basisLabel: OPEN_BASIS_LABEL };
+  // Resolve the filter descriptor ONCE. It feeds two outputs -- the payload's own routeFilter field and
+  // the source notes derived from it -- and those two must never be able to disagree: the notes are the
+  // mechanism that tells a reader Active leads are NOT route-filtered, so a payload declaring one state
+  // while its notes describe another would undermine exactly the disclosure this filter depends on.
+  const routeFilter = input.routeFilter ?? describeRouteFilter();
 
   const departments: DepartmentMetric[] = [
     {
@@ -308,8 +371,23 @@ export function assembleMondayShowcase(input: AssembleInput): MondayShowcaseData
     officeProjection: ladderFrom(input.officeProjection),
     weeklyTrend: input.weeklyTrend,
     valueBases: { won_awarded_first: WON_BASIS_LABEL, open_best_estimate: OPEN_BASIS_LABEL },
-    notes: DEPARTMENT_NOTES,
+    routeFilter,
+    // When the selection narrows, the source notes carry the caveat too -- so a printed/exported copy of
+    // this report still states which figures the filter could not reach. Same object as the field above.
+    notes: [...DEPARTMENT_NOTES, ...routeFilterNotes(routeFilter)],
   };
+}
+
+/** The extra source notes a NARROWING selection adds. Empty when both buckets are selected. */
+function routeFilterNotes(routeFilter: ShowcaseRouteFilter): string[] {
+  if (!routeFilter.active) return [];
+  const bucketLabel = routeFilter.selected[0] === "service" ? "Service" : "Other (non-service)";
+  return [
+    `Filtered to ${bucketLabel} only — deal figures count deals whose workflow route ${
+      routeFilter.selected[0] === "service" ? "is 'service'" : "is anything other than 'service' (a missing route counts as Other)"
+    }.`,
+    `NOT filtered by this selection: ${routeFilter.unfilterable.join("; ")}.`,
+  ];
 }
 
 // ===================== SQL builders (compose F1-F5; SQL-shape tested, no DB) =====================
@@ -331,7 +409,12 @@ function ctDateInWindowSql(tsExpr: string, from: string, to: string): SQL {
  * DISTINCT collapses a deal that re-entered the stage in the window). $ uses the F3 open best-estimate
  * basis over those distinct deals.
  */
-export function buildStageEntryCohortSql(slugs: readonly string[], from: string, to: string): SQL {
+export function buildStageEntryCohortSql(
+  slugs: readonly string[],
+  from: string,
+  to: string,
+  routes?: readonly WorkflowRouteBucket[]
+): SQL {
   return sql`
     SELECT d.assigned_rep_id AS rep_id,
            COUNT(*)::int AS cnt,
@@ -345,13 +428,13 @@ export function buildStageEntryCohortSql(slugs: readonly string[], from: string,
         AND ${ctDateInWindowSql("dsh.created_at", from, to)}
     ) entered ON entered.deal_id = d.id
     WHERE COALESCE(d.is_test_data, false) = false
-      AND ${aliasedReportableDealFilterSql("d")}
+      AND ${aliasedReportableDealFilterSql("d")}${aliasedWorkflowRouteFilterSql("d", routes)}
     GROUP BY d.assigned_rep_id
   `;
 }
 
 /** Per-rep projection bands (F2): open, future-dated deals bucketed 30/60/90, best-estimate $. */
-export function buildProjectionBandsSql(): SQL {
+export function buildProjectionBandsSql(routes?: readonly WorkflowRouteBucket[]): SQL {
   return sql`
     SELECT d.assigned_rep_id AS rep_id,
            ${projectionBandSql("d.expected_close_date")} AS band,
@@ -363,7 +446,7 @@ export function buildProjectionBandsSql(): SQL {
       AND ${aliasedReportableDealFilterSql("d")}
       AND d.is_active = true
       AND psc.is_terminal = false
-      AND ${futureDatedCloseDatePredicateSql("d.expected_close_date")}
+      AND ${futureDatedCloseDatePredicateSql("d.expected_close_date")}${aliasedWorkflowRouteFilterSql("d", routes)}
     GROUP BY d.assigned_rep_id, ${projectionBandSql("d.expected_close_date")}
   `;
 }
@@ -376,7 +459,7 @@ export function buildProjectionBandsSql(): SQL {
  * predicate (the same one buildAtRiskDealsSql lists as the M − N complement), so undated_value is the $
  * of precisely the rows buildUndatedEvidenceSql returns.
  */
-export function buildProjectionCoverageSql(): SQL {
+export function buildProjectionCoverageSql(routes?: readonly WorkflowRouteBucket[]): SQL {
   return sql`
     SELECT d.assigned_rep_id AS rep_id,
            COUNT(*) FILTER (WHERE ${futureDatedCloseDatePredicateSql("d.expected_close_date")})::int AS n,
@@ -391,7 +474,7 @@ export function buildProjectionCoverageSql(): SQL {
     WHERE COALESCE(d.is_test_data, false) = false
       AND ${aliasedReportableDealFilterSql("d")}
       AND d.is_active = true
-      AND psc.is_terminal = false
+      AND psc.is_terminal = false${aliasedWorkflowRouteFilterSql("d", routes)}
     GROUP BY d.assigned_rep_id
   `;
 }
@@ -400,6 +483,14 @@ export function buildProjectionCoverageSql(): SQL {
  * Active (open) leads grouped by lead stage, per rep -- current-state, no date bucket. Mirrors the
  * canonical active-lead query's scope (is_active, open, lead workflow family, non-terminal) and excludes
  * test data, so the Report B badges count the SAME leads as the rest of the reporting surfaces.
+ *
+ * DELIBERATELY TAKES NO ROUTE FILTER. workflow_route is a DEAL column; the `leads` table has none (a lead
+ * carries a workflow FAMILY, and every row here is already family='lead'). There is no honest Service /
+ * Other split to make, so this query is identical under every selection -- and so is buildLeadEvidenceSql,
+ * which means the badge and its drill-through still agree with each other. The payload's routeFilter
+ * .unfilterable names this figure so the UI marks it instead of letting a viewer read an unfiltered
+ * lead count as a filtered one. (Faking the split via the lead's converted deal would answer a different
+ * question -- these are OPEN leads, which by definition have no deal yet.)
  */
 export function buildLeadStatusSql(): SQL {
   return sql`
@@ -419,7 +510,12 @@ export function buildLeadStatusSql(): SQL {
  * 8-week Sunday-anchored trend of Est/Sent stage entries (F1 bucket; F5 distinct deal). An optional repId
  * scopes the trend to one rep (used by the Rep 1:1 Pack); undefined = office-wide (the showcase).
  */
-export function buildWeeklyCohortTrendSql(fromWeekStart: string, toDate: string, repId?: string | null): SQL {
+export function buildWeeklyCohortTrendSql(
+  fromWeekStart: string,
+  toDate: string,
+  repId?: string | null,
+  routes?: readonly WorkflowRouteBucket[]
+): SQL {
   const weekStart = sundayWeekBucketSql("dsh.created_at");
   return sql`
     SELECT ${weekStart} AS week_start,
@@ -430,7 +526,7 @@ export function buildWeeklyCohortTrendSql(fromWeekStart: string, toDate: string,
     JOIN ${deals} d ON d.id = dsh.deal_id
     WHERE COALESCE(d.is_test_data, false) = false
       AND ${aliasedReportableDealFilterSql("d")}
-      AND ${ctDateInWindowSql("dsh.created_at", fromWeekStart, toDate)}${repScopeSql("d", repId)}
+      AND ${ctDateInWindowSql("dsh.created_at", fromWeekStart, toDate)}${repScopeSql("d", repId)}${aliasedWorkflowRouteFilterSql("d", routes)}
     GROUP BY ${weekStart}
     ORDER BY ${weekStart}
   `;
@@ -441,6 +537,13 @@ export function buildWeeklyCohortTrendSql(fromWeekStart: string, toDate: string,
 export interface MondayShowcaseOptions {
   mode?: WeekMode;
   now?: Date;
+  /**
+   * Page-local Service / Other narrowing. `undefined` (and an explicit both-buckets selection) apply NO
+   * predicate, so the payload is byte-identical to the pre-filter one -- the page defaults to both, and a
+   * weekly report's headline numbers must not move because a filter shipped. Applied at the PAYLOAD level,
+   * so all 8 variants slice the same narrowed figures and none can disagree.
+   */
+  routes?: readonly WorkflowRouteBucket[];
 }
 
 function shiftIsoDays(isoDate: string, days: number): string {
@@ -466,7 +569,7 @@ export function eightWeekStartsEndingAt(sundayFrom: string): string[] {
  */
 export async function computeWeeklyTrend(
   tenantDb: TenantDb,
-  { from, to, repId }: { from: string; to: string; repId?: string }
+  { from, to, repId, routes }: { from: string; to: string; repId?: string; routes?: readonly WorkflowRouteBucket[] }
 ): Promise<ShowcaseWeek[]> {
   // Anchor the 8 trailing weeks on the Sunday of the period END, NOT the window start `from`. For weekly
   // modes `from` is already a Sunday so this is a no-op (to_date: to=today → this Sunday = from; completed:
@@ -476,7 +579,7 @@ export async function computeWeeklyTrend(
   // `to` to its Sunday keeps the trend ending at/near the current week and Sunday-aligned in every mode.
   const anchorSunday = sundayWeekStart(to);
   const trendFrom = shiftIsoDays(anchorSunday, -7 * 7); // 7 prior weeks + the current one
-  const trendRows = await tenantDb.execute(buildWeeklyCohortTrendSql(trendFrom, to, repId));
+  const trendRows = await tenantDb.execute(buildWeeklyCohortTrendSql(trendFrom, to, repId, routes));
   const trendByWeek = new Map<string, { estimating: number; sent: number }>();
   for (const r of rowsFromExecute<{ week_start: string; estimating: unknown; sent: unknown }>(trendRows)) {
     trendByWeek.set(String(r.week_start).slice(0, 10), { estimating: num(r.estimating), sent: num(r.sent) });
@@ -487,7 +590,9 @@ export async function computeWeeklyTrend(
     const cohort = trendByWeek.get(weekStart) ?? { estimating: 0, sent: 0 };
     const weekEnd = shiftIsoDays(weekStart, 6);
     const cappedEnd = weekEnd < to ? weekEnd : to;
-    const wonWeek = await getWonCloseSummary(tenantDb, { from: weekStart, to: cappedEnd, repId });
+    // The trend's Won leg goes through the SAME protected aggregate (and the same route narrowing) the
+    // headline Won uses, so a filtered sparkline's last bucket still ties to the filtered headline number.
+    const wonWeek = await getWonCloseSummary(tenantDb, { from: weekStart, to: cappedEnd, repId, workflowRoutes: routes });
     weeklyTrend.push({
       weekStart,
       estimating: cohort.estimating,
@@ -544,6 +649,11 @@ export async function getMondayShowcaseData(
   const now = options.now ?? new Date();
   const { from, to } = getWtdPeriod(mode, now);
   const period: ShowcasePeriod = { from, to, mode, label: `${from} → ${to}` };
+  // Resolve the route selection ONCE and pass the SAME value to every query below. Every deal-sourced
+  // figure in this payload is narrowed identically or not at all -- a figure filtered here while its
+  // neighbour is not is precisely how a filtered report starts lying.
+  const routes = options.routes;
+  const routeFilter = describeRouteFilter(routes);
 
   // last completed week (for the WoW delta chip)
   const lastWeekFrom = shiftIsoDays(from, -7);
@@ -554,15 +664,17 @@ export async function getMondayShowcaseData(
   // every query's client-side query_timeout start at once, so a late one could time out on cumulative
   // QUEUE wait rather than its own execution. Awaiting in sequence keeps each query's timer scoped to its
   // own run (same total wall-clock on one connection).
-  const wonSummary = await getWonCloseSummary(tenantDb, { from, to });
-  const repWonRows = await getCanonicalRepWonSummary(tenantDb, { from, to });
-  const lastWonSummary = await getWonCloseSummary(tenantDb, { from: lastWeekFrom, to: lastWeekTo });
-  const sentRows = await tenantDb.execute(buildStageEntryCohortSql(SENT_STAGE_SLUGS, from, to));
-  const estimatedRows = await tenantDb.execute(buildStageEntryCohortSql(ESTIMATED_STAGE_SLUGS, from, to));
-  const lastSentRows = await tenantDb.execute(buildStageEntryCohortSql(SENT_STAGE_SLUGS, lastWeekFrom, lastWeekTo));
-  const lastEstRows = await tenantDb.execute(buildStageEntryCohortSql(ESTIMATED_STAGE_SLUGS, lastWeekFrom, lastWeekTo));
-  const projBandRows = await tenantDb.execute(buildProjectionBandsSql());
-  const projCovRows = await tenantDb.execute(buildProjectionCoverageSql());
+  const wonSummary = await getWonCloseSummary(tenantDb, { from, to, workflowRoutes: routes });
+  const repWonRows = await getCanonicalRepWonSummary(tenantDb, { from, to, workflowRoutes: routes });
+  const lastWonSummary = await getWonCloseSummary(tenantDb, { from: lastWeekFrom, to: lastWeekTo, workflowRoutes: routes });
+  const sentRows = await tenantDb.execute(buildStageEntryCohortSql(SENT_STAGE_SLUGS, from, to, routes));
+  const estimatedRows = await tenantDb.execute(buildStageEntryCohortSql(ESTIMATED_STAGE_SLUGS, from, to, routes));
+  const lastSentRows = await tenantDb.execute(buildStageEntryCohortSql(SENT_STAGE_SLUGS, lastWeekFrom, lastWeekTo, routes));
+  const lastEstRows = await tenantDb.execute(buildStageEntryCohortSql(ESTIMATED_STAGE_SLUGS, lastWeekFrom, lastWeekTo, routes));
+  const projBandRows = await tenantDb.execute(buildProjectionBandsSql(routes));
+  const projCovRows = await tenantDb.execute(buildProjectionCoverageSql(routes));
+  // NOT route-narrowed -- the leads table has no workflow_route. See buildLeadStatusSql. routeFilter
+  // .unfilterable carries that fact to the UI so the badge is marked, not silently mixed in.
   const leadRows = await tenantDb.execute(buildLeadStatusSql());
   const repNameRows = await tenantDb.execute(
     sql`SELECT ${users.id} AS id, ${users.displayName} AS name FROM ${users}`,
@@ -629,7 +741,7 @@ export async function getMondayShowcaseData(
 
   // 8-week office trend (zero-filled to exactly 8 buckets; current week's Won capped at `to`). Shared
   // helper so the Rep 1:1 Pack computes its per-rep trend the identical way.
-  const weeklyTrend = await computeWeeklyTrend(tenantDb, { from, to });
+  const weeklyTrend = await computeWeeklyTrend(tenantDb, { from, to, routes });
   const sparklines = {
     estimating: weeklyTrend.map((w) => w.estimating),
     sent: weeklyTrend.map((w) => w.sent),
@@ -649,6 +761,7 @@ export async function getMondayShowcaseData(
     sparklines,
     lastWeek: { estimating: lastEst.count, sent: lastSent.count, won: lastWonSummary.count },
     repNames,
+    routeFilter,
   });
 }
 
@@ -671,6 +784,13 @@ export interface EvidenceRecord {
   /** the canonical DFW/ATL project number when present (null for leads / when unset). */
   projectNumber: string | null;
   name: string;
+  /**
+   * `deals.is_change_order` — the AUTHORITY for the change-order display relabel, so the drawer never has
+   * to infer it from `name`. `false` for leads (a lead is never a generated change-order child).
+   * `undefined` only if the column ever arrives NULL — deliberately NOT coerced to `false`, which would be
+   * a confident wrong claim about a real change-order child.
+   */
+  dealIsChangeOrder?: boolean | null;
   repId: string | null;
   repName: string;
   /** the record's current pipeline/lead stage. */
@@ -703,6 +823,20 @@ export type EvidenceScope =
   | { kind: "rep"; repId: string | null; repName: string }
   | { kind: "region"; regionName: string };
 
+/**
+ * The Service/Other selection AS APPLIED TO THIS DRILL. `applied` is the load-bearing field: it is false
+ * for the `leads` metric (no workflow_route on that table) even when `active` is true, so the drawer can
+ * say "this list ignores the Service/Other filter" instead of presenting an office-wide lead list under a
+ * filtered-looking header.
+ */
+export interface EvidenceRouteFilter {
+  selected: WorkflowRouteBucket[];
+  /** the selection narrows (exactly one bucket chosen). */
+  active: boolean;
+  /** the narrowing actually reached THIS metric's query. */
+  applied: boolean;
+}
+
 export interface MondayShowcaseEvidence {
   metric: EvidenceMetric;
   metricLabel: string;
@@ -712,9 +846,13 @@ export interface MondayShowcaseEvidence {
   scope: EvidenceScope;
   band: ProjectionBand | null;
   leadStage: string | null;
+  routeFilter: EvidenceRouteFilter;
   total: EvidenceTotal;
   records: EvidenceRecord[];
 }
+
+/** Metrics whose source table has no workflow_route, so a route selection cannot be applied to them. */
+const ROUTE_UNFILTERABLE_METRICS: readonly EvidenceMetric[] = ["leads"];
 
 /**
  * Optional per-rep narrowing for an evidence query. `undefined` = office-wide (no rep predicate, so it
@@ -750,6 +888,10 @@ function regionScopeSql(regionName?: string): SQL {
  * Company + region come from additive LEFT JOINs (companies c, region_config rc) the callers add; both are
  * FK->PK 1:1, so they never change the cohort row set -- COUNT(rows) and SUM(value) stay exactly the
  * aggregate's, and the reconciliation guarantee holds.
+ *
+ * `deal_is_change_order` is deals.is_change_order, the AUTHORITY for the change-order display relabel.
+ * The name alone cannot answer it: a deal a human named "Lobby — Change Order 1" is byte-identical to a
+ * generated child, and without this column the drawer relabelled it "Change Order 1 — Lobby".
  */
 function dealEvidenceSelectSql(valueSql: SQL, cohortDateExpr: string): SQL {
   return sql`
@@ -757,6 +899,7 @@ function dealEvidenceSelectSql(valueSql: SQL, cohortDateExpr: string): SQL {
     d.deal_number AS deal_number,
     d.project_number AS project_number,
     d.name AS name,
+    d.is_change_order AS deal_is_change_order,
     d.assigned_rep_id AS rep_id,
     COALESCE(u.display_name, '') AS rep_name,
     COALESCE(psc.name, '') AS stage_label,
@@ -776,7 +919,13 @@ function dealEvidenceSelectSql(valueSql: SQL, cohortDateExpr: string): SQL {
  * usable-won-date guard, reportable + test filters) and the SAME awarded-first $ basis, so
  * COUNT(rows) === Won count and SUM(value) === Won $.
  */
-export function buildWonEvidenceSql(from: string, to: string, repId?: string | null, regionName?: string): SQL {
+export function buildWonEvidenceSql(
+  from: string,
+  to: string,
+  repId?: string | null,
+  regionName?: string,
+  routes?: readonly WorkflowRouteBucket[]
+): SQL {
   return sql`
     SELECT ${dealEvidenceSelectSql(aliasedEffectiveWonDealValueSql("d"), "d.won_closed_date")}
     FROM ${deals} d
@@ -791,7 +940,7 @@ export function buildWonEvidenceSql(from: string, to: string, repId?: string | n
       AND psc.slug IN (${slugInList(WON_STAGE_SLUGS)})
       AND ${aliasedHasUsableWonDateSql("d")}
       AND ${aliasedWonHsClosedWonDateSql("d")} >= ${from}::date
-      AND ${aliasedWonHsClosedWonDateSql("d")} <= ${to}::date${repScopeSql("d", repId)}${regionScopeSql(regionName)}
+      AND ${aliasedWonHsClosedWonDateSql("d")} <= ${to}::date${repScopeSql("d", repId)}${regionScopeSql(regionName)}${aliasedWorkflowRouteFilterSql("d", routes)}
     ORDER BY value DESC, d.name
   `;
 }
@@ -807,7 +956,8 @@ export function buildStageEntryEvidenceSql(
   from: string,
   to: string,
   repId?: string | null,
-  regionName?: string
+  regionName?: string,
+  routes?: readonly WorkflowRouteBucket[]
 ): SQL {
   return sql`
     SELECT ${dealEvidenceSelectSql(openValueSql("d"), "entered.entered_at")}
@@ -826,7 +976,7 @@ export function buildStageEntryEvidenceSql(
     LEFT JOIN region_config rc ON rc.id = d.region_id
     LEFT JOIN public.project_type_config ptc ON ptc.id = d.project_type_id
     WHERE COALESCE(d.is_test_data, false) = false
-      AND ${aliasedReportableDealFilterSql("d")}${repScopeSql("d", repId)}${regionScopeSql(regionName)}
+      AND ${aliasedReportableDealFilterSql("d")}${repScopeSql("d", repId)}${regionScopeSql(regionName)}${aliasedWorkflowRouteFilterSql("d", routes)}
     ORDER BY value DESC, d.name
   `;
 }
@@ -836,7 +986,12 @@ export function buildStageEntryEvidenceSql(
  * buildProjectionBandsSql -- optionally narrowed to one 30/60/90 rung via the SAME band CASE, so the
  * per-band rows reconcile to that rung's count/$.
  */
-export function buildProjectionEvidenceSql(repId?: string | null, band?: ProjectionBand, regionName?: string): SQL {
+export function buildProjectionEvidenceSql(
+  repId?: string | null,
+  band?: ProjectionBand,
+  regionName?: string,
+  routes?: readonly WorkflowRouteBucket[]
+): SQL {
   const bandFilter = band
     ? sql` AND ${projectionBandSql("d.expected_close_date")} = ${band}`
     : sql``;
@@ -852,7 +1007,7 @@ export function buildProjectionEvidenceSql(repId?: string | null, band?: Project
       AND ${aliasedReportableDealFilterSql("d")}
       AND d.is_active = true
       AND psc.is_terminal = false
-      AND ${futureDatedCloseDatePredicateSql("d.expected_close_date")}${repScopeSql("d", repId)}${regionScopeSql(regionName)}${bandFilter}
+      AND ${futureDatedCloseDatePredicateSql("d.expected_close_date")}${repScopeSql("d", repId)}${regionScopeSql(regionName)}${bandFilter}${aliasedWorkflowRouteFilterSql("d", routes)}
     ORDER BY d.expected_close_date, value DESC
   `;
 }
@@ -868,7 +1023,7 @@ export function buildProjectionEvidenceSql(repId?: string | null, band?: Project
  * enrich the evidence columns; they never change the row set. NOT a region drill (the region report has
  * no undated section), so it carries no regionName param.
  */
-export function buildUndatedEvidenceSql(repId?: string | null): SQL {
+export function buildUndatedEvidenceSql(repId?: string | null, routes?: readonly WorkflowRouteBucket[]): SQL {
   return sql`
     SELECT ${dealEvidenceSelectSql(openValueSql("d"), "d.expected_close_date")}
     FROM ${deals} d
@@ -881,13 +1036,13 @@ export function buildUndatedEvidenceSql(repId?: string | null): SQL {
       AND ${aliasedReportableDealFilterSql("d")}
       AND d.is_active = true
       AND psc.is_terminal = false
-      AND NOT (${futureDatedCloseDatePredicateSql("d.expected_close_date")})${repScopeSql("d", repId)}
+      AND NOT (${futureDatedCloseDatePredicateSql("d.expected_close_date")})${repScopeSql("d", repId)}${aliasedWorkflowRouteFilterSql("d", routes)}
     ORDER BY value DESC, d.name
   `;
 }
 
 /** Evidence for open deals whose expected close date is explicitly in the past. */
-export function buildStaleEvidenceSql(repId?: string | null): SQL {
+export function buildStaleEvidenceSql(repId?: string | null, routes?: readonly WorkflowRouteBucket[]): SQL {
   return sql`
     SELECT ${dealEvidenceSelectSql(openValueSql("d"), "d.expected_close_date")}
     FROM ${deals} d
@@ -901,13 +1056,13 @@ export function buildStaleEvidenceSql(repId?: string | null): SQL {
       AND d.is_active = true
       AND psc.is_terminal = false
       AND d.expected_close_date IS NOT NULL
-      AND d.expected_close_date < (now() AT TIME ZONE 'America/Chicago')::date${repScopeSql("d", repId)}
+      AND d.expected_close_date < (now() AT TIME ZONE 'America/Chicago')::date${repScopeSql("d", repId)}${aliasedWorkflowRouteFilterSql("d", routes)}
     ORDER BY value DESC, d.name
   `;
 }
 
 /** Evidence for open deals that have never had an expected close date. */
-export function buildNoDateEvidenceSql(repId?: string | null): SQL {
+export function buildNoDateEvidenceSql(repId?: string | null, routes?: readonly WorkflowRouteBucket[]): SQL {
   return sql`
     SELECT ${dealEvidenceSelectSql(openValueSql("d"), "d.expected_close_date")}
     FROM ${deals} d
@@ -920,7 +1075,7 @@ export function buildNoDateEvidenceSql(repId?: string | null): SQL {
       AND ${aliasedReportableDealFilterSql("d")}
       AND d.is_active = true
       AND psc.is_terminal = false
-      AND d.expected_close_date IS NULL${repScopeSql("d", repId)}
+      AND d.expected_close_date IS NULL${repScopeSql("d", repId)}${aliasedWorkflowRouteFilterSql("d", routes)}
     ORDER BY value DESC, d.name
   `;
 }
@@ -931,7 +1086,12 @@ export function buildNoDateEvidenceSql(repId?: string | null): SQL {
  * deliberately NOT the projection metric, which is future-dated-only and would undercount the pipeline. An
  * optional `stageSlug` narrows to one stage, reconciling to a single region×stage heatmap cell.
  */
-export function buildPipelineEvidenceSql(repId?: string | null, regionName?: string, stageSlug?: string): SQL {
+export function buildPipelineEvidenceSql(
+  repId?: string | null,
+  regionName?: string,
+  stageSlug?: string,
+  routes?: readonly WorkflowRouteBucket[]
+): SQL {
   const stageFilter = stageSlug ? sql` AND psc.slug = ${stageSlug}` : sql``;
   return sql`
     SELECT ${dealEvidenceSelectSql(openValueSql("d"), "d.expected_close_date")}
@@ -944,7 +1104,7 @@ export function buildPipelineEvidenceSql(repId?: string | null, regionName?: str
     WHERE COALESCE(d.is_test_data, false) = false
       AND ${aliasedReportableDealFilterSql("d")}
       AND d.is_active = true
-      AND psc.is_terminal = false${repScopeSql("d", repId)}${regionScopeSql(regionName)}${stageFilter}
+      AND psc.is_terminal = false${repScopeSql("d", repId)}${regionScopeSql(regionName)}${stageFilter}${aliasedWorkflowRouteFilterSql("d", routes)}
     ORDER BY value DESC, d.name
   `;
 }
@@ -952,6 +1112,16 @@ export function buildPipelineEvidenceSql(repId?: string | null, regionName?: str
 /**
  * Lead evidence: active (open) lead rows -- same scope as buildLeadStatusSql -- optionally narrowed to one
  * lead stage. Leads carry no deal value (value column is NULL); the cohort date is the lead's created_at.
+ *
+ * TAKES NO ROUTE FILTER, for the same reason buildLeadStatusSql doesn't: the leads table has no
+ * workflow_route. Crucially the aggregate and THIS query are unfiltered TOGETHER, so the badge count still
+ * equals the drilled record count under every selection -- the drawer just has to SAY that this one metric
+ * ignores the Service/Other choice (MondayShowcaseEvidence.routeFilter.applied === false).
+ *
+ * deal_is_change_order is FALSE here, not NULL: the leads table has no such column and a lead can never BE
+ * a generated change-order child (those are created as DEALS, by change-order-service.ts). So false is the
+ * authoritative answer rather than an unknown, and it stops the drawer -- which renders lead rows through
+ * the same name cell as deal rows -- relabelling a lead a human named "<Something> — Change Order 1".
  */
 export function buildLeadEvidenceSql(repId?: string | null, leadStage?: string): SQL {
   const stageFilter = leadStage ? sql` AND psc.name = ${leadStage}` : sql``;
@@ -960,6 +1130,7 @@ export function buildLeadEvidenceSql(repId?: string | null, leadStage?: string):
            NULL AS deal_number,
            NULL AS project_number,
            l.name AS name,
+           FALSE AS deal_is_change_order,
            l.assigned_rep_id AS rep_id,
            COALESCE(u.display_name, '') AS rep_name,
            COALESCE(psc.name, '') AS stage_label,
@@ -1030,6 +1201,13 @@ export interface MondayShowcaseEvidenceOptions {
    *  not a mode-derived week. Snapshot metrics (projection) ignore it. */
   from?: string;
   to?: string;
+  /**
+   * The SAME Service/Other selection the clicked figure was computed under. This is the whole point of
+   * threading it here: a card that counts 6 under "Service" must open 6 records, not the office's 10. The
+   * caller MUST pass what the number was computed with — the drawer reconciles to the figure, not to a
+   * default. `undefined`/both = no narrowing, identical to the pre-filter behaviour.
+   */
+  routes?: readonly WorkflowRouteBucket[];
 }
 
 interface EvidenceRow {
@@ -1037,6 +1215,7 @@ interface EvidenceRow {
   deal_number: string | null;
   project_number: string | null;
   name: string;
+  deal_is_change_order: boolean | null;
   rep_id: string | null;
   rep_name: string;
   stage_label: string;
@@ -1066,39 +1245,50 @@ export async function getMondayShowcaseEvidence(
   const from = options.from ?? derived.from;
   const to = options.to ?? derived.to;
   const period: ShowcasePeriod = { from, to, mode, label: `${from} → ${to}` };
-  const { metric, repId, band, leadStage, regionName, stageSlug } = options;
+  const { metric, repId, band, leadStage, regionName, stageSlug, routes } = options;
+  // The narrowing is reported per-metric, not just per-request: `applied` is what the drawer renders, and
+  // it is false exactly where the source table has no route to filter on.
+  const selection = describeRouteFilter(routes);
+  const routeFilter: EvidenceRouteFilter = {
+    selected: selection.selected,
+    active: selection.active,
+    applied: selection.active && !ROUTE_UNFILTERABLE_METRICS.includes(metric),
+  };
 
   let query: SQL;
   switch (metric) {
     case "won":
-      query = buildWonEvidenceSql(from, to, repId, regionName);
+      query = buildWonEvidenceSql(from, to, repId, regionName, routes);
       break;
     case "sent":
-      query = buildStageEntryEvidenceSql(SENT_STAGE_SLUGS, from, to, repId, regionName);
+      query = buildStageEntryEvidenceSql(SENT_STAGE_SLUGS, from, to, repId, regionName, routes);
       break;
     case "estimated":
-      query = buildStageEntryEvidenceSql(ESTIMATED_STAGE_SLUGS, from, to, repId, regionName);
+      query = buildStageEntryEvidenceSql(ESTIMATED_STAGE_SLUGS, from, to, repId, regionName, routes);
       break;
     case "projection":
-      query = buildProjectionEvidenceSql(repId, band, regionName);
+      query = buildProjectionEvidenceSql(repId, band, regionName, routes);
       break;
     case "undated":
       // The B4 "No future close date" card's complement (M − N): open deals lacking a future-dated close
       // date, scoped office-wide or to one rep — never a region drill, so regionName is intentionally unused.
-      query = buildUndatedEvidenceSql(repId);
+      query = buildUndatedEvidenceSql(repId, routes);
       break;
     case "stale":
-      query = buildStaleEvidenceSql(repId);
+      query = buildStaleEvidenceSql(repId, routes);
       break;
     case "no_date":
-      query = buildNoDateEvidenceSql(repId);
+      query = buildNoDateEvidenceSql(repId, routes);
       break;
     case "pipeline":
-      query = buildPipelineEvidenceSql(repId, regionName, stageSlug);
+      query = buildPipelineEvidenceSql(repId, regionName, stageSlug, routes);
       break;
     case "leads":
       // Leads have no region (their region is the company's text field); the region report has no leads
       // section, so a region-scoped leads drill is never requested — regionName is intentionally unused.
+      // `routes` is likewise unused: no workflow_route on the leads table. The aggregate this drill backs
+      // (buildLeadStatusSql) is unfiltered too, so count === rows still holds; routeFilter.applied = false
+      // is what tells the drawer to say so out loud.
       query = buildLeadEvidenceSql(repId, leadStage);
       break;
     default: {
@@ -1114,6 +1304,9 @@ export async function getMondayShowcaseEvidence(
     dealNumber: r.deal_number == null ? null : String(r.deal_number),
     projectNumber: r.project_number == null ? null : String(r.project_number),
     name: r.name,
+    // `?? undefined`, never `?? false`: an absent flag is unknown, and asserting `false` would tell the
+    // formatter a real change-order child is not one.
+    dealIsChangeOrder: r.deal_is_change_order ?? undefined,
     repId: r.rep_id == null ? null : String(r.rep_id),
     repName: r.rep_name || (r.rep_id ? "Unknown rep" : "Unassigned"),
     stageLabel: r.stage_label,
@@ -1165,6 +1358,7 @@ export async function getMondayShowcaseEvidence(
     scope,
     band: band ?? null,
     leadStage: leadStage ?? null,
+    routeFilter,
     total,
     records,
   };

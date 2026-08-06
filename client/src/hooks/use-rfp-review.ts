@@ -5,6 +5,8 @@ import { getOfficeRequestOptions } from "@/lib/office-selection";
 export interface RfpReviewDetail {
   dealId: string;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   dealNumber: string | null;
   projectNumber: string | null;
   rfpApprovalStatus: string | null;

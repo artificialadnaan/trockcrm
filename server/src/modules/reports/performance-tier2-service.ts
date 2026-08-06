@@ -166,7 +166,12 @@ function buildResponsibleUserScopeSql(filters: PerformanceReportFilters, alias: 
   return sql.join(clauses, sql` AND `);
 }
 
-function buildActivityScopeSql(filters: PerformanceReportFilters, ownerIds = filters.ownerIds) {
+// EXPORTED so the Daily Activity Log report (daily-activity-log-service.ts) can bind the SAME
+// activity predicate rather than restating it. That report is the readable-log companion to Rep
+// Activity, and its per-day entry counts are meant to EQUAL this report's `timeline` when no type
+// filter is applied -- which only holds if both sides share this exact date basis (occurred_at),
+// this exact half-open window, and this exact office/owner scoping. Do NOT fork a second copy.
+export function buildActivityScopeSql(filters: PerformanceReportFilters, ownerIds = filters.ownerIds) {
   const clauses = [
     sql`a.occurred_at >= ${filters.dateFrom}::date`,
     sql`a.occurred_at < (${filters.dateTo}::date + INTERVAL '1 day')`,
@@ -270,6 +275,7 @@ interface DirectorOfficeRow {
 interface AtRiskDealRow {
   deal_id: string;
   deal_name: string;
+  deal_is_change_order?: boolean | null;
   owner_name: string | null;
   stage_name: string | null;
   days_in_stage: string | number | null;
@@ -324,6 +330,8 @@ export interface DirectorScorecardReport {
   topAtRiskDeals: Array<{
     dealId: string;
     dealName: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
     ownerName: string;
     stageName: string;
     daysInStage: number;
@@ -373,6 +381,7 @@ export function buildDirectorScorecardFromRows(input: {
     topAtRiskDeals: input.atRiskRows.map((row) => ({
       dealId: row.deal_id,
       dealName: row.deal_name,
+      dealIsChangeOrder: row.deal_is_change_order ?? undefined,
       ownerName: row.owner_name || "Unassigned",
       stageName: row.stage_name || "Unassigned Stage",
       daysInStage: numberValue(row.days_in_stage),
@@ -426,6 +435,9 @@ function buildDirectorScorecardAtRiskRows(
     .map(({ row, atRisk }) => ({
       deal_id: row.deal_id,
       deal_name: row.deal_name,
+      // Carried through the narrowing re-map: dropping it here would strand the column the query
+      // selected one hand-off short of the mapper that needs it.
+      deal_is_change_order: row.deal_is_change_order,
       owner_name: row.owner_name,
       stage_name: row.stage_name,
       days_in_stage: atRisk.effectiveStageAgeDays,
@@ -589,7 +601,8 @@ export async function getDirectorScorecard(db: TenantDb, filters: PerformanceRep
         ORDER BY oo.office_name ASC
       `);
     const atRiskCandidates = await db.execute<AtRiskDealCandidateRow>(sql`
-        SELECT d.id AS deal_id, d.name AS deal_name, u.display_name AS owner_name, psc.name AS stage_name,
+        SELECT d.id AS deal_id, d.name AS deal_name, d.is_change_order AS deal_is_change_order,
+          u.display_name AS owner_name, psc.name AS stage_name,
           COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
           d.workflow_route,
           d.stage_entered_at,
@@ -740,12 +753,18 @@ export async function getRepActivityReport(db: TenantDb, filters: PerformanceRep
         WHERE ${activityScope}
       `);
     const timeline = await db.execute(sql`
-        SELECT a.occurred_at::date::text AS day, COUNT(*)::int AS touchpoints
+        -- Bucket pinned to UTC rather than left to the session TimeZone. A bare occurred_at::date
+        -- follows whatever zone the connection carries, which made this timeline non-deterministic
+        -- across server configurations AND let it silently diverge from the Daily Activity Log,
+        -- whose day sections must equal these bars. Both are pinned in the same change so they agree
+        -- by construction; under a UTC session (the expected production configuration) this is a
+        -- no-op. See daily-activity-log-service.ts OCCURRED_DAY_UTC for the full reasoning.
+        SELECT (a.occurred_at AT TIME ZONE 'UTC')::date::text AS day, COUNT(*)::int AS touchpoints
         FROM activities a
         JOIN users u ON u.id = a.responsible_user_id
           JOIN offices o ON o.id = u.office_id
         WHERE ${activityScope}
-        GROUP BY a.occurred_at::date
+        GROUP BY (a.occurred_at AT TIME ZONE 'UTC')::date
         ORDER BY day ASC
       `);
     const types = await db.execute(sql`
@@ -835,6 +854,7 @@ interface ForecastMonthlyRow {
 interface ForecastAtRiskRow {
   deal_id: string;
   deal_name: string;
+  deal_is_change_order?: boolean | null;
   owner_name: string | null;
   stage_name: string | null;
   value: string | number | null;
@@ -853,6 +873,8 @@ export interface ForecastAccuracyReport {
   pipelineAtRisk: Array<{
     dealId: string;
     dealName: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
     ownerName: string;
     stageName: string;
     value: number;
@@ -886,6 +908,7 @@ export function buildForecastAccuracyFromRows(input: {
     pipelineAtRisk: input.atRiskRows.map((row) => ({
       dealId: row.deal_id,
       dealName: row.deal_name,
+      dealIsChangeOrder: row.deal_is_change_order ?? undefined,
       ownerName: row.owner_name || "Unassigned",
       stageName: row.stage_name || "Unassigned Stage",
       value: numberValue(row.value),
@@ -966,7 +989,8 @@ export async function getForecastAccuracyReport(db: TenantDb, filters: Performan
         ORDER BY m.month_start
       `);
     const atRisk = await db.execute(sql`
-        SELECT d.id AS deal_id, d.name AS deal_name, u.display_name AS owner_name, psc.name AS stage_name,
+        SELECT d.id AS deal_id, d.name AS deal_name, d.is_change_order AS deal_is_change_order,
+          u.display_name AS owner_name, psc.name AS stage_name,
           ${forecastValue} AS value,
           d.expected_close_date::text AS expected_close_date
         FROM deals d

@@ -196,6 +196,9 @@ export function createScorecardEditDraft(
     kind: detail.kind === "leadership" ? "leadership" : undefined,
     dealId: detail.dealId,
     dealName: projectName(detail),
+    // Carry the AUTHORITY with the name. Without it the draft's own `isChangeOrder` was undefined and
+    // the editor fell back to syntax — relabelling a flag-false project while the user edited it.
+    isChangeOrder: detail.isChangeOrder ?? undefined,
     projectNumber: detail.projectNumber,
     weekOf: detail.weekOf,
     superintendentName: detail.superintendentName ?? "",

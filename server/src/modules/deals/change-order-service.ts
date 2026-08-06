@@ -2,7 +2,11 @@ import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { dealChangeOrders, deals, pipelineStageConfig, tasks } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
-import { isGenuineWonDealStageSlug, type WorkflowRoute } from "@trock-crm/shared/types";
+import {
+  deriveChangeOrderScopeTitle,
+  isGenuineWonDealStageSlug,
+  type WorkflowRoute,
+} from "@trock-crm/shared/types";
 import { WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 import { generateDealNumberForProject } from "../../services/projectNumber.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
@@ -100,6 +104,7 @@ interface ParentForChildCreate {
   propertyId: string | null;
   assignedRepId: string | null;
   projectNumber: string | null;
+  scopeTitle: string | null;
   officeCode: string | null;
   projectType: string | null;
   projectTypeId: string | null;
@@ -134,6 +139,9 @@ async function loadParentForChildCreate(
       propertyId: deals.propertyId,
       assignedRepId: deals.assignedRepId,
       projectNumber: deals.projectNumber,
+      // Only a FALLBACK for the child's own scope title — see deriveChangeOrderScopeTitle. The child's
+      // title is independent once created; this is not propagated on later parent edits, deliberately.
+      scopeTitle: deals.scopeTitle,
       officeCode: deals.officeCode,
       projectType: deals.projectType,
       projectTypeId: deals.projectTypeId,
@@ -301,6 +309,15 @@ export async function createChangeOrderChildDeal(
   const childName = `${parent.name}${childNameSuffix}`.length > 500
     ? `${parent.name.slice(0, 500 - childNameSuffix.length)}${childNameSuffix}`
     : `${parent.name}${childNameSuffix}`;
+  // The child's OWN scope title, seeded once at creation and independent thereafter. A CO is separately
+  // billable work with its own scope ("Panel Relocation" under a full exterior job), so this is a
+  // convenience default, not inheritance: a later edit to either deal is expected to make them differ,
+  // and nothing propagates. The ordering rationale (and the production census behind it) lives on
+  // deriveChangeOrderScopeTitle.
+  const childScopeTitle = deriveChangeOrderScopeTitle({
+    changeOrderDescription: description,
+    parentScopeTitle: parent.scopeTitle,
+  });
   // Suppress the project-number-first-set email (migration 0138 trigger) for this insert: a CO child
   // shares the parent's project_number, so it is NOT a first project-number assignment. Transaction-local
   // (the per-request connection runs in one transaction — middleware/tenant.ts), reset right after the
@@ -310,14 +327,16 @@ export async function createChangeOrderChildDeal(
     INSERT INTO deals (
       deal_number, name, stage_id, is_change_order, parent_deal_id, assigned_rep_id, company_id, property_id,
       awarded_amount, won_closed_date, contract_signed_date, project_number, office_code, project_type,
-      project_type_id, region_id, pipeline_type_snapshot, estimator_user_id, sales_source_user_id, source, description,
+      project_type_id, region_id, pipeline_type_snapshot, estimator_user_id, sales_source_user_id, source,
+      scope_title, description,
       created_by_user_id, workflow_route,
       is_active, on_hold, is_test_data, stage_entered_at, created_at, updated_at
     ) VALUES (
       ${dealNumber}, ${childName}, ${wonStage.id}, true, ${parent.id}, ${parent.assignedRepId},
       ${parent.companyId}, ${parent.propertyId}, ${amount}, ${signedDate}, ${signedDate},
       ${parent.projectNumber}, ${parent.officeCode}, ${parent.projectType}, ${parent.projectTypeId},
-      ${parent.regionId}, ${parent.pipelineTypeSnapshot}, ${parent.estimatorUserId}, ${parent.salesSourceUserId}, 'change_order', ${description}, ${input.createdBy ?? null},
+      ${parent.regionId}, ${parent.pipelineTypeSnapshot}, ${parent.estimatorUserId}, ${parent.salesSourceUserId}, 'change_order',
+      ${childScopeTitle}, ${description}, ${input.createdBy ?? null},
       ${parent.workflowRoute ?? "normal"}, true, false, ${parent.isTestData}, ${createdAt}, ${createdAt}, ${createdAt}
     )
     RETURNING id, deal_number, created_at, updated_at

@@ -97,6 +97,24 @@ describe("createScorecardEditDraft", () => {
     expect(body.pmResponderId).toBe("resp-pm");
   });
 
+  it("carries deals.is_change_order from the card into the edit draft", () => {
+    // The editor treats `draft.isChangeOrder` as the AUTHORITY. Hydrating dealName/projectNumber but not
+    // the flag left it undefined, so the editor fell back to reading the name — and relabelled a
+    // flag-FALSE project while the user was editing it.
+    expect(createScorecardEditDraft(detail({ isChangeOrder: true }), {
+      id: "e1", clientSubmissionId: "a1", now: 1,
+    }).isChangeOrder).toBe(true);
+
+    expect(createScorecardEditDraft(detail({ isChangeOrder: false }), {
+      id: "e2", clientSubmissionId: "a2", now: 1,
+    }).isChangeOrder).toBe(false);
+
+    // An older API deployment omits it — that must stay UNDEFINED, never become false.
+    expect(createScorecardEditDraft(detail(), {
+      id: "e3", clientSubmissionId: "a3", now: 1,
+    }).isChangeOrder).toBeUndefined();
+  });
+
   it("hydrates a card with no picks as explicit nulls (falls back to the deal team server-side)", () => {
     const draft = createScorecardEditDraft(detail(), {
       id: "local-edit-unpicked",
