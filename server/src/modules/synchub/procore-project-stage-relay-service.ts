@@ -1,6 +1,10 @@
 import { createHash } from "crypto";
 import type { PoolClient } from "pg";
-import { normalizePortfolioProjectStage, isPortfolioProjectBoardStage } from "@trock-crm/shared/types";
+import {
+  bareNormalizePortfolioProjectStage,
+  isPortfolioProjectBoardRelevantStage,
+  normalizePortfolioProjectStage,
+} from "@trock-crm/shared/types";
 import { pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 
@@ -224,7 +228,11 @@ function eventTimestamp(payload: SyncHubProjectStageChangedPayload, receivedAt: 
   };
 }
 
-function eventKeyForPayload(payload: SyncHubProjectStageChangedPayload): string {
+function buildEventKey(
+  payload: SyncHubProjectStageChangedPayload,
+  currentStageKeyPart: string,
+  previousStageKeyPart: string | null,
+): string {
   const traceKey = optionalString(payload.synchub?.webhookLogId) ?? optionalString((payload.rawProcoreWebhook as any)?.id);
   if (traceKey) {
     return [
@@ -232,7 +240,7 @@ function eventKeyForPayload(payload: SyncHubProjectStageChangedPayload): string 
       traceKey,
       payload.procore.companyId,
       payload.procore.portfolioProjectId,
-      payload.stage.current.normalized,
+      currentStageKeyPart,
       payload.stageChange.detectedAt ?? "",
     ].join(":");
   }
@@ -244,8 +252,8 @@ function eventKeyForPayload(payload: SyncHubProjectStageChangedPayload): string 
       portfolioProjectId: payload.procore.portfolioProjectId,
       projectNumber: payload.procore.projectNumber,
       projectName: payload.procore.projectName,
-      previousStage: payload.stage.previous.normalized,
-      stage: payload.stage.current.normalized,
+      previousStage: previousStageKeyPart,
+      stage: currentStageKeyPart,
       detectedAt: payload.stageChange.detectedAt,
       webhookTimestamp: payload.stageChange.webhookTimestamp,
       synchubReceivedAt: optionalString(payload.synchub?.receivedAt),
@@ -258,6 +266,61 @@ function eventKeyForPayload(payload: SyncHubProjectStageChangedPayload): string 
     .digest("hex")
     .slice(0, 32);
   return `synchub-stage:${digest}`;
+}
+
+function eventKeyForPayload(payload: SyncHubProjectStageChangedPayload): string {
+  return buildEventKey(payload, payload.stage.current.normalized, payload.stage.previous.normalized);
+}
+
+/**
+ * Every event key the PREVIOUS alias map could have produced for this same webhook.
+ *
+ * The hazard: the key embeds the ALIAS-normalized stage, and the alias map is code we edit.
+ * Adding the `pre-construction` alias changed Pre-Construction's canonical form from
+ * "pre - construction" to "pre-construction", so after deploy the same webhook — a SyncHub
+ * retry, or a pre-deploy receipt replayed by replayUnresolvedSyncHubProcoreProjectStageReceipts
+ * (which re-derives the payload from raw_payload and recomputes the key) — hashes to a NEW key.
+ * That inserts a second receipt and a second stage entry while the original unresolved receipt
+ * is orphaned, unreachable by any future replay.
+ *
+ * The candidate set is provably complete, not a guess. The old key's stage part was
+ * `STAGE_ALIASES_old[x] ?? bare(x)`. No EXISTING alias target was changed when the map grew, so
+ * for any stage x that value is either today's alias output or the bare textual form — the two
+ * forms enumerated here. (This holds for adding aliases, which is the normal edit. RETARGETING
+ * an existing alias would break the guarantee and needs a key reconciliation instead; that is
+ * why bareNormalizePortfolioProjectStage is exported with the warning it carries.)
+ */
+function legacyEventKeysForPayload(payload: SyncHubProjectStageChangedPayload): string[] {
+  const primary = eventKeyForPayload(payload);
+  const currents = [payload.stage.current.normalized, bareNormalizePortfolioProjectStage(payload.stage.current.raw)];
+  const previouses = payload.stage.previous.raw === null
+    ? [payload.stage.previous.normalized]
+    : [payload.stage.previous.normalized, bareNormalizePortfolioProjectStage(payload.stage.previous.raw)];
+
+  const keys = new Set<string>();
+  for (const current of currents) {
+    for (const previous of previouses) {
+      keys.add(buildEventKey(payload, current, previous));
+    }
+  }
+  keys.delete(primary);
+  return [...keys];
+}
+
+/**
+ * The key this event should be written under: an existing receipt's key wins over the freshly
+ * computed one, so a retry/replay of a pre-deploy event updates that row instead of twinning it.
+ */
+async function resolveEventKey(client: QueryClient, payload: SyncHubProjectStageChangedPayload) {
+  const primary = eventKeyForPayload(payload);
+  const primaryReceipt = await existingReceipt(client, primary);
+  if (primaryReceipt) return { eventKey: primary, receipt: primaryReceipt };
+
+  for (const legacyKey of legacyEventKeysForPayload(payload)) {
+    const receipt = await existingReceipt(client, legacyKey);
+    if (receipt) return { eventKey: legacyKey, receipt };
+  }
+  return { eventKey: primary, receipt: null };
 }
 
 export function validateSyncHubProjectStageChangedPayload(input: unknown): SyncHubProjectStageChangedPayload {
@@ -306,7 +369,19 @@ export function validateSyncHubProjectStageChangedPayload(input: unknown): SyncH
       current: {
         raw: newStage,
         normalized: normalizedCurrentStage,
-        isBoardRelevant: isPortfolioProjectBoardStage(normalizedCurrentStage),
+        // Relevance, not column membership: a stage with no column is still relayed onto the
+        // board (into "Other / No Column"). Only the explicit off-board legacy stages are false.
+        //
+        // Classified from the RAW `newStage`, never from `normalizedCurrentStage`, because
+        // normalizePortfolioProjectStage is NOT IDEMPOTENT for every input and this predicate
+        // normalizes again internally. `_Hold` is the case: JS trims BEFORE collapsing, so the
+        // underscore becomes a leading space and the raw value normalizes to " hold" — which
+        // matches no alias and is therefore unknown-but-relevant, exactly as the seed and
+        // migration 0216 treat it. Feed " hold" back in and the second pass trims it to "hold",
+        // hits the legacy alias, and the project is written is_board_relevant = false — it
+        // disappears from the board instead of landing in "Other / No Column". Same input, same
+        // question, two answers, purely because of which string was handed to the classifier.
+        isBoardRelevant: isPortfolioProjectBoardRelevantStage(newStage),
       },
     },
     synchub: payload.synchub && typeof payload.synchub === "object"
@@ -768,14 +843,15 @@ export async function processSyncHubProcoreProjectStageChanged(
   deps: ServiceDeps = {}
 ): Promise<SyncHubProjectStageChangedResult> {
   const payload = validateSyncHubProjectStageChangedPayload(input);
-  const eventKey = eventKeyForPayload(payload);
   const ownsClient = !deps.client;
   const client = deps.client ?? await pool.connect();
   let releaseErr: unknown;
   const receivedAt = deps.receivedAt ?? new Date();
 
   try {
-    const duplicate = await existingReceipt(client, eventKey);
+    // Adopts a pre-deploy key when one exists, so an alias-map change cannot turn a retry or a
+    // replay into a second receipt + a second stage entry.
+    const { eventKey, receipt: duplicate } = await resolveEventKey(client, payload);
     if (duplicate && duplicate.status !== "unresolved") {
       return { status: "duplicate", eventKey };
     }

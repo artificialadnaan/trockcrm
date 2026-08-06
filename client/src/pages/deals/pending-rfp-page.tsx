@@ -10,6 +10,7 @@ import {
   Inbox,
 } from "lucide-react";
 import { usePendingRfp, type PendingRfpDeal } from "@/hooks/use-deals";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 
@@ -241,7 +242,9 @@ export function PendingRfpPage() {
                                   onClick={(e) => e.stopPropagation()}
                                   className="font-semibold text-slate-900 group-hover:text-brand-red hover:underline"
                                 >
-                                  {deal.name}
+                                  {/* A change-order child is STORED as "<Parent> — Change Order N"; lead
+                                      with the label so the queue row names the CO. Display-only. */}
+                                  {formatDealDisplayName(deal.name, deal.isChangeOrder)}
                                 </Link>
                                 <p className="text-xs text-muted-foreground">
                                   {displayNumber ?? "No number"}

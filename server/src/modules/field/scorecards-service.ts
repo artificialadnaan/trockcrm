@@ -197,6 +197,7 @@ interface ScorecardSummarySource {
   superintendentName: string | null;
   pmName: string | null;
   projectName?: string | null;
+  isChangeOrder?: boolean | null;
   projectNumber: string | null;
   criticalDeficiencies: string[] | null;
   status?: string;
@@ -258,7 +259,7 @@ export async function createFieldScorecard(
   // Idempotency runs FIRST so a retry of an already-submitted card still succeeds even if the deal has
   // since dropped off the field surface (e.g. moved to Lost after the original submit).
   const priorCard = await findByClientSubmissionId(tenantDb, input.clientSubmissionId);
-  if (priorCard) return { scorecard: toSummary(priorCard, priorCard.projectName, input.userId), created: false };
+  if (priorCard) return { scorecard: toSummary(priorCard, { name: priorCard.projectName, isChangeOrder: priorCard.isChangeOrder }, input.userId), created: false };
 
   // Only browsable field projects (active pipeline OR Won-family, never Lost/terminal/inactive) may be
   // scored — same gate the field project reads use. Runs in the resolved office; an off-office deal isn't
@@ -379,7 +380,7 @@ export async function createFieldScorecard(
 
   if (inserted.length === 0) {
     const raced = await findByClientSubmissionId(tenantDb, input.clientSubmissionId);
-    if (raced) return { scorecard: toSummary(raced, raced.projectName, input.userId), created: false };
+    if (raced) return { scorecard: toSummary(raced, { name: raced.projectName, isChangeOrder: raced.isChangeOrder }, input.userId), created: false };
     throw new AppError(409, "Could not save the scorecard — please try again.");
   }
   const card = inserted[0];
@@ -476,7 +477,7 @@ export async function createFieldScorecard(
     maxAttempts: 6,
   });
 
-  return { scorecard: toSummary(reconciledCard ?? card, project.name, input.userId), created: true };
+  return { scorecard: toSummary(reconciledCard ?? card, project, input.userId), created: true };
 }
 
 /**
@@ -681,7 +682,7 @@ export async function updateFieldScorecard(
       userId: input.userId,
       fileIds: photos.flatMap((photo) => (photo.linkId ? [photo.fileId] : [])),
     });
-    return { scorecard: toSummary(card, project.name, input.userId) };
+    return { scorecard: toSummary(card, project, input.userId) };
   }
 
   // Item identity is internal (the API addresses sections by their canonical keys), so a two-statement
@@ -885,7 +886,7 @@ export async function updateFieldScorecard(
     .where(eq(fieldScorecards.id, card.id))
     .limit(1);
 
-  return { scorecard: toSummary(reconciledCard ?? updatedCard, project.name, input.userId) };
+  return { scorecard: toSummary(reconciledCard ?? updatedCard, project, input.userId) };
 }
 
 export async function listFieldScorecardsForProject(
@@ -910,7 +911,7 @@ export async function listFieldScorecardsForProject(
   });
   return {
     scorecards: rows.map((row) =>
-      toSummary(row, project.name, access.userId, canRespondToCorrectiveAction),
+      toSummary(row, project, access.userId, canRespondToCorrectiveAction),
     ),
   };
 }
@@ -935,6 +936,7 @@ export async function listRecentFieldScorecards(
       sc.superintendent_name AS "superintendentName",
       sc.pm_name AS "pmName",
       d.name AS "projectName",
+      d.is_change_order AS "isChangeOrder",
       sc.project_number AS "projectNumber",
       sc.critical_deficiencies AS "criticalDeficiencies",
       sc.status AS "status",
@@ -1034,7 +1036,7 @@ export async function getFieldScorecardDetail(
   );
 
   return {
-    ...toSummary(card, project.name, access.userId),
+    ...toSummary(card, project, access.userId),
     items,
     criticalDeficiencies: card.criticalDeficiencies ?? [],
     criticalDeficiencyNotes: card.criticalDeficiencyNotes ?? {},
@@ -1624,11 +1626,12 @@ export async function presignFieldScorecardPdf(
 async function findByClientSubmissionId(
   tenantDb: TenantDb,
   clientSubmissionId: string,
-): Promise<(ScorecardRow & { projectName: string }) | null> {
+): Promise<(ScorecardRow & { projectName: string; isChangeOrder: boolean }) | null> {
   const rows = await tenantDb
     .select({
       ...getTableColumns(fieldScorecards),
       projectName: deals.name,
+      isChangeOrder: deals.isChangeOrder,
     })
     .from(fieldScorecards)
     .innerJoin(deals, eq(deals.id, fieldScorecards.dealId))
@@ -2007,12 +2010,24 @@ function scorecardEditableContentEquals(input: {
 // scorecard-evidence-upload.ts (the evidence-presign guard reuses the same set) and re-imported here to keep a
 // single source of truth for the editable lifecycle.
 
+/**
+ * `project` carries BOTH the resolved name and `deals.is_change_order`, together, on purpose.
+ *
+ * Several callers hand in a plain `field_scorecards` row and resolve the deal separately, so `row` has
+ * no `isChangeOrder` at all. Serializing that absence as `false` would be worse than omitting it: on the
+ * client `false` is AUTHORITATIVE and suppresses the change-order relabel outright, so a real CO project's
+ * scorecard would keep its raw "<Parent> — Change Order N" name on exactly the endpoints users hit most.
+ * `undefined` instead means "not stated", which falls back to reading the name. Never coerce here.
+ */
 function toSummary(
   row: ScorecardSummarySource,
-  projectName = row.projectName ?? null,
+  project?: { name: string | null; isChangeOrder?: boolean | null },
   viewerUserId?: string,
   canRespondToCorrectiveAction?: boolean,
 ): FieldScorecardSummary {
+  const projectName = project?.name ?? row.projectName ?? null;
+  // `??` (not `||`) so a genuine `false` from either source is preserved rather than falling through.
+  const isChangeOrder = project?.isChangeOrder ?? row.isChangeOrder ?? undefined;
   const formVersion: ScorecardFormVersion = row.formVersion === 2 ? 2 : 1;
   const kind: ScorecardKind = row.kind === "leadership" ? "leadership" : "project";
   const rating = row.rating as ScorecardRating;
@@ -2029,6 +2044,7 @@ function toSummary(
     superintendentName: row.superintendentName ?? null,
     pmName: row.pmName ?? null,
     projectName,
+    isChangeOrder,
     projectNumber: row.projectNumber ?? null,
     criticalDeficiencyCount: (row.criticalDeficiencies ?? []).length,
     submittedByName: row.submittedByName ?? null,

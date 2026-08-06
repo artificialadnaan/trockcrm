@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VariantB4ForecastLadder } from "./variants";
 import { DrillProvider } from "./drill";
+import { UNFILTERED_ROUTE_FILTER } from "./types";
 import type { MondayShowcaseData, EvidenceRequest, ProjectionBandCell } from "./types";
 
 // Office ladder = the per-rep ladders summed (server officeProjection). 0–30d $ total (9999) is
@@ -53,6 +54,7 @@ const fixture: MondayShowcaseData = {
   },
   weeklyTrend: [],
   valueBases: { won_awarded_first: "Awarded-first won value", open_best_estimate: "Best current estimate" },
+  routeFilter: UNFILTERED_ROUTE_FILTER,
   notes: [],
 };
 

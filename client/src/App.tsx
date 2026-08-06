@@ -46,6 +46,7 @@ import { LeadConversionPage } from "@/pages/reports/lead-conversion-page";
 import { MarketMixPage } from "@/pages/reports/market-mix-page";
 import { PipelineVelocityPage } from "@/pages/reports/pipeline-velocity-page";
 import { RepActivityPage } from "@/pages/reports/rep-activity-page";
+import { DailyActivityLogPage } from "@/pages/reports/daily-activity-log-page";
 import { PlatformUsagePage } from "@/pages/reports/platform-usage-page";
 import { PlatformUsageRepDetailPage } from "@/pages/reports/platform-usage-rep-detail-page";
 import { PortfolioLoadPage } from "@/pages/reports/portfolio-load-page";
@@ -293,10 +294,15 @@ export function App() {
               {/* Open to all authenticated users (no RequireRole) — matches the analytics report
                   routes; server /api/reports/region is likewise no longer director-gated. */}
               <Route path="/reports/region" element={<RegionReportPage />} />
+              {/* Widened from admin+director to the report-capable CRM roles. The reports index lists
+                  the At-Risk Watchlist card to reps too, so the old gate did not hide the report — it
+                  turned the click into a 403. `rep` is added and nothing else: this mirrors the server
+                  guard (requireAnyRole) exactly, so the page can never render for a role the API will
+                  refuse. */}
               <Route
                 path="/reports/at-risk"
                 element={(
-                  <RequireRole allowedRoles={["admin", "director"]}>
+                  <RequireRole allowedRoles={["admin", "director", "rep"]}>
                     <AtRiskPage />
                   </RequireRole>
                 )}
@@ -322,6 +328,14 @@ export function App() {
                 element={(
                   <RequireRole allowedRoles={["admin", "director", "rep"]}>
                     <RepActivityPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/reports/performance/daily-activity-log"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director", "rep"]}>
+                    <DailyActivityLogPage />
                   </RequireRole>
                 )}
               />

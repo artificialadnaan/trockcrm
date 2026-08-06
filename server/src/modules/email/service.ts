@@ -177,6 +177,8 @@ export interface EmailThreadResponse {
     leadName: string | null;
     dealId: string | null;
     dealName: string | null;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
     projectId: string | null;
     projectName: string | null;
     confidence: string;
@@ -555,6 +557,10 @@ async function getEmailCandidateDeals(
       id: deals.id,
       dealNumber: deals.dealNumber,
       name: deals.name,
+      // MUST match the companyDeals projection below. The dedupe keeps the FIRST occurrence, and
+      // contactDeals is spread first, so a deal reachable through the email's contact — the primary
+      // path for this queue — used to win with the flag missing even when the company query had it.
+      isChangeOrder: deals.isChangeOrder,
       companyId: deals.companyId,
       stageSlug: pipelineStageConfig.slug,
       stageDisplayOrder: pipelineStageConfig.displayOrder,
@@ -576,6 +582,7 @@ async function getEmailCandidateDeals(
             id: deals.id,
             dealNumber: deals.dealNumber,
             name: deals.name,
+            isChangeOrder: deals.isChangeOrder,
             companyId: deals.companyId,
             stageSlug: pipelineStageConfig.slug,
             stageDisplayOrder: pipelineStageConfig.displayOrder,
@@ -2590,7 +2597,7 @@ export async function getEmailThread(
   if (conversationBinding) {
     const [dealRow] = conversationBinding.dealId
       ? await tenantDb
-          .select({ id: deals.id, name: deals.name })
+          .select({ id: deals.id, name: deals.name, isChangeOrder: deals.isChangeOrder })
           .from(deals)
           .where(eq(deals.id, conversationBinding.dealId))
           .limit(1)
@@ -2609,6 +2616,9 @@ export async function getEmailThread(
       leadName: null,
       dealId: conversationBinding.dealId ?? null,
       dealName: dealRow?.name ?? null,
+      // Three-state on purpose: `undefined` when there is no bound deal row to speak for, so the client
+      // falls back to reading the name's shape rather than asserting "not a change order".
+      dealIsChangeOrder: dealRow ? dealRow.isChangeOrder ?? undefined : undefined,
       projectId: conversationBinding.projectId ?? null,
       projectName: null,
       confidence: conversationBinding.confidence,

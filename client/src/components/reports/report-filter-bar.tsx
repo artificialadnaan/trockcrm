@@ -168,6 +168,15 @@ export function ReportFilterBar({ defaultRange = "90" }: { defaultRange?: Defaul
 
   function applyFilters(nextFilters = draft) {
     const next = new URLSearchParams(searchParams);
+    // Applying a filter invalidates any paging offset. This bar deliberately COPIES the current
+    // search string so pages can keep their own params across an Apply -- but a page offset is the one
+    // param that must NOT survive, because it silently points at the wrong slice of a different result
+    // set. A user on ?page=3 who narrows the date range would land on page 3 of the new, smaller log
+    // and never see the newest matching rows; the entries shown are real, so nothing looks broken.
+    // Cleared here rather than in each page: this bar is what preserves unknown params, so it owns
+    // invalidating them. Reports that do not paginate are unaffected (deleting an absent key is a
+    // no-op), and any future paginated report inherits the correct behaviour instead of the bug.
+    next.delete("page");
     next.set("range", nextFilters.range);
     next.set("dateFrom", nextFilters.dateFrom);
     next.set("dateTo", nextFilters.dateTo);

@@ -11,6 +11,7 @@ import { ZoomableImage } from "../components/ZoomableImage";
 import {
   categoryLabel,
   filterPhotos,
+  formatDealDisplayName,
   groupPhotos,
   isProjectOffOffice,
   LEGACY_PHOTO_CATEGORIES,
@@ -217,7 +218,12 @@ export function ProjectDetailPage() {
             <ArrowLeft className="h-5 w-5" />
           </button>
           <div className="min-w-0 flex-1">
-            <h1 className="truncate text-2xl font-black">{project?.name ?? "Project"}</h1>
+            <h1 className="truncate text-2xl font-black">{formatDealDisplayName(project?.name, project?.isChangeOrder) ?? "Project"}</h1>
+            {/* The screen a Projects-page search result lands on. Without this, the phrase that matched
+                is gone one tap after it was shown, and the header reads as the parent deal. */}
+            {project?.scopeTitle ? (
+              <p className="truncate text-base font-bold text-foreground/80">{project.scopeTitle}</p>
+            ) : null}
             <p className="truncate text-sm text-muted-foreground">{project?.propertyAddress ?? "No address on file"}</p>
           </div>
           {offOffice ? (
@@ -511,7 +517,7 @@ export function ProjectDetailPage() {
       <ReportBuilder
         isOpen={reportBuilderOpen}
         projectId={id}
-        projectName={project?.name ?? project?.projectNumber ?? "Project"}
+        projectName={formatDealDisplayName(project?.name, project?.isChangeOrder) ?? project?.projectNumber ?? "Project"}
         creatorName={[user?.firstName, user?.lastName].filter(Boolean).join(" ") || user?.email || "Field User"}
         photos={photos}
         onClose={() => setReportBuilderOpen(false)}

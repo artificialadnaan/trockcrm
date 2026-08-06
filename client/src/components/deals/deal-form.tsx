@@ -14,7 +14,11 @@ import {
 import { usePipelineStages, useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
 import { createDeal, updateDeal } from "@/hooks/use-deals";
 import type { Deal } from "@/hooks/use-deals";
-import { LEAD_SOURCE_CATEGORIES } from "@trock-crm/shared/types";
+import {
+  DEAL_SCOPE_TITLE_EXAMPLES,
+  DEAL_SCOPE_TITLE_MAX_LENGTH,
+  LEAD_SOURCE_CATEGORIES,
+} from "@trock-crm/shared/types";
 import { Loader2, Lock } from "lucide-react";
 import { getDefaultDealStageId, getNewDealStages, getSelectedOptionLabel } from "./deal-form.helpers";
 import { CompanySelector } from "@/components/companies/company-selector";
@@ -41,6 +45,7 @@ interface DealFormProps {
     name: string;
     companyId: string;
     propertyId: string;
+    scopeTitle: string;
     description: string;
     projectTypeId: string;
     source: string;
@@ -103,6 +108,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
     assignedRepId: deal?.assignedRepId ?? (user?.role === "rep" ? user.id : ""),
     companyId: deal?.companyId ?? initialValues?.companyId ?? "",
     propertyId: deal?.propertyId ?? initialValues?.propertyId ?? "",
+    scopeTitle: deal?.scopeTitle ?? initialValues?.scopeTitle ?? "",
     description: deal?.description ?? initialValues?.description ?? "",
     ddEstimate: deal?.ddEstimate ?? "",
     bidEstimate: deal?.bidEstimate ?? "",
@@ -236,6 +242,11 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
       }
     }
 
+    // Mirrors the API's validateScopeTitlePayload, which trims before measuring — a client-side check
+    // on the RAW value would flag a title that the server would happily accept after trimming.
+    if (formData.scopeTitle.trim().length > DEAL_SCOPE_TITLE_MAX_LENGTH) {
+      errs.scopeTitle = `Must be ${DEAL_SCOPE_TITLE_MAX_LENGTH} characters or fewer`;
+    }
     if (formData.description.length > 5000) {
       errs.description = "Must be 5000 characters or fewer";
     }
@@ -292,6 +303,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
     try {
       const payload: Record<string, unknown> = {
         name: formData.name.trim(),
+        scopeTitle: formData.scopeTitle.trim() || null,
         description: formData.description.trim() || null,
         propertyAddress: formData.propertyAddress.trim() || null,
         propertyCity: formData.propertyCity.trim() || null,
@@ -496,6 +508,32 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
               </Select>
             </div>
           )}
+
+          {/* ABOVE Description on purpose: this is the primary, brief answer to "what is the work?", and
+              the long notes field is the overflow. Reversing the order is what produced the wall-of-text
+              values accounting cannot use. */}
+          <div className="space-y-2">
+            <Label htmlFor="scopeTitle">Scope Title</Label>
+            {/* No `maxLength` attribute, deliberately: it would silently truncate a pasted paragraph
+                mid-word and the user would save the mangled half of it without noticing. An explicit
+                over-limit error is the feedback this field wants — it says "this is a title, not a
+                description", which silent truncation does not. Matches the Description field below,
+                which is likewise counter + error rather than a hard input cap. */}
+            <Input
+              id="scopeTitle"
+              placeholder={`Short title for the scope of work — e.g. ${DEAL_SCOPE_TITLE_EXAMPLES.join(", ")}`}
+              value={formData.scopeTitle}
+              onChange={(e) => handleChange("scopeTitle", e.target.value)}
+              aria-describedby="scopeTitle-help"
+            />
+            <p id="scopeTitle-help" className="text-xs text-muted-foreground">
+              A few words naming the overall scope. Accounting uses this as the project title.{" "}
+              <span className={formData.scopeTitle.trim().length > DEAL_SCOPE_TITLE_MAX_LENGTH ? "text-red-600" : undefined}>
+                {formData.scopeTitle.length}/{DEAL_SCOPE_TITLE_MAX_LENGTH}
+              </span>
+            </p>
+            {fieldErrors.scopeTitle && <p className="text-xs text-red-600">{fieldErrors.scopeTitle}</p>}
+          </div>
 
           <div className="space-y-2">
             <Label htmlFor="description">Description</Label>

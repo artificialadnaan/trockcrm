@@ -203,6 +203,28 @@ function cleanIso(value: Date | string | null | undefined): string | null {
   return Number.isFinite(parsed.getTime()) ? parsed.toISOString() : null;
 }
 
+/**
+ * The ONE precedence that turns a deal's four value columns into the single `amount` SyncHub stores.
+ *
+ * `buildNormalizedRfpRequestBody` (the send-time snapshot) and the internal
+ * `POST /api/internal/deals/current-values` batch lookup (the report's render-time resolution) BOTH
+ * call this. Keep it that way: a second copy of the ordering would let the number a reviewer saw in
+ * the RFP email and the number the RFP report shows for the same deal drift apart silently.
+ */
+export function resolveRfpDealAmount(deal: {
+  awardedAmount?: string | number | null;
+  bidEstimate?: string | number | null;
+  ddEstimate?: string | number | null;
+  forecastRevenue?: string | number | null;
+}): number | null {
+  return (
+    cleanNumber(deal.awardedAmount) ??
+    cleanNumber(deal.bidEstimate) ??
+    cleanNumber(deal.ddEstimate) ??
+    cleanNumber(deal.forecastRevenue)
+  );
+}
+
 function buildAddress(deal: RfpPayloadSourceDeal): NormalizedRfpRequestBody["deal"]["address"] {
   const street = cleanString(deal.propertyAddress);
   const city = cleanString(deal.propertyCity);
@@ -443,11 +465,7 @@ export function buildNormalizedRfpRequestBody(input: {
         projectType: deal.projectType,
         workflowRoute: deal.workflowRoute ?? "normal",
       }),
-      amount:
-        cleanNumber(deal.awardedAmount) ??
-        cleanNumber(deal.bidEstimate) ??
-        cleanNumber(deal.ddEstimate) ??
-        cleanNumber(deal.forecastRevenue),
+      amount: resolveRfpDealAmount(deal),
       estimator: cleanString(deal.estimator) ?? cleanString(deal.bidBoardEstimator),
       ownerName: cleanString(deal.ownerName),
       ownerEmail: cleanString(deal.ownerEmail),

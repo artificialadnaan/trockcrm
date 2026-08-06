@@ -1,13 +1,22 @@
 import { Link } from "react-router-dom";
-import { Building2, RefreshCw } from "lucide-react";
+import { AlertTriangle, Building2, RefreshCw, Wrench } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import {
   usePortfolioProjectBoard,
+  type PortfolioProductionRollup,
+  type PortfolioProductionRollupGroup,
   type PortfolioProjectBoardColumn,
   type PortfolioProjectSummary,
 } from "@/hooks/use-projects";
 import { formatCurrency } from "@/lib/deal-utils";
+
+/** Synthetic column key the server uses for projects whose stage matches no board column. */
+const UNMAPPED_STAGE = "unmapped";
+
+function titleCaseStage(stage: string) {
+  return stage.replace(/\b\w/g, (char) => char.toUpperCase());
+}
 
 function formatSyncDate(value: string | null | undefined) {
   if (!value) return null;
@@ -64,10 +73,165 @@ function ProjectCard({ project }: { project: PortfolioProjectSummary }) {
   );
 }
 
-function StageColumn({ column }: { column: PortfolioProjectBoardColumn }) {
+function RollupGroupTile({
+  title,
+  icon,
+  group,
+}: {
+  title: string;
+  icon: React.ReactNode;
+  group: PortfolioProductionRollupGroup;
+}) {
+  return (
+    <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+      <div className="flex items-center gap-2 text-[11px] font-black uppercase tracking-[0.18em] text-slate-500">
+        {icon}
+        {title}
+      </div>
+      <p className="mt-2 text-2xl font-black tabular-nums text-slate-950">
+        {formatCurrency(group.totalValue)}
+      </p>
+      <p className="mt-1 text-[11px] font-bold text-slate-500">
+        {group.projectCount} {group.projectCount === 1 ? "project" : "projects"}
+        {" · "}
+        {group.stages.map(titleCaseStage).join(", ")}
+      </p>
+    </div>
+  );
+}
+
+/**
+ * The caveat text, as four distinct statements — because "the total is a floor" is only true
+ * when something is MISSING from it.
+ *
+ * A stale value is present and counted; Procore may since have revised it up or down, so a
+ * stale-only roll-up is complete-but-possibly-out-of-date IN EITHER DIRECTION, which is a
+ * different claim from understating. Saying "floor" there — and pairing it with "0 projects
+ * have no synced value" — asserted two things that were both false.
+ */
+function rollupCaveat(rollup: PortfolioProductionRollup) {
+  const { unsyncedValueCount: missing, staleValueCount: stale, staleAfterDays: days } = rollup;
+  const staleClause = (
+    <>
+      <span className="tabular-nums">{stale}</span>{" "}
+      {stale === 1 ? "value was" : "values were"} last synced from Procore more than {days} days
+      ago and may have moved in either direction
+    </>
+  );
+  const missingClause = (
+    <>
+      <span className="tabular-nums">{missing}</span>{" "}
+      {missing === 1 ? "project has" : "projects have"} no synced value and
+      {missing === 1 ? " counts" : " count"} as $0
+    </>
+  );
+
+  if (missing > 0 && stale > 0) {
+    return { tone: "warn" as const, body: <>Total is a floor, not a final number: {missingClause}; a further {staleClause}.</> };
+  }
+  if (missing > 0) {
+    return { tone: "warn" as const, body: <>Total is a floor, not a final number: {missingClause}.</> };
+  }
+  if (stale > 0) {
+    // Complete, but not necessarily current. Deliberately does NOT say "floor".
+    return { tone: "warn" as const, body: <>Every project's value is included, but {staleClause}.</> };
+  }
+  if (rollup.projectCount === 0) {
+    return {
+      tone: "calm" as const,
+      body: <>No projects are in a construction or service production stage right now.</>,
+    };
+  }
+  return {
+    tone: "calm" as const,
+    body: (
+      <>
+        All {rollup.projectCount} {rollup.projectCount === 1 ? "project" : "projects"} have a value
+        synced from Procore within the last {days} days.
+      </>
+    ),
+  };
+}
+
+/**
+ * Production Revenue roll-up.
+ *
+ * Every dollar here is the sum of the board's OWN stage-column subtotals (the server rolls up
+ * column.totalValue, it does not re-sum the rows), so the card and the columns underneath it
+ * reconcile by construction.
+ *
+ * The caveat is not optional decoration: a project with no synced value counts as $0, so the
+ * headline can only ever UNDERSTATE. The card says how much of it is unreliable and why.
+ */
+function ProductionRollupCard({ rollup }: { rollup: PortfolioProductionRollup }) {
+  const caveat = rollupCaveat(rollup);
+  const hasCaveat = caveat.tone === "warn";
+
   return (
     <section
-      className="flex h-full min-h-[32rem] w-[20rem] shrink-0 flex-col overflow-hidden rounded-lg border border-slate-200 bg-slate-50"
+      className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm"
+      aria-label="Production revenue roll-up"
+    >
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div>
+          <p className="text-[11px] font-black uppercase tracking-[0.2em] text-brand-red">
+            Production Revenue
+          </p>
+          <p className="mt-2 text-4xl font-black tabular-nums leading-none text-slate-950">
+            {formatCurrency(rollup.totalValue)}
+          </p>
+          {/*
+            Track-NEUTRAL wording on purpose. This count includes the service stages as well as the
+            construction ones (the server rolls both into projectCount and totalValue), so naming only
+            "Buy Out, Pre-Construction and In Production" described service revenue as construction-stage
+            work — undercutting the split the card exists to show. The tiles below name the exact stages
+            per track, so the summary does not need to and must not contradict them.
+          */}
+          <p className="mt-2 text-[11px] font-bold text-slate-500">
+            {rollup.projectCount} {rollup.projectCount === 1 ? "project" : "projects"} across the
+            construction and service production stages
+          </p>
+        </div>
+        <div className="grid w-full gap-3 sm:grid-cols-2 lg:max-w-xl">
+          <RollupGroupTile
+            title="Construction"
+            icon={<Building2 className="h-4 w-4 text-brand-red" />}
+            group={rollup.construction}
+          />
+          <RollupGroupTile
+            title="Service"
+            icon={<Wrench className="h-4 w-4 text-brand-red" />}
+            group={rollup.service}
+          />
+        </div>
+      </div>
+
+      <div
+        className={cn(
+          "mt-4 flex items-start gap-2 rounded-lg border p-3 text-[11px] font-bold",
+          hasCaveat
+            ? "border-amber-300 bg-amber-50 text-amber-900"
+            : "border-slate-200 bg-slate-50 text-slate-600"
+        )}
+      >
+        <AlertTriangle
+          className={cn("mt-px h-3.5 w-3.5 shrink-0", hasCaveat ? "text-amber-700" : "text-slate-400")}
+        />
+        <p>{caveat.body}</p>
+      </div>
+    </section>
+  );
+}
+
+function StageColumn({ column }: { column: PortfolioProjectBoardColumn }) {
+  const unmapped = column.stage === UNMAPPED_STAGE;
+
+  return (
+    <section
+      className={cn(
+        "flex h-full min-h-[32rem] w-[20rem] shrink-0 flex-col overflow-hidden rounded-lg border",
+        unmapped ? "border-amber-300 bg-amber-50/60" : "border-slate-200 bg-slate-50"
+      )}
       aria-label={`${column.label} projects`}
     >
       <div className="border-b border-slate-200 bg-white p-4">
@@ -80,10 +244,20 @@ function StageColumn({ column }: { column: PortfolioProjectBoardColumn }) {
               {column.projects.length}
             </p>
           </div>
-          <span className="rounded-full bg-brand-red px-2.5 py-0.5 text-xs font-black text-white">
-            Portfolio
+          <span
+            className={cn(
+              "rounded-full px-2.5 py-0.5 text-xs font-black text-white",
+              unmapped ? "bg-amber-600" : "bg-brand-red"
+            )}
+          >
+            {unmapped ? "Unmapped" : "Portfolio"}
           </span>
         </div>
+        {unmapped ? (
+          <p className="mt-2 text-[11px] font-bold text-amber-800">
+            Stages with no board column of their own. Shown here so no project is ever dropped.
+          </p>
+        ) : null}
         <div className="mt-3">
           <p className="text-lg font-black tabular-nums text-slate-950">
             {formatCurrency(column.totalValue)}
@@ -107,7 +281,7 @@ function StageColumn({ column }: { column: PortfolioProjectBoardColumn }) {
 }
 
 export function ProjectsPage() {
-  const { stages, projects, loading, error, refetch } = usePortfolioProjectBoard();
+  const { stages, projects, productionRollup, loading, error, refetch } = usePortfolioProjectBoard();
 
   return (
     <div className="space-y-6">
@@ -126,6 +300,10 @@ export function ProjectsPage() {
           Refresh
         </Button>
       </section>
+
+      {!loading && !error && productionRollup ? (
+        <ProductionRollupCard rollup={productionRollup} />
+      ) : null}
 
       <section
         className="relative flex h-[min(74vh,58rem)] min-h-[42rem] flex-col overflow-hidden rounded-lg border border-slate-200 bg-white"

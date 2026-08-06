@@ -26,6 +26,10 @@ import { Wearables, isAvailable as wearablesBridgeAvailable } from "../../src/we
 import { describePairing, type Pairing } from "../../src/walkthrough/pairing";
 import { isAudioTruncated, isVideoTruncated, isWalkActive, type Walk } from "../../src/walkthrough/session";
 import { deriveWalkSiteLabel, deriveWalkTitle } from "../../src/walkthrough/walk-meta";
+// Display-only change-order prefix, used for the "About to record" headline ONLY. `targetName` itself
+// stays RAW: deriveWalkTitle builds the walk title the office sees, and that title is PERSISTED — the
+// unqueued-walk banners below deliberately echo that stored title verbatim, so they are not transformed.
+import { decodeChangeOrderParam, formatDealDisplayName } from "../../src/projects/field-projects";
 import { useWalkQueueSession } from "../../src/walkthrough/use-queue-session";
 import { drainWalkQueue, enqueueWalk, type WalkQueueMeta } from "../../src/walkthrough/upload";
 import { walkthroughUploadClient } from "../../src/walkthrough/upload-client";
@@ -178,6 +182,7 @@ export default function WalkScreen() {
   const params = useLocalSearchParams<{
     dealId?: string;
     targetName?: string;
+    isChangeOrder?: string;
     projectId?: string;
     propertyAddress?: string;
   }>();
@@ -186,6 +191,8 @@ export default function WalkScreen() {
   const dealId = typeof params.dealId === "string" ? params.dealId : "";
   const projectId = typeof params.projectId === "string" && params.projectId ? params.projectId : null;
   const targetName = typeof params.targetName === "string" && params.targetName ? params.targetName : "this project";
+  // "1"/"0" from capture; "" or absent means the target was picked somewhere without the flag.
+  const targetIsChangeOrder = decodeChangeOrderParam(params.isChangeOrder);
   const propertyAddress = typeof params.propertyAddress === "string" ? params.propertyAddress : null;
 
   // Identity for the upload queue: user + ACTIVE OFFICE, same resolution rule (activeOfficeId ??
@@ -634,7 +641,7 @@ export default function WalkScreen() {
           <View style={styles.centered}>
             <Text style={styles.aboutToLabel}>About to record</Text>
             <Text style={styles.aboutToTarget} numberOfLines={2}>
-              {targetName}
+              {formatDealDisplayName(targetName, targetIsChangeOrder)}
             </Text>
             {/* Only while IDLE. Once a walk is "starting" native owns the sequence and this gate has
                 no say left — swapping the "Starting…" button out from under a start already in

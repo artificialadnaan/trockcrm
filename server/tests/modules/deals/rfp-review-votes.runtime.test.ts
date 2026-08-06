@@ -9,6 +9,10 @@ import { getRfpReviewDetail } from "../../../src/modules/deals/rfp-override-serv
 
 const U = (s: string) => `00000000-0000-0000-0000-${s.padStart(12, "0")}`;
 const DEAL = U("d01");
+// A generated change-order child and an ORDINARY deal a human named with a CO-shaped suffix. Only
+// `is_change_order` tells them apart; the names are the same shape.
+const DEAL_CO = U("d02");
+const DEAL_LOOKALIKE = U("d03");
 const ROUND = U("e01");
 const REQ = U("a09");
 const SIDNEY = U("a01");
@@ -25,7 +29,8 @@ beforeAll(async () => {
     CREATE SCHEMA IF NOT EXISTS public;
     CREATE TABLE public.users (id uuid PRIMARY KEY, display_name text, email text);
     CREATE TABLE deals (
-      id uuid PRIMARY KEY, name text, deal_number text, project_number text,
+      id uuid PRIMARY KEY, name text, is_change_order boolean NOT NULL DEFAULT false,
+      deal_number text, project_number text,
       rfp_approval_status text, rfp_approval_request_id bigint,
       rfp_approval_request_event_id uuid,
       rfp_approval_requested_at timestamptz, rfp_approval_requested_by uuid,
@@ -51,6 +56,9 @@ beforeAll(async () => {
     VALUES ('${DEAL}', 'Terraces Re-Roof', 'DFW-1-100', 'DFW-1-100', 'declined', NULL,
       '${ROUND}', '2026-07-02T14:00:00Z', '${REQ}',
       'Rejected by vote (2 of 3). sidney@trockgc.com: cost; james@trockgc.com: scope', '2026-07-02T14:25:00Z');
+    INSERT INTO deals (id, name, is_change_order, deal_number, rfp_approval_status) VALUES
+      ('${DEAL_CO}', 'Tides Park Lane — Change Order 2', true, 'DFW-1-101', 'declined'),
+      ('${DEAL_LOOKALIKE}', 'Lobby — Change Order 1', false, 'DFW-1-102', 'declined');
     INSERT INTO rfp_votes (deal_id, round_event_id, voter_user_id, voter_email, decision, reason, created_at) VALUES
       ('${DEAL}', '${ROUND}', '${SIDNEY}', 'sidney@trockgc.com', 'reject', 'cost', '2026-07-02T14:14:00Z'),
       ('${DEAL}', '${ROUND}', '${JAMES}', 'james@trockgc.com', 'reject', 'scope', '2026-07-02T14:20:00Z');
@@ -70,5 +78,25 @@ describe("getRfpReviewDetail (vote-enriched)", () => {
     expect(detail!.votes.map((v) => v.voterEmail)).toEqual(["sidney@trockgc.com", "james@trockgc.com"]);
     expect(detail!.votes.every((v) => v.decision === "reject")).toBe(true);
     expect(detail!.votes[1]).toMatchObject({ voterName: "James Helms", reason: "scope" });
+  });
+});
+
+describe("getRfpReviewDetail carries deals.is_change_order", () => {
+  // The review page renders the Deal row through formatDealDisplayName. Without this column the page
+  // has only the stored name to go on, so it relabels by syntax — right for a generated child by luck,
+  // and WRONG for a deal a human named the same shape.
+  //
+  // Runtime rather than a mocked `execute` on purpose: the reader is raw SQL with a quoted camelCase
+  // alias, so this pins that the column exists, that the alias matches what the mapper reads, and that
+  // it survives to the payload. A mock would only prove the mapper reads a key the test invented.
+  it("reports true for a generated change-order child", async () => {
+    const detail = await getRfpReviewDetail(tdb, DEAL_CO);
+    expect(detail!.dealName).toBe("Tides Park Lane — Change Order 2");
+    expect(detail!.dealIsChangeOrder).toBe(true);
+  });
+
+  it("reports false for an ordinary deal whose NAME merely looks like a change order", async () => {
+    const detail = await getRfpReviewDetail(tdb, DEAL_LOOKALIKE);
+    expect(detail!.dealIsChangeOrder).toBe(false);
   });
 });

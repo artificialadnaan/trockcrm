@@ -323,6 +323,8 @@ export interface ForecastVarianceRepRollup {
 export interface ForecastVarianceDealRow {
   dealId: string;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   repName: string;
   workflowRoute: WorkflowRoute;
   initialForecast: number;
@@ -522,6 +524,7 @@ export async function getForecastVarianceOverview(
       SELECT
         d.id AS deal_id,
         d.name AS deal_name,
+        d.is_change_order AS deal_is_change_order,
         cw.workflow_route,
         cw.assigned_rep_id,
         u.display_name AS rep_name,
@@ -552,6 +555,9 @@ export async function getForecastVarianceOverview(
     SELECT
       deal_id,
       deal_name,
+      -- Projected out of forecast_base explicitly: the CTE selected it and this outer SELECT dropped it,
+      -- so the mapper below was reading a column that never reached it.
+      deal_is_change_order,
       rep_name,
       workflow_route,
       initial_forecast,
@@ -595,6 +601,7 @@ export async function getForecastVarianceOverview(
     deals: dealRows.map((row) => ({
       dealId: row.deal_id,
       dealName: row.deal_name,
+      dealIsChangeOrder: row.deal_is_change_order === true ? true : row.deal_is_change_order === false ? false : undefined,
       repName: row.rep_name,
       workflowRoute: row.workflow_route,
       initialForecast: Number(row.initial_forecast ?? 0),
@@ -949,6 +956,22 @@ export interface StaleDealRow {
   dealId: string;
   dealNumber: string;
   dealName: string;
+  /**
+   * `deals.is_change_order` — the AUTHORITY for the change-order display relabel.
+   *
+   * Optional because this row has TWO producers and only one can answer: the dashboard's
+   * buildDashboardAtRiskStaleDeals carries the column out of its query, while this module's
+   * staleDealRowsFromEngine reads a candidate row that does not select it. `undefined` there is the
+   * honest answer — it degrades to the name-shape fallback rather than asserting "not a change order".
+   */
+  dealIsChangeOrder?: boolean | null;
+  /**
+   * `deals.scope_title` — travels with the flag above, and optional for the SAME reason: only the
+   * dashboard producer selects it. Once the relabel fires, this is the only field distinguishing one
+   * change order from another, so a surface that carries the flag and drops this renders siblings
+   * identically.
+   */
+  dealScopeTitle?: string | null;
   stageId: string;
   stageName: string;
   assignedRepId: string;
@@ -2577,6 +2600,10 @@ export async function getUnifiedWorkflowOverview(
       dealId: row.dealId,
       dealNumber: row.dealNumber,
       dealName: row.dealName,
+      // Carried rather than dropped. staleDealRowsFromEngine's candidate query does not select the
+      // column today, so this forwards `undefined` — the documented "unknown" state, not a false
+      // claim — and the chain is already complete the day that query starts projecting it.
+      dealIsChangeOrder: row.dealIsChangeOrder,
       stageName: row.stageName,
       workflowRoute: row.workflowRoute ?? "normal",
       repName: row.repName,

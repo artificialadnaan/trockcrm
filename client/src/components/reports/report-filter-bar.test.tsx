@@ -4,7 +4,7 @@
 import { act } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ReportFilterBar, hydrateOwnerSelection, useReportFilters, type ReportFilters } from "./report-filter-bar";
 
@@ -82,6 +82,39 @@ function renderFilterBar(initialEntry = "/reports/operations/workflow-bottleneck
   return container;
 }
 
+/**
+ * Like renderFilterBar, but with a probe that exposes the router's current search string so a test
+ * can assert what the bar actually wrote to the URL. MemoryRouter never touches window.location, so
+ * the URL has to be read from inside the router.
+ */
+function renderFilterBarWithLocation(initialEntry: string) {
+  container = document.createElement("div");
+  document.body.appendChild(container);
+  root = createRoot(container);
+  function LocationProbe() {
+    const location = useLocation();
+    return <span data-testid="search">{location.search}</span>;
+  }
+  act(() => {
+    root?.render(
+      <MemoryRouter initialEntries={[initialEntry]}>
+        <ReportFilterBar />
+        <LocationProbe />
+      </MemoryRouter>,
+    );
+  });
+  return {
+    search: () => container.querySelector("[data-testid='search']")?.textContent ?? "",
+    clickApply() {
+      const apply = Array.from(container.querySelectorAll("button")).find(
+        (button) => button.textContent?.trim() === "Apply"
+      );
+      if (!apply) throw new Error("Apply button not found");
+      apply.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    },
+  };
+}
+
 function changeSelect(select: HTMLSelectElement, value: string) {
   const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, "value")?.set;
   setter?.call(select, value);
@@ -117,6 +150,24 @@ describe("ReportFilterBar", () => {
 
     expect(hydrated.ownerIds).toEqual(["rep-a"]);
     expect(hydrated.ownerIds).not.toContain("rep-b");
+  });
+
+  it("clears a paging offset when filters are applied, but keeps the page's other params", () => {
+    // The bar copies the current search string so pages keep their own params across an Apply. `page`
+    // is the exception: page 3 of the old result set is the wrong slice of the new one, and because
+    // the rows shown are real the user gets no signal that they skipped the newest matches.
+    const bar = renderFilterBarWithLocation(
+      "/reports/performance/daily-activity-log?page=3&types=note&dateFrom=2026-02-01&dateTo=2026-05-01"
+    );
+    expect(bar.search()).toContain("page=3");
+
+    act(() => {
+      bar.clickApply();
+    });
+
+    expect(bar.search()).not.toContain("page=");
+    // The page's own filter param must still survive the Apply -- that is why the bar copies params.
+    expect(bar.search()).toContain("types=note");
   });
 
   it("refetches sales reps scoped to the selected office", async () => {

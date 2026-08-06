@@ -89,6 +89,14 @@ export interface PhotoUploadTarget {
   id: string;
   type: "lead" | "opportunity" | "deal";
   name: string;
+  /** `deals.is_change_order` — deal/opportunity rows only; a lead can never be a change-order child. */
+  isChangeOrder?: boolean | null;
+  /**
+   * `deals.scope_title` — deal/opportunity rows only, same gate as the flag. It is SEARCHED and RANKED
+   * server-side, so a row can be in these results BECAUSE of this field; not showing it leaves the
+   * user with a match they cannot account for.
+   */
+  scopeTitle?: string | null;
   recordNumber: string | null;
   stageName: string | null;
   companyName: string | null;

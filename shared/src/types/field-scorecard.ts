@@ -516,6 +516,8 @@ export interface FieldScorecardSummary {
   pmName: string | null;
   /** Current canonical deal/job name. Optional while older API deployments roll out. */
   projectName?: string | null;
+  /** `deals.is_change_order` for `projectName` — the AUTHORITY for the change-order display relabel. */
+  isChangeOrder?: boolean | null;
   projectNumber: string | null;
   criticalDeficiencyCount: number;
   submittedByName: string | null;

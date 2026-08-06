@@ -55,6 +55,8 @@ import {
   aliasedDealBestEstimateSql,
   aliasedEffectiveDealValueSql,
   aliasedEffectiveWonDealValueSql,
+  aliasedWorkflowRouteFilterSql,
+  type WorkflowRouteBucket,
 } from "../shared/deal-value-sql.js";
 import {
   aliasedWonHsClosedWonDateSql,
@@ -70,6 +72,14 @@ export type DashboardAtRiskSummaryRow = {
   repId?: string | null;
   repName?: string | null;
   dealName?: string | null;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
+  /**
+   * `deals.scope_title`. Travels WITH `dealIsChangeOrder`, always — the flag turns the name into
+   * "<Parent> — Change Order N", and this is the only field left that says which change order it is.
+   * Carrying the flag without the title is what makes two siblings render identically.
+   */
+  dealScopeTitle?: string | null;
   stageName?: string | null;
   regionClassification?: string | null;
   dealValue: number;
@@ -196,6 +206,8 @@ export function buildDashboardAtRiskDeals(
       repId: row.repId ? String(row.repId) : null,
       repName: String(row.repName ?? "Unassigned"),
       dealName: String(row.dealName ?? "Deal"),
+      dealIsChangeOrder: row.dealIsChangeOrder ?? undefined,
+      dealScopeTitle: row.dealScopeTitle ?? null,
       stageName: resolveMirroredStageLabel(row.stageSlug, row.stageName ?? "Stage"),
       mirroredStageStatus: row.mirroredStageStatus ?? null,
       workflowRoute: row.workflowRoute === "service" ? "service" : "normal",
@@ -227,6 +239,8 @@ export function buildDashboardAtRiskStaleDeals(
       dealId: String(row.dealId ?? ""),
       dealNumber: String(row.dealNumber ?? ""),
       dealName: String(row.dealName ?? "Deal"),
+      dealIsChangeOrder: row.dealIsChangeOrder ?? undefined,
+      dealScopeTitle: row.dealScopeTitle ?? null,
       stageId: String(row.stageId ?? ""),
       stageName: resolveMirroredStageLabel(row.stageSlug, row.stageName ?? "Stage"),
       assignedRepId: String(row.repId ?? ""),
@@ -269,6 +283,8 @@ export function buildDashboardDownstreamBottlenecks(
       repId: row.repId ? String(row.repId) : null,
       repName: String(row.repName ?? "Unassigned"),
       dealName: String(row.dealName ?? "Deal"),
+      dealIsChangeOrder: row.dealIsChangeOrder ?? undefined,
+      dealScopeTitle: row.dealScopeTitle ?? null,
       stageName: resolveMirroredStageLabel(row.stageSlug, row.stageName ?? "Stage"),
       mirroredStageStatus: row.mirroredStageStatus ?? null,
       workflowRoute: row.workflowRoute === "service" ? "service" : "normal",
@@ -533,6 +549,8 @@ export interface RepCommissionDealEarning {
   dealId: string;
   dealNumber: string | null;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   companyName: string | null;
   propertyName: string | null;
   paidRevenue: number;
@@ -551,6 +569,13 @@ export interface RepWonMissingContractDeal {
   dealId: string;
   dealNumber: string | null;
   dealName: string;
+  /**
+   * `deals.is_change_order` — always `false` here, and that is a guarantee of the query rather than a
+   * value read off the row: the WHERE clause carries `COALESCE(d.is_change_order, false) = false`
+   * because setDealContractSignedDate rejects change orders outright. Sent anyway so the client never
+   * has to fall back to parsing the name's shape on this worklist.
+   */
+  dealIsChangeOrder?: boolean | null;
   companyName: string | null;
   propertyName: string | null;
   value: number;
@@ -623,6 +648,10 @@ export interface DashboardDownstreamBottleneckRow {
   repId: string | null;
   repName: string;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
+  /** `deals.scope_title` — see DashboardAtRiskSummaryRow.dealScopeTitle; it travels with the flag. */
+  dealScopeTitle?: string | null;
   stageName: string;
   mirroredStageStatus: string | null;
   workflowRoute: "normal" | "service";
@@ -1069,6 +1098,12 @@ type CommissionDealRollup = {
   dealId: string;
   dealNumber: string | null;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
+  // NO dealScopeTitle here, deliberately. The commission drill renders deal names through FOUR
+  // separate row types across three DTOs (rep-commission-drilldown.tsx), and carrying the column
+  // without rendering all four would reproduce exactly the carried-but-not-shown defect this change
+  // exists to remove. Tracked as a follow-up rather than half-built.
   companyName: string | null;
   propertyName: string | null;
   paidRevenue: number;
@@ -1193,6 +1228,7 @@ async function getCommissionDealRollups(
       d.id AS deal_id,
       d.deal_number AS deal_number,
       d.name AS deal_name,
+      d.is_change_order AS deal_is_change_order,
       c.name AS company_name,
       p.name AS property_name,
       dsc.source_value_amount::numeric AS paid_revenue,
@@ -1221,6 +1257,7 @@ async function getCommissionDealRollups(
     dealId: String(row.deal_id),
     dealNumber: row.deal_number ? String(row.deal_number) : null,
     dealName: String(row.deal_name ?? "Deal"),
+    dealIsChangeOrder: row.deal_is_change_order ?? undefined,
     companyName: row.company_name ? String(row.company_name) : null,
     propertyName: row.property_name ? String(row.property_name) : null,
     paidRevenue: Number(row.paid_revenue ?? 0),
@@ -1593,6 +1630,10 @@ export interface RepDashboardData {
   dealSnapshot: Array<{
     dealId: string;
     dealName: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
+    /** `deals.scope_title` — travels with the flag; see DashboardAtRiskSummaryRow.dealScopeTitle. */
+    dealScopeTitle?: string | null;
     companyName: string | null;
     propertyName: string | null;
     stageName: string;
@@ -1835,6 +1876,8 @@ export async function getRepDashboard(
       SELECT
         d.id AS deal_id,
         d.name AS deal_name,
+        d.is_change_order AS deal_is_change_order,
+        d.scope_title AS deal_scope_title,
         c.name AS company_name,
         p.name AS property_name,
         psc.slug AS stage_slug,
@@ -1951,6 +1994,8 @@ export async function getRepDashboard(
     dealSnapshot: dsRows.map((row: any) => ({
       dealId: row.deal_id,
       dealName: row.deal_name,
+      dealIsChangeOrder: row.deal_is_change_order ?? undefined,
+      dealScopeTitle: row.deal_scope_title ?? null,
       companyName: row.company_name ?? null,
       propertyName: row.property_name ?? null,
       stageName: resolveDealSnapshotStageLabel(
@@ -2081,6 +2126,10 @@ export interface RecentClose {
   dealId: string;
   dealNumber: string | null;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
+  /** `deals.scope_title` — travels with the flag; see DashboardAtRiskSummaryRow.dealScopeTitle. */
+  dealScopeTitle?: string | null;
   repId: string | null;
   repName: string;
   outcome: "won" | "lost";
@@ -2114,6 +2163,10 @@ export interface DirectorDashboardData {
     dealId: string;
     dealNumber: string;
     dealName: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
+    /** `deals.scope_title` — travels with the flag; see DashboardAtRiskSummaryRow.dealScopeTitle. */
+    dealScopeTitle?: string | null;
     stageName: string;
     repName: string;
     daysInStage: number;
@@ -2612,6 +2665,8 @@ async function getRecentCloses(
       d.id AS deal_id,
       d.deal_number,
       d.name AS deal_name,
+      d.is_change_order AS deal_is_change_order,
+      d.scope_title AS deal_scope_title,
       d.assigned_rep_id AS rep_id,
       COALESCE(u.display_name, 'Unassigned') AS rep_name,
       CASE
@@ -2637,6 +2692,8 @@ async function getRecentCloses(
     dealId: String(row.deal_id),
     dealNumber: row.deal_number ? String(row.deal_number) : null,
     dealName: String(row.deal_name ?? "Deal"),
+    dealIsChangeOrder: row.deal_is_change_order ?? undefined,
+    dealScopeTitle: row.deal_scope_title ?? null,
     repId: row.rep_id ? String(row.rep_id) : null,
     repName: String(row.rep_name ?? "Unassigned"),
     outcome: row.outcome === "won" ? "won" : "lost",
@@ -2647,9 +2704,13 @@ async function getRecentCloses(
 
 export async function getWonCloseSummary(
   tenantDb: TenantDb,
-  options: { from: string; to: string } & DashboardScopeOptions
+  options: { from: string; to: string; workflowRoutes?: readonly WorkflowRouteBucket[] } & DashboardScopeOptions
 ): Promise<{ count: number; totalValue: number }> {
   const repFilter = dealScopeFilterSql("d", options);
+  // OPTIONAL Service/Other narrowing (the Monday-showcase page filter). Omitted or both-buckets ->
+  // the EMPTY fragment, so every existing caller emits the SAME SQL it always has and the protected
+  // 191 / $9,778,045.90 basis is untouched.
+  const routeFilter = aliasedWorkflowRouteFilterSql("d", options.workflowRoutes);
   // §6.1: gate the period on the true HubSpot close-won date alone. The previous
   // COALESCE(actual_close_date, ..., updated_at::date) inflated the card — the
   // updated_at fallback counted any deal "touched in-period" as "won in-period".
@@ -2676,7 +2737,7 @@ export async function getWonCloseSummary(
       AND ${aliasedHasUsableWonDateSql("d")}
       AND ${aliasedWonHsClosedWonDateSql("d")} >= ${options.from}::date
       AND ${aliasedWonHsClosedWonDateSql("d")} <= ${options.to}::date
-      ${repFilter}
+      ${repFilter}${routeFilter}
   `);
 
   const [row] = rowsFromExecute<any>(result);
@@ -2703,9 +2764,12 @@ export interface CanonicalRepWonRow {
 // (unassigned) groups are RETAINED so the sum still equals the card exactly.
 export async function getCanonicalRepWonSummary(
   tenantDb: TenantDb,
-  options: { from: string; to: string } & DashboardScopeOptions
+  options: { from: string; to: string; workflowRoutes?: readonly WorkflowRouteBucket[] } & DashboardScopeOptions
 ): Promise<CanonicalRepWonRow[]> {
   const repFilter = dealScopeFilterSql("d", options);
+  // Same optional Service/Other narrowing as getWonCloseSummary above, applied IDENTICALLY -- that is what
+  // keeps SUM(rows) === the card under a route filter, exactly as it does without one.
+  const routeFilter = aliasedWorkflowRouteFilterSql("d", options.workflowRoutes);
   const result = await tenantDb.execute(sql`
     SELECT
       d.assigned_rep_id AS rep_id,
@@ -2720,7 +2784,7 @@ export async function getCanonicalRepWonSummary(
       AND ${aliasedHasUsableWonDateSql("d")}
       AND ${aliasedWonHsClosedWonDateSql("d")} >= ${options.from}::date
       AND ${aliasedWonHsClosedWonDateSql("d")} <= ${options.to}::date
-      ${repFilter}
+      ${repFilter}${routeFilter}
     GROUP BY d.assigned_rep_id
   `);
 
@@ -2808,6 +2872,8 @@ export async function getDashboardAtRiskRows(
       d.assigned_rep_id AS rep_id,
       COALESCE(u.display_name, 'Unassigned') AS rep_name,
       d.name AS deal_name,
+      d.is_change_order AS deal_is_change_order,
+      d.scope_title AS deal_scope_title,
       ${dealValueSql()}::numeric AS deal_value,
       COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
       psc.name AS stage_name,
@@ -2844,6 +2910,8 @@ export async function getDashboardAtRiskRows(
     repId: row.rep_id ? String(row.rep_id) : null,
     repName: row.rep_name ? String(row.rep_name) : null,
     dealName: row.deal_name ? String(row.deal_name) : null,
+    dealIsChangeOrder: row.deal_is_change_order ?? undefined,
+    dealScopeTitle: row.deal_scope_title ?? null,
     dealValue: Number(row.deal_value ?? 0),
     stageSlug: row.stage_slug ? String(row.stage_slug) : null,
     stageName: resolveMirroredStageLabel(row.stage_slug, row.stage_name),
@@ -3033,6 +3101,13 @@ export interface CommissionEvidenceRecord {
   value: number | null;             // $ contribution (deal value / earned $); null for count-only metrics
   date: string | null;              // ISO cohort date (stage entered / signed / occurred)
   companyName: string | null;
+  /**
+   * `deals.is_change_order` — the AUTHORITY for the change-order display relabel, carried so the drawer
+   * never has to guess from `name`. Absent (undefined) on the lead + activity + manager-override rows,
+   * whose `name` is a lead name / activity subject / literal and is not a deal name at all; the drawer
+   * gates the formatter on `kind === "deal"`, so those rows never reach it.
+   */
+  dealIsChangeOrder?: boolean | null;
   // Won·unsigned ("missing contract date") reconciliation fields — populated for deal metrics, surfaced by the
   // Team Commissions drill-down so accounting can look a deal up in QuickBooks without drilling into it.
   projectNumber?: string | null;      // deals.project_number (e.g. dfw-1-02932-aa)
@@ -3133,8 +3208,12 @@ export async function getDirectorCommissionEvidence(
     const notBooked = excludeBooked
       ? sql` AND NOT EXISTS (SELECT 1 FROM ${dealSignedCommissions} dsc WHERE dsc.deal_id = d.id AND dsc.rep_user_id = ${repId})`
       : sql``;
-    const res = await tenantDb.execute(sql`
+    // Named apart from the lead / activity branches' `res`/`rows` below: this is the only one of the three
+    // that carries a deal row (and therefore the change-order flag), and sharing the name made it
+    // ambiguous which mapper consumed which query.
+    const dealRes = await tenantDb.execute(sql`
       SELECT d.id, d.deal_number, d.name, COALESCE(psc.name, '') AS stage_label,
+        d.is_change_order AS is_change_order,
         ${dealValueSql}::numeric AS value, (d.stage_entered_at)::date AS cohort_date,
         COALESCE(c.name, '') AS company_name,
         d.project_number,
@@ -3151,14 +3230,17 @@ export async function getDirectorCommissionEvidence(
         AND psc.slug IN (${commissionSlugList(stageSlugs)})${involvementGate}
       ORDER BY value DESC NULLS LAST, d.name ASC
     `);
-    const rows = (res as any).rows ?? res;
-    return rows.map((r: any) => ({
+    const dealRows = (dealRes as any).rows ?? dealRes;
+    return dealRows.map((r: any) => ({
       id: String(r.id),
       navKind: "deal" as const,
       navId: String(r.id),
       primary: r.deal_number ? String(r.deal_number) : null,
       name: String(r.name ?? "Deal"),
       stageLabel: String(r.stage_label ?? ""),
+      // `?? undefined`, never `?? false`: a NULL column is "unknown", and claiming `false` would tell the
+      // formatter authoritatively that a real change-order child is not one.
+      dealIsChangeOrder: r.is_change_order ?? undefined,
       value: Number(r.value ?? 0),
       date: r.cohort_date ? String(r.cohort_date).slice(0, 10) : null,
       companyName: r.company_name ? String(r.company_name) : null,
@@ -3274,6 +3356,9 @@ export async function getDirectorCommissionEvidence(
       navId: r.dealId,
       primary: r.dealNumber,
       name: r.dealName,
+      // The rollup already carries the authoritative flag (getCommissionDealRollups projects
+      // d.is_change_order); this hand-off is the link that used to drop it, leaving the drawer to guess.
+      dealIsChangeOrder: r.dealIsChangeOrder ?? undefined,
       stageLabel:
         r.attributionRole === "estimator"
           ? "Estimator cut"
@@ -3577,6 +3662,13 @@ export async function getDirectorDashboard(
       dealId: s.dealId,
       dealNumber: s.dealNumber,
       dealName: s.dealName,
+      // The source row carries the flag; this re-map used to drop it, so StaleDealList got `undefined`
+      // and guessed from the name even once the query below started projecting the column.
+      dealIsChangeOrder: s.dealIsChangeOrder,
+      // ...and the title has to come with it, for the SAME reason and through the SAME hop. It was
+      // dropped here once already, one field over. This is the only re-map between the at-risk rows
+      // and the director panel, so a field missing HERE is invisible everywhere upstream looks right.
+      dealScopeTitle: s.dealScopeTitle,
       stageName: s.stageName,
       repName: s.repName,
       daysInStage: s.daysInStage,
@@ -3820,6 +3912,9 @@ export async function getRepWonMissingContractDate(
     dealId: String(row.deal_id),
     dealNumber: row.deal_number ? String(row.deal_number) : null,
     dealName: String(row.deal_name ?? "Deal"),
+    // Asserted from the WHERE clause above (`COALESCE(d.is_change_order, false) = false`), not read off
+    // the row — every deal this worklist can contain is provably not a change-order child.
+    dealIsChangeOrder: false,
     companyName: row.company_name ? String(row.company_name) : null,
     propertyName: row.property_name ? String(row.property_name) : null,
     value: Number(row.value ?? 0),

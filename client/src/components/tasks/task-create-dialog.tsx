@@ -20,7 +20,7 @@ import { ChevronsUpDown, Loader2, Plus } from "lucide-react";
 import { createProjectTask, createTask } from "@/hooks/use-tasks";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
-import { formatDealDisplayNumber } from "@/lib/deal-utils";
+import { formatDealDisplayName, formatDealDisplayNumber } from "@/lib/deal-utils";
 
 interface Assignee {
   id: string;
@@ -32,15 +32,20 @@ interface DealOption {
   dealNumber: string;
   projectNumber?: string | null;
   name: string;
+  /** `deals.is_change_order` — present on the /deals list payload. */
+  isChangeOrder?: boolean | null;
 }
 
 const PROJECT_SEARCH_DEBOUNCE_MS = 150;
 /** The deals API ignores a search term shorter than this, so don't fire a request for one. */
 const PROJECT_SEARCH_MIN_CHARS = 2;
 
+// A change-order child deal is STORED as "<Parent> — Change Order N", which this option label
+// truncates away. formatDealDisplayName moves the label to the front; DISPLAY-ONLY, never persisted.
 function dealOptionLabel(deal: DealOption) {
   const display = formatDealDisplayNumber(deal);
-  return display.isPending ? deal.name : `${display.label} - ${deal.name}`;
+  const name = formatDealDisplayName(deal.name, deal.isChangeOrder);
+  return display.isPending ? name : `${display.label} - ${name}`;
 }
 
 interface TaskCreateDialogProps {

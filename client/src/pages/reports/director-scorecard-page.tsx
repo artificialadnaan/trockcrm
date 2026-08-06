@@ -39,7 +39,7 @@ const REP_PERF_COLUMNS: ReadonlyArray<SortedColumn<RepPerfRow>> = [
 ];
 
 const TOP_ATRISK_COLUMNS: ReadonlyArray<SortedColumn<AtRiskDealRow>> = [
-  { key: "dealName", type: "text", accessor: (r) => r.dealName, header: "Deal Name", numeric: false, cell: (r) => <DealLink dealId={r.dealId}>{r.dealName}</DealLink> },
+  { key: "dealName", type: "text", accessor: (r) => r.dealName, header: "Deal Name", numeric: false, cell: (r) => <DealLink dealId={r.dealId} dealName={r.dealName} dealIsChangeOrder={r.dealIsChangeOrder} /> },
   { key: "ownerName", type: "text", accessor: (r) => r.ownerName, header: "Owner", numeric: false, cell: (r) => r.ownerName },
   { key: "stageName", type: "text", accessor: (r) => r.stageName, header: "Stage", numeric: false, cell: (r) => r.stageName },
   { key: "daysInStage", type: "number", accessor: (r) => r.daysInStage, header: "Days In Stage", numeric: true, cell: (r) => formatNumber(r.daysInStage) },

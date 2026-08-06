@@ -57,13 +57,29 @@ function makeRecord(overrides: Partial<PipelineRecordCardData> = {}): PipelineRe
   };
 }
 
-function render(record: PipelineRecordCardData) {
+function render(record: PipelineRecordCardData, entity: "deal" | "lead" = "deal") {
   return renderToStaticMarkup(
     <MemoryRouter>
-      <PipelineRecordCard entity="deal" record={record} />
+      <PipelineRecordCard entity={entity} record={record} />
     </MemoryRouter>
   );
 }
+
+describe("PipelineRecordCard — the change-order relabel is gated on `entity`", () => {
+  it("moves 'Change Order N' to the front on the DEAL board", () => {
+    const html = render(makeRecord({ name: "Tides Park Lane — Change Order 2" }));
+    expect(html).toContain("Change Order 2 — Tides Park Lane");
+    expect(html).not.toContain("Tides Park Lane — Change Order 2");
+  });
+
+  it("leaves a LEAD's name byte for byte on the lead board", () => {
+    // This card backs both boards. Only a deal can be a generated change-order child; a lead a human
+    // named "Lobby — Change Order 1" must render exactly as typed.
+    const html = render(makeRecord({ name: "Lobby — Change Order 1" }), "lead");
+    expect(html).toContain("Lobby — Change Order 1");
+    expect(html).not.toContain("Change Order 1 — Lobby");
+  });
+});
 
 describe("PipelineRecordCard", () => {
   afterEach(() => {
@@ -198,5 +214,41 @@ describe("PipelineRecordCard", () => {
     expect(html).toContain("5d in stage");
     expect(html).not.toContain("9d in stage");
     expect(html).not.toContain("0d in stage");
+  });
+});
+
+// The rep dashboard and the director dashboard render their pipeline boards through THIS card, not
+// through the deals board's DecoratedKanbanCard. A scope title added only to the latter leaves both
+// dashboards showing name-only cards — the same structural blind spot that hid the deals-list mobile
+// card, one component over (Codex #1051 sweep).
+describe("PipelineRecordCard — scope title", () => {
+  it("renders the scope title on a DEAL card, under the name", () => {
+    const html = render(makeRecord({ name: "Palm Villas", scopeTitle: "Balcony Repair" }));
+
+    expect(html).toContain('data-testid="pipeline-record-card-scope-title"');
+    expect(html).toContain("Balcony Repair");
+    expect(html.indexOf("Palm Villas")).toBeLessThan(html.indexOf("Balcony Repair"));
+  });
+
+  it("renders nothing extra for a deal without one", () => {
+    const html = render(makeRecord({ scopeTitle: null }));
+
+    expect(html).not.toContain('data-testid="pipeline-record-card-scope-title"');
+    expect(html).toContain("Palm Villas"); // the card itself still renders
+  });
+
+  it("treats a whitespace-only title as absent rather than rendering a blank line", () => {
+    const html = render(makeRecord({ scopeTitle: "   " }));
+
+    expect(html).not.toContain('data-testid="pipeline-record-card-scope-title"');
+  });
+
+  it("does NOT render a scope title on the LEAD board", () => {
+    // This card backs the lead board too. A lead has no scope_title column, so a value arriving here is
+    // a caller passing the wrong record shape — render nothing rather than inventing a lead field.
+    const html = render(makeRecord({ scopeTitle: "Balcony Repair" }), "lead");
+
+    expect(html).not.toContain('data-testid="pipeline-record-card-scope-title"');
+    expect(html).not.toContain("Balcony Repair");
   });
 });

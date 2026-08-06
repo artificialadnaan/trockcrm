@@ -10,7 +10,10 @@ import { getAiReportStatus, getReportDownload, getTranscriptionConfig } from "..
 import {
   categoryLabel,
   correctiveAffordance,
+  decodeChangeOrderParam,
+  encodeChangeOrderParam,
   filterPhotos,
+  formatDealDisplayName,
   groupPhotos,
   isProjectOffOffice,
   projectNumberLabel,
@@ -74,6 +77,8 @@ export default function ProjectDetailScreen() {
   const params = useLocalSearchParams<{
     id: string;
     name?: string;
+    /** "1"/"0" from the list row — `deals.is_change_order`, the authority for the name relabel. */
+    isChangeOrder?: string;
     projectNumber?: string;
     propertyAddress?: string;
     stage?: string;
@@ -81,6 +86,10 @@ export default function ProjectDetailScreen() {
     officeSlug?: string;
   }>();
   const dealId = toStr(params.id);
+  // `deals.is_change_order`, forwarded by the list row as "1"/"0". Anything else — absent on a direct
+  // deep link, or an empty string — decodes to UNDEFINED, so the display helper reads the name instead
+  // of being told "not a change order".
+  const changeOrderParam = decodeChangeOrderParam(params.isChangeOrder);
   const router = useRouter();
   const { fetcher, user, activeOfficeId } = useAuth();
   // Off-office projects are view-only until cross-office writes ship: the single-office report/capture
@@ -258,6 +267,9 @@ export default function ProjectDetailScreen() {
                   params: {
                     dealId,
                     targetName: toStr(params.name),
+                    // Forward the AUTHORITY, not just the name — but only when we actually have one.
+                    // `toStr(undefined)` was emitting "", which capture then read as an assertive FALSE.
+                    isChangeOrder: encodeChangeOrderParam(changeOrderParam),
                     projectNumber: toStr(params.projectNumber),
                     stage: toStr(params.stage),
                     propertyAddress: toStr(params.propertyAddress),
@@ -514,7 +526,9 @@ export default function ProjectDetailScreen() {
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <ScreenHeader onBack={() => router.back()} title={toStr(params.name) || "Project"} />
+      {/* Display-only change-order prefix. The `params.name` value itself stays RAW — it is forwarded on
+          to /capture and then /walk, where it becomes a walk title PERSISTED to the server. */}
+      <ScreenHeader onBack={() => router.back()} title={formatDealDisplayName(toStr(params.name), changeOrderParam) || "Project"} />
 
       {/* The gallery is VIRTUALIZED. It used to be a ScrollView rendering every photo of every group,
           which on a project with thousands of photos mounted thousands of native image views and held

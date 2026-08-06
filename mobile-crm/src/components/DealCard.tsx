@@ -101,6 +101,10 @@ function DealCardComponent({
          because it is empty, or because this is the board, is absent here too. */
       accessibilityLabel={[
         deal.name ?? "Untitled deal",
+        // Immediately after the name, matching the JSX order below. For a change order this is the
+        // ONLY phrase distinguishing this card from its siblings, so omitting it here would leave the
+        // card's one identifying detail rendered and unspoken.
+        deal.scopeTitle,
         deal.companyName,
         displayAmount(deal),
         location,
@@ -143,6 +147,15 @@ function DealCardComponent({
                 {displayAmount(deal)}
               </Text>
             </View>
+
+            {/* Under the name on BOTH variants, not just the list: the board is where change-order
+                siblings sit stacked in one Won column, which is exactly where "<Parent> — Change
+                Order 1" and "…Change Order 2" are impossible to tell apart without it. */}
+            {deal.scopeTitle ? (
+              <Text testID={`${testIDPrefix}-scope-title-${deal.id}`} style={styles.cardScopeTitle} numberOfLines={1}>
+                {deal.scopeTitle}
+              </Text>
+            ) : null}
 
             {deal.companyName ? (
               /* Uppercased by STYLE and labelled explicitly — on iOS the transform is applied before
@@ -227,6 +240,11 @@ const styles = StyleSheet.create({
     // Tabular figures so a column of amounts aligns digit-for-digit instead of shimmering as it scrolls.
     fontVariant: ["tabular-nums"],
   },
+  // `label` (13 semibold), sitting between the 17pt name above and the 11pt uppercase company below:
+  // subordinate to the name, but ahead of the company, because on a change order this line carries the
+  // scope and the name carries only the parent. Composed from existing tokens — never re-point one by
+  // name, which is how three P1s were shipped to this design system.
+  cardScopeTitle: { ...theme.type.label, color: theme.color.textSecondary },
   cardCompany: { ...theme.type.caption, color: theme.color.textMuted, textTransform: "uppercase" },
   cardMeta: { ...theme.type.label, color: theme.color.textSecondary },
   cardBadges: {

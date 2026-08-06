@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import { breakdownLabel } from "@trock-crm/shared/types";
 import { useDailySummary, type LeaderRow, type RepBreakdown } from "@/hooks/use-daily-summary";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 
 const RED = "#CC0000";
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -80,7 +81,9 @@ export function DailySummaryPage() {
               <tbody>
                 {data.wonToday.map((d, i) => (
                   <tr key={i} className="border-b border-slate-50 last:border-0">
-                    <td className="py-1.5 pr-3 text-slate-800"><span className="text-emerald-600">●</span> {d.dealName}</td>
+                    {/* A change-order child is STORED "<Parent> — Change Order N"; move the label to the
+                        front for DISPLAY only so a CO does not read as its parent in this digest. */}
+                    <td className="py-1.5 pr-3 text-slate-800"><span className="text-emerald-600">●</span> {formatDealDisplayName(d.dealName, d.dealIsChangeOrder)}</td>
                     <td className="py-1.5 px-3 text-slate-500">{d.repName}</td>
                     <td className="py-1.5 text-right font-bold tabular-nums text-slate-800 whitespace-nowrap">{usdFull(d.value)}</td>
                   </tr>
@@ -102,7 +105,7 @@ export function DailySummaryPage() {
                 {data.advancedToday.map((m, i) => (
                   <tr key={i} className="border-b border-slate-50 last:border-0">
                     <td className="py-2">
-                      <div className="font-medium text-slate-800">▸ {m.dealName}</div>
+                      <div className="font-medium text-slate-800">▸ {formatDealDisplayName(m.dealName, m.dealIsChangeOrder)}</div>
                       <div className="text-slate-500">{m.fromStage ?? "—"} → {m.toStage ?? "—"} · {m.repName}</div>
                     </td>
                   </tr>

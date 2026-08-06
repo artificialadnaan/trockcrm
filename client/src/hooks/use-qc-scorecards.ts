@@ -7,6 +7,8 @@ export interface QcScorecardRow {
   scorecardId: string;
   dealId: string;
   projectName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  isChangeOrder?: boolean | null;
   projectNumber: string | null;
   regionName: string | null;
   superintendentName: string | null;

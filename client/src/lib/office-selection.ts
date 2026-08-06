@@ -72,3 +72,17 @@ export function resolveDefaultOfficeCode(input: {
 export function getOfficeRequestOptions(officeId?: string | null) {
   return officeId ? { headers: { "x-office-id": officeId } } : {};
 }
+
+/**
+ * Carry office context across an in-app navigation. Office context is URL-driven (lib/api reads ?officeId
+ * and sends it as x-office-id), so a link that drops it silently re-scopes the destination to the viewer's
+ * default office — which is how a freshly created cross-office record reads as not-found.
+ *
+ * The rule this codebase has converged on: pass the id VERBATIM when there is one, add nothing when there
+ * isn't. Never synthesize an office for a caller that did not have one.
+ */
+export function appendOfficeIdSearch(path: string, officeId?: string | null) {
+  if (!officeId) return path;
+  const separator = path.includes("?") ? "&" : "?";
+  return `${path}${separator}officeId=${encodeURIComponent(officeId)}`;
+}

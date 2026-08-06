@@ -30,7 +30,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { displayNameOrFallback } from "@/lib/display-identifiers";
-import { formatDealDisplayNumber } from "@/lib/deal-utils";
+import { formatDealDisplayName, formatDealDisplayNumber } from "@/lib/deal-utils";
 
 function formatDate(value: string | null) {
   if (!value) return "N/A";
@@ -119,7 +119,9 @@ export function InterventionDetailPanel(props: {
                   {detail.crm.deal ? (
                     <Link to={`/deals/${detail.crm.deal.id}`} className="text-base font-semibold text-brand-red hover:underline">
                       {formatDealDisplayNumber(detail.crm.deal).label === "Pending" ? "" : `${formatDealDisplayNumber(detail.crm.deal).label} `}
-                      {detail.crm.deal.name}
+                      {/* A change-order child is STORED "<Parent> — Change Order N"; lead with the
+                          label so it isn't read as its parent. Display-only, stored name unchanged. */}
+                      {formatDealDisplayName(detail.crm.deal.name, detail.crm.deal.isChangeOrder)}
                     </Link>
                   ) : (
                     <div className="text-base font-semibold">Unlinked disconnect case</div>
