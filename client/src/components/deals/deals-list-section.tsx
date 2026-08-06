@@ -1451,13 +1451,20 @@ export function DealsListSection({
                 const ownerColor = getOwnerInitialColor(deal.assignedRepId ?? ownerName);
                 const propertyLabel = getDealPropertyLabel(deal);
                 const stageLabel = deal.stageName ?? stageNameById.get(deal.stageId) ?? deal.stageSlug ?? "Stage";
+                // The Scope column is `hidden lg:table-cell`, so at phone width the table is not what
+                // renders — this card is. Without it a title-only deal ("Panel Relocation") is invisible
+                // on a phone until it is opened or exported, which is most of how the list is read in
+                // the field.
+                const cardScopeTitle = deal.scopeTitle?.trim() ?? "";
                 return (
                   <button
                     key={deal.id}
                     type="button"
                     className="min-h-11 w-full rounded-xl border border-slate-200 bg-slate-50/60 p-4 text-left transition hover:border-brand-red/30 hover:bg-white focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red"
                     onClick={() => navigate(`/deals/${deal.id}`)}
-                    aria-label={`Open deal ${displayName}`}
+                    // The button's aria-label overrides its descendant text, so the title has to be
+                    // folded in or a screen-reader user loses the discriminator a sighted one just got.
+                    aria-label={cardScopeTitle ? `Open deal ${displayName}. ${cardScopeTitle}` : `Open deal ${displayName}`}
                   >
                     <div className="space-y-3">
                       <div className="space-y-1">
@@ -1474,6 +1481,16 @@ export function DealsListSection({
                         >
                           {displayNumber.label || "--"}
                         </p>
+                        {cardScopeTitle ? (
+                          <p
+                            className="line-clamp-2 text-xs font-bold leading-4 text-slate-700"
+                            aria-label={cardScopeTitle}
+                            title={cardScopeTitle}
+                            data-testid="deals-list-card-scope-title"
+                          >
+                            {cardScopeTitle}
+                          </p>
+                        ) : null}
                       </div>
 
                       <div className="space-y-3">

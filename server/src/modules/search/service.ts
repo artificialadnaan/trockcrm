@@ -36,6 +36,10 @@ export interface SearchResult {
   rank: number;
   // True when this deal result is a change-order child deal, so the UI can badge it. Deal results only.
   isChangeOrder?: boolean;
+  // The deal's short scope title. Deal results only. Carried because scope_title is now a MATCHED field:
+  // a user who searched "Panel Relocation" and got back a row labelled "<Parent> — Change Order 1" has
+  // no way to see why it matched, which reads as a wrong result rather than a right one.
+  scopeTitle?: string | null;
   // Assigned rep display name + best-value deal amount (awarded>bbts>bid>dd, raw string — or awarded_amount
   // verbatim, possibly NEGATIVE, for a change-order child). Deal results only.
   assignedRepName?: string | null;
@@ -388,6 +392,7 @@ export async function searchDeals(tenantDb: TenantDb, query: string, limit: numb
       name: deals.name,
       dealNumber: deals.dealNumber,
       projectNumber: deals.projectNumber,
+      scopeTitle: deals.scopeTitle,
       propertyCity: deals.propertyCity,
       propertyState: deals.propertyState,
       onHold: deals.onHold,
@@ -433,6 +438,7 @@ export async function searchDeals(tenantDb: TenantDb, query: string, limit: numb
     deepLink: `/deals/${r.id}`,
     rank: Number(r.relevance ?? 0),
     isChangeOrder: r.isChangeOrder === true,
+    scopeTitle: r.scopeTitle ?? null,
     assignedRepName: r.assignedRepName ?? null,
     // Deliberately the RAW best-value (awarded>bbts>bid>dd, canonical DEAL_VALUE_PRIORITY_CHAIN — or, for
     // a change-order child, awarded_amount verbatim, possibly NEGATIVE), NOT the on-hold-zeroed effective

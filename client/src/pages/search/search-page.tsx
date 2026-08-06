@@ -60,6 +60,13 @@ function ResultCard({ result }: { result: SearchResult }) {
             ? formatDealDisplayName(result.primaryLabel, result.isChangeOrder)
             : result.primaryLabel}
         </div>
+        {result.entityType === "deal" && result.scopeTitle ? (
+          // Above the meta line, because it is frequently WHY this row matched — scope_title is a
+          // searched field, and a change-order child's name carries no scope at all.
+          <div className="truncate text-sm font-semibold text-gray-700" title={result.scopeTitle}>
+            {result.scopeTitle}
+          </div>
+        ) : null}
         {(() => {
           // Deal-only assignedRepName appended to the number/location meta line; falsy parts drop
           // out (no dangling separator), and non-deal results are unchanged.

@@ -209,6 +209,55 @@ describe("PropertyDetailPage", () => {
     expect(html).toContain("Files");
   });
 
+  // Every deal on a property page tends to carry the SAME name (the property's), so before the scope
+  // title there was nothing on the row that said which job it was (Codex #1051 sweep). The deals list
+  // lives on a tab whose state is local, so this has to mount and click rather than static-render.
+  it("renders each linked deal's scope title so same-named deals are distinguishable", () => {
+    mocks.usePropertyDetailMock.mockReturnValue({
+      property: makeProperty(),
+      leads: [],
+      deals: [
+        makeDeal({ id: "deal-1", scopeTitle: "Balcony Repair" }),
+        makeDeal({ id: "deal-2", dealNumber: "TR-0002", scopeTitle: "Plumbing Renovations" }),
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    mounted = mountPage();
+
+    act(() => {
+      mounted!.container
+        .querySelector('button[aria-label="Deals"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mounted.container.querySelectorAll('[data-testid="property-deal-scope-title"]').length).toBe(2);
+    expect(mounted.container.textContent).toContain("Balcony Repair");
+    expect(mounted.container.textContent).toContain("Plumbing Renovations");
+  });
+
+  it("omits the scope-title line for a linked deal that has none", () => {
+    mocks.usePropertyDetailMock.mockReturnValue({
+      property: makeProperty(),
+      leads: [],
+      deals: [makeDeal({ scopeTitle: null })],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    mounted = mountPage();
+
+    act(() => {
+      mounted!.container
+        .querySelector('button[aria-label="Deals"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(mounted.container.querySelector('[data-testid="property-deal-scope-title"]')).toBeNull();
+    expect(mounted.container.textContent).toContain("Dallas ISD Roof Replacement"); // row still renders
+  });
+
   it("renders right-rail with owner company, address, type, and system IDs", () => {
     const html = normalize(renderPage());
 

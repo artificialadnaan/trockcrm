@@ -369,6 +369,44 @@ describe("DealsListSection", () => {
     expect(html).not.toContain(">—<");
   });
 
+  // The Scope column is `hidden lg:table-cell`, so at phone width the table is not what renders — the
+  // card branch is, and it showed name/number/property/owner/value/stage and never read scopeTitle.
+  // A title-only deal was invisible on a phone until opened or exported (Codex #1051).
+  it("renders the scope title on the MOBILE card branch, not just the desktop table", () => {
+    mocks.useDealsMock.mockReturnValue({
+      deals: [makeDeal({ name: "Tides at Highland Meadows", scopeTitle: "Panel Relocation" })],
+      pagination: { page: 1, limit: 25, total: 1, totalPages: 1 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = render();
+
+    expect(html).toContain('data-testid="deals-list-card-scope-title"');
+    // The card branch is the md:hidden container — the title must be inside it, not only in the table.
+    const cardsStart = html.indexOf('aria-label="Deals list cards"');
+    expect(cardsStart).toBeGreaterThan(-1);
+    expect(html.indexOf('data-testid="deals-list-card-scope-title"')).toBeGreaterThan(cardsStart);
+    // The button's aria-label overrides descendant text, so the title has to be folded in too.
+    expect(html).toContain('aria-label="Open deal Tides at Highland Meadows. Panel Relocation"');
+  });
+
+  it("leaves the mobile card unchanged when a deal has no scope title", () => {
+    mocks.useDealsMock.mockReturnValue({
+      deals: [makeDeal({ name: "Palm Villas", scopeTitle: null })],
+      pagination: { page: 1, limit: 25, total: 1, totalPages: 1 },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = render();
+
+    expect(html).not.toContain('data-testid="deals-list-card-scope-title"');
+    expect(html).toContain('aria-label="Open deal Palm Villas"');
+  });
+
   it("renders the selected owner filter label from assignees instead of the raw id", () => {
     const html = render();
 

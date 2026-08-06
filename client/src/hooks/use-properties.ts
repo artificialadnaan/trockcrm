@@ -79,6 +79,8 @@ export interface PropertyDeal {
   id: string;
   dealNumber: string;
   name: string;
+  /** `deals.scope_title` — on the wire already (the query returns the whole deal row). */
+  scopeTitle?: string | null;
   stageId: string;
   workflowRoute: "normal" | "service";
   assignedRepId: string;

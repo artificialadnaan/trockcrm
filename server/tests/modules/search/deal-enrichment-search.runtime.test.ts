@@ -108,6 +108,18 @@ describe("searchDeals — scope_title participates in RELEVANCE, not just the WH
     );
   });
 
+  it("carries scopeTitle on the deal result so the UI can show WHY the row matched", async () => {
+    const results = await searchDeals(tdb, "Panel Relocation", 50);
+    const titled = results.find((r) => r.id === D.titleExact);
+
+    expect(titled?.scopeTitle).toBe("Panel Relocation");
+    // A deal without one carries null, not undefined-by-omission — the client renders on truthiness and
+    // an absent key would be indistinguishable from a field the server forgot to project.
+    const anyUntitled = (await searchDeals(tdb, "Zephyr", 50))[0];
+    expect(anyUntitled).toBeDefined();
+    expect(anyUntitled.scopeTitle).toBeNull();
+  });
+
   it("scores a scope-title PREFIX match above an unranked match", async () => {
     const results = await searchDeals(tdb, "Panel", 50);
     const titled = results.find((r) => r.id === D.titleExact);
