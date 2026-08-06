@@ -51,7 +51,12 @@ describe("promoting approved recommendations into an estimate", () => {
       })),
     } as any;
 
-    await loadApprovedRecommendationsForRun(tenantDb, "deal-1", "run-1");
+    // The gate is now OPT-IN: the wide read that feeds duplicate-group derivation must NOT apply it
+    // (filtering a duplicate there makes its sibling look unique). Promotion asks for it on the narrow,
+    // locked read — which is the call this test is about.
+    await loadApprovedRecommendationsForRun(tenantDb, "deal-1", "run-1", undefined, {
+      requirePriceableQuantity: true,
+    });
 
     const sqlText = extractSqlText(captured);
     expect(sqlText).toContain("quantity");
@@ -91,7 +96,12 @@ describe("promoting approved recommendations into an estimate", () => {
       })),
     } as any;
 
-    await loadApprovedRecommendationsForRun(tenantDb, "deal-1", "run-1");
+    // The gate is now OPT-IN: the wide read that feeds duplicate-group derivation must NOT apply it
+    // (filtering a duplicate there makes its sibling look unique). Promotion asks for it on the narrow,
+    // locked read — which is the call this test is about.
+    await loadApprovedRecommendationsForRun(tenantDb, "deal-1", "run-1", undefined, {
+      requirePriceableQuantity: true,
+    });
 
     const sqlText = extractSqlText(captured);
     expect(sqlText).toContain("override_quantity");
@@ -102,5 +112,67 @@ describe("promoting approved recommendations into an estimate", () => {
     expect(overrideClause).toContain("is not null");
     expect(overrideClause).toContain("> 0");
     expect(overrideClause).toContain("NaN");
+  });
+
+  it("does NOT let a healthy extraction rescue an INVALID override quantity", async () => {
+    // The alternatives must be mutually exclusive. An override carrying 0, a negative or NaN fails its
+    // own alternative — but if the extraction alternative were unconditional, a healthy extraction
+    // would admit the row, and `resolvePromotionLineValues` would then promote the INVALID override
+    // value, because it prefers a non-null `overrideQuantity` over the fallback. A bad number in a
+    // client estimate, on a row the workbench simultaneously called unpromotable.
+    let captured: unknown;
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          innerJoin: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              where: vi.fn((condition: unknown) => {
+                captured = condition;
+                return { for: vi.fn().mockResolvedValue([]) };
+              }),
+            })),
+          })),
+        })),
+      })),
+    } as any;
+
+    await loadApprovedRecommendationsForRun(tenantDb, "deal-1", "run-1", undefined, {
+      requirePriceableQuantity: true,
+    });
+
+    const sqlText = extractSqlText(captured);
+    // The extraction alternative is GUARDED: it applies only to rows that are not an override, or
+    // whose override carries no quantity of its own (the price-only case, which genuinely falls back).
+    expect(sqlText).toContain("is distinct from");
+    const extractionClause = sqlText.slice(sqlText.lastIndexOf("is distinct from"));
+    expect(extractionClause).toContain("is null");
+  });
+
+  it("omits the gate entirely when it is not requested, so duplicate derivation sees every row", async () => {
+    // Applying the gate to the wide read is a CORRECTNESS bug, not a scoping one: a filtered-out
+    // duplicate makes its valid sibling look unique, so the sibling promotes even when the filtered row
+    // already holds a promoted line item. The wide read must return the whole approved/overridden set.
+    let captured: unknown;
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          innerJoin: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              where: vi.fn((condition: unknown) => {
+                captured = condition;
+                return { for: vi.fn().mockResolvedValue([]) };
+              }),
+            })),
+          })),
+        })),
+      })),
+    } as any;
+
+    await loadApprovedRecommendationsForRun(tenantDb, "deal-1", "run-1");
+
+    const sqlText = extractSqlText(captured);
+    expect(sqlText).toContain("status");
+    expect(sqlText).not.toContain("NaN");
+    expect(sqlText).not.toContain("override_quantity");
   });
 });

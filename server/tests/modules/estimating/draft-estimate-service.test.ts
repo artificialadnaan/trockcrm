@@ -1,5 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+/**
+ * A mocked `.where(...)` that serves BOTH promote reads: the wide unlocked load (awaited directly) and
+ * the narrow `FOR UPDATE` load. Promotion reads twice now — wide and UNGATED so duplicate groups are
+ * derived over the whole run, narrow/gated/locked for the rows it will actually write — so a mock
+ * offering only `.for()` made the wide read resolve to the mock object instead of rows.
+ */
+function selectResult(rows: unknown[]) {
+  const result = Promise.resolve(rows) as Promise<unknown[]> & { for: ReturnType<typeof vi.fn> };
+  result.for = vi.fn().mockResolvedValue(rows);
+  return result;
+}
+
 const estimateServiceMocks = vi.hoisted(() => ({
   createSection: vi.fn(),
   createLineItem: vi.fn(),
@@ -38,7 +50,7 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
               innerJoin: vi.fn(() => ({
                 // `.where(...).for("update")` — the promote locks the joined extraction so a
                 // quantity-clearing PATCH cannot commit between this read and the line item it creates.
-                where: vi.fn(() => ({ for: vi.fn().mockResolvedValue([
+                where: vi.fn(() => selectResult([
                   {
                     recommendationId: "rec-1",
                     description: "Parapet Wall Flashing",
@@ -48,7 +60,28 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
                     notes: null,
                     sectionName: "Generated Estimate",
                   },
-                ]) })),
+                ])),
+              })),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                // `.where(...).for("update")` — the promote locks the joined extraction so a
+                // quantity-clearing PATCH cannot commit between this read and the line item it creates.
+                where: vi.fn(() => selectResult([
+                  {
+                    recommendationId: "rec-1",
+                    description: "Parapet Wall Flashing",
+                    quantity: "3",
+                    unit: "ft",
+                    unitPrice: "121.54",
+                    notes: null,
+                    sectionName: "Generated Estimate",
+                  },
+                ])),
               })),
             })),
           })),
@@ -95,7 +128,7 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
               innerJoin: vi.fn(() => ({
                 // `.where(...).for("update")` — the promote locks the joined extraction so a
                 // quantity-clearing PATCH cannot commit between this read and the line item it creates.
-                where: vi.fn(() => ({ for: vi.fn().mockResolvedValue([
+                where: vi.fn(() => selectResult([
                   {
                     recommendationId: "rec-1",
                     description: "Parapet Wall Flashing",
@@ -108,7 +141,31 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
                     createdByRunId: "run-1",
                     promotedEstimateLineItemId: "line-1",
                   },
-                ]) })),
+                ])),
+              })),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                // `.where(...).for("update")` — the promote locks the joined extraction so a
+                // quantity-clearing PATCH cannot commit between this read and the line item it creates.
+                where: vi.fn(() => selectResult([
+                  {
+                    recommendationId: "rec-1",
+                    description: "Parapet Wall Flashing",
+                    quantity: "3",
+                    unit: "ft",
+                    unitPrice: "121.54",
+                    notes: null,
+                    sectionName: "Generated Estimate",
+                    status: "approved",
+                    createdByRunId: "run-1",
+                    promotedEstimateLineItemId: "line-1",
+                  },
+                ])),
               })),
             })),
           })),
@@ -149,7 +206,7 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
               innerJoin: vi.fn(() => ({
                 // `.where(...).for("update")` — the promote locks the joined extraction so a
                 // quantity-clearing PATCH cannot commit between this read and the line item it creates.
-                where: vi.fn(() => ({ for: vi.fn().mockResolvedValue([
+                where: vi.fn(() => selectResult([
                   {
                     recommendationId: "rec-2",
                     description: "Mobilization",
@@ -159,7 +216,28 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
                     notes: null,
                     sectionName: "Generated Estimate",
                   },
-                ]) })),
+                ])),
+              })),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                // `.where(...).for("update")` — the promote locks the joined extraction so a
+                // quantity-clearing PATCH cannot commit between this read and the line item it creates.
+                where: vi.fn(() => selectResult([
+                  {
+                    recommendationId: "rec-2",
+                    description: "Mobilization",
+                    quantity: "1",
+                    unit: "ea",
+                    unitPrice: "500",
+                    notes: null,
+                    sectionName: "Generated Estimate",
+                  },
+                ])),
               })),
             })),
           })),
@@ -214,7 +292,7 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
               innerJoin: vi.fn(() => ({
                 // `.where(...).for("update")` — the promote locks the joined extraction so a
                 // quantity-clearing PATCH cannot commit between this read and the line item it creates.
-                where: vi.fn(() => ({ for: vi.fn().mockResolvedValue([
+                where: vi.fn(() => selectResult([
                   {
                     recommendationId: "rec-ovr",
                     description: "Seam Sealant",
@@ -230,7 +308,34 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
                     createdByRunId: "run-3",
                     promotedEstimateLineItemId: null,
                   },
-                ]) })),
+                ])),
+              })),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                // `.where(...).for("update")` — the promote locks the joined extraction so a
+                // quantity-clearing PATCH cannot commit between this read and the line item it creates.
+                where: vi.fn(() => selectResult([
+                  {
+                    recommendationId: "rec-ovr",
+                    description: "Seam Sealant",
+                    quantity: "2",
+                    unit: "ea",
+                    unitPrice: "75.00",
+                    notes: null,
+                    sectionName: "Roof",
+                    sourceType: "explicit",
+                    normalizedIntent: "seam sealant",
+                    sourceRowIdentity: "roof:seam-1",
+                    status: "overridden",
+                    createdByRunId: "run-3",
+                    promotedEstimateLineItemId: null,
+                  },
+                ])),
               })),
             })),
           })),
@@ -283,7 +388,7 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
               innerJoin: vi.fn(() => ({
                 // `.where(...).for("update")` — the promote locks the joined extraction so a
                 // quantity-clearing PATCH cannot commit between this read and the line item it creates.
-                where: vi.fn(() => ({ for: vi.fn().mockResolvedValue([
+                where: vi.fn(() => selectResult([
                   {
                     recommendationId: "rec-alt",
                     description: "Recommendation default label",
@@ -301,7 +406,36 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
                     createdByRunId: "run-alt",
                     promotedEstimateLineItemId: null,
                   },
-                ]) })),
+                ])),
+              })),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                // `.where(...).for("update")` — the promote locks the joined extraction so a
+                // quantity-clearing PATCH cannot commit between this read and the line item it creates.
+                where: vi.fn(() => selectResult([
+                  {
+                    recommendationId: "rec-alt",
+                    description: "Recommendation default label",
+                    quantity: "4",
+                    unit: "ea",
+                    unitPrice: "32.00",
+                    notes: "Default notes",
+                    sectionName: "Roof",
+                    sourceType: "explicit",
+                    selectedSourceType: "alternate",
+                    selectedOptionId: "option-2",
+                    normalizedIntent: "roof vent",
+                    sourceRowIdentity: "roof:vent-1",
+                    status: "approved",
+                    createdByRunId: "run-alt",
+                    promotedEstimateLineItemId: null,
+                  },
+                ])),
               })),
             })),
           })),
@@ -310,6 +444,21 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
           from: vi.fn(() => ({
             where: vi.fn(() => ({
               limit: vi.fn().mockResolvedValue([{ id: "section-alt" }]),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              where: vi.fn(() => ({
+                limit: vi.fn().mockResolvedValue([
+                  {
+                    id: "option-2",
+                    optionLabel: "Alternate vent cover",
+                    optionKind: "alternate",
+                  },
+                ]),
+              })),
             })),
           })),
         })
@@ -380,7 +529,7 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
               innerJoin: vi.fn(() => ({
                 // `.where(...).for("update")` — the promote locks the joined extraction so a
                 // quantity-clearing PATCH cannot commit between this read and the line item it creates.
-                where: vi.fn(() => ({ for: vi.fn().mockResolvedValue([
+                where: vi.fn(() => selectResult([
                   {
                     recommendationId: "rec-manual",
                     description: "Stale extracted label",
@@ -403,7 +552,41 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
                     createdByRunId: "run-manual",
                     promotedEstimateLineItemId: null,
                   },
-                ]) })),
+                ])),
+              })),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                // `.where(...).for("update")` — the promote locks the joined extraction so a
+                // quantity-clearing PATCH cannot commit between this read and the line item it creates.
+                where: vi.fn(() => selectResult([
+                  {
+                    recommendationId: "rec-manual",
+                    description: "Stale extracted label",
+                    quantity: "9",
+                    unit: "sq",
+                    unitPrice: "11.00",
+                    notes: "stale note",
+                    sectionName: "Roof",
+                    sourceType: "explicit",
+                    selectedSourceType: "manual",
+                    selectedOptionId: null,
+                    manualLabel: "Manual baseline label",
+                    manualQuantity: "2",
+                    manualUnit: "ea",
+                    manualUnitPrice: "75.00",
+                    manualNotes: "manual note",
+                    normalizedIntent: "manual row",
+                    sourceRowIdentity: "roof:manual-1",
+                    status: "approved",
+                    createdByRunId: "run-manual",
+                    promotedEstimateLineItemId: null,
+                  },
+                ])),
               })),
             })),
           })),
@@ -465,7 +648,7 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
               innerJoin: vi.fn(() => ({
                 // `.where(...).for("update")` — the promote locks the joined extraction so a
                 // quantity-clearing PATCH cannot commit between this read and the line item it creates.
-                where: vi.fn(() => ({ for: vi.fn().mockResolvedValue([
+                where: vi.fn(() => selectResult([
                   {
                     recommendationId: "rec-manual-catalog",
                     description: "Stale extracted label",
@@ -488,7 +671,41 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
                     createdByRunId: "run-manual-catalog",
                     promotedEstimateLineItemId: null,
                   },
-                ]) })),
+                ])),
+              })),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                // `.where(...).for("update")` — the promote locks the joined extraction so a
+                // quantity-clearing PATCH cannot commit between this read and the line item it creates.
+                where: vi.fn(() => selectResult([
+                  {
+                    recommendationId: "rec-manual-catalog",
+                    description: "Stale extracted label",
+                    quantity: null,
+                    unit: null,
+                    unitPrice: null,
+                    notes: null,
+                    sectionName: "Roof",
+                    sourceType: "manual",
+                    selectedSourceType: "catalog_option",
+                    selectedOptionId: "option-catalog-1",
+                    manualLabel: "Legacy manual label",
+                    manualQuantity: "3",
+                    manualUnit: "ea",
+                    manualUnitPrice: "42.00",
+                    manualNotes: "legacy manual note",
+                    normalizedIntent: "manual row",
+                    sourceRowIdentity: "roof:manual-catalog-legacy",
+                    status: "approved",
+                    createdByRunId: "run-manual-catalog",
+                    promotedEstimateLineItemId: null,
+                  },
+                ])),
               })),
             })),
           })),
@@ -497,6 +714,21 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
           from: vi.fn(() => ({
             where: vi.fn(() => ({
               limit: vi.fn().mockResolvedValue([]),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              where: vi.fn(() => ({
+                limit: vi.fn().mockResolvedValue([
+                  {
+                    id: "option-catalog-1",
+                    optionLabel: "Catalog-backed manual option",
+                    optionKind: "recommended",
+                  },
+                ]),
+              })),
             })),
           })),
         })
@@ -565,7 +797,7 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
               innerJoin: vi.fn(() => ({
                 // `.where(...).for("update")` — the promote locks the joined extraction so a
                 // quantity-clearing PATCH cannot commit between this read and the line item it creates.
-                where: vi.fn(() => ({ for: vi.fn().mockResolvedValue([
+                where: vi.fn(() => selectResult([
                   {
                     recommendationId: "rec-legacy-manual",
                     description: "Legacy manual description",
@@ -588,7 +820,41 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
                     createdByRunId: "run-legacy-manual",
                     promotedEstimateLineItemId: null,
                   },
-                ]) })),
+                ])),
+              })),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                // `.where(...).for("update")` — the promote locks the joined extraction so a
+                // quantity-clearing PATCH cannot commit between this read and the line item it creates.
+                where: vi.fn(() => selectResult([
+                  {
+                    recommendationId: "rec-legacy-manual",
+                    description: "Legacy manual description",
+                    quantity: null,
+                    unit: null,
+                    unitPrice: null,
+                    notes: null,
+                    sectionName: "Roof",
+                    sourceType: "manual",
+                    selectedSourceType: null,
+                    selectedOptionId: null,
+                    manualLabel: "Legacy manual label",
+                    manualQuantity: "5",
+                    manualUnit: "ea",
+                    manualUnitPrice: "12.00",
+                    manualNotes: "legacy note",
+                    normalizedIntent: "manual row",
+                    sourceRowIdentity: "roof:legacy-manual",
+                    status: "approved",
+                    createdByRunId: "run-legacy-manual",
+                    promotedEstimateLineItemId: null,
+                  },
+                ])),
               })),
             })),
           })),
@@ -644,7 +910,7 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
               innerJoin: vi.fn(() => ({
                 // `.where(...).for("update")` — the promote locks the joined extraction so a
                 // quantity-clearing PATCH cannot commit between this read and the line item it creates.
-                where: vi.fn(() => ({ for: vi.fn().mockResolvedValue([
+                where: vi.fn(() => selectResult([
                   {
                     recommendationId: "rec-manual-incomplete",
                     description: "Stale extracted label",
@@ -667,7 +933,41 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
                     createdByRunId: "run-manual",
                     promotedEstimateLineItemId: null,
                   },
-                ]) })),
+                ])),
+              })),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                // `.where(...).for("update")` — the promote locks the joined extraction so a
+                // quantity-clearing PATCH cannot commit between this read and the line item it creates.
+                where: vi.fn(() => selectResult([
+                  {
+                    recommendationId: "rec-manual-incomplete",
+                    description: "Stale extracted label",
+                    quantity: null,
+                    unit: "sq",
+                    unitPrice: null,
+                    notes: "stale note",
+                    sectionName: "Roof",
+                    sourceType: "manual",
+                    selectedSourceType: "manual",
+                    selectedOptionId: null,
+                    manualLabel: "Manual baseline label",
+                    manualQuantity: null,
+                    manualUnit: "ea",
+                    manualUnitPrice: null,
+                    manualNotes: "manual note",
+                    normalizedIntent: "manual row",
+                    sourceRowIdentity: "roof:manual-incomplete",
+                    status: "approved",
+                    createdByRunId: "run-manual",
+                    promotedEstimateLineItemId: null,
+                  },
+                ])),
               })),
             })),
           })),
@@ -716,7 +1016,7 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
               innerJoin: vi.fn(() => ({
                 // `.where(...).for("update")` — the promote locks the joined extraction so a
                 // quantity-clearing PATCH cannot commit between this read and the line item it creates.
-                where: vi.fn(() => ({ for: vi.fn().mockResolvedValue([
+                where: vi.fn(() => selectResult([
                   {
                     recommendationId: "rec-override",
                     description: "Existing description",
@@ -738,7 +1038,40 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
                     createdByRunId: "run-override",
                     promotedEstimateLineItemId: null,
                   },
-                ]) })),
+                ])),
+              })),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                // `.where(...).for("update")` — the promote locks the joined extraction so a
+                // quantity-clearing PATCH cannot commit between this read and the line item it creates.
+                where: vi.fn(() => selectResult([
+                  {
+                    recommendationId: "rec-override",
+                    description: "Existing description",
+                    quantity: "9",
+                    unit: "sq",
+                    unitPrice: "11.00",
+                    notes: "stale note",
+                    sectionName: "Roof",
+                    sourceType: "explicit",
+                    selectedSourceType: "override",
+                    selectedOptionId: null,
+                    overrideQuantity: "4",
+                    overrideUnit: "ea",
+                    overrideUnitPrice: "125.00",
+                    overrideNotes: "override note",
+                    normalizedIntent: "override row",
+                    sourceRowIdentity: "roof:override-1",
+                    status: "overridden",
+                    createdByRunId: "run-override",
+                    promotedEstimateLineItemId: null,
+                  },
+                ])),
               })),
             })),
           })),
@@ -799,7 +1132,7 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
               innerJoin: vi.fn(() => ({
                 // `.where(...).for("update")` — the promote locks the joined extraction so a
                 // quantity-clearing PATCH cannot commit between this read and the line item it creates.
-                where: vi.fn(() => ({ for: vi.fn().mockResolvedValue([
+                where: vi.fn(() => selectResult([
                   {
                     recommendationId: "rec-lock",
                     description: "Termination Bar",
@@ -815,7 +1148,34 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
                     createdByRunId: "run-lock",
                     promotedEstimateLineItemId: null,
                   },
-                ]) })),
+                ])),
+              })),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                // `.where(...).for("update")` — the promote locks the joined extraction so a
+                // quantity-clearing PATCH cannot commit between this read and the line item it creates.
+                where: vi.fn(() => selectResult([
+                  {
+                    recommendationId: "rec-lock",
+                    description: "Termination Bar",
+                    quantity: "1",
+                    unit: "ea",
+                    unitPrice: "25.00",
+                    notes: null,
+                    sectionName: "Roof",
+                    sourceType: "explicit",
+                    normalizedIntent: "termination bar",
+                    sourceRowIdentity: "roof:termination-bar",
+                    status: "approved",
+                    createdByRunId: "run-lock",
+                    promotedEstimateLineItemId: null,
+                  },
+                ])),
               })),
             })),
           })),
@@ -867,7 +1227,7 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
               innerJoin: vi.fn(() => ({
                 // `.where(...).for("update")` — the promote locks the joined extraction so a
                 // quantity-clearing PATCH cannot commit between this read and the line item it creates.
-                where: vi.fn(() => ({ for: vi.fn().mockResolvedValue([
+                where: vi.fn(() => selectResult([
                   {
                     recommendationId: "rec-tx",
                     description: "Termination Bar",
@@ -883,7 +1243,34 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
                     createdByRunId: "run-tx",
                     promotedEstimateLineItemId: null,
                   },
-                ]) })),
+                ])),
+              })),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                // `.where(...).for("update")` — the promote locks the joined extraction so a
+                // quantity-clearing PATCH cannot commit between this read and the line item it creates.
+                where: vi.fn(() => selectResult([
+                  {
+                    recommendationId: "rec-tx",
+                    description: "Termination Bar",
+                    quantity: "1",
+                    unit: "ea",
+                    unitPrice: "25.00",
+                    notes: null,
+                    sectionName: "Roof",
+                    sourceType: "explicit",
+                    normalizedIntent: "termination bar",
+                    sourceRowIdentity: "roof:termination-bar",
+                    status: "approved",
+                    createdByRunId: "run-tx",
+                    promotedEstimateLineItemId: null,
+                  },
+                ])),
               })),
             })),
           })),
@@ -978,7 +1365,7 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
               innerJoin: vi.fn(() => ({
                 // `.where(...).for("update")` — the promote locks the joined extraction so a
                 // quantity-clearing PATCH cannot commit between this read and the line item it creates.
-                where: vi.fn(() => ({ for: vi.fn().mockResolvedValue([
+                where: vi.fn(() => selectResult([
                   {
                     recommendationId: "rec-dup-1",
                     description: "Parapet Wall Flashing",
@@ -1006,7 +1393,46 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
                     sourceRowIdentity: "roof:parapet-2",
                     promotedEstimateLineItemId: null,
                   },
-                ]) })),
+                ])),
+              })),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                // `.where(...).for("update")` — the promote locks the joined extraction so a
+                // quantity-clearing PATCH cannot commit between this read and the line item it creates.
+                where: vi.fn(() => selectResult([
+                  {
+                    recommendationId: "rec-dup-1",
+                    description: "Parapet Wall Flashing",
+                    quantity: "3",
+                    unit: "ft",
+                    unitPrice: "121.54",
+                    notes: null,
+                    sectionName: "Roof",
+                    sourceType: "explicit",
+                    normalizedIntent: "parapet flashing",
+                    sourceRowIdentity: "roof:parapet-1",
+                    status: "approved",
+                    promotedEstimateLineItemId: "line-existing",
+                  },
+                  {
+                    recommendationId: "rec-dup-2",
+                    description: "Parapet Wall Flashing",
+                    quantity: "3",
+                    unit: "ft",
+                    unitPrice: "121.54",
+                    notes: null,
+                    sectionName: "Roof",
+                    sourceType: "explicit",
+                    normalizedIntent: "parapet flashing",
+                    sourceRowIdentity: "roof:parapet-2",
+                    promotedEstimateLineItemId: null,
+                  },
+                ])),
               })),
             })),
           })),
@@ -1060,7 +1486,7 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
               innerJoin: vi.fn(() => ({
                 // `.where(...).for("update")` — the promote locks the joined extraction so a
                 // quantity-clearing PATCH cannot commit between this read and the line item it creates.
-                where: vi.fn(() => ({ for: vi.fn().mockResolvedValue([
+                where: vi.fn(() => selectResult([
                   {
                     recommendationId: "rec-dup-1",
                     description: "Parapet Wall Flashing",
@@ -1091,7 +1517,49 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
                     createdByRunId: "run-1",
                     promotedEstimateLineItemId: null,
                   },
-                ]) })),
+                ])),
+              })),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                // `.where(...).for("update")` — the promote locks the joined extraction so a
+                // quantity-clearing PATCH cannot commit between this read and the line item it creates.
+                where: vi.fn(() => selectResult([
+                  {
+                    recommendationId: "rec-dup-1",
+                    description: "Parapet Wall Flashing",
+                    quantity: "3",
+                    unit: "ft",
+                    unitPrice: "121.54",
+                    notes: null,
+                    sectionName: "Roof",
+                    sourceType: "explicit",
+                    normalizedIntent: "parapet flashing",
+                    sourceRowIdentity: "roof:parapet-1",
+                    status: "approved",
+                    createdByRunId: "run-1",
+                    promotedEstimateLineItemId: null,
+                  },
+                  {
+                    recommendationId: "rec-dup-2",
+                    description: "Parapet Wall Flashing",
+                    quantity: "3",
+                    unit: "ft",
+                    unitPrice: "121.54",
+                    notes: null,
+                    sectionName: "Roof",
+                    sourceType: "explicit",
+                    normalizedIntent: "parapet flashing",
+                    sourceRowIdentity: "roof:parapet-2",
+                    status: "approved",
+                    createdByRunId: "run-1",
+                    promotedEstimateLineItemId: null,
+                  },
+                ])),
               })),
             })),
           })),
@@ -1141,7 +1609,7 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
               innerJoin: vi.fn(() => ({
                 // `.where(...).for("update")` — the promote locks the joined extraction so a
                 // quantity-clearing PATCH cannot commit between this read and the line item it creates.
-                where: vi.fn(() => ({ for: vi.fn().mockResolvedValue([
+                where: vi.fn(() => selectResult([
                   {
                     recommendationId: "rec-live",
                     description: "Termination Bar",
@@ -1159,7 +1627,36 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
                     createdByRunId: "run-1",
                     promotedEstimateLineItemId: null,
                   },
-                ]) })),
+                ])),
+              })),
+            })),
+          })),
+        })
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                // `.where(...).for("update")` — the promote locks the joined extraction so a
+                // quantity-clearing PATCH cannot commit between this read and the line item it creates.
+                where: vi.fn(() => selectResult([
+                  {
+                    recommendationId: "rec-live",
+                    description: "Termination Bar",
+                    quantity: "1",
+                    unit: "ea",
+                    unitPrice: "25.00",
+                    notes: null,
+                    sectionName: "Roof",
+                    sourceType: "explicit",
+                    selectedSourceType: "catalog_option",
+                    selectedOptionId: null,
+                    normalizedIntent: "termination bar",
+                    sourceRowIdentity: "roof:termination-bar",
+                    status: "approved",
+                    createdByRunId: "run-1",
+                    promotedEstimateLineItemId: null,
+                  },
+                ])),
               })),
             })),
           })),

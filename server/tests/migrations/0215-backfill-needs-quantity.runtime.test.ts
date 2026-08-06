@@ -22,6 +22,43 @@ async function seed(schema: string) {
   `);
 }
 
+/**
+ * The full promote chain, for the remediation half of the migration. The base `seed` deliberately does
+ * NOT create these: the migration guards on `to_regclass`, and a schema without them must still park
+ * its extractions rather than fail — which is what the other tests cover.
+ */
+async function seedPromotionChain(schema: string) {
+  await pg.exec(`
+    CREATE TABLE IF NOT EXISTS ${schema}.estimate_extraction_matches (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      extraction_id uuid NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS ${schema}.estimate_line_items (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      quantity numeric(12,3) NOT NULL DEFAULT 1
+    );
+    CREATE TABLE IF NOT EXISTS ${schema}.estimate_pricing_recommendations (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      deal_id uuid NOT NULL,
+      extraction_match_id uuid NOT NULL,
+      promoted_estimate_line_item_id uuid
+    );
+    CREATE TABLE IF NOT EXISTS ${schema}.estimate_review_events (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      deal_id uuid NOT NULL,
+      project_id uuid,
+      subject_type text NOT NULL,
+      subject_id uuid NOT NULL,
+      event_type text NOT NULL,
+      before_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+      after_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+      reason text,
+      user_id uuid,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+  `);
+}
+
 async function statuses(schema: string): Promise<Record<string, string>> {
   const { rows } = (await pg.query(
     `SELECT id::text AS id, status FROM ${schema}.estimate_extractions ORDER BY id`
@@ -74,6 +111,85 @@ describe("migration 0215 — parking already-priced rows that never had a usable
     expect(after["00000000-0000-4000-8000-000000000007"]).toBe("rejected");
     expect(after["00000000-0000-4000-8000-000000000008"]).toBe("overridden");
     expect(after["00000000-0000-4000-8000-000000000009"]).toBe("pending");
+  });
+
+  it("FLAGS an already-promoted line, because parking the source does not undo the price", async () => {
+    // The gap this closes: the extraction moves to `needs_quantity`, but the line it already produced
+    // is sitting in a client-facing estimate at the fabricated quantity of 1, still counted in the
+    // total. Supplying the real quantity and rerunning then adds a CORRECTED line beside the stale one,
+    // so the mispricing can end up double-counted rather than merely surviving.
+    await seed("office_dallas");
+    await seedPromotionChain("office_dallas");
+    await pg.exec(`
+      INSERT INTO office_dallas.estimate_extractions (id, status, quantity) VALUES
+        ('11111111-1111-4111-8111-111111111111', 'processed', NULL);
+      INSERT INTO office_dallas.estimate_extraction_matches (id, extraction_id) VALUES
+        ('22222222-2222-4222-8222-222222222222', '11111111-1111-4111-8111-111111111111');
+      INSERT INTO office_dallas.estimate_line_items (id, quantity) VALUES
+        ('33333333-3333-4333-8333-333333333333', 1);
+      INSERT INTO office_dallas.estimate_pricing_recommendations
+        (id, deal_id, extraction_match_id, promoted_estimate_line_item_id) VALUES
+        ('44444444-4444-4444-8444-444444444444',
+         '55555555-5555-4555-8555-555555555555',
+         '22222222-2222-4222-8222-222222222222',
+         '33333333-3333-4333-8333-333333333333');
+    `);
+
+    await pg.exec(MIGRATION_SQL);
+
+    const { rows } = (await pg.query(
+      `SELECT subject_id::text AS subject_id, subject_type, event_type, reason,
+              before_json->>'quantity' AS quantity
+         FROM office_dallas.estimate_review_events`
+    )) as { rows: Array<Record<string, string>> };
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.subject_id).toBe("33333333-3333-4333-8333-333333333333");
+    expect(rows[0]!.subject_type).toBe("estimate_line_item");
+    expect(rows[0]!.event_type).toBe("remediation_required");
+    // The QUOTED quantity is captured, not the extraction's — that is the number a human has to judge.
+    expect(rows[0]!.quantity).toBe("1.000");
+    expect(rows[0]!.reason).toMatch(/still counted in the estimate total/i);
+  });
+
+  it("does NOT flag a line whose extraction was fine, and never flags one twice", async () => {
+    // Two claims in one run: the flag follows the same unpriceable definition as the parking above, and
+    // the insert is idempotent on replay — a deploy that runs the migration twice must not file a
+    // second remediation task for the same line.
+    await seed("office_dallas");
+    await seedPromotionChain("office_dallas");
+    await pg.exec(`
+      INSERT INTO office_dallas.estimate_extractions (id, status, quantity) VALUES
+        ('11111111-1111-4111-8111-111111111111', 'processed', NULL),
+        ('66666666-6666-4666-8666-666666666666', 'processed', 12);
+      INSERT INTO office_dallas.estimate_extraction_matches (id, extraction_id) VALUES
+        ('22222222-2222-4222-8222-222222222222', '11111111-1111-4111-8111-111111111111'),
+        ('77777777-7777-4777-8777-777777777777', '66666666-6666-4666-8666-666666666666');
+      INSERT INTO office_dallas.estimate_line_items (id, quantity) VALUES
+        ('33333333-3333-4333-8333-333333333333', 1),
+        ('88888888-8888-4888-8888-888888888888', 12);
+      INSERT INTO office_dallas.estimate_pricing_recommendations
+        (id, deal_id, extraction_match_id, promoted_estimate_line_item_id) VALUES
+        ('44444444-4444-4444-8444-444444444444',
+         '55555555-5555-4555-8555-555555555555',
+         '22222222-2222-4222-8222-222222222222',
+         '33333333-3333-4333-8333-333333333333'),
+        ('99999999-9999-4999-8999-999999999999',
+         '55555555-5555-4555-8555-555555555555',
+         '77777777-7777-4777-8777-777777777777',
+         '88888888-8888-4888-8888-888888888888');
+    `);
+
+    await pg.exec(MIGRATION_SQL);
+    await pg.exec(MIGRATION_SQL);
+
+    const { rows } = (await pg.query(
+      `SELECT subject_id::text AS subject_id FROM office_dallas.estimate_review_events`
+    )) as { rows: Array<{ subject_id: string }> };
+
+    expect(rows.map((row) => row.subject_id)).toEqual([
+      "33333333-3333-4333-8333-333333333333",
+    ]);
   });
 
   it("is REPLAYABLE — a second run changes nothing", async () => {

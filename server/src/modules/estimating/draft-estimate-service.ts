@@ -71,7 +71,24 @@ export async function loadApprovedRecommendationsForRun(
   tenantDb: TenantDb,
   dealId: string,
   generationRunId: string,
-  recommendationIds?: string[]
+  recommendationIds?: string[],
+  options: {
+    /**
+     * `FOR UPDATE`, OFF BY DEFAULT AND SCOPED WHEN ON. Locking is only correct for the rows a caller is
+     * about to write. Unconditionally locking the whole run held every qualifying recommendation, match
+     * and extraction for the duration of section and line-item creation, so two people promoting
+     * DISJOINT rows serialised, and an unrelated extraction edit blocked until the promotion finished.
+     */
+    lock?: boolean;
+    /**
+     * The effective-quantity gate, OFF BY DEFAULT. Applying it to the read that feeds duplicate-group
+     * derivation is a correctness bug, not just a scoping one: a filtered-out duplicate makes its valid
+     * sibling look UNIQUE, so the sibling promotes even when the filtered row already holds a promoted
+     * line item. Duplicates must be derived over the whole approved/overridden set; the gate belongs
+     * only on the read that decides what actually promotes.
+     */
+    requirePriceableQuantity?: boolean;
+  } = {}
 ) {
   if (recommendationIds && recommendationIds.length === 0) return [];
 
@@ -79,45 +96,27 @@ export async function loadApprovedRecommendationsForRun(
     eq(estimatePricingRecommendations.dealId, dealId),
     eq(estimatePricingRecommendations.createdByRunId, generationRunId),
     inArray(estimatePricingRecommendations.status, ["approved", "overridden"]),
-    // THE EXTRACTION MUST STILL HAVE A PRICEABLE QUANTITY, checked here because this is the query that
-    // puts a number into a client-facing estimate.
-    //
-    // An approval is a statement about a recommendation, and the recommendation outlives the quantity
-    // it was computed from: an estimator clearing a quantity leaves the approved row untouched, and
-    // nothing between here and the estimate looks at the extraction again. So a price derived from a
-    // number somebody explicitly deleted could still be promoted — and it would arrive looking exactly
-    // like every other approved line.
-    //
-    // Enforced at the PROMOTE rather than only at the edit, because the edit is one of several ways a
-    // quantity can end up absent (a reconciliation, a rerun, a hand-written correction), and this is
-    // the single point they all funnel through. Nonpositive is refused with null for the same reason
-    // the worker refuses it: `applyMarketRateAdjustment` cannot price it either.
-    // MANUAL ROWS ARE EXEMPT, keyed on `sourceType` and NOT on `selectedSourceType`. The creation path
-    // sets `sourceType: 'manual'` while persisting `selectedSourceType: null`, and a catalog-backed
-    // manual row selects `catalog_option` — so keying on the selection missed the ordinary case
-    // entirely and left those rows failing as `recommendation_unavailable`, which is the very bug this
-    // exemption was added to fix.
-    //
-    // A manual recommendation carries its own `manualQuantity` and
-    // `manualUnitPrice`, and `resolvePromotionLineValues` promotes those; its extraction match exists
-    // only as an active-artifact anchor. Gating it on that extraction's quantity meant clearing an
-    // unrelated source row made a perfectly valid hand-entered line vanish as
-    // `recommendation_unavailable` — breaking a path this change had no business touching.
-    //
-    // NaN IS EXCLUDED EXPLICITLY, because Postgres orders numeric NaN ABOVE all finite values: `NaN > 0`
-    // is TRUE, so the positive test alone would have ADMITTED a NaN quantity into a client estimate.
-    // Same mistake, opposite direction, as the worker's claim predicate.
-    // AN OVERRIDE IS EXEMPT ON THE SAME GROUNDS AS A MANUAL ROW, and for a reason the manual exemption
-    // above does not cover: `resolvePromotionLineValues` promotes `overrideQuantity` for these rows
-    // (`case "override"` below), so the anchor extraction's quantity is not the number that reaches the
-    // estimate. Gating on it dropped an otherwise complete override as `recommendation_unavailable` —
-    // and unlike the manual cases, an override row's `sourceType` is ordinarily `'extracted'`, so it
-    // missed the exemption above entirely.
-    //
-    // The override's OWN quantity is held to the identical standard, NaN included: exempting the row
-    // from the extraction's check must not exempt it from having a priceable number of its own,
-    // otherwise this widening reintroduces exactly the null-priced-as-one-unit bug the PR removes.
-    sql`(
+    ...(options.requirePriceableQuantity
+      ? [
+          // THE EFFECTIVE QUANTITY — the number promotion will actually use — must be priceable.
+          //
+          // `resolvePromotionLineValues` decides that number: for `selectedSourceType = 'override'` it
+          // takes `overrideQuantity ?? <fallback>`, and for everything else the extraction's. So the
+          // three alternatives below are mutually exclusive BY CONSTRUCTION, not by luck:
+          //
+          //   * a MANUAL row promotes its own manualQuantity; its extraction match is only an anchor.
+          //   * an override WITH a quantity of its own is judged on that quantity ALONE. The extraction
+          //     fallback is explicitly excluded for it — otherwise an override carrying 0, a negative
+          //     or NaN would fail its own alternative, be admitted by a healthy extraction, and then be
+          //     promoted with the INVALID override value, because the resolver prefers a non-null
+          //     override. That is a bad number in a client estimate, and the workbench simultaneously
+          //     called the same row unpromotable.
+          //   * everything else — including a PRICE-ONLY override, whose overrideQuantity is null and
+          //     which therefore genuinely falls back — is judged on the extraction.
+          //
+          // NaN is refused explicitly throughout: Postgres orders numeric NaN ABOVE all finite values,
+          // so `NaN > 0` is TRUE and a positive test alone would admit it.
+          sql`(
       ${estimatePricingRecommendations.sourceType} = 'manual'
       or (
         ${estimatePricingRecommendations.selectedSourceType} = 'override'
@@ -126,18 +125,24 @@ export async function loadApprovedRecommendationsForRun(
         and ${estimatePricingRecommendations.overrideQuantity} <> 'NaN'::numeric
       )
       or (
-        ${estimateExtractions.quantity} is not null
+        (
+          ${estimatePricingRecommendations.selectedSourceType} is distinct from 'override'
+          or ${estimatePricingRecommendations.overrideQuantity} is null
+        )
+        and ${estimateExtractions.quantity} is not null
         and ${estimateExtractions.quantity} > 0
         and ${estimateExtractions.quantity} <> 'NaN'::numeric
       )
     )`,
+        ]
+      : []),
   ];
 
   if (recommendationIds) {
     conditions.push(inArray(estimatePricingRecommendations.id, recommendationIds));
   }
 
-  return tenantDb
+  const query = tenantDb
     .select({
       recommendationId: estimatePricingRecommendations.id,
       description: estimateExtractions.rawLabel,
@@ -173,14 +178,19 @@ export async function loadApprovedRecommendationsForRun(
       estimateExtractions,
       eq(estimateExtractionMatches.extractionId, estimateExtractions.id)
     )
-    .where(and(...conditions))
-    // LOCKED, because the predicate above is otherwise a check-then-act. A quantity-clearing PATCH that
-    // commits after this SELECT returns but before the promotion loop writes its line item would find
-    // the recommendation already admitted — and the promotion's own advisory locks cover recommendation
-    // ids, not the joined extraction, so the two never serialise. `updateEstimateExtraction` takes
-    // `FOR UPDATE` on that row; taking it here too is what makes these two operations queue behind each
-    // other instead of interleaving.
-    .for("update") as Promise<PromotionCandidateRow[]>;
+    .where(and(...conditions));
+
+  // LOCKED ONLY WHEN ASKED, because the gate above is otherwise a check-then-act. A quantity-clearing
+  // PATCH that commits after this SELECT returns but before the promotion loop writes its line item
+  // would find the recommendation already admitted — and the promotion's own advisory locks cover
+  // recommendation ids, not the joined extraction, so the two never serialise. `updateEstimateExtraction`
+  // takes `FOR UPDATE` on that row; taking it here too is what makes them queue instead of interleave.
+  //
+  // Conditional because the wide duplicate-derivation read must NOT lock: it spans the whole run, and
+  // holding it for the length of section and line-item creation serialised unrelated promotions.
+  return (
+    options.lock ? query.for("update") : query
+  ) as unknown as Promise<PromotionCandidateRow[]>;
 }
 
 async function lockPromotionCandidates(
@@ -345,18 +355,40 @@ export async function promoteApprovedRecommendationsToEstimate({
 
     await lockPromotionCandidates(tx, dealId, approvedRecommendationIds);
 
+    // WIDE, UNGATED, UNLOCKED — the set duplicate groups are derived over. It must include rows whose
+    // quantity is no longer priceable: filtering them here made a valid sibling look UNIQUE, so it
+    // promoted even when the filtered row already held a promoted line item. Needing to READ a row is
+    // also not a reason to LOCK it.
     const recommendations = await loadApprovedRecommendationsForRun(
       tx,
       dealId,
       generationRunId
     );
 
+    // NARROW, GATED, LOCKED — exactly the rows this promotion will write.
+    const promotableCandidates = await loadApprovedRecommendationsForRun(
+      tx,
+      dealId,
+      generationRunId,
+      approvedRecommendationIds,
+      { lock: true, requirePriceableQuantity: true }
+    );
+    const promotableCandidateIds = new Set(
+      promotableCandidates.map((row) => row.recommendationId)
+    );
+
     const requestedRecommendationIds = new Set(approvedRecommendationIds);
     const derivedRecommendations = deriveEstimatePricingWorkbenchRows(
       recommendations as unknown as PromotionCandidateRow[]
     );
-    const requestedRecommendations = derivedRecommendations.filter((row) =>
-      requestedRecommendationIds.has(row.recommendationId)
+    const requestedRecommendations = derivedRecommendations.filter(
+      (row) =>
+        requestedRecommendationIds.has(row.recommendationId) &&
+        // Survived the gated, locked revalidation. A requested row that did not falls through to
+        // `missingRowErrors` — the same answer the caller would have got had its quantity been cleared
+        // a moment earlier — while STAYING in `derivedRecommendations`, so its duplicate sibling is
+        // still correctly blocked.
+        promotableCandidateIds.has(row.recommendationId)
     );
     const loadedRecommendationIds = new Set(
       requestedRecommendations.map((row) => row.recommendationId)

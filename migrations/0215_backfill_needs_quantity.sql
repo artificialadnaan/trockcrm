@@ -32,6 +32,7 @@ DO $tenant$
 DECLARE
   schema_name text;
   moved bigint;
+  flagged bigint;
 BEGIN
   FOR schema_name IN
     SELECT nspname FROM pg_namespace WHERE nspname LIKE 'office\_%' ESCAPE '\' ORDER BY nspname
@@ -55,6 +56,64 @@ BEGIN
       schema_name
     );
     GET DIAGNOSTICS moved = ROW_COUNT;
+
+    -- PARKING THE SOURCE DOES NOT UNDO THE PRICE. Some of those extractions were already PROMOTED, and
+    -- their estimate_line_items row is sitting in a client-facing estimate carrying the fabricated
+    -- quantity of 1, with its amount still in the totals. Moving the extraction to `needs_quantity`
+    -- makes the source correctable; it does nothing to the line already quoted. Supplying the real
+    -- quantity and rerunning then produces a CORRECTED recommendation alongside the stale line, so
+    -- without this the historical mispricing not only survives the deploy, it can be double-counted.
+    --
+    -- SURFACED, NOT DELETED. This migration will not silently alter a number a client has been shown:
+    -- removing or rewriting an already-quoted line is an estimator's decision, and one that needs the
+    -- deal in front of them. What the backfill owes them is to make the set findable and to say so.
+    -- `estimate_review_events` is the durable place for that — queryable, per-deal, and already the
+    -- record every other promote/override decision lands in.
+    --
+    -- IDEMPOTENT via NOT EXISTS on the same (subject, event_type) pair, matching the UPDATE above: a
+    -- replay records nothing twice. `user_id` is NULL because no person did this.
+    IF to_regclass(format('%I.estimate_review_events', schema_name)) IS NOT NULL THEN
+      EXECUTE format(
+        $rem$INSERT INTO %I.estimate_review_events
+               (deal_id, subject_type, subject_id, event_type, before_json, after_json, reason, user_id)
+             SELECT r.deal_id,
+                    'estimate_line_item',
+                    r.promoted_estimate_line_item_id,
+                    'remediation_required',
+                    jsonb_build_object(
+                      'quantity', li.quantity,
+                      'extractionId', e.id,
+                      'extractionQuantity', e.quantity,
+                      'recommendationId', r.id
+                    ),
+                    '{}'::jsonb,
+                    'Migration 0215: promoted from an extraction that had no usable quantity, so this '
+                      || 'line was priced as ONE UNIT. The source extraction is now needs_quantity. '
+                      || 'Re-price or void this line; it is still counted in the estimate total.',
+                    NULL
+               FROM %I.estimate_extractions e
+               JOIN %I.estimate_extraction_matches m ON m.extraction_id = e.id
+               JOIN %I.estimate_pricing_recommendations r ON r.extraction_match_id = m.id
+               JOIN %I.estimate_line_items li ON li.id = r.promoted_estimate_line_item_id
+              WHERE e.status = 'needs_quantity'
+                AND r.promoted_estimate_line_item_id IS NOT NULL
+                AND (
+                  e.quantity IS NULL
+                  OR e.quantity <= 0
+                  OR e.quantity = 'NaN'::numeric
+                )
+                AND NOT EXISTS (
+                  SELECT 1
+                    FROM %I.estimate_review_events x
+                   WHERE x.subject_id = r.promoted_estimate_line_item_id
+                     AND x.event_type = 'remediation_required'
+                )$rem$,
+        schema_name, schema_name, schema_name, schema_name, schema_name, schema_name
+      );
+      GET DIAGNOSTICS flagged = ROW_COUNT;
+
+      RAISE NOTICE '0215: % already-promoted line item(s) flagged for remediation in %', flagged, schema_name;
+    END IF;
 
     -- Said out loud per office. A silent backfill of pricing state is exactly the kind of change
     -- somebody needs to be able to find in a deploy log six weeks later.
