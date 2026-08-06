@@ -2165,6 +2165,8 @@ export interface DirectorDashboardData {
     dealName: string;
     /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
     dealIsChangeOrder?: boolean | null;
+    /** `deals.scope_title` — travels with the flag; see DashboardAtRiskSummaryRow.dealScopeTitle. */
+    dealScopeTitle?: string | null;
     stageName: string;
     repName: string;
     daysInStage: number;
@@ -3663,6 +3665,10 @@ export async function getDirectorDashboard(
       // The source row carries the flag; this re-map used to drop it, so StaleDealList got `undefined`
       // and guessed from the name even once the query below started projecting the column.
       dealIsChangeOrder: s.dealIsChangeOrder,
+      // ...and the title has to come with it, for the SAME reason and through the SAME hop. It was
+      // dropped here once already, one field over. This is the only re-map between the at-risk rows
+      // and the director panel, so a field missing HERE is invisible everywhere upstream looks right.
+      dealScopeTitle: s.dealScopeTitle,
       stageName: s.stageName,
       repName: s.repName,
       daysInStage: s.daysInStage,

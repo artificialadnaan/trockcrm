@@ -313,6 +313,8 @@ export interface RepDetailData {
     dealName: string;
     /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
     dealIsChangeOrder?: boolean | null;
+    /** `deals.scope_title` — the only field distinguishing two change orders once the relabel fires. */
+    dealScopeTitle?: string | null;
     stageName: string;
     repName: string;
     daysInStage: number;
