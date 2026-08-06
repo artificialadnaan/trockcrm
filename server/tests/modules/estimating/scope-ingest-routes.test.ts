@@ -1,4 +1,6 @@
 import crypto from "node:crypto";
+import http from "node:http";
+import zlib from "node:zlib";
 import express from "express";
 import request from "supertest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -53,7 +55,13 @@ function flattenSql(value: unknown): string {
 }
 
 function sign(body: string): string {
-  return `sha256=${crypto.createHmac("sha256", SECRET).update(Buffer.from(body, "utf8")).digest("hex")}`;
+  return signBytes(Buffer.from(body, "utf8"));
+}
+
+/** Signs EXACT BYTES. The string form above cannot express a body that is not valid UTF-8, nor one
+ *  whose transmitted bytes differ from the bytes signed — both of which are under test below. */
+function signBytes(body: Buffer): string {
+  return `sha256=${crypto.createHmac("sha256", SECRET).update(body).digest("hex")}`;
 }
 
 async function appWithRoute() {
@@ -61,6 +69,59 @@ async function appWithRoute() {
   const app = express();
   app.use("/api/integrations/scope", scopeIngestRoutes);
   return app;
+}
+
+/**
+ * POST EXACT BYTES, over a real socket.
+ *
+ * supertest cannot express these tests. Superagent SERIALIZES a Buffer when the content type is JSON —
+ * `.send(buf)` arrives as `{"type":"Buffer","data":[…]}` — so a test that thought it was posting gzip
+ * was posting 76 bytes of JSON about a Buffer, and one that thought it was posting an invalid byte was
+ * posting its decimal code point. Both then failed for the wrong reason, which is worse than not being
+ * written: the failure looked like the finding under test.
+ *
+ * Everything else in this file posts strings, which superagent passes through untouched, so only the
+ * byte-exact cases need this.
+ */
+async function postRawBytes(
+  app: express.Express,
+  { headers, body }: { headers: Record<string, string>; body: Buffer }
+): Promise<{ status: number; body: Record<string, any> }> {
+  const server = http.createServer(app);
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  try {
+    const { port } = server.address() as { port: number };
+    return await new Promise((resolve, reject) => {
+      const req = http.request(
+        {
+          port,
+          method: "POST",
+          path: "/api/integrations/scope/walkthrough-extractions",
+          // Set explicitly: without it Node uses chunked encoding, and `Content-Length` is part of what
+          // the body parser reads to decide how much to buffer.
+          headers: { ...headers, "content-length": String(body.byteLength) },
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (chunk: Buffer) => chunks.push(chunk));
+          res.on("end", () => {
+            const text = Buffer.concat(chunks).toString("utf8");
+            let parsed: Record<string, any> = {};
+            try {
+              parsed = JSON.parse(text);
+            } catch {
+              // A non-JSON error page is a legitimate answer to assert a status against.
+            }
+            resolve({ status: res.statusCode ?? 0, body: parsed });
+          });
+        }
+      );
+      req.on("error", reject);
+      req.end(body);
+    });
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 }
 
 /**
@@ -243,6 +304,67 @@ describe("the machine door into estimating", () => {
     const res = await req.set("x-trock-scope-signature", sign(body)).send(body);
 
     expect(res.status).toBe(415);
+    expect(mocks.ingestWalkthrough).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["gzip", (raw: Buffer) => zlib.gzipSync(raw)],
+    ["deflate", (raw: Buffer) => zlib.deflateSync(raw)],
+    ["br", (raw: Buffer) => zlib.brotliCompressSync(raw)],
+  ])("REFUSES a %s-encoded body rather than signing bytes that were never sent", async (encoding, compress) => {
+    // THE SIGNATURE MUST COVER THE WIRE BYTES. body-parser's `raw()` inflates a compressed body by
+    // default (read.js `contentstream`: it decompresses unless `inflate === false`), so `req.body` was
+    // the DECOMPRESSED JSON. That breaks the contract in both directions: a sender that signs what it
+    // actually transmitted gets a 401, and a sender that signs the uncompressed bytes is accepted on a
+    // signature covering something other than the request. The second is the dangerous one — an
+    // attacker who can re-compress a body changes the transmitted bytes without disturbing the HMAC.
+    //
+    // Refused outright rather than verified pre-inflation: the only sender is trock-scope, an exact-byte
+    // contract is far easier to keep than a "sign the compressed form" one, and a 415 tells the sender
+    // precisely what to change.
+    const raw = Buffer.from(JSON.stringify(VALID), "utf8");
+    const res = await postRawBytes(await appWithRoute(), {
+      headers: {
+        "content-type": "application/json",
+        "content-encoding": encoding,
+        // Signs the UNCOMPRESSED bytes — the sender the old behaviour silently accepted, because the
+        // parser handed the route exactly these bytes after inflating.
+        "x-trock-scope-signature": signBytes(raw),
+      },
+      body: compress(raw),
+    });
+
+    expect(res.status).toBe(415);
+    expect(res.body.error).toMatch(/encoding/i);
+    expect(mocks.ingestWalkthrough).not.toHaveBeenCalled();
+  });
+
+  it("REFUSES malformed UTF-8 instead of storing a substituted character", async () => {
+    // `Buffer.toString("utf8")` is LOSSY: an invalid byte becomes U+FFFD rather than an error. The
+    // result is still valid JSON, still passes every validator, and commits with a 201 — so the row
+    // stored is not the row whose bytes were signed, and a sender's encoding bug is reported as a
+    // success. The byte goes inside `rawLabel`, a free-text field, precisely so the request would
+    // otherwise sail through to `ingestWalkthrough`.
+    const json = JSON.stringify(VALID);
+    const marker = "Replace wall base";
+    const splitAt = json.indexOf(marker) + marker.length;
+    expect(splitAt).toBeGreaterThan(marker.length); // the fixture still contains the anchor
+    const body = Buffer.concat([
+      Buffer.from(json.slice(0, splitAt), "utf8"),
+      // A lone continuation byte: never valid UTF-8 in any position.
+      Buffer.from([0xff]),
+      Buffer.from(json.slice(splitAt), "utf8"),
+    ]);
+
+    const res = await postRawBytes(await appWithRoute(), {
+      headers: {
+        "content-type": "application/json",
+        "x-trock-scope-signature": signBytes(body),
+      },
+      body,
+    });
+
+    expect(res.status).toBe(400);
     expect(mocks.ingestWalkthrough).not.toHaveBeenCalled();
   });
 

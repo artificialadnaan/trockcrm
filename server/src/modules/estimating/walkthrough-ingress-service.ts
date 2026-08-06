@@ -11,6 +11,7 @@ import { and, eq, isNull, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import {
+  deals,
   estimateDocumentParseRuns,
   estimateExtractions,
   estimateSourceDocuments,
@@ -2040,6 +2041,48 @@ export async function ingestWalkthrough({
         payload.walkthroughId
       )}, 0))`
     );
+
+    // DEAL AUTHORIZATION, RE-READ AND LOCKED INSIDE THIS TRANSACTION.
+    //
+    // Every caller checks the deal before calling in — `scope-ingest-routes.ts` proves it is active and
+    // belongs to the office. That check is a separate statement in a separate transaction, so it is a
+    // TOCTOU gate: a deal archived in the window between it and these writes leaves a file, a source
+    // document, a parse run and a full set of extractions filed under a deal no CRM screen will ever
+    // show — and the sender is told 201, so it records the export as delivered and never retries.
+    //
+    // An earlier revision of the route's comment claimed the ingress already re-read the deal here. It
+    // did not; there was no `deals` lookup in this function at all. That claim was the worse half of the
+    // bug, because it told the next reader a hazard was handled — the same way the project check's own
+    // comment once did. It is true now.
+    //
+    // `FOR SHARE`, for exactly the reason the project lock below uses it: `is_active` is a NON-KEY
+    // column, so `FOR KEY SHARE` permits the archiving UPDATE — permitting non-key updates is what KEY
+    // SHARE is for — and would read like a lock while being none. `FOR UPDATE` would work but is
+    // stronger than the property needs: it would serialize two unrelated walkthroughs onto the same
+    // deal, which is the ordinary case here, whereas `FOR SHARE` lockers do not conflict with each
+    // other. Both orderings are then safe: an archive that gets there first is visible to this
+    // statement's own snapshot at READ COMMITTED and the request is refused; an archive that arrives
+    // after blocks until this transaction ends, so the writes it authorized were authorized when they
+    // happened.
+    //
+    // AFTER the advisory lock, never before: that lock is documented as the first statement in this
+    // transaction, and the consistent order (advisory -> deal -> project) is also what keeps two
+    // concurrent ingresses from deadlocking against each other.
+    const [deal] = await tx
+      .select({ id: deals.id })
+      .from(deals)
+      .where(and(eq(deals.id, payload.dealId), eq(deals.isActive, true)))
+      .limit(1)
+      .for("share");
+
+    if (!deal) {
+      throw new AppError(
+        404,
+        `Deal ${payload.dealId} is not an active deal in this office. A walkthrough is filed against ` +
+          `the deal, so ingesting one for an archived or unknown deal would write a file, a document, ` +
+          `a parse run and every extraction under a record no CRM screen shows.`
+      );
+    }
 
     // PROJECT AUTHORIZATION, and it belongs HERE rather than in the validator because it is a database
     // question, not a shape question.

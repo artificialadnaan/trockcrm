@@ -83,7 +83,25 @@ scopeIngestRoutes.post(
   "/walkthrough-extractions",
   // The limit is the CONTRACT's, imported rather than restated — see MAX_WALKTHROUGH_PAYLOAD_BYTES.
   // A literal here is what let the door refuse payloads the validator next door called valid.
-  express.raw({ type: "application/json", limit: MAX_WALKTHROUGH_TRANSPORT_BYTES }),
+  //
+  // `inflate: false` IS THE SIGNING CONTRACT. body-parser DECOMPRESSES by default (read.js
+  // `contentstream` inflates anything whose `Content-Encoding` is not `identity`), so with a compressed
+  // request `req.body` was the decompressed JSON and the HMAC covered bytes that were never on the
+  // wire. Both directions were wrong: a sender signing what it actually transmitted got a 401, and a
+  // sender signing the uncompressed form was ACCEPTED on a signature that says nothing about the
+  // request — so anyone able to re-compress a body could change the transmitted bytes without
+  // disturbing the signature.
+  //
+  // Refused rather than verified pre-inflation. Capturing the raw stream ahead of the parser is
+  // possible, but it means maintaining a second body path whose only job is to keep two
+  // representations in agreement; the sole sender is trock-scope, and "sign exactly what you send,
+  // uncompressed" is a contract that cannot drift. body-parser raises a 415 `encoding.unsupported`,
+  // which the error handler at the bottom of this router turns into an actionable message.
+  express.raw({
+    type: "application/json",
+    limit: MAX_WALKTHROUGH_TRANSPORT_BYTES,
+    inflate: false,
+  }),
   async (req, res, next) => {
     try {
       // `express.raw({ type: "application/json" })` SKIPS parsing for any other content type — and for a
@@ -104,9 +122,30 @@ scopeIngestRoutes.post(
         return;
       }
 
+      // DECODED FATALLY, because `Buffer.toString("utf8")` is LOSSY and this endpoint's whole claim is
+      // that what it stores is what was signed. An invalid byte becomes U+FFFD rather than an error, and
+      // the substituted text is usually still valid JSON — so a malformed export passed every validator
+      // and committed with a 201, storing a label or a piece of transcript evidence that differs from
+      // the bytes whose HMAC was verified. The sender is told it filed correctly; nothing anywhere
+      // records that a character was replaced.
+      //
+      // `TextDecoder` with `fatal: true` throws on any ill-formed sequence. `ignoreBOM: false` is the
+      // default and is left alone deliberately: a leading BOM is stripped, which keeps the JSON parse
+      // working for a sender that emits one — the BOM is a legitimate encoding of nothing, not a
+      // corrupted character.
+      let decoded: string;
+      try {
+        decoded = new TextDecoder("utf-8", { fatal: true }).decode(rawBody);
+      } catch {
+        res.status(400).json({
+          error: "Body is not well-formed UTF-8; the signed bytes must decode exactly.",
+        });
+        return;
+      }
+
       let parsed: unknown;
       try {
-        parsed = JSON.parse(rawBody.toString("utf8"));
+        parsed = JSON.parse(decoded);
       } catch {
         res.status(400).json({ error: "Body is not valid JSON" });
         return;
@@ -169,10 +208,18 @@ scopeIngestRoutes.post(
       // atomicity guarantee false. The service owns the only transaction; this supplies the office
       // search_path and the actor the audit triggers read.
       //
-      // The two checks below therefore run OUTSIDE that transaction. They are reads whose job is to
-      // refuse a request, not to hold a state: the ingress re-reads the deal inside its own transaction,
-      // and the actor is a foreign key the write would fail on regardless. What they buy is a clean
-      // 404 instead of a constraint error.
+      // The two checks below therefore run OUTSIDE that transaction, and are GATES, not guarantees.
+      // An earlier version of this comment claimed the ingress re-read the deal inside its own
+      // transaction. It did not — `ingestWalkthrough` contained no `deals` lookup at all — so this was
+      // a TOCTOU window asserted to be closed, which is worse than one left open and labelled. A deal
+      // archived between this read and the service's writes got a full chain filed under it and a 201.
+      //
+      // `ingestWalkthrough` now genuinely re-reads the deal inside its transaction and holds it with
+      // `FOR SHARE`, which is what actually closes the window; the check here is kept because it is
+      // cheap, because it answers a clean 404 naming the office rather than surfacing the service's
+      // error, and because it is what scopes `dealId` to the office `officeSlug` resolved. The actor
+      // check is the same shape: a foreign key the write would fail on regardless, refused early with
+      // a better answer than a constraint violation.
       const result = await runInOfficeAsUser(office, userId, async (officeDb) => {
         // THE ACTOR IS PROVED, not accepted. `files.uploaded_by` and the source document's uploader are
         // both stamped from this id, so an unverified value would put a person's name on a machine's
@@ -237,6 +284,17 @@ scopeIngestRoutes.use(
           `limit is ${MAX_WALKTHROUGH_PAYLOAD_BYTES} bytes of canonical JSON (validated per payload, ` +
           `so a conforming export is never refused here for its formatting alone) — split the export ` +
           `by walkthrough.`,
+      });
+      return;
+    }
+    // `encoding.unsupported` — raised by the body parser's `inflate: false`, before any handler runs.
+    // Unhandled it is a bare 415 with an HTML body, which tells a machine sender nothing about what to
+    // change; the signing contract is the reason for the refusal, so the answer says so.
+    if (err && typeof err === "object" && (err as { type?: string }).type === "encoding.unsupported") {
+      res.status(415).json({
+        error:
+          `Content-Encoding is not supported: the signature covers the exact bytes of the request, so ` +
+          `the body must be sent uncompressed and signed as transmitted.`,
       });
       return;
     }
