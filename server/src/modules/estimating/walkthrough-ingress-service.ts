@@ -502,6 +502,33 @@ export function detectWalkthroughContactSheetArtifactDrift(
 export const MAX_WALKTHROUGH_SCOPE_ROWS = 1000;
 
 /**
+ * The transcript quote grounding ONE scope row. Bounded for the same reason `rawLabel` is — an
+ * unbounded field makes the payload's own size unbounded, and the sender learns that only as a
+ * transport failure it cannot act on.
+ *
+ * Generous on purpose: this is a spoken clause, not a document, and truncating evidence is worse than
+ * refusing it (the clause that would be cut is usually the qualifying one — same argument as rawLabel).
+ * It is NOT bounded by a column: `evidenceText` reaches `estimate_line_items.notes`, which is `text`.
+ */
+export const MAX_WALKTHROUGH_EVIDENCE_TEXT_CHARS = 4000;
+
+/**
+ * THE ONE SIZE LIMIT, read by both the contract and the transport.
+ *
+ * `scope-ingest-routes.ts` passes this straight to `express.raw({ limit })`, so the bytes the door
+ * accepts and the bytes this contract promises are the same number by construction rather than by
+ * anyone keeping two literals in step. That mattered here: the door shipped with a 1 MiB literal while
+ * this validator permitted 1000 rows with an UNBOUNDED `evidenceText`, so a structurally valid export
+ * was refused before it was ever validated — and, because Express's `entity.too.large` was unhandled,
+ * refused as a generic 500 the sender could do nothing with.
+ *
+ * 8 MiB comfortably clears the contract's realistic worst case (1000 rows × ~4.3 KB of bounded text
+ * ≈ 4.3 MB of ASCII) with room for multi-byte transcripts, and is small enough that the pre-signature
+ * buffer an unauthenticated caller can force stays bounded.
+ */
+export const MAX_WALKTHROUGH_PAYLOAD_BYTES = 8 * 1024 * 1024;
+
+/**
  * Rows per INSERT. Each row binds 15 parameters and Postgres's protocol caps a single statement at
  * 65535 of them, so an unchunked insert would break somewhere north of ~4300 rows with a protocol
  * error rather than anything actionable. 200 rows = 3000 parameters, comfortably clear, and few
@@ -1218,6 +1245,26 @@ export async function insertWalkthroughExtractions({
 const LONE_SURROGATE_PATTERN =
   /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
+/**
+ * `evidenceText`, bounded. Delegates to `requireString` first so the NUL / lone-surrogate refusals stay
+ * in ONE place — a private copy of those checks is exactly how one field ends up storable and another
+ * not. The length check then mirrors `rawLabel`'s: refuse now, with the number, rather than let an
+ * unbounded field decide the payload's size and surface as a transport error the sender cannot read.
+ */
+function requireEvidenceText(value: unknown, field: string): string {
+  const text = requireString(value, field);
+  if (text.length > MAX_WALKTHROUGH_EVIDENCE_TEXT_CHARS) {
+    throw new AppError(
+      400,
+      `${field} is ${text.length} characters, over the ${MAX_WALKTHROUGH_EVIDENCE_TEXT_CHARS}-character ` +
+        `limit. evidenceText is the spoken clause this row is grounded in, not a document; an export ` +
+        `this long is a segmentation bug upstream. It is not truncated, because the clause that would ` +
+        `be cut is usually the qualifying one.`
+    );
+  }
+  return text;
+}
+
 function requireString(value: unknown, field: string): string {
   if (typeof value !== "string") {
     throw new AppError(400, `${field} must be a string`);
@@ -1637,7 +1684,7 @@ function validateScopeRow(value: unknown, index: number): WalkthroughScopeRow {
     quantity,
     unit,
     confidence,
-    evidenceText: requireString(row.evidenceText, `${at}.evidenceText`),
+    evidenceText: requireEvidenceText(row.evidenceText, `${at}.evidenceText`),
     evidence: {
       clipId: requireNonEmptyString(evidence.clipId, `${at}.evidence.clipId`),
       timelineMs,

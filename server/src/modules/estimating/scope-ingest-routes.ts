@@ -5,7 +5,18 @@ import { deals, users } from "@trock-crm/shared/schema";
 import { pool } from "../../db.js";
 import { runInOfficeTransaction, type FieldOffice } from "../field/cross-office.js";
 import { createWalkthroughContactSheetStore } from "./walkthrough-contact-sheet-store.js";
-import { ingestWalkthrough } from "./walkthrough-ingress-service.js";
+import {
+  ingestWalkthrough,
+  validateWalkthroughIngressPayload,
+  MAX_WALKTHROUGH_PAYLOAD_BYTES,
+} from "./walkthrough-ingress-service.js";
+
+/**
+ * Same shape as the three backfill scripts use. `dealId` and `userId` land on `uuid` columns, and a
+ * non-UUID string passes every non-empty check above only to raise a Postgres `22P02` inside the office
+ * transaction — a 500 for what is plainly a malformed request.
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * The ONE door a machine may use to file walkthrough scope into estimating.
@@ -63,7 +74,9 @@ async function resolveOfficeBySlug(slug: string): Promise<FieldOffice | null> {
 
 scopeIngestRoutes.post(
   "/walkthrough-extractions",
-  express.raw({ type: "application/json", limit: "1mb" }),
+  // The limit is the CONTRACT's, imported rather than restated — see MAX_WALKTHROUGH_PAYLOAD_BYTES.
+  // A literal here is what let the door refuse payloads the validator next door called valid.
+  express.raw({ type: "application/json", limit: MAX_WALKTHROUGH_PAYLOAD_BYTES }),
   async (req, res, next) => {
     try {
       const rawBody = req.body as Buffer;
@@ -73,19 +86,45 @@ scopeIngestRoutes.post(
         return;
       }
 
-      let body: Record<string, unknown>;
+      let parsed: unknown;
       try {
-        body = JSON.parse(rawBody.toString("utf8")) as Record<string, unknown>;
+        parsed = JSON.parse(rawBody.toString("utf8"));
       } catch {
         res.status(400).json({ error: "Body is not valid JSON" });
         return;
       }
+      // `JSON.parse` returns valid JSON that is not an object for `null`, `[]`, `7` and `"x"`. Reading
+      // `.officeSlug` off `null` THROWS, so the most trivial malformed body — four bytes — was the one
+      // shape that reached the catch-all as a 500 instead of a 400.
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+        res.status(400).json({ error: "Body must be a JSON object" });
+        return;
+      }
+      const body = parsed as Record<string, unknown>;
 
       const officeSlug = typeof body.officeSlug === "string" ? body.officeSlug.trim() : "";
       const dealId = typeof body.dealId === "string" ? body.dealId.trim() : "";
       const userId = typeof body.userId === "string" ? body.userId.trim() : "";
       if (!officeSlug || !dealId || !userId) {
         res.status(400).json({ error: "officeSlug, dealId and userId are required" });
+        return;
+      }
+
+      if (!UUID_RE.test(dealId) || !UUID_RE.test(userId)) {
+        res.status(400).json({ error: "dealId and userId must be UUIDs" });
+        return;
+      }
+
+      // VALIDATE THE WHOLE BODY BEFORE TOUCHING A TENANT. The ingress validator is the contract, and it
+      // is cheap and pure — running it first means a malformed export costs one office lookup fewer and,
+      // more importantly, answers 400 with the offending field instead of failing partway through a
+      // transaction. It is deliberately run AGAIN by `ingestWalkthrough` below: this call is a gate, not
+      // a substitute, and the ingress must stay safe for callers that do not come through this door.
+
+      try {
+        validateWalkthroughIngressPayload({ ...body, dealId, userId });
+      } catch (validationError) {
+        next(validationError);
         return;
       }
 
@@ -110,10 +149,14 @@ scopeIngestRoutes.post(
 
         // Re-read INSIDE the office schema. A deal id from another office finds nothing here, which is
         // what keeps `officeSlug` from being a way to reach across tenants.
+        // `isActive` is this schema's soft-delete marker, and every per-deal action route reaches a deal
+        // through `getDealById`, which hides inactive ones. Without it a delayed or replayed export
+        // lands a file, a source document, a parse run and extraction rows under a deal no CRM screen
+        // will ever show — and answers 201, so the sender records it as filed.
         const [deal] = await officeDb
           .select({ id: deals.id })
           .from(deals)
-          .where(eq(deals.id, dealId))
+          .where(and(eq(deals.id, dealId), eq(deals.isActive, true)))
           .limit(1);
         if (!deal) return { status: 404 as const, error: "Deal not found in this office" };
 
@@ -135,5 +178,30 @@ scopeIngestRoutes.post(
     } catch (err) {
       next(err);
     }
+  }
+);
+
+/**
+ * `entity.too.large`, answered as a 413 instead of a 500.
+ *
+ * Mounted with `.use()` and NOT inline in the `.post()` chain: Express's `Route.dispatch` SKIPS any
+ * handler with arity > 3, so a four-argument function in a route chain is silently never called — it
+ * does not error, it just does nothing, which is how the first attempt at this passed review-by-eye and
+ * failed every test in the file. Router-level `.use` is where four-arity means "error handler".
+ *
+ * Scoped to THIS router so it cannot change how any other route reports a body-size failure.
+ */
+scopeIngestRoutes.use(
+  (err: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (err && typeof err === "object" && (err as { type?: string }).type === "entity.too.large") {
+      res.status(413).json({
+        error:
+          `Body exceeds the ${MAX_WALKTHROUGH_PAYLOAD_BYTES}-byte walkthrough ingress limit. Split the ` +
+          `export by walkthrough; a single walkthrough is capped at ${"1000"} scope rows and this ` +
+          `ceiling is sized to hold that many bounded rows.`,
+      });
+      return;
+    }
+    next(err);
   }
 );
