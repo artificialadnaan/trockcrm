@@ -147,6 +147,10 @@ export function activeProjectWhere(search?: string) {
         -- For HubSpot-imported deals the canonical DFW/ATL number lives in project_number (deal_number
         -- holds the HS- id), so it must be searchable too.
         OR d.project_number ILIKE ${`%${normalizedSearch}%`}
+        -- The short accounting title. A change-order child's NAME is the generic "<Parent> — Change
+        -- Order N", so the scope phrase a field user actually remembers ("Panel Relocation") lives
+        -- only here; without this column that deal is unfindable from the Projects page.
+        OR d.scope_title ILIKE ${`%${normalizedSearch}%`}
         OR d.property_address ILIKE ${`%${normalizedSearch}%`}
         OR d.property_city ILIKE ${`%${normalizedSearch}%`}
       )
