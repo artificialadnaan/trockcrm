@@ -662,6 +662,91 @@ describe("buildEstimatingWorkbenchState", () => {
     ]);
   });
 
+  it("clears promotable for a CORRECTED extraction whose live quantity is not the one it was priced from", async () => {
+    // The other half of the readiness mirror, and the case the repair itself creates. Migration 0215
+    // parks a fabricated-as-one-unit row at `needs_quantity`; an estimator then supplies the real
+    // number. Live-and-positive now holds, but `resolvePromotionLineValues` still promotes the STORED
+    // `recommendedQuantity` — the fabricated 1 — so the promote query refuses the row on the equality
+    // added alongside this. Checking only positivity here left the workbench counting it as ready and
+    // `canPromote` true, so the button stayed live and promotion answered `recommendation_unavailable`
+    // on the very rows the migration exists to repair.
+    const { tenantDb } = makeDb({
+      documents: [{ id: "doc-1", activeParseRunId: "run-1", ocrStatus: "completed" }],
+      extractions: [
+        {
+          id: "ext-1",
+          documentId: "doc-1",
+          status: "approved",
+          // Corrected to the real number...
+          quantity: "5",
+          metadataJson: { sourceParseRunId: "run-1", activeArtifact: true },
+        },
+      ],
+      matches: [{ id: "match-1", extractionId: "ext-1", status: "selected" }],
+      pricing: [
+        {
+          id: "rec-corrected",
+          extractionMatchId: "match-1",
+          status: "approved",
+          createdByRunId: "run-1",
+          sourceType: "explicit",
+          // ...while the recommendation still carries the one it was actually priced from.
+          recommendedQuantity: "1",
+          normalizedIntent: "coping metal",
+          sourceRowIdentity: "roof:coping-1",
+          sectionName: "Roof",
+        },
+      ],
+    });
+
+    const state = await buildEstimatingWorkbenchState(tenantDb, "deal-1");
+
+    expect(state.summary.pricing.readyToPromote).toBe(0);
+    expect(state.pricingRows).toEqual([
+      expect.objectContaining({ id: "rec-corrected", promotable: false }),
+    ]);
+  });
+
+  it("compares the priced quantity by VALUE, so numeric scale does not make a matching row unpromotable", async () => {
+    // `numeric(14, 3)` round-trips as a string, and the promote query compares with Postgres numeric
+    // equality — where `5` and `5.000` are the same number. A string comparison here would call this
+    // row unpromotable while promotion accepts it: the same disagreement as the test above, inverted,
+    // and the more expensive direction because it hides a ready row instead of offering a dead button.
+    const { tenantDb } = makeDb({
+      documents: [{ id: "doc-1", activeParseRunId: "run-1", ocrStatus: "completed" }],
+      extractions: [
+        {
+          id: "ext-1",
+          documentId: "doc-1",
+          status: "approved",
+          quantity: "5",
+          metadataJson: { sourceParseRunId: "run-1", activeArtifact: true },
+        },
+      ],
+      matches: [{ id: "match-1", extractionId: "ext-1", status: "selected" }],
+      pricing: [
+        {
+          id: "rec-scaled",
+          extractionMatchId: "match-1",
+          status: "approved",
+          createdByRunId: "run-1",
+          sourceType: "explicit",
+          recommendedQuantity: "5.000",
+          normalizedIntent: "coping metal",
+          sourceRowIdentity: "roof:coping-1",
+          sectionName: "Roof",
+        },
+      ],
+    });
+
+    const state = await buildEstimatingWorkbenchState(tenantDb, "deal-1");
+
+    expect(state.summary.pricing.readyToPromote).toBe(1);
+    expect(state.pricingRows).toEqual([
+      expect.objectContaining({ id: "rec-scaled", promotable: true }),
+    ]);
+  });
+
   it("keeps promotion duplicate-blocking behavior intact", async () => {
     const { tenantDb } = makeDb({
       documents: [{ id: "doc-1", activeParseRunId: "run-1", ocrStatus: "completed" }],

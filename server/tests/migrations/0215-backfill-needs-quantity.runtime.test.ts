@@ -244,6 +244,61 @@ describe("migration 0215 — parking already-priced rows that never had a usable
     ]);
   });
 
+  it("does NOT flag an override carrying ZERO or NaN — that number came from the override", async () => {
+    // `resolvePromotionLineValues` does `quantity = row.overrideQuantity ?? quantity`, and `??` falls
+    // back on NULL ALONE. A zero, a negative or a NaN override is therefore the number that reached the
+    // estimate; the extraction's missing quantity had nothing to do with it. The remediation this
+    // migration writes says the line "was priced as ONE UNIT" from the extraction — for these rows that
+    // is simply untrue, and a wrong remediation task is worse than none.
+    //
+    // Such a line may well be broken, for a DIFFERENT reason. That is not this migration's claim to
+    // make, and no code path ORIGINATES a non-null `override_quantity` today — the insert in
+    // recommendation-persistence-service.ts writes NULL, and the carry-forward inserts in
+    // draft-estimate-service.ts only copy an existing value — so the exemption is defensive.
+    await seed("office_dallas");
+    await seedPromotionChain("office_dallas");
+    await pg.exec(`
+      INSERT INTO office_dallas.estimate_extractions (id, status, quantity) VALUES
+        ('11111111-1111-4111-8111-111111111111', 'processed', NULL),
+        ('66666666-6666-4666-8666-666666666666', 'processed', NULL),
+        ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'processed', NULL);
+      INSERT INTO office_dallas.estimate_extraction_matches (id, extraction_id) VALUES
+        ('22222222-2222-4222-8222-222222222222', '11111111-1111-4111-8111-111111111111'),
+        ('77777777-7777-4777-8777-777777777777', '66666666-6666-4666-8666-666666666666'),
+        ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+      INSERT INTO office_dallas.estimate_line_items (id, quantity) VALUES
+        ('33333333-3333-4333-8333-333333333333', 1),
+        ('88888888-8888-4888-8888-888888888888', 0),
+        ('cccccccc-cccc-4ccc-8ccc-cccccccccccc', 0);
+      INSERT INTO office_dallas.estimate_pricing_recommendations
+        (id, deal_id, extraction_match_id, promoted_estimate_line_item_id,
+         source_type, selected_source_type, override_quantity) VALUES
+        -- the control: extraction-derived, priced as one unit, MUST still be flagged so a green
+        -- assertion below cannot come from the migration failing to run at all
+        ('44444444-4444-4444-8444-444444444444', '55555555-5555-4555-8555-555555555555',
+         '22222222-2222-4222-8222-222222222222', '33333333-3333-4333-8333-333333333333',
+         'extracted', NULL, NULL),
+        -- override of ZERO: nullish-coalescing keeps the 0, so the line took the override's number
+        ('99999999-9999-4999-8999-999999999999', '55555555-5555-4555-8555-555555555555',
+         '77777777-7777-4777-8777-777777777777', '88888888-8888-4888-8888-888888888888',
+         'extracted', 'override', 0),
+        -- override of NaN: non-null, so likewise not fabricated from the extraction
+        ('dddddddd-dddd-4ddd-8ddd-dddddddddddd', '55555555-5555-4555-8555-555555555555',
+         'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+         'extracted', 'override', 'NaN'::numeric);
+    `);
+
+    await pg.exec(MIGRATION_SQL);
+
+    const { rows } = (await pg.query(
+      `SELECT subject_id::text AS subject_id FROM office_dallas.estimate_review_events`
+    )) as { rows: Array<{ subject_id: string }> };
+
+    expect(rows.map((row) => row.subject_id)).toEqual([
+      "33333333-3333-4333-8333-333333333333",
+    ]);
+  });
+
   it("STILL flags an override whose own quantity is unusable, since it falls back to the extraction", async () => {
     // The narrowing must not become a hole: an override with a null quantity falls back to the
     // extraction, so its line WAS priced from the invalid number and does need remediation.

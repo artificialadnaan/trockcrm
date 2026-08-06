@@ -160,6 +160,44 @@ describe("extraction-review-service", () => {
     expect(sqlTextOf(updateSetCalls[0].status)).toContain("pending");
   });
 
+  it("REQUEUES an APPROVED row when its quantity genuinely changes, or it is stranded", async () => {
+    // THE OTHER END OF THE PROMOTE EQUALITY. Holding `approved` here looked like protecting a human
+    // decision, and for a CLEARED quantity it is — see the sibling test below. For a NEW usable
+    // quantity it strands the row instead: the worker reselects ordinary extractions only at
+    // `status = 'pending'`, so it is never re-priced, while the promote predicate now refuses its
+    // stored recommendation because that was computed from the OLD number. Neither repriceable nor
+    // promotable, and nothing on the screen says why.
+    //
+    // Requeuing is not undoing the review. The approval described a row whose quantity has since
+    // changed, `estimate_review_events` still holds both the approval and this edit, and `pending` is
+    // the only way this system expresses "needs pricing". Re-approving after the re-price is the
+    // honest cost.
+    const { tenantDb, updateSetCalls } = editHarness({
+      id: "ext-approved-moved",
+      status: "approved",
+      normalizedLabel: "Install laminate",
+      quantity: "700.000",
+      unit: "SF",
+      divisionHint: null,
+      rawLabel: "Install laminate",
+      metadataJson: {},
+    });
+
+    await updateEstimateExtraction({
+      tenantDb,
+      dealId: "deal-1",
+      extractionId: "ext-approved-moved",
+      userId: "user-1",
+      input: { quantity: "5" },
+    });
+
+    const sqlText = sqlTextOf(updateSetCalls[0].status);
+    expect(sqlText).toContain("pending");
+    // The claimable list itself, not merely the target — asserting `pending` alone passed before this
+    // change, because the CASE has always named `pending` in the branch `approved` fell past.
+    expect(sqlText).toContain("approved");
+  });
+
   it("flags a PROCESSED row when its quantity becomes zero, not only when it is cleared", async () => {
     // The worst surviving version of the original bug. Changing 700 to "0" satisfied neither branch, so
     // the status went untouched: the row kept `processed`, the worker only reselects ordinary rows at
@@ -324,12 +362,18 @@ describe("extraction-review-service", () => {
     expect(updateSetCalls[0].status).toBeUndefined();
   });
 
-  it("leaves any OTHER status alone when a quantity is edited", async () => {
-    // `approved`, `unmatched` and `overridden` are somebody else's state machine; an edit here has no
-    // business rewriting them.
+  it("leaves a REJECTED row alone when a quantity is edited", async () => {
+    // The limit of the requeue. `rejected` is a decision not to include this line at all, so it is not
+    // stranded by staying put the way an `approved` row was — and pushing a refused row back into
+    // pricing would spend worker time re-deriving a number nobody intends to use.
+    //
+    // This test used to be "leaves any OTHER status alone" and fixture an `approved` row, which is now
+    // exactly the case that DOES requeue. It survived the behaviour change only because its assertion
+    // was `toContain("else")` — true of both branches and of every CASE this function can build. The
+    // claimable list is asserted directly now, so the test fails if `rejected` is ever added to it.
     const { tenantDb, updateSetCalls } = editHarness({
-      id: "ext-app",
-      status: "approved",
+      id: "ext-rej",
+      status: "rejected",
       normalizedLabel: "Roofing tearoff",
       quantity: "1.000",
       unit: "ea",
@@ -341,16 +385,16 @@ describe("extraction-review-service", () => {
     await updateEstimateExtraction({
       tenantDb,
       dealId: "deal-1",
-      extractionId: "ext-app",
+      extractionId: "ext-rej",
       userId: "user-1",
       input: { quantity: "9.000" },
     });
 
-    // The expression IS sent — it has to be, since only the database can decide safely — but it is a
-    // no-op for any status other than `needs_quantity`: the CASE writes the column back to itself.
-    // `approved`, `unmatched` and `overridden` are somebody else's state machine.
+    // The expression IS sent — it has to be, since only the database can decide safely — but the CASE
+    // writes the column back to itself for a status it does not claim.
     const sqlText = sqlTextOf(updateSetCalls[0].status);
     expect(sqlText).toContain("else");
+    expect(sqlText).not.toContain("rejected");
   });
 
   it("marks an extraction approved and writes a review event", async () => {

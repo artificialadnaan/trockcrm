@@ -102,14 +102,24 @@ BEGIN
                 -- that — for both, the anchor extraction is only an artifact link, and the quoted line
                 -- may be perfectly correct. Flagging those would tell an estimator a valid line was
                 -- fabricated as one unit and ask them to void it: a false remediation task is worse
-                -- than none, because it teaches people to ignore the queue. Mirrors the promote
-                -- predicate's alternatives exactly, so the two cannot drift.
+                -- than none, because it teaches people to ignore the queue.
+                --
+                -- DELIBERATELY NOT THE PROMOTE PREDICATE'S OVERRIDE BRANCH, which additionally requires
+                -- the override quantity to be positive and finite. The two ask different questions:
+                -- promotion asks "is this row safe to price NOW", this asks "did this line's number
+                -- come from the invalid extraction". resolvePromotionLineValues does
+                -- `quantity = row.overrideQuantity ?? quantity`, and nullish-coalescing falls back on
+                -- NULL ALONE — so a zero, negative or NaN override IS the number that reached the
+                -- estimate. Such a line was not fabricated as one unit, and this remediation's text
+                -- would be false about it. It may be broken for its own reason; that is a different
+                -- claim, and no path ORIGINATES a non-null override_quantity today — the insert in
+                -- recommendation-persistence-service.ts writes NULL, and the two carry-forward inserts
+                -- in draft-estimate-service.ts only copy an existing value — so it is not a claim this
+                -- migration should invent. Every non-null override quantity is excluded here.
                 AND r.source_type IS DISTINCT FROM 'manual'
                 AND NOT (
                   r.selected_source_type = 'override'
                   AND r.override_quantity IS NOT NULL
-                  AND r.override_quantity > 0
-                  AND r.override_quantity <> 'NaN'::numeric
                 )
                 AND (
                   e.quantity IS NULL

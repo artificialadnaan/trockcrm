@@ -817,7 +817,21 @@ export async function buildEstimatingWorkbenchState(
     // the mismatch this function exists to fix. Null IS a claim, and is refused.
     if (extraction.quantity === undefined) return true;
     const quantity = Number(extraction.quantity);
-    return extraction.quantity !== null && Number.isFinite(quantity) && quantity > 0;
+    if (extraction.quantity === null || !Number.isFinite(quantity) || quantity <= 0) return false;
+    // AND IT MUST BE THE NUMBER THE RECOMMENDATION WAS PRICED FROM — the promote query's equality,
+    // mirrored. Positivity alone is what the repair path defeats: migration 0215 parks a
+    // fabricated-as-one-unit row at `needs_quantity`, an estimator supplies the real number, and every
+    // test above now passes while `resolvePromotionLineValues` still promotes the stored
+    // `recommendedQuantity`. Promotion refuses that row; without this, readiness said yes to it — so
+    // the rows the migration exists to repair were exactly the rows offering a button that fails.
+    //
+    // Compared as NUMBERS, not strings: `numeric(14, 3)` round-trips as text, and Postgres numeric
+    // equality makes `5` and `5.000` the same value. A string comparison would hide a genuinely ready
+    // row, which is the worse direction of the same disagreement.
+    if (row.recommendedQuantity === undefined) return true;
+    if (row.recommendedQuantity === null) return false;
+    const recommendedQuantity = Number(row.recommendedQuantity);
+    return Number.isFinite(recommendedQuantity) && recommendedQuantity === quantity;
   };
 
   // THE ROW'S OWN FLAG IS THE ONE DECISION, so the count in the header and the flag each row carries

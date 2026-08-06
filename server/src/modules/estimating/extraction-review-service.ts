@@ -135,10 +135,10 @@ export async function updateEstimateExtraction(args: {
   // estimator does exactly what the flag asks and the row silently stays dead: worse than the
   // mispricing the flag replaced, because that at least produced a number somebody could challenge.
   //
-  // Reset only from `needs_quantity`, and only once a quantity actually exists. Any other status is
-  // somebody else's state machine — `approved`, `unmatched`, `overridden` all mean things this edit has
-  // no business rewriting — and a null quantity would send the row back to be flagged again on the next
-  // run, which is a loop rather than a fix.
+  // Reset only from a claimable status, and only once a quantity actually exists. `rejected` and
+  // `unmatched` mean things this edit has no business rewriting, and a null quantity would send the row
+  // back to be flagged again on the next run, which is a loop rather than a fix. The exact claimable
+  // list, and why `approved` is on it, is at `statusAfterEdit` below.
   //
   // DECIDED IN SQL, UNDER THE UPDATE'S OWN ROW LOCK, not from the snapshot read above. `existing` is
   // read before this statement takes its lock, so the generation job can claim the row in between:
@@ -201,16 +201,33 @@ export async function updateEstimateExtraction(args: {
   // Requeuing on any quantity change is right beyond that legacy case: a priced row whose quantity
   // moved needs re-pricing, and `pending` is how this system says so.
   //
-  // AND IT DOES NOT OVERWRITE A HUMAN DECISION. `approved`, `rejected` and `overridden` are somebody's
-  // judgement about this row; making a quantity unpriceable is a reason to stop PRICING it, never a
-  // reason to silently undo a review. Those rows are held out of the promote by the quantity predicate
-  // in draft-estimate-service.ts, which is where the harm actually was.
+  // `approved` REQUEUES TOO — and the two branches below differ about it ON PURPOSE.
+  //
+  // Holding `approved` on a NEW usable quantity stranded the row. The worker reselects ordinary
+  // extractions only at `status = 'pending'`, so it was never re-priced; meanwhile the promote
+  // predicate in draft-estimate-service.ts refuses its stored recommendation, because that
+  // recommendation was computed from the quantity the estimator has just replaced. Neither repriceable
+  // nor promotable, with nothing on the screen to explain it — the same dead end the `processed` case
+  // above describes, reached through the review path instead of the pricing one.
+  //
+  // That is not undoing somebody's review. The approval was a statement about a row whose quantity has
+  // since changed; `estimate_review_events` still records both the approval and this edit; and
+  // `pending` is the only way this system says "needs pricing". Re-approving after the re-price is the
+  // honest cost, and the workbench's `approved` count becomes accurate rather than merely stable.
+  //
+  // THE CLEARING BRANCH KEEPS ITS RESTRAINT, because the asymmetry is real: a cleared quantity leaves
+  // nothing to re-price, so reopening the row buys no repair and still costs a human decision — and
+  // the promote predicate already holds that row back. Supplying a usable number is the opposite: the
+  // row CAN be repaired, and only `pending` repairs it.
+  //
+  // `rejected` is excluded from both. It is a decision not to include this line at all, so it is not
+  // stranded by staying put, and requeuing it would push a refused row back into pricing.
   //
   // Decided in SQL for the same reason the requeue is: `existing` is authoritative only until this
   // statement takes its own lock, and the CASE is evaluated when the row is held.
   const statusAfterEdit = becomesUnpriceable
     ? sql`case when ${estimateExtractions.status} in ('pending', 'needs_quantity', 'processed', 'unmatched') then 'needs_quantity' else ${estimateExtractions.status} end`
-    : sql`case when ${estimateExtractions.status} in ('needs_quantity', 'processed') then 'pending' else ${estimateExtractions.status} end`;
+    : sql`case when ${estimateExtractions.status} in ('needs_quantity', 'processed', 'approved') then 'pending' else ${estimateExtractions.status} end`;
 
   const [updated] = await args.tenantDb
     .update(estimateExtractions)
