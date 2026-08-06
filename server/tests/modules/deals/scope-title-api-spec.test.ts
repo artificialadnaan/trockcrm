@@ -64,7 +64,35 @@ describe("OpenAPI spec — scopeTitle is documented wherever description is", ()
       expect(properties.scopeTitle, `${label} documents description but not scopeTitle`).toBeDefined();
       const scopeTitle = properties.scopeTitle as JsonObject;
       expect(scopeTitle.maxLength, `${label} scopeTitle cap`).toBe(DEAL_SCOPE_TITLE_MAX_LENGTH);
+      // The SHAPE as well as the cap. Asserting only that the key exists with a maxLength let a later
+      // edit strip `type` or `nullable` and still pass — and `nullable` is not decoration here: it is
+      // what tells a generated client that null is a legal value at all, which is the whole clearing
+      // mechanism pinned in the test below.
+      expect(scopeTitle.type, `${label} scopeTitle type`).toBe("string");
+      expect(scopeTitle.nullable, `${label} scopeTitle nullable`).toBe(true);
     }
+  });
+
+  it("documents, on PATCH, that null CLEARS and an omitted key LEAVES IT ALONE", () => {
+    // This is the one that can lose data, and the spec is the only place it is written down.
+    //
+    // The write path is three-state, enforced by validateScopeTitlePayload's hasOwnProperty guard:
+    // a value sets, an explicit null clears, and an ABSENT key is left untouched so a partial PATCH
+    // cannot blank a title it never mentioned. A generated client reading a spec that documents only
+    // "nullable" reasonably sends null for "no change" — and that silently wipes the accounting title
+    // off every deal it touches. The distinction has to survive in prose, so it is asserted as prose.
+    const paths = apiSpec.paths as Record<string, Record<string, JsonObject>>;
+    const properties = requestBodyProperties(paths["/api/deals/{id}"].patch);
+    expect(properties).not.toBeNull();
+    const description = String((properties!.scopeTitle as JsonObject).description ?? "");
+
+    // Two halves, asserted separately so a failure says WHICH one went missing.
+    expect(description, "PATCH scopeTitle must document that null clears").toMatch(
+      /null[^.]*\bclear/i
+    );
+    expect(description, "PATCH scopeTitle must document that omitting the key changes nothing").toMatch(
+      /omit[^.]*\b(untouched|unchanged)\b/i
+    );
   });
 
   it("tells a caller how the write is rejected, so a 400 is actionable rather than mysterious", () => {
