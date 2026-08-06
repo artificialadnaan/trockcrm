@@ -132,6 +132,16 @@ export async function loadApprovedRecommendationsForRun(
         and ${estimateExtractions.quantity} is not null
         and ${estimateExtractions.quantity} > 0
         and ${estimateExtractions.quantity} <> 'NaN'::numeric
+        -- AND IT MUST BE THE NUMBER THIS RECOMMENDATION WAS PRICED FROM. Live-and-positive is not
+        -- enough: a row parked at needs_quantity by migration 0215 and then CORRECTED to a real value
+        -- satisfies every test above, while resolvePromotionLineValues still promotes the stored
+        -- recommendedQuantity -- commonly the fabricated 1 this PR exists to remove. Correcting the
+        -- extraction neither enqueues a rerun nor invalidates the recommendation, so without this the
+        -- repair hands an estimator a row that looks fixed and prices the old number. Refused here so
+        -- it must re-price, which is the only thing that actually repairs it. Same rule the worker's
+        -- reread already enforces (stillPriceable: it must be the SAME number the recommendation was
+        -- built from), applied at the other end of the same pipeline.
+        and ${estimateExtractions.quantity} = ${estimatePricingRecommendations.recommendedQuantity}
       )
     )`,
         ]

@@ -41,7 +41,10 @@ async function seedPromotionChain(schema: string) {
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       deal_id uuid NOT NULL,
       extraction_match_id uuid NOT NULL,
-      promoted_estimate_line_item_id uuid
+      promoted_estimate_line_item_id uuid,
+      source_type text,
+      selected_source_type text,
+      override_quantity numeric(14,3)
     );
     CREATE TABLE IF NOT EXISTS ${schema}.estimate_review_events (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -190,6 +193,84 @@ describe("migration 0215 — parking already-priced rows that never had a usable
     expect(rows.map((row) => row.subject_id)).toEqual([
       "33333333-3333-4333-8333-333333333333",
     ]);
+  });
+
+  it("does NOT flag a line that never took its number from the extraction", async () => {
+    // A manual recommendation promotes its own manualQuantity; an override with a quantity of its own
+    // promotes that. For both the anchor extraction is only an artifact link, so the quoted line can be
+    // perfectly correct even though the extraction is unpriceable. Telling an estimator such a line was
+    // fabricated as one unit and asking them to void it is a FALSE remediation task — worse than none,
+    // because it teaches people to ignore the queue.
+    await seed("office_dallas");
+    await seedPromotionChain("office_dallas");
+    await pg.exec(`
+      INSERT INTO office_dallas.estimate_extractions (id, status, quantity) VALUES
+        ('11111111-1111-4111-8111-111111111111', 'processed', NULL),
+        ('66666666-6666-4666-8666-666666666666', 'processed', NULL),
+        ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'processed', NULL);
+      INSERT INTO office_dallas.estimate_extraction_matches (id, extraction_id) VALUES
+        ('22222222-2222-4222-8222-222222222222', '11111111-1111-4111-8111-111111111111'),
+        ('77777777-7777-4777-8777-777777777777', '66666666-6666-4666-8666-666666666666'),
+        ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa');
+      INSERT INTO office_dallas.estimate_line_items (id, quantity) VALUES
+        ('33333333-3333-4333-8333-333333333333', 1),
+        ('88888888-8888-4888-8888-888888888888', 40),
+        ('cccccccc-cccc-4ccc-8ccc-cccccccccccc', 25);
+      INSERT INTO office_dallas.estimate_pricing_recommendations
+        (id, deal_id, extraction_match_id, promoted_estimate_line_item_id,
+         source_type, selected_source_type, override_quantity) VALUES
+        -- extraction-derived: priced as one unit, MUST be flagged
+        ('44444444-4444-4444-8444-444444444444', '55555555-5555-4555-8555-555555555555',
+         '22222222-2222-4222-8222-222222222222', '33333333-3333-4333-8333-333333333333',
+         'extracted', NULL, NULL),
+        -- manual: promotes manualQuantity, must NOT be flagged
+        ('99999999-9999-4999-8999-999999999999', '55555555-5555-4555-8555-555555555555',
+         '77777777-7777-4777-8777-777777777777', '88888888-8888-4888-8888-888888888888',
+         'manual', NULL, NULL),
+        -- override with its own quantity: promotes overrideQuantity, must NOT be flagged
+        ('dddddddd-dddd-4ddd-8ddd-dddddddddddd', '55555555-5555-4555-8555-555555555555',
+         'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+         'extracted', 'override', 25);
+    `);
+
+    await pg.exec(MIGRATION_SQL);
+
+    const { rows } = (await pg.query(
+      `SELECT subject_id::text AS subject_id FROM office_dallas.estimate_review_events`
+    )) as { rows: Array<{ subject_id: string }> };
+
+    expect(rows.map((row) => row.subject_id)).toEqual([
+      "33333333-3333-4333-8333-333333333333",
+    ]);
+  });
+
+  it("STILL flags an override whose own quantity is unusable, since it falls back to the extraction", async () => {
+    // The narrowing must not become a hole: an override with a null quantity falls back to the
+    // extraction, so its line WAS priced from the invalid number and does need remediation.
+    await seed("office_dallas");
+    await seedPromotionChain("office_dallas");
+    await pg.exec(`
+      INSERT INTO office_dallas.estimate_extractions (id, status, quantity) VALUES
+        ('11111111-1111-4111-8111-111111111111', 'processed', NULL);
+      INSERT INTO office_dallas.estimate_extraction_matches (id, extraction_id) VALUES
+        ('22222222-2222-4222-8222-222222222222', '11111111-1111-4111-8111-111111111111');
+      INSERT INTO office_dallas.estimate_line_items (id, quantity) VALUES
+        ('33333333-3333-4333-8333-333333333333', 1);
+      INSERT INTO office_dallas.estimate_pricing_recommendations
+        (id, deal_id, extraction_match_id, promoted_estimate_line_item_id,
+         source_type, selected_source_type, override_quantity) VALUES
+        ('44444444-4444-4444-8444-444444444444', '55555555-5555-4555-8555-555555555555',
+         '22222222-2222-4222-8222-222222222222', '33333333-3333-4333-8333-333333333333',
+         'extracted', 'override', NULL);
+    `);
+
+    await pg.exec(MIGRATION_SQL);
+
+    const { rows } = (await pg.query(
+      `SELECT subject_id::text AS subject_id FROM office_dallas.estimate_review_events`
+    )) as { rows: Array<{ subject_id: string }> };
+
+    expect(rows).toHaveLength(1);
   });
 
   it("is REPLAYABLE — a second run changes nothing", async () => {

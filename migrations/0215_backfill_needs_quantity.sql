@@ -97,6 +97,20 @@ BEGIN
                JOIN %I.estimate_line_items li ON li.id = r.promoted_estimate_line_item_id
               WHERE e.status = 'needs_quantity'
                 AND r.promoted_estimate_line_item_id IS NOT NULL
+                -- ONLY LINES WHOSE NUMBER ACTUALLY CAME FROM THIS EXTRACTION. A manual recommendation
+                -- promotes its own manualQuantity, and an override with a quantity of its own promotes
+                -- that — for both, the anchor extraction is only an artifact link, and the quoted line
+                -- may be perfectly correct. Flagging those would tell an estimator a valid line was
+                -- fabricated as one unit and ask them to void it: a false remediation task is worse
+                -- than none, because it teaches people to ignore the queue. Mirrors the promote
+                -- predicate's alternatives exactly, so the two cannot drift.
+                AND r.source_type IS DISTINCT FROM 'manual'
+                AND NOT (
+                  r.selected_source_type = 'override'
+                  AND r.override_quantity IS NOT NULL
+                  AND r.override_quantity > 0
+                  AND r.override_quantity <> 'NaN'::numeric
+                )
                 AND (
                   e.quantity IS NULL
                   OR e.quantity <= 0

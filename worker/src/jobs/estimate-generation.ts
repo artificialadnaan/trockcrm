@@ -109,20 +109,42 @@ function buildSourceRowIdentity(input: {
  *
  * Asked INSIDE the persistence transaction and `FOR UPDATE`, so the answer cannot go stale between this
  * check and the write it guards. Returns false for absent, non-finite and nonpositive alike, which is
- * the same definition of priceable the loop's own guard uses.
+ * the same definition of priceable the loop's own guard uses — and false when the row's STATUS has
+ * moved since the snapshot, which is how a reviewer's decision survives a run that is already in
+ * flight.
  */
+/**
+ * Review outcomes that take an extraction OUT of pricing scope. A row that reached one of these after a
+ * run snapshotted it must not be re-marked `processed` by that run: the decision is the newer fact.
+ */
+const UNPRICEABLE_REVIEW_STATUSES = new Set(["rejected", "needs_quantity"]);
+
 async function stillPriceable(
   db: any,
   extractionId: string,
   snapshotQuantity: unknown
 ): Promise<boolean> {
   const [row] = await db
-    .select({ quantity: estimateExtractions.quantity })
+    .select({ quantity: estimateExtractions.quantity, status: estimateExtractions.status })
     .from(estimateExtractions)
     .where(eq(estimateExtractions.id, extractionId))
     .limit(1)
     .for("update");
-  if (!row || row.quantity === null || row.quantity === undefined) return false;
+  if (!row) return false;
+
+  // AND A REVIEW DECISION TAKEN MID-RUN MUST SURVIVE. Checking only the quantity let one be silently
+  // undone: a reviewer REJECTING a positive-quantity extraction while the run is in flight changes
+  // `status`, not `quantity`, so this reread passed and `persistPricingRecommendationBundle` then wrote
+  // `status = 'processed'` unconditionally — erasing a committed rejection and publishing a
+  // recommendation for a row a human had just excluded.
+  //
+  // Stated as the states that EXCLUDE pricing, deliberately, rather than as "the status must equal the
+  // snapshot's". Equality is the stricter rule and the wrong one: a reviewer APPROVING a pending row
+  // mid-run also changes the status, and throwing away correct pricing for that is a regression, not a
+  // safeguard. What must not be overwritten is a decision that took the row OUT of scope.
+  if (UNPRICEABLE_REVIEW_STATUSES.has(String(row.status))) return false;
+
+  if (row.quantity === null || row.quantity === undefined) return false;
   const value = Number(row.quantity);
   if (!Number.isFinite(value) || value <= 0) return false;
 
