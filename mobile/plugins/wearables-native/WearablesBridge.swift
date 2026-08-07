@@ -38,6 +38,18 @@ final class WearablesBridge: RCTEventEmitter {
   /// stored properties: a data race by construction.
   private let stateLock = NSLock()
 
+  /// Which start attempt is CURRENT. `startStream` spends seconds awaiting a device selector before
+  /// it ever assigns `session`, and Stop stays enabled throughout — so a Stop pressed inside that
+  /// window called `teardown()` on nothing, and the pending Task then went on to create and start a
+  /// stream AFTER the UI had reported it stopped. Nothing owned that Task, so there was nothing to
+  /// cancel; a monotonic token gives the awaiting Task a way to ask "am I still the one?" at each
+  /// point where it is about to commit state. `teardown()` bumps it, which is what makes Stop
+  /// authoritative even when there is nothing yet to tear down.
+  ///
+  /// Read and written under `stateLock` for the same reason everything else here is: the Task and the
+  /// bridge queue are different threads.
+  private var streamStartGeneration = 0
+
   /// `Wearables.configure()` is not idempotent in 0.8.0, so the guard lives here rather
   /// than trusting every JS caller to remember.
   private static var configured = false
@@ -301,11 +313,24 @@ final class WearablesBridge: RCTEventEmitter {
     // Reset the frame measurement synchronously, BEFORE the Task. NSLock's lock()/unlock() are
     // unavailable from async contexts — a task can suspend while holding the lock — and that is
     // a hard error under Swift 6. Nothing here needs to be async, so it simply moves out.
+    // `teardown()` above already bumped the generation; this attempt claims the value it left. Read
+    // under the same lock as the reset so the claim and the reset are one critical section.
     stateLock.lock()
     firstFrameSize = nil
     firstFrameAt = nil
     streamStartedAt = Date()
+    let generation = streamStartGeneration
     stateLock.unlock()
+
+    // Whether this attempt is still the current one — false as soon as Stop (or another start) has
+    // run `teardown()`. A closure with an explicit capture rather than a nested func, because a local
+    // function that captures `self` is called from inside the escaping Task below.
+    let isCurrent: () -> Bool = { [weak self] in
+      guard let self else { return false }
+      self.stateLock.lock()
+      defer { self.stateLock.unlock() }
+      return self.streamStartGeneration == generation
+    }
 
     Task {
       do {
@@ -328,6 +353,16 @@ final class WearablesBridge: RCTEventEmitter {
           )
           return
         }
+
+        // THE FIRST COMMIT POINT. Everything above only waited; from here the SDK holds real state,
+        // so a Stop pressed during that wait has to stop the attempt HERE — otherwise it creates a
+        // session the UI has already reported as stopped, and the next start then fails with
+        // `sessionAlreadyExists`, an error about our own litter.
+        guard isCurrent() else {
+          reject("wearables_stream_cancelled", "Stopped before the stream started", nil)
+          return
+        }
+
         let created = try sdk.createSession(deviceSelector: selector)
         session = created
         try created.start()
@@ -357,6 +392,15 @@ final class WearablesBridge: RCTEventEmitter {
           reject("wearables_stream_nil", "addStream() returned nil (session state: \(state))", nil)
           return
         }
+        // THE SECOND COMMIT POINT, checked again because the two waits above can each span seconds:
+        // the session-start poll is up to 10s and `addStream()` is a round trip. Without this, a Stop
+        // during either of them still ended with a started stream and a screen saying "stopped".
+        guard isCurrent() else {
+          teardown()
+          reject("wearables_stream_cancelled", "Stopped before the stream started", nil)
+          return
+        }
+
         stream = newStream
 
       // Record what the FIRST frame actually measures. The configuration says what we asked
@@ -420,6 +464,14 @@ final class WearablesBridge: RCTEventEmitter {
   /// Stop and forget the current session and stream. Safe to call when there is nothing to tear
   /// down, which is what lets `startStream` use it as a precondition rather than a cleanup.
   private func teardown() {
+    // INVALIDATE ANY PENDING START FIRST. Tearing down what exists is not enough while a start is
+    // still awaiting a selector: that Task holds no reference this can reach, so bumping the
+    // generation is the only way to tell it that its result is no longer wanted. Done before the
+    // stops, so a Task that checks the token mid-teardown already sees itself superseded.
+    stateLock.lock()
+    streamStartGeneration &+= 1
+    stateLock.unlock()
+
     stream?.stop()
     session?.stop()
     frameToken = nil
@@ -650,19 +702,82 @@ final class WearablesBridge: RCTEventEmitter {
         _ = try await Self.activateHfpAndSettle()
         let before = Self.routeSnapshot(audio)
 
-        // Meta step 3: only now.
+        // A DELIVERED FRAME IS THE PRECONDITION OF THE VERDICT, not a detail of it.
+        //
+        // This rung answers "does the HFP mic route survive a DAT camera stream", and the evidence is
+        // that the route is unchanged AFTER the stream is genuinely running. `start()` is
+        // asynchronous, so a stream that stalls or never produces a frame also leaves the route
+        // unchanged — for the trivial reason that nothing ever happened. Reading the snapshot on a
+        // timer alone cannot tell those two apart, and it resolves the benign-looking one as PASS.
+        //
+        // That is the most expensive failure available here: this verdict decides whether the capture
+        // design can use video and glasses audio together. A false PASS ships a design built on a
+        // stream that does not run.
+        //
+        // Observed rather than assumed, using the same publisher `startStream` already measures the
+        // first frame with.
+        var frameArrivedAt: Date?
+        let frameLock = NSLock()
+        let observationToken = newStream.videoFramePublisher.listen { (_: VideoFrame) in
+          frameLock.lock()
+          if frameArrivedAt == nil { frameArrivedAt = Date() }
+          frameLock.unlock()
+        }
+
+        let startedAt = Date()
         newStream.start()
-        // First-frame latency measured 2.2-2.5s on this hardware. Four seconds keeps a real
-        // margin: reading early would report a route the stream had not yet had a chance to
+
+        // First-frame latency measured 2.2-2.5s on this hardware, so the wait is generous rather
+        // than tight: reading early would report a route the stream had not yet had a chance to
         // disturb, and a spurious FAIL here would wrongly push the whole design onto the
-        // audio-plus-stills fallback.
-        try? await Task.sleep(nanoseconds: 4_000_000_000)
+        // audio-plus-stills fallback. Polled instead of slept so a healthy stream still spends the
+        // full settling time — the deadline bounds the FAILURE case, not the success one.
+        let frameDeadline = Date().addingTimeInterval(8)
+        while Date() < frameDeadline {
+          frameLock.lock()
+          let seen = frameArrivedAt != nil
+          frameLock.unlock()
+          if seen { break }
+          try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+
+        frameLock.lock()
+        let firstFrame = frameArrivedAt
+        frameLock.unlock()
+
+        guard let firstFrame else {
+          _ = observationToken
+          teardown()
+          try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+          reject(
+            "wearables_stream_no_frames",
+            "The stream started but delivered NO frames within 8s, so the route snapshot proves "
+              + "nothing: an unchanged route is what a stalled stream looks like too. This is not a "
+              + "verdict on HFP — the stream itself needs investigating first.",
+            nil
+          )
+          return
+        }
+
+        // Let the running stream disturb the route if it is going to, measured from the frame rather
+        // than from `start()` so the settling window is the same regardless of startup latency.
+        let settleRemaining = 4.0 - Date().timeIntervalSince(firstFrame)
+        if settleRemaining > 0 {
+          try? await Task.sleep(nanoseconds: UInt64(settleRemaining * 1_000_000_000))
+        }
         let after = Self.routeSnapshot(audio)
 
+        _ = observationToken
         teardown()
         try? audio.setActive(false, options: .notifyOthersOnDeactivation)
 
-        resolve(["beforeStreamStart": before, "afterStreamStart": after])
+        resolve([
+          "beforeStreamStart": before,
+          "afterStreamStart": after,
+          // Reported, so the verdict carries its own evidence rather than asking to be trusted.
+          "firstFrameLatencyMs": Int(firstFrame.timeIntervalSince(startedAt) * 1000),
+          "framesDelivered": true,
+        ])
       } catch {
         teardown()
         try? audio.setActive(false, options: .notifyOthersOnDeactivation)
@@ -703,7 +818,28 @@ final class WearablesBridge: RCTEventEmitter {
 
         capture.startRunning()
         try? await Task.sleep(nanoseconds: 2_000_000_000)
+
+        // AND ACTUALLY TAKE THE PICTURE. Opening the session is not the operation the design needs
+        // to be safe — the feature takes phone STILLS during a glasses walk, and the still-capture
+        // and shutter phase is where AVFoundation reconfigures hardware. A disturbance confined to
+        // that phase would be absent from all three snapshots while the verdict declared phone stills
+        // safe, which is precisely the answer this rung exists to give and the one it would get wrong.
+        //
+        // The snapshot is taken WHILE the capture is outstanding, so a route dropped by the shutter
+        // is visible rather than already renegotiated by the time it is read.
+        let shutter = PhotoCaptureProbe()
+        photo.capturePhoto(with: AVCapturePhotoSettings(), delegate: shutter)
         let during = Self.routeSnapshot(audio)
+
+        // Bounded: a capture that never calls back must not hang the diagnostic, and its absence is
+        // itself reportable — an unfinished shutter is a fact about the phone camera, not a reason to
+        // stay silent.
+        let shutterDeadline = Date().addingTimeInterval(5)
+        while !shutter.isFinished, Date() < shutterDeadline {
+          try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        let shutterCompleted = shutter.isFinished
+        let shutterError = shutter.errorDescription
 
         capture.stopRunning()
         // A route lost on teardown can take a moment to renegotiate, and this file already
@@ -719,12 +855,57 @@ final class WearablesBridge: RCTEventEmitter {
         let after = Self.routeSnapshot(audio)
 
         try? audio.setActive(false, options: .notifyOthersOnDeactivation)
-        resolve(["before": before, "during": during, "after": after])
+        resolve([
+          "before": before,
+          "during": during,
+          "after": after,
+          // The verdict carries its evidence: "during" only means something if the shutter actually
+          // fired. A false here says the route was undisturbed by a capture that never happened.
+          "photoCaptured": shutterCompleted,
+          "photoError": shutterError ?? "none",
+        ])
       } catch {
         try? audio.setActive(false, options: .notifyOthersOnDeactivation)
         reject("wearables_phone_camera_check_failed",
                "checkPhoneCameraDuringHfp failed: \(Self.describe(error))", error)
       }
     }
+  }
+}
+
+/// Waits for one `AVCapturePhotoOutput` capture to finish, so rung 10 can measure the route while a
+/// real shutter is outstanding rather than only while the session is open.
+///
+/// The photo BYTES are deliberately discarded — this rung is not about image quality, it is about
+/// whether taking the picture disturbs the Bluetooth route. What it needs from the delegate is the
+/// completion and the error, nothing more.
+///
+/// `AVCapturePhotoOutput` holds the delegate WEAKLY, so the caller must keep this alive for the
+/// duration of the capture; it is held in a local for exactly that reason. The flag is guarded
+/// because the delegate callback and the polling loop are different threads.
+private final class PhotoCaptureProbe: NSObject, AVCapturePhotoCaptureDelegate {
+  private let lock = NSLock()
+  private var finished = false
+  private var error: String?
+
+  var isFinished: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return finished
+  }
+
+  var errorDescription: String? {
+    lock.lock()
+    defer { lock.unlock() }
+    return error
+  }
+
+  func photoOutput(_ output: AVCapturePhotoOutput,
+                   didFinishProcessingPhoto photo: AVCapturePhoto,
+                   error: Error?) {
+    lock.lock()
+    finished = true
+    self.error = error.map { String(describing: $0) }
+    lock.unlock()
   }
 }
