@@ -100,11 +100,52 @@ function ipv6IsGlobal(host) {
   // construction rather than merely unreachable from the field.
   if (/^ff/.test(h)) return false;
   // 100::/64 — the DISCARD-ONLY prefix. Packets to it are dropped by design (it exists to blackhole
-  // traffic), so it is not merely unrouted, it is guaranteed to go nowhere. Matched on the hextet
-  // boundary for the same reason the documentation range is: a bare "100" prefix test would also
-  // swallow 1000::/16 and 100a::, which are ordinary global unicast.
-  if (/^100:/.test(h)) return false;
+  // traffic), so it is not merely unrouted, it is guaranteed to go nowhere.
+  //
+  // SIXTY-FOUR BITS, which means the first FOUR hextets must all be `100:0:0:0`. An earlier `^100:`
+  // test matched only the first SIXTEEN and so swallowed the whole of `100::/16`, refusing globally
+  // routable addresses like `100:0:0:1::1`. The comment then claimed a "hextet boundary" match, which
+  // was true of one hextet and wrong about the prefix — the same shape of error as the `2001:db8` one
+  // it was modelled on, made one line below it.
+  //
+  // Decided by EXPANDING the address rather than matching its text, because the text is not stable:
+  // `100:0:0:0:1:2:3:4` and `100::1:2:3:4` are the same address, and `new URL()` returns the second.
+  // Any prefix test on the compressed form has to reason about how many hextets `::` stands for,
+  // which is exactly the arithmetic `expandIpv6` already does correctly.
+  const hextets = expandIpv6(h);
+  if (hextets && hextets[0] === 0x100 && hextets[1] === 0 && hextets[2] === 0 && hextets[3] === 0) {
+    return false;
+  }
   return true;
+}
+
+/**
+ * An IPv6 address as its eight 16-bit hextets, or null if it is not one this can decide about.
+ *
+ * Needed because prefix questions are about BITS and the textual form is compressed: `::` stands for
+ * however many zero groups are required to reach eight, so its meaning depends on what surrounds it.
+ * Returning null rather than guessing keeps a parse failure from being read as "not in the range" —
+ * the caller treats null as "no claim" and falls through to its other rules.
+ *
+ * Embedded IPv4 tails (`::ffff:10.0.0.5`) are handled by the callers above before this is reached, so
+ * a dotted quad here is out of scope and returns null rather than being half-parsed.
+ */
+function expandIpv6(host) {
+  if (host.includes(".")) return null;
+  const halves = host.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] === "" ? [] : halves[0].split(":");
+  const tail = halves.length === 2 ? (halves[1] === "" ? [] : halves[1].split(":")) : [];
+  if (halves.length === 1) {
+    if (head.length !== 8) return null;
+  } else if (head.length + tail.length > 7) {
+    return null;
+  }
+  const zeros = halves.length === 2 ? 8 - head.length - tail.length : 0;
+  const groups = [...head, ...Array(zeros).fill("0"), ...tail];
+  if (groups.length !== 8) return null;
+  const parsed = groups.map((group) => (/^[0-9a-f]{1,4}$/.test(group) ? parseInt(group, 16) : NaN));
+  return parsed.some(Number.isNaN) ? null : parsed;
 }
 
 /**

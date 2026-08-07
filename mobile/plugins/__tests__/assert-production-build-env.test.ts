@@ -201,6 +201,29 @@ describe("assertProductionBuildEnv", () => {
     ).toThrow(/private host/);
   });
 
+  it.each(["https://[100:0:0:1::1]", "https://[100:0:1::1]", "https://[100:1::1]"])(
+    "GUARD: accepts %s, which is outside the /64 discard prefix",
+    (url) => {
+      // The discard prefix is `100::/64` — SIXTY-FOUR bits, meaning the first FOUR hextets must all
+      // be `100:0:0:0`. A `^100:` test matches only the first sixteen, so it swallowed the whole of
+      // `100::/16` and refused globally routable addresses. My previous comment claimed this was
+      // matched "on the hextet boundary", which was true of one hextet and wrong about the prefix.
+      expect(() => assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: url }))).not.toThrow();
+    }
+  );
+
+  it.each(["https://[100::1]", "https://[100::1:2:3:4]", "https://[100:0:0:0:1:2:3:4]"])(
+    "still rejects %s, which IS inside the /64 discard prefix",
+    (url) => {
+      // The narrowing must not become a hole. Note the third spelling normalises to `100::1:2:3:4`,
+      // so the two forms are the same address written differently — which is exactly why this is
+      // decided by expanding the address rather than by matching its text.
+      expect(() => assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: url }))).toThrow(
+        /private host/
+      );
+    }
+  );
+
   it("GUARD: accepts global unicast that merely starts with the same digits", () => {
     // The hextet boundary again: a bare "100" prefix test would swallow `1000::/16` and `100a::`,
     // which are ordinary global addresses.
