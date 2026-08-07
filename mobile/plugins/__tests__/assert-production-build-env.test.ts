@@ -158,6 +158,41 @@ describe("assertProductionBuildEnv", () => {
     );
   });
 
+  it.each([
+    // A LATER backslash, not a leading one. The first-character rule below caught `https://\host` and
+    // walked straight past these: `new URL()` rewrites the `\` to `/` while `src/config.ts` keeps the
+    // raw spelling, so the device asks for a different path than the one configured.
+    "https://api.example.com\\v1",
+    "https://api.example.com/foo\\bar",
+  ])("REGRESSION: rejects a backslash anywhere in %j, not only at the authority", (url) => {
+    expect(() => assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: url }))).toThrow(
+      /must begin with/
+    );
+  });
+
+  it("REGRESSION: rejects credentials embedded in the base URL", () => {
+    // `EXPO_PUBLIC_*` is baked into the BUNDLE, so a password here ships to every device and can be
+    // read out of the app. It also collides with the Bearer flow the client actually uses: URL
+    // credentials invoke a different authentication path entirely.
+    expect(() =>
+      assertProductionBuildEnv(
+        onBuilder({ EXPO_PUBLIC_API_BASE_URL: "https://user:password@api.example.com" })
+      )
+    ).toThrow(/credential/i);
+  });
+
+  it.each(["https://[ff02::1]", "https://[ff00::1]"])(
+    "REGRESSION: rejects the IPv6 multicast address %s, which cannot terminate a TCP connection",
+    (url) => {
+      // `ff00::/8` is multicast. The unique-local test is `^f[cd]` and link-local is `^fe[89ab]`, so
+      // `ff` fell through every arm to the global default and a build was allowed against an address
+      // no HTTPS server can listen on.
+      expect(() => assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: url }))).toThrow(
+        /private host/
+      );
+    }
+  );
+
   it("GUARD: still accepts an IPv6 literal spelled with leading zeros", () => {
     // The counterweight to the rule above, and the reason it is written as "what will the parser
     // rewrite" rather than "does the raw authority equal the parsed host": comparing them would

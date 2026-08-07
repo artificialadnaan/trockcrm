@@ -94,6 +94,11 @@ function ipv6IsGlobal(host) {
   // boundary — `new URL()` normalises to lowercase with leading zeros removed, so the /32 always ends
   // in `2001:db8:` (or `2001:db8::` when the rest is zero, which this also matches).
   if (/^2001:db8:/.test(h)) return false;
+  // ff00::/8 — MULTICAST, and it fell through every arm above to the global default: the unique-local
+  // test is `^f[cd]` and link-local is `^fe[89ab]`, so `ff02::1` matched neither. Multicast has no
+  // TCP semantics at all — nothing can listen on it — so an https URL pointed there is unusable by
+  // construction rather than merely unreachable from the field.
+  if (/^ff/.test(h)) return false;
   return true;
 }
 
@@ -158,8 +163,10 @@ function assertProductionBuildEnv(env) {
   //
   //   * EXTRA SLASHES — `https:///host` and `https:////host` both satisfy a plain `^https://` test
   //     and are repaired to `https://host/`. NSURL sees an https scheme with an EMPTY authority.
-  //   * BACKSLASHES — `\` is equivalent to `/` for special schemes, so `https://\host` normalises the
-  //     same way. Counting only forward slashes fixes the first spelling and leaves this one.
+  //   * BACKSLASHES, ANYWHERE — `\` is equivalent to `/` for special schemes. `https://\host` is the
+  //     obvious spelling, but `https://host\v1` and `https://host/foo\bar` begin with a clean
+  //     authority and are rewritten just the same, so the PATH the parser reports is not the path
+  //     `src/config.ts` builds a request from. Rejected wherever it appears, not just at the front.
   //   * STRIPPED CHARACTERS — tab, newline and carriage return are removed from ANYWHERE in the input,
   //     and leading/trailing C0 controls and spaces are trimmed, before parsing begins.
   //
@@ -171,7 +178,7 @@ function assertProductionBuildEnv(env) {
   // this. That comparison also rejects `https://[2606:0050::1]` — a valid global address the parser
   // merely compresses to `[2606:50::1]` — and blocking a real build over a spelling is a worse failure
   // than the one being prevented.
-  if (/[ - ]/.test(raw) || !/^https:\/\/[^/\\]/i.test(raw)) {
+  if (/[ - ]/.test(raw) || raw.includes("\\") || !/^https:\/\/[^/]/i.test(raw)) {
     throw new Error(
       `EXPO_PUBLIC_API_BASE_URL must begin with "https://" followed immediately by the host, and may ` +
         `contain no whitespace or control characters (got ${JSON.stringify(raw)}). Values like ` +
@@ -188,6 +195,19 @@ function assertProductionBuildEnv(env) {
     throw new Error(
       `EXPO_PUBLIC_API_BASE_URL is not a valid URL ("${raw}"). It must be an absolute https URL, ` +
         "for example https://<prod-api-host> (no trailing /api)."
+    );
+  }
+
+  // CREDENTIALS IN THE URL. `EXPO_PUBLIC_*` is baked into the BUNDLE, so a password here ships to
+  // every device and can be read straight out of the app — and it is not even doing what it looks
+  // like: the client authenticates with a Bearer token, so URL credentials invoke a different
+  // authentication path that collides with it. Refused rather than stripped, because silently
+  // discarding half of what somebody configured is how a build ends up not doing what its config says.
+  if (url.username !== "" || url.password !== "") {
+    throw new Error(
+      "EXPO_PUBLIC_API_BASE_URL must not contain credentials. This value is baked into the app " +
+        "bundle and can be read out of a shipped build, and the client authenticates with a Bearer " +
+        "token rather than URL credentials. Use https://<host> with no user:password@ prefix."
     );
   }
 
