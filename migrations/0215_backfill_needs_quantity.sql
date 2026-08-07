@@ -72,7 +72,16 @@ BEGIN
     --
     -- IDEMPOTENT via NOT EXISTS on the same (subject, event_type) pair, matching the UPDATE above: a
     -- replay records nothing twice. `user_id` is NULL because no person did this.
-    IF to_regclass(format('%I.estimate_review_events', schema_name)) IS NOT NULL THEN
+    -- EVERY RELATION THE STATEMENT TOUCHES, not just the one it writes to. The query joins matches,
+    -- recommendations and line items, and a missing relation raises INSIDE this DO block — which
+    -- aborts the whole migration, so a single half-provisioned office would stop every office after it
+    -- from being parked at all. The partial schema turns into a silent no-op deploy for everybody.
+    -- Guarding only the INSERT target made that failure depend on which table a schema happened to be
+    -- missing, which is not a property anyone should have to reason about at deploy time.
+    IF to_regclass(format('%I.estimate_review_events', schema_name)) IS NOT NULL
+       AND to_regclass(format('%I.estimate_extraction_matches', schema_name)) IS NOT NULL
+       AND to_regclass(format('%I.estimate_pricing_recommendations', schema_name)) IS NOT NULL
+       AND to_regclass(format('%I.estimate_line_items', schema_name)) IS NOT NULL THEN
       EXECUTE format(
         $rem$INSERT INTO %I.estimate_review_events
                (deal_id, subject_type, subject_id, event_type, before_json, after_json, reason, user_id)
@@ -87,9 +96,17 @@ BEGIN
                       'recommendationId', r.id
                     ),
                     '{}'::jsonb,
+                    -- THE REASON MUST BE TRUE OF THE ROW IT IS ATTACHED TO. This used to say the line
+                    -- "was priced as ONE UNIT", which is only the NULLISH case: resolvePromotionLineValues
+                    -- substitutes 1 when the recommendation's quantity is null, but a stored 0, negative
+                    -- or NaN was promoted AS ITSELF — and this migration deliberately selects those too.
+                    -- A remediation task carrying a number the line never had is false diagnostic
+                    -- information on exactly the rows somebody is being asked to trust, so the quantity
+                    -- is quoted from the line instead of asserted.
                     'Migration 0215: promoted from an extraction that had no usable quantity, so this '
-                      || 'line was priced as ONE UNIT. The source extraction is now needs_quantity. '
-                      || 'Re-price or void this line; it is still counted in the estimate total.',
+                      || 'line was priced at a quantity of ' || li.quantity::text || ', which was not '
+                      || 'measured. The source extraction is now needs_quantity. Re-price or void this '
+                      || 'line; it is still counted in the estimate total.',
                     NULL
                FROM %I.estimate_extractions e
                JOIN %I.estimate_extraction_matches m ON m.extraction_id = e.id

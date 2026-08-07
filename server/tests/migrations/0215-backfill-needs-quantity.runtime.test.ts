@@ -438,6 +438,86 @@ describe("migration 0215 — parking already-priced rows that never had a usable
     expect((second.rows[0] as any).updated_at).toEqual((first.rows[0] as any).updated_at);
   });
 
+  it("does not claim ONE UNIT for a line whose promoted quantity was never one", async () => {
+    // The remediation text has to be true of the row it is attached to. The one-unit fabrication is
+    // the NULLISH case: `resolvePromotionLineValues` substitutes 1 only when the recommendation's
+    // quantity is null. An extraction of 0, a negative or NaN was priced with THAT number, and this
+    // migration deliberately selects those too — so the sentence "this line was priced as ONE UNIT"
+    // is false diagnostic information on exactly the rows an estimator is being asked to trust.
+    await seed("office_dallas");
+    await seedPromotionChain("office_dallas");
+    await pg.exec(`
+      INSERT INTO office_dallas.estimate_extractions (id, status, quantity) VALUES
+        ('11111111-1111-4111-8111-111111111111', 'processed', 0);
+      INSERT INTO office_dallas.estimate_extraction_matches (id, extraction_id) VALUES
+        ('22222222-2222-4222-8222-222222222222', '11111111-1111-4111-8111-111111111111');
+      INSERT INTO office_dallas.estimate_line_items (id, quantity) VALUES
+        ('33333333-3333-4333-8333-333333333333', 0);
+      INSERT INTO office_dallas.estimate_pricing_recommendations
+        (id, deal_id, extraction_match_id, promoted_estimate_line_item_id,
+         source_type, selected_source_type, override_quantity, recommended_quantity) VALUES
+        ('44444444-4444-4444-8444-444444444444', '55555555-5555-4555-8555-555555555555',
+         '22222222-2222-4222-8222-222222222222', '33333333-3333-4333-8333-333333333333',
+         'extracted', NULL, NULL, 0);
+    `);
+
+    await pg.exec(MIGRATION_SQL);
+
+    const { rows } = (await pg.query(
+      `SELECT reason, (before_json->>'quantity') AS quantity
+         FROM office_dallas.estimate_review_events`
+    )) as { rows: Array<{ reason: string; quantity: string }> };
+
+    // It IS still flagged — the line is unpriceable and needs a human.
+    expect(rows).toHaveLength(1);
+    // ...but not with a number it never had. The payload already carries the real one.
+    expect(rows[0].reason).not.toMatch(/ONE UNIT/i);
+    expect(Number(rows[0].quantity)).toBe(0);
+  });
+
+  it("skips remediation for a schema missing a JOINED table, without killing the whole run", async () => {
+    // The guard proved only that `estimate_review_events` exists. The remediation statement also joins
+    // matches, recommendations and line items — and a missing relation raises inside the DO block, which
+    // aborts the ENTIRE migration. One half-provisioned office would therefore stop every office after
+    // it from being parked at all, turning a partial schema into a silent no-op deploy for everyone.
+    //
+    // `office_aabroken` sorts before `office_dallas`, so if the abort happens the second office is
+    // demonstrably never reached.
+    await seed("office_aabroken");
+    await seed("office_dallas");
+    await pg.exec(`
+      -- Enough to enter the guard, and NOT enough to run the query: review_events exists, the join
+      -- targets do not.
+      CREATE TABLE office_aabroken.estimate_review_events (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        deal_id uuid NOT NULL,
+        project_id uuid,
+        subject_type text NOT NULL,
+        subject_id uuid NOT NULL,
+        event_type text NOT NULL,
+        before_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+        after_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+        reason text,
+        user_id uuid,
+        created_at timestamptz NOT NULL DEFAULT now()
+      );
+      INSERT INTO office_aabroken.estimate_extractions (id, status, quantity)
+        VALUES ('00000000-0000-4000-8000-0000000000a1', 'processed', NULL);
+      INSERT INTO office_dallas.estimate_extractions (id, status, quantity)
+        VALUES ('00000000-0000-4000-8000-0000000000a2', 'processed', NULL);
+    `);
+
+    await pg.exec(MIGRATION_SQL);
+
+    // Both offices parked. The broken one simply gets no remediation pass.
+    expect((await statuses("office_aabroken"))["00000000-0000-4000-8000-0000000000a1"]).toBe(
+      "needs_quantity"
+    );
+    expect((await statuses("office_dallas"))["00000000-0000-4000-8000-0000000000a2"]).toBe(
+      "needs_quantity"
+    );
+  });
+
   it("runs across EVERY office, and skips a half-provisioned schema", async () => {
     await seed("office_dallas");
     await seed("office_atlanta");
