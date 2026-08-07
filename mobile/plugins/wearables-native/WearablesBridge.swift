@@ -392,16 +392,28 @@ final class WearablesBridge: RCTEventEmitter {
           reject("wearables_stream_nil", "addStream() returned nil (session state: \(state))", nil)
           return
         }
-        // THE SECOND COMMIT POINT, checked again because the two waits above can each span seconds:
-        // the session-start poll is up to 10s and `addStream()` is a round trip. Without this, a Stop
-        // during either of them still ended with a started stream and a screen saying "stopped".
-        guard isCurrent() else {
-          teardown()
+        // THE SECOND COMMIT POINT — and the check and the PUBLISH happen under ONE lock hold.
+        //
+        // Checking and then assigning as two steps left the race intact: Stop could run `teardown()`
+        // in the gap, bumping the generation and stopping a `stream` that was still nil, after which
+        // this task published `newStream` anyway. Teardown had nothing to find, so the stream survived
+        // a Stop that had already resolved. Doing both inside the same critical section makes that
+        // interleaving unrepresentable — teardown takes the same lock to bump, so it either runs
+        // entirely before this (and `stillCurrent` is false) or entirely after (and it sees the stream
+        // it needs to stop).
+        var stillCurrent = false
+        stateLock.lock()
+        stillCurrent = streamStartGeneration == generation
+        if stillCurrent { stream = newStream }
+        stateLock.unlock()
+
+        guard stillCurrent else {
+          // Ours to clean up: it was never published, so `teardown()` cannot reach it.
+          newStream.stop()
+          created.stop()
           reject("wearables_stream_cancelled", "Stopped before the stream started", nil)
           return
         }
-
-        stream = newStream
 
       // Record what the FIRST frame actually measures. The configuration says what we asked
       // for; only a delivered frame says what the glasses sent.
@@ -424,6 +436,17 @@ final class WearablesBridge: RCTEventEmitter {
 
       photoToken = newStream.photoDataPublisher.listen { [weak self] (photo: PhotoData) in
         self?.deliverPhoto(photo)
+      }
+
+      // ONE LAST CHECK, because publishing the stream is not the end of the window. A Stop between the
+      // publish above and this line runs `teardown()`, which stops `newStream` and clears it — and
+      // starting it here would resurrect a stream the UI has already reported as stopped, with nothing
+      // left holding a reference to stop it again. Attaching the listeners first is harmless; starting
+      // is the irreversible part, so it is what gets guarded.
+      guard isCurrent() else {
+        newStream.stop()
+        reject("wearables_stream_cancelled", "Stopped before the stream started", nil)
+        return
       }
 
       newStream.start()
@@ -802,6 +825,31 @@ final class WearablesBridge: RCTEventEmitter {
         _ = try await Self.activateHfpAndSettle()
         let before = Self.routeSnapshot(audio)
 
+        // NARRATION RUNS DURING THE STILL, so the check has to run one too.
+        //
+        // The proposed walkthrough records continuously while the estimator takes phone photos, and a
+        // shutter can INTERRUPT OR STOP an active recorder while leaving `currentRoute` on Bluetooth
+        // HFP — AVFoundation reconfigures the capture graph, and the route is not what notices. All
+        // three route snapshots then look perfect and the diagnostic declares the workflow safe while
+        // the narration for that moment is gone. Route health was never the whole question; it was the
+        // part that was easy to sample.
+        //
+        // Failing to start the recorder does NOT fail the rung — that is a separate defect, measured
+        // by rung 8 — but it is reported, so a route-only result cannot be mistaken for a full one.
+        let narrationUrl = FileManager.default.temporaryDirectory
+          .appendingPathComponent("wearables-narration-\(Int(Date().timeIntervalSince1970)).m4a")
+        let narration = try? AVAudioRecorder(url: narrationUrl, settings: [
+          AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+          AVSampleRateKey: 48_000.0,
+          AVNumberOfChannelsKey: 1,
+        ])
+        let narrationStarted = narration?.record() ?? false
+        if narrationStarted {
+          // Long enough to hold a measurable amount of audio before the shutter, so "it stopped" and
+          // "it never really began" are distinguishable by the byte count below.
+          try? await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+
         let capture = AVCaptureSession()
         capture.sessionPreset = .photo
         guard let device = AVCaptureDevice.default(for: .video),
@@ -825,21 +873,58 @@ final class WearablesBridge: RCTEventEmitter {
         // that phase would be absent from all three snapshots while the verdict declared phone stills
         // safe, which is precisely the answer this rung exists to give and the one it would get wrong.
         //
-        // The snapshot is taken WHILE the capture is outstanding, so a route dropped by the shutter
-        // is visible rather than already renegotiated by the time it is read.
+        // SAMPLED THROUGHOUT THE SHUTTER, not once just after submitting it.
+        //
+        // `capturePhoto` only ENQUEUES the capture; the shutter and the processing happen afterwards,
+        // asynchronously. A single snapshot on the next line therefore usually reads the route BEFORE
+        // anything has happened — so a route that drops when the shutter fires and recovers before the
+        // delegate returns is invisible in every sample, and the rung reports phone stills safe on the
+        // strength of having looked in the one moment nothing was going on.
+        //
+        // A transient drop is not a lesser version of a permanent one here: the walkthrough is
+        // narrating continuously, so audio lost for the length of a shutter is exactly the sentence
+        // that explains the photo. The WORST route seen across the whole capture is what the verdict
+        // needs, so the poll keeps the first non-HFP sample it observes.
         let shutter = PhotoCaptureProbe()
         photo.capturePhoto(with: AVCapturePhotoSettings(), delegate: shutter)
-        let during = Self.routeSnapshot(audio)
+
+        var during = Self.routeSnapshot(audio)
+        var sawRouteLoss = !audio.currentRoute.inputs.contains(where: { $0.portType == .bluetoothHFP })
 
         // Bounded: a capture that never calls back must not hang the diagnostic, and its absence is
         // itself reportable — an unfinished shutter is a fact about the phone camera, not a reason to
-        // stay silent.
+        // stay silent. Polled at 50ms rather than 100ms because the window being hunted is short by
+        // nature: a reconfiguration that outlasts a lazy poll was never the hard case.
         let shutterDeadline = Date().addingTimeInterval(5)
         while !shutter.isFinished, Date() < shutterDeadline {
-          try? await Task.sleep(nanoseconds: 100_000_000)
+          if !sawRouteLoss,
+             !audio.currentRoute.inputs.contains(where: { $0.portType == .bluetoothHFP }) {
+            // FIRST loss wins and is then held: overwriting it with a later healthy sample is how the
+            // transient case disappears, which is the whole failure being fixed.
+            sawRouteLoss = true
+            during = Self.routeSnapshot(audio)
+          }
+          try? await Task.sleep(nanoseconds: 50_000_000)
         }
+
+        // One final look for a drop that lands on the very last moment of processing.
+        if !sawRouteLoss,
+           !audio.currentRoute.inputs.contains(where: { $0.portType == .bluetoothHFP }) {
+          during = Self.routeSnapshot(audio)
+        }
+
         let shutterCompleted = shutter.isFinished
         let shutterError = shutter.errorDescription
+
+        // DID THE NARRATION SURVIVE? Asked while the capture session is still up, so a recorder the
+        // shutter stopped is caught here rather than being confused with the ordinary teardown below.
+        // `isRecording` going false is the signal AVFoundation gives for an interrupted recorder, and
+        // it is invisible to `currentRoute`.
+        let narrationSurvived = narration?.isRecording ?? false
+        narration?.stop()
+        let narrationBytes =
+          (try? FileManager.default.attributesOfItem(atPath: narrationUrl.path))?[.size] as? Int ?? 0
+        try? FileManager.default.removeItem(at: narrationUrl)
 
         capture.stopRunning()
         // A route lost on teardown can take a moment to renegotiate, and this file already
@@ -863,6 +948,11 @@ final class WearablesBridge: RCTEventEmitter {
           // fired. A false here says the route was undisturbed by a capture that never happened.
           "photoCaptured": shutterCompleted,
           "photoError": shutterError ?? "none",
+          // The other half of "is this workflow safe": route health says nothing about whether the
+          // narration kept running through the shutter.
+          "narrationStarted": narrationStarted,
+          "narrationSurvivedShutter": narrationSurvived,
+          "narrationBytes": narrationBytes,
         ])
       } catch {
         try? audio.setActive(false, options: .notifyOthersOnDeactivation)

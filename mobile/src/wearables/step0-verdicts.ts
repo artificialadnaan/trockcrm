@@ -76,10 +76,49 @@ export type PhoneCameraCheck = {
   before: RouteSnapshot;
   during: RouteSnapshot;
   after: RouteSnapshot;
+  /** Whether the shutter actually completed. The native side reports it; see the guard below for why
+   *  the route snapshots mean nothing without it. Optional so an older payload is INCONCLUSIVE rather
+   *  than silently treated as a success. */
+  photoCaptured?: boolean;
+  /** The delegate's error, or "none". Reported so a failure can name itself. */
+  photoError?: string;
+  /** Whether a narration recorder was running across the shutter, and whether it was still running
+   *  afterwards. Route health is silent about this: a shutter can stop a recorder while `currentRoute`
+   *  stays on HFP throughout, and the walkthrough narrates continuously. */
+  narrationStarted?: boolean;
+  narrationSurvivedShutter?: boolean;
 };
 
 export function describePhoneCameraCheck(check: PhoneCameraCheck): Verdict {
-  const { before, during, after } = check;
+  const { before, during, after, photoCaptured, photoError, narrationStarted, narrationSurvivedShutter } =
+    check;
+
+  // NO SHUTTER, NO VERDICT — checked FIRST, before any route reasoning.
+  //
+  // The native side takes a real photo now precisely because opening the camera is not the operation
+  // this rung is about. But three healthy route snapshots around a capture that never completed say
+  // only that nothing happened — and "nothing happened" reaching the pass branch is exactly the false
+  // PASS that adding the capture was meant to remove. The evidence was being collected and thrown
+  // away, which is worse than not collecting it: it makes the verdict look better sourced than it is.
+  //
+  // INCONCLUSIVE rather than FAIL: a shutter that timed out or errored is a fact about this run, not
+  // evidence that phone stills disturb the route. Calling it a failure would push the design onto the
+  // fallback for a reason nobody has established.
+  if (photoCaptured !== true) {
+    const reason =
+      photoError && photoError !== "none"
+        ? `the capture failed (${photoError})`
+        : photoCaptured === false
+          ? "the capture never completed within the timeout"
+          : "this build's native side did not report a capture outcome";
+    return {
+      outcome: "inconclusive",
+      summary:
+        `No still was successfully captured, so the route snapshots prove nothing — ${reason}. ` +
+        `Opening the camera is not what this rung tests; the shutter is. Investigate the capture ` +
+        `itself before reading anything into the audio route.`,
+    };
+  }
 
   if (!before.isBluetoothHFP) {
     return {
@@ -182,10 +221,38 @@ export function describePhoneCameraCheck(check: PhoneCameraCheck): Verdict {
     };
   }
 
+  // THE ROUTE IS ONLY HALF THE QUESTION. A shutter can stop an active recorder while `currentRoute`
+  // stays on HFP the whole way through — AVFoundation reconfigures the capture graph, and the route is
+  // not what notices. Every check above would pass on that run while the narration for the moment the
+  // photo documents is simply missing, which is the same false PASS as before wearing different
+  // clothes.
+  if (narrationStarted === true && narrationSurvivedShutter === false) {
+    return {
+      outcome: "fail",
+      summary:
+        `The HFP route was untouched (${after.portName}, ${after.sampleRate} Hz) but the SHUTTER ` +
+        `STOPPED THE RECORDER — narration was running before the capture and had stopped by the ` +
+        `time it finished. Route health did not show this, and it is the narration explaining the ` +
+        `photo that is lost. Phone stills during a glasses walk are not safe as designed.`,
+    };
+  }
+
+  if (narrationStarted !== true) {
+    return {
+      outcome: "inconclusive",
+      summary:
+        `The phone camera did not disturb the HFP route (${after.portName}, ` +
+        `${after.sampleRate} Hz), but no narration recorder was running across the shutter, so ` +
+        `only half the question was measured. A shutter can stop a recorder without touching the ` +
+        `route. Re-run on a build that records during the capture before relying on this.`,
+    };
+  }
+
   return {
     outcome: "pass",
     summary:
       `The phone camera did not disturb the HFP route (${after.portName}, ` +
-      `${after.sampleRate} Hz). Phone stills during a glasses walk are safe.`,
+      `${after.sampleRate} Hz), and narration kept running across the shutter. Phone stills ` +
+      `during a glasses walk are safe.`,
   };
 }

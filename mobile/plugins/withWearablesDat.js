@@ -111,7 +111,22 @@ const withDatSwiftPackage = (config, opts) =>
     objects.XCRemoteSwiftPackageReference[refId] = {
       isa: "XCRemoteSwiftPackageReference",
       repositoryURL: `"${PACKAGE_URL}"`,
-      requirement: { kind: "upToNextMajorVersion", minimumVersion: opts.version },
+      // NEXT MINOR, NOT NEXT MAJOR — because this is a 0.x package.
+      //
+      // SemVer gives 0.x no stability promise: a MINOR bump may break the API, and by convention for
+      // pre-1.0 packages it routinely does. `upToNextMajorVersion` on `0.8.x` admits everything below
+      // 1.0.0, so Meta's 0.9 release is a candidate for this build even though the bridge is written
+      // against the 0.8 API (`DeviceSession.addStream` among others).
+      //
+      // AND NOTHING PINS IT DOWNSTREAM. This is a managed project: no `Package.resolved` is committed,
+      // so every clean EAS build re-resolves the range from scratch. The failure mode is therefore the
+      // worst kind — an unchanged commit that built yesterday stops compiling today because a third
+      // party published, with nothing in this repository having changed to explain it.
+      //
+      // `upToNextMinorVersion` keeps us on 0.8.x, where the patch releases are the only thing that can
+      // move. Widening this is a deliberate migration (see the pinned-version follow-up on #1020), not
+      // something a resolver should decide on our behalf at build time.
+      requirement: { kind: "upToNextMinorVersion", minimumVersion: opts.version },
     };
     objects.XCRemoteSwiftPackageReference[`${refId}_comment`] =
       "XCRemoteSwiftPackageReference \"meta-wearables-dat-ios\"";
