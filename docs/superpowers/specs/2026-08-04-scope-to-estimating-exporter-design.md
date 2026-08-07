@@ -1,7 +1,11 @@
 # TROCK Scope → CRM estimating exporter
 
-**Status:** design, not approved. Nothing below is built.
-**Date:** 2026-08-04
+**Status:** design, not approved. Nothing on the **Scope** side is built. The CRM-side prerequisite
+that was blocked — a way for a machine to call the receiver at all — has since been **decided and
+implemented**: `POST /api/integrations/scope/walkthrough-extractions`, an HMAC-signed integration
+route outside `tenantRouter` (PR #1033). The section below is kept because it records why the obvious
+shapes were rejected, but it is no longer a blocker.
+**Date:** 2026-08-04 · **Blocker resolved:** 2026-08-06
 
 ## The gap in one sentence
 
@@ -30,6 +34,77 @@ Worth stating, because it removes most of the hard problems from this design:
 - **Status codes are already meaningful** and the sender must distinguish them: `400` = "your upload
   is not at the derived key, fix it", NOT retryable. `503` = "we could not reach object storage",
   retryable. `409` = the stored object no longer matches what the `files` row recorded.
+
+## RESOLVED BLOCKER: there was no way for a machine to call this endpoint
+
+**This spec originally said "POST the payload with the service token". That was wrong, and it is the
+single biggest correction here.** There is no service token for this route, and nothing in the CRM
+issues one.
+
+`POST /api/deals/:id/estimating/walkthrough-extractions` is mounted on the CRM's `tenantRouter`
+(`app.ts`, `CRM_ONLY_TENANT_ROUTE_MOUNTS[0]`), which means it sits behind `authMiddleware`, per-user
+rate limiting, and tenant/office resolution from an authenticated user. Every one of those assumes a
+logged-in human.
+
+**CSRF is not among them, and an earlier draft of this section said it was.** The global middleware
+(`app.ts`, the `hasAuthCookie` guard) returns early unless a `token` COOKIE is present, so an
+`Authorization`-only bearer request never reaches a CSRF check at all. CSRF is a property of
+cookie-authenticated browser sessions here, not a universal constraint on unsafe methods — which
+matters, because "it inherits CSRF" was being used as an argument against a bearer credential and is
+simply not true of one.
+
+**Nor is `field-login` the CRM's only machine path**, which this section also claimed. `app.ts` mounts
+four HMAC-signed integration routers before `express.json()` precisely so raw bytes survive for
+signature verification — the Procore webhook, the SyncHub Procore relay, Bid Board sync, and the
+internal RFP callbacks — and `/api/integrations/synchub` authenticates on a shared-secret header. The
+accurate statement is narrower and still blocking: **no machine path reaches the tenant deal routes.**
+The distinction matters, because it means the CRM already has an established pattern for this problem
+rather than needing one invented.
+
+So the exporter is **not** Scope-side work plus configuration. It needs a CRM-side authentication path
+that does not exist. Three ways:
+
+1. **A service principal for this route** — a bearer credential plus an allow-list of the routes it may
+   reach. Workable, but it does NOT fall out of route allow-listing alone: `tenantMiddleware` selects
+   the tenant schema exclusively from `req.user.activeOfficeId`, and the existing auth middleware
+   derives that from the user's home office or an authorized `x-office-id` override. A principal with
+   one fixed active office would look up every out-of-office walkthrough in the wrong schema and answer
+   404. Choosing this shape therefore requires specifying how `officeSlug` maps to a permitted office
+   context and how that context is authorized — a design question this spec previously left silent.
+2. **Scope holds a CRM user's credentials** and logs in. Rejected: it puts a human's session in a
+   machine, inherits browser rate-limiting, and makes every row that machine files indistinguishable
+   from one that person typed.
+3. **A separate HMAC-signed integration route, outside `tenantRouter`** — the pattern the four existing
+   integration routers already use. No user, no session, no office resolution from a principal: the
+   payload names the office and the route resolves it explicitly.
+
+**Decided: (3), implemented in PR #1033** as `POST /api/integrations/scope/walkthrough-extractions`.
+It sidesteps the office problem in (1) by taking `officeSlug` on the payload and resolving the tenant
+itself, and it keeps the captured actor — see below.
+
+### What `userId` means, and why (3) preserves it
+
+An earlier draft said `capturedByExternalId` "stays correct as the actor even when the caller is a
+service". On the tenant deal route that is **false**: `deals/routes.ts` overwrites the body's `userId`
+with `req.user!.id` before validation, deliberately, so a caller cannot forge the uploader stamped on
+the contact-sheet file. Under a service principal the actor recorded on `files.uploadedBy` and
+`estimate_source_documents.uploadedByUserId` would therefore be the SERVICE, not the person who walked
+the site — the opposite of what the spec assumed.
+
+Option (3) is what makes the original intent achievable: with no `req.user` to overwrite it, the
+integration route takes the payload's `userId`, PROVES it against an active `users` row in the resolved
+office, and pins that proven value. The captured actor survives because it is verified rather than
+trusted — not because the field was left alone.
+
+### Provenance already exists
+
+The spec argued for a new provenance column so a machine-filed extraction is distinguishable from a
+human's. That distinction is **already recorded**: `insertWalkthroughExtractions` writes
+`extractionType: "scope_utterance"` and stamps `extractionProvider: "trock-scope"` and
+`extractionMethod: "walkthrough_grounding"` into `metadataJson`, and the source document carries the
+Scope parse provider and profile. A new field may still be justified to record which CREDENTIAL filed a
+row — that is an authentication fact, not an origin fact — but "there is no way to tell machine rows
+from human rows" was not true when this was written.
 
 ## The three things that make this non-trivial
 
@@ -66,8 +141,10 @@ write-only access, this decision inverts** and the fallback is CRM-issued presig
 upload-proxy endpoint), because an unscoped bucket credential held by a second service is a worse trade
 than the extra hop it was chosen to avoid.
 
-Nothing in Scope currently composes a contact sheet. It has evidence frames per clip; turning them into
-one `image/jpeg` is new work (sharp is already a CRM dependency; Scope would need its own).
+Nothing in Scope currently composes a contact sheet, and it has **no image library at all** — no sharp,
+no jimp, no canvas in any workspace. It has evidence frames (`frames`, `moment_frames`), so the inputs
+exist, but turning them into one `image/jpeg` means adding an image dependency to Scope, not just
+writing new code against an existing one.
 
 ### 2. A null quantity is refused today, and that refusal is being removed
 
@@ -86,10 +163,25 @@ way to see what was withheld.
 
 ### 3. Scope does not know the CRM's `projectId`
 
-The payload needs `dealId`, `projectId` and `userId`. Scope's `walkthroughs` row carries `dealUuid`,
-`officeSlug`, `siteId` and `capturedByExternalId`.
+The payload needs `dealId`, `projectId` and `userId` — and, on the integration route decided above,
+`officeSlug` too, since that route resolves the tenant from the payload rather than from a session.
+Scope's `walkthroughs` row carries `dealUuid`, `officeSlug`, `siteId` and `capturedByExternalId`.
 
-- `userId` — `capturedByExternalId` already holds the CRM user id. Fine.
+- `officeSlug` — held directly. It is what selects the tenant schema, so it is load-bearing rather than
+  informational.
+- `userId` — `capturedByExternalId` already holds the CRM user id. It is not merely passed through: the
+  receiver proves it against an **active** `users` row and refuses the request otherwise, because this
+  value is stamped on `files.uploadedBy` and the source document's uploader. A deactivated or unknown
+  id is a 404, not a row with a stranger's name on it.
+
+  **Not scoped to the deal's office, deliberately** — an earlier draft of this line said a "foreign"
+  user was refused, and that was wrong in a way worth correcting rather than deleting. `users` is a
+  PUBLIC table, and the office session runs with `search_path = office_<slug>,public`, so the lookup
+  finds any active user whatever their home office. That is the correct behaviour, not an oversight:
+  the field surface is explicitly office-agnostic (`field/cross-office.ts`) and the field walkthrough
+  route already resolves the DEAL's office while keeping `req.fieldUser.id` as the actor, so a capturer
+  whose home office differs from the deal's is an ordinary supported case. Refusing them would reject
+  real walks.
 - `dealId` — `dealUuid`. Fine.
 - `projectId` — **not held.** `siteId` is Scope's own notion. Either the forward starts carrying the
   CRM project id (a change on the CRM's forward job, small), or every export goes in deal-level with
@@ -118,7 +210,12 @@ Sequence:
    this is a true retry and there is nothing to do. **Unequal ⇒ abort the export and dead-letter** — the
    key holds something this walkthrough did not produce, and posting would attach the deal's estimating
    chain to a foreign object.
-4. `POST` the payload with the service token.
+4. `POST` the payload to **`/api/integrations/scope/walkthrough-extractions`** — not to the tenant deal
+   route, which has no machine path. Signed with an HMAC of the **exact request bytes** in
+   `x-trock-scope-signature`, sent uncompressed (the receiver refuses `Content-Encoding`, because
+   inflating before verification would mean the signature covers bytes that were never transmitted),
+   and carrying `officeSlug` alongside `dealId`, `userId` and `projectId` — that route resolves the
+   tenant from the payload rather than from a session. See PR #1033.
 5. Retry policy, per operation rather than one rule for all three:
    - **Timeouts**: HEAD 5s, PUT 60s (it carries the sheet), POST 30s. Bounded attempts — 5 for HEAD/PUT,
      5 for POST — with exponential backoff and full jitter, so a Scope-wide retry storm cannot
