@@ -26,6 +26,7 @@ import { drizzle } from "drizzle-orm/pglite";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
+  deals,
   estimateDocumentParseRuns,
   estimateExtractions,
   estimateSourceDocuments,
@@ -133,17 +134,29 @@ const PAYLOAD: WalkthroughIngressPayload = {
 
 beforeAll(async () => {
   pg = new PGlite();
-  // Only the four tables the ingress chain itself writes: this file never reads the workbench, so the
-  // market/pricing/deal tables that suite needs are not on any read path here.
+  // The four tables the ingress chain writes, plus `deals` — which is on the WRITE path now: R21 has
+  // `ingestWalkthrough` re-read and lock the deal inside its own transaction, so an ingress against a
+  // schema with no `deals` relation fails at that statement rather than at the assertion under test.
+  // This file still never reads the workbench, so the market/pricing tables that suite needs stay out.
   await pg.exec(
     tenantSchemaSql("public", [
       files,
       estimateSourceDocuments,
       estimateDocumentParseRuns,
       estimateExtractions,
+      deals,
     ])
   );
   tenantDb = drizzle(pg);
+  // Active, because that is what the lock requires. Every payload in this file targets DEAL, and the
+  // defects it characterizes are about ROW CONTENT — a missing deal would turn each of them into the
+  // same 404 and the file would assert nothing it claims to.
+  await tenantDb.insert(deals).values({
+    id: DEAL,
+    dealNumber: "CH-0001",
+    name: "Walkthrough characterization deal",
+    stageId: U("c7777"),
+  });
 }, 60_000);
 
 afterAll(async () => {
