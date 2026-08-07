@@ -36,6 +36,15 @@ async function insertReviewEvent(
   return event;
 }
 
+/** The one definition of "can be priced", shared by every decision in this file. Mirrors the
+ *  worker's own guard and `applyMarketRateAdjustment`: absent, non-finite and nonpositive are all
+ *  unpriceable. Module-level because approve needs it as well as edit. */
+function isPriceableQuantity(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0;
+}
+
 async function loadEstimateExtraction(
   tenantDb: TenantDb,
   dealId: string,
@@ -148,13 +157,9 @@ export async function updateEstimateExtraction(args: {
   // JavaScript boolean computed from a stale row cannot see that; a CASE evaluated when the row is
   // locked can.
   //
-  /** The one definition of "can be priced", shared by every decision below. Mirrors the worker's own
-   *  guard and `applyMarketRateAdjustment`: absent, non-finite and nonpositive are all unpriceable. */
-  const isPriceable = (value: unknown): boolean => {
-    if (value === null || value === undefined) return false;
-    const numeric = Number(value);
-    return Number.isFinite(numeric) && numeric > 0;
-  };
+  /** Module-level now — see `isPriceableQuantity`. Kept as a local alias so the reasoning in the
+   *  comments below still reads against a short name. */
+  const isPriceable = isPriceableQuantity;
 
   const suppliesQuantity = isPriceable(nextQuantity);
 
@@ -305,6 +310,33 @@ export async function approveEstimateExtraction(args: {
 
   if (!existing) {
     throw new AppError(404, "Estimate extraction not found");
+  }
+
+  // APPROVAL MUST NOT ERASE THE MISSING-QUANTITY SIGNAL.
+  //
+  // `needs_quantity` is the ONLY place an unpriceable row is visible: the worker reselects ordinary
+  // extractions at `pending`, the workbench's `needsQuantity` bucket counts that status and nothing
+  // else, and the promote predicate refuses the row's stale recommendation. Approving such a row
+  // used to write `approved` unconditionally — which removed it from the bucket while changing
+  // nothing about why it could not be priced. The row then sat approved, unpriceable, ineligible for
+  // re-pricing and invisible: strictly worse than before somebody tried to help it.
+  //
+  // Refused rather than silently ignored, because an estimator pressing Approve has formed an
+  // intention and deserves to be told the row is not ready, not to watch it appear to succeed.
+  //
+  // MEASUREMENT CANDIDATES ARE EXEMPT. The worker prices those on `extraction_type` regardless of
+  // status (`status = 'pending' OR extraction_type = 'measurement_candidate'`), and
+  // `resolvePricingScopeFromExtraction` treats them differently too — so a quantity-less measurement
+  // candidate is not the stranded row this guard is about, and refusing it would block a working
+  // path to fix one that is broken.
+  if (existing.extractionType !== "measurement_candidate" && !isPriceableQuantity(existing.quantity)) {
+    throw new AppError(
+      400,
+      `This extraction has no usable quantity (${existing.quantity ?? "none"}), so approving it would ` +
+        "remove it from the needs-quantity queue without making it priceable. The worker only " +
+        "re-prices ordinary rows at status 'pending', and promotion refuses a recommendation built " +
+        "from a quantity that is no longer there. Supply the quantity first — the row requeues itself."
+    );
   }
 
   const [updated] = await args.tenantDb

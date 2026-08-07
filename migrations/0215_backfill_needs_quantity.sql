@@ -33,6 +33,7 @@ DECLARE
   schema_name text;
   moved bigint;
   flagged bigint;
+  surfaced bigint;
 BEGIN
   FOR schema_name IN
     SELECT nspname FROM pg_namespace WHERE nspname LIKE 'office\_%' ESCAPE '\' ORDER BY nspname
@@ -168,6 +169,58 @@ BEGIN
       GET DIAGNOSTICS flagged = ROW_COUNT;
 
       RAISE NOTICE '0215: % already-promoted line item(s) flagged for remediation in %', flagged, schema_name;
+    END IF;
+
+    -- LEGACY APPROVED ROWS, WHICH THE MOVE ABOVE CANNOT TOUCH.
+    --
+    -- The UPDATE parks `processed` rows only, deliberately: `approved` is somebody's decision and a
+    -- migration must not overwrite it at deploy time. But that leaves a real set with no signal
+    -- ANYWHERE. An extraction approved before this deploy, carrying a null, zero, negative or NaN
+    -- quantity, is now: refused by the promote predicate (its recommendation was built from a quantity
+    -- that is not there), skipped by the worker (which reselects ordinary rows at `pending`), and
+    -- absent from `summary.extractions.needsQuantity` (which counts that one status). Three surfaces
+    -- agree it needs attention and none of them says so.
+    --
+    -- SURFACED, NOT MOVED — the same rule the promoted-line remediation above follows, for the same
+    -- reason: an event is additive and reversible, a status change silently discards a human decision
+    -- for a whole class of rows at once. The event names the extraction rather than a line item, so it
+    -- cannot collide with the remediation written above even on a row that is both.
+    --
+    -- Guarded on both relations it touches. `estimate_extractions` is proven by the CONTINUE at the top
+    -- of the loop; `estimate_review_events` is not.
+    IF to_regclass(format('%I.estimate_review_events', schema_name)) IS NOT NULL THEN
+      EXECUTE format(
+        $legacy$INSERT INTO %I.estimate_review_events
+                  (deal_id, subject_type, subject_id, event_type, before_json, after_json, reason, user_id)
+                SELECT e.deal_id,
+                       'estimate_extraction',
+                       e.id,
+                       'remediation_required',
+                       jsonb_build_object('status', e.status, 'quantity', e.quantity),
+                       '{}'::jsonb,
+                       'Migration 0215: this extraction was APPROVED with no usable quantity ('
+                         || COALESCE(e.quantity::text, 'none') || '). Its review decision has been left '
+                         || 'alone, but nothing can price it: the generation job only re-prices rows at '
+                         || 'pending, and promotion refuses a recommendation built from a quantity that '
+                         || 'is not there. Supply the quantity to put it back in the queue.',
+                       NULL
+                  FROM %I.estimate_extractions e
+                 WHERE e.status = 'approved'
+                   AND (
+                     e.quantity IS NULL
+                     OR e.quantity <= 0
+                     OR e.quantity = 'NaN'::numeric
+                   )
+                   AND NOT EXISTS (
+                     SELECT 1
+                       FROM %I.estimate_review_events x
+                      WHERE x.subject_id = e.id
+                        AND x.event_type = 'remediation_required'
+                   )$legacy$,
+        schema_name, schema_name, schema_name
+      );
+      GET DIAGNOSTICS surfaced = ROW_COUNT;
+      RAISE NOTICE '0215: % approved extraction(s) surfaced as needing a quantity in %', surfaced, schema_name;
     END IF;
 
     -- Said out loud per office. A silent backfill of pricing state is exactly the kind of change

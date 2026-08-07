@@ -15,6 +15,9 @@ async function seed(schema: string) {
     CREATE SCHEMA IF NOT EXISTS ${schema};
     CREATE TABLE IF NOT EXISTS ${schema}.estimate_extractions (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      -- On the migration's read path since it began surfacing legacy APPROVED rows: that event is
+      -- written against the extraction, and every review event carries the deal it belongs to.
+      deal_id uuid,
       status text NOT NULL,
       quantity numeric(14,3),
       updated_at timestamptz NOT NULL DEFAULT now()
@@ -416,6 +419,43 @@ describe("migration 0215 — parking already-priced rows that never had a usable
     )) as { rows: Array<{ subject_id: string }> };
 
     expect(rows).toHaveLength(1);
+  });
+
+  it("SURFACES a legacy APPROVED row with an unusable quantity, without moving it", async () => {
+    // The move only parks `processed` rows, because `approved` is somebody decision and a migration
+    // must not overwrite one at deploy time. That leaves a real set with no signal anywhere: the
+    // promote predicate refuses it, the worker skips it (ordinary rows re-price at `pending`), and the
+    // needs-quantity bucket counts only that status. Three surfaces agree it needs attention and none
+    // of them says so. Surfaced as an event — additive and reversible — rather than by a status change.
+    await seed("office_dallas");
+    await seedPromotionChain("office_dallas");
+    await pg.exec(`
+      INSERT INTO office_dallas.estimate_extractions (id, deal_id, status, quantity) VALUES
+        ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '55555555-5555-4555-8555-555555555555', 'approved', NULL),
+        ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', '55555555-5555-4555-8555-555555555555', 'approved', 0),
+        -- the control: approved AND priceable, which must be left entirely alone
+        ('cccccccc-cccc-4ccc-8ccc-cccccccccccc', '55555555-5555-4555-8555-555555555555', 'approved', 12);
+    `);
+
+    await pg.exec(MIGRATION_SQL);
+
+    const { rows } = (await pg.query(
+      `SELECT subject_id::text AS subject_id, subject_type, reason
+         FROM office_dallas.estimate_review_events ORDER BY subject_id`
+    )) as { rows: Array<{ subject_id: string; subject_type: string; reason: string }> };
+
+    expect(rows.map((r) => r.subject_id)).toEqual([
+      "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    ]);
+    expect(rows[0].subject_type).toBe("estimate_extraction");
+    expect(rows[0].reason).toMatch(/APPROVED with no usable quantity/);
+
+    // AND THE STATUS IS UNTOUCHED — the review decision survives, which is the whole point of using an
+    // event instead of the move.
+    const after = await statuses("office_dallas");
+    expect(after["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]).toBe("approved");
+    expect(after["bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"]).toBe("approved");
   });
 
   it("is REPLAYABLE — a second run changes nothing", async () => {

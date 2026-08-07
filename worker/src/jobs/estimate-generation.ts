@@ -461,7 +461,22 @@ export async function runEstimateGeneration(
                 //   q is null or q <= 0                -> {null, -5, 0}
                 //   q is null or q <= 0 or q = 'NaN'   -> {null, -5, 0, NaN}
                 sql`(${estimateExtractions.quantity} is null or ${estimateExtractions.quantity} <= 0 or ${estimateExtractions.quantity} = 'NaN'::numeric)`,
-                sql`${estimateExtractions.status} = ${extraction.status}`
+                sql`${estimateExtractions.status} = ${extraction.status}`,
+                // AND IT MUST STILL BE THE ACTIVE ARTIFACT. The candidate query that produced
+                // `pendingExtractions` filters on this, but that read happened earlier: a newer parse
+                // completing in between flips `activeArtifact` to false
+                // (document-parse-orchestrator.ts) WITHOUT touching status or quantity, so every other
+                // condition in this claim still matches and the row is marked `needs_quantity` anyway.
+                //
+                // The result is an action request nobody can act on. `buildEstimatingWorkbenchState`
+                // hides a superseded extraction — it filters rows by active artifact — but returns
+                // review events UNFILTERED, so the estimator sees "supply a quantity" for a row that is
+                // not on their screen and has been replaced by one that is.
+                //
+                // Re-asserted in the claim rather than re-read beforehand, for the same reason the
+                // status is: this UPDATE is the only statement that takes the row lock, so it is the
+                // only place the answer is still true when it is used.
+                sql`${estimateExtractions.metadataJson}->>'activeArtifact' = 'true'`
               )
             )
             .returning({ id: estimateExtractions.id });
