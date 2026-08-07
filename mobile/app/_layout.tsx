@@ -16,6 +16,10 @@ import { ErrorBoundary } from "../src/components/ErrorBoundary";
 // Side-effect import: registers the background upload-drain task at startup so the OS can invoke it even
 // when the app is cold-launched in the background (before the capture screen mounts).
 import "../src/capture/upload-background-task";
+// Side-effect import, same reason: a COLD return from Meta AI is launched BY the callback URL, and
+// expo-router routes it somewhere that is not the diagnostic screen — so a handler owned by that
+// screen never installs and registration silently never completes. Dev-only internally.
+import "../src/wearables/registration-callback";
 
 // retry once, treat data as fresh for 30s — same defaults as the reference app.
 const queryClient = new QueryClient({

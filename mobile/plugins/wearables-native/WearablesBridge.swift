@@ -519,7 +519,22 @@ final class WearablesBridge: RCTEventEmitter {
           AVSampleRateKey: 48_000.0,
           AVNumberOfChannelsKey: 1,
         ])
-        recorder.record()
+        // `record()` REPORTS FAILURE BY RETURNING FALSE, and ignoring it was the difference between
+        // a green rung and a measurement. If recording cannot begin the delayed callback still fires,
+        // reads a nominally wideband sample rate off the session, and resolves — typically with a
+        // zero-byte file — so the diagnostic reports that the glasses negotiated 16 kHz when no
+        // glasses audio was captured at all. Rejecting immediately, and handing the route back on the
+        // way out, because this path also holds HFP.
+        guard recorder.record() else {
+          try? audioSession.setActive(false, options: .notifyOthersOnDeactivation)
+          reject(
+            "wearables_audio_recorder_not_started",
+            "AVAudioRecorder.record() returned false — recording never began, so there is no sample "
+              + "rate to report. The session is configured but the recorder could not start.",
+            nil
+          )
+          return
+        }
 
         let route = audioSession.currentRoute
         let input = route.inputs.first
@@ -560,6 +575,14 @@ final class WearablesBridge: RCTEventEmitter {
           resolve(payload)
         }
       } catch {
+        // HAND THE GLASSES BACK ON THE FAILURE PATH TOO. Everything after `setActive(true)` runs
+        // inside this do — notably constructing the AVAudioRecorder, which throws on a bad settings
+        // dictionary or an unwritable URL. Rejecting without deactivating leaves the session active,
+        // and HFP and A2DP are mutually exclusive: the glasses stay pinned to the 8 kHz mono profile
+        // for every other app until something else happens to reset the session. The success path
+        // already treats deactivation as the other half of choosing HFP deliberately; a failed rung
+        // owes the same.
+        try? audioSession.setActive(false, options: .notifyOthersOnDeactivation)
         reject("wearables_audio_failed", "HFP capture failed: \(Self.describe(error))", error)
       }
     }

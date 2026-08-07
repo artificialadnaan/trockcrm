@@ -22,6 +22,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import * as Linking from "expo-linking";
+import {
+  getLastRegistrationCallback,
+  handleRegistrationCallback,
+  subscribeToRegistrationCallback,
+} from "../../src/wearables/registration-callback";
 import { theme } from "../../src/theme/theme";
 import {
   Wearables,
@@ -74,18 +79,28 @@ function Diagnostic() {
   // failed with "No eligible device available" — an error that names the glasses when the real
   // culprit was this missing line.
   useEffect(() => {
-    const handle = (url: string) => {
-      setCallback(url);
-      Wearables.handleUrl(url)
-        .then((r) => setCallback(`${url}\nhandled: ${r.handled}`))
-        .catch((e) => setCallback(`${url}\n${String(e)}`));
+    const show = (record: { url: string; handled: boolean | null; error: string | null }) => {
+      if (record.error) return setCallback(`${record.url}\n${record.error}`);
+      if (record.handled === null) return setCallback(record.url);
+      setCallback(`${record.url}\nhandled: ${record.handled}`);
     };
-    // A cold launch from the callback delivers the URL here instead of as an event.
-    void Linking.getInitialURL().then((url) => {
-      if (url) handle(url);
-    });
+    // Routed through the shared handler so the warm path and the cold path submit to the SDK the
+    // same way, and both land in the same record.
+    const handle = (url: string) => handleRegistrationCallback(url);
+    // THE COLD LAUNCH IS NOT HANDLED HERE, and cannot be. If iOS terminated the app during the
+    // handoff, the callback URL is what launches it — expo-router routes that URL, which does not
+    // resolve to this screen, so this effect never runs and `getInitialURL()` is never reached.
+    // `src/wearables/registration-callback` owns that case from the root layout, before any screen
+    // exists; this subscribes to what it saw so a cold return still displays here.
+    const seen = getLastRegistrationCallback();
+    if (seen) show(seen);
+    const unsubscribe = subscribeToRegistrationCallback(show);
+    // The WARM return is still this screen's: the app is running, so the URL arrives as an event.
     const sub = Linking.addEventListener("url", ({ url }) => handle(url));
-    return () => sub.remove();
+    return () => {
+      unsubscribe();
+      sub.remove();
+    };
   }, []);
 
   const rungs: Rung[] = [
@@ -137,6 +152,21 @@ function Diagnostic() {
       // capturePhoto only reports that the request was ACCEPTED; the image and its
       // dimensions arrive later on the photo event, so this rung stays "running".
       if (rung.key === "photo") {
+        // ...but ACCEPTED is a value, not a given. The native side resolves `{ requested: false }`
+        // when it declines — capture asked for before the stream is ready, or while it is busy — and
+        // NO photo event follows. Ignoring that left the rung stuck on "waiting for image" forever,
+        // with the button disabled by `running`: a refusal presented as a hang, on the one screen
+        // whose entire job is telling you which step actually failed.
+        const requested = (value as { requested?: boolean } | undefined)?.requested;
+        if (requested === false) {
+          setState((s) => ({ ...s, photo: "fail" }));
+          setResult((r) => ({
+            ...r,
+            photo: "capturePhoto was declined (requested: false) — no image will arrive. The stream "
+              + "is usually not ready yet, or a capture is already in flight. Run rung 6, then retry.",
+          }));
+          return;
+        }
         setResult((r) => ({ ...r, photo: "requested — waiting for image…" }));
         return;
       }

@@ -61,6 +61,15 @@ export default function AppLayout() {
         name="profile"
         options={{ title: "Profile", tabBarIcon: ({ color }) => <TabIcon name="person-outline" color={color} /> }}
       />
+      {/* REGISTERED PRECISELY SO IT DOES NOT APPEAR. Expo Router adds a tab for EVERY route file in
+          this group, so `dev-wearables.tsx` was becoming a fifth tab after the four above — visible
+          in production, where the screen's own `__DEV__` guard then renders nothing. A crew tapping
+          it got a blank screen with no way to tell it apart from a broken app.
+
+          `href: null` removes it from the bar while leaving the route navigable by URL, which is how
+          the diagnostic is reached in a dev build. Deleting the file or moving it out of the group
+          would also work; this keeps it one tap from where it is used. */}
+      <Tabs.Screen name="dev-wearables" options={{ href: null }} />
     </Tabs>
   );
 }
