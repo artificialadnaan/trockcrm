@@ -1,8 +1,11 @@
 # TROCK Scope → CRM estimating exporter
 
-**Status:** design, not approved. Nothing below is built, and one prerequisite is BLOCKED — see the
-authentication blocker below.
-**Date:** 2026-08-04
+**Status:** design, not approved. Nothing on the **Scope** side is built. The CRM-side prerequisite
+that was blocked — a way for a machine to call the receiver at all — has since been **decided and
+implemented**: `POST /api/integrations/scope/walkthrough-extractions`, an HMAC-signed integration
+route outside `tenantRouter` (PR #1033). The section below is kept because it records why the obvious
+shapes were rejected, but it is no longer a blocker.
+**Date:** 2026-08-04 · **Blocker resolved:** 2026-08-06
 
 ## The gap in one sentence
 
@@ -32,7 +35,7 @@ Worth stating, because it removes most of the hard problems from this design:
   is not at the derived key, fix it", NOT retryable. `503` = "we could not reach object storage",
   retryable. `409` = the stored object no longer matches what the `files` row recorded.
 
-## BLOCKER: there is no way for a machine to call this endpoint
+## RESOLVED BLOCKER: there was no way for a machine to call this endpoint
 
 **This spec originally said "POST the payload with the service token". That was wrong, and it is the
 single biggest correction here.** There is no service token for this route, and nothing in the CRM
@@ -167,9 +170,18 @@ Scope's `walkthroughs` row carries `dealUuid`, `officeSlug`, `siteId` and `captu
 - `officeSlug` — held directly. It is what selects the tenant schema, so it is load-bearing rather than
   informational.
 - `userId` — `capturedByExternalId` already holds the CRM user id. It is not merely passed through: the
-  receiver proves it against an active `users` row in the resolved office and refuses the request
-  otherwise, because this value is stamped on `files.uploadedBy` and the source document's uploader. An
-  id belonging to a departed or foreign user is a 404, not a row with a stranger's name on it.
+  receiver proves it against an **active** `users` row and refuses the request otherwise, because this
+  value is stamped on `files.uploadedBy` and the source document's uploader. A deactivated or unknown
+  id is a 404, not a row with a stranger's name on it.
+
+  **Not scoped to the deal's office, deliberately** — an earlier draft of this line said a "foreign"
+  user was refused, and that was wrong in a way worth correcting rather than deleting. `users` is a
+  PUBLIC table, and the office session runs with `search_path = office_<slug>,public`, so the lookup
+  finds any active user whatever their home office. That is the correct behaviour, not an oversight:
+  the field surface is explicitly office-agnostic (`field/cross-office.ts`) and the field walkthrough
+  route already resolves the DEAL's office while keeping `req.fieldUser.id` as the actor, so a capturer
+  whose home office differs from the deal's is an ordinary supported case. Refusing them would reject
+  real walks.
 - `dealId` — `dealUuid`. Fine.
 - `projectId` — **not held.** `siteId` is Scope's own notion. Either the forward starts carrying the
   CRM project id (a change on the CRM's forward job, small), or every export goes in deal-level with
@@ -198,7 +210,12 @@ Sequence:
    this is a true retry and there is nothing to do. **Unequal ⇒ abort the export and dead-letter** — the
    key holds something this walkthrough did not produce, and posting would attach the deal's estimating
    chain to a foreign object.
-4. `POST` the payload — **see the authentication blocker below, which this step cannot be written against yet.**
+4. `POST` the payload to **`/api/integrations/scope/walkthrough-extractions`** — not to the tenant deal
+   route, which has no machine path. Signed with an HMAC of the **exact request bytes** in
+   `x-trock-scope-signature`, sent uncompressed (the receiver refuses `Content-Encoding`, because
+   inflating before verification would mean the signature covers bytes that were never transmitted),
+   and carrying `officeSlug` alongside `dealId`, `userId` and `projectId` — that route resolves the
+   tenant from the payload rather than from a session. See PR #1033.
 5. Retry policy, per operation rather than one rule for all three:
    - **Timeouts**: HEAD 5s, PUT 60s (it carries the sheet), POST 30s. Bounded attempts — 5 for HEAD/PUT,
      5 for POST — with exponential backoff and full jitter, so a Scope-wide retry storm cannot
