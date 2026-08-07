@@ -137,6 +137,54 @@ describe("assertProductionBuildEnv", () => {
     }
   );
 
+  it.each([
+    // EXTRA SLASHES. Both satisfy a `^https://` test and the parser repairs them to
+    // `https://api.example.com/`, so every later check saw a healthy host — while `src/config.ts`
+    // keeps the raw spelling and iOS receives an https URL with an EMPTY authority.
+    "https:///api.example.com",
+    "https:////api.example.com",
+    // BACKSLASHES. The same repair by a different route: WHATWG treats `\` as `/` for special
+    // schemes, so these normalise identically. A rule that only counted forward slashes would fix
+    // the reported spelling and leave this one, which is the same bug wearing a different hat.
+    "https://\\api.example.com",
+    "https://\\\\api.example.com",
+    // STRIPPED CHARACTERS. Tabs, newlines and carriage returns are removed ANYWHERE in the input
+    // before parsing, so the parser sees a clean URL and the raw string still carries the junk.
+    "https://\tapi.example.com",
+    "https://api.example\n.com",
+  ])("REGRESSION: rejects %j, which the parser repairs into a host the app never sends", (url) => {
+    expect(() => assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: url }))).toThrow(
+      /must begin with/
+    );
+  });
+
+  it("GUARD: still accepts an IPv6 literal spelled with leading zeros", () => {
+    // The counterweight to the rule above, and the reason it is written as "what will the parser
+    // rewrite" rather than "does the raw authority equal the parsed host": comparing them would
+    // reject `[2606:0050::1]` — a perfectly valid global address the parser merely compresses to
+    // `[2606:50::1]` — and block a legitimate build for a spelling preference.
+    expect(() =>
+      assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: "https://[2606:0050::1]" }))
+    ).not.toThrow();
+  });
+
+  it.each(["https://[2001:db80::1]", "https://[2001:db8f::1]"])(
+    "GUARD: accepts %s, which is global unicast and not the documentation range",
+    (url) => {
+      // `2001:db8::/32` is the documentation prefix, and a textual `startsWith("2001:db8")` also
+      // swallows the sixteen distinct hextets `db80`–`db8f`. Those are ordinary global addresses, so
+      // the guard was refusing to build against a host that works.
+      expect(() => assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: url }))).not.toThrow();
+    }
+  );
+
+  it("still rejects the actual documentation range", () => {
+    // The boundary fix must not become a hole: `2001:db8::/32` itself is still unroutable.
+    expect(() =>
+      assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: "https://[2001:db8::1]" }))
+    ).toThrow();
+  });
+
   it("REGRESSION: rejects port 0, which is reserved and can host nothing", () => {
     expect(() =>
       assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: "https://api.example.com:0" }))

@@ -88,7 +88,12 @@ function ipv6IsGlobal(host) {
   if (h.startsWith("::")) return false;
   if (/^f[cd]/.test(h)) return false; // fc00::/7 — unique-local
   if (/^fe[89ab]/.test(h)) return false; // fe80::/10 — link-local
-  if (h.startsWith("2001:db8")) return false; // documentation
+  // 2001:db8::/32 — documentation. ON THE HEXTET BOUNDARY, not as a text prefix: `startsWith` also
+  // swallowed `2001:db80` through `2001:db8f`, sixteen distinct hextets of ordinary global unicast,
+  // so the guard refused to build against a host that works. The trailing colon is what pins the
+  // boundary — `new URL()` normalises to lowercase with leading zeros removed, so the /32 always ends
+  // in `2001:db8:` (or `2001:db8::` when the rest is zero, which this also matches).
+  if (/^2001:db8:/.test(h)) return false;
   return true;
 }
 
@@ -147,11 +152,32 @@ function assertProductionBuildEnv(env) {
         "API from a device."
     );
   }
-  if (!/^https:\/\//i.test(raw)) {
+  // ONE RULE FOR EVERY REPAIR, rather than a list of spellings. The WHATWG parser rewrites the input
+  // in three separate ways before it ever reports a host, and each of them makes a broken value look
+  // healthy here while `src/config.ts` keeps the raw string that iOS actually gets:
+  //
+  //   * EXTRA SLASHES — `https:///host` and `https:////host` both satisfy a plain `^https://` test
+  //     and are repaired to `https://host/`. NSURL sees an https scheme with an EMPTY authority.
+  //   * BACKSLASHES — `\` is equivalent to `/` for special schemes, so `https://\host` normalises the
+  //     same way. Counting only forward slashes fixes the first spelling and leaves this one.
+  //   * STRIPPED CHARACTERS — tab, newline and carriage return are removed from ANYWHERE in the input,
+  //     and leading/trailing C0 controls and spaces are trimmed, before parsing begins.
+  //
+  // So the question asked is "will the parser rewrite this?", not "does this look like a URL": the
+  // value must contain no character the parser strips, and the authority must begin immediately after
+  // exactly two forward slashes.
+  //
+  // Deliberately NOT "the raw authority must equal `url.host`", which is the other obvious way to say
+  // this. That comparison also rejects `https://[2606:0050::1]` — a valid global address the parser
+  // merely compresses to `[2606:50::1]` — and blocking a real build over a spelling is a worse failure
+  // than the one being prevented.
+  if (/[ - ]/.test(raw) || !/^https:\/\/[^/\\]/i.test(raw)) {
     throw new Error(
-      `EXPO_PUBLIC_API_BASE_URL must begin with "https://" (got "${raw}"). A missing slash still ` +
-        "parses — the URL standard repairs it — but the raw string is what the app builds requests " +
-        "from, and an https URL with no authority reaches no host at all."
+      `EXPO_PUBLIC_API_BASE_URL must begin with "https://" followed immediately by the host, and may ` +
+        `contain no whitespace or control characters (got ${JSON.stringify(raw)}). Values like ` +
+        `"https:/host", "https:///host", "https://\\\\host" or a host with a stray tab still PARSE — ` +
+        "the URL standard repairs them — but the raw string is what the app builds requests from, and " +
+        "what reaches the device is an https URL with no usable authority."
     );
   }
 
