@@ -246,6 +246,10 @@ scopeIngestRoutes.post(
 
         const ingested = await ingestWalkthrough({
           tenantDb: officeDb as never,
+          // Handed over so the service can hold it ACTIVE for the write. This route resolved the
+          // office from the payload, and nothing else about an unauthenticated-by-person request keeps
+          // that office still — so the id has to travel with the call rather than be re-derived.
+          officeId: office.id,
           // Re-validated by the ingress itself; this route does not pre-empt that. The two fields it
           // does pin are the ones a caller must not choose: the deal it just proved, and the actor.
           payload: { ...body, dealId, userId } as never,

@@ -20,6 +20,8 @@ import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   deals,
+  offices,
+  users,
   estimateDealMarketOverrides,
   estimateDocumentParseRuns,
   estimateExtractionMatches,
@@ -179,6 +181,10 @@ const REPROCESS_DEAL = U("55553");
  *  rather than an absent one — an archived deal and an unknown deal are different failures, and only
  *  the first is the TOCTOU the row lock exists to close. */
 const ARCHIVED_DEAL = U("55554");
+/** R21b fixtures: a revoked capturer and a switched-off office. */
+const DEACTIVATED_USER = U("33334");
+const ACTIVE_OFFICE = U("88881");
+const INACTIVE_OFFICE = U("88882");
 const DEFAULT_MARKET = U("66661");
 /** The bucket the CRM presigns every download against. A `files` row recorded against any other
  *  bucket yields a download URL for an object that is not there (r2-client.ts:168-186 signs the key
@@ -243,6 +249,11 @@ beforeAll(async () => {
       // `estimate_extractions.project_id` carry no foreign key, so `ingestWalkthrough` resolves the
       // project itself and requires `projects.source_deal_id` to equal the authorized deal.
       projects,
+      // R21b. The ingress locks the ACTOR as well as the deal — `payload.userId` is stamped on
+      // `files.uploaded_by` — so `users` is on the write path now. It is a PUBLIC table, which is
+      // exactly why a capturer whose home office differs from the deal's still resolves here.
+      users,
+      offices,
     ])
   );
   tenantDb = drizzle(pg);
@@ -312,6 +323,27 @@ beforeAll(async () => {
       name: "Walkthrough reprocess-guard deal",
       stageId: U("77771"),
     },
+  ]);
+
+  // The actor every payload names. Active, because the ingress now requires it to be.
+  await tenantDb.insert(users).values({
+    id: USER,
+    email: "walkthrough-capturer@example.com",
+    displayName: "Walkthrough Capturer",
+    role: "rep",
+    officeId: U("99991"),
+  });
+  await tenantDb.insert(users).values({
+    id: DEACTIVATED_USER,
+    email: "revoked@example.com",
+    displayName: "Revoked Capturer",
+    role: "rep",
+    officeId: U("99991"),
+    isActive: false,
+  });
+  await tenantDb.insert(offices).values([
+    { id: ACTIVE_OFFICE, name: "Active Office", slug: "active-office" },
+    { id: INACTIVE_OFFICE, name: "Closed Office", slug: "closed-office", isActive: false },
   ]);
 
   // R19. Every projectId the suite posts has to resolve to a project OF THE POSTING DEAL, because the
@@ -1933,8 +1965,10 @@ describe("ingestWalkthrough", () => {
     expect(log[1]).toMatchObject({ kind: "advisory-locks-held", sql: "1" });
 
     // EVERYTHING ELSE RUNS UNDER IT, asserted as the exact prefix rather than as "a select happens
-    // somewhere later": three reads — the R21 deal authorization, the R19 project-ownership resolution,
-    // then the idempotency lookup — and no write until all three have answered.
+    // somewhere later": FOUR reads — the R21 deal authorization, the R21b actor authorization, the R19
+    // project-ownership resolution, then the idempotency lookup — and no write until all four have
+    // answered. (The office authorization is a fifth, but only when a caller supplies `officeId`; this
+    // harness does not, which is what keeps the count here stable.)
     // ("advisory-locks-held" is this test's own probe, injected right after the lock statement; the rest
     // is the service's.)
     const firstWriteAt = log.findIndex((entry) => entry.kind === "insert");
@@ -1945,13 +1979,14 @@ describe("ingestWalkthrough", () => {
       "select",
       "select",
       "select",
+      "select",
     ]);
 
     // WHICH select is which, established by removing one of them: a deal-level walkthrough has no
-    // project to resolve, so exactly TWO reads precede the first write — the R21 deal authorization,
-    // which every ingress does, and the idempotency lookup. That is what attributes the THIRD select
-    // above to the project resolution rather than to some unrelated query, and it is the assertion that
-    // would fail if the ownership check were moved after the first write.
+    // project to resolve, so exactly THREE reads precede the first write — the deal and actor
+    // authorizations, which every ingress does, and the idempotency lookup. That is what attributes the
+    // FOURTH select above to the project resolution rather than to some unrelated query, and it is the
+    // assertion that would fail if the ownership check were moved after the first write.
     const dealLevelLog = await recordIngressStatements(
       walkthroughPayload(U("33032"), { projectId: null })
     );
@@ -1962,6 +1997,7 @@ describe("ingestWalkthrough", () => {
     expect(dealLevelLog.slice(0, dealLevelFirstWriteAt).map((entry) => entry.kind)).toEqual([
       "execute",
       "advisory-locks-held",
+      "select",
       "select",
       "select",
     ]);
@@ -3300,6 +3336,55 @@ describe("ingestWalkthrough", () => {
   //
   // The check belongs HERE and not only at the door for the same reason the project check does: the
   // ingress is reachable by any caller, and a guarantee that lives in one route is not a guarantee.
+  it("REFUSES a DEACTIVATED actor, and writes nothing", async () => {
+    // The same TOCTOU as the deal, one row over. `payload.userId` is stamped on `files.uploadedBy`
+    // and the source document's uploader, so a walkthrough filed under a revoked account puts a
+    // name the system has switched off onto a client-facing estimate's source material. Callers
+    // prove the actor before calling in; that proof is a separate statement in a separate
+    // transaction, so only a re-read inside this one is authoritative.
+    const before = await tableCounts();
+
+    await expect(
+      ingestWalkthrough({
+        tenantDb,
+        payload: walkthroughPayload(U("35020"), { projectId: null, userId: DEACTIVATED_USER }),
+      })
+    ).rejects.toMatchObject({ statusCode: 404 });
+
+    expect(await tableCounts()).toEqual(before);
+  });
+
+  it("REFUSES an office switched off mid-write, when the caller names one", async () => {
+    // The tenant schema is bound once, at connection setup, and never re-checks itself — so an
+    // office deactivated after admission still had its whole chain written and answered 201.
+    // `officeId` travels with the call because the service genuinely cannot derive it: the session
+    // carries a search_path, not an id.
+    const before = await tableCounts();
+
+    await expect(
+      ingestWalkthroughService({
+        tenantDb: tenantDb as never,
+        payload: walkthroughPayload(U("35021"), { projectId: null }),
+        contactSheetStore: contactSheetStoreFor(walkthroughPayload(U("35021"), { projectId: null })),
+        officeId: INACTIVE_OFFICE,
+      })
+    ).rejects.toMatchObject({ statusCode: 404 });
+
+    expect(await tableCounts()).toEqual(before);
+  });
+
+  it("ACCEPTS an active office named by the caller, so the guard is not simply refusing everything", async () => {
+    // The counterweight: without this, the test above would pass just as well against a guard that
+    // rejected every `officeId` it was handed.
+    const result = await ingestWalkthroughService({
+      tenantDb: tenantDb as never,
+      payload: walkthroughPayload(U("35022"), { projectId: null }),
+      contactSheetStore: contactSheetStoreFor(walkthroughPayload(U("35022"), { projectId: null })),
+      officeId: ACTIVE_OFFICE,
+    });
+    expect(result.documentId).toBeTruthy();
+  });
+
   it("REFUSES a soft-deleted deal, and writes nothing", async () => {
     const before = await tableCounts();
 

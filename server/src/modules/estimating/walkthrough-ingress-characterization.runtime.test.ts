@@ -31,6 +31,7 @@ import {
   estimateExtractions,
   estimateSourceDocuments,
   files,
+  users,
 } from "@trock-crm/shared/schema";
 import type { WalkthroughIngressPayload, WalkthroughScopeRow } from "@trock-crm/shared/types";
 import { tenantSchemaSql } from "../../../tests/helpers/tenant-schema-from-drizzle.js";
@@ -145,6 +146,10 @@ beforeAll(async () => {
       estimateDocumentParseRuns,
       estimateExtractions,
       deals,
+      // Also on the write path: the ingress locks the ACTOR as well as the deal, because
+      // `payload.userId` is stamped on `files.uploaded_by`. `users` is a PUBLIC table, which is why a
+      // capturer from another office resolves here at all.
+      users,
     ])
   );
   tenantDb = drizzle(pg);
@@ -156,6 +161,13 @@ beforeAll(async () => {
     dealNumber: "CH-0001",
     name: "Walkthrough characterization deal",
     stageId: U("c7777"),
+  });
+  await tenantDb.insert(users).values({
+    id: USER,
+    email: "characterization@example.com",
+    displayName: "Characterization Capturer",
+    role: "rep",
+    officeId: U("c8888"),
   });
 }, 60_000);
 

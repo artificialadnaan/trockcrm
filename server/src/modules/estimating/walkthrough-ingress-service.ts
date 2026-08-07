@@ -16,7 +16,9 @@ import {
   estimateExtractions,
   estimateSourceDocuments,
   files,
+  offices,
   projects,
+  users,
 } from "@trock-crm/shared/schema";
 import type {
   WalkthroughIngressPayload,
@@ -1984,9 +1986,25 @@ export async function ingestWalkthrough({
   tenantDb,
   payload: rawPayload,
   contactSheetStore,
+  officeId,
 }: {
   tenantDb: TenantDb;
   payload: WalkthroughIngressPayload;
+  /**
+   * The office whose schema `tenantDb` is bound to, held ACTIVE for the duration of the write.
+   *
+   * A PARAMETER rather than something this function derives, because it genuinely cannot: the session
+   * carries a `search_path`, not an office id, and recovering one from the other means parsing
+   * `office_<slug>` out of `current_schema()` — encoding a naming convention in the one place that has
+   * no business knowing it, and one that would silently mis-answer in any schema not named that way.
+   * The caller resolved the office to get here; it is the only party that knows the id.
+   *
+   * Optional ONLY so a caller that has already pinned the office for the life of its request need not
+   * restate it. The machine door supplies it, and that is the caller that needs it: it resolves the
+   * office from an unauthenticated-by-person payload, so nothing else about the request holds that
+   * office still.
+   */
+  officeId?: string;
   /** R23/R25. Object storage, injected — see `WalkthroughContactSheetStore` for why it is a required
    *  port rather than an import or an optional dependency. */
   contactSheetStore: WalkthroughContactSheetStore;
@@ -2081,6 +2099,63 @@ export async function ingestWalkthrough({
         `Deal ${payload.dealId} is not an active deal in this office. A walkthrough is filed against ` +
           `the deal, so ingesting one for an archived or unknown deal would write a file, a document, ` +
           `a parse run and every extraction under a record no CRM screen shows.`
+      );
+    }
+
+    // THE OFFICE, HELD ACTIVE ACROSS THE WRITE. Deactivating an office is meant to take effect at
+    // once — `resolveOfficeBySlug` and `tenantMiddleware` both refuse an inactive one at admission —
+    // but nothing held it still afterwards, so an office deactivated between that lookup and these
+    // writes still received a file, a document, a parse run and every extraction, and the sender was
+    // told 201. The tenant schema is bound at connection setup and does not re-check itself.
+    //
+    // Same `FOR SHARE` reasoning as the deal and the actor: `is_active` is a non-key column.
+    if (officeId !== undefined) {
+      const [office] = await tx
+        .select({ id: offices.id })
+        .from(offices)
+        .where(and(eq(offices.id, officeId), eq(offices.isActive, true)))
+        .limit(1)
+        .for("share");
+
+      if (!office) {
+        throw new AppError(
+          404,
+          `Office ${officeId} is not active. Its schema is still reachable on this connection — the ` +
+            `search_path is bound once, at setup — so without this check the whole chain would be ` +
+            `written into an office the CRM has switched off.`
+        );
+      }
+    }
+
+    // THE ACTOR, RE-READ AND LOCKED TOO — the same window as the deal, one row over.
+    //
+    // `payload.userId` is stamped on `files.uploadedBy` and the source document's uploader, so it is
+    // not decoration: it is whose name appears on this work. Callers prove the user before calling in,
+    // and that check is a separate statement in a separate transaction — so an administrator
+    // deactivating the account in between left the request writing the whole chain under an actor the
+    // system had just revoked, and answering 201.
+    //
+    // `users` is a PUBLIC table, not a tenant one, so this reads across the office boundary by design;
+    // the office session runs with `search_path = office_<slug>,public`. Deliberately NOT scoped to
+    // this deal's office: the field surface is office-agnostic and a walkthrough captured by someone
+    // whose home office differs from the deal's is an ordinary supported case. The question is "is
+    // this a live account", not "is this one of ours".
+    //
+    // `FOR SHARE` for the same reason as the deal: `is_active` is a NON-KEY column, so `FOR KEY SHARE`
+    // would permit the deactivating UPDATE — permitting non-key updates is what that mode is for.
+    const [actor] = await tx
+      .select({ id: users.id })
+      .from(users)
+      .where(and(eq(users.id, payload.userId), eq(users.isActive, true)))
+      .limit(1)
+      .for("share");
+
+    if (!actor) {
+      throw new AppError(
+        404,
+        `User ${payload.userId} is not an active user. This id is written to files.uploaded_by and ` +
+          `to the source document's uploader, so filing a walkthrough under a deactivated or unknown ` +
+          `account would put a revoked name on a client-facing estimate's source material.`
       );
     }
 
