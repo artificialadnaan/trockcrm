@@ -401,13 +401,13 @@ final class WearablesBridge: RCTEventEmitter {
         // interleaving unrepresentable — teardown takes the same lock to bump, so it either runs
         // entirely before this (and `stillCurrent` is false) or entirely after (and it sees the stream
         // it needs to stop).
-        var stillCurrent = false
-        stateLock.lock()
-        stillCurrent = streamStartGeneration == generation
-        if stillCurrent { stream = newStream }
-        stateLock.unlock()
-
-        guard stillCurrent else {
+        // Via a SYNCHRONOUS helper, not by locking here. `NSLock.lock()` is annotated unavailable from
+        // async contexts — a warning in Swift 5 and an ERROR in Swift 6, since a task can suspend while
+        // holding the lock. The comment at the top of this method says exactly that and moved code out
+        // of the Task for the reason; locking inline here walked straight back into it. `teardown()`
+        // and `isCurrent()` are fine because the annotation is checked lexically at the call site and
+        // both are synchronous functions that lock internally. So is this one.
+        guard publishStreamIfCurrent(newStream, generation: generation) else {
           // Ours to clean up: it was never published, so `teardown()` cannot reach it.
           newStream.stop()
           created.stop()
@@ -486,6 +486,24 @@ final class WearablesBridge: RCTEventEmitter {
 
   /// Stop and forget the current session and stream. Safe to call when there is nothing to tear
   /// down, which is what lets `startStream` use it as a precondition rather than a cleanup.
+  /// Publish `newStream` as the current stream, but ONLY if `generation` is still the live attempt.
+  ///
+  /// The check and the publish are one critical section on purpose: as two steps, Stop could run
+  /// `teardown()` in the gap — bumping the generation and stopping a `stream` that was still nil —
+  /// after which the task published anyway and the stream outlived a Stop that had already resolved.
+  /// `teardown()` takes the same lock to bump, so it now either runs entirely before this (and this
+  /// returns false) or entirely after (and it finds the stream it needs to stop).
+  ///
+  /// Synchronous because the caller is inside a `Task`, and `NSLock.lock()` is unavailable from an
+  /// async context — see the call site.
+  private func publishStreamIfCurrent(_ newStream: MWDATCamera.Stream, generation: Int) -> Bool {
+    stateLock.lock()
+    defer { stateLock.unlock() }
+    guard streamStartGeneration == generation else { return false }
+    stream = newStream
+    return true
+  }
+
   private func teardown() {
     // INVALIDATE ANY PENDING START FIRST. Tearing down what exists is not enough while a start is
     // still awaiting a selector: that Task holds no reference this can reach, so bumping the
@@ -888,8 +906,25 @@ final class WearablesBridge: RCTEventEmitter {
         let shutter = PhotoCaptureProbe()
         photo.capturePhoto(with: AVCapturePhotoSettings(), delegate: shutter)
 
+        // ONE OBSERVATION, and the flag DERIVED FROM IT — never two separate reads of `currentRoute`.
+        //
+        // Taking the snapshot and then asking the route a second question re-opened the exact hole this
+        // poll exists to close: if the route dropped between the two lines, `during` held the healthy
+        // snapshot while the flag said a loss had been seen — and because every later re-snapshot is
+        // gated on that flag, the loss was detected and then permanently discarded. The verdict then
+        // read a healthy `during` and passed a run where the route was lost.
+        //
+        // Worst-sample-wins, and `during` is only ever replaced by a sample that is actually worse.
+        // The RATE matters as much as the port. `describePhoneCameraCheck` has a whole branch for a
+        // dip on an unchanged port, and it reads `during.sampleRate` — so watching only for port loss
+        // would leave that branch reading the pre-shutter sample taken before anything happened, and a
+        // shutter that renegotiates HFP to 8 kHz and back would stay exactly as invisible as before.
+        //
+        // "Worse" therefore means EITHER: the port is no longer HFP, or the rate is lower than the
+        // worst seen so far. `during` is only ever replaced by a sample that is genuinely worse.
         var during = Self.routeSnapshot(audio)
-        var sawRouteLoss = !audio.currentRoute.inputs.contains(where: { $0.portType == .bluetoothHFP })
+        var sawRouteLoss = (during["isBluetoothHFP"] as? Bool) != true
+        var worstSampleRate = (during["sampleRate"] as? Double) ?? 0
 
         // Bounded: a capture that never calls back must not hang the diagnostic, and its absence is
         // itself reportable — an unfinished shutter is a fact about the phone camera, not a reason to
