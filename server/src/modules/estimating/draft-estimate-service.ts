@@ -388,8 +388,28 @@ export async function promoteApprovedRecommendationsToEstimate({
     );
 
     const requestedRecommendationIds = new Set(approvedRecommendationIds);
+    // THE LOCKED ROW'S VALUES WIN, not just its id.
+    //
+    // `lockPromotionCandidates` takes an ADVISORY lock, so it binds other promotions and nothing else.
+    // A reviewer calling `updateEstimatePricingRecommendationReviewState` takes no such lock, and at
+    // READ COMMITTED each statement gets a fresh snapshot — so an override committed between the wide
+    // read above and the narrow `FOR UPDATE` read is invisible to the first and visible to the second.
+    // The narrow read was contributing only its id to a Set, and the line was then built from the wide
+    // row: the estimator's committed decision was discarded and the quote went out at the old number,
+    // with a review event recording it as promoted. A `FOR UPDATE` whose values you throw away buys
+    // nothing.
+    //
+    // Substituted rather than filtered, so the wide set keeps its shape: duplicate grouping must still
+    // see every row of the run — including ones this promotion will not write — or a blocked sibling
+    // looks unique. Rows outside the locked set keep their wide values; they are only ever counted, not
+    // promoted.
+    const lockedCandidatesById = new Map(
+      promotableCandidates.map((row) => [row.recommendationId, row])
+    );
     const derivedRecommendations = deriveEstimatePricingWorkbenchRows(
-      recommendations as unknown as PromotionCandidateRow[]
+      recommendations.map(
+        (row) => lockedCandidatesById.get(row.recommendationId) ?? row
+      ) as unknown as PromotionCandidateRow[]
     );
     const requestedRecommendations = derivedRecommendations.filter(
       (row) =>

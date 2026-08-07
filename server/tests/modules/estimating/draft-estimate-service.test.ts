@@ -1594,6 +1594,109 @@ describe("promoteApprovedRecommendationsToEstimate", () => {
     ]);
   });
 
+  it("promotes the LOCKED row's values, not the stale ones the wide read saw", async () => {
+    // THE TWO READS CAN DISAGREE, and only one of them is authoritative.
+    //
+    // `lockPromotionCandidates` takes an ADVISORY lock, which binds only other promotions — a reviewer
+    // calling `updateEstimatePricingRecommendationReviewState` takes no such lock, and at READ COMMITTED
+    // every statement gets a fresh snapshot. So an override committed after the wide read and before the
+    // narrow `FOR UPDATE` read is invisible to the first and visible to the second.
+    //
+    // The narrow read exists precisely to be authoritative, and it was contributing only its row's ID:
+    // the line was then built from the wide row. The estimator's committed decision — here a unit price
+    // moved from 25.00 to 41.50 — was silently discarded, and the quote went out at the old number with
+    // a review event saying it was promoted. `FOR UPDATE` on a row whose values you then throw away
+    // buys nothing.
+    estimateServiceMocks.createSection.mockResolvedValue({ id: "section-stale" });
+    estimateServiceMocks.createLineItem.mockResolvedValue({ id: "line-stale" });
+
+    const baseRow = {
+      recommendationId: "rec-repriced",
+      description: "Termination Bar",
+      quantity: "4",
+      unit: "ea",
+      notes: null,
+      sectionName: "Roof",
+      sourceType: "explicit",
+      selectedOptionId: null,
+      normalizedIntent: "termination bar",
+      sourceRowIdentity: "roof:termination-bar",
+      status: "approved",
+      createdByRunId: "run-1",
+      promotedEstimateLineItemId: null,
+    };
+
+    const tenantDb = {
+      execute: vi.fn().mockResolvedValue(undefined),
+      select: vi
+        .fn()
+        // WIDE, UNLOCKED — the snapshot taken before the reviewer committed.
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                where: vi.fn(() =>
+                  selectResult([
+                    { ...baseRow, unitPrice: "25.00", selectedSourceType: null, overrideUnitPrice: null },
+                  ])
+                ),
+              })),
+            })),
+          })),
+        })
+        // NARROW, GATED, LOCKED — the committed truth, taken after.
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            innerJoin: vi.fn(() => ({
+              innerJoin: vi.fn(() => ({
+                where: vi.fn(() =>
+                  selectResult([
+                    {
+                      ...baseRow,
+                      unitPrice: "25.00",
+                      selectedSourceType: "override",
+                      overrideUnitPrice: "41.50",
+                    },
+                  ])
+                ),
+              })),
+            })),
+          })),
+        })
+        // `getOrCreateEstimateSection`'s own lookup — no existing section, so one is created.
+        .mockReturnValueOnce({
+          from: vi.fn(() => ({
+            where: vi.fn(() => ({ limit: vi.fn().mockResolvedValue([]) })),
+          })),
+        }),
+      insert: vi.fn(() => ({ values: vi.fn().mockResolvedValue(undefined) })),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: vi
+              .fn()
+              .mockResolvedValue([{ id: "rec-repriced", promotedEstimateLineItemId: "line-stale" }]),
+          })),
+        })),
+      })),
+    } as any;
+
+    const result = await promoteApprovedRecommendationsToEstimate({
+      tenantDb,
+      dealId: "deal-1",
+      generationRunId: "run-1",
+      approvedRecommendationIds: ["rec-repriced"],
+    });
+
+    expect(result.promotedRecommendationIds).toEqual(["rec-repriced"]);
+    expect(estimateServiceMocks.createLineItem).toHaveBeenCalledWith(
+      expect.anything(),
+      "deal-1",
+      "section-stale",
+      expect.objectContaining({ unitPrice: "41.50" })
+    );
+  });
+
   it("returns an explicit row error when a requested recommendation disappears before promotion", async () => {
     estimateServiceMocks.createSection.mockResolvedValue({ id: "section-live" });
     estimateServiceMocks.createLineItem.mockResolvedValue({ id: "line-live" });

@@ -44,7 +44,12 @@ async function seedPromotionChain(schema: string) {
       promoted_estimate_line_item_id uuid,
       source_type text,
       selected_source_type text,
-      override_quantity numeric(14,3)
+      override_quantity numeric(14,3),
+      -- The number promotion actually wrote onto the line: resolvePromotionLineValues falls back to
+      -- one unit over this column, so COALESCE(recommended_quantity, 1) is what an untouched promoted
+      -- line still carries. Widths match the real schema (14,3), so a value this fixture accepts is
+      -- one the column would.
+      recommended_quantity numeric(14,3)
     );
     CREATE TABLE IF NOT EXISTS ${schema}.estimate_review_events (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -231,6 +236,91 @@ describe("migration 0215 — parking already-priced rows that never had a usable
         ('dddddddd-dddd-4ddd-8ddd-dddddddddddd', '55555555-5555-4555-8555-555555555555',
          'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
          'extracted', 'override', 25);
+    `);
+
+    await pg.exec(MIGRATION_SQL);
+
+    const { rows } = (await pg.query(
+      `SELECT subject_id::text AS subject_id FROM office_dallas.estimate_review_events`
+    )) as { rows: Array<{ subject_id: string }> };
+
+    expect(rows.map((row) => row.subject_id)).toEqual([
+      "33333333-3333-4333-8333-333333333333",
+    ]);
+  });
+
+  it("does NOT flag a line an estimator has ALREADY corrected", async () => {
+    // The remediation says, in the estimator's own queue, that this line "was priced as ONE UNIT" and
+    // asks them to re-price or void it. For a line somebody has already fixed through the estimate-item
+    // PATCH that sentence is false: `updateLineItem` (deals/estimate-service.ts) rewrites the quantity
+    // and recalculates the total but never clears `promoted_estimate_line_item_id`, so the link this
+    // migration joins on survives the correction and the extraction stays unpriceable forever.
+    //
+    // Flagging it tells somebody their finished work is broken. That is how a remediation queue stops
+    // being read — the same reasoning as the manual/override exemption above, applied to the one case
+    // where the line WAS fabricated and has since been repaired.
+    //
+    // The promoted number is `COALESCE(recommended_quantity, 1)`: `resolvePromotionLineValues` does
+    // `quantity = row.quantity ?? "1"` over the recommendation's `recommendedQuantity`. A line still
+    // carrying it has not been touched; a line carrying anything else has.
+    await seed("office_dallas");
+    await seedPromotionChain("office_dallas");
+    await pg.exec(`
+      INSERT INTO office_dallas.estimate_extractions (id, status, quantity) VALUES
+        ('11111111-1111-4111-8111-111111111111', 'processed', NULL),
+        ('66666666-6666-4666-8666-666666666666', 'processed', NULL);
+      INSERT INTO office_dallas.estimate_extraction_matches (id, extraction_id) VALUES
+        ('22222222-2222-4222-8222-222222222222', '11111111-1111-4111-8111-111111111111'),
+        ('77777777-7777-4777-8777-777777777777', '66666666-6666-4666-8666-666666666666');
+      INSERT INTO office_dallas.estimate_line_items (id, quantity) VALUES
+        -- untouched: still the fabricated one unit
+        ('33333333-3333-4333-8333-333333333333', 1),
+        -- corrected by hand to the real number
+        ('88888888-8888-4888-8888-888888888888', 8);
+      INSERT INTO office_dallas.estimate_pricing_recommendations
+        (id, deal_id, extraction_match_id, promoted_estimate_line_item_id,
+         source_type, selected_source_type, override_quantity, recommended_quantity) VALUES
+        ('44444444-4444-4444-8444-444444444444', '55555555-5555-4555-8555-555555555555',
+         '22222222-2222-4222-8222-222222222222', '33333333-3333-4333-8333-333333333333',
+         'extracted', NULL, NULL, NULL),
+        ('99999999-9999-4999-8999-999999999999', '55555555-5555-4555-8555-555555555555',
+         '77777777-7777-4777-8777-777777777777', '88888888-8888-4888-8888-888888888888',
+         'extracted', NULL, NULL, NULL);
+    `);
+
+    await pg.exec(MIGRATION_SQL);
+
+    const { rows } = (await pg.query(
+      `SELECT subject_id::text AS subject_id FROM office_dallas.estimate_review_events`
+    )) as { rows: Array<{ subject_id: string }> };
+
+    // Only the untouched line. The corrected one is left alone — and the control proves the migration
+    // ran rather than that the predicate refused everything.
+    expect(rows.map((row) => row.subject_id)).toEqual([
+      "33333333-3333-4333-8333-333333333333",
+    ]);
+  });
+
+  it("still flags a line whose recommendation carried a real quantity it never used", async () => {
+    // The other side of `COALESCE(recommended_quantity, 1)`: when the recommendation DID hold a
+    // quantity, the promoted line took that number, so "still carries the promoted value" means equal
+    // to it — not equal to 1. Pinning only the `1` case would have let a stale non-1 line escape the
+    // remediation it needs.
+    await seed("office_dallas");
+    await seedPromotionChain("office_dallas");
+    await pg.exec(`
+      INSERT INTO office_dallas.estimate_extractions (id, status, quantity) VALUES
+        ('11111111-1111-4111-8111-111111111111', 'processed', NULL);
+      INSERT INTO office_dallas.estimate_extraction_matches (id, extraction_id) VALUES
+        ('22222222-2222-4222-8222-222222222222', '11111111-1111-4111-8111-111111111111');
+      INSERT INTO office_dallas.estimate_line_items (id, quantity) VALUES
+        ('33333333-3333-4333-8333-333333333333', 3);
+      INSERT INTO office_dallas.estimate_pricing_recommendations
+        (id, deal_id, extraction_match_id, promoted_estimate_line_item_id,
+         source_type, selected_source_type, override_quantity, recommended_quantity) VALUES
+        ('44444444-4444-4444-8444-444444444444', '55555555-5555-4555-8555-555555555555',
+         '22222222-2222-4222-8222-222222222222', '33333333-3333-4333-8333-333333333333',
+         'extracted', NULL, NULL, 3);
     `);
 
     await pg.exec(MIGRATION_SQL);

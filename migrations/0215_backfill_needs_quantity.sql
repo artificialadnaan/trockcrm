@@ -126,6 +126,20 @@ BEGIN
                   OR e.quantity <= 0
                   OR e.quantity = 'NaN'::numeric
                 )
+                -- AND THE LINE MUST STILL CARRY THE NUMBER PROMOTION GAVE IT. `updateLineItem`
+                -- (deals/estimate-service.ts) rewrites a line's quantity and recalculates its total but
+                -- never clears `promoted_estimate_line_item_id`, so the join above survives a
+                -- correction while the source extraction stays unpriceable forever. Without this, an
+                -- estimator who has ALREADY fixed a line is told in their own queue that it "was priced
+                -- as ONE UNIT" and asked to re-price or void it — a false task about finished work,
+                -- which is the fastest way to teach somebody the queue is noise.
+                --
+                -- `COALESCE(recommended_quantity, 1)` is exactly what promotion wrote:
+                -- resolvePromotionLineValues takes the recommendation's quantity and falls back to one
+                -- unit when it is null. Written against the column rather than the literal 1 because a
+                -- recommendation that DID carry a quantity promoted THAT number, and pinning only the
+                -- 1 case would let an untouched non-1 line escape the remediation it needs.
+                AND li.quantity = COALESCE(r.recommended_quantity, 1)
                 AND NOT EXISTS (
                   SELECT 1
                     FROM %I.estimate_review_events x
