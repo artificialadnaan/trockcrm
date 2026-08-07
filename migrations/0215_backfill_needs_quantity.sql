@@ -200,9 +200,11 @@ BEGIN
                        '{}'::jsonb,
                        'Migration 0215: this extraction was APPROVED with no usable quantity ('
                          || COALESCE(e.quantity::text, 'none') || '). Its review decision has been left '
-                         || 'alone, but nothing can price it: the generation job only re-prices rows at '
-                         || 'pending, and promotion refuses a recommendation built from a quantity that '
-                         || 'is not there. Supply the quantity to put it back in the queue.',
+                         || 'alone. It is absent from the needs-quantity bucket, and the generation job '
+                         || 'only re-prices ordinary rows at pending, so nothing will revisit it on its '
+                         || 'own. If a manual row or a quantity-carrying override is anchored to it, it '
+                         || 'may still price correctly — check before acting. Otherwise supply the '
+                         || 'quantity to put it back in the queue.',
                        NULL
                   FROM %I.estimate_extractions e
                  WHERE e.status = 'approved'
@@ -211,10 +213,20 @@ BEGIN
                      OR e.quantity <= 0
                      OR e.quantity = 'NaN'::numeric
                    )
+                   -- MEASUREMENT CANDIDATES ARE NOT STRANDED. The worker selects them on
+                   -- extraction_type regardless of status, so one with no quantity is re-examined on
+                   -- the next run by design. Flagging it would be a false task about a working path.
+                   AND e.extraction_type IS DISTINCT FROM 'measurement_candidate'
+                   -- AND ONLY THE ACTIVE ARTIFACT. A superseded extraction is hidden by the workbench
+                   -- (it filters rows by active artifact) while review events are returned UNFILTERED,
+                   -- so flagging one produces an action request for a row that is not on the
+                   -- estimator's screen — the same defect this migration's worker change fixes.
+                   AND e.metadata_json->>'activeArtifact' = 'true'
                    AND NOT EXISTS (
                      SELECT 1
                        FROM %I.estimate_review_events x
-                      WHERE x.subject_id = e.id
+                      WHERE x.subject_type = 'estimate_extraction'
+                        AND x.subject_id = e.id
                         AND x.event_type = 'remediation_required'
                    )$legacy$,
         schema_name, schema_name, schema_name

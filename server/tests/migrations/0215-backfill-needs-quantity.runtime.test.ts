@@ -19,6 +19,8 @@ async function seed(schema: string) {
       -- written against the extraction, and every review event carries the deal it belongs to.
       deal_id uuid,
       status text NOT NULL,
+      extraction_type text,
+      metadata_json jsonb NOT NULL DEFAULT '{}'::jsonb,
       quantity numeric(14,3),
       updated_at timestamptz NOT NULL DEFAULT now()
     );
@@ -430,11 +432,11 @@ describe("migration 0215 — parking already-priced rows that never had a usable
     await seed("office_dallas");
     await seedPromotionChain("office_dallas");
     await pg.exec(`
-      INSERT INTO office_dallas.estimate_extractions (id, deal_id, status, quantity) VALUES
-        ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '55555555-5555-4555-8555-555555555555', 'approved', NULL),
-        ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', '55555555-5555-4555-8555-555555555555', 'approved', 0),
+      INSERT INTO office_dallas.estimate_extractions (id, deal_id, status, quantity, metadata_json) VALUES
+        ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '55555555-5555-4555-8555-555555555555', 'approved', NULL, '{"activeArtifact":"true"}'::jsonb),
+        ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', '55555555-5555-4555-8555-555555555555', 'approved', 0, '{"activeArtifact":"true"}'::jsonb),
         -- the control: approved AND priceable, which must be left entirely alone
-        ('cccccccc-cccc-4ccc-8ccc-cccccccccccc', '55555555-5555-4555-8555-555555555555', 'approved', 12);
+        ('cccccccc-cccc-4ccc-8ccc-cccccccccccc', '55555555-5555-4555-8555-555555555555', 'approved', 12, '{"activeArtifact":"true"}'::jsonb);
     `);
 
     await pg.exec(MIGRATION_SQL);
