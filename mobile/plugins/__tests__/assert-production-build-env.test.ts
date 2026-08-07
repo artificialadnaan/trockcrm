@@ -193,6 +193,49 @@ describe("assertProductionBuildEnv", () => {
     }
   );
 
+  it("REGRESSION: rejects the IPv6 discard-only prefix", () => {
+    // `100::/64` exists to BLACKHOLE traffic — packets to it are dropped by design, so it is not
+    // merely unrouted, it is guaranteed to go nowhere.
+    expect(() =>
+      assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: "https://[100::1]" }))
+    ).toThrow(/private host/);
+  });
+
+  it("GUARD: accepts global unicast that merely starts with the same digits", () => {
+    // The hextet boundary again: a bare "100" prefix test would swallow `1000::/16` and `100a::`,
+    // which are ordinary global addresses.
+    expect(() =>
+      assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: "https://[1000::1]" }))
+    ).not.toThrow();
+    expect(() =>
+      assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: "https://[100a::1]" }))
+    ).not.toThrow();
+  });
+
+  it.each([
+    "https://api..example.com",
+    "https://-api.example.com",
+    "https://api-.example.com",
+  ])("REGRESSION: rejects the malformed DNS name %s, which can have no host record", (url) => {
+    // The URL parser is far more permissive than DNS. An empty label is unrepresentable in the wire
+    // format, and a leading or trailing hyphen is illegal — so these are not unlikely names, they are
+    // impossible ones, and the build shipped unable to resolve its own API.
+    expect(() => assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: url }))).toThrow(
+      /private host/
+    );
+  });
+
+  it("GUARD: accepts ordinary names with hyphens and a fully-qualified trailing dot", () => {
+    // The syntax rule must not become a hole in the other direction: an internal hyphen is legal, and
+    // a single trailing dot is just the fully-qualified spelling.
+    expect(() =>
+      assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: "https://api-prod.trock-gc.com" }))
+    ).not.toThrow();
+    expect(() =>
+      assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: "https://api.trockgc.com." }))
+    ).not.toThrow();
+  });
+
   it("GUARD: still accepts an IPv6 literal spelled with leading zeros", () => {
     // The counterweight to the rule above, and the reason it is written as "what will the parser
     // rewrite" rather than "does the raw authority equal the parsed host": comparing them would

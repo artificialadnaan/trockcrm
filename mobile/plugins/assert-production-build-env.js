@@ -99,6 +99,11 @@ function ipv6IsGlobal(host) {
   // TCP semantics at all — nothing can listen on it — so an https URL pointed there is unusable by
   // construction rather than merely unreachable from the field.
   if (/^ff/.test(h)) return false;
+  // 100::/64 — the DISCARD-ONLY prefix. Packets to it are dropped by design (it exists to blackhole
+  // traffic), so it is not merely unrouted, it is guaranteed to go nowhere. Matched on the hextet
+  // boundary for the same reason the documentation range is: a bare "100" prefix test would also
+  // swallow 1000::/16 and 100a::, which are ordinary global unicast.
+  if (/^100:/.test(h)) return false;
   return true;
 }
 
@@ -122,10 +127,37 @@ const PRIVATE_HOSTNAME_PATTERNS = [
   /(^|\.)home\.arpa\.?$/i,
 ];
 
+/**
+ * Whether a name could be a real public DNS host — SYNTAX only, no lookup.
+ *
+ * The WHATWG parser is far more permissive than DNS: it happily accepts `api..example.com`,
+ * `-api.example.com` and `api-.example.com`, `net.isIP` returns 0 for all of them, and the
+ * special-use suffix list above matches none — so they reached the guard's "looks fine" default and
+ * shipped a build that cannot resolve its own API.
+ *
+ * The rules are the ones DNS actually imposes: labels are 1-63 characters of letters, digits and
+ * hyphens, and a hyphen may not start or end a label. An EMPTY label is what `api..example.com` has,
+ * and it is unrepresentable in the wire format rather than merely unusual. A single trailing dot is
+ * the fully-qualified spelling and is allowed, matching the suffix patterns above.
+ *
+ * Deliberately NOT a reachability check. Resolving here would make the outcome of a build depend on
+ * the builder's DNS, which is exactly the kind of non-determinism a build gate must not have; a
+ * syntactically impossible name is decidable without asking anybody.
+ */
+function isSyntacticallyResolvableHostname(host) {
+  const withoutRootDot = host.endsWith(".") ? host.slice(0, -1) : host;
+  if (withoutRootDot === "" || withoutRootDot.length > 253) return false;
+  return withoutRootDot
+    .split(".")
+    .every((label) => /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/i.test(label));
+}
+
 function isPrivateHost(host) {
   const family = net.isIP(host);
   if (family === 4) return !ipv4IsGlobal(host);
   if (family === 6) return !ipv6IsGlobal(host);
+  // A name that cannot exist is treated as unreachable, which is what the caller's message says.
+  if (!isSyntacticallyResolvableHostname(host)) return true;
   return PRIVATE_HOSTNAME_PATTERNS.some((pattern) => pattern.test(host));
 }
 
