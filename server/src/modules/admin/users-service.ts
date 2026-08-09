@@ -234,6 +234,27 @@ export function assertCreatableCrmUser(input: CreateCrmUserInput): asserts input
   if (!isAssignableCrmRole(input.role)) throw new AppError(400, `Invalid role: ${input.role}`);
 }
 
+/**
+ * A field contractor NEVER carries deals. `acceptFieldInvite` states that invariant by inserting them with
+ * generates_sales = false, and the commission roster excludes the role outright.
+ *
+ * Enforced on the SERVER, not merely hidden in the UI: the admin PATCH route hands `req.body` straight
+ * through, so a hand-made request could otherwise enrol a contractor in the rep cards, the funnel, the
+ * performance snapshots, the strategic alerts and the coaching prompts. Evaluated against the role the
+ * request is MOVING TO when it changes both at once, so the two cannot race past each other.
+ *
+ * Pure and exported so the rule is testable without standing up a transaction — the same shape as the
+ * other gates in this module (evaluateUpdateUserGuards, stripsAdminPrivilege).
+ */
+export function assertGeneratesSalesAllowedForRole(
+  generatesSales: boolean,
+  role: string | null | undefined
+): void {
+  if (generatesSales === true && role === "field_contractor") {
+    throw new AppError(400, "Field contractors cannot be marked as generating sales");
+  }
+}
+
 export async function createCrmUser(input: CreateCrmUserInput, actorUserId: string) {
   assertCreatableCrmUser(input);
   const email = input.email.trim().toLowerCase();
@@ -354,6 +375,7 @@ export async function updateUser(
       if (typeof input.generatesSales !== "boolean") {
         throw new AppError(400, "generatesSales must be a boolean");
       }
+      assertGeneratesSalesAllowedForRole(input.generatesSales, nextRole ?? existingUser.role);
       updates.generatesSales = input.generatesSales;
     }
     if (input.notificationPrefs !== undefined) updates.notificationPrefs = input.notificationPrefs;

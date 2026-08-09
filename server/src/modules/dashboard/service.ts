@@ -2529,12 +2529,18 @@ export async function getRepPerformanceSnapshots(
         ON u.id = rps.rep_id
        AND u.is_active = true
        AND COALESCE(u.is_test_data, false) = false
-       -- Same roster question as the cards/funnel above, asked at the only place this query can ask it:
-       -- the roster here is "whoever the rollup worker happened to write a snapshot row for", so without
-       -- this an unticked estimator keeps their Activity Pulse row and their strategic-alert / coaching
-       -- entries after vanishing from the cards. Gating the READ (not the worker's write) means ticking
-       -- someone back on restores their history instantly instead of waiting for the next rollup.
-       AND u.generates_sales = true
+       -- The SAME roster rule as the cards and the funnel, including its owner-backed exception -- not a
+       -- bare flag test. dashboardRosterMembershipSql deliberately RETAINS anyone who owns a deal in this
+       -- office whatever the flag says; if this read dropped them, the Activity Pulse, strategic alerts
+       -- and coaching prompts would go quiet for exactly the people the cards still show, which is the
+       -- cross-panel drift the shared predicate exists to prevent.
+       --
+       -- Gating the READ rather than the worker's write means ticking someone back on restores their
+       -- history instantly instead of waiting for the next rollup.
+       AND (
+         u.generates_sales = true
+         OR EXISTS (SELECT 1 FROM deals d WHERE d.assigned_rep_id = u.id)
+       )
        AND u.office_id = ${officeId}
       WHERE rps.period_kind = ${periodKind}
       ORDER BY rps.rep_id, rps.period_kind, rps.computed_at DESC NULLS LAST, rps.period_start DESC

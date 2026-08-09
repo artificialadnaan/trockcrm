@@ -697,7 +697,15 @@ export function UsersPage() {
                   <Checkbox
                     checked={user.generatesSales}
                     onCheckedChange={() => void handleToggleGeneratesSales(user.id, user.generatesSales)}
-                    disabled={updatingId === user.id || bulkUpdating}
+                    // A field contractor never carries deals: the field-invite flow creates them with the
+                    // flag off and the commission roster excludes the role outright. The server rejects a
+                    // tick regardless (updateUser), so this only spares an admin a pointless error —
+                    // the invariant is enforced there, not here.
+                    disabled={
+                      updatingId === user.id ||
+                      bulkUpdating ||
+                      String(user.role) === "field_contractor"
+                    }
                     aria-label={`${user.displayName} generates sales`}
                   />
                 </TableCell>
