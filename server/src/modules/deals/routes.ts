@@ -738,7 +738,11 @@ async function loadTriggerRfpDeal(tenantDb: any, dealId: string) {
       projectTypeCode: sql<string | null>`(SELECT code FROM public.project_type_config WHERE id = ${deals.projectTypeId})`,
     })
     .from(deals)
-    .where(eq(deals.id, dealId))
+    // A soft-deleted deal reads as NOT FOUND, the same convention authorizeAndCastRfpVote states and the
+    // vote-path reservation enforces with eq(deals.isActive, true). Without it a stale tab could trigger an
+    // RFP for a deleted deal: the loader returned the row, the handler only checked for null, and the
+    // direct SyncHub reservation had no active condition of its own — so the deal got stamped and enqueued.
+    .where(and(eq(deals.id, dealId), eq(deals.isActive, true)))
     .limit(1);
   return deal ?? null;
 }
@@ -1394,6 +1398,10 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
     const updateConditions = [
       eq(deals.id, deal.id),
       eq(deals.stageId, deal.stageId),
+      // Bound atomically as well as at load, mirroring the vote-path reservation: the load and the reserve
+      // are separated by async work, so a delete landing in that gap must make this UPDATE match nothing
+      // rather than enqueue an RFP for a deal that no longer exists.
+      eq(deals.isActive, true),
       isNull(deals.rfpApprovalStatus),
       isNull(deals.rfpApprovalRequestedAt),
       eq(deals.isBidBoardOwned, false),
