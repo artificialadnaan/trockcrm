@@ -1614,6 +1614,18 @@ export async function getDirectorRepCommissionRows(
               WHERE dsc.rep_user_id = u.id
                 AND COALESCE(d.is_test_data, false) = false
             )
+            -- ...and live-deal involvement, the SAME evidence the rep branch above accepts. Without it an
+            -- unticked director who still owns deals is RETAINED on the cards and the funnel by
+            -- dashboardRosterMembershipSql's owner-backed exception but DROPPED from Team Commissions, so
+            -- one toggle splits three rosters on one screen and contradicts what the setting promises.
+            -- Their money columns stay zeroed either way (isRep gates those), so this adds a row, never a
+            -- figure — the deal-VALUE footer counts role='rep' only and is untouched.
+            OR EXISTS (
+              SELECT 1 FROM ${deals} d
+              WHERE u.id IN (d.assigned_rep_id, d.estimator_user_id)
+                AND d.is_active = true
+                AND COALESCE(d.is_test_data, false) = false
+            )
           )
         )
       )
