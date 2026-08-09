@@ -20,7 +20,7 @@ import {
 } from "./audit-service-classification.js";
 
 const U = (n: string) => `00000000-0000-0000-0000-${n.padStart(12, "0")}`;
-const ST = { openStd: U("1"), openSvc: U("2") };
+const ST = { openStd: U("1"), openSvc: U("2"), openEst: U("3") };
 const PT = { service: U("11"), roofing: U("12") };
 
 let pg: PGlite;
@@ -47,6 +47,9 @@ beforeEach(async () => {
       project_type text,
       project_type_id uuid,
       workflow_route text NOT NULL DEFAULT 'normal',
+      -- NOT NULL in production, and read FIRST by the report builder's
+      -- COALESCE(pipeline_type_snapshot, workflow_route), so the repair has to move it too.
+      pipeline_type_snapshot text NOT NULL DEFAULT 'normal',
       -- Provenance: a route these systems chose is not a silently-defaulted one.
       is_bid_board_owned boolean NOT NULL DEFAULT false,
       synchub_bid_board_id text,
@@ -68,7 +71,10 @@ beforeEach(async () => {
       ('${PT.roofing}', 'Roofing', '3');
     INSERT INTO office_dallas.pipeline_stage_config (id, slug, workflow_family) VALUES
       ('${ST.openStd}', 'opportunity', 'standard_deal'),
-      ('${ST.openSvc}', 'service_estimating', 'service_deal');
+      ('${ST.openSvc}', 'service_estimating', 'service_deal'),
+      -- standard-family AND outside the shared set: a service route here WOULD be an invalid pair, which
+      -- is what keeps the mismatch assertions below from being vacuous now that shared stages are allowed.
+      ('${ST.openEst}', 'estimating', 'standard_deal');
 
     INSERT INTO office_dallas.deals (name, stage_id, project_number, project_type, project_type_id, workflow_route, awarded_amount) VALUES
       -- MISCLASSIFIED: typed service, routed normal, sitting in a STANDARD stage. The headline population,
@@ -77,7 +83,7 @@ beforeEach(async () => {
       -- MISCLASSIFIED but already in the service stage family: repairing this one is route-only.
       ('typed-service routed-normal svc-stage', '${ST.openSvc}', 'DFW-4-04127-AF', 'service', NULL, 'normal', 200),
       -- MISCLASSIFIED and carrying NO project number: proves classification never needed one.
-      ('typed-service no-number', '${ST.openStd}', NULL, 'service', NULL, 'normal', 300),
+      ('typed-service no-number', '${ST.openEst}', NULL, 'service', NULL, 'normal', 300),
       -- MISCLASSIFIED via the configured code only (no project_type text) -- the HubSpot import shape.
       ('config-coded-service', '${ST.openSvc}', 'PENDING', NULL, '${PT.service}', 'normal', 400),
       -- The OPPOSITE error: routed service, but typed roofing. project_type wins, so it should be normal.
@@ -186,10 +192,13 @@ describe("census", () => {
 
   it("separates the rows whose repair is a BEHAVIOUR change from the rows where it is not", async () => {
     const census = await censusForSchema(client(), "office_dallas");
-    // Six of the eight to-service rows sit in a standard_deal stage; flipping their route puts them in a
-    // family their stage does not belong to. That is the number a human has to accept before --execute.
-    expect(census.toServiceStageMismatch).toBe(6);
-    // Both to-normal rows sit in a service_deal stage, so they have the same problem in reverse.
+    // Only ONE to-service row is a genuine mismatch: the one in 'estimating'. The rest sit in
+    // 'opportunity', a SHARED stage getStageByIdForWorkflowRoute accepts for a service route, so counting
+    // those would report a conflict that does not exist and defer safe rows indefinitely. This is the
+    // number a human has to accept before --execute, so it must mean exactly what it says.
+    expect(census.toServiceStageMismatch).toBe(1);
+    // The two to-normal rows in a service_deal stage still are: demotion has no shared-stage allowance,
+    // because the normal lookup is standard-family only.
     expect(census.toNormalStageMismatch).toBe(2);
     // Strictly fewer than the totals -- otherwise this column would be telling us nothing.
     expect(census.toServiceStageMismatch).toBeLessThan(census.toServiceCount);
@@ -276,7 +285,9 @@ describe("repair", () => {
     // pipeline cannot resolve — they are deferred, not silently rewritten.
     expect(routes["typed-service routed-normal svc-stage"]).toBe("service");
     expect(routes["config-coded-service"]).toBe("service");
-    expect(routes["typed-service routed-normal std-stage"]).toBe("normal");
+    // 'opportunity' is a SHARED stage, valid for a service route, so this one moves too.
+    expect(routes["typed-service routed-normal std-stage"]).toBe("service");
+    // ...while the row in 'estimating' does not: that pair really would be invalid.
     expect(routes["typed-service no-number"]).toBe("normal");
     // Untouched: correct already, or the other direction's problem.
     expect(routes["typed-roofing routed-normal"]).toBe("normal");
@@ -319,7 +330,7 @@ describe("repair", () => {
     // NOT the sum of the two counts: a row can be BOTH upstream-owned and stage-mismatched (the Bid
     // Board rows here are), so adding them would double-count. What must hold is that every remaining row
     // is covered by at least one reported reason, and that the count is stable.
-    expect(after.toServiceCount).toBe(6);
+    expect(after.toServiceCount).toBe(5);
     expect(after.toServiceCount).toBeLessThanOrEqual(
       before.authoritativeRouteSkipped + before.toServiceStageMismatch
     );
@@ -328,6 +339,6 @@ describe("repair", () => {
     // ...and both reasons are still reported, so a second reader sees why it stopped.
     expect(after.authoritativeRouteSkipped).toBe(4);
     // Every remaining row is stage-mismatched, which is exactly why the repair refused them.
-    expect(after.toServiceStageMismatch).toBe(6);
+    expect(after.toServiceStageMismatch).toBe(1);
   });
 });

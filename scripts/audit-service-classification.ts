@@ -41,6 +41,7 @@ import pg from "pg";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { aliasedIsServiceProjectSql } from "../server/src/modules/shared/deal-value-sql.js";
+import { SHARED_CANONICAL_DEAL_STAGE_SLUGS } from "../server/src/modules/deals/service.js";
 
 const OFFICE_SCHEMA_PATTERN = /^office_[a-z0-9_]+$/;
 const dialect = new PgDialect();
@@ -129,6 +130,39 @@ const AUTHORITATIVE_ROUTE_SQL = `(
  */
 const HAS_SALES_SOURCE_SQL = `d.sales_source_user_id IS NOT NULL`;
 
+/**
+ * Is the deal's CURRENT stage valid for the route the repair would give it?
+ *
+ * A stage belongs to one workflow family, so rewriting the route alone can produce a pair the platform
+ * rejects and getStageByIdForWorkflowRoute resolves to NULL. But a blanket family test is too strict in
+ * one direction: a SERVICE-routed deal may legitimately sit in the SHARED standard-family stages
+ * (opportunity, contract, won, …) — that is exactly what getStageByIdForWorkflowRoute accepts — so
+ * excluding them would defer safe rows for ever while claiming a mismatch that does not exist.
+ *
+ * The shared list is IMPORTED from the service rather than retyped, so the repair and the runtime cannot
+ * disagree about which pairs are legal. Demotion to `normal` has no such allowance: the normal lookup is
+ * standard-family only.
+ */
+function stageCompatibleSql(direction: Exclude<Direction, "both">): string {
+  if (direction === "to-normal") {
+    return `EXISTS (
+      SELECT 1 FROM pipeline_stage_config psc
+       WHERE psc.id = d.stage_id AND psc.workflow_family = 'standard_deal'
+    )`;
+  }
+  const sharedSlugs = [...SHARED_CANONICAL_DEAL_STAGE_SLUGS]
+    .map((slug) => `'${slug}'`)
+    .join(", ");
+  return `EXISTS (
+    SELECT 1 FROM pipeline_stage_config psc
+     WHERE psc.id = d.stage_id
+       AND (
+         psc.workflow_family = 'service_deal'
+         OR (psc.workflow_family = 'standard_deal' AND psc.slug IN (${sharedSlugs}))
+       )
+  )`;
+}
+
 export interface OfficeCensus {
   schema: string;
   activeDeals: number;
@@ -178,6 +212,10 @@ export function buildCensusSql(): { text: string; params: unknown[] } {
             0
           )::numeric AS deal_value,
           psc.workflow_family,
+          -- The SAME compatibility rule the repair applies, so the census can never report a mismatch the
+          -- repair would have been happy to fix (or vice versa).
+          ${stageCompatibleSql("to-service")} AS service_stage_ok,
+          ${stageCompatibleSql("to-normal")} AS normal_stage_ok,
           ${AUTHORITATIVE_ROUTE_SQL} AS authoritative_route,
           ${HAS_SALES_SOURCE_SQL} AS has_sales_source,
           (${isService}) AS is_service
@@ -203,11 +241,11 @@ export function buildCensusSql(): { text: string; params: unknown[] } {
 
         COUNT(*) FILTER (
           WHERE is_service AND workflow_route IS DISTINCT FROM 'service'
-            AND workflow_family IS DISTINCT FROM 'service_deal'
+            AND NOT service_stage_ok
         )::int AS to_service_stage_mismatch,
         COUNT(*) FILTER (
           WHERE NOT is_service AND workflow_route = 'service'
-            AND workflow_family IS DISTINCT FROM 'standard_deal'
+            AND NOT normal_stage_ok
         )::int AS to_normal_stage_mismatch,
 
         COUNT(*) FILTER (
@@ -236,7 +274,6 @@ export function buildCensusSql(): { text: string; params: unknown[] } {
 export function buildUpdateSql(direction: Exclude<Direction, "both">): { text: string; params: unknown[] } {
   const { text: isService, params } = canonicalServicePredicate("d");
   const target = direction === "to-service" ? "service" : "normal";
-  const targetFamily = direction === "to-service" ? "service_deal" : "standard_deal";
   const guard =
     direction === "to-service"
       ? `(${isService}) AND d.workflow_route IS DISTINCT FROM 'service'`
@@ -247,6 +284,11 @@ export function buildUpdateSql(direction: Exclude<Direction, "both">): { text: s
     text: `
       UPDATE deals d
          SET workflow_route = '${target}',
+             -- Kept in step with the route, exactly as createDeal and the SyncHub route updater do.
+             -- pipeline_type_snapshot is NOT NULL, and the report builder groups and filters deal type on
+             -- COALESCE(d.pipeline_type_snapshot, d.workflow_route) -- the SNAPSHOT first -- so leaving it
+             -- behind would repair the route while that report went on showing the old classification.
+             pipeline_type_snapshot = '${target}',
              updated_at = now()
        WHERE d.is_active = true
          AND COALESCE(d.is_test_data, false) = false
@@ -262,11 +304,7 @@ export function buildUpdateSql(direction: Exclude<Direction, "both">): { text: s
          -- These rows are not lost, they are DEFERRED: the census reports them under "behaviour change",
          -- and repairing them means moving the deal to its counterpart stage as well, which is a decision
          -- about a live pipeline rather than a column edit.
-         AND EXISTS (
-           SELECT 1 FROM pipeline_stage_config psc
-            WHERE psc.id = d.stage_id
-              AND psc.workflow_family = '${targetFamily}'
-         )
+         AND ${stageCompatibleSql(direction)}
          AND ${guard}
     `,
     params,

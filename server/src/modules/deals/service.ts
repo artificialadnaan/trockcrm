@@ -1308,7 +1308,12 @@ export function workflowFamilyForRoute(workflowRoute: WorkflowRoute) {
   return workflowRoute === "service" ? "service_deal" : "standard_deal";
 }
 
-const SHARED_CANONICAL_DEAL_STAGE_SLUGS = new Set([
+/**
+ * Standard-family stages a SERVICE-routed deal may legitimately occupy. Exported so the
+ * service-classification repair script applies the same rule instead of a stricter family-only test that
+ * would defer safe rows for ever — getStageByIdForWorkflowRoute accepts exactly this set below.
+ */
+export const SHARED_CANONICAL_DEAL_STAGE_SLUGS = new Set([
   // opportunity is standard_deal-family but valid for service deals as the
   // CRM-side RFP approval trigger before Bid Board-owned progression.
   "opportunity",
@@ -2688,7 +2693,12 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
     .values({
       dealNumber,
       name: input.name,
-      stageId: input.stageId,
+      // stage.id, NOT input.stageId. When a derived service route maps the requested stage to its
+      // service-family counterpart (estimating -> service_estimating), validation ran against the MAPPED
+      // stage; persisting the original id would store a service route beside a standard-family stage —
+      // precisely the mismatch the mapping exists to avoid. Identical to input.stageId on every path
+      // where no mapping happened.
+      stageId: stage.id,
       assignedRepId: input.assignedRepId,
       primaryContactId: lineage.primaryContactId,
       companyId: lineage.companyId,
