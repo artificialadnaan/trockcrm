@@ -2583,15 +2583,34 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
   // where the route would otherwise have defaulted silently.
   const requestedRoute = input.workflowRoute ?? workflowRouteForProjectType(derivedProjectType);
 
-  // A stage belongs to ONE workflow family, so deriving a route can invalidate a stage the caller chose
-  // deliberately. Rather than turning a working create into a 400, fall back to the previous behaviour
-  // ('normal') when the derived route and the requested stage disagree and the caller named no route.
-  // The reports stay correct either way: they resolve service from project_type, not from this column.
+  // A stage belongs to ONE workflow family, so a derived service route can fail against a stage the caller
+  // chose from the standard family. getStageByIdForWorkflowRoute already accepts the SHARED canonical
+  // stages (opportunity, contract, won, …) for a service deal, so most creates resolve on the first try.
+  //
+  // `estimating` is the one that does not, and it is the case that matters: the deal form offers ONLY
+  // standard_deal stages (getNewDealStages) and sends no workflowRoute, so a Service-typed deal started in
+  // Estimating hit this path. Discarding the derived route there would have written the deal as normal —
+  // wrong pipeline, wrong RFP behaviour — and would have made this whole write-side fix inert for the
+  // main create path. So map the stage to its SERVICE-FAMILY equivalent
+  // (toCanonicalDealStageSlug: estimating -> service_estimating) instead of dropping the route.
+  //
+  // Only if no equivalent exists do we fall back to 'normal', which preserves the original behaviour
+  // rather than turning a working create into a 400. Reports stay correct either way: they resolve
+  // service from project_type, not from this column.
   let stage = await getStageByIdForWorkflowRoute(input.stageId, requestedRoute);
   let workflowRoute = requestedRoute;
-  if (!stage && input.workflowRoute == null && requestedRoute !== "normal") {
-    workflowRoute = "normal";
-    stage = await getStageByIdForWorkflowRoute(input.stageId, "normal");
+  if (!stage && input.workflowRoute == null && requestedRoute === "service") {
+    const standardStage = await getStageById(input.stageId, "standard_deal");
+    const serviceSlug = standardStage
+      ? toCanonicalDealStageSlug(standardStage.slug, "service")
+      : null;
+    if (serviceSlug) {
+      stage = await getStageBySlug(serviceSlug, "service_deal");
+    }
+    if (!stage) {
+      workflowRoute = "normal";
+      stage = await getStageByIdForWorkflowRoute(input.stageId, "normal");
+    }
   }
   if (!stage) {
     throw new AppError(400, "Invalid stage ID for workflow route");

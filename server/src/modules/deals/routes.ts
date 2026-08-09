@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Router } from "express";
-import { and, eq, desc, isNotNull, isNull, or, sql } from "drizzle-orm";
+import { and, eq, desc, getTableColumns, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { companies, dealApprovals, dealHistory, dealScopingIntake, deals, dealSubscriptions, jobQueue, properties } from "@trock-crm/shared/schema";
 import { requireRole, requireRfpReviewer } from "../../middleware/rbac.js";
 import {
@@ -729,7 +729,14 @@ async function loadDealStageSlug(tenantDb: any, stageId: string): Promise<string
 
 async function loadTriggerRfpDeal(tenantDb: any, dealId: string) {
   const [deal] = await tenantDb
-    .select()
+    .select({
+      ...getTableColumns(deals),
+      // isServiceRfp reads the CONFIGURED project-type digit, and it is the only tier that answers for a
+      // deal carrying no project_type text — the majority shape. A bare .select() here would leave the
+      // field undefined and silently route a service RFP into the CRM three-voter round instead of the
+      // SyncHub service-approval path, with nothing failing to show it.
+      projectTypeCode: sql<string | null>`(SELECT code FROM public.project_type_config WHERE id = ${deals.projectTypeId})`,
+    })
     .from(deals)
     .where(eq(deals.id, dealId))
     .limit(1);
