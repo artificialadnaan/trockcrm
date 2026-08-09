@@ -946,16 +946,30 @@ function activeOfficeRepMembershipSql(officeId: string): SQL {
  * `users.generates_sales` (migration 0219) answers "is this person expected to carry deals?" directly,
  * so neither failure is reachable.
  *
- * The office boundary is UNCHANGED and still load-bearing: `users` is a GLOBAL table, so without it
- * every generates_sales rep in EVERY office would leak into this office's roster (the D-5 finding).
- * The owner branch stays un-gated by office because `deals` is a TENANT table — tenantDb runs with
- * search_path office_slug,public, so `owner_rows` is already bounded to THIS office by schema
- * isolation. Assumes the users alias is `u` and a `deal_owners`-derived `owner_rows` join is in scope.
+ * THE FLAG CAN ONLY REMOVE SOMEONE WHO OWNS NO DEALS IN THIS OFFICE. The owner branch is deliberately
+ * left UN-GATED, exactly as it was before, and that single decision buys three things:
+ *   • EXACT parity at deploy, including multi-office. `users` is GLOBAL, so a flag set because someone
+ *     owns a deal in office B would otherwise grant them visibility in every office they are a member
+ *     of — admitting them to office A's roster with no admin action and no deal in A. Keeping ownership
+ *     as its own tenant-local branch means office A's roster still turns on office A's deals.
+ *   • The commission footer stays reconcilable. getCommissionOfficeTotals counts a deal whenever a
+ *     rostered involved user exists and does NOT read this flag (a roster flag must never move a money
+ *     total). If unticking someone could hide a row whose deals still sit in that total, the table would
+ *     show a footer larger than the sum of its visible rows, with no drill-down to explain the gap.
+ *   • It matches what was actually asked for: remove the people who are "never going to truly have any
+ *     deals". Someone with deals is not that person, and the honest way to remove them is to reassign
+ *     the deals, not to hide a row while its value keeps counting.
+ *
+ * The office boundary is UNCHANGED and still load-bearing: without it every generates_sales rep in EVERY
+ * office would leak into this office's roster (the D-5 finding). The owner branch needs no office gate
+ * because `deals` is a TENANT table — tenantDb runs with search_path office_slug,public, so `owner_rows`
+ * is already bounded to THIS office by schema isolation.
+ *
+ * Assumes the users alias is `u` and a `deal_owners`-derived `owner_rows` join is in scope.
  */
 export function dashboardRosterMembershipSql(officeId?: string): SQL {
-  return sql`u.generates_sales = true
-        AND (
-          ${officeId ? activeOfficeRepMembershipSql(officeId) : sql`TRUE`}
+  return sql`(
+          (u.generates_sales = true${officeId ? sql` AND ${activeOfficeRepMembershipSql(officeId)}` : sql``})
           OR owner_rows.rep_id IS NOT NULL
         )`;
 }
@@ -1547,16 +1561,30 @@ export async function getDirectorRepCommissionRows(
         -- honouring the generates_sales roster flag so an unticked estimator does not linger in the
         -- commission table at $0 after disappearing from the cards on the same screen.
         --
-        -- THE "OR EXISTS" IS A SAFETY VALVE, NOT A CONVENIENCE. generates_sales is a ROSTER flag; it must
-        -- never be able to hide MONEY. A rep who has been unticked but genuinely holds a signed-commission
-        -- row still appears here, so no earned commission can be made invisible by a roster edit. Same
-        -- non-test-deal condition as the non-rep branch below, so both halves count the same population.
+        -- THE TWO "OR EXISTS" LEGS ARE SAFETY VALVES, NOT CONVENIENCES. generates_sales is a ROSTER flag
+        -- and must never be able to move, or orphan, a money figure:
+        --   • EARNED — an unticked rep who genuinely holds a signed-commission row still appears, so no
+        --     earned commission can be made invisible by a roster edit.
+        --   • INVOLVED ON A LIVE DEAL — getCommissionOfficeTotals counts a deal whenever a rostered
+        --     involved user (owner OR estimator) exists, and it deliberately does NOT read this flag.
+        --     Without this leg, unticking a rep who still owns or estimates live deals would remove their
+        --     ROW while their deal values stayed in the footer: a total larger than the sum of the rows
+        --     above it, with no drill-down anywhere to account for the difference. The condition mirrors
+        --     that query's "rostered" EXISTS so the two cannot disagree about who is countable.
+        -- Both use the same non-test-deal scoping as the non-rep branch below, so every leg here counts
+        -- the same population.
         (u.role = 'rep'${officeScope} AND (
           u.generates_sales = true
           OR EXISTS (
             SELECT 1 FROM ${dealSignedCommissions} dsc
             JOIN ${deals} d ON d.id = dsc.deal_id
             WHERE dsc.rep_user_id = u.id
+              AND COALESCE(d.is_test_data, false) = false
+          )
+          OR EXISTS (
+            SELECT 1 FROM ${deals} d
+            WHERE u.id IN (d.assigned_rep_id, d.estimator_user_id)
+              AND d.is_active = true
               AND COALESCE(d.is_test_data, false) = false
           )
         ))
@@ -1571,13 +1599,21 @@ export async function getDirectorRepCommissionRows(
         -- source always passes: setting a source runs validateAssignee, which requires office access.
         -- role NOT IN ('rep', ...) (not role <> field_contractor) keeps every rep handled ONLY by the
         -- office-scoped rep branch above, so a cross-office rep D-5 dropped can't drift the deal-VALUE footer.
+        --
+        -- ...OR who has been explicitly flagged as a sales carrier. Without this leg the toggle would be
+        -- incoherent: ticking a director puts them on the cards, the funnel and the Activity Pulse but
+        -- NOT on the Team Commissions roster on the same screen, until their first commission is booked.
+        -- The office membership check is unchanged and still carries the whole security boundary.
         OR (
           u.role NOT IN ('rep', 'field_contractor')${officeScope}
-          AND EXISTS (
-            SELECT 1 FROM ${dealSignedCommissions} dsc
-            JOIN ${deals} d ON d.id = dsc.deal_id
-            WHERE dsc.rep_user_id = u.id
-              AND COALESCE(d.is_test_data, false) = false
+          AND (
+            u.generates_sales = true
+            OR EXISTS (
+              SELECT 1 FROM ${dealSignedCommissions} dsc
+              JOIN ${deals} d ON d.id = dsc.deal_id
+              WHERE dsc.rep_user_id = u.id
+                AND COALESCE(d.is_test_data, false) = false
+            )
           )
         )
       )

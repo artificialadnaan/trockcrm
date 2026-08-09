@@ -466,7 +466,17 @@ async function refreshOfficePeriod(
      LEFT JOIN activity a ON a.rep_id = u.id
      WHERE u.office_id = $4
        AND u.is_active = true
-       AND u.role = 'rep'`,
+       -- Snapshots must exist for everyone the director dashboard can show, or the read-side roster gate
+       -- has nothing to return. Activity Pulse, strategic alerts and the coaching prompts are all driven
+       -- from these rows, so a director an admin has flagged as a sales carrier (migration 0219) would
+       -- otherwise appear on the cards and the funnel while staying permanently absent from those three
+       -- panels — the flag would look half-wired.
+       --
+       -- A UNION with the old condition, not a replacement: writing for every role='rep' user as before
+       -- means an unticked rep keeps accruing history, so re-ticking them restores it immediately instead
+       -- of starting from the next rollup. The READ side (getRepPerformanceSnapshots) still applies
+       -- generates_sales, so the extra rows are never shown; they are only kept warm.
+       AND (u.role = 'rep' OR u.generates_sales = true)`,
     [
       period.kind,
       period.start,

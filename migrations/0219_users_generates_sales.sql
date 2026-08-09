@@ -25,76 +25,54 @@
 -- REMOVAL of someone is what must be deliberate and visible, so it happens in the admin UI, by a human,
 -- one person at a time.
 --
--- THE BACKFILL IS A DELIBERATE NO-OP FOR THE DASHBOARD. It sets false only for people who could not
--- appear on the dashboard TODAY anyway (neither role='rep' nor the owner of any deal in any office).
--- So deploying this migration changes WHO IS ON THE DASHBOARD by exactly zero people. It does not, and
--- must not, clean the roster by itself — the estimators/managers Adnaan wants gone are carrying
--- role='rep' for CRM access and are therefore left `true` here, to be unticked in the UI. That is the
--- point: this file makes the cleanup POSSIBLE and auditable; it does not perform it silently.
+-- THE BACKFILL IS A DELIBERATE NO-OP FOR THE DASHBOARD, and the roster predicate is what makes that
+-- true cheaply. Ownership is NOT folded into this flag: the predicate keeps its own tenant-local
+-- `owner_rows` branch un-gated, so anyone who owns a deal in an office still appears in THAT office
+-- whatever this column says. The flag therefore only has to answer for people with no deals at all.
 --
--- It also does NOT put anyone new on the dashboard. A director with no deals yet stays invisible until
--- an admin ticks them — which is the intended first use of the toggle.
+-- So the classification is simply: role='rep' -> true, everyone else -> false. At deploy that admits
+-- exactly the old predicate's population, office by office, and it does so WITHOUT reading tenant data.
+--
+-- An earlier draft flagged deal owners true by scanning every office_*.deals. That was subtly wrong in a
+-- multi-office setup: `users` is GLOBAL, so "owns a deal in office B" would set one global flag and hand
+-- the person visibility in office A too, whose roster previously turned on office A's deals alone. The
+-- un-gated owner branch expresses ownership where it actually lives -- per tenant -- and this column stays
+-- a statement about the PERSON, which is what it claims to be.
+--
+-- It does not clean the roster by itself. The estimators/managers to be removed carry role='rep' for CRM
+-- access and are left `true` here, to be unticked in the UI. This file makes the cleanup possible and
+-- auditable; it does not perform it silently. Nor does it put anyone new on the dashboard: a director
+-- with no deals yet stays invisible until an admin ticks them, which is the toggle's intended first use.
 --
 -- SCOPE: ROSTERS ONLY, NEVER A MONEY TOTAL. Read by the four director-dashboard ROSTER queries in
 -- server/src/modules/dashboard/service.ts (buildRepPerformanceCards, getDirectorFunnelSummary,
--- getRepPerformanceSnapshots, getDirectorRepCommissionRows). It is deliberately NOT read by
--- getCommissionOfficeTotals or getOverrideEarnedCommission, which compute MONEY — a roster-hygiene flag
--- must never be able to move a financial figure (the same boundary migration 0142 drew for is_test_data).
--- In the one place where the two meet (getDirectorRepCommissionRows), the flag is OR'd with an
--- "actually earned" EXISTS, so unticking a person can never hide commission they really hold.
+-- getRepPerformanceSnapshots, getDirectorRepCommissionRows). Deliberately NOT read by
+-- getCommissionOfficeTotals or getOverrideEarnedCommission, which compute MONEY -- a roster-hygiene flag
+-- must never move a financial figure (the boundary migration 0142 drew for is_test_data). Where the two
+-- meet, the flag is OR'd with evidence -- an earned commission row OR involvement on a live deal -- so
+-- unticking someone can neither hide commission they hold nor strand value in the footer with no row
+-- to explain it.
 --
--- `users` is a single SHARED (non-tenant) table, so the ALTER is a plain one: no per-tenant office_*
--- loop and no provisioner replay block (contrast a migration adding a column to office_*.deals). The
--- READ side of the backfill does loop the tenant schemas, because deal ownership lives in each of them.
+-- `users` is a single SHARED (non-tenant) table, so this is a plain ALTER: no per-tenant office_* loop
+-- and no provisioner replay block.
 
 ALTER TABLE public.users
   ADD COLUMN IF NOT EXISTS generates_sales boolean NOT NULL DEFAULT true;
 
 COMMENT ON COLUMN public.users.generates_sales IS
-  'Roster flag: is this person expected to carry deals? Gates the director-dashboard rosters only — never a money total. Orthogonal to users.role (access) by design. Migration 0219.';
+  'Roster flag: is this person expected to carry deals? Gates the director-dashboard rosters only -- never a money total, and never overrides deal ownership. Orthogonal to users.role (access) by design. Migration 0219.';
 
 DO $$
-DECLARE
-  tenant_schema text;
-  schema_owner_ids uuid[];
-  owner_ids uuid[] := ARRAY[]::uuid[];
 BEGIN
   -- Re-run guard. Migrations are tracked in public._migrations so this normally executes once, but the
   -- file is also the kind of thing someone replays by hand against a restored dump. After the first run
-  -- at least one row is false (there is always a field_contractor or admin who owns nothing), so this
-  -- test distinguishes "never classified" from "classified, then edited by a human in the UI" — and
-  -- stops a replay from silently reverting every deliberate untick an admin has made since.
+  -- at least one row is false (there is always a non-rep -- an admin, a field contractor), so this test
+  -- distinguishes "never classified" from "classified, then edited by a human in the UI", and stops a
+  -- replay from silently reverting every deliberate tick an admin has made since.
   IF EXISTS (SELECT 1 FROM public.users WHERE generates_sales = false) THEN
     RAISE NOTICE '0219: generates_sales already classified; leaving admin edits intact.';
     RETURN;
   END IF;
 
-  -- Deal ownership is per-tenant (office_*.deals), so the "has ever owned a deal" half of today's
-  -- roster predicate has to be gathered schema by schema. to_regclass guards a half-provisioned schema
-  -- (a tenant mid-creation with no deals table yet) instead of aborting the whole migration on it.
-  FOR tenant_schema IN
-    SELECT nspname FROM pg_namespace WHERE nspname LIKE 'office\_%' ORDER BY nspname
-  LOOP
-    IF to_regclass(format('%I.deals', tenant_schema)) IS NULL THEN
-      RAISE NOTICE '0219: skipping %, no deals table', tenant_schema;
-      CONTINUE;
-    END IF;
-
-    EXECUTE format(
-      'SELECT COALESCE(array_agg(DISTINCT d.assigned_rep_id), ARRAY[]::uuid[])
-         FROM %I.deals d
-        WHERE d.assigned_rep_id IS NOT NULL',
-      tenant_schema
-    ) INTO schema_owner_ids;
-
-    owner_ids := owner_ids || schema_owner_ids;
-  END LOOP;
-
-  -- The complement of today's live predicate: NOT a rep, and NOT a deal owner anywhere. These people are
-  -- already absent from every dashboard roster, so flipping them to false is invisible — which is the
-  -- whole design of this backfill.
-  UPDATE public.users u
-     SET generates_sales = false
-   WHERE u.role <> 'rep'
-     AND NOT (u.id = ANY (owner_ids));
+  UPDATE public.users SET generates_sales = false WHERE role <> 'rep';
 END $$;

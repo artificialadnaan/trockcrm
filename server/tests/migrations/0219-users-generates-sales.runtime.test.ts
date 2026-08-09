@@ -2,20 +2,21 @@
 //
 // 0219 adds `public.users.generates_sales`, the flag that decides who appears on the DIRECTOR DASHBOARD.
 // Its central claim is a NEGATIVE one — "deploying this changes the dashboard for nobody" — and a claim
-// of that shape is worth exactly as much as its proof. So the load-bearing test here is not any single
-// backfill outcome but the PARITY test at the bottom: the OLD predicate and the NEW one are both run
-// against the same rows, and required to return the same roster.
+// of that shape is worth exactly as much as its proof. So the load-bearing tests here are the PARITY ones
+// at the bottom: the OLD predicate and the NEW one are both run against the same rows, in a MULTI-OFFICE
+// fixture, and required to return the same roster.
 //
-// Proven here against real SQL, none of which a fixture test can reach:
-//   1. the column lands NOT NULL DEFAULT true, so any insert path that has not been taught about it
-//      still produces a valid row;
-//   2. the backfill flips only people who could not appear on the dashboard today anyway;
-//   3. role='rep' survives it — the estimators Adnaan wants gone are NOT cleaned up by deploying this,
-//      by design, because silently removing people is the behaviour this flag exists to make explicit;
-//   4. deal ownership is honoured across EVERY office_% schema, not just the first;
-//   5. a half-provisioned tenant is skipped rather than aborting the migration for every other office;
-//   6. the re-run guard protects an admin's deliberate edits from a replay; and
-//   7. the OLD and NEW roster predicates select the identical set of users.
+// THE DESIGN THE PARITY TESTS FORCED. An earlier draft folded deal ownership into the flag, by scanning
+// every office_*.deals and marking owners true. That is wrong when there is more than one office: `users`
+// is a GLOBAL table, so "owns a deal in office B" sets one global flag, and if the person is also a member
+// of office A they appear on A's roster — which previously turned on A's deals alone. Ownership therefore
+// stays where it lives, in the predicate's own tenant-local `owner_rows` branch, un-gated by the flag. The
+// classification collapses to role='rep' -> true, everyone else -> false, and the flag only has to answer
+// for people who own no deals at all.
+//
+// That also keeps the Team Commissions footer reconcilable: getCommissionOfficeTotals counts a deal
+// whenever a rostered involved user exists and deliberately never reads this flag, so a flag that could
+// hide a deal-owning person's row would leave value in the total with no row to explain it.
 import { beforeEach, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { PgDialect } from "drizzle-orm/pg-core";
@@ -40,32 +41,18 @@ async function createFixtureSchema(pg: PGlite) {
       is_active boolean NOT NULL DEFAULT true,
       is_test_data boolean NOT NULL DEFAULT false
     );
-    CREATE TABLE public.user_office_access (
-      user_id uuid NOT NULL,
-      office_id uuid NOT NULL
-    );
+    CREATE TABLE public.user_office_access (user_id uuid NOT NULL, office_id uuid NOT NULL);
     CREATE SCHEMA office_dallas;
-    CREATE TABLE office_dallas.deals (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      assigned_rep_id uuid
-    );
+    CREATE TABLE office_dallas.deals (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), assigned_rep_id uuid);
     CREATE SCHEMA office_atlanta;
-    CREATE TABLE office_atlanta.deals (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-      assigned_rep_id uuid
-    );
+    CREATE TABLE office_atlanta.deals (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), assigned_rep_id uuid);
   `);
 }
 
-async function addUser(
-  pg: PGlite,
-  name: string,
-  role: string,
-  officeId: string = DALLAS,
-): Promise<string> {
+async function addUser(pg: PGlite, name: string, role: string, officeId: string = DALLAS): Promise<string> {
   const result = await pg.query<{ id: string }>(
     `INSERT INTO public.users (display_name, role, office_id) VALUES ($1, $2, $3) RETURNING id`,
-    [name, role, officeId],
+    [name, role, officeId]
   );
   return result.rows[0].id;
 }
@@ -74,9 +61,17 @@ async function ownDeal(pg: PGlite, schema: string, repId: string) {
   await pg.query(`INSERT INTO ${schema}.deals (assigned_rep_id) VALUES ($1)`, [repId]);
 }
 
+async function grantOfficeAccess(pg: PGlite, name: string, officeId: string) {
+  await pg.query(
+    `INSERT INTO public.user_office_access (user_id, office_id)
+     SELECT id, $1 FROM public.users WHERE display_name = $2`,
+    [officeId, name]
+  );
+}
+
 async function flagsByName(pg: PGlite): Promise<Record<string, boolean>> {
   const result = await pg.query<{ display_name: string; generates_sales: boolean }>(
-    `SELECT display_name, generates_sales FROM public.users ORDER BY display_name`,
+    `SELECT display_name, generates_sales FROM public.users ORDER BY display_name`
   );
   return Object.fromEntries(result.rows.map((row) => [row.display_name, row.generates_sales]));
 }
@@ -85,12 +80,14 @@ async function flagsByName(pg: PGlite): Promise<Record<string, boolean>> {
  * The roster query the dashboard actually runs, with the predicate under test spliced in. Built as a
  * drizzle template and rendered through PgDialect so the SHIPPED SQL is what executes here — a
  * hand-retyped copy of the predicate would pass forever after the real one changed.
+ *
+ * `dealsSchema` is which office's deals form `owner_rows`, i.e. which office's dashboard this is.
  */
-async function rosterWithNewPredicate(pg: PGlite, officeId?: string): Promise<string[]> {
+async function rosterWithNewPredicate(pg: PGlite, officeId: string, dealsSchema = "office_dallas"): Promise<string[]> {
   const query = sql`
     WITH deal_owners AS (
       SELECT DISTINCT d.assigned_rep_id AS rep_id
-      FROM office_dallas.deals d
+      FROM ${sql.raw(dealsSchema)}.deals d
       WHERE d.assigned_rep_id IS NOT NULL
     )
     SELECT u.display_name
@@ -107,19 +104,14 @@ async function rosterWithNewPredicate(pg: PGlite, officeId?: string): Promise<st
 }
 
 /**
- * The predicate as it stood BEFORE 0219, retyped deliberately: it is being deleted, so it is a
- * historical constant that cannot drift. This is the baseline the parity test compares against.
+ * The predicate as it stood BEFORE 0219, retyped deliberately: it is being deleted, so it is a historical
+ * constant that cannot drift. This is the baseline the parity tests compare against.
  */
-async function rosterWithOldPredicate(pg: PGlite, officeId?: string): Promise<string[]> {
-  const repBranch = officeId
-    ? `(u.role = 'rep' AND (u.office_id = $1 OR EXISTS (
-         SELECT 1 FROM user_office_access uo WHERE uo.user_id = u.id AND uo.office_id = $1
-       )))`
-    : `(u.role = 'rep')`;
+async function rosterWithOldPredicate(pg: PGlite, officeId: string, dealsSchema = "office_dallas"): Promise<string[]> {
   const result = await pg.query<{ display_name: string }>(
     `WITH deal_owners AS (
        SELECT DISTINCT d.assigned_rep_id AS rep_id
-       FROM office_dallas.deals d
+       FROM ${dealsSchema}.deals d
        WHERE d.assigned_rep_id IS NOT NULL
      )
      SELECT u.display_name
@@ -127,9 +119,14 @@ async function rosterWithOldPredicate(pg: PGlite, officeId?: string): Promise<st
      LEFT JOIN deal_owners owner_rows ON owner_rows.rep_id = u.id
      WHERE u.is_active = true
        AND COALESCE(u.is_test_data, false) = false
-       AND (${repBranch} OR owner_rows.rep_id IS NOT NULL)
+       AND (
+         (u.role = 'rep' AND (u.office_id = $1 OR EXISTS (
+            SELECT 1 FROM public.user_office_access uo WHERE uo.user_id = u.id AND uo.office_id = $1
+         )))
+         OR owner_rows.rep_id IS NOT NULL
+       )
      ORDER BY u.display_name`,
-    officeId ? [officeId] : [],
+    [officeId]
   );
   return result.rows.map((row) => row.display_name);
 }
@@ -143,73 +140,80 @@ describe("migration 0219 — users.generates_sales", () => {
 
     // A working rep with no deals yet. Must stay on the dashboard.
     await addUser(pg, "Rita Rep", "rep");
-    // The clutter: an estimator holding role='rep' purely for CRM access. 0219 must NOT remove her —
-    // that is a human decision made in the UI, not a side effect of deploying.
+    // The clutter: an estimator holding role='rep' purely for CRM access, and owning nothing. 0219 must
+    // NOT remove her — that is a human decision made in the UI, not a side effect of deploying.
     await addUser(pg, "Eve Estimator", "rep");
     // The Daniel Choc case: a director who will carry deals but has none yet, so he is invisible today.
     await addUser(pg, "Dan Director", "director");
-    // A director who HAS owned a deal — visible today via the owner branch, must stay visible.
+    // A director who HAS owned a Dallas deal — visible today via the owner branch, must stay visible.
     const owner = await addUser(pg, "Olive Owner", "director");
     await ownDeal(pg, "office_dallas", owner);
-    // Neither a rep nor an owner: invisible today, so flipping him false is unobservable.
+    // Neither a rep nor an owner: invisible today, so flipping them false is unobservable.
     await addUser(pg, "Adam Admin", "admin");
     await addUser(pg, "Frank Field", "field_contractor");
-    // An Atlanta admin who owns an ATLANTA deal. Proves the backfill loops every schema.
-    const atl = await addUser(pg, "Aria Atlanta", "admin", ATLANTA);
-    await ownDeal(pg, "office_atlanta", atl);
     // A rep whose only office is Atlanta, with no Dallas deal: role='rep' globally, but the Dallas
     // dashboard must not show him (the D-5 cross-office finding).
     await addUser(pg, "Fred Foreign", "rep", ATLANTA);
+
+    // THE MULTI-OFFICE TRAP. A non-rep who owns a deal in ATLANTA and is ALSO a member of Dallas. Under
+    // the old predicate he is on Atlanta's roster (owner there) and NOT on Dallas's (non-rep, owns nothing
+    // in Dallas). A flag set from "owns a deal anywhere" would have put him on BOTH.
+    const crossOffice = await addUser(pg, "Carl CrossOffice", "director", ATLANTA);
+    await ownDeal(pg, "office_atlanta", crossOffice);
+    await grantOfficeAccess(pg, "Carl CrossOffice", DALLAS);
   });
 
   it("adds the column NOT NULL DEFAULT true, so an insert that ignores it still yields a valid row", async () => {
     await pg.exec(MIGRATION_SQL);
     await addUser(pg, "Nina New", "rep");
-    const flags = await flagsByName(pg);
-    expect(flags["Nina New"]).toBe(true);
+    expect((await flagsByName(pg))["Nina New"]).toBe(true);
 
-    const nullable = await pg.query<{ is_nullable: string; column_default: string }>(
+    const meta = await pg.query<{ is_nullable: string; column_default: string }>(
       `SELECT is_nullable, column_default FROM information_schema.columns
-        WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'generates_sales'`,
+        WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'generates_sales'`
     );
-    expect(nullable.rows[0].is_nullable).toBe("NO");
-    expect(nullable.rows[0].column_default).toContain("true");
+    expect(meta.rows[0].is_nullable).toBe("NO");
+    expect(meta.rows[0].column_default).toContain("true");
   });
 
-  it("leaves every rep and every deal owner ticked, and unticks only the invisible remainder", async () => {
+  it("classifies on ROLE alone — ownership is the predicate's job, not this column's", async () => {
     await pg.exec(MIGRATION_SQL);
     expect(await flagsByName(pg)).toEqual({
-      // Reps stay — INCLUDING the estimator. Deploy must not quietly remove a human from a report.
+      // Reps stay ticked — INCLUDING the estimator. Deploy must not quietly remove a human from a report.
       "Rita Rep": true,
       "Eve Estimator": true,
       "Fred Foreign": true,
-      // Owners stay, whatever their role and whichever office they own in.
-      "Olive Owner": true,
-      "Aria Atlanta": true,
-      // Neither rep nor owner: already absent from every roster, so this is unobservable.
+      // Everyone else is false, INCLUDING deal owners. They keep their dashboard row through the
+      // un-gated owner branch, per office, which is what makes multi-office parity hold.
+      "Olive Owner": false,
+      "Carl CrossOffice": false,
       "Dan Director": false,
       "Adam Admin": false,
       "Frank Field": false,
     });
   });
 
-  it("counts deal ownership in EVERY office schema, not just the first", async () => {
-    await pg.exec(MIGRATION_SQL);
-    // Aria owns nothing in Dallas; her only deal is in office_atlanta. A single-schema backfill would
-    // have unticked her, silently dropping a real deal owner off the Atlanta dashboard.
-    expect((await flagsByName(pg))["Aria Atlanta"]).toBe(true);
-  });
-
-  it("skips a half-provisioned office schema instead of aborting the migration for every office", async () => {
-    await pg.exec(`CREATE SCHEMA office_halfbuilt;`); // no deals table
-    await expect(pg.exec(MIGRATION_SQL)).resolves.toBeDefined();
-    expect((await flagsByName(pg))["Olive Owner"]).toBe(true);
+  it("reads no tenant data at all — the classification is a single global UPDATE", async () => {
+    // The earlier draft looped every office_%.deals to find owners. Beyond the multi-office bug, that made
+    // a global column's value depend on tenant state, so a half-provisioned schema could change it.
+    //
+    // EXECUTABLE SQL ONLY. The header discusses the office_* schemas at length to explain why it does not
+    // touch them, and prose is not a dependency — asserting against the raw file would fail on its own
+    // documentation. (0216's POSIX-class guard filters comments for exactly this reason.)
+    const executableSql = MIGRATION_SQL.split("\n")
+      .filter((line) => !line.trimStart().startsWith("--"))
+      .join("\n");
+    expect(executableSql).not.toContain("office_");
+    expect(executableSql).not.toContain("to_regclass");
+    expect(executableSql).toContain("WHERE role <> 'rep'");
+    // Not vacuous: there IS executable SQL to inspect.
+    expect(executableSql).toContain("ALTER TABLE public.users");
   });
 
   it("a replay does not revert an admin's deliberate edits", async () => {
     await pg.exec(MIGRATION_SQL);
-    // The intended first use of the toggle: put Dan on the dashboard. And the intended cleanup:
-    // take the estimator off it.
+    // The intended first use of the toggle: put Dan on the dashboard. And the intended cleanup: take the
+    // estimator off it.
     await pg.exec(`
       UPDATE public.users SET generates_sales = true  WHERE display_name = 'Dan Director';
       UPDATE public.users SET generates_sales = false WHERE display_name = 'Eve Estimator';
@@ -223,36 +227,51 @@ describe("migration 0219 — users.generates_sales", () => {
   });
 
   /**
-   * THE TEST THE MIGRATION'S HEADER RESTS ON. Every other assertion here describes a column; this one
-   * describes the SCREEN. If it ever fails, the deploy moves somebody on or off the director dashboard
-   * without a human having asked for it — which is the one outcome that is never acceptable, whatever
-   * the flag says.
+   * THE TESTS THE MIGRATION'S HEADER RESTS ON. Every other assertion here describes a column; these
+   * describe the SCREEN. If either fails, the deploy moves somebody on or off a director dashboard
+   * without a human having asked for it — the one outcome that is never acceptable.
    */
-  it("selects the IDENTICAL roster to the predicate it replaces, immediately after the backfill", async () => {
+  it("selects the IDENTICAL Dallas roster to the predicate it replaces", async () => {
     await pg.exec(MIGRATION_SQL);
 
     const before = await rosterWithOldPredicate(pg, DALLAS);
     const after = await rosterWithNewPredicate(pg, DALLAS);
     expect(after).toEqual(before);
 
-    // NOT VACUOUS: the roster is a real, partial subset — some users in, some out. "They agree" proves
-    // nothing if both sides return everybody or nobody.
+    // NOT VACUOUS: a real, partial subset. "They agree" proves nothing if both return everybody.
     expect(before).toEqual(["Eve Estimator", "Olive Owner", "Rita Rep"]);
     expect(before.length).toBeLessThan(Object.keys(await flagsByName(pg)).length);
   });
 
+  it("selects the IDENTICAL ATLANTA roster too — parity is per office, not just for the busy one", async () => {
+    await pg.exec(MIGRATION_SQL);
+
+    const before = await rosterWithOldPredicate(pg, ATLANTA, "office_atlanta");
+    const after = await rosterWithNewPredicate(pg, ATLANTA, "office_atlanta");
+    expect(after).toEqual(before);
+    // Fred is an Atlanta rep; Carl owns an Atlanta deal. Both belong here, and nobody from Dallas does.
+    expect(before).toEqual(["Carl CrossOffice", "Fred Foreign"]);
+  });
+
+  it("does NOT let ownership in one office grant a roster seat in another", async () => {
+    // The bug this design avoids. Carl owns in Atlanta and is a MEMBER of Dallas. A global flag set from
+    // "owns a deal anywhere" would satisfy the Dallas membership arm and put him on Dallas's dashboard,
+    // with no admin action and no Dallas deal — silently, on deploy.
+    await pg.exec(MIGRATION_SQL);
+    expect(await rosterWithNewPredicate(pg, DALLAS)).not.toContain("Carl CrossOffice");
+    expect(await rosterWithOldPredicate(pg, DALLAS)).not.toContain("Carl CrossOffice");
+    // ...while he is correctly present on Atlanta's.
+    expect(await rosterWithNewPredicate(pg, ATLANTA, "office_atlanta")).toContain("Carl CrossOffice");
+  });
+
   it("keeps the office boundary the old predicate enforced — a foreign-office rep stays out", async () => {
     await pg.exec(MIGRATION_SQL);
-    // Fred is role='rep' and generates_sales=true, so ONLY the membership half of the predicate keeps
-    // him off the Dallas dashboard. `users` is global; without that half every office's reps merge.
+    // Fred is role='rep' and generates_sales=true, so ONLY the membership half keeps him off the Dallas
+    // dashboard. `users` is global; without that half every office's reps merge.
     expect(await rosterWithNewPredicate(pg, DALLAS)).not.toContain("Fred Foreign");
 
     // ...and a user_office_access grant is what legitimately lets a shared rep back in.
-    await pg.query(
-      `INSERT INTO public.user_office_access (user_id, office_id)
-       SELECT id, $1 FROM public.users WHERE display_name = 'Fred Foreign'`,
-      [DALLAS],
-    );
+    await grantOfficeAccess(pg, "Fred Foreign", DALLAS);
     expect(await rosterWithNewPredicate(pg, DALLAS)).toContain("Fred Foreign");
   });
 
@@ -262,13 +281,13 @@ describe("migration 0219 — users.generates_sales", () => {
 
     await pg.exec(`UPDATE public.users SET generates_sales = true WHERE display_name = 'Dan Director'`);
 
-    // The whole point of P0 #1: he is tracked from day one. Under the old predicate this was
-    // unreachable — no amount of configuration could show a director with no deals.
+    // The whole point of P0 #1: tracked from day one. Under the old predicate this was unreachable — no
+    // configuration could show a director with no deals.
     expect(await rosterWithNewPredicate(pg, DALLAS)).toContain("Dan Director");
     expect(await rosterWithOldPredicate(pg, DALLAS)).not.toContain("Dan Director");
   });
 
-  it("removes an unticked estimator from the roster", async () => {
+  it("removes an unticked estimator who owns nothing — the actual cleanup", async () => {
     await pg.exec(MIGRATION_SQL);
     expect(await rosterWithNewPredicate(pg, DALLAS)).toContain("Eve Estimator");
 
@@ -279,13 +298,13 @@ describe("migration 0219 — users.generates_sales", () => {
     expect(await rosterWithNewPredicate(pg, DALLAS)).toContain("Rita Rep");
   });
 
-  it("unticking a deal OWNER removes them too — the owner branch is no longer an override", async () => {
+  it("does NOT remove someone who owns deals, however the flag is set", async () => {
     await pg.exec(MIGRATION_SQL);
     await pg.exec(`UPDATE public.users SET generates_sales = false WHERE display_name = 'Olive Owner'`);
 
-    // Deliberate: under the old predicate a single historical deal pinned someone to the dashboard
-    // forever, with no way to remove them. That was the other half of the messy room.
-    expect(await rosterWithNewPredicate(pg, DALLAS)).not.toContain("Olive Owner");
-    expect(await rosterWithOldPredicate(pg, DALLAS)).toContain("Olive Owner");
+    // Deliberate, and it is what keeps the Team Commissions footer honest: those deal values are still
+    // counted in getCommissionOfficeTotals, which never reads this flag. Hiding the row would leave a
+    // total with no row to account for it. Removing a deal owner means reassigning their deals.
+    expect(await rosterWithNewPredicate(pg, DALLAS)).toContain("Olive Owner");
   });
 });
