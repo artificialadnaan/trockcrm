@@ -116,6 +116,11 @@ export type PhoneCameraCheck = {
   capturePhotoSucceeded: boolean;
   capturePhotoTimedOut: boolean;
   capturePhotoError: string | null;
+  /** Whether the run disabled `AVCaptureSession.automaticallyConfiguresApplicationAudioSession`,
+   *  which defaults to YES and lets AVFoundation pick its own microphone to match the camera.
+   *  Optional so a payload from an older native build reads as INCONCLUSIVE rather than being
+   *  silently trusted — the same rule `capturePhotoSucceeded` follows, for the same reason. */
+  capturePreventedAudioSessionReconfiguration?: boolean;
 };
 
 export function describePhoneCameraCheck(check: PhoneCameraCheck): Verdict {
@@ -154,6 +159,33 @@ export function describePhoneCameraCheck(check: PhoneCameraCheck): Verdict {
         `The camera opened but ${reason} — the shutter never completed, so this run cannot say ` +
         `whether taking a still disturbs the HFP route. Opening the camera is not the claim ` +
         `that matters; the shutter is. Retry.`,
+    };
+  }
+
+  // The shutter fired — but a route reading only names a CAUSE if the camera was the only thing
+  // allowed to move the route.
+  //
+  // `AVCaptureSession.automaticallyConfiguresApplicationAudioSession` defaults to YES, and Apple's
+  // header is explicit that it then "picks an appropriate microphone and polar pattern to match
+  // the video camera being used". Picking a microphone IS a route change. A run that left it on
+  // cannot separate "the camera hardware contended for the mic" from "AVFoundation reconfigured
+  // the session because we let it", and those two have opposite consequences for the design: the
+  // first says phone stills are unusable during a walk, the second says set one property.
+  //
+  // Checked after the shutter gate and before every route conclusion, so it governs the clean
+  // readings too. A held route under the old default is arguably stronger evidence — iOS was free
+  // to reconfigure and didn't — but "arguably stronger" is a judgement call that the PASS text
+  // would then have to carry, and this rung's verdict is read as a decision. Re-running against a
+  // build that sets the flag is cheap; deciding the product on an unattributable reading is not.
+  if (check.capturePreventedAudioSessionReconfiguration !== true) {
+    return {
+      outcome: "inconclusive",
+      summary:
+        `The shutter fired, but this build did not disable ` +
+        `automaticallyConfiguresApplicationAudioSession, so AVFoundation was free to re-pick the ` +
+        `microphone itself. Any route change here could be that rather than the camera, and an ` +
+        `unchanged route was measured under a different configuration than the one the feature ` +
+        `would ship. Rebuild and re-run before reading anything into these numbers.`,
     };
   }
 
@@ -280,6 +312,8 @@ export function describePhoneCameraCheck(check: PhoneCameraCheck): Verdict {
     summary:
       `The shutter did not disturb the HFP route (${duringCapture.portName}, ` +
       `${duringCapture.sampleRate} Hz), and it held afterward too (${after.portName}, ` +
-      `${after.sampleRate} Hz). Phone stills during a glasses walk are safe.`,
+      `${after.sampleRate} Hz). Phone stills during a glasses walk are safe — PROVIDED the ` +
+      `capture session sets automaticallyConfiguresApplicationAudioSession = false, which is ` +
+      `the configuration this was measured under and is not the AVCaptureSession default.`,
   };
 }

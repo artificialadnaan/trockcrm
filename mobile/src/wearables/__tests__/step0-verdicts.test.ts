@@ -46,6 +46,7 @@ const cleanCameraCheck: PhoneCameraCheck = {
   capturePhotoSucceeded: true,
   capturePhotoTimedOut: false,
   capturePhotoError: null,
+  capturePreventedAudioSessionReconfiguration: true,
 };
 
 describe("describeHfpStreamCheck", () => {
@@ -145,6 +146,37 @@ describe("describePhoneCameraCheck", () => {
   it("passes when the route is untouched throughout, including the shutter", () => {
     const result = describePhoneCameraCheck(cleanCameraCheck);
     expect(result.outcome).toBe("pass");
+  });
+
+  // A payload from a native build predating the flag omits the field entirely. That is the case
+  // the enumeration below cannot reach (it only varies true/false), and it is the one that
+  // actually happens: an old app on a phone, run against this JS.
+  it("is inconclusive when the payload does not report the audio-session flag at all", () => {
+    const { capturePreventedAudioSessionReconfiguration: _omitted, ...withoutFlag } =
+      cleanCameraCheck;
+    const result = describePhoneCameraCheck(withoutFlag);
+    expect(result.outcome).toBe("inconclusive");
+    expect(result.summary).toContain("automaticallyConfiguresApplicationAudioSession");
+  });
+
+  // The gate must not be readable as "only a pass needs attribution". A route that was visibly
+  // destroyed while AVFoundation was free to re-pick the mic still names no cause, so reporting
+  // it as a fail would push the design onto the fallback for a reason nobody established.
+  it("is inconclusive rather than fail when the route is lost but the flag was not set", () => {
+    const result = describePhoneCameraCheck({
+      ...cleanCameraCheck,
+      capturePreventedAudioSessionReconfiguration: false,
+      during: builtIn,
+      duringCapture: builtIn,
+      after: builtIn,
+    });
+    expect(result.outcome).toBe("inconclusive");
+  });
+
+  it("names the flag as the reason the shipped configuration matters, in the pass summary", () => {
+    const result = describePhoneCameraCheck(cleanCameraCheck);
+    expect(result.outcome).toBe("pass");
+    expect(result.summary).toContain("automaticallyConfiguresApplicationAudioSession = false");
   });
 
   it("fails when the camera takes the route and it does not come back", () => {
@@ -297,6 +329,7 @@ describe("describePhoneCameraCheck", () => {
     const result = describePhoneCameraCheck({
       ...cleanCameraCheck,
       capturePhotoSucceeded: false,
+      capturePreventedAudioSessionReconfiguration: true,
       capturePhotoTimedOut: true,
       capturePhotoError: null,
     });
@@ -308,6 +341,7 @@ describe("describePhoneCameraCheck", () => {
     const result = describePhoneCameraCheck({
       ...cleanCameraCheck,
       capturePhotoSucceeded: false,
+      capturePreventedAudioSessionReconfiguration: true,
       capturePhotoTimedOut: false,
       capturePhotoError: "AVFoundation error -11800",
     });
@@ -319,6 +353,7 @@ describe("describePhoneCameraCheck", () => {
     const result = describePhoneCameraCheck({
       ...cleanCameraCheck,
       capturePhotoSucceeded: false,
+      capturePreventedAudioSessionReconfiguration: true,
       capturePhotoTimedOut: true,
       capturePhotoError: null,
     });
@@ -430,9 +465,11 @@ describe("describePhoneCameraCheck — state-space enumeration", () => {
       for (const duringCaptureLevel of ALL_LEVELS) {
         for (const afterLevel of ALL_LEVELS) {
           for (const capturePhotoSucceeded of [true, false]) {
+          for (const preventedReconfig of [true, false]) {
             const label =
               `before=${beforeLevel} during=${duringLevel} duringCapture=${duringCaptureLevel} ` +
-              `after=${afterLevel} captured=${capturePhotoSucceeded}`;
+              `after=${afterLevel} captured=${capturePhotoSucceeded} ` +
+              `noAutoAudioCfg=${preventedReconfig}`;
             it(`never overstates pass — ${label}`, () => {
               const check: PhoneCameraCheck = {
                 before: LEVELS[beforeLevel],
@@ -442,6 +479,7 @@ describe("describePhoneCameraCheck — state-space enumeration", () => {
                 capturePhotoSucceeded,
                 capturePhotoTimedOut: !capturePhotoSucceeded,
                 capturePhotoError: null,
+                capturePreventedAudioSessionReconfiguration: preventedReconfig,
               };
               const result = describePhoneCameraCheck(check);
 
@@ -450,7 +488,8 @@ describe("describePhoneCameraCheck — state-space enumeration", () => {
                 duringLevel === "wideband" &&
                 duringCaptureLevel === "wideband" &&
                 afterLevel === "wideband" &&
-                capturePhotoSucceeded;
+                capturePhotoSucceeded &&
+                preventedReconfig;
 
               if (!supportsPass) {
                 expect(result.outcome).not.toBe("pass");
@@ -465,8 +504,13 @@ describe("describePhoneCameraCheck — state-space enumeration", () => {
                 expect(result.outcome).toBe("inconclusive");
               } else if (!capturePhotoSucceeded) {
                 expect(result.outcome).toBe("inconclusive");
+              } else if (!preventedReconfig) {
+                // A route reading taken while AVFoundation could re-pick the microphone names no
+                // cause, so it cannot support a fail either — not just a pass.
+                expect(result.outcome).toBe("inconclusive");
               }
             });
+          }
           }
         }
       }

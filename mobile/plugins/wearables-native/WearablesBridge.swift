@@ -36,15 +36,31 @@ final class WearablesBridge: RCTEventEmitter {
   /// Frames arrive on the SDK's delivery thread at video rate while `streamInfo()` reads from
   /// the RN bridge queue and `teardown()` writes from a Task. Three threads, unsynchronised
   /// stored properties: a data race by construction.
+  ///
+  /// KNOWN GAP, deliberately not closed here: `session`, `stream`, `frameToken` and `photoToken`
+  /// are still WRITTEN outside this lock (each rung publishes them from its own Task). `sweep()`
+  /// now reads and clears them under it, which is what makes teardown atomic, but a publish
+  /// racing a sweep is still unsynchronised. Closing it properly means routing every access to
+  /// those four through the lock, which is a wider change than the races this file was opened to
+  /// fix. See the PR description.
   private let stateLock = NSLock()
 
-  /// Bumped by `teardown()` every time it runs. `startStream`'s `Task` captures the value as of
-  /// when it began and rechecks it at each significant step; a mismatch means a `stopStream()`
-  /// (or a newer `startStream()`) ran while this Task was waiting on the selector, the session,
-  /// or `addStream()` — and continuing would create and start a stream after the UI was already
-  /// told everything stopped. Guarded by `stateLock` for the same reason `firstFrameSize` is:
-  /// written from the bridge queue (`teardown()`) and read from a Task.
+  /// Bumped by every sweep — `teardown()` unconditionally, `teardownIfCurrent(_:)` only when it
+  /// wins its claim. Each rung's `Task` captures the value as of when it began and rechecks it at
+  /// every significant step; a mismatch means a `stopStream()` (or a newer rung) ran while this
+  /// Task was waiting on the selector, the session, or `addStream()` — and continuing would
+  /// create and start a stream after the UI was already told everything stopped.
+  ///
+  /// The bump happens BEFORE the objects are stopped, so "generation unchanged" genuinely implies
+  /// "not swept yet". The converse does not hold: "generation changed" does NOT imply the sweeper
+  /// saw this run's objects, because a rung can publish after a sweep has already passed. That is
+  /// why the superseded branches stop their own local references instead of assuming.
   private var teardownGeneration = 0
+
+  /// Whether THIS bridge is the reason the shared `AVAudioSession` is active, so a sweep knows
+  /// whether it owes a deactivation. Guarded by `stateLock`: set from a rung's Task, read and
+  /// cleared by whichever thread sweeps.
+  private var weActivatedAudioSession = false
 
   /// `Wearables.configure()` is not idempotent in 0.8.0, so the guard lives here rather
   /// than trusting every JS caller to remember. Internal (not `private`), deliberately: this is
@@ -325,6 +341,10 @@ final class WearablesBridge: RCTEventEmitter {
     stateLock.unlock()
 
     Task {
+      // Declared out here so the `catch` can reach them; the `let`s inside the `do` cannot
+      // be seen from it, so without these a superseded run's catch path can stop nothing.
+      var createdRef: DeviceSession?
+      var streamRef: MWDATCamera.Stream?
       do {
         let sdk = Wearables.shared
         let selector = AutoDeviceSelector(wearables: sdk)
@@ -353,6 +373,13 @@ final class WearablesBridge: RCTEventEmitter {
           return
         }
         let created = try sdk.createSession(deviceSelector: selector)
+        // Held outside the `do` as well, so the `catch` can still reach it. A rung publishes to
+        // `session`/`stream` with no generation check, so it can publish AFTER a newer run has
+        // already swept — at which point the sweeper never saw these objects and nothing but this
+        // path will ever stop them. An un-stopped DeviceSession is not a quiet leak: only one
+        // session may run on a device at a time, so it blocks every later createSession with the
+        // `sessionAlreadyExists` failure this file already calls "our own litter".
+        createdRef = created
         session = created
         try created.start()
 
@@ -410,6 +437,7 @@ final class WearablesBridge: RCTEventEmitter {
                  "startStream was superseded by stop() after addStream()", nil)
           return
         }
+        streamRef = newStream
         stream = newStream
 
       // Record what the FIRST frame actually measures. The configuration says what we asked
@@ -455,18 +483,28 @@ final class WearablesBridge: RCTEventEmitter {
         return
       }
       newStream.start()
+      // Symmetric with the guard above on purpose. `created` is stopped here too even though the
+      // sweeper that failed this guard will already have stopped it: for this guard to fail, the
+      // bump must have landed during `start()`, and at that instant `self.session` still held
+      // `created` and `self.stream` still held `newStream`, so the sweep did reach both. That
+      // argument depends on facts several screens apart, and stopping twice costs nothing —
+      // relying on it silently is how it rots into a leak the next time the publish order moves.
       guard currentTeardownGeneration() == myGeneration else {
         newStream.stop()
+        created.stop()
         reject("wearables_stream_superseded",
                "startStream was superseded by stop() as the stream was starting", nil)
         return
       }
       resolve(["started": true, "config": String(describing: newStream.streamConfiguration)])
       } catch {
-        // `created`/`newStream` are scoped to the `do` block, so a superseded run cannot reach
-        // them from here. It does not need to: anything it had published to `session`/`stream`
-        // was already stopped by whatever superseded it.
-        teardownIfCurrent(myGeneration)
+        // A superseded run cannot assume the sweeper saw its objects: the publish above is not
+        // generation-checked, so it can land after the sweep. `createdRef`/`streamRef` exist for
+        // exactly this path.
+        if !teardownIfCurrent(myGeneration) {
+          streamRef?.stop()
+          createdRef?.stop()
+        }
         reject("wearables_stream_failed", "startStream failed: \(Self.describe(error))", error)
       }
     }
@@ -503,19 +541,11 @@ final class WearablesBridge: RCTEventEmitter {
   ///
   /// Unconditional: this is what a user-initiated `stopStream()` or the start of a new rung wants.
   /// A long-running rung's OWN failure path must use `teardownIfCurrent(_:)` instead — see there.
+  /// All five callers are user-initiated and run on the serial RN method queue: `stopStream()` and
+  /// each rung's precondition. That serialisation is load-bearing — it is why the unconditional
+  /// form cannot interleave with itself.
   private func teardown() {
-    // Synchronous, no `await` between lock and unlock — safe under the same rule as every other
-    // lock in this file. This runs on whichever thread called teardown() (bridge queue for
-    // stopStream(), the Task itself on startStream()'s own failure paths).
-    //
-    // Bumped BEFORE the stops, not after. The bump is what tells every in-flight Task it has been
-    // superseded, and doing it last left a window in which a Task could check the generation,
-    // still match, and go on to touch session/stream while this teardown was already stopping
-    // them out from under it.
-    stateLock.lock()
-    teardownGeneration += 1
-    stateLock.unlock()
-    performTeardown()
+    sweep(ifGeneration: nil)
   }
 
   /// Tear down ONLY if `generation` is still current — i.e. only if nothing has superseded the
@@ -536,26 +566,71 @@ final class WearablesBridge: RCTEventEmitter {
   /// afterwards would be the same check-then-act race one level up.
   @discardableResult
   private func teardownIfCurrent(_ generation: Int) -> Bool {
+    sweep(ifGeneration: generation)
+  }
+
+  /// The ONE place the generation moves and the owned objects are detached. `generation == nil`
+  /// means unconditional.
+  ///
+  /// The compare, the bump and the DETACH all happen inside a single acquisition. Bumping under
+  /// the lock but reading `session`/`stream` afterwards would leave the claim atomic and the sweep
+  /// not: a sweeper preempted between the two could resume much later and stop objects a newer run
+  /// had since published — the very bug this file is fixing, reintroduced by its own fix.
+  ///
+  /// The `stop()` calls stay OUTSIDE the lock. The frame listener takes `stateLock` and `NSLock`
+  /// is not recursive, so stopping under it risks a deadlock if the SDK ever delivers synchronously.
+  /// Detaching first makes that safe: once the fields are nil'd under the lock, the objects in hand
+  /// are unreachable by anyone else and can be stopped at leisure.
+  @discardableResult
+  private func sweep(ifGeneration generation: Int?) -> Bool {
     stateLock.lock()
-    let isCurrent = teardownGeneration == generation
-    if isCurrent {
-      teardownGeneration += 1
+    if let generation, teardownGeneration != generation {
+      stateLock.unlock()
+      return false
     }
+    teardownGeneration += 1
+    let doomedStream = stream
+    let doomedSession = session
+    let owedAudioDeactivation = weActivatedAudioSession
+    stream = nil
+    session = nil
+    frameToken = nil
+    photoToken = nil
+    weActivatedAudioSession = false
     stateLock.unlock()
-    guard isCurrent else { return false }
-    performTeardown()
+
+    doomedStream?.stop()
+    doomedSession?.stop()
+    // Handing the audio session back belongs to WHOEVER SWEEPS, not to the run that happens to
+    // finish. Gating each rung's own `setActive(false)` on its claim looked safer and was strictly
+    // worse: a rung superseded mid-run then skipped its deactivation and nothing else performed
+    // one, so the glasses stayed pinned in HFP for the life of the process. Every later rung then
+    // measured against leftover HFP — including the one that reports `audioSessionUsed: false`,
+    // whose whole premise is that no audio session is active.
+    if owedAudioDeactivation {
+      try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
     return true
   }
 
-  /// The stopping half of a teardown, with no generation bookkeeping. Never call this directly;
-  /// go through `teardown()` or `teardownIfCurrent(_:)` so the generation always moves with it.
-  private func performTeardown() {
-    stream?.stop()
-    session?.stop()
-    frameToken = nil
-    photoToken = nil
-    stream = nil
-    session = nil
+  /// Record that this bridge put the shared `AVAudioSession` into an active state, so the next
+  /// sweep knows it owes a deactivation. Only what we activated is ever handed back — the app has
+  /// another owner of that singleton in `WalkthroughRecorder`, and deactivating unconditionally
+  /// would reach into a walk this screen knows nothing about.
+  private func noteAudioSessionActivated() {
+    stateLock.lock()
+    weActivatedAudioSession = true
+    stateLock.unlock()
+  }
+
+  /// Deactivate now, for the rungs that own an audio session but no SDK session to sweep.
+  private func deactivateAudioSessionIfOurs() {
+    stateLock.lock()
+    let owed = weActivatedAudioSession
+    weActivatedAudioSession = false
+    stateLock.unlock()
+    guard owed else { return }
+    try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
   }
 
   /// Reads `teardownGeneration` under `stateLock`. Always call this instead of touching the
@@ -777,6 +852,10 @@ final class WearablesBridge: RCTEventEmitter {
 
     Task {
       let audio = AVAudioSession.sharedInstance()
+      // Declared out here so the `catch` can reach them; the `let`s inside the `do` cannot
+      // be seen from it, so without these a superseded run's catch path can stop nothing.
+      var createdRef: DeviceSession?
+      var streamRef: MWDATCamera.Stream?
       do {
         let sdk = Wearables.shared
         let selector = AutoDeviceSelector(wearables: sdk)
@@ -790,6 +869,13 @@ final class WearablesBridge: RCTEventEmitter {
         }
 
         let created = try sdk.createSession(deviceSelector: selector)
+        // Held outside the `do` as well, so the `catch` can still reach it. A rung publishes to
+        // `session`/`stream` with no generation check, so it can publish AFTER a newer run has
+        // already swept — at which point the sweeper never saw these objects and nothing but this
+        // path will ever stop them. An un-stopped DeviceSession is not a quiet leak: only one
+        // session may run on a device at a time, so it blocks every later createSession with the
+        // `sessionAlreadyExists` failure this file already calls "our own litter".
+        createdRef = created
         session = created
         try created.start()
         deadline = Date().addingTimeInterval(10)
@@ -815,10 +901,12 @@ final class WearablesBridge: RCTEventEmitter {
           reject("wearables_stream_nil", "addStream() returned nil", nil)
           return
         }
+        streamRef = newStream
         stream = newStream
 
         // Meta step 2: HFP comes up while the stream is still stopped.
         _ = try await Self.activateHfpAndSettle()
+        noteAudioSessionActivated()
         let before = Self.routeSnapshot(audio)
 
         // Subscribe BEFORE start(). Reading the route undisturbed proves nothing on its own — a
@@ -860,9 +948,7 @@ final class WearablesBridge: RCTEventEmitter {
         // used to stop a newer run's session. Deactivating the audio session is part of the same
         // claim — if this run no longer owns the world, the HFP session it would deactivate is
         // one the CURRENT run activated for itself.
-        if teardownIfCurrent(myGeneration) {
-          try? audio.setActive(false, options: .notifyOthersOnDeactivation)
-        } else {
+        if !teardownIfCurrent(myGeneration) {
           // Superseded. `created`/`newStream` may have been published after the superseding
           // teardown already swept, in which case nothing else will ever stop them.
           newStream.stop()
@@ -885,10 +971,12 @@ final class WearablesBridge: RCTEventEmitter {
           "firstFrameSeconds": firstFrameSecondsValue,
         ])
       } catch {
-        // `created`/`newStream` are scoped to the `do` block and unreachable here; whatever this
-        // run published was already stopped by whichever teardown superseded it.
-        if teardownIfCurrent(myGeneration) {
-          try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+        // A superseded run cannot assume the sweeper saw its objects: the publish above is not
+        // generation-checked, so it can land after the sweep. `createdRef`/`streamRef` exist for
+        // exactly this path.
+        if !teardownIfCurrent(myGeneration) {
+          streamRef?.stop()
+          createdRef?.stop()
         }
         reject("wearables_hfp_stream_check_failed",
                "checkHfpWithStream failed: \(Self.describe(error))", error)
@@ -1002,6 +1090,7 @@ final class WearablesBridge: RCTEventEmitter {
         }
 
         _ = try await Self.activateHfpAndSettle()
+        noteAudioSessionActivated()
         let before = Self.routeSnapshot(audio)
 
         let capture = AVCaptureSession()
@@ -1019,7 +1108,7 @@ final class WearablesBridge: RCTEventEmitter {
         capture.sessionPreset = .photo
         guard let device = AVCaptureDevice.default(for: .video),
               let input = try? AVCaptureDeviceInput(device: device) else {
-          try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+          deactivateAudioSessionIfOurs()
           reject("wearables_no_camera", "No video capture device available", nil)
           return
         }
@@ -1029,14 +1118,14 @@ final class WearablesBridge: RCTEventEmitter {
         capture.beginConfiguration()
         guard capture.canAddInput(input) else {
           capture.commitConfiguration()
-          try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+          deactivateAudioSessionIfOurs()
           reject("wearables_no_camera", "Capture session refused the video input", nil)
           return
         }
         capture.addInput(input)
         guard capture.canAddOutput(photo) else {
           capture.commitConfiguration()
-          try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+          deactivateAudioSessionIfOurs()
           reject("wearables_no_camera", "Capture session refused the photo output", nil)
           return
         }
@@ -1067,7 +1156,7 @@ final class WearablesBridge: RCTEventEmitter {
         }
         let after = Self.routeSnapshot(audio)
 
-        try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+        deactivateAudioSessionIfOurs()
 
         // Whether the shutter itself succeeded is a raw fact, not a verdict: a route reading
         // taken around a capture that silently failed would repeat exactly the mistake this fix
@@ -1086,9 +1175,16 @@ final class WearablesBridge: RCTEventEmitter {
           "capturePhotoSucceeded": !captureOutcome.timedOut && captureOutcome.error == nil,
           "capturePhotoTimedOut": captureOutcome.timedOut,
           "capturePhotoError": capturePhotoErrorValue,
+          // Reported, not assumed. This rung's answer is only transferable to a shipped feature
+          // that configures its capture session the same way; a PASS read without this field
+          // says "phone stills are safe" when what was measured is "phone stills are safe WITH
+          // automaticallyConfiguresApplicationAudioSession off". Hard-coded rather than read
+          // back off `capture`, because the reading that matters is the one in force during the
+          // measurement above, and the session is torn down by now.
+          "capturePreventedAudioSessionReconfiguration": true,
         ])
       } catch {
-        try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+        deactivateAudioSessionIfOurs()
         reject("wearables_phone_camera_check_failed",
                "checkPhoneCameraDuringHfp failed: \(Self.describe(error))", error)
       }
@@ -1123,6 +1219,10 @@ final class WearablesBridge: RCTEventEmitter {
     let myGeneration = currentTeardownGeneration()
 
     Task {
+      // Declared out here so the `catch` can reach them; the `let`s inside the `do` cannot
+      // be seen from it, so without these a superseded run's catch path can stop nothing.
+      var createdRef: DeviceSession?
+      var streamRef: MWDATCamera.Stream?
       do {
         let sdk = Wearables.shared
         let selector = AutoDeviceSelector(wearables: sdk)
@@ -1136,6 +1236,13 @@ final class WearablesBridge: RCTEventEmitter {
         }
 
         let created = try sdk.createSession(deviceSelector: selector)
+        // Held outside the `do` as well, so the `catch` can still reach it. A rung publishes to
+        // `session`/`stream` with no generation check, so it can publish AFTER a newer run has
+        // already swept — at which point the sweeper never saw these objects and nothing but this
+        // path will ever stop them. An un-stopped DeviceSession is not a quiet leak: only one
+        // session may run on a device at a time, so it blocks every later createSession with the
+        // `sessionAlreadyExists` failure this file already calls "our own litter".
+        createdRef = created
         session = created
         try created.start()
         deadline = Date().addingTimeInterval(10)
@@ -1164,6 +1271,7 @@ final class WearablesBridge: RCTEventEmitter {
           reject("wearables_stream_nil", "addStream() returned nil", nil)
           return
         }
+        streamRef = newStream
         stream = newStream
 
         let counter = FrameArrivalCounter()
@@ -1199,7 +1307,10 @@ final class WearablesBridge: RCTEventEmitter {
           "audioSessionUsed": false,
         ])
       } catch {
-        teardownIfCurrent(myGeneration)
+        if !teardownIfCurrent(myGeneration) {
+          streamRef?.stop()
+          createdRef?.stop()
+        }
         reject("wearables_stream_measure_failed",
                "measureStreamWithoutAudio failed: \(Self.describe(error))", error)
       }
@@ -1240,6 +1351,10 @@ extension WearablesBridge {
 
     Task {
       let audio = AVAudioSession.sharedInstance()
+      // Declared out here so the `catch` can reach them; the `let`s inside the `do` cannot
+      // be seen from it, so without these a superseded run's catch path can stop nothing.
+      var createdRef: DeviceSession?
+      var streamRef: MWDATCamera.Stream?
       do {
         let sdk = Wearables.shared
         let selector = AutoDeviceSelector(wearables: sdk)
@@ -1253,6 +1368,13 @@ extension WearablesBridge {
         }
 
         let created = try sdk.createSession(deviceSelector: selector)
+        // Held outside the `do` as well, so the `catch` can still reach it. A rung publishes to
+        // `session`/`stream` with no generation check, so it can publish AFTER a newer run has
+        // already swept — at which point the sweeper never saw these objects and nothing but this
+        // path will ever stop them. An un-stopped DeviceSession is not a quiet leak: only one
+        // session may run on a device at a time, so it blocks every later createSession with the
+        // `sessionAlreadyExists` failure this file already calls "our own litter".
+        createdRef = created
         session = created
         try created.start()
         deadline = Date().addingTimeInterval(10)
@@ -1279,20 +1401,20 @@ extension WearablesBridge {
           reject("wearables_stream_nil", "addStream() returned nil", nil)
           return
         }
+        streamRef = newStream
         stream = newStream
 
         // NOTE the absent option: `.playAndRecord` WITHOUT `.allowBluetoothHFP`. That single
         // omission is the experiment — it is what keeps the glasses out of hands-free mode.
         try audio.setCategory(.playAndRecord, mode: .default, options: [])
         try audio.setActive(true)
+        noteAudioSessionActivated()
         try? await Task.sleep(nanoseconds: 500_000_000)
 
         let input = audio.currentRoute.inputs.first
         // If the route picked the glasses anyway, this measures HFP again and the answer is void.
         guard input?.portType != .bluetoothHFP else {
-          if teardownIfCurrent(myGeneration) {
-            try? audio.setActive(false, options: .notifyOthersOnDeactivation)
-          } else {
+          if !teardownIfCurrent(myGeneration) {
             newStream.stop()
             created.stop()
           }
@@ -1311,9 +1433,7 @@ extension WearablesBridge {
           AVNumberOfChannelsKey: 1,
         ])
         guard recorder.record() else {
-          if teardownIfCurrent(myGeneration) {
-            try? audio.setActive(false, options: .notifyOthersOnDeactivation)
-          } else {
+          if !teardownIfCurrent(myGeneration) {
             newStream.stop()
             created.stop()
           }
@@ -1353,9 +1473,7 @@ extension WearablesBridge {
 
         // Same claim as every other exit from this rung, success included — see the no-audio
         // rung and checkHfpWithStream for why the audio deactivation rides on it.
-        if teardownIfCurrent(myGeneration) {
-          try? audio.setActive(false, options: .notifyOthersOnDeactivation)
-        } else {
+        if !teardownIfCurrent(myGeneration) {
           newStream.stop()
           created.stop()
         }
@@ -1376,8 +1494,9 @@ extension WearablesBridge {
           "audioFileUri": url.absoluteString,
         ])
       } catch {
-        if teardownIfCurrent(myGeneration) {
-          try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+        if !teardownIfCurrent(myGeneration) {
+          streamRef?.stop()
+          createdRef?.stop()
         }
         reject("wearables_phone_audio_measure_failed",
                "measureStreamWithPhoneAudio failed: \(Self.describe(error))", error)
