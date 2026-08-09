@@ -31,7 +31,9 @@ describe("extraction-review-service", () => {
     });
     const eventValues: any[] = [];
     const tenantDb = {
-      select: vi.fn(() => ({ from: vi.fn(() => ({ where: vi.fn(() => ({ limit: vi.fn(() => ({ for: selectLimit })) })) })) })),
+      select: vi.fn(() => ({ from: vi.fn(() => ({
+          // No promoted line for this row, so the requeue raises no remediation flag.
+          innerJoin: vi.fn(() => ({ where: vi.fn().mockResolvedValue([]) })), where: vi.fn(() => ({ limit: vi.fn(() => ({ for: selectLimit })) })) })) })),
       update: vi.fn(() => ({ set: updateSet })),
       insert: vi.fn(() => ({
         values: vi.fn((values: any) => {
@@ -135,6 +137,73 @@ describe("extraction-review-service", () => {
     });
 
     expect(updateSetCalls[0].status).toBeUndefined();
+  });
+
+  it("FLAGS the line a requeued row already promoted, instead of silently double-counting it", async () => {
+    // Requeuing does not undo the line the row already produced. The promoted `estimate_line_items`
+    // row is in a client-facing estimate at the OLD number, and duplicate grouping is scoped to the
+    // NEW generation run — so promoting the correction adds a second line while the first stays in
+    // the total. The edit meant to fix a number ends up double-counting it.
+    //
+    // Flagged rather than retired, matching migration 0215's stated policy for the identical
+    // situation: this service must not silently rewrite a number a client has been shown.
+    const existingRow = {
+      id: "ext-1",
+      dealId: "deal-1",
+      status: "processed",
+      normalizedLabel: "Base trim",
+      quantity: "700.000",
+      unit: "lf",
+      divisionHint: "09",
+      metadataJson: {},
+      rawLabel: "Base trim",
+    };
+    const selectLimit = vi.fn().mockResolvedValue([existingRow]);
+    const promotedWhere = vi
+      .fn()
+      .mockResolvedValue([{ lineItemId: "line-1", recommendationId: "rec-1" }]);
+    const updateReturning = vi
+      .fn()
+      .mockResolvedValue([{ id: "ext-1", status: "pending", quantity: "500.000" }]);
+    const insertValues = vi
+      .fn()
+      .mockReturnValue({ returning: vi.fn().mockResolvedValue([{ id: "evt-1", eventType: "edited" }]) });
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          innerJoin: vi.fn(() => ({ where: promotedWhere })),
+          where: vi.fn(() => ({ limit: vi.fn(() => ({ for: selectLimit })) })),
+        })),
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({ where: vi.fn(() => ({ returning: updateReturning })) })),
+      })),
+      insert: vi.fn(() => ({ values: insertValues })),
+    } as any;
+
+    await updateEstimateExtraction({
+      tenantDb,
+      dealId: "deal-1",
+      extractionId: "ext-1",
+      userId: "user-1",
+      input: { quantity: "500" },
+    } as any);
+
+    const flag = insertValues.mock.calls
+      .map((call: any[]) => call[0])
+      .find((values: any) => values.eventType === "remediation_required");
+
+    expect(flag).toBeDefined();
+    // Against the LINE, not the extraction — the extraction's own `edited` event already exists, and
+    // the thing needing attention is the quoted line.
+    expect(flag.subjectType).toBe("estimate_line_item");
+    expect(flag.subjectId).toBe("line-1");
+    expect(flag.reason).toMatch(/still counted in the estimate total/);
+    expect(flag.reason).toMatch(/nothing has been changed automatically/);
+    // And the edit's own event still happens.
+    expect(
+      insertValues.mock.calls.map((call: any[]) => call[0]).some((v: any) => v.eventType === "edited")
+    ).toBe(true);
   });
 
   it("DOES requeue a processed row when the quantity genuinely changes", async () => {
@@ -413,6 +482,8 @@ describe("extraction-review-service", () => {
     const tenantDb = {
       select: vi.fn(() => ({
         from: vi.fn(() => ({
+          // No promoted line for this row, so the requeue raises no remediation flag.
+          innerJoin: vi.fn(() => ({ where: vi.fn().mockResolvedValue([]) })),
           where: vi.fn(() => ({
             limit: vi.fn(() => ({ for: selectLimit })),
           })),
@@ -481,6 +552,8 @@ describe("extraction-review-service", () => {
     const tenantDb = {
       select: vi.fn(() => ({
         from: vi.fn(() => ({
+          // No promoted line for this row, so the requeue raises no remediation flag.
+          innerJoin: vi.fn(() => ({ where: vi.fn().mockResolvedValue([]) })),
           where: vi.fn(() => ({
             limit: vi.fn(() => ({ for: selectLimit })),
           })),
@@ -571,6 +644,8 @@ describe("extraction-review-service", () => {
     const tenantDb = {
       select: vi.fn(() => ({
         from: vi.fn(() => ({
+          // No promoted line for this row, so the requeue raises no remediation flag.
+          innerJoin: vi.fn(() => ({ where: vi.fn().mockResolvedValue([]) })),
           where: vi.fn(() => ({
             limit: vi.fn(() => ({ for: selectLimit })),
           })),

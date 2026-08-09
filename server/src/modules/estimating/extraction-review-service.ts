@@ -1,7 +1,12 @@
 import { and, eq, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import { estimateExtractions, estimateReviewEvents } from "@trock-crm/shared/schema";
+import {
+  estimateExtractionMatches,
+  estimateExtractions,
+  estimatePricingRecommendations,
+  estimateReviewEvents,
+} from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { resolvePricingScopeFromExtraction } from "./pricing-service.js";
 
@@ -14,6 +19,9 @@ async function insertReviewEvent(
     subjectId: string;
     eventType: string;
     userId: string;
+    /** Defaults to the extraction. The promoted-line flag below is the one caller that addresses a
+     *  different subject, and the column exists precisely so the two can be told apart. */
+    subjectType?: string;
     beforeJson?: Record<string, unknown>;
     afterJson?: Record<string, unknown>;
     reason?: string | null;
@@ -23,7 +31,7 @@ async function insertReviewEvent(
     .insert(estimateReviewEvents)
     .values({
       dealId: input.dealId,
-      subjectType: "estimate_extraction",
+      subjectType: input.subjectType ?? "estimate_extraction",
       subjectId: input.subjectId,
       eventType: input.eventType,
       userId: input.userId,
@@ -268,6 +276,66 @@ export async function updateEstimateExtraction(args: {
   // answer the two sibling verbs already give for the same shape.
   if (!updated) {
     throw new AppError(404, "Estimate extraction not found");
+  }
+
+  // REQUEUING DOES NOT UNDO THE LINE THIS ROW ALREADY PRODUCED.
+  //
+  // When a `processed` or `approved` extraction has already been PROMOTED, its estimate_line_items
+  // row is sitting in a client-facing estimate at the OLD number. Moving the extraction back to
+  // `pending` makes it re-price, and duplicate grouping is scoped to the new generation run — so
+  // approving and promoting the correction adds a SECOND line while the first stays in the total.
+  // The edit that was supposed to fix a number ends up double-counting it.
+  //
+  // FLAGGED, NOT RETIRED, and that is a deliberate choice rather than the easy one. Migration 0215
+  // states the policy for the identical situation on historical rows: "this migration will not
+  // silently alter a number a client has been shown: removing or rewriting an already-quoted line is
+  // an estimator's decision, and one that needs the deal in front of them." Retiring or rewriting
+  // the line here would have this service quietly edit a client-facing estimate as a side effect of
+  // a quantity correction, which is a much larger behavioural step than making the problem visible.
+  // Same event type, subject and shape 0215 uses, so the two arrive in the review feed identically.
+  //
+  // Only when the requeue ACTUALLY happened: `statusAfterEdit` is a SQL CASE resolved under the row
+  // lock, so `updated.status` is the only thing that knows whether this edit moved the row.
+  if (requeuesForPricing && updated.status === "pending" && existing.status !== "pending") {
+    const promoted = await args.tenantDb
+      .select({
+        lineItemId: estimatePricingRecommendations.promotedEstimateLineItemId,
+        recommendationId: estimatePricingRecommendations.id,
+      })
+      .from(estimatePricingRecommendations)
+      .innerJoin(
+        estimateExtractionMatches,
+        eq(estimatePricingRecommendations.extractionMatchId, estimateExtractionMatches.id)
+      )
+      .where(
+        and(
+          eq(estimateExtractionMatches.extractionId, args.extractionId),
+          sql`${estimatePricingRecommendations.promotedEstimateLineItemId} is not null`
+        )
+      );
+
+    for (const row of promoted) {
+      if (!row.lineItemId) continue;
+      await insertReviewEvent(args.tenantDb, {
+        dealId: args.dealId,
+        subjectType: "estimate_line_item",
+        subjectId: row.lineItemId,
+        eventType: "remediation_required",
+        userId: args.userId,
+        beforeJson: {
+          extractionId: args.extractionId,
+          recommendationId: row.recommendationId,
+          previousQuantity: existing.quantity,
+        },
+        afterJson: { correctedQuantity: updated.quantity },
+        reason:
+          "The extraction behind this line was corrected from " +
+          `${existing.quantity ?? "none"} to ${updated.quantity ?? "none"} and requeued for ` +
+          "re-pricing. This line still carries the OLD number and is still counted in the estimate " +
+          "total, so promoting the corrected recommendation will add a second line beside it. " +
+          "Re-price or void this line; nothing has been changed automatically.",
+      });
+    }
   }
 
   const reviewEvent = await insertReviewEvent(args.tenantDb, {
