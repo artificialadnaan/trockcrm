@@ -179,11 +179,16 @@ export function UsersPage() {
     setUpdatingId(userId);
     try {
       await updateUser(userId, { generatesSales: !generatesSales });
-      // Name the consequence rather than the field. "generatesSales updated" tells an admin nothing
-      // about what they just changed; the whole reason this toggle exists is the dashboard roster.
+      // Name the consequence rather than the field — "generatesSales updated" tells an admin nothing.
+      //
+      // But do NOT claim removal. The roster predicate retains anyone who owns a deal in this office
+      // through its owner-backed exception, so for those users the row stays on the cards and the funnel
+      // and a flat "Removed from the director dashboard" would report the opposite of what happened. The
+      // client cannot tell which case this is (the users payload carries no ownership), so the copy states
+      // the setting, which is always true, and names the one exception rather than guessing.
       toast.success(
         generatesSales
-          ? "Removed from the director dashboard"
+          ? "No longer tracked as a sales carrier. Anyone who owns deals still appears."
           : "Now tracked on the director dashboard"
       );
     } catch (err) {
