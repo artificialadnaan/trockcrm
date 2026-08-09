@@ -2235,6 +2235,12 @@ export async function getDeals(
       ...getTableColumns(deals),
       companyName: companies.name,
       stageSlug: pipelineStageConfig.slug,
+      // The CONFIGURED project-type digit, resolved through project_type_id. Shipped to the client
+      // because the canonical service test needs it: 646 of 1,351 active deals carry NO project_type TEXT
+      // and are typed ONLY by this FK, so a client that saw just the text column would fall back to
+      // workflow_route for the exact population this release is correcting (277 of the 279 misclassified
+      // deals). Same scalar-subquery idiom as stageSlug/companyOwnerUserName above.
+      projectTypeCode: sql<string | null>`(SELECT code FROM public.project_type_config WHERE id = ${deals.projectTypeId})`,
       // Outcome-aware display date (filter-axis == display-axis): when an
       // outcome dimension is in play we've already resolved the Won/Lost stage
       // sets (needsStageClassification above), so each row's displayed date is
@@ -2315,6 +2321,12 @@ export async function getDealById(
       ...getTableColumns(deals),
       stageSlug: pipelineStageConfig.slug,
       estimatorUserName: users.displayName,
+      // The CONFIGURED project-type digit, resolved through project_type_id. Shipped to the client
+      // because the canonical service test needs it: 646 of 1,351 active deals carry NO project_type TEXT
+      // and are typed ONLY by this FK, so a client that saw just the text column would fall back to
+      // workflow_route for the exact population this release is correcting (277 of the 279 misclassified
+      // deals). Same scalar-subquery idiom as stageSlug/companyOwnerUserName above.
+      projectTypeCode: sql<string | null>`(SELECT code FROM public.project_type_config WHERE id = ${deals.projectTypeId})`,
       salesSourceUserName: salesSourceUser.displayName,
     })
     .from(deals)
@@ -2371,6 +2383,12 @@ export async function getDealDetail(
       ...getTableColumns(deals),
       assignedRepName: users.displayName,
       estimatorUserName: estimatorUser.displayName,
+      // The CONFIGURED project-type digit, resolved through project_type_id. Shipped to the client
+      // because the canonical service test needs it: 646 of 1,351 active deals carry NO project_type TEXT
+      // and are typed ONLY by this FK, so a client that saw just the text column would fall back to
+      // workflow_route for the exact population this release is correcting (277 of the 279 misclassified
+      // deals). Same scalar-subquery idiom as stageSlug/companyOwnerUserName above.
+      projectTypeCode: sql<string | null>`(SELECT code FROM public.project_type_config WHERE id = ${deals.projectTypeId})`,
       salesSourceUserName: salesSourceUser.displayName,
       companyName: companies.name,
       companyOwnerUserId: companies.ownerId,
@@ -3794,6 +3812,12 @@ export async function getDealsForPipeline(
         ...getTableColumns(deals),
         companyName: companies.name,
         assignedRepName: users.displayName,
+        // The CONFIGURED project-type digit, resolved through project_type_id. Shipped to the client
+        // because the canonical service test needs it: 646 of 1,351 active deals carry NO project_type TEXT
+        // and are typed ONLY by this FK, so a client that saw just the text column would fall back to
+        // workflow_route for the exact population this release is correcting (277 of the 279 misclassified
+        // deals). Same scalar-subquery idiom as stageSlug/companyOwnerUserName above.
+        projectTypeCode: sql<string | null>`(SELECT code FROM public.project_type_config WHERE id = ${deals.projectTypeId})`,
       })
       .from(deals)
       .leftJoin(companies, eq(companies.id, deals.companyId))

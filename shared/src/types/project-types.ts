@@ -43,20 +43,28 @@ export function isProjectTypeValue(value: string): value is ProjectTypeValue {
  * client's At Risk cards, kanban narrowing and drill-down all tested that column alone, which put deals
  * whose own numbers read DFW-4-… on the non-service side of a split the reports had already corrected.
  *
- * KNOWN LIMIT, stated rather than papered over: the SQL form has a middle tier the client cannot reach —
- * the configured digit on `project_type_config.code`, resolved through `deals.project_type_id`. The client
- * is not given that table, so a deal typed ONLY by its config FK, with `project_type` text left empty,
- * still falls through to the route here. In practice `applyProjectTypeChange` writes the text and the FK
- * in lockstep, so that shape is confined to legacy/imported rows. Closing it needs the server to ship its
- * verdict on the deal payload; until then this is a narrower gap than the one it replaces, not a claim of
- * full parity.
+ * THREE TIERS, in the canonical order, matching `aliasedIsServiceProjectSql` exactly:
+ *   1. a VALID `projectType` -> decisive in BOTH directions (roofing on the service route is NOT service);
+ *   2. else the CONFIGURED digit (`project_type_config.code` via `project_type_id`), which the server ships
+ *      on the deal payload as `projectTypeCode`;
+ *   3. else, and only else, the route.
+ *
+ * TIER 2 IS NOT AN EDGE CASE, and an earlier draft of this helper wrongly dismissed it as one. Measured on
+ * production: 646 of 1,351 active deals carry no `project_type` TEXT at all and are typed ONLY by the FK,
+ * and 277 of the 279 currently-misclassified deals are in exactly that shape. Falling through to the route
+ * without tier 2 would therefore have left the client disagreeing with the reports for essentially the
+ * whole population this release exists to fix.
  */
 export function isServiceProjectDeal(deal: {
   projectType?: string | null;
+  projectTypeCode?: string | null;
   workflowRoute?: string | null;
 }): boolean {
   const normalized = normalizeProjectType(String(deal.projectType ?? ""));
-  // A VALID type is decisive in both directions: roofing on the service route is NOT service.
   if (normalized && isProjectTypeValue(normalized)) return normalized === "service";
+
+  const code = String(deal.projectTypeCode ?? "").trim();
+  if (/^[1-9]$/.test(code)) return code === PROJECT_TYPE_CODE_BY_VALUE.service;
+
   return deal.workflowRoute === "service";
 }

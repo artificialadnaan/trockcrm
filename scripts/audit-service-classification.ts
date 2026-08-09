@@ -89,10 +89,34 @@ export function canonicalServicePredicate(alias = "d"): { text: string; params: 
  *   • synchub_bid_board_id — linked to a SyncHub/Procore record that drives its own stage + family.
  *   • source_lead_id — converted from a lead, where the route came from the lead's own workflow.
  */
+function authoritativeRouteFor(alias: string): string {
+  return `(
+    COALESCE(${alias}.is_bid_board_owned, false) = true
+    OR ${alias}.synchub_bid_board_id IS NOT NULL
+    OR ${alias}.source_lead_id IS NOT NULL
+  )`;
+}
+
+/**
+ * ...AND a change order whose PARENT is protected.
+ *
+ * A change-order child is created by copying the parent's project_type, project_type_id,
+ * pipeline_type_snapshot and workflow_route — but NOT its provenance columns (change-order-service.ts).
+ * So a child of a Bid Board-owned or converted parent carries no source_lead_id, no synchub id and
+ * is_bid_board_owned=false, and would sail through the row-level guard above while its parent was skipped.
+ *
+ * That matters because a change order's route is INHERITED, not independent: the normal update path
+ * rejects edits that would diverge it from the parent. Flipping the child alone breaks the invariant in a
+ * way nothing downstream expects. Where the parent is NOT protected, parent and child flip together
+ * anyway — they share a project type, so the canonical predicate returns the same verdict for both.
+ */
 const AUTHORITATIVE_ROUTE_SQL = `(
-  COALESCE(d.is_bid_board_owned, false) = true
-  OR d.synchub_bid_board_id IS NOT NULL
-  OR d.source_lead_id IS NOT NULL
+  ${authoritativeRouteFor("d")}
+  OR EXISTS (
+    SELECT 1 FROM deals parent
+    WHERE parent.id = d.parent_deal_id
+      AND ${authoritativeRouteFor("parent")}
+  )
 )`;
 
 /**

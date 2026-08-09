@@ -108,7 +108,7 @@ export const AT_RISK_ROUTE_SUBLINK_BUCKETS = ["service", "non_service"] as const
  * service code) on the non-service side of this split — while the Monday Showcase, fixed first, counted
  * them as service. Two surfaces, same words, different answers.
  */
-export function isServiceRouteDeal(deal: Pick<Deal, "workflowRoute" | "projectType">): boolean {
+export function isServiceRouteDeal(deal: Pick<Deal, "workflowRoute" | "projectType" | "projectTypeCode">): boolean {
   return isServiceProjectDeal(deal);
 }
 
@@ -118,7 +118,7 @@ export function isServiceRouteDeal(deal: Pick<Deal, "workflowRoute" | "projectTy
  * Total partition: every deal matches exactly one of "service" / "non_service", and always "all".
  */
 export function matchesAtRiskRouteBucket(
-  deal: Pick<Deal, "workflowRoute" | "projectType">,
+  deal: Pick<Deal, "workflowRoute" | "projectType" | "projectTypeCode">,
   bucket: AtRiskRouteBucket
 ): boolean {
   if (bucket === "all") return true;

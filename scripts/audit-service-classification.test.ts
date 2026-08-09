@@ -52,6 +52,8 @@ beforeEach(async () => {
       synchub_bid_board_id text,
       source_lead_id uuid,
       sales_source_user_id uuid,
+      is_change_order boolean NOT NULL DEFAULT false,
+      parent_deal_id uuid,
       awarded_amount numeric,
       bid_board_total_sales numeric,
       bid_estimate numeric,
@@ -100,6 +102,13 @@ beforeEach(async () => {
     -- A demotion candidate carrying a sales source: service route, roofing type, sales-source attribution.
     INSERT INTO office_dallas.deals (name, stage_id, project_type, workflow_route, awarded_amount, sales_source_user_id) VALUES
       ('sales-sourced typed-roofing routed-service', '${ST.openSvc}', 'roofing', 'service', 4000, '${U("98")}');
+
+    -- A CHANGE-ORDER CHILD of the Bid Board-owned parent. It copies the parent's project type and route
+    -- but NOT its provenance columns, so on its own row it looks like an ordinary silently-defaulted deal.
+    -- Its route is inherited by invariant, so flipping it while its parent is skipped would diverge them.
+    INSERT INTO office_dallas.deals (name, stage_id, project_type, workflow_route, awarded_amount, is_change_order, parent_deal_id)
+    SELECT 'CO child of bid-board parent', '${ST.openStd}', 'service', 'normal', 500, true, p.id
+      FROM office_dallas.deals p WHERE p.name = 'bid-board-owned typed-service';
   `);
 });
 
@@ -154,26 +163,26 @@ describe("census", () => {
     const census = await censusForSchema(client(), "office_dallas");
 
     // 13 seeded, minus the inactive and the test-data row.
-    expect(census.activeDeals).toBe(11);
+    expect(census.activeDeals).toBe(12);
     // Canonically service: the 4 plainly misclassified, the 3 provenance-protected ones (which are
     // misclassified in exactly the same way), and the already-correct one.
-    expect(census.canonicalService).toBe(8);
+    expect(census.canonicalService).toBe(9);
     // By the raw column today: the already-correct one, plus the two wrongly-routed roofing deals.
     expect(census.routeService).toBe(3);
 
     // The census COUNTS every disagreement, including rows the repair will refuse to touch. Counting only
     // the repairable ones would understate the problem and make the exclusions invisible.
-    expect(census.toServiceCount).toBe(7);
-    expect(census.toServiceValue).toBe(100 + 200 + 300 + 400 + 1000 + 2000 + 3000);
+    expect(census.toServiceCount).toBe(8);
+    expect(census.toServiceValue).toBe(100 + 200 + 300 + 400 + 1000 + 2000 + 3000 + 500);
     expect(census.toNormalCount).toBe(2);
     expect(census.toNormalValue).toBe(500 + 4000);
   });
 
   it("separates the rows whose repair is a BEHAVIOUR change from the rows where it is not", async () => {
     const census = await censusForSchema(client(), "office_dallas");
-    // Five of the seven to-service rows sit in a standard_deal stage; flipping their route puts them in a
+    // Six of the eight to-service rows sit in a standard_deal stage; flipping their route puts them in a
     // family their stage does not belong to. That is the number a human has to accept before --execute.
-    expect(census.toServiceStageMismatch).toBe(5);
+    expect(census.toServiceStageMismatch).toBe(6);
     // Both to-normal rows sit in a service_deal stage, so they have the same problem in reverse.
     expect(census.toNormalStageMismatch).toBe(2);
     // Strictly fewer than the totals -- otherwise this column would be telling us nothing.
@@ -182,17 +191,17 @@ describe("census", () => {
 
   it("reports how many misclassified deals have no project number", async () => {
     const census = await censusForSchema(client(), "office_dallas");
-    // Four NULLs. 'PENDING' is a real stored value, not an absent number, so it is deliberately NOT
+    // Five NULLs. 'PENDING' is a real stored value, not an absent number, so it is deliberately NOT
     // counted here -- the point of the figure is that classification worked without generating any
     // number at all.
-    expect(census.toServiceMissingProjectNumber).toBe(4);
+    expect(census.toServiceMissingProjectNumber).toBe(5);
   });
 
   it("renders a census a human can act on", async () => {
     const lines = formatCensus(await censusForSchema(client(), "office_dallas")).join("\n");
     expect(lines).toContain("office_dallas");
     expect(lines).toContain("behaviour change");
-    expect(lines).toContain("$7,000"); // the to-service value, formatted
+    expect(lines).toContain("$7,500"); // the to-service value, formatted
   });
 });
 
@@ -219,6 +228,11 @@ describe("repair", () => {
     expect(routes["bid-board-owned typed-service"]).toBe("normal");
     expect(routes["synchub-linked typed-service"]).toBe("normal");
     expect(routes["converted-lead typed-service"]).toBe("normal");
+
+    // ...and the change-order CHILD of a protected parent, whose own row carries no provenance at all.
+    // A guard that only looked at the row being updated would flip this one and diverge it from a parent
+    // it is required to match.
+    expect(routes["CO child of bid-board parent"]).toBe("normal");
   });
 
   it("never demotes a deal carrying a sales source", async () => {
@@ -238,7 +252,7 @@ describe("repair", () => {
     const census = await censusForSchema(client(), "office_dallas");
     // Silent truncation is what makes an audit lie: a repair that skipped rows without saying so reads as
     // "everything is handled" when it is not.
-    expect(census.authoritativeRouteSkipped).toBe(3);
+    expect(census.authoritativeRouteSkipped).toBe(4);
     expect(census.toNormalSalesSourceSkipped).toBe(1);
     const rendered = formatCensus(census).join("\n");
     expect(rendered).toContain("SKIPPED, upstream owns the route");
@@ -289,10 +303,10 @@ describe("repair", () => {
     // reported up front. Anything else would mean the repair and the census disagree about their own
     // scope, which is the failure an audit exists to prevent.
     expect(after.toServiceCount).toBe(before.authoritativeRouteSkipped);
-    expect(after.toServiceCount).toBe(3);
+    expect(after.toServiceCount).toBe(4);
     // Not vacuous: the repair genuinely did most of the work.
-    expect(before.toServiceCount).toBe(7);
+    expect(before.toServiceCount).toBe(8);
     // ...and the residual is still reported as skipped, so a second reader sees why it stopped.
-    expect(after.authoritativeRouteSkipped).toBe(3);
+    expect(after.authoritativeRouteSkipped).toBe(4);
   });
 });

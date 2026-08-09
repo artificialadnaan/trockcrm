@@ -38,6 +38,8 @@ function deal(o: {
   // The PROJECT TYPE, which outranks the route. Omitted on most fixtures so the existing route-only
   // assertions keep exercising the fallback tier.
   projectType?: string | null;
+  // The CONFIGURED digit, shipped by the server. Most real deals are typed only by this.
+  projectTypeCode?: string | null;
 }): Deal {
   const { id, atRisk = false, value = 0, onHold = false, updatedAt = "2026-06-10T00:00:00.000Z" } = o;
   return {
@@ -47,6 +49,7 @@ function deal(o: {
     bidEstimate: value,
     ...("workflowRoute" in o ? { workflowRoute: o.workflowRoute } : {}),
     ...("projectType" in o ? { projectType: o.projectType } : {}),
+    ...("projectTypeCode" in o ? { projectTypeCode: o.projectTypeCode } : {}),
     atRisk: atRisk
       ? { isAtRisk: true, status: "at_risk", effectiveStageAgeDays: 30 }
       : { isAtRisk: false, status: "on_track", effectiveStageAgeDays: 1 },
@@ -288,6 +291,34 @@ describe("at-risk route bucketing — PROJECT TYPE outranks the route", () => {
     for (const spelling of ["Service", "  SERVICE  ", "\tservice\n"]) {
       const d = deal({ id: `t-${spelling}`, workflowRoute: "normal", projectType: spelling });
       expect({ spelling, service: isServiceRouteDeal(d) }).toEqual({ spelling, service: true });
+    }
+  });
+
+  it("uses the CONFIGURED code when there is no project type text — the majority shape", () => {
+    // Measured on production: 646 of 1,351 active deals carry no projectType text and are typed ONLY by
+    // the FK, and 277 of the 279 misclassified deals are in exactly this shape. Without this tier the
+    // client would fall back to the route for essentially the whole population being corrected — the
+    // fix would have looked done and changed almost nothing on this page.
+    const svc = deal({ id: "c1", atRisk: true, workflowRoute: "normal", projectType: null, projectTypeCode: "4" });
+    expect(isServiceRouteDeal(svc)).toBe(true);
+    expect(matchesAtRiskRouteBucket(svc, "service")).toBe(true);
+
+    // ...and a non-4 code is decisive the other way, so this cannot only ever add to Service.
+    const roof = deal({ id: "c2", atRisk: true, workflowRoute: "service", projectType: null, projectTypeCode: "3" });
+    expect(isServiceRouteDeal(roof)).toBe(false);
+  });
+
+  it("prefers the TEXT type over the configured code when both are present", () => {
+    // Tier order matters: project_type is what the platform treats as authoritative, and the code is the
+    // fallback for rows that never got the text written.
+    const d = deal({ id: "c3", workflowRoute: "normal", projectType: "roofing", projectTypeCode: "4" });
+    expect(isServiceRouteDeal(d)).toBe(false);
+  });
+
+  it("ignores a malformed or absent code rather than guessing", () => {
+    for (const code of [null, "", "  ", "0", "44", "x"]) {
+      const d = deal({ id: `c-${code}`, workflowRoute: "normal", projectType: null, projectTypeCode: code });
+      expect({ code, service: isServiceRouteDeal(d) }).toEqual({ code, service: false });
     }
   });
 

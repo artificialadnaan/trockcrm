@@ -165,6 +165,9 @@ export interface Deal {
   officeCode?: string | null;
   projectType?: string | null;
   projectTypeId: string | null;
+  /** The CONFIGURED project-type digit, resolved server-side through projectTypeId. Load-bearing for the
+   *  At Risk service split: most deals carry no projectType text and are typed only by the FK. */
+  projectTypeCode?: string | null;
   bidBoardProjectNumber?: string | null;
   bidBoardLinkedAt?: string | null;
   intendedProjectNumber?: string | null;

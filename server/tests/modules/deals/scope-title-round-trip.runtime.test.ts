@@ -93,6 +93,13 @@ beforeAll(async () => {
       created_at timestamptz NOT NULL DEFAULT NOW(),
       updated_at timestamptz NOT NULL DEFAULT NOW()
     );
+    -- The deal projections resolve the configured project-type digit through this table (it is what the
+    -- At Risk service split reads), so every fixture exercising them needs it present.
+    CREATE TABLE IF NOT EXISTS public.project_type_config (
+      id uuid PRIMARY KEY,
+      name text NOT NULL,
+      code text
+    );
   `);
   await pg.query(
     `INSERT INTO public.pipeline_stage_config (id, slug, name, display_order) VALUES ($1, $2, $3, 1)`,

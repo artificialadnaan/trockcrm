@@ -41,6 +41,9 @@ beforeAll(async () => {
   await pg.exec(`SET TimeZone='UTC';`);
   await pg.exec(`
     CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, name text, slug text UNIQUE, is_terminal boolean NOT NULL DEFAULT false);
+    -- The deal projections resolve the configured project-type digit through this table (it is what
+    -- the At Risk service split reads), so every fixture exercising them needs it present.
+    CREATE TABLE IF NOT EXISTS public.project_type_config (id uuid PRIMARY KEY, name text NOT NULL, code text);
     CREATE TABLE deals (
       id uuid PRIMARY KEY,
       deal_number varchar(50), name varchar(500), stage_id uuid, assigned_rep_id uuid,
