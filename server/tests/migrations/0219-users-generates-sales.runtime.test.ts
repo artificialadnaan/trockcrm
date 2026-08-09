@@ -210,6 +210,22 @@ describe("migration 0219 — users.generates_sales", () => {
     expect(executableSql).toContain("ALTER TABLE public.users");
   });
 
+  it("a replay is safe even when NO user is left false — the guard keys on the schema, not the data", async () => {
+    // The case a data-based guard ("does anyone have false?") gets wrong. An admin may legitimately tick
+    // EVERY non-rep on, leaving no false rows at all; a replay would then look like a first run and reset
+    // all of them, silently undoing precisely the decisions the guard protects.
+    await pg.exec(MIGRATION_SQL);
+    await pg.exec(`UPDATE public.users SET generates_sales = true`);
+
+    await pg.exec(MIGRATION_SQL);
+
+    const flags = await flagsByName(pg);
+    expect(Object.values(flags).every(Boolean)).toBe(true);
+    // ...and specifically the non-reps an admin turned on stay on.
+    expect(flags["Adam Admin"]).toBe(true);
+    expect(flags["Dan Director"]).toBe(true);
+  });
+
   it("a replay does not revert an admin's deliberate edits", async () => {
     await pg.exec(MIGRATION_SQL);
     // The intended first use of the toggle: put Dan on the dashboard. And the intended cleanup: take the

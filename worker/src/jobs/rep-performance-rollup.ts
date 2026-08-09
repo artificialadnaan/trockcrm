@@ -476,7 +476,17 @@ async function refreshOfficePeriod(
        -- means an unticked rep keeps accruing history, so re-ticking them restores it immediately instead
        -- of starting from the next rollup. The READ side (getRepPerformanceSnapshots) still applies
        -- generates_sales, so the extra rows are never shown; they are only kept warm.
-       AND (u.role = 'rep' OR u.generates_sales = true)`,
+       --
+       -- The OWNER leg mirrors dashboardRosterMembershipSql's owner-backed exception, which the read side
+       -- also honours. It matters because the DELETE above clears snapshots for EVERY user in the office
+       -- and only this roster gets re-inserted: without it, a non-rep who owns deals is kept on the cards,
+       -- the funnel AND the snapshot read, yet has no row to return — the panels go blank for exactly the
+       -- people the roster promises to retain. All three rosters now ask the same question.
+       AND (
+         u.role = 'rep'
+         OR u.generates_sales = true
+         OR EXISTS (SELECT 1 FROM ${schemaName}.deals owned WHERE owned.assigned_rep_id = u.id)
+       )`,
     [
       period.kind,
       period.start,

@@ -56,23 +56,37 @@
 -- `users` is a single SHARED (non-tenant) table, so this is a plain ALTER: no per-tenant office_* loop
 -- and no provisioner replay block.
 
-ALTER TABLE public.users
-  ADD COLUMN IF NOT EXISTS generates_sales boolean NOT NULL DEFAULT true;
-
-COMMENT ON COLUMN public.users.generates_sales IS
-  'Roster flag: is this person expected to carry deals? Gates the director-dashboard rosters only -- never a money total, and never overrides deal ownership. Orthogonal to users.role (access) by design. Migration 0219.';
-
+-- CLASSIFY EXACTLY ONCE, KEYED ON THE SCHEMA, NOT ON THE DATA.
+--
+-- An earlier draft guarded the replay with "does any user already have generates_sales = false?". That
+-- reads the wrong thing: an organisation where an admin has deliberately ticked EVERY non-rep on (or one
+-- that only ever contained reps) legitimately has no false rows at all, so a hand replay against a
+-- restored dump would sail past the guard and reset every non-rep to false -- silently undoing exactly
+-- the admin decisions the guard exists to protect. Whether the classification has run is a fact about the
+-- SCHEMA, so the column's own existence is what decides it.
+--
+-- The runner already skips executed files via public._migrations; this makes a manual replay safe too.
 DO $$
+DECLARE
+  column_existed boolean;
 BEGIN
-  -- Re-run guard. Migrations are tracked in public._migrations so this normally executes once, but the
-  -- file is also the kind of thing someone replays by hand against a restored dump. After the first run
-  -- at least one row is false (there is always a non-rep -- an admin, a field contractor), so this test
-  -- distinguishes "never classified" from "classified, then edited by a human in the UI", and stops a
-  -- replay from silently reverting every deliberate tick an admin has made since.
-  IF EXISTS (SELECT 1 FROM public.users WHERE generates_sales = false) THEN
-    RAISE NOTICE '0219: generates_sales already classified; leaving admin edits intact.';
+  SELECT EXISTS (
+    SELECT 1 FROM information_schema.columns
+     WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'generates_sales'
+  ) INTO column_existed;
+
+  IF column_existed THEN
+    RAISE NOTICE '0219: generates_sales already exists; leaving every value as the admins left it.';
     RETURN;
   END IF;
 
+  ALTER TABLE public.users
+    ADD COLUMN generates_sales boolean NOT NULL DEFAULT true;
+
+  -- The one and only classification. role='rep' -> true, everyone else -> false; ownership is handled
+  -- per tenant by the roster predicate's own un-gated owner branch, so it plays no part here.
   UPDATE public.users SET generates_sales = false WHERE role <> 'rep';
 END $$;
+
+COMMENT ON COLUMN public.users.generates_sales IS
+  'Roster flag: is this person expected to carry deals? Gates the director-dashboard rosters only -- never a money total, and never overrides deal ownership. Orthogonal to users.role (access) by design. Migration 0219.';

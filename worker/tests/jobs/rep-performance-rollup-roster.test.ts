@@ -45,7 +45,9 @@ describe("rep performance rollup roster", () => {
     // The union is the assertion. A bare `u.role = 'rep'` here is exactly the defect: the read side would
     // have nothing to return for a flagged director.
     expect(insertSql).toContain("u.generates_sales = true");
-    expect(insertSql).toMatch(/u\.role = 'rep' OR u\.generates_sales = true/);
+    // Whitespace-tolerant: the roster spans several lines, and pinning the exact layout would make an
+    // unrelated reformat look like a behaviour change.
+    expect(insertSql).toMatch(/u\.role = 'rep'\s+OR\s+u\.generates_sales = true/);
   });
 
   it("keeps writing for every active rep, so unticking someone does not destroy their history", async () => {
@@ -58,5 +60,16 @@ describe("rep performance rollup roster", () => {
     expect(insertSql).toContain("u.is_active = true");
     // ...and the office scoping the read side matches (u.office_id) is untouched.
     expect(insertSql).toContain("u.office_id = $4");
+  });
+
+  it("also writes for owner-backed non-reps, matching the roster's owner exception", async () => {
+    const insertSql = await captureInsertSql();
+
+    // dashboardRosterMembershipSql retains anyone owning a deal in this office whatever the flag says,
+    // and the snapshot READ honours that too. The rollup DELETEs snapshots for every user in the office
+    // before re-inserting this roster, so a writer that skipped owner-backed non-reps would leave them on
+    // the cards and the funnel with permanently empty Activity Pulse / alerts / coaching. All three
+    // rosters have to ask the same question.
+    expect(insertSql).toMatch(/EXISTS \(SELECT 1 FROM \w+\.deals owned WHERE owned\.assigned_rep_id = u\.id\)/);
   });
 });
