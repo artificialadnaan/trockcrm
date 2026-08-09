@@ -88,6 +88,14 @@ final class WearablesBridge: RCTEventEmitter {
   /// against it the way holding `stateLock` across `stop()` would.
   private let teardownLock = NSLock()
 
+  /// Serialises audio-session ACTIVATION against last-owner DEACTIVATION. Ordering rule: take this
+  /// before `stateLock`, never after.
+  private let audioLock = NSLock()
+
+  /// A deactivation that was attempted and FAILED, still owed. Distinct from an owner count on
+  /// purpose — see `deactivateHoldingAudioLock()`. Guarded by `stateLock`.
+  private var audioDeactivationOwed = false
+
   /// `Wearables.configure()` is not idempotent in 0.8.0, so the guard lives here rather
   /// than trusting every JS caller to remember. Internal (not `private`), deliberately: this is
   /// the single source of truth for "has configure() actually succeeded", and
@@ -129,11 +137,13 @@ final class WearablesBridge: RCTEventEmitter {
   /// that the route "needs time to stabilize"; reading it immediately reports the built-in mic.
   private func activateHfpAndSettle() async throws -> AVAudioSession {
     let session = AVAudioSession.sharedInstance()
-    try session.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothHFP])
-    try session.setActive(true)
-    // Registered here, not after the settle below: the session is active from this line onward, and
-    // the caller's `defer { releaseAudioSession() }` is what hands it back on every path.
-    acquireAudioSession()
+    // Activation and acquisition are ONE transition — see `withAudioSessionActivation`. Registered
+    // here, not after the settle below: the session is active from this point onward, and the
+    // caller's `defer { releaseAudioSession() }` is what hands it back on every path.
+    try withAudioSessionActivation {
+      try session.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothHFP])
+      try session.setActive(true)
+    }
     let deadline = Date().addingTimeInterval(3)
     while !session.currentRoute.inputs.contains(where: { $0.portType == .bluetoothHFP }),
           Date() < deadline {
@@ -431,7 +441,7 @@ final class WearablesBridge: RCTEventEmitter {
           // it is this path's own responsibility.
           if !teardownIfCurrent(myGeneration) {
             retract(publicationTicket)
-            created.stop()
+            stopOrphans(stream: nil, session: created)
           }
           reject(
             "wearables_session_not_started",
@@ -445,7 +455,7 @@ final class WearablesBridge: RCTEventEmitter {
         // own that property. Either way it is no longer safe to touch `self.session` here; only
         // stop the LOCAL `created` reference, which is unambiguously ours.
         guard currentTeardownGeneration() == myGeneration else {
-          created.stop()
+          stopOrphans(stream: nil, session: created)
           reject("wearables_stream_superseded",
                  "startStream was superseded by stop() after the session reached .started", nil)
           return
@@ -456,7 +466,7 @@ final class WearablesBridge: RCTEventEmitter {
           // Same reasoning as the `.started` timeout above: only tear down what is still ours.
           if !teardownIfCurrent(myGeneration) {
             retract(publicationTicket)
-            created.stop()
+            stopOrphans(stream: nil, session: created)
           }
           reject("wearables_stream_nil", "addStream() returned nil (session state: \(state))", nil)
           return
@@ -465,8 +475,7 @@ final class WearablesBridge: RCTEventEmitter {
         // been assigned yet, so a concurrent teardown() could not have stopped `newStream` —
         // stopping it here is not defensive, it is the only place it happens.
         guard currentTeardownGeneration() == myGeneration else {
-          newStream.stop()
-          created.stop()
+          stopOrphans(stream: newStream, session: created)
           reject("wearables_stream_superseded",
                  "startStream was superseded by stop() after addStream()", nil)
           return
@@ -510,8 +519,7 @@ final class WearablesBridge: RCTEventEmitter {
       // not be, but it does not stay that way, and the resolve() below never reports success for
       // a run that was superseded.
       guard currentTeardownGeneration() == myGeneration else {
-        newStream.stop()
-        created.stop()
+        stopOrphans(stream: newStream, session: created)
         reject("wearables_stream_superseded",
                "startStream was superseded by stop() before the stream was started", nil)
         return
@@ -525,8 +533,7 @@ final class WearablesBridge: RCTEventEmitter {
       // relying on it silently is how it rots into a leak the next time the publish order moves.
       guard currentTeardownGeneration() == myGeneration else {
         retract(publicationTicket)
-        newStream.stop()
-        created.stop()
+        stopOrphans(stream: newStream, session: created)
         reject("wearables_stream_superseded",
                "startStream was superseded by stop() as the stream was starting", nil)
         return
@@ -538,8 +545,7 @@ final class WearablesBridge: RCTEventEmitter {
         // exactly this path.
         if !teardownIfCurrent(myGeneration) {
           retract(publicationTicket)
-          streamRef?.stop()
-          createdRef?.stop()
+          stopOrphans(stream: streamRef, session: createdRef)
         }
         reject("wearables_stream_failed", "startStream failed: \(Self.describe(error))", error)
       }
@@ -660,6 +666,19 @@ final class WearablesBridge: RCTEventEmitter {
     return ticket
   }
 
+  /// Stop objects this run created that no sweep will ever see, under the SAME serialisation a sweep
+  /// uses.
+  ///
+  /// Stopping them outside `teardownLock` reopened the race the lock exists to close: a newly tapped
+  /// rung could run its precondition sweep, find nothing, return, and call `createSession()` while
+  /// these stops were still in progress — `sessionAlreadyExists` again, by a different door.
+  private func stopOrphans(stream orphanStream: MWDATCamera.Stream?, session orphanSession: DeviceSession?) {
+    teardownLock.lock()
+    orphanStream?.stop()
+    orphanSession?.stop()
+    teardownLock.unlock()
+  }
+
   /// Retract a publication, but ONLY while it is still the live one.
   ///
   /// A rung that publishes after a sweep has already passed leaves the shared fields pointing at
@@ -682,9 +701,24 @@ final class WearablesBridge: RCTEventEmitter {
   /// before any settling wait: registering after the wait left a window in which the session was
   /// already active but unowned, so a sweep in that window could not hand it back and the rung then
   /// claimed ownership it could no longer act on — HFP live with nobody accountable for it.
-  private func acquireAudioSession() {
+  /// Run `activate` (the `setCategory`/`setActive(true)` pair) and take a share, as ONE serialised
+  /// transition.
+  ///
+  /// Acquiring after activating, without this lock, exposed a zero-owner window: a rung releasing the
+  /// last share could be between "owners hit 0" and `setActive(false)` while another rung activated
+  /// and acquired, and the old release then deactivated the session the new rung had just brought up —
+  /// corrupting exactly the route measurements it was about to take.
+  ///
+  /// `audioLock` is always taken BEFORE `stateLock`, never the other way round, so the two cannot
+  /// deadlock against each other.
+  private func withAudioSessionActivation(_ activate: () throws -> Void) throws {
+    audioLock.lock()
+    defer { audioLock.unlock() }
+    try activate()
     stateLock.lock()
     audioSessionOwners += 1
+    // Somebody wants it active again, so any deactivation still owed from before is moot.
+    audioDeactivationOwed = false
     stateLock.unlock()
   }
 
@@ -699,21 +733,42 @@ final class WearablesBridge: RCTEventEmitter {
   /// swallowing it while clearing the ownership meant nothing would ever try again, so a
   /// `.playAndRecord` session stayed live and invalidated the next no-audio measurement.
   private func releaseAudioSession() {
+    audioLock.lock()
+    defer { audioLock.unlock() }
+
     stateLock.lock()
     guard audioSessionOwners > 0 else {
+      let owed = audioDeactivationOwed
       stateLock.unlock()
+      // Nothing of ours to give up, but a previous last-owner deactivation may still be owed.
+      if owed { deactivateHoldingAudioLock() }
       return
     }
     audioSessionOwners -= 1
     let isLastOwner = audioSessionOwners == 0
     stateLock.unlock()
     guard isLastOwner else { return }
+    deactivateHoldingAudioLock()
+  }
 
+  /// Deactivate, recording DEBT on failure rather than inventing an owner.
+  ///
+  /// The previous revision restored `audioSessionOwners` when `setActive(false)` threw. That reads as
+  /// "put the share back", but the rung that held it has already exited and its `defer` has already
+  /// run — so the restored count belonged to nobody. Every later rung then went 1 -> 2 -> 1, the
+  /// last-owner branch was never reached again, and the session stayed active for the life of the
+  /// process: the exact failure the retry was added to prevent, made permanent instead of transient.
+  ///
+  /// A separate flag is retryable without being owned. Caller must hold `audioLock`.
+  private func deactivateHoldingAudioLock() {
     do {
       try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+      stateLock.lock()
+      audioDeactivationOwed = false
+      stateLock.unlock()
     } catch {
       stateLock.lock()
-      audioSessionOwners += 1
+      audioDeactivationOwed = true
       stateLock.unlock()
     }
   }
@@ -955,6 +1010,17 @@ final class WearablesBridge: RCTEventEmitter {
           reject("wearables_no_active_device", "No active device after 8s. Run rung 4b.", nil)
           return
         }
+        // Checkpoint BEFORE creating anything — the same one `startStream` has and these rungs did
+        // not. The device wait above can run for 8s; a rung tapped during it sweeps a world with no
+        // objects in it, so nothing here notices, and this task then wins `createSession()` and holds
+        // the device for its whole observation window. The NEWER rung is the one that fails, with
+        // `sessionAlreadyExists`, blaming the glasses for a session this task should never have
+        // opened. Nothing has been created yet, so a mismatch needs no teardown.
+        guard currentTeardownGeneration() == myGeneration else {
+          reject("wearables_rung_superseded",
+                 "This check was superseded by another rung while waiting for a device", nil)
+          return
+        }
 
         let created = try sdk.createSession(deviceSelector: selector)
         // Held outside the `do` as well, so the `catch` can still reach it. A rung publishes to
@@ -976,7 +1042,7 @@ final class WearablesBridge: RCTEventEmitter {
           // otherwise `created` is an orphan only this path holds a reference to.
           if !teardownIfCurrent(myGeneration) {
             retract(publicationTicket)
-            created.stop()
+            stopOrphans(stream: nil, session: created)
           }
           reject("wearables_session_not_started", "Stalled in \(stalled) after 10s", nil)
           return
@@ -986,7 +1052,7 @@ final class WearablesBridge: RCTEventEmitter {
         guard let newStream = try created.addStream() else {
           if !teardownIfCurrent(myGeneration) {
             retract(publicationTicket)
-            created.stop()
+            stopOrphans(stream: nil, session: created)
           }
           reject("wearables_stream_nil", "addStream() returned nil", nil)
           return
@@ -1040,9 +1106,12 @@ final class WearablesBridge: RCTEventEmitter {
         // one the CURRENT run activated for itself.
         if !teardownIfCurrent(myGeneration) {
           // Superseded. `created`/`newStream` may have been published after the superseding
-          // teardown already swept, in which case nothing else will ever stop them.
-          newStream.stop()
-          created.stop()
+          // teardown already swept, in which case nothing else will ever stop them — and the shared
+          // fields would still be pointing at them, so `capturePhoto()` and `recordGlassesAudio()`
+          // would go on reporting a stream that is dead. The endurance rungs already retracted here;
+          // this one did not, which is the only reason it needed saying twice.
+          retract(publicationTicket)
+          stopOrphans(stream: newStream, session: created)
         }
 
         // No frame ever arriving is itself a fact worth reporting, not a rejection: a rejection
@@ -1066,8 +1135,7 @@ final class WearablesBridge: RCTEventEmitter {
         // exactly this path.
         if !teardownIfCurrent(myGeneration) {
           retract(publicationTicket)
-          streamRef?.stop()
-          createdRef?.stop()
+          stopOrphans(stream: streamRef, session: createdRef)
         }
         reject("wearables_hfp_stream_check_failed",
                "checkHfpWithStream failed: \(Self.describe(error))", error)
@@ -1323,6 +1391,17 @@ final class WearablesBridge: RCTEventEmitter {
           reject("wearables_no_active_device", "No active device after 8s. Run rung 4b.", nil)
           return
         }
+        // Checkpoint BEFORE creating anything — the same one `startStream` has and these rungs did
+        // not. The device wait above can run for 8s; a rung tapped during it sweeps a world with no
+        // objects in it, so nothing here notices, and this task then wins `createSession()` and holds
+        // the device for its whole observation window. The NEWER rung is the one that fails, with
+        // `sessionAlreadyExists`, blaming the glasses for a session this task should never have
+        // opened. Nothing has been created yet, so a mismatch needs no teardown.
+        guard currentTeardownGeneration() == myGeneration else {
+          reject("wearables_rung_superseded",
+                 "This check was superseded by another rung while waiting for a device", nil)
+          return
+        }
 
         let created = try sdk.createSession(deviceSelector: selector)
         // Held outside the `do` as well, so the `catch` can still reach it. A rung publishes to
@@ -1344,7 +1423,7 @@ final class WearablesBridge: RCTEventEmitter {
           // otherwise `created` is an orphan only this path holds a reference to.
           if !teardownIfCurrent(myGeneration) {
             retract(publicationTicket)
-            created.stop()
+            stopOrphans(stream: nil, session: created)
           }
           reject("wearables_session_not_started", "Stalled in \(stalled) after 10s", nil)
           return
@@ -1357,7 +1436,7 @@ final class WearablesBridge: RCTEventEmitter {
         ) else {
           if !teardownIfCurrent(myGeneration) {
             retract(publicationTicket)
-            created.stop()
+            stopOrphans(stream: nil, session: created)
           }
           reject("wearables_stream_nil", "addStream() returned nil", nil)
           return
@@ -1385,8 +1464,7 @@ final class WearablesBridge: RCTEventEmitter {
         // screen to have moved on to something else.
         if !teardownIfCurrent(myGeneration) {
           retract(publicationTicket)
-          newStream.stop()
-          created.stop()
+          stopOrphans(stream: newStream, session: created)
         }
 
         resolve([
@@ -1401,8 +1479,7 @@ final class WearablesBridge: RCTEventEmitter {
       } catch {
         if !teardownIfCurrent(myGeneration) {
           retract(publicationTicket)
-          streamRef?.stop()
-          createdRef?.stop()
+          stopOrphans(stream: streamRef, session: createdRef)
         }
         reject("wearables_stream_measure_failed",
                "measureStreamWithoutAudio failed: \(Self.describe(error))", error)
@@ -1462,6 +1539,17 @@ extension WearablesBridge {
           reject("wearables_no_active_device", "No active device after 8s. Run rung 4b.", nil)
           return
         }
+        // Checkpoint BEFORE creating anything — the same one `startStream` has and these rungs did
+        // not. The device wait above can run for 8s; a rung tapped during it sweeps a world with no
+        // objects in it, so nothing here notices, and this task then wins `createSession()` and holds
+        // the device for its whole observation window. The NEWER rung is the one that fails, with
+        // `sessionAlreadyExists`, blaming the glasses for a session this task should never have
+        // opened. Nothing has been created yet, so a mismatch needs no teardown.
+        guard currentTeardownGeneration() == myGeneration else {
+          reject("wearables_rung_superseded",
+                 "This check was superseded by another rung while waiting for a device", nil)
+          return
+        }
 
         let created = try sdk.createSession(deviceSelector: selector)
         // Held outside the `do` as well, so the `catch` can still reach it. A rung publishes to
@@ -1483,7 +1571,7 @@ extension WearablesBridge {
           // otherwise `created` is an orphan only this path holds a reference to.
           if !teardownIfCurrent(myGeneration) {
             retract(publicationTicket)
-            created.stop()
+            stopOrphans(stream: nil, session: created)
           }
           reject("wearables_session_not_started", "Stalled in \(stalled) after 10s", nil)
           return
@@ -1494,7 +1582,7 @@ extension WearablesBridge {
         ) else {
           if !teardownIfCurrent(myGeneration) {
             retract(publicationTicket)
-            created.stop()
+            stopOrphans(stream: nil, session: created)
           }
           reject("wearables_stream_nil", "addStream() returned nil", nil)
           return
@@ -1504,9 +1592,10 @@ extension WearablesBridge {
 
         // NOTE the absent option: `.playAndRecord` WITHOUT `.allowBluetoothHFP`. That single
         // omission is the experiment — it is what keeps the glasses out of hands-free mode.
-        try audio.setCategory(.playAndRecord, mode: .default, options: [])
-        try audio.setActive(true)
-        acquireAudioSession()
+        try withAudioSessionActivation {
+          try audio.setCategory(.playAndRecord, mode: .default, options: [])
+          try audio.setActive(true)
+        }
         defer { releaseAudioSession() }
         try? await Task.sleep(nanoseconds: 500_000_000)
 
@@ -1514,8 +1603,8 @@ extension WearablesBridge {
         // If the route picked the glasses anyway, this measures HFP again and the answer is void.
         guard input?.portType != .bluetoothHFP else {
           if !teardownIfCurrent(myGeneration) {
-            newStream.stop()
-            created.stop()
+            retract(publicationTicket)
+            stopOrphans(stream: newStream, session: created)
           }
           reject("wearables_route_is_glasses",
                  "The audio route selected the glasses (\(input?.portName ?? "unknown")) despite "
@@ -1533,8 +1622,8 @@ extension WearablesBridge {
         ])
         guard recorder.record() else {
           if !teardownIfCurrent(myGeneration) {
-            newStream.stop()
-            created.stop()
+            retract(publicationTicket)
+            stopOrphans(stream: newStream, session: created)
           }
           reject("wearables_recorder_not_started", "AVAudioRecorder.record() returned false", nil)
           return
@@ -1574,8 +1663,7 @@ extension WearablesBridge {
         // rung and checkHfpWithStream for why the audio deactivation rides on it.
         if !teardownIfCurrent(myGeneration) {
           retract(publicationTicket)
-          newStream.stop()
-          created.stop()
+          stopOrphans(stream: newStream, session: created)
         }
 
         resolve([
@@ -1596,8 +1684,7 @@ extension WearablesBridge {
       } catch {
         if !teardownIfCurrent(myGeneration) {
           retract(publicationTicket)
-          streamRef?.stop()
-          createdRef?.stop()
+          stopOrphans(stream: streamRef, session: createdRef)
         }
         reject("wearables_phone_audio_measure_failed",
                "measureStreamWithPhoneAudio failed: \(Self.describe(error))", error)
