@@ -79,6 +79,32 @@ export function canonicalServicePredicate(alias = "d"): { text: string; params: 
   return { text, params: params as unknown[] };
 }
 
+/**
+ * Rows whose route was chosen by an upstream system rather than defaulted, and which the repair must NOT
+ * touch. createDeal deliberately preserves an explicitly-supplied route for exactly these callers; a
+ * repair that ignored that provenance would put an imported or converted deal into a pipeline its source
+ * disagrees with, until the next sync reverts it — or, worse, keeps processing it under the wrong family.
+ *
+ *   • is_bid_board_owned — the Bid Board owns the record; direct writes are known to revert on sync.
+ *   • synchub_bid_board_id — linked to a SyncHub/Procore record that drives its own stage + family.
+ *   • source_lead_id — converted from a lead, where the route came from the lead's own workflow.
+ */
+const AUTHORITATIVE_ROUTE_SQL = `(
+  COALESCE(d.is_bid_board_owned, false) = true
+  OR d.synchub_bid_board_id IS NOT NULL
+  OR d.source_lead_id IS NOT NULL
+)`;
+
+/**
+ * A service→normal demotion is not a column edit. `updateDeal` and the resolved-fields route both call
+ * `clearSalesSource` on exactly this transition, because a sales-source commission cut is invalid outside
+ * the service workflow; a raw UPDATE would leave the attribution and its commission state behind, live and
+ * now unbacked. Rather than reimplement that cleanup in SQL — where it would drift from the ORM path that
+ * owns the invariant — the repair EXCLUDES these rows and reports them for a human to move through the
+ * normal write path.
+ */
+const HAS_SALES_SOURCE_SQL = `d.sales_source_user_id IS NOT NULL`;
+
 export interface OfficeCensus {
   schema: string;
   activeDeals: number;
@@ -96,6 +122,10 @@ export interface OfficeCensus {
   toNormalStageMismatch: number;
   /** to-service rows with no project number yet. Informational: classification never needed one. */
   toServiceMissingProjectNumber: number;
+  /** Disagreeing rows whose route an upstream system owns. Excluded from the repair, reported instead. */
+  authoritativeRouteSkipped: number;
+  /** to-normal rows carrying a sales source. Excluded: demotion needs clearSalesSource, not an UPDATE. */
+  toNormalSalesSourceSkipped: number;
 }
 
 /**
@@ -124,6 +154,8 @@ export function buildCensusSql(): { text: string; params: unknown[] } {
             0
           )::numeric AS deal_value,
           psc.workflow_family,
+          ${AUTHORITATIVE_ROUTE_SQL} AS authoritative_route,
+          ${HAS_SALES_SOURCE_SQL} AS has_sales_source,
           (${isService}) AS is_service
         FROM deals d
         JOIN pipeline_stage_config psc ON psc.id = d.stage_id
@@ -156,7 +188,16 @@ export function buildCensusSql(): { text: string; params: unknown[] } {
 
         COUNT(*) FILTER (
           WHERE is_service AND workflow_route IS DISTINCT FROM 'service' AND project_number = ''
-        )::int AS to_service_missing_project_number
+        )::int AS to_service_missing_project_number,
+
+        COUNT(*) FILTER (
+          WHERE authoritative_route
+            AND ((is_service AND workflow_route IS DISTINCT FROM 'service')
+              OR (NOT is_service AND workflow_route = 'service'))
+        )::int AS authoritative_route_skipped,
+        COUNT(*) FILTER (
+          WHERE NOT is_service AND workflow_route = 'service' AND has_sales_source
+        )::int AS to_normal_sales_source_skipped
       FROM scoped
     `,
     params,
@@ -174,7 +215,9 @@ export function buildUpdateSql(direction: Exclude<Direction, "both">): { text: s
   const guard =
     direction === "to-service"
       ? `(${isService}) AND d.workflow_route IS DISTINCT FROM 'service'`
-      : `NOT (${isService}) AND d.workflow_route = 'service'`;
+      // A demotion must not strand a sales-source attribution; those rows go through the ORM path that
+      // owns clearSalesSource, not this UPDATE.
+      : `NOT (${isService}) AND d.workflow_route = 'service' AND NOT (${HAS_SALES_SOURCE_SQL})`;
   return {
     text: `
       UPDATE deals d
@@ -182,6 +225,8 @@ export function buildUpdateSql(direction: Exclude<Direction, "both">): { text: s
              updated_at = now()
        WHERE d.is_active = true
          AND COALESCE(d.is_test_data, false) = false
+         -- Never overwrite a route an upstream system chose. See AUTHORITATIVE_ROUTE_SQL.
+         AND NOT ${AUTHORITATIVE_ROUTE_SQL}
          AND ${guard}
     `,
     params,
@@ -216,6 +261,8 @@ export async function censusForSchema(client: QueryClient, schema: string): Prom
     toServiceStageMismatch: Number(row.to_service_stage_mismatch ?? 0),
     toNormalStageMismatch: Number(row.to_normal_stage_mismatch ?? 0),
     toServiceMissingProjectNumber: Number(row.to_service_missing_project_number ?? 0),
+    authoritativeRouteSkipped: Number(row.authoritative_route_skipped ?? 0),
+    toNormalSalesSourceSkipped: Number(row.to_normal_sales_source_skipped ?? 0),
   };
 }
 
@@ -232,6 +279,8 @@ export function formatCensus(census: OfficeCensus): string[] {
     `         of which have no project number .. ${census.toServiceMissingProjectNumber}   (classification never needed one)`,
     `    -> would flip TO normal ............... ${census.toNormalCount}  (${money(census.toNormalValue)})`,
     `         of which in a non-standard stage . ${census.toNormalStageMismatch}   << behaviour change`,
+    `    SKIPPED, upstream owns the route ...... ${census.authoritativeRouteSkipped}   (bid board / SyncHub / converted lead)`,
+    `    SKIPPED, carries a sales source ....... ${census.toNormalSalesSourceSkipped}   (needs clearSalesSource, not an UPDATE)`,
   ];
 }
 

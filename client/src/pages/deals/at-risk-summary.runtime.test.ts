@@ -35,6 +35,9 @@ function deal(o: {
   // OMIT the key entirely to model a wire payload that carries no route at all; pass null to model an
   // explicit null. Neither is "service", so both must land in the non-service bucket.
   workflowRoute?: "normal" | "service" | null;
+  // The PROJECT TYPE, which outranks the route. Omitted on most fixtures so the existing route-only
+  // assertions keep exercising the fallback tier.
+  projectType?: string | null;
 }): Deal {
   const { id, atRisk = false, value = 0, onHold = false, updatedAt = "2026-06-10T00:00:00.000Z" } = o;
   return {
@@ -43,6 +46,7 @@ function deal(o: {
     updatedAt,
     bidEstimate: value,
     ...("workflowRoute" in o ? { workflowRoute: o.workflowRoute } : {}),
+    ...("projectType" in o ? { projectType: o.projectType } : {}),
     atRisk: atRisk
       ? { isAtRisk: true, status: "at_risk", effectiveStageAgeDays: 30 }
       : { isAtRisk: false, status: "on_track", effectiveStageAgeDays: 1 },
@@ -253,6 +257,60 @@ describe("at-risk route bucketing — the predicate", () => {
       const inService = matchesAtRiskRouteBucket(d, "service");
       const inNonService = matchesAtRiskRouteBucket(d, "non_service");
       expect(inService !== inNonService).toBe(true); // exactly one side — never both, never neither
+      expect(matchesAtRiskRouteBucket(d, "all")).toBe(true);
+    }
+  });
+});
+
+describe("at-risk route bucketing — PROJECT TYPE outranks the route", () => {
+  // The Deals page and the Monday Showcase answer the same question with the same words, so they must not
+  // answer it differently. The showcase was fixed to resolve service from project_type (project_type wins,
+  // workflow_route is the fallback); this page tested workflow_route ALONE. Until both used the canonical
+  // definition, a deal whose own number reads DFW-4-… counted as service in one place and normal in the
+  // other — and 279 prod deals, $3.1M, are in exactly that state.
+
+  it("puts a typed-service deal in Service even when its route says normal", () => {
+    const d = deal({ id: "t1", atRisk: true, workflowRoute: "normal", projectType: "service" });
+    expect(isServiceRouteDeal(d)).toBe(true);
+    expect(matchesAtRiskRouteBucket(d, "service")).toBe(true);
+    expect(matchesAtRiskRouteBucket(d, "non_service")).toBe(false);
+  });
+
+  it("puts a typed-roofing deal in Non-service even when its route says service", () => {
+    // Precedence runs BOTH ways, or it is not precedence — otherwise this change would only ever grow
+    // the Service bucket rather than correct it.
+    const d = deal({ id: "t2", atRisk: true, workflowRoute: "service", projectType: "roofing" });
+    expect(isServiceRouteDeal(d)).toBe(false);
+    expect(matchesAtRiskRouteBucket(d, "non_service")).toBe(true);
+  });
+
+  it("normalizes case and whitespace the way the canonical resolver does", () => {
+    for (const spelling of ["Service", "  SERVICE  ", "\tservice\n"]) {
+      const d = deal({ id: `t-${spelling}`, workflowRoute: "normal", projectType: spelling });
+      expect({ spelling, service: isServiceRouteDeal(d) }).toEqual({ spelling, service: true });
+    }
+  });
+
+  it("falls back to the route when the type is absent or unrecognised", () => {
+    // The fallback tier must survive: deals carrying no usable type are exactly the population the route
+    // column was carrying, and dropping it would lose them from Service entirely.
+    expect(isServiceRouteDeal(deal({ id: "f1", workflowRoute: "service", projectType: null }))).toBe(true);
+    expect(isServiceRouteDeal(deal({ id: "f2", workflowRoute: "service", projectType: "not a type" }))).toBe(true);
+    expect(isServiceRouteDeal(deal({ id: "f3", workflowRoute: "normal", projectType: "" }))).toBe(false);
+  });
+
+  it("keeps the split TOTAL — every deal lands in exactly one bucket", () => {
+    const deals = [
+      deal({ id: "a", workflowRoute: "normal", projectType: "service" }),
+      deal({ id: "b", workflowRoute: "service", projectType: "roofing" }),
+      deal({ id: "c", workflowRoute: "service" }),
+      deal({ id: "d", workflowRoute: null }),
+      deal({ id: "e" }),
+    ];
+    for (const d of deals) {
+      const inService = matchesAtRiskRouteBucket(d, "service");
+      const inNonService = matchesAtRiskRouteBucket(d, "non_service");
+      expect({ id: d.id, exactlyOne: inService !== inNonService }).toEqual({ id: d.id, exactlyOne: true });
       expect(matchesAtRiskRouteBucket(d, "all")).toBe(true);
     }
   });

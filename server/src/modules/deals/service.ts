@@ -2668,6 +2668,13 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
       expectedCloseDate: input.expectedCloseDate ?? null,
       salesSourceUserId: input.salesSourceUserId ?? null,
       workflowRoute,
+      // Written from the SAME resolved route, not left to the column default. pipeline_type_snapshot is
+      // NOT NULL DEFAULT 'normal', and the report builder groups and filters deal type on
+      // COALESCE(d.pipeline_type_snapshot, d.workflow_route) (report-builder-service.ts) — the snapshot
+      // FIRST. Deriving the route while leaving the snapshot at its default would have produced a deal
+      // that reads service everywhere except the report builder, which is a worse failure than the one
+      // this change set out to fix: two service definitions disagreeing instead of one being wrong.
+      pipelineTypeSnapshot: workflowRoute,
       // Forward-only: normal CRM-created and lead-converted projects must eventually carry a billing
       // contact. Historical/migration imports deliberately remain exempt and there is no backfill.
       billingContactRequiredAt: creationPolicy.origin === "migration" ? null : createdAt,

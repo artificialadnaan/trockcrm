@@ -47,6 +47,11 @@ beforeEach(async () => {
       project_type text,
       project_type_id uuid,
       workflow_route text NOT NULL DEFAULT 'normal',
+      -- Provenance: a route these systems chose is not a silently-defaulted one.
+      is_bid_board_owned boolean NOT NULL DEFAULT false,
+      synchub_bid_board_id text,
+      source_lead_id uuid,
+      sales_source_user_id uuid,
       awarded_amount numeric,
       bid_board_total_sales numeric,
       bid_estimate numeric,
@@ -83,6 +88,18 @@ beforeEach(async () => {
       ('test-data typed-service', '${ST.openStd}', NULL, 'service', NULL, 'normal', 900);
     UPDATE office_dallas.deals SET is_active = false WHERE name = 'inactive typed-service';
     UPDATE office_dallas.deals SET is_test_data = true WHERE name = 'test-data typed-service';
+
+    -- PROVENANCE ROWS. Each is misclassified in exactly the same way as the rows above, so the ONLY thing
+    -- keeping them out of the repair is who chose their route. If the exclusions regress, these flip.
+    INSERT INTO office_dallas.deals (name, stage_id, project_type, workflow_route, awarded_amount, is_bid_board_owned) VALUES
+      ('bid-board-owned typed-service', '${ST.openStd}', 'service', 'normal', 1000, true);
+    INSERT INTO office_dallas.deals (name, stage_id, project_type, workflow_route, awarded_amount, synchub_bid_board_id) VALUES
+      ('synchub-linked typed-service', '${ST.openStd}', 'service', 'normal', 2000, 'SH-123');
+    INSERT INTO office_dallas.deals (name, stage_id, project_type, workflow_route, awarded_amount, source_lead_id) VALUES
+      ('converted-lead typed-service', '${ST.openStd}', 'service', 'normal', 3000, '${U("99")}');
+    -- A demotion candidate carrying a sales source: service route, roofing type, sales-source attribution.
+    INSERT INTO office_dallas.deals (name, stage_id, project_type, workflow_route, awarded_amount, sales_source_user_id) VALUES
+      ('sales-sourced typed-roofing routed-service', '${ST.openSvc}', 'roofing', 'service', 4000, '${U("98")}');
   `);
 });
 
@@ -136,41 +153,46 @@ describe("census", () => {
   it("counts the disagreement in both directions, and never counts inactive or test deals", async () => {
     const census = await censusForSchema(client(), "office_dallas");
 
-    expect(census.activeDeals).toBe(7); // 9 seeded, minus the inactive and the test-data row
-    // Canonically service: the 4 misclassified + the already-correct one.
-    expect(census.canonicalService).toBe(5);
-    // By the raw column today: the already-correct one + the wrongly-routed roofing deal.
-    expect(census.routeService).toBe(2);
+    // 13 seeded, minus the inactive and the test-data row.
+    expect(census.activeDeals).toBe(11);
+    // Canonically service: the 4 plainly misclassified, the 3 provenance-protected ones (which are
+    // misclassified in exactly the same way), and the already-correct one.
+    expect(census.canonicalService).toBe(8);
+    // By the raw column today: the already-correct one, plus the two wrongly-routed roofing deals.
+    expect(census.routeService).toBe(3);
 
-    expect(census.toServiceCount).toBe(4);
-    expect(census.toServiceValue).toBe(100 + 200 + 300 + 400);
-    expect(census.toNormalCount).toBe(1);
-    expect(census.toNormalValue).toBe(500);
+    // The census COUNTS every disagreement, including rows the repair will refuse to touch. Counting only
+    // the repairable ones would understate the problem and make the exclusions invisible.
+    expect(census.toServiceCount).toBe(7);
+    expect(census.toServiceValue).toBe(100 + 200 + 300 + 400 + 1000 + 2000 + 3000);
+    expect(census.toNormalCount).toBe(2);
+    expect(census.toNormalValue).toBe(500 + 4000);
   });
 
   it("separates the rows whose repair is a BEHAVIOUR change from the rows where it is not", async () => {
     const census = await censusForSchema(client(), "office_dallas");
-    // Two of the four to-service rows sit in a standard_deal stage; flipping their route puts them in a
+    // Five of the seven to-service rows sit in a standard_deal stage; flipping their route puts them in a
     // family their stage does not belong to. That is the number a human has to accept before --execute.
-    expect(census.toServiceStageMismatch).toBe(2);
-    // The one to-normal row sits in a service_deal stage, so it has the same problem in reverse.
-    expect(census.toNormalStageMismatch).toBe(1);
+    expect(census.toServiceStageMismatch).toBe(5);
+    // Both to-normal rows sit in a service_deal stage, so they have the same problem in reverse.
+    expect(census.toNormalStageMismatch).toBe(2);
     // Strictly fewer than the totals -- otherwise this column would be telling us nothing.
     expect(census.toServiceStageMismatch).toBeLessThan(census.toServiceCount);
   });
 
   it("reports how many misclassified deals have no project number", async () => {
     const census = await censusForSchema(client(), "office_dallas");
-    // One NULL. 'PENDING' is a real stored value, not an absent number, so it is deliberately NOT counted
-    // here -- the point of the figure is that classification worked without generating any number at all.
-    expect(census.toServiceMissingProjectNumber).toBe(1);
+    // Four NULLs. 'PENDING' is a real stored value, not an absent number, so it is deliberately NOT
+    // counted here -- the point of the figure is that classification worked without generating any
+    // number at all.
+    expect(census.toServiceMissingProjectNumber).toBe(4);
   });
 
   it("renders a census a human can act on", async () => {
     const lines = formatCensus(await censusForSchema(client(), "office_dallas")).join("\n");
     expect(lines).toContain("office_dallas");
     expect(lines).toContain("behaviour change");
-    expect(lines).toContain("$1,000"); // the to-service value, formatted
+    expect(lines).toContain("$7,000"); // the to-service value, formatted
   });
 });
 
@@ -184,6 +206,43 @@ describe("repair", () => {
 
   beforeEach(async () => {
     await pg.exec(`SET search_path TO office_dallas, public`);
+  });
+
+  it("never overwrites a route an upstream system chose", async () => {
+    const { text, params } = buildUpdateSql("to-service");
+    await pg.query(text, params as any[]);
+    const routes = await routesByName();
+
+    // All three are typed service on a normal route — identical to the rows the repair DOES flip. Only
+    // provenance separates them. A repair that ignored it would fight the Bid Board / SyncHub sync, or
+    // re-route a converted lead away from the workflow its lead chose.
+    expect(routes["bid-board-owned typed-service"]).toBe("normal");
+    expect(routes["synchub-linked typed-service"]).toBe("normal");
+    expect(routes["converted-lead typed-service"]).toBe("normal");
+  });
+
+  it("never demotes a deal carrying a sales source", async () => {
+    const { text, params } = buildUpdateSql("to-normal");
+    await pg.query(text, params as any[]);
+    const routes = await routesByName();
+
+    // Demotion out of the service workflow must run clearSalesSource (updateDeal and the resolved-fields
+    // route both do). A raw UPDATE would leave the attribution live with no valid commission basis, so
+    // the row is left for a human to move through the ORM path.
+    expect(routes["sales-sourced typed-roofing routed-service"]).toBe("service");
+    // ...while the demotion candidate WITHOUT a sales source still moves, so this is not just inert.
+    expect(routes["typed-roofing routed-service"]).toBe("normal");
+  });
+
+  it("reports both exclusions rather than silently dropping them", async () => {
+    const census = await censusForSchema(client(), "office_dallas");
+    // Silent truncation is what makes an audit lie: a repair that skipped rows without saying so reads as
+    // "everything is handled" when it is not.
+    expect(census.authoritativeRouteSkipped).toBe(3);
+    expect(census.toNormalSalesSourceSkipped).toBe(1);
+    const rendered = formatCensus(census).join("\n");
+    expect(rendered).toContain("SKIPPED, upstream owns the route");
+    expect(rendered).toContain("SKIPPED, carries a sales source");
   });
 
   it("to-service flips exactly the misclassified rows and nothing else", async () => {
@@ -220,12 +279,20 @@ describe("repair", () => {
     expect(await routesByName()).toEqual(after);
   });
 
-  it("leaves the census with nothing left to do in that direction", async () => {
+  it("leaves behind EXACTLY the rows it deliberately refused, and says so", async () => {
+    const before = await censusForSchema(client(), "office_dallas");
     const { text, params } = buildUpdateSql("to-service");
     await pg.query(text, params as any[]);
-    const census = await censusForSchema(client(), "office_dallas");
-    expect(census.toServiceCount).toBe(0);
-    // ...and the raw column now agrees with the canonical definition for the service population.
-    expect(census.routeService).toBe(census.canonicalService + census.toNormalCount);
+    const after = await censusForSchema(client(), "office_dallas");
+
+    // The residual is not "some rows failed" — it is precisely the provenance-protected set the census
+    // reported up front. Anything else would mean the repair and the census disagree about their own
+    // scope, which is the failure an audit exists to prevent.
+    expect(after.toServiceCount).toBe(before.authoritativeRouteSkipped);
+    expect(after.toServiceCount).toBe(3);
+    // Not vacuous: the repair genuinely did most of the work.
+    expect(before.toServiceCount).toBe(7);
+    // ...and the residual is still reported as skipped, so a second reader sees why it stopped.
+    expect(after.authoritativeRouteSkipped).toBe(3);
   });
 });

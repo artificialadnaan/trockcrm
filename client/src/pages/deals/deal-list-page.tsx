@@ -16,7 +16,7 @@ import { isBoardVisibleStage, DEAL_LIST_SORT_OPTIONS } from "@/components/deals/
 import type { FilterDimension } from "@/components/filters/filter-bar";
 import { useAuth } from "@/lib/auth";
 import { formatDealDisplayName } from "@/lib/deal-utils";
-import { getEffectiveDealValue, WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
+import { getEffectiveDealValue, isServiceProjectDeal, WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import {
   buildDealStageWorkspacePath,
   clampDateToToday,
@@ -98,9 +98,18 @@ export const AT_RISK_ROUTE_BUCKETS = ["service", "non_service", "all"] as const 
 /** The two ROUTE cohorts, in the order they read as sub-links under the At Risk headline. */
 export const AT_RISK_ROUTE_SUBLINK_BUCKETS = ["service", "non_service"] as const satisfies readonly AtRiskRouteBucket[];
 
-/** A deal is on the SERVICE side only when its route is literally "service"; null/absent is not. */
-export function isServiceRouteDeal(deal: Pick<Deal, "workflowRoute">): boolean {
-  return deal.workflowRoute === "service";
+/**
+ * A deal is on the SERVICE side when the PLATFORM's definition says so — project type first, the route
+ * only as a fallback. Delegates to the shared `isServiceProjectDeal` so this page and the reports cannot
+ * answer the same question differently.
+ *
+ * This used to test `workflowRoute === "service"` alone. That column is NOT NULL DEFAULT 'normal' and
+ * nothing derived it from the project type, so it put deals whose own numbers read DFW-4-… (4 IS the
+ * service code) on the non-service side of this split — while the Monday Showcase, fixed first, counted
+ * them as service. Two surfaces, same words, different answers.
+ */
+export function isServiceRouteDeal(deal: Pick<Deal, "workflowRoute" | "projectType">): boolean {
+  return isServiceProjectDeal(deal);
 }
 
 /**
@@ -108,7 +117,10 @@ export function isServiceRouteDeal(deal: Pick<Deal, "workflowRoute">): boolean {
  * drill-down list all call this, so a card can never count a deal the list it links to would drop.
  * Total partition: every deal matches exactly one of "service" / "non_service", and always "all".
  */
-export function matchesAtRiskRouteBucket(deal: Pick<Deal, "workflowRoute">, bucket: AtRiskRouteBucket): boolean {
+export function matchesAtRiskRouteBucket(
+  deal: Pick<Deal, "workflowRoute" | "projectType">,
+  bucket: AtRiskRouteBucket
+): boolean {
   if (bucket === "all") return true;
   return isServiceRouteDeal(deal) === (bucket === "service");
 }
