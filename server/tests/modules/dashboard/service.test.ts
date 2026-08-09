@@ -719,9 +719,13 @@ describe("Dashboard Service", () => {
 
       await getDirectorDashboard(tenantDb, { from: "2026-01-01", to: "2026-12-31", officeId: "office-1" });
 
+      // Match the CTE DEFINITION, not the bare token. The token also appears in prose — the commission
+      // roster's comment explains why its owner exception is narrower than the cards' — and counting that
+      // as "a query with deal-owner widening" made this fail for a comment, which is the wrong thing to
+      // measure. What the test means is: exactly two queries actually BUILD the deal_owners CTE.
       const dealOwnerQueries = tenantDb.execute.mock.calls
         .map(([query]: [unknown]) => extractSqlText(query).toLowerCase())
-        .filter((text: string) => text.includes("deal_owners"));
+        .filter((text: string) => text.includes("with deal_owners as ("));
 
       expect(dealOwnerQueries).toHaveLength(2);
       expect(dealOwnerQueries.every((text: string) => text.includes("from users u"))).toBe(true);

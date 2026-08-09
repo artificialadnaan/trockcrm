@@ -1614,15 +1614,20 @@ export async function getDirectorRepCommissionRows(
               WHERE dsc.rep_user_id = u.id
                 AND COALESCE(d.is_test_data, false) = false
             )
-            -- ...and live-deal involvement, the SAME evidence the rep branch above accepts. Without it an
-            -- unticked director who still owns deals is RETAINED on the cards and the funnel by
-            -- dashboardRosterMembershipSql's owner-backed exception but DROPPED from Team Commissions, so
-            -- one toggle splits three rosters on one screen and contradicts what the setting promises.
-            -- Their money columns stay zeroed either way (isRep gates those), so this adds a row, never a
-            -- figure — the deal-VALUE footer counts role='rep' only and is untouched.
+            -- ...and live-deal OWNERSHIP, matching dashboardRosterMembershipSql's owner-backed exception
+            -- so the three rosters on this screen agree. Without it an unticked director who still owns
+            -- deals is retained on the cards and the funnel but dropped from Team Commissions.
+            --
+            -- assigned_rep_id ONLY -- deliberately NARROWER than the rep branch above, which mirrors
+            -- getCommissionOfficeTotals' involvement test and so accepts the estimator too. The cards and
+            -- funnel derive their exception from deal_owners, which is assigned_rep_id alone, so an
+            -- estimator-only non-rep is absent THERE; admitting them here would hand them a commission row
+            -- that is blank (isRep zeroes every involvement metric for non-reps) and unexplained by any
+            -- other roster. A non-rep estimator who actually EARNED is still retained, by the
+            -- signed-commission branch directly above, which is the evidence that belongs to them.
             OR EXISTS (
               SELECT 1 FROM ${deals} d
-              WHERE u.id IN (d.assigned_rep_id, d.estimator_user_id)
+              WHERE d.assigned_rep_id = u.id
                 AND d.is_active = true
                 AND COALESCE(d.is_test_data, false) = false
             )
