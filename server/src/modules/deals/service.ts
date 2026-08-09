@@ -2546,16 +2546,24 @@ export async function getDealDetail(
  * Create a new deal.
  */
 export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
-  // The project type is resolved FIRST because the workflow route is derived from it. `workflow_route` is
-  // NOT NULL DEFAULT 'normal', so a deal created without one used to look like a confident "not service"
-  // rather than "nobody said" — and nothing anywhere derived it from the type. That is why service work
-  // whose own deal number reads DFW-4-… was sitting in the Normal pipeline.
-  const projectType = input.projectType ? await assertValidProjectType(input.projectType) : null;
+  // The workflow route is derived from the project type, so the type has to be known before the stage is
+  // looked up. `workflow_route` is NOT NULL DEFAULT 'normal', so a deal created without one used to look
+  // like a confident "not service" rather than "nobody said" — and nothing anywhere derived it from the
+  // type. That is why service work whose own deal number reads DFW-4-… sat in the Normal pipeline.
+  //
+  // NON-THROWING on purpose. The validating `assertValidProjectType` stays exactly where it was, further
+  // down: hoisting it would put project-type validation AHEAD of the stage check, the creation policy and
+  // the awarded-amount role gate, changing which error a rejected caller sees first and letting an
+  // unauthorized one probe type validity. An unrecognised type simply yields null here and routes normal;
+  // the assert below still rejects it with the same message, in the same order, as before this change.
+  const derivedProjectType = input.projectType
+    ? await resolveActiveProjectTypeValue(input.projectType)
+    : null;
 
   // An EXPLICIT route from the caller always wins: lead conversion, the SyncHub ingest and the Bid Board
   // all state a route deliberately, and this must not overrule them. The derivation only fills the gap
   // where the route would otherwise have defaulted silently.
-  const requestedRoute = input.workflowRoute ?? workflowRouteForProjectType(projectType);
+  const requestedRoute = input.workflowRoute ?? workflowRouteForProjectType(derivedProjectType);
 
   // A stage belongs to ONE workflow family, so deriving a route can invalidate a stage the caller chose
   // deliberately. Rather than turning a working create into a 400, fall back to the previous behaviour
@@ -2609,7 +2617,9 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
   await validateDealPrimaryContact(tenantDb, lineage.companyId, lineage.primaryContactId);
 
   const officeCode = assertValidOfficeCode(input.officeCode);
-  // projectType is resolved at the top of this function — the workflow route is derived from it.
+  // Unmoved: this is the throwing validation, and it stays after the stage/policy/role gates so the error
+  // a caller sees is the one they saw before the route derivation existed.
+  const projectType = input.projectType ? await assertValidProjectType(input.projectType) : null;
   const normalizedBidDueDate = normalizeOptionalDealBidDueDate(input.bidDueDate);
   const createdAt = new Date();
   const dealNumber = await generateDealNumberForProject(tenantDb, {
