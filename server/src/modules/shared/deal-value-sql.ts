@@ -2,6 +2,8 @@ import { sql, type SQL } from "drizzle-orm";
 import {
   reportableDealSqlPredicate,
   closeTargetFarOutSqlPredicate,
+  PROJECT_TYPE_CODE_BY_VALUE,
+  PROJECT_TYPE_VALUES,
   SHOWCASE_ROUTE_BUCKETS,
   type ShowcaseRouteBucket,
 } from "@trock-crm/shared/types";
@@ -549,14 +551,99 @@ export const WORKFLOW_ROUTE_BUCKETS = SHOWCASE_ROUTE_BUCKETS;
 export type WorkflowRouteBucket = ShowcaseRouteBucket;
 
 /**
- * Service-vs-Other narrowing on deals.workflow_route, as a LEADING-` AND ` fragment (the same composition
- * idiom as the showcase's repScopeSql / regionScopeSql) or EMPTY when nothing should be narrowed.
+ * JS `String.prototype.trim()` expressed as an explicit character set for Postgres `btrim`.
  *
- * A NULL / absent route is NOT service, so it lands in "other" — the same convention #1035 asserted for the
- * At Risk split. It is spelled out as `IS NULL OR <> 'service'` rather than a bare `<> 'service'` because a
- * bare inequality is UNKNOWN (not true) for a NULL row, which would silently drop that row from BOTH
- * buckets. The column is NOT NULL with a 'normal' default today, so this leg is currently inert — it is the
- * guard that keeps the partition total if that ever stops holding (a new nullable source, a legacy import).
+ * NOT `btrim(x)` and NOT `[[:space:]]`. The one-argument btrim strips ASCII SPACE ONLY, so a tab-wrapped
+ * value survives it; the POSIX class is evaluated per the server's collation, so it is
+ * correct-under-the-locale-we-tested rather than correct, and no behavioural test can catch that (both
+ * sides of a parity test run on the same backend and agree in CI while diverging in production).
+ * Migration 0216 learned both of these the expensive way — see its suite. Pinned character-for-character
+ * against JS \s by a test, so a well-meaning simplification fails there rather than in a report.
+ *
+ * Built from CODE POINTS, never a written-out string literal. btrim's second argument is a SET of
+ * characters, not a range, so the tempting "\t-\r" spelling does not mean "tab through carriage
+ * return" — it means {tab, HYPHEN, carriage return}, and would quietly strip hyphens off real values.
+ */
+const JS_TRIM_CHARS = [
+  0x09, 0x0a, 0x0b, 0x0c, 0x0d, // tab, LF, VT, FF, CR
+  0x20, 0xa0, 0x1680, // space, NBSP, ogham space mark
+  0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, // quad block
+  0x2028, 0x2029, // line separator, paragraph separator
+  0x202f, 0x205f, 0x3000, // narrow NBSP, medium mathematical space, ideographic space
+  0xfeff, // zero-width NBSP / BOM
+].map((code) => String.fromCodePoint(code)).join("");
+
+/** `normalizeProjectType` (shared/types) in SQL: JS-trim, then lower-case. */
+function normalizedProjectTypeSql(alias: string): SQL {
+  return sql`lower(btrim(COALESCE(${sql.raw(alias)}.project_type, ''), ${JS_TRIM_CHARS}))`;
+}
+
+/**
+ * THE CANONICAL "IS THIS SERVICE?" TEST, and the reason the Monday Showcase was reporting ~$490k of
+ * service against a single service rep's $1.1M.
+ *
+ * `resolveProjectTypeCode` (server/src/services/projectNumber.ts) is the platform's definition of a
+ * deal's project type, and it is emphatic about precedence: **project_type WINS, and workflow_route is
+ * only consulted when nothing else answers.** The `4` in a deal number like `DFW-4-04126-AE` is DERIVED
+ * from project_type at creation, which is why deals whose number says service were sitting in the
+ * "Normal" bucket: every reader here tested `workflow_route` ALONE, the one input the canonical function
+ * consults LAST, and nothing on the write side ever derives it from the type. So a correctly-typed
+ * service deal reads as "confidently not service" — `workflow_route` is NOT NULL DEFAULT 'normal', so an
+ * unset route is indistinguishable from a deliberate one.
+ *
+ * The three tiers below mirror resolveProjectTypeCode exactly, in its order:
+ *   1. a VALID `deals.project_type` -> its code (nothing else consulted);
+ *   2. else the configured digit on `project_type_config.code` via `deals.project_type_id` — the SQL
+ *      analogue of the function's `projectTypes` digit tier, and what actually stamps the deal number;
+ *   3. else, and only else, `workflow_route`.
+ * COALESCE over three nullable booleans expresses that fall-through directly: a tier that cannot answer
+ * yields NULL and the next one is consulted.
+ *
+ * The value list and the '4' are generated FROM `PROJECT_TYPE_VALUES` / `PROJECT_TYPE_CODE_BY_VALUE`, not
+ * retyped, because SQL cannot import the constant and a hand-copied list is how this drifts back apart.
+ *
+ * KEEPING THIS AS A SAFETY NET IS THE POINT. Deriving workflow_route on write (and backfilling it) makes
+ * the column correct TODAY; reading the canonical definition here is what stops ONE missed write path
+ * from silently recreating the undercount. Do not "simplify" this back to the raw column on the grounds
+ * that the data is now clean.
+ *
+ * `alias` is always a trusted developer literal ("d"/"deals"), never user input.
+ */
+export function aliasedIsServiceProjectSql(alias: string): SQL {
+  const normalized = normalizedProjectTypeSql(alias);
+  const knownValues = sql.join(
+    PROJECT_TYPE_VALUES.map((value) => sql`${value}`),
+    sql`, `
+  );
+  const serviceCode = PROJECT_TYPE_CODE_BY_VALUE.service;
+
+  return sql`COALESCE(
+    CASE WHEN ${normalized} IN (${knownValues}) THEN ${normalized} = 'service' END,
+    (
+      SELECT CASE WHEN btrim(COALESCE(ptc.code, ''), ${JS_TRIM_CHARS}) ~ '^[1-9]$'
+                  THEN btrim(ptc.code, ${JS_TRIM_CHARS}) = ${serviceCode} END
+        FROM public.project_type_config ptc
+       WHERE ptc.id = ${sql.raw(alias)}.project_type_id
+    ),
+    ${sql.raw(alias)}.workflow_route = 'service',
+    false
+  )`;
+}
+
+/**
+ * Service-vs-Other narrowing, as a LEADING-` AND ` fragment (the same composition idiom as the
+ * showcase's repScopeSql / regionScopeSql) or EMPTY when nothing should be narrowed.
+ *
+ * NOW ASKS `aliasedIsServiceProjectSql`, NOT the raw `workflow_route` column. That change is the fix for
+ * the Monday Showcase under-reporting service: this fragment is the single definition behind BOTH the
+ * showcase's Service / Other chips and the deals dashboard's Service / Non-service At Risk cards (#1035),
+ * so both surfaces were narrowing on the one field the canonical definition consults LAST. Deals whose
+ * number literally reads `DFW-4-…` were counted as normal work.
+ *
+ * "other" remains the exact complement — `NOT (is service)` — rather than a re-derived rule, which is
+ * what keeps the partition total. The old spelling needed an explicit `IS NULL OR <> 'service'` because a
+ * bare inequality is UNKNOWN for a NULL row and would drop it from BOTH buckets; the canonical predicate
+ * COALESCEs to `false` instead, so it is never NULL and a plain NOT is total by construction.
  *
  * TOTALITY IS THE POINT: service ∪ other = every row and service ∩ other = ∅, so a bucket's figure plus its
  * complement's always re-sums to the unfiltered figure. Callers depend on that additivity to prove a split
@@ -564,7 +651,8 @@ export type WorkflowRouteBucket = ShowcaseRouteBucket;
  *
  * `undefined` (caller passed no selection) and BOTH buckets selected return the SAME empty fragment — no
  * predicate at all. So a surface that ships this filter defaulted to "everything" emits SQL byte-identical
- * to the surface before the filter existed, and cannot move a number on first load.
+ * to the surface before the filter existed, and cannot move a number on first load. That property is why
+ * this fix moves the SPLIT without moving any unfiltered total.
  *
  * `alias` is always a trusted developer literal ("d"/"deals"), never user input.
  */
@@ -576,9 +664,9 @@ export function aliasedWorkflowRouteFilterSql(
   const service = buckets.includes("service");
   const other = buckets.includes("other");
   if (service && other) return sql``;
-  if (service) return sql` AND ${sql.raw(alias)}.workflow_route = 'service'`;
+  if (service) return sql` AND ${aliasedIsServiceProjectSql(alias)}`;
   if (other) {
-    return sql` AND (${sql.raw(alias)}.workflow_route IS NULL OR ${sql.raw(alias)}.workflow_route <> 'service')`;
+    return sql` AND NOT ${aliasedIsServiceProjectSql(alias)}`;
   }
   // Neither bucket. There is no honest row set for "no selection at all", and emitting a `false` predicate
   // would return zeros that read like real measurements — the exact failure this split exists to avoid. The

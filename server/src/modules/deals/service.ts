@@ -54,7 +54,7 @@ import {
 import { getActiveProjectTypes, getStageById, getStageBySlug, resolveActiveProjectTypeValue } from "../pipeline/service.js";
 import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.js";
 import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
-import { generateDealNumberForProject } from "../../services/projectNumber.js";
+import { generateDealNumberForProject, resolveProjectTypeCode } from "../../services/projectNumber.js";
 import { isContractSignedHandoffEnabled } from "../../config/feature-flags.js";
 import { resolveActiveOfficeUserIds, resolveTeamRepIds } from "../shared/team-scope.js";
 import {
@@ -923,6 +923,22 @@ export async function applyProjectTypeChange(
     projectType: nextProjectTypeValue,
     intendedProjectNumber: nextIntendedProjectNumber,
   };
+}
+
+/**
+ * The workflow route a project type IMPLIES, per the platform's canonical resolution.
+ *
+ * Pure and exported so it is testable without the whole createDeal dependency graph, and so the one place
+ * that answers "does this type mean service?" on the write side is the same `resolveProjectTypeCode` the
+ * read side uses. Everything else in this area drifted precisely because that question had a different
+ * answer in each place that asked it.
+ *
+ * NOT a general-purpose "is this deal service" test — that is aliasedIsServiceProjectSql, which also
+ * consults the configured code and the existing route. This one answers only the narrower question the
+ * create path needs: given a project type and nothing else, which pipeline should this deal start in?
+ */
+export function workflowRouteForProjectType(projectType: string | null | undefined): WorkflowRoute {
+  return resolveProjectTypeCode({ projectType }) === "4" ? "service" : "normal";
 }
 
 function estimatingBoundaryStageSlugForRoute(workflowRoute: WorkflowRoute) {
@@ -2530,8 +2546,27 @@ export async function getDealDetail(
  * Create a new deal.
  */
 export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
-  const workflowRoute = input.workflowRoute ?? "normal";
-  const stage = await getStageByIdForWorkflowRoute(input.stageId, workflowRoute);
+  // The project type is resolved FIRST because the workflow route is derived from it. `workflow_route` is
+  // NOT NULL DEFAULT 'normal', so a deal created without one used to look like a confident "not service"
+  // rather than "nobody said" — and nothing anywhere derived it from the type. That is why service work
+  // whose own deal number reads DFW-4-… was sitting in the Normal pipeline.
+  const projectType = input.projectType ? await assertValidProjectType(input.projectType) : null;
+
+  // An EXPLICIT route from the caller always wins: lead conversion, the SyncHub ingest and the Bid Board
+  // all state a route deliberately, and this must not overrule them. The derivation only fills the gap
+  // where the route would otherwise have defaulted silently.
+  const requestedRoute = input.workflowRoute ?? workflowRouteForProjectType(projectType);
+
+  // A stage belongs to ONE workflow family, so deriving a route can invalidate a stage the caller chose
+  // deliberately. Rather than turning a working create into a 400, fall back to the previous behaviour
+  // ('normal') when the derived route and the requested stage disagree and the caller named no route.
+  // The reports stay correct either way: they resolve service from project_type, not from this column.
+  let stage = await getStageByIdForWorkflowRoute(input.stageId, requestedRoute);
+  let workflowRoute = requestedRoute;
+  if (!stage && input.workflowRoute == null && requestedRoute !== "normal") {
+    workflowRoute = "normal";
+    stage = await getStageByIdForWorkflowRoute(input.stageId, "normal");
+  }
   if (!stage) {
     throw new AppError(400, "Invalid stage ID for workflow route");
   }
@@ -2574,7 +2609,7 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
   await validateDealPrimaryContact(tenantDb, lineage.companyId, lineage.primaryContactId);
 
   const officeCode = assertValidOfficeCode(input.officeCode);
-  const projectType = input.projectType ? await assertValidProjectType(input.projectType) : null;
+  // projectType is resolved at the top of this function — the workflow route is derived from it.
   const normalizedBidDueDate = normalizeOptionalDealBidDueDate(input.bidDueDate);
   const createdAt = new Date();
   const dealNumber = await generateDealNumberForProject(tenantDb, {
