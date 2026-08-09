@@ -647,6 +647,26 @@ final class WearablesBridge: RCTEventEmitter {
   /// are unreachable by anyone else and can be stopped at leisure.
   @discardableResult
   private func sweep(ifGeneration generation: Int?) -> Bool {
+    // `teardownLock` FIRST, and held across the generation bump — not taken later, just for the
+    // stops.
+    //
+    // Bumping before acquiring it left the bump and a session CREATION able to interleave.
+    // `createAndPublishSession` takes this lock, then checks the generation, then creates: so a
+    // sweep could bump, capture the fields as they stood (not yet including the session that
+    // creation is about to publish), and block here — while the creating task, already past its
+    // check, went on to publish. The sweep then woke and stopped only what it had captured,
+    // missing that session entirely. A superseded task kept the device, and the NEWER rung — the
+    // one the user is looking at — failed with `sessionAlreadyExists`.
+    //
+    // Taking it first makes claim-and-create mutually exclusive on a lock that already exists,
+    // rather than adding another mechanism: either the sweep bumps first and the creation's guard
+    // then fails, or the creation publishes first and the sweep's capture includes it.
+    //
+    // Ordering is teardownLock -> audioLock -> stateLock throughout. Nothing anywhere takes
+    // `teardownLock` while holding either of the others, so there is no cycle.
+    teardownLock.lock()
+    defer { teardownLock.unlock() }
+
     stateLock.lock()
     if let generation, teardownGeneration != generation {
       stateLock.unlock()
@@ -686,12 +706,10 @@ final class WearablesBridge: RCTEventEmitter {
         forceReleaseAllAudioOwnership()
     }
     //
-    // Serialised so that when this returns, the stopping is genuinely finished and the next
-    // `createSession()` cannot race it.
-    teardownLock.lock()
+    // Still inside `teardownLock`, so when this returns the stopping is genuinely finished and the
+    // next `createSession()` cannot race it.
     doomedStream?.stop()
     doomedSession?.stop()
-    teardownLock.unlock()
     return true
   }
 
