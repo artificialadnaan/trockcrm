@@ -188,7 +188,12 @@ BEGIN
     --
     -- Guarded on both relations it touches. `estimate_extractions` is proven by the CONTINUE at the top
     -- of the loop; `estimate_review_events` is not.
-    IF to_regclass(format('%I.estimate_review_events', schema_name)) IS NOT NULL THEN
+    -- BOTH tables, because the remediation predicate now reads the document to ask the same
+    -- active-artifact question the workbench asks. A schema that has review events but no
+    -- `estimate_source_documents` is half-provisioned; this migration's contract for that case is to
+    -- SKIP the block, not to abort the whole run and take every other office down with it.
+    IF to_regclass(format('%I.estimate_review_events', schema_name)) IS NOT NULL
+       AND to_regclass(format('%I.estimate_source_documents', schema_name)) IS NOT NULL THEN
       EXECUTE format(
         $legacy$INSERT INTO %I.estimate_review_events
                   (deal_id, subject_type, subject_id, event_type, before_json, after_json, reason, user_id)
@@ -217,11 +222,31 @@ BEGIN
                    -- extraction_type regardless of status, so one with no quantity is re-examined on
                    -- the next run by design. Flagging it would be a false task about a working path.
                    AND e.extraction_type IS DISTINCT FROM 'measurement_candidate'
-                   -- AND ONLY THE ACTIVE ARTIFACT. A superseded extraction is hidden by the workbench
-                   -- (it filters rows by active artifact) while review events are returned UNFILTERED,
-                   -- so flagging one produces an action request for a row that is not on the
-                   -- estimator's screen — the same defect this migration's worker change fixes.
-                   AND e.metadata_json->>'activeArtifact' = 'true'
+                   -- AND ONLY THE ACTIVE ARTIFACT — by the SAME test the workbench applies, not a
+                   -- stricter one. `isActiveParseArtifact` (workbench-service.ts) asks three things:
+                   -- the document HAS an active parse run, the row's `sourceParseRunId` IS that run,
+                   -- and `activeArtifact` is not explicitly `false`.
+                   --
+                   -- `activeArtifact = 'true'` on its own got that wrong in BOTH directions.
+                   --
+                   -- Too strict: a legacy row predating the flag omits the key entirely. Missing is
+                   -- not `false`, so the workbench SHOWS it while this excluded it from remediation —
+                   -- leaving a row that is approved, refused by promotion, skipped by generation, and
+                   -- never told why. That is precisely the stranded state this block exists to
+                   -- surface, so the one predicate meant to find it was skipping the clearest cases.
+                   --
+                   -- Too loose: a row from a SUPERSEDED parse run keeps `activeArtifact = 'true'`
+                   -- until something rewrites it, so this would flag a row the workbench HIDES —
+                   -- the "action request for a row that is not on the estimator's screen" the old
+                   -- comment claimed to be preventing while not actually preventing it.
+                   AND EXISTS (
+                     SELECT 1
+                       FROM %I.estimate_source_documents d
+                      WHERE d.id = e.document_id
+                        AND d.active_parse_run_id IS NOT NULL
+                        AND e.metadata_json->>'sourceParseRunId' = d.active_parse_run_id::text
+                   )
+                   AND COALESCE(e.metadata_json->>'activeArtifact', 'true') <> 'false'
                    AND NOT EXISTS (
                      SELECT 1
                        FROM %I.estimate_review_events x
@@ -229,7 +254,10 @@ BEGIN
                         AND x.subject_id = e.id
                         AND x.event_type = 'remediation_required'
                    )$legacy$,
-        schema_name, schema_name, schema_name
+        -- Four now: review_events, extractions, source_documents (the active-parse test above),
+        -- review_events again. format() substitutes positionally, so this order tracks the order
+        -- the %I placeholders appear in, not the order the tables are read.
+        schema_name, schema_name, schema_name, schema_name
       );
       GET DIAGNOSTICS surfaced = ROW_COUNT;
       RAISE NOTICE '0215: % approved extraction(s) surfaced as needing a quantity in %', surfaced, schema_name;

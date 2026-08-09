@@ -119,6 +119,17 @@ function buildSourceRowIdentity(input: {
  */
 const UNPRICEABLE_REVIEW_STATUSES = new Set(["rejected", "needs_quantity"]);
 
+/**
+ * Statuses that represent a decision already recorded about the row, so the quantityless-row claim
+ * must leave them alone rather than restamp them as `needs_quantity`.
+ *
+ * A superset of {@link UNPRICEABLE_REVIEW_STATUSES}, and deliberately not the same set: `approved` is
+ * priceable, so it must NOT make `stillPriceable` return false — but it is still somebody's decision,
+ * and migration 0215 states the policy for an approved row with no usable quantity, which is to leave
+ * the decision alone and surface it for remediation rather than silently reopen it.
+ */
+const REVIEW_DECIDED_STATUSES = new Set(["needs_quantity", "rejected", "approved"]);
+
 async function stillPriceable(
   db: any,
   extractionId: string,
@@ -401,13 +412,25 @@ export async function runEstimateGeneration(
         !Number.isFinite(quantityValue) ||
         quantityValue <= 0
       ) {
-        // ALREADY FLAGGED ⇒ say nothing further. The candidate filter is
+        // ALREADY DECIDED ⇒ say nothing further. The candidate filter is
         // `status = 'pending' OR extraction_type = 'measurement_candidate'`, so a normal row drops out
         // of the set the moment it is marked — but a MEASUREMENT CANDIDATE is re-selected on every run
         // regardless of status. Without this, one unmeasured candidate emits a fresh `needs_quantity`
         // event on every generation run for as long as it lacks a number, burying the review feed under
         // repetitions of a fact already recorded. The row still skips pricing either way.
-        if (extraction.status === "needs_quantity") continue;
+        //
+        // `rejected` and `approved` are here for a sharper reason than noise: the claim below pins the
+        // status to the SNAPSHOT's, which defends against a decision made after the select but is no
+        // defence when the snapshot ITSELF is a decision. A measurement candidate is admitted on
+        // `extraction_type` alone, so a human's `rejected` arrives here as `extraction.status`, matches
+        // its own equality test, and gets overwritten with `needs_quantity` — a committed review
+        // decision destroyed, and a review event raised asking someone to supply a quantity for a row
+        // they had already thrown out. The positive-quantity path never had this hole because it goes
+        // through `stillPriceable`, whose UNPRICEABLE_REVIEW_STATUSES check refuses exactly this.
+        //
+        // Ordinary extractions are unaffected: their filter admits only `status = 'pending'`, so none
+        // of these three can be their snapshot status.
+        if (REVIEW_DECIDED_STATUSES.has(String(extraction.status))) continue;
 
         // THE CLAIM IS THE CONDITIONAL UPDATE, and it comes FIRST.
         //

@@ -566,6 +566,195 @@ describe("estimate generation job", () => {
     expect(lockedClient.query).toHaveBeenLastCalledWith("COMMIT");
   });
 
+  it("does NOT restamp a measurement candidate a human REJECTED", async () => {
+    // THE DESTRUCTIVE CASE. The claim below pins the status to the SNAPSHOT's, which defends against a
+    // decision made after the select — but is no defence when the snapshot IS the decision. A
+    // measurement candidate is admitted on `extraction_type` alone, regardless of status, so a human's
+    // `rejected` arrives as `extraction.status`, satisfies its own equality test, and gets overwritten
+    // with `needs_quantity`: a committed review decision destroyed, plus an event asking someone to
+    // supply a quantity for a row they had already thrown out.
+    //
+    // The positive-quantity path never had this hole, because it goes through `stillPriceable`, whose
+    // UNPRICEABLE_REVIEW_STATUSES check refuses exactly this.
+    const statusWrites: any[] = [];
+    const events: any[] = [];
+    const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
+    const extractionWhere = vi.fn().mockResolvedValue([
+      {
+        id: "ext-rejected-candidate",
+        dealId: "deal-1",
+        projectId: null,
+        documentId: "doc-1",
+        extractionType: "measurement_candidate",
+        status: "rejected",
+        quantity: null,
+        unit: null,
+        normalizedLabel: "Measure the run of base",
+        metadataJson: {
+          sourceParseRunId: "parse-run-1",
+          activeArtifact: true,
+          measurementConfirmationState: "approved",
+        },
+      },
+    ]);
+    const appDb = {
+      select: vi.fn(() => ({ from: vi.fn(() => ({ where: vi.fn(() => ({ limit: sourceLimit })) })) })),
+    } as any;
+    const lockedClient = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: "doc-1", active_parse_run_id: "parse-run-1" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    } as any;
+    let tenantSelectCallCount = 0;
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => {
+          tenantSelectCallCount += 1;
+          if (tenantSelectCallCount === 1) {
+            return { where: vi.fn(() => ({ limit: vi.fn().mockResolvedValue([]) })) };
+          }
+          if (tenantSelectCallCount === 2) return { where: extractionWhere };
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: null, status: "rejected" }]) })),
+            })),
+          };
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn((values: any) => {
+          if (values?.eventType) events.push(values);
+          return { returning: vi.fn().mockResolvedValue([{ id: "generated-id" }]) };
+        }),
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn((values: unknown) => {
+          statusWrites.push(values);
+          return { where: vi.fn(() => ({ returning: vi.fn().mockResolvedValue([{ id: "claimed" }]) })) };
+        }),
+      })),
+    } as any;
+
+    getHistoricalPricingSignalsMock.mockResolvedValue({
+      historicalItems: [],
+      vendorQuotes: [],
+      currentDeal: null,
+    });
+    resolveActiveCatalogSnapshotVersionIdMock.mockResolvedValue("snapshot-1");
+    listCatalogCandidatesForMatchingMock.mockResolvedValue([]);
+    poolConnectMock.mockResolvedValue(lockedClient);
+    drizzleMock.mockReturnValueOnce(appDb).mockReturnValueOnce(tenantDb);
+
+    const { runEstimateGeneration } = await import("../../src/jobs/estimate-generation.js");
+    await runEstimateGeneration(
+      { documentId: "doc-1", dealId: "deal-1", parseRunId: "parse-run-1" },
+      "office-1"
+    );
+
+    // No second announcement, and no write of any kind against the row.
+    expect(events.filter((event) => event.eventType === "needs_quantity")).toHaveLength(0);
+    expect(statusWrites.some((write: any) => write?.status === "needs_quantity")).toBe(false);
+    // And it never reached matching, which is the point of skipping before that work.
+    expect(rankExtractionMatchesMock).not.toHaveBeenCalled();
+  });
+
+  it("does NOT restamp a measurement candidate a human APPROVED", async () => {
+    // Same shape as the rejected case, and the same policy migration 0215 states for an approved row
+    // with no usable quantity: leave the decision alone and surface it, rather than silently reopening
+    // it. `approved` is deliberately NOT in UNPRICEABLE_REVIEW_STATUSES — it is priceable, so it must
+    // not make `stillPriceable` return false — which is why the decided-status set is a separate one.
+    const statusWrites: any[] = [];
+    const events: any[] = [];
+    const sourceLimit = vi.fn().mockResolvedValue([{ id: "source-1" }]);
+    const extractionWhere = vi.fn().mockResolvedValue([
+      {
+        id: "ext-approved-candidate",
+        dealId: "deal-1",
+        projectId: null,
+        documentId: "doc-1",
+        extractionType: "measurement_candidate",
+        status: "approved",
+        quantity: null,
+        unit: null,
+        normalizedLabel: "Measure the run of base",
+        metadataJson: {
+          sourceParseRunId: "parse-run-1",
+          activeArtifact: true,
+          measurementConfirmationState: "approved",
+        },
+      },
+    ]);
+    const appDb = {
+      select: vi.fn(() => ({ from: vi.fn(() => ({ where: vi.fn(() => ({ limit: sourceLimit })) })) })),
+    } as any;
+    const lockedClient = {
+      query: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [{ id: "doc-1", active_parse_run_id: "parse-run-1" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+      release: vi.fn(),
+    } as any;
+    let tenantSelectCallCount = 0;
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => {
+          tenantSelectCallCount += 1;
+          if (tenantSelectCallCount === 1) {
+            return { where: vi.fn(() => ({ limit: vi.fn().mockResolvedValue([]) })) };
+          }
+          if (tenantSelectCallCount === 2) return { where: extractionWhere };
+          return {
+            where: vi.fn(() => ({
+              limit: vi.fn(() => ({ for: vi.fn().mockResolvedValue([{ quantity: null, status: "approved" }]) })),
+            })),
+          };
+        }),
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn((values: any) => {
+          if (values?.eventType) events.push(values);
+          return { returning: vi.fn().mockResolvedValue([{ id: "generated-id" }]) };
+        }),
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn((values: unknown) => {
+          statusWrites.push(values);
+          return { where: vi.fn(() => ({ returning: vi.fn().mockResolvedValue([{ id: "claimed" }]) })) };
+        }),
+      })),
+    } as any;
+
+    getHistoricalPricingSignalsMock.mockResolvedValue({
+      historicalItems: [],
+      vendorQuotes: [],
+      currentDeal: null,
+    });
+    resolveActiveCatalogSnapshotVersionIdMock.mockResolvedValue("snapshot-1");
+    listCatalogCandidatesForMatchingMock.mockResolvedValue([]);
+    poolConnectMock.mockResolvedValue(lockedClient);
+    drizzleMock.mockReturnValueOnce(appDb).mockReturnValueOnce(tenantDb);
+
+    const { runEstimateGeneration } = await import("../../src/jobs/estimate-generation.js");
+    await runEstimateGeneration(
+      { documentId: "doc-1", dealId: "deal-1", parseRunId: "parse-run-1" },
+      "office-1"
+    );
+
+    // No second announcement, and no write of any kind against the row.
+    expect(events.filter((event) => event.eventType === "needs_quantity")).toHaveLength(0);
+    expect(statusWrites.some((write: any) => write?.status === "needs_quantity")).toBe(false);
+    // And it never reached matching, which is the point of skipping before that work.
+    expect(rankExtractionMatchesMock).not.toHaveBeenCalled();
+  });
+
   it("SKIPS an already-flagged measurement candidate without touching it", async () => {
     // The early `status === "needs_quantity"` guard, which had no test that actually reached it — the
     // second-pass case used `pending` rows and forced the claim to lose, exercising the claim instead.

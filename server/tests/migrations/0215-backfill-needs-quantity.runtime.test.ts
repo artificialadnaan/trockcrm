@@ -18,6 +18,9 @@ async function seed(schema: string) {
       -- On the migration's read path since it began surfacing legacy APPROVED rows: that event is
       -- written against the extraction, and every review event carries the deal it belongs to.
       deal_id uuid,
+      -- On the read path since the remediation predicate started asking the SAME active-artifact
+      -- question the workbench asks, which begins with the row's document.
+      document_id uuid,
       status text NOT NULL,
       extraction_type text,
       metadata_json jsonb NOT NULL DEFAULT '{}'::jsonb,
@@ -27,6 +30,12 @@ async function seed(schema: string) {
   `);
 }
 
+/** The parse run `seedPromotionChain` marks ACTIVE on `DOCUMENT_ID`. */
+const ACTIVE_PARSE_RUN_ID = "a0000000-0000-4000-8000-00000000a001";
+/** A completed-but-superseded run on the same document. */
+const STALE_PARSE_RUN_ID = "a0000000-0000-4000-8000-00000000a002";
+const DOCUMENT_ID = "d0000000-0000-4000-8000-00000000d001";
+
 /**
  * The full promote chain, for the remediation half of the migration. The base `seed` deliberately does
  * NOT create these: the migration guards on `to_regclass`, and a schema without them must still park
@@ -34,6 +43,13 @@ async function seed(schema: string) {
  */
 async function seedPromotionChain(schema: string) {
   await pg.exec(`
+    CREATE TABLE IF NOT EXISTS ${schema}.estimate_source_documents (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      active_parse_run_id uuid
+    );
+    INSERT INTO ${schema}.estimate_source_documents (id, active_parse_run_id)
+      VALUES ('${DOCUMENT_ID}', '${ACTIVE_PARSE_RUN_ID}')
+      ON CONFLICT (id) DO NOTHING;
     CREATE TABLE IF NOT EXISTS ${schema}.estimate_extraction_matches (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
       extraction_id uuid NOT NULL
@@ -432,11 +448,11 @@ describe("migration 0215 — parking already-priced rows that never had a usable
     await seed("office_dallas");
     await seedPromotionChain("office_dallas");
     await pg.exec(`
-      INSERT INTO office_dallas.estimate_extractions (id, deal_id, status, quantity, metadata_json) VALUES
-        ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '55555555-5555-4555-8555-555555555555', 'approved', NULL, '{"activeArtifact":"true"}'::jsonb),
-        ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', '55555555-5555-4555-8555-555555555555', 'approved', 0, '{"activeArtifact":"true"}'::jsonb),
+      INSERT INTO office_dallas.estimate_extractions (id, deal_id, document_id, status, quantity, metadata_json) VALUES
+        ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '55555555-5555-4555-8555-555555555555', '${DOCUMENT_ID}', 'approved', NULL, '{"activeArtifact":"true","sourceParseRunId":"${ACTIVE_PARSE_RUN_ID}"}'::jsonb),
+        ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', '55555555-5555-4555-8555-555555555555', '${DOCUMENT_ID}', 'approved', 0, '{"activeArtifact":"true","sourceParseRunId":"${ACTIVE_PARSE_RUN_ID}"}'::jsonb),
         -- the control: approved AND priceable, which must be left entirely alone
-        ('cccccccc-cccc-4ccc-8ccc-cccccccccccc', '55555555-5555-4555-8555-555555555555', 'approved', 12, '{"activeArtifact":"true"}'::jsonb);
+        ('cccccccc-cccc-4ccc-8ccc-cccccccccccc', '55555555-5555-4555-8555-555555555555', '${DOCUMENT_ID}', 'approved', 12, '{"activeArtifact":"true","sourceParseRunId":"${ACTIVE_PARSE_RUN_ID}"}'::jsonb);
     `);
 
     await pg.exec(MIGRATION_SQL);
@@ -458,6 +474,62 @@ describe("migration 0215 — parking already-priced rows that never had a usable
     const after = await statuses("office_dallas");
     expect(after["aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"]).toBe("approved");
     expect(after["bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"]).toBe("approved");
+  });
+
+  it("SURFACES a legacy row that predates the activeArtifact flag entirely", async () => {
+    // THE TOO-STRICT HALF. `activeArtifact = 'true'` demanded the key be present and true. A row
+    // written before the flag existed has no key at all, and `isActiveParseArtifact` treats missing
+    // as ACTIVE (`!== false`) — so the workbench shows it while the remediation predicate skipped it.
+    // That is the stranded row this block exists to find, and it was the one case it could not see.
+    await seed("office_dallas");
+    await seedPromotionChain("office_dallas");
+    await pg.exec(`
+      INSERT INTO office_dallas.estimate_extractions (id, deal_id, document_id, status, quantity, metadata_json) VALUES
+        ('dddddddd-dddd-4ddd-8ddd-dddddddddddd', '55555555-5555-4555-8555-555555555555', '${DOCUMENT_ID}', 'approved', NULL, '{"sourceParseRunId":"${ACTIVE_PARSE_RUN_ID}"}'::jsonb);
+    `);
+
+    await pg.exec(MIGRATION_SQL);
+
+    const { rows } = (await pg.query(
+      `SELECT subject_id::text AS subject_id FROM office_dallas.estimate_review_events`
+    )) as { rows: Array<{ subject_id: string }> };
+    expect(rows.map((r) => r.subject_id)).toEqual(["dddddddd-dddd-4ddd-8ddd-dddddddddddd"]);
+  });
+
+  it("does NOT surface a row whose parse run has been SUPERSEDED, even with activeArtifact true", async () => {
+    // THE TOO-LOOSE HALF, and the one the old comment claimed to be preventing while not preventing
+    // it. A superseded row keeps `activeArtifact = 'true'` until something rewrites it; what makes it
+    // stale is that its `sourceParseRunId` is no longer the document's active run. The workbench hides
+    // it, so an event about it is an action request for a row that is not on anyone's screen.
+    await seed("office_dallas");
+    await seedPromotionChain("office_dallas");
+    await pg.exec(`
+      INSERT INTO office_dallas.estimate_extractions (id, deal_id, document_id, status, quantity, metadata_json) VALUES
+        ('eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', '55555555-5555-4555-8555-555555555555', '${DOCUMENT_ID}', 'approved', NULL, '{"activeArtifact":"true","sourceParseRunId":"${STALE_PARSE_RUN_ID}"}'::jsonb);
+    `);
+
+    await pg.exec(MIGRATION_SQL);
+
+    const { rows } = (await pg.query(
+      `SELECT count(*)::int AS n FROM office_dallas.estimate_review_events`
+    )) as { rows: Array<{ n: number }> };
+    expect(rows[0]!.n).toBe(0);
+  });
+
+  it("does NOT surface a row explicitly marked activeArtifact false", async () => {
+    await seed("office_dallas");
+    await seedPromotionChain("office_dallas");
+    await pg.exec(`
+      INSERT INTO office_dallas.estimate_extractions (id, deal_id, document_id, status, quantity, metadata_json) VALUES
+        ('ffffffff-ffff-4fff-8fff-ffffffffffff', '55555555-5555-4555-8555-555555555555', '${DOCUMENT_ID}', 'approved', NULL, '{"activeArtifact":"false","sourceParseRunId":"${ACTIVE_PARSE_RUN_ID}"}'::jsonb);
+    `);
+
+    await pg.exec(MIGRATION_SQL);
+
+    const { rows } = (await pg.query(
+      `SELECT count(*)::int AS n FROM office_dallas.estimate_review_events`
+    )) as { rows: Array<{ n: number }> };
+    expect(rows[0]!.n).toBe(0);
   });
 
   it("is REPLAYABLE — a second run changes nothing", async () => {
