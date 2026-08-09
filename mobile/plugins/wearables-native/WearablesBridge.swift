@@ -366,7 +366,13 @@ final class WearablesBridge: RCTEventEmitter {
         }
         guard created.state == .started else {
           let stalled = created.state.description
-          teardown()
+          // This is reached up to 10s after the wait began, which is ample time for a stop() or a
+          // newer startStream() to have taken over. Tear down shared state only if it is still
+          // ours; if it is not, `created` is an orphan nobody else has a reference to, so stopping
+          // it is this path's own responsibility.
+          if !teardownIfCurrent(myGeneration) {
+            created.stop()
+          }
           reject(
             "wearables_session_not_started",
             "Session never reached .started — stalled in \(stalled) after 10s",
@@ -387,7 +393,10 @@ final class WearablesBridge: RCTEventEmitter {
 
         guard let newStream = try created.addStream() else {
           let state = created.state.description
-          teardown()
+          // Same reasoning as the `.started` timeout above: only tear down what is still ours.
+          if !teardownIfCurrent(myGeneration) {
+            created.stop()
+          }
           reject("wearables_stream_nil", "addStream() returned nil (session state: \(state))", nil)
           return
         }
@@ -426,10 +435,38 @@ final class WearablesBridge: RCTEventEmitter {
         self?.deliverPhoto(photo)
       }
 
+      // Checkpoint 4, and the reason there is a re-check AFTER start() as well.
+      //
+      // `stream` was published above, so from here a concurrent teardown() can and will stop
+      // `newStream`. Checking the generation and then calling start() is check-then-act: a
+      // teardown landing in that window stops a stream this line then starts again, leaving a
+      // live stream the UI believes it stopped — frames flowing, HFP held, nothing on screen
+      // owning it. The window cannot be closed by holding `stateLock` across start(), because
+      // the frame listener installed above takes that same lock and NSLock is not recursive.
+      //
+      // So: check, start, then check again and undo. The stream is briefly started when it should
+      // not be, but it does not stay that way, and the resolve() below never reports success for
+      // a run that was superseded.
+      guard currentTeardownGeneration() == myGeneration else {
+        newStream.stop()
+        created.stop()
+        reject("wearables_stream_superseded",
+               "startStream was superseded by stop() before the stream was started", nil)
+        return
+      }
       newStream.start()
+      guard currentTeardownGeneration() == myGeneration else {
+        newStream.stop()
+        reject("wearables_stream_superseded",
+               "startStream was superseded by stop() as the stream was starting", nil)
+        return
+      }
       resolve(["started": true, "config": String(describing: newStream.streamConfiguration)])
       } catch {
-        teardown()
+        // `created`/`newStream` are scoped to the `do` block, so a superseded run cannot reach
+        // them from here. It does not need to: anything it had published to `session`/`stream`
+        // was already stopped by whatever superseded it.
+        teardownIfCurrent(myGeneration)
         reject("wearables_stream_failed", "startStream failed: \(Self.describe(error))", error)
       }
     }
@@ -463,19 +500,62 @@ final class WearablesBridge: RCTEventEmitter {
 
   /// Stop and forget the current session and stream. Safe to call when there is nothing to tear
   /// down, which is what lets `startStream` use it as a precondition rather than a cleanup.
+  ///
+  /// Unconditional: this is what a user-initiated `stopStream()` or the start of a new rung wants.
+  /// A long-running rung's OWN failure path must use `teardownIfCurrent(_:)` instead — see there.
   private func teardown() {
+    // Synchronous, no `await` between lock and unlock — safe under the same rule as every other
+    // lock in this file. This runs on whichever thread called teardown() (bridge queue for
+    // stopStream(), the Task itself on startStream()'s own failure paths).
+    //
+    // Bumped BEFORE the stops, not after. The bump is what tells every in-flight Task it has been
+    // superseded, and doing it last left a window in which a Task could check the generation,
+    // still match, and go on to touch session/stream while this teardown was already stopping
+    // them out from under it.
+    stateLock.lock()
+    teardownGeneration += 1
+    stateLock.unlock()
+    performTeardown()
+  }
+
+  /// Tear down ONLY if `generation` is still current — i.e. only if nothing has superseded the
+  /// caller since it captured that value.
+  ///
+  /// The rungs below each run a Task that lives for seconds (up to 180 for the measure rungs) and
+  /// owns `session`/`stream` for its duration. Their failure and completion paths used to call
+  /// `teardown()` unconditionally, which meant a rung the user had already moved on from would,
+  /// on its way out, stop the session belonging to whatever is running NOW. The superseded run
+  /// then reported a failure caused by nothing but its own lateness, and the current run died
+  /// with no explanation at all.
+  ///
+  /// Returns `true` if this call won the claim and performed the teardown, `false` if it was
+  /// superseded. A `false` return means shared state now belongs to someone else, so the caller
+  /// must clean up only the local objects it created itself.
+  ///
+  /// The compare and the bump happen under a single acquisition: checking first and tearing down
+  /// afterwards would be the same check-then-act race one level up.
+  @discardableResult
+  private func teardownIfCurrent(_ generation: Int) -> Bool {
+    stateLock.lock()
+    let isCurrent = teardownGeneration == generation
+    if isCurrent {
+      teardownGeneration += 1
+    }
+    stateLock.unlock()
+    guard isCurrent else { return false }
+    performTeardown()
+    return true
+  }
+
+  /// The stopping half of a teardown, with no generation bookkeeping. Never call this directly;
+  /// go through `teardown()` or `teardownIfCurrent(_:)` so the generation always moves with it.
+  private func performTeardown() {
     stream?.stop()
     session?.stop()
     frameToken = nil
     photoToken = nil
     stream = nil
     session = nil
-    // Synchronous, no `await` between lock and unlock — safe under the same rule as every other
-    // lock in this file. This runs on whichever thread called teardown() (bridge queue for
-    // stopStream(), the Task itself on startStream()'s own failure paths).
-    stateLock.lock()
-    teardownGeneration += 1
-    stateLock.unlock()
   }
 
   /// Reads `teardownGeneration` under `stateLock`. Always call this instead of touching the
@@ -689,6 +769,11 @@ final class WearablesBridge: RCTEventEmitter {
       return
     }
     teardown()
+    // This rung's Task owns `session`/`stream` for 12s or more. Without a generation, every
+    // `teardown()` below fires unconditionally on the way out — including the one on the SUCCESS
+    // path — so a rung the user has already moved on from stops whatever is running now. Captured
+    // after the teardown above so it names this run's own starting point.
+    let myGeneration = currentTeardownGeneration()
 
     Task {
       let audio = AVAudioSession.sharedInstance()
@@ -713,14 +798,20 @@ final class WearablesBridge: RCTEventEmitter {
         }
         guard created.state == .started else {
           let stalled = created.state.description
-          teardown()
+          // Up to 10s after this run began, so only tear down shared state if it is still ours;
+          // otherwise `created` is an orphan only this path holds a reference to.
+          if !teardownIfCurrent(myGeneration) {
+            created.stop()
+          }
           reject("wearables_session_not_started", "Stalled in \(stalled) after 10s", nil)
           return
         }
 
         // Meta step 1: the stream exists but is NOT started.
         guard let newStream = try created.addStream() else {
-          teardown()
+          if !teardownIfCurrent(myGeneration) {
+            created.stop()
+          }
           reject("wearables_stream_nil", "addStream() returned nil", nil)
           return
         }
@@ -764,8 +855,19 @@ final class WearablesBridge: RCTEventEmitter {
         // than just dropping the reference is the deterministic version of "release it after."
         await frameListenerToken.cancel()
 
-        teardown()
-        try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+        // The SUCCESS path needs the claim just as much as the failure paths: arriving here is
+        // ~12s after the rung began, and tearing down unconditionally is how a completed rung
+        // used to stop a newer run's session. Deactivating the audio session is part of the same
+        // claim — if this run no longer owns the world, the HFP session it would deactivate is
+        // one the CURRENT run activated for itself.
+        if teardownIfCurrent(myGeneration) {
+          try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+        } else {
+          // Superseded. `created`/`newStream` may have been published after the superseding
+          // teardown already swept, in which case nothing else will ever stop them.
+          newStream.stop()
+          created.stop()
+        }
 
         // No frame ever arriving is itself a fact worth reporting, not a rejection: a rejection
         // would throw away the two route snapshots along with it, and the numbers here are worth
@@ -783,8 +885,11 @@ final class WearablesBridge: RCTEventEmitter {
           "firstFrameSeconds": firstFrameSecondsValue,
         ])
       } catch {
-        teardown()
-        try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+        // `created`/`newStream` are scoped to the `do` block and unreachable here; whatever this
+        // run published was already stopped by whichever teardown superseded it.
+        if teardownIfCurrent(myGeneration) {
+          try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+        }
         reject("wearables_hfp_stream_check_failed",
                "checkHfpWithStream failed: \(Self.describe(error))", error)
       }
@@ -900,6 +1005,17 @@ final class WearablesBridge: RCTEventEmitter {
         let before = Self.routeSnapshot(audio)
 
         let capture = AVCaptureSession()
+        // Defaults to YES, which hands AVFoundation permission to reconfigure the app's shared
+        // AVAudioSession on its own — category, mode, and route — around startRunning() and the
+        // shutter. `activateHfpAndSettle()` just put that session on Bluetooth HFP deliberately,
+        // and this rung's entire question is whether opening the phone camera disturbs it.
+        //
+        // Leaving it YES does not just risk a disturbance; it makes the measurement unable to
+        // answer its own question. A route change would be this flag reconfiguring the session
+        // rather than the camera hardware contending for the microphone, and the verdict — which
+        // decides whether the capture feature gets built on this path at all — cannot tell those
+        // apart. Turning it off is what makes a disturbance, if one shows up, attributable.
+        capture.automaticallyConfiguresApplicationAudioSession = false
         capture.sessionPreset = .photo
         guard let device = AVCaptureDevice.default(for: .video),
               let input = try? AVCaptureDeviceInput(device: device) else {
@@ -1001,6 +1117,10 @@ final class WearablesBridge: RCTEventEmitter {
       return
     }
     teardown()
+    // `seconds` is clamped to 180 below, so this Task can own `session`/`stream` for three
+    // minutes. It is the longest-lived run in the file and therefore the most likely to outlive
+    // the screen that started it; its teardowns must not reach past their own run.
+    let myGeneration = currentTeardownGeneration()
 
     Task {
       do {
@@ -1024,7 +1144,11 @@ final class WearablesBridge: RCTEventEmitter {
         }
         guard created.state == .started else {
           let stalled = created.state.description
-          teardown()
+          // Up to 10s after this run began, so only tear down shared state if it is still ours;
+          // otherwise `created` is an orphan only this path holds a reference to.
+          if !teardownIfCurrent(myGeneration) {
+            created.stop()
+          }
           reject("wearables_session_not_started", "Stalled in \(stalled) after 10s", nil)
           return
         }
@@ -1034,7 +1158,9 @@ final class WearablesBridge: RCTEventEmitter {
         guard let newStream = try created.addStream(
           config: StreamConfiguration(videoCodec: .raw, resolution: .high, frameRate: 30)
         ) else {
-          teardown()
+          if !teardownIfCurrent(myGeneration) {
+            created.stop()
+          }
           reject("wearables_stream_nil", "addStream() returned nil", nil)
           return
         }
@@ -1056,7 +1182,12 @@ final class WearablesBridge: RCTEventEmitter {
         }
         let lastArrival = counter.lastTick()
 
-        teardown()
+        // Up to three minutes after this rung began — the longest window in the file for the
+        // screen to have moved on to something else.
+        if !teardownIfCurrent(myGeneration) {
+          newStream.stop()
+          created.stop()
+        }
 
         resolve([
           "secondsObserved": total,
@@ -1068,7 +1199,7 @@ final class WearablesBridge: RCTEventEmitter {
           "audioSessionUsed": false,
         ])
       } catch {
-        teardown()
+        teardownIfCurrent(myGeneration)
         reject("wearables_stream_measure_failed",
                "measureStreamWithoutAudio failed: \(Self.describe(error))", error)
       }
@@ -1103,6 +1234,9 @@ extension WearablesBridge {
       return
     }
     teardown()
+    // Same clamp and the same three-minute ceiling as the no-audio rung, plus an activated
+    // AVAudioSession this run is responsible for deactivating.
+    let myGeneration = currentTeardownGeneration()
 
     Task {
       let audio = AVAudioSession.sharedInstance()
@@ -1127,7 +1261,11 @@ extension WearablesBridge {
         }
         guard created.state == .started else {
           let stalled = created.state.description
-          teardown()
+          // Up to 10s after this run began, so only tear down shared state if it is still ours;
+          // otherwise `created` is an orphan only this path holds a reference to.
+          if !teardownIfCurrent(myGeneration) {
+            created.stop()
+          }
           reject("wearables_session_not_started", "Stalled in \(stalled) after 10s", nil)
           return
         }
@@ -1135,7 +1273,9 @@ extension WearablesBridge {
         guard let newStream = try created.addStream(
           config: StreamConfiguration(videoCodec: .raw, resolution: .high, frameRate: 30)
         ) else {
-          teardown()
+          if !teardownIfCurrent(myGeneration) {
+            created.stop()
+          }
           reject("wearables_stream_nil", "addStream() returned nil", nil)
           return
         }
@@ -1150,8 +1290,12 @@ extension WearablesBridge {
         let input = audio.currentRoute.inputs.first
         // If the route picked the glasses anyway, this measures HFP again and the answer is void.
         guard input?.portType != .bluetoothHFP else {
-          teardown()
-          try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+          if teardownIfCurrent(myGeneration) {
+            try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+          } else {
+            newStream.stop()
+            created.stop()
+          }
           reject("wearables_route_is_glasses",
                  "The audio route selected the glasses (\(input?.portName ?? "unknown")) despite "
                    + "not requesting HFP, so this would re-measure HFP rather than the phone mic.",
@@ -1167,8 +1311,12 @@ extension WearablesBridge {
           AVNumberOfChannelsKey: 1,
         ])
         guard recorder.record() else {
-          teardown()
-          try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+          if teardownIfCurrent(myGeneration) {
+            try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+          } else {
+            newStream.stop()
+            created.stop()
+          }
           reject("wearables_recorder_not_started", "AVAudioRecorder.record() returned false", nil)
           return
         }
@@ -1203,8 +1351,14 @@ extension WearablesBridge {
         let finalInput = audio.currentRoute.inputs.first
         let finalSampleRate = audio.sampleRate
 
-        teardown()
-        try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+        // Same claim as every other exit from this rung, success included — see the no-audio
+        // rung and checkHfpWithStream for why the audio deactivation rides on it.
+        if teardownIfCurrent(myGeneration) {
+          try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+        } else {
+          newStream.stop()
+          created.stop()
+        }
 
         resolve([
           "secondsObserved": total,
@@ -1222,8 +1376,9 @@ extension WearablesBridge {
           "audioFileUri": url.absoluteString,
         ])
       } catch {
-        teardown()
-        try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+        if teardownIfCurrent(myGeneration) {
+          try? audio.setActive(false, options: .notifyOthersOnDeactivation)
+        }
         reject("wearables_phone_audio_measure_failed",
                "measureStreamWithPhoneAudio failed: \(Self.describe(error))", error)
       }
