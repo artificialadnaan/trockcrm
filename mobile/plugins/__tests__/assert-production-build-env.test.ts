@@ -202,18 +202,36 @@ describe("assertProductionBuildEnv", () => {
   });
 
   it.each(["https://[100:0:0:1::1]", "https://[100:0:1::1]", "https://[100:1::1]"])(
-    "GUARD: accepts %s, which is outside the /64 discard prefix",
+    "rejects %s too — outside the /64 discard prefix but still inside reserved 0100::/8",
     (url) => {
-      // The discard prefix is `100::/64` — SIXTY-FOUR bits, meaning the first FOUR hextets must all
-      // be `100:0:0:0`. A `^100:` test matches only the first sixteen, so it swallowed the whole of
-      // `100::/16` and refused globally routable addresses. My previous comment claimed this was
-      // matched "on the hextet boundary", which was true of one hextet and wrong about the prefix.
+      // THIS TEST PREVIOUSLY ASSERTED THE OPPOSITE, and was wrong in a way worth recording: it
+      // called these "globally routable" and required them to be ACCEPTED. They are not routable.
+      // `100::/64` is the discard prefix, but the enclosing `0100::/8` is IANA-reserved in full and
+      // has never been allocated for global unicast, so a phone in the field cannot reach any of it.
+      //
+      // The sequence was: a `^100:` test matched sixteen bits and over-rejected; correcting it to
+      // four hextets under-rejected; and this test then pinned the under-rejection in place. A test
+      // that encodes the bug is worse than no test, because it makes the next reader defend it.
+      //
+      // Over-rejecting failed loudly on the build machine. Under-rejecting ships an app that cannot
+      // reach its API, which is exactly what this guard exists to prevent.
+      expect(() => assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: url }))).toThrow(
+        /private host/
+      );
+    }
+  );
+
+  it.each(["https://[200::1]", "https://[2600:1f18::1]"])(
+    "still ACCEPTS %s, so the /8 rejection did not become another over-rejection",
+    (url) => {
+      // The boundary that matters: `0100::/8` is the top octet 0x01 alone. `200::` and a real
+      // globally-allocated `2600::/12` address sit outside it and must still build.
       expect(() => assertProductionBuildEnv(onBuilder({ EXPO_PUBLIC_API_BASE_URL: url }))).not.toThrow();
     }
   );
 
   it.each(["https://[100::1]", "https://[100::1:2:3:4]", "https://[100:0:0:0:1:2:3:4]"])(
-    "still rejects %s, which IS inside the /64 discard prefix",
+    "still rejects %s, the discard prefix itself",
     (url) => {
       // The narrowing must not become a hole. Note the third spelling normalises to `100::1:2:3:4`,
       // so the two forms are the same address written differently — which is exactly why this is

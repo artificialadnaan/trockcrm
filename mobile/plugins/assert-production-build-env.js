@@ -99,21 +99,25 @@ function ipv6IsGlobal(host) {
   // TCP semantics at all — nothing can listen on it — so an https URL pointed there is unusable by
   // construction rather than merely unreachable from the field.
   if (/^ff/.test(h)) return false;
-  // 100::/64 — the DISCARD-ONLY prefix. Packets to it are dropped by design (it exists to blackhole
-  // traffic), so it is not merely unrouted, it is guaranteed to go nowhere.
+  // 0100::/8 — IETF-RESERVED, the whole block. `100::/64` inside it is the discard-only prefix
+  // (packets dropped by design), but the remainder is reserved by IANA too and has never been
+  // allocated for global unicast: a phone in the field cannot route to any of it.
   //
-  // SIXTY-FOUR BITS, which means the first FOUR hextets must all be `100:0:0:0`. An earlier `^100:`
-  // test matched only the first SIXTEEN and so swallowed the whole of `100::/16`, refusing globally
-  // routable addresses like `100:0:0:1::1`. The comment then claimed a "hextet boundary" match, which
-  // was true of one hextet and wrong about the prefix — the same shape of error as the `2001:db8` one
-  // it was modelled on, made one line below it.
+  // THE WHOLE /8, not the /64. A previous revision narrowed this to the four hextets `100:0:0:0`
+  // after correctly finding that `^100:` matched only sixteen bits — but it then let addresses like
+  // `100:0:0:1::1` through, and the comment justifying that called them "globally routable". They
+  // are not. Correcting a too-wide test by making it too narrow permitted exactly the unusable
+  // production build this guard exists to stop, which is worse than the over-rejection it replaced:
+  // an over-rejection fails loudly on the build machine, this ships an app that cannot reach its API.
   //
   // Decided by EXPANDING the address rather than matching its text, because the text is not stable:
   // `100:0:0:0:1:2:3:4` and `100::1:2:3:4` are the same address, and `new URL()` returns the second.
   // Any prefix test on the compressed form has to reason about how many hextets `::` stands for,
   // which is exactly the arithmetic `expandIpv6` already does correctly.
+  //
+  // Eight bits means the TOP OCTET of the first hextet alone: 0x0100-0x01ff.
   const hextets = expandIpv6(h);
-  if (hextets && hextets[0] === 0x100 && hextets[1] === 0 && hextets[2] === 0 && hextets[3] === 0) {
+  if (hextets && (hextets[0] & 0xff00) === 0x0100) {
     return false;
   }
   return true;
