@@ -92,6 +92,17 @@ final class WearablesBridge: RCTEventEmitter {
   /// before `stateLock`, never after.
   private let audioLock = NSLock()
 
+  /// Bumped every time `forceReleaseAllAudioOwnership()` wipes the count. A rung captures the epoch
+  /// it acquired under and releases against it, so a release invalidated by a reset cannot consume an
+  /// acquisition that came AFTER it.
+  ///
+  /// An anonymous count alone was not enough, and the previous revision's commit message asserted the
+  /// opposite as fact: it said a superseded rung's late release "finds no owners and no-ops". That is
+  /// only true while nobody else has acquired. If a newer HFP or phone-audio rung takes ownership
+  /// before the old task reaches its `defer`, the stale release decrements the NEWER count to zero and
+  /// deactivates the session that rung is mid-measurement on. Guarded by `stateLock`.
+  private var audioEpoch = 0
+
   /// A deactivation that was attempted and FAILED, still owed. Distinct from an owner count on
   /// purpose — see `deactivateHoldingAudioLock()`. Guarded by `stateLock`.
   private var audioDeactivationOwed = false
@@ -135,12 +146,12 @@ final class WearablesBridge: RCTEventEmitter {
 
   /// Bring up the HFP microphone route and wait for it to stabilize. Meta's guidance is explicit
   /// that the route "needs time to stabilize"; reading it immediately reports the built-in mic.
-  private func activateHfpAndSettle() async throws -> AVAudioSession {
+  private func activateHfpAndSettle() async throws -> (session: AVAudioSession, audioEpoch: Int) {
     let session = AVAudioSession.sharedInstance()
     // Activation and acquisition are ONE transition — see `withAudioSessionActivation`. Registered
     // here, not after the settle below: the session is active from this point onward, and the
-    // caller's `defer { releaseAudioSession() }` is what hands it back on every path.
-    try withAudioSessionActivation {
+    // caller's `defer { releaseAudioSession(epoch:) }` is what hands it back on every path.
+    let epoch = try withAudioSessionActivation {
       try session.setCategory(.playAndRecord, mode: .default, options: [.allowBluetoothHFP])
       try session.setActive(true)
     }
@@ -149,7 +160,7 @@ final class WearablesBridge: RCTEventEmitter {
           Date() < deadline {
       try? await Task.sleep(nanoseconds: 100_000_000)
     }
-    return session
+    return (session, epoch)
   }
 
   // MARK: - 1. Configure
@@ -655,8 +666,13 @@ final class WearablesBridge: RCTEventEmitter {
     // comparison that rung exists to make, and the one the shipped design rests on.
     //
     // `teardownIfCurrent` must NOT do this: there the caller is a late run cleaning up after itself,
-    // and the audio it would deactivate belongs to whatever superseded it. The old rung's eventual
-    // `releaseAudioSession()` finds no owners and no-ops, which is why forcing the count here is safe.
+    // and the audio it would deactivate belongs to whatever superseded it.
+    //
+    // AN EARLIER REVISION CLAIMED forcing the count was safe because "the old rung's eventual release
+    // finds no owners and no-ops". That is only true while nobody else has acquired. If a newer rung
+    // takes ownership before the old task reaches its `defer`, the stale release decrements the NEWER
+    // count to zero and deactivates a session that rung is mid-measurement on. The epoch bumped below
+    // is what actually makes this safe: a release carrying a superseded epoch is refused outright.
     if generation == nil {
         forceReleaseAllAudioOwnership()
     }
@@ -690,6 +706,9 @@ final class WearablesBridge: RCTEventEmitter {
     let hadOwners = audioSessionOwners > 0
     let owed = audioDeactivationOwed
     audioSessionOwners = 0
+    // Invalidates every outstanding share, so the deferred releases that still refer to them cannot
+    // consume an acquisition made after this reset.
+    audioEpoch += 1
     stateLock.unlock()
     guard hadOwners || owed else { return }
     deactivateHoldingAudioLock()
@@ -767,7 +786,9 @@ final class WearablesBridge: RCTEventEmitter {
   ///
   /// `audioLock` is always taken BEFORE `stateLock`, never the other way round, so the two cannot
   /// deadlock against each other.
-  private func withAudioSessionActivation(_ activate: () throws -> Void) throws {
+  /// Returns the epoch this share was taken under — pass it back to `releaseAudioSession(epoch:)`.
+  @discardableResult
+  private func withAudioSessionActivation(_ activate: () throws -> Void) throws -> Int {
     audioLock.lock()
     defer { audioLock.unlock() }
     try activate()
@@ -775,7 +796,9 @@ final class WearablesBridge: RCTEventEmitter {
     audioSessionOwners += 1
     // Somebody wants it active again, so any deactivation still owed from before is moot.
     audioDeactivationOwed = false
+    let epoch = audioEpoch
     stateLock.unlock()
+    return epoch
   }
 
   /// Give up this rung's share, deactivating only when the last one goes.
@@ -788,11 +811,18 @@ final class WearablesBridge: RCTEventEmitter {
   /// while audio I/O is still running — an `AVAudioRecorder` mid-measurement is exactly that — and
   /// swallowing it while clearing the ownership meant nothing would ever try again, so a
   /// `.playAndRecord` session stayed live and invalidated the next no-audio measurement.
-  private func releaseAudioSession() {
+  private func releaseAudioSession(epoch: Int) {
     audioLock.lock()
     defer { audioLock.unlock() }
 
     stateLock.lock()
+    // OUR SHARE WAS ALREADY WIPED. A user-initiated sweep zeroed the count while this rung was still
+    // running; the share this release refers to no longer exists, and any owners present now belong
+    // to a rung that started afterwards. Decrementing here would deactivate THEIR session.
+    guard epoch == audioEpoch else {
+      stateLock.unlock()
+      return
+    }
     guard audioSessionOwners > 0 else {
       let owed = audioDeactivationOwed
       stateLock.unlock()
@@ -1114,8 +1144,8 @@ final class WearablesBridge: RCTEventEmitter {
         publicationTicket = publish(stream: newStream, session: nil)
 
         // Meta step 2: HFP comes up while the stream is still stopped.
-        _ = try await activateHfpAndSettle()
-        defer { releaseAudioSession() }
+        let activated = try await activateHfpAndSettle()
+        defer { releaseAudioSession(epoch: activated.audioEpoch) }
         let before = Self.routeSnapshot(audio)
 
         // Subscribe BEFORE start(). Reading the route undisturbed proves nothing on its own — a
@@ -1301,8 +1331,8 @@ final class WearablesBridge: RCTEventEmitter {
           return
         }
 
-        _ = try await activateHfpAndSettle()
-        defer { releaseAudioSession() }
+        let activated = try await activateHfpAndSettle()
+        defer { releaseAudioSession(epoch: activated.audioEpoch) }
         let before = Self.routeSnapshot(audio)
 
         let capture = AVCaptureSession()
@@ -1639,11 +1669,11 @@ extension WearablesBridge {
 
         // NOTE the absent option: `.playAndRecord` WITHOUT `.allowBluetoothHFP`. That single
         // omission is the experiment — it is what keeps the glasses out of hands-free mode.
-        try withAudioSessionActivation {
+        let audioEpochHeld = try withAudioSessionActivation {
           try audio.setCategory(.playAndRecord, mode: .default, options: [])
           try audio.setActive(true)
         }
-        defer { releaseAudioSession() }
+        defer { releaseAudioSession(epoch: audioEpochHeld) }
         try? await Task.sleep(nanoseconds: 500_000_000)
 
         let input = audio.currentRoute.inputs.first
