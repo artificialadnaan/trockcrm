@@ -11,11 +11,14 @@ import { and, eq, isNull, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
 import {
+  deals,
   estimateDocumentParseRuns,
   estimateExtractions,
   estimateSourceDocuments,
   files,
+  offices,
   projects,
+  users,
 } from "@trock-crm/shared/schema";
 import type {
   WalkthroughIngressPayload,
@@ -500,6 +503,47 @@ export function detectWalkthroughContactSheetArtifactDrift(
  * limit — it is what keeps a nonsense payload from being ingested at all.
  */
 export const MAX_WALKTHROUGH_SCOPE_ROWS = 1000;
+
+/**
+ * The transcript quote grounding ONE scope row, in UTF-8 BYTES rather than characters.
+ *
+ * Bounded for the same reason `rawLabel` is — an unbounded field makes the payload's own size
+ * unbounded, and the sender learns that only as a transport failure it cannot act on. Measured in BYTES
+ * because a character cap does not bound size: 4000 CJK characters are ~12 KB, so a character-capped
+ * contract still admitted payloads three times over any byte ceiling derived from it.
+ *
+ * Generous on purpose: this is a spoken clause, not a document, and truncating evidence is worse than
+ * refusing it (the clause that would be cut is usually the qualifying one — same argument as rawLabel).
+ * It is NOT bounded by a column: `evidenceText` reaches `estimate_line_items.notes`, which is `text`.
+ */
+export const MAX_WALKTHROUGH_EVIDENCE_TEXT_BYTES = 4000;
+
+/**
+ * THE ONE SIZE LIMIT, read by both the contract and the transport.
+ *
+ * `scope-ingest-routes.ts` passes this straight to `express.raw({ limit })`, so the bytes the door
+ * accepts and the bytes this contract promises are the same number by construction rather than by
+ * anyone keeping two literals in step. That mattered here: the door shipped with a 1 MiB literal while
+ * this validator permitted 1000 rows with an UNBOUNDED `evidenceText`, so a structurally valid export
+ * was refused before it was ever validated — and, because Express's `entity.too.large` was unhandled,
+ * refused as a generic 500 the sender could do nothing with.
+ *
+ * 8 MiB comfortably clears the contract's realistic worst case (1000 rows × ~4.3 KB of bounded text
+ * ≈ 4.3 MB of ASCII) with room for multi-byte transcripts, and is small enough that the pre-signature
+ * buffer an unauthenticated caller can force stays bounded.
+ */
+export const MAX_WALKTHROUGH_PAYLOAD_BYTES = 8 * 1024 * 1024;
+
+/**
+ * What the DOOR accepts, as opposed to what the CONTRACT promises.
+ *
+ * Deliberately larger than the contract limit. The contract is measured on the CANONICAL serialization
+ * (`JSON.stringify` of the parsed body), while the transport sees the sender's actual bytes — which may
+ * be pretty-printed. Sizing the door to the contract exactly would 413 a contract-valid payload purely
+ * for its whitespace, which is the same class of mismatch this pair exists to remove. The headroom is
+ * what makes "valid by the contract" imply "accepted by the door" for any sane formatting.
+ */
+export const MAX_WALKTHROUGH_TRANSPORT_BYTES = 2 * MAX_WALKTHROUGH_PAYLOAD_BYTES;
 
 /**
  * Rows per INSERT. Each row binds 15 parameters and Postgres's protocol caps a single statement at
@@ -1218,6 +1262,28 @@ export async function insertWalkthroughExtractions({
 const LONE_SURROGATE_PATTERN =
   /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
+/**
+ * `evidenceText`, bounded. Delegates to `requireString` first so the NUL / lone-surrogate refusals stay
+ * in ONE place — a private copy of those checks is exactly how one field ends up storable and another
+ * not. The length check then mirrors `rawLabel`'s: refuse now, with the number, rather than let an
+ * unbounded field decide the payload's size and surface as a transport error the sender cannot read.
+ */
+function requireEvidenceText(value: unknown, field: string): string {
+  const text = requireString(value, field);
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes > MAX_WALKTHROUGH_EVIDENCE_TEXT_BYTES) {
+    throw new AppError(
+      400,
+      `${field} is ${bytes} bytes, over the ${MAX_WALKTHROUGH_EVIDENCE_TEXT_BYTES}-byte ` +
+        `limit (measured in UTF-8 bytes, not characters, so the bound holds in every script). ` +
+        `evidenceText is the spoken clause this row is grounded in, not a document; an export ` +
+        `this long is a segmentation bug upstream. It is not truncated, because the clause that would ` +
+        `be cut is usually the qualifying one.`
+    );
+  }
+  return text;
+}
+
 function requireString(value: unknown, field: string): string {
   if (typeof value !== "string") {
     throw new AppError(400, `${field} must be a string`);
@@ -1637,7 +1703,7 @@ function validateScopeRow(value: unknown, index: number): WalkthroughScopeRow {
     quantity,
     unit,
     confidence,
-    evidenceText: requireString(row.evidenceText, `${at}.evidenceText`),
+    evidenceText: requireEvidenceText(row.evidenceText, `${at}.evidenceText`),
     evidence: {
       clipId: requireNonEmptyString(evidence.clipId, `${at}.evidence.clipId`),
       timelineMs,
@@ -1656,6 +1722,27 @@ function validateScopeRow(value: unknown, index: number): WalkthroughScopeRow {
  */
 export function validateWalkthroughIngressPayload(input: unknown): WalkthroughIngressPayload {
   const raw = requireObject(input, "walkthrough ingress payload");
+
+  // THE AGGREGATE BYTE CEILING, checked HERE and not only at the door.
+  //
+  // Per-field caps cannot imply a total: this contract permits 1000 rows, and the fields it bounds are
+  // bounded in CHARACTERS against columns, not in bytes against a payload. So the only honest way for
+  // "valid by the contract" to imply "small enough to send" is for the contract to state the byte
+  // ceiling itself. Without this, a sender obeying every documented field rule could still be refused
+  // by the transport with a 413 — a rejection no field-level message could explain.
+  //
+  // Measured on the CANONICAL serialization so the number does not move with the sender's formatting.
+  // Cheap: the body has already been parsed, and the transport bounded it before that.
+  const canonicalBytes = Buffer.byteLength(JSON.stringify(raw), "utf8");
+  if (canonicalBytes > MAX_WALKTHROUGH_PAYLOAD_BYTES) {
+    throw new AppError(
+      400,
+      `Walkthrough payload is ${canonicalBytes} bytes, over the ${MAX_WALKTHROUGH_PAYLOAD_BYTES}-byte ` +
+        `limit. Split the export by walkthrough rather than trimming rows — a partial walkthrough is ` +
+        `worse than two complete ones, because the scope a crew spoke once would land split across ` +
+        `runs with no record that anything was dropped.`
+    );
+  }
 
   const rowsValue = raw.rows;
   if (!Array.isArray(rowsValue)) {
@@ -1899,9 +1986,25 @@ export async function ingestWalkthrough({
   tenantDb,
   payload: rawPayload,
   contactSheetStore,
+  officeId,
 }: {
   tenantDb: TenantDb;
   payload: WalkthroughIngressPayload;
+  /**
+   * The office whose schema `tenantDb` is bound to, held ACTIVE for the duration of the write.
+   *
+   * A PARAMETER rather than something this function derives, because it genuinely cannot: the session
+   * carries a `search_path`, not an office id, and recovering one from the other means parsing
+   * `office_<slug>` out of `current_schema()` — encoding a naming convention in the one place that has
+   * no business knowing it, and one that would silently mis-answer in any schema not named that way.
+   * The caller resolved the office to get here; it is the only party that knows the id.
+   *
+   * Optional ONLY so a caller that has already pinned the office for the life of its request need not
+   * restate it. The machine door supplies it, and that is the caller that needs it: it resolves the
+   * office from an unauthenticated-by-person payload, so nothing else about the request holds that
+   * office still.
+   */
+  officeId?: string;
   /** R23/R25. Object storage, injected — see `WalkthroughContactSheetStore` for why it is a required
    *  port rather than an import or an optional dependency. */
   contactSheetStore: WalkthroughContactSheetStore;
@@ -1956,6 +2059,105 @@ export async function ingestWalkthrough({
         payload.walkthroughId
       )}, 0))`
     );
+
+    // DEAL AUTHORIZATION, RE-READ AND LOCKED INSIDE THIS TRANSACTION.
+    //
+    // Every caller checks the deal before calling in — `scope-ingest-routes.ts` proves it is active and
+    // belongs to the office. That check is a separate statement in a separate transaction, so it is a
+    // TOCTOU gate: a deal archived in the window between it and these writes leaves a file, a source
+    // document, a parse run and a full set of extractions filed under a deal no CRM screen will ever
+    // show — and the sender is told 201, so it records the export as delivered and never retries.
+    //
+    // An earlier revision of the route's comment claimed the ingress already re-read the deal here. It
+    // did not; there was no `deals` lookup in this function at all. That claim was the worse half of the
+    // bug, because it told the next reader a hazard was handled — the same way the project check's own
+    // comment once did. It is true now.
+    //
+    // `FOR SHARE`, for exactly the reason the project lock below uses it: `is_active` is a NON-KEY
+    // column, so `FOR KEY SHARE` permits the archiving UPDATE — permitting non-key updates is what KEY
+    // SHARE is for — and would read like a lock while being none. `FOR UPDATE` would work but is
+    // stronger than the property needs: it would serialize two unrelated walkthroughs onto the same
+    // deal, which is the ordinary case here, whereas `FOR SHARE` lockers do not conflict with each
+    // other. Both orderings are then safe: an archive that gets there first is visible to this
+    // statement's own snapshot at READ COMMITTED and the request is refused; an archive that arrives
+    // after blocks until this transaction ends, so the writes it authorized were authorized when they
+    // happened.
+    //
+    // AFTER the advisory lock, never before: that lock is documented as the first statement in this
+    // transaction, and the consistent order (advisory -> deal -> project) is also what keeps two
+    // concurrent ingresses from deadlocking against each other.
+    const [deal] = await tx
+      .select({ id: deals.id })
+      .from(deals)
+      .where(and(eq(deals.id, payload.dealId), eq(deals.isActive, true)))
+      .limit(1)
+      .for("share");
+
+    if (!deal) {
+      throw new AppError(
+        404,
+        `Deal ${payload.dealId} is not an active deal in this office. A walkthrough is filed against ` +
+          `the deal, so ingesting one for an archived or unknown deal would write a file, a document, ` +
+          `a parse run and every extraction under a record no CRM screen shows.`
+      );
+    }
+
+    // THE OFFICE, HELD ACTIVE ACROSS THE WRITE. Deactivating an office is meant to take effect at
+    // once — `resolveOfficeBySlug` and `tenantMiddleware` both refuse an inactive one at admission —
+    // but nothing held it still afterwards, so an office deactivated between that lookup and these
+    // writes still received a file, a document, a parse run and every extraction, and the sender was
+    // told 201. The tenant schema is bound at connection setup and does not re-check itself.
+    //
+    // Same `FOR SHARE` reasoning as the deal and the actor: `is_active` is a non-key column.
+    if (officeId !== undefined) {
+      const [office] = await tx
+        .select({ id: offices.id })
+        .from(offices)
+        .where(and(eq(offices.id, officeId), eq(offices.isActive, true)))
+        .limit(1)
+        .for("share");
+
+      if (!office) {
+        throw new AppError(
+          404,
+          `Office ${officeId} is not active. Its schema is still reachable on this connection — the ` +
+            `search_path is bound once, at setup — so without this check the whole chain would be ` +
+            `written into an office the CRM has switched off.`
+        );
+      }
+    }
+
+    // THE ACTOR, RE-READ AND LOCKED TOO — the same window as the deal, one row over.
+    //
+    // `payload.userId` is stamped on `files.uploadedBy` and the source document's uploader, so it is
+    // not decoration: it is whose name appears on this work. Callers prove the user before calling in,
+    // and that check is a separate statement in a separate transaction — so an administrator
+    // deactivating the account in between left the request writing the whole chain under an actor the
+    // system had just revoked, and answering 201.
+    //
+    // `users` is a PUBLIC table, not a tenant one, so this reads across the office boundary by design;
+    // the office session runs with `search_path = office_<slug>,public`. Deliberately NOT scoped to
+    // this deal's office: the field surface is office-agnostic and a walkthrough captured by someone
+    // whose home office differs from the deal's is an ordinary supported case. The question is "is
+    // this a live account", not "is this one of ours".
+    //
+    // `FOR SHARE` for the same reason as the deal: `is_active` is a NON-KEY column, so `FOR KEY SHARE`
+    // would permit the deactivating UPDATE — permitting non-key updates is what that mode is for.
+    const [actor] = await tx
+      .select({ id: users.id })
+      .from(users)
+      .where(and(eq(users.id, payload.userId), eq(users.isActive, true)))
+      .limit(1)
+      .for("share");
+
+    if (!actor) {
+      throw new AppError(
+        404,
+        `User ${payload.userId} is not an active user. This id is written to files.uploaded_by and ` +
+          `to the source document's uploader, so filing a walkthrough under a deactivated or unknown ` +
+          `account would put a revoked name on a client-facing estimate's source material.`
+      );
+    }
 
     // PROJECT AUTHORIZATION, and it belongs HERE rather than in the validator because it is a database
     // question, not a shape question.
