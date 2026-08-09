@@ -546,6 +546,30 @@ export async function runEstimateGeneration(
 
       const topMatch = matches[0];
       if (!topMatch) {
+        // CLAIM FIRST, ANNOUNCE SECOND, and pin the status to the snapshot's — the same shape the
+        // quantityless claim uses, for the same reason and one that bites harder here.
+        //
+        // Matching takes real time. An estimator clearing the quantity during it writes
+        // `needs_quantity`; this write used to be unconditional, so it stamped `unmatched` straight
+        // over that edit. The row is then stranded for good: `unmatched` is outside the worker's
+        // `pending` candidate filter, so no later run revisits it, AND `unmatched` is absent from
+        // the usable-quantity requeue CASE, so supplying the quantity does not bring it back either.
+        // Both exits from this room are closed by one lost update.
+        //
+        // `stillPriceable` guards the persistence path further down, but it is only reached when
+        // there IS a recommendation to persist — these two unmatched exits return before it.
+        const claimed = await tenantDb
+          .update(estimateExtractions)
+          .set({ status: "unmatched" })
+          .where(
+            and(
+              eq(estimateExtractions.id, extraction.id),
+              sql`${estimateExtractions.status} = ${extraction.status}`
+            )
+          )
+          .returning({ id: estimateExtractions.id });
+        if (claimed.length === 0) continue;
+
         await tenantDb.insert(estimateReviewEvents).values({
           dealId: extraction.dealId,
           projectId: extraction.projectId,
@@ -554,10 +578,6 @@ export async function runEstimateGeneration(
           eventType: "unmatched",
           afterJson: { normalizedLabel: extraction.normalizedLabel },
         });
-        await tenantDb
-          .update(estimateExtractions)
-          .set({ status: "unmatched" })
-          .where(eq(estimateExtractions.id, extraction.id));
         continue;
       }
 
@@ -637,10 +657,17 @@ export async function runEstimateGeneration(
           dependencySupportCount: Number.isFinite(dependencySupportCount) ? dependencySupportCount : 0,
         })
       ) {
+        // Same pin as the no-match exit above: this one is reached later still, so it has had even
+        // longer for a reviewer's edit to land underneath it.
         await tenantDb
           .update(estimateExtractions)
           .set({ status: "unmatched" })
-          .where(eq(estimateExtractions.id, extraction.id));
+          .where(
+            and(
+              eq(estimateExtractions.id, extraction.id),
+              sql`${estimateExtractions.status} = ${extraction.status}`
+            )
+          );
         continue;
       }
 
