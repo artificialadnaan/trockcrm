@@ -407,22 +407,24 @@ final class WearablesBridge: RCTEventEmitter {
           )
           return
         }
-        // Checkpoint 1: nothing has been created yet, so a mismatch here needs no teardown —
-        // just stop before creating anything the UI no longer expects.
-        guard currentTeardownGeneration() == myGeneration else {
+        // Checkpoint 1, now atomic with the creation it guards — see `createAndPublishSession`.
+        // A separate check followed by a separate create leaves a gap in which a sweep lands and
+        // this superseded task still takes the device.
+        //
+        // `createdRef` is held outside the `do` so the `catch` can reach it: an un-stopped
+        // DeviceSession is not a quiet leak — only one may run on a device at a time, so it blocks
+        // every later createSession with the `sessionAlreadyExists` failure this file already calls
+        // "our own litter".
+        guard let opened = try createAndPublishSession(ifGeneration: myGeneration, {
+          try sdk.createSession(deviceSelector: selector)
+        }) else {
           reject("wearables_stream_superseded",
                  "startStream was superseded by stop() while waiting for a device", nil)
           return
         }
-        let created = try sdk.createSession(deviceSelector: selector)
-        // Held outside the `do` as well, so the `catch` can still reach it. A rung publishes to
-        // `session`/`stream` with no generation check, so it can publish AFTER a newer run has
-        // already swept — at which point the sweeper never saw these objects and nothing but this
-        // path will ever stop them. An un-stopped DeviceSession is not a quiet leak: only one
-        // session may run on a device at a time, so it blocks every later createSession with the
-        // `sessionAlreadyExists` failure this file already calls "our own litter".
+        let created = opened.session
         createdRef = created
-        publicationTicket = publish(stream: nil, session: created)
+        publicationTicket = opened.ticket
         try created.start()
 
         // start() only moves the session to .starting. The transition to .started happens
@@ -642,9 +644,22 @@ final class WearablesBridge: RCTEventEmitter {
     photoToken = nil
     stateLock.unlock()
 
-    // The audio session is deliberately NOT touched here — see `releaseAudioSession()`. A sweep is
-    // about SDK objects; audio ownership belongs to the rung that acquired it, because a sweep by
-    // one rung must not hand back a session another rung is still using.
+    // AUDIO: cleared by an UNCONDITIONAL sweep, left alone by a claimed one. The distinction is the
+    // whole point.
+    //
+    // `teardown()` is only ever called by `stopStream()` or a rung's own precondition — i.e. the user
+    // has just said "stop that and start this". Superseding IS the intent, so the world must be reset
+    // including the audio route. Leaving it to the old task's `defer` meant `measureStreamWithoutAudio`
+    // could run its entire 1-180s window under an HFP or phone-audio session belonging to a rung that
+    // had not finished exiting, while reporting `audioSessionUsed: false` — corrupting the one
+    // comparison that rung exists to make, and the one the shipped design rests on.
+    //
+    // `teardownIfCurrent` must NOT do this: there the caller is a late run cleaning up after itself,
+    // and the audio it would deactivate belongs to whatever superseded it. The old rung's eventual
+    // `releaseAudioSession()` finds no owners and no-ops, which is why forcing the count here is safe.
+    if generation == nil {
+        forceReleaseAllAudioOwnership()
+    }
     //
     // Serialised so that when this returns, the stopping is genuinely finished and the next
     // `createSession()` cannot race it.
@@ -664,6 +679,47 @@ final class WearablesBridge: RCTEventEmitter {
     if let newSession { session = newSession }
     stateLock.unlock()
     return ticket
+  }
+
+  /// Drop every audio share and deactivate, for a user-initiated reset. Distinct from
+  /// `releaseAudioSession()`, which gives up ONE share.
+  private func forceReleaseAllAudioOwnership() {
+    audioLock.lock()
+    defer { audioLock.unlock() }
+    stateLock.lock()
+    let hadOwners = audioSessionOwners > 0
+    let owed = audioDeactivationOwed
+    audioSessionOwners = 0
+    stateLock.unlock()
+    guard hadOwners || owed else { return }
+    deactivateHoldingAudioLock()
+  }
+
+  /// Claim the generation, create the device session and publish it as ONE serialised step.
+  ///
+  /// Checking the generation and then creating is check-then-act, and the gap is not academic: only
+  /// one session may run on a device at a time, so a sweep landing in it lets a SUPERSEDED task take
+  /// the device and hold it for its whole 1-180s window, while the newer rung — the one the user is
+  /// actually looking at — fails with `sessionAlreadyExists`. Serialised on `teardownLock` so a
+  /// concurrent precondition sweep cannot interleave, which is the same lock that already makes a
+  /// sweep's stops finish before the next creation.
+  ///
+  /// Returns nil when superseded, having created nothing.
+  private func createAndPublishSession(
+    ifGeneration generation: Int,
+    _ make: () throws -> DeviceSession?
+  ) rethrows -> (session: DeviceSession, ticket: Int)? {
+    teardownLock.lock()
+    defer { teardownLock.unlock() }
+
+    stateLock.lock()
+    let current = teardownGeneration
+    stateLock.unlock()
+    guard current == generation else { return nil }
+
+    guard let created = try make() else { return nil }
+    let ticket = publish(stream: nil, session: created)
+    return (created, ticket)
   }
 
   /// Stop objects this run created that no sweep will ever see, under the SAME serialisation a sweep
@@ -1010,27 +1066,24 @@ final class WearablesBridge: RCTEventEmitter {
           reject("wearables_no_active_device", "No active device after 8s. Run rung 4b.", nil)
           return
         }
-        // Checkpoint BEFORE creating anything — the same one `startStream` has and these rungs did
-        // not. The device wait above can run for 8s; a rung tapped during it sweeps a world with no
-        // objects in it, so nothing here notices, and this task then wins `createSession()` and holds
-        // the device for its whole observation window. The NEWER rung is the one that fails, with
-        // `sessionAlreadyExists`, blaming the glasses for a session this task should never have
-        // opened. Nothing has been created yet, so a mismatch needs no teardown.
-        guard currentTeardownGeneration() == myGeneration else {
+        // Claim, create and publish as ONE step — see `createAndPublishSession`. The device wait
+        // above can run for 8s, and a separate checkpoint before a separate `createSession()` still
+        // leaves a gap in which a superseded task takes the only permitted device session.
+        //
+        // `createdRef` is held outside the `do` so the `catch` can still reach it: publication is not
+        // free of races even here, and an un-stopped DeviceSession is not a quiet leak — it blocks
+        // every later createSession with the `sessionAlreadyExists` failure this file already calls
+        // "our own litter".
+        guard let opened = try createAndPublishSession(ifGeneration: myGeneration, {
+          try sdk.createSession(deviceSelector: selector)
+        }) else {
           reject("wearables_rung_superseded",
                  "This check was superseded by another rung while waiting for a device", nil)
           return
         }
-
-        let created = try sdk.createSession(deviceSelector: selector)
-        // Held outside the `do` as well, so the `catch` can still reach it. A rung publishes to
-        // `session`/`stream` with no generation check, so it can publish AFTER a newer run has
-        // already swept — at which point the sweeper never saw these objects and nothing but this
-        // path will ever stop them. An un-stopped DeviceSession is not a quiet leak: only one
-        // session may run on a device at a time, so it blocks every later createSession with the
-        // `sessionAlreadyExists` failure this file already calls "our own litter".
+        let created = opened.session
         createdRef = created
-        publicationTicket = publish(stream: nil, session: created)
+        publicationTicket = opened.ticket
         try created.start()
         deadline = Date().addingTimeInterval(10)
         while created.state != .started, Date() < deadline {
@@ -1391,27 +1444,24 @@ final class WearablesBridge: RCTEventEmitter {
           reject("wearables_no_active_device", "No active device after 8s. Run rung 4b.", nil)
           return
         }
-        // Checkpoint BEFORE creating anything — the same one `startStream` has and these rungs did
-        // not. The device wait above can run for 8s; a rung tapped during it sweeps a world with no
-        // objects in it, so nothing here notices, and this task then wins `createSession()` and holds
-        // the device for its whole observation window. The NEWER rung is the one that fails, with
-        // `sessionAlreadyExists`, blaming the glasses for a session this task should never have
-        // opened. Nothing has been created yet, so a mismatch needs no teardown.
-        guard currentTeardownGeneration() == myGeneration else {
+        // Claim, create and publish as ONE step — see `createAndPublishSession`. The device wait
+        // above can run for 8s, and a separate checkpoint before a separate `createSession()` still
+        // leaves a gap in which a superseded task takes the only permitted device session.
+        //
+        // `createdRef` is held outside the `do` so the `catch` can still reach it: publication is not
+        // free of races even here, and an un-stopped DeviceSession is not a quiet leak — it blocks
+        // every later createSession with the `sessionAlreadyExists` failure this file already calls
+        // "our own litter".
+        guard let opened = try createAndPublishSession(ifGeneration: myGeneration, {
+          try sdk.createSession(deviceSelector: selector)
+        }) else {
           reject("wearables_rung_superseded",
                  "This check was superseded by another rung while waiting for a device", nil)
           return
         }
-
-        let created = try sdk.createSession(deviceSelector: selector)
-        // Held outside the `do` as well, so the `catch` can still reach it. A rung publishes to
-        // `session`/`stream` with no generation check, so it can publish AFTER a newer run has
-        // already swept — at which point the sweeper never saw these objects and nothing but this
-        // path will ever stop them. An un-stopped DeviceSession is not a quiet leak: only one
-        // session may run on a device at a time, so it blocks every later createSession with the
-        // `sessionAlreadyExists` failure this file already calls "our own litter".
+        let created = opened.session
         createdRef = created
-        publicationTicket = publish(stream: nil, session: created)
+        publicationTicket = opened.ticket
         try created.start()
         deadline = Date().addingTimeInterval(10)
         while created.state != .started, Date() < deadline {
@@ -1539,27 +1589,24 @@ extension WearablesBridge {
           reject("wearables_no_active_device", "No active device after 8s. Run rung 4b.", nil)
           return
         }
-        // Checkpoint BEFORE creating anything — the same one `startStream` has and these rungs did
-        // not. The device wait above can run for 8s; a rung tapped during it sweeps a world with no
-        // objects in it, so nothing here notices, and this task then wins `createSession()` and holds
-        // the device for its whole observation window. The NEWER rung is the one that fails, with
-        // `sessionAlreadyExists`, blaming the glasses for a session this task should never have
-        // opened. Nothing has been created yet, so a mismatch needs no teardown.
-        guard currentTeardownGeneration() == myGeneration else {
+        // Claim, create and publish as ONE step — see `createAndPublishSession`. The device wait
+        // above can run for 8s, and a separate checkpoint before a separate `createSession()` still
+        // leaves a gap in which a superseded task takes the only permitted device session.
+        //
+        // `createdRef` is held outside the `do` so the `catch` can still reach it: publication is not
+        // free of races even here, and an un-stopped DeviceSession is not a quiet leak — it blocks
+        // every later createSession with the `sessionAlreadyExists` failure this file already calls
+        // "our own litter".
+        guard let opened = try createAndPublishSession(ifGeneration: myGeneration, {
+          try sdk.createSession(deviceSelector: selector)
+        }) else {
           reject("wearables_rung_superseded",
                  "This check was superseded by another rung while waiting for a device", nil)
           return
         }
-
-        let created = try sdk.createSession(deviceSelector: selector)
-        // Held outside the `do` as well, so the `catch` can still reach it. A rung publishes to
-        // `session`/`stream` with no generation check, so it can publish AFTER a newer run has
-        // already swept — at which point the sweeper never saw these objects and nothing but this
-        // path will ever stop them. An un-stopped DeviceSession is not a quiet leak: only one
-        // session may run on a device at a time, so it blocks every later createSession with the
-        // `sessionAlreadyExists` failure this file already calls "our own litter".
+        let created = opened.session
         createdRef = created
-        publicationTicket = publish(stream: nil, session: created)
+        publicationTicket = opened.ticket
         try created.start()
         deadline = Date().addingTimeInterval(10)
         while created.state != .started, Date() < deadline {
