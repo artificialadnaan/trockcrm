@@ -468,6 +468,9 @@ final class WearablesBridge: RCTEventEmitter {
         // own that property. Either way it is no longer safe to touch `self.session` here; only
         // stop the LOCAL `created` reference, which is unambiguously ours.
         guard currentTeardownGeneration() == myGeneration else {
+          // `created` is already published, so if the sweep landed before that publish the shared
+          // `session` still points at what this line is about to stop.
+          retract(publicationTicket)
           stopOrphans(stream: nil, session: created)
           reject("wearables_stream_superseded",
                  "startStream was superseded by stop() after the session reached .started", nil)
@@ -488,6 +491,7 @@ final class WearablesBridge: RCTEventEmitter {
         // been assigned yet, so a concurrent teardown() could not have stopped `newStream` —
         // stopping it here is not defensive, it is the only place it happens.
         guard currentTeardownGeneration() == myGeneration else {
+          retract(publicationTicket)
           stopOrphans(stream: newStream, session: created)
           reject("wearables_stream_superseded",
                  "startStream was superseded by stop() after addStream()", nil)
@@ -532,6 +536,11 @@ final class WearablesBridge: RCTEventEmitter {
       // not be, but it does not stay that way, and the resolve() below never reports success for
       // a run that was superseded.
       guard currentTeardownGeneration() == myGeneration else {
+        // Retract FIRST, same as every other superseded path. `stream` was published above, so if
+        // the sweep landed before that publish it never saw `newStream` — and without this the
+        // shared field and the listener tokens keep pointing at a stream this line is about to
+        // stop, so `capturePhoto()` accepts a dead stream until something else sweeps.
+        retract(publicationTicket)
         stopOrphans(stream: newStream, session: created)
         reject("wearables_stream_superseded",
                "startStream was superseded by stop() before the stream was started", nil)
