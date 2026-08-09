@@ -236,6 +236,7 @@ export function buildCensusSql(): { text: string; params: unknown[] } {
 export function buildUpdateSql(direction: Exclude<Direction, "both">): { text: string; params: unknown[] } {
   const { text: isService, params } = canonicalServicePredicate("d");
   const target = direction === "to-service" ? "service" : "normal";
+  const targetFamily = direction === "to-service" ? "service_deal" : "standard_deal";
   const guard =
     direction === "to-service"
       ? `(${isService}) AND d.workflow_route IS DISTINCT FROM 'service'`
@@ -251,6 +252,21 @@ export function buildUpdateSql(direction: Exclude<Direction, "both">): { text: s
          AND COALESCE(d.is_test_data, false) = false
          -- Never overwrite a route an upstream system chose. See AUTHORITATIVE_ROUTE_SQL.
          AND NOT ${AUTHORITATIVE_ROUTE_SQL}
+         -- NEVER leave a route its stage disagrees with. A stage belongs to ONE workflow family, so
+         -- rewriting the route alone would produce a combination the normal update path rejects outright
+         -- and getStageByIdForWorkflowRoute resolves to null — the deal would read as broken to the very
+         -- code that has to move it next. Reporting the mismatch count is not a substitute for refusing
+         -- the write: on production every single to-service candidate (279 of 279) is in this state, so
+         -- an unguarded --execute would have corrupted all of them.
+         --
+         -- These rows are not lost, they are DEFERRED: the census reports them under "behaviour change",
+         -- and repairing them means moving the deal to its counterpart stage as well, which is a decision
+         -- about a live pipeline rather than a column edit.
+         AND EXISTS (
+           SELECT 1 FROM pipeline_stage_config psc
+            WHERE psc.id = d.stage_id
+              AND psc.workflow_family = '${targetFamily}'
+         )
          AND ${guard}
     `,
     params,

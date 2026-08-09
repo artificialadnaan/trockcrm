@@ -14,6 +14,10 @@ export interface ProjectNumberDealInput {
   workflowRoute?: WorkflowRoute | null;
   officeCode?: string | null;
   projectType?: string | null;
+  /** The CONFIGURED digit from project_type_config (via project_type_id) — resolveProjectTypeCode's
+   *  middle tier. Without it a deal typed only by its FK gets the '9' (residential) fallback stamped
+   *  into its deal NUMBER, which is the number every downstream reader treats as the type of record. */
+  projectTypes?: string | null;
   createdAt?: Date | string | null;
 }
 
@@ -182,6 +186,7 @@ export async function generateDealNumberForProject(
   const officeCode = resolveOfficeCode(deal.officeCode);
   const projectTypeCode = resolveProjectTypeCode({
     projectType: deal.projectType,
+    projectTypes: deal.projectTypes,
     workflowRoute: deal.workflowRoute ?? "normal",
   });
 

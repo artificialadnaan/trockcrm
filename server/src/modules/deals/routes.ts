@@ -1402,6 +1402,17 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
       isNull(deals.readOnlySyncedAt),
       isNull(deals.bidBoardStageEnteredAt),
       isNull(deals.bidBoardMirrorSourceEnteredAt),
+      // Bind the SERVICE VERDICT'S inputs, exactly as openRfpVoteRound does. isServiceRfp(deal) above was
+      // evaluated from a pre-reservation read; a concurrent edit in that gap could flip this deal from
+      // service to non-service, and this direct SyncHub send would still match and deliver an RFP that had
+      // just become vote-eligible. All three tiers are bound because all three decide the verdict:
+      // project_type, project_type_id (the configured code, which answers for most deals) and
+      // workflow_route. A re-typed deal 409s here instead of taking the wrong branch.
+      deal.projectType == null ? isNull(deals.projectType) : eq(deals.projectType, deal.projectType),
+      deal.projectTypeId == null
+        ? isNull(deals.projectTypeId)
+        : eq(deals.projectTypeId, deal.projectTypeId),
+      eq(deals.workflowRoute, deal.workflowRoute ?? "normal"),
     ];
     if (userRole === "rep") {
       updateConditions.push(eq(deals.assignedRepId, userId));

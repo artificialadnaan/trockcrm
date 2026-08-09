@@ -103,6 +103,12 @@ beforeEach(async () => {
     INSERT INTO office_dallas.deals (name, stage_id, project_type, workflow_route, awarded_amount, sales_source_user_id) VALUES
       ('sales-sourced typed-roofing routed-service', '${ST.openSvc}', 'roofing', 'service', 4000, '${U("98")}');
 
+    -- A demotion candidate whose stage ALREADY belongs to the target (standard) family, so the repair can
+    -- safely move it. Without this row the to-normal direction would be vacuous once the stage-family
+    -- guard landed, and a guard that blocks everything looks identical to a guard that works.
+    INSERT INTO office_dallas.deals (name, stage_id, project_type, workflow_route, awarded_amount) VALUES
+      ('typed-roofing routed-service std-stage', '${ST.openStd}', 'roofing', 'service', 250);
+
     -- A CHANGE-ORDER CHILD of the Bid Board-owned parent. It copies the parent's project type and route
     -- but NOT its provenance columns, so on its own row it looks like an ordinary silently-defaulted deal.
     -- Its route is inherited by invariant, so flipping it while its parent is skipped would diverge them.
@@ -163,19 +169,19 @@ describe("census", () => {
     const census = await censusForSchema(client(), "office_dallas");
 
     // 13 seeded, minus the inactive and the test-data row.
-    expect(census.activeDeals).toBe(12);
+    expect(census.activeDeals).toBe(13);
     // Canonically service: the 4 plainly misclassified, the 3 provenance-protected ones (which are
     // misclassified in exactly the same way), and the already-correct one.
     expect(census.canonicalService).toBe(9);
     // By the raw column today: the already-correct one, plus the two wrongly-routed roofing deals.
-    expect(census.routeService).toBe(3);
+    expect(census.routeService).toBe(4);
 
     // The census COUNTS every disagreement, including rows the repair will refuse to touch. Counting only
     // the repairable ones would understate the problem and make the exclusions invisible.
     expect(census.toServiceCount).toBe(8);
     expect(census.toServiceValue).toBe(100 + 200 + 300 + 400 + 1000 + 2000 + 3000 + 500);
-    expect(census.toNormalCount).toBe(2);
-    expect(census.toNormalValue).toBe(500 + 4000);
+    expect(census.toNormalCount).toBe(3);
+    expect(census.toNormalValue).toBe(500 + 4000 + 250);
   });
 
   it("separates the rows whose repair is a BEHAVIOUR change from the rows where it is not", async () => {
@@ -244,8 +250,9 @@ describe("repair", () => {
     // route both do). A raw UPDATE would leave the attribution live with no valid commission basis, so
     // the row is left for a human to move through the ORM path.
     expect(routes["sales-sourced typed-roofing routed-service"]).toBe("service");
-    // ...while the demotion candidate WITHOUT a sales source still moves, so this is not just inert.
-    expect(routes["typed-roofing routed-service"]).toBe("normal");
+    // ...while the demotion candidate WITHOUT a sales source, in a compatible stage, still moves — so
+    // this test is measuring the sales-source guard rather than the stage guard blocking everything.
+    expect(routes["typed-roofing routed-service std-stage"]).toBe("normal");
   });
 
   it("reports both exclusions rather than silently dropping them", async () => {
@@ -264,10 +271,13 @@ describe("repair", () => {
     await pg.query(text, params as any[]);
     const routes = await routesByName();
 
-    expect(routes["typed-service routed-normal std-stage"]).toBe("service");
+    // Only the rows whose stage ALREADY belongs to the service family move. The other two are correctly
+    // misclassified but sit in standard_deal stages, so flipping the route alone would leave a pair the
+    // pipeline cannot resolve — they are deferred, not silently rewritten.
     expect(routes["typed-service routed-normal svc-stage"]).toBe("service");
-    expect(routes["typed-service no-number"]).toBe("service");
     expect(routes["config-coded-service"]).toBe("service");
+    expect(routes["typed-service routed-normal std-stage"]).toBe("normal");
+    expect(routes["typed-service no-number"]).toBe("normal");
     // Untouched: correct already, or the other direction's problem.
     expect(routes["typed-roofing routed-normal"]).toBe("normal");
     expect(routes["typed-roofing routed-service"]).toBe("service");
@@ -280,7 +290,10 @@ describe("repair", () => {
     const { text, params } = buildUpdateSql("to-normal");
     await pg.query(text, params as any[]);
     const routes = await routesByName();
-    expect(routes["typed-roofing routed-service"]).toBe("normal");
+    // The stage-compatible one moves...
+    expect(routes["typed-roofing routed-service std-stage"]).toBe("normal");
+    // ...the one sitting in a service_deal stage does not, for the same reason as above.
+    expect(routes["typed-roofing routed-service"]).toBe("service");
     expect(routes["typed-service routed-service"]).toBe("service");
   });
 
@@ -299,14 +312,22 @@ describe("repair", () => {
     await pg.query(text, params as any[]);
     const after = await censusForSchema(client(), "office_dallas");
 
-    // The residual is not "some rows failed" — it is precisely the provenance-protected set the census
-    // reported up front. Anything else would mean the repair and the census disagree about their own
-    // scope, which is the failure an audit exists to prevent.
-    expect(after.toServiceCount).toBe(before.authoritativeRouteSkipped);
-    expect(after.toServiceCount).toBe(4);
-    // Not vacuous: the repair genuinely did most of the work.
+    // The residual is not "some rows failed" — it is exactly the two sets the census reported up front:
+    // rows an upstream system owns, and rows whose stage belongs to the other workflow family. Anything
+    // else would mean the repair and the census disagree about their own scope, which is the failure an
+    // audit exists to prevent.
+    // NOT the sum of the two counts: a row can be BOTH upstream-owned and stage-mismatched (the Bid
+    // Board rows here are), so adding them would double-count. What must hold is that every remaining row
+    // is covered by at least one reported reason, and that the count is stable.
+    expect(after.toServiceCount).toBe(6);
+    expect(after.toServiceCount).toBeLessThanOrEqual(
+      before.authoritativeRouteSkipped + before.toServiceStageMismatch
+    );
+    // Not vacuous: the repair genuinely moved the rows it could move safely.
     expect(before.toServiceCount).toBe(8);
-    // ...and the residual is still reported as skipped, so a second reader sees why it stopped.
+    // ...and both reasons are still reported, so a second reader sees why it stopped.
     expect(after.authoritativeRouteSkipped).toBe(4);
+    // Every remaining row is stage-mismatched, which is exactly why the repair refused them.
+    expect(after.toServiceStageMismatch).toBe(6);
   });
 });

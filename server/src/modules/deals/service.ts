@@ -937,8 +937,14 @@ export async function applyProjectTypeChange(
  * consults the configured code and the existing route. This one answers only the narrower question the
  * create path needs: given a project type and nothing else, which pipeline should this deal start in?
  */
-export function workflowRouteForProjectType(projectType: string | null | undefined): WorkflowRoute {
-  return resolveProjectTypeCode({ projectType }) === "4" ? "service" : "normal";
+export function workflowRouteForProjectType(
+  projectType: string | null | undefined,
+  /** The CONFIGURED digit from project_type_config, resolved through project_type_id. */
+  projectTypeCode?: string | null
+): WorkflowRoute {
+  return resolveProjectTypeCode({ projectType, projectTypes: projectTypeCode }) === "4"
+    ? "service"
+    : "normal";
 }
 
 function estimatingBoundaryStageSlugForRoute(workflowRoute: WorkflowRoute) {
@@ -2577,11 +2583,20 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
   const derivedProjectType = input.projectType
     ? await resolveActiveProjectTypeValue(input.projectType)
     : null;
+  // ...and the CONFIGURED digit behind projectTypeId. POST /api/deals accepts the ID WITHOUT the redundant
+  // text, which is also the shape most existing rows are in, so deriving from the text alone would leave a
+  // code-4 deal with a normal route, a normal pipeline_type_snapshot and a residential deal NUMBER — the
+  // row internally contradicting itself the moment it is inserted. Same tier order as everywhere else:
+  // text first, configured code second.
+  const derivedProjectTypeCode = input.projectTypeId
+    ? (await resolveProjectTypeConfigById(input.projectTypeId))?.code ?? null
+    : null;
 
   // An EXPLICIT route from the caller always wins: lead conversion, the SyncHub ingest and the Bid Board
   // all state a route deliberately, and this must not overrule them. The derivation only fills the gap
   // where the route would otherwise have defaulted silently.
-  const requestedRoute = input.workflowRoute ?? workflowRouteForProjectType(derivedProjectType);
+  const requestedRoute =
+    input.workflowRoute ?? workflowRouteForProjectType(derivedProjectType, derivedProjectTypeCode);
 
   // A stage belongs to ONE workflow family, so a derived service route can fail against a stage the caller
   // chose from the standard family. getStageByIdForWorkflowRoute already accepts the SHARED canonical
@@ -2663,6 +2678,7 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
     id: "new",
     officeCode,
     projectType,
+    projectTypes: derivedProjectTypeCode,
     workflowRoute,
     createdAt,
   });
