@@ -834,6 +834,7 @@ export async function acceptFieldInvite(input: { token: string; password: string
           role,
           office_id,
           is_active,
+          generates_sales,
           created_by_user_id,
           updated_at
         )
@@ -847,6 +848,10 @@ export async function acceptFieldInvite(input: { token: string; password: string
           'field_contractor',
           ${invite.tenant_id}::uuid,
           true,
+          -- Explicit false, not the column default (migration 0219). A field contractor never carries
+          -- deals, so they must never reach a director-dashboard roster; spelling it out here means a
+          -- change to that default can't quietly enrol every future contractor.
+          false,
           ${invite.invited_by_user_id}::uuid,
           now()
         )

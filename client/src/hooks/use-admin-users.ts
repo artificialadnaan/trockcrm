@@ -11,6 +11,10 @@ export interface AdminUser {
   reportsTo?: string | null;
   officeName: string | null;
   isActive: boolean;
+  /** Is this person expected to carry deals? Decides whether they appear on the DIRECTOR DASHBOARD
+   *  rosters (migration 0219). Independent of `role`, which decides what they may see and do — an
+   *  estimator can hold role='rep' for CRM access without ever selling, and a director can sell. */
+  generatesSales: boolean;
   extraOfficeCount: number;
   commissionRate?: number;
   commissionStructure?: "solo" | "mixed";

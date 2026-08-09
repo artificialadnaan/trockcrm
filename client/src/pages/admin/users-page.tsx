@@ -175,6 +175,24 @@ export function UsersPage() {
     }
   };
 
+  const handleToggleGeneratesSales = async (userId: string, generatesSales: boolean) => {
+    setUpdatingId(userId);
+    try {
+      await updateUser(userId, { generatesSales: !generatesSales });
+      // Name the consequence rather than the field. "generatesSales updated" tells an admin nothing
+      // about what they just changed; the whole reason this toggle exists is the dashboard roster.
+      toast.success(
+        generatesSales
+          ? "Removed from the director dashboard"
+          : "Now tracked on the director dashboard"
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update sales tracking");
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
   const handleManagerChange = async (userId: string, managerId: string) => {
     setUpdatingId(userId);
     try {
@@ -606,7 +624,7 @@ export function UsersPage() {
         bodyClassName="overflow-x-auto overscroll-x-contain"
         bodyLabel="Users table. Scroll horizontally to view all user details and actions."
       >
-        <table className="w-full min-w-[76rem] caption-bottom text-sm">
+        <table className="w-full min-w-[84rem] caption-bottom text-sm">
           <TableHeader>
             <TableRow>
               <TableHead className="w-10">
@@ -619,6 +637,12 @@ export function UsersPage() {
               <TableHead>User</TableHead>
               <TableHead>Primary Office</TableHead>
               <TableHead>Role</TableHead>
+              <TableHead>
+                Generates Sales
+                <span className="block text-xs font-normal text-gray-500">
+                  Shows on director dashboard
+                </span>
+              </TableHead>
               <TableHead>Sources</TableHead>
               <TableHead>Extra Offices</TableHead>
               <TableHead>Status</TableHead>
@@ -668,6 +692,14 @@ export function UsersPage() {
                       <SelectItem value="construction">Construction</SelectItem>
                     </SelectContent>
                   </Select>
+                </TableCell>
+                <TableCell>
+                  <Checkbox
+                    checked={user.generatesSales}
+                    onCheckedChange={() => void handleToggleGeneratesSales(user.id, user.generatesSales)}
+                    disabled={updatingId === user.id || bulkUpdating}
+                    aria-label={`${user.displayName} generates sales`}
+                  />
                 </TableCell>
                 <TableCell>
                   <div className="flex flex-wrap gap-1">
