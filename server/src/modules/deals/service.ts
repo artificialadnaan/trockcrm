@@ -54,7 +54,7 @@ import {
 import { getActiveProjectTypes, getStageById, getStageBySlug, resolveActiveProjectTypeValue } from "../pipeline/service.js";
 import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.js";
 import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
-import { generateDealNumberForProject } from "../../services/projectNumber.js";
+import { generateDealNumberForProject, resolveProjectTypeCode } from "../../services/projectNumber.js";
 import { isContractSignedHandoffEnabled } from "../../config/feature-flags.js";
 import { resolveActiveOfficeUserIds, resolveTeamRepIds } from "../shared/team-scope.js";
 import {
@@ -925,6 +925,28 @@ export async function applyProjectTypeChange(
   };
 }
 
+/**
+ * The workflow route a project type IMPLIES, per the platform's canonical resolution.
+ *
+ * Pure and exported so it is testable without the whole createDeal dependency graph, and so the one place
+ * that answers "does this type mean service?" on the write side is the same `resolveProjectTypeCode` the
+ * read side uses. Everything else in this area drifted precisely because that question had a different
+ * answer in each place that asked it.
+ *
+ * NOT a general-purpose "is this deal service" test — that is aliasedIsServiceProjectSql, which also
+ * consults the configured code and the existing route. This one answers only the narrower question the
+ * create path needs: given a project type and nothing else, which pipeline should this deal start in?
+ */
+export function workflowRouteForProjectType(
+  projectType: string | null | undefined,
+  /** The CONFIGURED digit from project_type_config, resolved through project_type_id. */
+  projectTypeCode?: string | null
+): WorkflowRoute {
+  return resolveProjectTypeCode({ projectType, projectTypes: projectTypeCode }) === "4"
+    ? "service"
+    : "normal";
+}
+
 function estimatingBoundaryStageSlugForRoute(workflowRoute: WorkflowRoute) {
   return workflowRoute === "service" ? "service_estimating" : "estimate_in_progress";
 }
@@ -1286,7 +1308,12 @@ export function workflowFamilyForRoute(workflowRoute: WorkflowRoute) {
   return workflowRoute === "service" ? "service_deal" : "standard_deal";
 }
 
-const SHARED_CANONICAL_DEAL_STAGE_SLUGS = new Set([
+/**
+ * Standard-family stages a SERVICE-routed deal may legitimately occupy. Exported so the
+ * service-classification repair script applies the same rule instead of a stricter family-only test that
+ * would defer safe rows for ever — getStageByIdForWorkflowRoute accepts exactly this set below.
+ */
+export const SHARED_CANONICAL_DEAL_STAGE_SLUGS = new Set([
   // opportunity is standard_deal-family but valid for service deals as the
   // CRM-side RFP approval trigger before Bid Board-owned progression.
   "opportunity",
@@ -2219,6 +2246,12 @@ export async function getDeals(
       ...getTableColumns(deals),
       companyName: companies.name,
       stageSlug: pipelineStageConfig.slug,
+      // The CONFIGURED project-type digit, resolved through project_type_id. Shipped to the client
+      // because the canonical service test needs it: 646 of 1,351 active deals carry NO project_type TEXT
+      // and are typed ONLY by this FK, so a client that saw just the text column would fall back to
+      // workflow_route for the exact population this release is correcting (277 of the 279 misclassified
+      // deals). Same scalar-subquery idiom as stageSlug/companyOwnerUserName above.
+      projectTypeCode: sql<string | null>`(SELECT code FROM public.project_type_config WHERE id = ${deals.projectTypeId})`,
       // Outcome-aware display date (filter-axis == display-axis): when an
       // outcome dimension is in play we've already resolved the Won/Lost stage
       // sets (needsStageClassification above), so each row's displayed date is
@@ -2299,6 +2332,12 @@ export async function getDealById(
       ...getTableColumns(deals),
       stageSlug: pipelineStageConfig.slug,
       estimatorUserName: users.displayName,
+      // The CONFIGURED project-type digit, resolved through project_type_id. Shipped to the client
+      // because the canonical service test needs it: 646 of 1,351 active deals carry NO project_type TEXT
+      // and are typed ONLY by this FK, so a client that saw just the text column would fall back to
+      // workflow_route for the exact population this release is correcting (277 of the 279 misclassified
+      // deals). Same scalar-subquery idiom as stageSlug/companyOwnerUserName above.
+      projectTypeCode: sql<string | null>`(SELECT code FROM public.project_type_config WHERE id = ${deals.projectTypeId})`,
       salesSourceUserName: salesSourceUser.displayName,
     })
     .from(deals)
@@ -2355,6 +2394,12 @@ export async function getDealDetail(
       ...getTableColumns(deals),
       assignedRepName: users.displayName,
       estimatorUserName: estimatorUser.displayName,
+      // The CONFIGURED project-type digit, resolved through project_type_id. Shipped to the client
+      // because the canonical service test needs it: 646 of 1,351 active deals carry NO project_type TEXT
+      // and are typed ONLY by this FK, so a client that saw just the text column would fall back to
+      // workflow_route for the exact population this release is correcting (277 of the 279 misclassified
+      // deals). Same scalar-subquery idiom as stageSlug/companyOwnerUserName above.
+      projectTypeCode: sql<string | null>`(SELECT code FROM public.project_type_config WHERE id = ${deals.projectTypeId})`,
       salesSourceUserName: salesSourceUser.displayName,
       companyName: companies.name,
       companyOwnerUserId: companies.ownerId,
@@ -2530,8 +2575,63 @@ export async function getDealDetail(
  * Create a new deal.
  */
 export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
-  const workflowRoute = input.workflowRoute ?? "normal";
-  const stage = await getStageByIdForWorkflowRoute(input.stageId, workflowRoute);
+  // The workflow route is derived from the project type, so the type has to be known before the stage is
+  // looked up. `workflow_route` is NOT NULL DEFAULT 'normal', so a deal created without one used to look
+  // like a confident "not service" rather than "nobody said" — and nothing anywhere derived it from the
+  // type. That is why service work whose own deal number reads DFW-4-… sat in the Normal pipeline.
+  //
+  // NON-THROWING on purpose. The validating `assertValidProjectType` stays exactly where it was, further
+  // down: hoisting it would put project-type validation AHEAD of the stage check, the creation policy and
+  // the awarded-amount role gate, changing which error a rejected caller sees first and letting an
+  // unauthorized one probe type validity. An unrecognised type simply yields null here and routes normal;
+  // the assert below still rejects it with the same message, in the same order, as before this change.
+  const derivedProjectType = input.projectType
+    ? await resolveActiveProjectTypeValue(input.projectType)
+    : null;
+  // ...and the CONFIGURED digit behind projectTypeId. POST /api/deals accepts the ID WITHOUT the redundant
+  // text, which is also the shape most existing rows are in, so deriving from the text alone would leave a
+  // code-4 deal with a normal route, a normal pipeline_type_snapshot and a residential deal NUMBER — the
+  // row internally contradicting itself the moment it is inserted. Same tier order as everywhere else:
+  // text first, configured code second.
+  const derivedProjectTypeCode = input.projectTypeId
+    ? (await resolveProjectTypeConfigById(input.projectTypeId))?.code ?? null
+    : null;
+
+  // An EXPLICIT route from the caller always wins: lead conversion, the SyncHub ingest and the Bid Board
+  // all state a route deliberately, and this must not overrule them. The derivation only fills the gap
+  // where the route would otherwise have defaulted silently.
+  const requestedRoute =
+    input.workflowRoute ?? workflowRouteForProjectType(derivedProjectType, derivedProjectTypeCode);
+
+  // A stage belongs to ONE workflow family, so a derived service route can fail against a stage the caller
+  // chose from the standard family. getStageByIdForWorkflowRoute already accepts the SHARED canonical
+  // stages (opportunity, contract, won, …) for a service deal, so most creates resolve on the first try.
+  //
+  // `estimating` is the one that does not, and it is the case that matters: the deal form offers ONLY
+  // standard_deal stages (getNewDealStages) and sends no workflowRoute, so a Service-typed deal started in
+  // Estimating hit this path. Discarding the derived route there would have written the deal as normal —
+  // wrong pipeline, wrong RFP behaviour — and would have made this whole write-side fix inert for the
+  // main create path. So map the stage to its SERVICE-FAMILY equivalent
+  // (toCanonicalDealStageSlug: estimating -> service_estimating) instead of dropping the route.
+  //
+  // Only if no equivalent exists do we fall back to 'normal', which preserves the original behaviour
+  // rather than turning a working create into a 400. Reports stay correct either way: they resolve
+  // service from project_type, not from this column.
+  let stage = await getStageByIdForWorkflowRoute(input.stageId, requestedRoute);
+  let workflowRoute = requestedRoute;
+  if (!stage && input.workflowRoute == null && requestedRoute === "service") {
+    const standardStage = await getStageById(input.stageId, "standard_deal");
+    const serviceSlug = standardStage
+      ? toCanonicalDealStageSlug(standardStage.slug, "service")
+      : null;
+    if (serviceSlug) {
+      stage = await getStageBySlug(serviceSlug, "service_deal");
+    }
+    if (!stage) {
+      workflowRoute = "normal";
+      stage = await getStageByIdForWorkflowRoute(input.stageId, "normal");
+    }
+  }
   if (!stage) {
     throw new AppError(400, "Invalid stage ID for workflow route");
   }
@@ -2574,6 +2674,8 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
   await validateDealPrimaryContact(tenantDb, lineage.companyId, lineage.primaryContactId);
 
   const officeCode = assertValidOfficeCode(input.officeCode);
+  // Unmoved: this is the throwing validation, and it stays after the stage/policy/role gates so the error
+  // a caller sees is the one they saw before the route derivation existed.
   const projectType = input.projectType ? await assertValidProjectType(input.projectType) : null;
   const normalizedBidDueDate = normalizeOptionalDealBidDueDate(input.bidDueDate);
   const createdAt = new Date();
@@ -2581,6 +2683,7 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
     id: "new",
     officeCode,
     projectType,
+    projectTypes: derivedProjectTypeCode,
     workflowRoute,
     createdAt,
   });
@@ -2590,7 +2693,12 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
     .values({
       dealNumber,
       name: input.name,
-      stageId: input.stageId,
+      // stage.id, NOT input.stageId. When a derived service route maps the requested stage to its
+      // service-family counterpart (estimating -> service_estimating), validation ran against the MAPPED
+      // stage; persisting the original id would store a service route beside a standard-family stage —
+      // precisely the mismatch the mapping exists to avoid. Identical to input.stageId on every path
+      // where no mapping happened.
+      stageId: stage.id,
       assignedRepId: input.assignedRepId,
       primaryContactId: lineage.primaryContactId,
       companyId: lineage.companyId,
@@ -2623,6 +2731,13 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
       expectedCloseDate: input.expectedCloseDate ?? null,
       salesSourceUserId: input.salesSourceUserId ?? null,
       workflowRoute,
+      // Written from the SAME resolved route, not left to the column default. pipeline_type_snapshot is
+      // NOT NULL DEFAULT 'normal', and the report builder groups and filters deal type on
+      // COALESCE(d.pipeline_type_snapshot, d.workflow_route) (report-builder-service.ts) — the snapshot
+      // FIRST. Deriving the route while leaving the snapshot at its default would have produced a deal
+      // that reads service everywhere except the report builder, which is a worse failure than the one
+      // this change set out to fix: two service definitions disagreeing instead of one being wrong.
+      pipelineTypeSnapshot: workflowRoute,
       // Forward-only: normal CRM-created and lead-converted projects must eventually carry a billing
       // contact. Historical/migration imports deliberately remain exempt and there is no backfill.
       billingContactRequiredAt: creationPolicy.origin === "migration" ? null : createdAt,
@@ -3742,6 +3857,12 @@ export async function getDealsForPipeline(
         ...getTableColumns(deals),
         companyName: companies.name,
         assignedRepName: users.displayName,
+        // The CONFIGURED project-type digit, resolved through project_type_id. Shipped to the client
+        // because the canonical service test needs it: 646 of 1,351 active deals carry NO project_type TEXT
+        // and are typed ONLY by this FK, so a client that saw just the text column would fall back to
+        // workflow_route for the exact population this release is correcting (277 of the 279 misclassified
+        // deals). Same scalar-subquery idiom as stageSlug/companyOwnerUserName above.
+        projectTypeCode: sql<string | null>`(SELECT code FROM public.project_type_config WHERE id = ${deals.projectTypeId})`,
       })
       .from(deals)
       .leftJoin(companies, eq(companies.id, deals.companyId))

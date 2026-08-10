@@ -24,6 +24,7 @@ import { LOST_STAGE_SLUGS, TERMINAL_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shar
 import {
   aliasedActiveDealCountFilterSql,
   aliasedDealBestEstimateSql,
+  aliasedIsServiceProjectSql,
   aliasedEffectiveDealValueSql,
   aliasedEffectiveLostDealValueSql,
   aliasedEffectiveWonDealValueSql,
@@ -2323,12 +2324,15 @@ export async function getUnifiedWorkflowOverview(
             AND ${aliasedActiveDealCountFilterSql("d")}
         )::int AS active_deal_count,
         COUNT(*) FILTER (
-          WHERE d.workflow_route = 'normal'
+          -- Canonical service test, not the raw route: project_type decides, workflow_route is the
+          -- fallback. Also NOT(service) rather than = 'normal', so the two counts partition the rows
+          -- instead of both dropping a NULL route.
+          WHERE NOT ${aliasedIsServiceProjectSql("d")}
             AND ${nonTerminalDealStageSql()}
             AND ${aliasedActiveDealCountFilterSql("d")}
         )::int AS standard_deal_count,
         COUNT(*) FILTER (
-          WHERE d.workflow_route = 'service'
+          WHERE ${aliasedIsServiceProjectSql("d")}
             AND ${nonTerminalDealStageSql()}
             AND ${aliasedActiveDealCountFilterSql("d")}
         )::int AS service_deal_count,

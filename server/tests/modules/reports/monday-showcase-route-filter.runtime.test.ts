@@ -47,7 +47,11 @@ const D = {
   s1: U("21001"), s2: U("21002"), s3: U("21003"), e1: U("21005"), e2: U("21006"),
   p1: U("31001"), p2: U("31002"), p3: U("31003"), p4: U("31004"), p5: U("31005"), p6: U("31006"), p7: U("31007"),
   l1: U("41001"), l2: U("41002"), l3: U("41003"),
+  // The project-type tiers -- the rows that would have been miscounted before this fix.
+  t1: U("51001"), t2: U("51002"), t3: U("51003"), t4: U("51004"), t5: U("51005"),
 };
+/** project_type_config rows: the configured digit code is the MIDDLE tier of the resolution. */
+const PT = { service: U("61004"), roofing: U("61003"), uncoded: U("61009") };
 
 // Fixed clock for the Won/Sent/Estimated window. Projection is a snapshot metric anchored on the REAL CT
 // today (the same now() the band CASE uses), so those rows are seeded relative to now() instead.
@@ -90,7 +94,10 @@ beforeAll(async () => {
     );
     CREATE TABLE companies (id uuid PRIMARY KEY, name text NOT NULL, region text);
     CREATE TABLE region_config (id uuid PRIMARY KEY, name text NOT NULL);
-    CREATE TABLE project_type_config (id uuid PRIMARY KEY, name text NOT NULL);
+    -- "code" is the digit the deal NUMBER is stamped from, and the middle tier of the canonical
+    -- project-type resolution. Without it here the fixture cannot exercise a deal that is typed only
+    -- by its config FK -- which is how a real HubSpot-imported deal often arrives.
+    CREATE TABLE project_type_config (id uuid PRIMARY KEY, name text NOT NULL, code text);
 
     INSERT INTO users (id, display_name) VALUES ('${REP_A}', 'Alice Rep'), ('${REP_B}', 'Bob Rep');
 
@@ -109,6 +116,27 @@ beforeAll(async () => {
       ('${D.w4}','W-4','Won onhold (excl)','${ST.won}','${REP_A}','2026-05-25', 999, false, true, 'service'),
       ('${D.w5}','W-5','Won test (excl)','${ST.won}','${REP_A}','2026-05-25', 888, true, false, 'service'),
       ('${D.w6}','W-6','Won out-of-window (excl)','${ST.won}','${REP_A}','2026-05-20', 777, false, false, 'service');
+
+    -- ===== PROJECT-TYPE TIERS: the rows the old workflow_route-only filter got WRONG. =====
+    -- Every one of these has a workflow_route that DISAGREES with its project type, which is precisely
+    -- the production state that under-reported service: the route column is NOT NULL DEFAULT 'normal',
+    -- nothing derives it from the type, so a correctly-typed service deal reads as confidently normal.
+    INSERT INTO project_type_config (id, name, code) VALUES
+      ('${PT.service}', 'Service', '4'),
+      ('${PT.roofing}', 'Roofing', '3'),
+      ('${PT.uncoded}', 'Legacy Unmapped', NULL);
+
+    INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, won_closed_date, awarded_amount, is_test_data, on_hold, workflow_route, project_type, project_type_id) VALUES
+      -- TIER 1, the headline case: typed service, routed normal. Deal number says 4; the report said normal.
+      ('${D.t1}','DFW-4-04126-AE','Won typed-service routed-normal','${ST.won}','${REP_A}','2026-05-25', 111000, false, false, 'normal', 'service', NULL),
+      -- TIER 1 in the OTHER direction: project_type WINS, so a roofing deal on the service route is Other.
+      ('${D.t2}','DFW-3-04127-AF','Won typed-roofing routed-service','${ST.won}','${REP_A}','2026-05-25', 122000, false, false, 'service', 'roofing', NULL),
+      -- TIER 2: no project_type text at all, typed only by the config FK whose code is 4.
+      ('${D.t3}','DFW-4-04128-AG','Won config-coded-service routed-normal','${ST.won}','${REP_B}','2026-05-25', 133000, false, false, 'normal', NULL, '${PT.service}'),
+      -- TIER 1 with hostile whitespace/case: JS trims NBSP and tabs, so SQL must too (one-arg btrim would not).
+      ('${D.t4}','DFW-4-04129-AH','Won padded-service routed-normal','${ST.won}','${REP_A}','2026-05-25', 144000, false, false, 'normal', E'\t  SERVICE  ', NULL),
+      -- TIER 3: an UNRECOGNISED type with an uncoded config -- neither tier can answer, so the route decides.
+      ('${D.t5}','DFW-9-04130-AI','Won unknown-type routed-service','${ST.won}','${REP_B}','2026-05-25', 155000, false, false, 'service', 'not a real type', '${PT.uncoded}');
 
     -- ===== SENT / ESTIMATED: stage-entry cohorts, mixed routes (s1 enters twice -> still ONE deal). =====
     INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, bid_board_total_sales, on_hold, is_test_data, workflow_route) VALUES
@@ -287,9 +315,14 @@ describe("additivity: service-only + other-only === both-selected", () => {
     const service = await showcase(SERVICE);
     const other = await showcase(OTHER);
     // Without these guards every additivity assertion above would pass vacuously on 0 + 0 === 0.
-    expect(both.execHero.won.count).toBe(3);
-    expect(service.execHero.won.count).toBe(1);
-    expect(other.execHero.won.count).toBe(2);
+    //
+    // Won is 8 in-window rows: the 3 original route-only ones (w1 service, w2 normal, w3 null-route)
+    // plus the 5 project-type tier rows. Service = w1 + t1 (typed service) + t3 (config code 4)
+    // + t4 (padded/upper) + t5 (unknown type, service route) = 5. Other = w2 + w3 + t2 (typed roofing
+    // on the service route, which project_type precedence pulls OUT of Service) = 3.
+    expect(both.execHero.won.count).toBe(8);
+    expect(service.execHero.won.count).toBe(5);
+    expect(other.execHero.won.count).toBe(3);
     expect(both.execHero.sent.count).toBe(3);
     expect(service.execHero.sent.count).toBe(1);
     expect(other.execHero.sent.count).toBe(2);
@@ -326,6 +359,68 @@ describe("a NULL workflow_route counts as Other", () => {
     expect(sentOther.records.map((r) => r.name)).toContain("Sent null-route A");
     const projOther = await getMondayShowcaseEvidence(tdb, { metric: "projection", mode: "to_date", now: NOW, routes: OTHER });
     expect(projOther.records.map((r) => r.name)).toContain("Proj null-route 0_30");
+  });
+});
+
+/**
+ * THE SUITE THIS FIX EXISTS FOR.
+ *
+ * Symptom: the showcase reported ~$490k of service YTD while a single service rep showed $1.1M won.
+ * Cause: every builder narrowed on `workflow_route` alone, and that column is NOT NULL DEFAULT 'normal'
+ * with nothing on the write side deriving it from the project type. So deals whose own number reads
+ * `DFW-4-…` -- 4 IS the service project-type code, stamped FROM project_type at creation -- sat in the
+ * Normal bucket. `resolveProjectTypeCode` is emphatic that project_type wins and workflow_route is
+ * consulted last; the filter asked the last input first.
+ */
+describe("service is decided by PROJECT TYPE, not the workflow_route column", () => {
+  async function wonNames(routes: readonly WorkflowRouteBucket[]): Promise<string[]> {
+    const ev = await getMondayShowcaseEvidence(tdb, { metric: "won", mode: "to_date", now: NOW, routes });
+    return ev.records.map((r) => r.name);
+  }
+
+  it("counts a typed-service deal as Service even though its route says normal", async () => {
+    // The Colby case, exactly. Before this fix it appeared under Other.
+    expect(await wonNames(SERVICE)).toContain("Won typed-service routed-normal");
+    expect(await wonNames(OTHER)).not.toContain("Won typed-service routed-normal");
+  });
+
+  it("counts a typed-roofing deal as Other even though its route says service", async () => {
+    // Precedence runs BOTH ways, or it is not precedence. If project_type only ever added deals to
+    // Service, this fix would inflate the bucket instead of correcting it.
+    expect(await wonNames(OTHER)).toContain("Won typed-roofing routed-service");
+    expect(await wonNames(SERVICE)).not.toContain("Won typed-roofing routed-service");
+  });
+
+  it("falls back to the configured project_type_config code when there is no project_type text", async () => {
+    // How a HubSpot-imported deal often arrives: typed by FK, with the text column never populated.
+    expect(await wonNames(SERVICE)).toContain("Won config-coded-service routed-normal");
+    expect(await wonNames(OTHER)).not.toContain("Won config-coded-service routed-normal");
+  });
+
+  it("normalizes like JS does -- tabs, NBSP and case included", async () => {
+    // E'\t  SERVICE  ' with a non-breaking space. Postgres's one-argument btrim strips ASCII space ONLY,
+    // so it would leave the tab in place and the value would not match; matching JS \s is what makes
+    // this row land in Service. Migration 0216 shipped exactly this bug.
+    expect(await wonNames(SERVICE)).toContain("Won padded-service routed-normal");
+    expect(await wonNames(OTHER)).not.toContain("Won padded-service routed-normal");
+  });
+
+  it("still uses workflow_route when neither the type nor the configured code can answer", async () => {
+    // The tier that must NOT be dropped: deals with no usable type at all are exactly the population the
+    // route column was carrying, and removing that fallback would lose them from Service entirely.
+    expect(await wonNames(SERVICE)).toContain("Won unknown-type routed-service");
+    expect(await wonNames(OTHER)).not.toContain("Won unknown-type routed-service");
+  });
+
+  it("moves the SPLIT without moving the unfiltered total", async () => {
+    // The safety property. This fix reclassifies deals between two buckets; it must not add or remove a
+    // single deal from the report as a whole, or it would be moving headline numbers rather than fixing
+    // an attribution.
+    const unfiltered = await getMondayShowcaseEvidence(tdb, { metric: "won", mode: "to_date", now: NOW });
+    const service = await wonNames(SERVICE);
+    const other = await wonNames(OTHER);
+    expect([...service, ...other].sort()).toEqual([...unfiltered.records.map((r) => r.name)].sort());
+    expect(service.filter((name) => other.includes(name))).toEqual([]);
   });
 });
 

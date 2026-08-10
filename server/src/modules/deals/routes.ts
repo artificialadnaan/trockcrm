@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Router } from "express";
-import { and, eq, desc, isNotNull, isNull, or, sql } from "drizzle-orm";
+import { and, eq, desc, getTableColumns, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { companies, dealApprovals, dealHistory, dealScopingIntake, deals, dealSubscriptions, jobQueue, properties } from "@trock-crm/shared/schema";
 import { requireRole, requireRfpReviewer } from "../../middleware/rbac.js";
 import {
@@ -729,9 +729,20 @@ async function loadDealStageSlug(tenantDb: any, stageId: string): Promise<string
 
 async function loadTriggerRfpDeal(tenantDb: any, dealId: string) {
   const [deal] = await tenantDb
-    .select()
+    .select({
+      ...getTableColumns(deals),
+      // isServiceRfp reads the CONFIGURED project-type digit, and it is the only tier that answers for a
+      // deal carrying no project_type text — the majority shape. A bare .select() here would leave the
+      // field undefined and silently route a service RFP into the CRM three-voter round instead of the
+      // SyncHub service-approval path, with nothing failing to show it.
+      projectTypeCode: sql<string | null>`(SELECT code FROM public.project_type_config WHERE id = ${deals.projectTypeId})`,
+    })
     .from(deals)
-    .where(eq(deals.id, dealId))
+    // A soft-deleted deal reads as NOT FOUND, the same convention authorizeAndCastRfpVote states and the
+    // vote-path reservation enforces with eq(deals.isActive, true). Without it a stale tab could trigger an
+    // RFP for a deleted deal: the loader returned the row, the handler only checked for null, and the
+    // direct SyncHub reservation had no active condition of its own — so the deal got stamped and enqueued.
+    .where(and(eq(deals.id, dealId), eq(deals.isActive, true)))
     .limit(1);
   return deal ?? null;
 }
@@ -1387,6 +1398,10 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
     const updateConditions = [
       eq(deals.id, deal.id),
       eq(deals.stageId, deal.stageId),
+      // Bound atomically as well as at load, mirroring the vote-path reservation: the load and the reserve
+      // are separated by async work, so a delete landing in that gap must make this UPDATE match nothing
+      // rather than enqueue an RFP for a deal that no longer exists.
+      eq(deals.isActive, true),
       isNull(deals.rfpApprovalStatus),
       isNull(deals.rfpApprovalRequestedAt),
       eq(deals.isBidBoardOwned, false),
@@ -1395,6 +1410,17 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
       isNull(deals.readOnlySyncedAt),
       isNull(deals.bidBoardStageEnteredAt),
       isNull(deals.bidBoardMirrorSourceEnteredAt),
+      // Bind the SERVICE VERDICT'S inputs, exactly as openRfpVoteRound does. isServiceRfp(deal) above was
+      // evaluated from a pre-reservation read; a concurrent edit in that gap could flip this deal from
+      // service to non-service, and this direct SyncHub send would still match and deliver an RFP that had
+      // just become vote-eligible. All three tiers are bound because all three decide the verdict:
+      // project_type, project_type_id (the configured code, which answers for most deals) and
+      // workflow_route. A re-typed deal 409s here instead of taking the wrong branch.
+      deal.projectType == null ? isNull(deals.projectType) : eq(deals.projectType, deal.projectType),
+      deal.projectTypeId == null
+        ? isNull(deals.projectTypeId)
+        : eq(deals.projectTypeId, deal.projectTypeId),
+      eq(deals.workflowRoute, deal.workflowRoute ?? "normal"),
     ];
     if (userRole === "rep") {
       updateConditions.push(eq(deals.assignedRepId, userId));

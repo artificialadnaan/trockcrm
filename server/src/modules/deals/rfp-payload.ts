@@ -11,6 +11,8 @@ export interface RfpPayloadSourceDeal {
    *  so the payload never ships the raw HubSpot id. See resolveDealDisplayNumber. */
   projectNumber?: string | null;
   projectType?: string | null;
+  /** The CONFIGURED project-type digit (project_type_config.code via project_type_id). See isServiceRfp. */
+  projectTypeCode?: string | null;
   workflowRoute?: WorkflowRoute | null;
   awardedAmount?: string | number | null;
   bidEstimate?: string | number | null;
@@ -461,8 +463,12 @@ export function buildNormalizedRfpRequestBody(input: {
       projectNumber:
         resolveDealDisplayNumber({ projectNumber: deal.projectNumber, dealNumber: deal.dealNumber }) ??
         deal.id,
+      // Same three tiers as isServiceRfp and the SQL predicate. The configured digit matters most here:
+      // a deal typed only by project_type_id (the common import shape) would otherwise ship as type 9,
+      // telling SyncHub a service job is residential work.
       projectType: resolveProjectTypeCode({
         projectType: deal.projectType,
+        projectTypes: deal.projectTypeCode,
         workflowRoute: deal.workflowRoute ?? "normal",
       }),
       amount: resolveRfpDealAmount(deal),

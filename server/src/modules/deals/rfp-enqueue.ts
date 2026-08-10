@@ -121,11 +121,13 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, deal: { id: string }) {
            concat_ws(' ', pc.first_name, pc.last_name) AS "contactName",
            pc.email AS "clientEmail",
            pc.phone AS "clientPhone",
-           l.bid_due_date AS "sourceLeadBidDueDate"
+           l.bid_due_date AS "sourceLeadBidDueDate",
+           ptc.code AS "projectTypeCode"
       FROM deals d
       LEFT JOIN companies c ON c.id = d.company_id
       LEFT JOIN contacts pc ON pc.id = d.primary_contact_id
       LEFT JOIN leads l ON l.id = d.source_lead_id
+      LEFT JOIN public.project_type_config ptc ON ptc.id = d.project_type_id
      WHERE d.id = ${deal.id}
      LIMIT 1
   `);
@@ -151,6 +153,9 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, deal: { id: string }) {
     dealNumber: (row.deal_number as string | null) ?? "",
     projectNumber: (row.project_number as string | null) ?? null,
     projectType: (row.project_type as string | null) ?? null,
+    // The CONFIGURED digit. Without it the payload ships type 9 for a deal typed only by project_type_id
+    // -- the common import shape -- telling SyncHub a service job is residential work.
+    projectTypeCode: (row.projectTypeCode as string | null) ?? null,
     workflowRoute: (row.workflow_route as "normal" | "service" | null) ?? null,
     awardedAmount: row.awarded_amount ?? null,
     bidEstimate: row.bid_estimate ?? null,
