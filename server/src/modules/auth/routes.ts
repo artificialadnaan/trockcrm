@@ -18,6 +18,12 @@ import { requireAdmin } from "../../middleware/rbac.js";
 import { isRfpReviewerEmail } from "@trock-crm/shared/lib/rfpReviewerEmails";
 import { isRfpVoterEmail } from "@trock-crm/shared/lib/rfpVoterEmails";
 import { isDailyActivityLogViewerEmail } from "@trock-crm/shared/lib/dailyActivityLogViewers";
+
+/**
+ * The role floor on GET /api/reports/daily-activity-log (requireAnyRole). Kept beside the flag that mirrors
+ * it so the two cannot drift; if that route's role list changes, this changes with it.
+ */
+const DAILY_ACTIVITY_LOG_ROLES = new Set(["admin", "director", "rep"]);
 import {
   exchangeCodeForTokens,
   getConsentUrl,
@@ -189,10 +195,12 @@ async function withOnboardingGate<T extends { id: string; email: string; officeI
     // Whether this user is one of the 3 RFP voters (Sidney/Tim/James). Gates the vote UI + /rfp-vote page;
     // the vote endpoint enforces the same allowlist (requireRfpVoter) as the hard boundary.
     isRfpVoter: isRfpVoterEmail(user.email, process.env),
-    // Whether this user is one of the designated Daily Activity Log viewers. Hides the report card and blocks
-    // the route in the web client so nobody is offered a surface that would 403; the report endpoint enforces
-    // the same allowlist (requireDailyActivityLogViewer) as the hard boundary.
-    canViewDailyActivityLog: isDailyActivityLogViewerEmail(user.email, process.env),
+    // Whether this user can actually OPEN the Daily Activity Log. The endpoint carries two guards —
+    // requireAnyRole then the allowlist — so this flag mirrors BOTH. Reporting the allowlist alone would set
+    // it true for an allowlisted sales_manager or construction user, who would then be offered a card whose
+    // route bounces them to "/" with no explanation. The report endpoint enforces both as the hard boundary.
+    canViewDailyActivityLog:
+      DAILY_ACTIVITY_LOG_ROLES.has(user.role) && isDailyActivityLogViewerEmail(user.email, process.env),
   };
 }
 

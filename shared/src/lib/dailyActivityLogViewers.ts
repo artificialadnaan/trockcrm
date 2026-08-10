@@ -29,9 +29,15 @@ const DEV_FALLBACK_NODE_ENVS = new Set(["development", "test"]);
 /**
  * Resolve the Daily Activity Log viewer emails from `DAILY_ACTIVITY_LOG_VIEWER_EMAILS`.
  *
- * In dev/test only, falls back to `DEV_DAILY_ACTIVITY_LOG_VIEWER` or a non-personal placeholder so local
- * runs can exercise the flow. In any other env — including a misconfigured prod — this returns [], and
- * callers must treat that as "nobody may open it" rather than as "anybody may".
+ * In dev/test only, falls back to `DEV_DAILY_ACTIVITY_LOG_VIEWER` if set, otherwise to a non-personal
+ * placeholder address. Note what that placeholder means in practice: it belongs to nobody, so an
+ * unconfigured local environment denies EVERY developer. That is intentional — the alternative is a
+ * fallback that opens the report to whoever is signed in locally, which would make the gate untestable by
+ * hand and invite a "works on my machine" that never had the gate on. To use it locally, set
+ * DEV_DAILY_ACTIVITY_LOG_VIEWER to your own address.
+ *
+ * In any other env — including a misconfigured prod — this returns [], and callers must treat that as
+ * "nobody may open it" rather than as "anybody may".
  */
 export function resolveDailyActivityLogViewers(env: NodeJS.ProcessEnv): string[] {
   const parsed = parseReviewerEmails(env.DAILY_ACTIVITY_LOG_VIEWER_EMAILS);
