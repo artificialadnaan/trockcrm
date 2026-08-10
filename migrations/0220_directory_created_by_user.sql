@@ -39,6 +39,14 @@ BEGIN
            ON %I.companies (created_at)',
         schema_name
       );
+      -- Partial, for the attribution-start MIN only: that aggregate is filtered on a non-null creator, so
+      -- the plain index above cannot serve it as an indexed min and it would rescan the whole history on
+      -- every request.
+      EXECUTE format(
+        'CREATE INDEX IF NOT EXISTS companies_attributed_created_at_idx
+           ON %I.companies (created_at) WHERE created_by_user_id IS NOT NULL',
+        schema_name
+      );
     END IF;
 
     IF to_regclass(format('%I.properties', schema_name)) IS NOT NULL THEN
@@ -52,6 +60,14 @@ BEGIN
            ON %I.properties (created_at)',
         schema_name
       );
+      -- Partial, for the attribution-start MIN only: that aggregate is filtered on a non-null creator, so
+      -- the plain index above cannot serve it as an indexed min and it would rescan the whole history on
+      -- every request.
+      EXECUTE format(
+        'CREATE INDEX IF NOT EXISTS properties_attributed_created_at_idx
+           ON %I.properties (created_at) WHERE created_by_user_id IS NOT NULL',
+        schema_name
+      );
     END IF;
 
     IF to_regclass(format('%I.contacts', schema_name)) IS NOT NULL THEN
@@ -63,6 +79,14 @@ BEGIN
       EXECUTE format(
         'CREATE INDEX IF NOT EXISTS contacts_created_at_idx
            ON %I.contacts (created_at)',
+        schema_name
+      );
+      -- Partial, for the attribution-start MIN only: that aggregate is filtered on a non-null creator, so
+      -- the plain index above cannot serve it as an indexed min and it would rescan the whole history on
+      -- every request.
+      EXECUTE format(
+        'CREATE INDEX IF NOT EXISTS contacts_attributed_created_at_idx
+           ON %I.contacts (created_at) WHERE created_by_user_id IS NOT NULL',
         schema_name
       );
     END IF;
@@ -95,11 +119,20 @@ ALTER TABLE office_dallas.contacts
 CREATE INDEX IF NOT EXISTS companies_created_at_idx
   ON office_dallas.companies (created_at);
 
+CREATE INDEX IF NOT EXISTS companies_attributed_created_at_idx
+  ON office_dallas.companies (created_at) WHERE created_by_user_id IS NOT NULL;
+
 CREATE INDEX IF NOT EXISTS properties_created_at_idx
   ON office_dallas.properties (created_at);
 
+CREATE INDEX IF NOT EXISTS properties_attributed_created_at_idx
+  ON office_dallas.properties (created_at) WHERE created_by_user_id IS NOT NULL;
+
 CREATE INDEX IF NOT EXISTS contacts_created_at_idx
   ON office_dallas.contacts (created_at);
+
+CREATE INDEX IF NOT EXISTS contacts_attributed_created_at_idx
+  ON office_dallas.contacts (created_at) WHERE created_by_user_id IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS leads_created_at_idx
   ON office_dallas.leads (created_at);

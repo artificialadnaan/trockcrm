@@ -56,6 +56,9 @@ export const contacts = pgTable(
   },
   (table) => [
     index("contacts_created_at_idx").on(table.createdAt),
+    index("contacts_attributed_created_at_idx")
+      .on(table.createdAt)
+      .where(sql`${table.createdByUserId} IS NOT NULL`),
     index("contacts_name_company_idx").on(table.companyName),
     index("contacts_role_idx").on(table.role),
     index("contacts_owner_id_idx").on(table.ownerId).where(sql`${table.ownerId} IS NOT NULL`),

@@ -56,6 +56,9 @@ export const properties = pgTable(
   },
   (table) => [
     index("properties_created_at_idx").on(table.createdAt),
+    index("properties_attributed_created_at_idx")
+      .on(table.createdAt)
+      .where(sql`${table.createdByUserId} IS NOT NULL`),
     index("properties_company_id_idx").on(table.companyId),
     index("properties_company_name_idx").on(table.companyId, table.name),
     index("properties_type_idx").on(table.type),

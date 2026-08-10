@@ -79,6 +79,14 @@ export interface CanvassingActivityFilters {
   /** Cap on the notes feed. The counts are never capped; only the readable list is. */
   notesLimit?: number;
   /**
+   * Owner selections in their legacy NAME / EMAIL forms. The filter bar writes `?owners=` and
+   * `?ownerEmails=` alongside `?ownerIds=`, resolves them locally and visibly ticks the person — but only
+   * ids reached this report, so the page showed a person filtered while the numbers stayed office-wide
+   * until someone pressed Apply. Resolved here so every form the URL supports means the same thing.
+   */
+  ownerNames?: string[];
+  ownerEmails?: string[];
+  /**
    * The office this request is scoped to. `users` is a single GLOBAL table, so without it a crafted
    * ?userIds=<uuid> for an account in another office would be looked up and its name, email, role and
    * active flag returned as a zero-count row — reading the global directory through a tenant report.
@@ -241,11 +249,23 @@ export function normalizeCanvassingFilters(query: Record<string, unknown>): Canv
     .split(",")
     .map((value) => value.trim())
     .filter((value) => UUID.test(value));
+  const splitList = (raw: string) =>
+    raw.split(",").map((value) => value.trim()).filter((value) => value.length > 0 && value.length <= 320);
+  const ownerNames = splitList(pick(query.owners) || pick(query.ownerNames));
+  const ownerEmails = splitList(pick(query.ownerEmails));
 
   const limitRaw = Number(pick(query.notesLimit));
   const notesLimit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.floor(limitRaw), MAX_NOTES_LIMIT) : DEFAULT_NOTES_LIMIT;
 
-  return { dateFrom: from, dateTo: to, bucket, userIds: userIds.length > 0 ? userIds : undefined, notesLimit };
+  return {
+    dateFrom: from,
+    dateTo: to,
+    bucket,
+    userIds: userIds.length > 0 ? userIds : undefined,
+    ownerNames: ownerNames.length > 0 ? ownerNames : undefined,
+    ownerEmails: ownerEmails.length > 0 ? ownerEmails : undefined,
+    notesLimit,
+  };
 }
 
 /**
@@ -371,10 +391,49 @@ function createdStreamSql(filters: CanvassingActivityFilters): SQL {
   `;
 }
 
-export async function getCanvassingActivityReport(
+/**
+ * Fold `ownerNames` / `ownerEmails` into `userIds`.
+ *
+ * The filter bar writes all three forms and resolves names locally, so a URL carrying `?owners=Jane` shows
+ * Jane ticked while the report — which only ever read ids — stayed office-wide until Apply was pressed. The
+ * lookup is bounded to this office for the same reason the roster lookup is: `users` is global, and
+ * resolving an arbitrary name must not become a way to test who exists elsewhere.
+ */
+async function resolveOwnerSelection(
   tenantDb: TenantDb,
   filters: CanvassingActivityFilters
+): Promise<CanvassingActivityFilters> {
+  const names = filters.ownerNames ?? [];
+  const emails = filters.ownerEmails ?? [];
+  if (names.length === 0 && emails.length === 0) return filters;
+
+  const membership = filters.officeId
+    ? sql`(u.office_id = ${filters.officeId} OR EXISTS (
+        SELECT 1 FROM user_office_access uo WHERE uo.user_id = u.id AND uo.office_id = ${filters.officeId}
+      ))`
+    : sql`TRUE`;
+  const matchers: SQL[] = [];
+  if (names.length) {
+    matchers.push(sql`LOWER(u.display_name) = ANY(${sql`ARRAY[${sql.join(names.map((n) => sql`${n.toLowerCase()}`), sql`, `)}]`})`);
+  }
+  if (emails.length) {
+    matchers.push(sql`LOWER(u.email) = ANY(${sql`ARRAY[${sql.join(emails.map((e) => sql`${e.toLowerCase()}`), sql`, `)}]`})`);
+  }
+
+  const rows = await tenantDb.execute<{ id: string }>(sql`
+    SELECT u.id::text AS id FROM users u
+     WHERE (${sql.join(matchers, sql` OR `)}) AND ${membership}
+  `);
+  const resolved = rows.rows.map((row) => row.id);
+  if (resolved.length === 0) return filters;
+  return { ...filters, userIds: [...new Set([...(filters.userIds ?? []), ...resolved])] };
+}
+
+export async function getCanvassingActivityReport(
+  tenantDb: TenantDb,
+  input: CanvassingActivityFilters
 ): Promise<CanvassingActivityReport> {
+  const filters = await resolveOwnerSelection(tenantDb, input);
   const stream = createdStreamSql(filters);
   const bucketExpr = bucketSql(filters.bucket, "s.created_at");
 
@@ -681,15 +740,26 @@ async function loadNotes(
  * and for the three that share 0220 it is simply the first record any of them attributed.
  */
 async function loadAttributionStart(tenantDb: TenantDb): Promise<string | null> {
-  const result = await tenantDb.execute<{ started: string | null }>(sql`
-    SELECT MIN(started)::text AS started FROM (
-      SELECT MIN(${businessDateSql("c.created_at")}) AS started FROM companies c WHERE c.created_by_user_id IS NOT NULL
+  // MIN over the BARE column, so the partial (created_at WHERE created_by_user_id IS NOT NULL) indexes from
+  // migration 0220 can serve it as an indexed min instead of a full history scan on every request. The
+  // business-tz conversion happens once, here, rather than per row inside the aggregate.
+  const result = await tenantDb.execute<{ started: string | Date | null }>(sql`
+    SELECT MIN(started) AS started FROM (
+      SELECT MIN(c.created_at) AS started FROM companies c WHERE c.created_by_user_id IS NOT NULL
       UNION ALL
-      SELECT MIN(${businessDateSql("p.created_at")}) FROM properties p WHERE p.created_by_user_id IS NOT NULL
+      SELECT MIN(p.created_at) FROM properties p WHERE p.created_by_user_id IS NOT NULL
       UNION ALL
-      SELECT MIN(${businessDateSql("ct.created_at")}) FROM contacts ct WHERE ct.created_by_user_id IS NOT NULL
+      SELECT MIN(ct.created_at) FROM contacts ct WHERE ct.created_by_user_id IS NOT NULL
     ) firsts
   `);
   const value = result.rows[0]?.started ?? null;
-  return value ? String(value).slice(0, 10) : null;
+  if (!value) return null;
+  const at = value instanceof Date ? value : new Date(String(value));
+  if (Number.isNaN(at.getTime())) return null;
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: BUSINESS_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(at);
 }

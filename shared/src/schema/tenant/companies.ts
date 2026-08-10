@@ -62,6 +62,9 @@ export const companies = pgTable(
   },
   (table) => [
     index("companies_created_at_idx").on(table.createdAt),
+    index("companies_attributed_created_at_idx")
+      .on(table.createdAt)
+      .where(sql`${table.createdByUserId} IS NOT NULL`),
     index("companies_name_idx").on(table.name),
     index("companies_category_idx").on(table.category),
     index("companies_industry_idx").on(table.industry),

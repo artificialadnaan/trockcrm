@@ -585,3 +585,51 @@ describe("canvassing activity — the window is sargable AND still exact", () =>
     }
   });
 });
+
+describe("canvassing activity — owner selections in their legacy forms", () => {
+  // The filter bar writes ?owners= and ?ownerEmails= as well as ?ownerIds=, resolves them locally and ticks
+  // the person — but only ids reached this report, so the page showed a filter applied while the numbers
+  // stayed office-wide until Apply was pressed.
+  it("resolves an owner NAME to the same report a pinned id produces", async () => {
+    const byName = await getCanvassingActivityReport(tdb, filters({ ownerNames: ["Caleb Stone"], officeId: OFF }));
+    const byId = await getCanvassingActivityReport(tdb, filters({ userIds: [CAL], officeId: OFF }));
+
+    expect(byName.people.map((p) => p.userId)).toEqual([CAL]);
+    expect(byName.totals).toEqual(byId.totals);
+  });
+
+  it("resolves an owner EMAIL the same way, case-insensitively", async () => {
+    const report = await getCanvassingActivityReport(
+      tdb,
+      filters({ ownerEmails: ["CSTONE@EXAMPLE.COM"], officeId: OFF })
+    );
+    expect(report.people.map((p) => p.userId)).toEqual([CAL]);
+  });
+
+  // Same reason the roster lookup is bounded: `users` is global, so resolving an arbitrary name must not
+  // become a way to discover who exists in another office.
+  it("will not resolve a name belonging to another office", async () => {
+    const OTHER_OFFICE = U("0ff3");
+    const OUTSIDER = U("0476");
+    await pg.exec(`
+      INSERT INTO public.offices (id, name, slug) VALUES ('${OTHER_OFFICE}', 'Atlanta 2', 'atlanta-2');
+      INSERT INTO public.users (id, email, display_name, role, office_id, is_active)
+      VALUES ('${OUTSIDER}', 'outsider2@example.com', 'Outside Person Two', 'rep', '${OTHER_OFFICE}', true);
+    `);
+
+    const report = await getCanvassingActivityReport(
+      tdb,
+      filters({ ownerNames: ["Outside Person Two"], officeId: OFF })
+    );
+    // Unresolvable, so the selection is simply not applied — and the outsider never appears.
+    expect(report.people.some((p) => p.userId === OUTSIDER)).toBe(false);
+    expect(JSON.stringify(report)).not.toContain("Outside Person Two");
+
+    await pg.exec(`DELETE FROM public.users WHERE id = '${OUTSIDER}'; DELETE FROM public.offices WHERE id = '${OTHER_OFFICE}';`);
+  });
+
+  it("reads the attribution hint the same way after moving the tz conversion out of the aggregate", async () => {
+    const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF }));
+    expect(report.attributionStartHint).toBe("2026-06-01");
+  });
+});

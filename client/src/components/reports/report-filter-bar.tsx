@@ -4,6 +4,7 @@ import { RotateCcw, SlidersHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { useOfficeScopeId } from "@/hooks/use-office-scope";
 import { useAccessibleOffices } from "@/hooks/use-accessible-offices";
 import { useSalesReps } from "@/hooks/use-sales-reps";
 
@@ -158,15 +159,19 @@ export function ReportFilterBar({
   const { filters } = useReportFilters({ defaultRange });
   const [draft, setDraft] = useState<ReportFilters>(filters);
   const { offices } = useAccessibleOffices();
+  const activeOfficeId = useOfficeScopeId();
   const canonicalOfficeId = useMemo(() => {
+    // With the selector hidden the report is pinned to the active tenant, so the picker must be too —
+    // otherwise it lists people the report can never return a number for.
+    if (!showOffice) return activeOfficeId ?? undefined;
     if (!draft.office || draft.office === "all") return undefined;
     return offices.find((office) => office.id === draft.office || office.slug === draft.office)?.id;
-  }, [draft.office, offices]);
+  }, [showOffice, activeOfficeId, draft.office, offices]);
   // Suppress the sales-reps fetch until offices are available OR the user
   // explicitly chose "all". Otherwise an unscoped fetch fires before we can
   // canonicalize a legacy `?office=dallas` URL into its UUID, leaking
   // unrelated reps into the owner picker.
-  const salesRepsEnabled = offices.length > 0 || draft.office === "all";
+  const salesRepsEnabled = !showOffice ? true : offices.length > 0 || draft.office === "all";
   const { salesReps } = useSalesReps(canonicalOfficeId, { enabled: salesRepsEnabled });
 
   useEffect(() => {
@@ -192,7 +197,7 @@ export function ReportFilterBar({
     next.set("range", nextFilters.range);
     next.set("dateFrom", nextFilters.dateFrom);
     next.set("dateTo", nextFilters.dateTo);
-    if (nextFilters.office && nextFilters.office !== "all") next.set("office", nextFilters.office);
+    if (showOffice && nextFilters.office && nextFilters.office !== "all") next.set("office", nextFilters.office);
     else next.delete("office");
 
     if (nextFilters.ownerIds.length || nextFilters.ownerNames.length || nextFilters.ownerEmails.length) {

@@ -104,18 +104,27 @@ describe("migration 0220 — created_by_user_id on the directory tables", () => 
     await pg.exec(migrationSql(MIGRATION));
 
     const result = await pg.query<{ indexname: string; indexdef: string }>(
-      `SELECT indexname, indexdef FROM pg_indexes WHERE schemaname='office_dallas' AND indexname LIKE '%_created_at_idx' ORDER BY indexname`
+      `SELECT indexname, indexdef FROM pg_indexes WHERE schemaname='office_dallas' AND indexname LIKE '%created_at_idx' ORDER BY indexname`
     );
-    expect(result.rows.map((r) => r.indexname)).toEqual([
-      "companies_created_at_idx",
-      "contacts_created_at_idx",
-      "leads_created_at_idx",
-      "properties_created_at_idx",
-    ]);
-    for (const row of result.rows) {
-      expect(row.indexdef, row.indexname).not.toContain("WHERE");
-      expect(row.indexdef, row.indexname).toContain("created_at");
+    const byName = new Map(result.rows.map((r) => [r.indexname, r.indexdef]));
+
+    // The RANGE scan: plain, unfiltered, so it can serve a window that deliberately includes null-creator
+    // rows. A partial index on a non-null creator could never satisfy that query.
+    for (const table of ["companies", "contacts", "leads", "properties"]) {
+      const def = byName.get(`${table}_created_at_idx`);
+      expect(def, `${table}_created_at_idx`).toBeDefined();
+      expect(def, table).not.toContain("WHERE");
     }
+
+    // The attribution-start MIN: filtered on a non-null creator, so it needs its own partial index to get
+    // the indexed-min path instead of rescanning the table's whole history on every request. `leads` has
+    // none because the hint deliberately excludes it — it was attributed long before this migration.
+    for (const table of ["companies", "contacts", "properties"]) {
+      const def = byName.get(`${table}_attributed_created_at_idx`);
+      expect(def, `${table}_attributed_created_at_idx`).toBeDefined();
+      expect(def, table).toContain("created_by_user_id IS NOT NULL");
+    }
+    expect(byName.has("leads_attributed_created_at_idx")).toBe(false);
   });
 
   // The provisioner replays ONLY the marked block for offices created after this deploy. If it drifts from
@@ -134,8 +143,9 @@ describe("migration 0220 — created_by_user_id on the directory tables", () => 
       expect(await columnExists("office_dallas", table, "created_by_user_id"), table).toBe(true);
     }
     const indexes = await pg.query<{ indexname: string }>(
-      `SELECT indexname FROM pg_indexes WHERE schemaname='office_dallas' AND indexname LIKE '%_created_at_idx'`
+      `SELECT indexname FROM pg_indexes WHERE schemaname='office_dallas' AND indexname LIKE '%created_at_idx'`
     );
-    expect(indexes.rows).toHaveLength(4);
+    // 4 plain range indexes + 3 partial attribution indexes (leads is excluded from the hint).
+    expect(indexes.rows).toHaveLength(7);
   });
 });
