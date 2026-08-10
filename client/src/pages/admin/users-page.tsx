@@ -181,14 +181,18 @@ export function UsersPage() {
       await updateUser(userId, { generatesSales: !generatesSales });
       // Name the consequence rather than the field — "generatesSales updated" tells an admin nothing.
       //
-      // But do NOT claim removal. The roster predicate retains anyone who owns a deal in this office
-      // through its owner-backed exception, so for those users the row stays on the cards and the funnel
-      // and a flat "Removed from the director dashboard" would report the opposite of what happened. The
-      // client cannot tell which case this is (the users payload carries no ownership), so the copy states
-      // the setting, which is always true, and names the one exception rather than guessing.
+      // A plain statement of removal is now the truth: dashboardRosterMembershipSql gates the rep cards,
+      // the funnel rows and the snapshot read on this flag ABSOLUTELY, so an untick removes the person
+      // whether or not they own deals. An earlier revision hedged with "anyone who owns deals still
+      // appears", which described the owner-backed exception that used to sit in the predicate; leaving
+      // that copy here would now report the exact opposite of what the click did.
+      //
+      // Scoped to "the director dashboard" on purpose, not "everywhere": an unticked person who holds
+      // earned commission or owns a live deal is still listed in Team Commissions, which keeps its own
+      // evidence-based roster so no money is ever orphaned.
       toast.success(
         generatesSales
-          ? "No longer tracked as a sales carrier. Anyone who owns deals still appears."
+          ? "Removed from the director dashboard"
           : "Now tracked on the director dashboard"
       );
     } catch (err) {

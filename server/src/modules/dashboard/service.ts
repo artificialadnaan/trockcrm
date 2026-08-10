@@ -1621,17 +1621,19 @@ export async function getDirectorRepCommissionRows(
               WHERE dsc.rep_user_id = u.id
                 AND COALESCE(d.is_test_data, false) = false
             )
-            -- ...and live-deal OWNERSHIP, matching dashboardRosterMembershipSql's owner-backed exception
-            -- so the three rosters on this screen agree. Without it an unticked director who still owns
-            -- deals is retained on the cards and the funnel but dropped from Team Commissions.
+            -- ...and live-deal OWNERSHIP. This is what lets the PERFORMANCE rosters treat the flag as
+            -- absolute: getCommissionOfficeTotals counts a deal whenever a rostered involved user exists
+            -- and never reads the flag, so if nothing retained an unticked owner HERE, their value would
+            -- sit in the footer with no row to explain it. Team Commissions therefore keeps its own
+            -- EVIDENCE-based roster -- earned, or owns live work -- while the cards and funnel answer the
+            -- separate question of who an admin wants judged on sales.
             --
             -- assigned_rep_id ONLY -- deliberately NARROWER than the rep branch above, which mirrors
-            -- getCommissionOfficeTotals' involvement test and so accepts the estimator too. The cards and
-            -- funnel derive their exception from deal_owners, which is assigned_rep_id alone, so an
-            -- estimator-only non-rep is absent THERE; admitting them here would hand them a commission row
-            -- that is blank (isRep zeroes every involvement metric for non-reps) and unexplained by any
-            -- other roster. A non-rep estimator who actually EARNED is still retained, by the
-            -- signed-commission branch directly above, which is the evidence that belongs to them.
+            -- getCommissionOfficeTotals' involvement test and so accepts the estimator too. An
+            -- estimator-only non-rep would get a row that is blank (isRep zeroes every involvement metric
+            -- for non-reps) and backed by no value of their own in the footer. A non-rep estimator who
+            -- actually EARNED is still retained by the signed-commission branch above, which is the
+            -- evidence that belongs to them.
             OR EXISTS (
               SELECT 1 FROM ${deals} d
               WHERE d.assigned_rep_id = u.id
@@ -2553,14 +2555,6 @@ export async function getRepPerformanceSnapshots(
         ON u.id = rps.rep_id
        AND u.is_active = true
        AND COALESCE(u.is_test_data, false) = false
-       -- The SAME roster rule as the cards and the funnel, including its owner-backed exception -- not a
-       -- bare flag test. dashboardRosterMembershipSql deliberately RETAINS anyone who owns a deal in this
-       -- office whatever the flag says; if this read dropped them, the Activity Pulse, strategic alerts
-       -- and coaching prompts would go quiet for exactly the people the cards still show, which is the
-       -- cross-panel drift the shared predicate exists to prevent.
-       --
-       -- Gating the READ rather than the worker's write means ticking someone back on restores their
-       -- history instantly instead of waiting for the next rollup.
        -- Absolute, matching dashboardRosterMembershipSql: unticked is gone from the cards, the funnel and
        -- these panels alike. The owner-backed exception that used to sit here made the toggle a no-op for
        -- anyone holding a single deal, which is not what it promises. Gating the READ rather than the
