@@ -100,6 +100,10 @@ function CanvassingActivityReportView() {
     setSearchParams(params, { replace: false });
   }
 
+  // Whether a person filter is on. It changes what several panels can honestly claim: the counts follow the
+  // selection, but `unattributed` cannot — it describes records with no recorded author at all.
+  const filteredToPeople = (query.ownerIds?.length ?? 0) > 0;
+
   const chartData = useMemo(
     () =>
       (data?.buckets ?? []).map((row) => ({
@@ -174,7 +178,7 @@ function CanvassingActivityReportView() {
                 properties, contacts and leads from now on.
               </>
             )}
-            {data.unattributed.total > 0 ? (
+            {data.unattributed.total > 0 && !filteredToPeople ? (
               <>
                 {" "}
                 <strong>{formatNumber(data.unattributed.total)}</strong> record
@@ -303,7 +307,13 @@ function CanvassingActivityReportView() {
             )}
           </ReportPanel>
 
-          <ReportPanel title={`Office totals by ${bucket}`}>
+          <ReportPanel
+            title={
+              filteredToPeople
+                ? `Selected people by ${bucket}`
+                : `Office totals by ${bucket}`
+            }
+          >
             {data.buckets.length === 0 ? (
               <EmptyState label="Nothing entered in this window." />
             ) : (
@@ -317,7 +327,13 @@ function CanvassingActivityReportView() {
                       <th>Contacts</th>
                       <th>Leads</th>
                       <th>Total</th>
-                      <th>No author recorded</th>
+                      {/*
+                        Only shown unfiltered. `unattributed` is a property of the DATA — records whose
+                        creator was never recorded — so it is always whole-office and cannot be narrowed to
+                        the selected people. Printing it beside person-filtered counts would put two
+                        different scopes in one row.
+                      */}
+                      {filteredToPeople ? null : <th>No author recorded</th>}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
@@ -329,7 +345,9 @@ function CanvassingActivityReportView() {
                         <td>{formatNumber(row.counts.contact)}</td>
                         <td>{formatNumber(row.counts.lead)}</td>
                         <td className="font-semibold text-slate-900">{formatNumber(row.counts.total)}</td>
-                        <td className="text-slate-500">{formatNumber(row.unattributed.total)}</td>
+                        {filteredToPeople ? null : (
+                          <td className="text-slate-500">{formatNumber(row.unattributed.total)}</td>
+                        )}
                       </tr>
                     ))}
                   </tbody>

@@ -96,19 +96,26 @@ describe("migration 0220 — created_by_user_id on the directory tables", () => 
     expect(await columnExists("office_dallas", "companies", "created_by_user_id")).toBe(true);
   });
 
-  it("creates the reporting index on all four tables, including leads", async () => {
+  // Indexed on created_at, not on (creator, created_at) and not partial: the report's scan deliberately
+  // includes null-creator rows to count what it cannot attribute, so a partial index on a non-null creator
+  // could never serve it, and the column it actually filters on is the date.
+  it("creates a created_at index on all four tables, including leads", async () => {
     await seedOffices(["office_dallas"]);
     await pg.exec(migrationSql(MIGRATION));
 
-    const result = await pg.query<{ indexname: string }>(
-      `SELECT indexname FROM pg_indexes WHERE schemaname='office_dallas' AND indexname LIKE '%created_by_user_created_at_idx' ORDER BY indexname`
+    const result = await pg.query<{ indexname: string; indexdef: string }>(
+      `SELECT indexname, indexdef FROM pg_indexes WHERE schemaname='office_dallas' AND indexname LIKE '%_created_at_idx' ORDER BY indexname`
     );
     expect(result.rows.map((r) => r.indexname)).toEqual([
-      "companies_created_by_user_created_at_idx",
-      "contacts_created_by_user_created_at_idx",
-      "leads_created_by_user_created_at_idx",
-      "properties_created_by_user_created_at_idx",
+      "companies_created_at_idx",
+      "contacts_created_at_idx",
+      "leads_created_at_idx",
+      "properties_created_at_idx",
     ]);
+    for (const row of result.rows) {
+      expect(row.indexdef, row.indexname).not.toContain("WHERE");
+      expect(row.indexdef, row.indexname).toContain("created_at");
+    }
   });
 
   // The provisioner replays ONLY the marked block for offices created after this deploy. If it drifts from
@@ -127,7 +134,7 @@ describe("migration 0220 — created_by_user_id on the directory tables", () => 
       expect(await columnExists("office_dallas", table, "created_by_user_id"), table).toBe(true);
     }
     const indexes = await pg.query<{ indexname: string }>(
-      `SELECT indexname FROM pg_indexes WHERE schemaname='office_dallas' AND indexname LIKE '%created_by_user_created_at_idx'`
+      `SELECT indexname FROM pg_indexes WHERE schemaname='office_dallas' AND indexname LIKE '%_created_at_idx'`
     );
     expect(indexes.rows).toHaveLength(4);
   });

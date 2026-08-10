@@ -139,9 +139,7 @@ export const leads = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
-    index("leads_created_by_user_created_at_idx")
-      .on(table.createdByUserId, table.createdAt)
-      .where(sql`${table.createdByUserId} IS NOT NULL`),
+    index("leads_created_at_idx").on(table.createdAt),
     index("leads_company_id_idx").on(table.companyId),
     index("leads_property_id_idx").on(table.propertyId),
     index("leads_assigned_rep_id_idx").on(table.assignedRepId),

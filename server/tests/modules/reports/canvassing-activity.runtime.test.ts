@@ -23,6 +23,7 @@ import {
   offices,
   pipelineStageConfig,
   properties,
+  userOfficeAccess,
   users,
 } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
@@ -67,7 +68,8 @@ beforeAll(async () => {
   // Pinning to a NON-UTC zone here is deliberate: it proves that independence rather than assuming it.
   await pg.exec("SET TimeZone='Asia/Tokyo';");
   await pg.exec(
-    tenantSchemaSql("public", [offices, users, pipelineStageConfig, companies, contacts, properties, leads, deals, activities])
+    // userOfficeAccess: the roster lookup bounds pinned ids to this office via office_id OR a grant here.
+    tenantSchemaSql("public", [offices, users, userOfficeAccess, pipelineStageConfig, companies, contacts, properties, leads, deals, activities])
   );
 
   await pg.exec(`
@@ -445,5 +447,87 @@ describe("canvassing activity — findings from review", () => {
     expect(report.attributionStartHint).not.toBe("2025-03-04");
 
     await pg.exec(`DELETE FROM public.leads WHERE id = '${OLD_LEAD}';`);
+  });
+});
+
+describe("canvassing activity — findings from the second review round", () => {
+  // A period with nothing in it produced no row at all, so weeks 1 and 3 rendered as adjacent columns and
+  // the quiet week between them vanished — the exact opposite of what an accountability report is for.
+  it("materialises every calendar week in the range, including the empty ones", async () => {
+    const report = await getCanvassingActivityReport(tdb, filters({ bucket: "week" }));
+
+    // 2026-06-01..06-30 spans the Sundays May 31, Jun 7, 14, 21 and 28.
+    expect(report.buckets.map((b) => b.bucketStart)).toEqual([
+      "2026-05-31",
+      "2026-06-07",
+      "2026-06-14",
+      "2026-06-21",
+      "2026-06-28",
+    ]);
+    // Jun 21 and Jun 28 have no activity at all and must still be present, at zero.
+    const quiet = report.buckets.find((b) => b.bucketStart === "2026-06-21");
+    expect(quiet?.counts).toEqual({ company: 0, property: 0, contact: 0, lead: 0, total: 0 });
+    expect(quiet?.perUser).toEqual([]);
+  });
+
+  it("materialises months and quarters the same way", async () => {
+    const months = await getCanvassingActivityReport(
+      tdb,
+      filters({ bucket: "month", dateFrom: "2026-05-01", dateTo: "2026-08-31" })
+    );
+    expect(months.buckets.map((b) => b.bucketStart)).toEqual(["2026-05-01", "2026-06-01", "2026-07-01", "2026-08-01"]);
+
+    const quarters = await getCanvassingActivityReport(
+      tdb,
+      filters({ bucket: "quarter", dateFrom: "2026-02-01", dateTo: "2026-08-31" })
+    );
+    expect(quarters.buckets.map((b) => b.bucketStart)).toEqual(["2026-01-01", "2026-04-01", "2026-07-01"]);
+  });
+
+  it("gives a pinned person who did nothing all range a full row of zero buckets", async () => {
+    const report = await getCanvassingActivityReport(tdb, filters({ userIds: [OWNER], officeId: OFF }));
+
+    expect(report.people.map((p) => p.userId)).toEqual([OWNER]);
+    expect(report.buckets).toHaveLength(5);
+    expect(report.buckets.every((b) => b.counts.total === 0)).toBe(true);
+  });
+
+  // `users` is a single GLOBAL table. Resolving an arbitrary pinned uuid returned that person's name,
+  // email, role and active flag as a zero-count row — reading the global directory through a tenant report.
+  it("refuses to resolve a pinned user who is not a member of this office", async () => {
+    const OTHER_OFFICE = U("0ff2");
+    const OUTSIDER = U("0475");
+    await pg.exec(`
+      INSERT INTO public.offices (id, name, slug) VALUES ('${OTHER_OFFICE}', 'Atlanta', 'atlanta');
+      INSERT INTO public.users (id, email, display_name, role, office_id, is_active)
+      VALUES ('${OUTSIDER}', 'outsider@example.com', 'Outside Person', 'rep', '${OTHER_OFFICE}', true);
+    `);
+
+    const report = await getCanvassingActivityReport(tdb, filters({ userIds: [OUTSIDER], officeId: OFF }));
+
+    expect(report.people).toEqual([]);
+    expect(JSON.stringify(report)).not.toContain("outsider@example.com");
+    expect(JSON.stringify(report)).not.toContain("Outside Person");
+
+    // A member of THIS office is still resolved, so the guard narrows rather than breaking the feature.
+    const ok = await getCanvassingActivityReport(tdb, filters({ userIds: [OWNER], officeId: OFF }));
+    expect(ok.people.map((p) => p.displayName)).toEqual(["Book Owner"]);
+
+    await pg.exec(`DELETE FROM public.users WHERE id = '${OUTSIDER}'; DELETE FROM public.offices WHERE id = '${OTHER_OFFICE}';`);
+  });
+
+  it("still lists someone who created records here, even without a current office grant", async () => {
+    // Their rows live in this schema, so they are already this tenant's business — the guard is about
+    // arbitrary lookups, not about erasing real contributors.
+    const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF }));
+    expect(report.people.map((p) => p.displayName)).toContain("Edward McCarty");
+  });
+
+  // Postgres has no year zero, so this reached `'0000-01-01'::date` and 500'd instead of falling back.
+  it("rejects year zero, which JavaScript round-trips happily", () => {
+    const parsed = normalizeCanvassingFilters({ dateFrom: "0000-01-01", dateTo: "2026-01-01" });
+    expect(parsed.dateFrom).not.toBe("0000-01-01");
+    expect(parsed.dateFrom).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(Number(parsed.dateFrom.slice(0, 4))).toBeGreaterThan(0);
   });
 });

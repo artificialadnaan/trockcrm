@@ -49,7 +49,13 @@
 import { sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import { BUSINESS_TIMEZONE, businessToday, shiftBusinessDate, sundayWeekBucketSql } from "../../lib/period.js";
+import {
+  BUSINESS_TIMEZONE,
+  businessToday,
+  shiftBusinessDate,
+  sundayWeekBucketSql,
+  sundayWeekStart,
+} from "../../lib/period.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -72,6 +78,12 @@ export interface CanvassingActivityFilters {
   userIds?: string[];
   /** Cap on the notes feed. The counts are never capped; only the readable list is. */
   notesLimit?: number;
+  /**
+   * The office this request is scoped to. `users` is a single GLOBAL table, so without it a crafted
+   * ?userIds=<uuid> for an account in another office would be looked up and its name, email, role and
+   * active flag returned as a zero-count row — reading the global directory through a tenant report.
+   */
+  officeId?: string | null;
 }
 
 export type CanvassingCounts = Record<CanvassingKind, number> & { total: number };
@@ -139,8 +151,39 @@ const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
  */
 function isRealIsoDate(value: string): boolean {
   if (!ISO_DATE.test(value)) return false;
+  // Postgres has no year zero, so `0000-01-01::date` errors even though JavaScript round-trips it happily
+  // — a stale bookmark would 500 rather than fall back, which is the failure this function exists to stop.
+  if (value.startsWith("0000")) return false;
   const parsed = new Date(`${value}T00:00:00Z`);
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
+/**
+ * Every calendar bucket in the range, whether or not anything happened in it.
+ *
+ * A period with no creations and no notes produced no row at all, so weeks 1 and 3 rendered as adjacent
+ * columns and week 2 vanished — the page claims an explicit zero is the finding, and then hid the emptiest
+ * weeks of all. A pinned person who did nothing all range got an empty table rather than a row of zeros.
+ */
+function bucketStartsInRange(bucket: CanvassingBucket, from: string, to: string): string[] {
+  const startOf = (iso: string): string => {
+    if (bucket === "week") return sundayWeekStart(iso);
+    const [y, m] = iso.split("-").map(Number);
+    const month = bucket === "month" ? m : Math.floor((m - 1) / 3) * 3 + 1;
+    return `${String(y).padStart(4, "0")}-${String(month).padStart(2, "0")}-01`;
+  };
+  const next = (iso: string): string => {
+    if (bucket === "week") return shiftBusinessDate(iso, 7);
+    const [y, m] = iso.split("-").map(Number);
+    const step = bucket === "month" ? 1 : 3;
+    const raw = m - 1 + step;
+    return `${String(y + Math.floor(raw / 12)).padStart(4, "0")}-${String((raw % 12) + 1).padStart(2, "0")}-01`;
+  };
+
+  const out: string[] = [];
+  // Bounded independently of the loop body: a malformed range must not be able to spin here.
+  for (let cursor = startOf(from); cursor <= to && out.length < 1024; cursor = next(cursor)) out.push(cursor);
+  return out;
 }
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -345,13 +388,33 @@ export async function getCanvassingActivityReport(
   `);
 
   const requested = filters.userIds ?? [];
-  const seenUserIds = new Set<string>();
-  for (const row of gridRows.rows) if (row.user_id) seenUserIds.add(row.user_id);
-  for (const row of noteCountRows.rows) if (row.user_id) seenUserIds.add(row.user_id);
-  for (const id of requested) seenUserIds.add(id);
+  const dataUserIds = new Set<string>();
+  for (const row of gridRows.rows) if (row.user_id) dataUserIds.add(row.user_id);
+  for (const row of noteCountRows.rows) if (row.user_id) dataUserIds.add(row.user_id);
+  const seenUserIds = new Set<string>([...dataUserIds, ...requested]);
 
-  const rosterIds = [...seenUserIds];
-  const rosterRows = rosterIds.length
+  // Two classes of id reach this lookup, and they get different treatment.
+  //
+  // Ids DISCOVERED IN THE DATA are safe to resolve unconditionally: the rows are in this office's schema,
+  // so whoever created them is already this tenant's business, even if their office membership has since
+  // moved. Ids the CALLER PINNED are not: `users` is one global table, so resolving an arbitrary uuid would
+  // return that person's name, email, role and active flag from any office — a directory read dressed up as
+  // a zero-count row. Those must prove membership of this office first, the same way the dashboard roster
+  // does (office_id, or a user_office_access grant).
+  const discovered = [...seenUserIds].filter((id) => !requested.includes(id) || dataUserIds.has(id));
+  const pinnedOnly = [...seenUserIds].filter((id) => !discovered.includes(id));
+  const idArray = (ids: string[]) => sql`ARRAY[${sql.join(ids.map((id) => sql`${id}::uuid`), sql`, `)}]`;
+  const membership = filters.officeId
+    ? sql`(u.office_id = ${filters.officeId} OR EXISTS (
+        SELECT 1 FROM user_office_access uo WHERE uo.user_id = u.id AND uo.office_id = ${filters.officeId}
+      ))`
+    : sql`TRUE`;
+
+  const rosterPredicates: SQL[] = [];
+  if (discovered.length) rosterPredicates.push(sql`u.id = ANY(${idArray(discovered)})`);
+  if (pinnedOnly.length) rosterPredicates.push(sql`(u.id = ANY(${idArray(pinnedOnly)}) AND ${membership})`);
+
+  const rosterRows = rosterPredicates.length
     ? await tenantDb.execute<{
         id: string;
         display_name: string;
@@ -361,7 +424,7 @@ export async function getCanvassingActivityReport(
       }>(sql`
         SELECT u.id::text AS id, u.display_name, u.email, u.role::text AS role, u.is_active
           FROM users u
-         WHERE u.id = ANY(${sql`ARRAY[${sql.join(rosterIds.map((id) => sql`${id}::uuid`), sql`, `)}]`})
+         WHERE ${sql.join(rosterPredicates, sql` OR `)}
       `)
     : { rows: [] as Array<{ id: string; display_name: string; email: string | null; role: string | null; is_active: boolean }> };
 
@@ -458,6 +521,9 @@ export async function getCanvassingActivityReport(
   // Pinned people who did nothing still get a row. That zero is the finding.
   const peopleIds = new Set([...perPersonCounts.keys(), ...perPersonNotes.keys(), ...(pinned ?? [])]);
   const people: CanvassingPersonRow[] = [...peopleIds]
+    // A pinned id the roster refused (not a member of this office) is dropped outright. Printing it as an
+    // "Unknown user" zero row would still confirm the uuid resolves to somebody.
+    .filter((userId) => roster.has(userId) || dataUserIds.has(userId))
     .map((userId) => {
       const user = roster.get(userId);
       return {
@@ -474,6 +540,11 @@ export async function getCanvassingActivityReport(
 
   const notes = await loadNotes(tenantDb, filters, pinned);
   const attributionStartHint = await loadAttributionStart(tenantDb);
+
+  // Every calendar period in the range gets a row, present or not. A silently-missing week is the one thing
+  // this report must not do: it renders weeks 1 and 3 side by side and the quiet week in between disappears,
+  // which is the opposite of an accountability view.
+  for (const start of bucketStartsInRange(filters.bucket, filters.dateFrom, filters.dateTo)) ensureBucket(start);
 
   return {
     range: { from: filters.dateFrom, to: filters.dateTo },

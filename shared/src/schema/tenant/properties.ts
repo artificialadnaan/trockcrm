@@ -55,9 +55,7 @@ export const properties = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
-    index("properties_created_by_user_created_at_idx")
-      .on(table.createdByUserId, table.createdAt)
-      .where(sql`${table.createdByUserId} IS NOT NULL`),
+    index("properties_created_at_idx").on(table.createdAt),
     index("properties_company_id_idx").on(table.companyId),
     index("properties_company_name_idx").on(table.companyId, table.name),
     index("properties_type_idx").on(table.type),

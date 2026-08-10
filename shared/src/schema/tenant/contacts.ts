@@ -55,9 +55,7 @@ export const contacts = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
-    index("contacts_created_by_user_created_at_idx")
-      .on(table.createdByUserId, table.createdAt)
-      .where(sql`${table.createdByUserId} IS NOT NULL`),
+    index("contacts_created_at_idx").on(table.createdAt),
     index("contacts_name_company_idx").on(table.companyName),
     index("contacts_role_idx").on(table.role),
     index("contacts_owner_id_idx").on(table.ownerId).where(sql`${table.ownerId} IS NOT NULL`),

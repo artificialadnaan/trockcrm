@@ -1630,10 +1630,11 @@ router.get("/platform-usage/detail", requireAnyRole, async (req, res, next) => {
 // so a zero before that date reads as "not recorded", not as "did nothing".
 router.get("/canvassing-activity", requireAnyRole, requireCanvassingReportViewer, async (req, res, next) => {
   try {
-    const data = await getCanvassingActivityReport(
-      req.tenantDb!,
-      normalizeCanvassingFilters(req.query as Record<string, unknown>)
-    );
+    const data = await getCanvassingActivityReport(req.tenantDb!, {
+      ...normalizeCanvassingFilters(req.query as Record<string, unknown>),
+      // Bounds the roster lookup: `users` is global, so a pinned id from another office must not resolve.
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
+    });
     await req.commitTransaction!();
     res.json({ data });
   } catch (err) {

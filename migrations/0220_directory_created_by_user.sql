@@ -30,12 +30,13 @@ BEGIN
            ADD COLUMN IF NOT EXISTS created_by_user_id uuid REFERENCES public.users(id) ON DELETE SET NULL',
         schema_name
       );
-      -- Partial: the report only ever looks up attributed rows, and the vast majority of existing rows
-      -- are null, so this stays small.
+      -- Indexed on created_at, NOT on (creator, created_at) and NOT partial on a non-null creator.
+      -- The report's scan reads every row in the window INCLUDING the null-creator ones — that is how it
+      -- counts what it cannot attribute — so a partial index on `created_by_user_id IS NOT NULL` can never
+      -- satisfy it, and the leading column it filters on is the date.
       EXECUTE format(
-        'CREATE INDEX IF NOT EXISTS companies_created_by_user_created_at_idx
-           ON %I.companies (created_by_user_id, created_at)
-           WHERE created_by_user_id IS NOT NULL',
+        'CREATE INDEX IF NOT EXISTS companies_created_at_idx
+           ON %I.companies (created_at)',
         schema_name
       );
     END IF;
@@ -47,9 +48,8 @@ BEGIN
         schema_name
       );
       EXECUTE format(
-        'CREATE INDEX IF NOT EXISTS properties_created_by_user_created_at_idx
-           ON %I.properties (created_by_user_id, created_at)
-           WHERE created_by_user_id IS NOT NULL',
+        'CREATE INDEX IF NOT EXISTS properties_created_at_idx
+           ON %I.properties (created_at)',
         schema_name
       );
     END IF;
@@ -61,9 +61,8 @@ BEGIN
         schema_name
       );
       EXECUTE format(
-        'CREATE INDEX IF NOT EXISTS contacts_created_by_user_created_at_idx
-           ON %I.contacts (created_by_user_id, created_at)
-           WHERE created_by_user_id IS NOT NULL',
+        'CREATE INDEX IF NOT EXISTS contacts_created_at_idx
+           ON %I.contacts (created_at)',
         schema_name
       );
     END IF;
@@ -71,9 +70,8 @@ BEGIN
     -- leads.created_by_user_id already exists (0128); it only lacks the reporting index.
     IF to_regclass(format('%I.leads', schema_name)) IS NOT NULL THEN
       EXECUTE format(
-        'CREATE INDEX IF NOT EXISTS leads_created_by_user_created_at_idx
-           ON %I.leads (created_by_user_id, created_at)
-           WHERE created_by_user_id IS NOT NULL',
+        'CREATE INDEX IF NOT EXISTS leads_created_at_idx
+           ON %I.leads (created_at)',
         schema_name
       );
     END IF;
@@ -94,19 +92,15 @@ ALTER TABLE office_dallas.properties
 ALTER TABLE office_dallas.contacts
   ADD COLUMN IF NOT EXISTS created_by_user_id uuid REFERENCES public.users(id) ON DELETE SET NULL;
 
-CREATE INDEX IF NOT EXISTS companies_created_by_user_created_at_idx
-  ON office_dallas.companies (created_by_user_id, created_at)
-  WHERE created_by_user_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS companies_created_at_idx
+  ON office_dallas.companies (created_at);
 
-CREATE INDEX IF NOT EXISTS properties_created_by_user_created_at_idx
-  ON office_dallas.properties (created_by_user_id, created_at)
-  WHERE created_by_user_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS properties_created_at_idx
+  ON office_dallas.properties (created_at);
 
-CREATE INDEX IF NOT EXISTS contacts_created_by_user_created_at_idx
-  ON office_dallas.contacts (created_by_user_id, created_at)
-  WHERE created_by_user_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS contacts_created_at_idx
+  ON office_dallas.contacts (created_at);
 
-CREATE INDEX IF NOT EXISTS leads_created_by_user_created_at_idx
-  ON office_dallas.leads (created_by_user_id, created_at)
-  WHERE created_by_user_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS leads_created_at_idx
+  ON office_dallas.leads (created_at);
 -- TENANT_SCHEMA_END
