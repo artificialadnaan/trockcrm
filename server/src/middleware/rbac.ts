@@ -23,7 +23,17 @@ export function requireRole(...allowedRoles: UserRole[]) {
 
 export const requireAdmin = requireRole("admin");
 export const requireDirector = requireRole("admin", "director");
-export const requireAnyRole = requireRole("admin", "director", "rep");
+
+/**
+ * The ordinary CRM role floor: every role that may reach a report surface at all.
+ *
+ * Exported as DATA, not only as a middleware, because more than one place has to agree on it — the guard
+ * that enforces it on the route, and the session flags that tell the web client which reports it may
+ * offer. A second hand-written copy of this list is precisely how the two drift, and a drift here is
+ * invisible: the client offers a card whose route then bounces the user with no explanation.
+ */
+export const CRM_REPORT_ROLES: readonly UserRole[] = ["admin", "director", "rep"];
+export const requireAnyRole = requireRole(...CRM_REPORT_ROLES);
 
 /**
  * Require GLOBAL admin — the user's HOME role (`baseRole`), NOT the effective office role. `requireAdmin`

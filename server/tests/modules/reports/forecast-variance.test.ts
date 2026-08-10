@@ -8,6 +8,10 @@ const reportRouteMocks = vi.hoisted(() => ({
 
 vi.mock("../../../src/middleware/rbac.js", () => ({
   requireRole: vi.fn(() => (_req: any, _res: any, next: any) => next()),
+  // The role floor is now built from rbac's exported CRM_REPORT_ROLES rather than re-declared in the
+  // reports router, so the mock has to supply it too.
+  CRM_REPORT_ROLES: ["admin", "director", "rep"],
+  requireAnyRole: vi.fn((_req: any, _res: any, next: any) => next()),
   requireDirector: reportRouteMocks.requireDirector,
   // The Daily Activity Log route carries a second, allowlist-based guard. These suites are about
   // other report routes, so it is stubbed open — its own behaviour is covered by

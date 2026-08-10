@@ -6,7 +6,7 @@ import {
   type EstimatorPipelineCohort,
   type ScorecardKind,
 } from "@trock-crm/shared/types";
-import { requireRole, requireDirector, requireDailyActivityLogViewer } from "../../middleware/rbac.js";
+import { requireRole, requireDirector, requireAnyRole, requireDailyActivityLogViewer } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import {
   getPipelineSummary,
@@ -122,7 +122,7 @@ function parseWeekMode(modeRaw: string | undefined): WeekMode {
 const router = Router();
 const VALID_REPORT_FREQUENCIES = ["daily", "weekly", "biweekly", "monthly", "quarterly"] as const;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const requireAnyRole = requireRole("admin", "director", "rep");
+// requireAnyRole comes from rbac.ts so this file cannot hold a second, divergent copy of the role floor.
 
 function readQueryString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;

@@ -14,16 +14,11 @@ import {
 import { authMiddleware } from "../../middleware/auth.js";
 import { authLimiter } from "../../middleware/rate-limit.js";
 import { AppError } from "../../middleware/error-handler.js";
-import { requireAdmin } from "../../middleware/rbac.js";
+import { requireAdmin, CRM_REPORT_ROLES } from "../../middleware/rbac.js";
 import { isRfpReviewerEmail } from "@trock-crm/shared/lib/rfpReviewerEmails";
 import { isRfpVoterEmail } from "@trock-crm/shared/lib/rfpVoterEmails";
 import { isDailyActivityLogViewerEmail } from "@trock-crm/shared/lib/dailyActivityLogViewers";
 
-/**
- * The role floor on GET /api/reports/daily-activity-log (requireAnyRole). Kept beside the flag that mirrors
- * it so the two cannot drift; if that route's role list changes, this changes with it.
- */
-const DAILY_ACTIVITY_LOG_ROLES = new Set(["admin", "director", "rep"]);
 import {
   exchangeCodeForTokens,
   getConsentUrl,
@@ -51,6 +46,13 @@ import {
 import { loginMobileUser } from "./mobile-auth-service.js";
 import { fieldUserAuthRouter } from "../field-users/routes.js";
 import { isAuthDemoBootstrapEnabled } from "../../config/feature-flags.js";
+
+/**
+ * The role floor on GET /api/reports/daily-activity-log, read from the SAME exported list the route's
+ * requireAnyRole guard is built from. Derived rather than restated: a second hand-written copy would let
+ * the flag and the endpoint disagree the next time that list changes.
+ */
+const DAILY_ACTIVITY_LOG_ROLES = new Set<string>(CRM_REPORT_ROLES);
 
 const router = Router();
 
