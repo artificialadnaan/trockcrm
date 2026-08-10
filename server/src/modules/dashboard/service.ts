@@ -931,6 +931,49 @@ function activeOfficeRepMembershipSql(officeId: string): SQL {
   ))`;
 }
 
+/**
+ * WHO BELONGS ON A DIRECTOR-DASHBOARD ROSTER. ONE definition, shared by the rep-performance cards and
+ * the funnel rows, because those two tables sit on the same screen and a person appearing in one but
+ * not the other is the drift this codebase keeps re-introducing by copy-paste.
+ *
+ * Replaces `(u.role = 'rep' AND <office membership>) OR <owns a deal>`, which asked the WRONG QUESTION
+ * in both directions:
+ *   • it admitted every estimator/manager holding role='rep' purely for CRM access, then the client
+ *     scored them Low-activity and printed a red NEEDS HELP badge — flagging people as struggling at a
+ *     job nobody gave them;
+ *   • it excluded a director hired to run deals until his FIRST deal landed, which is backwards: the
+ *     reason to track someone is strongest before they have results, not after.
+ * `users.generates_sales` (migration 0219) answers "is this person expected to carry deals?" directly,
+ * so neither failure is reachable.
+ *
+ * THE FLAG CAN ONLY REMOVE SOMEONE WHO OWNS NO DEALS IN THIS OFFICE. The owner branch is deliberately
+ * left UN-GATED, exactly as it was before, and that single decision buys three things:
+ *   • EXACT parity at deploy, including multi-office. `users` is GLOBAL, so a flag set because someone
+ *     owns a deal in office B would otherwise grant them visibility in every office they are a member
+ *     of — admitting them to office A's roster with no admin action and no deal in A. Keeping ownership
+ *     as its own tenant-local branch means office A's roster still turns on office A's deals.
+ *   • The commission footer stays reconcilable. getCommissionOfficeTotals counts a deal whenever a
+ *     rostered involved user exists and does NOT read this flag (a roster flag must never move a money
+ *     total). If unticking someone could hide a row whose deals still sit in that total, the table would
+ *     show a footer larger than the sum of its visible rows, with no drill-down to explain the gap.
+ *   • It matches what was actually asked for: remove the people who are "never going to truly have any
+ *     deals". Someone with deals is not that person, and the honest way to remove them is to reassign
+ *     the deals, not to hide a row while its value keeps counting.
+ *
+ * The office boundary is UNCHANGED and still load-bearing: without it every generates_sales rep in EVERY
+ * office would leak into this office's roster (the D-5 finding). The owner branch needs no office gate
+ * because `deals` is a TENANT table — tenantDb runs with search_path office_slug,public, so `owner_rows`
+ * is already bounded to THIS office by schema isolation.
+ *
+ * Assumes the users alias is `u` and a `deal_owners`-derived `owner_rows` join is in scope.
+ */
+export function dashboardRosterMembershipSql(officeId?: string): SQL {
+  return sql`(
+          (u.generates_sales = true${officeId ? sql` AND ${activeOfficeRepMembershipSql(officeId)}` : sql``})
+          OR owner_rows.rep_id IS NOT NULL
+        )`;
+}
+
 async function getDirectorFunnelSummary(
   tenantDb: TenantDb,
   officeId?: string
@@ -1029,14 +1072,9 @@ async function getDirectorFunnelSummary(
         -- P2-8 (Codex round 2): exclude flagged smoke-test / duplicate accounts from the
         -- funnel roster too, matching the rep-card roster.
         AND COALESCE(u.is_test_data, false) = false
-        -- D-5: scope the rep branch to ACTIVE-OFFICE membership (primary office or a
-        -- user_office_access grant -- see activeOfficeRepMembershipSql), matching the rep-card
-        -- roster + the deals/leads layer, while preserving the locked owner-row requirement (a
-        -- deal owner in THIS office is kept even if their primary users.office_id differs).
-        AND (
-          (u.role = 'rep'${officeId ? sql` AND ${activeOfficeRepMembershipSql(officeId)}` : sql``})
-          OR owner_rows.rep_id IS NOT NULL
-        )
+        -- Roster membership: see dashboardRosterMembershipSql. Shared verbatim with the rep-card
+        -- roster so the two tables on this screen can never list different people.
+        AND ${dashboardRosterMembershipSql(officeId)}
       ORDER BY
         (
           COALESCE(lc.leads, 0) +
@@ -1519,8 +1557,37 @@ export async function getDirectorRepCommissionRows(
       -- commission roster (dashboard payload + commission workspace).
       AND COALESCE(u.is_test_data, false) = false
       AND (
-        -- The office-scoped rep roster (unchanged — preserves D-5 cross-office scoping for reps).
-        (u.role = 'rep'${officeScope})
+        -- The office-scoped rep roster (D-5 cross-office scoping for reps preserved verbatim), now also
+        -- honouring the generates_sales roster flag so an unticked estimator does not linger in the
+        -- commission table at $0 after disappearing from the cards on the same screen.
+        --
+        -- THE TWO "OR EXISTS" LEGS ARE SAFETY VALVES, NOT CONVENIENCES. generates_sales is a ROSTER flag
+        -- and must never be able to move, or orphan, a money figure:
+        --   • EARNED — an unticked rep who genuinely holds a signed-commission row still appears, so no
+        --     earned commission can be made invisible by a roster edit.
+        --   • INVOLVED ON A LIVE DEAL — getCommissionOfficeTotals counts a deal whenever a rostered
+        --     involved user (owner OR estimator) exists, and it deliberately does NOT read this flag.
+        --     Without this leg, unticking a rep who still owns or estimates live deals would remove their
+        --     ROW while their deal values stayed in the footer: a total larger than the sum of the rows
+        --     above it, with no drill-down anywhere to account for the difference. The condition mirrors
+        --     that query's "rostered" EXISTS so the two cannot disagree about who is countable.
+        -- Both use the same non-test-deal scoping as the non-rep branch below, so every leg here counts
+        -- the same population.
+        (u.role = 'rep'${officeScope} AND (
+          u.generates_sales = true
+          OR EXISTS (
+            SELECT 1 FROM ${dealSignedCommissions} dsc
+            JOIN ${deals} d ON d.id = dsc.deal_id
+            WHERE dsc.rep_user_id = u.id
+              AND COALESCE(d.is_test_data, false) = false
+          )
+          OR EXISTS (
+            SELECT 1 FROM ${deals} d
+            WHERE u.id IN (d.assigned_rep_id, d.estimator_user_id)
+              AND d.is_active = true
+              AND COALESCE(d.is_test_data, false) = false
+          )
+        ))
         -- Plus any NON-rep internal CRM user (isCrmUserRole == role <> 'field_contractor') who is a MEMBER
         -- of the active office AND actually EARNED — holds >=1 deal_signed_commissions row on a non-test
         -- deal (e.g. a director like Chase Kelly with a 'sales_source' cut). The membership check reuses the
@@ -1532,13 +1599,38 @@ export async function getDirectorRepCommissionRows(
         -- source always passes: setting a source runs validateAssignee, which requires office access.
         -- role NOT IN ('rep', ...) (not role <> field_contractor) keeps every rep handled ONLY by the
         -- office-scoped rep branch above, so a cross-office rep D-5 dropped can't drift the deal-VALUE footer.
+        --
+        -- ...OR who has been explicitly flagged as a sales carrier. Without this leg the toggle would be
+        -- incoherent: ticking a director puts them on the cards, the funnel and the Activity Pulse but
+        -- NOT on the Team Commissions roster on the same screen, until their first commission is booked.
+        -- The office membership check is unchanged and still carries the whole security boundary.
         OR (
           u.role NOT IN ('rep', 'field_contractor')${officeScope}
-          AND EXISTS (
-            SELECT 1 FROM ${dealSignedCommissions} dsc
-            JOIN ${deals} d ON d.id = dsc.deal_id
-            WHERE dsc.rep_user_id = u.id
-              AND COALESCE(d.is_test_data, false) = false
+          AND (
+            u.generates_sales = true
+            OR EXISTS (
+              SELECT 1 FROM ${dealSignedCommissions} dsc
+              JOIN ${deals} d ON d.id = dsc.deal_id
+              WHERE dsc.rep_user_id = u.id
+                AND COALESCE(d.is_test_data, false) = false
+            )
+            -- ...and live-deal OWNERSHIP, matching dashboardRosterMembershipSql's owner-backed exception
+            -- so the three rosters on this screen agree. Without it an unticked director who still owns
+            -- deals is retained on the cards and the funnel but dropped from Team Commissions.
+            --
+            -- assigned_rep_id ONLY -- deliberately NARROWER than the rep branch above, which mirrors
+            -- getCommissionOfficeTotals' involvement test and so accepts the estimator too. The cards and
+            -- funnel derive their exception from deal_owners, which is assigned_rep_id alone, so an
+            -- estimator-only non-rep is absent THERE; admitting them here would hand them a commission row
+            -- that is blank (isRep zeroes every involvement metric for non-reps) and unexplained by any
+            -- other roster. A non-rep estimator who actually EARNED is still retained, by the
+            -- signed-commission branch directly above, which is the evidence that belongs to them.
+            OR EXISTS (
+              SELECT 1 FROM ${deals} d
+              WHERE d.assigned_rep_id = u.id
+                AND d.is_active = true
+                AND COALESCE(d.is_test_data, false) = false
+            )
           )
         )
       )
@@ -2454,6 +2546,18 @@ export async function getRepPerformanceSnapshots(
         ON u.id = rps.rep_id
        AND u.is_active = true
        AND COALESCE(u.is_test_data, false) = false
+       -- The SAME roster rule as the cards and the funnel, including its owner-backed exception -- not a
+       -- bare flag test. dashboardRosterMembershipSql deliberately RETAINS anyone who owns a deal in this
+       -- office whatever the flag says; if this read dropped them, the Activity Pulse, strategic alerts
+       -- and coaching prompts would go quiet for exactly the people the cards still show, which is the
+       -- cross-panel drift the shared predicate exists to prevent.
+       --
+       -- Gating the READ rather than the worker's write means ticking someone back on restores their
+       -- history instantly instead of waiting for the next rollup.
+       AND (
+         u.generates_sales = true
+         OR EXISTS (SELECT 1 FROM deals d WHERE d.assigned_rep_id = u.id)
+       )
        AND u.office_id = ${officeId}
       WHERE rps.period_kind = ${periodKind}
       ORDER BY rps.rep_id, rps.period_kind, rps.computed_at DESC NULLS LAST, rps.period_start DESC
@@ -3796,15 +3900,9 @@ async function buildRepPerformanceCards(
       -- roster. Test DEALS are already excluded from Won (deals.is_test_data), so this
       -- changes only WHO appears, never the Won total.
       AND COALESCE(u.is_test_data, false) = false
-      -- D-5: users is a GLOBAL (public) table, so an unscoped role='rep' branch admits reps
-      -- from EVERY office. Scope the rep branch to ACTIVE-OFFICE membership (primary office or
-      -- a user_office_access grant -- see activeOfficeRepMembershipSql) so foreign-office reps
-      -- no longer leak in, while a rep shared into this office still appears. The locked owner
-      -- branch is preserved un-gated, so anyone who has owned a deal in THIS office stays.
-      AND (
-        (u.role = 'rep'${officeId ? sql` AND ${activeOfficeRepMembershipSql(officeId)}` : sql``})
-        OR owner_rows.rep_id IS NOT NULL
-      )
+      -- Roster membership: see dashboardRosterMembershipSql. Shared verbatim with the funnel rows
+      -- below so the two tables on this screen can never list different people.
+      AND ${dashboardRosterMembershipSql(officeId)}
     ORDER BY pipeline_value DESC
   `);
   const staleLeadCounts = await getStaleLeadCountsByRep(tenantDb);

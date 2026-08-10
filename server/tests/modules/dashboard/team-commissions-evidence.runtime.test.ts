@@ -55,6 +55,7 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE TABLE users (id uuid PRIMARY KEY, display_name text, role text NOT NULL DEFAULT 'rep',
       is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false,
+      generates_sales boolean NOT NULL DEFAULT true,
       reports_to uuid, office_id uuid);
     CREATE TABLE user_commission_settings (user_id uuid PRIMARY KEY, is_active boolean DEFAULT true,
       commission_rate numeric DEFAULT 0, rolling_floor numeric DEFAULT 0, override_rate numeric DEFAULT 0,

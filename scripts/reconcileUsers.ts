@@ -564,10 +564,14 @@ async function createMissingUsers(client: pg.Client, orgUsers: OrgChartUser[], a
   for (const user of plan.wouldCreate) {
     const officeId = await getOfficeIdBySlug(client, user.officeSlug);
     const inserted = await client.query(
-      `INSERT INTO public.users (email, display_name, role, office_id, is_active, notification_prefs, updated_at)
-       VALUES ($1, $2, $3::user_role, $4, $5, COALESCE($6::jsonb, '{}'::jsonb), NOW())
+      // generates_sales is EXPLICIT, not left to the column default (migration 0219). This script creates
+      // admins, directors and construction users from the org chart; the default is `true`, so omitting it
+      // would put every one of them straight onto the director-dashboard rosters — the exact clutter the
+      // flag exists to remove. Same role-derived rule as createCrmUser and the user import.
+      `INSERT INTO public.users (email, display_name, role, office_id, is_active, generates_sales, notification_prefs, updated_at)
+       VALUES ($1, $2, $3::user_role, $4, $5, $7, COALESCE($6::jsonb, '{}'::jsonb), NOW())
        RETURNING id, email, role, is_active`,
-      [user.email, user.name, user.crmRole, officeId, user.status !== "inactive", notificationPrefsPatch({ flags: user.flags ?? [], notes: user.notes ?? null, source: "org_chart_cleanup" })]
+      [user.email, user.name, user.crmRole, officeId, user.status !== "inactive", notificationPrefsPatch({ flags: user.flags ?? [], notes: user.notes ?? null, source: "org_chart_cleanup" }), user.crmRole === "rep"]
     );
     auditRows.push({
       timestamp: nowIso(),

@@ -32,6 +32,12 @@ export const users = pgTable("users", {
   // duplicate human row from the director dashboard rosters. Does NOT affect any financial
   // total -- Won filters test DEALS (deals.is_test_data), not users.
   isTestData: boolean("is_test_data").default(false).notNull(),
+  // Migration 0219: is this person expected to CARRY DEALS? Orthogonal to `role`, which answers the
+  // separate question of what they may SEE/DO -- an estimator holds role='rep' purely for CRM access,
+  // and a director may well run deals. Gates the director-dashboard ROSTERS only; it is deliberately
+  // not read by the commission MONEY totals, so a roster edit can never move a financial figure.
+  // Defaults true: ticking someone on is safe, removing them is the act that must be deliberate.
+  generatesSales: boolean("generates_sales").default(true).notNull(),
   notificationPrefs: jsonb("notification_prefs").default({}).notNull(),
   // Per-user CRM email signature (sanitized HTML; a logo is an <img> pointing at the public
   // signature-logo asset route). Appended to user-composed outbound mail in sendEmail; null/empty

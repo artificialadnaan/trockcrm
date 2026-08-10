@@ -175,6 +175,29 @@ export function UsersPage() {
     }
   };
 
+  const handleToggleGeneratesSales = async (userId: string, generatesSales: boolean) => {
+    setUpdatingId(userId);
+    try {
+      await updateUser(userId, { generatesSales: !generatesSales });
+      // Name the consequence rather than the field — "generatesSales updated" tells an admin nothing.
+      //
+      // But do NOT claim removal. The roster predicate retains anyone who owns a deal in this office
+      // through its owner-backed exception, so for those users the row stays on the cards and the funnel
+      // and a flat "Removed from the director dashboard" would report the opposite of what happened. The
+      // client cannot tell which case this is (the users payload carries no ownership), so the copy states
+      // the setting, which is always true, and names the one exception rather than guessing.
+      toast.success(
+        generatesSales
+          ? "No longer tracked as a sales carrier. Anyone who owns deals still appears."
+          : "Now tracked on the director dashboard"
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update sales tracking");
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
   const handleManagerChange = async (userId: string, managerId: string) => {
     setUpdatingId(userId);
     try {
@@ -606,7 +629,7 @@ export function UsersPage() {
         bodyClassName="overflow-x-auto overscroll-x-contain"
         bodyLabel="Users table. Scroll horizontally to view all user details and actions."
       >
-        <table className="w-full min-w-[76rem] caption-bottom text-sm">
+        <table className="w-full min-w-[84rem] caption-bottom text-sm">
           <TableHeader>
             <TableRow>
               <TableHead className="w-10">
@@ -619,6 +642,12 @@ export function UsersPage() {
               <TableHead>User</TableHead>
               <TableHead>Primary Office</TableHead>
               <TableHead>Role</TableHead>
+              <TableHead>
+                Generates Sales
+                <span className="block text-xs font-normal text-gray-500">
+                  Shows on director dashboard
+                </span>
+              </TableHead>
               <TableHead>Sources</TableHead>
               <TableHead>Extra Offices</TableHead>
               <TableHead>Status</TableHead>
@@ -668,6 +697,22 @@ export function UsersPage() {
                       <SelectItem value="construction">Construction</SelectItem>
                     </SelectContent>
                   </Select>
+                </TableCell>
+                <TableCell>
+                  <Checkbox
+                    checked={user.generatesSales}
+                    onCheckedChange={() => void handleToggleGeneratesSales(user.id, user.generatesSales)}
+                    // A field contractor never carries deals: the field-invite flow creates them with the
+                    // flag off and the commission roster excludes the role outright. The server rejects a
+                    // tick regardless (updateUser), so this only spares an admin a pointless error —
+                    // the invariant is enforced there, not here.
+                    disabled={
+                      updatingId === user.id ||
+                      bulkUpdating ||
+                      String(user.role) === "field_contractor"
+                    }
+                    aria-label={`${user.displayName} generates sales`}
+                  />
                 </TableCell>
                 <TableCell>
                   <div className="flex flex-wrap gap-1">

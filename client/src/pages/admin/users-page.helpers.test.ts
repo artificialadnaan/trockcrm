@@ -16,6 +16,8 @@ const users: AdminUser[] = [
     officeId: "office-1",
     officeName: "Dallas",
     isActive: true,
+    // An admin who does not sell: role grants access, this flag keeps her off the dashboard rosters.
+    generatesSales: false,
     extraOfficeCount: 0,
     sourceSystems: ["hubspot", "procore"],
     localAuthStatus: "not_invited",
@@ -36,6 +38,9 @@ const users: AdminUser[] = [
     officeId: "office-1",
     officeName: "Dallas",
     isActive: true,
+    // The Daniel Choc shape: a director who DOES carry deals. Role and sales attribution disagreeing
+    // is exactly the combination the old role-based roster could not express.
+    generatesSales: true,
     extraOfficeCount: 1,
     sourceSystems: ["hubspot"],
     localAuthStatus: "invite_sent",
@@ -60,6 +65,7 @@ const users: AdminUser[] = [
     officeId: "office-1",
     officeName: "Dallas",
     isActive: false,
+    generatesSales: true,
     extraOfficeCount: 0,
     sourceSystems: ["procore"],
     localAuthStatus: "disabled",
