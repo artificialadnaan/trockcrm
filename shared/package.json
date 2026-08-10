@@ -33,6 +33,10 @@
       "types": "./dist/lib/correctiveActionOrder.d.ts",
       "default": "./dist/lib/correctiveActionOrder.js"
     },
+    "./lib/dailyActivityLogViewers": {
+      "types": "./dist/lib/dailyActivityLogViewers.d.ts",
+      "default": "./dist/lib/dailyActivityLogViewers.js"
+    },
     "./lib/fieldScorecardEmails": {
       "types": "./dist/lib/fieldScorecardEmails.d.ts",
       "default": "./dist/lib/fieldScorecardEmails.js"

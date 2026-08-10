@@ -27,6 +27,12 @@ interface User {
   isRfpReviewer?: boolean;
   /** True iff this user is one of the 3 RFP voters (Sidney/Tim/James); gates the vote UI + /rfp-vote page. */
   isRfpVoter?: boolean;
+  /**
+   * True iff this user may open the Daily Activity Log; hides the report card + blocks the route. The server
+   * enforces the same allowlist on the endpoint, so treating a missing flag as "no" only hides a surface that
+   * would have 403'd anyway.
+   */
+  canViewDailyActivityLog?: boolean;
 }
 
 interface AuthContextValue {

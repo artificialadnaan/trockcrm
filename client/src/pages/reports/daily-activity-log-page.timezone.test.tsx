@@ -28,6 +28,13 @@ vi.mock("@/hooks/use-accessible-offices", () => ({
   useAccessibleOffices: () => ({ offices: [], loading: false, error: null, refetch: vi.fn() }),
 }));
 
+// The page is gated on the DAILY_ACTIVITY_LOG_VIEWER_EMAILS allowlist and renders a denial instead of the
+// report for anyone the server did not flag. These cases exercise the REPORT, so they run as a flagged
+// viewer; the gate itself is covered by daily-activity-log-access.runtime.test.tsx.
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => ({ user: { id: "u1", email: "viewer@trockgc.com", canViewDailyActivityLog: true } }),
+}));
+
 vi.mock("@/components/reports/report-filter-bar", () => ({
   ReportFilterBar: () => <div>Report Filters</div>,
   useReportFilters: () => ({

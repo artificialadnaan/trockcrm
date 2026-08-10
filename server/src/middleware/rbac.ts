@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import { AppError } from "./error-handler.js";
 import type { UserRole } from "@trock-crm/shared/types";
+import { isDailyActivityLogViewerEmail } from "@trock-crm/shared/lib/dailyActivityLogViewers";
 import { isRfpReviewerEmail } from "@trock-crm/shared/lib/rfpReviewerEmails";
 import { isRfpVoterEmail } from "@trock-crm/shared/lib/rfpVoterEmails";
 
@@ -57,6 +58,30 @@ export function requireRfpReviewer(req: Request, _res: Response, next: NextFunct
         403,
         "Only the designated RFP reviewers can review declined RFPs.",
         "RFP_REVIEWER_ONLY"
+      )
+    );
+  }
+  next();
+}
+
+/**
+ * Restrict a route to the designated Daily Activity Log viewers, resolved from DAILY_ACTIVITY_LOG_VIEWER_EMAILS.
+ *
+ * The log exposes the readable content of what people logged — including, for admin/director, synced email
+ * BODIES — so readership is a named list rather than a role. This only NARROWS: it runs after the ordinary
+ * role guard, and the service still applies its own row-scoping and its own baseRole check for email content.
+ * With the env var unset it denies everyone, which is the intended failure direction for a privacy gate.
+ */
+export function requireDailyActivityLogViewer(req: Request, _res: Response, next: NextFunction) {
+  if (!req.user) {
+    return next(new AppError(401, "Authentication required"));
+  }
+  if (!isDailyActivityLogViewerEmail(req.user.email, process.env)) {
+    return next(
+      new AppError(
+        403,
+        "The Daily Activity Log is limited to designated viewers.",
+        "DAILY_ACTIVITY_LOG_VIEWER_ONLY"
       )
     );
   }

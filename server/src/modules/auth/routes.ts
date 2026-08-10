@@ -17,6 +17,7 @@ import { AppError } from "../../middleware/error-handler.js";
 import { requireAdmin } from "../../middleware/rbac.js";
 import { isRfpReviewerEmail } from "@trock-crm/shared/lib/rfpReviewerEmails";
 import { isRfpVoterEmail } from "@trock-crm/shared/lib/rfpVoterEmails";
+import { isDailyActivityLogViewerEmail } from "@trock-crm/shared/lib/dailyActivityLogViewers";
 import {
   exchangeCodeForTokens,
   getConsentUrl,
@@ -188,6 +189,10 @@ async function withOnboardingGate<T extends { id: string; email: string; officeI
     // Whether this user is one of the 3 RFP voters (Sidney/Tim/James). Gates the vote UI + /rfp-vote page;
     // the vote endpoint enforces the same allowlist (requireRfpVoter) as the hard boundary.
     isRfpVoter: isRfpVoterEmail(user.email, process.env),
+    // Whether this user is one of the designated Daily Activity Log viewers. Hides the report card and blocks
+    // the route in the web client so nobody is offered a surface that would 403; the report endpoint enforces
+    // the same allowlist (requireDailyActivityLogViewer) as the hard boundary.
+    canViewDailyActivityLog: isDailyActivityLogViewerEmail(user.email, process.env),
   };
 }
 
@@ -327,9 +332,9 @@ router.post("/mobile-login", authLimiter, async (req, res, next) => {
       res.cookie(clear.name, "", clear.options);
     }
 
-    // withOnboardingGate supplies isRfpVoter / isRfpReviewer / requiresOnboarding — the same flags the web
-    // client gates its RFP screens on, so the app can hide exactly what the web hides. The server
-    // endpoints still enforce those allowlists as the hard boundary.
+    // withOnboardingGate supplies isRfpVoter / isRfpReviewer / canViewDailyActivityLog / requiresOnboarding —
+    // the same flags the web client gates its RFP and reporting screens on, so the app can hide exactly what
+    // the web hides. The server endpoints still enforce those allowlists as the hard boundary.
     res.json({ token, user: await withOnboardingGate({ ...user, activeOfficeId: user.officeId }) });
   } catch (err) {
     next(err);
