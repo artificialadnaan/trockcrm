@@ -1,6 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
+
+// The index reads the viewer's allowlist flags to decide which cards to offer, so it needs an auth context.
+// These cases are about the CATEGORY LAYOUT, so they run as a viewer who can see everything; the gating
+// itself is covered by reports-page-visibility.runtime.test.tsx.
+vi.mock("@/lib/auth", () => ({
+  useAuth: () => ({ user: { id: "u1", email: "viewer@trockgc.com", canViewDailyActivityLog: true } }),
+}));
+
 import { ReportsPage } from "./reports-page";
 
 function normalize(html: string) {

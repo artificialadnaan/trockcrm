@@ -6,7 +6,7 @@ import {
   type EstimatorPipelineCohort,
   type ScorecardKind,
 } from "@trock-crm/shared/types";
-import { requireRole, requireDirector } from "../../middleware/rbac.js";
+import { requireRole, requireDirector, requireDailyActivityLogViewer } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import {
   getPipelineSummary,
@@ -745,15 +745,19 @@ router.get("/rep-activity", requireAnyRole, async (req, res, next) => {
 });
 
 // GET /api/reports/daily-activity-log?dateFrom=2026-02-01&dateTo=2026-05-01&office=dallas&types=note,call&loggedOffDay=1&page=1&limit=200
-// The readable day-by-day log of notes and updates behind the Rep Activity counts. Same guard as
-// rep-activity (requireAnyRole) and the same in-service scoping (resolveRepActivityScope), so a rep
-// hitting this endpoint directly still only reads their own entries.
+// The readable day-by-day log of notes and updates behind the Rep Activity counts.
+//
+// TWO guards, and the order matters. `requireAnyRole` is the ordinary role floor; `requireDailyActivityLogViewer`
+// then narrows to the named allowlist in DAILY_ACTIVITY_LOG_VIEWER_EMAILS. The allowlist can only take access
+// away -- the in-service scoping (resolveRepActivityScope) still applies underneath, so a listed rep reads only
+// their own entries, and email CONTENT still requires the admin/director baseRole check inside the service.
+// With the env var unset nobody may open it; see shared/lib/dailyActivityLogViewers.ts for why that direction.
 //
 // `types` and `loggedOffDay` narrow the LISTED ROWS (and pagination.total) only; the response's `kpis`
 // always describe the whole date/office/owner window, because the client renders them on cards that
 // are themselves these filters. Email CONTENT is readable here by admin/director -- deliberately more
 // permissive than GET /activities, see the PRIVACY block in daily-activity-log-service.ts.
-router.get("/daily-activity-log", requireAnyRole, async (req, res, next) => {
+router.get("/daily-activity-log", requireAnyRole, requireDailyActivityLogViewer, async (req, res, next) => {
   try {
     const data = await getDailyActivityLogReport(
       req.tenantDb!,

@@ -50,4 +50,9 @@ export interface AuthenticatedUser {
   isRfpReviewer?: boolean;
   /** True iff this user is one of the 3 RFP voters (RFP_VOTER_EMAILS allowlist); gates the vote UI + /rfp-vote page. */
   isRfpVoter?: boolean;
+  /**
+   * True iff this user may open the Daily Activity Log (DAILY_ACTIVITY_LOG_VIEWER_EMAILS allowlist); hides the
+   * report card + route. Absent/false must be read as "no" — the endpoint enforces the same list regardless.
+   */
+  canViewDailyActivityLog?: boolean;
 }
