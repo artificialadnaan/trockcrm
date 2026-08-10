@@ -739,7 +739,7 @@ export function UsersPage() {
                   )}
                 </TableCell>
                 <TableCell>
-                  <Badge className={user.isActive ? "bg-green-100 text-xs text-green-800" : "bg-gray-100 text-xs text-gray-500"}>
+                  <Badge className={user.isActive ? "bg-green-100 text-xs text-green-800" : "bg-gray-100 text-xs text-gray-600"}>
                     {user.isActive ? "Active" : "Inactive"}
                   </Badge>
                 </TableCell>
