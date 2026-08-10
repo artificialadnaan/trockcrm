@@ -181,19 +181,19 @@ export function UsersPage() {
       await updateUser(userId, { generatesSales: !generatesSales });
       // Name the consequence rather than the field — "generatesSales updated" tells an admin nothing.
       //
-      // A plain statement of removal is now the truth: dashboardRosterMembershipSql gates the rep cards,
-      // the funnel rows and the snapshot read on this flag ABSOLUTELY, so an untick removes the person
-      // whether or not they own deals. An earlier revision hedged with "anyone who owns deals still
-      // appears", which described the owner-backed exception that used to sit in the predicate; leaving
-      // that copy here would now report the exact opposite of what the click did.
+      // Say PERFORMANCE VIEWS, not "the director dashboard". The flag is absolute over the rep cards, the
+      // funnel rows and the snapshot read, so removal there is unconditional — but Team Commissions is on
+      // that same screen and deliberately keeps anyone with earned commission or a live deal, so it never
+      // orphans money. A toast claiming whole-dashboard removal would be contradicted by a row still
+      // sitting a few inches below it, which reads as a broken toggle rather than a deliberate boundary.
       //
-      // Scoped to "the director dashboard" on purpose, not "everywhere": an unticked person who holds
-      // earned commission or owns a live deal is still listed in Team Commissions, which keeps its own
-      // evidence-based roster so no money is ever orphaned.
+      // The second clause exists to answer that question before it is asked. Two earlier versions of this
+      // copy were each accurate for the predicate at the time and wrong the moment it changed; naming the
+      // surfaces rather than "the dashboard" is what stops it drifting again.
       toast.success(
         generatesSales
-          ? "Removed from the director dashboard"
-          : "Now tracked on the director dashboard"
+          ? "Removed from the rep performance views. Team Commissions still lists anyone with deals or earnings."
+          : "Now tracked on the rep performance views"
       );
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to update sales tracking");
@@ -649,7 +649,7 @@ export function UsersPage() {
               <TableHead>
                 Generates Sales
                 <span className="block text-xs font-normal text-gray-500">
-                  Shows on director dashboard
+                  Shows on rep performance views
                 </span>
               </TableHead>
               <TableHead>Sources</TableHead>
