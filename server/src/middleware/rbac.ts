@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import { AppError } from "./error-handler.js";
 import type { UserRole } from "@trock-crm/shared/types";
+import { isCanvassingReportViewerEmail } from "@trock-crm/shared/lib/canvassingReportViewers";
 import { isDailyActivityLogViewerEmail } from "@trock-crm/shared/lib/dailyActivityLogViewers";
 import { isRfpReviewerEmail } from "@trock-crm/shared/lib/rfpReviewerEmails";
 import { isRfpVoterEmail } from "@trock-crm/shared/lib/rfpVoterEmails";
@@ -82,6 +83,29 @@ export function requireDailyActivityLogViewer(req: Request, _res: Response, next
         403,
         "The Daily Activity Log is limited to designated viewers.",
         "DAILY_ACTIVITY_LOG_VIEWER_ONLY"
+      )
+    );
+  }
+  next();
+}
+
+/**
+ * Restrict a route to the designated Canvassing Activity viewers (CANVASSING_REPORT_VIEWER_EMAILS).
+ *
+ * The report is a per-person scoreboard of how much new business each individual entered, so readership is
+ * a named list rather than a role. It runs after the ordinary role guard and can only narrow. With the env
+ * var unset it denies everyone, which is the intended failure direction for a performance-management view.
+ */
+export function requireCanvassingReportViewer(req: Request, _res: Response, next: NextFunction) {
+  if (!req.user) {
+    return next(new AppError(401, "Authentication required"));
+  }
+  if (!isCanvassingReportViewerEmail(req.user.email, process.env)) {
+    return next(
+      new AppError(
+        403,
+        "The Canvassing Activity report is limited to designated viewers.",
+        "CANVASSING_REPORT_VIEWER_ONLY"
       )
     );
   }

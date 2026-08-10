@@ -13,6 +13,10 @@ vi.mock("../../../src/middleware/rbac.js", () => ({
   // other report routes, so it is stubbed open — its own behaviour is covered by
   // tests/middleware/require-daily-activity-log-viewer.runtime.test.ts.
   requireDailyActivityLogViewer: vi.fn((_req: any, _res: any, next: any) => next()),
+  // The Canvassing Activity route carries a second, allowlist-based guard. These suites are about other
+  // report routes, so it is stubbed open — its own behaviour is covered by
+  // tests/middleware/require-canvassing-report-viewer.runtime.test.ts.
+  requireCanvassingReportViewer: vi.fn((_req: any, _res: any, next: any) => next()),
 }));
 
 vi.mock("../../../src/db.js", () => ({

@@ -47,6 +47,7 @@ import { MarketMixPage } from "@/pages/reports/market-mix-page";
 import { PipelineVelocityPage } from "@/pages/reports/pipeline-velocity-page";
 import { RepActivityPage } from "@/pages/reports/rep-activity-page";
 import { DailyActivityLogPage } from "@/pages/reports/daily-activity-log-page";
+import { CanvassingActivityPage } from "@/pages/reports/canvassing-activity-page";
 import { PlatformUsagePage } from "@/pages/reports/platform-usage-page";
 import { PlatformUsageRepDetailPage } from "@/pages/reports/platform-usage-rep-detail-page";
 import { PortfolioLoadPage } from "@/pages/reports/portfolio-load-page";
@@ -328,6 +329,14 @@ export function App() {
                 element={(
                   <RequireRole allowedRoles={["admin", "director", "rep"]}>
                     <RepActivityPage />
+                  </RequireRole>
+                )}
+              />
+              <Route
+                path="/reports/performance/canvassing-activity"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director", "rep"]}>
+                    <CanvassingActivityPage />
                   </RequireRole>
                 )}
               />

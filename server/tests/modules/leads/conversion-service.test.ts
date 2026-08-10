@@ -1215,8 +1215,13 @@ describe("Lead Conversion Shared Contract", () => {
     expect(columns.name.notNull).toBe(true);
     expect(columns.isActive.hasDefault).toBe(true);
     expect(columns.isActive.default).toBe(true);
+    // Two, and only two. The company anchor is the structural one this case is named for; the creator FK
+    // (migration 0220) records who entered the property for the Canvassing Activity report — properties
+    // carry no owner column, so it is the only authorship a property has. It is ON DELETE SET NULL, so
+    // deleting a user unattributes their records rather than deleting the buildings they found.
     expect(config.foreignKeys.map((fk) => fk.getName())).toEqual([
       "properties_company_id_companies_id_fk",
+      "properties_created_by_user_id_users_id_fk",
     ]);
   });
 

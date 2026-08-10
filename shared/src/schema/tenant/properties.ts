@@ -14,6 +14,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { PROPERTY_TYPES } from "../../types/enums.js";
 import { companies } from "./companies.js";
+import { users } from "../public/users.js";
 
 export const propertyTypeEnum = pgEnum("property_type", PROPERTY_TYPES);
 
@@ -47,12 +48,16 @@ export const properties = pgTable(
     imageR2Key: text("image_r2_key"),
     imageThumbnailR2Key: text("image_thumbnail_r2_key"),
     notes: text("notes"),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     isTestData: boolean("is_test_data").default(false).notNull(),
     isActive: boolean("is_active").default(true).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
+    index("properties_created_by_user_created_at_idx")
+      .on(table.createdByUserId, table.createdAt)
+      .where(sql`${table.createdByUserId} IS NOT NULL`),
     index("properties_company_id_idx").on(table.companyId),
     index("properties_company_name_idx").on(table.companyId, table.name),
     index("properties_type_idx").on(table.type),

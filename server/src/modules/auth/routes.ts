@@ -18,12 +18,13 @@ import { requireAdmin } from "../../middleware/rbac.js";
 import { isRfpReviewerEmail } from "@trock-crm/shared/lib/rfpReviewerEmails";
 import { isRfpVoterEmail } from "@trock-crm/shared/lib/rfpVoterEmails";
 import { isDailyActivityLogViewerEmail } from "@trock-crm/shared/lib/dailyActivityLogViewers";
+import { isCanvassingReportViewerEmail } from "@trock-crm/shared/lib/canvassingReportViewers";
 
 /**
- * The role floor on GET /api/reports/daily-activity-log (requireAnyRole). Kept beside the flag that mirrors
- * it so the two cannot drift; if that route's role list changes, this changes with it.
+ * The role floor both allowlisted report routes sit behind (requireAnyRole). Shared by the two flags below
+ * so they cannot drift from each other; if that role list changes, this changes with it.
  */
-const DAILY_ACTIVITY_LOG_ROLES = new Set(["admin", "director", "rep"]);
+const REPORT_SURFACE_ROLES = new Set(["admin", "director", "rep"]);
 import {
   exchangeCodeForTokens,
   getConsentUrl,
@@ -195,12 +196,14 @@ async function withOnboardingGate<T extends { id: string; email: string; officeI
     // Whether this user is one of the 3 RFP voters (Sidney/Tim/James). Gates the vote UI + /rfp-vote page;
     // the vote endpoint enforces the same allowlist (requireRfpVoter) as the hard boundary.
     isRfpVoter: isRfpVoterEmail(user.email, process.env),
-    // Whether this user can actually OPEN the Daily Activity Log. The endpoint carries two guards —
-    // requireAnyRole then the allowlist — so this flag mirrors BOTH. Reporting the allowlist alone would set
-    // it true for an allowlisted sales_manager or construction user, who would then be offered a card whose
-    // route bounces them to "/" with no explanation. The report endpoint enforces both as the hard boundary.
+    // Whether this user can actually OPEN each allowlisted report. Both endpoints carry TWO guards —
+    // requireAnyRole then the allowlist — so both flags mirror BOTH. Reporting the allowlist alone would set
+    // a flag true for an allowlisted sales_manager or construction user, who would then be offered a card
+    // whose route bounces them to "/" with no explanation. The endpoints enforce both as the hard boundary.
     canViewDailyActivityLog:
-      DAILY_ACTIVITY_LOG_ROLES.has(user.role) && isDailyActivityLogViewerEmail(user.email, process.env),
+      REPORT_SURFACE_ROLES.has(user.role) && isDailyActivityLogViewerEmail(user.email, process.env),
+    canViewCanvassingReport:
+      REPORT_SURFACE_ROLES.has(user.role) && isCanvassingReportViewerEmail(user.email, process.env),
   };
 }
 

@@ -15,6 +15,7 @@ import {
   ShieldAlert,
   TrendingUp,
   UserRound,
+  UserRoundPlus,
   Users,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -38,12 +39,13 @@ type ReportCard = {
    * Marks a card whose report is limited to a named email allowlist rather than a role. Cards carrying
    * this are dropped for anyone the server did not flag — see visibleReportCategories.
    */
-  requiresDailyActivityLogAccess?: boolean;
+  requiresFlag?: keyof ReportVisibilityContext;
 };
 
 /** What the index needs to know about the viewer. Only allowlist flags — role gating lives on the routes. */
 export type ReportVisibilityContext = {
   canViewDailyActivityLog?: boolean;
+  canViewCanvassingReport?: boolean;
 };
 
 const reportCategories: Array<{ category: string; description: string; reports: ReportCard[] }> = [
@@ -93,7 +95,8 @@ const reportCategories: Array<{ category: string; description: string; reports: 
     reports: [
       { name: "Director Scorecard", description: "Executive view of targets, risk, and output.", icon: Gauge, path: "/reports/performance/director-scorecard" },
       { name: "Rep Activity", description: "Touchpoints, follow-ups, and stalled accounts.", icon: Activity, path: "/reports/performance/rep-activity" },
-      { name: "Daily Activity Log", description: "The actual notes and updates reps logged, day by day — the readable record behind the Rep Activity counts.", icon: NotebookPen, path: "/reports/performance/daily-activity-log", requiresDailyActivityLogAccess: true },
+      { name: "Canvassing Activity", description: "New companies, properties, contacts and leads entered by each person — weekly, monthly or quarterly — plus the notes they logged.", icon: UserRoundPlus, path: "/reports/performance/canvassing-activity", requiresFlag: "canViewCanvassingReport" },
+      { name: "Daily Activity Log", description: "The actual notes and updates reps logged, day by day — the readable record behind the Rep Activity counts.", icon: NotebookPen, path: "/reports/performance/daily-activity-log", requiresFlag: "canViewDailyActivityLog" },
       { name: "Forecast Accuracy", description: "Commit, best case, and pipeline reliability.", icon: LineChart, path: "/reports/performance/forecast-accuracy" },
       { name: "Platform Usage", description: "Active time, actions, and views per rep — daily and weekly.", icon: Activity, path: "/reports/performance/platform-usage" },
     ],
@@ -151,7 +154,7 @@ export function visibleReportCategories(ctx: ReportVisibilityContext) {
     .map((group) => ({
       ...group,
       reports: group.reports.filter((report) =>
-        report.requiresDailyActivityLogAccess ? ctx.canViewDailyActivityLog === true : true
+        report.requiresFlag ? ctx[report.requiresFlag] === true : true
       ),
     }))
     .filter((group) => group.reports.length > 0);
@@ -161,8 +164,12 @@ export function ReportsPage() {
   const { search } = useLocation();
   const { user } = useAuth();
   const categories = useMemo(
-    () => visibleReportCategories({ canViewDailyActivityLog: user?.canViewDailyActivityLog }),
-    [user?.canViewDailyActivityLog]
+    () =>
+      visibleReportCategories({
+        canViewDailyActivityLog: user?.canViewDailyActivityLog,
+        canViewCanvassingReport: user?.canViewCanvassingReport,
+      }),
+    [user?.canViewDailyActivityLog, user?.canViewCanvassingReport]
   );
 
   return (

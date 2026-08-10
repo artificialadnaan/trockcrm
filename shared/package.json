@@ -25,6 +25,10 @@
       "types": "./dist/lib/editDistance.d.ts",
       "default": "./dist/lib/editDistance.js"
     },
+    "./lib/canvassingReportViewers": {
+      "types": "./dist/lib/canvassingReportViewers.d.ts",
+      "default": "./dist/lib/canvassingReportViewers.js"
+    },
     "./lib/correctiveActionApprovers": {
       "types": "./dist/lib/correctiveActionApprovers.d.ts",
       "default": "./dist/lib/correctiveActionApprovers.js"

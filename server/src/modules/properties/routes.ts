@@ -114,6 +114,9 @@ router.post("/", async (req, res, next) => {
       // the Mapbox geocode so the property is findable by distance next time someone stands there.
       lat,
       lng,
+      // Who keyed it in. Properties have no owner column, so this is the ONLY record of authorship.
+      // Taken from the session, never the body, so it can't be spoofed by a crafted request.
+      createdByUserId: req.user!.id,
     });
     await req.commitTransaction!();
     res.status(201).json({ property });

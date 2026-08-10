@@ -33,6 +33,10 @@ interface User {
    * would have 403'd anyway.
    */
   canViewDailyActivityLog?: boolean;
+   * True iff this user may open the Canvassing Activity report; hides the card + blocks the route. The
+   * server enforces the same allowlist, so treating a missing flag as "no" only hides a dead link.
+   */
+  canViewCanvassingReport?: boolean;
 }
 
 interface AuthContextValue {
