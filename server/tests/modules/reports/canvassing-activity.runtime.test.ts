@@ -531,3 +531,57 @@ describe("canvassing activity — findings from the second review round", () => 
     expect(Number(parsed.dateFrom.slice(0, 4))).toBeGreaterThan(0);
   });
 });
+
+describe("canvassing activity — the window is sargable AND still exact", () => {
+  // The WHERE moved off `((created_at AT TIME ZONE ...)::date) BETWEEN a AND b` onto a half-open range on
+  // the bare column, so the created_at indexes can actually narrow it. These cases pin that the rewrite
+  // selects the SAME rows: both endpoints inclusive by business date, nothing either side.
+  const EDGE_BEFORE = U("ed9e");
+  const EDGE_FIRST = U("ed01");
+  const EDGE_LAST = U("ed30");
+  const EDGE_AFTER = U("ed31");
+
+  it("includes both endpoint days in full and excludes the days either side", async () => {
+    await pg.exec(`
+      INSERT INTO public.companies (id, name, slug, category, created_by_user_id, is_active, is_test_data, created_at) VALUES
+        -- 2026-05-31 23:59 business time = 2026-06-01T04:59Z. Outside a June 1-30 window.
+        ('${EDGE_BEFORE}', 'Edge Before', 'edge-before', 'client', '${ED}', true, false, '2026-06-01T04:59:00Z'),
+        -- 2026-06-01 00:01 business time. The first instant inside.
+        ('${EDGE_FIRST}', 'Edge First',  'edge-first',  'client', '${ED}', true, false, '2026-06-01T05:01:00Z'),
+        -- 2026-06-30 23:59 business time. The last instant inside — the half-open end must not clip it.
+        ('${EDGE_LAST}',  'Edge Last',   'edge-last',   'client', '${ED}', true, false, '2026-07-01T04:59:00Z'),
+        -- 2026-07-01 00:01 business time. The first instant outside.
+        ('${EDGE_AFTER}', 'Edge After',  'edge-after',  'client', '${ED}', true, false, '2026-07-01T05:01:00Z');
+    `);
+
+    const report = await getCanvassingActivityReport(tdb, filters());
+    // 3 from the base fixture + the two edge rows that genuinely fall inside.
+    expect(report.totals.company).toBe(5);
+
+    await pg.exec(`DELETE FROM public.companies WHERE id IN ('${EDGE_BEFORE}','${EDGE_FIRST}','${EDGE_LAST}','${EDGE_AFTER}');`);
+  });
+
+  // The old code capped the bucket LOOP, so a very long range silently lost periods out of a grid that
+  // promises every one — with no explanation anywhere in the payload. The window is clamped instead, and
+  // the returned range says so.
+  it("clamps an absurd range instead of silently truncating the bucket grid", () => {
+    const parsed = normalizeCanvassingFilters({ dateFrom: "2000-01-01", dateTo: "2026-12-31", bucket: "week" });
+
+    expect(parsed.dateTo).toBe("2026-12-31");
+    expect(parsed.dateFrom).not.toBe("2000-01-01");
+    expect(parsed.dateFrom > "2020-01-01").toBe(true);
+  });
+
+  it("reports buckets covering exactly the clamped range it returns", async () => {
+    const parsed = normalizeCanvassingFilters({ dateFrom: "2000-01-01", dateTo: "2026-12-31", bucket: "quarter" });
+    const report = await getCanvassingActivityReport(tdb, { ...parsed, officeId: OFF });
+
+    expect(report.range.from).toBe(parsed.dateFrom);
+    expect(report.buckets[0]!.bucketStart <= parsed.dateFrom).toBe(true);
+    expect(report.buckets[report.buckets.length - 1]!.bucketStart <= parsed.dateTo).toBe(true);
+    // No gap: consecutive quarters, start to finish.
+    for (let i = 1; i < report.buckets.length; i += 1) {
+      expect(report.buckets[i]!.bucketStart > report.buckets[i - 1]!.bucketStart).toBe(true);
+    }
+  });
+});

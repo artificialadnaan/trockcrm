@@ -14,7 +14,6 @@ import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAx
 import { PageHeader } from "@/components/layout/page-header";
 import { ReportFilterBar, useReportFilters } from "@/components/reports/report-filter-bar";
 import { ExportExcelButton } from "@/components/reports/export-excel-button";
-import { sheetsFromReport } from "@/lib/excel-export";
 import { useAuth } from "@/lib/auth";
 import {
   useCanvassingActivityReport,
@@ -104,6 +103,11 @@ function CanvassingActivityReportView() {
   // selection, but `unattributed` cannot — it describes records with no recorded author at all.
   const filteredToPeople = (query.ownerIds?.length ?? 0) > 0;
 
+  // Whether the window reaches back past the point creator tracking existed. True for the default view for
+  // a while after migration 0220, and it changes what a zero in this grid is allowed to claim.
+  const rangeReachesBeforeAttribution =
+    !data?.attributionStartHint || (data ? data.range.from < data.attributionStartHint : false);
+
   const chartData = useMemo(
     () =>
       (data?.buckets ?? []).map((row) => ({
@@ -116,10 +120,87 @@ function CanvassingActivityReportView() {
     [data]
   );
 
-  // sheetsFromReport derives a sheet per array on the payload (people / buckets / notes) and flattens the
-  // nested count objects, the same way every other report page exports. Hand-rolling the columns here would
-  // silently go stale the next time the payload gains a field.
-  const exportSheets = useMemo(() => sheetsFromReport("Canvassing Activity", data), [data]);
+  // Built explicitly rather than via sheetsFromReport. That helper stringifies any nested array, so each
+  // bucket's `perUser` came out as "[object Object],[object Object]" and the person-by-period comparison —
+  // the reason this report exists — was the one thing missing from the download.
+  const exportSheets = useMemo(() => {
+    if (!data) return [];
+    const periodColumns = data.buckets.map((row) => ({ key: row.label, header: row.label }));
+    return [
+      {
+        name: "By person",
+        columns: [
+          { key: "person", header: "Person" },
+          { key: "companies", header: "Companies" },
+          { key: "properties", header: "Properties" },
+          { key: "contacts", header: "Contacts" },
+          { key: "leads", header: "Leads" },
+          { key: "total", header: "Total" },
+          { key: "notes", header: "Notes logged" },
+        ],
+        rows: data.people.map((person) => ({
+          person: person.displayName,
+          companies: person.counts.company,
+          properties: person.counts.property,
+          contacts: person.counts.contact,
+          leads: person.counts.lead,
+          total: person.counts.total,
+          notes: person.notesLogged,
+        })),
+      },
+      {
+        name: `Person by ${bucket}`,
+        columns: [{ key: "person", header: "Person" }, ...periodColumns, { key: "total", header: "Total" }],
+        rows: data.people.map((person) => {
+          const row: Record<string, unknown> = { person: person.displayName, total: person.counts.total };
+          for (const period of data.buckets) {
+            row[period.label] = period.perUser.find((entry) => entry.userId === person.userId)?.counts.total ?? 0;
+          }
+          return row;
+        }),
+      },
+      {
+        name: `Totals by ${bucket}`,
+        columns: [
+          { key: "period", header: "Period" },
+          { key: "companies", header: "Companies" },
+          { key: "properties", header: "Properties" },
+          { key: "contacts", header: "Contacts" },
+          { key: "leads", header: "Leads" },
+          { key: "total", header: "Total" },
+          { key: "unattributed", header: "No author recorded" },
+        ],
+        rows: data.buckets.map((row) => ({
+          period: row.label,
+          companies: row.counts.company,
+          properties: row.counts.property,
+          contacts: row.counts.contact,
+          leads: row.counts.lead,
+          total: row.counts.total,
+          unattributed: row.unattributed.total,
+        })),
+      },
+      {
+        name: "Notes",
+        columns: [
+          { key: "when", header: "When" },
+          { key: "person", header: "Person" },
+          { key: "type", header: "Type" },
+          { key: "subject", header: "Subject" },
+          { key: "body", header: "Body" },
+          { key: "target", header: "Attached to" },
+        ],
+        rows: data.notes.map((note) => ({
+          when: note.occurredAt,
+          person: note.userName ?? "",
+          type: labelForType(note.type),
+          subject: note.subject ?? "",
+          body: note.body ?? "",
+          target: note.targetName ?? "",
+        })),
+      },
+    ];
+  }, [data, bucket]);
 
   return (
     <div className="space-y-6">
@@ -300,8 +381,15 @@ function CanvassingActivityReportView() {
                   </tbody>
                 </table>
                 <p className="mt-2 text-xs font-semibold text-slate-500">
-                  New companies, properties, contacts and leads combined. A zero is a real zero — that person
-                  entered nothing in that period.
+                  New companies, properties, contacts and leads combined.{" "}
+                  {rangeReachesBeforeAttribution ? (
+                    <>
+                      Periods before {formatDay(data.attributionStartHint)} read as zero because no creator was
+                      recorded then — only zeros on or after that date mean the person entered nothing.
+                    </>
+                  ) : (
+                    <>A zero is a real zero — that person entered nothing in that period.</>
+                  )}
                 </p>
               </div>
             )}

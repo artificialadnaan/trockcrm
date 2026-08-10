@@ -136,6 +136,8 @@ export interface CanvassingActivityReport {
   attributionStartHint: string | null;
 }
 
+/** ~5 years. Long enough for any real quarterly comparison, short enough to stay one screen of buckets. */
+const MAX_RANGE_DAYS = 1830;
 const DEFAULT_NOTES_LIMIT = 200;
 const MAX_NOTES_LIMIT = 500;
 
@@ -182,7 +184,9 @@ function bucketStartsInRange(bucket: CanvassingBucket, from: string, to: string)
 
   const out: string[] = [];
   // Bounded independently of the loop body: a malformed range must not be able to spin here.
-  for (let cursor = startOf(from); cursor <= to && out.length < 1024; cursor = next(cursor)) out.push(cursor);
+  // The range is already clamped to MAX_RANGE_DAYS by normalizeCanvassingFilters, so this cannot truncate a
+  // real request; it is a backstop against a caller constructing filters directly.
+  for (let cursor = startOf(from); cursor <= to && out.length < 4096; cursor = next(cursor)) out.push(cursor);
   return out;
 }
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -227,6 +231,11 @@ export function normalizeCanvassingFilters(query: Record<string, unknown>): Canv
   // An inverted range returns nothing at all, which reads as "nobody did anything" rather than as a bad
   // URL. Swapping is the interpretation that keeps the page honest.
   if (from > to) [from, to] = [to, from];
+  // Clamp the WINDOW rather than capping the bucket loop. Truncating the loop silently dropped periods out
+  // of a grid that promises every one of them, and the gap had no explanation anywhere in the payload; the
+  // returned `range` reflects this clamp, so the page always describes the window it actually reports on.
+  const earliest = shiftBusinessDate(to, -(MAX_RANGE_DAYS - 1));
+  if (from < earliest) from = earliest;
 
   const userIds = pick(query.userIds)
     .split(",")
@@ -278,9 +287,24 @@ function bucketSql(bucket: CanvassingBucket, tsExpr: string): SQL {
   return sql.raw(`(date_trunc('${unit}', ((${tsExpr}) AT TIME ZONE '${BUSINESS_TIMEZONE}')))::date`);
 }
 
-/** Business-tz calendar date of a timestamptz column, for windowing. */
+/** Business-tz calendar date of a timestamptz column. For SELECT/GROUP BY only — never for a WHERE. */
 function businessDateSql(tsExpr: string): SQL {
   return sql.raw(`(((${tsExpr}) AT TIME ZONE '${BUSINESS_TIMEZONE}')::date)`);
+}
+
+/**
+ * The date window, as a half-open range ON THE COLUMN ITSELF.
+ *
+ * Deliberately NOT `businessDateSql(col) BETWEEN from AND to`, which is what this used to be. That wraps the
+ * column in a function, so it is not sargable and no index on created_at can narrow it — every request read
+ * all four tables end to end no matter how short the window. `[from 00:00 business, to+1 00:00 business)`
+ * selects exactly the same rows while leaving the column bare, so the plain created_at indexes from
+ * migration 0220 can actually be used. Half-open, so the last day is whole and no row is double-counted.
+ */
+function businessWindowSql(tsExpr: string, from: string, to: string): SQL {
+  const col = sql.raw(`(${tsExpr})`);
+  return sql`${col} >= (${from}::date AT TIME ZONE ${BUSINESS_TIMEZONE})
+         AND ${col} < ((${to}::date + 1) AT TIME ZONE ${BUSINESS_TIMEZONE})`;
 }
 
 export function labelForBucket(bucket: CanvassingBucket, startIso: string): string {
@@ -311,8 +335,7 @@ export function labelForBucket(bucket: CanvassingBucket, startIso: string): stri
 function createdStreamSql(filters: CanvassingActivityFilters): SQL {
   const from = filters.dateFrom;
   const to = filters.dateTo;
-  const window = (alias: string) =>
-    sql`${businessDateSql(`${alias}.created_at`)} BETWEEN ${from}::date AND ${to}::date`;
+  const window = (alias: string) => businessWindowSql(`${alias}.created_at`, from, to);
 
   // The creator is LEFT-joined and filtered on the USER's test flag as well as the row's. Filtering only the
   // row let a user marked is_test_data create ordinary-looking records and appear on the scoreboard, which
@@ -383,7 +406,7 @@ export async function getCanvassingActivityReport(
       JOIN users u ON u.id = a.responsible_user_id
      WHERE ${NOTES_ONLY}
        AND COALESCE(u.is_test_data, false) = false
-       AND ${businessDateSql("a.occurred_at")} BETWEEN ${filters.dateFrom}::date AND ${filters.dateTo}::date
+       AND ${businessWindowSql("a.occurred_at", filters.dateFrom, filters.dateTo)}
      GROUP BY 1, 2
   `);
 
@@ -623,7 +646,7 @@ async function loadNotes(
       LEFT JOIN deals de     ON de.id = a.deal_id
      WHERE ${NOTES_ONLY}
        AND COALESCE(u.is_test_data, false) = false
-       AND ${businessDateSql("a.occurred_at")} BETWEEN ${filters.dateFrom}::date AND ${filters.dateTo}::date
+       AND ${businessWindowSql("a.occurred_at", filters.dateFrom, filters.dateTo)}
        ${userFilter}
      ORDER BY a.occurred_at DESC, a.id DESC
      LIMIT ${limit + 1}
