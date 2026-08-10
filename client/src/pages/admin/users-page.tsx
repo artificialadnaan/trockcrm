@@ -181,15 +181,19 @@ export function UsersPage() {
       await updateUser(userId, { generatesSales: !generatesSales });
       // Name the consequence rather than the field — "generatesSales updated" tells an admin nothing.
       //
-      // But do NOT claim removal. The roster predicate retains anyone who owns a deal in this office
-      // through its owner-backed exception, so for those users the row stays on the cards and the funnel
-      // and a flat "Removed from the director dashboard" would report the opposite of what happened. The
-      // client cannot tell which case this is (the users payload carries no ownership), so the copy states
-      // the setting, which is always true, and names the one exception rather than guessing.
+      // Say PERFORMANCE VIEWS, not "the director dashboard". The flag is absolute over the rep cards, the
+      // funnel rows and the snapshot read, so removal there is unconditional — but Team Commissions is on
+      // that same screen and deliberately keeps anyone with earned commission or a live deal, so it never
+      // orphans money. A toast claiming whole-dashboard removal would be contradicted by a row still
+      // sitting a few inches below it, which reads as a broken toggle rather than a deliberate boundary.
+      //
+      // The second clause exists to answer that question before it is asked. Two earlier versions of this
+      // copy were each accurate for the predicate at the time and wrong the moment it changed; naming the
+      // surfaces rather than "the dashboard" is what stops it drifting again.
       toast.success(
         generatesSales
-          ? "No longer tracked as a sales carrier. Anyone who owns deals still appears."
-          : "Now tracked on the director dashboard"
+          ? "Removed from the rep performance views. Team Commissions still lists anyone with deals or earnings."
+          : "Now tracked on the rep performance views"
       );
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to update sales tracking");
@@ -645,7 +649,7 @@ export function UsersPage() {
               <TableHead>
                 Generates Sales
                 <span className="block text-xs font-normal text-gray-500">
-                  Shows on director dashboard
+                  Shows on rep performance views
                 </span>
               </TableHead>
               <TableHead>Sources</TableHead>

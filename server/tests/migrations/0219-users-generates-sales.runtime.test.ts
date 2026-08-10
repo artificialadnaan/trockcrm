@@ -247,26 +247,32 @@ describe("migration 0219 — users.generates_sales", () => {
    * describe the SCREEN. If either fails, the deploy moves somebody on or off a director dashboard
    * without a human having asked for it — the one outcome that is never acceptable.
    */
-  it("selects the IDENTICAL Dallas roster to the predicate it replaces", async () => {
+  it("shows exactly the TICKED office members, and nobody else", async () => {
     await pg.exec(MIGRATION_SQL);
 
-    const before = await rosterWithOldPredicate(pg, DALLAS);
+    // The flag is ABSOLUTE. Strict old/new parity no longer holds and is no longer claimed: the old
+    // predicate admitted any deal owner regardless, so Olive (a director who owns a Dallas deal but is
+    // not ticked) appeared there and does not here. That difference IS the fix -- an admin who unticks
+    // someone expects them gone, and the previous behaviour silently declined for anyone holding a deal.
     const after = await rosterWithNewPredicate(pg, DALLAS);
-    expect(after).toEqual(before);
+    expect(after).toEqual(["Eve Estimator", "Rita Rep"]);
 
-    // NOT VACUOUS: a real, partial subset. "They agree" proves nothing if both return everybody.
-    expect(before).toEqual(["Eve Estimator", "Olive Owner", "Rita Rep"]);
-    expect(before.length).toBeLessThan(Object.keys(await flagsByName(pg)).length);
+    // NOT VACUOUS: a real, partial subset of the fixture.
+    expect(after.length).toBeLessThan(Object.keys(await flagsByName(pg)).length);
+
+    // ...and the one the old predicate kept purely for owning a deal is the difference.
+    const before = await rosterWithOldPredicate(pg, DALLAS);
+    expect(before).toContain("Olive Owner");
+    expect(after).not.toContain("Olive Owner");
   });
 
-  it("selects the IDENTICAL ATLANTA roster too — parity is per office, not just for the busy one", async () => {
+  it("applies the same rule per office — Atlanta shows its ticked members only", async () => {
     await pg.exec(MIGRATION_SQL);
 
-    const before = await rosterWithOldPredicate(pg, ATLANTA, "office_atlanta");
+    // Fred is a ticked Atlanta rep. Carl owns an Atlanta deal but is a non-rep the backfill left
+    // unticked, so he is absent here too — consistently, not just in Dallas.
     const after = await rosterWithNewPredicate(pg, ATLANTA, "office_atlanta");
-    expect(after).toEqual(before);
-    // Fred is an Atlanta rep; Carl owns an Atlanta deal. Both belong here, and nobody from Dallas does.
-    expect(before).toEqual(["Carl CrossOffice", "Fred Foreign"]);
+    expect(after).toEqual(["Fred Foreign"]);
   });
 
   it("does NOT let ownership in one office grant a roster seat in another", async () => {
@@ -276,8 +282,13 @@ describe("migration 0219 — users.generates_sales", () => {
     await pg.exec(MIGRATION_SQL);
     expect(await rosterWithNewPredicate(pg, DALLAS)).not.toContain("Carl CrossOffice");
     expect(await rosterWithOldPredicate(pg, DALLAS)).not.toContain("Carl CrossOffice");
-    // ...while he is correctly present on Atlanta's.
+    // Once an admin TICKS him he appears in both offices — and that is right, not a leak: he holds a
+    // user_office_access grant for Dallas, so he is a member there, and a ticked member is exactly who
+    // the roster is for (the same shape as a director hired to sell who has no deals yet). The point of
+    // this test is that OWNERSHIP alone never did that; only a deliberate tick does.
+    await pg.exec(`UPDATE public.users SET generates_sales = true WHERE display_name = 'Carl CrossOffice'`);
     expect(await rosterWithNewPredicate(pg, ATLANTA, "office_atlanta")).toContain("Carl CrossOffice");
+    expect(await rosterWithNewPredicate(pg, DALLAS)).toContain("Carl CrossOffice");
   });
 
   it("keeps the office boundary the old predicate enforced — a foreign-office rep stays out", async () => {
@@ -314,13 +325,18 @@ describe("migration 0219 — users.generates_sales", () => {
     expect(await rosterWithNewPredicate(pg, DALLAS)).toContain("Rita Rep");
   });
 
-  it("does NOT remove someone who owns deals, however the flag is set", async () => {
+  it("REMOVES someone who owns deals — the flag is absolute", async () => {
     await pg.exec(MIGRATION_SQL);
+    await pg.exec(`UPDATE public.users SET generates_sales = true  WHERE display_name = 'Olive Owner'`);
+    expect(await rosterWithNewPredicate(pg, DALLAS)).toContain("Olive Owner");
+
     await pg.exec(`UPDATE public.users SET generates_sales = false WHERE display_name = 'Olive Owner'`);
 
-    // Deliberate, and it is what keeps the Team Commissions footer honest: those deal values are still
-    // counted in getCommissionOfficeTotals, which never reads this flag. Hiding the row would leave a
-    // total with no row to account for it. Removing a deal owner means reassigning their deals.
-    expect(await rosterWithNewPredicate(pg, DALLAS)).toContain("Olive Owner");
+    // An earlier revision kept deal owners regardless, to stop the Team Commissions footer counting value
+    // whose row had been hidden. That protection now lives where it belongs — getDirectorRepCommissionRows
+    // retains anyone with earned or live-deal evidence on its own — so the performance rosters can honour
+    // the toggle. In production the old behaviour meant unticking a director with 3 deals, a rep with 2
+    // and an admin with 122 changed nothing at all.
+    expect(await rosterWithNewPredicate(pg, DALLAS)).not.toContain("Olive Owner");
   });
 });

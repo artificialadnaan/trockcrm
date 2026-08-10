@@ -52,7 +52,7 @@ describe("rep performance active rep filtering", () => {
     expect(queryText).not.toContain("left join public.users u on u.id = current.rep_id");
   });
 
-  it("applies the roster flag WITH its owner-backed exception, matching the cards and funnel", async () => {
+  it("applies the roster flag ABSOLUTELY, matching the cards and funnel", async () => {
     // The cards and the funnel (dashboardRosterMembershipSql) deliberately RETAIN anyone who owns a deal
     // in this office whatever the flag says. Activity Pulse, strategic alerts and the coaching prompts
     // are all built from these snapshot rows, so a bare `generates_sales = true` here would go quiet for
@@ -65,6 +65,8 @@ describe("rep performance active rep filtering", () => {
     const queryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
 
     expect(queryText).toContain("u.generates_sales = true");
-    expect(queryText).toContain("select 1 from deals d where d.assigned_rep_id = u.id");
+    // No owner-backed escape hatch here any more: an unticked person is gone from Activity Pulse, the
+    // strategic alerts and the coaching prompts exactly as they are gone from the cards and the funnel.
+    expect(queryText).not.toContain("select 1 from deals d where d.assigned_rep_id = u.id");
   });
 });
