@@ -946,19 +946,25 @@ function activeOfficeRepMembershipSql(officeId: string): SQL {
  * `users.generates_sales` (migration 0219) answers "is this person expected to carry deals?" directly,
  * so neither failure is reachable.
  *
- * THE FLAG CAN ONLY REMOVE SOMEONE WHO OWNS NO DEALS IN THIS OFFICE. The owner branch is deliberately
- * left UN-GATED, exactly as it was before, and that single decision buys three things:
- *   • EXACT parity at deploy, including multi-office. `users` is GLOBAL, so a flag set because someone
- *     owns a deal in office B would otherwise grant them visibility in every office they are a member
- *     of — admitting them to office A's roster with no admin action and no deal in A. Keeping ownership
- *     as its own tenant-local branch means office A's roster still turns on office A's deals.
- *   • The commission footer stays reconcilable. getCommissionOfficeTotals counts a deal whenever a
- *     rostered involved user exists and does NOT read this flag (a roster flag must never move a money
- *     total). If unticking someone could hide a row whose deals still sit in that total, the table would
- *     show a footer larger than the sum of its visible rows, with no drill-down to explain the gap.
- *   • It matches what was actually asked for: remove the people who are "never going to truly have any
- *     deals". Someone with deals is not that person, and the honest way to remove them is to reassign
- *     the deals, not to hide a row while its value keeps counting.
+ * THE FLAG IS ABSOLUTE. Unticked means gone, whether or not the person owns deals.
+ *
+ * An earlier revision left the owner branch UN-GATED, so unticking someone who owned even one deal did
+ * nothing. That was wrong for the thing this flag exists to do. In production it meant a director with 3
+ * deals, a rep with 2 and an admin with 122 stayed on the dashboard after an admin had explicitly
+ * unticked all three -- the control silently declined to work, which is worse than not offering it.
+ *
+ * The reasoning for the old exception was that getCommissionOfficeTotals counts a deal whenever a
+ * ROSTERED involved user exists and does not read this flag, so hiding a deal-owner's row could leave
+ * their value in the Team Commissions footer with no visible row to explain it. That concern is real,
+ * and it is answered where it actually lives: getDirectorRepCommissionRows retains anyone with EVIDENCE
+ * -- an earned commission row, or ownership of a live deal -- independently of this flag. So the money
+ * table still reconciles while the PERFORMANCE rosters honour the toggle.
+ *
+ * The two rosters therefore answer different questions on purpose: the cards and funnel ask "who is
+ * judged on sales?" (the admin decides), the commission table asks "who has money attached?" (the data
+ * decides). Deploy-time parity with the pre-0219 predicate no longer holds for a deal-owning non-rep,
+ * and that is intended: by the time this shipped the flags were already set by hand, so what changes is
+ * exactly what an admin chose.
  *
  * The office boundary is UNCHANGED and still load-bearing: without it every generates_sales rep in EVERY
  * office would leak into this office's roster (the D-5 finding). The owner branch needs no office gate
@@ -968,8 +974,9 @@ function activeOfficeRepMembershipSql(officeId: string): SQL {
  * Assumes the users alias is `u` and a `deal_owners`-derived `owner_rows` join is in scope.
  */
 export function dashboardRosterMembershipSql(officeId?: string): SQL {
-  return sql`(
-          (u.generates_sales = true${officeId ? sql` AND ${activeOfficeRepMembershipSql(officeId)}` : sql``})
+  return sql`u.generates_sales = true
+        AND (
+          ${officeId ? activeOfficeRepMembershipSql(officeId) : sql`TRUE`}
           OR owner_rows.rep_id IS NOT NULL
         )`;
 }
@@ -2554,10 +2561,11 @@ export async function getRepPerformanceSnapshots(
        --
        -- Gating the READ rather than the worker's write means ticking someone back on restores their
        -- history instantly instead of waiting for the next rollup.
-       AND (
-         u.generates_sales = true
-         OR EXISTS (SELECT 1 FROM deals d WHERE d.assigned_rep_id = u.id)
-       )
+       -- Absolute, matching dashboardRosterMembershipSql: unticked is gone from the cards, the funnel and
+       -- these panels alike. The owner-backed exception that used to sit here made the toggle a no-op for
+       -- anyone holding a single deal, which is not what it promises. Gating the READ rather than the
+       -- worker's write means ticking someone back on restores their history instantly.
+       AND u.generates_sales = true
        AND u.office_id = ${officeId}
       WHERE rps.period_kind = ${periodKind}
       ORDER BY rps.rep_id, rps.period_kind, rps.computed_at DESC NULLS LAST, rps.period_start DESC
