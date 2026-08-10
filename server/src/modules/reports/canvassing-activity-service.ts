@@ -49,7 +49,7 @@
 import { sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
-import { BUSINESS_TIMEZONE, sundayWeekBucketSql } from "../../lib/period.js";
+import { BUSINESS_TIMEZONE, businessToday, shiftBusinessDate, sundayWeekBucketSql } from "../../lib/period.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -128,6 +128,20 @@ const DEFAULT_NOTES_LIMIT = 200;
 const MAX_NOTES_LIMIT = 500;
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * A date that is both ISO-SHAPED and real.
+ *
+ * The shape test alone accepts "2026-13-45" and "2026-02-30", which Postgres then rejects with
+ * "date/time field value out of range" — turning a stale bookmark into a 500, the exact opposite of what
+ * this normalizer promises. Round-tripping through Date catches both the out-of-range month/day and the
+ * silently-rolled-over ones (Feb 30 -> Mar 2).
+ */
+function isRealIsoDate(value: string): boolean {
+  if (!ISO_DATE.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function zeroCounts(): CanvassingCounts {
@@ -159,14 +173,14 @@ export function normalizeCanvassingFilters(query: Record<string, unknown>): Canv
     ? (bucketRaw as CanvassingBucket)
     : "week";
 
-  // A missing/garbled range defaults to the trailing 12 weeks, which is the window this report is read in.
-  const today = new Date();
-  const fallbackTo = today.toISOString().slice(0, 10);
-  const fallbackFromDate = new Date(today.getTime() - 84 * 24 * 60 * 60 * 1000);
-  const fallbackFrom = fallbackFromDate.toISOString().slice(0, 10);
+  // A missing/garbled range defaults to the trailing 12 weeks. Anchored on the BUSINESS date, not
+  // toISOString(): between ~19:00 and midnight Chicago the UTC date is already tomorrow, which would put
+  // `dateTo` a day past the business date every other calculation in this file uses.
+  const fallbackTo = businessToday();
+  const fallbackFrom = shiftBusinessDate(fallbackTo, -83);
 
-  let from = ISO_DATE.test(rawFrom) ? rawFrom : fallbackFrom;
-  let to = ISO_DATE.test(rawTo) ? rawTo : fallbackTo;
+  let from = isRealIsoDate(rawFrom) ? rawFrom : fallbackFrom;
+  let to = isRealIsoDate(rawTo) ? rawTo : fallbackTo;
   // An inverted range returns nothing at all, which reads as "nobody did anything" rather than as a bad
   // URL. Swapping is the interpretation that keeps the page honest.
   if (from > to) [from, to] = [to, from];
@@ -180,6 +194,33 @@ export function normalizeCanvassingFilters(query: Record<string, unknown>): Canv
   const notesLimit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(Math.floor(limitRaw), MAX_NOTES_LIMIT) : DEFAULT_NOTES_LIMIT;
 
   return { dateFrom: from, dateTo: to, bucket, userIds: userIds.length > 0 ? userIds : undefined, notesLimit };
+}
+
+/**
+ * What counts as "a note this person logged".
+ *
+ * `type = 'note'` and nothing else, matching Rep Activity (reports/service.ts) and the Daily Activity Log.
+ * The alternative — counting every activity row — would be wrong twice over. It would silently include the
+ * `email` activities the Outlook sync mints per synced message, which are machine-generated rather than
+ * logged by anyone, and would swamp the number. And it would put synced mailbox SUBJECT and BODY into this
+ * report's feed, which is a different privacy question from the one this report was scoped to answer; the
+ * Daily Activity Log gates that content behind an admin/director check for exactly that reason.
+ */
+const NOTES_ONLY = sql`a.responsible_user_id IS NOT NULL AND a.type = 'note'`;
+
+/**
+ * A date-only column, as a plain YYYY-MM-DD string.
+ *
+ * Every `::date` selected by this service is cast `::text` in SQL rather than trusted to arrive as a
+ * string, because it does NOT arrive as one in production: node-postgres registers a parser for type 1082
+ * that returns a JS `Date`, so `String(row.bucket_start)` would read "Sun May 31" and every downstream
+ * split on "-" would produce NaN. This is invisible under test — drizzle's PGlite driver overrides the DATE
+ * parser to pass the raw string through — which is exactly why the cast belongs in the query and not in a
+ * defensive JS branch. This helper is the second line of defence for anything that slips past.
+ */
+export function asIsoDate(value: unknown): string {
+  if (value instanceof Date) return value.toISOString().slice(0, 10);
+  return String(value).slice(0, 10);
 }
 
 /**
@@ -199,9 +240,13 @@ function businessDateSql(tsExpr: string): SQL {
   return sql.raw(`(((${tsExpr}) AT TIME ZONE '${BUSINESS_TIMEZONE}')::date)`);
 }
 
-function labelForBucket(bucket: CanvassingBucket, startIso: string): string {
+export function labelForBucket(bucket: CanvassingBucket, startIso: string): string {
   const [y, m, d] = startIso.split("-").map(Number);
+  // Never throw here. Intl.format on an Invalid Date raises a RangeError, which would turn one unexpected
+  // value into a 500 for the whole report; showing the raw bucket key instead degrades one label.
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return startIso;
   const start = new Date(Date.UTC(y, (m ?? 1) - 1, d ?? 1));
+  if (Number.isNaN(start.getTime())) return startIso;
   if (bucket === "month") {
     return new Intl.DateTimeFormat("en-US", { month: "short", year: "numeric", timeZone: "UTC" }).format(start);
   }
@@ -261,7 +306,7 @@ export async function getCanvassingActivityReport(
     n: number;
   }>(sql`
     WITH s AS (${stream})
-    SELECT ${bucketExpr} AS bucket_start,
+    SELECT ${bucketExpr}::text AS bucket_start,
            s.user_id::text AS user_id,
            s.kind AS kind,
            COUNT(*)::int AS n
@@ -270,13 +315,16 @@ export async function getCanvassingActivityReport(
      ORDER BY 1
   `);
 
-  // Notes logged per person in the window, attributed the way Rep Activity attributes them.
+  // Notes logged per person in the window, attributed and TYPED the way Rep Activity and the Daily Activity
+  // Log do it, so "notes logged" means the same thing on all three surfaces.
   const noteCountRows = await tenantDb.execute<{ bucket_start: string; user_id: string; n: number }>(sql`
-    SELECT ${bucketSql(filters.bucket, "a.occurred_at")} AS bucket_start,
+    SELECT ${bucketSql(filters.bucket, "a.occurred_at")}::text AS bucket_start,
            a.responsible_user_id::text AS user_id,
            COUNT(*)::int AS n
       FROM activities a
-     WHERE a.responsible_user_id IS NOT NULL
+      JOIN users u ON u.id = a.responsible_user_id
+     WHERE ${NOTES_ONLY}
+       AND COALESCE(u.is_test_data, false) = false
        AND ${businessDateSql("a.occurred_at")} BETWEEN ${filters.dateFrom}::date AND ${filters.dateTo}::date
      GROUP BY 1, 2
   `);
@@ -332,15 +380,18 @@ export async function getCanvassingActivityReport(
   const bucketUser = new Map<string, Map<string, { counts: CanvassingCounts; notesLogged: number }>>();
 
   for (const row of gridRows.rows) {
-    const start = String(row.bucket_start).slice(0, 10);
-    const bucketRow = ensureBucket(start);
+    const start = asIsoDate(row.bucket_start);
 
     if (!row.user_id) {
+      const bucketRow = ensureBucket(start);
       addTo(unattributed, row.kind, row.n);
       addTo(bucketRow.unattributed, row.kind, row.n);
       continue;
     }
+    // Deliberately AFTER the include check: a bucket whose only rows belong to people the caller did not
+    // pin would otherwise render as a row of zeros, which reads as "a quiet week" rather than "not asked".
     if (!includeUser(row.user_id)) continue;
+    const bucketRow = ensureBucket(start);
 
     addTo(totals, row.kind, row.n);
     addTo(bucketRow.counts, row.kind, row.n);
@@ -369,7 +420,7 @@ export async function getCanvassingActivityReport(
   const perPersonNotes = new Map<string, number>();
   for (const row of noteCountRows.rows) {
     if (!row.user_id || !includeUser(row.user_id)) continue;
-    const start = String(row.bucket_start).slice(0, 10);
+    const start = asIsoDate(row.bucket_start);
     ensureBucket(start);
     notesLogged += row.n;
     perPersonNotes.set(row.user_id, (perPersonNotes.get(row.user_id) ?? 0) + row.n);
@@ -458,29 +509,34 @@ async function loadNotes(
            a.occurred_at,
            a.responsible_user_id::text AS user_id,
            u.display_name AS user_name,
+           -- Precedence deliberately matches the Daily Activity Log (deal > contact > company > lead >
+           -- property), because activities routinely carry SEVERAL of these at once: the Outlook sync writes
+           -- companyId, propertyId, leadId AND dealId on one row. A different order here would label the
+           -- same activity "on <Company>" while the neighbouring report labels it "on <Deal>".
            CASE
-             WHEN a.company_id  IS NOT NULL THEN 'company'
-             WHEN a.property_id IS NOT NULL THEN 'property'
-             WHEN a.contact_id  IS NOT NULL THEN 'contact'
-             WHEN a.lead_id     IS NOT NULL THEN 'lead'
              WHEN a.deal_id     IS NOT NULL THEN 'deal'
+             WHEN a.contact_id  IS NOT NULL THEN 'contact'
+             WHEN a.company_id  IS NOT NULL THEN 'company'
+             WHEN a.lead_id     IS NOT NULL THEN 'lead'
+             WHEN a.property_id IS NOT NULL THEN 'property'
            END AS target_type,
-           COALESCE(a.company_id, a.property_id, a.contact_id, a.lead_id, a.deal_id)::text AS target_id,
+           COALESCE(a.deal_id, a.contact_id, a.company_id, a.lead_id, a.property_id)::text AS target_id,
            COALESCE(
-             co.name,
-             pr.name,
+             de.name,
              NULLIF(BTRIM(CONCAT_WS(' ', ct.first_name, ct.last_name)), ''),
+             co.name,
              le.name,
-             de.name
+             pr.name
            ) AS target_name
       FROM activities a
-      LEFT JOIN users u      ON u.id  = a.responsible_user_id
+      JOIN users u           ON u.id  = a.responsible_user_id
       LEFT JOIN companies co ON co.id = a.company_id
       LEFT JOIN properties pr ON pr.id = a.property_id
       LEFT JOIN contacts ct  ON ct.id = a.contact_id
       LEFT JOIN leads le     ON le.id = a.lead_id
       LEFT JOIN deals de     ON de.id = a.deal_id
-     WHERE a.responsible_user_id IS NOT NULL
+     WHERE ${NOTES_ONLY}
+       AND COALESCE(u.is_test_data, false) = false
        AND ${businessDateSql("a.occurred_at")} BETWEEN ${filters.dateFrom}::date AND ${filters.dateTo}::date
        ${userFilter}
      ORDER BY a.occurred_at DESC, a.id DESC

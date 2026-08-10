@@ -27,7 +27,9 @@ import {
 } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 import {
+  asIsoDate,
   getCanvassingActivityReport,
+  labelForBucket,
   normalizeCanvassingFilters,
 } from "../../../src/modules/reports/canvassing-activity-service.js";
 
@@ -107,7 +109,9 @@ beforeAll(async () => {
       (id, type, source_entity_type, source_entity_id, responsible_user_id, company_id, subject, body, occurred_at, created_at) VALUES
       ('${U("a01")}', 'note', 'company', '${CO_A}', '${ED}',  '${CO_A}', 'Door knock', 'Spoke to the facilities lead.', '2026-06-01T14:00:00Z', '2026-06-01T14:00:00Z'),
       ('${U("a02")}', 'note', 'company', '${CO_A}', '${ED}',  '${CO_A}', 'Follow-up',  'Left a card.',                  '2026-06-02T14:00:00Z', '2026-06-02T14:00:00Z'),
-      ('${U("a03")}', 'call', 'company', '${CO_B}', '${CAL}', '${CO_B}', 'Cold call',  'Asked for the PM.',             '2026-06-15T14:00:00Z', '2026-06-15T14:00:00Z');
+      ('${U("a03")}', 'call', 'company', '${CO_B}', '${CAL}', '${CO_B}', 'Cold call',  'Asked for the PM.',             '2026-06-15T14:00:00Z', '2026-06-15T14:00:00Z'),
+      ('${U("a04")}', 'note', 'company', '${CO_B}', '${CAL}', '${CO_B}', 'Site walk',  'Walked the north building.',    '2026-06-16T14:00:00Z', '2026-06-16T14:00:00Z'),
+      ('${U("a05")}', 'email','company', '${CO_A}', '${ED}',  '${CO_A}', 'Re: proposal', 'Private mailbox body.',       '2026-06-03T14:00:00Z', '2026-06-03T14:00:00Z');
   `);
 
   tdb = drizzle(pg);
@@ -237,11 +241,26 @@ describe("canvassing activity — notes feed", () => {
 
     expect(report.notesLogged).toBe(3);
     expect(report.notes).toHaveLength(3);
-    expect(report.notes[0]?.subject).toBe("Cold call");
+    expect(report.notes[0]?.subject).toBe("Site walk");
     expect(report.notes[0]?.userName).toBe("Caleb Stone");
     expect(report.notes[0]?.targetType).toBe("company");
     expect(report.notes[0]?.targetName).toBe("Acme Two");
-    expect(report.notes[0]?.body).toBe("Asked for the PM.");
+    expect(report.notes[0]?.body).toBe("Walked the north building.");
+  });
+
+  // "Notes logged" has to mean what it means on Rep Activity and the Daily Activity Log: type='note'.
+  // Counting every activity type would fold in the email rows the Outlook sync mints per synced message —
+  // machine-generated rather than logged by anyone, and carrying real mailbox subjects and bodies. An
+  // earlier draft of this suite seeded a 'call' and asserted it AS a note, which is how the bug survived.
+  it("counts and shows ONLY notes — never calls, and never synced email", async () => {
+    const report = await getCanvassingActivityReport(tdb, filters());
+
+    expect(report.notes.map((note) => note.type)).toEqual(["note", "note", "note"]);
+    expect(report.notes.map((note) => note.subject)).not.toContain("Cold call");
+    expect(report.notes.map((note) => note.subject)).not.toContain("Re: proposal");
+    expect(report.notes.map((note) => note.body)).not.toContain("Private mailbox body.");
+    // Three notes exist in this window; five activities do.
+    expect(report.notesLogged).toBe(3);
   });
 
   it("narrows the feed to pinned people", async () => {
@@ -299,6 +318,24 @@ describe("canvassing activity — filter normalization", () => {
     expect(parsed.userIds).toEqual([ED]);
   });
 
+  // ISO-SHAPED is not the same as REAL. "2026-13-45" passes a /^\d{4}-\d{2}-\d{2}$/ test and then reaches
+  // Postgres as `'2026-13-45'::date`, which errors — turning a stale bookmark into a 500, the exact opposite
+  // of what this normalizer promises.
+  it("rejects an ISO-shaped date that is not a real date", () => {
+    const bad = normalizeCanvassingFilters({ dateFrom: "2026-13-45", dateTo: "2026-02-30" });
+    expect(bad.dateFrom).not.toBe("2026-13-45");
+    expect(bad.dateTo).not.toBe("2026-02-30");
+    expect(bad.dateFrom).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(bad.dateTo).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    // And the fallback it chose must itself be a real, ordered range.
+    expect(bad.dateFrom <= bad.dateTo).toBe(true);
+  });
+
+  it("accepts a real leap day and rejects a fake one", () => {
+    expect(normalizeCanvassingFilters({ dateFrom: "2024-02-29", dateTo: "2024-03-01" }).dateFrom).toBe("2024-02-29");
+    expect(normalizeCanvassingFilters({ dateFrom: "2026-02-29", dateTo: "2026-03-01" }).dateFrom).not.toBe("2026-02-29");
+  });
+
   it("caps notesLimit and ignores a nonsense value", () => {
     expect(normalizeCanvassingFilters({ notesLimit: "99999" }).notesLimit).toBe(500);
     expect(normalizeCanvassingFilters({ notesLimit: "-4" }).notesLimit).toBe(200);
@@ -323,5 +360,47 @@ describe("canvassing activity — timezone", () => {
     expect(byStart.get("2026-06-07")?.counts.company).toBe(2);
 
     await pg.exec(`DELETE FROM public.companies WHERE id = '${LATE}';`);
+  });
+});
+
+// The bug this section exists for: `::date` columns do NOT arrive as strings in production. node-postgres
+// registers a parser for type 1082 that returns a JS Date, so `String(bucket_start).slice(0,10)` read
+// "Sun May 31" and labelForBucket then threw a RangeError formatting an Invalid Date — a 500 on the default
+// view. It was invisible here because drizzle's PGlite driver overrides the DATE parser to pass the raw
+// string through, so the runtime suite exercises a shape production never produces.
+//
+// The real fix is the `::text` cast in the queries. These cases cover the second line of defence, which is
+// the part a test CAN reach: the normaliser must handle both shapes, and the label must never throw.
+describe("canvassing activity — date shapes across drivers", () => {
+  it("normalises the Date that node-postgres actually returns, not just the string PGlite returns", () => {
+    expect(asIsoDate(new Date(Date.UTC(2026, 4, 31)))).toBe("2026-05-31");
+    expect(asIsoDate("2026-05-31")).toBe("2026-05-31");
+    expect(asIsoDate("2026-05-31T00:00:00Z")).toBe("2026-05-31");
+  });
+
+  it("labels every bucket type without throwing", () => {
+    expect(labelForBucket("month", "2026-06-01")).toBe("Jun 2026");
+    expect(labelForBucket("quarter", "2026-04-01")).toBe("Q2 2026");
+    expect(labelForBucket("quarter", "2026-01-01")).toBe("Q1 2026");
+    expect(labelForBucket("week", "2026-05-31")).toBe("May 31 – Jun 6");
+  });
+
+  // Formatting an Invalid Date raises a RangeError, which would turn one odd value into a 500 for the whole
+  // report. Degrade to the raw key instead.
+  it("degrades to the raw key rather than throwing on a value it cannot parse", () => {
+    expect(() => labelForBucket("week", "Sun May 31")).not.toThrow();
+    expect(labelForBucket("week", "Sun May 31")).toBe("Sun May 31");
+    expect(labelForBucket("month", "")).toBe("");
+  });
+
+  it("emits plain YYYY-MM-DD bucket keys and real labels end to end", async () => {
+    const report = await getCanvassingActivityReport(tdb, filters({ bucket: "week" }));
+
+    for (const bucket of report.buckets) {
+      expect(bucket.bucketStart).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(bucket.label).not.toContain("NaN");
+      expect(bucket.label).not.toBe(bucket.bucketStart);
+    }
+    expect(report.buckets.map((b) => b.label)).toContain("May 31 – Jun 6");
   });
 });
