@@ -124,7 +124,8 @@ function CanvassingActivityReportView() {
         title="Canvassing Activity"
         description="New companies, properties, contacts and leads entered by each person — plus the notes they logged."
       />
-      <ReportFilterBar defaultRange="90" />
+      {/* No office select: these tables are per-office schemas with no office column, so it could not narrow anything. */}
+      <ReportFilterBar defaultRange="90" showOffice={false} />
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
@@ -256,7 +257,53 @@ function CanvassingActivityReportView() {
             )}
           </ReportPanel>
 
-          <ReportPanel title={`By ${bucket}`}>
+          <ReportPanel title={`Each person, by ${bucket}`}>
+            {data.buckets.length === 0 || data.people.length === 0 ? (
+              <EmptyState label="Nothing entered in this window." />
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="min-w-full text-sm">
+                  <thead className="text-left text-xs font-black uppercase tracking-[0.14em] text-slate-500">
+                    <tr>
+                      <th className="py-2 pr-4">Person</th>
+                      {data.buckets.map((row) => (
+                        <th key={row.bucketStart} className="px-2 text-right">{row.label}</th>
+                      ))}
+                      <th className="px-2 text-right">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {data.people.map((person) => (
+                      <tr key={person.userId}>
+                        <td className="py-3 pr-4 font-semibold text-slate-900">{person.displayName}</td>
+                        {data.buckets.map((row) => {
+                          const cell = row.perUser.find((entry) => entry.userId === person.userId);
+                          const value = cell?.counts.total ?? 0;
+                          return (
+                            <td
+                              key={row.bucketStart}
+                              className={value === 0 ? "px-2 text-right text-slate-400" : "px-2 text-right text-slate-900"}
+                            >
+                              {formatNumber(value)}
+                            </td>
+                          );
+                        })}
+                        <td className="px-2 text-right font-semibold text-slate-900">
+                          {formatNumber(person.counts.total)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <p className="mt-2 text-xs font-semibold text-slate-500">
+                  New companies, properties, contacts and leads combined. A zero is a real zero — that person
+                  entered nothing in that period.
+                </p>
+              </div>
+            )}
+          </ReportPanel>
+
+          <ReportPanel title={`Office totals by ${bucket}`}>
             {data.buckets.length === 0 ? (
               <EmptyState label="Nothing entered in this window." />
             ) : (

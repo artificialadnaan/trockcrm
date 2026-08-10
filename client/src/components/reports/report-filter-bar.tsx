@@ -141,7 +141,19 @@ export function useReportFilters(options: { defaultRange?: DefaultRange } = {}) 
   };
 }
 
-export function ReportFilterBar({ defaultRange = "90" }: { defaultRange?: DefaultRange } = {}) {
+/**
+ * `showOffice=false` for reports whose data has no office dimension to filter ON.
+ *
+ * The directory tables (companies/properties/contacts) live in a per-office schema and carry no office
+ * column, so a report over them is already scoped to one tenant by the search_path. Offering an office
+ * select there is worse than useless: it looks like it narrows the report and does nothing, and picking a
+ * person from another office sends their id against the current tenant, where they show up as a real-looking
+ * zero. A control that cannot do what it says should not be rendered.
+ */
+export function ReportFilterBar({
+  defaultRange = "90",
+  showOffice = true,
+}: { defaultRange?: DefaultRange; showOffice?: boolean } = {}) {
   const [searchParams, setSearchParams] = useSearchParams();
   const { filters } = useReportFilters({ defaultRange });
   const [draft, setDraft] = useState<ReportFilters>(filters);
@@ -285,6 +297,7 @@ export function ReportFilterBar({ defaultRange = "90" }: { defaultRange?: Defaul
             className="h-10"
           />
         </label>
+        {showOffice ? (
         <label className="space-y-1 text-sm font-semibold text-slate-700">
           Office
           <select
@@ -310,6 +323,7 @@ export function ReportFilterBar({ defaultRange = "90" }: { defaultRange?: Defaul
             ) : null}
           </select>
         </label>
+        ) : null}
         <div className="space-y-2">
           <p className="text-sm font-semibold text-slate-700">Owner</p>
           <div className="flex max-h-28 flex-wrap gap-2 overflow-y-auto rounded-md border border-slate-200 bg-slate-50 p-2">

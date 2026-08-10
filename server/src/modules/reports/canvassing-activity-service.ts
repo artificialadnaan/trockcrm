@@ -271,22 +271,37 @@ function createdStreamSql(filters: CanvassingActivityFilters): SQL {
   const window = (alias: string) =>
     sql`${businessDateSql(`${alias}.created_at`)} BETWEEN ${from}::date AND ${to}::date`;
 
+  // The creator is LEFT-joined and filtered on the USER's test flag as well as the row's. Filtering only the
+  // row let a user marked is_test_data create ordinary-looking records and appear on the scoreboard, which
+  // contradicts this file's own "test data excluded" rule and inflates the totals. LEFT, not INNER, because
+  // a null creator is the unattributed case this report reports on rather than discards.
+  const notATestUser = (alias: string) =>
+    sql`(${sql.raw(alias)}.id IS NULL OR COALESCE(${sql.raw(alias)}.is_test_data, false) = false)`;
+
   return sql`
     SELECT 'company'::text AS kind, c.created_by_user_id AS user_id, c.created_at
       FROM companies c
-     WHERE c.is_active = true AND COALESCE(c.is_test_data, false) = false AND ${window("c")}
+      LEFT JOIN users cu ON cu.id = c.created_by_user_id
+     WHERE c.is_active = true AND COALESCE(c.is_test_data, false) = false
+       AND ${notATestUser("cu")} AND ${window("c")}
     UNION ALL
     SELECT 'property'::text, p.created_by_user_id, p.created_at
       FROM properties p
-     WHERE p.is_active = true AND COALESCE(p.is_test_data, false) = false AND ${window("p")}
+      LEFT JOIN users pu ON pu.id = p.created_by_user_id
+     WHERE p.is_active = true AND COALESCE(p.is_test_data, false) = false
+       AND ${notATestUser("pu")} AND ${window("p")}
     UNION ALL
     SELECT 'contact'::text, ct.created_by_user_id, ct.created_at
       FROM contacts ct
-     WHERE ct.is_active = true AND COALESCE(ct.is_test_data, false) = false AND ${window("ct")}
+      LEFT JOIN users ctu ON ctu.id = ct.created_by_user_id
+     WHERE ct.is_active = true AND COALESCE(ct.is_test_data, false) = false
+       AND ${notATestUser("ctu")} AND ${window("ct")}
     UNION ALL
     SELECT 'lead'::text, l.created_by_user_id, l.created_at
       FROM leads l
-     WHERE l.is_active = true AND COALESCE(l.is_test_data, false) = false AND ${window("l")}
+      LEFT JOIN users lu ON lu.id = l.created_by_user_id
+     WHERE l.is_active = true AND COALESCE(l.is_test_data, false) = false
+       AND ${notATestUser("lu")} AND ${window("l")}
   `;
 }
 
@@ -561,8 +576,15 @@ async function loadNotes(
 }
 
 /**
- * Earliest attributed creation across the four tables — the date before which this report is structurally
- * blind. Null when nothing has ever been attributed (i.e. before anyone creates a record post-deploy).
+ * The date this report becomes trustworthy: the earliest attributed creation among the three tables that
+ * migration 0220 introduced.
+ *
+ * `leads` is deliberately EXCLUDED from this minimum even though it is counted in the report. It has carried
+ * created_by_user_id since migration 0128, so in any office holding an older attributed lead a MIN across
+ * all four would return that older date — and the banner would claim creator tracking began then, while
+ * companies, properties and contacts were still structurally unattributed. That reads their zeros as
+ * meaningful when they are not. The binding constraint is the LATEST of the four onsets, not the earliest,
+ * and for the three that share 0220 it is simply the first record any of them attributed.
  */
 async function loadAttributionStart(tenantDb: TenantDb): Promise<string | null> {
   const result = await tenantDb.execute<{ started: string | null }>(sql`
@@ -572,8 +594,6 @@ async function loadAttributionStart(tenantDb: TenantDb): Promise<string | null> 
       SELECT MIN(${businessDateSql("p.created_at")}) FROM properties p WHERE p.created_by_user_id IS NOT NULL
       UNION ALL
       SELECT MIN(${businessDateSql("ct.created_at")}) FROM contacts ct WHERE ct.created_by_user_id IS NOT NULL
-      UNION ALL
-      SELECT MIN(${businessDateSql("l.created_at")}) FROM leads l WHERE l.created_by_user_id IS NOT NULL
     ) firsts
   `);
   const value = result.rows[0]?.started ?? null;

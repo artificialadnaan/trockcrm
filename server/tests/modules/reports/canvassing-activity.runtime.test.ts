@@ -40,6 +40,7 @@ const ED = U("ed1"); // Edward McCarty
 const CAL = U("ca1"); // Caleb Stone
 const CHR = U("cb1"); // Chris — pinned in one case having entered nothing
 const OWNER = U("0e1"); // owns records ED created, to prove owner is not the creator
+const TESTER = U("7e57"); // users.is_test_data — their records must not reach the scoreboard
 
 const CO_A = U("c0a"); // ED, 06-01
 const CO_B = U("c0b"); // ED, 06-01
@@ -75,7 +76,9 @@ beforeAll(async () => {
       ('${ED}',    'emccarty@example.com', 'Edward McCarty',  'rep',      '${OFF}', true),
       ('${CAL}',   'cstone@example.com',   'Caleb Stone',     'rep',      '${OFF}', true),
       ('${CHR}',   'chigg@example.com',    'Chris H',         'director', '${OFF}', true),
+      ('${TESTER}','tester@example.com',   'QA Tester',       'rep',      '${OFF}', true),
       ('${OWNER}', 'owner@example.com',    'Book Owner',      'rep',      '${OFF}', true);
+    UPDATE public.users SET is_test_data = true WHERE id = '${TESTER}';
     INSERT INTO public.pipeline_stage_config (id, slug, name, display_order) VALUES ('${STAGE}', 'estimating', 'Estimating', 3);
   `);
 
@@ -402,5 +405,45 @@ describe("canvassing activity — date shapes across drivers", () => {
       expect(bucket.label).not.toBe(bucket.bucketStart);
     }
     expect(report.buckets.map((b) => b.label)).toContain("May 31 – Jun 6");
+  });
+});
+
+
+describe("canvassing activity — findings from review", () => {
+  const TEST_CO = U("dead");
+  const OLD_LEAD = U("01d1");
+
+  // A user flagged is_test_data creating an otherwise ordinary company was counted: the stream filtered the
+  // ROW's test flag but never the CREATOR's, while the notes queries did. That inflates the scoreboard and
+  // contradicts this file's own "test data excluded" rule.
+  it("excludes records created BY a test user, even when the record itself is not test data", async () => {
+    await pg.exec(`
+      INSERT INTO public.companies (id, name, slug, category, created_by_user_id, is_active, is_test_data, created_at)
+      VALUES ('${TEST_CO}', 'QA Co', 'qa-co', 'client', '${TESTER}', true, false, '2026-06-01T12:00:00Z');
+    `);
+
+    const report = await getCanvassingActivityReport(tdb, filters());
+    expect(report.people.find((p) => p.userId === TESTER)).toBeUndefined();
+    expect(report.totals.company).toBe(3);
+    // And it is not silently reclassified as unattributed either — it is simply not this report's business.
+    expect(report.unattributed.company).toBe(1);
+
+    await pg.exec(`DELETE FROM public.companies WHERE id = '${TEST_CO}';`);
+  });
+
+  // leads has carried created_by_user_id since migration 0128, long before 0220 gave it to the other three.
+  // Taking the hint from all four would report the older lead's date, telling a reader that creator tracking
+  // began then — while companies/properties/contacts were still structurally unattributed.
+  it("does not let an older attributed LEAD drag the attribution hint back before 0220", async () => {
+    await pg.exec(`
+      INSERT INTO public.leads (id, company_id, property_id, assigned_rep_id, office_code, office, name, stage_id, created_by_user_id, is_active, is_test_data, created_at)
+      VALUES ('${OLD_LEAD}', '${CO_HOST}', '${PR_A}', '${OWNER}', 'dallas', 'dfw', 'Ancient lead', '${STAGE}', '${ED}', true, false, '2025-03-04T12:00:00Z');
+    `);
+
+    const report = await getCanvassingActivityReport(tdb, filters());
+    expect(report.attributionStartHint).toBe("2026-06-01");
+    expect(report.attributionStartHint).not.toBe("2025-03-04");
+
+    await pg.exec(`DELETE FROM public.leads WHERE id = '${OLD_LEAD}';`);
   });
 });
