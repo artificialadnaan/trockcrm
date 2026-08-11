@@ -6,7 +6,12 @@ import {
   type EstimatorPipelineCohort,
   type ScorecardKind,
 } from "@trock-crm/shared/types";
-import { requireRole, requireDirector, requireDailyActivityLogViewer } from "../../middleware/rbac.js";
+import {
+  requireRole,
+  requireDirector,
+  requireDailyActivityLogViewer,
+  requireCanvassingReportViewer,
+} from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import {
   getPipelineSummary,
@@ -68,6 +73,10 @@ import {
   getDailyActivityLogReport,
   normalizeDailyActivityLogOptions,
 } from "./daily-activity-log-service.js";
+import {
+  getCanvassingActivityReport,
+  normalizeCanvassingFilters,
+} from "./canvassing-activity-service.js";
 import {
   getAnalyticsEvidence,
   getCustomerConcentrationReport,
@@ -1604,6 +1613,36 @@ router.get("/platform-usage/detail", requireAnyRole, async (req, res, next) => {
 
     await req.commitTransaction!();
     res.json({ data: { rep: { id: rep.id, displayName: rep.displayName }, grain, dates, actions, views } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/canvassing-activity?dateFrom=2026-06-01&dateTo=2026-08-31&bucket=week&userIds=<uuid>,<uuid>
+//
+// Who entered new companies, properties, contacts and leads, per person, per week/month/quarter — plus the
+// notes those people logged. Gated on the CANVASSING_REPORT_VIEWER_EMAILS allowlist rather than a role,
+// because it is a per-person scoreboard; see shared/lib/canvassingReportViewers.ts. The role floor still
+// runs first, and the tenant search_path still scopes every count to the caller's office.
+//
+// Counts come from `created_by_user_id`, which only exists from migration 0220 onward for companies /
+// properties / contacts. The response carries `attributionStartHint` and per-bucket `unattributed` counts
+// so a zero before that date reads as "not recorded", not as "did nothing".
+router.get("/canvassing-activity", requireAnyRole, requireCanvassingReportViewer, async (req, res, next) => {
+  try {
+    const data = await getCanvassingActivityReport(req.tenantDb!, {
+      ...normalizeCanvassingFilters(req.query as Record<string, unknown>),
+      // Bounds the roster lookup: `users` is global, so a pinned id from another office must not resolve.
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
+      // Only the notes FEED reads these: a rep sees their own notes' text, never the office's. The HOME
+      // role, not the effective one — a rep holding a director role_override on an office must not read
+      // that office's note content through it (#740).
+      viewerRole: req.user!.baseRole ?? req.user!.role,
+      viewerEffectiveRole: req.user!.role,
+      viewerUserId: req.user!.id,
+    });
+    await req.commitTransaction!();
+    res.json({ data });
   } catch (err) {
     next(err);
   }

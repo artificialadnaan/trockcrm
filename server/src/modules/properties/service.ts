@@ -129,6 +129,12 @@ export interface CreatePropertyInput {
    */
   lat?: OptionalCoordinate;
   lng?: OptionalCoordinate;
+  /**
+   * Who keyed the property in. Properties carry no owner column at all, so before this there was no way
+   * to tell who added one — which is the gap the canvassing report exists to close. Null for machine
+   * callers (ingestion, imports, seeds); the report reads null as unattributed rather than crediting it.
+   */
+  createdByUserId?: string | null;
 }
 
 export interface UpdatePropertyInput {
@@ -694,6 +700,7 @@ export async function createProperty(tenantDb: TenantDb, input: CreatePropertyIn
       // makes the property permanently unmatchable by distance (matchProperties requires both), which
       // is precisely the state this feature exists to stop creating.
       ...coordinatePair(input.lat, input.lng),
+      createdByUserId: input.createdByUserId ?? null,
       isActive: true,
     })
     .returning();

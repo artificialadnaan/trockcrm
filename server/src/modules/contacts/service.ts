@@ -63,6 +63,10 @@ export interface CreateContactInput {
   // The user creating the contact becomes its owner ("whoever creates it owns it"). Optional +
   // null-safe so non-interactive callers (imports/sync) can omit it and leave the contact unowned.
   ownerUserId?: string | null;
+  // Who keyed the record in. Kept SEPARATE from ownerUserId even though the two start equal here:
+  // ownership moves as accounts are reassigned, authorship does not, and the canvassing report counts
+  // what a person entered. Null for machine callers, which the report reads as unattributed.
+  createdByUserId?: string | null;
 }
 
 function validateEmailInput(email: string | null | undefined): void {
@@ -751,6 +755,7 @@ export async function createContact(
         procoreContactId: input.procoreContactId ?? null,
         hubspotContactId: input.hubspotContactId ?? null,
         ownerId: input.ownerUserId ?? null,
+        createdByUserId: input.createdByUserId ?? null,
       })
       .returning();
   } catch (err: any) {

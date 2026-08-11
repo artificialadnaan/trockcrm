@@ -55,4 +55,9 @@ export interface AuthenticatedUser {
    * report card + route. Absent/false must be read as "no" — the endpoint enforces the same list regardless.
    */
   canViewDailyActivityLog?: boolean;
+  /**
+   * True iff this user may open the Canvassing Activity report (CANVASSING_REPORT_VIEWER_EMAILS
+   * allowlist); hides the report card + route. Absent/false must be read as "no".
+   */
+  canViewCanvassingReport?: boolean;
 }

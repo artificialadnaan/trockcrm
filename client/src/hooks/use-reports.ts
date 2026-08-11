@@ -502,6 +502,81 @@ export interface DailyActivityLogQueryOptions extends PerformanceReportQueryOpti
   limit?: number;
 }
 
+/* -------------------------------------------------------------------------------------------------
+ * Canvassing Activity — who entered new companies/properties/contacts/leads, per person, per period.
+ * Mirrors server/src/modules/reports/canvassing-activity-service.ts.
+ * ---------------------------------------------------------------------------------------------- */
+
+export const CANVASSING_KINDS = ["company", "property", "contact", "lead"] as const;
+export type CanvassingKind = (typeof CANVASSING_KINDS)[number];
+export type CanvassingBucket = "week" | "month" | "quarter";
+
+export type CanvassingCounts = Record<CanvassingKind, number> & { total: number };
+
+export interface CanvassingPersonRow {
+  userId: string;
+  displayName: string;
+  email: string | null;
+  role: string | null;
+  isActive: boolean;
+  counts: CanvassingCounts;
+  notesLogged: number;
+}
+
+export interface CanvassingBucketRow {
+  bucketStart: string;
+  label: string;
+  /** The range covers only PART of this calendar period — normal for the first and last bucket. */
+  partial: boolean;
+  counts: CanvassingCounts;
+  /** Records created in this bucket that name NO creator — pre-0220 rows and machine-created ones. */
+  unattributed: CanvassingCounts;
+  perUser: Array<{ userId: string; counts: CanvassingCounts; notesLogged: number }>;
+}
+
+export interface CanvassingNoteRow {
+  id: string;
+  type: string;
+  subject: string | null;
+  body: string | null;
+  occurredAt: string;
+  userId: string | null;
+  userName: string | null;
+  /** Set only when someone OTHER than the attributed user actually logged it. */
+  performedByName: string | null;
+  targetType: "company" | "property" | "contact" | "lead" | "deal" | null;
+  targetId: string | null;
+  targetName: string | null;
+}
+
+export interface CanvassingActivityReport {
+  range: { from: string; to: string };
+  /** The requested window was longer than supported and `range.from` was moved forward. */
+  rangeClamped: boolean;
+  bucket: CanvassingBucket;
+  totals: CanvassingCounts;
+  unattributed: CanvassingCounts;
+  notesLogged: number;
+  people: CanvassingPersonRow[];
+  buckets: CanvassingBucketRow[];
+  notes: CanvassingNoteRow[];
+  notesTruncated: boolean;
+  /** The feed shows only the viewer's own notes; the counts still describe everyone. */
+  notesRestrictedToSelf: boolean;
+  /** Earliest attributed creation; before this the report is structurally blind, not empty. */
+  attributionStartHint: string | null;
+}
+
+export interface CanvassingActivityQueryOptions {
+  dateFrom?: string;
+  dateTo?: string;
+  bucket?: CanvassingBucket;
+  userIds?: string[];
+  /** The filter bar's legacy name/email owner selectors; resolved to ids server-side. */
+  ownerNames?: string[];
+  ownerEmails?: string[];
+}
+
 export interface ForecastAccuracyReport {
   kpis: {
     commit: number;
@@ -1521,6 +1596,27 @@ export function useDailyActivityLogReport(options: DailyActivityLogQueryOptions 
       options.limit,
     ],
     "Failed to load the daily activity log"
+  );
+}
+
+export function useCanvassingActivityReport(options: CanvassingActivityQueryOptions = {}) {
+  const userKey = options.userIds?.join(",") ?? "";
+  const nameKey = options.ownerNames?.join(",") ?? "";
+  const emailKey = options.ownerEmails?.join(",") ?? "";
+  return useScopedReport<CanvassingActivityReport>(
+    async () => {
+      const params = new URLSearchParams();
+      if (options.dateFrom) params.set("dateFrom", options.dateFrom);
+      if (options.dateTo) params.set("dateTo", options.dateTo);
+      if (options.bucket) params.set("bucket", options.bucket);
+      if (userKey) params.set("userIds", userKey);
+      if (nameKey) params.set("owners", nameKey);
+      if (emailKey) params.set("ownerEmails", emailKey);
+      const qs = params.toString();
+      return (await api<{ data: CanvassingActivityReport }>(`/reports/canvassing-activity${qs ? `?${qs}` : ""}`)).data;
+    },
+    [options.dateFrom, options.dateTo, options.bucket, userKey, nameKey, emailKey],
+    "Failed to load canvassing activity"
   );
 }
 

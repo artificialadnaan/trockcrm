@@ -4,9 +4,11 @@ import { MemoryRouter } from "react-router-dom";
 
 // The index reads the viewer's allowlist flags to decide which cards to offer, so it needs an auth context.
 // These cases are about the CATEGORY LAYOUT, so they run as a viewer who can see everything; the gating
-// itself is covered by reports-page-visibility.runtime.test.tsx.
+// itself is covered by reports-page-visibility.runtime.test.tsx and canvassing-activity-access.runtime.test.tsx.
 vi.mock("@/lib/auth", () => ({
-  useAuth: () => ({ user: { id: "u1", email: "viewer@trockgc.com", canViewDailyActivityLog: true } }),
+  useAuth: () => ({
+    user: { id: "u1", email: "viewer@trockgc.com", canViewDailyActivityLog: true, canViewCanvassingReport: true },
+  }),
 }));
 
 import { ReportsPage } from "./reports-page";
