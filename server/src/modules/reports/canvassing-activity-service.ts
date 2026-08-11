@@ -30,10 +30,16 @@
 // ---------------------------------------------------------------------------------------------
 // COUNTING RULES, all deliberate
 // ---------------------------------------------------------------------------------------------
-// ACTIVE ONLY. Soft-deleted rows do not count. Canvassing credit should not survive the cleanup of a
-// duplicate someone entered twice, and the reports suite already treats is_active=true as the population.
-// The consequence, stated because it is surprising: a past week's number can go DOWN if a record entered
-// then is deactivated later. That is the intended direction -- the alternative pays for duplicates.
+// ACTIVE ONLY, WITH ONE EXCEPTION THAT MATTERS. Soft-deleted rows do not count: canvassing credit should
+// not survive the cleanup of a duplicate someone entered twice, and the reports suite already treats
+// is_active=true as the population. The consequence, stated because it is surprising: a past week's number
+// can go DOWN if a record entered then is deactivated later. That is the intended direction -- the
+// alternative pays for duplicates.
+//
+// THE EXCEPTION IS LEADS. Converting a lead sets is_active=false while keeping status='converted'. That is
+// the outcome this whole exercise is for, not a deletion, so `is_active = true OR status = 'converted'`.
+// Without it the report docked a canvasser the moment their lead paid off -- and 155 of the 209 leads in
+// office_dallas are converted+inactive, so it would have hidden most of the lead column outright.
 //
 // TEST DATA EXCLUDED, via COALESCE(is_test_data,false)=false, matching every other report here.
 //
@@ -109,6 +115,12 @@ export interface CanvassingPersonRow {
 export interface CanvassingBucketRow {
   bucketStart: string;
   label: string;
+  /**
+   * True when the requested range covers only PART of this calendar period — which is the normal case for
+   * the first and last bucket of any range that does not start on a Sunday / the 1st. Without it a clipped
+   * week is charted beside whole ones and reads as a quiet week rather than a partial one.
+   */
+  partial: boolean;
   counts: CanvassingCounts;
   unattributed: CanvassingCounts;
   perUser: Array<{ userId: string; counts: CanvassingCounts; notesLogged: number }>;
@@ -327,6 +339,21 @@ function businessWindowSql(tsExpr: string, from: string, to: string): SQL {
          AND ${col} < ((${to}::date + 1) AT TIME ZONE ${BUSINESS_TIMEZONE})`;
 }
 
+/** The exclusive end of the calendar period beginning at `start`. */
+function bucketEndExclusive(bucket: CanvassingBucket, start: string): string {
+  if (bucket === "week") return shiftBusinessDate(start, 7);
+  const [y, m] = start.split("-").map(Number);
+  const raw = m - 1 + (bucket === "month" ? 1 : 3);
+  return `${String(y + Math.floor(raw / 12)).padStart(4, "0")}-${String((raw % 12) + 1).padStart(2, "0")}-01`;
+}
+
+/** Whether the requested range clips this calendar period at either end. */
+function isPartialBucket(bucket: CanvassingBucket, start: string, from: string, to: string): boolean {
+  const endExclusive = bucketEndExclusive(bucket, start);
+  const lastDay = shiftBusinessDate(endExclusive, -1);
+  return start < from || lastDay > to;
+}
+
 export function labelForBucket(bucket: CanvassingBucket, startIso: string): string {
   const [y, m, d] = startIso.split("-").map(Number);
   // Never throw here. Intl.format on an Invalid Date raises a RangeError, which would turn one unexpected
@@ -386,7 +413,13 @@ function createdStreamSql(filters: CanvassingActivityFilters): SQL {
     SELECT 'lead'::text, l.created_by_user_id, l.created_at
       FROM leads l
       LEFT JOIN users lu ON lu.id = l.created_by_user_id
-     WHERE l.is_active = true AND COALESCE(l.is_test_data, false) = false
+       -- is_active = true OR status = 'converted', NOT is_active alone. Converting a lead sets
+       -- is_active=false (conversion-service.ts) while keeping status='converted': that is the SUCCESS
+       -- state, not a soft delete. Counting on is_active alone removed a canvasser's converted leads from
+       -- their own total, so the report docked people for the outcome it exists to encourage — and it is
+       -- not a corner case: 155 of 209 leads in office_dallas are converted+inactive.
+     WHERE (l.is_active = true OR l.status = 'converted')
+       AND COALESCE(l.is_test_data, false) = false
        AND ${notATestUser("lu")} AND ${window("l")}
   `;
 }
@@ -529,6 +562,7 @@ export async function getCanvassingActivityReport(
       row = {
         bucketStart: start,
         label: labelForBucket(filters.bucket, start),
+        partial: isPartialBucket(filters.bucket, start, filters.dateFrom, filters.dateTo),
         counts: zeroCounts(),
         unattributed: zeroCounts(),
         perUser: [],

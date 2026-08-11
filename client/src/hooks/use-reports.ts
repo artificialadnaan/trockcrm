@@ -526,6 +526,8 @@ export interface CanvassingPersonRow {
 export interface CanvassingBucketRow {
   bucketStart: string;
   label: string;
+  /** The range covers only PART of this calendar period — normal for the first and last bucket. */
+  partial: boolean;
   counts: CanvassingCounts;
   /** Records created in this bucket that name NO creator — pre-0220 rows and machine-created ones. */
   unattributed: CanvassingCounts;

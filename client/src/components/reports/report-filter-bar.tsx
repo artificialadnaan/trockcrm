@@ -37,12 +37,22 @@ export interface ReportOwnerOption {
 
 type DefaultRange = "30" | "60" | "90" | "6m" | "12m" | "qtd" | "ytd";
 
+/**
+ * The platform's canonical period anchor (server/src/lib/period.ts). Every report these filters drive
+ * windows in business time, so the defaults have to be computed there too — not in UTC (which moved both
+ * bounds to tomorrow after 6pm Central) and not in the viewer's own zone (which is still a day off for
+ * anyone outside Central).
+ */
+const BUSINESS_TIMEZONE = "America/Chicago";
+
+/** YYYY-MM-DD for an instant, read in business time. */
 function toDateInput(date: Date) {
-  // en-CA renders YYYY-MM-DD, and no timeZone argument means the VIEWER's zone — which is what the
-  // surrounding `setDate`/`getMonth` arithmetic already operates in. toISOString() here was a UTC
-  // conversion applied to a local-time Date: after 6pm Central both bounds advanced a day, so "last 90
-  // days" quietly meant a window ending tomorrow and starting a day late.
-  return date.toLocaleDateString("en-CA");
+  return date.toLocaleDateString("en-CA", { timeZone: BUSINESS_TIMEZONE });
+}
+
+/** "Now", as a Date whose LOCAL fields are the business-time calendar fields — safe for date arithmetic. */
+function businessNow(): Date {
+  return new Date(`${toDateInput(new Date())}T00:00:00`);
 }
 
 export function subtractMonthsClamped(date: Date, months: number) {
@@ -62,7 +72,7 @@ export function subtractMonthsClamped(date: Date, months: number) {
 }
 
 function rangeDates(range: string) {
-  const today = new Date();
+  const today = businessNow();
   const from = new Date(today);
 
   if (range === "6m") {

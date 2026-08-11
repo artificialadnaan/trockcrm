@@ -111,7 +111,7 @@ function CanvassingActivityReportView() {
   const chartData = useMemo(
     () =>
       (data?.buckets ?? []).map((row) => ({
-        label: row.label,
+        label: row.partial ? `${row.label}*` : row.label,
         Companies: row.counts.company,
         Properties: row.counts.property,
         Contacts: row.counts.contact,
@@ -127,18 +127,18 @@ function CanvassingActivityReportView() {
     if (!data) return [];
     // Keyed by bucketStart, which is unique by construction; the LABEL is only a header. Weekly labels omit
     // the year, so keying by label collapsed e.g. 2020-01-05 and 2025-01-05 into one column.
-    const periodColumns = data.buckets.map((row) => ({ key: row.bucketStart, header: row.label }));
+    const periodColumns = data.buckets.map((row) => ({ key: row.bucketStart, header: row.label, type: "number" as const }));
     return [
       {
         name: "By person",
         columns: [
           { key: "person", header: "Person" },
-          { key: "companies", header: "Companies" },
-          { key: "properties", header: "Properties" },
-          { key: "contacts", header: "Contacts" },
-          { key: "leads", header: "Leads" },
-          { key: "total", header: "Total" },
-          { key: "notes", header: "Notes logged" },
+          { key: "companies", header: "Companies", type: "number" as const },
+          { key: "properties", header: "Properties", type: "number" as const },
+          { key: "contacts", header: "Contacts", type: "number" as const },
+          { key: "leads", header: "Leads", type: "number" as const },
+          { key: "total", header: "Total", type: "number" as const },
+          { key: "notes", header: "Notes logged", type: "number" as const },
         ],
         rows: data.people.map((person) => ({
           person: person.displayName,
@@ -152,7 +152,7 @@ function CanvassingActivityReportView() {
       },
       {
         name: `Person by ${bucket}`,
-        columns: [{ key: "person", header: "Person" }, ...periodColumns, { key: "total", header: "Total" }],
+        columns: [{ key: "person", header: "Person" }, ...periodColumns, { key: "total", header: "Total", type: "number" as const }],
         rows: data.people.map((person) => {
           const row: Record<string, unknown> = { person: person.displayName, total: person.counts.total };
           for (const period of data.buckets) {
@@ -162,15 +162,17 @@ function CanvassingActivityReportView() {
         }),
       },
       {
-        name: `Totals by ${bucket}`,
+        name: filteredToPeople ? `Selected people by ${bucket}` : `Totals by ${bucket}`,
         columns: [
           { key: "period", header: "Period" },
-          { key: "companies", header: "Companies" },
-          { key: "properties", header: "Properties" },
-          { key: "contacts", header: "Contacts" },
-          { key: "leads", header: "Leads" },
-          { key: "total", header: "Total" },
-          { key: "unattributed", header: "No author recorded" },
+          { key: "companies", header: "Companies", type: "number" as const },
+          { key: "properties", header: "Properties", type: "number" as const },
+          { key: "contacts", header: "Contacts", type: "number" as const },
+          { key: "leads", header: "Leads", type: "number" as const },
+          { key: "total", header: "Total", type: "number" as const },
+          // Dropped under a person filter for the same reason the on-screen column is: `unattributed` is
+          // always whole-office, so printing it beside person-filtered counts puts two scopes in one row.
+          ...(filteredToPeople ? [] : [{ key: "unattributed", header: "No author recorded", type: "number" as const }]),
         ],
         rows: data.buckets.map((row) => ({
           period: row.label,
@@ -179,7 +181,7 @@ function CanvassingActivityReportView() {
           contacts: row.counts.contact,
           leads: row.counts.lead,
           total: row.counts.total,
-          unattributed: row.unattributed.total,
+          ...(filteredToPeople ? {} : { unattributed: row.unattributed.total }),
         })),
       },
       {
@@ -202,7 +204,7 @@ function CanvassingActivityReportView() {
         })),
       },
     ];
-  }, [data, bucket]);
+  }, [data, bucket, filteredToPeople]);
 
   return (
     <div className="space-y-6">
@@ -362,7 +364,10 @@ function CanvassingActivityReportView() {
                     <tr>
                       <th className="py-2 pr-4">Person</th>
                       {data.buckets.map((row) => (
-                        <th key={row.bucketStart} className="px-2 text-right">{row.label}</th>
+                        <th key={row.bucketStart} className="px-2 text-right">
+                          {row.label}
+                          {row.partial ? <span className="font-normal text-slate-400"> *</span> : null}
+                        </th>
                       ))}
                       <th className="px-2 text-right">Total</th>
                     </tr>
@@ -437,7 +442,14 @@ function CanvassingActivityReportView() {
                   <tbody className="divide-y divide-slate-100">
                     {data.buckets.map((row) => (
                       <tr key={row.bucketStart}>
-                        <td className="py-3 font-semibold text-slate-900">{row.label}</td>
+                        <td className="py-3 font-semibold text-slate-900">
+                          {row.label}
+                          {row.partial ? (
+                            <span className="ml-2 text-xs font-semibold text-slate-500" title="The selected range covers only part of this period">
+                              partial
+                            </span>
+                          ) : null}
+                        </td>
                         <td>{formatNumber(row.counts.company)}</td>
                         <td>{formatNumber(row.counts.property)}</td>
                         <td>{formatNumber(row.counts.contact)}</td>

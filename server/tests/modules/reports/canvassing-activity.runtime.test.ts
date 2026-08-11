@@ -633,3 +633,87 @@ describe("canvassing activity — owner selections in their legacy forms", () =>
     expect(report.attributionStartHint).toBe("2026-06-01");
   });
 });
+
+describe("canvassing activity — a converted lead is the WIN, not a deletion", () => {
+  // The worst defect this report had. Converting a lead sets is_active=false while keeping
+  // status='converted', so an `is_active = true` rule removed a canvasser's converted leads from their own
+  // count — the report docked people for the outcome it exists to encourage. Not a corner case either:
+  // 155 of the 209 leads in office_dallas are converted+inactive, so most of the lead column was missing.
+  const CONVERTED = U("c0117");
+  const DELETED = U("de1e7");
+
+  it("counts a converted lead, and still ignores a soft-deleted one", async () => {
+    const before = await getCanvassingActivityReport(tdb, filters({ officeId: OFF }));
+    expect(before.totals.lead).toBe(1);
+
+    await pg.exec(`
+      INSERT INTO public.leads (id, company_id, property_id, assigned_rep_id, office_code, office, name, stage_id, created_by_user_id, status, is_active, is_test_data, created_at) VALUES
+        -- The success state: converted, and therefore inactive.
+        ('${CONVERTED}', '${CO_HOST}', '${PR_A}', '${OWNER}', 'dallas', 'dfw', 'Converted lead', '${STAGE}', '${CAL}', 'converted', false, false, '2026-06-02T12:00:00Z'),
+        -- A genuine soft delete: open, but removed. Must stay excluded.
+        ('${DELETED}',   '${CO_HOST}', '${PR_A}', '${OWNER}', 'dallas', 'dfw', 'Deleted lead',   '${STAGE}', '${CAL}', 'open',      false, false, '2026-06-02T12:00:00Z');
+    `);
+
+    const after = await getCanvassingActivityReport(tdb, filters({ officeId: OFF }));
+    expect(after.totals.lead).toBe(2);
+    expect(after.people.find((p) => p.userId === CAL)?.counts.lead).toBe(1);
+
+    await pg.exec(`DELETE FROM public.leads WHERE id IN ('${CONVERTED}','${DELETED}');`);
+  });
+
+  it("does not extend the exception to the other three tables", async () => {
+    // Only leads repurpose is_active as a success state; a deactivated company is simply gone.
+    const GONE = U("9017");
+    await pg.exec(`
+      INSERT INTO public.companies (id, name, slug, category, created_by_user_id, is_active, is_test_data, created_at)
+      VALUES ('${GONE}', 'Retired Co', 'retired-co', 'client', '${CAL}', false, false, '2026-06-02T12:00:00Z');
+    `);
+
+    const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF }));
+    expect(report.totals.company).toBe(3);
+
+    await pg.exec(`DELETE FROM public.companies WHERE id = '${GONE}';`);
+  });
+});
+
+describe("canvassing activity — partial periods are labelled as such", () => {
+  // The default trailing-90-day view almost never starts on a Sunday or the 1st, so its first and last
+  // buckets hold only the part inside the range. Charted beside whole periods without a marker, a clipped
+  // week reads as a quiet week.
+  it("flags the clipped first and last buckets and no others", async () => {
+    // 2026-06-03 is a Wednesday and 2026-06-24 a Wednesday, so both ends clip their week.
+    const report = await getCanvassingActivityReport(
+      tdb,
+      filters({ bucket: "week", dateFrom: "2026-06-03", dateTo: "2026-06-24", officeId: OFF })
+    );
+
+    expect(report.buckets[0]!.partial).toBe(true);
+    expect(report.buckets[report.buckets.length - 1]!.partial).toBe(true);
+    for (const middle of report.buckets.slice(1, -1)) {
+      expect(middle.partial, middle.bucketStart).toBe(false);
+    }
+  });
+
+  it("flags nothing when the range lands exactly on calendar boundaries", async () => {
+    // Sunday through Saturday: every week is whole.
+    const report = await getCanvassingActivityReport(
+      tdb,
+      filters({ bucket: "week", dateFrom: "2026-05-31", dateTo: "2026-06-27", officeId: OFF })
+    );
+    expect(report.buckets.every((b) => b.partial === false)).toBe(true);
+  });
+
+  it("treats a whole calendar month and quarter as complete", async () => {
+    const month = await getCanvassingActivityReport(
+      tdb,
+      filters({ bucket: "month", dateFrom: "2026-06-01", dateTo: "2026-06-30", officeId: OFF })
+    );
+    expect(month.buckets.map((b) => b.partial)).toEqual([false]);
+
+    const clipped = await getCanvassingActivityReport(
+      tdb,
+      filters({ bucket: "month", dateFrom: "2026-06-02", dateTo: "2026-06-30", officeId: OFF })
+    );
+    expect(clipped.buckets.map((b) => b.partial)).toEqual([true]);
+  });
+});
