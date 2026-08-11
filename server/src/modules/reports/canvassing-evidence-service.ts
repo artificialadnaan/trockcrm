@@ -85,6 +85,20 @@ const MAX_ROWS = 500;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/**
+ * ISO-shaped AND a date that exists.
+ *
+ * The regex alone accepts 2026-02-30 and 2026-13-01, which survive all the way to Postgres and fail at the
+ * `::date` cast — a 500 where the route means to answer 400. Round-tripping through Date is what separates
+ * "looks like a date" from "is one": JS normalises 2026-02-30 to March 2, so the formatted value differs
+ * from the input.
+ */
+function isRealCalendarDate(value: string): boolean {
+  if (!ISO_DATE.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
 export function parseCanvassingEvidenceParams(query: Record<string, unknown>): {
   kind: CanvassingEvidenceKind;
   userId: string;
@@ -106,8 +120,21 @@ export function parseCanvassingEvidenceParams(query: Record<string, unknown>): {
     ? (bucketRaw as CanvassingBucket)
     : "week";
 
+  // ABSENT and INVALID are different answers, and collapsing them was a quiet widening.
+  //
+  // `bucketStart` omitted means "this person's whole-range total" — a real, offered drill. Falling back to
+  // that for a MALFORMED value meant a stale bookmark or a crafted URL asking for one week silently
+  // returned every record in the selected range, under a heading naming the week. A drill that answers a
+  // different question from the one asked is the one failure this whole feature exists to prevent, so an
+  // unparseable period is refused rather than reinterpreted.
   const bucketStartRaw = pick(query.bucketStart).trim();
-  const bucketStart = ISO_DATE.test(bucketStartRaw) ? bucketStartRaw : undefined;
+  let bucketStart: string | undefined;
+  if (bucketStartRaw.length > 0) {
+    if (!isRealCalendarDate(bucketStartRaw)) {
+      throw new Error("bucketStart must be a YYYY-MM-DD calendar date");
+    }
+    bucketStart = bucketStartRaw;
+  }
 
   return { kind: kindRaw as CanvassingEvidenceKind, userId, bucketStart, bucket };
 }

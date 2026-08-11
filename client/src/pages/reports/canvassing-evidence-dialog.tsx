@@ -5,10 +5,10 @@
 // the report's own predicate rather than a second hand-written one — so a mismatch is a bug, not a rounding
 // difference someone has to reason about.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Loader2 } from "lucide-react";
-import { useOfficeScopedHref } from "@/hooks/use-office-scope";
+import { useOfficeScopeId, useOfficeScopedHref } from "@/hooks/use-office-scope";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   fetchCanvassingEvidence,
@@ -75,6 +75,9 @@ export function CanvassingEvidenceDialog({
   // href on the way out pointed the detail page at the viewer's default tenant instead — the record either
   // does not exist there or is a different one. Same rule, and the same helper, as every report deal link.
   const scopedHref = useOfficeScopedHref();
+  const officeScopeId = useOfficeScopeId();
+  /** The office the open drill was requested under, so a scope change can be detected rather than ignored. */
+  const requestedForOffice = useRef<string | null>(null);
 
   useEffect(() => {
     if (!target) {
@@ -82,6 +85,7 @@ export function CanvassingEvidenceDialog({
       setError(null);
       return;
     }
+    requestedForOffice.current = officeScopeId;
     let cancelled = false;
     setLoading(true);
     setError(null);
@@ -109,6 +113,24 @@ export function CanvassingEvidenceDialog({
       cancelled = true;
     };
   }, [target, bucket, dateFrom, dateTo]);
+
+  // Close the drill if the tenant scope moves out from under it.
+  //
+  // Neither the target nor the date range changes when ?officeId does — via the office switcher, or plain
+  // browser history on this route — but the tenant every one of these ids belongs to does. The dialog would
+  // keep showing the previous office's records while scopedHref had already rewritten every row link for the
+  // NEW office: one tenant's list, another tenant's links, landing on whatever unrelated record happens to
+  // share that id. Refetching instead would be wrong in its own way, because `expected` was read off the
+  // previous office's report, so every row would then be accused of a mismatch. A drill belongs to the
+  // report that opened it; when that report's scope changes, the drill is over.
+  //
+  // Declared AFTER the fetch effect deliberately. Effects run in declaration order, so the fetch effect has
+  // already stamped requestedForOffice for a newly-opened target by the time this compares them — reversed,
+  // this would fire against the initial null and close every dialog the instant it opened.
+  useEffect(() => {
+    if (!target || requestedForOffice.current === officeScopeId) return;
+    onClose();
+  }, [target, officeScopeId, onClose]);
 
   const noun = target ? KIND_NOUNS[target.kind] : "";
   const scope = target?.periodLabel ? `in ${target.periodLabel}` : "in the selected range";

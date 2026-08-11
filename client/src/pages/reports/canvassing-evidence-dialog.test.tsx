@@ -10,9 +10,9 @@
 //
 // 2. THE COMBINED LIST SAYS WHAT EACH ROW IS. In `all` mode the list mixes four kinds, and a bare name
 //    cannot be told apart — "Acme Roofing" is a company or a lead depending on which table it came from.
-import { act, createElement } from "react";
+import { act, createElement, Fragment } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useNavigate } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // See file-row.runtime.test.tsx — this repo renders client components with createRoot + act under jsdom.
@@ -43,32 +43,53 @@ const COMBINED_RESULT = {
   ],
 };
 
-async function renderDialog(search: string, result: unknown = COMBINED_RESULT) {
+const TARGET = {
+  kind: "all" as const,
+  userId: "user-ed",
+  personName: "Edward McCarty",
+  bucketStart: null,
+  periodLabel: null,
+  expected: 3,
+};
+
+/**
+ * Renders inside a MemoryRouter whose entries the test can push to, so an office switch is exercised as the
+ * URL change it actually is rather than by re-mounting (which would hide the whole bug).
+ */
+/** Captured so a test can drive a real in-router navigation — an office switch is a URL change, not a remount. */
+let navigate: ((to: string) => void) | null = null;
+
+function NavigationHandle() {
+  navigate = useNavigate();
+  return null;
+}
+
+function tree(search: string, onClose: () => void) {
+  return createElement(
+    MemoryRouter,
+    { initialEntries: [`/reports/performance/canvassing-activity${search}`] },
+    createElement(
+      Fragment,
+      null,
+      createElement(NavigationHandle),
+      createElement(CanvassingEvidenceDialog, {
+        target: TARGET,
+        bucket: "week" as const,
+        dateFrom: "2026-06-01",
+        dateTo: "2026-06-30",
+        onClose,
+      })
+    )
+  );
+}
+
+async function renderDialog(search: string, result: unknown = COMBINED_RESULT, onClose: () => void = () => {}) {
   fetchMocks.fetchCanvassingEvidence.mockResolvedValue(result);
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
   await act(async () => {
-    root!.render(
-      createElement(
-        MemoryRouter,
-        { initialEntries: [`/reports/performance/canvassing-activity${search}`] },
-        createElement(CanvassingEvidenceDialog, {
-          target: {
-            kind: "all" as const,
-            userId: "user-ed",
-            personName: "Edward McCarty",
-            bucketStart: null,
-            periodLabel: null,
-            expected: 3,
-          },
-          bucket: "week" as const,
-          dateFrom: "2026-06-01",
-          dateTo: "2026-06-30",
-          onClose: () => {},
-        })
-      )
-    );
+    root!.render(tree(search, onClose));
   });
   // The dialog portals into document.body, so the container alone would look empty.
   return document.body;
@@ -110,6 +131,58 @@ describe("CanvassingEvidenceDialog — record links", () => {
     const body = await renderDialog("?office=atlanta");
 
     expect(hrefs(body)).toEqual(["/companies/co-1", "/properties/pr-1", "/leads/le-1"]);
+  });
+});
+
+describe("CanvassingEvidenceDialog — the office scope moving under an open drill", () => {
+  // The drill and its links must never describe two different tenants. Nothing in the target or the date
+  // range changes when ?officeId does, so without this the dialog kept the previous office's records while
+  // every row link had already been rewritten for the new one — and following one lands on whatever
+  // unrelated record shares that id there.
+  it("closes when ?officeId changes while it is open", async () => {
+    const onClose = vi.fn();
+    await renderDialog("?officeId=office-atlanta", COMBINED_RESULT, onClose);
+    expect(onClose).not.toHaveBeenCalled();
+
+    await act(async () => {
+      navigate!("/reports/performance/canvassing-activity?officeId=office-dallas");
+    });
+
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("closes when the office scope is dropped entirely", async () => {
+    const onClose = vi.fn();
+    await renderDialog("?officeId=office-atlanta", COMBINED_RESULT, onClose);
+
+    await act(async () => {
+      navigate!("/reports/performance/canvassing-activity");
+    });
+
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  // The guard must not be so eager that it shuts the dialog on any navigation. ?office is the report's own
+  // display filter and does not change tenant, so a drill opened under it stays open.
+  it("stays open when a non-tenant query param changes", async () => {
+    const onClose = vi.fn();
+    await renderDialog("?officeId=office-atlanta", COMBINED_RESULT, onClose);
+
+    await act(async () => {
+      navigate!("/reports/performance/canvassing-activity?officeId=office-atlanta&office=dallas");
+    });
+
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  // The regression this ordering exists to prevent: comparing before the fetch effect stamps the office
+  // would fire against the initial null and close every dialog on the frame it opened.
+  it("does not close itself the moment it opens", async () => {
+    const onClose = vi.fn();
+    const body = await renderDialog("?officeId=office-atlanta", COMBINED_RESULT, onClose);
+
+    expect(onClose).not.toHaveBeenCalled();
+    expect(body.textContent).toContain("Acme Roofing");
   });
 });
 
