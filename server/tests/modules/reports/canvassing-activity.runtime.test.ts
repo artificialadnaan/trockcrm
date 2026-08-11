@@ -812,14 +812,45 @@ describe("canvassing activity — note CONTENT respects the rep boundary", () =>
               'Logged for Edward', 'Chris wrote this up for him.', '2026-06-05T14:00:00Z', '2026-06-05T14:00:00Z');
     `);
 
-    const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF, viewerRole: "director" }));
-    const row = report.notes.find((note) => note.subject === "Logged for Edward");
+    try {
+      const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF, viewerRole: "director" }));
+      const row = report.notes.find((note) => note.subject === "Logged for Edward");
 
-    expect(row?.userName).toBe("Edward McCarty");
-    expect(row?.performedByName).toBe("Chris H");
-    // An ordinary note, written by the person it belongs to, carries no marker.
-    expect(report.notes.find((note) => note.subject === "Door knock")?.performedByName).toBeNull();
+      expect(row?.userName).toBe("Edward McCarty");
+      expect(row?.performedByName).toBe("Chris H");
+      // An ordinary note, written by the person it belongs to, carries no marker.
+      expect(report.notes.find((note) => note.subject === "Door knock")?.performedByName).toBeNull();
+    } finally {
+      // In a finally: a failed assertion above would otherwise leak this row into every later case.
+      await pg.exec(`DELETE FROM public.activities WHERE id = '${ON_BEHALF}';`);
+    }
+  });
+});
 
-    await pg.exec(`DELETE FROM public.activities WHERE id = '${ON_BEHALF}';`);
+
+describe("canvassing activity — the notes gate fails closed", () => {
+  // The restriction previously required a viewerUserId to be present before it applied, so a caller passing
+  // role="rep" with no id fell through to the unrestricted office-wide feed — the one combination that must
+  // never widen access.
+  it("returns NO notes for a rep whose id is missing, rather than all of them", async () => {
+    const report = await getCanvassingActivityReport(
+      tdb,
+      filters({ officeId: OFF, viewerRole: "rep", viewerUserId: null })
+    );
+
+    expect(report.notes).toEqual([]);
+    expect(report.notesTruncated).toBe(false);
+    // The counts are a different disclosure and are unaffected.
+    expect(report.notesLogged).toBe(3);
+  });
+
+  // authMiddleware rewrites `role` from a per-office role_override, so the gate reads baseRole — otherwise a
+  // rep holding a director override on an office reads that office's note content (#740).
+  it("is driven by the HOME role, which is what the route passes", async () => {
+    const asRepBase = await getCanvassingActivityReport(
+      tdb,
+      filters({ officeId: OFF, viewerRole: "rep", viewerUserId: CAL })
+    );
+    expect(asRepBase.notes.every((note) => note.userId === CAL)).toBe(true);
   });
 });

@@ -99,9 +99,15 @@ export interface CanvassingActivityFilters {
    */
   officeId?: string | null;
   /**
-   * The viewer's effective role. Only the NOTES FEED uses it: an allowlisted viewer holding `rep` reads
-   * their own notes rather than the whole office's, matching GET /activities and the Daily Activity Log.
-   * Counts are unaffected — a scoreboard of how many is not the same disclosure as the text itself.
+   * The viewer's HOME role (users.role), NOT the per-office effective one.
+   *
+   * Only the NOTES FEED uses it: an allowlisted viewer holding `rep` reads their own notes rather than the
+   * whole office's, matching GET /activities and the Daily Activity Log. Counts are unaffected — a
+   * scoreboard of how many is not the same disclosure as the text itself.
+   *
+   * baseRole rather than role for the #740 escalation shape: authMiddleware rewrites `role` from a
+   * per-office role_override, so a rep holding a director override on some office would otherwise read that
+   * office's note content. The Daily Activity Log gates its email content on baseRole for the same reason.
    */
   viewerRole?: string | null;
   viewerUserId?: string | null;
@@ -725,10 +731,12 @@ async function loadNotes(
   // their own rows and the Daily Activity Log does the same; a report is not a way around that. The COUNTS
   // above stay office-wide on purpose — "Caleb logged 12 notes" is the accountability figure, and it is a
   // different disclosure from the text of what he wrote.
-  const restrictToSelf = filters.viewerRole === "rep" && Boolean(filters.viewerUserId);
-  const visible = restrictToSelf
-    ? new Set([filters.viewerUserId as string])
-    : pinned;
+  // Fails CLOSED. An earlier form required viewerUserId to be truthy for the restriction to apply, so a
+  // caller passing role="rep" with no id got the unrestricted office-wide feed — the one combination that
+  // must never widen. A rep with no id resolvable is given nothing.
+  const restrictToSelf = filters.viewerRole === "rep";
+  const visible = restrictToSelf ? new Set(filters.viewerUserId ? [filters.viewerUserId] : []) : pinned;
+  if (restrictToSelf && visible!.size === 0) return { rows: [], truncated: false };
   const userFilter = visible
     ? sql`AND a.responsible_user_id = ANY(${sql`ARRAY[${sql.join([...visible].map((id) => sql`${id}::uuid`), sql`, `)}]`})`
     : sql``;

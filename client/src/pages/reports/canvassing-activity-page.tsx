@@ -31,6 +31,14 @@ import {
   formatNumber,
 } from "./performance-report-ui";
 
+/** Plurals, spelled out — `${kind}s` produced "companys" and "propertys". */
+const KIND_LABELS: Record<CanvassingKind, string> = {
+  company: "Companies",
+  property: "Properties",
+  contact: "Contacts",
+  lead: "Leads",
+};
+
 const BUCKETS: Array<{ value: CanvassingBucket; label: string }> = [
   { value: "week", label: "Weekly" },
   { value: "month", label: "Monthly" },
@@ -108,7 +116,10 @@ function CanvassingActivityReportView() {
 
   // Whether a person filter is on. It changes what several panels can honestly claim: the counts follow the
   // selection, but `unattributed` cannot — it describes records with no recorded author at all.
-  const filteredToPeople = (query.ownerIds?.length ?? 0) > 0;
+  const filteredToPeople =
+    (query.ownerIds?.length ?? 0) > 0 ||
+    (query.ownerNames?.length ?? 0) > 0 ||
+    (query.ownerEmails?.length ?? 0) > 0;
 
   // Whether the window reaches back past the point creator tracking existed. True for the default view for
   // a while after migration 0220, and it changes what a zero in this grid is allowed to claim.
@@ -288,9 +299,11 @@ function CanvassingActivityReportView() {
           <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
             {data.attributionStartHint ? (
               <>
-                Who created a record has only been tracked since{" "}
-                <strong>{formatDay(data.attributionStartHint)}</strong>. Earlier periods show zero because the
-                information was never recorded, not because nothing was entered.
+                The earliest record naming its author is{" "}
+                <strong>{formatDay(data.attributionStartHint)}</strong>, so nothing before that can be
+                attributed to anyone. Companies, properties and contacts only began recording an author when
+                this feature shipped, and each kind starts from its own first entry — a zero before then
+                means it was never recorded, not that nothing was entered.
               </>
             ) : (
               <>
@@ -396,7 +409,7 @@ function CanvassingActivityReportView() {
                       : "rounded-full bg-white px-3 py-1 text-xs font-black uppercase tracking-[0.12em] text-slate-600 ring-1 ring-slate-200 hover:bg-slate-50"
                   }
                 >
-                  {kind === "all" ? "All" : `${kind}s`}
+                  {kind === "all" ? "All" : KIND_LABELS[kind]}
                 </button>
               ))}
             </div>
@@ -441,7 +454,9 @@ function CanvassingActivityReportView() {
                   </tbody>
                 </table>
                 <p className="mt-2 text-xs font-semibold text-slate-500">
-                  {gridKind === "all" ? "New companies, properties, contacts and leads combined." : `New ${gridKind}s only.`}{" "}
+                  {gridKind === "all"
+                    ? "New companies, properties, contacts and leads combined."
+                    : `New ${KIND_LABELS[gridKind].toLowerCase()} only.`}{" "}
                   {rangeReachesBeforeAttribution ? (
                     <>
                       Periods before {formatDay(data.attributionStartHint)} read as zero because no creator was

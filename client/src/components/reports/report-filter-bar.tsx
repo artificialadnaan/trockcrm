@@ -38,14 +38,6 @@ export interface ReportOwnerOption {
 type DefaultRange = "30" | "60" | "90" | "6m" | "12m" | "qtd" | "ytd";
 
 /**
- * The platform's canonical period anchor (server/src/lib/period.ts). Every report these filters drive
- * windows in business time, so the defaults have to be computed there too — not in UTC (which moved both
- * bounds to tomorrow after 6pm Central) and not in the viewer's own zone (which is still a day off for
- * anyone outside Central).
- */
-const BUSINESS_TIMEZONE = "America/Chicago";
-
-/**
  * YYYY-MM-DD from a Date's LOCAL calendar fields.
  *
  * Deliberately not toISOString() (a UTC conversion) and not toLocaleDateString with a timeZone (another
@@ -61,23 +53,21 @@ function toDateInput(date: Date) {
 }
 
 /**
- * "Today" in business time, as a Date whose LOCAL fields hold that calendar date.
+ * "Today", in the VIEWER's own calendar — and deliberately not in any fixed report timezone.
  *
- * The zone is crossed exactly ONCE, here, to read today's Chicago date; everything downstream —
- * setDate/getMonth in rangeDates, subtractMonthsClamped, toDateInput — then operates on local fields and
- * never converts again. Round-tripping a Chicago date string back through `new Date("...T00:00:00")`
- * parses it as LOCAL midnight, which for any zone ahead of Chicago (UTC, Eastern, Tokyo) formats back one
- * day early — verified in all four.
+ * This control is shared by every report, and the reports do not agree on a zone: the Daily Activity Log
+ * pins its buckets to UTC on purpose (so it reconciles with Rep Activity) while Canvassing Activity and the
+ * dashboard period helpers window in America/Chicago. An earlier revision anchored these defaults in
+ * business time, which fixed Canvassing and broke the UTC-bucketed reports for the hours when UTC has
+ * rolled over and Chicago has not.
+ *
+ * So the shared control means the least surprising thing — the date on the viewer's own calendar — and each
+ * report interprets that date in its own documented zone. What is NOT acceptable, and was the original bug,
+ * is doing local-field arithmetic and then serialising through toISOString(): that mixes two zones inside
+ * one calculation and lands a day out for everyone west of UTC every evening.
  */
-function businessNow(): Date {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: BUSINESS_TIMEZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(new Date());
-  const get = (type: string) => Number(parts.find((part) => part.type === type)?.value);
-  return new Date(get("year"), get("month") - 1, get("day"));
+function viewerToday(): Date {
+  return new Date();
 }
 
 export function subtractMonthsClamped(date: Date, months: number) {
@@ -102,7 +92,7 @@ export function rangeDatesForTest(range: string) {
 }
 
 function rangeDates(range: string) {
-  const today = businessNow();
+  const today = viewerToday();
   const from = new Date(today);
 
   if (range === "6m") {

@@ -1,23 +1,24 @@
 // @vitest-environment jsdom
 //
-// The default range is computed from "today", and every report these filters drive windows in business
-// time (server/src/lib/period.ts). Getting that anchor wrong shifts every default by a day, silently, for
-// a subset of viewers — which happened twice in a row here:
+// The default range is computed from "today", and getting that wrong shifts every report's default by a
+// day, silently. It has been wrong twice here, in opposite directions:
 //
-//   1. local date arithmetic serialised through toISOString()  -> wrong after 6pm for Central viewers
-//   2. a Chicago date string reparsed as local midnight        -> wrong ALL DAY for anyone ahead of Chicago
+//   1. local date arithmetic serialised through toISOString()  -> a day out every evening west of UTC
+//   2. anchored in America/Chicago                             -> a day out for the UTC-bucketed reports
+//                                                                 (Daily Activity Log, Rep Activity) during
+//                                                                 the hours UTC has rolled over and Chicago
+//                                                                 has not
 //
-// Both passed a casual check because they were correct in the author's own timezone. These cases pin the
-// invariant that actually matters: whatever the viewer's zone, the default bounds are the BUSINESS
-// calendar's dates, and the span between them is exactly the requested number of days.
+// This control is SHARED and the reports genuinely disagree about zones, so it means the least surprising
+// thing: the date on the viewer's own calendar. Each report then interprets that date in its documented
+// zone. The invariant worth pinning is that ONE zone is used throughout the calculation — mixing two is
+// what produced both bugs.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { rangeDatesForTest } from "./report-filter-bar";
 
-const BUSINESS_TIMEZONE = "America/Chicago";
-
-/** What the business calendar says "today" is, computed independently of the code under test. */
-function chicagoToday(now: Date) {
-  return now.toLocaleDateString("en-CA", { timeZone: BUSINESS_TIMEZONE });
+/** The viewer's own calendar date, computed independently of the code under test. */
+function viewerToday(now: Date) {
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 }
 
 function daysBetween(from: string, to: string) {
@@ -28,17 +29,17 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("report filter defaults are anchored in business time", () => {
-  // 03:00 UTC is the previous day in Chicago but already "today" in UTC/Tokyo — the instant that exposes
-  // an anchor which crosses a zone boundary more than once.
-  const INSTANTS = ["2026-06-15T03:00:00Z", "2026-06-15T14:00:00Z", "2026-06-16T04:59:00Z"];
+describe("report filter defaults", () => {
+  // Instants chosen to straddle midnight in several zones at once, which is where a mixed-zone calculation
+  // shows itself: 03:00 UTC is still yesterday in Chicago, and 23:00 UTC is already tomorrow in Tokyo.
+  const INSTANTS = ["2026-06-15T03:00:00Z", "2026-06-15T14:00:00Z", "2026-06-15T23:00:00Z"];
 
   for (const instant of INSTANTS) {
-    it(`ends the range on the business date, not the viewer's, at ${instant}`, () => {
+    it(`ends on the viewer's own calendar date at ${instant}`, () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date(instant));
 
-      expect(rangeDatesForTest("90").dateTo).toBe(chicagoToday(new Date(instant)));
+      expect(rangeDatesForTest("90").dateTo).toBe(viewerToday(new Date(instant)));
     });
   }
 
