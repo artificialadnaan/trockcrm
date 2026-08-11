@@ -1201,3 +1201,34 @@ describe("canvassing activity — notes on test records, and cross-year weeks", 
     expect(labelForBucket("week", "2026-06-07")).toBe("Jun 7 – Jun 13, 2026");
   });
 });
+
+describe("canvassing activity — test accounts on the performer side, and tiny years", () => {
+  // The notes queries filtered the RESPONSIBLE user's test flag. A test admin logging on a real rep's
+  // behalf stores the rep as responsible and the test account as performer, so QA activity still landed —
+  // under a real person's name, which is worse than landing under its own.
+  it("ignores a note PERFORMED by a test account on a real person's behalf", async () => {
+    const NOTE = U("7e57b1");
+    await pg.exec(`
+      INSERT INTO public.activities
+        (id, type, source_entity_type, source_entity_id, responsible_user_id, performed_by_user_id, company_id, subject, body, occurred_at, created_at)
+      VALUES ('${NOTE}', 'note', 'company', '${CO_A}', '${ED}', '${TESTER}', '${CO_A}',
+              'QA on behalf', 'Logged by a test admin.', '2026-06-05T14:00:00Z', '2026-06-05T14:00:00Z');
+    `);
+
+    try {
+      const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF, viewerRole: "director" }));
+      expect(report.notesLogged).toBe(3);
+      expect(report.notes.map((n) => n.subject)).not.toContain("QA on behalf");
+    } finally {
+      await pg.exec(`DELETE FROM public.activities WHERE id = '${NOTE}';`);
+    }
+  });
+
+  // Date.UTC maps years 0-99 onto 1900-1999, so a bucket starting in year 0042 formatted as 1942.
+  it("does not silently move a two-digit year into the twentieth century", () => {
+    // Intl does not zero-pad the year; what matters is that it is 42 and not 1942.
+    expect(labelForBucket("month", "0042-03-01")).not.toContain("1942");
+    expect(labelForBucket("month", "0042-03-01")).toContain("42");
+    expect(labelForBucket("quarter", "0042-01-01")).toBe("Q1 42");
+  });
+});

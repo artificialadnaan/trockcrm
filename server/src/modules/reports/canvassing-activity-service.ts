@@ -426,7 +426,10 @@ export function labelForBucket(bucket: CanvassingBucket, startIso: string): stri
   // Never throw here. Intl.format on an Invalid Date raises a RangeError, which would turn one unexpected
   // value into a 500 for the whole report; showing the raw bucket key instead degrades one label.
   if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return startIso;
-  const start = new Date(Date.UTC(y, (m ?? 1) - 1, d ?? 1));
+  // setUTCFullYear after construction: Date.UTC maps years 0-99 onto 1900-1999, so a bucket starting in
+  // year 0042 formatted as 1942 across every label and both period tables.
+  const start = new Date(Date.UTC(2000, (m ?? 1) - 1, d ?? 1));
+  start.setUTCFullYear(y);
   if (Number.isNaN(start.getTime())) return startIso;
   if (bucket === "month") {
     return new Intl.DateTimeFormat("en-US", { month: "short", year: "numeric", timeZone: "UTC" }).format(start);
@@ -588,6 +591,12 @@ export async function getCanvassingActivityReport(
        -- A REAL user logging against a TEST record is still test activity. Every other query filters test
        -- data on the row itself; these filtered only the author, so QA work reached both the count and the
        -- feed while the records it was about were excluded from the counts beside it.
+       -- The PERFORMER as well as the responsible user: a test admin logging on a real rep's behalf stores
+       -- the rep as responsible and the test account as performer, so filtering the responsible user alone
+       -- let QA activity through under a real person's name.
+       AND NOT EXISTS (
+         SELECT 1 FROM users pfu WHERE pfu.id = a.performed_by_user_id AND pfu.is_test_data = true
+       )
        AND NOT EXISTS (SELECT 1 FROM companies tc WHERE tc.id = a.company_id AND tc.is_test_data = true)
        AND NOT EXISTS (SELECT 1 FROM properties tp WHERE tp.id = a.property_id AND tp.is_test_data = true)
        AND NOT EXISTS (SELECT 1 FROM contacts tct WHERE tct.id = a.contact_id AND tct.is_test_data = true)
@@ -647,7 +656,15 @@ export async function getCanvassingActivityReport(
     : sql`u.role`;
 
   const rosterPredicates: SQL[] = [];
-  if (discovered.length) rosterPredicates.push(sql`u.id = ANY(${idArray(discovered)})`);
+  if (discovered.length) {
+    // Discovered ids are resolved on the reasoning that their rows live in THIS schema, so whoever is named
+    // is already this tenant's business. That holds for created_by_user_id, which only a session can write
+    // — but activities.responsible_user_id is POSTED, so an elevated caller can name an account from
+    // another office and have it surface here. They prove membership too.
+    rosterPredicates.push(
+      sql`(u.id = ANY(${idArray(discovered)}) AND COALESCE(u.is_test_data, false) = false AND ${membership})`
+    );
+  }
   if (pinnedOnly.length) {
     // Test users are excluded here too. Every counting query filters them and the default roster filters
     // them; leaving the pinned path open let a QA account be selected onto the scoreboard by id.
@@ -923,6 +940,12 @@ async function loadNotes(
       LEFT JOIN deals de     ON de.id = a.deal_id
      WHERE ${NOTES_ONLY}
        AND COALESCE(u.is_test_data, false) = false
+       -- The PERFORMER as well as the responsible user: a test admin logging on a real rep's behalf stores
+       -- the rep as responsible and the test account as performer, so filtering the responsible user alone
+       -- let QA activity through under a real person's name.
+       AND NOT EXISTS (
+         SELECT 1 FROM users pfu WHERE pfu.id = a.performed_by_user_id AND pfu.is_test_data = true
+       )
        AND NOT EXISTS (SELECT 1 FROM companies tc WHERE tc.id = a.company_id AND tc.is_test_data = true)
        AND NOT EXISTS (SELECT 1 FROM properties tp WHERE tp.id = a.property_id AND tp.is_test_data = true)
        AND NOT EXISTS (SELECT 1 FROM contacts tct WHERE tct.id = a.contact_id AND tct.is_test_data = true)
