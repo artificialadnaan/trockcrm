@@ -773,3 +773,53 @@ describe("canvassing activity — the default roster", () => {
     expect(report.people.map((p) => p.userId)).toEqual([CAL]);
   });
 });
+
+describe("canvassing activity — note CONTENT respects the rep boundary", () => {
+  // Being on the allowlist buys the scoreboard, not a way around the platform's activity-content rule.
+  // GET /activities pins an unscoped rep to their own rows and the Daily Activity Log does the same, so an
+  // allowlisted viewer holding `rep` must not read the office's note text here either.
+  it("shows a rep only their own notes, while leaving the COUNTS office-wide", async () => {
+    const asRep = await getCanvassingActivityReport(
+      tdb,
+      filters({ officeId: OFF, viewerRole: "rep", viewerUserId: CAL })
+    );
+
+    expect(asRep.notes.every((note) => note.userId === CAL)).toBe(true);
+    expect(asRep.notes.map((n) => n.subject)).toEqual(["Site walk"]);
+    // "Caleb logged 12 notes" is the accountability figure and is a different disclosure from the text.
+    expect(asRep.notesLogged).toBe(3);
+  });
+
+  it("shows a director every note", async () => {
+    const asDirector = await getCanvassingActivityReport(
+      tdb,
+      filters({ officeId: OFF, viewerRole: "director", viewerUserId: CHR })
+    );
+
+    expect(asDirector.notes).toHaveLength(3);
+    expect(asDirector.notes.map((n) => n.subject)).toContain("Door knock");
+  });
+
+  // Attribution stays on responsible_user_id so the figure reconciles with Rep Activity and the Daily
+  // Activity Log — but a note logged on someone's behalf has to say so, or the feed reads as evidence the
+  // attributed person did the work.
+  it("names who actually logged a note when that differs from who it is attributed to", async () => {
+    const ON_BEHALF = U("0b1f");
+    await pg.exec(`
+      INSERT INTO public.activities
+        (id, type, source_entity_type, source_entity_id, responsible_user_id, performed_by_user_id, company_id, subject, body, occurred_at, created_at)
+      VALUES ('${ON_BEHALF}', 'note', 'company', '${CO_A}', '${ED}', '${CHR}', '${CO_A}',
+              'Logged for Edward', 'Chris wrote this up for him.', '2026-06-05T14:00:00Z', '2026-06-05T14:00:00Z');
+    `);
+
+    const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF, viewerRole: "director" }));
+    const row = report.notes.find((note) => note.subject === "Logged for Edward");
+
+    expect(row?.userName).toBe("Edward McCarty");
+    expect(row?.performedByName).toBe("Chris H");
+    // An ordinary note, written by the person it belongs to, carries no marker.
+    expect(report.notes.find((note) => note.subject === "Door knock")?.performedByName).toBeNull();
+
+    await pg.exec(`DELETE FROM public.activities WHERE id = '${ON_BEHALF}';`);
+  });
+});

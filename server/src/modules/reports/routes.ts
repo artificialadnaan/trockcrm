@@ -1634,6 +1634,9 @@ router.get("/canvassing-activity", requireAnyRole, requireCanvassingReportViewer
       ...normalizeCanvassingFilters(req.query as Record<string, unknown>),
       // Bounds the roster lookup: `users` is global, so a pinned id from another office must not resolve.
       officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
+      // Only the notes FEED reads these: a rep sees their own notes' text, never the office's.
+      viewerRole: req.user!.role,
+      viewerUserId: req.user!.id,
     });
     await req.commitTransaction!();
     res.json({ data });

@@ -542,6 +542,8 @@ export interface CanvassingNoteRow {
   occurredAt: string;
   userId: string | null;
   userName: string | null;
+  /** Set only when someone OTHER than the attributed user actually logged it. */
+  performedByName: string | null;
   targetType: "company" | "property" | "contact" | "lead" | "deal" | null;
   targetId: string | null;
   targetName: string | null;
@@ -566,6 +568,9 @@ export interface CanvassingActivityQueryOptions {
   dateTo?: string;
   bucket?: CanvassingBucket;
   userIds?: string[];
+  /** The filter bar's legacy name/email owner selectors; resolved to ids server-side. */
+  ownerNames?: string[];
+  ownerEmails?: string[];
 }
 
 export interface ForecastAccuracyReport {
@@ -1592,6 +1597,8 @@ export function useDailyActivityLogReport(options: DailyActivityLogQueryOptions 
 
 export function useCanvassingActivityReport(options: CanvassingActivityQueryOptions = {}) {
   const userKey = options.userIds?.join(",") ?? "";
+  const nameKey = options.ownerNames?.join(",") ?? "";
+  const emailKey = options.ownerEmails?.join(",") ?? "";
   return useScopedReport<CanvassingActivityReport>(
     async () => {
       const params = new URLSearchParams();
@@ -1599,10 +1606,12 @@ export function useCanvassingActivityReport(options: CanvassingActivityQueryOpti
       if (options.dateTo) params.set("dateTo", options.dateTo);
       if (options.bucket) params.set("bucket", options.bucket);
       if (userKey) params.set("userIds", userKey);
+      if (nameKey) params.set("owners", nameKey);
+      if (emailKey) params.set("ownerEmails", emailKey);
       const qs = params.toString();
       return (await api<{ data: CanvassingActivityReport }>(`/reports/canvassing-activity${qs ? `?${qs}` : ""}`)).data;
     },
-    [options.dateFrom, options.dateTo, options.bucket, userKey],
+    [options.dateFrom, options.dateTo, options.bucket, userKey, nameKey, emailKey],
     "Failed to load canvassing activity"
   );
 }

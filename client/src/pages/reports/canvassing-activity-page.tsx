@@ -93,6 +93,11 @@ function CanvassingActivityReportView() {
     // The filter bar's owner picker writes UUIDs; they select WHOSE canvassing this is about. People
     // picked but with nothing entered still get a row — an explicit zero is the finding.
     userIds: query.ownerIds,
+    // The bar ALSO supports name and email selectors, and hydrates its checkboxes from them on load. They
+    // have to travel with the request or a shared ?owners=Jane link shows Jane ticked over office-wide
+    // numbers until someone presses Apply. The server resolves them, bounded to this office.
+    ownerNames: query.ownerNames,
+    ownerEmails: query.ownerEmails,
   });
 
   function setBucket(next: CanvassingBucket) {
@@ -518,6 +523,7 @@ function CanvassingActivityReportView() {
                       <span>{formatClock(note.occurredAt)}</span>
                       <span className="rounded-full bg-slate-100 px-2 py-0.5">{labelForType(note.type)}</span>
                       {note.targetName ? <span>on {note.targetName}</span> : null}
+                      {note.performedByName ? <span>logged by {note.performedByName}</span> : null}
                     </div>
                     {note.subject ? <p className="mt-2 text-sm font-semibold text-slate-900">{note.subject}</p> : null}
                     {note.body ? <p className="mt-1 whitespace-pre-wrap text-sm text-slate-700">{note.body}</p> : null}

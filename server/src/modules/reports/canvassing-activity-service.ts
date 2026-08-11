@@ -98,6 +98,13 @@ export interface CanvassingActivityFilters {
    * active flag returned as a zero-count row — reading the global directory through a tenant report.
    */
   officeId?: string | null;
+  /**
+   * The viewer's effective role. Only the NOTES FEED uses it: an allowlisted viewer holding `rep` reads
+   * their own notes rather than the whole office's, matching GET /activities and the Daily Activity Log.
+   * Counts are unaffected — a scoreboard of how many is not the same disclosure as the text itself.
+   */
+  viewerRole?: string | null;
+  viewerUserId?: string | null;
 }
 
 export type CanvassingCounts = Record<CanvassingKind, number> & { total: number };
@@ -134,6 +141,8 @@ export interface CanvassingNoteRow {
   occurredAt: string;
   userId: string | null;
   userName: string | null;
+  /** Set only when someone OTHER than the attributed user actually logged it. */
+  performedByName: string | null;
   targetType: "company" | "property" | "contact" | "lead" | "deal" | null;
   targetId: string | null;
   targetName: string | null;
@@ -712,8 +721,16 @@ async function loadNotes(
   pinned: Set<string> | null
 ): Promise<{ rows: CanvassingNoteRow[]; truncated: boolean }> {
   const limit = filters.notesLimit ?? DEFAULT_NOTES_LIMIT;
-  const userFilter = pinned
-    ? sql`AND a.responsible_user_id = ANY(${sql`ARRAY[${sql.join([...pinned].map((id) => sql`${id}::uuid`), sql`, `)}]`})`
+  // A `rep` reads only their own notes, even on the allowlist. GET /activities pins an unscoped rep to
+  // their own rows and the Daily Activity Log does the same; a report is not a way around that. The COUNTS
+  // above stay office-wide on purpose — "Caleb logged 12 notes" is the accountability figure, and it is a
+  // different disclosure from the text of what he wrote.
+  const restrictToSelf = filters.viewerRole === "rep" && Boolean(filters.viewerUserId);
+  const visible = restrictToSelf
+    ? new Set([filters.viewerUserId as string])
+    : pinned;
+  const userFilter = visible
+    ? sql`AND a.responsible_user_id = ANY(${sql`ARRAY[${sql.join([...visible].map((id) => sql`${id}::uuid`), sql`, `)}]`})`
     : sql``;
 
   const result = await tenantDb.execute<{
@@ -724,6 +741,7 @@ async function loadNotes(
     occurred_at: string;
     user_id: string | null;
     user_name: string | null;
+    performed_by_name: string | null;
     target_type: CanvassingNoteRow["targetType"];
     target_id: string | null;
     target_name: string | null;
@@ -735,6 +753,12 @@ async function loadNotes(
            a.occurred_at,
            a.responsible_user_id::text AS user_id,
            u.display_name AS user_name,
+           -- Attribution stays on responsible_user_id so "notes logged" reconciles with Rep Activity and
+           -- the Daily Activity Log. But an admin can log on someone's behalf and a workflow can mint a
+           -- note during a stage change, so the row carries who ACTUALLY did it when that differs -- the
+           -- same "on behalf of" marker the Daily Activity Log shows.
+           CASE WHEN a.performed_by_user_id IS NOT NULL AND a.performed_by_user_id <> a.responsible_user_id
+                THEN pu.display_name END AS performed_by_name,
            -- Precedence deliberately matches the Daily Activity Log (deal > contact > company > lead >
            -- property), because activities routinely carry SEVERAL of these at once: the Outlook sync writes
            -- companyId, propertyId, leadId AND dealId on one row. A different order here would label the
@@ -756,6 +780,7 @@ async function loadNotes(
            ) AS target_name
       FROM activities a
       JOIN users u           ON u.id  = a.responsible_user_id
+      LEFT JOIN users pu     ON pu.id = a.performed_by_user_id
       LEFT JOIN companies co ON co.id = a.company_id
       LEFT JOIN properties pr ON pr.id = a.property_id
       LEFT JOIN contacts ct  ON ct.id = a.contact_id
@@ -778,6 +803,7 @@ async function loadNotes(
     occurredAt: typeof row.occurred_at === "string" ? row.occurred_at : new Date(row.occurred_at).toISOString(),
     userId: row.user_id,
     userName: row.user_name,
+    performedByName: row.performed_by_name,
     targetType: row.target_type,
     targetId: row.target_id,
     targetName: row.target_name,
