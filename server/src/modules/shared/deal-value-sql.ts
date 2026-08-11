@@ -307,6 +307,23 @@ export function aliasedDealBestEstimateSql(alias: string): SQL {
   return aliasedDealValueChainSql(alias, DEAL_VALUE_PRIORITY_CHAIN);
 }
 
+/**
+ * The same awarded-first chain as plain SQL TEXT, for callers that build query strings rather than drizzle
+ * fragments — the tenant-sweeping internal routes run raw `pool.query` across every office schema.
+ *
+ * Exported as a rendering of DEAL_VALUE_PRIORITY_CHAIN rather than a hand-written COALESCE, so a change to
+ * the chain reaches string callers too. A restated copy is how the platform ends up quoting two different
+ * numbers for the same deal.
+ */
+export function aliasedDealBestEstimateSqlText(alias: string): string {
+  if (!/^[a-z_][a-z0-9_]*$/i.test(alias)) {
+    throw new Error(`Invalid SQL alias: ${alias}`);
+  }
+  return `COALESCE(${DEAL_VALUE_PRIORITY_CHAIN.map((column) =>
+    aliasedPositiveDealValueCandidateSql(alias, column)
+  ).join(", ")}, 0)`;
+}
+
 // 'estimating' stage only: DD outranks bid (awarded > dd > bid_board > bid). See ESTIMATING_VALUE_CHAIN.
 export function aliasedDealEstimatingValueSql(alias: string): SQL {
   return aliasedDealValueChainSql(alias, ESTIMATING_VALUE_CHAIN);

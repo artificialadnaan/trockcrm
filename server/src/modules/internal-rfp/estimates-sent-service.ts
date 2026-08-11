@@ -1,0 +1,167 @@
+// The deals that went out to a client in a window — the CRM half of SyncHub's RFP Report email.
+//
+// WHY THIS EXISTS AT ALL. SyncHub composes and sends the "T-Rock RFP Report" (server/rfp-reports.ts in
+// trocksynchubv3, on a report_schedule_config cron). It knows about RFPs only because the CRM PUSHED them:
+// the two systems are joined by HMAC-signed callbacks, not by a shared database. `estimate_sent_to_client`
+// is a CRM pipeline stage recorded in deal_stage_history inside each office's tenant schema, and SyncHub
+// has no read path to it. So the report asks for it, at compose time, through this feed.
+//
+// PULL, NOT PUSH — deliberately. The report is a point-in-time snapshot sent once a day, so the durability
+// machinery a push would need (an outbox, retries, dedup, a backfill for anything sent before the feature
+// existed) buys nothing: a missed event would still be visible to the next pull. And the annotation the
+// report wants — how many times this deal has been sent to the client BEFORE — is a question about the
+// deal's whole history, which a per-event push would have to reconstruct from events it may never have seen.
+//
+// WHICH STAGES COUNT. SENT_STAGE_SLUGS, the reports' own canonical set, rather than the single obvious
+// slug. It carries `service_estimate_sent_to_client` (the service pipeline's parallel stage) and `bid_sent`
+// (the pre-migration-0053 name, still referenced by historical deal_stage_history rows). Naming only
+// `estimate_sent_to_client` here would quietly omit every service deal from the email while the reports
+// counted them — two numbers for the same question, which is how people stop trusting both.
+//
+// EVERY ENTRY, NOT THE FIRST. A deal re-enters this stage whenever a revised estimate goes out, and each of
+// those is a real send worth reporting. `priorEntryCount` says how many times it had been sent before this
+// one, so a re-send reads as a re-send rather than as new business.
+
+import { SENT_STAGE_SLUGS } from "../reports/foundations.js";
+import { aliasedDealBestEstimateSqlText } from "../shared/deal-value-sql.js";
+
+/** A minimal query shape, so this is injectable in tests (pool.query, a PGlite query, or a mock all fit). */
+export type SqlQuery = (text: string, params?: unknown[]) => Promise<{ rows: any[] }>;
+
+export interface EstimateSentDeal {
+  dealId: string;
+  officeSlug: string;
+  name: string | null;
+  dealNumber: string | null;
+  projectNumber: string | null;
+  /** The stage actually entered — the service pipeline and the legacy alias are distinguishable downstream. */
+  stageSlug: string;
+  /** When it entered, ISO-8601 UTC. The report renders it in its own timezone. */
+  enteredAt: string;
+  /** Awarded-first best estimate, the same basis the reports quote. Never null; 0 when nothing is set. */
+  amount: string;
+  ownerName: string | null;
+  ownerEmail: string | null;
+  /** Sends of THIS deal strictly before this one. 0 on a first send, 2 on a third. */
+  priorEntryCount: number;
+}
+
+const TENANT_SCHEMA_REGEX = /^office_[a-z][a-z0-9_]*$/;
+
+export function quoteSchema(schemaName: string): string {
+  if (!TENANT_SCHEMA_REGEX.test(schemaName)) {
+    throw new Error(`Refusing to query a non-tenant schema: ${schemaName}`);
+  }
+  return `"${schemaName}"`;
+}
+
+/**
+ * One office's sends in [from, to).
+ *
+ * HALF-OPEN on purpose. A closed upper bound double-counts anything landing exactly on the boundary into
+ * two consecutive daily reports — rare, but it makes the two emails disagree about the same deal, and the
+ * reader has no way to tell which is right.
+ */
+export function estimatesSentQuery(schemaName: string): string {
+  const schema = quoteSchema(schemaName);
+  const slugList = SENT_STAGE_SLUGS.map((slug) => `'${slug}'`).join(", ");
+  return `
+    SELECT d.id::text                            AS deal_id,
+           d.name                                AS name,
+           d.deal_number                         AS deal_number,
+           d.project_number                      AS project_number,
+           ps.slug                               AS stage_slug,
+           h.created_at                          AS entered_at,
+           ${aliasedDealBestEstimateSqlText("d")} AS amount,
+           u.display_name                        AS owner_name,
+           u.email                               AS owner_email,
+           (SELECT COUNT(*)
+              FROM ${schema}.deal_stage_history ph
+              JOIN public.pipeline_stage_config pps ON pps.id = ph.to_stage_id
+             WHERE ph.deal_id = d.id
+               AND pps.slug IN (${slugList})
+               AND ph.created_at < h.created_at)::int AS prior_entry_count
+      FROM ${schema}.deal_stage_history h
+      -- Stages are a PUBLIC table, not a tenant one: deal_stage_history and deals live per-office, the
+      -- stage catalogue is shared. Joining a per-schema pipeline_stages would resolve to nothing.
+      JOIN public.pipeline_stage_config ps ON ps.id = h.to_stage_id
+      JOIN ${schema}.deals d               ON d.id = h.deal_id
+      LEFT JOIN public.users u             ON u.id = d.assigned_rep_id
+     WHERE ps.slug IN (${slugList})
+       AND h.created_at >= $1
+       AND h.created_at <  $2
+       -- Soft-deleted deals are excluded, matching every report. On-hold deals are NOT: the estimate did
+       -- go out, and parking the deal afterwards does not un-send it. Test rows never appear, and neither
+       -- does a send attributed to a test user.
+       AND d.is_active = true
+       AND COALESCE(d.is_test_data, false) = false
+       AND NOT EXISTS (SELECT 1 FROM public.users tu WHERE tu.id = d.assigned_rep_id AND tu.is_test_data = true)
+     ORDER BY h.created_at DESC, d.id DESC`;
+}
+
+function toIso(value: unknown): string {
+  if (value instanceof Date) return value.toISOString();
+  return new Date(String(value)).toISOString();
+}
+
+/**
+ * Every office's sends in the window, newest first.
+ *
+ * Swept across schemas because the report is company-wide — SyncHub has no office context and the email has
+ * never had one. `officeSlug` rides along on each row so a reader can still tell them apart.
+ */
+export async function loadEstimatesSent(
+  query: SqlQuery,
+  schemaNames: readonly string[],
+  from: Date,
+  to: Date
+): Promise<EstimateSentDeal[]> {
+  const collected: EstimateSentDeal[] = [];
+
+  for (const schemaName of schemaNames) {
+    const result = await query(estimatesSentQuery(schemaName), [from.toISOString(), to.toISOString()]);
+    for (const row of result.rows) {
+      collected.push({
+        dealId: String(row.deal_id),
+        officeSlug: schemaName.replace(/^office_/, ""),
+        name: row.name ?? null,
+        dealNumber: row.deal_number ?? null,
+        projectNumber: row.project_number ?? null,
+        stageSlug: String(row.stage_slug),
+        enteredAt: toIso(row.entered_at),
+        // Rendered as a STRING. These are numeric(12,2) columns; a JS number silently rounds past 2^53 and,
+        // more practically, turns 1234567.89 into a float the email would print with a drifting cent.
+        amount: String(row.amount ?? "0"),
+        ownerName: row.owner_name ?? null,
+        ownerEmail: row.owner_email ?? null,
+        priorEntryCount: Number(row.prior_entry_count ?? 0),
+      });
+    }
+  }
+
+  // Re-sorted ACROSS offices. Each per-schema query is ordered, but concatenating them would group by
+  // office and read as though every Dallas send preceded every Atlanta one.
+  collected.sort((a, b) => {
+    const delta = Date.parse(b.enteredAt) - Date.parse(a.enteredAt);
+    return delta !== 0 ? delta : a.dealId.localeCompare(b.dealId);
+  });
+  return collected;
+}
+
+/** Upper bound on the window a single request may ask for, so a bad `from` cannot sweep all of history. */
+export const MAX_WINDOW_DAYS = 31;
+
+export function parseWindow(payload: Record<string, unknown>): { from: Date; to: Date } {
+  const from = new Date(String(payload.from ?? ""));
+  const to = new Date(String(payload.to ?? ""));
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+    throw new Error("from and to must be ISO-8601 timestamps");
+  }
+  if (to <= from) {
+    throw new Error("to must be after from");
+  }
+  if (to.getTime() - from.getTime() > MAX_WINDOW_DAYS * 24 * 60 * 60 * 1000) {
+    throw new Error(`window must not exceed ${MAX_WINDOW_DAYS} days`);
+  }
+  return { from, to };
+}
