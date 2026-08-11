@@ -423,10 +423,46 @@ router.post("/opportunities", requireSyncHubSecret, async (req, res, next) => {
     // when it updates the deal.
     if (existingDealId) {
       const detachedResult = await client.query(
-        `SELECT bid_board_detached_at FROM ${schemaName}.deals WHERE id = $1 FOR UPDATE`,
+        `SELECT bid_board_detached_at, synchub_bid_board_id, procore_bid_id
+           FROM ${schemaName}.deals WHERE id = $1 FOR UPDATE`,
         [existingDealId]
       );
-      if (detachedResult.rows[0]?.bid_board_detached_at != null) {
+      const lockedRow = detachedResult.rows[0] ?? null;
+
+      // REVALIDATE THE IDENTITY UNDER THE LOCK, not just the detach marker.
+      //
+      // The synchub_bid_board_id lookup above takes NO row lock — only the advisory lock on this
+      // bid_board_id, which serializes concurrent /opportunities webhooks and nothing else. The
+      // RE-ATTACH path does not take that advisory lock at all (internal-rfp/routes.ts, the
+      // bid-board-created callback: a bare BEGIN + UPDATE), so it can commit in the gap between that
+      // unlocked lookup and this FOR UPDATE.
+      //
+      // When it does, it repoints procore_bid_id at the NEW project, clears the detach marker, and
+      // NULLs the retired synchub_bid_board_id. Checking the marker alone then reads a freshly-cleared
+      // NULL and lets this stale push through: it would re-stamp the RETIRED identity onto a deal that
+      // now belongs to a different Bid Board project, and drag that project's stage and financial
+      // mirrors backward — the precise damage the detach guard exists to prevent, arrived at by the one
+      // ordering the guard did not cover.
+      //
+      // So: the row we locked must still be the row we resolved. If the identity we matched on is gone,
+      // this push describes a project this deal is no longer attached to. Skip it — never fall through
+      // to the mirror, and never backfill, since backfilling would itself re-stamp the retired id.
+      const matchedBySyncHubId = existingDealIdBySyncHubBidBoardId != null;
+      const stillMatches = matchedBySyncHubId
+        ? lockedRow?.synchub_bid_board_id === syncHubBidBoardId
+        : procore_bid_id != null && String(lockedRow?.procore_bid_id ?? "") === String(procore_bid_id);
+
+      if (!lockedRow || !stillMatches) {
+        await client.query("COMMIT");
+        console.warn(
+          `[SyncHub] Skipped Bid Board push for deal ${existingDealId}: its Bid Board identity changed ` +
+            `while this push was in flight (re-attached to a different project). No mirror written.`
+        );
+        res.json({ status: "skipped_identity_changed", deal_id: existingDealId });
+        return;
+      }
+
+      if (lockedRow.bid_board_detached_at != null) {
         // BACKFILL THE STABLE IDENTITY BEFORE SKIPPING — this is not a mirror write, it is what keeps
         // the skip idempotent. A legacy deal reached here through the OPTIONAL procore_bid_id fallback
         // while its synchub_bid_board_id is still NULL (that is every deal in prod today: 0 of 1,294

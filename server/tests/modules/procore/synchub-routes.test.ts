@@ -39,10 +39,20 @@ type ClientOptions = {
   currentDealOverrides?: Record<string, unknown>;
   /** Non-null once "Move back to Opportunity" detached the resolved deal from Bid Board sync. */
   detachedAt?: string | null;
+  /**
+   * What the row ACTUALLY holds when the FOR UPDATE finally lands, as distinct from what the unlocked
+   * lookup matched on. Left undefined they echo the incoming identity — the ordinary case, nothing
+   * changed. Set them to simulate a re-attach committing in the gap between lookup and lock.
+   */
+  lockedSyncHubBidBoardId?: string | null;
+  lockedProcoreBidId?: number | string | null;
 };
 
 function createClient(options: ClientOptions = {}) {
   const queries: Array<{ sql: string; params: unknown[] | undefined }> = [];
+  // Captured from the identity lookups so the locked read can echo them back by default.
+  let seenSyncHubBidBoardId: unknown = null;
+  let seenProcoreBidId: unknown = null;
   const workflowRoute = options.workflowRoute ?? "normal";
   const currentStageEnteredAt =
     options.currentStageEnteredAt ?? new Date("2026-04-20T12:00:00.000Z");
@@ -70,6 +80,7 @@ function createClient(options: ClientOptions = {}) {
         return { rows: [] };
       }
       if (sql.includes("SELECT id FROM office_dallas.deals WHERE synchub_bid_board_id")) {
+        seenSyncHubBidBoardId = params?.[0] ?? null;
         return {
           rows: options.existingDealIdBySyncHubBidBoardId
             ? [{ id: options.existingDealIdBySyncHubBidBoardId }]
@@ -77,6 +88,7 @@ function createClient(options: ClientOptions = {}) {
         };
       }
       if (sql.includes("FROM office_dallas.deals") && sql.includes("WHERE procore_bid_id = $1")) {
+        seenProcoreBidId = params?.[0] ?? null;
         return {
           rows: options.existingDealsByProcoreBid ?? (options.existingDealIdByProcoreBid
             ? [{
@@ -86,8 +98,23 @@ function createClient(options: ClientOptions = {}) {
             : []),
         };
       }
-      if (sql.includes("SELECT bid_board_detached_at FROM office_dallas.deals")) {
-        return { rows: [{ bid_board_detached_at: options.detachedAt ?? null }] };
+      // The locked read now returns the IDENTITY columns alongside the marker, because the route
+      // revalidates that the row it locked is still the row it resolved. Defaults echo the incoming
+      // identity, so every existing case reads as "nothing changed under us".
+      if (sql.includes("SELECT bid_board_detached_at")) {
+        return {
+          rows: [
+            {
+              bid_board_detached_at: options.detachedAt ?? null,
+              synchub_bid_board_id:
+                options.lockedSyncHubBidBoardId !== undefined
+                  ? options.lockedSyncHubBidBoardId
+                  : seenSyncHubBidBoardId,
+              procore_bid_id:
+                options.lockedProcoreBidId !== undefined ? options.lockedProcoreBidId : seenProcoreBidId,
+            },
+          ],
+        };
       }
       if (sql.includes("LOWER(TRIM(name)) = LOWER(TRIM($2))")) {
         return { rows: options.existingDealIdByName ? [{ id: options.existingDealIdByName }] : [] };
@@ -1111,6 +1138,73 @@ describe("syncHubRoutes", () => {
     // Committed, not rolled back — the identity backfill has to survive.
     expect(queries.some((entry) => entry.sql === "COMMIT")).toBe(true);
     expect(queries.some((entry) => entry.sql === "ROLLBACK")).toBe(false);
+  });
+
+  // THE ORDERING THE DETACH GUARD DID NOT COVER.
+  //
+  // The synchub_bid_board_id lookup takes no row lock — only the advisory lock on that bid_board_id,
+  // which serializes concurrent /opportunities webhooks and nothing else. The RE-ATTACH path (the
+  // bid-board-created callback) takes no advisory lock at all, so it can commit in the gap between
+  // that unlocked lookup and the FOR UPDATE. When it does it repoints procore_bid_id at the NEW
+  // project, clears the detach marker, and NULLs the retired synchub_bid_board_id — so a guard that
+  // checked only the marker would read a freshly-cleared NULL and wave this stale push through, onto
+  // a deal that now belongs to a different Bid Board project.
+  it("skips when the deal's Bid Board identity changed between the lookup and the lock", async () => {
+    const { client, queries } = createClient({
+      existingDealIdBySyncHubBidBoardId: "deal-reattached",
+      // The re-attach committed in the gap: marker cleared, retired stable id nulled.
+      detachedAt: null,
+      lockedSyncHubBidBoardId: null,
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const app = createApp();
+    const response = await request(app)
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        // No procore_bid_id — the path whose lookup takes no row lock.
+        office_slug: "dallas",
+        bid_board_id: "bb-retired",
+        name: "Palm Villas",
+        stage_slug: "won",
+        stage_status: "won",
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ status: "skipped_identity_changed", deal_id: "deal-reattached" });
+
+    // Nothing mirrored: no stage move, no financial write, and no twin inserted.
+    expect(queries.some((entry) => entry.sql.includes("INSERT INTO office_dallas.deal_stage_history"))).toBe(false);
+    expect(queries.some((entry) => entry.sql.includes("INSERT INTO office_dallas.deals"))).toBe(false);
+    // And NOT the identity backfill either — writing it here would re-stamp the RETIRED bid board id
+    // onto a deal that has just been attached to a different project.
+    expect(queries.some((entry) => entry.sql.includes("UPDATE office_dallas.deals"))).toBe(false);
+  });
+
+  it("still mirrors when the locked row's identity is unchanged", async () => {
+    const { client, queries } = createClient({
+      existingDealIdBySyncHubBidBoardId: "deal-stable",
+      detachedAt: null,
+    });
+    dbMocks.connect.mockResolvedValue(client);
+
+    const app = createApp();
+    const response = await request(app)
+      .post("/api/integrations/synchub/opportunities")
+      .set("x-synchub-secret", "test-secret")
+      .send({
+        office_slug: "dallas",
+        bid_board_id: "bb-stable",
+        name: "Palm Villas",
+        stage_slug: "bid_sent",
+        stage_status: "under_review",
+      });
+
+    // The revalidation must not become a blanket off-switch for the ordinary path.
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ status: "updated", deal_id: "deal-stable" });
+    expect(queries.some((entry) => entry.sql.includes("UPDATE office_dallas.deals"))).toBe(true);
   });
 
   it("still mirrors an ATTACHED deal (the detach guard is not a blanket off-switch)", async () => {

@@ -1407,12 +1407,22 @@ describe("returnDealToOpportunity — queued RFP work is cancelled with the cycl
   });
 
   // The much larger, entirely non-racy case that was equally silent: the RFP went to SyncHub days ago
-  // (any status past pending_outbox is written only after an outbound POST) and the deal is moved back
-  // now. A submission definitely exists and nobody was told.
+  // and the deal is moved back now. A submission definitely exists and nobody was told.
+  //
+  // Seeded with the request id a real delivery leaves behind — updateDealPending writes SyncHub's
+  // response id — rather than a bare status. An earlier version of this fixture set the status alone,
+  // on the premise that "any status past pending_outbox is written only after an outbound POST". That
+  // premise is false: openRfpVoteRound stamps 'pending' on a LOCAL voting round having sent nothing,
+  // so a bare 'pending' is exactly the shape this test needs to be distinguishable FROM (see the
+  // voting-round case below). The fixture now models a delivery instead of merely asserting one.
   it("reports a possible SyncHub submission when the cycle had already been DELIVERED", async () => {
     const D = U("d606");
     await seedBidBoardDeal(D);
-    await pg.exec(`UPDATE public.deals SET rfp_approval_status = 'pending' WHERE id = '${D}'`);
+    await pg.exec(
+      `UPDATE public.deals
+          SET rfp_approval_status = 'pending', rfp_approval_request_id = 4242
+        WHERE id = '${D}'`
+    );
 
     const result = await returnDealToOpportunity(tdb, {
       dealId: D, userId: ADMIN, userRole: "admin", reason: "Submitted last week, now recalled", auditContext,
@@ -1426,6 +1436,53 @@ describe("returnDealToOpportunity — queued RFP work is cancelled with the cycl
     );
     expect(audits[0].full_row.rfpStatusCleared).toBe("pending");
     expect(audits[0].full_row.rfpDeliveryInFlight).toBe(false);
+  });
+
+  // A LOCAL VOTING ROUND is not a SyncHub submission, though it wears the same status.
+  //
+  // openRfpVoteRound stamps rfp_approval_status = 'pending' and enqueues nothing — no request id, no
+  // delivery job. Reading the status alone told the operator, in the success toast AND in the permanent
+  // audit trail, to go cancel a submission that was never created. The discriminator is the JOB: a
+  // request-backed round always enqueues rfp_request_delivery, a voting round never does.
+  it("does NOT warn for a request-less voting round, which never reached SyncHub", async () => {
+    const D = U("d60a");
+    await seedBidBoardDeal(D);
+    await pg.exec(
+      `UPDATE public.deals
+          SET rfp_approval_status = 'pending',
+              rfp_approval_request_id = NULL
+        WHERE id = '${D}'`
+    );
+
+    const result = await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Voting round retired", auditContext,
+    });
+
+    expect(result.rfpSubmissionMayExist).toBe(false);
+
+    const { rows: history } = await pg.query<{ reason: string }>(
+      `SELECT reason FROM public.deal_history WHERE deal_id = '${D}' AND source = 'return_to_opportunity'`
+    );
+    expect(history[0]?.reason ?? "").not.toContain("RFP submission may still exist in SyncHub");
+  });
+
+  // …but a round that DID enqueue a delivery still warns, even with no request id recorded — a SyncHub
+  // response that carried no id must not read as "nothing was ever sent".
+  it("still warns when a delivery job existed but no request id came back", async () => {
+    const D = U("d60b");
+    await seedBidBoardDeal(D);
+    await pg.exec(
+      `UPDATE public.deals
+          SET rfp_approval_status = 'pending', rfp_approval_request_id = NULL
+        WHERE id = '${D}'`
+    );
+    await queueRfpJob(D, "rfp_request_delivery", "completed");
+
+    const result = await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Sent, id unknown", auditContext,
+    });
+
+    expect(result.rfpSubmissionMayExist).toBe(true);
   });
 
   // …and the negative, which is what keeps this from being a warning nobody can act on. A cycle still

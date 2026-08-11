@@ -20,6 +20,7 @@ import { logActivity, type AuditContext } from "../audit/audit-logger.js";
 import { retireDealApprovals } from "./approval-retirement.js";
 import { lockDealCommissions } from "../commissions/deal-commission-lock.js";
 import { lockDealRfpDelivery } from "./deal-rfp-delivery-lock.js";
+import { isDealBidBoardLinked } from "./bid-board-linkage.js";
 import { removeCommissionForDeal } from "../commissions/service.js";
 import { getStageById, getStageBySlug } from "../pipeline/service.js";
 import { effectiveContractSignedDate } from "../shared/won-close-date.js";
@@ -326,22 +327,32 @@ async function cancelQueuedRfpJobs(tenantDb: TenantDb, dealId: string): Promise<
 async function probeInFlightRfpJobs(
   tenantDb: TenantDb,
   dealId: string
-): Promise<{ deliveryInFlight: boolean; createInFlight: boolean }> {
+): Promise<{ deliveryInFlight: boolean; createInFlight: boolean; deliveryEverEnqueued: boolean }> {
+  // Every status, not just 'processing'. The two in-flight flags still key on 'processing' exactly as
+  // before; the extra row is what tells a REQUEST-BACKED round apart from a purely local one — see
+  // deliveryEverEnqueued below. Cancellation leaves the row in place (it flips 'pending' to 'completed'
+  // and stamps the payload), so a cancelled job is still evidence that one was enqueued.
   const rows = await tenantDb.execute(sql`
-    SELECT job_type
+    SELECT job_type, status
       FROM public.job_queue
      WHERE job_type IN ('rfp_request_delivery', 'rfp_bidboard_create')
-       AND status = 'processing'
        AND payload->>'dealId' = ${dealId}
   `);
+  const jobRows = (((rows as unknown as { rows?: Array<{ job_type?: string; status?: string }> }).rows ??
+    []) as Array<{ job_type?: string; status?: string }>);
   const claimed = new Set(
-    (((rows as unknown as { rows?: Array<{ job_type?: string }> }).rows ?? []) as Array<{
-      job_type?: string;
-    }>).map((row) => row.job_type)
+    jobRows.filter((row) => row.status === "processing").map((row) => row.job_type)
   );
   return {
     deliveryInFlight: claimed.has("rfp_request_delivery"),
     createInFlight: claimed.has("rfp_bidboard_create"),
+    /**
+     * Whether an outbound delivery job ever existed for this deal, in ANY status.
+     *
+     * A request-backed RFP always enqueues one; openRfpVoteRound opens a LOCAL voting round and enqueues
+     * nothing. So this — not the status column — is what says a payload was ever headed for SyncHub.
+     */
+    deliveryEverEnqueued: jobRows.some((row) => row.job_type === "rfp_request_delivery"),
   };
 }
 
@@ -418,17 +429,6 @@ async function loadCommissionState(
  * already-detached deal returns false from both callers: the action is still allowed (it re-runs the
  * reset), but it is not severing a live link.
  */
-function isDealBidBoardLinked(deal: typeof deals.$inferSelect): boolean {
-  if (deal.bidBoardDetachedAt != null) return false;
-  return (
-    deal.isBidBoardOwned ||
-    deal.procoreBidId != null ||
-    deal.synchubBidBoardId != null ||
-    deal.bidBoardProjectNumber != null ||
-    deal.bidBoardLinkedAt != null ||
-    deal.readOnlySyncedAt != null
-  );
-}
 
 /**
  * The "(disconnected from Bid Board; voided N row(s) totalling $X)" tail on the deal_history reason.
@@ -671,7 +671,10 @@ export async function returnDealToOpportunity(
   // audit trail can never disagree with the instruction the operator was given.
   // Probe BEFORE the detach UPDATE: an in-flight Bid Board create changes what this deal can honestly
   // claim about its linkage, and the UPDATE persists that claim.
-  const { deliveryInFlight, createInFlight } = await probeInFlightRfpJobs(tenantDb, input.dealId);
+  const { deliveryInFlight, createInFlight, deliveryEverEnqueued } = await probeInFlightRfpJobs(
+    tenantDb,
+    input.dealId
+  );
 
   // "Was this deal bound to a real Bid Board project?" — now including "…or may have just become bound,
   // because a create was on the wire as this ran."
@@ -748,14 +751,31 @@ export async function returnDealToOpportunity(
   // thing is to name it and let the operator go cancel it there.
   //
   // 'pending_outbox' on its own means the payload never left the CRM: it was still queued, and the
-  // cancel above just neutralized the job. Every other status is written only AFTER an outbound POST
+  // cancel above just neutralized the job. The other statuses are written after an outbound POST
   // ('pending'/'approving'/'approved'/'declined'/'conflict' record a SyncHub response; 'send_failed'
   // records an attempt whose outcome is unknown, which is not the same as "nothing was sent"). Add the
   // in-flight probe and this covers both the narrow race Codex flagged and the far more common case of
   // moving back a deal whose RFP went out days ago — which was equally silent before.
+  //
+  // STATUS ALONE IS NOT EVIDENCE, though, because one path writes 'pending' without sending anything:
+  // openRfpVoteRound opens a LOCAL voting round, stamping rfp_approval_status = 'pending' with no
+  // request id and no outbound job. Treating that as a SyncHub submission told the operator — in the
+  // success toast and in the permanent audit trail — to go cancel a submission that never existed.
+  //
+  // The discriminator is the JOB, not the status: a request-backed round always enqueues an
+  // rfp_request_delivery job, a voting round never does. A request id is accepted as evidence too, since
+  // only SyncHub assigns one. Currently latent rather than live — ENABLE_RFP_VOTING is false in
+  // production — but a flag exists to be turned on, and this is the sort of wrong instruction nobody
+  // would trace back to a predicate.
   const rfpStatusCleared = deal.rfpApprovalStatus ?? null;
+  const localVotingRoundOnly =
+    rfpStatusCleared === "pending" &&
+    deal.rfpApprovalRequestId == null &&
+    !deliveryEverEnqueued &&
+    !deliveryInFlight;
   const rfpSubmissionMayExist =
-    deliveryInFlight || (rfpStatusCleared != null && rfpStatusCleared !== "pending_outbox");
+    deliveryInFlight ||
+    (rfpStatusCleared != null && rfpStatusCleared !== "pending_outbox" && !localVotingRoundOnly);
 
   // Void booked commission through the SAME audited helper the contract-date clear uses
   // (setDealContractSignedDate's date→null branch). deal_signed_commissions has no soft-delete column

@@ -76,14 +76,21 @@ function isAllowedRole(role: string | null | undefined, allowed: readonly string
  * keeping ownership, and that deal needs the detach exactly as much as an estimating one does.
  *
  * Exported so the deal-detail menu item hides the action on the SAME condition the service blocks it,
- * rather than on the stage alone. `commissionRowCount` is server-only knowledge; a caller that cannot
- * see it passes 0 and errs toward OFFERING the action, whose server preview then renders the real
- * verdict — the safe direction, and the one this module exists to keep consistent.
+ * rather than on the stage alone.
+ *
+ * `commissionRowCount` is server-only knowledge, so UNKNOWN is spelled `undefined` and only an
+ * explicitly known 0 counts as "no commission rows". Passing 0 for unknown — which the deal-detail
+ * page used to do — inverts the intended failure direction: for an Opportunity-stage deal that is
+ * unlinked and unsigned but still CARRIES commission rows, the server deliberately allows the action
+ * (those rows have to be voided), while a substituted 0 satisfies every leg here, makes this return
+ * true, and hides the menu item before the preview can report the live commission state. Unknown must
+ * therefore err toward OFFERING the action and letting the server preview render the real verdict.
  */
 export function isReturnToOpportunityNoOp(deal: {
   stageSlug: string | null | undefined;
   isBidBoardLinked: boolean;
-  commissionRowCount: number;
+  /** `undefined` = not known here. Only an explicit 0 means "no commission rows". */
+  commissionRowCount: number | undefined;
   effectiveContractSignedDate: string | null;
 }): boolean {
   return (

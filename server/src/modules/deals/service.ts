@@ -39,6 +39,7 @@ import {
 import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { isDealBidBoardLinked } from "./bid-board-linkage.js";
 import { isCrmUserRole } from "../../middleware/field-auth.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
 import { isUndefinedFunctionError } from "../../lib/db-errors.js";
@@ -1848,19 +1849,19 @@ export function buildBidBoardOwnershipState(
     isDetached &&
     (deal.bidBoardDetachedWasLinked ??
       (deal.procoreBidId != null || deal.synchubBidBoardId != null));
-  // The SAME footprint test the return-to-opportunity service uses (isDealBidBoardLinked): detached
-  // wins over everything, then any live ownership/mirror/identity signal counts. Published so the UI
-  // consumes one server answer instead of maintaining a second, drift-prone copy.
-  const isBidBoardLinked =
-    !isDetached &&
-    Boolean(
-      deal.isBidBoardOwned ||
-        deal.procoreBidId != null ||
-        deal.synchubBidBoardId != null ||
-        deal.bidBoardProjectNumber != null ||
-        deal.bidBoardLinkedAt != null ||
-        deal.readOnlySyncedAt != null
-    );
+  // THE footprint test, imported rather than restated: detached wins over everything, then any live
+  // ownership/mirror/identity signal counts. This was an inline copy of the return-to-opportunity
+  // service's predicate, which is how the two drifted the last time (the preview counted procore_bid_id
+  // and the audit flag did not). Published so the UI consumes one server answer, computed one way.
+  const isBidBoardLinked = isDealBidBoardLinked({
+    bidBoardDetachedAt: deal.bidBoardDetachedAt ?? null,
+    isBidBoardOwned: deal.isBidBoardOwned ?? null,
+    procoreBidId: deal.procoreBidId ?? null,
+    synchubBidBoardId: deal.synchubBidBoardId ?? null,
+    bidBoardProjectNumber: deal.bidBoardProjectNumber ?? null,
+    bidBoardLinkedAt: deal.bidBoardLinkedAt ?? null,
+    readOnlySyncedAt: deal.readOnlySyncedAt ?? null,
+  });
 
   return {
     isOwned,

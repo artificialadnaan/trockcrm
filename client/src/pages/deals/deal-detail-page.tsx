@@ -1030,12 +1030,15 @@ export function DealDetailPage() {
               so it can park a still-owned — and even a signed, commission-carrying — deal on Opportunity,
               and hiding the action there left an admin unable to sever a sync that kept reclaiming it.
               `isReturnToOpportunityNoOp` is the same function the service blocks on, so the menu and the
-              route cannot disagree. Commission rows are server-only knowledge; passing 0 errs toward
-              OFFERING the action and letting the preview render the real verdict. */}
+              route cannot disagree. Commission rows are server-only knowledge and the detail response does
+              not carry the count, so it is passed as UNDEFINED rather than 0. Zero would be a claim, and
+              the wrong one: an unlinked, unsigned Opportunity deal that still carries commission rows is
+              exactly the case the server ALLOWS (the rows must be voided), and a substituted 0 satisfies
+              every leg of the predicate and hides the item before the preview can say so. */}
           {!isReturnToOpportunityNoOp({
             stageSlug: canonicalCurrentStageSlug,
             isBidBoardLinked: isDealStillBidBoardLinked,
-            commissionRowCount: 0,
+            commissionRowCount: undefined,
             effectiveContractSignedDate: deal.contractSignedDate ?? deal.contractSignedAt ?? null,
           }) && canMoveBackToOpportunity ? (
             <DropdownMenuItem
@@ -1048,7 +1051,7 @@ export function DealDetailPage() {
           ) : !isReturnToOpportunityNoOp({
               stageSlug: canonicalCurrentStageSlug,
               isBidBoardLinked: isDealStillBidBoardLinked,
-              commissionRowCount: 0,
+              commissionRowCount: undefined,
               effectiveContractSignedDate: deal.contractSignedDate ?? deal.contractSignedAt ?? null,
             }) && (isDirectorOrAdmin || viewerOwnsDeal) ? (
             <DropdownMenuItem
