@@ -516,6 +516,11 @@ export async function getCanvassingActivityReport(
   // return that person's name, email, role and active flag from any office — a directory read dressed up as
   // a zero-count row. Those must prove membership of this office first, the same way the dashboard roster
   // does (office_id, or a user_office_access grant).
+  // When the caller pinned a set of people, the whole report is about them: everyone else drops out of the
+  // per-person and per-bucket breakdowns. The `unattributed` figures stay whole-office on purpose — they
+  // describe what the DATA cannot attribute, which is not a property of the selected people.
+  const pinned = requested.length > 0 ? new Set(requested) : null;
+
   const discovered = [...seenUserIds].filter((id) => !requested.includes(id) || dataUserIds.has(id));
   const pinnedOnly = [...seenUserIds].filter((id) => !discovered.includes(id));
   const idArray = (ids: string[]) => sql`ARRAY[${sql.join(ids.map((id) => sql`${id}::uuid`), sql`, `)}]`;
@@ -528,6 +533,23 @@ export async function getCanvassingActivityReport(
   const rosterPredicates: SQL[] = [];
   if (discovered.length) rosterPredicates.push(sql`u.id = ANY(${idArray(discovered)})`);
   if (pinnedOnly.length) rosterPredicates.push(sql`(u.id = ANY(${idArray(pinnedOnly)}) AND ${membership})`);
+  // UNFILTERED, the roster is everyone who is SUPPOSED to be canvassing, not merely everyone who did.
+  //
+  // Building it only from people with activity meant someone who canvassed nothing all week vanished from
+  // the report instead of showing the zero this whole surface exists to make visible — you cannot notice an
+  // absence that is not drawn. But "every active office member" is the wrong widening: it would list
+  // admins, estimators and construction staff at zero forever and bury the handful the report is about.
+  // `generates_sales` already answers exactly this question ("is this person expected to produce sales
+  // activity", migration 0219), so the default roster is the office's sales carriers — 10 people, not 40.
+  // A pinned selection overrides it, because then the caller has said who they want.
+  if (!pinned) {
+    rosterPredicates.push(
+      // Test users are excluded here as well as in the counting queries — otherwise a QA account would be
+      // drawn onto the scoreboard as a permanent zero row.
+      sql`(u.is_active = true AND u.generates_sales = true
+           AND COALESCE(u.is_test_data, false) = false AND ${membership})`
+    );
+  }
 
   const rosterRows = rosterPredicates.length
     ? await tenantDb.execute<{
@@ -545,10 +567,6 @@ export async function getCanvassingActivityReport(
 
   const roster = new Map(rosterRows.rows.map((row) => [row.id, row]));
 
-  // When the caller pinned a set of people, the whole report is about them: everyone else drops out of the
-  // per-person and per-bucket breakdowns. The `unattributed` figures stay whole-office on purpose — they
-  // describe what the DATA cannot attribute, which is not a property of the selected people.
-  const pinned = requested.length > 0 ? new Set(requested) : null;
   const includeUser = (userId: string) => (pinned ? pinned.has(userId) : true);
 
   const totals = zeroCounts();
@@ -635,7 +653,13 @@ export async function getCanvassingActivityReport(
   }
 
   // Pinned people who did nothing still get a row. That zero is the finding.
-  const peopleIds = new Set([...perPersonCounts.keys(), ...perPersonNotes.keys(), ...(pinned ?? [])]);
+  const peopleIds = new Set([
+    ...perPersonCounts.keys(),
+    ...perPersonNotes.keys(),
+    ...(pinned ?? []),
+    // The sales carriers the roster query returned, so a zero week is a visible row rather than an absence.
+    ...(pinned ? [] : rosterRows.rows.map((row) => row.id)),
+  ]);
   const people: CanvassingPersonRow[] = [...peopleIds]
     // A pinned id the roster refused (not a member of this office) is dropped outright. Printing it as an
     // "Unknown user" zero row would still confirm the uuid resolves to somebody.

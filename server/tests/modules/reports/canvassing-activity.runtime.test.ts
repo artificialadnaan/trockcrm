@@ -140,7 +140,9 @@ describe("canvassing activity — what counts", () => {
     // CO_A and CO_B are owned by OWNER but were created by ED. Crediting the owner would put four
     // records on a person who never canvassed anything.
     expect(report.totals).toEqual({ company: 3, property: 1, contact: 3, lead: 1, total: 8 });
-    expect(report.people.find((p) => p.userId === OWNER)).toBeUndefined();
+    // OWNER owns CO_A and CO_B but created nothing. They appear (the default roster is the office's sales
+    // carriers, so a zero week is visible) but are credited with NOTHING — which is the actual claim here.
+    expect(report.people.find((p) => p.userId === OWNER)?.counts.total).toBe(0);
 
     const ed = report.people.find((p) => p.userId === ED);
     expect(ed?.counts).toEqual({ company: 3, property: 0, contact: 1, lead: 0, total: 4 });
@@ -299,7 +301,8 @@ describe("canvassing activity — attribution honesty", () => {
     );
 
     expect(report.totals.total).toBe(0);
-    expect(report.people).toHaveLength(0);
+    // The roster still lists the office's sales carriers, all at zero — that is the point of the hint below.
+    expect(report.people.every((p) => p.counts.total === 0)).toBe(true);
     // The hint is what stops "0 in January" from reading as "the team did nothing in January".
     expect(report.attributionStartHint).toBe("2026-06-01");
   });
@@ -424,7 +427,8 @@ describe("canvassing activity — findings from review", () => {
       VALUES ('${TEST_CO}', 'QA Co', 'qa-co', 'client', '${TESTER}', true, false, '2026-06-01T12:00:00Z');
     `);
 
-    const report = await getCanvassingActivityReport(tdb, filters());
+    const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF }));
+    // Absent entirely: excluded from the counting queries AND from the default roster.
     expect(report.people.find((p) => p.userId === TESTER)).toBeUndefined();
     expect(report.totals.company).toBe(3);
     // And it is not silently reclassified as unattributed either — it is simply not this report's business.
@@ -715,5 +719,57 @@ describe("canvassing activity — partial periods are labelled as such", () => {
       filters({ bucket: "month", dateFrom: "2026-06-02", dateTo: "2026-06-30", officeId: OFF })
     );
     expect(clipped.buckets.map((b) => b.partial)).toEqual([true]);
+  });
+});
+
+describe("canvassing activity — the default roster", () => {
+  // Built only from people WITH activity, someone who canvassed nothing all week simply vanished — you
+  // cannot notice an absence that is not drawn, and a visible zero is what this report is for. But
+  // "every active office member" would list admins and construction staff at zero forever and bury the
+  // handful it is about. generates_sales (migration 0219) already means "expected to produce sales
+  // activity", so that is the line.
+  it("lists the office's sales carriers even when they entered nothing", async () => {
+    const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF }));
+
+    // OWNER created nothing all window and is still on the report, at zero.
+    const owner = report.people.find((p) => p.userId === OWNER);
+    expect(owner).toBeDefined();
+    expect(owner?.counts.total).toBe(0);
+    expect(owner?.notesLogged).toBe(0);
+  });
+
+  it("leaves off someone who does not carry sales", async () => {
+    const BACKOFFICE = U("bac1");
+    await pg.exec(`
+      INSERT INTO public.users (id, email, display_name, role, office_id, is_active, generates_sales)
+      VALUES ('${BACKOFFICE}', 'ops@example.com', 'Back Office', 'admin', '${OFF}', true, false);
+    `);
+
+    const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF }));
+    expect(report.people.find((p) => p.userId === BACKOFFICE)).toBeUndefined();
+
+    await pg.exec(`DELETE FROM public.users WHERE id = '${BACKOFFICE}';`);
+  });
+
+  it("still credits a non-carrier who DID create something", async () => {
+    // The flag decides who is listed by default, never who gets credit: real work always counts.
+    const BACKOFFICE = U("bac2");
+    const THEIR_CO = U("bac2c0");
+    await pg.exec(`
+      INSERT INTO public.users (id, email, display_name, role, office_id, is_active, generates_sales)
+      VALUES ('${BACKOFFICE}', 'ops2@example.com', 'Back Office Two', 'admin', '${OFF}', true, false);
+      INSERT INTO public.companies (id, name, slug, category, created_by_user_id, is_active, is_test_data, created_at)
+      VALUES ('${THEIR_CO}', 'Ops Co', 'ops-co', 'client', '${BACKOFFICE}', true, false, '2026-06-02T12:00:00Z');
+    `);
+
+    const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF }));
+    expect(report.people.find((p) => p.userId === BACKOFFICE)?.counts.company).toBe(1);
+
+    await pg.exec(`DELETE FROM public.companies WHERE id = '${THEIR_CO}'; DELETE FROM public.users WHERE id = '${BACKOFFICE}';`);
+  });
+
+  it("a pinned selection overrides the default roster entirely", async () => {
+    const report = await getCanvassingActivityReport(tdb, filters({ userIds: [CAL], officeId: OFF }));
+    expect(report.people.map((p) => p.userId)).toEqual([CAL]);
   });
 });
