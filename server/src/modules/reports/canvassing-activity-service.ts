@@ -341,7 +341,7 @@ export function normalizeCanvassingFilters(query: Record<string, unknown>): Canv
  * report's feed, which is a different privacy question from the one this report was scoped to answer; the
  * Daily Activity Log gates that content behind an admin/director check for exactly that reason.
  */
-const NOTES_ONLY = sql`a.responsible_user_id IS NOT NULL AND a.type = 'note'`;
+export const NOTES_ONLY = sql`a.responsible_user_id IS NOT NULL AND a.type = 'note'`;
 
 /**
  * A date-only column, as a plain YYYY-MM-DD string.
@@ -364,7 +364,7 @@ export function asIsoDate(value: unknown): string {
  * `tsExpr` is emitted as RAW sql (it names a column), so it must never carry caller input — every call
  * site below passes a literal column reference.
  */
-function bucketSql(bucket: CanvassingBucket, tsExpr: string): SQL {
+export function bucketSql(bucket: CanvassingBucket, tsExpr: string): SQL {
   if (bucket === "week") return sundayWeekBucketSql(tsExpr);
   const unit = bucket === "month" ? "month" : "quarter";
   return sql.raw(`(date_trunc('${unit}', ((${tsExpr}) AT TIME ZONE '${BUSINESS_TIMEZONE}')))::date`);
@@ -384,7 +384,7 @@ function businessDateSql(tsExpr: string): SQL {
  * selects exactly the same rows while leaving the column bare, so the plain created_at indexes from
  * migration 0220 can actually be used. Half-open, so the last day is whole and no row is double-counted.
  */
-function businessWindowSql(tsExpr: string, from: string, to: string): SQL {
+export function businessWindowSql(tsExpr: string, from: string, to: string): SQL {
   const col = sql.raw(`(${tsExpr})`);
   return sql`${col} >= (${from}::date AT TIME ZONE ${BUSINESS_TIMEZONE})
          AND ${col} < ((${to}::date + 1) AT TIME ZONE ${BUSINESS_TIMEZONE})`;

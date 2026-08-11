@@ -23,7 +23,10 @@ import {
   CANVASSING_KINDS,
   canvassingKindJoinSql,
   canvassingKindSourceSql,
+  bucketSql,
+  businessWindowSql,
   isRealIsoDate,
+  NOTES_ONLY,
   type CanvassingBucket,
   type CanvassingKind,
 } from "./canvassing-activity-service.js";
@@ -161,11 +164,10 @@ export function parseCanvassingEvidenceParams(query: Record<string, unknown>): {
  */
 function bucketFilterSql(bucket: CanvassingBucket, tsExpr: string, bucketStart?: string): SQL {
   if (!bucketStart) return sql`TRUE`;
-  const bucketExpr =
-    bucket === "week"
-      ? sql.raw(`(date_trunc('week', (((${tsExpr}) AT TIME ZONE 'America/Chicago') + interval '1 day')) - interval '1 day')::date`)
-      : sql.raw(`(date_trunc('${bucket}', ((${tsExpr}) AT TIME ZONE 'America/Chicago')))::date`);
-  return sql`${bucketExpr} = ${bucketStart}::date`;
+  // The report's OWN bucket expression, imported rather than restated. The copy that used to live here
+  // had already drifted in a small way — it hardcoded the timezone instead of reading BUSINESS_TIMEZONE
+  // — and the module header above claims the drill repeats none of these rules. It does now.
+  return sql`${bucketSql(bucket, tsExpr)} = ${bucketStart}::date`;
 }
 
 export async function getCanvassingEvidence(
@@ -354,7 +356,10 @@ async function loadNoteEvidence(
   options: CanvassingEvidenceOptions
 ): Promise<CanvassingEvidenceResult> {
   const period = bucketFilterSql(options.bucket, "a.occurred_at", options.bucketStart);
-  const window = sql`(((a.occurred_at) AT TIME ZONE 'America/Chicago')::date) BETWEEN ${options.dateFrom}::date AND ${options.dateTo}::date`;
+  // The report's own window helper: a sargable half-open range on the bare column, not a restated
+  // BETWEEN over a casted one. Two spellings of "this window" is exactly how a drill stops matching the
+  // figure it was opened from at a range edge.
+  const window = businessWindowSql("a.occurred_at", options.dateFrom, options.dateTo);
 
   // Same rules as the report's own notes queries: notes only, no test author, no test performer, and not
   // attached to a test record.
@@ -366,8 +371,8 @@ async function loadNoteEvidence(
     LEFT JOIN contacts ct   ON ct.id = a.contact_id
     LEFT JOIN leads le      ON le.id = a.lead_id
     LEFT JOIN deals de      ON de.id = a.deal_id
-   WHERE ${options.userId ? sql`a.responsible_user_id = ${options.userId}::uuid` : sql`a.responsible_user_id IS NOT NULL`}
-     AND a.type = 'note'
+   WHERE ${NOTES_ONLY}
+     ${options.userId ? sql`AND a.responsible_user_id = ${options.userId}::uuid` : sql``}
      AND COALESCE(u.is_test_data, false) = false
      AND NOT EXISTS (SELECT 1 FROM users pfu WHERE pfu.id = a.performed_by_user_id AND pfu.is_test_data = true)
      AND NOT EXISTS (SELECT 1 FROM companies tc WHERE tc.id = a.company_id AND tc.is_test_data = true)
