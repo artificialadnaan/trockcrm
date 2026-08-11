@@ -4,6 +4,7 @@ import { AuthProvider, useAuth } from "@/lib/auth";
 import { AuthEntryScreen } from "@/components/auth/auth-entry-screen";
 import { ForcePasswordChangeScreen } from "@/components/auth/force-password-change-screen";
 import { RequireRole, RequireGlobalAdmin } from "@/components/auth/require-role";
+import { REPORT_VIEWER_ROLES } from "@/lib/roles";
 import { AppShell } from "@/components/layout/app-shell";
 import { BoardAliasRedirect } from "@/components/shared/board-alias-redirect";
 import { DealDetailPage } from "@/pages/deals/deal-detail-page";
@@ -418,7 +419,17 @@ export function App() {
                   </RequireRole>
                 )}
               />
-              <Route path="/sales-review" element={<SalesReviewPage />} />
+              {/* Gated to match the report index card and the server's GET /sales-review, which returns
+                  team-wide forecast and hygiene data. It self-scopes for a rep and for nobody else, so an
+                  ungated route handed every other role the whole team's numbers. */}
+              <Route
+                path="/sales-review"
+                element={(
+                  <RequireRole allowedRoles={REPORT_VIEWER_ROLES}>
+                    <SalesReviewPage />
+                  </RequireRole>
+                )}
+              />
               <Route path="/pipeline/hygiene" element={<PipelineHygienePage />} />
               <Route path="/projects" element={<ProjectsPage />} />
               <Route

@@ -25,6 +25,7 @@ import { Link, useLocation } from "react-router-dom";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent } from "@/components/ui/card";
 import { useAuth } from "@/lib/auth";
+import { REPORT_VIEWER_ROLES } from "@/lib/roles";
 import type { UserRole } from "@trock-crm/shared/types";
 
 export function canViewDataMiningSection(role: UserRole | undefined) {
@@ -37,10 +38,9 @@ type ReportCard = {
   icon: LucideIcon;
   path?: string;
   /**
-   * Marks a card whose report is limited to a named email allowlist rather than a role. Cards carrying
-   * this are dropped for anyone the server did not flag — see visibleReportCategories.
+   * A session flag the viewer must carry — for reports behind a named email allowlist rather than a role.
+   * Cards carrying this are dropped for anyone the server did not flag; see visibleReportCategories.
    */
-  /** A session flag the viewer must carry — for reports behind a named email allowlist. */
   requiresFlag?: ReportAccessFlag;
   /**
    * Roles whose route will actually open this report. Present only on cards whose route is NARROWER than
@@ -107,7 +107,7 @@ const reportCategories: Array<{ category: string; description: string; reports: 
       { name: "Closed Won Revenue", description: "Booked revenue by rep, office, and period.", icon: DollarSign, path: "/reports/sales/closed-won-revenue" },
       { name: "Reports by Region", description: "Won / pipeline / win rate / avg + forecast, stage mix and top reps, segmented by deal Region (with the Unassigned bucket).", icon: MapPinned, path: "/reports/region" },
       { name: "Lead Conversion", description: "Lead source performance through contract.", icon: ChartNoAxesCombined, path: "/reports/sales/lead-conversion" },
-      { name: "Sales Review", description: "Run the weekly forecast and pipeline hygiene meeting from CRM data instead of a spreadsheet.", icon: ClipboardCheck, path: "/sales-review" },
+      { name: "Sales Review", description: "Run the weekly forecast and pipeline hygiene meeting from CRM data instead of a spreadsheet.", icon: ClipboardCheck, path: "/sales-review", requiresRole: REPORT_VIEWER_ROLES },
     ],
   },
   {
@@ -150,6 +150,7 @@ const reportCategories: Array<{ category: string; description: string; reports: 
         description: "Field scorecards submitted from T-Rock Cam across every active project — performance, corrective actions, and the signed PDF.",
         icon: ClipboardCheck,
         path: "/projects/qc-reports",
+        requiresRole: REPORT_VIEWER_ROLES,
       },
       {
         name: "Estimator Pipeline",

@@ -153,6 +153,34 @@ describe("reports that existed but were not listed", () => {
     expect(cardNames({})).not.toContain("Team Commissions");
   });
 
+  // Both routes admit admin/director/rep and nobody else, so listing them for a `construction` user — who
+  // reaches /reports because the index itself has no role gate — offered a card that redirects on click.
+  // Sales Review was the worse half: its route had no gate at all, so the click SUCCEEDED and returned
+  // team-wide numbers. The card list and the route now read the same REPORT_VIEWER_ROLES constant.
+  it("hides QC Reports and Sales Review from a construction user", () => {
+    const names = cardNames({ role: "construction" });
+    expect(names).not.toContain("QC Reports");
+    expect(names).not.toContain("Sales Review");
+    // The rest of the index is untouched — this gates two cards, not the page.
+    expect(names).toContain("Pipeline Velocity");
+    expect(names).toContain("Rep Activity");
+  });
+
+  it("hides them when the role is absent entirely", () => {
+    expect(cardNames({})).not.toContain("QC Reports");
+    expect(cardNames({})).not.toContain("Sales Review");
+  });
+
+  // The render, not just the helper: the assertion that would have caught the original defect is that no
+  // LINK to either destination reaches the markup.
+  it("renders no link to either destination for a construction user", () => {
+    authUser = { id: "u6", email: "pm@trockgc.com", role: "construction" };
+    const html = render();
+
+    expect(html).not.toContain("/projects/qc-reports");
+    expect(html).not.toContain("/sales-review");
+  });
+
   it("keeps the category tally honest when a role-gated card is hidden", () => {
     const countsInMarkup = (html: string) =>
       [...html.matchAll(/tracking-tight text-slate-950">(\d+)</g)].map((match) => Number(match[1]));
