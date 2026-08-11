@@ -36,10 +36,11 @@
 // can go DOWN if a record entered then is deactivated later. That is the intended direction -- the
 // alternative pays for duplicates.
 //
-// THE EXCEPTION IS LEADS. Converting a lead sets is_active=false while keeping status='converted'. That is
-// the outcome this whole exercise is for, not a deletion, so `is_active = true OR status = 'converted'`.
-// Without it the report docked a canvasser the moment their lead paid off -- and 155 of the 209 leads in
-// office_dallas are converted+inactive, so it would have hidden most of the lead column outright.
+// THE EXCEPTION IS LEADS. Both TERMINAL statuses set is_active=false while keeping the status: converting
+// a lead and disqualifying one both take that path. Those are outcomes, not deletions, so the rule is
+// `is_active = true OR status IN ('converted','disqualified')`. Without it the report docked a canvasser
+// the moment their lead paid off, and again when one turned out not to qualify -- and 155 of the 209 leads
+// in office_dallas are converted+inactive, so it would have hidden most of the lead column outright.
 //
 // TEST DATA EXCLUDED, via COALESCE(is_test_data,false)=false, matching every other report here.
 //
@@ -418,7 +419,10 @@ export function labelForBucket(bucket: CanvassingBucket, startIso: string): stri
   }
   const end = new Date(start.getTime() + 6 * 24 * 60 * 60 * 1000);
   const fmt = new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
-  return `${fmt.format(start)} – ${fmt.format(end)}`;
+  // The year is carried on the week label too. Without it a range crossing a year boundary renders two
+  // columns reading "Jan 5 – Jan 11", indistinguishable in the chart and both period tables. The export
+  // headers were given the year two rounds ago; the on-screen labels were left behind.
+  return `${fmt.format(start)} – ${fmt.format(end)}, ${start.getUTCFullYear()}`;
 }
 
 /**
@@ -467,7 +471,14 @@ function createdStreamSql(filters: CanvassingActivityFilters): SQL {
        -- state, not a soft delete. Counting on is_active alone removed a canvasser's converted leads from
        -- their own total, so the report docked people for the outcome it exists to encourage — and it is
        -- not a corner case: 155 of 209 leads in office_dallas are converted+inactive.
-     WHERE (l.is_active = true OR l.status = 'converted')
+       -- Terminal statuses are OUTCOMES, not deletions: updateLead sets is_active=false alongside
+       -- status='disqualified' exactly as conversion does. Counting on is_active alone docked a canvasser
+       -- both for succeeding and for turning up a lead that did not qualify — the work was done in both
+       -- cases. Only a lead soft-deleted while still OPEN is excluded.
+       --
+       -- Residual, stated rather than hidden: a converted lead that is LATER soft-deleted is
+       -- indistinguishable from a live one here, because the model overloads is_active for both meanings.
+     WHERE (l.is_active = true OR l.status IN ('converted', 'disqualified'))
        AND COALESCE(l.is_test_data, false) = false
        AND ${notATestUser("lu")} AND ${window("l")}
   `;
@@ -607,8 +618,18 @@ export async function getCanvassingActivityReport(
     //
     // Test users are excluded here as well as in the counting queries — otherwise a QA account would be
     // drawn onto the scoreboard as a permanent zero row.
+    // The EFFECTIVE role in the selected office, not the global one. `users` is a single global table and
+    // user_office_access.role_override is what authMiddleware resolves a request's role from, so
+    // classifying on users.role alone judges a multi-office person by whichever office they call home.
+    const effectiveRole = filters.officeId
+      ? sql`COALESCE((
+          SELECT uo.role_override FROM user_office_access uo
+           WHERE uo.user_id = u.id AND uo.office_id = ${filters.officeId} AND uo.role_override IS NOT NULL
+           LIMIT 1
+        ), u.role)`
+      : sql`u.role`;
     rosterPredicates.push(
-      sql`(u.is_active = true AND u.role IN ('rep', 'director')
+      sql`(u.is_active = true AND ${effectiveRole} IN ('rep', 'director')
            AND COALESCE(u.is_test_data, false) = false AND ${membership})`
     );
   }

@@ -390,7 +390,7 @@ describe("canvassing activity — date shapes across drivers", () => {
     expect(labelForBucket("month", "2026-06-01")).toBe("Jun 2026");
     expect(labelForBucket("quarter", "2026-04-01")).toBe("Q2 2026");
     expect(labelForBucket("quarter", "2026-01-01")).toBe("Q1 2026");
-    expect(labelForBucket("week", "2026-05-31")).toBe("May 31 – Jun 6");
+    expect(labelForBucket("week", "2026-05-31")).toBe("May 31 – Jun 6, 2026");
   });
 
   // Formatting an Invalid Date raises a RangeError, which would turn one odd value into a 500 for the whole
@@ -409,7 +409,7 @@ describe("canvassing activity — date shapes across drivers", () => {
       expect(bucket.label).not.toContain("NaN");
       expect(bucket.label).not.toBe(bucket.bucketStart);
     }
-    expect(report.buckets.map((b) => b.label)).toContain("May 31 – Jun 6");
+    expect(report.buckets.map((b) => b.label)).toContain("May 31 – Jun 6, 2026");
   });
 });
 
@@ -1012,6 +1012,68 @@ describe("canvassing activity — the far edge of the date domain", () => {
       for (const row of report.buckets) {
         expect(row.bucketStart, `${bucket} ${row.bucketStart}`).toMatch(/^\d{4}-\d{2}-\d{2}$/);
       }
+    }
+  });
+});
+
+describe("canvassing activity — a lead that ended is still a lead that was canvassed", () => {
+  // Round 6 fixed CONVERTED and stopped there. Disqualification takes the same path — updateLead sets
+  // is_active=false alongside status='disqualified' — so a canvasser still lost credit for turning up a
+  // lead that did not qualify. The canvassing happened either way; this report measures the activity.
+  it("counts a disqualified lead, and still ignores one soft-deleted while open", async () => {
+    const DISQUALIFIED = U("d15c");
+    const DELETED_OPEN = U("de10");
+    await pg.exec(`
+      INSERT INTO public.leads (id, company_id, property_id, assigned_rep_id, office_code, office, name, stage_id, created_by_user_id, status, is_active, is_test_data, created_at) VALUES
+        ('${DISQUALIFIED}', '${CO_HOST}', '${PR_A}', '${OWNER}', 'dallas', 'dfw', 'Did not qualify', '${STAGE}', '${CAL}', 'disqualified', false, false, '2026-06-02T12:00:00Z'),
+        ('${DELETED_OPEN}', '${CO_HOST}', '${PR_A}', '${OWNER}', 'dallas', 'dfw', 'Removed lead',    '${STAGE}', '${CAL}', 'open',         false, false, '2026-06-02T12:00:00Z');
+    `);
+
+    try {
+      const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF }));
+      expect(report.people.find((p) => p.userId === CAL)?.counts.lead).toBe(1);
+      expect(report.totals.lead).toBe(2);
+    } finally {
+      await pg.exec(`DELETE FROM public.leads WHERE id IN ('${DISQUALIFIED}','${DELETED_OPEN}');`);
+    }
+  });
+});
+
+describe("canvassing activity — the roster reads the office's effective role", () => {
+  // users is a single global table and authMiddleware resolves a request's role from
+  // user_office_access.role_override, so classifying on users.role alone judges a multi-office person by
+  // whichever office they call home.
+  it("includes someone whose home role is not client-facing but who holds a rep override here", async () => {
+    const OVERRIDDEN = U("0e3a");
+    await pg.exec(`
+      INSERT INTO public.users (id, email, display_name, role, office_id, is_active)
+      VALUES ('${OVERRIDDEN}', 'override@example.com', 'Overridden User', 'construction', '${OFF}', true);
+      INSERT INTO public.user_office_access (user_id, office_id, role_override)
+      VALUES ('${OVERRIDDEN}', '${OFF}', 'rep');
+    `);
+
+    try {
+      const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF }));
+      expect(report.people.find((p) => p.userId === OVERRIDDEN)).toBeDefined();
+    } finally {
+      await pg.exec(`DELETE FROM public.user_office_access WHERE user_id = '${OVERRIDDEN}'; DELETE FROM public.users WHERE id = '${OVERRIDDEN}';`);
+    }
+  });
+
+  it("excludes someone whose home role is client-facing but who is overridden to a back-office role here", async () => {
+    const DEMOTED = U("0e42");
+    await pg.exec(`
+      INSERT INTO public.users (id, email, display_name, role, office_id, is_active)
+      VALUES ('${DEMOTED}', 'demoted@example.com', 'Demoted User', 'rep', '${OFF}', true);
+      INSERT INTO public.user_office_access (user_id, office_id, role_override)
+      VALUES ('${DEMOTED}', '${OFF}', 'construction');
+    `);
+
+    try {
+      const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF }));
+      expect(report.people.find((p) => p.userId === DEMOTED)).toBeUndefined();
+    } finally {
+      await pg.exec(`DELETE FROM public.user_office_access WHERE user_id = '${DEMOTED}'; DELETE FROM public.users WHERE id = '${DEMOTED}';`);
     }
   });
 });
