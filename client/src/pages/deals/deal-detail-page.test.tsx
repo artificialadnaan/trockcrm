@@ -2457,9 +2457,17 @@ describe("DealDetailPage", () => {
     const html = renderPage();
 
     expect(html).toContain("Archive Deal");
-    // Would have been data-disabled="true" before. The mock sets that attribute only for disabled items, so
-    // its ABSENCE is what proves the control is live for an owner outside the opportunity stage.
-    expect(html).not.toContain('data-disabled="true"');
+    // Asserted on the ARCHIVE ITEM, not on the whole page.
+    //
+    // This used to be `expect(html).not.toContain('data-disabled="true"')`, which held only while Archive
+    // was the sole item that could ever render disabled. "Move back to Opportunity" now renders a disabled
+    // variant for an owner who is not a designated approver, so the page-wide form failed on a menu that
+    // was entirely correct. It was also weaker than it looked: it passed just as happily if the Archive
+    // item disappeared altogether. Matching the item's own markup requires it to be present AND live —
+    // the same shape the clickable-item case below already uses.
+    const archiveItem = /<button[^>]*data-disabled="(true|false)"[^>]*>(?:(?!<\/button>).)*Archive Deal/s.exec(html);
+    expect(archiveItem, "no Archive Deal menu item rendered").toBeTruthy();
+    expect(archiveItem?.[1]).toBe("false");
   });
 
   it("shows a clickable Archive Deal item for an owner rep on an opportunity deal", async () => {
