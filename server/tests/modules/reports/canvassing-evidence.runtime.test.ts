@@ -355,3 +355,130 @@ describe("canvassing drill-to-evidence reconciles with every cell", () => {
     expect(drill.rows.map((r) => r.label)).not.toContain("Test Co");
   });
 });
+
+// The KPI cards and the "Office totals by period" table print office-wide figures, and they were the
+// larger share of the page's numbers left unable to answer "which records is this?".
+describe("office-wide drills (no userId)", () => {
+  const window = {
+    bucket: "week" as const,
+    dateFrom: "2026-06-01",
+    dateTo: "2026-06-30",
+    officeId: OFF,
+    viewerRole: "director",
+  };
+
+  it("totals the whole office, matching the report's own totals", async () => {
+    const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF }));
+
+    for (const kind of CANVASSING_KINDS) {
+      const drill = await getCanvassingEvidence(tdb, { ...window, kind });
+      expect(drill.total, kind).toBe(report.totals[kind]);
+      expect(drill.userId, "an office-wide drill names no person").toBeNull();
+    }
+  });
+
+  it("totals the whole office for the COMBINED column too", async () => {
+    const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF }));
+    const drill = await getCanvassingEvidence(tdb, { ...window, kind: "all" });
+
+    expect(drill.total).toBe(report.totals.total);
+  });
+
+  it("agrees with each office-wide PERIOD cell", async () => {
+    const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF, bucket: "week" }));
+
+    for (const bucketRow of report.buckets) {
+      const drill = await getCanvassingEvidence(tdb, {
+        ...window,
+        kind: "all",
+        bucketStart: bucketRow.bucketStart,
+      });
+      expect(drill.total, bucketRow.bucketStart).toBe(bucketRow.counts.total);
+    }
+  });
+
+  // UNATTRIBUTED rows are reported separately by the page and are never part of a person-sum, so an
+  // office-wide drill must not quietly fold them in — that would make it disagree with the cell.
+  it("excludes rows with no recorded creator, as the report's own totals do", async () => {
+    const drill = await getCanvassingEvidence(tdb, { ...window, kind: "company" });
+
+    expect(drill.rows.every((row) => row.label !== "Imported")).toBe(true);
+  });
+
+  // A rep may read only their OWN note text. Office-wide there is no single person to be, so they get
+  // the count and none of the text — the boundary, not a hole beside it.
+  it("gives a rep the office-wide notes COUNT but none of the text", async () => {
+    const drill = await getCanvassingEvidence(tdb, {
+      ...window,
+      kind: "notes",
+      viewerRole: "rep",
+      viewerUserId: ED,
+    });
+
+    expect(drill.total).toBeGreaterThan(0);
+    expect(drill.rows).toHaveLength(0);
+    expect(drill.restrictedToSelf).toBe(true);
+  });
+});
+
+// The "No author recorded" column — the one nonzero figure on the page that could not be inspected, and
+// the one a reader most needs to, because the whole report turns on telling "nobody did anything" apart
+// from "nobody was recorded doing it".
+describe("the unattributed drill", () => {
+  const window = {
+    bucket: "week" as const,
+    dateFrom: "2026-06-01",
+    dateTo: "2026-06-30",
+    officeId: OFF,
+    viewerRole: "director",
+  };
+
+  it("agrees with each period's unattributed total", async () => {
+    const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF, bucket: "week" }));
+
+    for (const bucketRow of report.buckets) {
+      const drill = await getCanvassingEvidence(tdb, {
+        ...window,
+        kind: "unattributed",
+        bucketStart: bucketRow.bucketStart,
+      });
+      expect(drill.total, bucketRow.bucketStart).toBe(bucketRow.unattributed.total);
+    }
+  });
+
+  it("lists ONLY rows with no recorded creator", async () => {
+    const drill = await getCanvassingEvidence(tdb, { ...window, kind: "unattributed" });
+
+    expect(drill.rows.map((row) => row.label)).toContain("Imported");
+    expect(drill.rows.map((row) => row.label)).not.toContain("Acme One");
+  });
+
+  // Attributed and unattributed must PARTITION the population: an overlap or a gap means the two columns
+  // sitting beside each other do not add up to what the office actually entered.
+  it("partitions the population with the attributed drill", async () => {
+    const attributed = await getCanvassingEvidence(tdb, { ...window, kind: "all" });
+    const unattributed = await getCanvassingEvidence(tdb, { ...window, kind: "unattributed" });
+
+    const overlap = attributed.rows.filter((a) => unattributed.rows.some((u) => u.id === a.id));
+    expect(overlap).toHaveLength(0);
+  });
+});
+
+// A note with a generic or empty subject identifies nothing on its own, and notes carry no link through
+// which a reader could recover the context. The query already resolved it; the mapping used to drop it.
+describe("note evidence carries what the note was attached to", () => {
+  it("names the attached record", async () => {
+    const drill = await getCanvassingEvidence(tdb, {
+      kind: "notes",
+      userId: ED,
+      bucket: "week",
+      dateFrom: "2026-06-01",
+      dateTo: "2026-06-30",
+      officeId: OFF,
+      viewerRole: "director",
+    });
+
+    expect(drill.rows.length).toBeGreaterThan(0);
+    expect(drill.rows.some((row) => Boolean(row.attachedTo))).toBe(true);
+  });
+});

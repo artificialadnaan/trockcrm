@@ -35,6 +35,7 @@ const KIND_NOUNS: Record<CanvassingEvidenceKind, string> = {
   contact: "contacts",
   lead: "leads",
   all: "records",
+  unattributed: "records with no recorded author",
   notes: "notes",
 };
 
@@ -175,7 +176,9 @@ export function CanvassingEvidenceDialog({
           <DialogDescription>
             {target?.kind === "notes"
               ? `Notes logged ${scope}.`
-              : `New ${noun} entered ${scope}.`}
+              : target?.kind === "unattributed"
+                ? `Entered ${scope} with no creator recorded — these predate attribution or were machine-created.`
+                : `New ${noun} entered ${scope}.`}
           </DialogDescription>
         </DialogHeader>
 
@@ -238,6 +241,11 @@ export function CanvassingEvidenceDialog({
                           </span>
                         ) : null}
                       </div>
+                      {/* What the note documents. Without it a note with a generic or empty subject
+                          identifies nothing, and notes carry no link to recover the context from. */}
+                      {row.attachedTo ? (
+                        <p className="mt-1 text-xs font-semibold text-slate-500">On {row.attachedTo}</p>
+                      ) : null}
                       {row.sublabel ? (
                         <p className="mt-1 whitespace-pre-wrap text-sm text-slate-600">{row.sublabel}</p>
                       ) : null}

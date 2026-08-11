@@ -1625,7 +1625,7 @@ export function useCanvassingActivityReport(options: CanvassingActivityQueryOpti
  * ---------------------------------------------------------------------------------------------- */
 
 /** `all` is the grid's combined column — counts.total — and returns the four kinds in one list. */
-export type CanvassingEvidenceKind = CanvassingKind | "all" | "notes";
+export type CanvassingEvidenceKind = CanvassingKind | "all" | "unattributed" | "notes";
 
 export interface CanvassingEvidenceRecord {
   id: string;
@@ -1635,6 +1635,8 @@ export interface CanvassingEvidenceRecord {
   href: string | null;
   /** Which of the four this row is. Present on record drills; the combined list needs it to be readable. */
   kind?: CanvassingKind;
+  /** What a NOTE was attached to — the deal, contact, company, lead or property it documents. */
+  attachedTo?: string | null;
 }
 
 export interface CanvassingEvidenceResult {

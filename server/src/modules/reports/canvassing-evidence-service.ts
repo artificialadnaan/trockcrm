@@ -38,8 +38,12 @@ type TenantDb = NodePgDatabase<typeof schema>;
  * companies AND properties AND contacts lists a fraction of the records and then reports a mismatch
  * against the figure it was opened from, on nearly every cell. That is the precise failure this drill
  * exists to make impossible, so the combined column returns a combined list.
+ *
+ * `unattributed` is the "No author recorded" column — the same four tables, but the rows whose creator
+ * was never recorded. It is the one figure on the page a reader most needs to inspect, because the whole
+ * report turns on telling "nobody did anything" apart from "nobody was recorded doing it".
  */
-export const CANVASSING_EVIDENCE_KINDS = [...CANVASSING_KINDS, "all", "notes"] as const;
+export const CANVASSING_EVIDENCE_KINDS = [...CANVASSING_KINDS, "all", "unattributed", "notes"] as const;
 export type CanvassingEvidenceKind = (typeof CANVASSING_EVIDENCE_KINDS)[number];
 
 export interface CanvassingEvidenceOptions {
@@ -75,6 +79,13 @@ export interface CanvassingEvidenceRecord {
    * kinds and "Acme Roofing" alone does not say whether it is a company or a lead.
    */
   kind?: CanvassingKind;
+  /**
+   * What a NOTE was attached to — the deal, contact, company, lead or property it documents.
+   *
+   * The query already resolved it and the mapping used to drop it, leaving a note with a generic or
+   * empty subject with nothing at all to identify the work it records, and no link to recover it from.
+   */
+  attachedTo?: string | null;
 }
 
 export interface CanvassingEvidenceResult {
@@ -162,7 +173,8 @@ export async function getCanvassingEvidence(
   options: CanvassingEvidenceOptions
 ): Promise<CanvassingEvidenceResult> {
   if (options.kind === "notes") return loadNoteEvidence(tenantDb, options);
-  if (options.kind === "all") return loadCombinedEvidence(tenantDb, options);
+  if (options.kind === "all") return loadCombinedEvidence(tenantDb, options, "attributed");
+  if (options.kind === "unattributed") return loadCombinedEvidence(tenantDb, options, "unattributed");
   return loadRecordEvidence(tenantDb, options, options.kind);
 }
 
@@ -221,8 +233,14 @@ async function loadRecordEvidence(
   const period = bucketFilterSql(options.bucket, `${source.alias}.created_at`, options.bucketStart);
   const { label, sublabel } = kindDisplaySql(kind, alias);
 
-  const rows = await tenantDb.execute<{ id: string; label: string | null; sublabel: string | null; created_at: string | Date }>(sql`
-    SELECT ${alias}.id::text AS id, ${label} AS label, ${sublabel} AS sublabel, ${alias}.created_at
+  // ONE statement for both the rows and the total. Window functions are evaluated BEFORE LIMIT, so
+  // COUNT(*) OVER () is the full count even on a truncated page — and, unlike a second query, it cannot
+  // describe a different population. Under READ COMMITTED a note or record inserted between two separate
+  // statements would leave `total` describing the old set and `rows` the new one, so the dialog would
+  // report a reconciliation it had not actually performed.
+  const rows = await tenantDb.execute<{ id: string; label: string | null; sublabel: string | null; created_at: string | Date; total_count: number }>(sql`
+    SELECT ${alias}.id::text AS id, ${label} AS label, ${sublabel} AS sublabel, ${alias}.created_at,
+           COUNT(*) OVER ()::int AS total_count
       ${canvassingKindJoinSql(kind)}
      WHERE ${source.where}
        AND ${recordNarrowingSql(options, alias, `${source.alias}.created_at`)}
@@ -233,20 +251,11 @@ async function loadRecordEvidence(
   const truncated = rows.rows.length > MAX_ROWS;
   const kept = truncated ? rows.rows.slice(0, MAX_ROWS) : rows.rows;
 
-  // Counted with the SAME predicate rather than taken from rows.length, so a truncated drill still reports
-  // the figure it was opened from instead of silently reporting the cap.
-  const counted = await tenantDb.execute<{ n: number }>(sql`
-    SELECT COUNT(*)::int AS n
-      ${canvassingKindJoinSql(kind)}
-     WHERE ${source.where}
-       AND ${recordNarrowingSql(options, alias, `${source.alias}.created_at`)}
-  `);
-
   return {
     kind,
     userId: options.userId ?? null,
     bucketStart: options.bucketStart ?? null,
-    total: counted.rows[0]?.n ?? 0,
+    total: rows.rows[0]?.total_count ?? 0,
     truncated,
     restrictedToSelf: false,
     rows: kept.map((row) => ({
@@ -273,7 +282,14 @@ async function loadRecordEvidence(
  */
 async function loadCombinedEvidence(
   tenantDb: TenantDb,
-  options: CanvassingEvidenceOptions
+  options: CanvassingEvidenceOptions,
+  /**
+   * `attributed` is the combined column: rows with a recorded creator, narrowed to a person when the
+   * cell belongs to one. `unattributed` is the "No author recorded" column — the same four tables, rows
+   * whose creator was never recorded, and never person-narrowed because by definition there is nobody
+   * to narrow to.
+   */
+  attribution: "attributed" | "unattributed"
 ): Promise<CanvassingEvidenceResult> {
   const parts = CANVASSING_KINDS.map((kind) => {
     const source = canvassingKindSourceSql(kind, options);
@@ -288,18 +304,26 @@ async function loadCombinedEvidence(
              ${alias}.created_at
         ${canvassingKindJoinSql(kind)}
        WHERE ${source.where}
-         AND ${recordNarrowingSql(options, alias, `${source.alias}.created_at`)}`;
+         AND ${
+           attribution === "unattributed"
+             ? sql`${alias}.created_by_user_id IS NULL
+         AND ${bucketFilterSql(options.bucket, `${source.alias}.created_at`, options.bucketStart)}`
+             : recordNarrowingSql(options, alias, `${source.alias}.created_at`)
+         }`;
   });
   const union = sql.join(parts, sql` UNION ALL `);
 
+  // One statement, for the same snapshot reason as the single-kind drill.
   const rows = await tenantDb.execute<{
     kind: CanvassingKind;
     id: string;
     label: string | null;
     sublabel: string | null;
     created_at: string | Date;
+    total_count: number;
   }>(sql`
-    SELECT * FROM (${union}) AS combined
+    SELECT combined.*, COUNT(*) OVER ()::int AS total_count
+      FROM (${union}) AS combined
      ORDER BY combined.created_at DESC, combined.id DESC
      LIMIT ${MAX_ROWS + 1}
   `);
@@ -307,16 +331,11 @@ async function loadCombinedEvidence(
   const truncated = rows.rows.length > MAX_ROWS;
   const kept = truncated ? rows.rows.slice(0, MAX_ROWS) : rows.rows;
 
-  // Same reason as the single-kind drill: counted with the predicate, not measured off a capped list.
-  const counted = await tenantDb.execute<{ n: number }>(sql`
-    SELECT COUNT(*)::int AS n FROM (${union}) AS combined
-  `);
-
   return {
-    kind: "all",
+    kind: attribution === "unattributed" ? "unattributed" : "all",
     userId: options.userId ?? null,
     bucketStart: options.bucketStart ?? null,
-    total: counted.rows[0]?.n ?? 0,
+    total: rows.rows[0]?.total_count ?? 0,
     truncated,
     restrictedToSelf: false,
     rows: kept.map((row) => ({
@@ -359,8 +378,6 @@ async function loadNoteEvidence(
      AND ${window}
      AND ${period}`;
 
-  const counted = await tenantDb.execute<{ n: number }>(sql`SELECT COUNT(*)::int AS n ${base}`);
-
   // A rep may read only their OWN note text — the same line the report's feed draws. The COUNT above stays
   // office-wide, so drilling a colleague's notes cell shows the right number and no text, rather than
   // becoming a way around the boundary.
@@ -369,43 +386,52 @@ async function loadNoteEvidence(
   // rep gets the count and no text at all — the same boundary the feed draws, not a hole beside it.
   const mayRead = !restrictToSelf || (options.userId != null && options.viewerUserId === options.userId);
 
+  // ONE statement for the rows AND the total, so the two cannot describe different populations — under
+  // READ COMMITTED a note inserted or deleted between two separate queries would leave the dialog
+  // claiming a reconciliation it never performed. COUNT(*) OVER () is evaluated before LIMIT, so the
+  // total is the whole set even on a truncated page.
+  const rows = await tenantDb.execute<{ id: string; subject: string | null; body: string | null; occurred_at: string | Date; target: string | null; total_count: number }>(sql`
+    SELECT a.id::text AS id,
+           a.subject,
+           a.body,
+           a.occurred_at,
+           COALESCE(de.name, NULLIF(BTRIM(CONCAT_WS(' ', ct.first_name, ct.last_name)), ''), co.name, le.name, pr.name) AS target,
+           COUNT(*) OVER ()::int AS total_count
+    ${base}
+     ORDER BY a.occurred_at DESC, a.id DESC
+     LIMIT ${MAX_ROWS + 1}
+  `);
+
+  const total = rows.rows[0]?.total_count ?? 0;
+  const truncated = rows.rows.length > MAX_ROWS;
+  const kept = truncated ? rows.rows.slice(0, MAX_ROWS) : rows.rows;
+
+  // The COUNT stays office-wide either way; only the TEXT is withheld. Discarding the rows here rather
+  // than running a separate count keeps the number and the withheld set on one snapshot.
   if (!mayRead) {
     return {
       kind: "notes",
       userId: options.userId ?? null,
       bucketStart: options.bucketStart ?? null,
-      total: counted.rows[0]?.n ?? 0,
+      total,
       rows: [],
       truncated: false,
       restrictedToSelf: true,
     };
   }
 
-  const rows = await tenantDb.execute<{ id: string; subject: string | null; body: string | null; occurred_at: string | Date; target: string | null }>(sql`
-    SELECT a.id::text AS id,
-           a.subject,
-           a.body,
-           a.occurred_at,
-           COALESCE(de.name, NULLIF(BTRIM(CONCAT_WS(' ', ct.first_name, ct.last_name)), ''), co.name, le.name, pr.name) AS target
-    ${base}
-     ORDER BY a.occurred_at DESC, a.id DESC
-     LIMIT ${MAX_ROWS + 1}
-  `);
-
-  const truncated = rows.rows.length > MAX_ROWS;
-  const kept = truncated ? rows.rows.slice(0, MAX_ROWS) : rows.rows;
-
   return {
     kind: "notes",
     userId: options.userId ?? null,
     bucketStart: options.bucketStart ?? null,
-    total: counted.rows[0]?.n ?? 0,
+    total,
     truncated,
     restrictedToSelf: restrictToSelf,
     rows: kept.map((row) => ({
       id: row.id,
       label: row.subject ?? "(no subject)",
       sublabel: row.body,
+      attachedTo: row.target,
       occurredAt: toIso(row.occurred_at),
       href: null,
     })),

@@ -246,6 +246,23 @@ function CanvassingActivityReportView() {
 
   // Whether the window reaches back past the point creator tracking existed. True for the default view for
   // a while after migration 0220, and it changes what a zero in this grid is allowed to claim.
+  /**
+   * The scope a WHOLE-SELECTION figure (a KPI card, an office-totals cell) drills as, or null when there
+   * is no faithful one.
+   *
+   *   no person filter        -> office-wide, no userId;
+   *   exactly ONE person      -> that person's id. An exact scope the endpoint already accepts, so
+   *                              disabling the drill here was needless — the reconciliation concern that
+   *                              applies to office-wide requests does not apply to it;
+   *   two or more people      -> null. The endpoint narrows to one person or to none, so any drill would
+   *                              answer a different question from the cell; those stay plain text.
+   */
+  const totalsDrillScope: { userId: string | null; label: string } | null = !filteredToPeople
+    ? { userId: null, label: "Office-wide" }
+    : data && data.people.length === 1
+      ? { userId: data.people[0]!.userId, label: data.people[0]!.displayName }
+      : null;
+
   const rangeReachesBeforeAttribution =
     !data?.attributionStartHint || (data ? data.range.from < data.attributionStartHint : false);
 
@@ -500,6 +517,14 @@ function CanvassingActivityReportView() {
             ) : null}
           </div>
 
+          {/*
+            The scope a whole-selection figure drills as.
+              - no person filter  -> office-wide (no userId);
+              - exactly ONE person selected -> that person's id, which is an exact scope the endpoint
+                already accepts, so there is no reason to disable the drill;
+              - two or more -> no faithful scope, because the endpoint narrows to one person or to none.
+                Those figures stay plain text rather than quietly answering for everybody.
+          */}
           <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-6">
             {/*
               Drillable only when the report is NOT narrowed to particular people. These figures follow the
@@ -520,13 +545,13 @@ function CanvassingActivityReportView() {
                 label={label}
                 value={value}
                 onOpen={
-                  filteredToPeople
+                  totalsDrillScope === null
                     ? null
                     : () =>
                         setEvidenceTarget({
                           kind,
-                          userId: null,
-                          personName: "Office-wide",
+                          userId: totalsDrillScope.userId,
+                          personName: totalsDrillScope.label,
                           bucketStart: null,
                           periodLabel: null,
                           expected: value,
@@ -828,7 +853,7 @@ function CanvassingActivityReportView() {
                           const value = kind === "all" ? row.counts.total : row.counts[kind];
                           return (
                             <td key={kind} className={kind === "all" ? "font-semibold text-slate-900" : undefined}>
-                              {filteredToPeople ? (
+                              {totalsDrillScope === null ? (
                                 formatNumber(value)
                               ) : (
                                 <DrillNumber
@@ -837,8 +862,8 @@ function CanvassingActivityReportView() {
                                   onOpen={() =>
                                     setEvidenceTarget({
                                       kind,
-                                      userId: null,
-                                      personName: "Office-wide",
+                                      userId: totalsDrillScope.userId,
+                                      personName: totalsDrillScope.label,
                                       bucketStart: row.bucketStart,
                                       periodLabel: row.label,
                                       expected: value,
@@ -850,7 +875,26 @@ function CanvassingActivityReportView() {
                           );
                         })}
                         {filteredToPeople ? null : (
-                          <td className="text-slate-500">{formatNumber(row.unattributed.total)}</td>
+                          <td className="text-slate-500">
+                            {/* The one nonzero figure on this page that could not be inspected — and the
+                                one a reader most needs to, since the whole report turns on telling "nobody
+                                did anything" apart from "nobody was recorded doing it". Never
+                                person-narrowed: by definition these rows have nobody to narrow to. */}
+                            <DrillNumber
+                              value={row.unattributed.total}
+                              className="text-slate-500"
+                              onOpen={() =>
+                                setEvidenceTarget({
+                                  kind: "unattributed",
+                                  userId: null,
+                                  personName: "No author recorded",
+                                  bucketStart: row.bucketStart,
+                                  periodLabel: row.label,
+                                  expected: row.unattributed.total,
+                                })
+                              }
+                            />
+                          </td>
                         )}
                       </tr>
                     ))}
