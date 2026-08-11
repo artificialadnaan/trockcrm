@@ -54,11 +54,23 @@ function formatDay(iso: string | null) {
   );
 }
 
+/**
+ * Note clocks render in BUSINESS time, which is the zone the server filtered and bucketed them in.
+ *
+ * Rendered in the browser's zone, a note at 2026-06-02T04:30Z shows as "Jun 1, 11:30 PM" to a Central
+ * reader while the server counted it under Jun 1 — or, near a range edge, shows a date outside the window
+ * that returned it. The Daily Activity Log hit exactly this and fixed it the same way: move the clock to
+ * the bucket's zone and say so on the page.
+ */
 function formatClock(iso: string) {
   if (!iso) return "";
-  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(
-    new Date(iso)
-  );
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZone: "America/Chicago",
+  }).format(new Date(iso));
 }
 
 function labelForType(type: string) {
@@ -190,14 +202,29 @@ function CanvassingActivityReportView() {
       },
       {
         name: `Person by ${bucket}`,
-        columns: [{ key: "person", header: "Person" }, ...periodColumns, { key: "total", header: "Total", type: "number" as const }],
-        rows: data.people.map((person) => {
-          const row: Record<string, unknown> = { person: person.displayName, total: person.counts.total };
-          for (const period of data.buckets) {
-            row[period.bucketStart] = period.perUser.find((entry) => entry.userId === person.userId)?.counts.total ?? 0;
-          }
-          return row;
-        }),
+        // A row per person PER KIND, plus their combined row. The grid can switch kinds on screen; a
+        // workbook holding only the total cannot reconstruct that, and the whole-range sheet has no periods.
+        columns: [
+          { key: "person", header: "Person" },
+          { key: "kind", header: "Kind" },
+          ...periodColumns,
+          { key: "total", header: "Total", type: "number" as const },
+        ],
+        rows: data.people.flatMap((person) =>
+          (["all", ...CANVASSING_KINDS] as const).map((kind) => {
+            const read = (counts: CanvassingCounts) => (kind === "all" ? counts.total : counts[kind]);
+            const row: Record<string, unknown> = {
+              person: person.displayName,
+              kind: kind === "all" ? "All" : KIND_LABELS[kind],
+              total: read(person.counts),
+            };
+            for (const period of data.buckets) {
+              const cell = period.perUser.find((entry) => entry.userId === person.userId);
+              row[period.bucketStart] = cell ? read(cell.counts) : 0;
+            }
+            return row;
+          })
+        ),
       },
       {
         name: filteredToPeople ? `Selected people by ${bucket}` : `Totals by ${bucket}`,
@@ -526,7 +553,7 @@ function CanvassingActivityReportView() {
             )}
           </ReportPanel>
 
-          <ReportPanel title="Notes logged">
+          <ReportPanel title="Notes logged (times Central)">
             {data.notes.length === 0 ? (
               <EmptyState label="No notes logged in this window." />
             ) : (

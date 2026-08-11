@@ -854,3 +854,67 @@ describe("canvassing activity — the notes gate fails closed", () => {
     expect(asRepBase.notes.every((note) => note.userId === CAL)).toBe(true);
   });
 });
+
+describe("canvassing activity — note visibility as an intersection", () => {
+  // Patched three rounds running, each patch adding a hole. Stated now as "who may I see" ∩ "who was asked
+  // for", these cases pin every branch of that intersection.
+  it("a rep filtering to a COLLEAGUE gets that colleague's counts and NO notes", async () => {
+    const report = await getCanvassingActivityReport(
+      tdb,
+      filters({ officeId: OFF, userIds: [ED], viewerRole: "rep", viewerUserId: CAL })
+    );
+
+    // The counts follow the pin — a scoreboard is not the disclosure the gate protects.
+    expect(report.people.map((p) => p.userId)).toEqual([ED]);
+    expect(report.totals.company).toBe(3);
+    // The feed is the intersection of {ED} and {CAL}, which is empty. Previously it silently swapped in
+    // CAL's own notes, showing one person's counts beside another's writing.
+    expect(report.notes).toEqual([]);
+  });
+
+  it("a rep filtering to THEMSELVES still sees their own notes", async () => {
+    const report = await getCanvassingActivityReport(
+      tdb,
+      filters({ officeId: OFF, userIds: [CAL], viewerRole: "rep", viewerUserId: CAL })
+    );
+    expect(report.notes.map((n) => n.subject)).toEqual(["Site walk"]);
+  });
+
+  it("restricts when EITHER the home or the effective role is rep", async () => {
+    // Home director, rep override in this office: the effective role must still restrict.
+    const effective = await getCanvassingActivityReport(
+      tdb,
+      filters({ officeId: OFF, viewerRole: "director", viewerEffectiveRole: "rep", viewerUserId: CAL })
+    );
+    expect(effective.notes.every((n) => n.userId === CAL)).toBe(true);
+
+    // Home rep, director override in this office: the home role must still restrict (#740).
+    const home = await getCanvassingActivityReport(
+      tdb,
+      filters({ officeId: OFF, viewerRole: "rep", viewerEffectiveRole: "director", viewerUserId: CAL })
+    );
+    expect(home.notes.every((n) => n.userId === CAL)).toBe(true);
+  });
+});
+
+describe("canvassing activity — an owner filter that matches nobody", () => {
+  // Returning the filters untouched left userIds empty, which every downstream reader takes as "no person
+  // filter" — so a stale ?owners=Jane link for someone who has left showed the ENTIRE office under her name.
+  it("returns an empty report, not the whole office", async () => {
+    const report = await getCanvassingActivityReport(
+      tdb,
+      filters({ officeId: OFF, ownerNames: ["Nobody By That Name"] })
+    );
+
+    expect(report.people).toEqual([]);
+    expect(report.totals.total).toBe(0);
+  });
+
+  it("still resolves a name that DOES match", async () => {
+    const report = await getCanvassingActivityReport(
+      tdb,
+      filters({ officeId: OFF, ownerNames: ["Caleb Stone"] })
+    );
+    expect(report.people.map((p) => p.userId)).toEqual([CAL]);
+  });
+});

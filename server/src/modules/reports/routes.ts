@@ -1638,6 +1638,7 @@ router.get("/canvassing-activity", requireAnyRole, requireCanvassingReportViewer
       // role, not the effective one — a rep holding a director role_override on an office must not read
       // that office's note content through it (#740).
       viewerRole: req.user!.baseRole ?? req.user!.role,
+      viewerEffectiveRole: req.user!.role,
       viewerUserId: req.user!.id,
     });
     await req.commitTransaction!();

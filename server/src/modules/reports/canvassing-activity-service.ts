@@ -110,6 +110,13 @@ export interface CanvassingActivityFilters {
    * office's note content. The Daily Activity Log gates its email content on baseRole for the same reason.
    */
   viewerRole?: string | null;
+  /**
+   * The EFFECTIVE (per-office) role, alongside the home one above. The notes gate restricts when EITHER is
+   * `rep`: baseRole alone would miss someone whose home role is director but who holds a rep override in
+   * this office, and effective-role alone is the #740 escalation shape in reverse. Restricting on either
+   * is the only reading that cannot widen.
+   */
+  viewerEffectiveRole?: string | null;
   viewerUserId?: string | null;
 }
 
@@ -175,6 +182,12 @@ export interface CanvassingActivityReport {
 const MAX_RANGE_DAYS = 1830;
 const DEFAULT_NOTES_LIMIT = 200;
 const MAX_NOTES_LIMIT = 500;
+
+/**
+ * Stands in for an owner selection that matched nobody, so the request stays a FILTER (matching nothing)
+ * rather than degrading to no filter at all. A nil uuid never identifies a real user.
+ */
+const UNRESOLVABLE_OWNER = "00000000-0000-0000-0000-000000000000";
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -473,8 +486,12 @@ async function resolveOwnerSelection(
      WHERE (${sql.join(matchers, sql` OR `)}) AND ${membership}
   `);
   const resolved = rows.rows.map((row) => row.id);
-  if (resolved.length === 0) return filters;
-  return { ...filters, userIds: [...new Set([...(filters.userIds ?? []), ...resolved])] };
+  // An owner selector that resolves to NOBODY is still a selector. Returning the filters untouched left
+  // userIds empty, which every downstream reader takes as "no person filter" — so a stale ?owners=Jane link
+  // for someone who has left the office silently showed the ENTIRE office under Jane's name. A sentinel id
+  // keeps it a filter that simply matches nothing.
+  const merged = [...new Set([...(filters.userIds ?? []), ...resolved])];
+  return { ...filters, userIds: merged.length > 0 ? merged : [UNRESOLVABLE_OWNER] };
 }
 
 export async function getCanvassingActivityReport(
@@ -727,16 +744,28 @@ async function loadNotes(
   pinned: Set<string> | null
 ): Promise<{ rows: CanvassingNoteRow[]; truncated: boolean }> {
   const limit = filters.notesLimit ?? DEFAULT_NOTES_LIMIT;
-  // A `rep` reads only their own notes, even on the allowlist. GET /activities pins an unscoped rep to
-  // their own rows and the Daily Activity Log does the same; a report is not a way around that. The COUNTS
-  // above stay office-wide on purpose — "Caleb logged 12 notes" is the accountability figure, and it is a
+  // WHO MAY I SEE, intersected with WHO WAS ASKED FOR. Stated as two sets rather than a chain of
+  // conditionals, because three successive rounds of patching this rule each introduced a new hole: it
+  // failed open when the id was missing, it read the per-office role instead of the home one, and it
+  // REPLACED the pinned selection rather than intersecting it — so a rep filtering to a colleague got that
+  // colleague's counts beside their own notes, two scopes in one view.
+  //
+  // A `rep` reads only their own notes, even on the allowlist: GET /activities pins an unscoped rep to their
+  // own rows and the Daily Activity Log does the same, and a new report is not a way around that. The COUNTS
+  // stay office-wide on purpose — "Caleb logged 12 notes" is the accountability figure, and it is a
   // different disclosure from the text of what he wrote.
-  // Fails CLOSED. An earlier form required viewerUserId to be truthy for the restriction to apply, so a
-  // caller passing role="rep" with no id got the unrestricted office-wide feed — the one combination that
-  // must never widen. A rep with no id resolvable is given nothing.
-  const restrictToSelf = filters.viewerRole === "rep";
-  const visible = restrictToSelf ? new Set(filters.viewerUserId ? [filters.viewerUserId] : []) : pinned;
-  if (restrictToSelf && visible!.size === 0) return { rows: [], truncated: false };
+  const restrictToSelf = filters.viewerRole === "rep" || filters.viewerEffectiveRole === "rep";
+  // null means "no restriction from this side"; an EMPTY set means "restricted to nobody", which must
+  // return nothing rather than falling through to everything.
+  const maySee: Set<string> | null = restrictToSelf
+    ? new Set(filters.viewerUserId ? [filters.viewerUserId] : [])
+    : null;
+
+  let visible: Set<string> | null;
+  if (maySee && pinned) visible = new Set([...pinned].filter((id) => maySee.has(id)));
+  else visible = maySee ?? pinned;
+
+  if (visible && visible.size === 0) return { rows: [], truncated: false };
   const userFilter = visible
     ? sql`AND a.responsible_user_id = ANY(${sql`ARRAY[${sql.join([...visible].map((id) => sql`${id}::uuid`), sql`, `)}]`})`
     : sql``;
