@@ -19,7 +19,8 @@ import {
 
 export interface CanvassingEvidenceTarget {
   kind: CanvassingEvidenceKind;
-  userId: string;
+  /** Null for an office-wide figure; `personName` then names the office view rather than a person. */
+  userId: string | null;
   personName: string;
   /** Null for a whole-range total; otherwise the period column that was clicked. */
   bucketStart: string | null;
@@ -78,6 +79,34 @@ export function CanvassingEvidenceDialog({
   const officeScopeId = useOfficeScopeId();
   /** The office the open drill was requested under, so a scope change can be detected rather than ignored. */
   const requestedForOffice = useRef<string | null>(null);
+  /** Likewise for the report's own scope: the bucket and date range the drill was opened under. */
+  const openedForScope = useRef<string | null>(null);
+  const currentScope = `${bucket}|${dateFrom ?? ""}|${dateTo ?? ""}`;
+
+  // Close the drill if the REPORT SCOPE moves out from under it.
+  //
+  // `bucket`, `dateFrom` and `dateTo` are in the fetch effect's deps, so a Back/Forward or any other URL
+  // change refetches against the NEW scope while `target` still describes the old cell: its `expected`,
+  // its `bucketStart`, and the period named in its heading. Switching week -> month is the sharp case —
+  // a week-start date sent as a monthly bucket boundary matches nothing, so the dialog renders zero
+  // records and a mismatch banner under a heading naming a week. A drill belongs to the report that
+  // opened it.
+  //
+  // SELF-CONTAINED, unlike the office guard below, and deliberately so: these three ARE fetch-effect
+  // deps, so a scope change re-runs that effect too. Stamping the ref there would re-record the new
+  // scope before this could compare, and the guard would never fire. Stamping on the null -> set
+  // transition instead makes it independent of effect order.
+  useEffect(() => {
+    if (!target) {
+      openedForScope.current = null;
+      return;
+    }
+    if (openedForScope.current === null) {
+      openedForScope.current = currentScope;
+      return;
+    }
+    if (openedForScope.current !== currentScope) onClose();
+  }, [target, currentScope, onClose]);
 
   useEffect(() => {
     if (!target) {
@@ -113,6 +142,7 @@ export function CanvassingEvidenceDialog({
       cancelled = true;
     };
   }, [target, bucket, dateFrom, dateTo]);
+
 
   // Close the drill if the tenant scope moves out from under it.
   //

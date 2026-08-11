@@ -70,9 +70,23 @@ describe("parseCanvassingEvidenceParams — the other params", () => {
     expect(() => parse({ kind: "" })).toThrow(/kind must be one of/);
   });
 
-  it("requires a UUID userId — every drill is one person's cell", () => {
+  // ABSENT is now an office-wide figure (a KPI card, or an "Office totals by period" cell), which is a
+  // real drill rather than a missing parameter. PRESENT-BUT-MALFORMED is still refused, for the same
+  // reason a malformed bucketStart is: silently widening one person's drill to the whole office answers
+  // a different question from the one the cell asked.
+  it("accepts an absent userId as an office-wide drill", () => {
+    expect(parse({ userId: undefined }).userId).toBeUndefined();
+    expect(parse({ userId: "" }).userId).toBeUndefined();
+    expect(parse({ userId: "   " }).userId).toBeUndefined();
+  });
+
+  it("still refuses a malformed userId rather than widening to the office", () => {
     expect(() => parse({ userId: "not-a-uuid" })).toThrow(/userId/);
-    expect(() => parse({ userId: "" })).toThrow(/userId/);
+    expect(() => parse({ userId: "12345" })).toThrow(/userId/);
+  });
+
+  it("keeps a well-formed userId", () => {
+    expect(parse({ userId: USER }).userId).toBe(USER);
   });
 
   // Unlike bucketStart, an unrecognised BUCKET is safe to default: it changes how rows are grouped for the

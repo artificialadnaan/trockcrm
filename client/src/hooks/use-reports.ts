@@ -1639,7 +1639,8 @@ export interface CanvassingEvidenceRecord {
 
 export interface CanvassingEvidenceResult {
   kind: CanvassingEvidenceKind;
-  userId: string;
+  /** Null for an office-wide drill. */
+  userId: string | null;
   bucketStart: string | null;
   /** The figure the drill was opened from. Counted with the report's own predicate, not rows.length. */
   total: number;
@@ -1652,7 +1653,8 @@ export interface CanvassingEvidenceResult {
 /** Fetched on demand when a cell is clicked, rather than prefetched for every cell on the page. */
 export async function fetchCanvassingEvidence(input: {
   kind: CanvassingEvidenceKind;
-  userId: string;
+  /** Omitted for an office-wide figure — a KPI card or an "Office totals by period" cell. */
+  userId?: string | null;
   bucketStart?: string | null;
   bucket: CanvassingBucket;
   dateFrom?: string;
@@ -1661,7 +1663,7 @@ export async function fetchCanvassingEvidence(input: {
 }): Promise<CanvassingEvidenceResult> {
   const params = new URLSearchParams();
   params.set("kind", input.kind);
-  params.set("userId", input.userId);
+  if (input.userId) params.set("userId", input.userId);
   params.set("bucket", input.bucket);
   if (input.bucketStart) params.set("bucketStart", input.bucketStart);
   if (input.dateFrom) params.set("dateFrom", input.dateFrom);

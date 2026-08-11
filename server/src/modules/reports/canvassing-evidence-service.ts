@@ -23,6 +23,7 @@ import {
   CANVASSING_KINDS,
   canvassingKindJoinSql,
   canvassingKindSourceSql,
+  isRealIsoDate,
   type CanvassingBucket,
   type CanvassingKind,
 } from "./canvassing-activity-service.js";
@@ -43,7 +44,14 @@ export type CanvassingEvidenceKind = (typeof CANVASSING_EVIDENCE_KINDS)[number];
 
 export interface CanvassingEvidenceOptions {
   kind: CanvassingEvidenceKind;
-  userId: string;
+  /**
+   * Whose cell, or ABSENT for an office-wide figure.
+   *
+   * The per-person scoreboard is not the only place this report prints a number: the KPI cards and the
+   * "Office totals by period" table are office-wide, and leaving them undrillable left a large share of
+   * the page's figures unable to answer "which records is this?".
+   */
+  userId?: string;
   /** A single period column, or absent for the person's whole-range total. */
   bucketStart?: string;
   bucket: CanvassingBucket;
@@ -71,7 +79,8 @@ export interface CanvassingEvidenceRecord {
 
 export interface CanvassingEvidenceResult {
   kind: CanvassingEvidenceKind;
-  userId: string;
+  /** Null for an office-wide drill. */
+  userId: string | null;
   bucketStart: string | null;
   /** The number this drill was opened from. `rows.length` equals it unless `truncated`. */
   total: number;
@@ -82,26 +91,12 @@ export interface CanvassingEvidenceResult {
 }
 
 const MAX_ROWS = 500;
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/**
- * ISO-shaped AND a date that exists.
- *
- * The regex alone accepts 2026-02-30 and 2026-13-01, which survive all the way to Postgres and fail at the
- * `::date` cast — a 500 where the route means to answer 400. Round-tripping through Date is what separates
- * "looks like a date" from "is one": JS normalises 2026-02-30 to March 2, so the formatted value differs
- * from the input.
- */
-function isRealCalendarDate(value: string): boolean {
-  if (!ISO_DATE.test(value)) return false;
-  const parsed = new Date(`${value}T00:00:00Z`);
-  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
-}
 
 export function parseCanvassingEvidenceParams(query: Record<string, unknown>): {
   kind: CanvassingEvidenceKind;
-  userId: string;
+  userId?: string;
   bucketStart?: string;
   bucket: CanvassingBucket;
 } {
@@ -112,8 +107,15 @@ export function parseCanvassingEvidenceParams(query: Record<string, unknown>): {
   if (!(CANVASSING_EVIDENCE_KINDS as readonly string[]).includes(kindRaw)) {
     throw new Error(`kind must be one of: ${CANVASSING_EVIDENCE_KINDS.join(", ")}`);
   }
-  const userId = pick(query.userId).trim();
-  if (!UUID.test(userId)) throw new Error("userId must be a UUID");
+  // OPTIONAL now: absent means an office-wide figure (a KPI card or an "Office totals by period" cell).
+  // Present-but-malformed is still refused, for the same reason a malformed bucketStart is — silently
+  // widening a person's drill to the whole office answers a different question from the one asked.
+  const userIdRaw = pick(query.userId).trim();
+  let userId: string | undefined;
+  if (userIdRaw.length > 0) {
+    if (!UUID.test(userIdRaw)) throw new Error("userId must be a UUID");
+    userId = userIdRaw;
+  }
 
   const bucketRaw = pick(query.bucket).trim().toLowerCase();
   const bucket = (CANVASSING_BUCKETS as readonly string[]).includes(bucketRaw)
@@ -130,7 +132,7 @@ export function parseCanvassingEvidenceParams(query: Record<string, unknown>): {
   const bucketStartRaw = pick(query.bucketStart).trim();
   let bucketStart: string | undefined;
   if (bucketStartRaw.length > 0) {
-    if (!isRealCalendarDate(bucketStartRaw)) {
+    if (!isRealIsoDate(bucketStartRaw)) {
       throw new Error("bucketStart must be a YYYY-MM-DD calendar date");
     }
     bucketStart = bucketStartRaw;
@@ -194,9 +196,18 @@ function kindDisplaySql(kind: CanvassingKind, alias: SQL): { label: SQL; sublabe
   };
 }
 
-/** The narrowing every record drill applies on top of the shared predicate: this person, this period. */
+/**
+ * The narrowing every record drill applies on top of the shared predicate: this period, and — when the
+ * cell belongs to one person — that person. An office-wide cell narrows by period alone.
+ *
+ * Attribution still applies office-wide: rows with no creator are the UNATTRIBUTED count the report
+ * reports separately, never part of a person-sum, so they stay out of both.
+ */
 function recordNarrowingSql(options: CanvassingEvidenceOptions, alias: SQL, tsExpr: string): SQL {
-  return sql`${alias}.created_by_user_id = ${options.userId}::uuid
+  const person = options.userId
+    ? sql`${alias}.created_by_user_id = ${options.userId}::uuid`
+    : sql`${alias}.created_by_user_id IS NOT NULL`;
+  return sql`${person}
          AND ${bucketFilterSql(options.bucket, tsExpr, options.bucketStart)}`;
 }
 
@@ -214,8 +225,7 @@ async function loadRecordEvidence(
     SELECT ${alias}.id::text AS id, ${label} AS label, ${sublabel} AS sublabel, ${alias}.created_at
       ${canvassingKindJoinSql(kind)}
      WHERE ${source.where}
-       AND ${alias}.created_by_user_id = ${options.userId}::uuid
-       AND ${period}
+       AND ${recordNarrowingSql(options, alias, `${source.alias}.created_at`)}
      ORDER BY ${alias}.created_at DESC
      LIMIT ${MAX_ROWS + 1}
   `);
@@ -229,13 +239,12 @@ async function loadRecordEvidence(
     SELECT COUNT(*)::int AS n
       ${canvassingKindJoinSql(kind)}
      WHERE ${source.where}
-       AND ${alias}.created_by_user_id = ${options.userId}::uuid
-       AND ${period}
+       AND ${recordNarrowingSql(options, alias, `${source.alias}.created_at`)}
   `);
 
   return {
     kind,
-    userId: options.userId,
+    userId: options.userId ?? null,
     bucketStart: options.bucketStart ?? null,
     total: counted.rows[0]?.n ?? 0,
     truncated,
@@ -305,7 +314,7 @@ async function loadCombinedEvidence(
 
   return {
     kind: "all",
-    userId: options.userId,
+    userId: options.userId ?? null,
     bucketStart: options.bucketStart ?? null,
     total: counted.rows[0]?.n ?? 0,
     truncated,
@@ -338,7 +347,7 @@ async function loadNoteEvidence(
     LEFT JOIN contacts ct   ON ct.id = a.contact_id
     LEFT JOIN leads le      ON le.id = a.lead_id
     LEFT JOIN deals de      ON de.id = a.deal_id
-   WHERE a.responsible_user_id = ${options.userId}::uuid
+   WHERE ${options.userId ? sql`a.responsible_user_id = ${options.userId}::uuid` : sql`a.responsible_user_id IS NOT NULL`}
      AND a.type = 'note'
      AND COALESCE(u.is_test_data, false) = false
      AND NOT EXISTS (SELECT 1 FROM users pfu WHERE pfu.id = a.performed_by_user_id AND pfu.is_test_data = true)
@@ -356,12 +365,14 @@ async function loadNoteEvidence(
   // office-wide, so drilling a colleague's notes cell shows the right number and no text, rather than
   // becoming a way around the boundary.
   const restrictToSelf = options.viewerRole === "rep" || options.viewerEffectiveRole === "rep";
-  const mayRead = !restrictToSelf || options.viewerUserId === options.userId;
+  // A rep reads only their OWN note text. On an office-wide drill there is no single person to be, so a
+  // rep gets the count and no text at all — the same boundary the feed draws, not a hole beside it.
+  const mayRead = !restrictToSelf || (options.userId != null && options.viewerUserId === options.userId);
 
   if (!mayRead) {
     return {
       kind: "notes",
-      userId: options.userId,
+      userId: options.userId ?? null,
       bucketStart: options.bucketStart ?? null,
       total: counted.rows[0]?.n ?? 0,
       rows: [],
@@ -386,7 +397,7 @@ async function loadNoteEvidence(
 
   return {
     kind: "notes",
-    userId: options.userId,
+    userId: options.userId ?? null,
     bucketStart: options.bucketStart ?? null,
     total: counted.rows[0]?.n ?? 0,
     truncated,

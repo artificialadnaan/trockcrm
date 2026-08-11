@@ -64,7 +64,11 @@ function NavigationHandle() {
   return null;
 }
 
-function tree(search: string, onClose: () => void) {
+function tree(
+  search: string,
+  onClose: () => void,
+  scope: { bucket?: "week" | "month" | "quarter"; dateFrom?: string; dateTo?: string } = {}
+) {
   return createElement(
     MemoryRouter,
     { initialEntries: [`/reports/performance/canvassing-activity${search}`] },
@@ -74,16 +78,20 @@ function tree(search: string, onClose: () => void) {
       createElement(NavigationHandle),
       createElement(CanvassingEvidenceDialog, {
         target: TARGET,
-        bucket: "week" as const,
-        dateFrom: "2026-06-01",
-        dateTo: "2026-06-30",
+        bucket: scope.bucket ?? ("week" as const),
+        dateFrom: scope.dateFrom ?? "2026-06-01",
+        dateTo: scope.dateTo ?? "2026-06-30",
         onClose,
       })
     )
   );
 }
 
-async function renderDialog(search: string, result: unknown = COMBINED_RESULT, onClose: () => void = () => {}) {
+async function renderDialog(
+  search: string,
+  result: unknown = COMBINED_RESULT,
+  onClose: () => void = () => {}
+) {
   fetchMocks.fetchCanvassingEvidence.mockResolvedValue(result);
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -183,6 +191,47 @@ describe("CanvassingEvidenceDialog — the office scope moving under an open dri
 
     expect(onClose).not.toHaveBeenCalled();
     expect(body.textContent).toContain("Acme Roofing");
+  });
+});
+
+// The same failure as the office case, reached through a different parameter. bucket/dateFrom/dateTo are
+// in the fetch effect's deps, so a filter change refetches against the NEW scope while the target still
+// describes the old cell — its expected count, its bucketStart, and the period named in its heading.
+describe("CanvassingEvidenceDialog — the report scope moving under an open drill", () => {
+  it("closes when the bucket changes from week to month", async () => {
+    const onClose = vi.fn();
+    await renderDialog("?officeId=office-atlanta", COMBINED_RESULT, onClose);
+    expect(onClose).not.toHaveBeenCalled();
+
+    // The sharp case: a week-start date sent as a monthly bucket boundary matches nothing, so the dialog
+    // would render zero records and a mismatch banner under a heading naming a week.
+    await act(async () => {
+      root!.render(tree("?officeId=office-atlanta", onClose, { bucket: "month" }));
+    });
+
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("closes when the date range changes", async () => {
+    const onClose = vi.fn();
+    await renderDialog("?officeId=office-atlanta", COMBINED_RESULT, onClose);
+
+    await act(async () => {
+      root!.render(tree("?officeId=office-atlanta", onClose, { dateFrom: "2026-05-01" }));
+    });
+
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  it("stays open when the report scope is unchanged", async () => {
+    const onClose = vi.fn();
+    await renderDialog("?officeId=office-atlanta", COMBINED_RESULT, onClose);
+
+    await act(async () => {
+      root!.render(tree("?officeId=office-atlanta", onClose));
+    });
+
+    expect(onClose).not.toHaveBeenCalled();
   });
 });
 

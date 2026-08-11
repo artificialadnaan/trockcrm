@@ -12,6 +12,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { PageHeader } from "@/components/layout/page-header";
+import { Card, CardContent } from "@/components/ui/card";
 import { ReportFilterBar, useReportFilters } from "@/components/reports/report-filter-bar";
 import { ExportExcelButton } from "@/components/reports/export-excel-button";
 import { useAuth } from "@/lib/auth";
@@ -96,6 +97,33 @@ function formatExportTimestamp(iso: string) {
 
 function labelForType(type: string) {
   return type.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+/**
+ * KpiCard's markup with a drillable number.
+ *
+ * Local rather than a change to the shared KpiCard: that component takes `value: string` and is rendered
+ * by several other reports, none of which have an evidence endpoint to open.
+ */
+function DrillKpiCard({
+  label,
+  value,
+  onOpen,
+}: {
+  label: string;
+  value: number;
+  onOpen: (() => void) | null;
+}) {
+  return (
+    <Card className="border-slate-200 bg-white">
+      <CardContent className="p-5">
+        <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-500">{label}</p>
+        <div className="mt-2 text-2xl font-black tracking-tight text-slate-950">
+          {onOpen ? <DrillNumber value={value} onOpen={onOpen} className="text-slate-950" /> : formatNumber(value)}
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
 /**
@@ -473,12 +501,39 @@ function CanvassingActivityReportView() {
           </div>
 
           <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-6">
-            <KpiCard label="New Companies" value={formatNumber(data.totals.company)} />
-            <KpiCard label="New Properties" value={formatNumber(data.totals.property)} />
-            <KpiCard label="New Contacts" value={formatNumber(data.totals.contact)} />
-            <KpiCard label="New Leads" value={formatNumber(data.totals.lead)} />
-            <KpiCard label="Total Entered" value={formatNumber(data.totals.total)} />
-            <KpiCard label="Notes Logged" value={formatNumber(data.notesLogged)} />
+            {/*
+              Drillable only when the report is NOT narrowed to particular people. These figures follow the
+              person filter, but an office-wide drill carries no userId and would answer for EVERYONE — a
+              different question from the one the cell is showing. The evidence endpoint narrows to one
+              person or to none, so a multi-person selection has no faithful drill and stays plain text.
+            */}
+            {([
+              ["New Companies", "company", data.totals.company],
+              ["New Properties", "property", data.totals.property],
+              ["New Contacts", "contact", data.totals.contact],
+              ["New Leads", "lead", data.totals.lead],
+              ["Total Entered", "all", data.totals.total],
+              ["Notes Logged", "notes", data.notesLogged],
+            ] as const).map(([label, kind, value]) => (
+              <DrillKpiCard
+                key={label}
+                label={label}
+                value={value}
+                onOpen={
+                  filteredToPeople
+                    ? null
+                    : () =>
+                        setEvidenceTarget({
+                          kind,
+                          userId: null,
+                          personName: "Office-wide",
+                          bucketStart: null,
+                          periodLabel: null,
+                          expected: value,
+                        })
+                }
+              />
+            ))}
           </section>
 
           <ReportPanel title={`New records by ${bucket}`}>
@@ -767,11 +822,33 @@ function CanvassingActivityReportView() {
                             </span>
                           ) : null}
                         </td>
-                        <td>{formatNumber(row.counts.company)}</td>
-                        <td>{formatNumber(row.counts.property)}</td>
-                        <td>{formatNumber(row.counts.contact)}</td>
-                        <td>{formatNumber(row.counts.lead)}</td>
-                        <td className="font-semibold text-slate-900">{formatNumber(row.counts.total)}</td>
+                        {/* Same rule as the KPI cards: an office-wide drill is faithful only when the
+                            report is not narrowed to particular people. */}
+                        {(["company", "property", "contact", "lead", "all"] as const).map((kind) => {
+                          const value = kind === "all" ? row.counts.total : row.counts[kind];
+                          return (
+                            <td key={kind} className={kind === "all" ? "font-semibold text-slate-900" : undefined}>
+                              {filteredToPeople ? (
+                                formatNumber(value)
+                              ) : (
+                                <DrillNumber
+                                  value={value}
+                                  className={kind === "all" ? "font-semibold text-slate-900" : undefined}
+                                  onOpen={() =>
+                                    setEvidenceTarget({
+                                      kind,
+                                      userId: null,
+                                      personName: "Office-wide",
+                                      bucketStart: row.bucketStart,
+                                      periodLabel: row.label,
+                                      expected: value,
+                                    })
+                                  }
+                                />
+                              )}
+                            </td>
+                          );
+                        })}
                         {filteredToPeople ? null : (
                           <td className="text-slate-500">{formatNumber(row.unattributed.total)}</td>
                         )}

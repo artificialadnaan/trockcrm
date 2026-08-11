@@ -215,7 +215,7 @@ const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
  * this normalizer promises. Round-tripping through Date catches both the out-of-range month/day and the
  * silently-rolled-over ones (Feb 30 -> Mar 2).
  */
-function isRealIsoDate(value: string): boolean {
+export function isRealIsoDate(value: string): boolean {
   if (!ISO_DATE.test(value)) return false;
   // Postgres has no year zero, so `0000-01-01::date` errors even though JavaScript round-trips it happily
   // — a stale bookmark would 500 rather than fall back, which is the failure this function exists to stop.
