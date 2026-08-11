@@ -234,7 +234,12 @@ function bucketStartsInRange(bucket: CanvassingBucket, from: string, to: string)
   // Bounded independently of the loop body: a malformed range must not be able to spin here.
   // The range is already clamped to MAX_RANGE_DAYS by normalizeCanvassingFilters, so this cannot truncate a
   // real request; it is a backstop against a caller constructing filters directly.
-  for (let cursor = startOf(from); cursor <= to && out.length < 4096; cursor = next(cursor)) out.push(cursor);
+  // Stops before a five-digit year: 9999-12-31 is a legal bound, and advancing past it would emit
+  // "10000-01-01", which no consumer of these keys can parse.
+  for (let cursor = startOf(from); cursor <= to && out.length < 4096; cursor = next(cursor)) {
+    out.push(cursor);
+    if (next(cursor).length > 10) break;
+  }
   return out;
 }
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -285,10 +290,14 @@ export function normalizeCanvassingFilters(query: Record<string, unknown>): Canv
   const earliest = shiftBusinessDate(to, -(MAX_RANGE_DAYS - 1));
   if (from < earliest) from = earliest;
 
-  const userIds = pick(query.userIds)
+  const rawUserIds = pick(query.userIds)
     .split(",")
     .map((value) => value.trim())
-    .filter((value) => UUID.test(value));
+    .filter((value) => value.length > 0);
+  const userIds = rawUserIds.filter((value) => UUID.test(value));
+  // A selector that was PRESENT but resolved to nothing stays a filter matching nothing. Dropping it
+  // entirely would turn a corrupted person-filtered bookmark into a whole-office report.
+  const userIdsWereRequested = rawUserIds.length > 0;
   const splitList = (raw: string) =>
     raw.split(",").map((value) => value.trim()).filter((value) => value.length > 0 && value.length <= 320);
   const ownerNames = splitList(pick(query.owners) || pick(query.ownerNames));
@@ -301,7 +310,7 @@ export function normalizeCanvassingFilters(query: Record<string, unknown>): Canv
     dateFrom: from,
     dateTo: to,
     bucket,
-    userIds: userIds.length > 0 ? userIds : undefined,
+    userIds: userIds.length > 0 ? userIds : userIdsWereRequested ? [UNRESOLVABLE_OWNER] : undefined,
     ownerNames: ownerNames.length > 0 ? ownerNames : undefined,
     ownerEmails: ownerEmails.length > 0 ? ownerEmails : undefined,
     notesLimit,
@@ -467,6 +476,10 @@ async function resolveOwnerSelection(
   const names = filters.ownerNames ?? [];
   const emails = filters.ownerEmails ?? [];
   if (names.length === 0 && emails.length === 0) return filters;
+  // Explicit ids win outright. The filter bar sends ownerIds, owners AND ownerEmails together, so when two
+  // office members share a display name, unioning the name matches would widen a deliberate selection of
+  // one of them to both — the id says which one was actually clicked.
+  if ((filters.userIds?.length ?? 0) > 0) return filters;
 
   const membership = filters.officeId
     ? sql`(u.office_id = ${filters.officeId} OR EXISTS (
@@ -490,8 +503,7 @@ async function resolveOwnerSelection(
   // userIds empty, which every downstream reader takes as "no person filter" — so a stale ?owners=Jane link
   // for someone who has left the office silently showed the ENTIRE office under Jane's name. A sentinel id
   // keeps it a filter that simply matches nothing.
-  const merged = [...new Set([...(filters.userIds ?? []), ...resolved])];
-  return { ...filters, userIds: merged.length > 0 ? merged : [UNRESOLVABLE_OWNER] };
+  return { ...filters, userIds: resolved.length > 0 ? resolved : [UNRESOLVABLE_OWNER] };
 }
 
 export async function getCanvassingActivityReport(

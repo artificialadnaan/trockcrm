@@ -918,3 +918,50 @@ describe("canvassing activity — an owner filter that matches nobody", () => {
     expect(report.people.map((p) => p.userId)).toEqual([CAL]);
   });
 });
+
+describe("canvassing activity — a present-but-unresolvable owner filter", () => {
+  // The same defect in three sibling paths, found one round apart. Every one of them had to answer the
+  // same question — "was a selector PRESENT?" — and dropping the values silently turned a person-filtered
+  // link into a whole-office report.
+  it("keeps a bookmark whose ownerIds are all malformed as a filter matching nothing", () => {
+    const parsed = normalizeCanvassingFilters({ userIds: "not-a-uuid,also-bad" });
+    expect(parsed.userIds).toBeDefined();
+    expect(parsed.userIds).not.toEqual([]);
+  });
+
+  it("returns an empty report for that bookmark, not the whole office", async () => {
+    const report = await getCanvassingActivityReport(tdb, {
+      ...normalizeCanvassingFilters({ dateFrom: "2026-06-01", dateTo: "2026-06-30", userIds: "not-a-uuid" }),
+      officeId: OFF,
+    });
+
+    expect(report.people).toEqual([]);
+    expect(report.totals.total).toBe(0);
+  });
+
+  it("leaves an ABSENT selector as no filter at all", () => {
+    expect(normalizeCanvassingFilters({}).userIds).toBeUndefined();
+  });
+});
+
+describe("canvassing activity — explicit ids beat a shared display name", () => {
+  // The picker sends ownerIds, owners AND ownerEmails together. Unioning the name matches meant that when
+  // two office members share a display name, deliberately selecting one of them silently reported both.
+  it("does not widen an explicit id to a namesake", async () => {
+    const TWIN = U("7b10");
+    await pg.exec(`
+      INSERT INTO public.users (id, email, display_name, role, office_id, is_active)
+      VALUES ('${TWIN}', 'caleb.stone.2@example.com', 'Caleb Stone', 'rep', '${OFF}', true);
+    `);
+
+    try {
+      const report = await getCanvassingActivityReport(
+        tdb,
+        filters({ officeId: OFF, userIds: [CAL], ownerNames: ["Caleb Stone"] })
+      );
+      expect(report.people.map((p) => p.userId)).toEqual([CAL]);
+    } finally {
+      await pg.exec(`DELETE FROM public.users WHERE id = '${TWIN}';`);
+    }
+  });
+});

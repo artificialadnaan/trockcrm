@@ -129,6 +129,9 @@ describe("GET /reports/canvassing-activity — allowlist guard wiring", () => {
     expect(filters.bucket).toBe("week");
     expect(filters.dateFrom).toBe("2026-06-01");
     expect(filters.dateTo).toBe("2026-06-30");
-    expect(filters.userIds).toBeUndefined();
+    // A userIds param that was PRESENT but entirely malformed stays a filter — one that matches nobody.
+    // It used to normalise to undefined, which downstream reads as "no filter", so a corrupted
+    // person-filtered bookmark quietly rendered the whole office.
+    expect(filters.userIds).toEqual(["00000000-0000-0000-0000-000000000000"]);
   });
 });

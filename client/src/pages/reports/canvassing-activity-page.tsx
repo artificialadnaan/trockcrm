@@ -254,14 +254,20 @@ function CanvassingActivityReportView() {
         columns: [
           { key: "when", header: "When" },
           { key: "person", header: "Person" },
+          { key: "loggedBy", header: "Logged by (if not the same person)" },
           { key: "type", header: "Type" },
           { key: "subject", header: "Subject" },
           { key: "body", header: "Body" },
           { key: "target", header: "Attached to" },
         ],
         rows: data.notes.map((note) => ({
-          when: note.occurredAt,
+          // Central, matching the feed and the zone the server filtered in. A raw UTC ISO string put a note
+          // near midnight on a different calendar day in the workbook than on the page it came from.
+          when: formatClock(note.occurredAt),
           person: note.userName ?? "",
+          // The feed distinguishes who a note is ATTRIBUTED to from who actually entered it; a workbook
+          // without that column reads every on-behalf-of note as the assignee's own work.
+          loggedBy: note.performedByName ?? "",
           type: labelForType(note.type),
           subject: note.subject ?? "",
           body: note.body ?? "",
@@ -485,10 +491,19 @@ function CanvassingActivityReportView() {
                     ? "New companies, properties, contacts and leads combined."
                     : `New ${KIND_LABELS[gridKind].toLowerCase()} only.`}{" "}
                   {rangeReachesBeforeAttribution ? (
-                    <>
-                      Periods before {formatDay(data.attributionStartHint)} read as zero because no creator was
-                      recorded then — only zeros on or after that date mean the person entered nothing.
-                    </>
+                    data.attributionStartHint ? (
+                      <>
+                        Periods before {formatDay(data.attributionStartHint)} read as zero because no creator
+                        was recorded then — only zeros on or after that date mean the person entered nothing.
+                      </>
+                    ) : (
+                      // Nothing has been attributed at all yet, so every zero here is "not recorded" and
+                      // none of them mean anyone was idle. Naming a date would be worse than naming none.
+                      <>
+                        No record in this office names its author yet, so every zero below means the
+                        information was never recorded — not that nothing was entered.
+                      </>
+                    )
                   ) : (
                     <>A zero is a real zero — that person entered nothing in that period.</>
                   )}
