@@ -181,6 +181,111 @@ describe("canvassing drill-to-evidence reconciles with every cell", () => {
     }
   });
 
+  // The grid's DEFAULT mode is `all`, whose cell is counts.total. It used to drill as kind=company, so any
+  // cell holding a property, contact or lead listed a fraction of its records and then told the reader the
+  // drill disagreed with the report — on nearly every populated cell, in the mode most people open first.
+  it("agrees with each person's COMBINED figure, which is the mode the grid opens in", async () => {
+    const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF }));
+
+    for (const person of report.people) {
+      const drill = await getCanvassingEvidence(tdb, {
+        kind: "all",
+        userId: person.userId,
+        bucket: "week",
+        dateFrom: "2026-06-01",
+        dateTo: "2026-06-30",
+        officeId: OFF,
+        viewerRole: "director",
+      });
+      expect(drill.total, `${person.displayName}/all`).toBe(person.counts.total);
+      expect(drill.rows.length, `${person.displayName}/all rows`).toBe(person.counts.total);
+    }
+  });
+
+  it("agrees with each COMBINED period cell", async () => {
+    const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF, bucket: "week" }));
+
+    for (const bucketRow of report.buckets) {
+      for (const cell of bucketRow.perUser) {
+        const drill = await getCanvassingEvidence(tdb, {
+          kind: "all",
+          userId: cell.userId,
+          bucketStart: bucketRow.bucketStart,
+          bucket: "week",
+          dateFrom: "2026-06-01",
+          dateTo: "2026-06-30",
+          officeId: OFF,
+          viewerRole: "director",
+        });
+        expect(drill.total, `${bucketRow.bucketStart}/${cell.userId}/all`).toBe(cell.counts.total);
+      }
+    }
+  });
+
+  // Stronger than matching the total: the combined list must be exactly the four single-kind lists, not
+  // merely the same SIZE as their sum. A union that double-counted one kind and dropped another would
+  // satisfy the count assertions above and still show the wrong records.
+  it("returns exactly the union of the four single-kind drills, each row labelled and linked by its kind", async () => {
+    const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF }));
+    const hrefBase = { company: "/companies", property: "/properties", contact: "/contacts", lead: "/leads" };
+
+    for (const person of report.people) {
+      const perKind: Array<{ id: string; kind: string }> = [];
+      for (const kind of CANVASSING_KINDS) {
+        const one = await getCanvassingEvidence(tdb, {
+          kind,
+          userId: person.userId,
+          bucket: "week",
+          dateFrom: "2026-06-01",
+          dateTo: "2026-06-30",
+          officeId: OFF,
+          viewerRole: "director",
+        });
+        for (const row of one.rows) perKind.push({ id: row.id, kind });
+      }
+
+      const combined = await getCanvassingEvidence(tdb, {
+        kind: "all",
+        userId: person.userId,
+        bucket: "week",
+        dateFrom: "2026-06-01",
+        dateTo: "2026-06-30",
+        officeId: OFF,
+        viewerRole: "director",
+      });
+
+      const key = (row: { id: string; kind?: string }) => `${row.kind}:${row.id}`;
+      expect(combined.rows.map(key).sort(), person.displayName).toEqual(perKind.map(key).sort());
+
+      // Every row says which kind it is and points at that kind's detail route — a combined list where
+      // "Acme Roofing" could be a company or a lead is unreadable, and a wrong base is a 404.
+      for (const row of combined.rows) {
+        expect(row.kind, `${person.displayName}/${row.id} kind`).toBeTruthy();
+        expect(row.href).toBe(`${hrefBase[row.kind as keyof typeof hrefBase]}/${row.id}`);
+      }
+    }
+  });
+
+  it("orders the combined list newest first across all four tables", async () => {
+    const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF }));
+    const busiest = [...report.people].sort((a, b) => b.counts.total - a.counts.total)[0]!;
+
+    const drill = await getCanvassingEvidence(tdb, {
+      kind: "all",
+      userId: busiest.userId,
+      bucket: "week",
+      dateFrom: "2026-06-01",
+      dateTo: "2026-06-30",
+      officeId: OFF,
+      viewerRole: "director",
+    });
+
+    const times = drill.rows.map((row) => Date.parse(row.occurredAt));
+    expect(times).toEqual([...times].sort((a, b) => b - a));
+    // And it genuinely spans more than one table, or this proves nothing about cross-table ordering.
+    expect(new Set(drill.rows.map((row) => row.kind)).size).toBeGreaterThan(1);
+  });
+
   it("agrees with the notes figure", async () => {
     const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF, viewerRole: "director" }));
 

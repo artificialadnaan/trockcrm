@@ -548,10 +548,25 @@ function CanvassingActivityReportView() {
                             />
                           </td>
                         ))}
-                        {/* The total is a sum of the four beside it, so it has no single record list of its
-                            own — left as plain text rather than opening a dialog that would have to invent
-                            one. */}
-                        <td className="font-semibold text-slate-900">{formatNumber(person.counts.total)}</td>
+                        {/* The total is the four beside it summed, so its drill is the four UNIONed — the
+                            same population, not an invented one. That is why it is `all` rather than a
+                            re-count: counts.total and the combined evidence read the same row sources. */}
+                        <td className="font-semibold text-slate-900">
+                          <DrillNumber
+                            value={person.counts.total}
+                            className="font-semibold text-slate-900"
+                            onOpen={() =>
+                              setEvidenceTarget({
+                                kind: "all",
+                                userId: person.userId,
+                                personName: person.displayName,
+                                bucketStart: null,
+                                periodLabel: null,
+                                expected: person.counts.total,
+                              })
+                            }
+                          />
+                        </td>
                         <td>
                           <DrillNumber
                             value={person.notesLogged}
@@ -629,7 +644,10 @@ function CanvassingActivityReportView() {
                                 className={value === 0 ? "text-slate-400" : "text-slate-900"}
                                 onOpen={() =>
                                   setEvidenceTarget({
-                                    kind: gridKind === "all" ? "company" : gridKind,
+                                    // `all` is its own evidence kind. Sending `company` for a combined cell
+                                    // listed companies only and then flagged a mismatch against a figure
+                                    // that counted all four — on every cell holding anything else.
+                                    kind: gridKind,
                                     userId: person.userId,
                                     personName: person.displayName,
                                     bucketStart: row.bucketStart,
@@ -641,12 +659,31 @@ function CanvassingActivityReportView() {
                             </td>
                           );
                         })}
+                        {/* The row's whole-range figure for whichever kind the grid is showing — drills the
+                            same way its period cells do, with no bucket. */}
                         <td className="px-2 text-right font-semibold text-slate-900">
-                          {formatNumber(
-                            gridKind === "notes"
-                              ? person.notesLogged
-                              : person.counts[gridKind === "all" ? "total" : gridKind]
-                          )}
+                          {(() => {
+                            const rowTotal =
+                              gridKind === "notes"
+                                ? person.notesLogged
+                                : person.counts[gridKind === "all" ? "total" : gridKind];
+                            return (
+                              <DrillNumber
+                                value={rowTotal}
+                                className="font-semibold text-slate-900"
+                                onOpen={() =>
+                                  setEvidenceTarget({
+                                    kind: gridKind,
+                                    userId: person.userId,
+                                    personName: person.displayName,
+                                    bucketStart: null,
+                                    periodLabel: null,
+                                    expected: rowTotal,
+                                  })
+                                }
+                              />
+                            );
+                          })()}
                         </td>
                       </tr>
                     ))}

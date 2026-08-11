@@ -29,8 +29,16 @@ import {
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
-/** The five drillable columns: the four record kinds, plus the notes count. */
-export const CANVASSING_EVIDENCE_KINDS = [...CANVASSING_KINDS, "notes"] as const;
+/**
+ * The six drillable columns: the four record kinds, the notes count, and `all`.
+ *
+ * `all` is the grid's default mode, where a cell shows counts.total — the four kinds summed. It has to be
+ * its own evidence kind rather than an alias for one of them: sending `company` for a cell holding
+ * companies AND properties AND contacts lists a fraction of the records and then reports a mismatch
+ * against the figure it was opened from, on nearly every cell. That is the precise failure this drill
+ * exists to make impossible, so the combined column returns a combined list.
+ */
+export const CANVASSING_EVIDENCE_KINDS = [...CANVASSING_KINDS, "all", "notes"] as const;
 export type CanvassingEvidenceKind = (typeof CANVASSING_EVIDENCE_KINDS)[number];
 
 export interface CanvassingEvidenceOptions {
@@ -54,6 +62,11 @@ export interface CanvassingEvidenceRecord {
   sublabel: string | null;
   occurredAt: string;
   href: string | null;
+  /**
+   * Which of the four the row is. Only meaningful for the combined `all` drill, where the list mixes
+   * kinds and "Acme Roofing" alone does not say whether it is a company or a lead.
+   */
+  kind?: CanvassingKind;
 }
 
 export interface CanvassingEvidenceResult {
@@ -120,7 +133,44 @@ export async function getCanvassingEvidence(
   options: CanvassingEvidenceOptions
 ): Promise<CanvassingEvidenceResult> {
   if (options.kind === "notes") return loadNoteEvidence(tenantDb, options);
+  if (options.kind === "all") return loadCombinedEvidence(tenantDb, options);
   return loadRecordEvidence(tenantDb, options, options.kind);
+}
+
+/** Where each kind's detail page lives. Kept beside the label rules so a new kind cannot add one and not the other. */
+const KIND_HREF_BASE: Record<CanvassingKind, string> = {
+  company: "/companies",
+  property: "/properties",
+  contact: "/contacts",
+  lead: "/leads",
+};
+
+/**
+ * The display label and sub-label per kind. Contacts have no single name column; leads and companies do.
+ *
+ * Both expressions are text in every branch, which is what lets the combined drill UNION the four.
+ */
+function kindDisplaySql(kind: CanvassingKind, alias: SQL): { label: SQL; sublabel: SQL } {
+  return {
+    label:
+      kind === "contact"
+        ? sql`NULLIF(BTRIM(CONCAT_WS(' ', ${alias}.first_name, ${alias}.last_name)), '')`
+        : sql`${alias}.name`,
+    sublabel:
+      kind === "property"
+        ? sql`NULLIF(BTRIM(CONCAT_WS(', ', ${alias}.address, ${alias}.city)), '')`
+        : kind === "contact"
+          ? sql`${alias}.company_name`
+          : kind === "lead"
+            ? sql`${alias}.status::text`
+            : sql`${alias}.category::text`,
+  };
+}
+
+/** The narrowing every record drill applies on top of the shared predicate: this person, this period. */
+function recordNarrowingSql(options: CanvassingEvidenceOptions, alias: SQL, tsExpr: string): SQL {
+  return sql`${alias}.created_by_user_id = ${options.userId}::uuid
+         AND ${bucketFilterSql(options.bucket, tsExpr, options.bucketStart)}`;
 }
 
 async function loadRecordEvidence(
@@ -131,20 +181,7 @@ async function loadRecordEvidence(
   const source = canvassingKindSourceSql(kind, options);
   const alias = sql.raw(source.alias);
   const period = bucketFilterSql(options.bucket, `${source.alias}.created_at`, options.bucketStart);
-
-  // The display label per kind. Contacts have no single name column; leads and companies do.
-  const label =
-    kind === "contact"
-      ? sql`NULLIF(BTRIM(CONCAT_WS(' ', ${alias}.first_name, ${alias}.last_name)), '')`
-      : sql`${alias}.name`;
-  const sublabel =
-    kind === "property"
-      ? sql`NULLIF(BTRIM(CONCAT_WS(', ', ${alias}.address, ${alias}.city)), '')`
-      : kind === "contact"
-        ? sql`${alias}.company_name`
-        : kind === "lead"
-          ? sql`${alias}.status::text`
-          : sql`${alias}.category::text`;
+  const { label, sublabel } = kindDisplaySql(kind, alias);
 
   const rows = await tenantDb.execute<{ id: string; label: string | null; sublabel: string | null; created_at: string | Date }>(sql`
     SELECT ${alias}.id::text AS id, ${label} AS label, ${sublabel} AS sublabel, ${alias}.created_at
@@ -169,7 +206,6 @@ async function loadRecordEvidence(
        AND ${period}
   `);
 
-  const base = { company: "/companies", property: "/properties", contact: "/contacts", lead: "/leads" }[kind];
   return {
     kind,
     userId: options.userId,
@@ -179,10 +215,81 @@ async function loadRecordEvidence(
     restrictedToSelf: false,
     rows: kept.map((row) => ({
       id: row.id,
+      kind,
       label: row.label ?? "(untitled)",
       sublabel: row.sublabel,
       occurredAt: toIso(row.created_at),
-      href: `${base}/${row.id}`,
+      href: `${KIND_HREF_BASE[kind]}/${row.id}`,
+    })),
+  };
+}
+
+/**
+ * The combined drill behind an `all`-mode cell: the four record kinds in one list, newest first.
+ *
+ * Built as a UNION ALL over the SAME per-kind sources the single-kind drills use, which is what makes it
+ * reconcile. The grid's `all` cell is counts.total, and counts.total is accumulated from those same four
+ * sources in the report service — so this list and that figure are the same population by construction
+ * rather than by two hand-written predicates happening to agree.
+ *
+ * ORDER BY carries `id` as a tiebreak: four tables can produce identical created_at values, and without a
+ * total order a truncated list would drop an arbitrary row from the tie while the count kept it.
+ */
+async function loadCombinedEvidence(
+  tenantDb: TenantDb,
+  options: CanvassingEvidenceOptions
+): Promise<CanvassingEvidenceResult> {
+  const parts = CANVASSING_KINDS.map((kind) => {
+    const source = canvassingKindSourceSql(kind, options);
+    const alias = sql.raw(source.alias);
+    const { label, sublabel } = kindDisplaySql(kind, alias);
+    // Safe as raw: `kind` comes from the CANVASSING_KINDS literal tuple, never from the request.
+    return sql`
+      SELECT ${sql.raw(`'${kind}'`)}::text AS kind,
+             ${alias}.id::text AS id,
+             ${label} AS label,
+             ${sublabel} AS sublabel,
+             ${alias}.created_at
+        ${canvassingKindJoinSql(kind)}
+       WHERE ${source.where}
+         AND ${recordNarrowingSql(options, alias, `${source.alias}.created_at`)}`;
+  });
+  const union = sql.join(parts, sql` UNION ALL `);
+
+  const rows = await tenantDb.execute<{
+    kind: CanvassingKind;
+    id: string;
+    label: string | null;
+    sublabel: string | null;
+    created_at: string | Date;
+  }>(sql`
+    SELECT * FROM (${union}) AS combined
+     ORDER BY combined.created_at DESC, combined.id DESC
+     LIMIT ${MAX_ROWS + 1}
+  `);
+
+  const truncated = rows.rows.length > MAX_ROWS;
+  const kept = truncated ? rows.rows.slice(0, MAX_ROWS) : rows.rows;
+
+  // Same reason as the single-kind drill: counted with the predicate, not measured off a capped list.
+  const counted = await tenantDb.execute<{ n: number }>(sql`
+    SELECT COUNT(*)::int AS n FROM (${union}) AS combined
+  `);
+
+  return {
+    kind: "all",
+    userId: options.userId,
+    bucketStart: options.bucketStart ?? null,
+    total: counted.rows[0]?.n ?? 0,
+    truncated,
+    restrictedToSelf: false,
+    rows: kept.map((row) => ({
+      id: row.id,
+      kind: row.kind,
+      label: row.label ?? "(untitled)",
+      sublabel: row.sublabel,
+      occurredAt: toIso(row.created_at),
+      href: `${KIND_HREF_BASE[row.kind]}/${row.id}`,
     })),
   };
 }

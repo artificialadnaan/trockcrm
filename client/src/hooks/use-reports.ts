@@ -1624,7 +1624,8 @@ export function useCanvassingActivityReport(options: CanvassingActivityQueryOpti
  * Canvassing Activity drill-to-evidence — the records behind ONE number.
  * ---------------------------------------------------------------------------------------------- */
 
-export type CanvassingEvidenceKind = CanvassingKind | "notes";
+/** `all` is the grid's combined column — counts.total — and returns the four kinds in one list. */
+export type CanvassingEvidenceKind = CanvassingKind | "all" | "notes";
 
 export interface CanvassingEvidenceRecord {
   id: string;
@@ -1632,6 +1633,8 @@ export interface CanvassingEvidenceRecord {
   sublabel: string | null;
   occurredAt: string;
   href: string | null;
+  /** Which of the four this row is. Present on record drills; the combined list needs it to be readable. */
+  kind?: CanvassingKind;
 }
 
 export interface CanvassingEvidenceResult {

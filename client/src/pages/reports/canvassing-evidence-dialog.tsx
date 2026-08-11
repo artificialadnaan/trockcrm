@@ -8,6 +8,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Loader2 } from "lucide-react";
+import { useOfficeScopedHref } from "@/hooks/use-office-scope";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
   fetchCanvassingEvidence,
@@ -32,7 +33,16 @@ const KIND_NOUNS: Record<CanvassingEvidenceKind, string> = {
   property: "properties",
   contact: "contacts",
   lead: "leads",
+  all: "records",
   notes: "notes",
+};
+
+/** Singular, for the badge the combined list puts on each row so a mixed list stays readable. */
+const KIND_BADGES: Record<string, string> = {
+  company: "Company",
+  property: "Property",
+  contact: "Contact",
+  lead: "Lead",
 };
 
 function formatWhen(iso: string) {
@@ -61,6 +71,10 @@ export function CanvassingEvidenceDialog({
   const [data, setData] = useState<CanvassingEvidenceResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The evidence REQUEST is already office-scoped (api() derives x-office-id from ?officeId), so a bare
+  // href on the way out pointed the detail page at the viewer's default tenant instead — the record either
+  // does not exist there or is a different one. Same rule, and the same helper, as every report deal link.
+  const scopedHref = useOfficeScopedHref();
 
   useEffect(() => {
     if (!target) {
@@ -154,16 +168,24 @@ export function CanvassingEvidenceDialog({
 
             <ul className="divide-y divide-slate-100">
               {data.rows.map((row) => (
-                <li key={row.id} className="py-3">
+                <li key={`${row.kind ?? target?.kind}-${row.id}`} className="py-3">
                   <div className="flex items-start justify-between gap-4">
                     <div className="min-w-0">
-                      {row.href ? (
-                        <Link to={row.href} className="text-sm font-semibold text-slate-900 hover:text-brand-red">
-                          {row.label}
-                        </Link>
-                      ) : (
-                        <p className="text-sm font-semibold text-slate-900">{row.label}</p>
-                      )}
+                      <div className="flex flex-wrap items-baseline gap-2">
+                        {row.href ? (
+                          <Link to={scopedHref(row.href)} className="text-sm font-semibold text-slate-900 hover:text-brand-red">
+                            {row.label}
+                          </Link>
+                        ) : (
+                          <p className="text-sm font-semibold text-slate-900">{row.label}</p>
+                        )}
+                        {/* Only on the combined list: "Acme Roofing" alone does not say company or lead. */}
+                        {target?.kind === "all" && row.kind ? (
+                          <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-600">
+                            {KIND_BADGES[row.kind] ?? row.kind}
+                          </span>
+                        ) : null}
+                      </div>
                       {row.sublabel ? (
                         <p className="mt-1 whitespace-pre-wrap text-sm text-slate-600">{row.sublabel}</p>
                       ) : null}
