@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, sql, type SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   dealChangeOrders,
@@ -67,6 +67,11 @@ export interface ReturnToOpportunityInput {
    * both numbers, so both are checked.
    */
   acknowledgedCommissionRowCount?: number | null;
+  /**
+   * The tenant this move-back belongs to, used to scope the SHARED public.job_queue. Optional so existing
+   * callers keep working; when absent the queue predicates behave exactly as they did before.
+   */
+  officeId?: string | null;
   auditContext?: AuditContext;
 }
 
@@ -141,8 +146,15 @@ function buildBidBoardDetachUpdate(
     // the gap either: it can only find a deal that already carries an identity, which is itself enough
     // to have made the first answer true. Written as preserve-the-stored-answer because that is the
     // intent; if a future path ever does re-link a still-detached deal, this is the line to revisit.
+    // STICKY-ONCE-TRUE, not simply "preserve on a repeat". A repeat detach keeps the stored answer, but
+    // a newly OBSERVED true still has to win: a deal detached while CRM-only (stored false) can start a
+    // fresh RFP create, and if that create is already in flight when the second move-back runs,
+    // createInFlight makes wasBidBoardLinked true. Preserving the old false there suppressed the standing
+    // "delete this project from the Bid Board" banner after reload for exactly the deal whose project the
+    // in-flight POST was about to create — leaving the warning in the transient toast and the audit
+    // metadata only.
     bidBoardDetachedWasLinked:
-      alreadyDetached ? previouslyDetachedFromLinkedProject : wasBidBoardLinked,
+      alreadyDetached ? previouslyDetachedFromLinkedProject || wasBidBoardLinked : wasBidBoardLinked,
     isBidBoardOwned: false,
     bidBoardStageSlug: null,
     bidBoardStageFamily: null,
@@ -275,7 +287,27 @@ function buildRfpCycleReset() {
  * also refuses to write RFP state back onto a deal that is no longer in the round the job was built for
  * (worker/src/jobs/rfp-request-delivery.ts). Neither half suffices alone.
  */
-async function cancelQueuedRfpJobs(tenantDb: TenantDb, dealId: string): Promise<number> {
+/**
+ * `public.job_queue` is SHARED across every office, and a deal id is only unique within its own tenant
+ * schema — the Bid Board create sweep already scopes its lookups by office for exactly this reason. So
+ * both the cancellation and the in-flight probe are constrained to this tenant, or one office's move-back
+ * could mark another office's pending delivery completed and its dead jobs handled, so that unrelated
+ * round never runs and never surfaces its failure.
+ *
+ * Jobs with a NULL office_id are INCLUDED: nothing identifies which tenant they belong to, and excluding
+ * them would leave a real job of this deal's uncancelled — trading a remote collision for a certain miss.
+ * When the caller supplies no office at all the predicate is omitted entirely, which is the behaviour
+ * this had before.
+ */
+function tenantJobScopeSql(officeId: string | null | undefined): SQL {
+  return officeId ? sql`AND (office_id = ${officeId} OR office_id IS NULL)` : sql``;
+}
+
+async function cancelQueuedRfpJobs(
+  tenantDb: TenantDb,
+  dealId: string,
+  officeId: string | null | undefined
+): Promise<number> {
   // The deal_rfp_delivery lock that serializes this with the RFP workers is NOT taken here. It is taken
   // by the caller as one of the transaction's first statements, BEFORE the deal row lock — see
   // deal-rfp-delivery-lock.ts. Taking it here, after `loadDealOrThrow(…, FOR UPDATE)`, inverted the
@@ -299,6 +331,7 @@ async function cancelQueuedRfpJobs(tenantDb: TenantDb, dealId: string): Promise<
      WHERE job_type IN ${[...RFP_ROUND_SCOPED_JOB_TYPES]}
        AND status IN ('pending', 'dead')
        AND payload->>'dealId' = ${dealId}
+       ${tenantJobScopeSql(officeId)}
   `);
 
   return (result as unknown as { rowCount?: number }).rowCount ?? 0;
@@ -328,7 +361,9 @@ async function probeInFlightRfpJobs(
   tenantDb: TenantDb,
   dealId: string,
   /** The round this move-back is retiring — deals.rfp_approval_request_event_id. */
-  roundEventId: string | null
+  roundEventId: string | null,
+  /** Same shared-queue scoping as the cancellation; see tenantJobScopeSql. */
+  officeId: string | null | undefined
 ): Promise<{ deliveryInFlight: boolean; createInFlight: boolean; deliveryEnqueuedForRound: boolean }> {
   // Every status, not just 'processing'. The two in-flight flags still key on 'processing' exactly as
   // before; the extra columns are what tell a REQUEST-BACKED round apart from a purely local one.
@@ -340,6 +375,7 @@ async function probeInFlightRfpJobs(
       FROM public.job_queue
      WHERE job_type IN ('rfp_request_delivery', 'rfp_bidboard_create')
        AND payload->>'dealId' = ${dealId}
+       ${tenantJobScopeSql(officeId)}
   `);
   type JobRow = { job_type?: string; status?: string; cancelled_by?: string | null; source_event_id?: string | null };
   const jobRows = (((rows as unknown as { rows?: JobRow[] }).rows ?? []) as JobRow[]);
@@ -693,7 +729,8 @@ export async function returnDealToOpportunity(
   const { deliveryInFlight, createInFlight, deliveryEnqueuedForRound } = await probeInFlightRfpJobs(
     tenantDb,
     input.dealId,
-    deal.rfpApprovalRequestEventId ?? null
+    deal.rfpApprovalRequestEventId ?? null,
+    input.officeId
   );
 
   // "Was this deal bound to a real Bid Board project?" — now including "…or may have just become bound,
@@ -764,7 +801,7 @@ export async function returnDealToOpportunity(
   // payload and write the cycle straight back. Cancelled in THIS transaction so it commits atomically
   // with the reset — a job cancelled but a reset that rolled back, or vice versa, is the incoherent
   // outcome. See cancelQueuedRfpJobs for why the worker carries the other half of this guard.
-  await cancelQueuedRfpJobs(tenantDb, input.dealId);
+  await cancelQueuedRfpJobs(tenantDb, input.dealId, input.officeId);
 
   // Did this move-back retire a cycle SyncHub already has a copy of? The CRM cannot withdraw a
   // submission, so — exactly as with the Bid Board project this action also cannot delete — the honest
@@ -788,14 +825,16 @@ export async function returnDealToOpportunity(
   // live (ENABLE_RFP_VOTING is false in production), but a flag exists to be turned on, and this is the
   // sort of wrong instruction nobody would trace back to a predicate.
   const rfpStatusCleared = deal.rfpApprovalStatus ?? null;
-  const localVotingRoundOnly =
-    rfpStatusCleared === "pending" &&
-    deal.rfpApprovalRequestId == null &&
-    !deliveryEnqueuedForRound &&
-    !deliveryInFlight;
+  // Locality is decided by the ABSENCE of an outbound trail, not by matching one status. Keying on
+  // 'pending' alone missed the other request-less states the voting path produces: castRfpVote ->
+  // applyRfpDeclineToDeal writes 'declined' with a null request id and no delivery, and a failed
+  // invitation leaves a local 'send_failed'. Both would have told the operator to go cancel a SyncHub
+  // submission that never existed. A request id is proof of the opposite — only SyncHub assigns one.
+  const localRoundOnly =
+    deal.rfpApprovalRequestId == null && !deliveryEnqueuedForRound && !deliveryInFlight;
   const rfpSubmissionMayExist =
     deliveryInFlight ||
-    (rfpStatusCleared != null && rfpStatusCleared !== "pending_outbox" && !localVotingRoundOnly);
+    (rfpStatusCleared != null && rfpStatusCleared !== "pending_outbox" && !localRoundOnly);
 
   // Void booked commission through the SAME audited helper the contract-date clear uses
   // (setDealContractSignedDate's date→null branch). deal_signed_commissions has no soft-delete column

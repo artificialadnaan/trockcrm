@@ -2021,3 +2021,106 @@ describe("migration 0200 — tenant column-add shape", () => {
     expect(block).toContain("skipped_detached_count INTEGER NOT NULL DEFAULT 0");
   });
 });
+
+// public.job_queue is SHARED across every office, and a deal id is only unique inside its own tenant
+// schema. Without an office predicate, one office's move-back marked another office's pending delivery
+// completed and its dead jobs handled — so that unrelated round never ran and never surfaced its failure.
+describe("returnDealToOpportunity — the shared job queue is tenant-scoped", () => {
+  const OTHER_OFFICE = U("0ff2");
+
+  it("leaves another office's job for a colliding deal id alone", async () => {
+    const D = U("dc01");
+    await seedBidBoardDeal(D);
+    await pg.exec(`UPDATE public.deals SET rfp_approval_status = 'pending_outbox' WHERE id = '${D}'`);
+
+    // Same deal id, different tenant — the collision the office predicate exists for.
+    await pg.exec(
+      `INSERT INTO public.job_queue (job_type, payload, status, run_after, office_id)
+       VALUES ('rfp_request_delivery', '{"dealId":"${D}"}'::jsonb, 'pending', now(), '${OTHER_OFFICE}')`
+    );
+
+    await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Scoped cancel", officeId: OFFICE, auditContext,
+    });
+
+    const { rows } = await pg.query<{ status: string; office_id: string | null }>(
+      `SELECT status, office_id FROM public.job_queue WHERE payload->>'dealId' = '${D}'`
+    );
+    const foreign = rows.find((row) => row.office_id === OTHER_OFFICE);
+    expect(foreign?.status, "another office's queued delivery must be untouched").toBe("pending");
+  });
+
+  it("still cancels this office's job, and jobs with no office recorded", async () => {
+    const D = U("dc02");
+    await seedBidBoardDeal(D);
+    await pg.exec(`UPDATE public.deals SET rfp_approval_status = 'pending_outbox' WHERE id = '${D}'`);
+    await pg.exec(
+      `INSERT INTO public.job_queue (job_type, payload, status, run_after, office_id)
+       VALUES ('rfp_request_delivery', '{"dealId":"${D}"}'::jsonb, 'pending', now(), '${OFFICE}')`
+    );
+    // office_id NULL: nothing says which tenant it belongs to, so excluding it would leave a real job of
+    // this deal's uncancelled — a certain miss traded for a remote collision.
+    await pg.exec(
+      `INSERT INTO public.job_queue (job_type, payload, status, run_after, office_id)
+       VALUES ('rfp_bidboard_create', '{"dealId":"${D}"}'::jsonb, 'pending', now(), NULL)`
+    );
+
+    await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Scoped cancel", officeId: OFFICE, auditContext,
+    });
+
+    // Scoped to the two RFP job types this cancels; the action enqueues other work for the deal that is
+    // deliberately left alone, so asserting over every job type would be asserting the wrong thing.
+    const { rows } = await pg.query<{ job_type: string; status: string; office_id: string | null }>(
+      `SELECT job_type, status, office_id FROM public.job_queue
+        WHERE payload->>'dealId' = '${D}'
+          AND job_type IN ('rfp_request_delivery', 'rfp_bidboard_create')`
+    );
+
+    expect(rows).toHaveLength(2);
+    expect(rows.find((row) => row.office_id === OFFICE)?.status).toBe("completed");
+    expect(rows.find((row) => row.office_id === null)?.status).toBe("completed");
+  });
+});
+
+// Locality is decided by the ABSENCE of an outbound trail, not by one status. The voting path produces
+// several request-less states: castRfpVote -> applyRfpDeclineToDeal writes 'declined', a failed
+// invitation leaves 'send_failed'. Each would have told the operator to cancel a submission never made.
+describe("returnDealToOpportunity — request-less states are all local", () => {
+  it.each(["declined", "send_failed", "approving"])(
+    "does NOT warn for a request-less '%s' round",
+    async (status) => {
+      const D = U(`d71${status.length}`);
+      await seedBidBoardDeal(D);
+      await pg.exec(
+        `UPDATE public.deals
+            SET rfp_approval_status = '${status}',
+                rfp_approval_request_id = NULL,
+                rfp_approval_request_event_id = '${U("e71a")}'
+          WHERE id = '${D}'`
+      );
+
+      const result = await returnDealToOpportunity(tdb, {
+        dealId: D, userId: ADMIN, userRole: "admin", reason: "Local round retired", officeId: OFFICE, auditContext,
+      });
+
+      expect(result.rfpSubmissionMayExist).toBe(false);
+    }
+  );
+
+  it("still warns for the same status when SyncHub assigned a request id", async () => {
+    const D = U("d720");
+    await seedBidBoardDeal(D);
+    await pg.exec(
+      `UPDATE public.deals
+          SET rfp_approval_status = 'declined', rfp_approval_request_id = 9911
+        WHERE id = '${D}'`
+    );
+
+    const result = await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Declined by SyncHub", officeId: OFFICE, auditContext,
+    });
+
+    expect(result.rfpSubmissionMayExist).toBe(true);
+  });
+});

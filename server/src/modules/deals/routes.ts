@@ -4134,6 +4134,7 @@ router.post(
         reason,
         acknowledgedCommissionTotal,
         acknowledgedCommissionRowCount,
+        officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
         auditContext: buildRouteAuditContext(req),
       });
 
