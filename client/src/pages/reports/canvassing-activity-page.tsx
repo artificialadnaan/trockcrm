@@ -510,7 +510,26 @@ function CanvassingActivityReportView() {
             {data.unattributed.total > 0 && !filteredToPeople ? (
               <>
                 {" "}
-                <strong>{formatNumber(data.unattributed.total)}</strong> record
+                {/* Drillable for the WHOLE RANGE, not only period by period. This is the figure the
+                    caveat is about, so it is the one a reader most wants to look behind — and
+                    kind=unattributed without a bucketStart is exactly that question. */}
+                <strong>
+                  <DrillNumber
+                    value={data.unattributed.total}
+                    className="font-bold"
+                    onOpen={() =>
+                      setEvidenceTarget({
+                        kind: "unattributed",
+                        userId: null,
+                        personName: "No author recorded",
+                        bucketStart: null,
+                        periodLabel: null,
+                        expected: data.unattributed.total,
+                      })
+                    }
+                  />
+                </strong>{" "}
+                record
                 {data.unattributed.total === 1 ? "" : "s"} created in this window name no author (imported or
                 system-created) and are excluded from every person's totals.
               </>
