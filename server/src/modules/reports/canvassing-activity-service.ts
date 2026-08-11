@@ -182,6 +182,12 @@ export interface CanvassingActivityReport {
   notes: CanvassingNoteRow[];
   notesTruncated: boolean;
   /**
+   * The feed was narrowed to the viewer's OWN notes because they hold the rep role, while `notesLogged` and
+   * the per-person counts still describe everyone. Stated by the server rather than inferred, so every
+   * surface that renders the feed — the page, the export — can say the same thing about why it is short.
+   */
+  notesRestrictedToSelf: boolean;
+  /**
    * Earliest attributed creation in this office, or null if nothing has ever been attributed. The client
    * prints "attribution starts <date>" so a zero before that date is not misread as inactivity.
    */
@@ -808,6 +814,7 @@ export async function getCanvassingActivityReport(
     buckets: [...bucketMap.values()].sort((a, b) => a.bucketStart.localeCompare(b.bucketStart)),
     notes: notes.rows,
     notesTruncated: notes.truncated,
+    notesRestrictedToSelf: notes.restrictedToSelf,
     attributionStartHint,
   };
 }
@@ -822,7 +829,7 @@ async function loadNotes(
   tenantDb: TenantDb,
   filters: CanvassingActivityFilters,
   pinned: Set<string> | null
-): Promise<{ rows: CanvassingNoteRow[]; truncated: boolean }> {
+): Promise<{ rows: CanvassingNoteRow[]; truncated: boolean; restrictedToSelf: boolean }> {
   const limit = filters.notesLimit ?? DEFAULT_NOTES_LIMIT;
   // WHO MAY I SEE, intersected with WHO WAS ASKED FOR. Stated as two sets rather than a chain of
   // conditionals, because three successive rounds of patching this rule each introduced a new hole: it
@@ -845,7 +852,7 @@ async function loadNotes(
   if (maySee && pinned) visible = new Set([...pinned].filter((id) => maySee.has(id)));
   else visible = maySee ?? pinned;
 
-  if (visible && visible.size === 0) return { rows: [], truncated: false };
+  if (visible && visible.size === 0) return { rows: [], truncated: false, restrictedToSelf: restrictToSelf };
   const userFilter = visible
     ? sql`AND a.responsible_user_id = ANY(${sql`ARRAY[${sql.join([...visible].map((id) => sql`${id}::uuid`), sql`, `)}]`})`
     : sql``;
@@ -926,7 +933,7 @@ async function loadNotes(
     targetName: row.target_name,
   }));
 
-  return { rows, truncated };
+  return { rows, truncated, restrictedToSelf: restrictToSelf };
 }
 
 /**

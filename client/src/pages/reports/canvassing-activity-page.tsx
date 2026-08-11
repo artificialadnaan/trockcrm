@@ -304,7 +304,16 @@ function CanvassingActivityReportView() {
       {
         // Named so a truncated export cannot be mistaken for the whole record — the sheet tab itself says
         // it is a slice, because a spreadsheet carries no "showing the most recent 200" caption.
-        name: data.notesTruncated ? `Notes (newest ${data.notes.length})` : "Notes",
+        // The tab name carries BOTH reasons the feed can be short, because a workbook has no caption:
+        // a row limit, and — for a rep — the permission scope that leaves colleagues with note counts on
+        // the By-person sheet and no rows here.
+        name: data.notesRestrictedToSelf
+          ? data.notesTruncated
+            ? `Notes (yours only, newest ${data.notes.length})`
+            : "Notes (yours only)"
+          : data.notesTruncated
+            ? `Notes (newest ${data.notes.length})`
+            : "Notes",
         columns: [
           { key: "when", header: "When" },
           { key: "person", header: "Person" },
@@ -658,8 +667,8 @@ function CanvassingActivityReportView() {
             {data.notes.length === 0 ? (
               <EmptyState
                 label={
-                  data.notesLogged > 0
-                    ? "Notes were logged in this window, but you can only read your own. The counts above still include everyone's."
+                  data.notesRestrictedToSelf
+                    ? "You can only read your own notes. The counts above still include everyone's."
                     : "No notes logged in this window."
                 }
               />
@@ -678,6 +687,11 @@ function CanvassingActivityReportView() {
                     {note.body ? <p className="mt-1 whitespace-pre-wrap text-sm text-slate-700">{note.body}</p> : null}
                   </div>
                 ))}
+                {data.notesRestrictedToSelf ? (
+                  <p className="text-xs font-semibold text-slate-500">
+                    Showing your own notes only — the counts above cover everyone.
+                  </p>
+                ) : null}
                 {data.notesTruncated ? (
                   <p className="text-xs font-semibold text-slate-500">
                     Showing the most recent {data.notes.length} entries — narrow the date range to see the rest.

@@ -1130,3 +1130,42 @@ describe("canvassing activity — an over-long range says it was shortened", () 
     expect(report.rangeClamped).toBe(false);
   });
 });
+
+describe("canvassing activity — the feed says WHY it is short", () => {
+  // Both surfaces that render the feed have to explain a permission-limited result, and a workbook has no
+  // caption to carry it. Inferring the restriction from "counts > 0 but no rows" was fragile and, in the
+  // export, absent — so a rep's download presented their own notes as the complete record beside a
+  // By-person sheet crediting colleagues with note counts that had no rows behind them.
+  it("flags a rep's feed as restricted, even when it is not empty", async () => {
+    const report = await getCanvassingActivityReport(
+      tdb,
+      filters({ officeId: OFF, viewerRole: "rep", viewerUserId: CAL })
+    );
+
+    expect(report.notesRestrictedToSelf).toBe(true);
+    expect(report.notes.length).toBeGreaterThan(0);
+    expect(report.notes.every((note) => note.userId === CAL)).toBe(true);
+    // The counts deliberately still describe everyone, which is exactly why the feed must say so.
+    expect(report.notesLogged).toBe(3);
+  });
+
+  it("flags it when the intersection leaves the feed empty", async () => {
+    const report = await getCanvassingActivityReport(
+      tdb,
+      filters({ officeId: OFF, userIds: [ED], viewerRole: "rep", viewerUserId: CAL })
+    );
+
+    expect(report.notesRestrictedToSelf).toBe(true);
+    expect(report.notes).toEqual([]);
+  });
+
+  it("does not flag a director, whose feed really is everything", async () => {
+    const report = await getCanvassingActivityReport(
+      tdb,
+      filters({ officeId: OFF, viewerRole: "director", viewerUserId: CHR })
+    );
+
+    expect(report.notesRestrictedToSelf).toBe(false);
+    expect(report.notes).toHaveLength(3);
+  });
+});

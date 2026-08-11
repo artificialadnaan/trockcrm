@@ -561,6 +561,8 @@ export interface CanvassingActivityReport {
   buckets: CanvassingBucketRow[];
   notes: CanvassingNoteRow[];
   notesTruncated: boolean;
+  /** The feed shows only the viewer's own notes; the counts still describe everyone. */
+  notesRestrictedToSelf: boolean;
   /** Earliest attributed creation; before this the report is structurally blind, not empty. */
   attributionStartHint: string | null;
 }
