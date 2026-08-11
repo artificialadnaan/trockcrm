@@ -238,10 +238,12 @@ export function ReportFilterBar({
     clearedForOffice.current = activeOfficeId;
 
     const next = new URLSearchParams(searchParams);
-    if (!next.has("ownerIds") && !next.has("owners") && !next.has("ownerEmails")) return;
-    next.delete("ownerIds");
-    next.delete("owners");
-    next.delete("ownerEmails");
+    // Every alias useReportFilters reads, not just the two I remembered: it accepts `owners` OR
+    // `ownerNames` for the same selection, so clearing one left the other carrying a stale person filter
+    // into an office that cannot resolve it.
+    const OWNER_PARAMS = ["ownerIds", "owners", "ownerNames", "ownerEmails"] as const;
+    if (!OWNER_PARAMS.some((param) => next.has(param))) return;
+    for (const param of OWNER_PARAMS) next.delete(param);
     setSearchParams(next, { replace: true });
   }, [showOffice, activeOfficeId, searchParams, setSearchParams]);
 

@@ -555,7 +555,14 @@ function CanvassingActivityReportView() {
                     : gridKind === "notes"
                       ? "Notes logged, not records created."
                       : `New ${KIND_LABELS[gridKind].toLowerCase()} only.`}{" "}
-                  {rangeReachesBeforeAttribution ? (
+                  {/*
+                    The attribution caveat is about CREATED RECORDS. Activities have always recorded who
+                    logged them, so in notes mode a zero means nobody logged anything — applying the
+                    "not recorded" explanation there would excuse a real gap.
+                  */}
+                  {gridKind === "notes" ? (
+                    <>A zero is a real zero — that person logged no notes in that period.</>
+                  ) : rangeReachesBeforeAttribution ? (
                     data.attributionStartHint ? (
                       <>
                         Periods before {formatDay(data.attributionStartHint)} read as zero because no creator
@@ -635,7 +642,13 @@ function CanvassingActivityReportView() {
 
           <ReportPanel title="Notes logged (times Central)">
             {data.notes.length === 0 ? (
-              <EmptyState label="No notes logged in this window." />
+              <EmptyState
+                label={
+                  data.notesLogged > 0
+                    ? "Notes were logged in this window, but you can only read your own. The counts above still include everyone's."
+                    : "No notes logged in this window."
+                }
+              />
             ) : (
               <div className="space-y-3">
                 {data.notes.map((note) => (
