@@ -1145,10 +1145,26 @@ describe("returnDealToOpportunity — a repeat detach preserves what the first o
 });
 
 describe("returnDealToOpportunity — queued RFP work is cancelled with the cycle", () => {
-  async function queueRfpJob(dealId: string, jobType: string, status = "pending") {
+  /**
+   * `roundEventId` writes the payload shape enqueueRfpRequestDelivery really produces
+   * (body.sourceEventId = "crm:deal-stage:opportunity:<round>"), and `cancelledBy` the stamp
+   * cancelQueuedRfpJobs leaves behind. Both matter: delivery evidence is scoped to the CURRENT round and
+   * ignores cancelled rows, so a job without them is not evidence of anything.
+   */
+  async function queueRfpJob(
+    dealId: string,
+    jobType: string,
+    status = "pending",
+    options: { roundEventId?: string; cancelledBy?: string } = {}
+  ) {
+    const payload: Record<string, unknown> = { dealId };
+    if (options.roundEventId) {
+      payload.body = { sourceEventId: `crm:deal-stage:opportunity:${options.roundEventId}` };
+    }
+    if (options.cancelledBy) payload.cancelledBy = options.cancelledBy;
     await pg.exec(
       `INSERT INTO public.job_queue (job_type, payload, status, run_after)
-       VALUES ('${jobType}', '{"dealId":"${dealId}"}'::jsonb, '${status}', now())`
+       VALUES ('${jobType}', '${JSON.stringify(payload)}'::jsonb, '${status}', now())`
     );
   }
   async function jobRows(dealId: string) {
@@ -1450,7 +1466,8 @@ describe("returnDealToOpportunity — queued RFP work is cancelled with the cycl
     await pg.exec(
       `UPDATE public.deals
           SET rfp_approval_status = 'pending',
-              rfp_approval_request_id = NULL
+              rfp_approval_request_id = NULL,
+              rfp_approval_request_event_id = '${U("e0a0")}'
         WHERE id = '${D}'`
     );
 
@@ -1468,21 +1485,70 @@ describe("returnDealToOpportunity — queued RFP work is cancelled with the cycl
 
   // …but a round that DID enqueue a delivery still warns, even with no request id recorded — a SyncHub
   // response that carried no id must not read as "nothing was ever sent".
-  it("still warns when a delivery job existed but no request id came back", async () => {
+  it("still warns when a delivery job existed for THIS round but no request id came back", async () => {
     const D = U("d60b");
+    const ROUND = U("e0b0");
     await seedBidBoardDeal(D);
     await pg.exec(
       `UPDATE public.deals
-          SET rfp_approval_status = 'pending', rfp_approval_request_id = NULL
+          SET rfp_approval_status = 'pending',
+              rfp_approval_request_id = NULL,
+              rfp_approval_request_event_id = '${ROUND}'
         WHERE id = '${D}'`
     );
-    await queueRfpJob(D, "rfp_request_delivery", "completed");
+    await queueRfpJob(D, "rfp_request_delivery", "completed", { roundEventId: ROUND });
 
     const result = await returnDealToOpportunity(tdb, {
       dealId: D, userId: ADMIN, userRole: "admin", reason: "Sent, id unknown", auditContext,
     });
 
     expect(result.rfpSubmissionMayExist).toBe(true);
+  });
+
+  // The deal-wide, any-status version of that check reintroduced the warning it was added to remove.
+  // cancelQueuedRfpJobs leaves a cancelled delivery in place as 'completed' with a `cancelledBy` stamp,
+  // so a deal whose EARLIER request-backed round was cancelled before it sent lit this up for a LATER
+  // voting round that also sent nothing.
+  it("ignores a PRIOR round's cancelled delivery when the current round is a voting round", async () => {
+    const D = U("d60c");
+    await seedBidBoardDeal(D);
+    // The old round's job: a different round, and cancelled before it ever sent.
+    await queueRfpJob(D, "rfp_request_delivery", "completed", {
+      roundEventId: U("e0c1"),
+      cancelledBy: "return_to_opportunity",
+    });
+    await pg.exec(
+      `UPDATE public.deals
+          SET rfp_approval_status = 'pending',
+              rfp_approval_request_id = NULL,
+              rfp_approval_request_event_id = '${U("e0c2")}'
+        WHERE id = '${D}'`
+    );
+
+    const result = await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Voting round retired", auditContext,
+    });
+
+    expect(result.rfpSubmissionMayExist).toBe(false);
+  });
+
+  it("ignores a delivery enqueued for a DIFFERENT round, even uncancelled", async () => {
+    const D = U("d60d");
+    await seedBidBoardDeal(D);
+    await queueRfpJob(D, "rfp_request_delivery", "completed", { roundEventId: U("e0d1") });
+    await pg.exec(
+      `UPDATE public.deals
+          SET rfp_approval_status = 'pending',
+              rfp_approval_request_id = NULL,
+              rfp_approval_request_event_id = '${U("e0d2")}'
+        WHERE id = '${D}'`
+    );
+
+    const result = await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Voting round retired", auditContext,
+    });
+
+    expect(result.rfpSubmissionMayExist).toBe(false);
   });
 
   // …and the negative, which is what keeps this from being a warning nobody can act on. A cycle still

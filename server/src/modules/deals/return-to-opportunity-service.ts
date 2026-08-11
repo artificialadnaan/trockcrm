@@ -326,33 +326,52 @@ async function cancelQueuedRfpJobs(tenantDb: TenantDb, dealId: string): Promise<
  */
 async function probeInFlightRfpJobs(
   tenantDb: TenantDb,
-  dealId: string
-): Promise<{ deliveryInFlight: boolean; createInFlight: boolean; deliveryEverEnqueued: boolean }> {
+  dealId: string,
+  /** The round this move-back is retiring — deals.rfp_approval_request_event_id. */
+  roundEventId: string | null
+): Promise<{ deliveryInFlight: boolean; createInFlight: boolean; deliveryEnqueuedForRound: boolean }> {
   // Every status, not just 'processing'. The two in-flight flags still key on 'processing' exactly as
-  // before; the extra row is what tells a REQUEST-BACKED round apart from a purely local one — see
-  // deliveryEverEnqueued below. Cancellation leaves the row in place (it flips 'pending' to 'completed'
-  // and stamps the payload), so a cancelled job is still evidence that one was enqueued.
+  // before; the extra columns are what tell a REQUEST-BACKED round apart from a purely local one.
   const rows = await tenantDb.execute(sql`
-    SELECT job_type, status
+    SELECT job_type,
+           status,
+           payload->>'cancelledBy'              AS cancelled_by,
+           payload->'body'->>'sourceEventId'    AS source_event_id
       FROM public.job_queue
      WHERE job_type IN ('rfp_request_delivery', 'rfp_bidboard_create')
        AND payload->>'dealId' = ${dealId}
   `);
-  const jobRows = (((rows as unknown as { rows?: Array<{ job_type?: string; status?: string }> }).rows ??
-    []) as Array<{ job_type?: string; status?: string }>);
+  type JobRow = { job_type?: string; status?: string; cancelled_by?: string | null; source_event_id?: string | null };
+  const jobRows = (((rows as unknown as { rows?: JobRow[] }).rows ?? []) as JobRow[]);
   const claimed = new Set(
     jobRows.filter((row) => row.status === "processing").map((row) => row.job_type)
   );
+
+  // The round this deal is on, in the form enqueueRfpRequestDelivery writes into the payload.
+  const roundSourceEventId = roundEventId ? `crm:deal-stage:opportunity:${roundEventId}` : null;
+
   return {
     deliveryInFlight: claimed.has("rfp_request_delivery"),
     createInFlight: claimed.has("rfp_bidboard_create"),
     /**
-     * Whether an outbound delivery job ever existed for this deal, in ANY status.
+     * Whether an outbound delivery was enqueued FOR THE ROUND BEING RETIRED, and not cancelled.
      *
      * A request-backed RFP always enqueues one; openRfpVoteRound opens a LOCAL voting round and enqueues
-     * nothing. So this — not the status column — is what says a payload was ever headed for SyncHub.
+     * nothing. So the job — not the status column — is what says a payload was ever headed for SyncHub.
+     *
+     * Scoped to the round, and excluding cancelled rows, because a deal-wide any-status check was wrong
+     * in a way that reintroduced the very warning it was added to remove: cancelQueuedRfpJobs leaves a
+     * cancelled delivery in place as 'completed' with a `cancelledBy` stamp, so a deal whose EARLIER
+     * request-backed round was cancelled before it sent would light this up for a LATER voting round
+     * that sent nothing either.
      */
-    deliveryEverEnqueued: jobRows.some((row) => row.job_type === "rfp_request_delivery"),
+    deliveryEnqueuedForRound: jobRows.some(
+      (row) =>
+        row.job_type === "rfp_request_delivery" &&
+        !row.cancelled_by &&
+        roundSourceEventId != null &&
+        row.source_event_id === roundSourceEventId
+    ),
   };
 }
 
@@ -671,9 +690,10 @@ export async function returnDealToOpportunity(
   // audit trail can never disagree with the instruction the operator was given.
   // Probe BEFORE the detach UPDATE: an in-flight Bid Board create changes what this deal can honestly
   // claim about its linkage, and the UPDATE persists that claim.
-  const { deliveryInFlight, createInFlight, deliveryEverEnqueued } = await probeInFlightRfpJobs(
+  const { deliveryInFlight, createInFlight, deliveryEnqueuedForRound } = await probeInFlightRfpJobs(
     tenantDb,
-    input.dealId
+    input.dealId,
+    deal.rfpApprovalRequestEventId ?? null
   );
 
   // "Was this deal bound to a real Bid Board project?" — now including "…or may have just become bound,
@@ -762,16 +782,16 @@ export async function returnDealToOpportunity(
   // request id and no outbound job. Treating that as a SyncHub submission told the operator — in the
   // success toast and in the permanent audit trail — to go cancel a submission that never existed.
   //
-  // The discriminator is the JOB, not the status: a request-backed round always enqueues an
-  // rfp_request_delivery job, a voting round never does. A request id is accepted as evidence too, since
-  // only SyncHub assigns one. Currently latent rather than live — ENABLE_RFP_VOTING is false in
-  // production — but a flag exists to be turned on, and this is the sort of wrong instruction nobody
-  // would trace back to a predicate.
+  // The discriminator is the JOB — scoped to THIS round and excluding cancelled ones — not the status: a
+  // request-backed round always enqueues an rfp_request_delivery job, a voting round never does. A
+  // request id is accepted as evidence too, since only SyncHub assigns one. Currently latent rather than
+  // live (ENABLE_RFP_VOTING is false in production), but a flag exists to be turned on, and this is the
+  // sort of wrong instruction nobody would trace back to a predicate.
   const rfpStatusCleared = deal.rfpApprovalStatus ?? null;
   const localVotingRoundOnly =
     rfpStatusCleared === "pending" &&
     deal.rfpApprovalRequestId == null &&
-    !deliveryEverEnqueued &&
+    !deliveryEnqueuedForRound &&
     !deliveryInFlight;
   const rfpSubmissionMayExist =
     deliveryInFlight ||
