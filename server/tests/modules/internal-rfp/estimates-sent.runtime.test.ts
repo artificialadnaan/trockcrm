@@ -31,6 +31,9 @@ const D_ONHOLD = "33333333-3333-3333-3333-333333330007";
 const D_TESTREP = "33333333-3333-3333-3333-333333330008";
 const D_ATL = "33333333-3333-3333-3333-333333330009";
 const D_ESTIMATING = "33333333-3333-3333-3333-33333333000a";
+const D_DEDUCTIVE = "33333333-3333-3333-3333-33333333000b";
+const D_HUBSPOT_OWNER = "33333333-3333-3333-3333-33333333000c";
+const D_CREATOR_OWNER = "33333333-3333-3333-3333-33333333000d";
 
 const WINDOW_FROM = new Date("2026-08-06T00:00:00.000Z");
 const WINDOW_TO = new Date("2026-08-07T00:00:00.000Z");
@@ -60,6 +63,9 @@ beforeAll(async () => {
         deal_number text,
         project_number text,
         assigned_rep_id uuid,
+        created_by_user_id uuid,
+        hubspot_owner_email text,
+        is_change_order boolean DEFAULT false,
         awarded_amount numeric(12,2),
         bid_board_total_sales numeric(12,2),
         bid_estimate numeric(12,2),
@@ -102,6 +108,17 @@ beforeAll(async () => {
       ('${D_TESTREP}',    'Owned By QA',        'DFW-8', NULL,             '${REP_TEST}', NULL,   10000,     NULL,  false, true,  false),
       ('${D_ESTIMATING}', 'Still Estimating',   'DFW-9', NULL,             '${REP_A}', NULL,      30000,     NULL,  false, true,  false);
 
+    -- A DEDUCTIVE change order: a negative awarded_amount the positive-only chain would drop to 0.
+    INSERT INTO office_dallas.deals
+      (id, name, deal_number, assigned_rep_id, is_change_order, awarded_amount, bid_estimate, is_active, is_test_data) VALUES
+      ('${D_DEDUCTIVE}', 'Credit CO', 'DFW-10', '${REP_A}', true, -15000.00, 90000, true, false);
+
+    -- assigned_rep_id is NULLABLE (migration 0042). These two exercise the fallback chain.
+    INSERT INTO office_dallas.deals
+      (id, name, deal_number, assigned_rep_id, created_by_user_id, hubspot_owner_email, bid_estimate, is_active, is_test_data) VALUES
+      ('${D_HUBSPOT_OWNER}', 'HubSpot Owned', 'DFW-11', NULL, NULL,        'legacy@trockgc.com', 11000, true, false),
+      ('${D_CREATOR_OWNER}', 'Creator Owned', 'DFW-12', NULL, '${REP_B}',  NULL,                 12000, true, false);
+
     INSERT INTO office_atlanta.deals
       (id, name, deal_number, project_number, assigned_rep_id, awarded_amount, bid_estimate, dd_estimate, on_hold, is_active, is_test_data) VALUES
       ('${D_ATL}', 'Atlanta Send', 'ATL-1', NULL, '${REP_B}', NULL, 60000, NULL, false, true, false);
@@ -125,7 +142,10 @@ beforeAll(async () => {
       ${historyRow("44444444-4444-4444-4444-44444444000b", D_RESENT, ST_BID_SENT, "2026-06-01T09:00:00Z")},
       -- exact boundary rows: the lower bound is INCLUDED, the upper bound is EXCLUDED
       ${historyRow("44444444-4444-4444-4444-44444444000c", D_FIRST, ST_SENT, "2026-08-06T00:00:00Z")},
-      ${historyRow("44444444-4444-4444-4444-44444444000d", D_FIRST, ST_SENT, "2026-08-07T00:00:00Z")};
+      ${historyRow("44444444-4444-4444-4444-44444444000d", D_FIRST, ST_SENT, "2026-08-07T00:00:00Z")},
+      ${historyRow("44444444-4444-4444-4444-44444444000e", D_DEDUCTIVE, ST_SENT, "2026-08-06T12:36:00Z")},
+      ${historyRow("44444444-4444-4444-4444-44444444000f", D_HUBSPOT_OWNER, ST_SENT, "2026-08-06T12:34:00Z")},
+      ${historyRow("44444444-4444-4444-4444-444444440010", D_CREATOR_OWNER, ST_SENT, "2026-08-06T12:32:00Z")};
 
     INSERT INTO office_atlanta.deal_stage_history (id, deal_id, to_stage_id, changed_by, created_at) VALUES
       ${historyRow("44444444-4444-4444-4444-4444444400a1", D_ATL, ST_SENT, "2026-08-06T12:53:00Z")};
@@ -258,6 +278,36 @@ describe("estimates sent — the fields the email prints", () => {
     expect(amount).toBe("120000.55");
   });
 
+  // The canonical chain routes through a change-order branch that takes a CO's awarded_amount VERBATIM.
+  // The first text rendering of the chain omitted it, so a deductive child's negative amount fell through
+  // the positive-only COALESCE and rendered 0 — the two renderings would have disagreed on exactly the
+  // rows where a wrong number is most conspicuous.
+  it("keeps a deductive change order's NEGATIVE amount instead of zeroing it", async () => {
+    const rows = await load();
+    expect(rows.find((row) => row.name === "Credit CO")?.amount).toBe("-15000.00");
+  });
+
+  // assigned_rep_id is nullable, and the RFP half of this same email already falls back
+  // (resolveDealOwner: assigned rep -> HubSpot owner email -> creator). Without the same chain the new
+  // section printed an em-dash for deals the rest of the report can name.
+  it("falls back to the synced HubSpot owner when there is no assigned rep", async () => {
+    const rows = await load();
+    const row = rows.find((entry) => entry.name === "HubSpot Owned");
+    expect(row?.ownerEmail).toBe("legacy@trockgc.com");
+  });
+
+  it("falls back to the deal's creator when there is neither a rep nor a HubSpot owner", async () => {
+    const rows = await load();
+    const row = rows.find((entry) => entry.name === "Creator Owned");
+    expect(row?.ownerEmail).toBe("cburling@trockgc.com");
+    expect(row?.ownerName).toBe("Colby Burling");
+  });
+
+  it("still prefers the assigned rep over both fallbacks", async () => {
+    const rows = await load();
+    expect(rows.find((row) => row.name === "Elan at Bluffview")?.ownerEmail).toBe("agreen@trockgc.com");
+  });
+
   it("names the office each send came from", async () => {
     const rows = await load();
     expect(rows.find((row) => row.name === "Atlanta Send")?.officeSlug).toBe("atlanta");
@@ -289,6 +339,33 @@ describe("window parsing", () => {
   it("refuses a missing or unparseable bound rather than defaulting to one", () => {
     expect(() => parseWindow({})).toThrow(/ISO-8601/);
     expect(() => parseWindow({ from: "yesterday", to: "2026-08-07T00:00:00Z" })).toThrow(/ISO-8601/);
+  });
+
+  // new Date(String(x)) is far too permissive to guard a window with. Each of these previously became a
+  // DIFFERENT valid instant, so a caller with a date-construction bug got a successful report covering a
+  // period it never asked for — worse than the 422 it should have had.
+  it("refuses a non-string bound instead of stringifying it into a real date", () => {
+    // JSON 0 -> "0" -> 2000-01-01.
+    expect(() => parseWindow({ from: 0, to: "2026-08-07T00:00:00Z" })).toThrow(/ISO-8601/);
+    expect(() => parseWindow({ from: null, to: "2026-08-07T00:00:00Z" })).toThrow(/ISO-8601/);
+    expect(() => parseWindow({ from: ["2026-08-06T00:00:00Z"], to: "2026-08-07T00:00:00Z" })).toThrow(/ISO-8601/);
+  });
+
+  it("refuses an impossible calendar day rather than normalising it into another month", () => {
+    // 2026-02-30 parses as March 2.
+    expect(() => parseWindow({ from: "2026-02-30T00:00:00Z", to: "2026-03-05T00:00:00Z" })).toThrow(/ISO-8601/);
+  });
+
+  // Postgres has no year zero: this parses in JS and then fails at the ::date cast, turning an invalid
+  // parameter into a 500 where the route means to answer 400. The report service's own isRealIsoDate
+  // rejects 0000 for exactly this reason.
+  it("refuses a year-zero bound", () => {
+    expect(() => parseWindow({ from: "0000-01-01T00:00:00Z", to: "2026-08-07T00:00:00Z" })).toThrow(/ISO-8601/);
+  });
+
+  it("accepts a bound carrying a non-UTC offset", () => {
+    const parsed = parseWindow({ from: "2026-08-06T00:00:00-05:00", to: "2026-08-07T00:00:00Z" });
+    expect(parsed.from.toISOString()).toBe("2026-08-06T05:00:00.000Z");
   });
 
   it("refuses an inverted or empty window", () => {

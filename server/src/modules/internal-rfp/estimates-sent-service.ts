@@ -73,8 +73,17 @@ export function estimatesSentQuery(schemaName: string): string {
            ps.slug                               AS stage_slug,
            h.created_at                          AS entered_at,
            ${aliasedDealBestEstimateSqlText("d")} AS amount,
-           u.display_name                        AS owner_name,
-           u.email                               AS owner_email,
+           -- The SAME owner priority the RFP half of this email already uses (resolveDealOwner):
+           -- assigned rep -> synced HubSpot owner email -> deal creator. assigned_rep_id is nullable
+           -- (migration 0042), so keying on it alone printed an em-dash for deals the rest of the very
+           -- same report can name. Tier 2 keeps the rep's display name when one exists but carries no
+           -- email, exactly as resolveDealOwner does.
+           CASE
+             WHEN u.email IS NOT NULL THEN u.display_name
+             WHEN NULLIF(BTRIM(d.hubspot_owner_email), '') IS NOT NULL THEN u.display_name
+             ELSE cu.display_name
+           END                                   AS owner_name,
+           COALESCE(u.email, NULLIF(BTRIM(d.hubspot_owner_email), ''), cu.email) AS owner_email,
            (SELECT COUNT(*)
               FROM ${schema}.deal_stage_history ph
               JOIN public.pipeline_stage_config pps ON pps.id = ph.to_stage_id
@@ -87,6 +96,7 @@ export function estimatesSentQuery(schemaName: string): string {
       JOIN public.pipeline_stage_config ps ON ps.id = h.to_stage_id
       JOIN ${schema}.deals d               ON d.id = h.deal_id
       LEFT JOIN public.users u             ON u.id = d.assigned_rep_id
+      LEFT JOIN public.users cu            ON cu.id = d.created_by_user_id
      WHERE ps.slug IN (${slugList})
        AND h.created_at >= $1
        AND h.created_at <  $2
@@ -151,10 +161,35 @@ export async function loadEstimatesSent(
 /** Upper bound on the window a single request may ask for, so a bad `from` cannot sweep all of history. */
 export const MAX_WINDOW_DAYS = 31;
 
+/**
+ * ISO-8601 instant, round-tripped.
+ *
+ * `new Date(String(x))` is far too permissive to guard a window with: a JSON number 0 stringifies to "0"
+ * and parses as 2000-01-01, and "2026-02-30T00:00:00Z" normalises to March 2 — so a caller with a
+ * date-construction bug would get a SUCCESSFUL report covering a period it never asked for, which is
+ * worse than the 422 it should have received. Requiring a string, matching the shape, and comparing the
+ * parsed instant back to the input is what separates "parses" from "means what it says".
+ */
+function parseIsoInstant(value: unknown): Date | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/.test(trimmed)) return null;
+  // Postgres has no year zero; a 0000 date parses here and then fails at the ::date cast downstream.
+  if (trimmed.startsWith("0000")) return null;
+  const parsed = new Date(trimmed);
+  if (Number.isNaN(parsed.getTime())) return null;
+  // Round-trip the CALENDAR DAY: 2026-02-30 parses (as March 2) but is not the day that was asked for.
+  if (parsed.toISOString().slice(0, 10) !== trimmed.slice(0, 10)) {
+    // A non-UTC offset legitimately shifts the day, so only reject when the input was itself UTC.
+    if (trimmed.endsWith("Z")) return null;
+  }
+  return parsed;
+}
+
 export function parseWindow(payload: Record<string, unknown>): { from: Date; to: Date } {
-  const from = new Date(String(payload.from ?? ""));
-  const to = new Date(String(payload.to ?? ""));
-  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+  const from = parseIsoInstant(payload.from);
+  const to = parseIsoInstant(payload.to);
+  if (!from || !to) {
     throw new Error("from and to must be ISO-8601 timestamps");
   }
   if (to <= from) {
