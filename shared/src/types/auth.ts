@@ -50,4 +50,9 @@ export interface AuthenticatedUser {
   isRfpReviewer?: boolean;
   /** True iff this user is one of the 3 RFP voters (RFP_VOTER_EMAILS allowlist); gates the vote UI + /rfp-vote page. */
   isRfpVoter?: boolean;
+  /**
+   * True iff this user may move a deal back to Opportunity (DEAL_MOVE_BACK_APPROVER_EMAILS allowlist AND
+   * the admin/director floor). Hides the menu item; the route enforces both regardless.
+   */
+  canMoveDealBackToOpportunity?: boolean;
 }

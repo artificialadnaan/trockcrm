@@ -21,6 +21,10 @@
       "types": "./dist/lib/bidBoardStatusMap.d.ts",
       "default": "./dist/lib/bidBoardStatusMap.js"
     },
+    "./lib/dealMoveBackApprovers": {
+      "types": "./dist/lib/dealMoveBackApprovers.d.ts",
+      "default": "./dist/lib/dealMoveBackApprovers.js"
+    },
     "./lib/fieldScorecardEmails": {
       "types": "./dist/lib/fieldScorecardEmails.d.ts",
       "default": "./dist/lib/fieldScorecardEmails.js"

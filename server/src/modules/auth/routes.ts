@@ -17,6 +17,7 @@ import { AppError } from "../../middleware/error-handler.js";
 import { requireAdmin } from "../../middleware/rbac.js";
 import { isRfpReviewerEmail } from "@trock-crm/shared/lib/rfpReviewerEmails";
 import { isRfpVoterEmail } from "@trock-crm/shared/lib/rfpVoterEmails";
+import { isDealMoveBackApproverEmail } from "@trock-crm/shared/lib/dealMoveBackApprovers";
 import {
   exchangeCodeForTokens,
   getConsentUrl,
@@ -44,6 +45,9 @@ import {
 import { loginMobileUser } from "./mobile-auth-service.js";
 import { fieldUserAuthRouter } from "../field-users/routes.js";
 import { isAuthDemoBootstrapEnabled } from "../../config/feature-flags.js";
+
+/** The role floor on the return-to-opportunity routes, kept beside the flag that mirrors it. */
+const MOVE_BACK_ROLES = new Set(["admin", "director"]);
 
 const router = Router();
 
@@ -188,6 +192,11 @@ async function withOnboardingGate<T extends { id: string; email: string; officeI
     // Whether this user is one of the 3 RFP voters (Sidney/Tim/James). Gates the vote UI + /rfp-vote page;
     // the vote endpoint enforces the same allowlist (requireRfpVoter) as the hard boundary.
     isRfpVoter: isRfpVoterEmail(user.email, process.env),
+    // Whether this user may move a deal back to Opportunity. Mirrors BOTH guards on that route — the
+    // admin/director floor and the DEAL_MOVE_BACK_APPROVER_EMAILS allowlist — so the deal menu never
+    // offers an action the endpoint will refuse. The route enforces both as the hard boundary.
+    canMoveDealBackToOpportunity:
+      MOVE_BACK_ROLES.has(user.role) && isDealMoveBackApproverEmail(user.email, process.env),
   };
 }
 

@@ -5,7 +5,7 @@
 // and refuses the wrong callers before it ever gets there.
 import express from "express";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const serviceMocks = vi.hoisted(() => ({
   previewReturnToOpportunity: vi.fn(),
@@ -43,7 +43,7 @@ type Role = "admin" | "director" | "rep";
 
 const insertedJobs: unknown[] = [];
 
-function createApp(role: Role) {
+function createApp(role: Role, email?: string) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -51,7 +51,7 @@ function createApp(role: Role) {
       id: `${role}-1`,
       role,
       displayName: `${role} user`,
-      email: `${role}@example.com`,
+      email: email ?? `${role}@example.com`,
       officeId: "office-1",
       activeOfficeId: "office-1",
     };
@@ -70,8 +70,14 @@ function createApp(role: Role) {
   return app;
 }
 
+const ORIGINAL_APPROVERS = process.env.DEAL_MOVE_BACK_APPROVER_EMAILS;
+
 beforeEach(() => {
   vi.clearAllMocks();
+  // Moving a deal back is gated on DEAL_MOVE_BACK_APPROVER_EMAILS as well as the role floor, because it
+  // voids booked commission. These cases are about the ROUTE, so the acting roles are listed; the
+  // allowlist's own behaviour is covered by tests/middleware/require-deal-move-back-approver.runtime.test.ts.
+  process.env.DEAL_MOVE_BACK_APPROVER_EMAILS = "admin@example.com, director@example.com";
   insertedJobs.length = 0;
   accessMocks.assertDealOwnerAccess.mockResolvedValue({ id: "deal-1", assignedRepId: "rep-1" });
   accessMocks.assertDealCollaboratorAccess.mockResolvedValue({ id: "deal-1", assignedRepId: "rep-1" });
@@ -90,6 +96,50 @@ beforeEach(() => {
     allowed: true,
     commissionTotal: "0",
     commissionRowCount: 0,
+  });
+});
+
+afterEach(() => {
+  if (ORIGINAL_APPROVERS === undefined) delete process.env.DEAL_MOVE_BACK_APPROVER_EMAILS;
+  else process.env.DEAL_MOVE_BACK_APPROVER_EMAILS = ORIGINAL_APPROVERS;
+});
+
+describe("POST /api/deals/:id/return-to-opportunity — approver allowlist", () => {
+  // The role floor is no longer sufficient for this verb: it destroys booked commission, so the authority
+  // is a named list rather than a job title anyone can later be granted.
+  it("403s an ADMIN who is not on the allowlist, before the service is reached", async () => {
+    const response = await request(createApp("admin", "unlisted-admin@example.com"))
+      .post("/api/deals/deal-1/return-to-opportunity")
+      .send({ reason: "not ready" });
+
+    expect(response.status).toBe(403);
+    expect(response.body?.code ?? response.body?.error?.code).toBe("DEAL_MOVE_BACK_APPROVER_ONLY");
+    expect(serviceMocks.returnDealToOpportunity).not.toHaveBeenCalled();
+  });
+
+  it("403s an unlisted admin on the PREVIEW too — the dialog names the money it would destroy", async () => {
+    const response = await request(createApp("admin", "unlisted-admin@example.com")).get(
+      "/api/deals/deal-1/return-to-opportunity/preview"
+    );
+
+    expect(response.status).toBe(403);
+    expect(serviceMocks.previewReturnToOpportunity).not.toHaveBeenCalled();
+  });
+
+  it("refuses everyone when the allowlist is unset outside dev/test", async () => {
+    delete process.env.DEAL_MOVE_BACK_APPROVER_EMAILS;
+    const originalNodeEnv = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    try {
+      const response = await request(createApp("admin"))
+        .post("/api/deals/deal-1/return-to-opportunity")
+        .send({ reason: "not ready" });
+
+      expect(response.status).toBe(403);
+      expect(serviceMocks.returnDealToOpportunity).not.toHaveBeenCalled();
+    } finally {
+      process.env.NODE_ENV = originalNodeEnv;
+    }
   });
 });
 

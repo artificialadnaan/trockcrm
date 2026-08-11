@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import { AppError } from "./error-handler.js";
 import type { UserRole } from "@trock-crm/shared/types";
+import { isDealMoveBackApproverEmail } from "@trock-crm/shared/lib/dealMoveBackApprovers";
 import { isRfpReviewerEmail } from "@trock-crm/shared/lib/rfpReviewerEmails";
 import { isRfpVoterEmail } from "@trock-crm/shared/lib/rfpVoterEmails";
 
@@ -57,6 +58,33 @@ export function requireRfpReviewer(req: Request, _res: Response, next: NextFunct
         403,
         "Only the designated RFP reviewers can review declined RFPs.",
         "RFP_REVIEWER_ONLY"
+      )
+    );
+  }
+  next();
+}
+
+/**
+ * Restrict a route to the designated move-back approvers (DEAL_MOVE_BACK_APPROVER_EMAILS).
+ *
+ * Moving a deal back to Opportunity severs Bid Board sync, retires the RFP cycle and VOIDS booked
+ * commission — none of it reversible by moving the deal forward again. Every admin and director can make
+ * ordinary backward stage moves; this one destroys money, so it is a named list rather than a role.
+ *
+ * Only ever narrows: requireRole runs first, and the service still applies its own eligibility rules,
+ * including the admin-only narrowing when commission is at stake. With the env var unset nobody may do it,
+ * which for a NEW capability means it is simply unavailable rather than something being taken away.
+ */
+export function requireDealMoveBackApprover(req: Request, _res: Response, next: NextFunction) {
+  if (!req.user) {
+    return next(new AppError(401, "Authentication required"));
+  }
+  if (!isDealMoveBackApproverEmail(req.user.email, process.env)) {
+    return next(
+      new AppError(
+        403,
+        "Moving a deal back to Opportunity is limited to designated approvers.",
+        "DEAL_MOVE_BACK_APPROVER_ONLY"
       )
     );
   }

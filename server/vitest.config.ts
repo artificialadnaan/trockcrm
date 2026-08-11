@@ -8,6 +8,11 @@ export default defineConfig({
       "@trock-crm/shared/types": path.resolve(__dirname, "../shared/src/types/index.ts"),
       "@trock-crm/shared/utils": path.resolve(__dirname, "../shared/src/utils/normalize.ts"),
       "@trock-crm/shared/lib/bidBoardStatusMap": path.resolve(__dirname, "../shared/src/lib/bidBoardStatusMap.ts"),
+      // NOTE on merge: main has since replaced this hand-maintained map with one regex over lib/*.
+      // Keep main's wildcard when resolving that conflict — this line is only here because this
+      // branch predates it, and an unlisted subpath does not degrade gracefully: it fails to
+      // resolve and takes down every suite that transitively imports it.
+      "@trock-crm/shared/lib/dealMoveBackApprovers": path.resolve(__dirname, "../shared/src/lib/dealMoveBackApprovers.ts"),
       "@trock-crm/shared/lib/rfpReviewerEmails": path.resolve(__dirname, "../shared/src/lib/rfpReviewerEmails.ts"),
       "@trock-crm/shared/lib/rfpVoterEmails": path.resolve(__dirname, "../shared/src/lib/rfpVoterEmails.ts"),
       "@trock-crm/shared/lib/rfpVoteState": path.resolve(__dirname, "../shared/src/lib/rfpVoteState.ts"),

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import { and, eq, desc, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { companies, dealApprovals, dealHistory, dealScopingIntake, deals, dealSubscriptions, jobQueue, properties } from "@trock-crm/shared/schema";
-import { requireRole, requireRfpReviewer } from "../../middleware/rbac.js";
+import { requireRole, requireRfpReviewer , requireDealMoveBackApprover } from "../../middleware/rbac.js";
 import {
   addDealChangeOrder,
   deleteDealChangeOrder,
@@ -3696,6 +3696,9 @@ router.post("/:id/stage/preflight", async (req, res, next) => {
 router.get(
   "/:id/return-to-opportunity/preview",
   requireRole("admin", "director"),
+  // Same allowlist as the commit below: someone who cannot perform the move has no reason to be shown the
+  // dollar figure it would destroy, and gating only the commit would leave the dialog openable.
+  requireDealMoveBackApprover,
   async (req, res, next) => {
     try {
       const dealId = req.params.id as string;
@@ -3726,6 +3729,9 @@ router.get(
 router.post(
   "/:id/return-to-opportunity",
   requireRole("admin", "director"),
+  // The role floor admits every admin and director; this narrows to the named approvers who may destroy
+  // booked commission. The service still re-evaluates its own eligibility on top of both.
+  requireDealMoveBackApprover,
   async (req, res, next) => {
     try {
       const dealId = req.params.id as string;

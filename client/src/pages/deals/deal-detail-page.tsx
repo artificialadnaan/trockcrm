@@ -400,6 +400,9 @@ export function DealDetailPage() {
   const [watchPending, setWatchPending] = useState(false);
   const [holdTogglePending, setHoldTogglePending] = useState(false);
   const [returnToOpportunityOpen, setReturnToOpportunityOpen] = useState(false);
+  // Mirrors BOTH guards on the route: the admin/director floor and the approver allowlist. Absent reads as
+  // "no", which only ever hides an action the endpoint would have refused.
+  const canMoveBackToOpportunity = user?.canMoveDealBackToOpportunity === true;
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [archiveReason, setArchiveReason] = useState("");
   const [archiving, setArchiving] = useState(false);
@@ -995,7 +998,7 @@ export function DealDetailPage() {
             isBidBoardLinked: isDealStillBidBoardLinked,
             commissionRowCount: 0,
             effectiveContractSignedDate: deal.contractSignedDate ?? deal.contractSignedAt ?? null,
-          }) && isDirectorOrAdmin ? (
+          }) && canMoveBackToOpportunity ? (
             <DropdownMenuItem
               onClick={() => setReturnToOpportunityOpen(true)}
               className="text-amber-600"
@@ -1008,8 +1011,15 @@ export function DealDetailPage() {
               isBidBoardLinked: isDealStillBidBoardLinked,
               commissionRowCount: 0,
               effectiveContractSignedDate: deal.contractSignedDate ?? deal.contractSignedAt ?? null,
-            }) && viewerOwnsDeal ? (
-            <DropdownMenuItem disabled title="Only a director or an admin can move a deal back to Opportunity">
+            }) && (isDirectorOrAdmin || viewerOwnsDeal) ? (
+            <DropdownMenuItem
+              disabled
+              title={
+                isDirectorOrAdmin
+                  ? "Moving a deal back to Opportunity is limited to designated approvers"
+                  : "Only a director or an admin can move a deal back to Opportunity"
+              }
+            >
               <Undo2 className="h-4 w-4 mr-2" />
               Move back to Opportunity
             </DropdownMenuItem>
