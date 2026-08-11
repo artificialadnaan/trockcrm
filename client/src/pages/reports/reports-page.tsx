@@ -5,6 +5,7 @@ import {
   Calculator,
   CalendarClock,
   ChartNoAxesCombined,
+  ClipboardCheck,
   ClipboardList,
   DollarSign,
   Gauge,
@@ -39,14 +40,33 @@ type ReportCard = {
    * Marks a card whose report is limited to a named email allowlist rather than a role. Cards carrying
    * this are dropped for anyone the server did not flag — see visibleReportCategories.
    */
-  requiresFlag?: keyof ReportVisibilityContext;
+  /** A session flag the viewer must carry — for reports behind a named email allowlist. */
+  requiresFlag?: ReportAccessFlag;
+  /**
+   * Roles whose route will actually open this report. Present only on cards whose route is NARROWER than
+   * the index itself — most reports share the index's admin/director/rep floor and need nothing here.
+   * A card that redirects the moment it is clicked is worse than one that was never listed.
+   */
+  requiresRole?: readonly string[];
 };
 
-/** What the index needs to know about the viewer. Only allowlist flags — role gating lives on the routes. */
+/** What the index needs to know about the viewer: the allowlist flags, and the role for the few narrow routes. */
 export type ReportVisibilityContext = {
   canViewDailyActivityLog?: boolean;
   canViewCanvassingReport?: boolean;
+  /**
+   * Compared as a plain string: the client session's Role union (which has sales_manager) and the shared
+   * UserRole union (which has field_contractor) are different sets, and this gate only ever asks whether
+   * the viewer's role is in a card's list.
+   */
+  role?: string;
 };
+
+/**
+ * The allowlist flags a card can require. Narrower than `keyof ReportVisibilityContext` on purpose — that
+ * would also admit `role`, which is a string and would silently never equal true.
+ */
+type ReportAccessFlag = "canViewDailyActivityLog" | "canViewCanvassingReport";
 
 const reportCategories: Array<{ category: string; description: string; reports: ReportCard[] }> = [
   {
@@ -87,6 +107,7 @@ const reportCategories: Array<{ category: string; description: string; reports: 
       { name: "Closed Won Revenue", description: "Booked revenue by rep, office, and period.", icon: DollarSign, path: "/reports/sales/closed-won-revenue" },
       { name: "Reports by Region", description: "Won / pipeline / win rate / avg + forecast, stage mix and top reps, segmented by deal Region (with the Unassigned bucket).", icon: MapPinned, path: "/reports/region" },
       { name: "Lead Conversion", description: "Lead source performance through contract.", icon: ChartNoAxesCombined, path: "/reports/sales/lead-conversion" },
+      { name: "Sales Review", description: "Run the weekly forecast and pipeline hygiene meeting from CRM data instead of a spreadsheet.", icon: ClipboardCheck, path: "/sales-review" },
     ],
   },
   {
@@ -99,6 +120,7 @@ const reportCategories: Array<{ category: string; description: string; reports: 
       { name: "Daily Activity Log", description: "The actual notes and updates reps logged, day by day — the readable record behind the Rep Activity counts.", icon: NotebookPen, path: "/reports/performance/daily-activity-log", requiresFlag: "canViewDailyActivityLog" },
       { name: "Forecast Accuracy", description: "Commit, best case, and pipeline reliability.", icon: LineChart, path: "/reports/performance/forecast-accuracy" },
       { name: "Platform Usage", description: "Active time, actions, and views per rep — daily and weekly.", icon: Activity, path: "/reports/performance/platform-usage" },
+      { name: "Team Commissions", description: "Earned and projected commission by rep — every figure drills to the deals behind it.", icon: DollarSign, path: "/director/commissions", requiresRole: ["admin", "director"] },
     ],
   },
   {
@@ -122,6 +144,12 @@ const reportCategories: Array<{ category: string; description: string; reports: 
         description: "Active work grouped by company and property.",
         icon: BriefcaseBusiness,
         path: "/reports/operations/portfolio-load",
+      },
+      {
+        name: "QC Reports",
+        description: "Field scorecards submitted from T-Rock Cam across every active project — performance, corrective actions, and the signed PDF.",
+        icon: ClipboardCheck,
+        path: "/projects/qc-reports",
       },
       {
         name: "Estimator Pipeline",
@@ -153,9 +181,11 @@ export function visibleReportCategories(ctx: ReportVisibilityContext) {
   return reportCategories
     .map((group) => ({
       ...group,
-      reports: group.reports.filter((report) =>
-        report.requiresFlag ? ctx[report.requiresFlag] === true : true
-      ),
+      reports: group.reports.filter((report) => {
+        if (report.requiresFlag && ctx[report.requiresFlag] !== true) return false;
+        if (report.requiresRole && !(ctx.role && report.requiresRole.includes(ctx.role))) return false;
+        return true;
+      }),
     }))
     .filter((group) => group.reports.length > 0);
 }
@@ -168,8 +198,9 @@ export function ReportsPage() {
       visibleReportCategories({
         canViewDailyActivityLog: user?.canViewDailyActivityLog,
         canViewCanvassingReport: user?.canViewCanvassingReport,
+        role: user?.role,
       }),
-    [user?.canViewDailyActivityLog, user?.canViewCanvassingReport]
+    [user?.canViewDailyActivityLog, user?.canViewCanvassingReport, user?.role]
   );
 
   return (
