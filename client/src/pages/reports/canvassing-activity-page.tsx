@@ -17,6 +17,10 @@ import { ExportExcelButton } from "@/components/reports/export-excel-button";
 import { useAuth } from "@/lib/auth";
 import { useOfficeScopeId } from "@/hooks/use-office-scope";
 import {
+  CanvassingEvidenceDialog,
+  type CanvassingEvidenceTarget,
+} from "./canvassing-evidence-dialog";
+import {
   CANVASSING_KINDS,
   useCanvassingActivityReport,
   type CanvassingBucket,
@@ -94,6 +98,34 @@ function labelForType(type: string) {
   return type.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+/**
+ * A number that opens its own records.
+ *
+ * Zero renders as plain text rather than a dead button: there is nothing behind it, and offering a click
+ * that returns an empty dialog is a worse answer than not offering one.
+ */
+function DrillNumber({
+  value,
+  onOpen,
+  className,
+}: {
+  value: number;
+  onOpen: () => void;
+  className?: string;
+}) {
+  if (value === 0) return <span className={className ?? "text-slate-400"}>{formatNumber(value)}</span>;
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className={`underline decoration-dotted underline-offset-4 hover:text-brand-red focus:outline-none focus:ring-2 focus:ring-brand-red focus:ring-offset-1 ${className ?? ""}`}
+      title="Show the records behind this number"
+    >
+      {formatNumber(value)}
+    </button>
+  );
+}
+
 /** Access gate. Wrapping keeps the report's hooks — and its request — from running for a denied user. */
 export function CanvassingActivityPage() {
   const { user, refreshUser } = useAuth();
@@ -148,6 +180,7 @@ function CanvassingActivityReportView() {
   // otherwise the range offered describes a different day from the one the numbers are computed for.
   const { query } = useReportFilters({ defaultRange: "90", dateTimezone: BUSINESS_TIMEZONE });
   const [searchParams, setSearchParams] = useSearchParams();
+  const [evidenceTarget, setEvidenceTarget] = useState<CanvassingEvidenceTarget | null>(null);
 
   // The bucket lives in the URL for the same reason the filter bar's values do: the bar's Apply rewrites
   // the query string from a copy of the current params, so component state would be silently dropped.
@@ -498,12 +531,42 @@ function CanvassingActivityReportView() {
                             </span>
                           )}
                         </td>
-                        <td>{formatNumber(person.counts.company)}</td>
-                        <td>{formatNumber(person.counts.property)}</td>
-                        <td>{formatNumber(person.counts.contact)}</td>
-                        <td>{formatNumber(person.counts.lead)}</td>
+                        {CANVASSING_KINDS.map((kind) => (
+                          <td key={kind}>
+                            <DrillNumber
+                              value={person.counts[kind]}
+                              onOpen={() =>
+                                setEvidenceTarget({
+                                  kind,
+                                  userId: person.userId,
+                                  personName: person.displayName,
+                                  bucketStart: null,
+                                  periodLabel: null,
+                                  expected: person.counts[kind],
+                                })
+                              }
+                            />
+                          </td>
+                        ))}
+                        {/* The total is a sum of the four beside it, so it has no single record list of its
+                            own — left as plain text rather than opening a dialog that would have to invent
+                            one. */}
                         <td className="font-semibold text-slate-900">{formatNumber(person.counts.total)}</td>
-                        <td>{formatNumber(person.notesLogged)}</td>
+                        <td>
+                          <DrillNumber
+                            value={person.notesLogged}
+                            onOpen={() =>
+                              setEvidenceTarget({
+                                kind: "notes",
+                                userId: person.userId,
+                                personName: person.displayName,
+                                bucketStart: null,
+                                periodLabel: null,
+                                expected: person.notesLogged,
+                              })
+                            }
+                          />
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -560,11 +623,21 @@ function CanvassingActivityReportView() {
                               : cell.counts[gridKind === "all" ? "total" : gridKind]
                             : 0;
                           return (
-                            <td
-                              key={row.bucketStart}
-                              className={value === 0 ? "px-2 text-right text-slate-400" : "px-2 text-right text-slate-900"}
-                            >
-                              {formatNumber(value)}
+                            <td key={row.bucketStart} className="px-2 text-right">
+                              <DrillNumber
+                                value={value}
+                                className={value === 0 ? "text-slate-400" : "text-slate-900"}
+                                onOpen={() =>
+                                  setEvidenceTarget({
+                                    kind: gridKind === "all" ? "company" : gridKind,
+                                    userId: person.userId,
+                                    personName: person.displayName,
+                                    bucketStart: row.bucketStart,
+                                    periodLabel: row.label,
+                                    expected: value,
+                                  })
+                                }
+                              />
                             </td>
                           );
                         })}
@@ -712,6 +785,14 @@ function CanvassingActivityReportView() {
           </ReportPanel>
         </>
       ) : null}
+
+      <CanvassingEvidenceDialog
+        target={evidenceTarget}
+        bucket={bucket}
+        dateFrom={query.dateFrom}
+        dateTo={query.dateTo}
+        onClose={() => setEvidenceTarget(null)}
+      />
     </div>
   );
 }

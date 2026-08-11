@@ -78,6 +78,10 @@ import {
   normalizeCanvassingFilters,
 } from "./canvassing-activity-service.js";
 import {
+  getCanvassingEvidence,
+  parseCanvassingEvidenceParams,
+} from "./canvassing-evidence-service.js";
+import {
   getAnalyticsEvidence,
   getCustomerConcentrationReport,
   getExecutiveTrendsReport,
@@ -1637,6 +1641,40 @@ router.get("/canvassing-activity", requireAnyRole, requireCanvassingReportViewer
       // Only the notes FEED reads these: a rep sees their own notes' text, never the office's. The HOME
       // role, not the effective one — a rep holding a director role_override on an office must not read
       // that office's note content through it (#740).
+      viewerRole: req.user!.baseRole ?? req.user!.role,
+      viewerEffectiveRole: req.user!.role,
+      viewerUserId: req.user!.id,
+    });
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/reports/canvassing-activity/evidence?kind=company&userId=<uuid>&bucketStart=2026-06-07&bucket=week&dateFrom=..&dateTo=..
+//
+// The records behind ONE number on the Canvassing Activity report. Same allowlist as the report itself —
+// the drill must not be a way in for someone who cannot open the page it drills.
+//
+// `total` is counted with the SAME predicate the report counts with (both build on canvassingKindSourceSql),
+// so the list reconciles with the figure it was opened from. A drill that does not add up teaches a reader
+// the report cannot be checked, which is worse than having no drill.
+router.get("/canvassing-activity/evidence", requireAnyRole, requireCanvassingReportViewer, async (req, res, next) => {
+  try {
+    const filters = normalizeCanvassingFilters(req.query as Record<string, unknown>);
+    let params;
+    try {
+      params = parseCanvassingEvidenceParams(req.query as Record<string, unknown>);
+    } catch (err) {
+      throw new AppError(400, err instanceof Error ? err.message : "Invalid evidence parameters");
+    }
+    const data = await getCanvassingEvidence(req.tenantDb!, {
+      ...params,
+      dateFrom: filters.dateFrom,
+      dateTo: filters.dateTo,
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
+      // The same notes boundary the report's feed applies: a rep reads only their own note text.
       viewerRole: req.user!.baseRole ?? req.user!.role,
       viewerEffectiveRole: req.user!.role,
       viewerUserId: req.user!.id,

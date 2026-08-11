@@ -455,11 +455,17 @@ export function labelForBucket(bucket: CanvassingBucket, startIso: string): stri
  * window, the test-data rule or the active rule to drift between entity types, which is exactly how the
  * reports in this repo have historically ended up disagreeing with each other.
  */
-function createdStreamSql(filters: CanvassingActivityFilters): SQL {
-  const from = filters.dateFrom;
-  const to = filters.dateTo;
-  const window = (alias: string) => businessWindowSql(`${alias}.created_at`, from, to);
-
+/**
+ * The row source for ONE kind: its table, its creator join, and every rule that decides whether a row
+ * counts. Both the aggregate below and the drill-down in canvassing-evidence-service.ts build on this, so
+ * a drill can never disagree with the number it was opened from — the alternative is two hand-written
+ * predicates that agree until someone edits one.
+ */
+export function canvassingKindSourceSql(
+  kind: CanvassingKind,
+  filters: Pick<CanvassingActivityFilters, "dateFrom" | "dateTo">
+): { table: string; alias: string; where: SQL } {
+  const window = (alias: string) => businessWindowSql(`${alias}.created_at`, filters.dateFrom, filters.dateTo);
   // The creator is LEFT-joined and filtered on the USER's test flag as well as the row's. Filtering only the
   // row let a user marked is_test_data create ordinary-looking records and appear on the scoreboard, which
   // contradicts this file's own "test data excluded" rule and inflates the totals. LEFT, not INNER, because
@@ -467,44 +473,53 @@ function createdStreamSql(filters: CanvassingActivityFilters): SQL {
   const notATestUser = (alias: string) =>
     sql`(${sql.raw(alias)}.id IS NULL OR COALESCE(${sql.raw(alias)}.is_test_data, false) = false)`;
 
-  return sql`
-    SELECT 'company'::text AS kind, c.created_by_user_id AS user_id, c.created_at
-      FROM companies c
-      LEFT JOIN users cu ON cu.id = c.created_by_user_id
-     WHERE c.is_active = true AND COALESCE(c.is_test_data, false) = false
-       AND ${notATestUser("cu")} AND ${window("c")}
-    UNION ALL
-    SELECT 'property'::text, p.created_by_user_id, p.created_at
-      FROM properties p
-      LEFT JOIN users pu ON pu.id = p.created_by_user_id
-     WHERE p.is_active = true AND COALESCE(p.is_test_data, false) = false
-       AND ${notATestUser("pu")} AND ${window("p")}
-    UNION ALL
-    SELECT 'contact'::text, ct.created_by_user_id, ct.created_at
-      FROM contacts ct
-      LEFT JOIN users ctu ON ctu.id = ct.created_by_user_id
-     WHERE ct.is_active = true AND COALESCE(ct.is_test_data, false) = false
-       AND ${notATestUser("ctu")} AND ${window("ct")}
-    UNION ALL
-    SELECT 'lead'::text, l.created_by_user_id, l.created_at
-      FROM leads l
-      LEFT JOIN users lu ON lu.id = l.created_by_user_id
-       -- is_active = true OR status = 'converted', NOT is_active alone. Converting a lead sets
-       -- is_active=false (conversion-service.ts) while keeping status='converted': that is the SUCCESS
-       -- state, not a soft delete. Counting on is_active alone removed a canvasser's converted leads from
-       -- their own total, so the report docked people for the outcome it exists to encourage — and it is
-       -- not a corner case: 155 of 209 leads in office_dallas are converted+inactive.
-       -- Terminal statuses are OUTCOMES, not deletions: updateLead sets is_active=false alongside
-       -- status='disqualified' exactly as conversion does. Counting on is_active alone docked a canvasser
-       -- both for succeeding and for turning up a lead that did not qualify — the work was done in both
-       -- cases. Only a lead soft-deleted while still OPEN is excluded.
-       --
-       -- Residual, stated rather than hidden: a converted lead that is LATER soft-deleted is
-       -- indistinguishable from a live one here, because the model overloads is_active for both meanings.
-     WHERE (l.is_active = true OR l.status IN ('converted', 'disqualified'))
-       AND COALESCE(l.is_test_data, false) = false
-       AND ${notATestUser("lu")} AND ${window("l")}
-  `;
+  const spec = {
+    company: { table: "companies", alias: "c", user: "cu" },
+    property: { table: "properties", alias: "p", user: "pu" },
+    contact: { table: "contacts", alias: "ct", user: "ctu" },
+    lead: { table: "leads", alias: "l", user: "lu" },
+  }[kind];
+
+  // Terminal statuses are OUTCOMES, not deletions. Converting a lead sets is_active=false while keeping
+  // status='converted', and updateLead does the same for 'disqualified'. Counting on is_active alone docked
+  // a canvasser both for succeeding and for turning up a lead that did not qualify — the work was done in
+  // both cases, and 155 of the 209 leads in office_dallas are converted+inactive, so it hid most of the
+  // column. Only a lead soft-deleted while still OPEN is excluded.
+  //
+  // Residual, stated rather than hidden: a converted lead that is LATER soft-deleted is indistinguishable
+  // from a live one here, because the model overloads is_active for both meanings.
+  const alive =
+    kind === "lead"
+      ? sql`(${sql.raw(spec.alias)}.is_active = true OR ${sql.raw(spec.alias)}.status IN ('converted', 'disqualified'))`
+      : sql`${sql.raw(spec.alias)}.is_active = true`;
+
+  return {
+    table: spec.table,
+    alias: spec.alias,
+    where: sql`${alive}
+       AND COALESCE(${sql.raw(spec.alias)}.is_test_data, false) = false
+       AND ${notATestUser(spec.user)}
+       AND ${window(spec.alias)}`,
+  };
+}
+
+/** The creator join for a kind's row source, matching canvassingKindSourceSql's aliases. */
+export function canvassingKindJoinSql(kind: CanvassingKind): SQL {
+  const spec = { company: ["companies", "c", "cu"], property: ["properties", "p", "pu"], contact: ["contacts", "ct", "ctu"], lead: ["leads", "l", "lu"] }[kind];
+  return sql.raw(`FROM ${spec[0]} ${spec[1]} LEFT JOIN users ${spec[2]} ON ${spec[2]}.id = ${spec[1]}.created_by_user_id`);
+}
+
+function createdStreamSql(filters: CanvassingActivityFilters): SQL {
+  const parts = CANVASSING_KINDS.map((kind) => {
+    const source = canvassingKindSourceSql(kind, filters);
+    return sql`
+      SELECT ${sql.raw(`'${kind}'`)}::text AS kind,
+             ${sql.raw(source.alias)}.created_by_user_id AS user_id,
+             ${sql.raw(source.alias)}.created_at
+        ${canvassingKindJoinSql(kind)}
+       WHERE ${source.where}`;
+  });
+  return sql.join(parts, sql` UNION ALL `);
 }
 
 /**

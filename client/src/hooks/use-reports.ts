@@ -1620,6 +1620,52 @@ export function useCanvassingActivityReport(options: CanvassingActivityQueryOpti
   );
 }
 
+/* -------------------------------------------------------------------------------------------------
+ * Canvassing Activity drill-to-evidence — the records behind ONE number.
+ * ---------------------------------------------------------------------------------------------- */
+
+export type CanvassingEvidenceKind = CanvassingKind | "notes";
+
+export interface CanvassingEvidenceRecord {
+  id: string;
+  label: string;
+  sublabel: string | null;
+  occurredAt: string;
+  href: string | null;
+}
+
+export interface CanvassingEvidenceResult {
+  kind: CanvassingEvidenceKind;
+  userId: string;
+  bucketStart: string | null;
+  /** The figure the drill was opened from. Counted with the report's own predicate, not rows.length. */
+  total: number;
+  rows: CanvassingEvidenceRecord[];
+  truncated: boolean;
+  /** Rows narrowed to the viewer's own notes; `total` still describes everyone's. */
+  restrictedToSelf: boolean;
+}
+
+/** Fetched on demand when a cell is clicked, rather than prefetched for every cell on the page. */
+export async function fetchCanvassingEvidence(input: {
+  kind: CanvassingEvidenceKind;
+  userId: string;
+  bucketStart?: string | null;
+  bucket: CanvassingBucket;
+  dateFrom?: string;
+  dateTo?: string;
+  ownerIds?: string[];
+}): Promise<CanvassingEvidenceResult> {
+  const params = new URLSearchParams();
+  params.set("kind", input.kind);
+  params.set("userId", input.userId);
+  params.set("bucket", input.bucket);
+  if (input.bucketStart) params.set("bucketStart", input.bucketStart);
+  if (input.dateFrom) params.set("dateFrom", input.dateFrom);
+  if (input.dateTo) params.set("dateTo", input.dateTo);
+  return (await api<{ data: CanvassingEvidenceResult }>(`/reports/canvassing-activity/evidence?${params.toString()}`)).data;
+}
+
 export function useForecastAccuracyReport(options: PerformanceReportQueryOptions = {}) {
   return usePerformanceReport<ForecastAccuracyReport>(
     "forecast-accuracy",
