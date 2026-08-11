@@ -44,17 +44,17 @@ describe("BidDueDateBanner", () => {
     }
   });
 
-  // Wrapped in a router because the banner now offers a "Change" link, and that link carries the tenant
-  // scope through useOfficeScopedHref — a bare /deals/:id/edit resolves in the viewer's DEFAULT office,
-  // which for a cross-office deal is the wrong deal or none at all.
+  // Wrapped in a router because the banner renders a react-router Link. The href itself comes from the
+  // CALLER, which is what lets the deal page decide both whether this viewer may edit and how the tenant
+  // scope is carried (its own appendOfficeIdSearch) — rather than the banner answering either question.
   async function render(
     bidDueDate: string | null | undefined,
-    options: { dealId?: string; search?: string } = {}
+    options: { editHref?: string | null } = {}
   ) {
     await act(async () => {
       root.render(
-        <MemoryRouter initialEntries={[`/deals/deal-1${options.search ?? ""}`]}>
-          <BidDueDateBanner bidDueDate={bidDueDate} dealId={options.dealId} />
+        <MemoryRouter initialEntries={["/deals/deal-1"]}>
+          <BidDueDateBanner bidDueDate={bidDueDate} editHref={options.editHref} />
         </MemoryRouter>
       );
     });
@@ -108,30 +108,34 @@ describe("BidDueDateBanner", () => {
   // The complaint this answers: the date is shown here and was changeable only from the Scoping tab's
   // Project Overview section, which is not somewhere anyone looks for a bid due date.
   describe("the way to change it", () => {
-    it("offers a Change link to the deal's edit page", async () => {
-      await render("2026-07-03T00:00:00.000Z", { dealId: "deal-9" });
+    it("renders the Change link at the href the caller supplied", async () => {
+      await render("2026-07-03T00:00:00.000Z", { editHref: "/deals/deal-9/edit" });
       const link = container.querySelector("a");
       expect(link?.textContent).toBe("Change");
       expect(link?.getAttribute("href")).toBe("/deals/deal-9/edit");
     });
 
-    it("carries the tenant scope, so a cross-office deal edits the deal you were looking at", async () => {
-      await render("2026-07-03T00:00:00.000Z", { dealId: "deal-9", search: "?officeId=office-atlanta" });
+    // The caller owns the tenant scope, so whatever it carries reaches the link verbatim — the banner
+    // never builds a second answer to office scoping alongside the page's own appendOfficeIdSearch.
+    it("passes an office-scoped href through untouched", async () => {
+      await render("2026-07-03T00:00:00.000Z", {
+        editHref: "/deals/deal-9/edit?officeId=office-atlanta",
+      });
       expect(container.querySelector("a")?.getAttribute("href")).toBe(
         "/deals/deal-9/edit?officeId=office-atlanta"
       );
     });
 
-    // ?office is a report FILTER evaluated inside the current tenant, never a tenant switch.
-    it("never synthesises a scope from the ?office filter", async () => {
-      await render("2026-07-03T00:00:00.000Z", { dealId: "deal-9", search: "?office=dallas" });
-      expect(container.querySelector("a")?.getAttribute("href")).toBe("/deals/deal-9/edit");
-    });
-
-    it("omits the link where no deal id is supplied, rather than linking to nowhere", async () => {
+    // The deal page admits collaborators (estimator / sales-source reps) who cannot edit. Offering
+    // them a link would let them complete the form and be refused only on PATCH, losing the change —
+    // so the page passes no href and the banner shows none.
+    it("shows no link when the caller supplies none, e.g. a viewer who cannot edit", async () => {
       await render("2026-07-03T00:00:00.000Z");
       expect(container.querySelector("a")).toBeNull();
       expect(container.textContent).toContain("Bid due date: Jul 3, 2026");
+
+      await render("2026-07-03T00:00:00.000Z", { editHref: null });
+      expect(container.querySelector("a")).toBeNull();
     });
   });
 });

@@ -1,6 +1,5 @@
 import { CalendarDays } from "lucide-react";
 import { Link } from "react-router-dom";
-import { useOfficeScopedHref } from "@/hooks/use-office-scope";
 
 /**
  * Format a deal's bid due date for display. `deals.bid_due_date` is a timestamptz persisted at UTC
@@ -42,13 +41,20 @@ export function toBidDueDateInputValue(value: string | null | undefined): string
  */
 export function BidDueDateBanner({
   bidDueDate,
-  dealId,
+  editHref,
 }: {
   bidDueDate?: string | null;
-  /** When given, the banner offers the way to change the date. Omitted on surfaces with no edit route. */
-  dealId?: string | null;
+  /**
+   * Where "Change" goes, or absent for no link at all.
+   *
+   * The HREF, not a deal id, so the CALLER decides both whether this viewer may edit and how the
+   * tenant scope is carried. The deal page admits collaborators (estimator / sales-source reps) who
+   * cannot edit: offering them a link would let them fill the form in and only be refused on PATCH,
+   * discarding the change. Building the URL here would also have been a second answer to office
+   * scoping alongside the page's own appendOfficeIdSearch.
+   */
+  editHref?: string | null;
 }) {
-  const scopedHref = useOfficeScopedHref();
   const formatted = formatBidDueDate(bidDueDate);
   if (!formatted) return null;
 
@@ -60,9 +66,9 @@ export function BidDueDateBanner({
           go to correct it. Until now it could only be changed from the Scoping tab's Project Overview
           section, which nobody finds by looking for a bid due date. Office scope is carried, because a
           bare /deals/:id/edit resolves in the viewer's default tenant. */}
-      {dealId ? (
+      {editHref ? (
         <Link
-          to={scopedHref(`/deals/${dealId}/edit`)}
+          to={editHref}
           className="ml-auto shrink-0 font-semibold underline decoration-dotted underline-offset-4 hover:text-red-900"
         >
           Change
