@@ -6,6 +6,7 @@ import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { getLiveGps } from "../capture/metadata";
 import { useCaptureTargets, useNearbyCaptureTargets } from "../query/hooks";
 import type { FieldCaptureTarget } from "../api/types";
+import { captureTargetDisplayName } from "../projects/field-projects";
 import { Badge, EmptyState, LoadingState, TextInput } from "./ui";
 
 const TYPE_LABEL: Record<FieldCaptureTarget["type"], string> = {
@@ -77,6 +78,13 @@ export function TargetPicker({
           setNearbyCoords(null);
         }
       })
+      // The same guard RecoveryProjectPicker carries, for the same reason and against the same
+      // shape: `.finally` re-throws, and `void` handles nothing. See that file for why this is
+      // insurance rather than a live bug — the two pickers run identical GPS lifecycles, so a
+      // rejection either one cannot absorb is one neither can.
+      .catch(() => {
+        if (!cancelled) setNearbyCoords(null);
+      })
       .finally(() => {
         if (!cancelled) setLocationChecked(true);
       });
@@ -99,9 +107,20 @@ export function TargetPicker({
             style={({ pressed }) => [styles.row, pressed && { opacity: 0.7 }]}
           >
             <View style={{ flex: 1, gap: 2 }}>
+              {/* A change-order child is stored "<Parent> — Change Order N"; on a one-line row the suffix
+                  is the first thing lost. Gated on the target's type (this list mixes leads/opportunities/
+                  deals). Display-only — `onSelect` still hands back the raw target. */}
               <Text style={styles.rowTitle} numberOfLines={1}>
-                {item.name}
+                {captureTargetDisplayName(item)}
               </Text>
+              {/* Its own line rather than folded into the subtitle: this field is searched AND ranked
+                  server-side, so it is frequently the reason the row is in the list at all. Deal rows
+                  only — the server sets it nowhere else — so no extra type gate is needed. */}
+              {item.scopeTitle ? (
+                <Text style={styles.rowScopeTitle} numberOfLines={1}>
+                  {item.scopeTitle}
+                </Text>
+              ) : null}
               <Text style={styles.rowSub} numberOfLines={1}>
                 {targetSubtitle(item)}
               </Text>
@@ -174,5 +193,9 @@ const styles = StyleSheet.create({
     padding: theme.space.md,
   },
   rowTitle: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textPrimary },
+  // Between the 15pt name and the 13pt muted subtitle, on textPrimary so it reads as identity. This
+  // app's theme has only textPrimary/textMuted/textInverse; composed from an existing token, never
+  // re-pointing one by name — that shipped three P1s to the sibling app's design system.
+  rowScopeTitle: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.textPrimary },
   rowSub: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted },
 });

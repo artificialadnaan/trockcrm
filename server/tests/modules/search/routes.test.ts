@@ -60,8 +60,37 @@ describe("search routes", () => {
       ["deals", "contacts", "files", "companies", "leads", "properties"],
       "director",
       "director-1",
+      // The options bag added with `?crossOffice=` (#1013). toHaveBeenCalledWith is an EXACT argument
+      // match, so omitting it fails the assertion even though the route is correct — which is how this
+      // landed red on main. Defaults to true: only an explicit `crossOffice=false` narrows the search.
+      { crossOffice: true },
     );
     expect(res.body.total).toBe(1);
+  });
+
+  it.each([
+    ["?q=alpha&crossOffice=false", false, "an explicit false narrows the search to this request's office"],
+    ["?q=alpha&crossOffice=true", true, "an explicit true is cross-office"],
+    ["?q=alpha&crossOffice=", true, "an empty value is not the literal string 'false', so it stays cross-office"],
+    ["?q=alpha", true, "absent means cross-office — opt-in by design, so web surfaces are unchanged"],
+  ])("passes crossOffice for %s", async (qs, expected) => {
+    // The flag existed with NO coverage of the case it was added for. The route reads
+    // `req.query.crossOffice !== "false"`, so ONLY the exact string "false" narrows it — a distinction
+    // nothing asserted, and the one the single-office mobile client depends on (the per-entity cap is
+    // applied after the offices merge, so filtering client-side comes too late).
+    serviceMocks.globalSearch.mockResolvedValue({ deals: [], contacts: [], files: [], total: 0, query: "alpha" });
+
+    const res = await request(createApp()).get(`/api/search${qs}`);
+
+    expect(res.status).toBe(200);
+    expect(serviceMocks.globalSearch).toHaveBeenCalledWith(
+      expect.anything(),
+      "alpha",
+      expect.any(Array),
+      "director",
+      "director-1",
+      { crossOffice: expected },
+    );
   });
 
   it("returns AI search results", async () => {

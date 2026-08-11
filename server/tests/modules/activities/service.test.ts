@@ -1,6 +1,20 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { getTableName } from "drizzle-orm";
 
 type InsertValues = Record<string, unknown>;
+
+/**
+ * A target lookup that answers LIVE.
+ *
+ * createActivity now verifies the property and company it is about still exist and are active, so
+ * every stub needs to answer that — and the default is the ordinary case. A test that wants the
+ * soft-deleted path opts in by returning [].
+ */
+function liveTargetSelect(rows: unknown[] = [{ id: "target-1" }]) {
+  return vi.fn(() => ({
+    from: () => ({ where: () => ({ limit: async () => rows }) }),
+  }));
+}
 
 function createInsertMock() {
   let insertedValues: InsertValues | null = null;
@@ -172,6 +186,7 @@ describe("activities service", () => {
       const tenantDb = {
         insert: insertMock.insert,
         update,
+        select: liveTargetSelect(),
       } as any;
 
       const activity = await createActivity(tenantDb, {
@@ -205,6 +220,7 @@ describe("activities service", () => {
     const tenantDb = {
       insert: insertMock.insert,
       update: vi.fn(),
+      select: liveTargetSelect(),
     } as any;
 
     await expect(
@@ -343,4 +359,185 @@ describe("activities service", () => {
     expect(flattened).toContain("rep-1");
     expect(flattened).toContain("email");
   });
+});
+
+describe("createActivity — who maintains the last touch", () => {
+  /**
+   * properties.last_activity_at and companies.last_activity_at are maintained by the
+   * redesign_last_activity_refresh TRIGGER (migration 0090), which recomputes each as max(occurred_at)
+   * over the activities table on insert, update and delete. An earlier version of this service wrote
+   * them here too — redundant, and weaker than the trigger, since GREATEST only ratchets upward.
+   * Deals have no such trigger, so the service owns that one.
+   */
+  function harness() {
+    const insertMock = createInsertMock();
+    const updates: string[] = [];
+    const updateWhere = vi.fn(async () => []);
+    const updateSet = vi.fn(() => ({ where: updateWhere }));
+    const update = vi.fn((table: unknown) => {
+      updates.push(getTableName(table as Parameters<typeof getTableName>[0]));
+      return { set: updateSet };
+    });
+    return { insertMock, update, updates, updateSet, updateWhere, select: liveTargetSelect() };
+  }
+
+  it("refreshes the DEAL, which no trigger covers", async () => {
+    const { insertMock, update, updates, updateSet, updateWhere } = harness();
+    await createActivity({ insert: insertMock.insert, update, select: liveTargetSelect() } as any, {
+      type: "note",
+      responsibleUserId: "rep-1",
+      performedByUserId: "rep-1",
+      body: "Call",
+      dealId: "deal-1",
+      sourceEntityType: "deal",
+      sourceEntityId: "deal-1",
+    });
+    expect(updates).toContain("deals");
+    // Table name alone would survive a regression that dropped lastActivityAt, or dropped the WHERE and
+    // updated EVERY deal. Assert what is written and that it is scoped.
+    expect(updateSet).toHaveBeenCalledTimes(1);
+    expect(Object.keys(updateSet.mock.calls[0]?.[0] ?? {})).toEqual(["lastActivityAt"]);
+    expect(updateWhere).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT duplicate the trigger's property/company writes", async () => {
+    const { insertMock, update, updates } = harness();
+    await createActivity({ insert: insertMock.insert, update, select: liveTargetSelect() } as any, {
+      type: "note",
+      responsibleUserId: "rep-1",
+      performedByUserId: "rep-1",
+      body: "Met the super",
+      propertyId: "property-1",
+      companyId: "company-1",
+      sourceEntityType: "property",
+      sourceEntityId: "property-1",
+    });
+    expect(updates).not.toContain("properties");
+    expect(updates).not.toContain("companies");
+    // And NO update at all — the trigger owns both, so any statement here is redundant work on rows a
+    // busy office touches constantly.
+    expect(updates).toEqual([]);
+  });
+
+describe("createActivity — the target must still be live", () => {
+  /**
+   * Every read filters on is_active, so an activity written against a soft-deleted property or company
+   * is not merely misfiled — it is unreachable. The rep sees "Logged" and no surface will ever show it.
+   */
+  it("refuses a soft-deleted PROPERTY", async () => {
+    const insertMock = createInsertMock();
+    const tenantDb = {
+      insert: insertMock.insert,
+      update: vi.fn(),
+      select: liveTargetSelect([]),
+    } as any;
+
+    await expect(
+      createActivity(tenantDb, {
+        type: "note",
+        responsibleUserId: "rep-1",
+        performedByUserId: "rep-1",
+        body: "Visit",
+        propertyId: "property-gone",
+        sourceEntityType: "property",
+        sourceEntityId: "property-gone",
+      })
+    ).rejects.toMatchObject({ statusCode: 400 });
+    // And nothing was written.
+    expect(insertMock.values).not.toHaveBeenCalled();
+  });
+
+  it("refuses a soft-deleted COMPANY", async () => {
+    // Guarded alongside the property rather than after the next review round: the two are the same
+    // shape, and half-applying the predicate is what turns one defect into two.
+    const insertMock = createInsertMock();
+    const tenantDb = {
+      insert: insertMock.insert,
+      update: vi.fn(),
+      select: liveTargetSelect([]),
+    } as any;
+
+    await expect(
+      createActivity(tenantDb, {
+        type: "note",
+        responsibleUserId: "rep-1",
+        performedByUserId: "rep-1",
+        body: "Call",
+        companyId: "company-gone",
+        sourceEntityType: "company",
+        sourceEntityId: "company-gone",
+      })
+    ).rejects.toMatchObject({ statusCode: 400 });
+    expect(insertMock.values).not.toHaveBeenCalled();
+  });
+
+  it("ALLOWS a contact-sourced visit whose company was retired", async () => {
+    /**
+     * deleteCompany sets only companies.is_active = false and leaves linked contacts active, so the
+     * picker still returns that person — and their companyId rides along on the activity. Guarding
+     * every id rejected the save outright, so a valid, selectable contact could not receive a visit.
+     * Reachability follows the SOURCE, and the source here is the contact.
+     */
+    const insertMock = createInsertMock();
+    // Answers LIVE — and is asked exactly once, for the CONTACT. The retired company is never queried,
+    // which is the whole point: it is a rider, not the subject.
+    const select = liveTargetSelect();
+    const tenantDb = { insert: insertMock.insert, update: vi.fn(), select } as any;
+
+    await createActivity(tenantDb, {
+      type: "note",
+      responsibleUserId: "rep-1",
+      performedByUserId: "rep-1",
+      body: "Met Dana",
+      contactId: "contact-1",
+      companyId: "company-retired",
+      sourceEntityType: "contact",
+      sourceEntityId: "contact-1",
+    });
+    expect(insertMock.values).toHaveBeenCalledTimes(1);
+    expect(select).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses an ARCHIVED contact source — the stale-picker case", async () => {
+    const insertMock = createInsertMock();
+    const tenantDb = {
+      insert: insertMock.insert,
+      update: vi.fn(),
+      select: liveTargetSelect([]),
+    } as any;
+
+    await expect(
+      createActivity(tenantDb, {
+        type: "note",
+        responsibleUserId: "rep-1",
+        performedByUserId: "rep-1",
+        body: "Met Dana",
+        contactId: "contact-gone",
+        sourceEntityType: "contact",
+        sourceEntityId: "contact-gone",
+      })
+    ).rejects.toMatchObject({ statusCode: 400 });
+    expect(insertMock.values).not.toHaveBeenCalled();
+  });
+
+  it("writes normally against a live target", async () => {
+    const insertMock = createInsertMock();
+    const tenantDb = {
+      insert: insertMock.insert,
+      update: vi.fn(),
+      select: liveTargetSelect(),
+    } as any;
+
+    await createActivity(tenantDb, {
+      type: "note",
+      responsibleUserId: "rep-1",
+      performedByUserId: "rep-1",
+      body: "Visit",
+      propertyId: "property-1",
+      sourceEntityType: "property",
+      sourceEntityId: "property-1",
+    });
+    expect(insertMock.values).toHaveBeenCalledTimes(1);
+  });
+});
 });

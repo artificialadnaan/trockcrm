@@ -9,6 +9,7 @@ import {
 } from "./sla-policy.js";
 import {
   CANONICAL_TERMINAL_DEAL_STAGE_SLUGS,
+  ESTIMATING_STAGE_SLUG,
   isCanonicalDealStageSlug,
   toCanonicalDealStageSlug,
   type CanonicalDealStageSlug,
@@ -38,8 +39,11 @@ export interface AtRiskInput {
   /** Current hold flag. Active hold clears risk; historical hold time is reflected only in effective age. */
   onHold?: boolean | null;
   /**
-   * Set when a future close target (expected_close_date within the auto-hold window) should quiet the
-   * stage-age at-risk verdict. Computed by callers that have `now` — see {@link getDealAtRiskResult}.
+   * Set when a today-or-future hold horizon date within the auto-hold window should quiet the stage-age
+   * at-risk verdict. That date is `expected_close_date` in every stage EXCEPT the genuine 'estimating'
+   * stage, where it is the deal's BID due date falling back to the close target (2026-07-28) — so the
+   * flag no longer implies the close target drove it. Computed by callers that have `now` — see
+   * {@link getDealAtRiskResult}. Use `resolveAtRiskSuppressionDay` to NAME the date in UI copy.
    */
   closeTargetSuppressesRisk?: boolean;
   viewerRole: UserRole | null | undefined;
@@ -56,9 +60,18 @@ export interface AtRiskDealInput {
   /** The deal's close target (= expected_close_date); drives close-target suppression / auto-on-hold. */
   expectedCloseDate?: string | Date | null;
   /**
-   * Whether a today-or-future close target inside the auto-hold window should suppress risk.
+   * The deal's BID due date (`deals.bid_due_date`). Read ONLY while the deal is in the genuine
+   * 'estimating' stage, where it replaces the close target as the horizon for BOTH the 90+ day
+   * auto-on-hold exclusion (2026-07-27) AND the shorter at-risk SLA suppression (2026-07-28, superseding
+   * the original decision to scope it to auto-park alone). Every other stage stays on
+   * expected_close_date. A caller that forgets to select it does not error — the row silently keeps the
+   * close-target rule, so every at-risk row source must forward it.
+   */
+  bidDueDate?: string | Date | null;
+  /**
+   * Whether a today-or-future hold horizon date inside the auto-hold window should suppress risk.
    * Defaults to true for deal-detail style SLA messaging. Callers that only want the 90+ day
-   * effective-hold exclusion should pass false while still forwarding expectedCloseDate.
+   * effective-hold exclusion should pass false while still forwarding expectedCloseDate/bidDueDate.
    */
   applyCloseTargetSuppression?: boolean;
 }
@@ -272,6 +285,12 @@ export function getDealAtRiskResult(
   const effectiveOnHold = isDealEffectivelyOnHold({
     onHold: deal.onHold,
     expectedCloseDate: deal.expectedCloseDate,
+    // Estimating deals auto-park off the BID due date (2026-07-27). canonicalStageSlug is already
+    // route-canonicalized (estimate_in_progress folds in, service_estimating does not), so it is the same
+    // classification the value/hold SQL makes — an estimating deal that reads $0 on the board must also be
+    // quiet in at-risk, or the "relevant and quick" list nags about a deal it says is parked.
+    bidDueDate: deal.bidDueDate,
+    isEstimating: canonicalStageSlug === ESTIMATING_STAGE_SLUG,
     now,
     isTerminal: isTerminalStage,
   });
@@ -289,6 +308,11 @@ export function getDealAtRiskResult(
       applyCloseTargetSuppression &&
       isAtRiskSuppressedByCloseTarget({
         expectedCloseDate: deal.expectedCloseDate,
+        // Estimating deals are measured against the BID due date on BOTH legs (2026-07-28). Passing the
+        // same bidDueDate/isEstimating pair the auto-park above receives is what keeps one deal from
+        // being parked off one date and nagged off another.
+        bidDueDate: deal.bidDueDate,
+        isEstimating: canonicalStageSlug === ESTIMATING_STAGE_SLUG,
         now,
       }),
   });

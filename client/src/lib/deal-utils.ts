@@ -14,6 +14,11 @@ export {
 } from "@trock-crm/shared/types";
 export type { DealDisplayNumber } from "@trock-crm/shared/types";
 
+// The deal-NAME resolver lives beside it, for the same reason: a change-order child is stored as
+// "<Parent> — Change Order N" and every list truncates before the suffix. Display-only — the stored
+// name is unchanged. Re-exported here so deal render sites reach for one `@/lib/deal-utils` import.
+export { formatDealDisplayName } from "@trock-crm/shared/types";
+
 const VISIBLE_HUBSPOT_DEAL_NUMBER_PATTERN = /\bHS[-_ ]?\d{6,}\b/gi;
 
 export function sanitizeHubspotDealIdentifiers(
@@ -23,6 +28,28 @@ export function sanitizeHubspotDealIdentifiers(
   const trimmed = value?.trim();
   if (!trimmed) return "";
   return trimmed.replace(VISIBLE_HUBSPOT_DEAL_NUMBER_PATTERN, replacement);
+}
+
+/**
+ * Snap a float sum/difference of 2-decimal money values back onto a cent boundary.
+ *
+ * Money reaches the client as 2-decimal strings/numbers and is then added with plain `+`, so any
+ * chain that mixes signs (a deductive change order, or a residual computed as the difference of two
+ * independently grouped sums) lands a hair off the true value: `2.9 + 0.7 - 3.6 === -4.4e-16`, and
+ * `360000.04 - (240000.01 + 120000.03) === -5.8e-11`. That noise is `< 0` and `!== 0`, so any sign
+ * test on the raw number lies -- painting a break-even contract value red, or inventing an
+ * "Unassigned" residual row for a fully attributed book. Put the value through here BEFORE any sign
+ * comparison or zero test.
+ *
+ * Exact at the NUMERIC(14,2) ceiling: 999,999,999,999.99 * 100 is still a safe integer, and
+ * 2-decimal inputs can never produce the half-cent tie that Math.round breaks toward +inf.
+ *
+ * The `=== 0` branch collapses -0 onto 0: rounding a tiny negative gives -0, which Intl renders as
+ * "-$0" -- a minus sign on a break-even value, the same misreading in text that the sign fix removes.
+ */
+export function cents(n: number): number {
+  const rounded = Math.round(n * 100) / 100;
+  return rounded === 0 ? 0 : rounded;
 }
 
 /**
@@ -107,7 +134,21 @@ export function resolveBestEstimate(deal: {
   stageSlug?: string | null;
   bidBoardStageSlug?: string | null;
   workflowRoute?: string | null;
+  // A change-order child deal (0156) carries its value ONLY in awardedAmount, possibly NEGATIVE for a
+  // deductive CO — read by resolveBestEstimate below, which takes it verbatim ahead of the `> 0` fallback
+  // chain (mirrors server deal-value-sql.ts's withChangeOrderBranch and shared getRawDealValue /
+  // getRawAwardedDealValue; all three MUST NOT drift). A caller whose payload omits it falls through to
+  // the plain chain, silently pricing a deductive CO at $0 while every CO-aware surface reads the
+  // negative — the exact bug this feature exists to fix; any surface that sums Won deals must supply it.
+  isChangeOrder?: boolean | null;
 }): { value: number; source: DealEstimateSource } {
+  // A change-order child's value is awardedAmount VERBATIM — never the `> 0` fallback chain. A deductive
+  // CO is negative and every `> 0` candidate would drop it to 0. Mirrors server deal-value-sql.ts
+  // withChangeOrderBranch and shared getRawDealValue — all three MUST NOT drift.
+  if (deal.isChangeOrder) {
+    return { value: parseFloat(deal.awardedAmount ?? "0") || 0, source: "awarded" };
+  }
+
   // Awarded-first value priority (mirrors server deal-value-sql.ts + shared getRawDealValue), each gated
   // > 0. STAGE-AWARE override for the single 'estimating' stage (2026-06-18): DD outranks the in-progress
   // bid — awarded > dd > bid_board > bid. Bid is NOT skipped, just outranked when DD exists. Excludes

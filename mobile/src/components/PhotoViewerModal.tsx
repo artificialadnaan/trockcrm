@@ -24,6 +24,7 @@ import { Button, TextInput } from "./ui";
 import { useUpdatePhotoMetadata } from "../query/hooks";
 import { useAuth } from "../auth/AuthContext";
 import { getProjectPhotos } from "../api/endpoints";
+import { createUrlScanner } from "../lib/photo-url-scan";
 import { savePhotoToDevice } from "../photos/save-to-device";
 
 type SaveToast = "saved" | "permission" | "error";
@@ -40,8 +41,10 @@ const ADDRESS_SOURCE_LABEL: Record<string, string> = {
   manual_override: "Manually set",
 };
 
-// Presigned R2 URLs on a FieldPhoto are short-lived (~30 min). The viewer snapshots the photo list at open
-// time, so after the TTL the direct download 403s. Bound the pages we scan when re-fetching a fresh URL so a
+// Presigned R2 URLs on a FieldPhoto expire (PHOTO_LIST_URL_TTL_SECONDS, 6h — an earlier note here said
+// ~30 min, which was the unrelated upload-PUT TTL). The viewer snapshots the photo list at open time, so
+// past the TTL both the direct download AND the image load 403.
+// Bound the pages we scan when re-fetching a fresh URL so a
 // large deal can't spin. This ceiling MUST match the gallery's own page ceiling (useProjectPhotos'
 // PHOTOS_MAX_PAGES) — the viewer can only show a photo the gallery loaded, so any photo the user is looking at
 // is reachable within these pages. A smaller cap (was 5) left a photo past ~1000 (page 5 × 200) unable to
@@ -49,6 +52,20 @@ const ADDRESS_SOURCE_LABEL: Record<string, string> = {
 // finds the photo, or when it passes the reported totalPages — so a small deal pays only one page.
 const REFRESH_PER_PAGE = 200;
 const REFRESH_MAX_PAGES = 50;
+
+/**
+ * Whether the pager's opening scroll can be issued yet.
+ *
+ * iOS clamps a programmatic scroll into the content width MEASURED AT CALL TIME, and RN's one-shot
+ * `initialScrollIndex` scroll is fire-and-forget — no success check, no retry. Issue it before the list has
+ * measured its full width (3533 photos ≈ 1.39M px) and the clamp silently truncates it, leaving the viewport
+ * parked on the empty leading spacer: a black pane under a correct counter and correct metadata. So only
+ * (re-)issue once the content is genuinely wide enough to hold the target offset.
+ */
+export function canLandInitialScroll(contentWidth: number, targetOffset: number, viewportWidth: number): boolean {
+  if (targetOffset <= 0) return true; // opening on the first photo needs no scroll at all
+  return contentWidth >= targetOffset + viewportWidth;
+}
 
 function formatTimestamp(photo: FieldPhoto): string {
   const value = photo.takenAt ?? photo.createdAt;
@@ -88,6 +105,20 @@ export function PhotoViewerModal({
   const [editName, setEditName] = useState("");
   const [editDesc, setEditDesc] = useState("");
   const listRef = useRef<FlatList<FieldPhoto>>(null);
+  // Guards the one re-issue of the opening scroll (see onContentSizeChange) so later content-size changes —
+  // an orientation flip, say — can't yank the pager back to the photo it was opened on.
+  const initialScrollLanded = useRef(false);
+
+  // Full-res load state per photo id. expo-image renders NOTHING when a load fails, so before this the
+  // viewer's only failure mode was a black rectangle with a correct-looking detail panel underneath —
+  // indistinguishable from a slow decode, and impossible for a field user to report usefully.
+  const [loadState, setLoadState] = useState<Record<string, "loading" | "loaded" | "error">>({});
+  // Re-minted presigned URLs keyed by photo id, replacing the snapshot URL the viewer opened with.
+  const [freshUrls, setFreshUrls] = useState<Record<string, string>>({});
+  // Photo ids that have already spent their automatic refresh, so a genuinely broken photo can't loop.
+  const refreshAttempted = useRef<Set<string>>(new Set());
+  // Bumped per photo by Retry so the image can be remounted without its URL having changed.
+  const [retryNonce, setRetryNonce] = useState<Record<string, number>>({});
 
   const onScrollEnd = useCallback(
     (e: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -100,6 +131,31 @@ export function PhotoViewerModal({
     },
     [index, width],
   );
+
+  // The call site currently unmounts this modal between opens, so `index` starts fresh each time. That is
+  // load-bearing and invisible: switch to an always-mounted `visible={...}` and `index` would stick on the
+  // previously-viewed photo while initialScrollIndex moved underneath it — the detail panel describing one
+  // photo while the pager shows another. Syncing here makes the component correct either way.
+  //
+  // Skips the mount run deliberately. useState already seeded `index`, and clearing initialScrollLanded here
+  // would race the native onContentSizeChange: if that fires first (it is a layout callback, so ordering is
+  // not ours to assume) it would be reset to false, and a LATER content-size change — a rotation — would
+  // then re-issue the opening scroll and yank the user back to the photo they entered on.
+  const initialIndexSettled = useRef(false);
+  useEffect(() => {
+    if (!initialIndexSettled.current) {
+      initialIndexSettled.current = true;
+      return;
+    }
+    setIndex(initialIndex);
+    setZoomed(false);
+    initialScrollLanded.current = false;
+    // Moving `index` alone would only move the counter and the detail panel: initialScrollIndex is honored
+    // at mount only, and with the same data and width no content-size change fires, so the onContentSizeChange
+    // re-issue below would never run either — leaving the pager parked on the previous photo while the panel
+    // describes the new one. Scroll explicitly; onScrollToIndexFailed covers a not-yet-measured list.
+    listRef.current?.scrollToIndex({ index: initialIndex, animated: false });
+  }, [initialIndex]);
 
   // Clamp defensively so the header/detail panel can never index out of range.
   const safeIndex = photos.length > 0 ? Math.min(Math.max(index, 0), photos.length - 1) : 0;
@@ -146,31 +202,77 @@ export function PhotoViewerModal({
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (toastTimer.current) clearTimeout(toastTimer.current); }, []);
 
-  // Re-fetch a FRESH presigned download URL for one photo id, bypassing the (possibly-expired) snapshot the
-  // viewer opened with. Scans a bounded number of pages of the viewed project's photo list. Returns null if
-  // we can't resolve a fresh URL (no deal scope, photo not found, or the fetch fails).
+  /**
+   * The shared page-walk that re-mints presigned URLs, one per open viewer.
+   *
+   * When the snapshot's TTL lapses it does not lapse for one photo — every mounted cell fails at once —
+   * so the scanner coalesces them onto ONE walk that continues until the last waiting caller's photo,
+   * not the first. The logic lives in `src/lib/photo-url-scan.ts` because nothing in CI compiles or runs
+   * `mobile/`, and coordination this subtle should not be code that nothing ever checks.
+   */
+  const scanner = useRef<ReturnType<typeof createUrlScanner> | null>(null);
   const fetchFreshUrl = useCallback(
-    async (dealId: string, photoId: string): Promise<string | null> => {
-      for (let page = 1; page <= REFRESH_MAX_PAGES; page += 1) {
-        let res: Awaited<ReturnType<typeof getProjectPhotos>>;
-        try {
-          res = await getProjectPhotos(fetcher, dealId, { page, perPage: REFRESH_PER_PAGE });
-        } catch {
-          return null; // network/auth error — fall back to the generic failure toast
-        }
-        const found = res.photos.find((p) => p.id === photoId);
-        if (found) return found.fullImageUrl ?? found.imageUrl ?? null;
-        const totalPages = res.pagination?.totalPages ?? 1;
-        if (page >= totalPages) break; // no more pages to scan
+    (dealId: string, photoId: string): Promise<string | null> => {
+      // Built lazily: the deal id is not known until a photo is actually shown, and one viewer only ever
+      // looks at one project.
+      if (!scanner.current) {
+        scanner.current = createUrlScanner({
+          fetchPage: (page) => getProjectPhotos(fetcher, dealId, { page, perPage: REFRESH_PER_PAGE }),
+          maxPages: REFRESH_MAX_PAGES,
+        });
       }
-      return null;
+      return scanner.current.resolve(photoId);
     },
     [fetcher],
   );
 
+  /** The URL to display/save for a photo: a re-minted one if we've had to refresh, else the snapshot. */
+  const uriFor = useCallback(
+    (photo: FieldPhoto): string | null => freshUrls[photo.id] ?? photo.fullImageUrl ?? photo.imageUrl,
+    [freshUrls],
+  );
+
+  // A failed full-res load is overwhelmingly an EXPIRED presigned URL — the viewer snapshots the photo list
+  // at open time and those URLs are minted with a fixed TTL, so a gallery left open (or restored from the
+  // query cache) hands the pager links that now 403. The server's own note on the list TTL says "the client
+  // also refreshes on image error"; nothing actually did. This implements that contract: re-mint once per
+  // photo, swap the URL in, and only show an error if the fresh URL fails too.
+  const handleLoadError = useCallback(
+    async (photo: FieldPhoto) => {
+      const refreshDealId = projectDealId ?? photo.dealId ?? undefined;
+      if (refreshAttempted.current.has(photo.id) || !refreshDealId) {
+        setLoadState((prev) => ({ ...prev, [photo.id]: "error" }));
+        return;
+      }
+      refreshAttempted.current.add(photo.id);
+      const staleUrl = uriFor(photo);
+      const fresh = await fetchFreshUrl(refreshDealId, photo.id);
+      if (fresh && fresh !== staleUrl) {
+        // Back to "loading": the swapped-in URL remounts the image and will report its own outcome.
+        setLoadState((prev) => ({ ...prev, [photo.id]: "loading" }));
+        setFreshUrls((prev) => ({ ...prev, [photo.id]: fresh }));
+        return;
+      }
+      setLoadState((prev) => ({ ...prev, [photo.id]: "error" }));
+    },
+    [projectDealId, uriFor, fetchFreshUrl],
+  );
+
+  /**
+   * Manual retry from the error state. Clearing the one-shot guard and setting "loading" is not enough on
+   * its own: the uri is unchanged, and both the pager's key and expo-image's recyclingKey are derived from
+   * it, so nothing would re-request the image and Retry would spin forever. The nonce changes the key, which
+   * remounts the image and starts a genuinely new load.
+   */
+  const retryLoad = useCallback((photo: FieldPhoto) => {
+    refreshAttempted.current.delete(photo.id);
+    setLoadState((prev) => ({ ...prev, [photo.id]: "loading" }));
+    setRetryNonce((prev) => ({ ...prev, [photo.id]: (prev[photo.id] ?? 0) + 1 }));
+  }, []);
+
   const saveToDevice = useCallback(async () => {
     if (savingId != null || !current) return; // one save at a time
-    const url = current.fullImageUrl ?? current.imageUrl;
+    const url = uriFor(current);
     if (!url) return; // no image to save (placeholder / unresolved URL) — the action is hidden, but guard anyway
     const targetId = current.id;
     setSavingId(targetId);
@@ -190,7 +292,10 @@ export function PhotoViewerModal({
     AccessibilityInfo.announceForAccessibility(SAVE_TOAST_TEXT[kind]);
     if (toastTimer.current) clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setToast(null), 2600);
-  }, [savingId, current, projectDealId, fetchFreshUrl]);
+    // uriFor is a dependency, not an incidental call: it closes over freshUrls, so omitting it pins this
+    // callback to the URL the viewer opened with. Save would then download the expired snapshot link, fail,
+    // and re-run the page scan to re-mint a URL the screen is already displaying.
+  }, [savingId, current, projectDealId, fetchFreshUrl, uriFor]);
 
   return (
     <Modal visible={visible} animationType="fade" onRequestClose={onClose} transparent={false}>
@@ -209,7 +314,7 @@ export function PhotoViewerModal({
             <View style={styles.topBarActions}>
               {/* Only advertise Save when there's actually a URL to download — a placeholder / unresolved
                   photo would let the download 403/fail with a generic error, so hide the action instead. */}
-              {current && (current.fullImageUrl ?? current.imageUrl) ? (
+              {current && uriFor(current) ? (
                 <Pressable
                   onPress={saveToDevice}
                   hitSlop={12}
@@ -243,26 +348,81 @@ export function PhotoViewerModal({
               showsHorizontalScrollIndicator={false}
               initialScrollIndex={initialIndex}
               getItemLayout={(_, i) => ({ length: width, offset: width * i, index: i })}
-              // Each page decodes the FULL-res original (expo-image allowDownscaling={false}), which can be
-              // ~48MB of bitmap in RAM. Cap the mount window so at most the current photo ± one neighbor are
-              // decoded at once — RN's default windowSize (21) would mount ~20 full-res decodes on a large
-              // gallery and jetsam older field iPhones. Neighbors still preload for smooth swiping.
+              // Make the initial jump actually LAND. VirtualizedList freezes its render window while
+              // pendingScrollUpdateCount > 0 (set whenever initialScrollIndex > 0) and only clears it on a
+              // real scroll event, while its one-shot programmatic scroll is fire-and-forget with no retry.
+              // Natively that scroll is clamped against the content width MEASURED AT CALL TIME, so on a
+              // 3533-photo pager (~1.39M px of content) an early call clamps to ~0 and the viewport parks on
+              // the empty leading spacer — a black pane with a correct counter and correct metadata, and not
+              // even the "Image unavailable" fallback, because the mounted cell is simply parked off-screen.
+              // Re-issuing once the content is measured wide enough to hold the target offset defeats the
+              // clamp, and the resulting scroll event thaws the window.
+              onContentSizeChange={(contentWidth) => {
+                if (initialScrollLanded.current) return;
+                const target = initialIndex * width;
+                if (!canLandInitialScroll(contentWidth, target, width)) return;
+                initialScrollLanded.current = true;
+                if (target > 0) listRef.current?.scrollToOffset({ offset: target, animated: false });
+              }}
+              // getItemLayout makes this near-impossible, but a failed jump must not leave a black pane.
+              onScrollToIndexFailed={({ index: failedIndex }) => {
+                listRef.current?.scrollToOffset({ offset: failedIndex * width, animated: false });
+              }}
+              // Keep the mount window small — RN's default (21) would mount ~20 decodes on a large gallery
+              // and jetsam older field iPhones. Note windowSize={3} does NOT mean "current ± one neighbor" as
+              // an earlier note here claimed: it is an overscan of (3-1) screen widths split around the
+              // viewport, so the settled window is 4 cells, measured. That over-claim mattered when every
+              // mounted page decoded the full-res original; pages now decode downscaled until zoomed
+              // (see ZoomablePhoto), so 4 mounted cells is cheap and neighbors still preload for smooth swiping.
               windowSize={3}
               maxToRenderPerBatch={2}
               initialNumToRender={2}
               onMomentumScrollEnd={onScrollEnd}
               renderItem={({ item, index: itemIndex }) => {
-                const uri = item.fullImageUrl ?? item.imageUrl;
+                const uri = uriFor(item);
+                const state = loadState[item.id];
                 return (
                   <View style={{ width, height: height * 0.58, alignItems: "center", justifyContent: "center" }}>
                     {uri ? (
-                      <ZoomablePhoto
-                        uri={uri}
-                        width={width}
-                        height={height * 0.58}
-                        active={itemIndex === safeIndex}
-                        onZoomChange={(z) => itemIndex === safeIndex && setZoomed(z)}
-                      />
+                      <>
+                        <ZoomablePhoto
+                          // Keyed by the URL so a re-minted link remounts the image and re-runs the load
+                          // instead of expo-image holding on to the failed one; the retry nonce does the
+                          // same when the user asks again for a URL that hasn't changed.
+                          key={`${uri}#${retryNonce[item.id] ?? 0}`}
+                          uri={uri}
+                          thumbnailUri={item.imageUrl}
+                          cacheKey={item.id}
+                          width={width}
+                          height={height * 0.58}
+                          active={itemIndex === safeIndex}
+                          onZoomChange={(z) => itemIndex === safeIndex && setZoomed(z)}
+                          onLoadStart={() =>
+                            setLoadState((prev) => (prev[item.id] ? prev : { ...prev, [item.id]: "loading" }))
+                          }
+                          onLoad={() => setLoadState((prev) => ({ ...prev, [item.id]: "loaded" }))}
+                          onError={() => void handleLoadError(item)}
+                        />
+                        {state === "loading" ? (
+                          <View style={styles.imageOverlay} pointerEvents="none">
+                            <ActivityIndicator size="large" color={theme.color.textInverse} />
+                          </View>
+                        ) : null}
+                        {state === "error" ? (
+                          <View style={styles.imageOverlay}>
+                            <Text style={styles.noImage}>Couldn't load this photo</Text>
+                            <Pressable
+                              onPress={() => retryLoad(item)}
+                              hitSlop={10}
+                              style={styles.retryButton}
+                              accessibilityRole="button"
+                              accessibilityLabel="Retry loading photo"
+                            >
+                              <Text style={styles.retryText}>Retry</Text>
+                            </Pressable>
+                          </View>
+                        ) : null}
+                      </>
                     ) : (
                       <Text style={styles.noImage}>Image unavailable</Text>
                     )}
@@ -404,6 +564,16 @@ const styles = StyleSheet.create({
   },
   toastText: { color: theme.color.textInverse, fontFamily: theme.font.semibold, fontSize: 13 },
   noImage: { color: theme.color.textInverse, fontFamily: theme.font.body },
+  // Sits over the photo rather than replacing it, so the thumbnail placeholder underneath stays visible
+  // while the full-res original loads (or after it fails).
+  imageOverlay: { ...StyleSheet.absoluteFillObject, alignItems: "center", justifyContent: "center", gap: theme.space.md },
+  retryButton: {
+    paddingHorizontal: theme.space.lg,
+    paddingVertical: theme.space.sm,
+    borderRadius: theme.radius.pill,
+    backgroundColor: theme.color.brandRed,
+  },
+  retryText: { color: theme.color.textInverse, fontFamily: theme.font.semibold, fontSize: 14 },
   pager: { position: "relative", justifyContent: "center" },
   chevron: {
     position: "absolute",

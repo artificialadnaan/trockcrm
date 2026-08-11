@@ -122,6 +122,32 @@ describe("KanbanDealCard", () => {
     expect(html).toContain("Palm Villas");
   });
 
+  it("puts 'Change Order N' at the FRONT of a change-order child's card title", () => {
+    // change-order-service.ts stores the child as "<Parent> — Change Order N", and this card title is a
+    // single truncating line, so the suffix is the first thing lost. Display-only — nothing writes back.
+    const html = render(makeDeal({ name: "Tides Park Lane — Change Order 2" }));
+    expect(html).toContain("Change Order 2 — Tides Park Lane");
+    // The stored suffix-last form is not what the card shows.
+    expect(html).not.toContain("Tides Park Lane — Change Order 2");
+  });
+
+  it("obeys deals.is_change_order over the name's shape", () => {
+    // The flag is the AUTHORITY: createDeal stores a hand-typed name verbatim with is_change_order
+    // false, so a deal someone named "Lobby — Change Order 1" must render exactly as typed.
+    const notACo = render(makeDeal({ name: "Lobby — Change Order 1", isChangeOrder: false }));
+    expect(notACo).toContain("Lobby — Change Order 1");
+    expect(notACo).not.toContain("Change Order 1 — Lobby");
+
+    const realCo = render(makeDeal({ name: "Tides Park Lane — Change Order 2", isChangeOrder: true }));
+    expect(realCo).toContain("Change Order 2 — Tides Park Lane");
+  });
+
+  it("leaves an ordinary deal name byte for byte", () => {
+    const html = render(makeDeal({ name: "Tides — Phase 2" }));
+    expect(html).toContain("Tides — Phase 2");
+    expect(html).not.toContain("Change Order");
+  });
+
   it("renders 'Pending' with muted styling when project number is null and deal number is HubSpot-imported", () => {
     const html = render(makeDeal({ projectNumber: null, dealNumber: "HS-321687989951" }));
     expect(html).not.toContain("HS-321687989951");

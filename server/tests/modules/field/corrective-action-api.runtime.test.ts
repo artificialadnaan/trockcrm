@@ -13,12 +13,15 @@ import {
   fieldScorecardItems,
   fieldScorecardPhotos,
   scorecardCorrectiveActions,
+  scorecardCorrectiveActionEvents,
   scorecardCorrectiveActionTokens,
   scorecardCorrectiveActionUploads,
   dealTeamMembers,
   contacts,
 } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
+
+const TEST_OFFICE = { id: "00000000-0000-0000-0000-0000000000f1", slug: "test" };
 
 const DEAL = "11111111-1111-1111-1111-111111111111";
 const USER = "33333333-3333-3333-3333-333333333333";
@@ -73,7 +76,7 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE TABLE public.pipeline_stage_config (id uuid PRIMARY KEY, name text, slug text, is_terminal boolean DEFAULT false);
     CREATE TABLE deals (
-      id uuid PRIMARY KEY, name text, deal_number text, project_number text, stage_id uuid,
+      id uuid PRIMARY KEY, name text, scope_title text, is_change_order boolean NOT NULL DEFAULT false, deal_number text, project_number text, stage_id uuid,
       is_active boolean DEFAULT true, bid_board_stage_slug text,
       property_address text, property_city text, property_state text, property_zip text,
       last_activity_at timestamptz, updated_at timestamptz, created_at timestamptz DEFAULT now()
@@ -96,6 +99,7 @@ beforeAll(async () => {
       fieldScorecardItems,
       fieldScorecardPhotos,
       scorecardCorrectiveActions,
+      scorecardCorrectiveActionEvents,
       scorecardCorrectiveActionTokens,
       scorecardCorrectiveActionUploads,
       dealTeamMembers,
@@ -153,9 +157,12 @@ describe("getCorrectiveActionItems", () => {
     expect(items).toHaveLength(3);
     expect(items.every((i) => i.status === "open")).toBe(true);
     expect(items.every((i) => i.responseComment === null)).toBe(true);
-    // Shape: id, itemType, itemRef, itemLabel, status, responseComment, responder fields, respondedAt.
+    // Shape: id, itemType, itemRef, itemLabel, status, responseComment, responder fields, respondedAt,
+    // photos, and the append-only `events` thread (empty until someone responds).
+    expect(items.every((i) => i.events.length === 0)).toBe(true);
     expect(Object.keys(items[0]).sort()).toEqual(
       [
+        "events",
         "id",
         "itemLabel",
         "itemRef",
@@ -198,6 +205,7 @@ describe("getCorrectiveActionItems", () => {
       comment: "corrective action documented",
       photoFileIds: [FILE_B],
       respondedBy: { userId: USER, name: "Sam", email: null },
+      office: TEST_OFFICE,
     });
 
     // WITH a resolver: the response photo carries a resolvable url (same shape the evidence read uses).
@@ -227,11 +235,12 @@ describe("submitCorrectiveActionResponse", () => {
       comment: "Slab re-inspected",
       photoFileIds: [FILE_A, FILE_B],
       respondedBy: { userId: USER, name: "Sam Field", email: null },
+      office: TEST_OFFICE,
     });
 
     const items = await getCorrectiveActionItems(tdb, scorecard.id);
     const resolved = items.find((i) => i.id === first.id)!;
-    expect(resolved.status).toBe("resolved");
+    expect(resolved.status).toBe("submitted");
     expect(resolved.responseComment).toBe("Slab re-inspected");
     expect(resolved.respondedByUserId).toBe(USER);
     expect(resolved.photos.map((p) => p.fileId).sort()).toEqual([FILE_A, FILE_B].sort());
@@ -253,9 +262,10 @@ describe("submitCorrectiveActionResponse", () => {
           idx === items.length - 1
             ? { userId: null, name: "Ext PM", email: "pm@x.com" }
             : { userId: USER, name: "Sam", email: null },
+        office: TEST_OFFICE,
       });
     }
-    expect(await getScorecardStatus(scorecard.id)).toBe("corrective_action_closed");
+    expect(await getScorecardStatus(scorecard.id)).toBe("corrective_action_submitted");
   });
 
   it("rejects a photo file id that does not belong to the deal (400)", async () => {
@@ -268,6 +278,7 @@ describe("submitCorrectiveActionResponse", () => {
         comment: "x",
         photoFileIds: ["bbbbbbbb-0000-0000-0000-0000000000ff"],
         respondedBy: { userId: USER, name: "Sam", email: null },
+        office: TEST_OFFICE,
       }),
     ).rejects.toBeInstanceOf(AppError);
   });
@@ -280,6 +291,7 @@ describe("submitCorrectiveActionResponse", () => {
         itemId: "00000000-0000-0000-0000-0000000000ee",
         comment: "x",
         respondedBy: { userId: USER, name: "Sam", email: null },
+        office: TEST_OFFICE,
       }),
     ).rejects.toBeInstanceOf(AppError);
   });
@@ -303,6 +315,7 @@ describe("submitCorrectiveActionResponse", () => {
         comment: "trying to hijack evidence",
         photoFileIds: [FILE_A],
         respondedBy: { userId: USER, name: "Sam", email: null },
+        office: TEST_OFFICE,
       }),
     ).rejects.toBeInstanceOf(AppError);
 
@@ -344,6 +357,7 @@ describe("submitCorrectiveActionResponse", () => {
         comment: "borrowing a sibling scorecard's photo",
         photoFileIds: [FILE_B],
         respondedBy: { userId: USER, name: "Sam", email: null },
+        office: TEST_OFFICE,
       }),
     ).rejects.toBeInstanceOf(AppError);
 
@@ -377,6 +391,7 @@ describe("submitCorrectiveActionResponse", () => {
         comment: "attaching an arbitrary deal file",
         photoFileIds: [FILE_A],
         respondedBy: { userId: USER, name: "Sam", email: null },
+        office: TEST_OFFICE,
       }),
     ).rejects.toBeInstanceOf(AppError);
     expect(await getScorecardStatus(scorecard.id)).toBe("corrective_action_open");
@@ -394,6 +409,7 @@ describe("submitCorrectiveActionResponse", () => {
       comment: "resolved by the first responder",
       photoFileIds: [FILE_A],
       respondedBy: { userId: USER, name: "Sam", email: null },
+      office: TEST_OFFICE,
     });
 
     // A SECOND (stale) submit for the SAME now-resolved item — e.g. a concurrent responder or a replayed
@@ -408,6 +424,7 @@ describe("submitCorrectiveActionResponse", () => {
         comment: "stale submit from a losing responder",
         photoFileIds: [FILE_B],
         respondedBy: { userId: null, name: "Ext PM", email: "pm@x.com" },
+        office: TEST_OFFICE,
       });
     } catch (err) {
       thrown = err;
@@ -419,7 +436,7 @@ describe("submitCorrectiveActionResponse", () => {
     // The item keeps the WINNER's comment/responder (the stale resolve did not overwrite it).
     const items = await getCorrectiveActionItems(tdb, scorecard.id);
     const resolved = items.find((i) => i.id === first.id)!;
-    expect(resolved.status).toBe("resolved");
+    expect(resolved.status).toBe("submitted");
     expect(resolved.responseComment).toBe("resolved by the first responder");
     expect(resolved.respondedByUserId).toBe(USER);
 
@@ -440,6 +457,7 @@ describe("submitCorrectiveActionResponse", () => {
       itemId: first.id,
       comment: "resolved by the first responder",
       respondedBy: { userId: USER, name: "Sam", email: null },
+      office: TEST_OFFICE,
     });
 
     // A replayed comment-only submit by the SAME responder (the winner) is an idempotent success — nothing to
@@ -450,13 +468,14 @@ describe("submitCorrectiveActionResponse", () => {
         itemId: first.id,
         comment: "replay with no photos",
         respondedBy: { userId: USER, name: "Sam", email: null },
+        office: TEST_OFFICE,
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ resolved: false });
 
     // The winner's response is preserved.
     const items = await getCorrectiveActionItems(tdb, scorecard.id);
     const resolved = items.find((i) => i.id === first.id)!;
-    expect(resolved.status).toBe("resolved");
+    expect(resolved.status).toBe("submitted");
     expect(resolved.responseComment).toBe("resolved by the first responder");
     expect(resolved.respondedByUserId).toBe(USER);
   });
@@ -475,6 +494,7 @@ describe("submitCorrectiveActionResponse", () => {
       itemId: first.id,
       comment: "resolved by the super",
       respondedBy: { userId: USER, name: "Sam", email: null },
+      office: TEST_OFFICE,
     });
 
     // The loser (a DIFFERENT, token PM) submits comment-only after the winner resolved → 409.
@@ -485,6 +505,7 @@ describe("submitCorrectiveActionResponse", () => {
         itemId: first.id,
         comment: "PM's comment that lost the race",
         respondedBy: { userId: null, name: "Ext PM", email: "pm@x.com" },
+        office: TEST_OFFICE,
       });
     } catch (err) {
       thrown = err;
@@ -496,7 +517,7 @@ describe("submitCorrectiveActionResponse", () => {
     // The winner's response is untouched (the loser's comment never overwrote it).
     const items = await getCorrectiveActionItems(tdb, scorecard.id);
     const resolved = items.find((i) => i.id === first.id)!;
-    expect(resolved.status).toBe("resolved");
+    expect(resolved.status).toBe("submitted");
     expect(resolved.responseComment).toBe("resolved by the super");
     expect(resolved.respondedByUserId).toBe(USER);
   });
@@ -516,6 +537,7 @@ describe("submitCorrectiveActionResponse", () => {
       comment: "resolved with two response photos",
       photoFileIds: [FILE_A, FILE_B],
       respondedBy: { userId: USER, name: "Sam", email: null },
+      office: TEST_OFFICE,
     });
 
     // The SAME responder retries the SAME submission (order of fileIds differs — sets, not sequences).
@@ -526,13 +548,14 @@ describe("submitCorrectiveActionResponse", () => {
         comment: "resolved with two response photos",
         photoFileIds: [FILE_B, FILE_A],
         respondedBy: { userId: USER, name: "Sam", email: null },
+        office: TEST_OFFICE,
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ resolved: false });
 
     // The item keeps the ORIGINAL response (comment/responder unchanged) and its EXACT two photos — no dup rows.
     const items = await getCorrectiveActionItems(tdb, scorecard.id);
     const resolved = items.find((i) => i.id === first.id)!;
-    expect(resolved.status).toBe("resolved");
+    expect(resolved.status).toBe("submitted");
     expect(resolved.responseComment).toBe("resolved with two response photos");
     expect(resolved.respondedByUserId).toBe(USER);
     expect(resolved.photos.map((p) => p.fileId).sort()).toEqual([FILE_A, FILE_B].sort());
@@ -554,6 +577,7 @@ describe("submitCorrectiveActionResponse", () => {
       comment: "resolved by the external PM",
       photoFileIds: [FILE_A],
       respondedBy: { userId: null, name: "Ext PM", email: "pm@x.com" },
+      office: TEST_OFFICE,
     });
 
     await expect(
@@ -563,8 +587,9 @@ describe("submitCorrectiveActionResponse", () => {
         comment: "resolved by the external PM",
         photoFileIds: [FILE_A],
         respondedBy: { userId: null, name: "Ext PM", email: "pm@x.com" },
+        office: TEST_OFFICE,
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ resolved: false });
 
     const links = await tdb.execute(
       sql`SELECT file_id FROM field_scorecard_photos WHERE corrective_action_id = ${first.id}`,
@@ -586,6 +611,7 @@ describe("submitCorrectiveActionResponse", () => {
       comment: "resolved with FILE_A",
       photoFileIds: [FILE_A],
       respondedBy: { userId: USER, name: "Sam", email: null },
+      office: TEST_OFFICE,
     });
 
     // Same responder, but a DIFFERENT fresh file (FILE_B) that did NOT attach → competing/stale submit → 409.
@@ -597,6 +623,7 @@ describe("submitCorrectiveActionResponse", () => {
         comment: "trying to add another photo after resolution",
         photoFileIds: [FILE_B],
         respondedBy: { userId: USER, name: "Sam", email: null },
+        office: TEST_OFFICE,
       });
     } catch (err) {
       thrown = err;
@@ -625,6 +652,7 @@ describe("submitCorrectiveActionResponse", () => {
       comment: "resolved by the session responder",
       photoFileIds: [FILE_A],
       respondedBy: { userId: USER, name: "Sam", email: null },
+      office: TEST_OFFICE,
     });
 
     // A token responder re-supplies the SAME already-linked FILE_A → different responder → 409, not a replay.
@@ -636,6 +664,7 @@ describe("submitCorrectiveActionResponse", () => {
         comment: "external PM submitting the same file",
         photoFileIds: [FILE_A],
         respondedBy: { userId: null, name: "Ext PM", email: "pm@x.com" },
+        office: TEST_OFFICE,
       });
     } catch (err) {
       thrown = err;
@@ -669,6 +698,7 @@ describe("submitCorrectiveActionResponse", () => {
       comment: "resolved with a response photo",
       photoFileIds: [FILE_B],
       respondedBy: { userId: USER, name: "Sam", email: null },
+      office: TEST_OFFICE,
     });
 
     // Now (mis)supply the SAME already-linked FILE_B for the still-open item 2. It is still ledgered, so it
@@ -681,6 +711,7 @@ describe("submitCorrectiveActionResponse", () => {
         comment: "reusing an already-linked file id",
         photoFileIds: [FILE_B],
         respondedBy: { userId: USER, name: "Sam", email: null },
+        office: TEST_OFFICE,
       });
     } catch (err) {
       thrown = err;
@@ -712,6 +743,7 @@ describe("submitCorrectiveActionResponse", () => {
       comment: "item 1 done",
       photoFileIds: [FILE_A],
       respondedBy: { userId: USER, name: "Sam", email: null },
+      office: TEST_OFFICE,
     });
     await submitCorrectiveActionResponse(tdb, {
       scorecardId: scorecard.id,
@@ -719,6 +751,7 @@ describe("submitCorrectiveActionResponse", () => {
       comment: "item 2 done with a different fresh file",
       photoFileIds: [FILE_B],
       respondedBy: { userId: USER, name: "Sam", email: null },
+      office: TEST_OFFICE,
     });
 
     const after = await getCorrectiveActionItems(tdb, scorecard.id);
@@ -745,12 +778,13 @@ describe("submitCorrectiveActionResponse", () => {
       comment: "corrective action documented",
       photoFileIds: [FILE_B],
       respondedBy: { userId: USER, name: "Sam", email: null },
+      office: TEST_OFFICE,
     });
 
     // The response photo is attached to the item (corrective_action_id set, section_key null).
     const items = await getCorrectiveActionItems(tdb, scorecard.id);
     const resolved = items.find((i) => i.id === first.id)!;
-    expect(resolved.status).toBe("resolved");
+    expect(resolved.status).toBe("submitted");
     expect(resolved.photos.map((p) => p.fileId)).toEqual([FILE_B]);
 
     const responseRow = await tdb.execute(
@@ -768,5 +802,173 @@ describe("submitCorrectiveActionResponse", () => {
     const evidenceFileIds = (evidence.rows as { file_id: string }[]).map((r) => r.file_id);
     expect(evidenceFileIds).toContain(FILE_A);
     expect(evidenceFileIds).not.toContain(FILE_B);
+  });
+
+  it("returns the full back-and-forth, not just the latest attempt", async () => {
+    // The response COLUMNS hold one attempt: a resubmission overwrites them. Without the thread the CRM
+    // could show that a fix was approved but never that it was once rejected, or what it was asked to fix —
+    // which is the whole point of routing submissions through an approver.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const [item] = await getCorrectiveActionItems(tdb, scorecard.id);
+
+    await tdb.insert(scorecardCorrectiveActionEvents).values([
+      {
+        correctiveActionId: item.id,
+        scorecardId: scorecard.id,
+        eventType: "submitted",
+        actorName: "Pat Manager",
+        comment: "Anchors tightened.",
+      },
+      {
+        correctiveActionId: item.id,
+        scorecardId: scorecard.id,
+        eventType: "rejected",
+        actorName: "James Helms",
+        comment: "Torque values were not documented.",
+      },
+      {
+        correctiveActionId: item.id,
+        scorecardId: scorecard.id,
+        eventType: "submitted",
+        actorName: "Pat Manager",
+        comment: "Re-torqued to spec, values logged.",
+      },
+    ]);
+
+    const [refreshed] = await getCorrectiveActionItems(tdb, scorecard.id);
+    expect(refreshed.events.map((e) => e.eventType)).toEqual(["submitted", "rejected", "submitted"]);
+    expect(refreshed.events[1].comment).toBe("Torque values were not documented.");
+    expect(refreshed.events[1].actorName).toBe("James Helms");
+  });
+
+  it("orders the thread by its monotonic SEQUENCE, provably not by created_at", async () => {
+    // Events written inside one transaction share a timestamp to the microsecond and the uuid PK is random,
+    // so a created_at sort renders them in a nondeterministic order — for a record whose entire value is the
+    // sequence of what happened, that is a correctness bug, not a cosmetic one.
+    //
+    // Tied timestamps cannot prove which key is used (a created_at sort may return insertion order by
+    // accident), so this INVERTS them: created_at decreases as seq increases. Only a query ordering by seq
+    // returns insertion order here; one ordering by created_at returns the exact reverse.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const [item] = await getCorrectiveActionItems(tdb, scorecard.id);
+    const labels = ["first", "second", "third", "fourth"];
+
+    for (const [index, label] of labels.entries()) {
+      await tdb.insert(scorecardCorrectiveActionEvents).values({
+        correctiveActionId: item.id,
+        scorecardId: scorecard.id,
+        eventType: "submitted",
+        actorName: "Pat Manager",
+        comment: label,
+        createdAt: new Date(Date.parse("2026-07-28T12:00:00.000Z") - index * 60_000),
+      });
+    }
+
+    const [refreshed] = await getCorrectiveActionItems(tdb, scorecard.id);
+    expect(refreshed.events.map((e) => e.comment)).toEqual(labels);
+  });
+
+  it("REGRESSION: attributes each attempt's photos to ITS submission event", async () => {
+    // Photos are inserted before the event exists, so the event id was never written back and every event's
+    // photo set came back empty. The PDF then falls back to hanging every unattributed photo off the FIRST
+    // submission — so after a reject/resubmit, attempt two's evidence appears under attempt one, which is
+    // exactly the per-attempt record the events table was added to provide.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const [item] = await getCorrectiveActionItems(tdb, scorecard.id);
+
+    const attemptOnePhoto = "cccccccc-0000-0000-0000-000000000001";
+    const attemptTwoPhoto = "cccccccc-0000-0000-0000-000000000002";
+    await tdb.execute(sql`
+      INSERT INTO files (id, deal_id, client_upload_id, uploaded_by, description, is_active) VALUES
+        (${attemptOnePhoto}, ${DEAL}, 'up-c1', ${USER}, 'attempt one', true),
+        (${attemptTwoPhoto}, ${DEAL}, 'up-c2', ${USER}, 'attempt two', true)
+    `);
+    await seedUploadLedger(scorecard.id, [attemptOnePhoto, attemptTwoPhoto]);
+
+    await submitCorrectiveActionResponse(tdb, {
+      scorecardId: scorecard.id,
+      itemId: item.id,
+      comment: "First try.",
+      respondedBy: { userId: USER, name: "Pat Manager", email: "pat@trockgc.com" },
+      photoFileIds: [attemptOnePhoto],
+      office: TEST_OFFICE,
+    });
+
+    // The approver sends it back, and the responder answers again with NEW evidence.
+    await tdb.execute(sql`
+      UPDATE scorecard_corrective_actions SET status = 'rejected' WHERE id = ${item.id}
+    `);
+    await tdb.insert(scorecardCorrectiveActionEvents).values({
+      correctiveActionId: item.id,
+      scorecardId: scorecard.id,
+      eventType: "rejected",
+      actorName: "James Helms",
+      comment: "Not enough detail.",
+    });
+    await submitCorrectiveActionResponse(tdb, {
+      scorecardId: scorecard.id,
+      itemId: item.id,
+      comment: "Second try.",
+      respondedBy: { userId: USER, name: "Pat Manager", email: "pat@trockgc.com" },
+      photoFileIds: [attemptTwoPhoto],
+      office: TEST_OFFICE,
+    });
+
+    const [refreshed] = await getCorrectiveActionItems(tdb, scorecard.id);
+    const submissions = refreshed.events.filter((e) => e.eventType === "submitted");
+    expect(submissions).toHaveLength(2);
+    // Each attempt carries ITS OWN photo, not the aggregate and not the other attempt's.
+    expect(submissions[0].photos.map((p) => p.caption)).toEqual(["attempt one"]);
+    expect(submissions[1].photos.map((p) => p.caption)).toEqual(["attempt two"]);
+  });
+
+
+  it("REGRESSION: an idempotent retry of a REWORK response succeeds instead of 409ing", async () => {
+    // The replay check compared the retry's photo ids against every photo ever linked to the item. Once a
+    // rejected item can be resubmitted, an item accumulates one set per round, so the sizes can never match
+    // and a genuine retry of a committed rework 409s — telling the client to discard uploads that DID land.
+    const { scorecard } = await createFieldScorecard(tdb, belowBandSubmission());
+    const [item] = await getCorrectiveActionItems(tdb, scorecard.id);
+    const first = "dddddddd-0000-0000-0000-000000000001";
+    const second = "dddddddd-0000-0000-0000-000000000002";
+    await tdb.execute(sql`
+      INSERT INTO files (id, deal_id, client_upload_id, uploaded_by, description, is_active) VALUES
+        (${first}, ${DEAL}, 'up-d1', ${USER}, 'attempt one', true),
+        (${second}, ${DEAL}, 'up-d2', ${USER}, 'attempt two', true)
+    `);
+    await seedUploadLedger(scorecard.id, [first, second]);
+    const responder = { userId: USER, name: "Pat Manager", email: "pat@trockgc.com" };
+
+    await submitCorrectiveActionResponse(tdb, {
+      scorecardId: scorecard.id,
+      itemId: item.id,
+      comment: "First try.",
+      respondedBy: responder,
+      photoFileIds: [first],
+      office: TEST_OFFICE,
+    });
+
+    // Approver sends it back; the responder answers again with NEW evidence.
+    await tdb.execute(sql`UPDATE scorecard_corrective_actions SET status = 'rejected' WHERE id = ${item.id}`);
+    await submitCorrectiveActionResponse(tdb, {
+      scorecardId: scorecard.id,
+      itemId: item.id,
+      comment: "Second try.",
+      respondedBy: responder,
+      photoFileIds: [second],
+      office: TEST_OFFICE,
+    });
+
+    // The client never saw the response and retries the SAME rework submission.
+    await expect(
+      submitCorrectiveActionResponse(tdb, {
+        scorecardId: scorecard.id,
+        itemId: item.id,
+        comment: "Second try.",
+        respondedBy: responder,
+        photoFileIds: [second],
+        office: TEST_OFFICE,
+      }),
+    ).resolves.toMatchObject({ resolved: false });
   });
 });

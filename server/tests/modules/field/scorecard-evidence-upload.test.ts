@@ -23,11 +23,14 @@ describe("assertScorecardEvidenceUploadCard", () => {
     expect(captureError(card)).toBeNull();
   });
 
-  it("allows evidence on the open/closed corrective-action states (same editable lifecycle as the edit guard)", () => {
+  it("allows evidence while a corrective action is live, and refuses it once APPROVED", () => {
     // The mobile editor opens on these statuses (canEdit), so evidence presign must be permitted here too —
-    // else adding a photo to an open/closed corrective card 422s with SCORECARD_EDIT_UNSUPPORTED.
+    // else adding a photo to a live corrective card 422s with SCORECARD_EDIT_UNSUPPORTED.
     expect(captureError({ ...card, status: "corrective_action_open" })).toBeNull();
-    expect(captureError({ ...card, status: "corrective_action_closed" })).toBeNull();
+    expect(captureError({ ...card, status: "corrective_action_submitted" })).toBeNull();
+    // ...but an APPROVED card is locked. The approval attests to what the approver saw; letting evidence
+    // change afterwards republishes the record under a verdict nobody gave for that content.
+    expect(captureError({ ...card, status: "corrective_action_closed" })?.statusCode).toBe(422);
   });
 
   it("rejects non-deal, lead, opportunity, and mismatched-deal targets", () => {

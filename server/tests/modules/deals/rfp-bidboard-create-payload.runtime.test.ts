@@ -31,6 +31,9 @@ afterEach(async () => {
 async function setup() {
   const db = new PGlite();
   await db.exec(`
+    -- The RFP service verdict reads the CONFIGURED project-type digit through this table, so a fixture
+    -- exercising trigger/payload needs it present (an absent table is a 42P01, not a null code).
+    CREATE TABLE IF NOT EXISTS public.project_type_config (id uuid PRIMARY KEY, name text NOT NULL, code text);
     CREATE TABLE public.job_queue (
       id bigserial PRIMARY KEY, job_type text NOT NULL, payload jsonb NOT NULL, office_id uuid,
       status text NOT NULL, attempts integer NOT NULL DEFAULT 0, max_attempts integer NOT NULL DEFAULT 3,
@@ -47,7 +50,7 @@ async function setup() {
     -- deals: only the columns loadRfpPayloadDeal's SELECT d.* reads (plus JOIN keys).
     CREATE TABLE deals (
       id uuid PRIMARY KEY, name text NOT NULL, deal_number text NOT NULL, project_number text,
-      project_type text, workflow_route text NOT NULL DEFAULT 'normal',
+      project_type text, project_type_id uuid, workflow_route text NOT NULL DEFAULT 'normal',
       awarded_amount numeric, bid_estimate numeric, dd_estimate numeric, forecast_revenue numeric,
       estimator text, bid_board_estimator text,
       property_address text, property_city text, property_state text, property_zip text, property_country text,
@@ -58,7 +61,11 @@ async function setup() {
     );
     CREATE TABLE files (
       id uuid PRIMARY KEY, deal_id uuid, lead_id uuid, is_active boolean NOT NULL DEFAULT true,
-      parent_file_id uuid, display_name text, file_extension text, mime_type text, r2_key text, category text
+      parent_file_id uuid, display_name text, file_extension text, mime_type text, r2_key text, category text,
+      file_size_bytes bigint,
+      -- Attachments are ordered newest-first so the RFP body-size cap, which drops from the tail,
+      -- keeps the most recent documents (TRK-2607-H3X6).
+      created_at timestamptz NOT NULL DEFAULT now()
     );
   `);
   await db.query(

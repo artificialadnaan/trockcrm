@@ -137,6 +137,13 @@ export interface Deal {
   awardedAmount: string | null;
   awardedAmountOverridden?: boolean | null;
   changeOrderTotal: string | null;
+  /**
+   * deals.scope_title (migration 0218) — the SHORT scope-of-work title accounting reads to name a
+   * project in QuickBooks ("Balcony Repair", "Plumbing Renovations"). Optional and frequently null on
+   * historical deals; capped at DEAL_SCOPE_TITLE_MAX_LENGTH by both the form and the API. Distinct from
+   * `description` below, which is the long free-text notes field.
+   */
+  scopeTitle?: string | null;
   description: string | null;
   // deals.bid_due_date (timestamptz, nullable) — stamped at UTC midnight from the date-only source
   // value, so it arrives as e.g. "2026-07-03T00:00:00.000Z". Format in UTC for display (see
@@ -158,6 +165,9 @@ export interface Deal {
   officeCode?: string | null;
   projectType?: string | null;
   projectTypeId: string | null;
+  /** The CONFIGURED project-type digit, resolved server-side through projectTypeId. Load-bearing for the
+   *  At Risk service split: most deals carry no projectType text and are typed only by the FK. */
+  projectTypeCode?: string | null;
   bidBoardProjectNumber?: string | null;
   bidBoardLinkedAt?: string | null;
   // Set once "Move back to Opportunity" disconnected the deal from Bid Board sync. Drives the standing
@@ -291,7 +301,8 @@ export interface DealDetail extends Deal {
     dealId: string;
     fromStageId: string | null;
     toStageId: string;
-    changedBy: string;
+    /** Null when no session actor was identified — a script, sync or raw-SQL write (migration 0207). */
+    changedBy: string | null;
     isBackwardMove: boolean;
     isDirectorOverride: boolean;
     overrideReason: string | null;
@@ -366,6 +377,12 @@ export interface DealDetail extends Deal {
 export interface DealChangeOrder {
   id: string;
   dealId: string;
+  /**
+   * The CO child DEAL's id, or null for a legacy `deal_change_orders` row that has no deal behind it.
+   * The server has always sent this; declaring it lets callers tell a real cascading child from a legacy
+   * record — which archive eligibility depends on.
+   */
+  childDealId?: string | null;
   signedDate: string;
   amount: string;
   description: string | null;
@@ -405,6 +422,10 @@ export interface DealFilters {
   // Exclude on-hold (migration parking-lot) deals, matching the Won board/summary. The Won stage-page /
   // drill-down list sets this so it reconciles to the Won count; other surfaces omit it.
   excludeOnHold?: boolean;
+  /** Reproduce the board's population (drop open rows whose Bid Board mirror already closed). Non-terminal
+   *  stage pages only — it pairs with the stage summary's boardPopulation so header, pagination and list
+   *  describe one population (Codex P2 on #983). */
+  boardPopulation?: boolean;
   status?: "active" | "on_hold" | "inactive" | "any";
   workflowRoute?: "normal" | "service";
   valueMin?: number;
@@ -568,6 +589,7 @@ export function buildDealsQueryParams(filters: DealFilters): URLSearchParams {
   if (filters.dateTo) params.set("dateTo", filters.dateTo);
   if (filters.stageEntryDateWindow) params.set("stage_entry_window", "true");
   if (filters.excludeOnHold) params.set("exclude_on_hold", "true");
+  if (filters.boardPopulation) params.set("boardPopulation", "true");
   if (filters.workflowRoute) params.set("workflowRoute", filters.workflowRoute);
   if (filters.valueMin !== undefined) params.set("valueMin", String(filters.valueMin));
   if (filters.valueMax !== undefined) params.set("valueMax", String(filters.valueMax));
@@ -634,6 +656,7 @@ export function useDeals(filters: DealFilters = {}, options: { enabled?: boolean
     filters.dateTo,
     filters.stageEntryDateWindow,
     filters.excludeOnHold,
+    filters.boardPopulation,
     filters.status,
     filters.workflowRoute,
     filters.valueMin,
@@ -763,6 +786,7 @@ export type CreateServiceOpportunityInput = Partial<Pick<
   | "assignedRepId"
   | "companyId"
   | "description"
+  | "scopeTitle"
   | "expectedCloseDate"
   | "officeCode"
   | "projectNumber"
@@ -1158,6 +1182,17 @@ export function useDealStagePage(input: StagePageQuery & { stageId: string; scop
       ...(input.filters.lostSince ? { lost_since: input.filters.lostSince } : {}),
       ...(input.filters.lostUntil ? { lost_until: input.filters.lostUntil } : {}),
       ...(input.filters.lostAllTime ? { lost_all_time: "true" } : {}),
+      // The WEB board renders CANONICAL columns (aliases merged, aggregates summed), so its drill-down
+      // must query the same family or the page's header and list disagree with the board that opened it.
+      // Opt-in because mobile-crm shares this endpoint with UNMERGED raw columns (Codex P2 on #983).
+      canonicalStageFamily: "true",
+      // Canonical membership alone is only HALF of "what the board counted": the board also drops open
+      // rows whose Bid Board mirror has already closed (nonTerminalMirroredStageCondition), and the stage
+      // endpoint applies that predicate only under boardPopulation. Sending the family without it would
+      // broaden the population past the very column that opened the page. Measured inert on prod today —
+      // 0 active deals are Bid Board-terminal while their CRM stage is open — so this aligns the predicate
+      // without moving a number (Codex P2 on #983).
+      boardPopulation: "true",
     });
 
     setLoading(true);
@@ -1248,6 +1283,8 @@ export async function activateServiceHandoff(dealId: string) {
 export interface PendingRfpDeal {
   id: string;
   name: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  isChangeOrder: boolean;
   projectNumber: string | null;
   dealNumber: string | null;
   workflowRoute: string;

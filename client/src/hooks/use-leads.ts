@@ -736,6 +736,7 @@ export async function convertLead(
     primaryContactId?: string | null;
     name?: string;
     source?: string | null;
+    scopeTitle?: string | null;
     description?: string | null;
     ddEstimate?: string | null;
     bidEstimate?: string | null;
@@ -880,8 +881,15 @@ export async function preflightLeadStageCheck(leadId: string, targetStageId: str
   });
 }
 
-export async function convertLeadToOpportunity(leadId: string) {
+export async function convertLeadToOpportunity(
+  leadId: string,
+  // The convert dialog's one input. Optional so every existing caller is unchanged; omitted entirely
+  // (not sent as null) when blank, so the server's hasOwnProperty check leaves it alone.
+  input: { scopeTitle?: string | null } = {}
+) {
+  const json = input.scopeTitle ? { scopeTitle: input.scopeTitle } : undefined;
   return api<{ lead: LeadRecord; deal: { id: string } }>(`/leads/${leadId}/convert`, {
     method: "POST",
+    ...(json ? { json } : {}),
   });
 }

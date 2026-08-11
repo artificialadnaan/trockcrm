@@ -23,6 +23,7 @@ import {
   fieldScorecardPhotos,
   fieldScorecards,
   scorecardCorrectiveActions,
+  scorecardCorrectiveActionEvents,
   scorecardCorrectiveActionTokens,
 } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
@@ -147,7 +148,7 @@ beforeAll(async () => {
       id uuid PRIMARY KEY, name text, slug text, is_terminal boolean DEFAULT false
     );
     CREATE TABLE deals (
-      id uuid PRIMARY KEY, name text, deal_number text, project_number text, stage_id uuid,
+      id uuid PRIMARY KEY, name text, scope_title text, is_change_order boolean NOT NULL DEFAULT false, deal_number text, project_number text, stage_id uuid,
       is_active boolean DEFAULT true, bid_board_stage_slug text,
       property_address text, property_city text, property_state text, property_zip text,
       last_activity_at timestamptz, updated_at timestamptz, created_at timestamptz DEFAULT now()
@@ -174,6 +175,7 @@ beforeAll(async () => {
     fieldScorecardPhotos,
     fieldScorecardEditUploads,
     scorecardCorrectiveActions,
+  scorecardCorrectiveActionEvents,
     scorecardCorrectiveActionTokens,
     dealTeamMembers,
     contacts,
@@ -437,7 +439,7 @@ describe("updateFieldScorecard authorization and visibility", () => {
     expect((await listRecentFieldScorecards(tdb, { viewerUserId: OTHER_USER })).scorecards[0]?.canEdit).toBe(false);
   });
 
-  it("advertises canEdit for the submitter on open AND closed corrective-action cards (finding 3)", async () => {
+  it("advertises canEdit on open/awaiting corrective-action cards, but NOT once APPROVED", async () => {
     // A below-band card opens in corrective_action_open. canEdit must be true for the submitter so the mobile
     // edit action (gated on canEdit) can reach the edit/reconciliation path — the edit guard accepts this status.
     const { scorecard } = await createFieldScorecard(tdb, projectSubmission({
@@ -452,11 +454,19 @@ describe("updateFieldScorecard authorization and visibility", () => {
     // A different user still can't edit it.
     expect((await getFieldScorecardDetail(tdb, scorecard.id, OTHER_ACCESS)).canEdit).toBe(false);
 
-    // Drive the card to corrective_action_closed and confirm canEdit stays true for the submitter (re-open path).
+    // Awaiting the approver: still editable — the card is live and nobody has ruled on it yet.
+    await tdb.execute(
+      sql`UPDATE field_scorecards SET status = 'corrective_action_submitted' WHERE id = ${scorecard.id}`,
+    );
+    expect((await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS)).canEdit).toBe(true);
+
+    // APPROVED: locked, even for the submitter. corrective_action_closed now means an approver accepted this
+    // card, and an approval attests to what they actually saw — allowing an edit afterwards republishes the
+    // PDF under the existing verdict, so the record would show a sign-off over content nobody reviewed.
     await tdb.execute(
       sql`UPDATE field_scorecards SET status = 'corrective_action_closed' WHERE id = ${scorecard.id}`,
     );
-    expect((await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS)).canEdit).toBe(true);
+    expect((await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS)).canEdit).toBe(false);
     expect((await getFieldScorecardDetail(tdb, scorecard.id, OTHER_ACCESS)).canEdit).toBe(false);
   });
 
@@ -860,7 +870,7 @@ describe("updateFieldScorecard replacement and concurrency", () => {
     expect(filesRemain.rows[0]?.count).toBe(3);
   });
 
-  it("updates leadership summary/scores without requiring or persisting project-only fields", async () => {
+  it("updates leadership summary/scores, PERSISTS action items, and still drops project-only signatures", async () => {
     const { scorecard } = await createFieldScorecard(tdb, projectSubmission({
       clientSubmissionId: csid(24),
       kind: "leadership",
@@ -871,7 +881,12 @@ describe("updateFieldScorecard replacement and concurrency", () => {
     }));
     const result = await updateFieldScorecard(tdb, updateInput(scorecard.id, scorecard.updatedAt!, {
       items: leadershipItems(10),
-      actionItems: ["must be discarded"],
+      // Action items are NO LONGER project-only. This assertion used to read `toEqual([])` with the input
+      // literally named "must be discarded" — it pinned the strip that made a below-band leadership card
+      // structurally unable to open a corrective action. Because PUT is a full replacement, discarding these
+      // ALSO deleted a leadership card's flagged items (and the corrective actions reconcile tracks against
+      // them) on any unrelated edit.
+      actionItems: ["Rebuild the two-week look-ahead", "  Close the open safety observations  "],
       superintendentSignature: null,
       pmSignature: null,
       summary: "  Updated leadership summary  ",
@@ -879,7 +894,12 @@ describe("updateFieldScorecard replacement and concurrency", () => {
     expect(result.scorecard).toMatchObject({ kind: "leadership", averageScore: 10, totalScore: 100 });
     const detail = await getFieldScorecardDetail(tdb, scorecard.id, OWNER_ACCESS);
     expect(detail.summary).toBe("Updated leadership summary");
-    expect(detail.actionItems).toEqual([]);
+    // Trimmed, in order, both retained.
+    expect(detail.actionItems).toEqual([
+      "Rebuild the two-week look-ahead",
+      "Close the open safety observations",
+    ]);
+    // Signatures ARE still project-only: the leadership form has no signature blocks to collect them.
     expect(detail.superintendentSignature).toBeNull();
     expect(detail.pmSignature).toBeNull();
   });

@@ -57,6 +57,21 @@ export function DeltaChip({ delta, suffix = "WoW" }: { delta: number | null; suf
   );
 }
 
+// SIGNED, zero-baselined bars. Every consumer (Region "8-week won trend", Forecast Confidence "Won — last
+// 8 weeks (actuals)", the Monday-showcase department tiles) plots Won actuals, and a deductive change order
+// — a Won child deal with a NEGATIVE awarded_amount — can net a whole WEEK negative. Against a
+// bottom-anchored `(v / max) * height` a negative week rendered as the SAME 3px upward stub as a zero week,
+// hiding both magnitude and direction on a chart labelled "actuals".
+//
+// So the track is split around zero: the scale spans min..max (min clamped at 0) and the zero line sits
+// `zeroFromBottom` up from the floor. Positive bars grow up from that line, negative bars hang below it,
+// both on ONE shared scale so their lengths stay comparable.
+//
+// INERT for all-positive data (the overwhelming majority): with no negative value min is 0, so
+// `zeroFromBottom` is 0, the span equals the old `max`, no offset or baseline element is emitted and the
+// container class is unchanged — every bar keeps exactly the old `max(3, (v / max) * height)` and its
+// bottom anchor. The negative treatment reuses the palette's existing "down" tone (rose, as on DeltaChip)
+// and flips the rounded cap to the hanging end; nothing new is invented.
 export function Sparkline({
   values,
   spikeIndex,
@@ -70,19 +85,42 @@ export function Sparkline({
   highlightLast?: boolean;
   height?: number;
 }) {
-  const max = Math.max(1, ...values);
+  const min = Math.min(0, ...values);
+  // `Math.max(1, ...)` keeps the old all-zero behaviour (a flat row of 3px floor stubs) instead of /0.
+  const span = Math.max(1, Math.max(0, ...values) - min);
+  const zeroFromBottom = (-min / span) * height;
+  const hasNegative = zeroFromBottom > 0;
   const lastIdx = values.length - 1;
   return (
-    <div className="flex items-end gap-1" style={{ height }} data-testid="sparkline" aria-hidden>
+    <div
+      className={hasNegative ? "relative flex items-end gap-1" : "flex items-end gap-1"}
+      style={{ height }}
+      data-testid="sparkline"
+      aria-hidden
+    >
+      {hasNegative && (
+        <div
+          className="pointer-events-none absolute inset-x-0 border-t border-slate-200"
+          style={{ bottom: `${zeroFromBottom}px` }}
+          data-testid="sparkline-baseline"
+        />
+      )}
       {values.map((v, i) => {
         const isSpike = spikeIndex === i;
         const isLast = highlightLast && i === lastIdx;
+        const isNegative = v < 0;
+        const barHeight = Math.max(3, (Math.abs(v) / span) * height);
+        // A positive/zero bar starts AT the zero line; a negative one ends at it (clamped so the 3px floor
+        // on a hair-negative week can't push the bar off the bottom of the track).
+        const offset = isNegative ? Math.max(0, zeroFromBottom - barHeight) : zeroFromBottom;
+        const style: React.CSSProperties = { height: `${barHeight}px` };
+        if (hasNegative) style.marginBottom = `${offset}px`;
         return (
           <div
             key={i}
             title={isSpike ? `${v} (backfill spike — excluded from averages)` : String(v)}
-            className={`w-2.5 rounded-t transition-all ${isSpike ? "bg-amber-400" : barClass} ${isLast ? "opacity-100 ring-2 ring-slate-300 ring-offset-1" : "opacity-80"}`}
-            style={{ height: `${Math.max(3, (v / max) * height)}px` }}
+            className={`w-2.5 ${isNegative ? "rounded-b" : "rounded-t"} transition-all ${isSpike ? "bg-amber-400" : isNegative ? "bg-rose-500" : barClass} ${isLast ? "opacity-100 ring-2 ring-slate-300 ring-offset-1" : "opacity-80"}`}
+            style={style}
           />
         );
       })}

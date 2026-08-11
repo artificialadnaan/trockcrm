@@ -9,6 +9,7 @@ import {
   fieldScorecardItems,
   fieldScorecardPhotos,
   scorecardCorrectiveActions,
+  scorecardCorrectiveActionEvents,
   dealTeamMembers,
   contacts,
   fieldResponders,
@@ -73,7 +74,7 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE TABLE public.pipeline_stage_config (id uuid PRIMARY KEY, name text, slug text, is_terminal boolean DEFAULT false);
     CREATE TABLE deals (
-      id uuid PRIMARY KEY, name text, deal_number text, project_number text, stage_id uuid,
+      id uuid PRIMARY KEY, name text, scope_title text, is_change_order boolean NOT NULL DEFAULT false, deal_number text, project_number text, stage_id uuid,
       is_active boolean DEFAULT true, bid_board_stage_slug text,
       property_address text, property_city text, property_state text, property_zip text,
       last_activity_at timestamptz, updated_at timestamptz, created_at timestamptz DEFAULT now()
@@ -91,7 +92,7 @@ beforeAll(async () => {
     );
   `);
   await pg.exec(
-    tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, scorecardCorrectiveActions, dealTeamMembers, contacts, fieldResponders]),
+    tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, scorecardCorrectiveActions, scorecardCorrectiveActionEvents, dealTeamMembers, contacts, fieldResponders]),
   );
   await pg.exec(
     `ALTER TABLE public.field_scorecards ADD CONSTRAINT field_scorecards_csid_uniq UNIQUE (client_submission_id);`,

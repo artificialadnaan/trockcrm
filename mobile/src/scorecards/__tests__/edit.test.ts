@@ -97,6 +97,24 @@ describe("createScorecardEditDraft", () => {
     expect(body.pmResponderId).toBe("resp-pm");
   });
 
+  it("carries deals.is_change_order from the card into the edit draft", () => {
+    // The editor treats `draft.isChangeOrder` as the AUTHORITY. Hydrating dealName/projectNumber but not
+    // the flag left it undefined, so the editor fell back to reading the name — and relabelled a
+    // flag-FALSE project while the user was editing it.
+    expect(createScorecardEditDraft(detail({ isChangeOrder: true }), {
+      id: "e1", clientSubmissionId: "a1", now: 1,
+    }).isChangeOrder).toBe(true);
+
+    expect(createScorecardEditDraft(detail({ isChangeOrder: false }), {
+      id: "e2", clientSubmissionId: "a2", now: 1,
+    }).isChangeOrder).toBe(false);
+
+    // An older API deployment omits it — that must stay UNDEFINED, never become false.
+    expect(createScorecardEditDraft(detail(), {
+      id: "e3", clientSubmissionId: "a3", now: 1,
+    }).isChangeOrder).toBeUndefined();
+  });
+
   it("hydrates a card with no picks as explicit nulls (falls back to the deal team server-side)", () => {
     const draft = createScorecardEditDraft(detail(), {
       id: "local-edit-unpicked",
@@ -166,7 +184,7 @@ describe("createScorecardEditDraft", () => {
     expect(draft.editBaseContentFingerprint!.length).toBeLessThan(40);
   });
 
-  it("hydrates leadership fields, category/summary evidence, and no project-only data", () => {
+  it("hydrates leadership fields, its action items, category/summary evidence, and no project-only data", () => {
     const leadershipItems = FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS.map((sectionKey) => ({
       sectionKey,
       points: 9,
@@ -182,7 +200,10 @@ describe("createScorecardEditDraft", () => {
       summary: "Strong leadership visit",
       criticalDeficiencies: ["failed_inspection"],
       criticalDeficiencyNotes: { failed_inspection: "must not carry over" },
-      actionItems: ["must not carry over"],
+      // Action items DO carry over — they are a leadership card's only possible flagged item. This input was
+      // named "must not carry over" and asserted `[]` below, pinning a strip that made opening a leadership
+      // card for edit show an empty list and then PUT that empty list back, deleting the card's flagged items.
+      actionItems: ["Rebuild the look-ahead", "Close the safety observations"],
       photos: [
         {
           id: "lead-photo-1",
@@ -207,9 +228,10 @@ describe("createScorecardEditDraft", () => {
     expect(draft.evaluatorName).toBe("Erin Evaluator");
     expect(draft.summary).toBe("Strong leadership visit");
     expect(draft.scores).toEqual(Object.fromEntries(leadershipItems.map((item) => [item.sectionKey, 9])));
+    // Deficiencies genuinely ARE project-only (the server rejects them on a leadership card).
     expect(draft.criticalDeficiencies).toEqual([]);
     expect(draft.deficiencyNotes).toEqual({});
-    expect(draft.actionItems).toEqual([]);
+    expect(draft.actionItems).toEqual(["Rebuild the look-ahead", "Close the safety observations"]);
     expect(draft.photos.map((photo) => photo.sectionKey)).toEqual(["quality_control", "project_summary"]);
   });
 
@@ -1377,7 +1399,7 @@ describe("scorecardDraftToUpdate", () => {
     });
   });
 
-  it("builds leadership-only fields and nulls project-only fields", () => {
+  it("builds leadership-only fields, KEEPS action items, and nulls project-only fields", () => {
     const leadershipItems = FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS.map((sectionKey) => ({
       sectionKey,
       points: 8,
@@ -1388,7 +1410,10 @@ describe("scorecardDraftToUpdate", () => {
       items: leadershipItems,
       summary: "  Field leaders aligned  ",
       criticalDeficiencies: [],
-      actionItems: [],
+      // A leadership card WITH flagged items. PUT is a full replacement, so this payload is the one that used
+      // to send `[]` and silently delete them — along with the corrective actions reconcile tracks against
+      // them, in the same transaction. This assertion is the regression test for that deletion.
+      actionItems: ["  Rebuild the look-ahead  ", "   ", "Close the safety observations"],
       photos: [],
     }), { id: "lead-local", clientSubmissionId: "lead-attempt", now: 5 });
 
@@ -1396,7 +1421,8 @@ describe("scorecardDraftToUpdate", () => {
       expectedUpdatedAt: "2026-07-14T14:05:00.000Z",
       criticalDeficiencies: [],
       criticalDeficiencyNotes: {},
-      actionItems: [],
+      // Trimmed and blank-filtered, matching the project path and the server's own normalization.
+      actionItems: ["Rebuild the look-ahead", "Close the safety observations"],
       superintendentSignature: null,
       pmSignature: null,
       summary: "Field leaders aligned",

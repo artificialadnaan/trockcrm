@@ -58,9 +58,8 @@ describe("normalizeChangeOrderAmount", () => {
     expect(normalizeChangeOrderAmount(1500)).toBe("1500.00");
     expect(normalizeChangeOrderAmount("250.5")).toBe("250.50");
   });
-  it("rejects zero, negative, and non-numeric", () => {
+  it("rejects zero and non-numeric (negative is now a legitimate deductive amount — see the dedicated suite below)", () => {
     expect(() => normalizeChangeOrderAmount(0)).toThrow();
-    expect(() => normalizeChangeOrderAmount(-5)).toThrow();
     expect(() => normalizeChangeOrderAmount("abc")).toThrow();
     expect(() => normalizeChangeOrderAmount(null)).toThrow();
   });
@@ -96,5 +95,36 @@ describe("assertDealEligibleForChangeOrder", () => {
     await expect(assertDealEligibleForChangeOrder(tdb, U("dead"))).rejects.toMatchObject({
       statusCode: 404,
     });
+  });
+});
+
+describe("normalizeChangeOrderAmount — deductive change orders", () => {
+  it("accepts a negative amount", () => {
+    expect(normalizeChangeOrderAmount("-50000")).toBe("-50000.00");
+    expect(normalizeChangeOrderAmount("-1234.5")).toBe("-1234.50");
+    expect(normalizeChangeOrderAmount(-99.99)).toBe("-99.99");
+  });
+
+  it("still rejects zero", () => {
+    // Real message is "Change order amount cannot be 0." (CHANGE_ORDER_AMOUNT_INVALID, 400) — assert on
+    // both the string and the AppError shape so a future message tweak doesn't silently detach the test.
+    expect(() => normalizeChangeOrderAmount("0")).toThrow(/cannot be 0/i);
+    expect(() => normalizeChangeOrderAmount("0")).toThrow(
+      expect.objectContaining({ statusCode: 400, code: "CHANGE_ORDER_AMOUNT_INVALID" })
+    );
+    expect(() => normalizeChangeOrderAmount("-0.00")).toThrow(/cannot be 0/i);
+    // Pin the numeric -0 case too: String(-0) is "0" (a subtle JS fact — -0 does NOT stringify to
+    // "-0"), so this rejects for the same reason as the plain 0 case above, not via the sign path.
+    expect(() => normalizeChangeOrderAmount(-0)).toThrow(/cannot be 0/i);
+  });
+
+  it("still rejects sub-cent precision and over-ceiling magnitude", () => {
+    expect(() => normalizeChangeOrderAmount("-0.001")).toThrow();
+    expect(() => normalizeChangeOrderAmount("-9999999999999")).toThrow();
+  });
+
+  it("still rejects non-numeric input", () => {
+    expect(() => normalizeChangeOrderAmount("abc")).toThrow();
+    expect(() => normalizeChangeOrderAmount("--5")).toThrow();
   });
 });

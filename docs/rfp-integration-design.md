@@ -347,6 +347,58 @@ Implementation detail: this endpoint must select the current stage slug by joini
 
 Justification: this keeps the HMAC scheme uniform across SyncHub-to-CRM calls. All internal calls use raw body bytes plus `x-rfp-request-signature`; there is no separate method-plus-path signing convention.
 
+### POST /api/internal/deals/current-values
+
+Purpose: let SyncHub's RFP report resolve what a deal is worth **now**, for rows whose send-time
+snapshot is blank.
+
+`deal_data.amount` is the value captured when the RFP was sent, and it is routinely empty because
+the rep sends the RFP before the estimator writes the estimate — the snapshot is correct, the number
+simply did not exist yet. Rather than render an em-dash forever, the report resolves the current
+value at render time. This endpoint is **read-only**: it never rewrites the stored snapshot.
+
+Auth: identical to `/deals/eligibility-check` — `x-rfp-request-signature`, HMAC SHA-256 of the raw
+body bytes keyed by `SYNCHUB_SHARED_SECRET`, `401` on mismatch.
+
+Body:
+
+```ts
+{
+  dealIds: string[]; // CRM deal UUIDs; max 500 per request
+}
+```
+
+Response:
+
+```ts
+// 200
+{
+  values: Array<{ dealId: string; amount: number | null }>;
+  maxDealIds: 500;
+}
+```
+
+- `amount` uses the **same precedence as the outbound RFP payload** — `awarded_amount → bid_estimate
+  → dd_estimate → forecast_revenue` — by calling the one shared helper (`resolveRfpDealAmount` in
+  `server/src/modules/deals/rfp-payload.ts`). Do not restate the ordering anywhere; a second copy can
+  drift, which would let the number in the RFP email and the number on the RFP report disagree for
+  the same deal.
+- A deal that exists but has no value yet is returned with `amount: null`. A deal that is unknown or
+  soft-deleted (`is_active = false`) is **omitted** — callers must be able to tell the two apart.
+- Ids that are not castable UUIDs are dropped rather than failing the batch (a HubSpot-sourced RFP
+  carries a numeric id, and one of those in `= ANY($1::uuid[])` is a `22P02` that would lose every
+  other row's amount).
+- Request ids are lower-cased to Postgres's canonical form before the lookup, and response keys come
+  from `deals.id`, so both sides are always lower-case regardless of what the caller sent. This is
+  load-bearing, not cosmetic: the per-schema loop prunes already-found ids by comparing request ids
+  against `row.id`, so an upper-case request id would never match its own result, never be pruned,
+  and every later tenant schema would be swept for a deal already found.
+- Over `maxDealIds` the request is refused with `422 too_many_deal_ids` rather than silently
+  truncated. 500 is comfortably above the 100 rows a SyncHub report page can hold, so a whole report
+  resolves in one round trip.
+- One query per tenant schema with `id = ANY(...)`, stopping once every id is placed — never one
+  query per deal.
+
 ## 7. Editable Field Whitelist for /rfp-edits
 
 Allowed top-level or dotted fields:

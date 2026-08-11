@@ -21,6 +21,26 @@
       "types": "./dist/lib/bidBoardStatusMap.d.ts",
       "default": "./dist/lib/bidBoardStatusMap.js"
     },
+    "./lib/editDistance": {
+      "types": "./dist/lib/editDistance.d.ts",
+      "default": "./dist/lib/editDistance.js"
+    },
+    "./lib/canvassingReportViewers": {
+      "types": "./dist/lib/canvassingReportViewers.d.ts",
+      "default": "./dist/lib/canvassingReportViewers.js"
+    },
+    "./lib/correctiveActionApprovers": {
+      "types": "./dist/lib/correctiveActionApprovers.d.ts",
+      "default": "./dist/lib/correctiveActionApprovers.js"
+    },
+    "./lib/correctiveActionOrder": {
+      "types": "./dist/lib/correctiveActionOrder.d.ts",
+      "default": "./dist/lib/correctiveActionOrder.js"
+    },
+    "./lib/dailyActivityLogViewers": {
+      "types": "./dist/lib/dailyActivityLogViewers.d.ts",
+      "default": "./dist/lib/dailyActivityLogViewers.js"
+    },
     "./lib/dealMoveBackApprovers": {
       "types": "./dist/lib/dealMoveBackApprovers.d.ts",
       "default": "./dist/lib/dealMoveBackApprovers.js"
@@ -28,6 +48,10 @@
     "./lib/fieldScorecardEmails": {
       "types": "./dist/lib/fieldScorecardEmails.d.ts",
       "default": "./dist/lib/fieldScorecardEmails.js"
+    },
+    "./lib/responderNameMatch": {
+      "types": "./dist/lib/responderNameMatch.d.ts",
+      "default": "./dist/lib/responderNameMatch.js"
     },
     "./lib/rfpReviewerEmails": {
       "types": "./dist/lib/rfpReviewerEmails.d.ts",

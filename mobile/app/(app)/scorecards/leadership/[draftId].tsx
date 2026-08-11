@@ -19,6 +19,9 @@ import { getScorecard, getTranscriptionConfig, type Fetcher } from "../../../../
 import { apiFetch } from "../../../../src/api/client";
 import { uploadOwnerKey, newClientUploadId, removeQueuedUploads } from "../../../../src/capture/upload-queue";
 import { qk } from "../../../../src/query/keys";
+// Display-only change-order prefix. `draft.dealName` holds the RAW stored deal name (and stays raw in the
+// persisted draft); only the places that SHOW it are transformed.
+import { formatDealDisplayName } from "../../../../src/projects/field-projects";
 import { extractExifMetadata, getLiveGps, type PhotoMetadata } from "../../../../src/capture/metadata";
 import type { CapturedShot } from "../../../../src/capture/CameraCapture";
 import {
@@ -273,6 +276,20 @@ function LeadershipForm(props: {
   const summaryPhotos = scorecardDraftPhotosForSection(draft, SUMMARY_KEY);
   const captionPhoto = draft.photos.find((photo) => photo.key === captionPhotoKey) ?? null;
   const editingSubmitted = isEditingScorecardDraft(draft);
+  // A below-band card with no action items opens no corrective action: reconcile's gate is
+  // `isCorrectiveActionBand(rating) && enumerateFlaggedItems(...).length > 0`, and a leadership card carries
+  // no critical deficiencies, so action items are the only thing that can satisfy the second half. Mirrors
+  // the server's trim-then-filter so a whitespace-only item doesn't read as flagged here and empty there.
+  //
+  // Gated on every category being scored. scorecardDraftAverage divides by ALL four categories, so an
+  // unscored one counts as zero and a blank draft averages 0 — which reads as `corrective_action`. Without
+  // this guard the red banner fired the instant the form opened, announcing a below-standard result that
+  // does not exist yet on a card that cannot even be submitted.
+  const allCategoriesScored = validation.missingSections.length === 0;
+  const belowBandWithNoActionItems =
+    allCategoriesScored &&
+    scorecardDraftRating(draft) === "corrective_action" &&
+    draft.actionItems.every((item) => item.trim().length === 0);
 
   // Track whether any INLINE dictation (a category comment or the Project Summary) is still recording or
   // transcribing. VoiceRecorder dispatches its transcript asynchronously on stop; submitting mid-dictation
@@ -568,7 +585,7 @@ function LeadershipForm(props: {
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <ScreenHeader onBack={goBack} title={draft.dealName} />
+      <ScreenHeader onBack={goBack} title={formatDealDisplayName(draft.dealName, draft.isChangeOrder)} />
 
       {/* Freeze the whole form once submit begins: pointerEvents="none" makes every mutation control (scores,
           text, dictation, photo add/remove/caption) a no-op so a mid-submit edit can't be silently lost when
@@ -592,7 +609,7 @@ function LeadershipForm(props: {
         ) : null}
 
         <View style={{ gap: theme.space.md }}>
-          <Field label="Project"><Text style={styles.readonly}>{draft.dealName}</Text></Field>
+          <Field label="Project"><Text style={styles.readonly}>{formatDealDisplayName(draft.dealName, draft.isChangeOrder)}</Text></Field>
           {draft.projectNumber ? <Field label="Project number"><Text style={styles.readonly}>{draft.projectNumber}</Text></Field> : null}
           <Field label="Evaluator">
             {/* Display-only: the Evaluator IS whoever submits (the server stamps submittedByName from the
@@ -689,6 +706,52 @@ function LeadershipForm(props: {
             onCamera={() => setPhotoSectionKey(SUMMARY_KEY)}
             onImport={() => void importPhotos(SUMMARY_KEY)}
           />
+        </View>
+
+        {/* Action items are what a below-band leadership card can actually ASK someone to fix: each one seeds
+            a tracked corrective action the deal's superintendent/PM has to document and an approver has to
+            accept. A leadership card carries no critical deficiencies, so these are its ONLY flagged items —
+            below band with none, nothing is asked of anyone. The banner says so rather than blocking submit:
+            an evaluator may legitimately have nothing itemized. */}
+        <View style={{ gap: theme.space.sm }}>
+          <SectionLabel>Action items</SectionLabel>
+          <Text style={styles.hint}>
+            Add the follow-up work or corrections this review is asking for. On a below-standard card each one
+            becomes a corrective action the superintendent or project manager must document.
+          </Text>
+          {belowBandWithNoActionItems ? (
+            <Banner
+              // `error`, not `info`: a below-band card that asks nothing of anyone is the failure this whole
+              // feature exists to prevent, and it is invisible after submit. Loud beats quiet — but it does
+              // NOT block submit, because an evaluator may legitimately have nothing itemized.
+              tone="error"
+              message="This card is below standard but has no action items, so no corrective action will be opened and nobody will be asked to fix anything. Add at least one to start the corrective-action cycle."
+            />
+          ) : null}
+          {draft.actionItems.map((item, index) => (
+            <View key={`action-item-${index}`} style={styles.actionItemEditor}>
+              <TextInput
+                value={item}
+                onChangeText={(value) => dispatch({ type: "setActionItem", index, value })}
+                placeholder={`Action item ${index + 1}`}
+                multiline
+                style={styles.actionItemInput}
+              />
+              <Button
+                title="Remove"
+                variant="ghost"
+                onPress={() => dispatch({ type: "removeActionItem", index })}
+                accessibilityLabel={`Remove action item ${index + 1}`}
+              />
+            </View>
+          ))}
+          <Button title="Add action item" variant="ghost" onPress={() => dispatch({ type: "addActionItem" })} />
+          {voiceEnabled ? (
+            <VoiceRecorder
+              onTranscript={(text) => dispatch({ type: "appendActionItem", text })}
+              onBusyChange={getVoiceBusyHandler("action-items")}
+            />
+          ) : null}
         </View>
       </ScrollView>
 
@@ -891,6 +954,10 @@ const styles = StyleSheet.create({
   captionBackdrop: { ...StyleSheet.absoluteFillObject },
   captionSheet: { gap: theme.space.md, backgroundColor: theme.color.surfaceCard, borderTopLeftRadius: theme.radius.lg, borderTopRightRadius: theme.radius.lg, padding: theme.space.lg },
   submitBlockBanner: { paddingHorizontal: theme.space.lg, paddingBottom: theme.space.sm },
+  // Kept identical to the project form's action-item editor — the same control in both places should look
+  // the same, and a reviewer comparing the two screens shouldn't have to diff two styles to confirm it.
+  actionItemEditor: { gap: theme.space.sm, padding: theme.space.sm, borderWidth: 1, borderColor: theme.color.border, borderRadius: theme.radius.md, backgroundColor: theme.color.surfaceCard },
+  actionItemInput: { minHeight: 68, textAlignVertical: "top", paddingTop: 10 },
   footer: {
     flexDirection: "row", alignItems: "center", gap: theme.space.md,
     padding: theme.space.md, borderTopWidth: 1, borderTopColor: theme.color.border, backgroundColor: theme.color.surfaceCard,

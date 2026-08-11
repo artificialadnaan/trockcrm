@@ -80,3 +80,64 @@ describe("reconciliation — card number === the list it drills to", () => {
     expect(drilledSum).toBe(cardPipeline);
   });
 });
+
+/**
+ * A DEDUCTIVE change order makes a property's linked value NEGATIVE.
+ *
+ * A change order is a real child deal (0156) that inherits its parent's property_id, sits in Won, is
+ * active and not on-hold — so it is inside the property linked-value SUM by construction. That SUM
+ * (propertyLinkedDealValueSql -> aliasedDealBestEstimateWithForecastSql) is change-order-aware, so a
+ * deductive CO enters it as a NEGATIVE number and a property can arrive here netting below zero: the
+ * deductions on a project can outweigh whatever else the property still contributes (a parent that is
+ * soft-deleted is excluded from the SUM entirely — the query filters is_active — and a parent held to $0
+ * contributes nothing, while the child, which inherits neither flag, keeps its full negative value).
+ *
+ * The `> 0` gate made that property VANISH from the drilled list while its money stayed in the card's
+ * number, which is the worse half of the failure: a wrong total is visible, a missing row is not — there
+ * is no way to see which site the number came from once it has been filtered out from under it.
+ */
+describe("a net-negative property must not vanish from the pipeline drill", () => {
+  // ONE array, as above: the card number and the drilled list both derive from it, so the reconciliation
+  // below is the real invariant and not two hand-written numbers agreeing by luck.
+  const withDeduction: PropertySurface[] = [
+    prop({ id: "n1", leadCount: 0, activeDealsCount: 1, linkedValue: "100000", lastActivityAt: recent }),
+    prop({ id: "n2", leadCount: 0, activeDealsCount: 1, linkedValue: "-30000", lastActivityAt: recent }),
+    prop({ id: "n3", leadCount: 0, activeDealsCount: 0, linkedValue: "0", lastActivityAt: recent }),
+  ];
+  const cardWithDeduction = withDeduction.reduce(
+    (s, p) => s + Number(p.linkedValue ?? p.activePipelineValue ?? 0),
+    0
+  );
+
+  it("keeps the property whose linked pipeline nets negative", () => {
+    expect(withDeduction.filter(hasLinkedPipeline).map((p) => p.id)).toEqual(["n1", "n2"]);
+  });
+
+  it("Linked-pipeline $ sum === sum over the drilled list even with a deduction in it", () => {
+    const drilled = withDeduction.filter(PROPERTY_CARD_PREDICATES.pipeline);
+    const drilledSum = drilled.reduce((s, p) => s + Number(p.linkedValue ?? p.activePipelineValue ?? 0), 0);
+    expect(cardWithDeduction).toBe(70000);
+    expect(drilledSum).toBe(cardWithDeduction);
+  });
+
+  it("still drops a property that contributes NOTHING to the number", () => {
+    // The predicate is "contributes to the card", not "is positive". A $0 property moves the sum by
+    // nothing, so dropping it narrows the list without breaking the reconciliation — a negative one
+    // moves it by exactly its own value, so dropping that DOES break it.
+    expect(withDeduction.filter(hasLinkedPipeline).map((p) => p.id)).not.toContain("n3");
+  });
+
+  it("reconciles for a property set that nets negative overall", () => {
+    // Not merely "a negative row among positives": the whole card can read below zero, and the drill has
+    // to be able to show every site that put it there.
+    const allDeductive = [
+      prop({ id: "d1", activeDealsCount: 1, linkedValue: "-30000", lastActivityAt: recent }),
+      prop({ id: "d2", activeDealsCount: 1, linkedValue: "-12500", lastActivityAt: recent }),
+    ];
+    const card = allDeductive.reduce((s, p) => s + Number(p.linkedValue ?? p.activePipelineValue ?? 0), 0);
+    const drilled = allDeductive.filter(PROPERTY_CARD_PREDICATES.pipeline);
+    expect(card).toBe(-42500);
+    expect(drilled.map((p) => p.id)).toEqual(["d1", "d2"]);
+    expect(drilled.reduce((s, p) => s + Number(p.linkedValue ?? p.activePipelineValue ?? 0), 0)).toBe(card);
+  });
+});

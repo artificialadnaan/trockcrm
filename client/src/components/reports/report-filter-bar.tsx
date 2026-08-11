@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { RotateCcw, SlidersHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { useOfficeScopeId } from "@/hooks/use-office-scope";
 import { useAccessibleOffices } from "@/hooks/use-accessible-offices";
 import { useSalesReps } from "@/hooks/use-sales-reps";
 
@@ -36,8 +37,48 @@ export interface ReportOwnerOption {
 
 type DefaultRange = "30" | "60" | "90" | "6m" | "12m" | "qtd" | "ytd";
 
+/**
+ * YYYY-MM-DD from a Date's LOCAL calendar fields.
+ *
+ * Deliberately not toISOString() (a UTC conversion) and not toLocaleDateString with a timeZone (another
+ * conversion). Both of those cross a zone boundary, and crossing one HERE while `businessNow` crosses
+ * another is what produced two successive off-by-one bugs: read the same fields the arithmetic below
+ * writes, and there is no boundary left to get wrong.
+ */
 function toDateInput(date: Date) {
-  return date.toISOString().slice(0, 10);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * "Today", in the VIEWER's own calendar — and deliberately not in any fixed report timezone.
+ *
+ * This control is shared by every report, and the reports do not agree on a zone: the Daily Activity Log
+ * pins its buckets to UTC on purpose (so it reconciles with Rep Activity) while Canvassing Activity and the
+ * dashboard period helpers window in America/Chicago. An earlier revision anchored these defaults in
+ * business time, which fixed Canvassing and broke the UTC-bucketed reports for the hours when UTC has
+ * rolled over and Chicago has not.
+ *
+ * So the shared control means the least surprising thing — the date on the viewer's own calendar — and each
+ * report interprets that date in its own documented zone. What is NOT acceptable, and was the original bug,
+ * is doing local-field arithmetic and then serialising through toISOString(): that mixes two zones inside
+ * one calculation and lands a day out for everyone west of UTC every evening.
+ */
+function viewerToday(dateTimezone?: string): Date {
+  if (!dateTimezone) return new Date();
+  // Cross the boundary exactly ONCE, here, and hand back a Date whose LOCAL fields are that zone's calendar
+  // fields — everything downstream (setDate/getMonth, subtractMonthsClamped, toDateInput) then stays in
+  // local fields. Reparsing a formatted string instead lands a day out for anyone ahead of the target zone.
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: dateTimezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const get = (type: string) => Number(parts.find((part) => part.type === type)?.value);
+  return new Date(get("year"), get("month") - 1, get("day"));
 }
 
 export function subtractMonthsClamped(date: Date, months: number) {
@@ -56,8 +97,13 @@ export function subtractMonthsClamped(date: Date, months: number) {
   );
 }
 
-function rangeDates(range: string) {
-  const today = new Date();
+/** Exported for report-filter-bar-dates.runtime.test.tsx — the anchor has been wrong twice. */
+export function rangeDatesForTest(range: string, dateTimezone?: string) {
+  return rangeDates(range, dateTimezone);
+}
+
+function rangeDates(range: string, dateTimezone?: string) {
+  const today = viewerToday(dateTimezone);
   const from = new Date(today);
 
   if (range === "6m") {
@@ -77,8 +123,8 @@ function rangeDates(range: string) {
   return { dateFrom: toDateInput(subtractMonthsClamped(today, 12)), dateTo: toDateInput(today) };
 }
 
-function defaultFilters(defaultRange: DefaultRange = "90"): ReportFilters {
-  const dates = rangeDates(defaultRange);
+function defaultFilters(defaultRange: DefaultRange = "90", dateTimezone?: string): ReportFilters {
+  const dates = rangeDates(defaultRange, dateTimezone);
   return { range: defaultRange, ...dates, office: "all", ownerIds: [], ownerNames: [], ownerEmails: [] };
 }
 
@@ -112,10 +158,10 @@ export function hydrateOwnerSelection(filters: ReportFilters, owners: ReportOwne
   };
 }
 
-export function useReportFilters(options: { defaultRange?: DefaultRange } = {}) {
+export function useReportFilters(options: { defaultRange?: DefaultRange; dateTimezone?: string } = {}) {
   const [searchParams] = useSearchParams();
   const filters = useMemo<ReportFilters>(() => {
-    const defaults = defaultFilters(options.defaultRange);
+    const defaults = defaultFilters(options.defaultRange, options.dateTimezone);
     const range = searchParams.get("range") || defaults.range;
     return {
       range,
@@ -141,37 +187,106 @@ export function useReportFilters(options: { defaultRange?: DefaultRange } = {}) 
   };
 }
 
-export function ReportFilterBar({ defaultRange = "90" }: { defaultRange?: DefaultRange } = {}) {
+/**
+ * `showOffice=false` for reports whose data has no office dimension to filter ON.
+ *
+ * The directory tables (companies/properties/contacts) live in a per-office schema and carry no office
+ * column, so a report over them is already scoped to one tenant by the search_path. Offering an office
+ * select there is worse than useless: it looks like it narrows the report and does nothing, and picking a
+ * person from another office sends their id against the current tenant, where they show up as a real-looking
+ * zero. A control that cannot do what it says should not be rendered.
+ */
+export function ReportFilterBar({
+  defaultRange = "90",
+  showOffice = true,
+  ownerPickerPurpose,
+  ownerLabel = "Owner",
+  dateTimezone,
+}: {
+  defaultRange?: DefaultRange;
+  showOffice?: boolean;
+  ownerPickerPurpose?: "canvassing-report";
+  /**
+   * What the person picker is filtering ON. Most reports filter by current OWNER; Canvassing Activity
+   * filters by who CREATED the record, and those diverge as accounts are reassigned — so labelling that
+   * control "Owner" told a reader the numbers meant something they do not.
+   */
+  ownerLabel?: string;
+  /**
+   * The zone the CONSUMING report interprets these dates in, so the defaults describe the same day the
+   * numbers are computed for. Omitted means the viewer's own calendar, which is what a date picker means
+   * to a person and what every report used before this. Reports disagree here on purpose — the Daily
+   * Activity Log buckets in UTC so it reconciles with Rep Activity — so this is a parameter, not a
+   * platform-wide choice.
+   */
+  dateTimezone?: string;
+} = {}) {
   const [searchParams, setSearchParams] = useSearchParams();
-  const { filters } = useReportFilters({ defaultRange });
+  const { filters } = useReportFilters({ defaultRange, dateTimezone });
   const [draft, setDraft] = useState<ReportFilters>(filters);
   const { offices } = useAccessibleOffices();
+  const activeOfficeId = useOfficeScopeId();
   const canonicalOfficeId = useMemo(() => {
+    // With the selector hidden the report is pinned to the active tenant, so the picker must be too —
+    // otherwise it lists people the report can never return a number for.
+    if (!showOffice) return activeOfficeId ?? undefined;
     if (!draft.office || draft.office === "all") return undefined;
     return offices.find((office) => office.id === draft.office || office.slug === draft.office)?.id;
-  }, [draft.office, offices]);
+  }, [showOffice, activeOfficeId, draft.office, offices]);
   // Suppress the sales-reps fetch until offices are available OR the user
   // explicitly chose "all". Otherwise an unscoped fetch fires before we can
   // canonicalize a legacy `?office=dallas` URL into its UUID, leaking
   // unrelated reps into the owner picker.
-  const salesRepsEnabled = offices.length > 0 || draft.office === "all";
-  const { salesReps } = useSalesReps(canonicalOfficeId, { enabled: salesRepsEnabled });
+  const salesRepsEnabled = !showOffice ? true : offices.length > 0 || draft.office === "all";
+  const { salesReps } = useSalesReps(canonicalOfficeId, { enabled: salesRepsEnabled, purpose: ownerPickerPurpose });
 
   useEffect(() => {
     setDraft(hydrateOwnerSelection(filters, salesReps));
   }, [filters, salesReps]);
 
+  // Person ids are per-tenant. With the office control hidden the report follows ?officeId, so a switch
+  // re-pointed the roster at the new office while the previously selected ids stayed in the URL — ids the
+  // new tenant cannot resolve, giving an empty report under a picker that still showed a selection.
+  const clearedForOffice = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    if (showOffice) return;
+    if (clearedForOffice.current === undefined) {
+      clearedForOffice.current = activeOfficeId;
+      return;
+    }
+    if (clearedForOffice.current === activeOfficeId) return;
+    clearedForOffice.current = activeOfficeId;
+
+    const next = new URLSearchParams(searchParams);
+    // Every alias useReportFilters reads, not just the two I remembered: it accepts `owners` OR
+    // `ownerNames` for the same selection, so clearing one left the other carrying a stale person filter
+    // into an office that cannot resolve it.
+    const OWNER_PARAMS = ["ownerIds", "owners", "ownerNames", "ownerEmails"] as const;
+    if (!OWNER_PARAMS.some((param) => next.has(param))) return;
+    for (const param of OWNER_PARAMS) next.delete(param);
+    setSearchParams(next, { replace: true });
+  }, [showOffice, activeOfficeId, searchParams, setSearchParams]);
+
   function updateRange(range: string) {
-    const dates = range === "custom" ? { dateFrom: draft.dateFrom, dateTo: draft.dateTo } : rangeDates(range);
+    const dates = range === "custom" ? { dateFrom: draft.dateFrom, dateTo: draft.dateTo } : rangeDates(range, dateTimezone);
     setDraft((current) => ({ ...current, range, ...dates }));
   }
 
   function applyFilters(nextFilters = draft) {
     const next = new URLSearchParams(searchParams);
+    // Applying a filter invalidates any paging offset. This bar deliberately COPIES the current
+    // search string so pages can keep their own params across an Apply -- but a page offset is the one
+    // param that must NOT survive, because it silently points at the wrong slice of a different result
+    // set. A user on ?page=3 who narrows the date range would land on page 3 of the new, smaller log
+    // and never see the newest matching rows; the entries shown are real, so nothing looks broken.
+    // Cleared here rather than in each page: this bar is what preserves unknown params, so it owns
+    // invalidating them. Reports that do not paginate are unaffected (deleting an absent key is a
+    // no-op), and any future paginated report inherits the correct behaviour instead of the bug.
+    next.delete("page");
     next.set("range", nextFilters.range);
     next.set("dateFrom", nextFilters.dateFrom);
     next.set("dateTo", nextFilters.dateTo);
-    if (nextFilters.office && nextFilters.office !== "all") next.set("office", nextFilters.office);
+    if (showOffice && nextFilters.office && nextFilters.office !== "all") next.set("office", nextFilters.office);
     else next.delete("office");
 
     if (nextFilters.ownerIds.length || nextFilters.ownerNames.length || nextFilters.ownerEmails.length) {
@@ -201,7 +316,7 @@ export function ReportFilterBar({ defaultRange = "90" }: { defaultRange?: Defaul
   }
 
   function resetFilters() {
-    const defaults = defaultFilters(defaultRange);
+    const defaults = defaultFilters(defaultRange, dateTimezone);
     setDraft(defaults);
     applyFilters(defaults);
   }
@@ -276,6 +391,7 @@ export function ReportFilterBar({ defaultRange = "90" }: { defaultRange?: Defaul
             className="h-10"
           />
         </label>
+        {showOffice ? (
         <label className="space-y-1 text-sm font-semibold text-slate-700">
           Office
           <select
@@ -301,11 +417,12 @@ export function ReportFilterBar({ defaultRange = "90" }: { defaultRange?: Defaul
             ) : null}
           </select>
         </label>
+        ) : null}
         <div className="space-y-2">
-          <p className="text-sm font-semibold text-slate-700">Owner</p>
+          <p className="text-sm font-semibold text-slate-700">{ownerLabel}</p>
           <div className="flex max-h-28 flex-wrap gap-2 overflow-y-auto rounded-md border border-slate-200 bg-slate-50 p-2">
             {salesReps.length === 0 ? (
-              <span className="text-xs font-medium text-slate-500">All owners</span>
+              <span className="text-xs font-medium text-slate-500">{ownerLabel === "Owner" ? "All owners" : "Everyone"}</span>
             ) : salesReps.map((owner) => (
               <label key={owner.id} className="inline-flex items-center gap-2 rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-700 ring-1 ring-slate-200">
                 <Checkbox

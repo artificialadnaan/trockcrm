@@ -122,6 +122,56 @@ export async function runInOffice<T>(office: FieldOffice, run: (officeDb: FieldT
   }
 }
 
+/**
+ * An office-scoped connection with an ACTOR, and deliberately NO ambient transaction.
+ *
+ * WHY THIS EXISTS ALONGSIDE `runInOfficeTransaction`. That helper issues its own `BEGIN` on the pooled
+ * client. Drizzle is handed the client afterwards and has no idea it is inside a transaction, so a
+ * service that calls `tenantDb.transaction(...)` emits a NESTED `BEGIN` — a no-op warning in Postgres —
+ * followed by a real `COMMIT` that closes the OUTER transaction early. Everything after that point runs
+ * unprotected, and the wrapper's own `COMMIT` is a no-op on a transaction that already ended. The
+ * atomicity such a caller believes it has is not there.
+ *
+ * So for a service that owns its own transaction, the caller must not open one. This gives that service
+ * the two things `runInOfficeTransaction` was really being used for — the office `search_path` and the
+ * actor id the tenant audit triggers read (`current_setting('app.current_user_id')`, migration 0033) —
+ * and lets the service's own `BEGIN`/`COMMIT` be the only one.
+ *
+ * BOTH settings are SESSION-scoped (`set_config(..., false)`) because there is no transaction to scope
+ * them to, and BOTH are reset in `finally` for the same reason `runInOffice` resets `search_path`: this
+ * is a pooled connection, and a leaked actor id would silently attribute the NEXT request's audit rows
+ * to this one. A failed reset means the connection is unusable and takes precedence, exactly as there.
+ */
+export async function runInOfficeAsUser<T>(
+  office: FieldOffice,
+  userId: string,
+  run: (officeDb: FieldTenantDb) => Promise<T>
+): Promise<T> {
+  const client = await pool.connect();
+  let brokenErr: unknown;
+  try {
+    await client.query("SELECT set_config('search_path', $1, false)", [`office_${office.slug},public`]);
+    await client.query("SELECT set_config('app.current_user_id', $1, false)", [userId]);
+    const officeDb = drizzle(client, { schema });
+    return await run(officeDb);
+  } catch (err) {
+    brokenErr = err;
+    throw err;
+  } finally {
+    if (!isBrokenConnectionError(brokenErr)) {
+      try {
+        // Reset BOTH, and reset the actor even if the search_path reset throws — a connection carrying
+        // a stale `app.current_user_id` back into the pool is the more dangerous of the two leaks.
+        await client.query("SELECT set_config('app.current_user_id', '', false)");
+        await client.query("SELECT set_config('search_path', 'public', false)");
+      } catch (resetErr) {
+        brokenErr = resetErr;
+      }
+    }
+    releasePooledClient(client, brokenErr);
+  }
+}
+
 /** Fan out a read across ALL active offices, each on its own connection. One office failing degrades gracefully. */
 export async function fanOutActiveOffices<T>(
   run: (officeDb: FieldTenantDb, office: FieldOffice) => Promise<T>,

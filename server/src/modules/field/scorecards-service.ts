@@ -1,4 +1,4 @@
-import { and, desc, eq, getTableColumns, inArray, isNull, lte, notInArray, sql } from "drizzle-orm";
+import { and, desc, eq, getTableColumns, inArray, isNotNull, isNull, lte, notInArray, sql } from "drizzle-orm";
 import { createHash, randomUUID } from "node:crypto";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
@@ -10,18 +10,33 @@ import {
   fieldScorecardPhotos,
   files,
   jobQueue,
+  scorecardCorrectiveActions,
 } from "@trock-crm/shared/schema";
 import { generateDownloadUrl, headObjectStrict, putObject } from "../../lib/r2-client.js";
-import { buildScorecardPdfData, renderFieldScorecardPdf, MAX_EVIDENCE_PHOTOS } from "./scorecard-pdf.js";
+import {
+  buildScorecardPdfData,
+  renderFieldScorecardPdf,
+  MAX_CORRECTIVE_ACTION_PHOTOS,
+  MAX_EVIDENCE_PHOTOS,
+} from "./scorecard-pdf.js";
 import {
   CURRENT_SCORECARD_PDF_RENDER_VERSION,
+  classifyScorecardArtifactRecheck,
   coalesceScorecardPdfFinalization,
   isScorecardPdfObjectMetadataValid,
   needsScorecardPdfRegeneration,
   scorecardEvidenceFingerprint,
+  type ScorecardArtifactRecheck,
   type ScorecardPdfArtifactState,
 } from "./scorecard-pdf-artifact.js";
 import { prioritizeAndCapEvidencePhotos, resolveScorecardEvidenceImage } from "./scorecard-evidence-image.js";
+import { orderCorrectiveActions } from "@trock-crm/shared/lib/correctiveActionOrder";
+import {
+  getCorrectiveActionEventsByItem,
+  getDetachedCorrectiveActionEvents,
+  type CorrectiveActionEventRow,
+} from "./corrective-action-events.js";
+import { isOriginalEvidencePhoto, isResponsePhoto } from "./scorecard-evidence-predicate.js";
 import {
   FIELD_SCORECARD_LEADERSHIP_SECTION_KEYS,
   FIELD_SCORECARD_LEADERSHIP_SUMMARY_SECTION_KEY,
@@ -51,6 +66,9 @@ import {
   type ScorecardSectionKey,
   type ScorecardFormVersion,
   type ScorecardV2SectionKey,
+  CORRECTIVE_ACTION_CARD_AWAITING_APPROVAL,
+  CORRECTIVE_ACTION_CARD_CLOSED,
+  CORRECTIVE_ACTION_CARD_OPEN,
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { activeProjectWhere, assertActiveFieldProject, type FieldAccessContext } from "./projects-service.js";
@@ -179,6 +197,7 @@ interface ScorecardSummarySource {
   superintendentName: string | null;
   pmName: string | null;
   projectName?: string | null;
+  isChangeOrder?: boolean | null;
   projectNumber: string | null;
   criticalDeficiencies: string[] | null;
   status?: string;
@@ -240,7 +259,7 @@ export async function createFieldScorecard(
   // Idempotency runs FIRST so a retry of an already-submitted card still succeeds even if the deal has
   // since dropped off the field surface (e.g. moved to Lost after the original submit).
   const priorCard = await findByClientSubmissionId(tenantDb, input.clientSubmissionId);
-  if (priorCard) return { scorecard: toSummary(priorCard, priorCard.projectName, input.userId), created: false };
+  if (priorCard) return { scorecard: toSummary(priorCard, { name: priorCard.projectName, isChangeOrder: priorCard.isChangeOrder }, input.userId), created: false };
 
   // Only browsable field projects (active pipeline OR Won-family, never Lost/terminal/inactive) may be
   // scored — same gate the field project reads use. Runs in the resolved office; an off-office deal isn't
@@ -283,7 +302,13 @@ export async function createFieldScorecard(
     ? resolveScorecardV2Rating(averageScore ?? 0)
     : resolveScorecardRating(total);
 
-  const actionItems = kind === "leadership" ? [] : input.actionItems.map((s) => s.trim()).filter((s) => s.length > 0);
+  // Action items apply to BOTH kinds. They used to be dropped for leadership, which made a below-band
+  // leadership card structurally incapable of opening a corrective action: leadership cards carry no critical
+  // deficiencies either, so enumerateFlaggedItems returned nothing and reconcile's `inBand` gate
+  // (isCorrectiveActionBand && flagged.length > 0) never fired. Three cards scored 3.5-6.5 in production and
+  // asked nothing of anyone. The `actionItemsRequired` gate below stays formVersion-1-only, so it can never
+  // apply to a leadership card (always V2).
+  const actionItems = input.actionItems.map((s) => s.trim()).filter((s) => s.length > 0);
   if (formVersion === 1 && actionItemsRequired({ total, deficiencyCount: deficiencies.length }) && actionItems.length === 0) {
     throw new AppError(
       422,
@@ -355,7 +380,7 @@ export async function createFieldScorecard(
 
   if (inserted.length === 0) {
     const raced = await findByClientSubmissionId(tenantDb, input.clientSubmissionId);
-    if (raced) return { scorecard: toSummary(raced, raced.projectName, input.userId), created: false };
+    if (raced) return { scorecard: toSummary(raced, { name: raced.projectName, isChangeOrder: raced.isChangeOrder }, input.userId), created: false };
     throw new AppError(409, "Could not save the scorecard — please try again.");
   }
   const card = inserted[0];
@@ -452,7 +477,7 @@ export async function createFieldScorecard(
     maxAttempts: 6,
   });
 
-  return { scorecard: toSummary(reconciledCard ?? card, project.name, input.userId), created: true };
+  return { scorecard: toSummary(reconciledCard ?? card, project, input.userId), created: true };
 }
 
 /**
@@ -489,13 +514,22 @@ export async function updateFieldScorecard(
   // or re-open a closed card — reconcileScorecardCorrectiveActions (below) walks the status + tracked items
   // to match the freshly recomputed rating. The pre-edit status drives the enqueue-on-transition decision.
   const preEditStatus = card.status;
-  if (
-    (preEditStatus !== "submitted" &&
-      preEditStatus !== "corrective_action_open" &&
-      preEditStatus !== "corrective_action_closed") ||
-    card.formVersion !== 2
-  ) {
-    throw new AppError(422, "Only submitted current-form scorecards can be edited.", "SCORECARD_EDIT_UNSUPPORTED");
+  // `corrective_action_submitted` — awaiting approval — belongs here too. It is simply another stage of the
+  // corrective-action lifecycle, and omitting it would make a card uneditable for as long as it sits in the
+  // approver's queue, which can be indefinite (there is no escalation or timeout on that state).
+  // THE set, not a second hand-written copy of it. This guard listed its statuses inline, so removing
+  // `corrective_action_closed` from EDITABLE_SCORECARD_STATUSES locked the UI and the evidence presign while
+  // the actual write path still accepted it — an older client or a direct API call could still edit an
+  // APPROVED card and republish it under the existing verdict. A single set is the only version of "these
+  // three places agree" that stays true.
+  if (!EDITABLE_SCORECARD_STATUSES.has(preEditStatus) || card.formVersion !== 2) {
+    throw new AppError(
+      422,
+      preEditStatus === CORRECTIVE_ACTION_CARD_CLOSED
+        ? "This scorecard's corrective action has been approved and can no longer be edited."
+        : "Only submitted current-form scorecards can be edited.",
+      "SCORECARD_EDIT_UNSUPPORTED",
+    );
   }
 
   const expectedDate = new Date(input.expectedUpdatedAt);
@@ -535,9 +569,10 @@ export async function updateFieldScorecard(
   const rating = kind === "leadership"
     ? resolveScorecardLeadershipRating(averageScore)
     : resolveScorecardV2Rating(averageScore);
-  const actionItems = kind === "leadership"
-    ? []
-    : input.actionItems.map((value) => value.trim()).filter((value) => value.length > 0);
+  // Kept in lockstep with the create path: a leadership edit must PRESERVE its action items. Stripping them
+  // here would have deleted the card's flagged items on every save, and reconcileScorecardCorrectiveActions
+  // runs in this same transaction — so it would have purged the tracked corrective actions with them.
+  const actionItems = input.actionItems.map((value) => value.trim()).filter((value) => value.length > 0);
   const summary = kind === "leadership"
     ? input.summary?.trim()
       ? input.summary.trim().slice(0, 8000)
@@ -571,7 +606,7 @@ export async function updateFieldScorecard(
         eq(fieldScorecardPhotos.scorecardId, card.id),
         // The edit-replacement contract covers only the submitter's ORIGINAL evidence. Corrective-action
         // response photos are a separate surface and must never be clobbered by a scorecard edit.
-        isNull(fieldScorecardPhotos.correctiveActionId),
+        isOriginalEvidencePhoto(),
       ),
     );
   const visibleCurrentPhotos = currentPhotos.filter((photo) => photo.isActive && photo.deletedAt === null);
@@ -647,7 +682,7 @@ export async function updateFieldScorecard(
       userId: input.userId,
       fileIds: photos.flatMap((photo) => (photo.linkId ? [photo.fileId] : [])),
     });
-    return { scorecard: toSummary(card, project.name, input.userId) };
+    return { scorecard: toSummary(card, project, input.userId) };
   }
 
   // Item identity is internal (the API addresses sections by their canonical keys), so a two-statement
@@ -676,7 +711,7 @@ export async function updateFieldScorecard(
       .where(
         and(
           eq(fieldScorecardPhotos.scorecardId, card.id),
-          isNull(fieldScorecardPhotos.correctiveActionId),
+          isOriginalEvidencePhoto(),
         ),
       );
   } else {
@@ -685,7 +720,7 @@ export async function updateFieldScorecard(
       .where(
         and(
           eq(fieldScorecardPhotos.scorecardId, card.id),
-          isNull(fieldScorecardPhotos.correctiveActionId),
+          isOriginalEvidencePhoto(),
           notInArray(fieldScorecardPhotos.id, retainedLinkIds),
         ),
       );
@@ -851,7 +886,7 @@ export async function updateFieldScorecard(
     .where(eq(fieldScorecards.id, card.id))
     .limit(1);
 
-  return { scorecard: toSummary(reconciledCard ?? updatedCard, project.name, input.userId) };
+  return { scorecard: toSummary(reconciledCard ?? updatedCard, project, input.userId) };
 }
 
 export async function listFieldScorecardsForProject(
@@ -876,7 +911,7 @@ export async function listFieldScorecardsForProject(
   });
   return {
     scorecards: rows.map((row) =>
-      toSummary(row, project.name, access.userId, canRespondToCorrectiveAction),
+      toSummary(row, project, access.userId, canRespondToCorrectiveAction),
     ),
   };
 }
@@ -901,6 +936,7 @@ export async function listRecentFieldScorecards(
       sc.superintendent_name AS "superintendentName",
       sc.pm_name AS "pmName",
       d.name AS "projectName",
+      d.is_change_order AS "isChangeOrder",
       sc.project_number AS "projectNumber",
       sc.critical_deficiencies AS "criticalDeficiencies",
       sc.status AS "status",
@@ -981,7 +1017,7 @@ export async function getFieldScorecardDetail(
     .where(
       and(
         eq(fieldScorecardPhotos.scorecardId, id),
-        isNull(fieldScorecardPhotos.correctiveActionId),
+        isOriginalEvidencePhoto(),
       ),
     );
 
@@ -1000,7 +1036,7 @@ export async function getFieldScorecardDetail(
   );
 
   return {
-    ...toSummary(card, project.name, access.userId),
+    ...toSummary(card, project, access.userId),
     items,
     criticalDeficiencies: card.criticalDeficiencies ?? [],
     criticalDeficiencyNotes: card.criticalDeficiencyNotes ?? {},
@@ -1082,21 +1118,112 @@ export async function renderAndStoreFieldScorecardArtifacts(
         and(
           eq(fieldScorecardPhotos.scorecardId, scorecardId),
           // Exclude corrective-action response photos — the scorecard PDF embeds only the original evidence.
-          isNull(fieldScorecardPhotos.correctiveActionId),
+          isOriginalEvidencePhoto(),
         ),
       )
       // Deterministic order (link time, then PK tie-breaker) so the downstream MAX_EVIDENCE_PHOTOS cap
       // always keeps/drops the SAME photos across renders, not an arbitrary Postgres physical-row order.
       .orderBy(fieldScorecardPhotos.createdAt, fieldScorecardPhotos.id);
+    // The corrective-action record rendered by PDF v3 — one row per flagged item on a below-band card.
+    const correctiveActionRows = await db
+      .select({
+        id: scorecardCorrectiveActions.id,
+        itemType: scorecardCorrectiveActions.itemType,
+        itemRef: scorecardCorrectiveActions.itemRef,
+        itemLabel: scorecardCorrectiveActions.itemLabel,
+        status: scorecardCorrectiveActions.status,
+        responderName: scorecardCorrectiveActions.responderName,
+        // The record must say WHO. A session responder with no first/last name stores a null
+        // responder_name but a non-null email, so a name-only select renders the fix as anonymous.
+        // The CRM detail already falls back this way; the exports must match it.
+        responderEmail: scorecardCorrectiveActions.responderEmail,
+        respondedAt: scorecardCorrectiveActions.respondedAt,
+        responseComment: scorecardCorrectiveActions.responseComment,
+      })
+      .from(scorecardCorrectiveActions)
+      .where(eq(scorecardCorrectiveActions.scorecardId, scorecardId));
+
+    // Response photos, keyed by item. These are DELIBERATELY excluded from the evidence query above
+    // (corrective_action_id IS NULL) — original evidence and the corrective-action record are separate
+    // sets, and the publish-time recheck fingerprint applies the same exclusion. Widening either one alone
+    // produces a spurious SCORECARD_EVIDENCE_CHANGED on every regeneration.
+    //
+    // The skip-when-empty condition has to consider DETACHED events too. Gating on items alone meant the
+    // all-items-removed card — the one case the detachment exists for — always resolved an empty photo set,
+    // so the regenerated PDF and its email attachment kept the removed item's words and dropped its
+    // evidence. `isResponsePhoto()` already matches a detached photo (its item id is null, its event id is
+    // not); the query was simply never run.
+    // Events whose item a later edit removed. Loaded UNCONDITIONALLY — the case that matters most is the one
+    // where the last item was removed, which is exactly when a rows-based early return would skip the query
+    // and the record would show nothing at all. SET NULL preserved these rows; a reader that never asks for
+    // them preserves nothing.
+    //
+    // Read BEFORE the photos because it is one of the two things that make a photo read worth doing.
+    const detachedCorrectiveActionEvents = await getDetachedCorrectiveActionEvents(db, scorecardId);
+
+    const correctiveActionPhotoRows =
+      correctiveActionRows.length === 0 && detachedCorrectiveActionEvents.length === 0 ? [] : await db
+      .select({
+        correctiveActionId: fieldScorecardPhotos.correctiveActionId,
+        // Which ATTEMPT filed this photo. Null for every response that predates migration 0202 (and for the
+        // few the 0202 seed left alone because their item already had real history) — those fall back to the
+        // item's first submission, so a legacy photo still appears rather than vanishing from the record.
+        correctiveActionEventId: fieldScorecardPhotos.correctiveActionEventId,
+        fileId: files.id,
+        caption: files.description,
+        r2Key: files.r2Key,
+        thumbnailR2Key: files.thumbnailR2Key,
+        mimeType: files.mimeType,
+        isActive: files.isActive,
+        deletedAt: files.deletedAt,
+      })
+      .from(fieldScorecardPhotos)
+      .innerJoin(files, eq(files.id, fieldScorecardPhotos.fileId))
+      .where(
+        and(
+          eq(fieldScorecardPhotos.scorecardId, scorecardId),
+          isResponsePhoto(),
+          eq(files.isActive, true),
+          isNull(files.deletedAt),
+        ),
+      )
+      // Deterministic order so the MAX_CORRECTIVE_ACTION_PHOTOS cap keeps the SAME photos across renders.
+      .orderBy(fieldScorecardPhotos.createdAt, fieldScorecardPhotos.id);
+
+    // The append-only back-and-forth. One query for the whole card — the renderer needs every item's thread,
+    // and a per-item fetch would be N+1 on a read that already loads photos per item.
+    const correctiveActionEventsByItem =
+      correctiveActionRows.length === 0
+        ? new Map<string, CorrectiveActionEventRow[]>()
+        : await getCorrectiveActionEventsByItem(db, scorecardId);
+
     const [deal] = await db
       .select({ name: deals.name, dealNumber: deals.dealNumber })
       .from(deals)
       .where(eq(deals.id, card.dealId))
       .limit(1);
-    return { card, itemRows, photoRows, deal: deal ?? null };
+    return {
+      card,
+      itemRows,
+      photoRows,
+      correctiveActionRows,
+      correctiveActionPhotoRows,
+      correctiveActionEventsByItem,
+      detachedCorrectiveActionEvents,
+      deal: deal ?? null,
+    };
   });
   if (!loaded) return null;
-  const { card, itemRows, photoRows, deal } = loaded;
+  const {
+    card,
+    itemRows,
+    photoRows,
+    correctiveActionRows,
+    correctiveActionPhotoRows,
+    correctiveActionEventsByItem,
+    detachedCorrectiveActionEvents,
+    deal,
+  } = loaded;
   const evidenceFingerprint = scorecardEvidenceFingerprint(photoRows);
   const activePhotoRows = photoRows.filter((photo) => photo.isActive && photo.deletedAt == null);
 
@@ -1125,7 +1252,42 @@ export async function renderAndStoreFieldScorecardArtifacts(
     const batch = photosToLoad.slice(index, index + PDF_EVIDENCE_DOWNLOAD_CONCURRENCY);
     photos.push(...await Promise.all(batch.map(loadPhoto)));
   }
-  const retryableFailure = photos.find((photo) => photo.resolution.failure?.retryable);
+  // Corrective-action RESPONSE photos resolve through the SAME pipeline, so a transient storage failure
+  // stays retryable and a permanently-bad object renders a placeholder rather than making the whole report
+  // unexportable.
+  //
+  // Cap BEFORE downloading bytes, exactly as the evidence path does. Nothing upstream bounds how many
+  // photos a response may carry (submitCorrectiveActionResponse validates ownership, not count), so
+  // resolving every row first would fetch and transcode tiles the renderer discards — and, worse, a
+  // transient failure on a photo BEYOND the cap would 503 the whole download for an image that was never
+  // going to appear. Slice in the SAME order the renderer consumes the budget (item order, then link time)
+  // so the kept set matches what buildScorecardPdfData would have kept.
+  const responsePhotoRowsInRenderOrder = sortResponsePhotosForRender(
+    correctiveActionPhotoRows,
+    correctiveActionRows,
+    card.actionItems ?? [],
+    card.criticalDeficiencies ?? [],
+  );
+  const responsePhotosToLoad = responsePhotoRowsInRenderOrder.slice(0, MAX_CORRECTIVE_ACTION_PHOTOS);
+  const omittedCorrectiveActionPhotoCount =
+    responsePhotoRowsInRenderOrder.length - responsePhotosToLoad.length;
+
+  const loadResponsePhoto = async (photo: typeof correctiveActionPhotoRows[number]) => ({
+    correctiveActionId: photo.correctiveActionId as string,
+    correctiveActionEventId: photo.correctiveActionEventId ?? null,
+    caption: photo.caption ?? null,
+    resolution: await resolveScorecardEvidenceImage(photo),
+  });
+  const correctiveActionPhotos: Awaited<ReturnType<typeof loadResponsePhoto>>[] = [];
+  for (let index = 0; index < responsePhotosToLoad.length; index += PDF_EVIDENCE_DOWNLOAD_CONCURRENCY) {
+    const batch = responsePhotosToLoad.slice(index, index + PDF_EVIDENCE_DOWNLOAD_CONCURRENCY);
+    correctiveActionPhotos.push(...await Promise.all(batch.map(loadResponsePhoto)));
+  }
+
+  // Evaluate BOTH photo sets against the retryable/permanent policy — a response photo that is only
+  // temporarily unavailable must block the version stamp exactly like an evidence photo would.
+  const allResolvedPhotos = [...photos, ...correctiveActionPhotos];
+  const retryableFailure = allResolvedPhotos.find((photo) => photo.resolution.failure?.retryable);
   if (retryableFailure) {
     throw new AppError(
       503,
@@ -1133,7 +1295,7 @@ export async function renderAndStoreFieldScorecardArtifacts(
       "SCORECARD_EVIDENCE_UNAVAILABLE",
     );
   }
-  const permanentFailures = photos
+  const permanentFailures = allResolvedPhotos
     .map((photo) => photo.resolution.failure?.reason)
     .filter((reason): reason is NonNullable<typeof reason> => reason != null);
   if (permanentFailures.length > 0) {
@@ -1170,6 +1332,63 @@ export async function renderAndStoreFieldScorecardArtifacts(
       image: photo.resolution.image,
     })),
     omittedEvidenceCount,
+    omittedCorrectiveActionPhotoCount,
+    // Rendered after the per-item record, under their own heading: the items are gone, but a rejection and
+    // the answer to it are things that happened and belong in the audit trail.
+    removedItemEvents: detachedCorrectiveActionEvents.map((event) => ({
+      eventType: event.eventType,
+      itemLabel: event.itemLabel,
+      actorName: event.actorName ?? event.actorEmail ?? null,
+      createdAt: event.createdAt,
+      comment: event.comment,
+      // Their evidence SURVIVES the item now (0202 detaches rather than cascades), so an empty set here
+      // would drop it from the PDF and from the email attachments that carry the PDF — losing exactly what
+      // the detachment preserves. Resolved with the response photos, which are already loaded and capped.
+      photos: correctiveActionPhotos
+        .filter((photo) => photo.correctiveActionEventId === event.id)
+        .map((photo) => ({ caption: photo.caption, image: photo.resolution.image })),
+    })),
+    correctiveActions: correctiveActionRows.map((row) => {
+      const itemPhotos = correctiveActionPhotos.filter((photo) => photo.correctiveActionId === row.id);
+      const events = correctiveActionEventsByItem.get(row.id) ?? [];
+      // Attribute each photo to the attempt that filed it. A photo with no event id — every pre-0202
+      // response photo — attaches to the item's FIRST submission, which is where it was in fact filed and
+      // the only attempt it could have belonged to before resubmission existed. Falling through to nothing
+      // would silently drop it from the record.
+      const firstSubmissionId = events.find((event) => event.eventType === "submitted")?.id ?? null;
+      const photosByEvent = new Map<string, typeof itemPhotos>();
+      for (const photo of itemPhotos) {
+        const key = photo.correctiveActionEventId ?? firstSubmissionId;
+        if (!key) continue;
+        const bucket = photosByEvent.get(key);
+        if (bucket) bucket.push(photo);
+        else photosByEvent.set(key, [photo]);
+      }
+      return {
+        itemType: row.itemType,
+        itemRef: row.itemRef,
+        itemLabel: row.itemLabel,
+        status: row.status,
+        responderName: row.responderName ?? row.responderEmail ?? null,
+        respondedAt: toIso(row.respondedAt),
+        responseComment: row.responseComment ?? null,
+        // The aggregate, used ONLY when there is no thread at all (a card the 0202 seed did not reach).
+        // With a thread present the renderer draws the per-event sets instead, never both.
+        photos: itemPhotos.map((photo) => ({ caption: photo.caption, image: photo.resolution.image })),
+        events: events.map((event) => ({
+          eventType: event.eventType,
+          // Same name-or-email rule as the item row: an actor with no display name must still
+          // be identifiable, or the thread records what happened but not who did it.
+          actorName: event.actorName ?? event.actorEmail ?? null,
+          createdAt: event.createdAt,
+          comment: event.comment,
+          photos: (photosByEvent.get(event.id) ?? []).map((photo) => ({
+            caption: photo.caption,
+            image: photo.resolution.image,
+          })),
+        })),
+      };
+    }),
   });
   const bucket = process.env.R2_BUCKET_NAME || "trock-crm-files";
 
@@ -1226,7 +1445,7 @@ export async function renderAndStoreFieldScorecardArtifacts(
           // corrective-action RESPONSE photo (corrective_action_id set) is excluded here too. Without this,
           // once any response photo exists the recheck fingerprint includes it while the initial fingerprint
           // did not, so they never match → a spurious SCORECARD_EVIDENCE_CHANGED on every regeneration.
-          isNull(fieldScorecardPhotos.correctiveActionId),
+          isOriginalEvidencePhoto(),
         ),
       )
       .for("share", { of: files });
@@ -1245,6 +1464,10 @@ export async function renderAndStoreFieldScorecardArtifacts(
         pdfR2Bucket: bucket,
         pdfGeneratedAt: new Date(),
         pdfRenderVersion: CURRENT_SCORECARD_PDF_RENDER_VERSION,
+        // Stamp the generation this render READ (migration 0200). The guarded WHERE below already proves
+        // updated_at has not moved since, so this is exactly the content the stored bytes represent.
+        // needsScorecardPdfRegeneration compares it against the live updated_at on the next download.
+        pdfContentGeneration: card.updatedAt as Date,
       })
       // Monotonic revision write: an older server finishing late during a rolling deploy must never point
       // the row back at its older version-specific object. <= permits repairing a missing v2 object.
@@ -1290,6 +1513,8 @@ export async function getFieldScorecardPdfArtifactState(
       dealId: fieldScorecards.dealId,
       pdfR2Key: fieldScorecards.pdfR2Key,
       pdfRenderVersion: fieldScorecards.pdfRenderVersion,
+      pdfContentGeneration: fieldScorecards.pdfContentGeneration,
+      currentGeneration: fieldScorecards.updatedAt,
       linkedPhotoCount: sql<number>`COUNT(${files.id})::int`,
     })
     .from(fieldScorecards)
@@ -1308,6 +1533,8 @@ export async function getFieldScorecardPdfArtifactState(
       fieldScorecards.dealId,
       fieldScorecards.pdfR2Key,
       fieldScorecards.pdfRenderVersion,
+      fieldScorecards.pdfContentGeneration,
+      fieldScorecards.updatedAt,
     )
     .limit(1);
   if (!card) throw new AppError(404, "Scorecard not found");
@@ -1316,8 +1543,57 @@ export async function getFieldScorecardPdfArtifactState(
     pdfR2Key: card.pdfR2Key,
     pdfRenderVersion: card.pdfRenderVersion,
     linkedPhotoCount: Number(card.linkedPhotoCount),
+    pdfContentGeneration: card.pdfContentGeneration,
+    currentGeneration: card.currentGeneration,
   };
   return { ...state, needsRegeneration: needsScorecardPdfRegeneration(state) };
+}
+
+/**
+ * Confirm the key about to be presigned is STILL the published, current-generation artifact.
+ *
+ * The artifact-state read runs inside a tenant transaction that is released before the R2 HEAD /
+ * regeneration / presign. A corrective-action response committing in that window advances updated_at while
+ * deliberately retaining pdf_r2_key, so the snapshot's "current" verdict goes stale and the route would hand
+ * out a URL for the PRE-response PDF — the exact defect this work fixes, on the surface it was reported from.
+ * The email workers gained a post-fetch guard; the download routes need the same one before presigning.
+ *
+ * Returns a VERDICT rather than a boolean because the future-renderer case must be distinguishable: the
+ * routes' early snapshot check can pass and the generation can then drift within the same request, and
+ * needsScorecardPdfRegeneration answers "can this instance supersede it?" (always false above CURRENT), never
+ * "is it current?". Collapsing the two here is precisely how a rolling-deploy download served stale bytes
+ * despite the route's own guard.
+ *
+ * Manages its own connection (like finalizeFieldScorecardArtifacts) precisely because the caller's
+ * transaction is already gone by this point.
+ */
+export async function recheckScorecardArtifactCurrency(
+  office: { id: string; slug: string },
+  scorecardId: string,
+  key: string,
+): Promise<ScorecardArtifactRecheck> {
+  return runInOffice(office, async (db) => {
+    const [row] = await db
+      .select({
+        pdfR2Key: fieldScorecards.pdfR2Key,
+        pdfRenderVersion: fieldScorecards.pdfRenderVersion,
+        pdfContentGeneration: fieldScorecards.pdfContentGeneration,
+        currentGeneration: fieldScorecards.updatedAt,
+      })
+      .from(fieldScorecards)
+      .where(and(eq(fieldScorecards.id, scorecardId), eq(fieldScorecards.isActive, true)))
+      .limit(1);
+    // A vanished row is handled by the caller's own availability checks; treat it as not-current here so the
+    // route surfaces a retryable error rather than presigning something it can no longer vouch for.
+    if (!row || row.pdfR2Key !== key) return "stale";
+    return classifyScorecardArtifactRecheck({
+      pdfR2Key: row.pdfR2Key,
+      pdfRenderVersion: row.pdfRenderVersion,
+      linkedPhotoCount: 0,
+      pdfContentGeneration: row.pdfContentGeneration,
+      currentGeneration: row.currentGeneration,
+    });
+  });
 }
 
 /** Verify that a stored key still resolves to a non-empty PDF before issuing a presigned URL. */
@@ -1350,11 +1626,12 @@ export async function presignFieldScorecardPdf(
 async function findByClientSubmissionId(
   tenantDb: TenantDb,
   clientSubmissionId: string,
-): Promise<(ScorecardRow & { projectName: string }) | null> {
+): Promise<(ScorecardRow & { projectName: string; isChangeOrder: boolean }) | null> {
   const rows = await tenantDb
     .select({
       ...getTableColumns(fieldScorecards),
       projectName: deals.name,
+      isChangeOrder: deals.isChangeOrder,
     })
     .from(fieldScorecards)
     .innerJoin(deals, eq(deals.id, fieldScorecards.dealId))
@@ -1733,12 +2010,24 @@ function scorecardEditableContentEquals(input: {
 // scorecard-evidence-upload.ts (the evidence-presign guard reuses the same set) and re-imported here to keep a
 // single source of truth for the editable lifecycle.
 
+/**
+ * `project` carries BOTH the resolved name and `deals.is_change_order`, together, on purpose.
+ *
+ * Several callers hand in a plain `field_scorecards` row and resolve the deal separately, so `row` has
+ * no `isChangeOrder` at all. Serializing that absence as `false` would be worse than omitting it: on the
+ * client `false` is AUTHORITATIVE and suppresses the change-order relabel outright, so a real CO project's
+ * scorecard would keep its raw "<Parent> — Change Order N" name on exactly the endpoints users hit most.
+ * `undefined` instead means "not stated", which falls back to reading the name. Never coerce here.
+ */
 function toSummary(
   row: ScorecardSummarySource,
-  projectName = row.projectName ?? null,
+  project?: { name: string | null; isChangeOrder?: boolean | null },
   viewerUserId?: string,
   canRespondToCorrectiveAction?: boolean,
 ): FieldScorecardSummary {
+  const projectName = project?.name ?? row.projectName ?? null;
+  // `??` (not `||`) so a genuine `false` from either source is preserved rather than falling through.
+  const isChangeOrder = project?.isChangeOrder ?? row.isChangeOrder ?? undefined;
   const formVersion: ScorecardFormVersion = row.formVersion === 2 ? 2 : 1;
   const kind: ScorecardKind = row.kind === "leadership" ? "leadership" : "project";
   const rating = row.rating as ScorecardRating;
@@ -1755,6 +2044,7 @@ function toSummary(
     superintendentName: row.superintendentName ?? null,
     pmName: row.pmName ?? null,
     projectName,
+    isChangeOrder,
     projectNumber: row.projectNumber ?? null,
     criticalDeficiencyCount: (row.criticalDeficiencies ?? []).length,
     submittedByName: row.submittedByName ?? null,
@@ -1804,4 +2094,36 @@ function scorecardContentChangedError(): AppError {
 function toIso(value: unknown): string {
   if (value instanceof Date) return value.toISOString();
   return String(value);
+}
+
+/**
+ * Corrective-action RESPONSE photo rows in the order the PDF renders them: by item (action items ahead of
+ * critical deficiencies, then NUMERIC item_ref — "10" follows "2"), then by link time within an item.
+ *
+ * The render-side photo budget is spent in exactly this order, so slicing here keeps the same photos the
+ * renderer would have kept. Sorting the ROWS is cheap; it is the byte downloads the cap exists to avoid.
+ * Rows whose parent item is missing sort last — they cannot render, so they are the first to be dropped.
+ */
+function sortResponsePhotosForRender<T extends { correctiveActionId: string | null }>(
+  photoRows: T[],
+  itemRows: Array<{ id: string; itemType: string; itemRef: string; itemLabel: string }>,
+  actionItems: readonly string[],
+  criticalDeficiencyKeys: readonly string[],
+): T[] {
+  // MUST use the same ranking the renderer uses. This function decides which photos survive the global cap;
+  // the renderer decides which item draws them. Rank by item_ref here while the renderer ranks by the live
+  // action-item list and the two disagree the moment an editor reorders the list — the cap then keeps photos
+  // for one item and the renderer draws a different one, so an item silently loses its evidence.
+  const rankById = new Map<string, number>();
+  orderCorrectiveActions(itemRows, actionItems, criticalDeficiencyKeys).forEach((item, index) =>
+    rankById.set(item.id, index),
+  );
+
+  // The incoming rows already arrive ordered by (created_at, id); Array.prototype.sort is stable, so that
+  // ordering is preserved within each item.
+  return [...photoRows].sort(
+    (left, right) =>
+      (rankById.get(left.correctiveActionId ?? "") ?? Number.MAX_SAFE_INTEGER) -
+      (rankById.get(right.correctiveActionId ?? "") ?? Number.MAX_SAFE_INTEGER),
+  );
 }

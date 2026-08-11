@@ -37,6 +37,7 @@ import { procoreWebhookRoutes } from "./modules/procore/webhook-routes.js";
 import { syncHubRoutes } from "./modules/procore/synchub-routes.js";
 import { syncHubProcoreRelayRoutes } from "./modules/synchub/procore-project-relay-routes.js";
 import { bidBoardSyncRoutes } from "./modules/bid-board-sync/routes.js";
+import { scopeIngestRoutes } from "./modules/estimating/scope-ingest-routes.js";
 import { internalRfpRoutes } from "./modules/internal-rfp/routes.js";
 import { registerProcoreEventHandlers } from "./modules/procore/event-handlers.js";
 import { migrationRouter } from "./modules/migration/routes.js";
@@ -109,6 +110,12 @@ export function createApp() {
   // Bid Board ingestion route — public integration route signed by SyncHub.
   // Mounted before express.json() so HMAC verification uses the raw body.
   app.use("/api/bid-board-sync", bidBoardSyncRoutes);
+
+  // TROCK Scope's walkthrough-scope ingest — the ONE machine door into estimating. Signed integration
+  // route, mounted here with its siblings and before express.json() so the HMAC covers the raw bytes.
+  // The tenant comes from the signed body's officeSlug rather than from a session, which is why it
+  // cannot live on tenantRouter with the human-facing estimating routes.
+  app.use("/api/integrations/scope", scopeIngestRoutes);
 
   // Internal SyncHub RFP callbacks — signed integration routes. Mounted before
   // express.json() so HMAC verification uses the original raw body bytes.

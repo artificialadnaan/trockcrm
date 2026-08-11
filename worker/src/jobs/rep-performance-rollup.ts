@@ -1,5 +1,4 @@
 import {
-  closeTargetFarOutSqlPredicate,
   getDealAtRiskResult,
   isReportableDeal,
   reportableDealSqlPredicate,
@@ -8,35 +7,31 @@ import {
   WON_DEAL_STAGE_SLUGS,
 } from "@trock-crm/shared/types";
 import { pool } from "../db.js";
+import {
+  workerAwardedFirstDealValueSql,
+  workerCurrentDealValueSql,
+  workerEffectiveCurrentDealValueSql,
+} from "./deal-value-sql.js";
 
 export const STALE_ACCOUNT_THRESHOLD_DAYS = 30;
 const REPORTABLE_DEAL_SQL = reportableDealSqlPredicate("d");
-const currentDealValueSql = `COALESCE(
-  CASE WHEN d.bid_board_total_sales > 0 THEN d.bid_board_total_sales END,
-  CASE WHEN d.bid_estimate > 0 THEN d.bid_estimate END,
-  CASE WHEN d.dd_estimate > 0 THEN d.dd_estimate END,
-  CASE WHEN d.awarded_amount > 0 THEN d.awarded_amount END,
-  0
-)`;
-const awardedFirstDealValueSql = `COALESCE(
-  CASE WHEN d.awarded_amount > 0 THEN d.awarded_amount END,
-  CASE WHEN d.bid_board_total_sales > 0 THEN d.bid_board_total_sales END,
-  CASE WHEN d.bid_estimate > 0 THEN d.bid_estimate END,
-  CASE WHEN d.dd_estimate > 0 THEN d.dd_estimate END,
-  0
-)`;
+// The RAW, auto-parked and closed/awarded-first value expressions all come from the shared worker leaf
+// module (deal-value-sql.ts), which weekly-digest and the large-loss alert also use and the cross-surface
+// reconciliation test executes directly — so the jobs and the tests can no longer hold hand-copied
+// versions of the same rule. (The open chain is bid-board-first and the closed one awarded-first; that
+// divergence is deliberate and documented at the top of the leaf module.)
+const currentDealValueSql = workerCurrentDealValueSql("d");
+const awardedFirstDealValueSql = workerAwardedFirstDealValueSql("d");
 const wonStageSqlList = WON_DEAL_STAGE_SLUGS.map((slug) => `'${slug}'`).join(", ");
 const lostStageSqlList = LOST_DEAL_STAGE_SLUGS.map((slug) => `'${slug}'`).join(", ");
 const terminalStageSqlList = [...WON_DEAL_STAGE_SLUGS, ...LOST_DEAL_STAGE_SLUGS]
   .map((slug) => `'${slug}'`)
   .join(", ");
-// A Bid Board-owned deal can be terminal in bid_board_stage_slug while its CRM stage_id still joins to a
-// non-terminal stage — its realized value is preserved, never auto-parked (mirrors the server exemption).
-const bidBoardTerminalSql = `COALESCE(d.bid_board_stage_slug, '') IN (${terminalStageSqlList})`;
 // CURRENT-period pipeline_value: zero a far-out (90+ day) auto-held OPEN deal to $0 (deals-list parity),
-// EXCEPT a Bid Board-mirrored terminal deal. on_hold is already excluded via REPORTABLE_DEAL_SQL, so only the
-// far-out leg is added (Codex P2). closed_value/awardedFirst stays raw — it sums realized won deals.
-const effectiveCurrentDealValueSql = `CASE WHEN NOT (${bidBoardTerminalSql}) AND (${closeTargetFarOutSqlPredicate("d")}) THEN 0 ELSE ${currentDealValueSql} END`;
+// EXCEPT a Bid Board-mirrored terminal deal, whose realized value is preserved. on_hold is already excluded
+// via REPORTABLE_DEAL_SQL, so only the far-out leg is added (Codex P2). closed_value/awardedFirst stays raw —
+// it sums realized won deals.
+const effectiveCurrentDealValueSql = workerEffectiveCurrentDealValueSql("d");
 // HISTORICAL snapshots (last_month/quarter/year) reflect what was open AS OF that period, so they must NOT
 // re-zero by today's 90-day horizon (a deal won early with a stale far-future target, or the window moving
 // past 90 days, would otherwise mutate a closed historical period). $1 is the period_kind bind (Codex P2).
@@ -66,6 +61,8 @@ interface RepAtRiskInputRow {
   workflow_route: string | null;
   stage_entered_at: string | Date | null;
   expected_close_date: string | Date | null;
+  /** The estimating hold horizon (2026-07-27 auto-park; 2026-07-28 at-risk SLA suppression too) — see AtRiskDealInput.bidDueDate. */
+  bid_due_date: string | Date | null;
   on_hold: boolean | null;
   on_hold_started_at: string | Date | null;
   on_hold_accumulated_seconds: string | number | bigint | null;
@@ -167,6 +164,10 @@ export function computeRepAtRiskCountsFromRows(
         // at_risk_count mirrors the deals list/dashboard/detail; historical periods pass false (see
         // HISTORICAL_PERIOD_KINDS) to stay deterministic. The 90+ day auto-held exclusion applies either way.
         expectedCloseDate: row.expected_close_date,
+        // Estimating deals read the BID due date, not the project close target, as their hold horizon (2026-07-27
+        // auto-park; since 2026-07-28 the at-risk SLA suppression too), so
+        // this job never nags about a deal every in-app surface already reads as parked and worth $0.
+        bidDueDate: row.bid_due_date,
         applyCloseTargetSuppression,
         onHold: row.on_hold,
         onHoldStartedAt: row.on_hold_started_at,
@@ -206,6 +207,7 @@ async function getRepAtRiskCountsForPeriod(
          latest_current_stage_entered_at.entered_at
        ) AS stage_entered_at,
        d.expected_close_date,
+       d.bid_due_date,
        d.on_hold,
        d.on_hold_started_at,
        d.on_hold_accumulated_seconds,
@@ -464,7 +466,27 @@ async function refreshOfficePeriod(
      LEFT JOIN activity a ON a.rep_id = u.id
      WHERE u.office_id = $4
        AND u.is_active = true
-       AND u.role = 'rep'`,
+       -- Snapshots must exist for everyone the director dashboard can show, or the read-side roster gate
+       -- has nothing to return. Activity Pulse, strategic alerts and the coaching prompts are all driven
+       -- from these rows, so a director an admin has flagged as a sales carrier (migration 0219) would
+       -- otherwise appear on the cards and the funnel while staying permanently absent from those three
+       -- panels — the flag would look half-wired.
+       --
+       -- A UNION with the old condition, not a replacement: writing for every role='rep' user as before
+       -- means an unticked rep keeps accruing history, so re-ticking them restores it immediately instead
+       -- of starting from the next rollup. The READ side (getRepPerformanceSnapshots) still applies
+       -- generates_sales, so the extra rows are never shown; they are only kept warm.
+       --
+       -- The OWNER leg mirrors dashboardRosterMembershipSql's owner-backed exception, which the read side
+       -- also honours. It matters because the DELETE above clears snapshots for EVERY user in the office
+       -- and only this roster gets re-inserted: without it, a non-rep who owns deals is kept on the cards,
+       -- the funnel AND the snapshot read, yet has no row to return — the panels go blank for exactly the
+       -- people the roster promises to retain. All three rosters now ask the same question.
+       AND (
+         u.role = 'rep'
+         OR u.generates_sales = true
+         OR EXISTS (SELECT 1 FROM ${schemaName}.deals owned WHERE owned.assigned_rep_id = u.id)
+       )`,
     [
       period.kind,
       period.start,

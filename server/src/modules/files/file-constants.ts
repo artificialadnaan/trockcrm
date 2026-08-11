@@ -1,3 +1,4 @@
+import { isPostgresCalendarDate, isPostgresTzOffset } from "../../lib/pg-timestamp.js";
 import type { FileCategory } from "@trock-crm/shared/types";
 
 /**
@@ -158,17 +159,29 @@ export function parseFileDateParam(value: unknown): string | undefined {
   const v = value.trim();
   if (!v) return undefined;
 
-  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) {
-    // Round-trip through a UTC Date: rejects month- AND day-overflow (2026-13-45, 2026-02-30, 2026-04-31).
-    const d = new Date(`${v}T00:00:00Z`);
-    if (Number.isNaN(d.getTime()) || d.toISOString().slice(0, 10) !== v) return undefined;
-    return v;
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
+  if (dateOnly) {
+    // Round-trips through a UTC Date to reject month- AND day-overflow (2026-13-45, 2026-02-30,
+    // 2026-04-31), and checks the YEAR separately because the round-trip is faithful for year zero and
+    // therefore cannot catch it — Postgres has no year 0, JavaScript does. See lib/pg-timestamp.ts.
+    return isPostgresCalendarDate(dateOnly[1], dateOnly[2], dateOnly[3]) ? v : undefined;
   }
 
   // Not date-only: require an explicit time component so reduced-precision forms ("2026", "2026-07") are
   // dropped here instead of surfacing as a 500 at the SQL cast.
   if (!v.includes("T")) return undefined;
   if (Number.isNaN(Date.parse(v))) return undefined;
+  // `Date.parse` is necessary but NOT sufficient, in two independent ways, and BOTH end as an unmapped
+  // 500 at the `::timestamptz` cast rather than the documented "drop the invalid date filter":
+  //   1. it NORMALIZES calendar overflow ("2026-02-30T00:00:00Z" silently becomes March 2) and reports
+  //      success, and it accepts year 0000, which Postgres has no concept of;
+  //   2. it accepts timezone offsets out to ±23:59, while Postgres caps at ±15:59.
+  // Both bounds are owned by lib/pg-timestamp.ts and shared with the feed's cursor validator, because
+  // these two used to disagree and each carried a hole the other did not.
+  const parts = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(Z|z|[+-]\d{2}(?::?\d{2})?)?$/.exec(v);
+  if (!parts) return undefined;
+  if (!isPostgresCalendarDate(parts[1], parts[2], parts[3])) return undefined;
+  if (!isPostgresTzOffset(parts[4])) return undefined;
   return v;
 }
 

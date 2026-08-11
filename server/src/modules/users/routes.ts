@@ -7,6 +7,7 @@ import { listUsers } from "../admin/users-service.js";
 import { isCrmUserRole } from "../../middleware/field-auth.js";
 import { sanitizeSignatureHtml, MAX_SIGNATURE_HTML_BYTES } from "../../lib/sanitize-signature.js";
 import { generateUploadUrl, isR2Configured } from "../../lib/r2-client.js";
+import { isCanvassingReportViewerEmail } from "@trock-crm/shared/lib/canvassingReportViewers";
 import {
   SIGNATURE_LOGO_TYPES,
   SIGNATURE_LOGO_MAX_BYTES,
@@ -60,8 +61,13 @@ router.get("/sales-reps", async (req, res, next) => {
     // feed a plain rep otherwise gets. Without this a rep creating a service opportunity would see only
     // themselves (then excluded as the owner) → an empty source list.
     const isSalesSourcePicker = purpose === "sales-source";
+    // The Canvassing Activity report shows an office-wide per-person scoreboard to a named allowlist, and a
+    // listed viewer may hold the `rep` role. They need the roster to filter it. Gated on the SAME allowlist
+    // as the report, so the purpose string alone is not a way for any rep to read the office roster.
+    const isCanvassingReportPicker =
+      purpose === "canvassing-report" && isCanvassingReportViewerEmail(req.user!.email, process.env);
 
-    if (req.user!.role === "rep" && !isReassignmentPicker && !isSalesSourcePicker) {
+    if (req.user!.role === "rep" && !isReassignmentPicker && !isSalesSourcePicker && !isCanvassingReportPicker) {
       await req.commitTransaction!();
       res.json({ users: [{ id: req.user!.id, displayName: req.user!.displayName, email: req.user!.email }] });
       return;

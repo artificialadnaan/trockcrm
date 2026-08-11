@@ -15,6 +15,20 @@ import type { ExpoConfig, ConfigContext } from "expo/config";
 const EAS_PROJECT_ID = process.env.EAS_PROJECT_ID ?? "d829c598-4767-40cf-ba32-2441bd406221";
 const FIELD_APP_HOST = process.env.EXPO_PUBLIC_FIELD_APP_HOST?.trim();
 
+/**
+ * Whether this build is the one that reaches real users.
+ *
+ * EAS Build sets EAS_BUILD_PROFILE to the eas.json profile being built — "production",
+ * "preview", "development", "development-device". A local `expo prebuild` sets nothing, which
+ * reads as non-production, and that is the right default: a developer's machine is exactly where
+ * mock/dev credentials belong.
+ *
+ * This is the only production signal available while this file runs. `__DEV__` is a bundler
+ * constant that does not exist in Node, and NODE_ENV is not something EAS sets — so anything that
+ * must differ between a dev client and a shipped build has to key off this.
+ */
+const IS_PRODUCTION_BUILD = process.env.EAS_BUILD_PROFILE === "production";
+
 export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
   name: "T-Rock Cam",
@@ -22,6 +36,10 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   slug: "trockcam",
   scheme: "trockcam",
   version: "1.0.0",
+  // iOS only, in fact and not just by convention: react-native-web is not a dependency, so
+  // Metro's default ["ios","android","web"] makes every web bundle attempt fail noisily and
+  // for no reason. The ios block below is already the only platform block in this config.
+  platforms: ["ios"],
   orientation: "portrait",
   userInterfaceStyle: "light",
   newArchEnabled: true,
@@ -50,8 +68,14 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       // below) — declaring it here too is dead config (the plugin value wins).
       NSLocationWhenInUseUsageDescription:
         "T-Rock Cam tags jobsite photos with their capture location.",
+      // Covers BOTH microphone uses, because iOS shows this string once and then never again: the
+      // original short voice notes on a photo, and an AI walk, where the phone's mic records the
+      // entire narration for the length of the walk. A consent string that only mentions "short
+      // voice notes" is asking for the wrong thing — someone granting it has not been told the app
+      // may record them continuously for twenty minutes.
       NSMicrophoneUsageDescription:
-        "T-Rock Cam records short voice notes to transcribe photo descriptions.",
+        "T-Rock Cam records your voice — short notes on a photo, and the full narration during an " +
+        "AI walk, which is what the scope is written from.",
     },
   },
   plugins: [
@@ -91,6 +115,28 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       },
     ],
     "expo-audio",
+    [
+      // Meta Wearables Device Access Toolkit. MetaAppID "0" selects Developer Mode, which
+      // runs against MockDeviceKit with no registered app — set META_APP_ID and
+      // META_CLIENT_TOKEN from the Wearables Developer Center to talk to real glasses.
+      "./plugins/withWearablesDat",
+      {
+        scheme: "trockcam",
+        // Left undefined rather than defaulted to "0" here: the plugin owns the sentinel, and
+        // handing it one already resolved would make the production guard below unable to tell a
+        // deliberate Developer Mode config from an unset environment variable.
+        metaAppId: process.env.META_APP_ID,
+        clientToken: process.env.META_CLIENT_TOKEN ?? null,
+        // Fail prebuild rather than ship Developer Mode. Without a registered app the SDK answers
+        // from MockDeviceKit, so a released build finds no glasses at all and every walkthrough
+        // dies at pairing — a failure that costs an estimator a site visit to discover, and that
+        // nothing in the running app can attribute to a missing build variable.
+        requireRegisteredMetaApp: IS_PRODUCTION_BUILD,
+        // Prebuild does not carry the team over from eas.json; without it, device signing
+        // fails and MWDAT.TeamID resolves to an empty string.
+        appleTeamId: process.env.APPLE_TEAM_ID ?? "WKX5A3KC28",
+      },
+    ],
   ],
   experiments: {
     typedRoutes: true,

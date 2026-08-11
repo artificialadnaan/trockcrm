@@ -12,6 +12,9 @@ const D_OPP = U("d001");
 const D_AWARDED = U("d002");
 const D_DD = U("d003");
 const D_INACTIVE = U("d004");  // seeded already-archived (is_active=false)
+const D_AWARDED_REP = U("d005"); // awarded stage, owned by REP — for the rep-archives-any-stage case
+const D_CO_PARENT  = U("d006"); // parent carrying one ACTIVE change-order child
+const D_CO_CHILD   = U("d007"); // that child (re-pointed at the parent after insert)
 const D_MISSING = U("dfff");   // never inserted
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -29,7 +32,7 @@ beforeAll(async () => {
       deal_number varchar(50), name varchar(500), stage_id uuid, assigned_rep_id uuid,
       primary_contact_id uuid, billing_contact_id uuid, billing_contact_required_at timestamptz, company_id uuid, property_id uuid, source_lead_id uuid,
       dd_estimate numeric(14, 2), bid_estimate numeric(14, 2), awarded_amount numeric(14, 2),
-      awarded_amount_overridden boolean, dd_estimate_overridden boolean, change_order_total numeric(14, 2), description text,
+      awarded_amount_overridden boolean, dd_estimate_overridden boolean, change_order_total numeric(14, 2), scope_title varchar(120), description text,
       estimator text, property_address text, property_city varchar(255), property_state varchar(2),
       property_zip varchar(10), property_country text, office_code text, project_type text,
       project_type_id uuid, region_id uuid, source varchar(100), win_probability integer,
@@ -85,7 +88,14 @@ beforeAll(async () => {
       ('${D_OPP}',     'Opp Deal',     '${OPP_STAGE}',     'Original scope.', '${REP}', true, false, false, false, now(), now()),
       ('${D_AWARDED}', 'Awarded Deal', '${AWARDED_STAGE}',  'Original scope.', '${REP}', true, false, false, false, now(), now()),
       ('${D_DD}',      'DD Deal',      '${DD_STAGE}',       'Original scope.', '${REP}', true, false, false, false, now(), now()),
-      ('${D_INACTIVE}','Gone Deal',    '${OPP_STAGE}',      'Original scope.', '${REP}', false, false, false, false, now(), now());
+      ('${D_INACTIVE}','Gone Deal',    '${OPP_STAGE}',      'Original scope.', '${REP}', false, false, false, false, now(), now()),
+      ('${D_AWARDED_REP}','Awarded Own', '${AWARDED_STAGE}', 'Original scope.', '${REP}', true, false, false, false, now(), now()),
+      ('${D_CO_PARENT}','CO Parent',    '${AWARDED_STAGE}', 'Original scope.', '${REP}', true, false, false, false, now(), now());
+    -- The live CO child. Inserted separately because it needs parent_deal_id, which the column list above
+    -- does not carry; an UPDATE against a row that was never inserted matched nothing and silently left the
+    -- parent childless, so the guard under test had nothing to fire on and the test passed vacuously.
+    INSERT INTO deals (id, name, stage_id, description, assigned_rep_id, is_active, is_change_order, parent_deal_id, on_hold, is_test_data, created_at, updated_at) VALUES
+      ('${D_CO_CHILD}', 'CO Child', '${AWARDED_STAGE}', 'CO scope.', '${REP}', true, true, '${D_CO_PARENT}', false, false, now(), now());
     CREATE TABLE deal_history (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid NOT NULL, field_name text NOT NULL,
       old_value text, new_value text, changed_by uuid NOT NULL, source text, reason text,
@@ -113,10 +123,29 @@ describe("deleteDeal archive rules", () => {
     });
   });
 
-  it("blocks a rep archiving a non-opportunity deal", async () => {
+  it("BLOCKS a rep archiving a parent that still has active change-order children", async () => {
+    // Removing the stage gate opened an indirect route around an admin-only financial operation: the route
+    // rejects a non-admin whose TARGET is a CO, but a parent is not itself a CO, and deleteDeal then voids
+    // every child AND removes each child's earned commission. Unreachable before only because CO children
+    // hang off Won/awarded parents, which the stage gate happened to refuse — a coincidence, not a boundary.
     await expect(
-      deleteDeal(tdb, D_AWARDED, { actorRole: "rep", actorId: REP, reason: "no" })
-    ).rejects.toMatchObject({ statusCode: 403, code: "DEAL_ARCHIVE_STAGE_FORBIDDEN" });
+      deleteDeal(tdb, D_CO_PARENT, { actorRole: "rep", actorId: REP, reason: "cleanup" })
+    ).rejects.toMatchObject({ statusCode: 403, code: "CHANGE_ORDER_ADMIN_ONLY" });
+  });
+
+  it("lets an ADMIN archive that same CO parent", async () => {
+    // The carve-out is about authorization, not about the operation being disallowed outright.
+    const row = await deleteDeal(tdb, D_CO_PARENT, { actorRole: "admin", actorId: REP, reason: "Admin cleanup" });
+    expect(row?.isActive).toBe(false);
+  });
+
+  it("lets a rep archive a NON-opportunity deal they own — stage is no longer a gate", async () => {
+    // Replaces the old DEAL_ARCHIVE_STAGE_FORBIDDEN assertion. The stage rule admitted only `opportunity`
+    // and the legacy alias `dd` (itself seeded is_active_pipeline=FALSE), so the archive control was dead
+    // on nearly every real deal. Ownership, the mandatory reason and the admin-only change-order guard are
+    // what remain. Uses its OWN fixture so it cannot consume the deal the admin case archives.
+    const row = await deleteDeal(tdb, D_AWARDED_REP, { actorRole: "rep", actorId: REP, reason: "Duplicate entry" });
+    expect(row?.isActive).toBe(false);
   });
 
   it("archives an opportunity deal for a rep, prepending the reason to the description", async () => {

@@ -1,0 +1,408 @@
+import React, { useCallback, useMemo, useState } from "react";
+import {
+  ActivityIndicator,
+  FlatList,
+  Pressable,
+  RefreshControl,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+} from "react-native";
+import { useRouter } from "expo-router";
+import { SafeAreaView } from "react-native-safe-area-context";
+import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { ApiError } from "../../../../src/api/client";
+import * as dealsApi from "../../../../src/api/endpoints/deals";
+import type { DealListItem, DealScope } from "../../../../src/api/types";
+import { useAuth } from "../../../../src/auth/AuthContext";
+import { useQueryScope } from "../../../../src/auth/useOfficeId";
+import { useOffices } from "../../../../src/auth/useOffices";
+import { ScreenHeader } from "../../../../src/components/ScreenHeader";
+import { DealCard } from "../../../../src/components/DealCard";
+import { RetryNotice } from "../../../../src/components/RetryNotice";
+import { resolveListState } from "../../../../src/list-state";
+import { buildStageIndex, stageLabelFor } from "../../../../src/stage-label";
+import { qk } from "../../../../src/query/keys";
+import { useDebouncedSearch } from "../../../../src/lib/use-debounced-search";
+import { MIN_SEARCH_LENGTH, searchIsTooShort } from "../../../../src/search-query";
+import { theme } from "../../../../src/theme/theme";
+
+const SCOPES: Array<{ key: DealScope; label: string }> = [
+  { key: "mine", label: "Mine" },
+  { key: "all", label: "All" },
+  { key: "watched", label: "Watched" },
+];
+
+const PAGE_SIZE = 50;
+
+/**
+ * The server applies its search predicate only for trimmed terms of 2+ characters. Sending a single
+ * character returns the UNFILTERED first page, which looks exactly like "that one letter matched 400
+ * unrelated deals" — so the client holds it back and says why.
+ */
+
+export default function DealsListScreen() {
+  const router = useRouter();
+  const { fetcher } = useAuth();
+  const cacheScope = useQueryScope();
+  const { activeOfficeName, refetch: refetchOffices } = useOffices();
+  const [scope, setScope] = useState<DealScope>("mine");
+  const [search, setSearch] = useState("");
+
+  // Only the SUBMITTED search is part of the query key. Keying on every keystroke would fire a request
+  // per character against a rate-limited API (300/min/user) and thrash the cache.
+  /* Debounced, not submitted. See src/search-query.ts — the two-character floor stays, the
+     press-return ceremony goes. */
+  const submittedSearch = useDebouncedSearch(search);
+
+  const tooShort = searchIsTooShort(search);
+
+  const params = useMemo(
+    () => ({ scope, search: submittedSearch || undefined, limit: PAGE_SIZE }),
+    [scope, submittedSearch],
+  );
+
+  const query = useInfiniteQuery({
+    queryKey: qk.deals(cacheScope, params),
+    initialPageParam: 1,
+    queryFn: ({ pageParam }) => dealsApi.listDeals(fetcher, { ...params, page: pageParam }),
+    // Stop when the server says there are no further pages. Without this the list silently capped at the
+    // first 50 while the header cheerfully reported a larger total.
+    getNextPageParam: (last) =>
+      last.pagination.page < last.pagination.totalPages ? last.pagination.page + 1 : undefined,
+  });
+
+  const stagesQuery = useQuery({
+    queryKey: qk.stages(cacheScope),
+    queryFn: () => dealsApi.listStages(fetcher),
+    // Stage config is effectively static per office; refetching it per visit is wasted budget.
+    staleTime: 30 * 60_000,
+  });
+
+  // Built ONCE per stages payload, not per row — stageLabelFor is called inside renderItem.
+  const stageIndex = useMemo(() => buildStageIndex(stagesQuery.data), [stagesQuery.data]);
+
+  const deals = useMemo(() => (query.data?.pages ?? []).flatMap((p) => p.deals), [query.data]);
+
+  // Stable identity so memoised rows are not invalidated on every keystroke in the search field. With an
+  // inline arrow every card re-rendered on each render of this screen, which on a paginated list is the
+  // whole viewport per character typed.
+  // Hoisted out of renderDeal so it is one stable function for the life of the screen. Inline, every
+  // card received a BRAND-NEW onPress on each render, which defeats DealCard's React.memo entirely —
+  // the memo compares props, and a fresh closure never equals the last one. On a paginated list that is
+  // the whole viewport re-rendering per keystroke in the search field, which is exactly when it hurts.
+  const handleDealPress = useCallback(
+    (deal: DealListItem) => router.push(`/(app)/deals/${deal.id}`),
+    [router],
+  );
+
+  const renderDeal = useCallback(
+    ({ item }: { item: DealListItem }) => (
+      <DealCard
+        deal={item}
+        variant="list"
+        // The list had its own prefix before the two cards merged, and inheriting the component's
+        // "board-card" default silently renamed every testID on the most-opened screen. NOT
+        // "stage-card" — that belongs to the stage drill-down, and sharing it would make the two
+        // indistinguishable, which is the problem rather than the fix.
+        testIDPrefix="deal-card"
+        stageName={stageLabelFor(item, stageIndex)}
+        // The list is not stage-scoped, so it has no cheap way to know whose deal this is and does not
+        // claim to: "Yours" is a board affordance, where the next tap is a stage move.
+        canMove={false}
+        onPress={handleDealPress}
+      />
+    ),
+    [stageIndex, handleDealPress],
+  );
+  const total = query.data?.pages[0]?.pagination.total;
+
+
+  const offline = query.error instanceof ApiError && query.error.status === 0;
+
+  /**
+   * TanStack keeps every successfully-loaded page when a LATER fetch fails, and still sets `error`. So
+   * `error` alone must not drive the full-screen state: a failed page-3 request, or a failed pull-to-
+   * refresh, would replace a list the rep is reading — and on a phone that is their whole screen. The
+   * full-screen error belongs to the case where nothing loaded at all; everything else goes inline.
+   */
+  // `query.data`, NOT `deals.length`. A scope or search that legitimately returned ZERO deals has
+  // loaded successfully — so a later failed refresh must stay inline, exactly as it does for a
+  // non-empty list. Keying on row count treated "loaded, and empty" as "never loaded", and replaced a
+  // refreshable empty state with the blocking initial-load error.
+  // One tested decision, shared with the contacts list — see resolveListState for the four ways this
+  // has been got wrong, and why none of them are about how many rows there are.
+  const listState = resolveListState({
+    isLoading: query.isLoading,
+    data: query.data,
+    error: query.error,
+    isFetchNextPageError: query.isFetchNextPageError,
+  });
+  // A failed /deals/stages is NOT an empty stage config. Labels degrade to humanized slugs, which is
+  // deliberate and readable — but silently, so the rep has no idea the names are approximations and no
+  // way to get the real ones back.
+  /**
+   * Two different situations, and only one of them means the labels on screen are raw slugs.
+   *
+   * TanStack keeps the last good data when a background refetch fails, so `error` alone covers both "we
+   * never got the stage names" and "we have them, the refresh just failed". The banner said raw stages
+   * were being shown in BOTH cases — telling a rep the perfectly correct names in front of them were
+   * fallbacks. Wrong in a way that erodes trust in every other label the app shows.
+   */
+  const stagesUnavailable = Boolean(stagesQuery.error) && stagesQuery.data === undefined;
+  const stagesRefreshFailed = Boolean(stagesQuery.error) && stagesQuery.data !== undefined;
+  const stagesFailed = stagesUnavailable || stagesRefreshFailed;
+  const refreshError = listState.kind === "loaded" && listState.refreshFailed;
+  const pageError = listState.kind === "loaded" && listState.pageFailed;
+
+  return (
+    <SafeAreaView style={styles.safe} edges={["top"]}>
+      <ScreenHeader
+        title="Deals"
+        context={activeOfficeName ?? undefined}
+        right={total !== undefined ? <Text style={styles.count}>{total} total</Text> : undefined}
+      />
+
+      <Pressable
+        testID="open-board"
+        onPress={() => router.push("/(app)/deals/board")}
+        accessibilityRole="button"
+        accessibilityLabel="Open the pipeline board"
+        style={styles.boardLink}
+      >
+        <Text style={styles.boardLinkText}>View pipeline board ›</Text>
+      </Pressable>
+
+      <View style={styles.scopeRow}>
+        {SCOPES.map((s) => (
+          <Pressable
+            key={s.key}
+            testID={`scope-${s.key}`}
+            onPress={() => setScope(s.key)}
+            accessibilityRole="button"
+            accessibilityState={{ selected: scope === s.key }}
+            style={[styles.scopePill, scope === s.key && styles.scopePillActive]}
+          >
+            <Text style={[styles.scopeText, scope === s.key && styles.scopeTextActive]}>{s.label}</Text>
+          </Pressable>
+        ))}
+      </View>
+
+      <TextInput
+        testID="deals-search"
+        value={search}
+        onChangeText={setSearch}
+        returnKeyType="search"
+        placeholder="Search deals"
+        placeholderTextColor={theme.color.textMuted}
+        autoCapitalize="none"
+        autoCorrect={false}
+        style={styles.search}
+      />
+      {tooShort ? (
+        <Text style={styles.searchHint}>Type at least {MIN_SEARCH_LENGTH} characters to search.</Text>
+      ) : null}
+
+      {listState.kind === "loading" ? (
+        <View style={styles.center}>
+          <ActivityIndicator color={theme.color.brandRed} />
+        </View>
+      ) : listState.kind === "blocking-error" ? (
+        // A retry BUTTON, not "pull to retry" — this branch replaces the FlatList, so there is no
+        // RefreshControl mounted to pull on. The earlier copy advertised a gesture that did not exist.
+        <View style={styles.center}>
+          <Text style={styles.errorTitle}>{offline ? "You're offline" : "Couldn't load deals"}</Text>
+          <Text style={styles.errorBody}>
+            {offline
+              ? "Reconnect and try again."
+              : query.error instanceof ApiError
+                ? query.error.message
+                : "Something went wrong."}
+          </Text>
+          <Pressable
+            testID="deals-retry"
+            onPress={() => void query.refetch()}
+            accessibilityRole="button"
+            style={styles.retryBtn}
+          >
+            <Text style={styles.retryText}>Try again</Text>
+          </Pressable>
+        </View>
+      ) : (
+        <FlatList
+          data={deals}
+          keyExtractor={(d) => d.id}
+          // The search field sits directly above this list, so after a search the keyboard is still up.
+          // RN's default here is "never", which spends the first tap dismissing it — so opening a result,
+          // or the one-tap Call this screen advertises, silently needs two taps. Same fix the deal detail
+          // needed for its Save button.
+          keyboardShouldPersistTaps="handled"
+          // `flexGrow` so the empty state centres in the viewport while the list still scrolls — which is
+          // what keeps pull-to-refresh reachable with zero rows.
+          contentContainerStyle={[styles.list, deals.length === 0 && styles.listEmpty]}
+          // The empty state lives INSIDE the list rather than replacing it. Swapping in a plain View
+          // unmounted the RefreshControl with it, so a rep whose filter legitimately returns nothing had
+          // no way to refresh — and refetchOnWindowFocus is off, so the screen stayed empty for as long
+          // as it was mounted, even after someone else created the deal they were waiting for.
+          ListEmptyComponent={
+            <View style={styles.center}>
+              <Text style={styles.errorTitle}>No deals</Text>
+              <Text style={styles.errorBody}>
+                {submittedSearch
+                  ? "Nothing matched that search."
+                  : scope === "mine"
+                    ? "Nothing assigned to you yet. Try the All tab."
+                    : scope === "watched"
+                      ? "You're not watching any deals yet."
+                      : "There are no deals in this office."}
+              </Text>
+              <Text style={styles.errorBody}>Pull down to refresh.</Text>
+            </View>
+          }
+          onEndReachedThreshold={0.5}
+          onEndReached={() => {
+            // NOT after a page failure. onEndReached fires repeatedly while the user sits at the bottom,
+            // so without this a failed load-more retries on every scroll tick — hammering an endpoint
+            // that is already failing, and fighting the explicit retry the footer offers.
+            if (pageError) return;
+            if (query.hasNextPage && !query.isFetchingNextPage) void query.fetchNextPage();
+          }}
+          ListHeaderComponent={
+            /* BOTH, not either. These are two independent endpoints with independent retries, and the
+               exclusive ternary tied the stage-name recovery to the deals error clearing first: with
+               /deals still down and /deals/stages back up, the only control that could restore real
+               stage names was hidden, leaving the rep on raw slugs with no way to fix it. A retry for
+               a failure the user can actually clear should not be gated on an unrelated one. */
+            refreshError || stagesFailed ? (
+              <>
+                {refreshError ? (
+                  <RetryNotice
+                    testID="deals-refresh-retry"
+                    message="Couldn't refresh — showing saved deals. Tap to retry."
+                    onRetry={() => void query.refetch()}
+                    placement="top"
+                  />
+                ) : null}
+                {stagesFailed ? (
+                  <RetryNotice
+                    testID="deals-stages-retry"
+                    message={
+                      stagesUnavailable
+                        ? "Couldn't load stage names — showing raw stages. Tap to retry."
+                        : "Couldn't refresh stage names — showing the saved ones. Tap to retry."
+                    }
+                    onRetry={() => void stagesQuery.refetch()}
+                    placement="top"
+                  />
+                ) : null}
+              </>
+            ) : null
+          }
+          ListFooterComponent={
+            query.isFetchingNextPage ? (
+              <ActivityIndicator color={theme.color.brandRed} style={styles.footer} />
+            ) : pageError ? (
+              // fetchNextPage, not refetch: reloading page 1 would silently leave the gap the rep hit.
+              <RetryNotice
+                testID="deals-page-retry"
+                message="Couldn't load more — tap to retry"
+                onRetry={() => void query.fetchNextPage()}
+                placement="bottom"
+              />
+            ) : null
+          }
+          renderItem={renderDeal}
+          refreshControl={
+            <RefreshControl
+              refreshing={query.isRefetching}
+              // The office label too. useOffices retries once and focus-refetching is off, so once both
+              // attempts fail nothing retries it — a rep entering this tab directly was stuck with a blank
+              // office and no way to recover short of restarting. Refreshing a screen refreshes what is on it.
+              onRefresh={() => void Promise.all([query.refetch(), refetchOffices()])}
+            />
+          }
+        />
+      )}
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  safe: { flex: 1, backgroundColor: theme.color.canvas },
+  header: {
+    paddingHorizontal: theme.space.lg,
+    paddingTop: theme.space.sm,
+    flexDirection: "row",
+    alignItems: "baseline",
+    justifyContent: "space-between",
+  },
+  title: { ...theme.type.h1, color: theme.color.textPrimary },
+  count: { ...theme.type.label, color: theme.color.textMuted },
+  boardLink: {
+    minHeight: 44,
+    justifyContent: "center",
+    marginHorizontal: theme.space.lg,
+    marginTop: theme.space.sm,
+    alignItems: "center",
+    paddingVertical: theme.space.sm,
+    borderRadius: theme.radius.md,
+    borderWidth: 1,
+    borderColor: theme.color.border,
+    backgroundColor: theme.color.surface,
+  },
+  boardLinkText: { ...theme.type.body, color: theme.color.redText },
+  scopeRow: { flexDirection: "row", gap: theme.space.sm, paddingHorizontal: theme.space.lg, paddingTop: theme.space.md },
+  scopePill: {
+    minHeight: 44,
+    justifyContent: "center",
+    borderRadius: theme.radius.pill,
+    borderWidth: 1,
+    borderColor: theme.color.border,
+    paddingHorizontal: theme.space.lg,
+    paddingVertical: theme.space.sm,
+    backgroundColor: theme.color.surface,
+  },
+  // surfaceRaised, NOT inkNavy. inkNavy is a TEXT colour on the dark theme (it points at the
+  // primary text), so using it as a fill made the selected pill a light slab with white text on
+  // it — invisible. A raised surface is what "selected" means everywhere else in this app.
+  scopePillActive: { backgroundColor: theme.color.surfaceRaised, borderColor: theme.color.borderStrong },
+  scopeText: { ...theme.type.label, color: theme.color.textSecondary },
+  scopeTextActive: { color: theme.color.textPrimary },
+  search: {
+    minHeight: 44,
+    margin: theme.space.lg,
+    marginBottom: theme.space.sm,
+    borderWidth: 1,
+    borderColor: theme.color.borderControl,
+    borderRadius: theme.radius.md,
+    paddingHorizontal: theme.space.md,
+    paddingVertical: theme.space.md,
+        ...theme.type.body,
+    color: theme.color.textPrimary,
+    backgroundColor: theme.color.surface,
+  },
+  searchHint: {
+    marginHorizontal: theme.space.lg,
+    marginBottom: theme.space.sm,
+        ...theme.type.label,
+    color: theme.color.textMuted,
+  },
+  list: { padding: theme.space.lg, paddingTop: theme.space.sm, gap: theme.space.md },
+  listEmpty: { flexGrow: 1 },
+  footer: { paddingVertical: theme.space.lg },
+  center: { flex: 1, alignItems: "center", justifyContent: "center", padding: theme.space.xl, gap: theme.space.sm },
+  errorTitle: { ...theme.type.h2, color: theme.color.textPrimary },
+  errorBody: { ...theme.type.body, color: theme.color.textSecondary, textAlign: "center" },
+  retryBtn: {
+    minHeight: 44,
+    justifyContent: "center",
+    marginTop: theme.space.sm,
+    borderWidth: 1,
+    borderColor: theme.color.brandRed,
+    borderRadius: theme.radius.md,
+    paddingHorizontal: theme.space.xl,
+    paddingVertical: theme.space.md,
+  },
+  retryText: { ...theme.type.body, color: theme.color.redText },
+});

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -16,11 +16,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Plus } from "lucide-react";
+import { ChevronsUpDown, Loader2, Plus } from "lucide-react";
 import { createProjectTask, createTask } from "@/hooks/use-tasks";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
-import { formatDealDisplayNumber } from "@/lib/deal-utils";
+import { formatDealDisplayName, formatDealDisplayNumber } from "@/lib/deal-utils";
 
 interface Assignee {
   id: string;
@@ -32,6 +32,20 @@ interface DealOption {
   dealNumber: string;
   projectNumber?: string | null;
   name: string;
+  /** `deals.is_change_order` — present on the /deals list payload. */
+  isChangeOrder?: boolean | null;
+}
+
+const PROJECT_SEARCH_DEBOUNCE_MS = 150;
+/** The deals API ignores a search term shorter than this, so don't fire a request for one. */
+const PROJECT_SEARCH_MIN_CHARS = 2;
+
+// A change-order child deal is STORED as "<Parent> — Change Order N", which this option label
+// truncates away. formatDealDisplayName moves the label to the front; DISPLAY-ONLY, never persisted.
+function dealOptionLabel(deal: DealOption) {
+  const display = formatDealDisplayNumber(deal);
+  const name = formatDealDisplayName(deal.name, deal.isChangeOrder);
+  return display.isPending ? name : `${display.label} - ${name}`;
 }
 
 interface TaskCreateDialogProps {
@@ -59,6 +73,12 @@ export function TaskCreateDialog({
   const [error, setError] = useState<string | null>(null);
   const [assignees, setAssignees] = useState<Assignee[]>([]);
   const [deals, setDeals] = useState<DealOption[]>([]);
+  const [selectedDeal, setSelectedDeal] = useState<DealOption | null>(null);
+  const [dealPickerOpen, setDealPickerOpen] = useState(false);
+  const [dealQuery, setDealQuery] = useState("");
+  const [dealsLoading, setDealsLoading] = useState(false);
+  const [dealsError, setDealsError] = useState<string | null>(null);
+  const dealPickerRef = useRef<HTMLDivElement>(null);
 
   const canAssign = user?.role === "admin" || user?.role === "director" || user?.role === "rep";
   const isProjectScoped = Boolean(projectScopedProjectId);
@@ -71,13 +91,63 @@ export function TaskCreateDialog({
       .catch(() => setAssignees([]));
   }, [canAssign, open]);
 
-  // Fetch deals for the deal picker (only if no defaultDealId)
+  // Resolve the project list server-side. A fixed page of 50 meant any project outside that page
+  // was simply unattachable — the assignee then got a task with no project on it.
   useEffect(() => {
-    if (defaultDealId || !open || isProjectScoped) return;
-    api<{ deals: DealOption[] }>("/deals?limit=50&isActive=true")
-      .then((data) => setDeals(data.deals))
-      .catch(() => setDeals([]));
-  }, [defaultDealId, isProjectScoped, open]);
+    if (defaultDealId || !open || isProjectScoped || !dealPickerOpen) return;
+
+    let cancelled = false;
+    const trimmed = dealQuery.trim();
+    // scope=all because /deals otherwise defaults to the caller's OWN deals (readListScope →
+    // "mine"), which is the whole bug: you cannot attach a project you don't own, which is exactly
+    // the cross-user assignment case reported. POST /tasks accepts any deal id, and scope=all
+    // elevates the read office-wide — the same thing the photo-feed deal picker does.
+    const query =
+      trimmed.length >= PROJECT_SEARCH_MIN_CHARS
+        ? `/deals?scope=all&limit=20&isActive=true&search=${encodeURIComponent(trimmed)}`
+        : "/deals?scope=all&limit=50&isActive=true";
+
+    // Retire the previous results *now*, not when the debounce fires — otherwise results for the
+    // old query stay on screen and selectable for PROJECT_SEARCH_DEBOUNCE_MS after the user has
+    // typed something they no longer match.
+    setDeals([]);
+    setDealsLoading(true);
+    setDealsError(null);
+
+    const timer = setTimeout(() => {
+      api<{ deals: DealOption[] }>(query)
+        .then((data) => {
+          if (!cancelled) setDeals(data.deals ?? []);
+        })
+        .catch(() => {
+          // Surface the failure — silently rendering an empty picker is what hid this before.
+          if (!cancelled) {
+            setDeals([]);
+            setDealsError("Couldn't load projects — try again");
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setDealsLoading(false);
+        });
+    }, PROJECT_SEARCH_DEBOUNCE_MS);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [dealPickerOpen, dealQuery, defaultDealId, isProjectScoped, open]);
+
+  // Close the project dropdown on outside click.
+  useEffect(() => {
+    if (!dealPickerOpen) return;
+    function handleClick(event: MouseEvent) {
+      if (dealPickerRef.current && !dealPickerRef.current.contains(event.target as Node)) {
+        setDealPickerOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [dealPickerOpen]);
 
   useEffect(() => {
     if (!open) return;
@@ -123,6 +193,9 @@ export function TaskCreateDialog({
       setDueDate("");
       setAssignedTo("");
       setDealId(defaultDealId ?? "");
+      setSelectedDeal(null);
+      setDealQuery("");
+      setDealPickerOpen(false);
       setOpen(false);
       onCreated();
     } catch (err: unknown) {
@@ -199,22 +272,84 @@ export function TaskCreateDialog({
               </Select>
             </div>
           )}
-          {!defaultDealId && !isProjectScoped && deals.length > 0 && (
+          {!defaultDealId && !isProjectScoped && (
             <div>
-              <label className="text-xs text-muted-foreground mb-1 block">Link to Deal (optional)</label>
-              <Select value={dealId || "__none__"} onValueChange={(v) => setDealId(v === "__none__" ? "" : (v ?? ""))}>
-                <SelectTrigger>
-                  <SelectValue placeholder="No deal linked" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__none__">No deal linked</SelectItem>
-                  {deals.map((d) => (
-                    <SelectItem key={d.id} value={d.id}>
-                      {formatDealDisplayNumber(d).label} - {d.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <label className="text-xs text-muted-foreground mb-1 block">Link to Project (optional)</label>
+              <div className="relative" ref={dealPickerRef}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  aria-label="Choose a linked project"
+                  aria-expanded={dealPickerOpen}
+                  className="w-full justify-between font-normal"
+                  onClick={() => setDealPickerOpen((prev) => !prev)}
+                >
+                  <span className={selectedDeal ? "truncate text-foreground" : "truncate text-muted-foreground"}>
+                    {selectedDeal ? dealOptionLabel(selectedDeal) : "No project linked"}
+                  </span>
+                  <ChevronsUpDown className="h-4 w-4 opacity-50" />
+                </Button>
+
+                {dealPickerOpen && (
+                  <div className="absolute z-50 mt-1 w-full rounded-md border bg-background shadow-md">
+                    <div className="border-b p-2">
+                      <Input
+                        autoFocus
+                        placeholder="Search projects..."
+                        value={dealQuery}
+                        onChange={(e) => setDealQuery(e.target.value)}
+                        // This input lives inside the create form — without this, Enter while
+                        // searching submits the form and creates the task mid-search.
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            e.stopPropagation();
+                          }
+                        }}
+                        className="h-8 text-sm"
+                      />
+                    </div>
+                    <div className="max-h-52 overflow-y-auto">
+                      <button
+                        type="button"
+                        className="w-full px-3 py-2 text-left text-sm transition-colors hover:bg-muted"
+                        onClick={() => {
+                          setSelectedDeal(null);
+                          setDealId("");
+                          setDealPickerOpen(false);
+                        }}
+                      >
+                        No project linked
+                      </button>
+                      {dealsLoading && (
+                        <div className="flex items-center gap-2 px-3 py-2 text-sm text-muted-foreground">
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                          Searching...
+                        </div>
+                      )}
+                      {dealsError && <p className="px-3 py-2 text-sm text-red-600">{dealsError}</p>}
+                      {!dealsLoading && !dealsError && deals.length === 0 && (
+                        <p className="px-3 py-2 text-sm text-muted-foreground">No projects found.</p>
+                      )}
+                      {!dealsLoading &&
+                        deals.map((d) => (
+                          <button
+                            key={d.id}
+                            type="button"
+                            className="w-full px-3 py-2 text-left text-sm transition-colors hover:bg-muted"
+                            onClick={() => {
+                              setSelectedDeal(d);
+                              setDealId(d.id);
+                              setDealPickerOpen(false);
+                            }}
+                          >
+                            {dealOptionLabel(d)}
+                          </button>
+                        ))}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           )}
           {error && <p className="text-sm text-red-600">{error}</p>}

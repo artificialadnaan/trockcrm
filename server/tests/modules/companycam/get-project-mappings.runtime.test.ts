@@ -10,6 +10,7 @@ vi.mock("../../../src/modules/companycam/client.js", () => ({
   getProjectPhotos: vi.fn(),
 }));
 
+import { formatDealDisplayName } from "@trock-crm/shared/types";
 import * as client from "../../../src/modules/companycam/client.js";
 import { getProjectMappings, linkProjectToDeal, unlinkProject } from "../../../src/modules/companycam/service.js";
 
@@ -25,6 +26,11 @@ const BAR = U("ba2"); // no link yet — sanity check the normal auto path still
 // Two ACTIVE deals sharing a normalized name ("Dup Site") — an ambiguous collision that must NOT auto-link.
 const DUP_A = U("d0a");
 const DUP_B = U("d0b");
+// Change-order display relabel fixtures. The two FALSE rows are the discriminating cases: a name a HUMAN
+// typed that merely LOOKS like a generated change-order child.
+const CO_LINKED_FALSE = U("c01"); // is_change_order = FALSE, reached via the 'linked' branch
+const CO_AUTO_FALSE = U("c02"); // is_change_order = FALSE, reached via the 'auto' branch
+const CO_AUTO_TRUE = U("c03"); // is_change_order = TRUE  — the positive control
 
 let pg: PGlite;
 let tdb: ReturnType<typeof drizzle>;
@@ -48,6 +54,9 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE TABLE deals (
       id uuid PRIMARY KEY, sales_source_user_id uuid, name text, deal_number text, is_active boolean NOT NULL DEFAULT true,
+      -- Spelled as migration 0156 creates it. getProjectMappings selects it so the admin page can relabel a
+      -- change-order child by the FLAG rather than by guessing from the name.
+      is_change_order boolean NOT NULL DEFAULT false,
       -- Legacy scalar mirror: link/unlink keep it in sync for un-migrated readers (#830 drops it).
       companycam_project_id varchar(50)
     );
@@ -65,8 +74,16 @@ beforeAll(async () => {
       -- Two ACTIVE deals share the same normalized name -> ambiguous, must stay manual.
       ('${DUP_A}', 'Dup Site', 'D-3', true),
       ('${DUP_B}', 'Dup Site', 'D-4', true);
+    -- Change-order relabel fixtures: two human-typed names that LOOK generated (is_change_order false) and
+    -- one real generated child (true). All three normalize to distinct names, so none is ambiguous.
+    INSERT INTO deals (id, name, deal_number, is_active, is_change_order) VALUES
+      ('${CO_LINKED_FALSE}', 'Lobby — Change Order 1', 'D-5', true, false),
+      ('${CO_AUTO_FALSE}', 'Atrium — Change Order 2', 'D-6', true, false),
+      ('${CO_AUTO_TRUE}', 'Tides Park Lane — Change Order 1', 'D-7', true, true);
     -- FOO already owns CompanyCam project "cc-1".
     INSERT INTO deal_companycam_projects (deal_id, companycam_project_id) VALUES ('${FOO}', 'cc-1');
+    -- ...and CO_LINKED_FALSE owns "cc-6", so the 'linked' branch is exercised too.
+    INSERT INTO deal_companycam_projects (deal_id, companycam_project_id) VALUES ('${CO_LINKED_FALSE}', 'cc-6');
   `);
   tdb = drizzle(pg);
 
@@ -76,6 +93,9 @@ beforeAll(async () => {
     ccProject("cc-3", "Bar Plaza", 2), // unlinked, matches BAR -> normal auto path
     ccProject("cc-4", "Bar Plaza", 1), // ANOTHER unlinked same-named project -> must ALSO auto-match BAR (1:many)
     ccProject("cc-5", "Dup Site", 4), // name shared by TWO active deals -> ambiguous -> 'unmatched' (manual)
+    ccProject("cc-6", "Lobby — Change Order 1", 6), // linked to CO_LINKED_FALSE -> 'linked'
+    ccProject("cc-7", "Atrium — Change Order 2", 7), // unlinked -> auto-matches CO_AUTO_FALSE
+    ccProject("cc-8", "Tides Park Lane — Change Order 1", 8), // unlinked -> auto-matches CO_AUTO_TRUE
   ]);
 });
 
@@ -109,6 +129,44 @@ describe("getProjectMappings — 1:many auto-match (B-3)", () => {
     expect(byId.get("cc-5")).toMatchObject({ matchType: "unmatched", dealId: null });
     expect(byId.get("cc-5")?.dealId).not.toBe(DUP_A);
     expect(byId.get("cc-5")?.dealId).not.toBe(DUP_B);
+  });
+});
+
+// `deals.is_change_order` is the AUTHORITY for the change-order display relabel on the CompanyCam admin page.
+// It has to survive the drizzle projection -> both mapping branches -> the ProjectMapping type -> the client
+// type -> the call site. Break any link and the field arrives `undefined`, formatDealDisplayName falls back to
+// parsing the NAME, and a deal a human named "Lobby — Change Order 1" is rendered "Change Order 1 — Lobby".
+//
+// The is_change_order = FALSE rows are the DISCRIMINATING cases: with the flag missing entirely, the TRUE row
+// still renders correctly by coincidence, so a `true`-only assertion proves nothing about the wiring.
+describe("getProjectMappings — deals.is_change_order reaches the admin page", () => {
+  it("carries the flag on both matched branches, so a human-named change-order name is NOT relabelled", async () => {
+    const mappings = await getProjectMappings(tdb as never);
+    const byId = new Map(mappings.map((m) => [m.ccProjectId, m]));
+
+    const linked = byId.get("cc-6");
+    const autoFalse = byId.get("cc-7");
+    const autoTrue = byId.get("cc-8");
+
+    // Sanity: the fixtures land on the branches this test is about.
+    expect(linked).toMatchObject({ matchType: "linked", dealId: CO_LINKED_FALSE });
+    expect(autoFalse).toMatchObject({ matchType: "auto", dealId: CO_AUTO_FALSE });
+    expect(autoTrue).toMatchObject({ matchType: "auto", dealId: CO_AUTO_TRUE });
+
+    // What the admin page actually renders from each mapping (companycam-page.tsx).
+    expect(formatDealDisplayName(linked!.dealName, linked!.dealIsChangeOrder)).toBe("Lobby — Change Order 1");
+    expect(formatDealDisplayName(autoFalse!.dealName, autoFalse!.dealIsChangeOrder)).toBe("Atrium — Change Order 2");
+    expect(formatDealDisplayName(autoTrue!.dealName, autoTrue!.dealIsChangeOrder)).toBe(
+      "Change Order 1 — Tides Park Lane",
+    );
+
+    // And the stored value itself reached the payload — not `undefined`, not coerced to false.
+    expect(linked!.dealIsChangeOrder).toBe(false);
+    expect(autoFalse!.dealIsChangeOrder).toBe(false);
+    expect(autoTrue!.dealIsChangeOrder).toBe(true);
+
+    // An unmatched project has no deal at all, so there is nothing to claim about the flag.
+    expect(byId.get("cc-5")?.dealIsChangeOrder).toBeUndefined();
   });
 });
 

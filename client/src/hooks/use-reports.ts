@@ -1,9 +1,11 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
+import { useOfficeScopeId } from "./use-office-scope";
 import { api } from "@/lib/api";
 import type {
   MondayShowcaseData,
   MondayShowcaseEvidence,
   EvidenceRequest,
+  RouteBucket,
 } from "@/pages/reports/monday-showcase/types";
 import type { RepPackData, AtRiskWatchlist } from "@/pages/reports/part4-types";
 import type { WeekMode } from "@/pages/reports/week-mode";
@@ -153,12 +155,13 @@ export interface PipelineVelocityOverview {
     totalValue: number;
     avgDaysInStage: number;
     medianDaysInStage: number;
-    oldestDeal: { dealId: string | null; dealName: string; daysInStage: number };
+    oldestDeal: { dealId: string | null; dealName: string; dealIsChangeOrder?: boolean | null; daysInStage: number };
   }>;
   agingBuckets: Array<{ bucket: string; label: string; dealCount: number; totalValue: number }>;
   stuckDeals: Array<{
     dealId: string;
     dealName: string;
+    dealIsChangeOrder?: boolean | null;
     ownerName: string;
     stageName: string;
     daysInStage: number;
@@ -180,11 +183,11 @@ export interface ClosedWonRevenueOverview {
     wonDeals: number;
     totalRevenue: number;
     avgDealSize: number;
-    largestWonDeal: { dealId: string | null; dealName: string; value: number };
+    largestWonDeal: { dealId: string | null; dealName: string; dealIsChangeOrder?: boolean | null; value: number };
   }>;
   byRegion: Array<{ regionName: string; wonDeals: number; totalRevenue: number; percentOfTotal: number }>;
   byWorkflowFamily: Array<{ workflowFamily: string; workflowFamilyName: string; wonDeals: number; totalRevenue: number }>;
-  topDeals: Array<{ dealId: string; dealName: string; ownerName: string; value: number; wonAt: string }>;
+  topDeals: Array<{ dealId: string; dealName: string; dealIsChangeOrder?: boolean | null; ownerName: string; value: number; wonAt: string }>;
 }
 
 export interface LeadConversionOverview {
@@ -388,6 +391,8 @@ export interface DirectorScorecardReport {
   topAtRiskDeals: Array<{
     dealId: string;
     dealName: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
     ownerName: string;
     stageName: string;
     daysInStage: number;
@@ -418,6 +423,160 @@ export interface RepActivityReport {
   repSummary: Array<{ repName: string; touchpoints: number; activeDeals: number; stalledAccounts: number }>;
 }
 
+/**
+ * Daily Activity Log — the readable entries behind the Rep Activity counts.
+ *
+ * `days[].entryCount` is the FULL-window count for that day, not the number of entries on the
+ * current page, so a day section can legitimately show fewer rows than it claims. The page range in
+ * `pagination` is what makes that honest — render it.
+ */
+export interface DailyActivityLogEntry {
+  id: string;
+  type: string;
+  typeLabel: string;
+  occurredAt: string;
+  occurredDate: string;
+  loggedAt: string;
+  loggedDate: string;
+  loggedSameDay: boolean;
+  /** loggedDate - occurredDate in whole days: positive = written up late, negative = dated ahead. */
+  loggedDaysDiff: number;
+  responsibleUserId: string;
+  responsibleName: string;
+  performedByName: string | null;
+  subject: string | null;
+  body: string | null;
+  outcome: string | null;
+  nextStep: string | null;
+  nextStepDueAt: string | null;
+  /** Someone else's email activity: the row still counts, but its content is withheld. Label it. */
+  contentRestricted: boolean;
+  durationMinutes: number | null;
+  targetType: string | null;
+  targetName: string | null;
+  dealId: string | null;
+  dealName: string | null;
+  dealNumber: string | null;
+}
+
+export interface DailyActivityLogReport {
+  /**
+   * WINDOW-scoped: dates/office/owner only, NEVER the entry-type or logged-off-day narrowing. The KPI
+   * cards render these and are themselves the narrowing controls, so a card must not rewrite its own
+   * number when it is clicked. `pagination.total` is the narrowed count — render both.
+   */
+  kpis: {
+    totalEntries: number;
+    notes: number;
+    daysCovered: number;
+    repsLogging: number;
+    offDayLogged: number;
+  };
+  days: Array<{
+    date: string;
+    entryCount: number;
+    noteCount: number;
+    repCount: number;
+    offDayLoggedCount: number;
+    entries: DailyActivityLogEntry[];
+  }>;
+  pagination: {
+    page: number;
+    limit: number;
+    /** The NARROWED row count — how many entries the current type/off-day selection matches. */
+    total: number;
+    returned: number;
+    totalPages: number;
+    hasMore: boolean;
+  };
+  appliedTypes: string[];
+  /** Echoes the off-day narrowing the SERVER applied, the same way appliedTypes echoes the types. */
+  appliedLoggedOffDay: boolean;
+}
+
+export interface DailyActivityLogQueryOptions extends PerformanceReportQueryOptions {
+  types?: string[];
+  /** Narrow to entries logged on a different day than they occurred — the "Logged Off-Day" drill. */
+  loggedOffDay?: boolean;
+  page?: number;
+  limit?: number;
+}
+
+/* -------------------------------------------------------------------------------------------------
+ * Canvassing Activity — who entered new companies/properties/contacts/leads, per person, per period.
+ * Mirrors server/src/modules/reports/canvassing-activity-service.ts.
+ * ---------------------------------------------------------------------------------------------- */
+
+export const CANVASSING_KINDS = ["company", "property", "contact", "lead"] as const;
+export type CanvassingKind = (typeof CANVASSING_KINDS)[number];
+export type CanvassingBucket = "week" | "month" | "quarter";
+
+export type CanvassingCounts = Record<CanvassingKind, number> & { total: number };
+
+export interface CanvassingPersonRow {
+  userId: string;
+  displayName: string;
+  email: string | null;
+  role: string | null;
+  isActive: boolean;
+  counts: CanvassingCounts;
+  notesLogged: number;
+}
+
+export interface CanvassingBucketRow {
+  bucketStart: string;
+  label: string;
+  /** The range covers only PART of this calendar period — normal for the first and last bucket. */
+  partial: boolean;
+  counts: CanvassingCounts;
+  /** Records created in this bucket that name NO creator — pre-0220 rows and machine-created ones. */
+  unattributed: CanvassingCounts;
+  perUser: Array<{ userId: string; counts: CanvassingCounts; notesLogged: number }>;
+}
+
+export interface CanvassingNoteRow {
+  id: string;
+  type: string;
+  subject: string | null;
+  body: string | null;
+  occurredAt: string;
+  userId: string | null;
+  userName: string | null;
+  /** Set only when someone OTHER than the attributed user actually logged it. */
+  performedByName: string | null;
+  targetType: "company" | "property" | "contact" | "lead" | "deal" | null;
+  targetId: string | null;
+  targetName: string | null;
+}
+
+export interface CanvassingActivityReport {
+  range: { from: string; to: string };
+  /** The requested window was longer than supported and `range.from` was moved forward. */
+  rangeClamped: boolean;
+  bucket: CanvassingBucket;
+  totals: CanvassingCounts;
+  unattributed: CanvassingCounts;
+  notesLogged: number;
+  people: CanvassingPersonRow[];
+  buckets: CanvassingBucketRow[];
+  notes: CanvassingNoteRow[];
+  notesTruncated: boolean;
+  /** The feed shows only the viewer's own notes; the counts still describe everyone. */
+  notesRestrictedToSelf: boolean;
+  /** Earliest attributed creation; before this the report is structurally blind, not empty. */
+  attributionStartHint: string | null;
+}
+
+export interface CanvassingActivityQueryOptions {
+  dateFrom?: string;
+  dateTo?: string;
+  bucket?: CanvassingBucket;
+  userIds?: string[];
+  /** The filter bar's legacy name/email owner selectors; resolved to ids server-side. */
+  ownerNames?: string[];
+  ownerEmails?: string[];
+}
+
 export interface ForecastAccuracyReport {
   kpis: {
     commit: number;
@@ -430,6 +589,8 @@ export interface ForecastAccuracyReport {
   pipelineAtRisk: Array<{
     dealId: string;
     dealName: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
     ownerName: string;
     stageName: string;
     value: number;
@@ -478,6 +639,8 @@ export interface ForecastVarianceRepRollup {
 export interface ForecastVarianceDealRow {
   dealId: string;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   repName: string;
   workflowRoute: "estimating" | "service";
   initialForecast: number;
@@ -576,6 +739,8 @@ export interface WorkflowBottleneckStage {
 export interface WorkflowBottleneckDeal {
   dealId: string;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   ownerName: string;
   stageName: string;
   daysInStage: number;
@@ -615,6 +780,8 @@ export interface ProjectReadinessReport {
   missingReadiness: Array<{
     dealId: string;
     dealName: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
     ownerName: string;
     stageName: string;
     daysInStage: number;
@@ -822,34 +989,25 @@ async function executeSalesReport<T>(endpoint: string, options: SalesReportQuery
   return api<{ data: T }>(`${endpoint}${qs ? `?${qs}` : ""}`);
 }
 
+// Pipeline Velocity, Closed Won Revenue and Lead Conversion.
 function useSalesReport<T>(
   endpoint: string,
   options: SalesReportQueryOptions,
   errorMessage: string
 ) {
-  const [data, setData] = useState<T | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const fetchReport = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await executeSalesReport<T>(endpoint, options);
-      setData(result.data);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : errorMessage);
-      setData(null);
-    } finally {
-      setLoading(false);
-    }
-  }, [endpoint, options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(","), options.ownerEmails?.join(","), errorMessage]);
-
-  useEffect(() => {
-    fetchReport();
-  }, [fetchReport]);
-
-  return { data, loading, error, refetch: fetchReport };
+  return useScopedReport<T>(
+    async () => (await executeSalesReport<T>(endpoint, options)).data,
+    [
+      endpoint,
+      options.dateFrom,
+      options.dateTo,
+      options.office,
+      options.ownerIds?.join(","),
+      options.ownerNames?.join(","),
+      options.ownerEmails?.join(","),
+    ],
+    errorMessage
+  );
 }
 
 export function usePipelineVelocityReport(options: SalesReportQueryOptions = {}) {
@@ -950,78 +1108,27 @@ async function executeOperationsReport<T>(endpoint: string, options: OperationsR
 }
 
 export function useWorkflowBottlenecksReport(options: OperationsReportQueryOptions = {}) {
-  const [data, setData] = useState<WorkflowBottlenecksReport | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const fetchReport = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await executeOperationsReport<WorkflowBottlenecksReport>("/reports/workflow-bottlenecks", options);
-      setData(result.data);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load workflow bottlenecks");
-    } finally {
-      setLoading(false);
-    }
-  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(",")]);
-
-  useEffect(() => {
-    fetchReport();
-  }, [fetchReport]);
-
-  return { data, loading, error, refetch: fetchReport };
+  return useScopedReport<WorkflowBottlenecksReport>(
+    async () => (await executeOperationsReport<WorkflowBottlenecksReport>("/reports/workflow-bottlenecks", options)).data,
+    [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(",")],
+    "Failed to load workflow bottlenecks"
+  );
 }
 
 export function useProjectReadinessReport(options: OperationsReportQueryOptions = {}) {
-  const [data, setData] = useState<ProjectReadinessReport | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const fetchReport = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await executeOperationsReport<ProjectReadinessReport>("/reports/project-readiness", options);
-      setData(result.data);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load project readiness");
-    } finally {
-      setLoading(false);
-    }
-  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(",")]);
-
-  useEffect(() => {
-    fetchReport();
-  }, [fetchReport]);
-
-  return { data, loading, error, refetch: fetchReport };
+  return useScopedReport<ProjectReadinessReport>(
+    async () => (await executeOperationsReport<ProjectReadinessReport>("/reports/project-readiness", options)).data,
+    [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(",")],
+    "Failed to load project readiness"
+  );
 }
 
 export function usePortfolioLoadReport(options: OperationsReportQueryOptions = {}) {
-  const [data, setData] = useState<PortfolioLoadReport | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const fetchReport = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await executeOperationsReport<PortfolioLoadReport>("/reports/portfolio-load", options);
-      setData(result.data);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load portfolio load");
-    } finally {
-      setLoading(false);
-    }
-  }, [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(",")]);
-
-  useEffect(() => {
-    fetchReport();
-  }, [fetchReport]);
-
-  return { data, loading, error, refetch: fetchReport };
+  return useScopedReport<PortfolioLoadReport>(
+    async () => (await executeOperationsReport<PortfolioLoadReport>("/reports/portfolio-load", options)).data,
+    [options.dateFrom, options.dateTo, options.office, options.ownerIds?.join(","), options.ownerNames?.join(",")],
+    "Failed to load portfolio load"
+  );
 }
 
 export function useLeadSourceROI(options: AnalyticsQueryOptions = {}) {
@@ -1275,6 +1382,146 @@ function appendPerformanceReportQueryOptions(params: URLSearchParams, options: P
   if (options.ownerNames?.length) params.set("ownerNames", options.ownerNames.join(","));
 }
 
+/**
+ * The app-level cross-office scope (?officeId) as a dependency key.
+ *
+ * This is an INVISIBLE input to every report request: api() reads ?officeId straight off
+ * window.location at call time and sends it as the x-office-id header, so it never appears in a
+ * hook's options object and is trivially left out of a dependency array. When that happens the
+ * symptom is nasty rather than obvious — switching office re-renders the page (so links and headers
+ * pick up the new office) but does NOT refetch, leaving the PREVIOUS office's rows on screen now
+ * presented under, and linking into, the new office.
+ *
+ * Any hook whose request goes through api() must therefore include this in its deps, the same way it
+ * includes the filters it passes explicitly. Reading it here rather than making every caller thread
+ * it keeps the implicit input handled in one place. (EstimatorPipelinePage solves the same problem by
+ * hand with an `officeScopeKey` prop; this is that idea made reusable.)
+ */
+function useOfficeScopeKey() {
+  // Same source of truth as the deal links (useDealHref) — one reader of ?officeId, so the fetch
+  // scope and the link scope can never disagree about what the current tenant is.
+  return useOfficeScopeId() ?? "";
+}
+
+/**
+ * ┌───────────────────────────────────────────────────────────────────────────────────────────────┐
+ * │ BEFORE YOU CONVERT A HOOK TO THIS WRAPPER, READ THIS.                                         │
+ * │                                                                                               │
+ * │   A hook may not become office-scoped unless EVERY link on its pages carries the office.      │
+ * │                                                                                               │
+ * │ Converting a hook makes its rows follow ?officeId. Any link on those pages that still emits a │
+ * │ bare /deals/:id (or /companies/:id, /properties/:id) then points at the viewer's DEFAULT       │
+ * │ tenant while the rows came from the scoped one — correct rows under wrong links, which is      │
+ * │ worse than the stale list the conversion was meant to fix, because nothing looks broken.      │
+ * │                                                                                               │
+ * │ This is not hypothetical: converting useSalesReport and usePortfolioLoadReport did exactly    │
+ * │ this to Pipeline Velocity, Closed Won Revenue and Portfolio Load, whose inline links had been  │
+ * │ deferred as an acceptable follow-up while those reports were NOT office-aware. The conversion  │
+ * │ is what turned a harmless deferral into a bug.                                                │
+ * │                                                                                               │
+ * │ The wrapper CANNOT enforce this — it owns the fetch, not the JSX, and has no way to see what   │
+ * │ a page renders. It is a manual checklist item, which is why it is stated here rather than      │
+ * │ left to a lint rule that does not exist:                                                      │
+ * │                                                                                               │
+ * │   1. grep the pages using the hook for `to={\`/deals/`, `/companies/`, `/properties/`          │
+ * │   2. route every one through useDealHref / useOfficeScopedHref (hooks/use-office-scope.ts)     │
+ * │   3. test BOTH directions — officeId carried verbatim when present, nothing when absent        │
+ * │                                                                                               │
+ * │ Still unconverted, each carrying this obligation when its turn comes: the analytics family     │
+ * │ (useLeadSourceROI, useForecastVarianceOverview, useMarketMixReport,                            │
+ * │ useCustomerConcentrationReport, useExecutiveTrendsReport, useUnifiedWorkflowOverview,          │
+ * │ useDataMiningOverview, useRegionalOwnershipOverview) and the showcase family                   │
+ * │ (useMondayShowcase, useShowcaseEvidence, useRepPack, useAtRiskWatchlist, useRegionReport).     │
+ * │                                                                                               │
+ * │ ALSO OPEN, one hop further out: the scope now survives report -> entity detail, but company    │
+ * │ and property DETAIL pages emit bare onward links of their own (related deals, properties), so  │
+ * │ it dies on the second hop. Same rule, different surface — auditing every onward link on        │
+ * │ client/src/pages/companies/company-detail-page.tsx and                                         │
+ * │ client/src/pages/properties/property-detail-page.tsx is its own change, not a report fix.      │
+ * └───────────────────────────────────────────────────────────────────────────────────────────────┘
+ *
+ * The office-scope plumbing every report hook needs, in one place.
+ *
+ * Three DISTINCT properties that have to travel together. They were added one at a time, to one hook
+ * family at a time, and each omission produced its own bug:
+ *
+ *   1. Office DEPENDENCY — refetch when ?officeId changes. Without it the previous office's rows stay
+ *      on screen forever after a scope switch.
+ *   2. Stale-response GUARD — a monotonic request id, so an older office's in-flight response cannot
+ *      land after a newer one and overwrite it. Adding (1) without (2) creates this race.
+ *   3. Synchronous INVALIDATION — clear rows in a LAYOUT effect keyed on the scope. (2) stops an old
+ *      RESPONSE being accepted; it does nothing about old ROWS already painted. The request id is
+ *      bumped inside the async fetch callback, which runs in a passive effect AFTER commit, while
+ *      useDealHref has already re-rendered links with the NEW office. That leaves a painted frame
+ *      showing office A's rows under office B's links, and a fast click goes to the wrong tenant.
+ *      A layout effect runs after commit but before paint and before any pending response's
+ *      resolution microtask, so it closes that window.
+ *
+ * The layout-effect approach is lifted from usePendingRfp (client/src/hooks/use-deals.ts), which
+ * solved exactly this and documents why a layout effect beats mutating a ref during render (safe
+ * under concurrent rendering, and only for committed renders). Keyed here on the office scope alone
+ * rather than the whole search string: filter/page changes already refetch through `deps`, and
+ * blanking the table on every filter tweak would be a behaviour change beyond this fix.
+ */
+function useScopedReport<T>(
+  fetcher: () => Promise<T>,
+  /**
+   * The values that change the request. MUST be CONSTANT-LENGTH across renders for a given call site
+   * — it is spread into a useCallback dependency array, and React requires those to be stable in size.
+   * A caller building this conditionally (`[...base, ...(x ? [x] : [])]`) would break subtly: React
+   * warns, then compares mismatched positions, so the hook can refetch when nothing changed or fail to
+   * refetch when something did. Pass a fixed-shape array and let entries be `undefined` instead.
+   */
+  deps: readonly unknown[],
+  errorMessage: string
+) {
+  const officeScopeKey = useOfficeScopeKey();
+  const [data, setData] = useState<T | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const requestIdRef = useRef(0);
+  const isFirstLayout = useRef(true);
+
+  useLayoutEffect(() => {
+    requestIdRef.current += 1;
+    // Skip the mount run: state already starts as loading with no rows, and only a real scope CHANGE
+    // should clear anything.
+    if (isFirstLayout.current) {
+      isFirstLayout.current = false;
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    setData(null);
+  }, [officeScopeKey]);
+
+  const fetchReport = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await fetcher();
+      if (requestId !== requestIdRef.current) return; // superseded
+      setData(result);
+    } catch (err: unknown) {
+      if (requestId !== requestIdRef.current) return;
+      setError(err instanceof Error ? err.message : errorMessage);
+      setData(null);
+    } finally {
+      if (requestId === requestIdRef.current) setLoading(false);
+    }
+    // `fetcher` is intentionally not a dep — it is a fresh closure every render. The listed deps are
+    // the values that actually change the request, matching what these hooks already did.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [officeScopeKey, errorMessage, ...deps]);
+
+  useEffect(() => {
+    fetchReport();
+  }, [fetchReport]);
+
+  return { data, loading, error, refetch: fetchReport };
+}
+
 function performanceDeps(options: PerformanceReportQueryOptions) {
   return [
     options.dateFrom,
@@ -1292,31 +1539,13 @@ async function executePerformanceReport<T>(path: string, options: PerformanceRep
   return api<{ data: T }>(`/reports/${path}${qs ? `?${qs}` : ""}`);
 }
 
+// Director Scorecard, Rep Activity and Forecast Accuracy.
 function usePerformanceReport<T>(path: string, options: PerformanceReportQueryOptions = {}, errorMessage: string) {
-  const [data, setData] = useState<T | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const deps = performanceDeps(options);
-
-  const fetchReport = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await executePerformanceReport<T>(path, options);
-      setData(result.data);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : errorMessage);
-      setData(null);
-    } finally {
-      setLoading(false);
-    }
-  }, [path, errorMessage, ...deps]);
-
-  useEffect(() => {
-    fetchReport();
-  }, [fetchReport]);
-
-  return { data, loading, error, refetch: fetchReport };
+  return useScopedReport<T>(
+    async () => (await executePerformanceReport<T>(path, options)).data,
+    [path, ...performanceDeps(options)],
+    errorMessage
+  );
 }
 
 export function useDirectorScorecardReport(options: PerformanceReportQueryOptions = {}) {
@@ -1332,6 +1561,62 @@ export function useRepActivityReport(options: PerformanceReportQueryOptions = {}
     "rep-activity",
     options,
     "Failed to load rep activity"
+  );
+}
+
+/**
+ * Daily Activity Log. Not routed through usePerformanceReport because it carries four params that
+ * report does not know about (types/loggedOffDay/page/limit) and they must take part in the refetch
+ * deps — otherwise turning a filter on or paging forward would leave the previous page on screen.
+ */
+export function useDailyActivityLogReport(options: DailyActivityLogQueryOptions = {}) {
+  const typeKey = options.types?.join(",") ?? "";
+  return useScopedReport<DailyActivityLogReport>(
+    async () => {
+      const params = new URLSearchParams();
+      appendPerformanceReportQueryOptions(params, options);
+      if (options.types?.length) params.set("types", options.types.join(","));
+      if (options.loggedOffDay) params.set("loggedOffDay", "1");
+      if (options.page && options.page > 1) params.set("page", String(options.page));
+      if (options.limit) params.set("limit", String(options.limit));
+      const qs = params.toString();
+      return (await api<{ data: DailyActivityLogReport }>(`/reports/daily-activity-log${qs ? `?${qs}` : ""}`)).data;
+    },
+    [
+      options.dateFrom,
+      options.dateTo,
+      options.office,
+      options.ownerIds?.join(","),
+      options.ownerNames?.join(","),
+      typeKey,
+      // The off-day drill is a SERVER filter, so it has to be a dependency: without it the toggle
+      // would repaint the same rows and read as "the filter does nothing".
+      options.loggedOffDay,
+      options.page,
+      options.limit,
+    ],
+    "Failed to load the daily activity log"
+  );
+}
+
+export function useCanvassingActivityReport(options: CanvassingActivityQueryOptions = {}) {
+  const userKey = options.userIds?.join(",") ?? "";
+  const nameKey = options.ownerNames?.join(",") ?? "";
+  const emailKey = options.ownerEmails?.join(",") ?? "";
+  return useScopedReport<CanvassingActivityReport>(
+    async () => {
+      const params = new URLSearchParams();
+      if (options.dateFrom) params.set("dateFrom", options.dateFrom);
+      if (options.dateTo) params.set("dateTo", options.dateTo);
+      if (options.bucket) params.set("bucket", options.bucket);
+      if (userKey) params.set("userIds", userKey);
+      if (nameKey) params.set("owners", nameKey);
+      if (emailKey) params.set("ownerEmails", emailKey);
+      const qs = params.toString();
+      return (await api<{ data: CanvassingActivityReport }>(`/reports/canvassing-activity${qs ? `?${qs}` : ""}`)).data;
+    },
+    [options.dateFrom, options.dateTo, options.bucket, userKey, nameKey, emailKey],
+    "Failed to load canvassing activity"
   );
 }
 
@@ -1362,7 +1647,20 @@ export async function runReportBuilder(input: ReportBuilderRequest) {
 }
 
 // Reports Part 2 -- the Monday showcase. ONE payload feeds all 8 variants (so they reconcile).
-export function useMondayShowcase(mode: WeekMode = "to_date") {
+/**
+ * `routes` is the page-local Service/Other selection. `undefined` = both buckets = NO ?routes param, so a
+ * default page load issues the exact request it did before the filter existed. A narrowing selection is
+ * part of the cache key (the deps below), so toggling a chip refetches rather than repainting stale
+ * office-wide numbers under a filtered chip.
+ */
+export function useMondayShowcase(
+  mode: WeekMode = "to_date",
+  routes?: readonly RouteBucket[],
+  // `false` when the page is in a state that has no honest payload to request (no bucket selected, or an
+  // unparseable ?routes). It must not fetch: an un-narrowed request would load the OFFICE-WIDE report and
+  // leave a full payload sitting behind a filter UI that claims otherwise.
+  enabled: boolean = true
+) {
   const [data, setData] = useState<MondayShowcaseData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1370,23 +1668,43 @@ export function useMondayShowcase(mode: WeekMode = "to_date") {
   // request in flight. Only the latest request is allowed to write state -- a stale response is dropped,
   // so the page never shows the new toggle with the previous period's data.
   const latestRequest = useRef(0);
+  // Depend on the VALUE, not the array identity -- a caller rebuilding the array each render must not
+  // retrigger an infinite fetch loop.
+  const routesKey = routes?.join(",") ?? "";
 
   const fetchShowcase = useCallback(async () => {
     const requestId = ++latestRequest.current;
+    if (!enabled) {
+      // Drop any previously-loaded payload. Leaving it would let the last filter's numbers stay on screen
+      // while the controls say "nothing selected" — a stale set read as the current one.
+      setData(null);
+      setError(null);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
+    // Drop the previous payload BEFORE the new one lands. While it sits here every consumer deriving copy
+    // from it -- notably the chip-row caveat naming which figures are filtered -- describes a request that
+    // is no longer the current one. The numbers are already hidden behind `loading`; this closes the same
+    // gap for anything rendered outside that switch.
+    setData(null);
     try {
-      const result = await api<{ data: MondayShowcaseData }>(`/reports/monday-showcase?mode=${mode}`);
+      const params = new URLSearchParams({ mode });
+      if (routesKey) params.set("routes", routesKey);
+      const result = await api<{ data: MondayShowcaseData }>(`/reports/monday-showcase?${params.toString()}`);
       if (requestId !== latestRequest.current) return; // superseded by a newer request
       setData(result.data);
     } catch (err: unknown) {
       if (requestId !== latestRequest.current) return;
       setError(err instanceof Error ? err.message : "Failed to load the Monday showcase");
+      // Clear the payload on failure. A rejected ?routes value (400) must NOT leave the previous, more
+      // broadly-scoped numbers on screen under the new chip state -- that is a stale set read as a filtered one.
       setData(null);
     } finally {
       if (requestId === latestRequest.current) setLoading(false);
     }
-  }, [mode]);
+  }, [mode, routesKey, enabled]);
 
   useEffect(() => {
     fetchShowcase();
@@ -1400,12 +1718,17 @@ export function useMondayShowcase(mode: WeekMode = "to_date") {
 // can't show stale evidence under a newer heading.
 export function useShowcaseEvidence(
   request: EvidenceRequest | null,
-  mode: WeekMode
+  mode: WeekMode,
+  // The SAME Service/Other selection the clicked number was rendered under. Passing it is what makes the
+  // drawer's total equal the figure that was clicked instead of an office-wide superset -- a card reading
+  // 6 under "Service" opening 10 records is the exact defect this threading exists to prevent.
+  routes?: readonly RouteBucket[]
 ) {
   const [data, setData] = useState<MondayShowcaseEvidence | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const latestRequest = useRef(0);
+  const routesKey = routes?.join(",") ?? "";
 
   // The fetch is a stable callback so the drawer can REFETCH it after an inline edit (a close-date move on
   // the undated list) — the edited deal then drops out of the reconciling set without reopening the drawer.
@@ -1434,6 +1757,8 @@ export function useShowcaseEvidence(
     if (request.from) params.set("from", request.from);
     if (request.to) params.set("to", request.to);
     if (request.stageSlug) params.set("stageSlug", request.stageSlug);
+    // Omitted when both buckets are selected — the same "no narrowing" request as before the filter shipped.
+    if (routesKey) params.set("routes", routesKey);
 
     try {
       const result = await api<{ data: MondayShowcaseEvidence }>(
@@ -1447,7 +1772,7 @@ export function useShowcaseEvidence(
     } finally {
       if (requestId === latestRequest.current) setLoading(false);
     }
-  }, [request, mode]);
+  }, [request, mode, routesKey]);
 
   useEffect(() => {
     void fetchEvidence();

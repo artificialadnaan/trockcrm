@@ -8,7 +8,7 @@ import {
 } from "@/hooks/use-director-dashboard";
 import { useRepPerformance, type RepPerformancePeriodKind, type RepPerformanceSnapshotRow } from "@/hooks/use-rep-performance";
 import { useKeepPreviousData } from "@/hooks/use-keep-previous-data";
-import { formatCurrencyCompact } from "@/lib/deal-utils";
+import { formatCurrencyCompact, formatDealDisplayName, cents } from "@/lib/deal-utils";
 import {
   Activity,
   AlertTriangle,
@@ -582,9 +582,22 @@ export function DirectorDashboardPage() {
   // Live data currently has 0 such deals, so the row is hidden in practice.
   const repCardsClosedTotal = data.repCards.reduce((sum, rep) => sum + (rep.closedValue ?? 0), 0);
   const repCardsWinsTotal = data.repCards.reduce((sum, rep) => sum + (rep.winsCount ?? 0), 0);
-  const unassignedClosedValue = Math.max(0, (closedValue ?? 0) - repCardsClosedTotal);
+  // SIGN (deductive change orders): the VALUE residual is deliberately NOT clamped. A deductive CO is
+  // a Won child deal with a NEGATIVE value, so an unassigned/non-roster one makes the canonical
+  // null-rep group genuinely negative -- e.g. the parent closed in an earlier period while its
+  // deduction lands in this one. Clamping the value at 0 dropped those dollars on the floor and the
+  // table/CSV stopped summing to the Closed KPI, which is the whole point of this row. The COUNT keeps
+  // its clamp: a negative headcount is meaningless (and it cannot go negative anyway -- the per-rep
+  // groups are a subset of the same canonical getCanonicalRepWonSummary query behind the card).
+  // FLOAT NOISE: the residual subtracts two INDEPENDENTLY grouped Number sums, so with fractional-dollar
+  // values they disagree in the last bits (360000.04 - (240000.01 + 120000.03) === -5.8e-11). An exact
+  // `!== 0` on that invents an Unassigned row for a fully attributed book and prints it through Intl as a
+  // signed "-$0". cents() snaps the residual onto a cent boundary (and collapses -0 onto 0) BEFORE the
+  // zero test, which kills the phantom row without clamping: a real one-cent residual still surfaces, and
+  // a real negative one keeps its sign.
+  const unassignedClosedValue = cents((closedValue ?? 0) - repCardsClosedTotal);
   const unassignedWins = Math.max(0, (closedCount ?? 0) - repCardsWinsTotal);
-  const hasUnassignedWon = unassignedClosedValue > 0 || unassignedWins > 0;
+  const hasUnassignedWon = unassignedClosedValue !== 0 || unassignedWins > 0;
   // Wave 1 (P1-6): the forecast reads the director payload's live forecastVsGoal (active-
   // pipeline total), NOT the stale rep_performance_snapshots forecast.
   const forecastVsGoal = data.forecastVsGoal ?? null;
@@ -1079,7 +1092,14 @@ export function DirectorDashboardPage() {
                         {getInitials(repName)}
                       </div>
                       <div className="min-w-0">
-                        <p className="truncate text-sm font-bold text-gray-950">{deal.dealName}</p>
+                        {/* A change-order child is STORED "<Parent> — Change Order N" and these rows
+                            truncate; move the label to the front for DISPLAY only. */}
+                        <p className="truncate text-sm font-bold text-gray-950">{formatDealDisplayName(deal.dealName, deal.dealIsChangeOrder)}</p>
+                        {/* The relabel above is what makes this line necessary: once the name reads
+                            "<Parent> — Change Order N", this is the only thing that says which one. */}
+                        {deal.dealScopeTitle ? (
+                          <p className="truncate text-xs font-medium text-gray-600">{deal.dealScopeTitle}</p>
+                        ) : null}
                         <p className="text-xs text-gray-500">
                           {repName}
                           {deal.regionClassification ? ` · ${deal.regionClassification}` : ""}
@@ -1256,7 +1276,12 @@ export function DirectorDashboardPage() {
                   <Link key={close.dealId} to={`/deals/${close.dealId}`} className="grid grid-cols-[24px_1fr_auto] gap-3 rounded-lg border border-gray-100 p-3 hover:bg-gray-50">
                     <Icon className={`mt-0.5 h-4 w-4 ${color}`} />
                     <div className="min-w-0">
-                      <p className="truncate text-sm font-bold text-gray-950">{close.dealName}</p>
+                      <p className="truncate text-sm font-bold text-gray-950">{formatDealDisplayName(close.dealName, close.dealIsChangeOrder)}</p>
+                      {/* Same reason as the at-risk rows above: a closed change order is otherwise
+                          indistinguishable from its parent and from its siblings. */}
+                      {close.dealScopeTitle ? (
+                        <p className="truncate text-xs font-medium text-gray-600">{close.dealScopeTitle}</p>
+                      ) : null}
                       <p className="text-xs text-gray-500">{close.repName}</p>
                     </div>
                     <div className="text-right">

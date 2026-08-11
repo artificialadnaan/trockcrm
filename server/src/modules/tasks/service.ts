@@ -174,7 +174,7 @@ export async function transitionTaskStatus(
   userRole: string,
   userId: string
 ) {
-  const existing = (await getTaskById(tenantDb, taskId, userRole, userId)) as any;
+  const existing = (await getTaskRowById(tenantDb, taskId, userRole, userId)) as any;
   if (!existing) throw new AppError(404, "Task not found");
 
   if (existing.status === "completed" || existing.status === "dismissed") {
@@ -452,6 +452,7 @@ export async function getTasks(
       createdBy: tasks.createdBy,
       dealId: tasks.dealId,
       dealName: deals.name,
+      dealIsChangeOrder: deals.isChangeOrder,
       dealNumber: deals.dealNumber,
       projectNumber: deals.projectNumber,
       contactId: tasks.contactId,
@@ -549,6 +550,7 @@ export async function getProjectTasks(
       createdBy: tasks.createdBy,
       dealId: tasks.dealId,
       dealName: deals.name,
+      dealIsChangeOrder: deals.isChangeOrder,
       dealNumber: deals.dealNumber,
       projectNumber: deals.projectNumber,
       contactId: tasks.contactId,
@@ -625,8 +627,36 @@ export async function getTaskCounts(
   };
 }
 
+/** Reps may only ever see their own tasks — shared by both read paths so the rule can't drift. */
+function assertTaskVisible(task: { assignedTo: string } | null, userRole: string, userId: string) {
+  if (task && userRole === "rep" && task.assignedTo !== userId) {
+    throw new AppError(403, "You can only view your own tasks");
+  }
+}
+
 /**
- * Get a single task by ID.
+ * Raw task row by ID — no deal/assignee enrichment.
+ *
+ * The mutation guards (transition/update/complete/dismiss/snooze) only read `status`, `startedAt`
+ * and `assignedTo`, and their handlers return the raw `.returning()` row. Keeping this lean means
+ * those paths neither pay for the join nor return a shape that differs from the row they write.
+ */
+export async function getTaskRowById(
+  tenantDb: TenantDb,
+  taskId: string,
+  userRole: string,
+  userId: string
+) {
+  const result = await tenantDb.select().from(tasks).where(eq(tasks.id, taskId)).limit(1);
+
+  const task = (result[0] ?? null) as any;
+  if (!task) return null;
+  assertTaskVisible(task, userRole, userId);
+  return task;
+}
+
+/**
+ * Get a single task by ID, enriched for display.
  */
 export async function getTaskById(
   tenantDb: TenantDb,
@@ -634,20 +664,56 @@ export async function getTaskById(
   userRole: string,
   userId: string
 ) {
+  // Mirrors the list projection in getTasks — a bare `select()` here returned the raw `tasks`
+  // columns only, so a task opened by id (e.g. from the assignment email's deep link) arrived
+  // with `dealId` but no deal name/number and no assignee name. The UI then rendered the
+  // "Project linked" / "Unassigned" fallbacks even for a correctly linked task.
+  const taskColumns = tasks as typeof tasks & {
+    scheduledFor: typeof tasks.dueDate;
+    waitingOn: typeof tasks.dueDate;
+    blockedBy: typeof tasks.dueDate;
+    startedAt: typeof tasks.createdAt;
+  };
+  const assignedToName = sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${tasks.assignedTo})`.as("assignedToName");
+
   const result = await tenantDb
-    .select()
+    .select({
+      id: tasks.id,
+      title: tasks.title,
+      description: tasks.description,
+      type: tasks.type,
+      priority: tasks.priority,
+      status: tasks.status,
+      assignedTo: tasks.assignedTo,
+      assignedToName,
+      createdBy: tasks.createdBy,
+      dealId: tasks.dealId,
+      dealName: deals.name,
+      dealIsChangeOrder: deals.isChangeOrder,
+      dealNumber: deals.dealNumber,
+      projectNumber: deals.projectNumber,
+      contactId: tasks.contactId,
+      emailId: tasks.emailId,
+      dueDate: tasks.dueDate,
+      dueTime: tasks.dueTime,
+      remindAt: tasks.remindAt,
+      scheduledFor: taskColumns.scheduledFor,
+      waitingOn: taskColumns.waitingOn,
+      blockedBy: taskColumns.blockedBy,
+      startedAt: taskColumns.startedAt,
+      completedAt: tasks.completedAt,
+      isOverdue: tasks.isOverdue,
+      createdAt: tasks.createdAt,
+      updatedAt: tasks.updatedAt,
+    })
     .from(tasks)
+    .leftJoin(deals, eq(tasks.dealId, deals.id))
     .where(eq(tasks.id, taskId))
     .limit(1);
 
   const task = (result[0] ?? null) as any;
   if (!task) return null;
-
-  // Reps can only see their own tasks
-  if (userRole === "rep" && task.assignedTo !== userId) {
-    throw new AppError(403, "You can only view your own tasks");
-  }
-
+  assertTaskVisible(task, userRole, userId);
   return task;
 }
 
@@ -732,7 +798,7 @@ export async function updateTask(
   userRole: string,
   userId: string
 ) {
-  const existing = await getTaskById(tenantDb, taskId, userRole, userId);
+  const existing = await getTaskRowById(tenantDb, taskId, userRole, userId);
   if (!existing) throw new AppError(404, "Task not found");
 
   if (existing.status === "completed" || existing.status === "dismissed") {
@@ -770,8 +836,8 @@ export async function completeTask(
   userRole: string,
   userId: string
 ) {
-  // RBAC check: getTaskById enforces rep-only-own-tasks
-  const existing = await getTaskById(tenantDb, taskId, userRole, userId);
+  // RBAC check: getTaskRowById enforces rep-only-own-tasks
+  const existing = await getTaskRowById(tenantDb, taskId, userRole, userId);
   if (!existing) throw new AppError(404, "Task not found");
 
   // Conditional update: only complete if task is in a completable state
@@ -803,7 +869,7 @@ export async function dismissTask(
   userRole: string,
   userId: string
 ) {
-  const existing = await getTaskById(tenantDb, taskId, userRole, userId);
+  const existing = await getTaskRowById(tenantDb, taskId, userRole, userId);
   if (!existing) throw new AppError(404, "Task not found");
 
   if (existing.status === "completed" || existing.status === "dismissed") {
@@ -839,7 +905,7 @@ export async function snoozeTask(
   userRole: string,
   userId: string
 ) {
-  const existing = await getTaskById(tenantDb, taskId, userRole, userId);
+  const existing = await getTaskRowById(tenantDb, taskId, userRole, userId);
   if (!existing) throw new AppError(404, "Task not found");
 
   if (existing.status === "completed" || existing.status === "dismissed") {

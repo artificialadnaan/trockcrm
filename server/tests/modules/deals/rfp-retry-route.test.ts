@@ -280,7 +280,12 @@ describe("POST /api/deals/:id/rfp-retry", () => {
     await findRouteHandler("post", "/:id/rfp-retry")(req, res, next);
 
     expect(res.statusCode).toBe(202);
-    expect(loadRfpAttachmentsForDealMock).toHaveBeenCalledWith(req.tenantDb, "deal-1");
+    // The retry passes the acting user + office so the photo share link can be minted here too —
+    // without it a retried RFP would silently fall back to one attachment per photo.
+    expect(loadRfpAttachmentsForDealMock).toHaveBeenCalledWith(req.tenantDb, "deal-1", {
+      userId: "user-1",
+      officeId: "office-1",
+    });
     expect(inserted[0].payload.body.attachments).toEqual([
       { name: "Plan.pdf", url: "https://fresh.example/plan", contentType: "application/pdf" },
     ]);

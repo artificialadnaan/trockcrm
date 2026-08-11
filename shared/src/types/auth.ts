@@ -51,6 +51,16 @@ export interface AuthenticatedUser {
   /** True iff this user is one of the 3 RFP voters (RFP_VOTER_EMAILS allowlist); gates the vote UI + /rfp-vote page. */
   isRfpVoter?: boolean;
   /**
+   * True iff this user may open the Daily Activity Log (DAILY_ACTIVITY_LOG_VIEWER_EMAILS allowlist); hides the
+   * report card + route. Absent/false must be read as "no" — the endpoint enforces the same list regardless.
+   */
+  canViewDailyActivityLog?: boolean;
+  /**
+   * True iff this user may open the Canvassing Activity report (CANVASSING_REPORT_VIEWER_EMAILS
+   * allowlist); hides the report card + route. Absent/false must be read as "no".
+   */
+  canViewCanvassingReport?: boolean;
+  /**
    * True iff this user may move a deal back to Opportunity (DEAL_MOVE_BACK_APPROVER_EMAILS allowlist AND
    * the admin/director floor). Hides the menu item; the route enforces both regardless.
    */

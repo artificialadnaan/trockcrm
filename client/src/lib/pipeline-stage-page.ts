@@ -1,4 +1,5 @@
 import { LOST_DEAL_STAGE_SLUGS, WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
+import { normalizeDealStageSlug, workflowRouteFromStage } from "@/lib/pipeline-ownership";
 
 export interface StagePageFilters {
   assignedRepId?: string;
@@ -123,20 +124,54 @@ export function normalizeStagePageQuery(input: Record<string, string | undefined
 
 /**
  * The deal-stage ids the A′ stage-page LIST queries through getDeals. Mirrors the server stage endpoint
- * (getDealStagePage, service.ts:2700-2713): a Won/Lost route stage broadens to every stage id in its
- * terminal alias family (WON/LOST_DEAL_STAGE_SLUGS — the SAME shared constant the server broadens with),
- * so the list reconciles to the family-counting header; any other stage stays its single route id.
+ * (listDealStagePage): a Won/Lost route stage broadens to every stage id in its terminal alias family
+ * (WON/LOST_DEAL_STAGE_SLUGS — the SAME shared constant the server broadens with), so the list reconciles
+ * to the family-counting header.
+ *
+ * SUPERSEDES the previous "any other stage stays its single route id" rule (2026-07-28). The kanban
+ * renders CANONICAL columns that fold stage aliases together and SUM their aggregates, and the server
+ * summary now spans that same canonical family for OPEN stages. Leaving the list on one id would put the
+ * drift INSIDE one page — a header counting 16 deals above a list rendering 13 — which is worse than the
+ * board-vs-drill split it was fixing. Prod case: Estimating spans `estimating` + the retired
+ * `estimate_in_progress` alias.
+ *
+ * Terminal canonical families are still served by the Won/Lost branch above, and a stage whose canonical
+ * slug is terminal but which sits OUTSIDE those slug sets (`in_production`, `close_out`) deliberately
+ * stays single-id — matching the server's identical guard, so realized deals are never dragged through
+ * the open-stage path.
  */
+
+/**
+ * The OPEN-stage canonical family — the client twin of the server's canonicalDealStageFamilyIds. Groups by
+ * the SAME normalizeDealStageSlug the board folds columns with, route-specific so the estimating pair never
+ * cross-pollinates. Terminal canonical slugs fall back to the single id (see the note on
+ * getStagePageListStageIds).
+ */
+function canonicalStagePageFamilyIds(
+  stage: { id: string; slug: string; workflowFamily?: string | null },
+  allStages: ReadonlyArray<{ id: string; slug: string; workflowFamily?: string | null }>
+): string[] {
+  const canonicalSlug = normalizeDealStageSlug(stage.slug, workflowRouteFromStage(stage));
+  if (!canonicalSlug) return [stage.id];
+  if (WON_DEAL_STAGE_SLUGS.includes(canonicalSlug) || LOST_DEAL_STAGE_SLUGS.includes(canonicalSlug)) {
+    return [stage.id];
+  }
+  const familyIds = allStages
+    .filter((item) => normalizeDealStageSlug(item.slug, workflowRouteFromStage(item)) === canonicalSlug)
+    .map((item) => item.id);
+  return familyIds.includes(stage.id) ? familyIds : [stage.id];
+}
+
 export function getStagePageListStageIds(
-  stage: { id: string; slug: string },
-  allStages: ReadonlyArray<{ id: string; slug: string }>
+  stage: { id: string; slug: string; workflowFamily?: string | null },
+  allStages: ReadonlyArray<{ id: string; slug: string; workflowFamily?: string | null }>
 ): string[] {
   const family: readonly string[] | null = WON_DEAL_STAGE_SLUGS.includes(stage.slug)
     ? WON_DEAL_STAGE_SLUGS
     : LOST_DEAL_STAGE_SLUGS.includes(stage.slug)
       ? LOST_DEAL_STAGE_SLUGS
       : null;
-  if (!family) return [stage.id];
+  if (!family) return canonicalStagePageFamilyIds(stage, allStages);
   const familyIds = allStages.filter((item) => family.includes(item.slug)).map((item) => item.id);
   // Fall back to the route stage id if the family can't be resolved (stage list empty/failed to load),
   // so the list stays SCOPED to the route stage rather than rendering unscoped (all deals) — Codex P2.

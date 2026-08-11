@@ -1,12 +1,17 @@
 import React, { useState } from "react";
 import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import { useGoBack } from "../../../src/lib/go-back";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useQuery } from "@tanstack/react-query";
 import { ApiError } from "../../../src/api/client";
 import * as contactsApi from "../../../src/api/endpoints/contacts";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
+import { BackLink } from "../../../src/components/BackLink";
+import { RetryNotice } from "../../../src/components/RetryNotice";
+import { Row } from "../../../src/components/Row";
+import { resolveListState } from "../../../src/list-state";
 import { mailtoUrl, smsUrl, telUrl } from "../../../src/contact-links";
 import { openLink } from "../../../src/lib/open-link";
 import { formatLocation } from "../../../src/format";
@@ -17,6 +22,9 @@ export default function ContactDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const contactId = typeof id === "string" ? id : "";
   const router = useRouter();
+  // Back needs a destination: this screen is reachable by deep link and by restored
+  // navigation state, where goBack() is a no-op and the control would do nothing.
+  const goBack = useGoBack("/(app)/contacts");
   const { fetcher } = useAuth();
   const cacheScope = useQueryScope();
   // Surfaced under the action row — see openLink on why a silent failure is not acceptable here.
@@ -61,7 +69,7 @@ export default function ContactDetailScreen() {
           >
             <Text style={styles.backBtnText}>Try again</Text>
           </Pressable>
-          <Pressable onPress={() => router.back()} accessibilityRole="button" style={styles.backBtn}>
+          <Pressable onPress={() => goBack()} accessibilityRole="button" style={styles.backBtn}>
             <Text style={styles.backBtnText}>Go back</Text>
           </Pressable>
         </View>
@@ -90,7 +98,7 @@ export default function ContactDetailScreen() {
           <Text style={styles.emptyBody}>
             It was deleted or merged into another record, so its details are no longer current.
           </Text>
-          <Pressable onPress={() => router.back()} accessibilityRole="button" style={styles.backBtn}>
+          <Pressable onPress={() => goBack()} accessibilityRole="button" style={styles.backBtn}>
             <Text style={styles.backBtnText}>Go back</Text>
           </Pressable>
         </View>
@@ -101,6 +109,15 @@ export default function ContactDetailScreen() {
   const company = contactsApi.contactCompanyName(contact);
   const phone = contactsApi.contactPhone(contact);
   const location = formatLocation(contact.city, contact.state);
+  // Same state machine as everywhere else. `isFetchNextPageError: false` — this endpoint returns the
+  // whole association set in one response, so there is no next page that can fail.
+  const dealsState = resolveListState({
+    isLoading: dealsQuery.isLoading,
+    data: dealsQuery.data,
+    error: dealsQuery.error,
+    isFetchNextPageError: false,
+  });
+
   // Data is on screen but the last refresh failed — say so without taking the screen away.
   const refreshFailed = Boolean(contactQuery.error);
   // Reps see only the deals they own here — the server scopes this endpoint by assigned rep, unlike the
@@ -113,9 +130,7 @@ export default function ContactDetailScreen() {
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
       <ScrollView contentContainerStyle={styles.body}>
-        <Pressable onPress={() => router.back()} accessibilityRole="button" accessibilityLabel="Back">
-          <Text style={styles.back}>‹ Contacts</Text>
-        </Pressable>
+        <BackLink label="Contacts" onPress={() => goBack()} />
 
         {refreshFailed ? (
           <Pressable
@@ -193,9 +208,30 @@ export default function ContactDetailScreen() {
         ) : null}
 
         <Section title="Deals">
-          {dealsQuery.isLoading ? (
+          {/* A background failure once the linked deals have loaded: never replace what is on screen,
+              just say so. Gated on `data !== undefined` rather than on row count — and this is the case
+              that matters most, because reps see only their OWN deals here, so an empty result is the
+              NORMAL one. Requiring rows meant the most common state reported a failed refresh nowhere:
+              no notice, no retry, just "No deals you can see are linked to this contact" standing there
+              looking authoritative while the refresh behind it had failed.
+
+              TOP placement, beside the heading. It sat below every deal row, so on a contact with enough
+              linked work to fill the screen the warning and its retry were off-screen and the stale rows
+              read as current — the exact silent-failure the notice exists to prevent. Same fix as the
+              deal detail's activity timeline; both files had it, and fixing one and reading the other as
+              correct because it looked familiar is how this app keeps shipping the second copy wrong. */}
+          {dealsState.kind === "loaded" && dealsState.refreshFailed ? (
+            <RetryNotice
+              testID="retry-contact-deals-inline"
+              message="Couldn't refresh deals — tap to retry"
+              onRetry={() => void dealsQuery.refetch()}
+              placement="top"
+            />
+          ) : null}
+
+          {dealsState.kind === "loading" ? (
             <ActivityIndicator color={theme.color.brandRed} />
-          ) : dealsQuery.error && dealsQuery.data === undefined ? (
+          ) : dealsState.kind === "blocking-error" ? (
             // A FAILED request is not an empty result. Rendering "no deals are linked" on a 5xx presents
             // a network failure as a fact about the contact, and a rep would act on it — calling someone
             // believing they have no live work when they may have several.
@@ -220,6 +256,9 @@ export default function ContactDetailScreen() {
                 testID={`contact-deal-${assoc.deal.id}`}
                 onPress={() => router.push(`/(app)/deals/${assoc.deal.id}`)}
                 accessibilityRole="button"
+                /* Without this the composed name ends in the decorative chevron below — "Acme reroof,
+                   ›" — because an unlabelled group announces its children's text, punctuation and all. */
+                accessibilityLabel={assoc.deal.name ?? "Untitled deal"}
                 style={styles.dealRow}
               >
                 <Text style={styles.dealName} numberOfLines={1}>
@@ -230,22 +269,6 @@ export default function ContactDetailScreen() {
             ))
           )}
 
-          {/* A background failure once the linked deals have loaded: never replace what is on screen,
-              just say so. Gated on `data !== undefined` rather than on row count — and this is the case
-              that matters most, because reps see only their OWN deals here, so an empty result is the
-              NORMAL one. Requiring rows meant the most common state reported a failed refresh nowhere:
-              no notice, no retry, just "No deals you can see are linked to this contact" standing there
-              looking authoritative while the refresh behind it had failed. */}
-          {dealsQuery.data !== undefined && dealsQuery.error ? (
-            <Pressable
-              testID="retry-contact-deals-inline"
-              onPress={() => void dealsQuery.refetch()}
-              accessibilityRole="button"
-              style={styles.retry}
-            >
-              <Text style={styles.retryText}>Couldn&apos;t refresh deals — tap to retry</Text>
-            </Pressable>
-          ) : null}
         </Section>
       </ScrollView>
     </SafeAreaView>
@@ -282,31 +305,28 @@ function Action({
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <View style={styles.section}>
-      <Text style={styles.sectionTitle}>{title}</Text>
+      {/* `header` so the rotor can jump between sections, and an explicit label because
+          `sectionTitle` uppercases by transform — which on iOS becomes the accessible name itself. */}
+      <Text accessibilityRole="header" accessibilityLabel={title} style={styles.sectionTitle}>
+        {title}
+      </Text>
       <View style={styles.sectionBody}>{children}</View>
     </View>
   );
 }
 
-function Row({ label, value }: { label: string; value: string }) {
-  return (
-    <View style={styles.row}>
-      <Text style={styles.rowLabel}>{label}</Text>
-      <Text style={styles.rowValue}>{value}</Text>
-    </View>
-  );
-}
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: theme.color.surfaceMuted },
+  safe: { flex: 1, backgroundColor: theme.color.canvas },
   body: { padding: theme.space.lg, paddingBottom: theme.space.xxl },
   center: { flex: 1, alignItems: "center", justifyContent: "center", gap: theme.space.md },
-  back: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.brandRed },
   name: { fontFamily: theme.font.bold, fontSize: 24, color: theme.color.inkNavy, marginTop: theme.space.sm },
   jobTitle: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textMuted },
   company: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textSecondary },
   actionRow: { flexDirection: "row", gap: theme.space.sm, marginTop: theme.space.lg },
   action: {
+    minHeight: 44,
+    justifyContent: "center",
     flex: 1,
     backgroundColor: theme.color.brandRed,
     borderRadius: theme.radius.md,
@@ -330,27 +350,31 @@ const styles = StyleSheet.create({
     padding: theme.space.lg,
     gap: theme.space.sm,
   },
-  row: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: theme.space.md },
-  rowLabel: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary },
-  rowValue: { flexShrink: 1, textAlign: "right", fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
   notes: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary },
   emptyBody: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textMuted },
-  linkError: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.brandRedDeep },
-  retry: { paddingVertical: theme.space.sm },
+  linkError: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.redText },
+  retry: {
+    minHeight: 44,
+    justifyContent: "center", paddingVertical: theme.space.sm },
   staleBanner: {
+    minHeight: 44,
+    justifyContent: "center",
     marginTop: theme.space.sm,
     borderRadius: theme.radius.md,
-    backgroundColor: "#FEF3C7",
+    backgroundColor: theme.color.amberSurface,
     paddingHorizontal: theme.space.md,
     paddingVertical: theme.space.sm,
   },
-  staleText: { fontFamily: theme.font.semibold, fontSize: 13, color: "#92400E" },
-  retryText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
-  dealRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: theme.space.sm },
+  staleText: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.amberText },
+  retryText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.redText },
+  dealRow: {
+    minHeight: 44, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: theme.space.sm },
   dealName: { flex: 1, fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
   dealChevron: { fontFamily: theme.font.bold, fontSize: 18, color: theme.color.textMuted },
   errorTitle: { fontFamily: theme.font.bold, fontSize: 17, color: theme.color.inkNavy },
   backBtn: {
+    minHeight: 44,
+    justifyContent: "center",
     borderWidth: 1,
     borderColor: theme.color.border,
     borderRadius: theme.radius.md,

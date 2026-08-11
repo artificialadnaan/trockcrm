@@ -99,12 +99,29 @@ export function getAllowedR2CorsOrigins(env: NodeJS.ProcessEnv = process.env): s
  * @param r2Key   - Full object key (e.g. "office_dallas/deals/TR-2026-0142/photos/file.jpg")
  * @param mimeType - Content-Type for the upload
  * @param _maxSizeBytes - Maximum allowed file size (validated server-side, not signed)
- * @returns Presigned URL valid for PRESIGNED_URL_EXPIRY_SECONDS
+ * @param expiresInSeconds - How long the signature stays usable. Defaults to PRESIGNED_URL_EXPIRY_SECONDS,
+ *   which is what every caller that omits it keeps getting — this parameter is purely additive and changes
+ *   no existing call site's behavior.
+ *
+ *   Worth overriding when the URL is a WRITE capability whose destination becomes immutable later. This
+ *   function hands out a signature, and a signature cannot be recalled: any database rule that decides
+ *   "these bytes are now frozen" is evaluated HERE, at mint time, and stops binding the moment the URL is
+ *   in someone's hands. So for those callers the expiry is not a convenience setting, it is the width of
+ *   the window in which the freeze can still be undone. See GLASSES_WALKTHROUGH_PRESIGN_EXPIRY_SECONDS
+ *   (walkthrough-capture/glasses-walkthrough-service.ts) for the worked example.
+ *
+ *   The 30-minute default is sized for a BROWSER upload — a human picking a file out of a dialog after the
+ *   URL was fetched. It is not sized for the transfer itself: R2 checks expiry when the PUT is
+ *   authenticated, not when its body finishes, so a shorter value bounds how long a client may WAIT before
+ *   starting, never how long it may take to upload. (Nothing here could bound the latter anyway — a 2 GiB
+ *   artifact over a field LTE link already runs well past 30 minutes under the current default.)
+ * @returns Presigned URL valid for `expiresInSeconds`
  */
 export async function generateUploadUrl(
   r2Key: string,
   mimeType: string,
-  _maxSizeBytes: number
+  _maxSizeBytes: number,
+  expiresInSeconds: number = PRESIGNED_URL_EXPIRY_SECONDS
 ): Promise<{ uploadUrl: string; r2Key: string; expiresIn: number }> {
   const client = getClient();
   const bucket = getBucket();
@@ -120,13 +137,15 @@ export async function generateUploadUrl(
   });
 
   const uploadUrl = await getSignedUrl(client, command, {
-    expiresIn: PRESIGNED_URL_EXPIRY_SECONDS,
+    expiresIn: expiresInSeconds,
   });
 
+  // Echo back the value actually SIGNED, never the module default — a caller that asked for a short-lived
+  // capability and was told 1800 would compute its own deadline from a number the signature disagrees with.
   return {
     uploadUrl,
     r2Key,
-    expiresIn: PRESIGNED_URL_EXPIRY_SECONDS,
+    expiresIn: expiresInSeconds,
   };
 }
 
@@ -229,14 +248,19 @@ export function isR2ObjectNotFoundError(error: unknown): boolean {
  * so a storage outage returns a retryable error instead of launching an expensive regeneration stampede.
  */
 export async function headObjectStrict(
-  r2Key: string
+  r2Key: string,
+  /** Aborts the in-flight request. The S3 client has no request timeout configured, so without this a
+   *  HEAD that R2 accepts and never answers holds its socket and its promise for the life of the
+   *  process — a caller that gave up on a deadline releases only its own wait, not the request. */
+  signal?: AbortSignal
 ): Promise<{ contentType?: string; contentLength?: number } | null> {
   const client = getClient();
   const bucket = getBucket();
 
   try {
     const resp = await client.send(
-      new HeadObjectCommand({ Bucket: bucket, Key: r2Key })
+      new HeadObjectCommand({ Bucket: bucket, Key: r2Key }),
+      signal ? { abortSignal: signal as never } : undefined
     );
     return {
       contentType: resp.ContentType,
@@ -259,12 +283,16 @@ export class ObjectTooLargeError extends Error {
 
 export async function getObjectBuffer(
   r2Key: string,
-  opts?: { maxBytes?: number }
+  opts?: { maxBytes?: number; signal?: AbortSignal }
 ): Promise<{ buffer: Buffer; contentType?: string; contentLength?: number }> {
   const client = getClient();
   const bucket = getBucket();
+  // The signal reaches BOTH halves of the read. Passing it only to send() bounds the request but not the
+  // body: R2 can return headers promptly and then stall mid-stream, which is the shape that hangs a caller
+  // indefinitely. The chunk loop below re-checks it, and the stream is destroyed rather than left open.
   const resp = await client.send(
-    new GetObjectCommand({ Bucket: bucket, Key: r2Key })
+    new GetObjectCommand({ Bucket: bucket, Key: r2Key }),
+    opts?.signal ? { abortSignal: opts.signal } : undefined
   );
   const max = opts?.maxBytes;
   const stream = resp.Body as (AsyncIterable<Uint8Array> & { destroy?: (err?: Error) => void }) | undefined;
@@ -279,6 +307,12 @@ export async function getObjectBuffer(
   const chunks: Uint8Array[] = [];
   let total = 0;
   for await (const chunk of stream) {
+    // Checked per chunk, so a body that stalls or trickles is bounded by the caller's deadline rather than
+    // running until the socket happens to time out.
+    if (opts?.signal?.aborted) {
+      stream.destroy?.();
+      throw new Error(`R2 read of ${r2Key} was aborted`);
+    }
     total += chunk.byteLength;
     // Abort BEFORE accumulating past the cap, defending against an absent/under-reported Content-Length.
     if (max != null && total > max) {
@@ -329,7 +363,12 @@ export async function deleteObject(r2Key: string): Promise<void> {
 export async function putObject(
   r2Key: string,
   body: Buffer | Uint8Array,
-  mimeType: string
+  mimeType: string,
+  /**
+   * Bounds the upload. An accepted-then-stalled PUT hangs exactly as a stalled GET does, and callers that
+   * run on a single-in-flight poller cannot afford either.
+   */
+  opts?: { signal?: AbortSignal }
 ): Promise<void> {
   const client = getClient();
   const bucket = getBucket();
@@ -340,7 +379,8 @@ export async function putObject(
       Key: r2Key,
       Body: body,
       ContentType: mimeType,
-    })
+    }),
+    opts?.signal ? { abortSignal: opts.signal } : undefined
   );
 }
 

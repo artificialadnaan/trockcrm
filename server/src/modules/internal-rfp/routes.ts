@@ -6,8 +6,17 @@ import { buildAuditActorFromSystem } from "../audit/audit-logger.js";
 import { logActivityWithPgClient } from "../audit/pg-activity-logger.js";
 import { INTERNAL_RFP_RECEIVER } from "../audit/system-processes.js";
 import { applyRfpDeclineToDeal } from "../deals/rfp-decline-service.js";
+import { resolveRfpDealAmount } from "../deals/rfp-payload.js";
 
 export const internalRfpRoutes = Router();
+
+/**
+ * Ids accepted by ONE POST /deals/current-values call. Comfortably above the 100 rows SyncHub's
+ * getRfpReportList will ever return in a page, so a whole RFP report resolves in a single round trip
+ * and never has to fall back to per-row lookups. Over the cap the request is refused outright rather
+ * than silently truncated — a caller that needs more should page, not guess which ids survived.
+ */
+export const MAX_CURRENT_VALUE_DEAL_IDS = 500;
 
 const EDITABLE_DEAL_FIELDS = new Set([
   "name",
@@ -126,6 +135,48 @@ async function findDeal(sourceDealId: string) {
   return null;
 }
 
+/**
+ * Current value for each of `dealIds`, resolved with the SAME precedence the RFP payload uses.
+ *
+ * One query per tenant schema with `id = ANY(...)` — never one per deal — and it stops as soon as
+ * every id has been placed, so the single-office reality costs exactly one round trip. A deal that
+ * exists but genuinely has no value maps to `null`; a deal that is missing or soft-deleted is simply
+ * absent from the map, which the caller must be able to tell apart from `null`.
+ */
+async function findCurrentDealAmounts(dealIds: string[]): Promise<Map<string, number | null>> {
+  const amounts = new Map<string, number | null>();
+  let remaining = dealIds;
+
+  for (const schemaName of await listTenantSchemas()) {
+    if (remaining.length === 0) break;
+    const result = await pool.query(
+      `SELECT d.id,
+              d.awarded_amount,
+              d.bid_estimate,
+              d.dd_estimate,
+              d.forecast_revenue
+         FROM ${quoteIdent(schemaName)}.deals d
+        WHERE d.id = ANY($1::uuid[])
+          AND d.is_active = true`,
+      [remaining]
+    );
+    for (const row of result.rows) {
+      amounts.set(
+        String(row.id),
+        resolveRfpDealAmount({
+          awardedAmount: row.awarded_amount,
+          bidEstimate: row.bid_estimate,
+          ddEstimate: row.dd_estimate,
+          forecastRevenue: row.forecast_revenue,
+        })
+      );
+    }
+    remaining = remaining.filter((id) => !amounts.has(id));
+  }
+
+  return amounts;
+}
+
 function flattenEditedFields(fields: Record<string, unknown>) {
   const flattened = new Map<string, unknown>();
   for (const [key, value] of Object.entries(fields)) {
@@ -166,6 +217,17 @@ function normalizeOptionalString(value: unknown): { valid: true; value: string |
 
 function isUuid(value: string | null): boolean {
   return Boolean(value && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value));
+}
+
+/**
+ * Deliberately looser than `isUuid`: this asks only "will Postgres cast it?", not "is it a
+ * well-formed v1–5 identifier". `isUuid` pins the version and variant nibbles, so it would silently
+ * drop an otherwise perfectly readable `deals.id` — and for a read-only lookup the cost of a dropped
+ * id is a wrong (blank) number on the report, which is exactly what we are here to fix. The only
+ * thing that MUST hold is that the value cannot make `= ANY($1::uuid[])` raise 22P02.
+ */
+function isCastableUuid(value: string | null): value is string {
+  return Boolean(value && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value));
 }
 
 function auditFieldKeyForInternalRfpColumn(column: string): string {
@@ -467,6 +529,87 @@ internalRfpRoutes.post(
         exists: true,
         stage: found.deal.stage_slug ?? null,
         dealId: found.deal.id,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+/**
+ * Batch "what is this deal worth RIGHT NOW" lookup for SyncHub's RFP report.
+ *
+ * The report renders the amount SyncHub snapshotted when the RFP was SENT, and that snapshot is
+ * routinely (and legitimately) empty: the rep sends the RFP first and the estimator writes the
+ * estimate minutes-to-hours later. This endpoint lets the report resolve the deal's current value at
+ * render time instead of showing an em-dash. It is READ-ONLY and does NOT rewrite the snapshot.
+ *
+ * Auth is the same HMAC the rest of this router uses (SYNCHUB_SHARED_SECRET over the raw body via
+ * x-rfp-request-signature) — the mechanism SyncHub already signs POST /deals/eligibility-check with.
+ */
+internalRfpRoutes.post(
+  "/deals/current-values",
+  express.raw({ type: "application/json", limit: "128kb" }),
+  async (req, res, next) => {
+    try {
+      const rawBody = req.body;
+      if (!Buffer.isBuffer(rawBody)) {
+        res.status(422).json({ success: false, error: "invalid_payload" });
+        return;
+      }
+      const signature = req.headers["x-rfp-request-signature"] as string | undefined;
+      if (!verifySignature(rawBody, signature)) {
+        res.status(401).json({ success: false, error: "invalid_signature" });
+        return;
+      }
+
+      let payload: any;
+      try {
+        payload = parseBody(rawBody);
+      } catch {
+        res.status(400).json({ success: false, error: "invalid_json" });
+        return;
+      }
+
+      if (!payload || typeof payload !== "object" || Array.isArray(payload) || !Array.isArray(payload.dealIds)) {
+        res.status(422).json({ success: false, error: "invalid_payload", maxDealIds: MAX_CURRENT_VALUE_DEAL_IDS });
+        return;
+      }
+      if (payload.dealIds.length > MAX_CURRENT_VALUE_DEAL_IDS) {
+        res.status(422).json({
+          success: false,
+          error: "too_many_deal_ids",
+          maxDealIds: MAX_CURRENT_VALUE_DEAL_IDS,
+        });
+        return;
+      }
+
+      // Only real UUIDs are addressable here. A HubSpot-sourced RFP carries a numeric deal id, and
+      // feeding one to `= ANY($1::uuid[])` is a 22P02 that would fail the WHOLE batch — so drop the
+      // unusable ids rather than let one poison every other row's amount.
+      //
+      // Lower-cased to Postgres's canonical form BEFORE the lookup. This is not cosmetic: the lookup
+      // prunes `remaining` by comparing request ids against `row.id`, which always comes back
+      // lower-cased. An upper-case request id would therefore never match its own result, so it would
+      // never be pruned, the early-stop would never fire, and every later tenant schema would be
+      // queried for a deal already found. Normalizing here also dedupes ids that differ only in case.
+      const dealIds = [
+        ...new Set(
+          payload.dealIds
+            .map((value: unknown) => asStringOrNull(value)?.toLowerCase() ?? null)
+            .filter(isCastableUuid)
+        ),
+      ] as string[];
+
+      if (dealIds.length === 0) {
+        res.json({ values: [], maxDealIds: MAX_CURRENT_VALUE_DEAL_IDS });
+        return;
+      }
+
+      const amounts = await findCurrentDealAmounts(dealIds);
+      res.json({
+        values: [...amounts].map(([dealId, amount]) => ({ dealId, amount })),
+        maxDealIds: MAX_CURRENT_VALUE_DEAL_IDS,
       });
     } catch (err) {
       next(err);

@@ -29,6 +29,7 @@ export { fieldUserPasswordResets } from "./field-user-password-resets.js";
 export { userCommissionSettings } from "./user-commission-settings.js";
 export { jobQueue, jobStatusEnum } from "./job-queue.js";
 export { bidBoardIngestionInbox } from "./bid-board-ingestion-inbox.js";
+export { fieldAiReportRuns } from "./field-ai-report-runs.js";
 export {
   costCatalogSources,
   costCatalogSnapshotVersions,

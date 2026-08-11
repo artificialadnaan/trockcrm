@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { formatDate } from "@/lib/deal-utils";
+import { formatDate, formatDealDisplayName } from "@/lib/deal-utils";
 import { resolveDealDisplayNumber } from "@trock-crm/shared/types";
 import type { RepDetailData } from "@/hooks/use-director-dashboard";
 
@@ -47,6 +47,8 @@ interface RepCommissionView {
   deals: Array<{
     dealId: string;
     dealName: string;
+    /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+    dealIsChangeOrder?: boolean | null;
     dealNumber: string | null;
     companyName: string | null;
     commission: number;
@@ -275,11 +277,13 @@ export function RepCommissionDrilldown({
                           className="transition-colors hover:bg-slate-50"
                         >
                           <td className="px-4 py-3">
+                            {/* A change-order child is STORED "<Parent> — Change Order N"; every deal
+                                name on this surface moves the label to the front for DISPLAY only. */}
                             <Link
                               to={`/deals/${deal.dealId}`}
                               className="font-semibold text-slate-900 underline-offset-2 hover:text-brand-red hover:underline"
                             >
-                              {deal.dealName}
+                              {formatDealDisplayName(deal.dealName, deal.dealIsChangeOrder)}
                             </Link>
                             <div className="mt-0.5 text-xs text-slate-500">
                               {[deal.companyName, deal.propertyName].filter(Boolean).join(" · ") || "—"}
@@ -539,7 +543,7 @@ function MissingContractRow({
             to={`/deals/${deal.dealId}`}
             className="font-medium text-slate-900 underline-offset-2 hover:underline"
           >
-            {deal.dealName}
+            {formatDealDisplayName(deal.dealName, deal.dealIsChangeOrder)}
           </Link>
           {displayNumber ? (
             // The canonical lookup number so accounting can find the deal in QuickBooks without opening it.
@@ -570,7 +574,7 @@ function MissingContractRow({
             value={date}
             onChange={(e) => setDate(e.target.value)}
             className="h-8 w-[9.5rem]"
-            aria-label={`Contract signed date for ${deal.dealName}`}
+            aria-label={`Contract signed date for ${formatDealDisplayName(deal.dealName, deal.dealIsChangeOrder)}`}
             disabled={saving}
           />
           <Button size="sm" onClick={handleSave} disabled={saving}>
@@ -691,7 +695,7 @@ function RepViewPanel({
                           to={`/deals/${deal.dealId}`}
                           className="font-medium text-slate-900 underline-offset-2 hover:underline"
                         >
-                          {deal.dealName}
+                          {formatDealDisplayName(deal.dealName, deal.dealIsChangeOrder)}
                         </Link>
                         {deal.companyName ? (
                           <div className="text-xs text-slate-500">{deal.companyName}</div>

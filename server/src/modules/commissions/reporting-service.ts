@@ -51,6 +51,8 @@ export interface CommissionDealRow {
   dealId: string;
   dealNumber: string | null;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder: boolean;
   repId: string;
   repName: string;
   stageName: string;
@@ -76,6 +78,8 @@ export interface RepCommissionDashboardDeal {
   repId: string;
   dealNumber: string | null;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder: boolean;
   companyName: string | null;
   propertyName: string | null;
   propertyAddress: string | null;
@@ -309,6 +313,7 @@ function normalizeDashboardRow(row: any): RepCommissionDashboardDeal | null {
     repId: textFrom(row.rep_id),
     dealNumber: row.deal_number ? textFrom(row.deal_number) : null,
     dealName: textFrom(row.deal_name),
+    dealIsChangeOrder: row.deal_is_change_order === true,
     companyName: row.company_name ? textFrom(row.company_name) : null,
     propertyName: row.property_name ? textFrom(row.property_name) : null,
     propertyAddress: row.property_address ? textFrom(row.property_address) : null,
@@ -374,6 +379,7 @@ export async function getRepCommissionDashboard(
         d.id AS deal_id,
         d.deal_number,
         d.name AS deal_name,
+        d.is_change_order AS deal_is_change_order,
         dsc.rep_user_id AS rep_id,
         c.name AS company_name,
         p.name AS property_name,
@@ -407,6 +413,7 @@ export async function getRepCommissionDashboard(
         d.id AS deal_id,
         d.deal_number,
         d.name AS deal_name,
+        d.is_change_order AS deal_is_change_order,
         CASE
           WHEN d.assigned_rep_id = ${repId} THEN d.assigned_rep_id
           WHEN d.estimator_user_id = ${repId} THEN d.estimator_user_id
@@ -458,7 +465,21 @@ export async function getRepCommissionDashboard(
     )
     SELECT *
     FROM commission_rows
-    WHERE deal_value > 0
+    -- Display hygiene, NOT a sign gate: drop rows that carry no value at all. That covers the pipeline
+    -- branch's NULL deal_value (a deal with no estimate of any kind — NULL <> 0 is NULL, so it still
+    -- filters out) and genuinely $0 rows, which would otherwise pad the page with empty lines.
+    --
+    -- It must NOT be "> 0". A DEDUCTIVE change order is a real child deal with a NEGATIVE awarded amount,
+    -- and it mints an ordinary owner commission row at a negative source_value_amount (the claw-back the
+    -- product decision calls for: earned commission always equals rate × CURRENT contract value). "> 0"
+    -- dropped that row entirely, so this page kept showing the pre-CO commission while the dashboard
+    -- (Engine B, getDirectCommissionMetrics) showed the reduced one — a split with no edge case required.
+    --
+    -- "<> 0" makes the earned total reconcile with Engine B's unfiltered SUM(dsc.amount) BY CONSTRUCTION:
+    -- the only earned rows this drops carry source_value_amount = 0, and amount = source × rate on BOTH
+    -- write paths (insertCommissionRowForRep and recalculateCommissionForDeal), so every dropped row
+    -- contributes exactly 0 to Engine B's sum as well.
+    WHERE deal_value <> 0
     ORDER BY
       CASE
         WHEN is_earned THEN 1
@@ -647,6 +668,7 @@ export async function getCommissionEarned(
       d.id AS deal_id,
       d.deal_number,
       d.name AS deal_name,
+      d.is_change_order AS deal_is_change_order,
       u.id AS rep_id,
       u.display_name AS rep_name,
       psc.name AS stage_name,
@@ -689,6 +711,7 @@ export async function getCommissionEarned(
     dealId: textFrom(row.deal_id),
     dealNumber: row.deal_number ? textFrom(row.deal_number) : null,
     dealName: textFrom(row.deal_name),
+    dealIsChangeOrder: row.deal_is_change_order === true,
     repId: textFrom(row.rep_id),
     repName: textFrom(row.rep_name),
     stageName: textFrom(row.stage_name),

@@ -33,6 +33,22 @@ export type FieldProject = {
   id: string;
   name: string;
   /**
+   * `deals.is_change_order`. The field clients move "Change Order N" to the FRONT of the displayed
+   * name (a change-order child is STORED as "<Parent> — Change Order N", which truncates on a phone),
+   * and this flag is the AUTHORITY for that decision — a deal a human happened to name
+   * "Lobby — Change Order 1" is not a change order and must render exactly as typed. Display-only:
+   * `name` itself is the stored value, unchanged.
+   */
+  isChangeOrder: boolean;
+  /**
+   * `deals.scope_title`, the short accounting title. Travels WITH `isChangeOrder`: the flag is what
+   * front-loads "Change Order N" onto the displayed name, and once it does, this is the only field
+   * left saying WHICH change order — two children of one parent are otherwise the same row. It is
+   * also a SEARCHED column here (see activeProjectWhere), so without it a field user can type the
+   * scope phrase, match, and get back a row that cannot explain why it matched.
+   */
+  scopeTitle: string | null;
+  /**
    * RAW `deals.deal_number`. For HubSpot-imported deals this is the meaningless HubSpot id
    * ("HS-…") — do NOT display it. Kept raw because it is also a stable, unique, non-null key used
    * internally (e.g. the photo-report R2 storage path) and for record matching. Clients display
@@ -100,6 +116,11 @@ function mapFieldProject(row: any): FieldProject {
   const project: FieldProject = {
     id: row.id,
     name: row.name,
+    // `deals.is_change_order` is the AUTHORITY on whether this is a change-order child. The field
+    // clients move "Change Order N" to the front of the displayed name, and without this they had to
+    // infer it from the name's shape — which mislabels a deal a human happened to name that way.
+    isChangeOrder: row.is_change_order === true,
+    scopeTitle: row.scope_title ?? null,
     // Raw deal_number stays raw (storage-path / matching key). The display number is resolved the
     // same way the CRM + global search do: project_number, else a non-HubSpot deal_number, else null
     // — so the HubSpot id in deal_number is never shown.
@@ -135,6 +156,10 @@ export function activeProjectWhere(search?: string) {
         -- For HubSpot-imported deals the canonical DFW/ATL number lives in project_number (deal_number
         -- holds the HS- id), so it must be searchable too.
         OR d.project_number ILIKE ${`%${normalizedSearch}%`}
+        -- The short accounting title. A change-order child's NAME is the generic "<Parent> — Change
+        -- Order N", so the scope phrase a field user actually remembers ("Panel Relocation") lives
+        -- only here; without this column that deal is unfindable from the Projects page.
+        OR d.scope_title ILIKE ${`%${normalizedSearch}%`}
         OR d.property_address ILIKE ${`%${normalizedSearch}%`}
         OR d.property_city ILIKE ${`%${normalizedSearch}%`}
       )
@@ -177,6 +202,8 @@ export async function listFieldProjects(
     SELECT
       d.id,
       d.name,
+      d.is_change_order,
+      d.scope_title,
       d.deal_number,
       d.project_number,
       d.name AS property_name,
@@ -274,6 +301,8 @@ export async function listNearbyFieldProjects(
     SELECT
       d.id,
       d.name,
+      d.is_change_order,
+      d.scope_title,
       d.deal_number,
       d.project_number,
       d.name AS property_name,
@@ -307,6 +336,8 @@ export async function listStarredFieldProjects(tenantDb: TenantDb, access: Field
     SELECT
       d.id,
       d.name,
+      d.is_change_order,
+      d.scope_title,
       d.deal_number,
       d.project_number,
       d.name AS property_name,
@@ -361,6 +392,8 @@ export async function assertActiveFieldProject(tenantDb: TenantDb, _access: Fiel
     SELECT
       d.id,
       d.name,
+      d.is_change_order,
+      d.scope_title,
       d.deal_number,
       d.project_number,
       d.name AS property_name,
@@ -397,6 +430,8 @@ export async function getFieldProject(
     SELECT
       d.id,
       d.name,
+      d.is_change_order,
+      d.scope_title,
       d.deal_number,
       d.project_number,
       d.name AS property_name,
@@ -594,13 +629,37 @@ export async function listFieldProjectPhotos(
 export async function searchFieldCaptureTargets(
   tenantDb: TenantDb,
   _access: FieldAccessContext,
-  input: { search?: string; limit?: number; dealsOnly?: boolean } = {}
+  input: { search?: string; limit?: number; dealsOnly?: boolean; includeTerminalDeals?: boolean } = {}
 ) {
   // The field/TrockCam capture-target picker is intentionally UNSCOPED: any rep must
   // be able to find ANY lead/deal to attach photos to, so we do NOT forward the
   // rep identity into searchPhotoUploadTargets (forwarding it rep-scoped the search
   // and hid every non-owned lead). See .audit/trockcam-leads-not-returning.md.
   // dealsOnly (scorecard picker) filters to deals in SQL — before the per-type + cross-office caps.
+  //
+  // includeTerminalDeals (walkthrough RECOVERY picker) keeps that deals-only narrowing but drops the
+  // BROWSING stage rule `dealsOnly` also carries, because the two things that flag conflates pull
+  // apart here. The glasses-walkthrough upload routes accept ANY ACTIVE deal, Lost included, so a
+  // walk still draining when its bid is lost can finish filing (assertAccessibleFieldCaptureTarget);
+  // an orphaned recording is that case at its worst. So ask the UNFILTERED question — where the only
+  // predicate on deals is `is_active = true`, i.e. exactly the filing rule — and narrow to deals HERE,
+  // per office, BEFORE the caller's cross-office cap.
+  //
+  // Narrowing here rather than in SQL is not a shortcut, and it is not the client-side filter that
+  // starved leads: searchPhotoUploadTargets caps PER TYPE, so its deal slice is already every matching
+  // active deal it would have returned had the stage rule simply been omitted from the query. What
+  // must not happen after a cap is a filter across TYPES — and the one that does the damage is
+  // mergeFieldCaptureTargets' single global slice, ordered lead → opportunity → deal, which is
+  // downstream of this function. Twenty matching leads there cut every deal; dropping them first is
+  // what keeps the deals competing only with each other.
+  if (input.dealsOnly && input.includeTerminalDeals) {
+    const { targets } = await searchPhotoUploadTargets(tenantDb, {
+      search: input.search,
+      limit: input.limit,
+      dealsOnly: false,
+    });
+    return { targets: targets.filter((target) => target.type === "deal") };
+  }
   return searchPhotoUploadTargets(tenantDb, {
     search: input.search,
     limit: input.limit,
@@ -631,6 +690,8 @@ export async function listNearbyFieldCaptureTargets(
     SELECT
       d.id,
       d.name,
+      d.is_change_order,
+      d.scope_title,
       d.deal_number,
       d.project_number,
       COALESCE(psc.name, d.bid_board_stage_slug, 'Active') AS stage_name,
@@ -654,6 +715,8 @@ export async function listNearbyFieldCaptureTargets(
       id: row.id,
       type: "deal" as const,
       name: row.name,
+      isChangeOrder: row.is_change_order === true,
+      scopeTitle: row.scope_title ?? null,
       recordNumber: resolveDealDisplayNumber({ projectNumber: row.project_number, dealNumber: row.deal_number }),
       stageName: row.stage_name ?? null,
       companyName: row.company_name ?? null,

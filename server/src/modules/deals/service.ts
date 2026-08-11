@@ -26,7 +26,7 @@ import {
   getDealAtRiskResult,
   isGenuineEstimatingDealStageSlug,
   isGenuineWonDealStageSlug,
-  isOpportunityStageSlug,
+  toCanonicalDealStageSlug,
   resolveEffectiveStageEnteredAt,
   USER_ROLES,
   type AtRiskResult,
@@ -54,7 +54,7 @@ import {
 import { getActiveProjectTypes, getStageById, getStageBySlug, resolveActiveProjectTypeValue } from "../pipeline/service.js";
 import { evaluatePostConversionEnrichment } from "./post-conversion-enrichment.js";
 import { createAssignmentTaskIfNeeded } from "../assignment-tasks/service.js";
-import { generateDealNumberForProject } from "../../services/projectNumber.js";
+import { generateDealNumberForProject, resolveProjectTypeCode } from "../../services/projectNumber.js";
 import { isContractSignedHandoffEnabled } from "../../config/feature-flags.js";
 import { resolveActiveOfficeUserIds, resolveTeamRepIds } from "../shared/team-scope.js";
 import {
@@ -106,8 +106,8 @@ import { isRfpVotingEnabled, isStageEntryDateFilterEnabled } from "../../config/
 import { getWtdPeriod } from "../../lib/period.js";
 import {
   buildDealFilterBarConditions,
-  buildInvolvedRepCondition,
-  buildAliasedInvolvedRepSql,
+  buildOwnedRepCondition,
+  buildAliasedOwnedRepSql,
   aliasedStageAwareEffectiveDealValueSql,
   aliasedEffectiveStageAgeDaysSql,
   UNASSIGNED_FILTER_SENTINEL,
@@ -152,6 +152,11 @@ function nonTerminalMirroredStageCondition() {
   return sql`COALESCE(${deals.bidBoardStageSlug}, '') NOT IN (${sqlStringList(TERMINAL_STAGE_SLUGS)})`;
 }
 
+/** The same predicate against an aliased `deals` (the stage page selects `from deals d`). */
+function aliasedNonTerminalMirroredStageCondition(alias: string) {
+  return sql`COALESCE(${sql.raw(alias)}.bid_board_stage_slug, '') NOT IN (${sqlStringList(TERMINAL_STAGE_SLUGS)})`;
+}
+
 function normalizeAtRiskViewerRole(role: string | null | undefined): UserRole | null {
   return USER_ROLES.includes(role as UserRole) ? (role as UserRole) : null;
 }
@@ -169,6 +174,13 @@ export function attachAtRiskResult<T extends {
   onHoldAccumulatedSeconds?: number | bigint | null;
   onHoldAccumulatedSecondsAtStageEntry?: number | bigint | null;
   expectedCloseDate?: string | Date | null;
+  /**
+   * The BID due date — the auto-park horizon while a deal sits in estimating (2026-07-27). REQUIRED (not
+   * optional like the fields above) on purpose: forgetting it does not error at runtime, it silently
+   * reverts that row to the close-target rule, so the card would show full value while every SQL rollup
+   * shows $0. Making it mandatory turns "a row source forgot to select bid_due_date" into a compile error.
+   */
+  bidDueDate: string | Date | null;
 }>(
   deal: T,
   viewerRole: string | null | undefined,
@@ -186,6 +198,22 @@ export function attachAtRiskResult<T extends {
   // SEPARATELY and combine them internally (terminal-ness honours both), so this supplies the former
   // and leaves bidBoardStageSlug untouched rather than pre-merging the two.
   const valueSource = { ...deal, stageSlug: actualStageSlug };
+
+  /**
+   * ONE timestamp for both verdicts.
+   *
+   * Both helpers take `now` with a `new Date()` default (shared/src/types/deal-hold.ts:145,167), so
+   * calling them bare gives each its own clock reading. The far-future auto-park resolves "today"
+   * against the America/Chicago CALENDAR DAY, so two readings that straddle CT midnight can land on
+   * different days — and a deal whose close target sits on the 90-day boundary is then held by one
+   * verdict and not the other.
+   *
+   * The result is not a wrong number, it is two numbers that contradict each other: `effectiveOnHold:
+   * true` beside the full amount, or `false` beside zero. That is the exact "money next to an On Hold
+   * badge" failure these server-side verdicts exist to prevent, reintroduced one layer down. The window
+   * is narrow; the cost of closing it is one variable.
+   */
+  const verdictNow = new Date();
 
   return {
     ...deal,
@@ -207,8 +235,8 @@ export function attachAtRiskResult<T extends {
     // cards take the bid-first order, and made terminal cards with far-future close dates look held and
     // worth zero, because the won/lost exemption never fired. Both would then disagree with the
     // stage-aware pipeline totals computed from the same rows.
-    effectiveOnHold: isDealValueEffectivelyOnHold(valueSource as never),
-    effectiveValue: getEffectiveDealValue(valueSource as never),
+    effectiveOnHold: isDealValueEffectivelyOnHold(valueSource as never, verdictNow),
+    effectiveValue: getEffectiveDealValue(valueSource as never, verdictNow),
     atRisk: getDealAtRiskResult(
       {
         stageSlug,
@@ -227,10 +255,22 @@ export function attachAtRiskResult<T extends {
         // the deal-detail view shows as "Postponed". Defaults ON so the list/board/drill-down callers (which
         // omit options) match detail; a caller can still opt OUT with { applyCloseTargetSuppression: false }.
         expectedCloseDate: deal.expectedCloseDate ?? null,
+        // Estimating deals auto-park off the BID due date instead of the close target (2026-07-27), so an
+        // estimating deal the board reads as $0 is also quiet in at-risk. NOTE the deliberate asymmetry
+        // with `effectiveOnHold` above: at-risk classifies the stage from the DISPLAY (Bid Board-aware)
+        // slug because that is the stage its SLA policy is about, while the value/hold rule and the SQL
+        // both classify from the CRM stage_id. Prod has zero deals where those two disagree about
+        // estimating (the Bid Board sync mirrors the stage), but if one ever appears, the $ and the nag
+        // are answering two different questions and both answers are the intended one.
+        bidDueDate: deal.bidDueDate ?? null,
         applyCloseTargetSuppression: options?.applyCloseTargetSuppression !== false,
       },
       normalizeAtRiskViewerRole(viewerRole),
-      new Date()
+      // verdictNow, not a THIRD clock reading. At-risk applies the same close-target suppression against
+      // the same America/Chicago calendar day as the two verdicts above, so a separate reading reopens
+      // the midnight split one field over: a deal whose target sits on the boundary could come back
+      // effectively-held and simultaneously at-risk for a stage age that hold is supposed to pause.
+      verdictNow
     ),
   };
 }
@@ -342,6 +382,15 @@ export interface DealFilters {
   // reportable filter. The Won stage-page / drill-down list opts in so it reconciles to the Won count;
   // every other caller omits it (on-hold included, unchanged). Applied via the predicate registry.
   excludeOnHold?: boolean;
+  /**
+   * Reproduce the BOARD's population: drop OPEN rows whose Bid Board mirror has already reached a terminal
+   * stage. The kanban applies this (nonTerminalMirroredStageCondition) and the stage-page SUMMARY applies
+   * it under the same name, but this list endpoint never did — so a stage page that opted the summary in
+   * would exclude a deal from its header and pagination while still rendering it in the list below
+   * (Codex P2 on #983). Opt-in, and the caller must send it ONLY for non-terminal stages: a won/lost list
+   * is realized and legitimately carries terminal mirror slugs.
+   */
+  boardPopulation?: boolean;
   // Inclusive YYYY-MM-DD bounds against deals.contract_signed_at::date, with
   // deals.contract_signed_date as a transition fallback. RESERVED for the
   // commissions / contracts-signed surfaces (§6.5) — do NOT use for Won-period.
@@ -408,6 +457,9 @@ export interface CreateDealInput {
   bidEstimate?: string;
   awardedAmount?: string;
   bidDueDate?: string | null;
+  // Short scope-of-work title (migration 0218). Length-checked at the route by validateDealPayload,
+  // which also trims and maps blank -> null, so anything reaching here is already normalized.
+  scopeTitle?: string | null;
   description?: string;
   propertyAddress?: string;
   propertyCity?: string;
@@ -438,6 +490,9 @@ export interface UpdateDealInput {
   ddEstimate?: string | null;
   bidEstimate?: string | null;
   awardedAmount?: string | null;
+  // Short scope-of-work title (migration 0218). Explicit null clears it — unlike the relationship ids,
+  // an empty scope title is a legitimate state (the field is optional and was never required).
+  scopeTitle?: string | null;
   description?: string | null;
   propertyAddress?: string | null;
   propertyCity?: string | null;
@@ -870,6 +925,28 @@ export async function applyProjectTypeChange(
   };
 }
 
+/**
+ * The workflow route a project type IMPLIES, per the platform's canonical resolution.
+ *
+ * Pure and exported so it is testable without the whole createDeal dependency graph, and so the one place
+ * that answers "does this type mean service?" on the write side is the same `resolveProjectTypeCode` the
+ * read side uses. Everything else in this area drifted precisely because that question had a different
+ * answer in each place that asked it.
+ *
+ * NOT a general-purpose "is this deal service" test — that is aliasedIsServiceProjectSql, which also
+ * consults the configured code and the existing route. This one answers only the narrower question the
+ * create path needs: given a project type and nothing else, which pipeline should this deal start in?
+ */
+export function workflowRouteForProjectType(
+  projectType: string | null | undefined,
+  /** The CONFIGURED digit from project_type_config, resolved through project_type_id. */
+  projectTypeCode?: string | null
+): WorkflowRoute {
+  return resolveProjectTypeCode({ projectType, projectTypes: projectTypeCode }) === "4"
+    ? "service"
+    : "normal";
+}
+
 function estimatingBoundaryStageSlugForRoute(workflowRoute: WorkflowRoute) {
   return workflowRoute === "service" ? "service_estimating" : "estimate_in_progress";
 }
@@ -887,6 +964,13 @@ export interface DealBoardInput {
 
 export interface DealStagePageInput extends DealBoardInput {
   stageId: string;
+  /**
+   * Reproduce the BOARD's population — drops open rows whose Bid Board mirror has already closed.
+   * Off by default so the web workspace, which also uses this endpoint, is unchanged.
+   */
+  boardPopulation?: boolean;
+  /** Opt-in canonical-family expansion for OPEN stages — see readStageInput and canonicalDealStageFamilyIds. */
+  canonicalStageFamily?: boolean;
   page: number;
   pageSize: number;
   sort?: StagePageSort;
@@ -930,8 +1014,10 @@ type DealStageWorkspaceRow = {
   updated_at: string;
   stage_entered_at: string;
   expected_close_date: string | null;
+  bid_due_date: string | null;
   is_bid_board_owned: boolean;
   is_change_order: boolean;
+  is_active: boolean | null;
   bid_board_stage_slug: string | null;
   bid_board_stage_entered_at: string | null;
   on_hold: boolean;
@@ -969,8 +1055,12 @@ function buildDealListOrder(
   // sets — so it must be TERMINAL-aware WITHOUT a stage-id round-trip. It reads the JOINED
   // pipeline_stage_config.slug (the row query left-joins it) plus the Bid Board mirror: a realized won/lost
   // deal keeps its preserved value and is NOT sunk as $0/on-hold even when its forecast date is far out,
-  // while an OPEN row still auto-parks a far-out close target (Codex P2). Tier is a binary >0 check, so the
-  // simpler best-estimate chain matches the stage-aware value's positivity for every classification.
+  // while an OPEN row still auto-parks a far-out close target (Codex P2). Tier is a binary non-zero check
+  // — and the two chains are non-zero on exactly the same rows (same four columns, same `> 0` candidate
+  // gating, same change-order branch; only the candidate ORDER differs) — so the simpler best-estimate
+  // chain tiers identically to the stage-aware value for every classification. A DEDUCTIVE change order
+  // is non-zero, so it stays in the top tier and is ordered by the column the user actually asked for;
+  // see the SIGN note on aliasedActiveNonZeroDealSortTierSql.
   const tier = aliasedActiveNonZeroDealSortTierSql(
     "deals",
     aliasedTerminalAwareEffectiveDealValueSql(
@@ -1033,10 +1123,16 @@ function buildPipelineStageCardsOrder(
   options: { prioritizeBillingAttention?: boolean } = {}
 ) {
   // Two-tier order: active, non-zero cards on top; on-hold / $0 cards sink to the
-  // bottom of the column. This is sort-only — every card still loads (the preview
-  // limit is the board's effective-all 1000), nothing is hidden. The tier uses the
-  // SAME column EFFECTIVE value the header sums (terminal-aware, far-future-zeroed for
-  // open stages), so an auto-held $0 card sinks exactly as it shows $0.
+  // bottom of the column. Sort-only in the sense that the WHERE set is unchanged — but NOT
+  // "nothing is hidden", as this comment used to claim on the strength of the 1000-card cap: 1000 is
+  // only the DRILL-DOWN mount's window. The ordinary board asks for 8 cards per column (useDealBoard's
+  // default previewLimit) and mobile-crm for 15, while the column header's count and total cover the
+  // whole column. So this tier decides what a user can actually SEE against an aggregate that counts
+  // everything. The tier uses the SAME column EFFECTIVE value the header sums (terminal-aware,
+  // far-future-zeroed for open stages), so an auto-held $0 card sinks exactly as it shows $0 — and a
+  // DEDUCTIVE change-order card is NON-zero, so it stays in the top tier and keeps its place in the
+  // created_at order instead of being pushed off the preview behind every held/$0 row, which would
+  // leave a header total the visible cards cannot account for.
   const tier = aliasedActiveNonZeroDealSortTierSql("deals", effectiveValueSql);
   // Sort before preview limiting so each column shows the actual newest cards,
   // not an arbitrary subset from a tied timestamp group.
@@ -1227,7 +1323,12 @@ export function workflowFamilyForRoute(workflowRoute: WorkflowRoute) {
   return workflowRoute === "service" ? "service_deal" : "standard_deal";
 }
 
-const SHARED_CANONICAL_DEAL_STAGE_SLUGS = new Set([
+/**
+ * Standard-family stages a SERVICE-routed deal may legitimately occupy. Exported so the
+ * service-classification repair script applies the same rule instead of a stricter family-only test that
+ * would defer safe rows for ever — getStageByIdForWorkflowRoute accepts exactly this set below.
+ */
+export const SHARED_CANONICAL_DEAL_STAGE_SLUGS = new Set([
   // opportunity is standard_deal-family but valid for service deals as the
   // CRM-side RFP approval trigger before Bid Board-owned progression.
   "opportunity",
@@ -1378,6 +1479,59 @@ type PipelineValueSource = "won" | "estimating" | "current";
 // standard_deal | service_deal). Used to canonicalize a STAGE's slug for the estimating classification.
 function dealRouteForStageFamily(workflowFamily: string | null | undefined): WorkflowRoute {
   return workflowFamily === "service_deal" ? "service" : "normal";
+}
+
+/**
+ * Every stage id that belongs to the SAME canonical board column as `stage`.
+ *
+ * The kanban does not render raw stages — buildCanonicalDealBoardColumns (client
+ * `canonical-deal-board.ts`) folds every stage whose slug normalizes to the same canonical slug into ONE
+ * column and, for non-Won/Lost slugs, SUMS their aggregates. The stage drill-down previously expanded to a
+ * family only for the Won/Lost slug sets and queried `[input.stageId]` for everything else, so an OPEN
+ * column backed by more than one raw stage produced a header total the stage page could not reproduce, and
+ * cards visible on the board were unreachable from the drill.
+ *
+ * Prod (office_dallas, 2026-07-28): the Estimating header read $11.0M — 13 deals on `estimating` ($6.54M)
+ * plus 3 on the retired `estimate_in_progress` alias ($4.46M) — while the drill showed only $6.5M. The
+ * alias is `is_active_pipeline = false` yet still held live deals, which is exactly when the split bites.
+ *
+ * ROUTE-SPECIFIC, mirroring the client's buildCanonicalDealStageFamilies: each stage maps through ITS OWN
+ * route (workflowFamily → route), so the route-dependent estimating pair never cross-pollinates — a
+ * standard `estimating` stage joins only the normal Estimating column, a service one only
+ * `service_estimating`. Route-INVARIANT aliases still land together, matching the board and the existing
+ * ESTIMATE_SENT_STAGE_SLUGS grouping (estimate_sent_to_client + service_estimate_sent_to_client +
+ * bid_sent). Falls back to the clicked stage alone when the slug has no canonical mapping, so an
+ * unrecognised or bespoke stage can never widen its own drill-down.
+ *
+ * OPT-IN (input.canonicalStageFamily). mobile-crm renders UNMERGED raw board columns and opens this same
+ * endpoint with the raw stage id, so expanding unconditionally would make its "see all 13" return 16.
+ * Shipped mobile builds cannot start sending a flag, so narrow stays the default and the web workspace
+ * opts in. Same shape as the existing boardPopulation opt-in.
+ *
+ * TERMINAL FAMILIES ARE DELIBERATELY EXCLUDED. Won/Lost drills are served by the audited
+ * WON/LOST_TERMINAL_STAGE_SLUGS branch above, which also brings the won/lost date windows, the
+ * realized-value rules and the is_active handling those pages need. A handful of retired stages
+ * (`in_production`, `close_out`) canonicalize to `won` while sitting OUTSIDE WON_DEAL_STAGE_SLUGS, so
+ * without this guard they would fall through to here and drag the entire Won family — 438 live deals on
+ * prod — through the OPEN-stage code path, valuing realized revenue with the far-out auto-park rules.
+ * Keeping them single-id preserves today's behaviour exactly.
+ */
+function canonicalDealStageFamilyIds(
+  stages: readonly { id: string; slug: string; workflowFamily?: string | null }[],
+  stage: { id: string; slug: string; workflowFamily?: string | null }
+): string[] {
+  const canonicalSlug = toCanonicalDealStageSlug(stage.slug, dealRouteForStageFamily(stage.workflowFamily));
+  if (canonicalSlug == null) return [stage.id];
+  if (TERMINAL_STAGE_SLUGS.includes(canonicalSlug)) return [stage.id];
+  const familyIds = stages
+    .filter(
+      (item) =>
+        toCanonicalDealStageSlug(item.slug, dealRouteForStageFamily(item.workflowFamily)) === canonicalSlug
+    )
+    .map((item) => item.id);
+  // `stage` came out of `stages`, so it is normally already here; the guard keeps a caller that hands us a
+  // detached stage row from silently querying an EMPTY id list (which would render the page as zero deals).
+  return familyIds.includes(stage.id) ? familyIds : [stage.id, ...familyIds];
 }
 
 function pipelineValueSourceForStageSlug(
@@ -1624,8 +1778,23 @@ function mapDealStageWorkspaceRow(
     // Hydrate the close target so attachAtRiskResult marks a far-out (90+ day) row effectively on hold —
     // matching the header/status logic and the $0 card value (Codex P2).
     expectedCloseDate: row.expected_close_date,
+    // The estimating auto-park horizon (2026-07-27). Hydrated for the SAME reason as the close target
+    // above: without it this row silently falls back to the close-target rule while the stage-page header
+    // total (which runs the shared SQL predicate) already reads the bid due date, so the header and the
+    // sum of its own cards would disagree.
+    bidDueDate: row.bid_due_date,
     isBidBoardOwned: row.is_bid_board_owned,
     isChangeOrder: row.is_change_order,
+    /**
+     * The lifecycle flag, carried so a client can tell an ARCHIVED row from a live one.
+     *
+     * `is_active = false` is this codebase's soft-delete marker, and the Lost column deliberately keeps
+     * those rows in its reporting population — but getDealById hides them by default, so a client that
+     * cannot see this flag renders an archived card as openable and the tap lands on a 404. The board
+     * already receives it through the list shape; the stage drill-down did not, which made the client's
+     * archived guard silently inert on exactly the surface the all-time board links into.
+     */
+    isActive: row.is_active,
     bidBoardStageSlug: row.bid_board_stage_slug,
     bidBoardStageEnteredAt: row.bid_board_stage_entered_at,
     onHold: row.on_hold,
@@ -2146,6 +2315,12 @@ export async function getDeals(
       ...getTableColumns(deals),
       companyName: companies.name,
       stageSlug: pipelineStageConfig.slug,
+      // The CONFIGURED project-type digit, resolved through project_type_id. Shipped to the client
+      // because the canonical service test needs it: 646 of 1,351 active deals carry NO project_type TEXT
+      // and are typed ONLY by this FK, so a client that saw just the text column would fall back to
+      // workflow_route for the exact population this release is correcting (277 of the 279 misclassified
+      // deals). Same scalar-subquery idiom as stageSlug/companyOwnerUserName above.
+      projectTypeCode: sql<string | null>`(SELECT code FROM public.project_type_config WHERE id = ${deals.projectTypeId})`,
       // Outcome-aware display date (filter-axis == display-axis): when an
       // outcome dimension is in play we've already resolved the Won/Lost stage
       // sets (needsStageClassification above), so each row's displayed date is
@@ -2226,6 +2401,12 @@ export async function getDealById(
       ...getTableColumns(deals),
       stageSlug: pipelineStageConfig.slug,
       estimatorUserName: users.displayName,
+      // The CONFIGURED project-type digit, resolved through project_type_id. Shipped to the client
+      // because the canonical service test needs it: 646 of 1,351 active deals carry NO project_type TEXT
+      // and are typed ONLY by this FK, so a client that saw just the text column would fall back to
+      // workflow_route for the exact population this release is correcting (277 of the 279 misclassified
+      // deals). Same scalar-subquery idiom as stageSlug/companyOwnerUserName above.
+      projectTypeCode: sql<string | null>`(SELECT code FROM public.project_type_config WHERE id = ${deals.projectTypeId})`,
       salesSourceUserName: salesSourceUser.displayName,
     })
     .from(deals)
@@ -2282,6 +2463,12 @@ export async function getDealDetail(
       ...getTableColumns(deals),
       assignedRepName: users.displayName,
       estimatorUserName: estimatorUser.displayName,
+      // The CONFIGURED project-type digit, resolved through project_type_id. Shipped to the client
+      // because the canonical service test needs it: 646 of 1,351 active deals carry NO project_type TEXT
+      // and are typed ONLY by this FK, so a client that saw just the text column would fall back to
+      // workflow_route for the exact population this release is correcting (277 of the 279 misclassified
+      // deals). Same scalar-subquery idiom as stageSlug/companyOwnerUserName above.
+      projectTypeCode: sql<string | null>`(SELECT code FROM public.project_type_config WHERE id = ${deals.projectTypeId})`,
       salesSourceUserName: salesSourceUser.displayName,
       companyName: companies.name,
       companyOwnerUserId: companies.ownerId,
@@ -2411,9 +2598,22 @@ export async function getDealDetail(
   // Deal DETAIL re-derives at-risk here (overriding getDealById's), so it must opt into the
   // close-target suppression too — otherwise the detail page that hosts "Move Close Date" would still
   // read threshold_reached after a future date is set.
-  const attached = attachAtRiskResult(dealWithMetadata, atRiskViewerRole, currentStage?.slug ?? null, {
-    applyCloseTargetSuppression: true,
-  });
+  //
+  // Fed the RESOLVED bid due date, not the raw `deals.bid_due_date` snapshot (Codex P2). Since 2026-07-27
+  // that date is the auto-park horizon in the estimating stage, so it now drives `effectiveOnHold`,
+  // `effectiveValue` and `atRisk` — and this response deliberately publishes `resolvedBidDueDate` as the
+  // deal's bid due date below. Passing the snapshot here would ship ONE object whose banner shows the
+  // lead-owned date while its own $0/On-hold verdict was computed from a different one. The lead is the
+  // system of record for a converted deal's bid date (see the resolver above), so the authoritative date
+  // has to drive the money too. The remaining gap — SQL surfaces still read the denormalized column, so a
+  // lead-only edit with no write-through can make the board disagree with detail — is the documented
+  // follow-up in the PR body (prod drift today: 0 of 25 lead-backed estimating deals).
+  const attached = attachAtRiskResult(
+    { ...dealWithMetadata, bidDueDate: resolvedBidDueDate },
+    atRiskViewerRole,
+    currentStage?.slug ?? null,
+    { applyCloseTargetSuppression: true }
+  );
 
   return {
     ...dealWithMetadata,
@@ -2444,8 +2644,63 @@ export async function getDealDetail(
  * Create a new deal.
  */
 export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
-  const workflowRoute = input.workflowRoute ?? "normal";
-  const stage = await getStageByIdForWorkflowRoute(input.stageId, workflowRoute);
+  // The workflow route is derived from the project type, so the type has to be known before the stage is
+  // looked up. `workflow_route` is NOT NULL DEFAULT 'normal', so a deal created without one used to look
+  // like a confident "not service" rather than "nobody said" — and nothing anywhere derived it from the
+  // type. That is why service work whose own deal number reads DFW-4-… sat in the Normal pipeline.
+  //
+  // NON-THROWING on purpose. The validating `assertValidProjectType` stays exactly where it was, further
+  // down: hoisting it would put project-type validation AHEAD of the stage check, the creation policy and
+  // the awarded-amount role gate, changing which error a rejected caller sees first and letting an
+  // unauthorized one probe type validity. An unrecognised type simply yields null here and routes normal;
+  // the assert below still rejects it with the same message, in the same order, as before this change.
+  const derivedProjectType = input.projectType
+    ? await resolveActiveProjectTypeValue(input.projectType)
+    : null;
+  // ...and the CONFIGURED digit behind projectTypeId. POST /api/deals accepts the ID WITHOUT the redundant
+  // text, which is also the shape most existing rows are in, so deriving from the text alone would leave a
+  // code-4 deal with a normal route, a normal pipeline_type_snapshot and a residential deal NUMBER — the
+  // row internally contradicting itself the moment it is inserted. Same tier order as everywhere else:
+  // text first, configured code second.
+  const derivedProjectTypeCode = input.projectTypeId
+    ? (await resolveProjectTypeConfigById(input.projectTypeId))?.code ?? null
+    : null;
+
+  // An EXPLICIT route from the caller always wins: lead conversion, the SyncHub ingest and the Bid Board
+  // all state a route deliberately, and this must not overrule them. The derivation only fills the gap
+  // where the route would otherwise have defaulted silently.
+  const requestedRoute =
+    input.workflowRoute ?? workflowRouteForProjectType(derivedProjectType, derivedProjectTypeCode);
+
+  // A stage belongs to ONE workflow family, so a derived service route can fail against a stage the caller
+  // chose from the standard family. getStageByIdForWorkflowRoute already accepts the SHARED canonical
+  // stages (opportunity, contract, won, …) for a service deal, so most creates resolve on the first try.
+  //
+  // `estimating` is the one that does not, and it is the case that matters: the deal form offers ONLY
+  // standard_deal stages (getNewDealStages) and sends no workflowRoute, so a Service-typed deal started in
+  // Estimating hit this path. Discarding the derived route there would have written the deal as normal —
+  // wrong pipeline, wrong RFP behaviour — and would have made this whole write-side fix inert for the
+  // main create path. So map the stage to its SERVICE-FAMILY equivalent
+  // (toCanonicalDealStageSlug: estimating -> service_estimating) instead of dropping the route.
+  //
+  // Only if no equivalent exists do we fall back to 'normal', which preserves the original behaviour
+  // rather than turning a working create into a 400. Reports stay correct either way: they resolve
+  // service from project_type, not from this column.
+  let stage = await getStageByIdForWorkflowRoute(input.stageId, requestedRoute);
+  let workflowRoute = requestedRoute;
+  if (!stage && input.workflowRoute == null && requestedRoute === "service") {
+    const standardStage = await getStageById(input.stageId, "standard_deal");
+    const serviceSlug = standardStage
+      ? toCanonicalDealStageSlug(standardStage.slug, "service")
+      : null;
+    if (serviceSlug) {
+      stage = await getStageBySlug(serviceSlug, "service_deal");
+    }
+    if (!stage) {
+      workflowRoute = "normal";
+      stage = await getStageByIdForWorkflowRoute(input.stageId, "normal");
+    }
+  }
   if (!stage) {
     throw new AppError(400, "Invalid stage ID for workflow route");
   }
@@ -2488,6 +2743,8 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
   await validateDealPrimaryContact(tenantDb, lineage.companyId, lineage.primaryContactId);
 
   const officeCode = assertValidOfficeCode(input.officeCode);
+  // Unmoved: this is the throwing validation, and it stays after the stage/policy/role gates so the error
+  // a caller sees is the one they saw before the route derivation existed.
   const projectType = input.projectType ? await assertValidProjectType(input.projectType) : null;
   const normalizedBidDueDate = normalizeOptionalDealBidDueDate(input.bidDueDate);
   const createdAt = new Date();
@@ -2495,6 +2752,7 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
     id: "new",
     officeCode,
     projectType,
+    projectTypes: derivedProjectTypeCode,
     workflowRoute,
     createdAt,
   });
@@ -2504,7 +2762,12 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
     .values({
       dealNumber,
       name: input.name,
-      stageId: input.stageId,
+      // stage.id, NOT input.stageId. When a derived service route maps the requested stage to its
+      // service-family counterpart (estimating -> service_estimating), validation ran against the MAPPED
+      // stage; persisting the original id would store a service route beside a standard-family stage —
+      // precisely the mismatch the mapping exists to avoid. Identical to input.stageId on every path
+      // where no mapping happened.
+      stageId: stage.id,
       assignedRepId: input.assignedRepId,
       primaryContactId: lineage.primaryContactId,
       companyId: lineage.companyId,
@@ -2520,6 +2783,7 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
       // deals.bid_due_date is timestamptz, but the business field is date-only.
       // Persist UTC midnight so every environment resolves the same calendar day.
       bidDueDate: normalizedBidDueDate,
+      scopeTitle: input.scopeTitle ?? null,
       description: input.description ?? null,
       propertyAddress: input.propertyAddress ?? null,
       propertyCity: input.propertyCity ?? null,
@@ -2536,6 +2800,13 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
       expectedCloseDate: input.expectedCloseDate ?? null,
       salesSourceUserId: input.salesSourceUserId ?? null,
       workflowRoute,
+      // Written from the SAME resolved route, not left to the column default. pipeline_type_snapshot is
+      // NOT NULL DEFAULT 'normal', and the report builder groups and filters deal type on
+      // COALESCE(d.pipeline_type_snapshot, d.workflow_route) (report-builder-service.ts) — the snapshot
+      // FIRST. Deriving the route while leaving the snapshot at its default would have produced a deal
+      // that reads service everywhere except the report builder, which is a worse failure than the one
+      // this change set out to fix: two service definitions disagreeing instead of one being wrong.
+      pipelineTypeSnapshot: workflowRoute,
       // Forward-only: normal CRM-created and lead-converted projects must eventually carry a billing
       // contact. Historical/migration imports deliberately remain exempt and there is no backfill.
       billingContactRequiredAt: creationPolicy.origin === "migration" ? null : createdAt,
@@ -2819,6 +3090,7 @@ export async function updateDeal(
   // Procore mirror never overwrites it. Gated on touchesAwarded (the change-detected edit) — a no-op
   // re-save of the same value does NOT freeze sync, and the automatic seed never reaches this path.
   if (touchesAwarded) updates.awardedAmountOverridden = true;
+  if (input.scopeTitle !== undefined) updates.scopeTitle = input.scopeTitle;
   if (input.description !== undefined) updates.description = input.description;
   if (input.propertyAddress !== undefined) updates.propertyAddress = input.propertyAddress;
   if (input.propertyCity !== undefined) updates.propertyCity = input.propertyCity;
@@ -3025,6 +3297,7 @@ export async function updateDeal(
       "ddEstimate",
       "bidEstimate",
       "awardedAmount",
+      "scopeTitle",
       "description",
       "propertyAddress",
       "propertyCity",
@@ -3272,17 +3545,50 @@ export async function deleteDeal(
     return null;
   }
 
-  // Non-admins may only archive opportunity-stage deals (admins keep the any-stage escape hatch).
+  // A NON-ADMIN MAY NOT ARCHIVE A PARENT THAT STILL HAS ACTIVE CHANGE-ORDER CHILDREN.
+  //
+  // Removing the stage gate below opened an indirect route around an admin-only financial operation. The
+  // DELETE route rejects a non-admin whose TARGET is a change order, but a parent is not itself a CO, so it
+  // passed — and this function then calls softDeleteChangeOrderChildren, which voids every child AND removes
+  // each one's earned commission. A rep could therefore do, in one click on the parent, exactly what the
+  // admin-only change-order delete endpoint exists to reserve.
+  //
+  // It was unreachable before only by accident: CO children hang off Won/awarded parents, and the stage gate
+  // happened to refuse those. That is a coincidence, not a boundary, so the boundary is stated here — beside
+  // the cascade it protects, rather than in the route, so it cannot be bypassed by a future caller.
+  //
+  // REJECT rather than skip-the-cascade: archiving the parent while leaving live children pointed at it
+  // would strand COs under a deal that no longer exists.
   if (opts.actorRole !== "admin") {
-    const [stageRow] = await tenantDb
-      .select({ slug: pipelineStageConfig.slug })
-      .from(pipelineStageConfig)
-      .where(eq(pipelineStageConfig.id, existing.stageId))
+    const [activeCoChild] = await tenantDb
+      .select({ id: deals.id })
+      .from(deals)
+      .where(and(eq(deals.parentDealId, dealId), eq(deals.isChangeOrder, true), eq(deals.isActive, true)))
       .limit(1);
-    if (!isOpportunityStageSlug(stageRow?.slug)) {
-      throw new AppError(403, "Only opportunity-stage deals can be archived by reps.", "DEAL_ARCHIVE_STAGE_FORBIDDEN");
+    if (activeCoChild) {
+      throw new AppError(
+        403,
+        "This deal has active change orders. Only an admin can archive it, because doing so voids those change orders and removes their commission.",
+        "CHANGE_ORDER_ADMIN_ONLY",
+      );
     }
   }
+
+  // NO STAGE GATE. An owner may archive their own deal at ANY stage.
+  //
+  // This deliberately replaces the earlier "opportunity stage only" rule for reps. That rule made the
+  // control dead on nearly every real deal — `opportunity` and the legacy alias `dd` were the only slugs it
+  // admitted, and `dd` is seeded is_active_pipeline=FALSE — so a rep with work in estimating, contract or
+  // production could not archive any of it, and reported the button as doing nothing.
+  //
+  // ARCHIVING A WON DEAL IS NOW REACHABLE BY A REP, and that is not a neutral act: is_active=false is the
+  // canonical "soft-deleted" marker for a Won deal, which removes it from Won rollups and from the revenue
+  // its commission rows were computed against. Ownership, the mandatory reason, and the admin-only guard on
+  // change orders are what remain between a rep and that outcome. Widening this was an explicit product
+  // decision taken with that consequence stated.
+  //
+  // The change-order guard in the DELETE route (admin-only) is SEPARATE and still applies, because voiding
+  // a CO removes its commission outright.
 
   const archivedDescription = buildArchivedDescription(existing.description, reason, new Date());
 
@@ -3466,12 +3772,13 @@ export async function getDealsForPipeline(
   } else if (filters?.scope === "team") {
     const teamRepIds = await resolveTeamRepIds(tenantDb, userId, filters.activeOfficeId ?? null);
     if (filters?.assignedRepId) {
-      // Team scope, filtered to one person: bound by team membership (assigned_rep IN teamRepIds)
-      // AND match rep-OR-estimator, so the estimator clause can't surface deals assigned OUTSIDE
-      // the team — the same bounded pattern the deals list and stage drill-down use.
+      // Team scope, filtered to one person: bound by team membership (assigned_rep IN teamRepIds) AND
+      // owned by them. The team bound is now redundant with owner-only matching (owning it already implies
+      // being that person) but is kept so the predicate still reads as "within my team", and so re-widening
+      // the rep match later cannot silently surface deals assigned outside the team.
       commonConditions.push(
         teamRepIds.length > 0
-          ? and(inArray(deals.assignedRepId, teamRepIds), buildInvolvedRepCondition(filters.assignedRepId))!
+          ? and(inArray(deals.assignedRepId, teamRepIds), buildOwnedRepCondition(filters.assignedRepId))!
           : sql`false`
       );
       assignedRepFilterHandled = true;
@@ -3480,7 +3787,7 @@ export async function getDealsForPipeline(
     }
   }
   if (filters?.assignedRepId && !assignedRepFilterHandled) {
-    commonConditions.push(buildInvolvedRepCondition(filters.assignedRepId));
+    commonConditions.push(buildOwnedRepCondition(filters.assignedRepId));
   }
 
   // Office scope: mirror getDeals so the kanban board and the drill-down list
@@ -3619,6 +3926,12 @@ export async function getDealsForPipeline(
         ...getTableColumns(deals),
         companyName: companies.name,
         assignedRepName: users.displayName,
+        // The CONFIGURED project-type digit, resolved through project_type_id. Shipped to the client
+        // because the canonical service test needs it: 646 of 1,351 active deals carry NO project_type TEXT
+        // and are typed ONLY by this FK, so a client that saw just the text column would fall back to
+        // workflow_route for the exact population this release is correcting (277 of the 279 misclassified
+        // deals). Same scalar-subquery idiom as stageSlug/companyOwnerUserName above.
+        projectTypeCode: sql<string | null>`(SELECT code FROM public.project_type_config WHERE id = ${deals.projectTypeId})`,
       })
       .from(deals)
       .leftJoin(companies, eq(companies.id, deals.companyId))
@@ -3723,7 +4036,9 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
       : null;
   const stageIds =
     stageSlugs == null
-      ? [input.stageId]
+      ? input.canonicalStageFamily
+        ? canonicalDealStageFamilyIds(stages, stage)
+        : [input.stageId]
       : stages
           .filter((item) => (stageSlugs as readonly string[]).includes(item.slug))
           .map((item) => item.id);
@@ -3732,6 +4047,39 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
     scope,
     sql`d.stage_id IN (${sqlList(stageIds)})`,
     excludeTestDataCondition("d"),
+    /**
+     * OPT-IN board-equivalent population — OPEN stages only.
+     *
+     * getDealsForPipeline drops open-stage deals whose Bid Board mirror has already reached a terminal
+     * stage (nonTerminalMirroredStageCondition, :3579), and this endpoint never did — so a drill-down
+     * opened from "Showing X of Y — see all" could list deals the board had not counted, under an open
+     * stage they have in fact moved past.
+     *
+     * Behind a flag rather than applied unconditionally: this endpoint also backs the WEB deals
+     * workspace, which has not asked for the board's population, and silently removing rows from a
+     * surface this change set does not touch is not a fix, it is a second surprise. Callers that link
+     * FROM the board opt in; everyone else is byte-identical to before.
+     *
+     * And gated on `!isTerminalStagePage`, because the board applies this predicate in exactly ONE of
+     * its three branches. Won and Lost columns do not (:3532 / :3566) — a Won deal synchronized from the
+     * Bid Board carries a terminal slug in BOTH stage_id and bid_board_stage_slug, which is the correct,
+     * settled state, not a stale mirror. Applying it to a terminal drill-down would delete precisely the
+     * rows that belong there: the board counts them, the "see all" list and its total would not, and a
+     * fully Bid-Board-sourced Won column would open empty. Mirroring the board means mirroring where it
+     * branches, not just what it filters — copying the predicate without its guard inverts this fix on
+     * the two columns most likely to be tapped.
+     */
+    ...(input.boardPopulation && !isTerminalStagePage
+      ? [aliasedNonTerminalMirroredStageCondition("d")]
+      : []),
+    /**
+     * The soft-delete half of the board's population needs NOTHING here — buildDealWorkspaceScope
+     * (:1586-1597) already branches exactly as the board does: `is_active = true` for open stages
+     * (unless an explicit status owns the axis) and for Won (unless status=inactive, the administrator
+     * diagnostic view), and deliberately not for Lost, whose column retains soft-deleted deals for
+     * reporting. Adding it again here would be a second, redundant copy of a rule that is already
+     * correct — recorded because comparing the per-branch code alone makes it look missing.
+     */
   ];
 
   if (isWonTerminalStage) {
@@ -3752,7 +4100,7 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
   if (input.assignedRepId) {
     // The Unassigned FilterBar option sends the sentinel; map it to IS NULL like the list (getDeals /
     // buildAssignedRepPredicate), not a literal equality that would error on the UUID column (Codex P2).
-    conditions.push(buildAliasedInvolvedRepSql("d", input.assignedRepId));
+    conditions.push(buildAliasedOwnedRepSql("d", input.assignedRepId));
   }
   if (input.regionId) {
     conditions.push(
@@ -3883,8 +4231,10 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
       d.updated_at,
       d.stage_entered_at,
       d.expected_close_date,
+      d.bid_due_date,
       d.is_bid_board_owned,
       d.is_change_order,
+      d.is_active,
       d.bid_board_stage_slug,
       d.bid_board_stage_entered_at,
       d.on_hold,

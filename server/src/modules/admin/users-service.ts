@@ -126,6 +126,7 @@ export async function listUsers(officeId?: string) {
           u.office_id,
           u.reports_to,
           u.is_active,
+          u.generates_sales,
           u.created_at
         FROM users u
         WHERE u.office_id = ${officeId}
@@ -146,6 +147,7 @@ export async function listUsers(officeId?: string) {
           officeId: users.officeId,
           reportsTo: users.reportsTo,
           isActive: users.isActive,
+          generatesSales: users.generatesSales,
           createdAt: users.createdAt,
         })
         .from(users)
@@ -162,6 +164,7 @@ export async function listUsers(officeId?: string) {
           officeId: row.office_id,
           reportsTo: row.reports_to,
           isActive: row.is_active,
+          generatesSales: row.generates_sales,
           createdAt: row.created_at,
         }
       : row
@@ -198,6 +201,12 @@ export interface CreateCrmUserInput {
   role: string;
   officeId: string;
   reportsTo?: string | null;
+  /** Does this person carry deals? Drives the director-dashboard rosters (migration 0219), NOT access.
+   *  Omitted => derived from the role, which is the honest default: a 'rep' is being hired to sell, an
+   *  admin/director/construction user is not unless someone says so. Relying on the COLUMN default
+   *  (true) instead would put every newly-created admin straight onto the dashboard — the exact clutter
+   *  this flag exists to remove — so the create path always sends an explicit value. */
+  generatesSales?: boolean;
 }
 
 // Pure, throwing validation — the create-flow's gate of record. The role decision is the gate-proven
@@ -225,6 +234,27 @@ export function assertCreatableCrmUser(input: CreateCrmUserInput): asserts input
   if (!isAssignableCrmRole(input.role)) throw new AppError(400, `Invalid role: ${input.role}`);
 }
 
+/**
+ * A field contractor NEVER carries deals. `acceptFieldInvite` states that invariant by inserting them with
+ * generates_sales = false, and the commission roster excludes the role outright.
+ *
+ * Enforced on the SERVER, not merely hidden in the UI: the admin PATCH route hands `req.body` straight
+ * through, so a hand-made request could otherwise enrol a contractor in the rep cards, the funnel, the
+ * performance snapshots, the strategic alerts and the coaching prompts. Evaluated against the role the
+ * request is MOVING TO when it changes both at once, so the two cannot race past each other.
+ *
+ * Pure and exported so the rule is testable without standing up a transaction — the same shape as the
+ * other gates in this module (evaluateUpdateUserGuards, stripsAdminPrivilege).
+ */
+export function assertGeneratesSalesAllowedForRole(
+  generatesSales: boolean,
+  role: string | null | undefined
+): void {
+  if (generatesSales === true && role === "field_contractor") {
+    throw new AppError(400, "Field contractors cannot be marked as generating sales");
+  }
+}
+
 export async function createCrmUser(input: CreateCrmUserInput, actorUserId: string) {
   assertCreatableCrmUser(input);
   const email = input.email.trim().toLowerCase();
@@ -250,6 +280,7 @@ export async function createCrmUser(input: CreateCrmUserInput, actorUserId: stri
         officeId: input.officeId,
         reportsTo: input.reportsTo?.trim() || null,
         isActive: true,
+        generatesSales: input.generatesSales ?? input.role === "rep",
         createdByUserId: actorUserId,
       })
       .returning();
@@ -271,6 +302,10 @@ export async function updateUser(
     officeId: string;
     reportsTo: string | null;
     isActive: boolean;
+    /** Roster flag, not an access change — see CreateCrmUserInput.generatesSales. Unticking removes the
+     *  person from the director-dashboard rosters and nothing else; it cannot hide commission they hold
+     *  (getDirectorRepCommissionRows OR's this with an actually-earned EXISTS). */
+    generatesSales: boolean;
     notificationPrefs: Record<string, unknown>;
     /** Legacy alias: pre-structure callers set a single rate here. Mapped to capxRateSolo (the
      *  effective rate under the default 'solo' structure) so a stale bundle / old script isn't
@@ -333,6 +368,16 @@ export async function updateUser(
     if (input.officeId !== undefined) updates.officeId = input.officeId;
     if (input.reportsTo !== undefined) updates.reportsTo = input.reportsTo;
     if (input.isActive !== undefined) updates.isActive = input.isActive;
+    if (input.generatesSales !== undefined) {
+      // The route hands req.body straight through, so this is the only gate. Rejecting a non-boolean
+      // rather than coercing it matters here: `"false"` is truthy in JS, so a coercing path would tick
+      // someone ON while the admin watched themselves tick them off.
+      if (typeof input.generatesSales !== "boolean") {
+        throw new AppError(400, "generatesSales must be a boolean");
+      }
+      assertGeneratesSalesAllowedForRole(input.generatesSales, nextRole ?? existingUser.role);
+      updates.generatesSales = input.generatesSales;
+    }
     if (input.notificationPrefs !== undefined) updates.notificationPrefs = input.notificationPrefs;
 
     const hasBaseUserPatch = Object.keys(updates).length > 0;
@@ -598,6 +643,7 @@ export async function getUsersWithStats() {
       u.office_id,
       u.reports_to,
       u.is_active,
+      u.generates_sales,
       o.name AS office_name,
       COUNT(uoa.office_id)::int AS extra_office_count,
       cs.commission_rate,
@@ -624,6 +670,7 @@ export async function getUsersWithStats() {
       u.office_id,
       u.reports_to,
       u.is_active,
+      u.generates_sales,
       o.name,
       cs.commission_rate,
       cs.commission_structure,
@@ -727,6 +774,7 @@ export async function getUsersWithStats() {
     reportsTo: r.reports_to,
     officeName: r.office_name,
     isActive: r.is_active,
+    generatesSales: r.generates_sales,
     extraOfficeCount: Number(r.extra_office_count ?? 0),
     commissionRate: Number(r.commission_rate ?? 0),
     commissionStructure: (r.commission_structure ?? "solo") as "solo" | "mixed",

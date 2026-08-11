@@ -43,6 +43,31 @@ export function formatDate(value: string | null | undefined): string {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
+/**
+ * A timestamp with its TIME, for the one column that has one.
+ *
+ * `scheduled_for` is `timestamptz` and the web dialog lets someone pick the hour, so a task set for 9am
+ * and one set for 3pm are different commitments — rendering both as "Aug 14" collapsed them. `due_date`
+ * is a Postgres `date` and deliberately does NOT come through here: there is no time to show, and
+ * inventing "12:00 AM" would be a claim the data never made.
+ *
+ * Falls back to the date alone for a value with no time component, so a caller passing the wrong shape
+ * degrades to `formatDate`'s answer rather than to a fake midnight.
+ */
+export function formatDateTime(value: string | null | undefined): string {
+  if (!value) return "—";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return formatDate(value);
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 /** Whole days since an ISO timestamp — for "N days in stage". Null when unknown, never a fake 0. */
 export function daysSince(iso: string | null | undefined, now: number = Date.now()): number | null {
   if (!iso) return null;
@@ -55,4 +80,80 @@ export function daysSince(iso: string | null | undefined, now: number = Date.now
 export function formatLocation(city: string | null | undefined, state: string | null | undefined): string {
   const parts = [city?.trim(), state?.trim()].filter(Boolean);
   return parts.length ? parts.join(", ") : "";
+}
+
+/**
+ * A full postal address on ONE line — the thing a rep actually needs to drive to.
+ *
+ * `formatLocation` answers "roughly where"; a company row rendered only that, so a record with a
+ * street address and no city read "—" while the server was returning the street the whole time
+ * (`getTableColumns(companies)` includes `address` and `zip`). Withholding the exact location from a
+ * field app is the failure this fixes.
+ *
+ * Written as street / locality / ZIP so the ZIP hangs off the city-state pair the way a mailing label
+ * does — "1200 Main St, Dallas, TX 75201" — and every piece is optional, because in this data most of
+ * them frequently are. Returns "" rather than a lonely separator when nothing is on file, so a caller
+ * can fall back to its own placeholder.
+ */
+export function formatPostalAddress(
+  address: string | null | undefined,
+  city: string | null | undefined,
+  state: string | null | undefined,
+  zip: string | null | undefined
+): string {
+  const locality = [formatLocation(city, state), zip?.trim()].filter(Boolean).join(" ");
+  return [address?.trim(), locality].filter(Boolean).join(", ");
+}
+
+/**
+ * A database enum token, as a person would read it.
+ *
+ * These reach the app raw — `property_manager`, `general_contractor`, `mixed_use` — and every screen
+ * that rendered one published the column value. The uppercase card style made it worse, turning
+ * `property_manager` into "PROPERTY_MANAGER", and because those labels are also the accessible name,
+ * VoiceOver read the underscore out.
+ *
+ * Mirrors `client/src/lib/display-format.ts`'s `formatEnumLabel` rather than inventing a second rule,
+ * because a category has to read the same on the phone as it does on the web — mobile-crm sits outside
+ * the npm workspace and cannot import it. Kept to the parts that apply here: separator splitting and
+ * the single-word capital. The web's date and boolean special cases have no enum call site on mobile.
+ *
+ * Unknown values pass through unchanged. A token the server adds tomorrow should render as itself
+ * rather than vanish — a missing category reads as "we have no category", which would be a lie.
+ */
+export function formatEnumLabel(value: string | null | undefined): string {
+  const trimmed = value?.trim();
+  if (!trimmed) return "";
+  if (/[_-]/.test(trimmed)) {
+    return trimmed
+      .split(/[_-]+/)
+      .filter(Boolean)
+      .map((token) => token.charAt(0).toUpperCase() + token.slice(1).toLowerCase())
+      .join(" ");
+  }
+  if (/^[a-z][a-z0-9]*$/.test(trimmed)) {
+    return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
+  }
+  return trimmed;
+}
+
+/**
+ * A `time` column — "09:00:00" — as a clock reading.
+ *
+ * `tasks.due_time` is stored separately from `due_date`, so a task due at 9am and one due at 3pm shared
+ * a row until this existed. It is a wall-clock time with no date and no zone: parsing it through `Date`
+ * would attach today's date and the device's offset, which is how a 9:00 task starts displaying as 8:00
+ * for half the year. Formatted arithmetically instead, so it says exactly what the column says.
+ *
+ * Returns "" for anything it cannot read, so a caller composing a metadata line just omits it.
+ */
+export function formatTimeOfDay(value: string | null | undefined): string {
+  const match = /^(\d{1,2}):(\d{2})(?::\d{2})?/.exec(value?.trim() ?? "");
+  if (!match) return "";
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (hours > 23 || minutes > 59) return "";
+  const suffix = hours < 12 ? "AM" : "PM";
+  const hour12 = hours % 12 === 0 ? 12 : hours % 12;
+  return `${hour12}:${String(minutes).padStart(2, "0")} ${suffix}`;
 }

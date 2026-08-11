@@ -37,7 +37,17 @@ vi.mock("../../src/db.js", () => ({
   },
 }));
 
+// The job resolves each server module dist-FIRST with a src fallback (importFirstAvailable in
+// src/jobs/estimate-generation.ts). A mock bound only to the dist specifier silently no-ops whenever the
+// src branch is taken: the real module loads and the spies record ZERO calls — exactly the
+// "buildPricingRecommendationMock receives 0 calls" symptom reported on #988. Each mock below is
+// therefore registered against BOTH specifiers, so the suite no longer depends on whether server/dist
+// happens to exist (it differs between a fresh clone, a post-`npm run build` tree, and a CI sandbox).
 vi.mock("../../../server/dist/modules/estimating/catalog-read-model-service.js", () => ({
+  listCatalogCandidatesForMatching: listCatalogCandidatesForMatchingMock,
+  resolveActiveCatalogSnapshotVersionId: resolveActiveCatalogSnapshotVersionIdMock,
+}));
+vi.mock("../../../server/src/modules/estimating/catalog-read-model-service.js", () => ({
   listCatalogCandidatesForMatching: listCatalogCandidatesForMatchingMock,
   resolveActiveCatalogSnapshotVersionId: resolveActiveCatalogSnapshotVersionIdMock,
 }));
@@ -45,20 +55,35 @@ vi.mock("../../../server/dist/modules/estimating/catalog-read-model-service.js",
 vi.mock("../../../server/dist/modules/estimating/historical-pricing-service.js", () => ({
   getHistoricalPricingSignals: getHistoricalPricingSignalsMock,
 }));
+vi.mock("../../../server/src/modules/estimating/historical-pricing-service.js", () => ({
+  getHistoricalPricingSignals: getHistoricalPricingSignalsMock,
+}));
 
 vi.mock("../../../server/dist/modules/estimating/market-rate-provider.js", () => ({
+  createMarketRateProvider: createMarketRateProviderMock,
+}));
+vi.mock("../../../server/src/modules/estimating/market-rate-provider.js", () => ({
   createMarketRateProvider: createMarketRateProviderMock,
 }));
 
 vi.mock("../../../server/dist/modules/estimating/market-resolution-service.js", () => ({
   resolveMarketContext: resolveMarketContextMock,
 }));
+vi.mock("../../../server/src/modules/estimating/market-resolution-service.js", () => ({
+  resolveMarketContext: resolveMarketContextMock,
+}));
 
 vi.mock("../../../server/dist/modules/estimating/market-rate-service.js", () => ({
   calculateMarketRateAdjustment: calculateMarketRateAdjustmentMock,
 }));
+vi.mock("../../../server/src/modules/estimating/market-rate-service.js", () => ({
+  calculateMarketRateAdjustment: calculateMarketRateAdjustmentMock,
+}));
 
 vi.mock("../../../server/dist/modules/estimating/matching-service.js", () => ({
+  rankExtractionMatches: rankExtractionMatchesMock,
+}));
+vi.mock("../../../server/src/modules/estimating/matching-service.js", () => ({
   rankExtractionMatches: rankExtractionMatchesMock,
 }));
 
@@ -72,8 +97,21 @@ vi.mock("../../../server/dist/modules/estimating/pricing-service.js", async (imp
     isConfirmedMeasurementCandidateForPricing: isConfirmedMeasurementCandidateForPricingMock,
   };
 });
+vi.mock("../../../server/src/modules/estimating/pricing-service.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../server/src/modules/estimating/pricing-service.js")>();
+  return {
+    ...actual,
+    buildPricingRecommendation: buildPricingRecommendationMock,
+    applyMarketRateAdjustment: applyMarketRateAdjustmentMock,
+    isInferredRecommendationRowEligible: isInferredRecommendationRowEligibleMock,
+    isConfirmedMeasurementCandidateForPricing: isConfirmedMeasurementCandidateForPricingMock,
+  };
+});
 
 vi.mock("../../../server/dist/modules/estimating/draft-estimate-service.js", () => ({
+  cloneManualRowsForGenerationRun: cloneManualRowsForGenerationRunMock,
+}));
+vi.mock("../../../server/src/modules/estimating/draft-estimate-service.js", () => ({
   cloneManualRowsForGenerationRun: cloneManualRowsForGenerationRunMock,
 }));
 

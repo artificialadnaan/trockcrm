@@ -36,7 +36,7 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE TABLE public.region_config (id uuid PRIMARY KEY, name varchar(100) NOT NULL);
     CREATE TABLE public.pipeline_stage_config (id uuid PRIMARY KEY, slug text, is_terminal boolean NOT NULL DEFAULT false);
-    CREATE TABLE deals (id uuid PRIMARY KEY, name text, region_id uuid, project_number text, stage_id uuid, bid_board_stage_slug text, is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false);
+    CREATE TABLE deals (id uuid PRIMARY KEY, name text, is_change_order boolean NOT NULL DEFAULT false, region_id uuid, project_number text, stage_id uuid, bid_board_stage_slug text, is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false);
     SET search_path TO public;
   `);
   await pg.exec(tenantSchemaSql("public", [fieldScorecards]));
@@ -59,16 +59,18 @@ beforeAll(async () => {
   tdb = drizzle(pg);
 
   await tdb.insert(fieldScorecards).values([
-    { id: SC1, clientSubmissionId: "66666666-6666-6666-6666-000000000001", dealId: DEAL_D, weekOf: "2026-06-30", projectNumber: "DFW-10432", superintendentName: "Sam Reyes", totalScore: 82, rating: "needs_improvement", criticalDeficiencies: ["failed_inspection"], submittedBy: USER, submittedByName: "Sam Reyes", pdfR2Key: "k/sc1.pdf", submittedAt: new Date("2026-06-30T18:00:00Z") },
-    { id: SC2, clientSubmissionId: "66666666-6666-6666-6666-000000000002", dealId: DEAL_D, weekOf: "2026-06-23", projectNumber: "DFW-10432", superintendentName: "Sam Reyes", totalScore: 95, rating: "elite", submittedBy: USER, submittedByName: "Sam Reyes", pdfR2Key: null, submittedAt: new Date("2026-06-23T18:00:00Z") },
-    { id: SC3, clientSubmissionId: "66666666-6666-6666-6666-000000000003", dealId: DEAL_A, weekOf: "2026-06-30", projectNumber: "ATL-2207", superintendentName: "Dana Cole", totalScore: 71, rating: "corrective_action", criticalDeficiencies: ["a", "b"], submittedBy: USER, submittedByName: "Dana Cole", pdfR2Key: "k/sc3.pdf", submittedAt: new Date("2026-06-29T18:00:00Z") },
-    { id: SC_OLD, clientSubmissionId: "66666666-6666-6666-6666-000000000004", dealId: DEAL_A, weekOf: "2026-05-01", projectNumber: "ATL-2207", superintendentName: "Dana Cole", totalScore: 60, rating: "corrective_action", submittedBy: USER, submittedByName: "Dana Cole", submittedAt: new Date("2026-05-01T18:00:00Z") },
+    { id: SC1, clientSubmissionId: "66666666-6666-6666-6666-000000000001", dealId: DEAL_D, weekOf: "2026-06-30", projectNumber: "DFW-10432", superintendentName: "Sam Reyes", pmName: "Priya Shah", totalScore: 82, rating: "needs_improvement", criticalDeficiencies: ["failed_inspection"], submittedBy: USER, submittedByName: "Sam Reyes", pdfR2Key: "k/sc1.pdf", submittedAt: new Date("2026-06-30T18:00:00Z") },
+    { id: SC2, clientSubmissionId: "66666666-6666-6666-6666-000000000002", dealId: DEAL_D, weekOf: "2026-06-23", projectNumber: "DFW-10432", superintendentName: "Sam Reyes", pmName: "Priya Shah", totalScore: 95, rating: "elite", submittedBy: USER, submittedByName: "Sam Reyes", pdfR2Key: null, submittedAt: new Date("2026-06-23T18:00:00Z") },
+    { id: SC3, clientSubmissionId: "66666666-6666-6666-6666-000000000003", dealId: DEAL_A, weekOf: "2026-06-30", projectNumber: "ATL-2207", superintendentName: "Dana Cole", pmName: "Miguel Ortiz", totalScore: 71, rating: "corrective_action", criticalDeficiencies: ["a", "b"], submittedBy: USER, submittedByName: "Dana Cole", pdfR2Key: "k/sc3.pdf", submittedAt: new Date("2026-06-29T18:00:00Z") },
+    { id: SC_OLD, clientSubmissionId: "66666666-6666-6666-6666-000000000004", dealId: DEAL_A, weekOf: "2026-05-01", projectNumber: "ATL-2207", superintendentName: "Dana Cole", pmName: "Out Of Window PM", totalScore: 60, rating: "corrective_action", submittedBy: USER, submittedByName: "Dana Cole", submittedAt: new Date("2026-05-01T18:00:00Z") },
     { id: SC_LOST, clientSubmissionId: "66666666-6666-6666-6666-000000000005", dealId: DEAL_LOST, weekOf: "2026-06-30", projectNumber: "DFW-9999", superintendentName: "Sam Reyes", totalScore: 50, rating: "corrective_action", submittedBy: USER, submittedByName: "Sam Reyes", submittedAt: new Date("2026-06-30T18:00:00Z") },
     { id: SC_ARCHIVED, clientSubmissionId: "66666666-6666-6666-6666-000000000006", dealId: DEAL_ARCHIVED, weekOf: "2026-06-30", projectNumber: "DFW-8888", superintendentName: "Sam Reyes", totalScore: 88, rating: "on_standard", submittedBy: USER, submittedByName: "Sam Reyes", submittedAt: new Date("2026-06-30T18:00:00Z") },
     { id: SC_BB_LOST, clientSubmissionId: "66666666-6666-6666-6666-000000000007", dealId: DEAL_BB_LOST, weekOf: "2026-06-30", projectNumber: "DFW-7777", superintendentName: "Sam Reyes", totalScore: 65, rating: "corrective_action", submittedBy: USER, submittedByName: "Sam Reyes", submittedAt: new Date("2026-06-30T18:00:00Z") },
-    { id: SC_TEST, clientSubmissionId: "66666666-6666-6666-6666-000000000008", dealId: DEAL_TEST, weekOf: "2026-06-30", projectNumber: "DFW-0000", superintendentName: "Demo Tester", totalScore: 99, rating: "elite", submittedBy: USER, submittedByName: "Demo Tester", submittedAt: new Date("2026-06-30T18:00:00Z") },
+    { id: SC_TEST, clientSubmissionId: "66666666-6666-6666-6666-000000000008", dealId: DEAL_TEST, weekOf: "2026-06-30", projectNumber: "DFW-0000", superintendentName: "Demo Tester", pmName: "Demo PM", totalScore: 99, rating: "elite", submittedBy: USER, submittedByName: "Demo Tester", submittedAt: new Date("2026-06-30T18:00:00Z") },
     // Leadership and project cards intentionally share the QC report page. The explicit V2 average proves
     // the report contract carries the authoritative /10 score instead of relying on totalScore fallback.
+    // pmName is deliberately LEFT NULL: the PM field is optional on the form, so the option list must skip
+    // the null rather than surface a blank, unselectable dropdown entry.
     { id: SC_LEADERSHIP, clientSubmissionId: "66666666-6666-6666-6666-000000000009", dealId: DEAL_D, weekOf: "2026-06-30", projectNumber: "DFW-10432", superintendentName: "Leah Solo", totalScore: 90, formVersion: 2, averageScore: "9.0", rating: "elite", kind: "leadership", submittedBy: USER, submittedByName: "Lena Lead", submittedAt: new Date("2026-06-30T19:00:00Z") },
   ]);
 });
@@ -109,6 +111,7 @@ describe("getQcScorecardsReport", () => {
     // DEAL_TEST is active + live-staged but is_test_data — the reports guard keeps it out of rows AND options.
     expect(ids).not.toContain(SC_TEST);
     expect(res.superintendents).not.toContain("Demo Tester");
+    expect(res.projectManagers).not.toContain("Demo PM");
   });
 
   it("includes leadership cards and their filter options on the same QC report", async () => {
@@ -147,6 +150,35 @@ describe("getQcScorecardsReport", () => {
     // contains-ILIKE would have returned Sam Reyes' cards here.
     const partial = await getQcScorecardsReport(tdb, { ...JUNE, superintendent: "Sam" });
     expect(partial.scorecards).toEqual([]);
+  });
+
+  it("carries pmName on every row and filters project manager by EXACT name", async () => {
+    const all = await getQcScorecardsReport(tdb, JUNE);
+    const byId = new Map(all.scorecards.map((s) => [s.scorecardId, s]));
+    expect(byId.get(SC1)?.pmName).toBe("Priya Shah");
+    expect(byId.get(SC3)?.pmName).toBe("Miguel Ortiz");
+    // The optional field serializes as null, not undefined or "" — the column renders an em-dash off this.
+    expect(byId.get(SC_LEADERSHIP)?.pmName).toBeNull();
+
+    const exact = await getQcScorecardsReport(tdb, { ...JUNE, projectManager: "Priya Shah" });
+    expect(exact.scorecards.map((s) => s.scorecardId).sort()).toEqual([SC1, SC2].sort());
+    // Same exact-match contract as the superintendent filter: the dropdown only supplies verbatim names.
+    const partial = await getQcScorecardsReport(tdb, { ...JUNE, projectManager: "Priya" });
+    expect(partial.scorecards).toEqual([]);
+  });
+
+  it("returns window-wide project-manager options, excluding nulls and out-of-window cards", async () => {
+    // Filtered to Dallas, but the option list stays window-wide so selecting one filter never empties
+    // another's dropdown — the same contract region/superintendent are held to.
+    const res = await getQcScorecardsReport(tdb, { ...JUNE, region: "Dallas" });
+    expect(res.projectManagers).toEqual(["Miguel Ortiz", "Priya Shah"]);
+    // SC_OLD is outside [from, to]; its PM must not appear even though the card exists.
+    expect(res.projectManagers).not.toContain("Out Of Window PM");
+  });
+
+  it("searches project manager alongside project name / number / superintendent", async () => {
+    expect((await getQcScorecardsReport(tdb, { ...JUNE, search: "Miguel" })).scorecards.map((s) => s.scorecardId)).toEqual([SC3]);
+    expect((await getQcScorecardsReport(tdb, { ...JUNE, search: "Priya" })).scorecards.map((s) => s.scorecardId)).toEqual([SC1, SC2]);
   });
 
   it("filters by rating", async () => {
@@ -194,5 +226,33 @@ describe("getQcScorecardsReport — corrective-action status", () => {
   it("narrows to closed corrective-action cards with correctiveActionStatus=closed", async () => {
     const { scorecards } = await getQcScorecardsReport(tdb, { ...JUNE, correctiveActionStatus: "closed" });
     expect(scorecards.map((s) => s.scorecardId)).toEqual([SC1]);
+  });
+
+  it("narrows to the APPROVER's queue with correctiveActionStatus=awaiting_approval", async () => {
+    // corrective_action_submitted is neither open nor closed. Without its own bucket a card in the
+    // approver's queue would be invisible on every filter, and the dashboard's counts would not add up.
+    await tdb.execute(sql`UPDATE field_scorecards SET status = 'corrective_action_submitted' WHERE id = ${SC3}`);
+    try {
+      const awaiting = await getQcScorecardsReport(tdb, { ...JUNE, correctiveActionStatus: "awaiting_approval" });
+      expect(awaiting.scorecards.map((s) => s.scorecardId)).toEqual([SC3]);
+
+      // ...and it is NOT double-counted in either neighbouring bucket.
+      const open = await getQcScorecardsReport(tdb, { ...JUNE, correctiveActionStatus: "open" });
+      expect(open.scorecards.map((s) => s.scorecardId)).toEqual([]);
+      const closed = await getQcScorecardsReport(tdb, { ...JUNE, correctiveActionStatus: "closed" });
+      expect(closed.scorecards.map((s) => s.scorecardId)).toEqual([SC1]);
+    } finally {
+      await tdb.execute(sql`UPDATE field_scorecards SET status = 'corrective_action_open' WHERE id = ${SC3}`);
+    }
+  });
+
+  it("surfaces the awaiting-approval status on the row, so the table pill can render it", async () => {
+    await tdb.execute(sql`UPDATE field_scorecards SET status = 'corrective_action_submitted' WHERE id = ${SC3}`);
+    try {
+      const { scorecards } = await getQcScorecardsReport(tdb, JUNE);
+      expect(scorecards.find((s) => s.scorecardId === SC3)!.status).toBe("corrective_action_submitted");
+    } finally {
+      await tdb.execute(sql`UPDATE field_scorecards SET status = 'corrective_action_open' WHERE id = ${SC3}`);
+    }
   });
 });

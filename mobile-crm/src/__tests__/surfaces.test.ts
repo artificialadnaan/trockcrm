@@ -1,4 +1,4 @@
-import { accessibleSurfaces, canAccessSurface, hasAnyCrmSurface } from "../auth/surfaces";
+import { CRM_SURFACES, accessibleSurfaces, canAccessSurface, hasAnyCrmSurface } from "../auth/surfaces";
 
 /**
  * The CRM surface policy, mirroring client/src/components/layout/sidebar.tsx:65-71.
@@ -11,7 +11,19 @@ import { accessibleSurfaces, canAccessSurface, hasAnyCrmSurface } from "../auth/
  */
 describe("CRM surface policy", () => {
   it.each(["admin", "director", "rep"])("grants %s every current surface", (role) => {
-    expect(accessibleSurfaces(role)).toEqual(["deals", "contacts", "companies"]);
+    // Exact list, in SURFACE_ROLES order — the point is that adding a surface is a deliberate act that
+    // has to be acknowledged here, not something that quietly widens what a role can reach.
+    // "reports" acknowledged deliberately: sidebar.tsx:82 gives Reports to all three CRM roles, and
+    // /reports/monday-showcase — the only report this app shows — is `requireAnyRole` on the server.
+    // Most of that module is requireDirector, so widening past this one report means reading the ROUTE.
+    expect(accessibleSurfaces(role)).toEqual([
+      "deals",
+      "leads",
+      "contacts",
+      "companies",
+      "properties",
+      "reports",
+    ]);
     expect(hasAnyCrmSurface(role)).toBe(true);
   });
 
@@ -22,7 +34,10 @@ describe("CRM surface policy", () => {
     expect(hasAnyCrmSurface("construction")).toBe(false);
   });
 
-  it.each(["contacts", "deals", "companies"] as const)("refuses construction the %s surface", (surface) => {
+  // DERIVED from CRM_SURFACES, not hand-listed. The hand-written version was missing `leads` — the one
+  // surface added since it was written, which is exactly how a per-item list goes quietly incomplete
+  // while still passing. A refusal list that does not enumerate itself protects only what it remembers.
+  it.each(CRM_SURFACES)("refuses construction the %s surface", (surface) => {
     expect(canAccessSurface("construction", surface)).toBe(false);
   });
 

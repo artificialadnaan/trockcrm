@@ -2355,11 +2355,347 @@ describe("DealListPage", () => {
 
     const html = renderPage("/deals?scope=all&filter=at_risk", "director");
 
-    expect(html).toMatch(/At risk.*>1<.*Over SLA/);
+    // The At Risk card headline must keep the pre-split number. The one at-risk deal here is
+    // workflowRoute "normal", so the Service sub-link reads 0 and Non-service reads 1.
+    expect(readKpiCard(html, "View at-risk deals").count).toBe(1);
+    expect(readKpiCard(html, "View service at-risk deals").count).toBe(0);
+    expect(readKpiCard(html, "View non-service at-risk deals").count).toBe(1);
+    expect(html).toMatch(/Over SLA/);
     expect(html).toMatch(/Filtered results.*>1</);
     expect(html).toContain("Active Engine At Risk Deal");
     expect(html).not.toContain("Held Paused Deal");
     expect(html).not.toContain("Old But Engine Safe Deal");
+  });
+
+  // -------------------------------------------------------------------------------------------------
+  // The At-Risk card split by workflow route (Service / Non-service / All).
+  //
+  // These are the END-TO-END half of the reconciliation constraint: the runtime suite proves the pure
+  // helpers partition correctly, and these prove the PAGE wires each card's number to the very link that
+  // reproduces it — by rendering the card, following its own href, and comparing "Filtered results".
+  // -------------------------------------------------------------------------------------------------
+
+  /** A board with both routes at risk in the same stage, plus a route-less deal and non-at-risk noise. */
+  function mockRouteMixedAtRiskBoard() {
+    const atRisk = () => makeAtRiskResult();
+    mocks.useDealBoardMock.mockReturnValue({
+      board: {
+        columns: [
+          {
+            stage: { id: "stage-contract", name: "Contract", slug: "contract" },
+            count: 5,
+            totalValue: 500000,
+            cards: [
+              makeDeal({ id: "svc-1", name: "Service Risk One", stageId: "stage-contract",
+                workflowRoute: "service", bidEstimate: "100000", atRisk: atRisk() }),
+              makeDeal({ id: "svc-2", name: "Service Risk Two", stageId: "stage-contract",
+                workflowRoute: "service", bidEstimate: "60000", atRisk: atRisk() }),
+              makeDeal({ id: "nrm-1", name: "Normal Risk One", stageId: "stage-contract",
+                workflowRoute: "normal", bidEstimate: "80000", atRisk: atRisk() }),
+              // No workflowRoute on the wire at all — must be counted as NON-SERVICE, never dropped.
+              makeDeal({ id: "none-1", name: "Routeless Risk", stageId: "stage-contract",
+                workflowRoute: undefined, bidEstimate: "20000", atRisk: atRisk() }),
+              // On-track service deal: the route split must not let it into any at-risk bucket.
+              makeDeal({ id: "svc-ok", name: "Service On Track", stageId: "stage-contract",
+                workflowRoute: "service", bidEstimate: "900000",
+                atRisk: makeAtRiskResult({ isAtRisk: false, status: "not_at_risk", severity: "none", reason: "within_sla" }) }),
+            ],
+          },
+        ],
+        terminalStages: [],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+  }
+
+  /**
+   * The At Risk card is ONE card with three sibling links: a stretched overlay for All plus a
+   * Service / Non-service sub-link pair. So a cohort's href always comes from its own anchor
+   * (by accessible name), while its count comes from the headline for All and from inside the
+   * sub-link's own text for the two routes — i.e. still read per cohort, never shared.
+   */
+  const AT_RISK_ARIA_LABELS = {
+    service: "View service at-risk deals",
+    non_service: "View non-service at-risk deals",
+    all: "View at-risk deals",
+  } as const;
+
+  /** The anchor for one cohort: its href and its inner markup, located by accessible name. */
+  function readAtRiskAnchor(html: string, bucket: keyof typeof AT_RISK_ARIA_LABELS) {
+    const label = AT_RISK_ARIA_LABELS[bucket];
+    const match = new RegExp(`<a aria-label="${label}"[^>]*?href="([^"]+)"[^>]*>([\\s\\S]*?)</a>`).exec(html);
+    if (!match) throw new Error(`at-risk link "${label}" not found in markup`);
+    return { href: match[1].replace(/&amp;/g, "&"), inner: match[2] };
+  }
+
+  /** A cohort's href + the number the card actually shows for it. */
+  function readKpiCard(html: string, ariaLabelOrBucket: string) {
+    const bucket = (Object.keys(AT_RISK_ARIA_LABELS) as (keyof typeof AT_RISK_ARIA_LABELS)[]).find(
+      (key) => AT_RISK_ARIA_LABELS[key] === ariaLabelOrBucket
+    );
+    if (!bucket) {
+      // A non-at-risk KPI card (Active Pipeline / Won) — still one anchor wrapping its own value.
+      const match = new RegExp(
+        `<a aria-label="${ariaLabelOrBucket}" class="block" href="([^"]+)"[\\s\\S]*?text-4xl[^>]*>(\\d+)<`
+      ).exec(html);
+      if (!match) throw new Error(`KPI card "${ariaLabelOrBucket}" not found in markup`);
+      return { href: match[1].replace(/&amp;/g, "&"), count: Number(match[2]) };
+    }
+    const { href, inner } = readAtRiskAnchor(html, bucket);
+    if (bucket === "all") {
+      // The All count is the card headline, not link text (the overlay anchor is empty by design).
+      const total = /data-testid="at-risk-total"[^>]*>(\d+)</.exec(html);
+      if (!total) throw new Error("at-risk headline total not found in markup");
+      return { href, count: Number(total[1]) };
+    }
+    const digits = /(\d+)/.exec(inner.replace(/<[^>]*>/g, " "));
+    if (!digits) throw new Error(`no count rendered inside the "${bucket}" sub-link`);
+    return { href, count: Number(digits[1]) };
+  }
+
+  function readFilteredResults(html: string) {
+    const match = /Filtered results<\/p><p[^>]*>(\d+)</.exec(html);
+    if (!match) throw new Error("drill-down 'Filtered results' total not found in markup");
+    return Number(match[1]);
+  }
+
+  it("splits the At Risk card into Service / Non-service / All, and the two route cards sum to All", () => {
+    mockRouteMixedAtRiskBoard();
+    const html = renderPage("/deals?scope=all", "director");
+
+    const service = readKpiCard(html, "View service at-risk deals");
+    const nonService = readKpiCard(html, "View non-service at-risk deals");
+    const all = readKpiCard(html, "View at-risk deals");
+
+    expect(service.count).toBe(2); // svc-1, svc-2
+    expect(nonService.count).toBe(2); // nrm-1 + the ROUTE-LESS none-1
+    expect(all.count).toBe(4);
+    expect(service.count + nonService.count).toBe(all.count);
+    // The on-track service deal never enters any bucket — the split narrows the at-risk cohort, it does
+    // not redefine it.
+    expect(all.count).not.toBe(5);
+  });
+
+  it("gives each At-Risk card a link that reproduces ITS OWN number (card count === drill-down rows)", () => {
+    mockRouteMixedAtRiskBoard();
+    const base = renderPage("/deals?scope=all", "director");
+
+    for (const ariaLabel of [
+      "View service at-risk deals",
+      "View non-service at-risk deals",
+      "View at-risk deals",
+    ]) {
+      const card = readKpiCard(base, ariaLabel);
+      // Follow the card's OWN href — not a hand-written path — so a wrong ?filter on the card is caught.
+      mockRouteMixedAtRiskBoard();
+      const drilldown = renderPage(card.href, "director");
+      expect(readFilteredResults(drilldown)).toBe(card.count);
+    }
+  });
+
+  it("shows only the matching route's deals on each route drill-down", () => {
+    mockRouteMixedAtRiskBoard();
+    const service = renderPage("/deals?scope=all&filter=at_risk_service", "director");
+    expect(service).toContain("Service Deals At Risk");
+    expect(service).toContain("Service Risk One");
+    expect(service).toContain("Service Risk Two");
+    expect(service).not.toContain("Normal Risk One");
+    expect(service).not.toContain("Routeless Risk");
+    expect(service).not.toContain("Service On Track");
+
+    mockRouteMixedAtRiskBoard();
+    const nonService = renderPage("/deals?scope=all&filter=at_risk_non_service", "director");
+    expect(nonService).toContain("Non-service Deals At Risk");
+    expect(nonService).toContain("Normal Risk One");
+    expect(nonService).toContain("Routeless Risk"); // the route-less deal lands HERE
+    expect(nonService).not.toContain("Service Risk One");
+  });
+
+  it("keeps the three cards summing to All even while standing ON a route drill-down", () => {
+    // The KPI counters deliberately ignore the view's own route narrowing. If they did not, the
+    // Non-service card would read 0 on the service drill-down while still linking to a page with rows —
+    // the exact card/list divergence this feature must not introduce.
+    mockRouteMixedAtRiskBoard();
+    const html = renderPage("/deals?scope=all&filter=at_risk_service", "director");
+    const service = readKpiCard(html, "View service at-risk deals");
+    const nonService = readKpiCard(html, "View non-service at-risk deals");
+    const all = readKpiCard(html, "View at-risk deals");
+
+    expect(all.count).toBe(4); // unchanged from the base view — All is always the whole cohort
+    expect(service.count + nonService.count).toBe(all.count);
+    expect(nonService.count).toBe(2); // NOT zeroed by the service view it is rendered on
+  });
+
+  it("keeps ?period a no-op on all three at-risk drill-downs (current-state views)", () => {
+    // The route split changes WHICH deals are shown, never the date axis: an SLA surface windowed by
+    // updated_at would hide the stalest (= most at-risk) deals. So no at-risk link ever carries ?period.
+    expect(
+      buildDealsPageKpiDrilldownPath("at_risk_service", "all", null, {
+        queryParams: new URLSearchParams("assignedRepId=rep-1&period=last_month"),
+      })
+    ).toBe("/deals?filter=at_risk_service&scope=all&assignedRepId=rep-1");
+    expect(
+      buildDealsPageKpiDrilldownPath("at_risk_non_service", "mine", null, {
+        queryParams: new URLSearchParams("period=mtd"),
+      })
+    ).toBe("/deals?filter=at_risk_non_service&scope=mine");
+
+    mockRouteMixedAtRiskBoard();
+    const html = renderPage("/deals?scope=all&period=last_month", "director");
+    for (const ariaLabel of [
+      "View service at-risk deals",
+      "View non-service at-risk deals",
+      "View at-risk deals",
+    ]) {
+      expect(readKpiCard(html, ariaLabel).href).not.toContain("period=");
+    }
+  });
+
+  it("renders the three at-risk destinations as SIBLING anchors — never nested <a> elements", () => {
+    mockRouteMixedAtRiskBoard();
+    const html = renderPage("/deals?scope=all", "director");
+
+    // Walk the markup and require the anchor depth to never exceed 1. A nested <a> is invalid HTML and
+    // breaks both keyboard navigation and screen readers, which is the failure mode this guards.
+    let depth = 0;
+    let maxDepth = 0;
+    for (const token of html.match(/<a\s|<\/a>/g) ?? []) {
+      if (token === "</a>") depth -= 1;
+      else {
+        depth += 1;
+        maxDepth = Math.max(maxDepth, depth);
+      }
+    }
+    expect(maxDepth).toBe(1);
+    expect(depth).toBe(0); // balanced
+
+    // All three cohorts are still reachable as their own anchors, in reading order All -> Service ->
+    // Non-service (tab order follows DOM order, and the All overlay is emitted first).
+    const order = [...html.matchAll(/<a aria-label="(View (?:service |non-service )?at-risk deals)"/g)].map(
+      (m) => m[1]
+    );
+    expect(order).toEqual([
+      "View at-risk deals",
+      "View service at-risk deals",
+      "View non-service at-risk deals",
+    ]);
+  });
+
+  it("keeps a visible focus ring on the full-card at-risk link despite the card clipping overflow", () => {
+    mockRouteMixedAtRiskBoard();
+    const html = renderPage("/deals?scope=all", "director");
+
+    // The All link is `absolute inset-0`, so its box IS the card's box, and the card is
+    // `overflow-hidden`. A default (outset) ring paints outside that box and is clipped away entirely;
+    // with `focus:outline-none` also removing the browser fallback, a keyboard user tabbing to the first
+    // at-risk link would land on it with NO visible focus state. `ring-inset` draws inside the box, which
+    // is the only reason the indicator survives the clip.
+    const overlay = /<a aria-label="View at-risk deals"[^>]*class="([^"]*)"/.exec(html);
+    expect(overlay).not.toBeNull();
+    const overlayClass = overlay![1];
+
+    expect(overlayClass).toContain("absolute inset-0");
+    expect(overlayClass).toContain("focus-visible:ring-2");
+    // The assertion that actually matters: outset would be invisible here.
+    expect(overlayClass).toContain("focus-visible:ring-inset");
+    // And a ring colour must still be applied, or "visible" is only nominally true.
+    expect(overlayClass).toMatch(/focus-visible:ring-(white|brand-red)/);
+  });
+
+  it("gives each at-risk link a distinct accessible name that says WHICH cohort it opens", () => {
+    mockRouteMixedAtRiskBoard();
+    const html = renderPage("/deals?scope=all", "director");
+
+    const names = ["View at-risk deals", "View service at-risk deals", "View non-service at-risk deals"];
+    expect(new Set(names).size).toBe(names.length); // distinct
+    for (const name of names) {
+      expect(html).toContain(`aria-label="${name}"`);
+      // Each name identifies a cohort, not merely a number — a bare "3" would be useless in a
+      // screen-reader link list.
+      expect(name).toMatch(/at-risk deals$/);
+    }
+    // The sub-links still SHOW their cohort in visible text too, not just a naked count.
+    expect(readAtRiskAnchor(html, "service").inner.replace(/<[^>]*>/g, "")).toContain("Service");
+    expect(readAtRiskAnchor(html, "non_service").inner.replace(/<[^>]*>/g, "")).toContain("Non-service");
+  });
+
+  it("shows Service + Non-service adding up to the headline on the face of the one card", () => {
+    mockRouteMixedAtRiskBoard();
+    const html = renderPage("/deals?scope=all", "director");
+
+    const service = readKpiCard(html, "View service at-risk deals");
+    const nonService = readKpiCard(html, "View non-service at-risk deals");
+    const all = readKpiCard(html, "View at-risk deals");
+
+    expect(service.count).toBe(2);
+    expect(nonService.count).toBe(2);
+    expect(all.count).toBe(4);
+    expect(service.count + nonService.count).toBe(all.count);
+    // One card now, not three: exactly one at-risk headline total is rendered.
+    expect(html.match(/data-testid="at-risk-total"/g)).toHaveLength(1);
+    // And the card body still opens the pre-split all-at-risk destination.
+    expect(all.href).toBe("/deals?filter=at_risk&scope=all");
+  });
+
+  it("forwards ?officeId through every KPI drill-down link so a cross-office viewer stays in that office", () => {
+    // api() derives x-office-id from ?officeId in the URL. A card that drops it sends the viewer back to
+    // their ACTIVE office, so the drill-down lists a different office's deals than the card counted.
+    expect(
+      buildDealsPageKpiDrilldownPath("at_risk_service", "all", null, {
+        queryParams: new URLSearchParams("officeId=office-2&assignedRepId=rep-1&period=mtd"),
+      })
+    ).toBe("/deals?filter=at_risk_service&scope=all&officeId=office-2&assignedRepId=rep-1");
+    // Not an at-risk-only concern — the pre-existing cards dropped it too, so assert them as well.
+    expect(
+      buildDealsPageKpiDrilldownPath("at_risk", "all", null, {
+        queryParams: new URLSearchParams("officeId=office-2"),
+      })
+    ).toBe("/deals?filter=at_risk&scope=all&officeId=office-2");
+    expect(
+      buildDealsPageKpiDrilldownPath("won", "all", "mtd", {
+        queryParams: new URLSearchParams("officeId=office-2"),
+      })
+    ).toBe("/deals?filter=won&scope=all&period=mtd&officeId=office-2");
+    expect(
+      buildDealsPageKpiDrilldownPath("active_pipeline", "all", null, {
+        queryParams: new URLSearchParams("officeId=office-2"),
+      })
+    ).toBe("/deals?filter=active_pipeline&scope=all&officeId=office-2");
+    // A same-office viewer has no ?officeId, so their links are unchanged.
+    expect(buildDealsPageKpiDrilldownPath("at_risk", "mine")).toBe("/deals?filter=at_risk&scope=mine");
+  });
+
+  it("renders every at-risk card with an officeId-carrying href on a cross-office view", () => {
+    mockRouteMixedAtRiskBoard();
+    const html = renderPage("/deals?scope=all&officeId=office-2", "director");
+    for (const ariaLabel of [
+      "View service at-risk deals",
+      "View non-service at-risk deals",
+      "View at-risk deals",
+    ]) {
+      expect(readKpiCard(html, ariaLabel).href).toContain("officeId=office-2");
+    }
+  });
+
+  it("resolves the route drill-down views (titles, at-risk board mode, no period window)", () => {
+    const service = getDashboardDealListView({ filterParam: "at_risk_service", periodParam: "mtd" });
+    expect(service.filter).toBe("at_risk_service");
+    expect(service.title).toBe("Service Deals At Risk");
+    expect(service.boardMode).toBe("at_risk");
+    expect(service.listBaseFilters).toEqual({}); // ?period contributes no updated-at window
+    expect(service.subtitle).not.toContain("MTD");
+
+    const nonService = getDashboardDealListView({ filterParam: "at-risk-non-service", periodParam: null });
+    expect(nonService.filter).toBe("at_risk_non_service"); // hyphenated alias normalizes too
+    expect(nonService.title).toBe("Non-service Deals At Risk");
+    expect(nonService.boardMode).toBe("at_risk");
+
+    // The unsplit card's view is untouched.
+    const all = getDashboardDealListView({ filterParam: "at_risk", periodParam: "mtd" });
+    expect(all.title).toBe("Deals At Risk");
+    expect(all.listBaseFilters).toEqual({});
   });
 
   it("sums only non-on-hold deal values for board fallback totals", () => {

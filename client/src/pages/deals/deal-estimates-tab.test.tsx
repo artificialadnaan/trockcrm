@@ -19,6 +19,10 @@ vi.mock("@/lib/api", () => ({
   api: mocks.apiMock,
 }));
 
+vi.mock("@/components/deals/deal-ai-walk-panel", () => ({
+  DealAiWalkPanel: ({ dealId }: { dealId: string }) => <div data-testid="ai-walk-panel">{dealId}</div>,
+}));
+
 vi.mock("sonner", () => ({
   toast: {
     error: mocks.toastErrorMock,
@@ -49,6 +53,48 @@ function makeSection() {
     ],
   };
 }
+
+describe("the AI Walk panel's placement", () => {
+  it("renders inside the ESTIMATES tab, which is where the walk feeds the pricing", async () => {
+    // It used to live in the scoping workspace. Scoping is where PRE-RFP scope is written by hand; what
+    // the glasses heard on site is what an estimator prices FROM, so it belongs beside the line items it
+    // feeds. Asserted here rather than trusted to a manual look, because a panel that renders nothing
+    // when a deal has no walk is invisible when it is misplaced — which is exactly how it went unnoticed.
+    mocks.apiMock.mockResolvedValue({ sections: [] });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<DealEstimatesTab dealId="deal-1" />);
+    });
+
+    const panel = container.querySelector('[data-testid="ai-walk-panel"]');
+    expect(panel).not.toBeNull();
+    expect(panel?.textContent).toBe("deal-1");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("still renders when the ESTIMATES fetch fails, because it is a different endpoint", async () => {
+    // The regression the move itself would have introduced. The panel used to live on the scoping tab;
+    // putting it here behind the estimates error gate meant a broken `/deals/:id/estimates` hid an
+    // otherwise healthy walk, and there was no longer anywhere else to find it.
+    mocks.apiMock.mockRejectedValue(new Error("estimates are down"));
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<DealEstimatesTab dealId="deal-1" />);
+    });
+
+    expect(container.querySelector('[data-testid="ai-walk-panel"]')).not.toBeNull();
+    expect(container.textContent).toContain("Failed to load estimates");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+});
 
 describe("DealEstimatesTab", () => {
   let container: HTMLDivElement;

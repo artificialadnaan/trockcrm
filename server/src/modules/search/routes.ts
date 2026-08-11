@@ -30,12 +30,19 @@ router.get("/", async (req: Request, res: Response) => {
       ? typesParam.split(",").filter((t) => (ALL_SEARCH_TYPES as readonly string[]).includes(t))
       : [...ALL_SEARCH_TYPES]) as SearchType[];
 
+    // `crossOffice=false` confines the search to THIS request's office even for an admin or director.
+    // Opt-in by design: anything that does not send it keeps the role-driven behaviour, so the web
+    // surfaces are unchanged. See the note in globalSearch for why a single-office client needs it —
+    // the per-entity cap is applied after the offices merge, so client-side filtering comes too late.
+    const crossOffice = req.query.crossOffice !== "false";
+
     const results = await globalSearch(
       req.tenantDb!,
       q,
       types,
       req.user?.role,
       req.user?.id,
+      { crossOffice },
     );
     await req.commitTransaction!();
     return res.json(results);

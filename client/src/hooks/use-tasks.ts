@@ -22,6 +22,8 @@ export interface Task {
   createdBy: string | null;
   dealId: string | null;
   dealName?: string | null;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   dealNumber?: string | null;
   projectNumber?: string | null;
   contactId: string | null;

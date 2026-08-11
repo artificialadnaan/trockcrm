@@ -86,6 +86,92 @@ describe("SearchPage — renders the unified entity groups (PR5)", () => {
   });
 });
 
+describe("SearchPage — deal scope title", () => {
+  // scope_title is a SEARCHED field now. A user who typed "Panel Relocation" and got back a row labelled
+  // "Tides at Highland Meadows — Change Order 1" has no way to see WHY it matched — it reads as a wrong
+  // result rather than a right one. So the matched field has to be visible on the row that matched.
+  function renderWithDeals(deals: unknown[]) {
+    mocks.useRecentSearchesMock.mockReturnValue({ recent: [], addRecent: vi.fn(), clearRecent: vi.fn() });
+    mocks.useAiSearchMock.mockReturnValue({ query: "", setQuery: vi.fn(), results: null, loading: false });
+    mocks.useSearchMock.mockReturnValue({
+      query: "panel relocation",
+      setQuery: vi.fn(),
+      loading: false,
+      error: null,
+      results: {
+        deals,
+        companies: [],
+        contacts: [],
+        leads: [],
+        properties: [],
+        files: [],
+        total: deals.length,
+        query: "panel relocation",
+      },
+    });
+    return renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/search?q=panel+relocation"]}>
+        <SearchPage />
+      </MemoryRouter>,
+    );
+  }
+
+  it("shows the scope title on a deal result whose NAME does not contain the match", () => {
+    const html = renderWithDeals([
+      hit("deal", "d1", "Tides at Highland Meadows — Change Order 1", "/deals/d1", {
+        secondaryLabel: "DFW-9-10001-aa",
+        tertiaryLabel: "Dallas, TX",
+        scopeTitle: "Panel Relocation",
+        isChangeOrder: true,
+      }),
+    ]);
+
+    expect(html).toContain("Panel Relocation");
+    // Ordered: deal name, then the scope title, then the number/location meta line. The title sits above
+    // the meta because it is the reason this row is in the results at all.
+    expect(html.indexOf("Tides at Highland Meadows")).toBeLessThan(html.indexOf("Panel Relocation"));
+    expect(html.indexOf("Panel Relocation")).toBeLessThan(html.indexOf("DFW-9-10001-aa"));
+  });
+
+  it("renders nothing extra for a deal with no scope title", () => {
+    const html = renderWithDeals([hit("deal", "d1", "Palm Villas", "/deals/d1", { scopeTitle: null })]);
+
+    expect(html).toContain("Palm Villas");
+    expect(html).not.toContain("Panel Relocation");
+  });
+
+  it("does NOT render a scopeTitle that arrives on a non-deal result", () => {
+    // The card is shared with companies, contacts, leads, properties and FILES; the field is deal-only,
+    // so the render is gated on entityType exactly like the change-order relabel above it.
+    const html = renderWithDeals([]);
+    mocks.useSearchMock.mockReturnValue({
+      query: "panel relocation",
+      setQuery: vi.fn(),
+      loading: false,
+      error: null,
+      results: {
+        deals: [],
+        companies: [hit("company", "c1", "Acme Construction", "/companies/c1", { scopeTitle: "Panel Relocation" })],
+        contacts: [],
+        leads: [],
+        properties: [],
+        files: [],
+        total: 1,
+        query: "panel relocation",
+      },
+    });
+    const companyHtml = renderToStaticMarkup(
+      <MemoryRouter initialEntries={["/search?q=panel+relocation"]}>
+        <SearchPage />
+      </MemoryRouter>,
+    );
+
+    expect(companyHtml).toContain("Acme Construction");
+    expect(companyHtml).not.toContain("Panel Relocation");
+    void html;
+  });
+});
+
 describe("SearchPage — deal amount + rep name", () => {
   it("shows deal amount (compact) and rep name on a deal result card", () => {
     mocks.useRecentSearchesMock.mockReturnValue({ recent: [], addRecent: vi.fn(), clearRecent: vi.fn() });

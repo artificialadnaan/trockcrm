@@ -70,7 +70,7 @@ beforeAll(async () => {
       updated_at timestamptz NOT NULL DEFAULT now()
     );
     CREATE TABLE ${T}.deals (
-      id uuid PRIMARY KEY, sales_source_user_id uuid, name text NOT NULL, deal_number text, project_number text, pipeline_disposition text,
+      id uuid PRIMARY KEY, sales_source_user_id uuid, name text NOT NULL, scope_title text, is_change_order boolean NOT NULL DEFAULT false, deal_number text, project_number text, pipeline_disposition text,
       company_id uuid, property_id uuid, primary_contact_id uuid, stage_id uuid, assigned_rep_id uuid,
       source text, description text, property_address text, property_city text, property_state text,
       bid_board_stage_slug text,
@@ -210,6 +210,55 @@ describe("searchFieldCaptureTargets — UNSCOPED (any rep finds any lead)", () =
       { search: "Cottages at Bedford", limit: 30 }
     );
     expect(ids(targets).has(L_BLANK)).toBe(true);
+  });
+});
+
+/**
+ * The RECOVERY question, against real SQL: every ACTIVE deal, deals-only, narrowed BEFORE any cap.
+ *
+ * `dealsOnly` alone cannot answer it — that flag also carries the field BROWSING rule, which is what
+ * hides the very Lost deal an orphaned walk has to be filed against. Asking without it gets the right
+ * DEALS but pays for them in leads and opportunities, which the cross-office merge then ranks ahead of
+ * every deal under one global cap. `includeTerminalDeals` keeps the deals-only narrowing and drops
+ * only the stage rule, leaving exactly the set assertAccessibleFieldCaptureTarget accepts at filing.
+ */
+describe("searchFieldCaptureTargets — recovery (includeTerminalDeals)", () => {
+  it("returns the LOST deal alongside the browsable one (the filing rule, not the browsing rule)", async () => {
+    const { targets } = await searchFieldCaptureTargets(
+      tdb,
+      { userId: REP_A, userRole: "rep" },
+      { search: "gutter", limit: 30, dealsOnly: true, includeTerminalDeals: true }
+    );
+    const returned = ids(targets);
+    expect(returned.has(D_LOST)).toBe(true); // the walked job — invisible to every other picker
+    expect(returned.has(D_WON)).toBe(true); // and the ordinary ones are not traded away for it
+  });
+
+  it("still returns ONLY deals, so leads/opportunities can't consume the caller's cap", async () => {
+    const { targets } = await searchFieldCaptureTargets(
+      tdb,
+      { userId: REP_A, userRole: "rep" },
+      // "roof" is the flood term: 3 leads, 1 opportunity and 40 deals all match it.
+      { search: "roof", limit: 30, dealsOnly: true, includeTerminalDeals: true }
+    );
+    expect(targets.length).toBeGreaterThan(0);
+    expect(targets.every((t) => t.type === "deal")).toBe(true);
+    const returned = ids(targets);
+    expect(returned.has(L_ROOF1)).toBe(false);
+    expect(returned.has(OPP_ROOF)).toBe(false);
+  });
+
+  it("excludes INACTIVE deals — widening reaches the filing rule and stops there", async () => {
+    await pg.exec(
+      `INSERT INTO ${T}.deals (id, name, deal_number, pipeline_disposition, company_id, stage_id, assigned_rep_id, description, is_active, updated_at) VALUES
+        ('00000000-0000-0000-0000-0000000040a9', 'Gutter Deleted Job', 'D-DEL', 'deal', '${CO}', '${STAGE_LOST}', '${REP_A}', 'deleted gutter', false, now());`
+    );
+    const { targets } = await searchFieldCaptureTargets(
+      tdb,
+      { userId: REP_A, userRole: "rep" },
+      { search: "gutter", limit: 30, dealsOnly: true, includeTerminalDeals: true }
+    );
+    expect(ids(targets).has("00000000-0000-0000-0000-0000000040a9")).toBe(false);
   });
 });
 

@@ -3,6 +3,7 @@ import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import * as schema from "@trock-crm/shared/schema";
+import { formatDealDisplayName } from "@trock-crm/shared/types";
 import { db, pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { getDealPhotoTimeline } from "../files/service.js";
@@ -366,9 +367,14 @@ function publicPhotoAssetUrl(assetBaseUrl: string, rawToken: string, photoId: st
 // non-JPEG rasters are buffered + transcoded, so they're capped at MAX_TRANSCODE_BYTES. An oversized
 // transcodable photo is therefore NOT servable — so the viewer/download advertise nothing (placeholder),
 // matching the asset endpoint's 422, instead of a broken <img>. Unknown/NaN size is treated as
+// The viewer renders exactly ONE page and neither the public route nor the client exposes pagination,
+// so this is the hard ceiling on how many photos a share link can actually surface. Exported so the
+// RFP payload builder collapses only the photos the link can really show (TRK-2607-H3X6).
+export const PUBLIC_VIEWER_PAGE_SIZE = 500;
+
 // within-cap (the asset endpoint's HEAD-gate is the authoritative backstop). HEIC/HEIF (no libheif) and
 // non-rasters are never servable.
-function isPublicProxyServable(
+export function isPublicProxyServable(
   mimeType: string | null | undefined,
   fileExtension: string | null | undefined,
   fileSizeBytes: number | string | null | undefined,
@@ -406,6 +412,7 @@ export async function getPublicPhotoViewer(
       SELECT
         id,
         name,
+        is_change_order,
         NULLIF(CONCAT_WS(', ', NULLIF(property_address, ''), NULLIF(property_city, ''), NULLIF(property_state, ''), NULLIF(property_zip, '')), '') AS property_address
       FROM deals
       WHERE id = ${token.dealId}::uuid
@@ -414,7 +421,7 @@ export async function getPublicPhotoViewer(
     const deal = ((dealResult as any).rows ?? dealResult)[0];
     if (!deal) throw new AppError(404, "Photo link not found");
 
-    const timeline = await getDealPhotoTimeline(tenantDb, token.dealId, 1, 500, {
+    const timeline = await getDealPhotoTimeline(tenantDb, token.dealId, 1, PUBLIC_VIEWER_PAGE_SIZE, {
       ...filters,
       includeDeleted: false,
       // Subset token (non-null photo_ids) -> the viewer lists ONLY those photos; whole-deal token -> all.
@@ -428,7 +435,12 @@ export async function getPublicPhotoViewer(
       // Public exposure lock: property name + address only — no deal id, no token id,
       // no deal number (the deal number is also hidden by the image proxy).
       deal: {
-        name: deal.name,
+        // Formatted HERE, on purpose. The relabel needs `is_change_order` to decide, and this is the one
+        // payload that crosses to an unauthenticated external viewer — so the flag is consumed
+        // server-side and never leaves. Shipping the boolean would have been the smaller change, but it
+        // adds a field to a payload whose whole contract is that it carries two, and "it reveals little"
+        // is the argument every future field will also make. Formatting keeps the lock literally true.
+        name: formatDealDisplayName(deal.name, deal.is_change_order),
         propertyAddress: deal.property_address ?? null,
       },
       photos,

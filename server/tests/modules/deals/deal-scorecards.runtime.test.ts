@@ -19,9 +19,11 @@ import {
   fieldScorecardItems,
   fieldScorecardPhotos,
   scorecardCorrectiveActions,
+  scorecardCorrectiveActionEvents,
 } from "@trock-crm/shared/schema";
 import { sql } from "drizzle-orm";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
+import { CURRENT_SCORECARD_PDF_RENDER_VERSION } from "../../../src/modules/field/scorecard-pdf-artifact.js";
 
 const DEAL = "11111111-1111-1111-1111-111111111111";
 const OTHER_DEAL = "22222222-2222-2222-2222-222222222222";
@@ -32,7 +34,8 @@ const SC_LEADERSHIP = "55555555-5555-5555-5555-000000000004"; // DEAL, kind='lea
 const FILE1 = "aaaaaaaa-0000-0000-0000-000000000001";
 const FILE2 = "aaaaaaaa-0000-0000-0000-000000000002"; // leadership Project Summary photo
 const USER = "33333333-3333-3333-3333-333333333333";
-const CURRENT_PDF_KEY = `office_x/deals/DFW-10432/documents/scorecards/sc1.${"a".repeat(64)}.v2.pdf`;
+// Track the CURRENT renderer revision: a version bump must not require rewriting unrelated assertions.
+const CURRENT_PDF_KEY = `office_x/deals/DFW-10432/documents/scorecards/sc1.${"a".repeat(64)}.v${CURRENT_SCORECARD_PDF_RENDER_VERSION}.pdf`;
 
 let pg: PGlite;
 let tdb: any;
@@ -49,7 +52,7 @@ beforeAll(async () => {
     SET search_path TO public;
   `);
   await pg.exec(
-    tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, scorecardCorrectiveActions]),
+    tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, scorecardCorrectiveActions, scorecardCorrectiveActionEvents]),
   );
   await pg.exec(`INSERT INTO files (id, description) VALUES ('${FILE1}', 'Slab crack'), ('${FILE2}', 'Crew briefing');`);
   tdb = drizzle(pg);
@@ -59,7 +62,11 @@ beforeAll(async () => {
       id: SC_NEWER, clientSubmissionId: "66666666-6666-6666-6666-000000000001", dealId: DEAL, weekOf: "2026-06-30", projectNumber: "DFW-10432",
       totalScore: 82, rating: "needs_improvement", criticalDeficiencies: ["failed_inspection"], actionItems: ["Re-pour slab"],
       submittedBy: USER, submittedByName: "Sam Super", pdfR2Key: CURRENT_PDF_KEY,
-      pdfRenderVersion: 2,
+      pdfRenderVersion: CURRENT_SCORECARD_PDF_RENDER_VERSION,
+      // A CURRENT artifact was rendered from the row's own generation; updatedAt is pinned to match so the
+      // staleness check sees an up-to-date artifact rather than one predating migration 0200.
+      pdfContentGeneration: new Date("2026-06-30T18:00:00Z"),
+      updatedAt: new Date("2026-06-30T18:00:00Z"),
       submittedAt: new Date("2026-06-30T18:00:00Z"),
     },
     {
@@ -147,6 +154,16 @@ describe("getDealScorecardDetail", () => {
     expect(detail.photos).toHaveLength(1);
     expect(detail.photos[0].url).toBe(`url://${FILE1}`);
     expect(detail.photos[0].caption).toBe("Slab crack");
+  });
+
+  it("carries updatedAt — the token an approver's verdict is bound to, whose absence turns the guard OFF", async () => {
+    // A verdict sends back the card generation it was formed against, and the server refuses one that no
+    // longer matches. That check is deliberately SKIPPED when the client sends nothing, so older builds keep
+    // working — which means dropping `updatedAt` from this payload disables the guard everywhere with no
+    // error, no 400, and no failing test anywhere else. Fail-open protections need their input pinned, or
+    // the protection quietly stops existing.
+    const detail = await getDealScorecardDetail(tdb, DEAL, SC_NEWER);
+    expect(detail.updatedAt).toBe("2026-06-30T18:00:00.000Z");
   });
 
   it("404s a scorecard fetched through the WRONG deal (id is scoped by dealId)", async () => {
@@ -266,7 +283,7 @@ describe("corrective-action thread on the detail (spec §9)", () => {
 describe("deal scorecard PDF artifact download", () => {
   it("reports a current artifact and presigns its stored key separately", async () => {
     const state = await getDealScorecardPdfArtifactState(tdb, DEAL, SC_NEWER);
-    expect(state).toMatchObject({ pdfRenderVersion: 2, linkedPhotoCount: 1, needsRegeneration: false });
+    expect(state).toMatchObject({ pdfRenderVersion: CURRENT_SCORECARD_PDF_RENDER_VERSION, linkedPhotoCount: 1, needsRegeneration: false });
     const { url } = await presignDealScorecardPdf(SC_NEWER, state.pdfR2Key!);
     expect(url).toContain(CURRENT_PDF_KEY);
   });
@@ -295,5 +312,71 @@ describe("deal scorecard PDF artifact download", () => {
     } finally {
       await pg.exec(`UPDATE files SET is_active = true, deleted_at = NULL WHERE id = '${FILE1}'`);
     }
+  });
+
+});
+
+describe("deal detail ↔ responder API parity", () => {
+  it("REGRESSION: the deal detail returns the event THREAD, like the responder API does", async () => {
+    // These are TWO implementations of the same view. The deal-detail mapper never queried events at all, so
+    // the approval thread rendered EMPTY on the CRM surface the whole feature exists for, while the responder
+    // API returned it correctly — and every test I had covered the API. A reject/resubmit showed only the
+    // latest response, losing the rejection reason and the approver's attribution.
+    const CARD = "77777777-7777-7777-7777-00000000000e";
+    await tdb.insert(fieldScorecards).values({
+      id: CARD,
+      clientSubmissionId: "66666666-7777-7777-7777-00000000000e",
+      dealId: DEAL,
+      weekOf: "2026-07-27",
+      totalScore: 23,
+      formVersion: 2,
+      rating: "corrective_action",
+      status: "corrective_action_submitted",
+      submittedBy: USER,
+    });
+    const [item] = await tdb
+      .insert(scorecardCorrectiveActions)
+      .values({
+        scorecardId: CARD,
+        itemType: "action_item",
+        itemRef: "0",
+        itemLabel: "Re-torque the anchors",
+        status: "submitted",
+        responderName: "Pat Manager",
+        responseComment: "Second try.",
+        respondedAt: new Date(),
+      })
+      .returning({ id: scorecardCorrectiveActions.id });
+
+    await tdb.insert(scorecardCorrectiveActionEvents).values([
+      {
+        correctiveActionId: item.id,
+        scorecardId: CARD,
+        eventType: "submitted",
+        actorName: "Pat Manager",
+        comment: "First try.",
+      },
+      {
+        correctiveActionId: item.id,
+        scorecardId: CARD,
+        eventType: "rejected",
+        actorName: "James Helms",
+        comment: "Torque values were not documented.",
+      },
+      {
+        correctiveActionId: item.id,
+        scorecardId: CARD,
+        eventType: "submitted",
+        actorName: "Pat Manager",
+        comment: "Second try.",
+      },
+    ]);
+
+    const detail = await getDealScorecardDetail(tdb, DEAL, CARD);
+    const [threaded] = detail.correctiveActions ?? [];
+    expect(threaded?.events?.map((e) => e.eventType)).toEqual(["submitted", "rejected", "submitted"]);
+    // The rejection REASON and WHO gave it — the part that exists only on the thread.
+    expect(threaded?.events?.[1].comment).toBe("Torque values were not documented.");
+    expect(threaded?.events?.[1].actorName).toBe("James Helms");
   });
 });

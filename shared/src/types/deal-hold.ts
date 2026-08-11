@@ -29,10 +29,22 @@ type DealValueLike = {
   // zeroed even without the stored flag. Optional: a caller whose deal type lacks it falls back to the
   // stored on_hold leg only (graceful — the far-out leg simply never fires).
   expectedCloseDate?: string | Date | null;
+  // The BID due date. In the genuine 'estimating' stage ONLY it replaces expectedCloseDate as the auto-park
+  // horizon (2026-07-27) — see isDealEffectivelyOnHold. A caller whose payload omits it keeps the
+  // close-target rule, so a card that forgets to select bid_due_date silently reads FULL VALUE while the
+  // server rollup reads $0; any surface rendering estimating deals must supply it.
+  bidDueDate?: string | Date | null;
   awardedAmount?: string | number | null;
   bidBoardTotalSales?: string | number | null;
   bidEstimate?: string | number | null;
   ddEstimate?: string | number | null;
+  // A change-order child deal (0156) carries its value ONLY in awardedAmount, possibly NEGATIVE for a
+  // deductive CO — read by getRawDealValue / getRawAwardedDealValue below, which take it verbatim ahead of
+  // the `> 0` fallback chain (mirrors server deal-value-sql.ts's withChangeOrderBranch; the two MUST NOT
+  // drift). A caller whose payload omits it falls through to that plain chain, silently pricing a deductive
+  // CO at $0 while every CO-aware SQL surface reads the negative — the exact bug this feature exists to fix;
+  // any surface that sums Won deals must supply it.
+  isChangeOrder?: boolean | null;
   // stageSlug / stage.slug ARE read by getRawDealValue for the 'estimating' DD-over-bid branch (2026-06-18).
   // bidBoardStageSlug / workflowRoute remain accepted for caller convenience but are not read here.
   stageSlug?: string | null;
@@ -73,6 +85,11 @@ function toDate(value: string | Date | null | undefined): Date | null {
 }
 
 function getRawDealValue(deal: DealValueLike): number {
+  // A change-order child's value is awardedAmount VERBATIM — never the `> 0` fallback chain. It has no
+  // other value column, and a deductive CO is negative, which every `> 0` candidate would drop to 0.
+  // Mirrors server deal-value-sql.ts withChangeOrderBranch.
+  if (deal.isChangeOrder) return toNumber(deal.awardedAmount);
+
   // Awarded-first value priority (mirrors server deal-value-sql.ts), each candidate gated > 0 (0 AND NULL
   // both fall through). STAGE-AWARE override for the single 'estimating' stage (2026-06-18): there the
   // in-progress bid is outranked by DD — awarded > dd > bid_board > bid. Bid is NOT skipped, just outranked
@@ -94,6 +111,8 @@ function getRawDealValue(deal: DealValueLike): number {
 }
 
 function getRawAwardedDealValue(deal: DealValueLike): number {
+  // Same change-order verbatim rule as getRawDealValue above.
+  if (deal.isChangeOrder) return toNumber(deal.awardedAmount);
   const awarded = toNumber(deal.awardedAmount);
   return awarded > 0 ? awarded : 0;
 }
@@ -135,7 +154,8 @@ export function getHoldStateAtStageEntry(
 
 /**
  * Whether a deal's value reads as on hold for ZEROING purposes: the stored on_hold flag OR — for an OPEN
- * deal only — a close target past the 90-day horizon. A WON deal is realized, so the far-future leg never
+ * deal only — a hold horizon date past the 90-day mark (the close target, or the BID due date while the
+ * deal sits in the genuine 'estimating' stage). A WON deal is realized, so the far-future leg never
  * applies (its `expected_close_date` may still be far out if it was won early; only its stored flag
  * zeros it). This is the won-aware twin of the server's stage-aware value SQL: card display
  * (getEffectiveDealValue) and the On Hold badge both read it, so the card's $0 and badge always agree
@@ -159,6 +179,12 @@ export function isDealValueEffectivelyOnHold(deal: DealValueLike, now: Date = ne
   return isDealEffectivelyOnHold({
     onHold: deal.onHold,
     expectedCloseDate: deal.expectedCloseDate,
+    // In the genuine 'estimating' stage the auto-park horizon is measured from the BID due date, not the
+    // project close target (2026-07-27). Classified with the SAME route-aware helper getRawDealValue uses
+    // for the DD-over-bid chain, so a card's $0 and its DD-first value can never disagree about what
+    // "estimating" means.
+    bidDueDate: deal.bidDueDate,
+    isEstimating: isGenuineEstimatingDealStageSlug(stageSlug, workflowRoute),
     now,
     isTerminal,
   });

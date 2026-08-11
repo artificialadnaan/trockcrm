@@ -99,6 +99,47 @@ describe("ProjectsPage", () => {
     expect(node.textContent).not.toContain("HS-303033014984");
   });
 
+  it("puts 'Change Order N' at the FRONT of a change-order child's row, where truncation can't eat it", async () => {
+    // The stored name is what change-order-service.ts writes: "<Parent> — Change Order N". This row is a
+    // single truncating line, so the suffix is exactly the part a phone never shows. Display-only — the
+    // API payload still carries the stored name, which is what the server matches on for search.
+    apiMock
+      .mockResolvedValueOnce({ projects: [
+        { id: "deal-4", name: "Tides Park Lane — Change Order 2", dealNumber: "TR-4", projectNumber: "TR-4", propertyName: "Tides Park Lane", propertyAddress: "12 Tides", stage: "Contract", lastActivityAt: null, photoCount: 3, starred: false, officeId: "office-1", officeSlug: "dallas" },
+        { id: "deal-5", name: "Tides Park Lane", dealNumber: "TR-5", projectNumber: "TR-5", propertyName: "Tides Park Lane", propertyAddress: "12 Tides", stage: "Contract", lastActivityAt: null, photoCount: 1, starred: false, officeId: "office-1", officeSlug: "dallas" },
+      ] })
+      .mockResolvedValueOnce({ projects: [] });
+
+    const node = renderPage();
+
+    await vi.waitFor(() => expect(node.textContent).toContain("Change Order 2 — Tides Park Lane"));
+    // The stored, suffix-last form is gone from the row.
+    expect(node.textContent).not.toContain("Tides Park Lane — Change Order 2");
+    // The a11y label carries the same distinguishing prefix a sighted user gets.
+    expect(node.querySelector('a[aria-label="Open Change Order 2 — Tides Park Lane (TR-4)"]')).not.toBeNull();
+    // The ordinary parent deal beside it is untouched.
+    expect(node.querySelector('a[aria-label="Open Tides Park Lane (TR-5)"]')).not.toBeNull();
+  });
+
+  it("obeys the SERVER's isChangeOrder flag, not the name's shape", async () => {
+    // `deals.is_change_order` is the authority. A deal a human named "Lobby — Change Order 1" arrives
+    // with the flag false and must render exactly as typed, even though its name looks generated.
+    apiMock
+      .mockResolvedValueOnce({ projects: [
+        { id: "deal-6", name: "Lobby — Change Order 1", isChangeOrder: false, dealNumber: "TR-6", projectNumber: "TR-6", propertyName: "Lobby", propertyAddress: "9 Lobby", stage: "Contract", lastActivityAt: null, photoCount: 0, starred: false, officeId: "office-1", officeSlug: "dallas" },
+        { id: "deal-7", name: "Tides Park Lane — Change Order 3", isChangeOrder: true, dealNumber: "TR-7", projectNumber: "TR-7", propertyName: "Tides", propertyAddress: "9 Tides", stage: "Contract", lastActivityAt: null, photoCount: 0, starred: false, officeId: "office-1", officeSlug: "dallas" },
+      ] })
+      .mockResolvedValueOnce({ projects: [] });
+
+    const node = renderPage();
+
+    await vi.waitFor(() => expect(node.textContent).toContain("Change Order 3 — Tides Park Lane"));
+    // The flag-false row is untouched, despite matching the generated shape exactly.
+    expect(node.textContent).toContain("Lobby — Change Order 1");
+    expect(node.textContent).not.toContain("Change Order 1 — Lobby");
+    expect(node.querySelector('a[aria-label="Open Lobby — Change Order 1 (TR-6)"]')).not.toBeNull();
+  });
+
   it("shows empty state when no active projects exist", async () => {
     apiMock.mockResolvedValueOnce({ projects: [] }).mockResolvedValueOnce({ projects: [] });
     const node = renderPage();

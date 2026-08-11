@@ -29,7 +29,12 @@ export interface LegacyChangeOrderMigrationResult {
   newlyCountedAmount: string;
 }
 
-/** Add two non-negative money strings as integer cents via BigInt — exact at any magnitude. */
+// Add two non-negative money strings as integer cents via BigInt — exact at any magnitude. Safe ONLY
+// because every input here is a legacy_deal_change_orders.amount value (lines 118/119/122), which migration
+// 0153's CHECK (amount > 0) — plus updateDealChangeOrder's fail-closed legacy-amount guard in
+// change-order-service.ts — keeps positive. This is NOT sign-aware: it does not handle a negative operand
+// correctly (wrong-signed fraction for a negative intPart, and BigInt("-0") drops the sign under $1). For a
+// deductive (negative) child-deal amount, use the sign-aware `addMoneyStrings` in change-order-service.ts.
 export function addMoney(acc: string, amount: string | null): string {
   const toCents = (s: string): bigint => {
     const [intPart, frac = ""] = (s || "0").split(".");

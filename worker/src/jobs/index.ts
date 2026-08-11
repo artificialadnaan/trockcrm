@@ -15,6 +15,7 @@ import { runAiIndexDocument } from "./ai-index-document.js";
 import { runAiBackfillDocuments } from "./ai-backfill-documents.js";
 import { runAiRefreshCopilot } from "./ai-refresh-copilot.js";
 import { runAiGenerateDealCopilot } from "./ai-generate-deal-copilot.js";
+import { handleAiReportGeneration } from "./ai-report-generation.js";
 import { runAiGenerateInterventionPolicyRecommendations } from "./ai-generate-intervention-policy-recommendations.js";
 import { runAiDisconnectDigest } from "./ai-disconnect-digest.js";
 import { runAiDisconnectEscalationScan } from "./ai-disconnect-escalation.js";
@@ -25,6 +26,7 @@ import { runAiInterventionManagerAlerts } from "./ai-intervention-manager-alerts
 import { handleRfpRequestDelivery } from "./rfp-request-delivery.js";
 import { runReportsExecutionTick } from "./reports-execution.js";
 import { runRepPerformanceRollup } from "./rep-performance-rollup.js";
+import { workerAwardedFirstDealValueSql } from "./deal-value-sql.js";
 import {
   handleDealOpportunityFirstEntryEmail,
   handleProjectNumberFirstSetEmail,
@@ -37,6 +39,14 @@ import {
   handleScorecardCorrectiveActionEmail,
   SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB,
 } from "./scorecard-corrective-action-email.js";
+import {
+  GLASSES_WALKTHROUGH_FORWARD_JOB,
+  handleGlassesWalkthroughForward,
+} from "./glasses-walkthrough-forward.js";
+import {
+  handleScorecardCorrectiveActionOversightEmail,
+  SCORECARD_CORRECTIVE_ACTION_OVERSIGHT_EMAIL_JOB,
+} from "./scorecard-corrective-action-oversight-email.js";
 import { handleRfpReconfirmDenialEmail, RFP_RECONFIRM_DENIAL_JOB } from "./rfp-reconfirm-denial-email.js";
 import { handleRfpOverrideApprovedEmail, RFP_OVERRIDE_APPROVED_JOB } from "./rfp-override-approved-email.js";
 import { handleRfpVoteInvitation, RFP_VOTE_INVITATION_JOB } from "./rfp-vote-invitation.js";
@@ -131,13 +141,21 @@ export function registerAllJobs() {
   registerJobHandler("test_echo", handleTestEcho);
   registerJobHandler("domain_event", handleDomainEvent);
   registerJobHandler("rfp_request_delivery", async (payload, officeId) => {
-    await handleRfpRequestDelivery(payload, officeId);
+    // Return the handler's result: a 413 answers deadJob(...) so the row dead-letters immediately
+    // instead of retrying a payload that can never shrink. Swallowing it here would restore the
+    // ~2.7h of futile backoff (TRK-2607-H3X6).
+    return await handleRfpRequestDelivery(payload, officeId);
   });
   registerJobHandler(PROJECT_NUMBER_FIRST_SET_JOB, handleProjectNumberFirstSetEmail);
   registerJobHandler(DEAL_OPPORTUNITY_FIRST_ENTRY_JOB, handleDealOpportunityFirstEntryEmail);
   registerJobHandler(RFP_REJECTED_JOB, handleRfpRejectedEmail);
   registerJobHandler(FIELD_SCORECARD_EMAIL_JOB, handleFieldScorecardEmail);
   registerJobHandler(SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB, handleScorecardCorrectiveActionEmail);
+  registerJobHandler(GLASSES_WALKTHROUGH_FORWARD_JOB, handleGlassesWalkthroughForward);
+  registerJobHandler(
+    SCORECARD_CORRECTIVE_ACTION_OVERSIGHT_EMAIL_JOB,
+    handleScorecardCorrectiveActionOversightEmail,
+  );
   registerJobHandler(RFP_RECONFIRM_DENIAL_JOB, handleRfpReconfirmDenialEmail);
   registerJobHandler(RFP_OVERRIDE_APPROVED_JOB, handleRfpOverrideApprovedEmail);
   registerJobHandler(RFP_VOTE_INVITATION_JOB, handleRfpVoteInvitation);
@@ -181,6 +199,17 @@ export function registerAllJobs() {
   registerJobHandler("ai_refresh_copilot", (payload, officeId) => runAiRefreshCopilot(payload, officeId));
 
   registerJobHandler("ai_generate_deal_copilot", (payload, officeId) => runAiGenerateDealCopilot(payload, officeId));
+
+  // T Rock Cam "AI Report". The office is carried on the run row (public.field_ai_report_runs), not taken
+  // from the job's office_id — the run must render into the office the DEAL lives in, which under
+  // cross-office writes is not necessarily the office the request was made from.
+  // Returns the handler result (does NOT discard it): a run still held by a live attempt comes back as a
+  // deferral, which must reschedule the delivery rather than be recorded as completed.
+  // EVERY argument is forwarded, not just the payload. The shim needs the attempt context to reconcile the
+  // run when a throw dead-letters the final delivery; a wrapper that took only `payload` silently made that
+  // reconciliation unreachable while its unit tests — which call the shim directly — kept passing.
+  registerJobHandler("ai_report_generation", (payload, officeId, deps, ctx) =>
+    handleAiReportGeneration(payload, officeId, deps, ctx));
 
   registerJobHandler("ai_generate_intervention_policy_recommendations", async (payload) => {
     await runAiGenerateInterventionPolicyRecommendations(payload);
@@ -470,17 +499,14 @@ export function registerAllJobs() {
           if (slugRegex.test(slug)) {
             const schemaName = `office_${slug}`;
 
-            // Look up terminal deal value with positive awarded-first fallback.
+            // Terminal deal value via the SHARED closed/awarded-first chain (deal-value-sql.ts), which
+            // carries the change-order branch: a CO child (0156) is taken from awarded_amount VERBATIM,
+            // since it has no other value column and a deductive CO is negative — which every `> 0`
+            // candidate would drop to $0. Aliased `d` so the shared builder can qualify its columns.
             const dealRes = await lossPool.query(
-              `SELECT COALESCE(
-                        CASE WHEN awarded_amount > 0 THEN awarded_amount END,
-                        CASE WHEN bid_board_total_sales > 0 THEN bid_board_total_sales END,
-                        CASE WHEN bid_estimate > 0 THEN bid_estimate END,
-                        CASE WHEN dd_estimate > 0 THEN dd_estimate END,
-                        0
-                      )::numeric AS deal_value,
-                      lost_notes
-               FROM ${schemaName}.deals WHERE id = $1`,
+              `SELECT (${workerAwardedFirstDealValueSql("d")})::numeric AS deal_value,
+                      d.lost_notes
+               FROM ${schemaName}.deals d WHERE d.id = $1`,
               [payload.dealId]
             );
 

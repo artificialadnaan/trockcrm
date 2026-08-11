@@ -111,7 +111,28 @@ export function useProjectPhotos(dealId: string | undefined) {
         }
       }
 
-      return { photos, pagination: first.pagination, partial };
+      // Independently-fetched pages can overlap, so the concatenation can carry the same photo twice.
+      // Duplicate ids break every consumer that keys on id — the viewer's FlatList keyExtractor most
+      // visibly, where a duplicate key renders a blank page. Keep first occurrence, preserving order.
+      const seen = new Set<string>();
+      const deduped = photos.filter((photo) => {
+        if (seen.has(photo.id)) return false;
+        seen.add(photo.id);
+        return true;
+      });
+
+      // Enforce the guarantee the comment above only claimed. `partial` previously caught a rejected page
+      // and the page cap, but not the case where the walk simply came back with fewer photos than the
+      // server counted — which OFFSET paging over a live table produces for free: delete a photo while
+      // pages 2..18 are in flight and every later page shifts by one, so a row is never returned by any
+      // page. No fetch fails, so nothing was flagged, and the shortfall renders as a slightly smaller
+      // photo count that looks entirely plausible — while Report and Share stay enabled over a set that is
+      // quietly missing photos. Comparing against the page-1 count closes that. Only a SHORTFALL counts:
+      // photos added mid-walk can legitimately push the length past the original total.
+      const reportedTotal = first.pagination?.total;
+      if (typeof reportedTotal === "number" && deduped.length < reportedTotal) partial = true;
+
+      return { photos: deduped, pagination: first.pagination, partial };
     },
     enabled: !!user && !!dealId,
   });
@@ -186,12 +207,19 @@ export function useProjectTags(dealId: string | undefined, q: string) {
   });
 }
 
-/** Capture-target search (deals/leads/opps) for the target picker. `dealsOnly` restricts to deals (scorecard). */
-export function useCaptureTargets(search: string, dealsOnly = false) {
+/**
+ * Capture-target search (deals/leads/opps) for the target picker. `dealsOnly` restricts to deals
+ * (scorecard); `includeTerminalDeals` additionally drops the browsing stage rule, so Lost/terminal
+ * deals are offered too (walkthrough recovery only — see RecoveryProjectPicker).
+ *
+ * Both flags are part of the cache key: they are different QUESTIONS, not a view of one answer, and
+ * the recovery picker asks two of them at once for the same search term.
+ */
+export function useCaptureTargets(search: string, dealsOnly = false, includeTerminalDeals = false) {
   const { fetcher, user } = useAuth();
   return useQuery({
-    queryKey: [...qk.targets(user?.id ?? "anon", search), dealsOnly] as const,
-    queryFn: () => api.searchCaptureTargets(fetcher, search.trim(), 20, dealsOnly),
+    queryKey: [...qk.targets(user?.id ?? "anon", search), dealsOnly, includeTerminalDeals] as const,
+    queryFn: () => api.searchCaptureTargets(fetcher, search.trim(), 20, dealsOnly, includeTerminalDeals),
     enabled: !!user && search.trim().length > 0,
   });
 }

@@ -1,0 +1,46 @@
+-- Migration 0211: partial index on public.job_queue for the glasses-walkthrough forward dedupe lookup.
+--
+-- ROOT CAUSE: findGlassesWalkthroughForwardJobState (server/src/modules/walkthrough-capture/
+-- glasses-walkthrough-service.ts) runs on EVERY walk-completion call — including every mobile background
+-- retry of one — and answers both "is a forward already scheduled for this walk on this deal?" and "did a
+-- dead row learn a TROCK Scope checkpoint we must inherit?" in one scan:
+--   WHERE job_type = 'glasses_walkthrough_forward'
+--     AND payload->>'walkId' = $1
+--     AND payload->>'dealId' = $2
+--     AND (status <> 'dead' OR payload->>'scopeWalkthroughId' IS NOT NULL
+--                           OR payload->>'scopeCreatePendingRef' IS NOT NULL)
+-- Nothing indexes payload->>'walkId' or payload->>'dealId'. job_queue_pending_idx (0001) is partial on
+-- status = 'pending' and leads with (status, run_after), so it cannot serve a payload equality; the two
+-- existing expression indexes (0189, 0210) are partial on OTHER job types and never match this one.
+-- Because COMPLETED/DEAD rows are retained, public.job_queue grows without bound, so this becomes a full
+-- Seq Scan per completion attempt on an ever-larger table.
+--
+-- FIX: a partial expression index on ((payload->>'walkId'), (payload->>'dealId')) restricted to this job
+-- type. The leading column carries the selective equality and the second completes the pair the dedupe is
+-- keyed on — the pair matters, because a phone-minted walkId is not unique across deals and scoping the
+-- lookup to walkId alone silently dropped the second deal's forward entirely. job_queue is a PUBLIC (not
+-- per-tenant) table, so this is a single CREATE INDEX with no tenant DO-loop. Idempotent via IF NOT EXISTS.
+--
+-- NOT partial on status, unlike 0210: this lookup deliberately reads DEAD rows as well as live ones — the
+-- dead row is where the inherited scopeWalkthroughId / scopeCreatePendingRef checkpoint lives, and every
+-- forward costs a real transcription plus a real scope extraction on the TROCK Scope side. Restricting the
+-- index to live statuses would exclude exactly the rows the checkpoint half of the query exists to find.
+--
+-- CONCURRENTLY: same reasoning as 0189 and 0210. public.job_queue is written continuously (API enqueues +
+-- worker status flips), so a plain CREATE INDEX would hold a SHARE lock and block every insert and status
+-- update for the whole build. CREATE INDEX CONCURRENTLY cannot run inside a transaction block, but the
+-- migration runner (server/src/migrations/runner.ts) executes each .sql file with a bare client.query(sql)
+-- — no BEGIN/COMMIT wrapper — and this file is a SINGLE statement, so PostgreSQL runs it in autocommit and
+-- CONCURRENTLY is permitted. (The 0138/0120/0167 CONCURRENTLY caveats apply only to the PER-TENANT DO-loop
+-- migrations, which ARE transactional; this public single-index migration is not.)
+--
+-- If an interrupted CONCURRENTLY build leaves an INVALID index stub, IF NOT EXISTS would skip the rebuild;
+-- same accepted trade-off as 0189/0210 (reindex/drop-invalid is an ops step).
+--
+-- Schema source of truth: shared/src/schema/public/job-queue.ts must carry the matching index() entry
+-- (job_queue_glasses_walkthrough_forward_idx, alongside the 0189 and 0210 ones) so db:generate sees parity,
+-- not drift.
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS job_queue_glasses_walkthrough_forward_idx
+  ON public.job_queue ((payload->>'walkId'), (payload->>'dealId'))
+  WHERE job_type = 'glasses_walkthrough_forward';

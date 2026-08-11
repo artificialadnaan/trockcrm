@@ -9,6 +9,14 @@ const reportRouteMocks = vi.hoisted(() => ({
 vi.mock("../../../src/middleware/rbac.js", () => ({
   requireRole: vi.fn(() => (_req: any, _res: any, next: any) => next()),
   requireDirector: reportRouteMocks.requireDirector,
+  // The Daily Activity Log route carries a second, allowlist-based guard. These suites are about
+  // other report routes, so it is stubbed open — its own behaviour is covered by
+  // tests/middleware/require-daily-activity-log-viewer.runtime.test.ts.
+  requireDailyActivityLogViewer: vi.fn((_req: any, _res: any, next: any) => next()),
+  // The Canvassing Activity route carries a second, allowlist-based guard. These suites are about other
+  // report routes, so it is stubbed open — its own behaviour is covered by
+  // tests/middleware/require-canvassing-report-viewer.runtime.test.ts.
+  requireCanvassingReportViewer: vi.fn((_req: any, _res: any, next: any) => next()),
 }));
 
 const { reportRoutes } = await import("../../../src/modules/reports/routes.js");
@@ -431,3 +439,13 @@ describe("forecast variance route", () => {
     );
   });
 });
+
+/**
+ * One test for the forecast-variance reader, asserting BOTH halves of the change at once.
+ *
+ * This PR has now shipped the select/mapper pair out of step three times, in both directions: a SELECT
+ * added without its mapper (pending-rfp, project-stats), and a mapper reading a column the query never
+ * produced (this very reader — the CTE selected `deal_is_change_order` and the outer projection dropped
+ * it before the mapper). Typecheck sees neither, because the field is optional by design and the row is
+ * `any`. Asserting the SQL text AND the mapped output together is the cheapest thing that catches both.
+ */

@@ -57,6 +57,8 @@ beforeEach(() => {
         projectNumber: "DFW-101",
         regionName: "Dallas",
         superintendentName: "Adam Shaw",
+        // The PM field is optional on the form, so a null must render as an em-dash rather than "null".
+        pmName: null,
         kind: "leadership",
         totalScore: 85,
         formVersion: 2,
@@ -75,6 +77,7 @@ beforeEach(() => {
         projectNumber: "DFW-102",
         regionName: "Dallas",
         superintendentName: "Sam Reyes",
+        pmName: "Nick Cheatam",
         kind: "project",
         totalScore: 86,
         formVersion: 1,
@@ -90,6 +93,7 @@ beforeEach(() => {
     ],
     regions: ["Dallas"],
     superintendents: ["Adam Shaw", "Sam Reyes"],
+    projectManagers: ["Nick Cheatam"],
     truncated: false,
     loading: false,
     error: null,
@@ -100,6 +104,58 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
+});
+
+describe("QcReportsPage — change-order display name", () => {
+  it("leads the row and its a11y label with 'Change Order N'", async () => {
+    // `projectName` on a QC row is the DEAL's name, and a change-order child is STORED
+    // "<Parent> — Change Order N". Display only — the scorecard snapshot and the PDF are unaffected.
+    const base = mocks.useQcScorecards.getMockImplementation?.() ?? null;
+    void base;
+    const existing = mocks.useQcScorecards();
+    mocks.useQcScorecards.mockReturnValue({
+      ...existing,
+      scorecards: [{ ...existing.scorecards[1], projectName: "Tides Park Lane — Change Order 2" }],
+    });
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/projects/qc-reports?officeId=office-dallas"]}>
+          <QcReportsPage />
+        </MemoryRouter>,
+      );
+    });
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("Change Order 2 — Tides Park Lane");
+    expect(text).not.toContain("Tides Park Lane — Change Order 2");
+    const row = container.querySelector('tr[aria-label^="Open project scorecard for"]');
+    expect(row?.getAttribute("aria-label")).toContain("Change Order 2 — Tides Park Lane");
+  });
+});
+
+describe("QcReportsPage — deals.is_change_order decides, not the name", () => {
+  it("leaves a hand-named deal alone when the server says it is not a change order", async () => {
+    // The QC query now returns d.is_change_order. A deal a human named "Lobby — Change Order 1" has the
+    // flag false and must render exactly as typed, even though its name matches the generated shape.
+    const existing = mocks.useQcScorecards();
+    mocks.useQcScorecards.mockReturnValue({
+      ...existing,
+      scorecards: [{ ...existing.scorecards[1], projectName: "Lobby — Change Order 1", isChangeOrder: false }],
+    });
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/projects/qc-reports?officeId=office-dallas"]}>
+          <QcReportsPage />
+        </MemoryRouter>,
+      );
+    });
+
+    const text = container.textContent ?? "";
+    expect(text).toContain("Lobby — Change Order 1");
+    expect(text).not.toContain("Change Order 1 — Lobby");
+  });
 });
 
 describe("QcReportsPage", () => {
@@ -151,7 +207,56 @@ describe("QcReportsPage", () => {
       Array.from(select.options).some((option) => option.textContent === "Any status"),
     );
     expect(caFilter).toBeTruthy();
-    expect(Array.from(caFilter!.options).map((o) => o.textContent)).toEqual(["Any status", "Open", "Closed"]);
+    // `corrective_action_submitted` sits between open and approved — the approver's queue — so the filter
+    // carries its own option. "Closed" is now labelled "Approved", which is what that state means since the
+    // approval gate landed.
+    expect(Array.from(caFilter!.options).map((o) => o.textContent)).toEqual([
+      "Any status",
+      "Open",
+      "Awaiting Approval",
+      "Approved",
+    ]);
+  });
+
+  it("renders a Project Manager column and filter alongside Superintendent", async () => {
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/projects/qc-reports?officeId=office-dallas"]}>
+          <QcReportsPage />
+        </MemoryRouter>,
+      );
+    });
+
+    const headers = Array.from(container.querySelectorAll("thead th")).map((th) => th.textContent);
+    expect(headers).toContain("Superintendent");
+    expect(headers).toContain("Project Manager");
+
+    // The PM cell sits immediately after the superintendent cell on the row it belongs to. Asserting the
+    // position (not just the presence of the name somewhere in the table) is what catches the column being
+    // added to the header but not the body — the two are separate `!compact &&` guards that can drift.
+    const projectRow = Array.from(container.querySelectorAll("tbody tr")).find((tr) =>
+      (tr.textContent ?? "").includes("Project Job"),
+    );
+    expect(projectRow).toBeTruthy();
+    const cells = Array.from(projectRow!.querySelectorAll("td")).map((td) => td.textContent);
+    const supIndex = cells.findIndex((c) => c === "Sam Reyes");
+    expect(supIndex).toBeGreaterThan(-1);
+    expect(cells[supIndex + 1]).toBe("Nick Cheatam");
+
+    // A null PM renders the em-dash placeholder, never an empty cell or the string "null".
+    const leadershipRow = Array.from(container.querySelectorAll("tbody tr")).find((tr) =>
+      (tr.textContent ?? "").includes("Leadership Job"),
+    );
+    const leadershipCells = Array.from(leadershipRow!.querySelectorAll("td")).map((td) => td.textContent);
+    const leadSupIndex = leadershipCells.findIndex((c) => c === "Adam Shaw");
+    expect(leadershipCells[leadSupIndex + 1]).toBe("—");
+
+    // Its own dropdown, populated from the window-wide projectManagers option list.
+    const pmFilter = Array.from(container.querySelectorAll("select")).find((select) =>
+      Array.from(select.options).some((option) => option.textContent === "Nick Cheatam"),
+    );
+    expect(pmFilter).toBeTruthy();
+    expect(Array.from(pmFilter!.options).map((o) => o.textContent)).toEqual(["Anyone", "Nick Cheatam"]);
   });
 
   it.each([

@@ -4,7 +4,7 @@ import { Eye, Search, Star, X } from "lucide-react";
 import { api, getActiveOfficeId } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { Button, TextInput } from "../components/ui";
-import { type FieldProject, isProjectOffOffice, relativeDate } from "../lib/field-projects";
+import { type FieldProject, formatDealDisplayName, isProjectOffOffice, relativeDate } from "../lib/field-projects";
 
 function ProjectCard({
   project,
@@ -18,15 +18,24 @@ function ProjectCard({
   // Cross-office projects are view-only until cross-office writes ship: their single-office star write
   // would 404 against the active office's schema, so suppress the star and show why.
   const offOffice = isProjectOffOffice(project, writableOfficeId);
+  // A change-order child is stored "<Parent> — Change Order N"; this row is one truncated line, so the
+  // suffix never survives. Display-only — `project.name` itself is untouched.
+  const displayName = formatDealDisplayName(project.name, project.isChangeOrder);
   return (
     <Link
       to={`/projects/${project.id}`}
       className="block border-b border-border bg-white py-4 active:bg-muted"
-      aria-label={`Open ${project.name} (${project.projectNumber ?? "project pending"})`}
+      // The scope title is IN the label, not only the JSX: it is frequently the reason this row is in a
+      // filtered list at all, and an aria-label replaces the descendant text it is assembled from.
+      aria-label={`Open ${displayName}${project.scopeTitle ? `, ${project.scopeTitle}` : ""} (${project.projectNumber ?? "project pending"})`}
     >
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">
-          <h2 className="truncate text-lg font-bold">{project.name}</h2>
+          <h2 className="truncate text-lg font-bold">{displayName}</h2>
+          {/* Directly under the relabelled name — for a change order the name is the parent's. */}
+          {project.scopeTitle ? (
+            <p className="truncate text-sm font-semibold text-foreground/80">{project.scopeTitle}</p>
+          ) : null}
           <div className="mt-1 flex flex-wrap items-start gap-2 text-sm">
             <p className="font-semibold text-foreground break-all">
               {project.projectNumber ? `Project # ${project.projectNumber}` : "Project pending"}

@@ -6,7 +6,16 @@ import { Button } from "@/components/ui/button";
 import { MoveCloseDateDialog } from "@/components/deals/move-close-date-dialog";
 import { createActivity, useActivities, type Activity, type ActivitySourceEntityType } from "@/hooks/use-activities";
 
-type SupportedActivityEntity = Extract<ActivitySourceEntityType, "company" | "lead" | "deal">;
+/**
+ * `property` joins the list because field prospecting logs a site visit against the BUILDING, and its
+ * tab was a "coming soon" placeholder — so every capture a rep made landed in a table no office screen
+ * read. The server already answered `GET /activities?propertyId=` and the hook already took the filter;
+ * only this union and the map below excluded it.
+ */
+type SupportedActivityEntity = Extract<
+  ActivitySourceEntityType,
+  "company" | "lead" | "deal" | "property"
+>;
 
 interface EntityActivityTabProps {
   entityType: SupportedActivityEntity;
@@ -15,20 +24,79 @@ interface EntityActivityTabProps {
   showRecordings?: boolean;
   /** Deal-only: the current expected_close_date ("YYYY-MM-DD"), used to seed the Move Close Date picker. */
   closeTargetDate?: string | null;
+  /** Deal-only: the deal sits in the genuine estimating stage, where the SLA follows the BID due date, so
+   *  the Move Close Date dialog must not promise an SLA pause it cannot deliver (2026-07-28). */
+  slaFollowsBidDueDate?: boolean;
   /** Deal-only: called after the close date moves so the host can refetch the deal (the SLA badge). */
   onDealChanged?: () => void | Promise<void>;
   /** Deal-only: whether the viewer may edit the deal (assigned rep or admin). Gates the Move Close Date
    *  action so a view-only collaborator doesn't hit a 403 after filling the dialog. Default false. */
   canMoveCloseDate?: boolean;
+  /**
+   * Hide the log FORM and show the feed only.
+   *
+   * A soft-deleted record still resolves on its detail route, and the surrounding page treats it as
+   * read-only — but this tab mounted a writable form regardless, and POST /activities does not check
+   * whether the target is active. So opening Activity on a deleted property let notes, calls and site
+   * visits be written against it, where nothing lists them.
+   */
+  readOnly?: boolean;
   /** Deal-only: the office the deal was read from (cross-office detail). Threaded into the Move Close
    *  Date PATCH so a cross-office move/clear targets the deal's tenant, not the viewer's active office. */
   officeId?: string | null;
 }
 
-const activityFilterKey: Record<SupportedActivityEntity, "companyId" | "leadId" | "dealId"> = {
+/**
+ * The marker the field app writes into `nextStep` when a rep flags a prospect worth a lead.
+ *
+ * Matched as a PREFIX because the app keeps the rep's own next step alongside it — one column holds
+ * both ("Create lead — Call Dana Monday"), so an exact comparison would miss every flag that carried a
+ * note, which is most of them.
+ */
+const LEAD_FLAG_PREFIX = "Create lead";
+
+/**
+ * A due DATE, rendered without a timezone shift.
+ *
+ * ActivityLogForm's `type="date"` input sends "YYYY-MM-DD", which the server stores as midnight UTC.
+ * Running that through the activity timestamp formatter applies the browser's zone, so every user west
+ * of UTC saw the PREVIOUS calendar day — a 28 July due date reading as 27 July, plus a 7:00 PM that
+ * means nothing. Read the calendar parts back in UTC and show only the date.
+ */
+function formatDueDate(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toLocaleDateString("en-US", {
+    timeZone: "UTC",
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+export function isLeadFlagged(activity: Pick<Activity, "nextStep">): boolean {
+  const next = activity.nextStep?.trim();
+  if (!next) return false;
+  if (next === LEAD_FLAG_PREFIX) return true;
+  /**
+   * A BOUNDARY after the marker, because nextStep is free text.
+   *
+   * A bare prefix test badged "Create leadership deck" as a prospect flag on every activity tab in the
+   * app. The field app writes either the marker alone or the marker, a space-padded em dash, and the
+   * rep's own note — so anything else that merely starts with those characters is a different
+   * sentence.
+   */
+  return next.startsWith(`${LEAD_FLAG_PREFIX} — `);
+}
+
+const activityFilterKey: Record<
+  SupportedActivityEntity,
+  "companyId" | "leadId" | "dealId" | "propertyId"
+> = {
   company: "companyId",
   lead: "leadId",
   deal: "dealId",
+  property: "propertyId",
 };
 
 const activityLabels: Record<string, string> = {
@@ -73,8 +141,10 @@ export function EntityActivityTab({
   entityType,
   entityId,
   emptyLabel,
+  readOnly = false,
   showRecordings = false,
   closeTargetDate = null,
+  slaFollowsBidDueDate,
   onDealChanged,
   canMoveCloseDate = false,
   officeId = null,
@@ -111,7 +181,12 @@ export function EntityActivityTab({
 
   return (
     <div className="space-y-4">
-      {showRecordings ? <RecordingList entityType={entityType} entityId={entityId} /> : null}
+      {/* Recordings attach to a person or a deal, never to a BUILDING — RecordingList's own union says
+          so. Narrowed here rather than widened there: a property has no call to record. */}
+      {showRecordings && entityType !== "property" ? (
+        <RecordingList entityType={entityType} entityId={entityId} />
+      ) : null}
+      {readOnly ? null : (
       <ActivityLogForm
         onSubmit={handleLogActivity}
         showProposalSent={entityType === "deal"}
@@ -123,12 +198,14 @@ export function EntityActivityTab({
           ) : undefined
         }
       />
+      )}
       {entityType === "deal" && canMoveCloseDate ? (
         <MoveCloseDateDialog
           open={moveCloseDateOpen}
           onOpenChange={setMoveCloseDateOpen}
           dealId={entityId}
           currentDate={closeTargetDate}
+          slaFollowsBidDueDate={slaFollowsBidDueDate}
           officeId={officeId}
           onSaved={async () => {
             await refetch();
@@ -175,10 +252,31 @@ export function EntityActivityTab({
                         {activity.durationMinutes} min
                       </span>
                     ) : null}
+                    {/* The FLAG a rep sets in the field on a prospect worth a lead. It was written to
+                        nextStep and rendered by nothing, anywhere — so the marker existed and no office
+                        surface showed it, which made the whole "flag it and the office picks it up"
+                        handoff invisible. */}
+                    {isLeadFlagged(activity) ? (
+                      <span
+                        data-testid="activity-lead-flag"
+                        className="rounded bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-900"
+                      >
+                        Worth a lead
+                      </span>
+                    ) : null}
                   </div>
                   {activity.body ? (
                     <p className="mt-0.5 line-clamp-2 text-sm text-muted-foreground">
                       {activity.body}
+                    </p>
+                  ) : null}
+                  {/* The rep's own next step, flagged or not — it is what they wrote down for whoever
+                      picks this up, and it was not shown at all. */}
+                  {activity.nextStep ? (
+                    <p className="mt-1 text-xs text-muted-foreground" data-testid="activity-next-step">
+                      <span className="font-medium">Next: </span>
+                      {activity.nextStep}
+                      {activity.nextStepDueAt ? ` (due ${formatDueDate(activity.nextStepDueAt)})` : ""}
                     </p>
                   ) : null}
                   <p className="mt-1 text-xs text-muted-foreground">

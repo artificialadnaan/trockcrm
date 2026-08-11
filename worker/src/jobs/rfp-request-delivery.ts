@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { pool } from "../db.js";
+import { deadJob, type JobHandlerResult } from "../queue.js";
 import type { RfpRequestDeliveryPayload } from "@trock-crm/shared/types";
 export type { RfpRequestDeliveryPayload } from "@trock-crm/shared/types";
 
@@ -166,7 +167,7 @@ export async function handleRfpRequestDelivery(
     fetchImpl?: typeof fetch;
     secret?: string;
   } = {}
-): Promise<void> {
+): Promise<JobHandlerResult> {
   assertPayload(payload);
   const db = deps.db ?? pool;
   const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
@@ -264,6 +265,21 @@ export async function handleRfpRequestDelivery(
   if (response.status === 409) {
     await updateDealConflict(db, schemaName, payload.dealId, responseBody, roundEventId);
     return;
+  }
+
+  // 413 = the body exceeded SyncHub's JSON parser limit (100kb — the express/body-parser default,
+  // its RFP routes pass no `limit`). SyncHub rejects at the PARSER, before the signature check, and
+  // its production error middleware masks the real reason as "Internal server error". Retrying
+  // re-sends the identical bytes, so every remaining attempt is guaranteed to fail — burning ~2.7h
+  // of backoff before the dead-letter sweep finally shows the rep a message that explains nothing.
+  // Dead-letter now, and say what actually happened (TRK-2607-H3X6).
+  if (response.status === 413) {
+    return deadJob(
+      `RFP delivery failed with 413: SyncHub rejected the request as too large. The RFP payload for ` +
+        `this deal exceeds SyncHub's 100kb limit — most often because the deal carries a very large ` +
+        `number of files. Retrying sends the same payload and cannot succeed; remove or archive some ` +
+        `deal files, then retry.`
+    );
   }
 
   throw new Error(

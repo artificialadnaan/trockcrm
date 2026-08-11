@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
+import { formatDealDisplayName } from "@trock-crm/shared/types";
 import {
   getDirectorCommissionWorkspace,
   getDirectorCommissionEvidence,
@@ -29,6 +30,7 @@ const HELD = U("f07"); // below their OWN floor with earned commission but NO ov
 const XMGR = U("f08"); // office A manager: below own floor (held direct) + override rate, only report is cross-office
 const XREP = U("f09"); // office B rep reporting to XMGR -> OFF the roster when the view is scoped to office A
 const SRCDIR = U("f10"); // a DIRECTOR (Chase Kelly) who SOURCES: owns nothing, holds only a sales_source dsc row
+const CONAME = U("f11"); // owns the two change-order-NAMED deals below (see the fixture note)
 const OFF_A = U("0a1");
 const OFF_B = U("0b1");
 const FROM = "2026-01-01";
@@ -53,6 +55,7 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE TABLE users (id uuid PRIMARY KEY, display_name text, role text NOT NULL DEFAULT 'rep',
       is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false,
+      generates_sales boolean NOT NULL DEFAULT true,
       reports_to uuid, office_id uuid);
     CREATE TABLE user_commission_settings (user_id uuid PRIMARY KEY, is_active boolean DEFAULT true,
       commission_rate numeric DEFAULT 0, rolling_floor numeric DEFAULT 0, override_rate numeric DEFAULT 0,
@@ -65,10 +68,10 @@ beforeAll(async () => {
     CREATE TABLE deals (id uuid PRIMARY KEY, deal_number text, name text, assigned_rep_id uuid,
       estimator_user_id uuid, sales_source_user_id uuid, stage_id uuid NOT NULL, company_id uuid, property_id uuid,
       is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false,
-      on_hold boolean NOT NULL DEFAULT false, contract_signed_at timestamptz, contract_signed_date date,
+      is_change_order boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false, contract_signed_at timestamptz, contract_signed_date date,
       won_closed_date date, actual_close_date date, project_number text,
       awarded_amount numeric, bid_board_total_sales numeric, bid_estimate numeric, dd_estimate numeric,
-      change_order_total numeric, expected_close_date date, stage_entered_at timestamptz DEFAULT now());
+      change_order_total numeric, expected_close_date date, bid_due_date timestamptz, bid_board_stage_slug text, stage_entered_at timestamptz DEFAULT now());
     CREATE TABLE leads (id uuid PRIMARY KEY, name text, assigned_rep_id uuid, stage_id uuid NOT NULL,
       company_id uuid, status text NOT NULL DEFAULT 'open', is_active boolean NOT NULL DEFAULT true,
       stage_entered_at timestamptz DEFAULT now());
@@ -204,6 +207,23 @@ beforeAll(async () => {
       ('${U("e02")}','Lead B','${REP}','${ST.leadNew}','${CO}'),
       ('${U("e03")}','Lead C','${REP}','${ST.leadQual}','${CO}'),
       ('${U("e04")}','Lead D','${REP}','${ST.leadOpp}','${CO}');
+
+    -- CHANGE-ORDER DISPLAY FLAG. Two deals whose STORED names are byte-identical in shape and whose
+    -- deals.is_change_order disagrees — the only pair that can tell a real fix from one that guesses off
+    -- the name. Deliberately INERT for every other assertion in this file: awarded_amount 0 (adds nothing
+    -- to any $ total), contract-signed (excluded from pipeline/active, which gate on unsigned), and an
+    -- estimating-stage slug (never a won stage), so only the estimating + earned drills see them.
+    INSERT INTO users (id, display_name, role) VALUES ('${CONAME}','CO Name Rep','rep');
+    INSERT INTO user_commission_settings (user_id, is_active, commission_rate, rolling_floor, override_rate)
+      VALUES ('${CONAME}', true, 0.05, 0, 0);
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, company_id, awarded_amount, is_change_order, contract_signed_at) VALUES
+      -- NOT a change order: a human typed this name. Must be shown EXACTLY as stored.
+      ('${U("d19")}','D-19','Lobby — Change Order 1','${CONAME}','${ST.estimating}','${CO}', 0, false, '2026-03-01T00:00:00Z'),
+      -- a REAL generated child (change-order-service.ts appends the suffix). Must be relabelled.
+      ('${U("d20")}','D-20','Tides Park Lane — Change Order 2','${CONAME}','${ST.estimating}','${CO}', 0, true, '2026-03-01T00:00:00Z');
+    INSERT INTO deal_signed_commissions (id, deal_id, rep_user_id, amount, source_value_amount, attribution_role, contract_signed_date_at_signing) VALUES
+      ('${U("dc8")}','${U("d19")}','${CONAME}', 100, 2000, 'owner', '2026-03-01'),
+      ('${U("dc9")}','${U("d20")}','${CONAME}', 200, 4000, 'owner', '2026-03-01');
 
     -- ACTIVITIES by REP in window: 3 calls, 2 emails, 1 meeting (1 call linked to a deal).
     INSERT INTO activities (id, responsible_user_id, type, subject, occurred_at, deal_id) VALUES
@@ -510,6 +530,41 @@ describe("Team Commissions drill evidence reconciles to the table cell", () => {
     const linked = ev.records.find((r) => r.navId === U("d01"));
     expect(linked?.navKind).toBe("deal");
     expect(ev.records.filter((r) => r.navId === null)).toHaveLength(2);
+  });
+
+  it("deal records carry deals.is_change_order, so the drawer never relabels off the NAME alone", async () => {
+    // `deals.is_change_order` is the AUTHORITY for the change-order display relabel, and it crosses five
+    // links to reach commission-evidence-drawer.tsx: the SELECT projects the column -> the mapper copies it
+    // -> CommissionEvidenceRecord declares it (server AND client) -> the name cell passes it to
+    // formatDealDisplayName. Break one and the field arrives `undefined`, the formatter falls back to
+    // PARSING THE NAME, and D-19 — which a human named "Lobby — Change Order 1" — renders as
+    // "Change Order 1 — Lobby".
+    //
+    // Both of the drawer's two deal-row producers are exercised, because they are separate code paths:
+    // runDealQuery's raw SELECT (every deal metric) and the earned branch's hand-off off the commission
+    // rollup. D-19 (flag FALSE) is the DISCRIMINATING row — with the field missing, D-20 (flag TRUE) still
+    // renders correctly by coincidence, so a true-only assertion would pass on a wholly broken chain.
+    for (const metric of ["estimating", "earned"] as const) {
+      const ev = await getDirectorCommissionEvidence(tdb, { repId: CONAME, metric, from: FROM, to: TO });
+      const human = ev.records.find((r) => r.name === "Lobby — Change Order 1")!;
+      const generated = ev.records.find((r) => r.name === "Tides Park Lane — Change Order 2")!;
+      expect(human, `${metric}: human-named deal missing from the drill`).toBeTruthy();
+      expect(generated, `${metric}: generated change-order child missing from the drill`).toBeTruthy();
+
+      // The flag itself survived the hand-off — not merely present, but the value the column holds.
+      expect(human.dealIsChangeOrder, `${metric}: flag dropped on the human-named deal`).toBe(false);
+      expect(generated.dealIsChangeOrder, `${metric}: flag dropped on the generated child`).toBe(true);
+
+      // ...and the rendered outcome, which is what a viewer actually sees.
+      expect(formatDealDisplayName(human.name, human.dealIsChangeOrder), `${metric}: human-named deal relabelled`)
+        .toBe("Lobby — Change Order 1");
+      expect(formatDealDisplayName(generated.name, generated.dealIsChangeOrder), `${metric}: generated child not relabelled`)
+        .toBe("Change Order 2 — Tides Park Lane");
+    }
+
+    // Guard the guard: a NAME-only formatter (the pre-fix behavior) gets the discriminating row WRONG, so
+    // the assertions above cannot be satisfied by the fallback the fix exists to stop.
+    expect(formatDealDisplayName("Lobby — Change Order 1")).toBe("Change Order 1 — Lobby");
   });
 
   it("won·unsigned records carry the project number + both close dates, with the contract-signed date pending", async () => {

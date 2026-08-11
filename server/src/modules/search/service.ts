@@ -36,7 +36,12 @@ export interface SearchResult {
   rank: number;
   // True when this deal result is a change-order child deal, so the UI can badge it. Deal results only.
   isChangeOrder?: boolean;
-  // Assigned rep display name + best-value deal amount (awarded>bbts>bid>dd, raw string). Deal results only.
+  // The deal's short scope title. Deal results only. Carried because scope_title is now a MATCHED field:
+  // a user who searched "Panel Relocation" and got back a row labelled "<Parent> — Change Order 1" has
+  // no way to see why it matched, which reads as a wrong result rather than a right one.
+  scopeTitle?: string | null;
+  // Assigned rep display name + best-value deal amount (awarded>bbts>bid>dd, raw string — or awarded_amount
+  // verbatim, possibly NEGATIVE, for a change-order child). Deal results only.
   assignedRepName?: string | null;
   dealValue?: string | null;
 }
@@ -127,6 +132,7 @@ export async function globalSearch(
   types: SearchType[] = DEFAULT_SEARCH_TYPES,
   userRole?: string,
   userId?: string,
+  options: { crossOffice?: boolean } = {},
 ): Promise<SearchResponse> {
   // Trim only -- the ILIKE builders escape LIKE metacharacters, so punctuation-bearing terms
   // (deal numbers like D-1001, emails, phones with +, names with & or #) must reach the query
@@ -136,8 +142,20 @@ export async function globalSearch(
     return emptyResponse(query);
   }
 
-  // For directors/admins, search across all accessible offices
-  if (userId && userRole && (userRole === "admin" || userRole === "director")) {
+  // For directors/admins, search across all accessible offices -- UNLESS the caller opts out.
+  //
+  // Cross-office is chosen by role alone, and its per-entity cap is applied AFTER the offices merge
+  // (mergeWithOfficeCap). A client that can only ACT in one office therefore receives a page whose
+  // slots were already spent on records it has no route to open, and filtering on the client cannot
+  // recover the rest -- they were never sent. With enough offices the active one can end up with no
+  // slots at all, so that client shows "nothing matches here" about records that exist and were
+  // truncated server-side.
+  //
+  // Only an explicit `false` opts out, so every existing caller keeps the role-driven behaviour and
+  // the web palette and search page are untouched. The mobile CRM sends it because it works in one
+  // office at a time and has no office switcher to follow a foreign hit with.
+  const crossOfficeAllowed = options.crossOffice !== false;
+  if (crossOfficeAllowed && userId && userRole && (userRole === "admin" || userRole === "director")) {
     return crossOfficeSearch(sanitized, types, userId);
   }
 
@@ -362,13 +380,19 @@ export async function searchDeals(tenantDb: TenantDb, query: string, limit: numb
   // and the SearchResult.rank the cross-office merge re-ranks on -- so the merge can never demote or
   // drop a row on a field the SQL ranked it on. (The old JS scoreMatch covered fewer fields than the
   // builder/ORDER BY, so e.g. a zip/state/customer-only match got rank 0 and could be merged out.)
-  const relevance = relevanceOrder(query, [deals.name, deals.dealNumber, deals.projectNumber, deals.description, deals.propertyAddress, deals.propertyCity, deals.propertyState, deals.bidBoardCustomerName]);
+  // scope_title sits with description here for the reason the comment above gives: the ranked field set
+  // must not be NARROWER than the matched field set, or a scope-title-only hit (a change-order child
+  // whose name is "<Parent> — Change Order 1" and whose notes are blank) scores 0 and can be dropped by
+  // the per-entity LIMIT or demoted out of the cross-office merge — findable in principle, missing in
+  // practice. Placed AHEAD of description: a title match is a stronger signal than a notes match.
+  const relevance = relevanceOrder(query, [deals.name, deals.dealNumber, deals.projectNumber, deals.scopeTitle, deals.description, deals.propertyAddress, deals.propertyCity, deals.propertyState, deals.bidBoardCustomerName]);
   const rows = await tenantDb
     .select({
       id: deals.id,
       name: deals.name,
       dealNumber: deals.dealNumber,
       projectNumber: deals.projectNumber,
+      scopeTitle: deals.scopeTitle,
       propertyCity: deals.propertyCity,
       propertyState: deals.propertyState,
       onHold: deals.onHold,
@@ -414,18 +438,40 @@ export async function searchDeals(tenantDb: TenantDb, query: string, limit: numb
     deepLink: `/deals/${r.id}`,
     rank: Number(r.relevance ?? 0),
     isChangeOrder: r.isChangeOrder === true,
+    scopeTitle: r.scopeTitle ?? null,
     assignedRepName: r.assignedRepName ?? null,
-    // Deliberately the RAW best-value (awarded>bbts>bid>dd, canonical DEAL_VALUE_PRIORITY_CHAIN),
-    // NOT the on-hold-zeroed effective value: search is a display surface (on-hold already shows a
-    // badge), not a reporting aggregate. Matches the Won-metric email builder's snapshotBestValue.
-    dealValue: firstPositiveValue(r.awardedAmount, r.bidBoardTotalSales, r.bidEstimate, r.ddEstimate),
+    // Deliberately the RAW best-value (awarded>bbts>bid>dd, canonical DEAL_VALUE_PRIORITY_CHAIN — or, for
+    // a change-order child, awarded_amount verbatim, possibly NEGATIVE), NOT the on-hold-zeroed effective
+    // value: search is a display surface (on-hold already shows a badge), not a reporting aggregate.
+    // Matches the Won-metric email builder's snapshotBestValue.
+    dealValue: bestDealSearchValue(r.isChangeOrder === true, r.awardedAmount, r.bidBoardTotalSales, r.bidEstimate, r.ddEstimate),
   }));
 }
 
-// Best-value amount for a deal search result: awarded_amount > bid_board_total_sales > bid_estimate
-// > dd_estimate, positive-gated to match the canonical resolver (deal-value-sql.ts / deal-hold.ts):
-// a 0/negative candidate is SKIPPED so it falls through to the next positive estimate. numeric(14,2)
-// arrives as a string from pg; the first positive candidate is returned in its raw string form, else null.
+// Best-value amount for a deal search result, matching the canonical resolver (deal-value-sql.ts /
+// deal-hold.ts): a CHANGE-ORDER child (0156) is priced from awarded_amount VERBATIM — it carries no other
+// value column and a DEDUCTIVE CO carries a NEGATIVE amount — and every other deal runs the positive-gated
+// awarded_amount > bid_board_total_sales > bid_estimate > dd_estimate chain, where a 0/negative candidate
+// is SKIPPED so it falls through to the next positive estimate. Search already badges a CO on this same
+// row, so before the CO branch a deductive CO surfaced WITH its badge and NO amount at all.
+// The CO branch reads the SAME `awardedAmount` argument the chain leads with, so the flag and the amount
+// cannot be paired wrong at the call site. numeric(14,2) arrives as a string from pg; the winning
+// candidate is returned in its raw string form, else null (no value to display).
+function bestDealSearchValue(
+  isChangeOrder: boolean,
+  awardedAmount: string | number | null,
+  ...fallbacks: Array<string | number | null>
+): string | null {
+  if (isChangeOrder) {
+    if (awardedAmount == null) return null;
+    const n = Number(awardedAmount);
+    return Number.isFinite(n) ? String(awardedAmount) : null;
+  }
+  return firstPositiveValue(awardedAmount, ...fallbacks);
+}
+
+// The positive-gated half of the chain: returns the first candidate greater than 0 in its raw string form,
+// else null. Reached only for a NON-change-order deal (see bestDealSearchValue above).
 function firstPositiveValue(...values: Array<string | number | null>): string | null {
   for (const v of values) {
     if (v == null) continue;

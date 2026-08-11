@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
+import { formatDealDisplayName } from "@trock-crm/shared/types";
 import { getMondayShowcaseEvidence } from "../../../src/modules/reports/monday-showcase-service.js";
 import { getWonCloseSummary } from "../../../src/modules/dashboard/service.js";
 import { getWtdPeriod } from "../../../src/lib/period.js";
@@ -22,8 +23,10 @@ const ST = { won: U("57001"), leadNew: U("57005") };
 const CO = { acme: U("c0001"), beta: U("c0002") };
 const RC = { northTx: U("d0001") };
 const PT = { commercial: U("e0001") };
-const D = { won1: U("11001"), won2: U("11002") };
-const L = { l1: U("41001") };
+// coHuman / coGenerated: two Won deals with change-order-SHAPED names that disagree on is_change_order.
+// coHuman is the DISCRIMINATING one — a deal a human named "Lobby — Change Order 1", stored FALSE.
+const D = { won1: U("11001"), won2: U("11002"), coHuman: U("11003"), coGenerated: U("11004") };
+const L = { l1: U("41001"), coNamed: U("41002") };
 const NOW = new Date("2026-05-27T18:00:00Z");
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -44,8 +47,8 @@ beforeAll(async () => {
     CREATE TABLE project_type_config (id uuid PRIMARY KEY, name text NOT NULL);
     CREATE TABLE deals (
       id uuid PRIMARY KEY, sales_source_user_id uuid, deal_number text, project_number text, name text NOT NULL, stage_id uuid NOT NULL,
-      assigned_rep_id uuid, is_test_data boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
-      is_active boolean NOT NULL DEFAULT true, won_closed_date date, expected_close_date date,
+      assigned_rep_id uuid, is_test_data boolean NOT NULL DEFAULT false, is_change_order boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
+      is_active boolean NOT NULL DEFAULT true, won_closed_date date, expected_close_date date, bid_due_date timestamptz,
       dd_estimate numeric, bid_estimate numeric, awarded_amount numeric, bid_board_total_sales numeric,
       company_id uuid, region_id uuid, project_type text, project_type_id uuid, stage_entered_at timestamptz,
       win_probability integer
@@ -80,9 +83,19 @@ beforeAll(async () => {
       ('${D.won2}','W-2','Won Beta','${ST.won}','${REP}','2026-05-25', 50000,
        '${CO.beta}', '${RC.northTx}', 'Residential', NULL, now() - interval '3 days');
 
+    -- CHANGE-ORDER DISPLAY FLAG: two Won deals whose STORED names are the same shape and whose
+    -- is_change_order disagrees. awarded_amount 0 on both, so they add rows to the cohort without moving
+    -- the $ the reconciliation assertions pin.
+    INSERT INTO deals (id, deal_number, name, stage_id, assigned_rep_id, won_closed_date, awarded_amount, is_change_order, stage_entered_at) VALUES
+      ('${D.coHuman}','W-3','Lobby — Change Order 1','${ST.won}','${REP}','2026-05-26', 0, false, now() - interval '1 day'),
+      ('${D.coGenerated}','W-4','Tides Park Lane — Change Order 1','${ST.won}','${REP}','2026-05-26', 0, true, now() - interval '1 day');
+
     -- lead: company Acme -> region 'DFW' via the company, Residential, 5 days in stage
     INSERT INTO leads (id, name, stage_id, assigned_rep_id, status, is_active, company_id, project_type, project_type_id, stage_entered_at) VALUES
-      ('${L.l1}','Lead Acme','${ST.leadNew}','${REP}','open', true, '${CO.acme}', 'Residential', NULL, now() - interval '5 days');
+      ('${L.l1}','Lead Acme','${ST.leadNew}','${REP}','open', true, '${CO.acme}', 'Residential', NULL, now() - interval '5 days'),
+      -- a LEAD a human named with change-order-shaped text. The leads table has no is_change_order column,
+      -- and the drawer renders lead rows through the SAME name cell as deals.
+      ('${L.coNamed}','Lobby — Change Order 1','${ST.leadNew}','${REP}','open', true, '${CO.acme}', 'Residential', NULL, now() - interval '5 days');
   `);
   tdb = drizzle(pg);
 });
@@ -100,7 +113,9 @@ describe("enriched drill-down columns populate and stay reconciled", () => {
     // Additive joins did NOT change the cohort: count + $ tie to the protected aggregate.
     expect(ev.total.count).toBe(card.count);
     expect(ev.total.value).toBeCloseTo(card.totalValue, 2);
-    expect(ev.total.count).toBe(2);
+    // 4 = Won Acme + Won Beta + the two change-order-named deals below, which carry awarded_amount 0 and
+    // so add rows without moving the $.
+    expect(ev.total.count).toBe(4);
     expect(ev.total.value).toBeCloseTo(150000, 2);
 
     const acme = ev.records.find((r) => r.dealNumber === "W-1")!;
@@ -129,5 +144,49 @@ describe("enriched drill-down columns populate and stay reconciled", () => {
     expect(lead.daysInStage).toBeLessThanOrEqual(6);
     expect(lead.value).toBeNull();
     expect(lead.winProbability).toBeNull(); // leads have no win probability
+  });
+
+  it("evidence records carry deals.is_change_order, so the drawer never relabels off the NAME alone", async () => {
+    // `deals.is_change_order` is the AUTHORITY for the change-order display relabel and it crosses five
+    // links to reach the Monday Showcase drawer: dealEvidenceSelectSql projects the column -> the mapper
+    // copies it -> EvidenceRecord declares it (server AND client) -> the name cell passes it to
+    // formatDealDisplayName. Break one and it arrives `undefined`, the formatter falls back to PARSING THE
+    // NAME, and the deal a human named "Lobby — Change Order 1" renders "Change Order 1 — Lobby".
+    const ev = await getMondayShowcaseEvidence(tdb, { metric: "won", mode: "to_date", now: NOW });
+    const human = ev.records.find((r) => r.dealNumber === "W-3")!;
+    const generated = ev.records.find((r) => r.dealNumber === "W-4")!;
+    expect(human).toBeTruthy();
+    expect(generated).toBeTruthy();
+
+    // The stored name is untouched — the relabel is display-only, and the CSV export writes this.
+    expect(human.name).toBe("Lobby — Change Order 1");
+    expect(generated.name).toBe("Tides Park Lane — Change Order 1");
+
+    // The flag survived the projection -> mapper hand-off, with its real value. The FALSE row is the
+    // discriminating one: with the field missing entirely, the TRUE row still renders right by coincidence.
+    expect(human.dealIsChangeOrder).toBe(false);
+    expect(generated.dealIsChangeOrder).toBe(true);
+
+    // ...and the rendered outcome, which is what a viewer sees.
+    expect(formatDealDisplayName(human.name, human.dealIsChangeOrder)).toBe("Lobby — Change Order 1");
+    expect(formatDealDisplayName(generated.name, generated.dealIsChangeOrder)).toBe(
+      "Change Order 1 — Tides Park Lane"
+    );
+
+    // Guard the guard: the NAME-only formatter (the pre-fix behavior) gets the discriminating row WRONG,
+    // so these assertions cannot be satisfied by the fallback the fix exists to stop.
+    expect(formatDealDisplayName(human.name)).toBe("Change Order 1 — Lobby");
+  });
+
+  it("LEAD records report is_change_order = false, not unknown — a lead is never a change-order child", async () => {
+    // The drawer renders lead rows through the SAME name cell as deal rows, so a lead a human named
+    // "Lobby — Change Order 1" would be relabelled by the name-shape fallback. `leads` has no
+    // is_change_order column and a generated change order is always a DEAL, so the lead query answers
+    // FALSE — an authoritative answer, not an unknown that degrades to parsing the name.
+    const ev = await getMondayShowcaseEvidence(tdb, { metric: "leads", mode: "to_date", now: NOW });
+    const lead = ev.records.find((r) => r.name === "Lobby — Change Order 1")!;
+    expect(lead).toBeTruthy();
+    expect(lead.dealIsChangeOrder).toBe(false);
+    expect(formatDealDisplayName(lead.name, lead.dealIsChangeOrder)).toBe("Lobby — Change Order 1");
   });
 });

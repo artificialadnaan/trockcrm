@@ -4,6 +4,7 @@ import { CheckCircle2, ChevronRight, Download, Target, User as UserIcon, Users }
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import { buildReportExportFilename, downloadTextFile, serializeRowsToCsv } from "@/lib/report-export";
 
 type Period = "mtd" | "qtd" | "ytd" | "all";
@@ -13,6 +14,8 @@ interface CommissionDeal {
   dealId: string;
   dealNumber: string | null;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   companyName: string | null;
   propertyName: string | null;
   propertyAddress: string | null;
@@ -226,29 +229,100 @@ function StageBadge({ stage }: { stage: CommissionStage }) {
   );
 }
 
-function PipelineBar({ stageTotals }: { stageTotals: StageTotal[] }) {
-  const total = stageTotals.reduce((sum, stage) => sum + stage.commission, 0);
-  if (total <= 0) {
+// A claw-back segment keeps its stage colour — the legend dot below still has to identify it — and
+// carries the sign as a white diagonal hatch over that colour. Sign cannot ride on LENGTH (length is
+// magnitude) and it cannot ride on HUE either: the page's deduction colour is brand-red, which is
+// already the Contract stage's fill, so a red segment would read as a stage rather than as a sign.
+// Texture is the free channel. The signed amount in the label, the `title`, and the signed money in the
+// legend below carry the same fact in text, so nothing depends on seeing the hatch.
+const CLAW_BACK_HATCH = "repeating-linear-gradient(45deg, rgba(255,255,255,0.55) 0px, rgba(255,255,255,0.55) 3px, transparent 3px, transparent 7px)";
+
+interface StageSplit {
+  stageKey: CommissionStage;
+  net: number;
+  earned: number;
+  clawBack: number;
+  magnitude: number;
+}
+
+// The server NETS before we ever see a stage. `stageTotals[stage].commission` is a plain sum over the
+// stage's deals (reporting-service.ts), so a $5,000 commission and a deductive CO's $5,000 claw-back —
+// which share the `won` stageKey, the common case, since a CO child is created Won — arrive as a single
+// `0`. Taking `Math.abs` of that recovers nothing: the aggregation already destroyed the components.
+//
+// They are recoverable from the SAME payload, though. `deals` is literally the array the server
+// aggregated the stage totals from (same `rows`, unpaginated, no post-filter), so re-splitting it by sign
+// before it is summed reconstructs the two magnitudes exactly. That is why this stays client-side rather
+// than becoming new per-stage positive/claw-back fields on the wire: the wire already carries strictly
+// more than those two numbers, and a second server-side aggregate of the same rows could only drift.
+//
+// The per-deal rows stay a REFINEMENT of the stage total, never a replacement: if they fail to reconcile
+// with the server's net for that stage, the net wins and the stage renders as one segment. A stage total
+// the deal rows can't explain still has to be drawn.
+function splitStage(stage: StageTotal, deals: CommissionDeal[]): StageSplit {
+  const net = Number.isFinite(stage.commission) ? stage.commission : 0;
+  const stageDeals = deals.filter((deal) => deal.stageKey === stage.stageKey && Number.isFinite(deal.commission));
+  let earned = stageDeals.reduce((sum, deal) => (deal.commission > 0 ? sum + deal.commission : sum), 0);
+  let clawBack = stageDeals.reduce((sum, deal) => (deal.commission < 0 ? sum + deal.commission : sum), 0);
+  if (Math.abs(earned + clawBack - net) >= 0.005) {
+    earned = Math.max(net, 0);
+    clawBack = Math.min(net, 0);
+  }
+  // clawBack is <= 0, so this is |earned| + |clawBack| — the movement the stage accounts for.
+  return { stageKey: stage.stageKey, net, earned, clawBack, magnitude: earned - clawBack };
+}
+
+function PipelineBar({ stageTotals, deals }: { stageTotals: StageTotal[]; deals: CommissionDeal[] }) {
+  const stageAt = (stageKey: CommissionStage, index: number) =>
+    stageTotals.find((item) => item.stageKey === stageKey) ?? EMPTY_DASHBOARD.stageTotals[index]!;
+  const splits = STAGE_ORDER.map((stageKey, index) => splitStage(stageAt(stageKey, index), deals));
+
+  // MAGNITUDE, not the net sum. A deductive change order books a NEGATIVE commission, so a period can
+  // hold real activity whose NET is zero or below; sizing on the net hid this bar behind "no activity yet"
+  // while the deal list below plainly showed the claw-back. Zero here now means genuinely nothing moved —
+  // no commission and no claw-back on any stage — which is the only case the empty state should claim.
+  // Identical to the old basis whenever every deal is positive: the server's totalPotential is exactly the
+  // sum of the stage commissions.
+  const magnitudeTotal = splits.reduce((sum, split) => sum + split.magnitude, 0);
+  if (magnitudeTotal <= 0) {
     return <div className="flex h-14 items-center justify-center rounded-md bg-slate-100 text-xs text-slate-500">No commission activity yet</div>;
   }
+
+  // Share-of-total is derived HERE off the same magnitude basis rather than read from the server's
+  // `percentOfTotal`, which divides by totalPotential behind a `> 0` guard and so reports 0% for every
+  // stage of a net-negative period — the bar would then say 100% beside a legend saying 0%. Same number
+  // as the server's for an all-positive period.
+  const sharePct = (value: number) => (Math.abs(value) / magnitudeTotal) * 100;
+
+  // One segment per SIGNED component, so every mark on the bar is a real single-signed quantity the rep
+  // can point at in the list below. A stage holding a $5,000 commission and a $5,000 claw-back draws two
+  // half-width segments rather than one zero-width one (which shows nothing) or one $10,000 one (which
+  // nobody earned); the stage's net is read off the legend.
+  const barSegments = splits.flatMap((split) => {
+    const pieces: Array<{ key: string; stageKey: CommissionStage; amount: number; isClawBack: boolean }> = [];
+    if (split.earned > 0) pieces.push({ key: `${split.stageKey}-earned`, stageKey: split.stageKey, amount: split.earned, isClawBack: false });
+    if (split.clawBack < 0) pieces.push({ key: `${split.stageKey}-claw-back`, stageKey: split.stageKey, amount: split.clawBack, isClawBack: true });
+    return pieces;
+  });
 
   return (
     <div className="space-y-4">
       <div className="flex h-14 w-full overflow-hidden rounded-md ring-1 ring-slate-200">
-        {STAGE_ORDER.map((stageKey, index) => {
-          const stage = stageTotals.find((item) => item.stageKey === stageKey) ?? EMPTY_DASHBOARD.stageTotals[index]!;
-          if (stage.commission <= 0) return null;
-          const widthPct = (stage.commission / total) * 100;
+        {barSegments.map((segment, index) => {
+          const widthPct = sharePct(segment.amount);
           return (
             <div
-              key={stageKey}
-              style={{ width: `${widthPct}%` }}
-              className={`flex min-w-0 flex-col items-center justify-center ${STAGE_META[stageKey].bar} ${index > 0 ? "border-l border-white/40" : ""}`}
-              title={`${STAGE_META[stageKey].label}: ${money(stage.commission)}`}
+              key={segment.key}
+              data-testid="commission-stage-segment"
+              data-stage={segment.stageKey}
+              {...(segment.isClawBack ? { "data-claw-back": "true" } : {})}
+              style={{ width: `${widthPct}%`, ...(segment.isClawBack ? { backgroundImage: CLAW_BACK_HATCH } : {}) }}
+              className={`flex min-w-0 flex-col items-center justify-center ${STAGE_META[segment.stageKey].bar} ${index > 0 ? "border-l border-white/40" : ""}`}
+              title={`${STAGE_META[segment.stageKey].label}: ${money(segment.amount)}${segment.isClawBack ? " (claw-back)" : ""}`}
             >
               {widthPct > 8 ? (
                 <>
-                  <p className="text-xs font-black text-white drop-shadow-sm">{money(stage.commission, "compact")}</p>
+                  <p className="text-xs font-black text-white drop-shadow-sm">{money(segment.amount, "compact")}</p>
                   <p className="text-[9px] font-bold uppercase tracking-wide text-white/90">{widthPct.toFixed(0)}%</p>
                 </>
               ) : null}
@@ -258,15 +332,24 @@ function PipelineBar({ stageTotals }: { stageTotals: StageTotal[] }) {
       </div>
       <div className="grid grid-cols-2 gap-x-6 gap-y-3 sm:grid-cols-3 lg:grid-cols-5">
         {STAGE_ORDER.map((stageKey, index) => {
-          const stage = stageTotals.find((item) => item.stageKey === stageKey) ?? EMPTY_DASHBOARD.stageTotals[index]!;
+          const split = splits[index]!;
           return (
             <div key={stageKey} className="space-y-1">
               <div className="flex items-center gap-2">
                 <span className={`h-2.5 w-2.5 rounded-sm ${STAGE_META[stageKey].dot}`} />
                 <p className="text-[10px] font-bold uppercase tracking-[0.16em] text-slate-500">{STAGE_META[stageKey].label}</p>
               </div>
-              <p className="text-lg font-black tabular-nums text-slate-950">{money(stage.commission)}</p>
-              <p className="text-[10px] font-semibold tabular-nums text-slate-500">{stage.percentOfTotal.toFixed(0)}% of total</p>
+              {/* The NET is what the rep takes home, so that is the money shown; the share beside it is the
+                  stage's MAGNITUDE share, which is what its segments occupy up on the bar. Those two can
+                  look odd together ($0.00 at 100%) exactly when a stage is offset against itself, so the
+                  claw-back is named below whenever it is hiding inside a net — otherwise the split bar has
+                  no explanation anywhere in text. A stage that is ONLY a claw-back needs no such line: its
+                  net already reads negative, in red. */}
+              <p className={`text-lg font-black tabular-nums ${split.net < 0 ? "text-brand-red" : "text-slate-950"}`}>{money(split.net)}</p>
+              <p className="text-[10px] font-semibold tabular-nums text-slate-500">{sharePct(split.magnitude).toFixed(0)}% of total</p>
+              {split.clawBack < 0 && split.earned > 0 ? (
+                <p className="text-[10px] font-semibold tabular-nums text-brand-red">incl. {money(split.clawBack)} clawed back</p>
+              ) : null}
             </div>
           );
         })}
@@ -436,7 +519,7 @@ export function RepCommissionsPage() {
             </div>
           </div>
 
-          <PipelineBar stageTotals={dashboard.stageTotals} />
+          <PipelineBar stageTotals={dashboard.stageTotals} deals={dashboard.deals} />
 
           <div className="rounded-md border border-slate-200 bg-slate-50/40 p-4">
             <div className="flex items-center gap-2">
@@ -504,9 +587,12 @@ export function RepCommissionsPage() {
                             className="grid grid-cols-[minmax(0,1fr)_130px_80px_170px_24px] items-center gap-x-4 px-5 py-3 text-left transition-colors hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-brand-red/30"
                           >
                             <div className="min-w-0">
+                              {/* A change-order child is STORED "<Parent> — Change Order N" and this
+                                  row truncates; move the label to the front for DISPLAY only — the CSV
+                                  export above keeps the stored name. */}
                               <p className="truncate font-bold text-slate-950">
                                 {deal.dealNumber ? `${deal.dealNumber} · ` : ""}
-                                {deal.dealName}
+                                {formatDealDisplayName(deal.dealName, deal.dealIsChangeOrder)}
                               </p>
                               <p className="mt-0.5 truncate text-xs text-slate-500">
                                 {[deal.companyName, deal.propertyName ?? deal.propertyAddress].filter(Boolean).join(" · ")}

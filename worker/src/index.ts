@@ -3,7 +3,7 @@ dotenv.config();
 
 import http from "http";
 import { startListener } from "./listener.js";
-import { pollBidBoardIngestJobs, pollJobs, recoverStaleJobs } from "./queue.js";
+import { pollAiReportJobs, pollBidBoardIngestJobs, pollGlassesWalkthroughForwardJobs, pollJobs, recoverStaleJobs } from "./queue.js";
 import { registerAllJobs } from "./jobs/index.js";
 import cron from "node-cron";
 import { runStaleDealScan } from "./jobs/stale-deals.js";
@@ -29,6 +29,7 @@ import {
   runRfpBidBoardCreateStuckDealSweep,
 } from "./jobs/rfp-bidboard-create.js";
 import { runRfpVoteInvitationDeadLetterSweep } from "./jobs/rfp-vote-invitation.js";
+import { runGlassesWalkthroughForwardDeadLetterSweep } from "./jobs/glasses-walkthrough-forward.js";
 import { runReportsExecutionTick } from "./jobs/reports-execution.js";
 import { runRepPerformanceRollup } from "./jobs/rep-performance-rollup.js";
 import { runBidBoardIngestInboxRecovery } from "./jobs/bid-board-ingest.js";
@@ -73,6 +74,27 @@ async function main() {
   setInterval(pollBidBoardIngestJobs, POLL_INTERVAL_MS);
   console.log(`[Worker] Polling bid_board_ingest queue every ${POLL_INTERVAL_MS}ms (dedicated)`);
 
+  // Same treatment for the AI photo report: a Claude vision pass over up to 60 photographs runs 30-90s
+  // (minutes on retries) and would otherwise hold the main poller's guard for its whole run.
+  setInterval(pollAiReportJobs, POLL_INTERVAL_MS);
+  console.log(`[Worker] Polling ai_report_generation queue every ${POLL_INTERVAL_MS}ms (dedicated)`);
+
+  // Same treatment for the glasses-walkthrough forward: relaying a walk's clips (potentially gigabytes) to
+  // TROCK Scope over ranged R2 reads can hold this loop for minutes; on the main poller that would stall
+  // email/domain-event/delivery jobs behind a video upload. pollJobs excludes glasses_walkthrough_forward;
+  // this poller claims only that type (one at a time).
+  setInterval(pollGlassesWalkthroughForwardJobs, POLL_INTERVAL_MS);
+  console.log(`[Worker] Polling glasses_walkthrough_forward queue every ${POLL_INTERVAL_MS}ms (dedicated)`);
+
+  // NOTE: the recoverStaleJobs call above is no longer the ONLY one. It now also runs periodically, from
+  // inside pollJobs (startExpiredJobLeaseSweepIfDue, which STARTS the sweep beside the tick rather than
+  // awaiting it) — deliberately there rather than on a timer of its own, so
+  // every poller shares one sweeper, the same way they share one flushPendingRecoveries. Startup-only was
+  // never a complete answer: it requeues rows already five minutes stale, so a worker that crashed thirty
+  // seconds into a delivery and restarted left that row 'processing' forever, and nothing selects that
+  // status. What makes the periodic run safe is that a claim is now a renewed LEASE (queue.ts): a live
+  // handler re-stamps started_processing_at while it works, so the fifteen-minute AI report and the
+  // multi-GB glasses forward are never mistaken for a dead worker's leftovers.
   setInterval(async () => {
     try {
       const handled = await runRfpRequestDeadLetterSweep();
@@ -110,8 +132,21 @@ async function main() {
     }
     // Re-enqueue orphaned Bid Board ingestion inbox rows (self-healing; never throws).
     await runBidBoardIngestInboxRecovery();
+    // Glasses-walkthrough forward dead-letter alert: emails ops the FIRST time this sweep sees a
+    // permanently-failed glasses_walkthrough_forward job (either dead-lettered immediately on a config
+    // error, or after exhausting its 10 retries) — never a silent failure, and never more than once per
+    // job (the payload's alertSent marker). See the block comment above
+    // runGlassesWalkthroughForwardDeadLetterSweep for the full rationale.
+    try {
+      const alerted = await runGlassesWalkthroughForwardDeadLetterSweep();
+      if (alerted > 0) {
+        console.log(`[Worker:glasses_walkthrough_forward] Alerted on ${alerted} permanently-failed forward job(s)`);
+      }
+    } catch (err) {
+      console.error("[Worker:glasses_walkthrough_forward] Dead-letter alert sweep failed:", err);
+    }
   }, RFP_DEAD_LETTER_SWEEP_INTERVAL_MS);
-  console.log(`[Worker] RFP dead-letter sweeps (request delivery + Bid Board create + vote invitation) every ${RFP_DEAD_LETTER_SWEEP_INTERVAL_MS}ms`);
+  console.log(`[Worker] RFP dead-letter sweeps (request delivery + Bid Board create + vote invitation + glasses-walkthrough forward alert) every ${RFP_DEAD_LETTER_SWEEP_INTERVAL_MS}ms`);
 
   setInterval(async () => {
     try {

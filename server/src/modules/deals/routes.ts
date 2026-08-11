@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { Router } from "express";
-import { and, eq, desc, isNotNull, isNull, or, sql } from "drizzle-orm";
+import { and, eq, desc, getTableColumns, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { companies, dealApprovals, dealHistory, dealScopingIntake, deals, dealSubscriptions, jobQueue, properties } from "@trock-crm/shared/schema";
 import { requireRole, requireRfpReviewer , requireDealMoveBackApprover } from "../../middleware/rbac.js";
 import {
@@ -105,6 +105,7 @@ import {
   normalizeStagePageSort,
   pendingRfpSubStateForStatus,
   toCanonicalDealStageSlug,
+  validateDealScopeTitle,
   type DealOpportunityEnteredEventPayload,
   type RfpRequestDeliveryPayload,
 } from "@trock-crm/shared/types";
@@ -121,6 +122,18 @@ import { inferDealBidBoardOwnership } from "./workflow-backfill.js";
 import { getPendingRfpDeals, cancelPendingRfp } from "./pending-rfp-service.js";
 import { confirmUpload, getFileById, getFileDownloadUrl, getPendingUploadMetadata } from "../files/service.js";
 import {
+  approveCorrectiveActionItems,
+  assertCorrectiveActionApprover,
+  canApproveCorrectiveActions,
+  assertScorecardBelongsToDeal,
+  parseApproveItemIds,
+  parseReviewedAttempts,
+  parseReviewedAttempt,
+  parseReviewedGeneration,
+  parseRejectionComment,
+} from "../field/corrective-action-approval-routes.js";
+import { approveAndNotify, rejectAndRestart } from "../field/corrective-action-approval.js";
+import {
   getDealScorecardDetail,
   getDealScorecardPdfArtifactState,
   listDealScorecards,
@@ -128,6 +141,10 @@ import {
 } from "./scorecards-service.js";
 import {
   finalizeFieldScorecardArtifacts,
+  recheckScorecardArtifactCurrency,
+} from "../field/scorecards-service.js";
+import { isFutureRendererArtifactStale } from "../field/scorecard-pdf-artifact.js";
+import {
   isStoredScorecardPdfAvailable,
 } from "../field/scorecards-service.js";
 import { assertValidUuid } from "../field/photos-service.js";
@@ -143,6 +160,16 @@ import {
 import {
   updateEstimatePricingRecommendationReviewState,
 } from "../estimating/workbench-service.js";
+import {
+  ingestWalkthrough,
+  validateWalkthroughIngressPayload,
+} from "../estimating/walkthrough-ingress-service.js";
+import { createWalkthroughContactSheetStore } from "../estimating/walkthrough-contact-sheet-store.js";
+import {
+  loadDealGlassesWalkthroughRows,
+  resolveGlassesWalkthroughScope,
+} from "../walkthrough-capture/glasses-walkthrough-scope-service.js";
+import { createGlassesWalkthroughScopeReader } from "../walkthrough-capture/glasses-walkthrough-scope-store.js";
 
 function buildRouteAuditContext(req: { user?: any; headers: Record<string, unknown>; ip?: string | undefined }) {
   const actor = buildAuditActorFromUser({
@@ -194,7 +221,7 @@ import {
   listEstimateMarkets,
   setDealMarketOverride,
 } from "../estimating/deal-market-override-service.js";
-import { resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
+import { capRfpRequestBody, resolveSyncHubRfpRequestUrl, type NormalizedRfpRequestBody } from "./rfp-payload.js";
 import { enqueueRfpBidBoardCreate, enqueueRfpVoteInvitation, insertOpportunityRfpRequestJob, loadRfpAttachmentsForDeal } from "./rfp-enqueue.js";
 import { isOpportunityRfpEventEnabled, isRfpVotingEnabled } from "../../config/feature-flags.js";
 import { allRfpVotersHaveOfficeAccess, authorizeAndCastRfpVote, hasSufficientRfpVoters, isServiceRfp, openRfpVoteRound, rfpVotesTableExists } from "./rfp-vote-service.js";
@@ -628,6 +655,16 @@ function readStageInput(req: Parameters<typeof router.get>[1] extends never ? ne
   return {
     ...readBoardInput(req),
     stageId: req.params.stageId,
+    // Opt-in: reproduce the BOARD's population (drops open rows whose Bid Board mirror already closed)
+    // so a drill-down opened from the board lists what the board counted. Default off — the web
+    // workspace uses this endpoint too and its behaviour is unchanged.
+    boardPopulation: req.query.boardPopulation === "true",
+    // Opt-in: broaden an OPEN stage drill to the CANONICAL stage family (the board's own column
+    // membership). Default off, and deliberately so: mobile-crm renders UNMERGED raw columns and opens
+    // this same endpoint with the raw stage id, so expanding by default would make its "see all 13" open
+    // a list of 16. Already-shipped mobile builds cannot start sending a flag, so the narrow behaviour has
+    // to be the default and the web workspace — whose board DOES merge — opts in (Codex P2).
+    canonicalStageFamily: req.query.canonicalStageFamily === "true",
     page: parseNumber(req.query.page) ?? 1,
     pageSize: parseNumber(req.query.pageSize) ?? 25,
     sort: normalizeStagePageSort(req.query.sort as string | undefined),
@@ -696,9 +733,20 @@ async function loadDealStageSlug(tenantDb: any, stageId: string): Promise<string
 
 async function loadTriggerRfpDeal(tenantDb: any, dealId: string) {
   const [deal] = await tenantDb
-    .select()
+    .select({
+      ...getTableColumns(deals),
+      // isServiceRfp reads the CONFIGURED project-type digit, and it is the only tier that answers for a
+      // deal carrying no project_type text — the majority shape. A bare .select() here would leave the
+      // field undefined and silently route a service RFP into the CRM three-voter round instead of the
+      // SyncHub service-approval path, with nothing failing to show it.
+      projectTypeCode: sql<string | null>`(SELECT code FROM public.project_type_config WHERE id = ${deals.projectTypeId})`,
+    })
     .from(deals)
-    .where(eq(deals.id, dealId))
+    // A soft-deleted deal reads as NOT FOUND, the same convention authorizeAndCastRfpVote states and the
+    // vote-path reservation enforces with eq(deals.isActive, true). Without it a stale tab could trigger an
+    // RFP for a deleted deal: the loader returned the row, the handler only checked for null, and the
+    // direct SyncHub reservation had no active condition of its own — so the deal got stamped and enqueued.
+    .where(and(eq(deals.id, dealId), eq(deals.isActive, true)))
     .limit(1);
   return deal ?? null;
 }
@@ -930,6 +978,9 @@ router.get("/", async (req, res, next) => {
       stageEntryDateWindow:
         req.query.stage_entry_window === "true" || req.query.stageEntryDateWindow === "true",
       excludeOnHold: req.query.exclude_on_hold === "true" || req.query.excludeOnHold === "true",
+      // Mirrors the stage SUMMARY's boardPopulation so a stage page's header, pagination and list all
+      // describe one population (Codex P2 on #983).
+      boardPopulation: req.query.boardPopulation === "true",
       sortBy: req.query.sortBy as any,
       sortDir: req.query.sortDir as "asc" | "desc" | undefined,
       page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
@@ -1377,6 +1428,10 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
     const updateConditions = [
       eq(deals.id, deal.id),
       eq(deals.stageId, deal.stageId),
+      // Bound atomically as well as at load, mirroring the vote-path reservation: the load and the reserve
+      // are separated by async work, so a delete landing in that gap must make this UPDATE match nothing
+      // rather than enqueue an RFP for a deal that no longer exists.
+      eq(deals.isActive, true),
       isNull(deals.rfpApprovalStatus),
       isNull(deals.rfpApprovalRequestedAt),
       eq(deals.isBidBoardOwned, false),
@@ -1385,6 +1440,17 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
       isNull(deals.readOnlySyncedAt),
       isNull(deals.bidBoardStageEnteredAt),
       isNull(deals.bidBoardMirrorSourceEnteredAt),
+      // Bind the SERVICE VERDICT'S inputs, exactly as openRfpVoteRound does. isServiceRfp(deal) above was
+      // evaluated from a pre-reservation read; a concurrent edit in that gap could flip this deal from
+      // service to non-service, and this direct SyncHub send would still match and deliver an RFP that had
+      // just become vote-eligible. All three tiers are bound because all three decide the verdict:
+      // project_type, project_type_id (the configured code, which answers for most deals) and
+      // workflow_route. A re-typed deal 409s here instead of taking the wrong branch.
+      deal.projectType == null ? isNull(deals.projectType) : eq(deals.projectType, deal.projectType),
+      deal.projectTypeId == null
+        ? isNull(deals.projectTypeId)
+        : eq(deals.projectTypeId, deal.projectTypeId),
+      eq(deals.workflowRoute, deal.workflowRoute ?? "normal"),
     ];
     if (userRole === "rep") {
       updateConditions.push(eq(deals.assignedRepId, userId));
@@ -1419,6 +1485,7 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
       deal: reservedDeal,
       officeId,
       eventId,
+      userId: req.user!.id,
     });
 
     const eventsToEmit: Array<{ name: string; payload: Record<string, unknown> }> = [];
@@ -1713,11 +1780,22 @@ router.post("/:id/rfp-retry", async (req, res, next) => {
     // A dead job has exhausted all auto-retries, so a manual retry can land
     // well past the attachments' presigned-URL TTL. Re-mint the URLs here (the
     // retry is effectively a re-enqueue) so the job doesn't carry dead links.
-    const freshAttachments = await loadRfpAttachmentsForDeal(req.tenantDb!, deal.id);
+    const freshAttachments = await loadRfpAttachmentsForDeal(req.tenantDb!, deal.id, {
+      userId: req.user!.id,
+      officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+    });
     const payload: RfpRequestDeliveryPayload = {
       ...deadJob.payload,
       syncHubUrl: resolveSyncHubRfpRequestUrl(),
-      body: { ...deadJob.payload.body, attachments: freshAttachments },
+      // Re-run the byte limiter over the NEW attachment list. The dead job's body was capped against
+      // the file set as it stood at the original enqueue; a deal whose files grew since would
+      // otherwise re-enqueue an oversized body and be dead-lettered again with another 413.
+      // capRfpRequestBody also recomputes attachmentsOmitted rather than inheriting the stale count.
+      // The stored payload is typed as a loose record, so bridge it to the builder's shape here.
+      body: capRfpRequestBody({
+        ...(deadJob.payload.body as unknown as NormalizedRfpRequestBody),
+        attachments: freshAttachments,
+      }) as unknown as Record<string, unknown>,
     };
     delete payload.dealHandled;
     // Atomically re-claim the send-failed state BEFORE enqueuing, so a Return to Opportunity that lands
@@ -2135,7 +2213,30 @@ function validateDealPayload(body: Record<string, unknown>): void {
       throw new AppError(400, "bidDueDate must be an ISO date in YYYY-MM-DD format");
     }
   }
+  validateScopeTitlePayload(body);
   validateProjectNumberPayload(body);
+}
+
+/**
+ * scope_title is a SHORT title by definition — the field exists because `description` (5000 chars) is a
+ * notes field that keeps arriving as a wall of text. A cap the form alone enforces is not a cap: every
+ * non-form writer (a script, an importer, curl) would put the wall of text straight back, and the column
+ * would need widening within a release. So the length is rejected HERE, on the one validator all three
+ * write paths (POST /deals, POST /deals/service-opportunity, PATCH /deals/:id) already call.
+ *
+ * Normalizes in place as well as validates, mirroring validateProjectNumberPayload: trim, and blank ->
+ * null so a cleared form field clears the column instead of storing "". Only touches the body when the
+ * caller actually sent the key, so a partial PATCH that omits scopeTitle still omits it downstream
+ * (updateDeal keys on `!== undefined`) and cannot blank an existing title.
+ */
+function validateScopeTitlePayload(body: Record<string, unknown>): void {
+  if (!Object.prototype.hasOwnProperty.call(body, "scopeTitle")) return;
+
+  const result = validateDealScopeTitle(body.scopeTitle);
+  if (!result.ok) {
+    throw new AppError(400, result.error, "SCOPE_TITLE_INVALID");
+  }
+  body.scopeTitle = result.value;
 }
 
 function validateProjectNumberPayload(body: Record<string, unknown>): void {
@@ -2231,6 +2332,7 @@ router.post("/service-opportunity", async (req, res, next) => {
       companyId,
       propertyId,
       primaryContactId,
+      scopeTitle,
       description,
       source,
       winProbability,
@@ -2306,6 +2408,7 @@ router.post("/service-opportunity", async (req, res, next) => {
       primaryContactId,
       companyId,
       propertyId,
+      scopeTitle,
       description,
       source,
       winProbability,
@@ -2556,8 +2659,8 @@ router.patch(
 
 // ===== CRM change orders (dated value records added to Won / Bid-Board-Owned deals) =====
 // Distinct from the Procore-synced `change_orders` table; never synced out. Mutations are
-// admin-only; the amount is positive-only and the parent deal must be Won / Bid-Board-Owned
-// (both enforced in change-order-service).
+// admin-only; the amount is non-zero (negative = deductive, reduces the parent's contract value)
+// and the parent deal must be Won / Bid-Board-Owned (both enforced in change-order-service).
 
 // GET /api/deals/:id/scorecards — list the Field Scorecards submitted for this deal (T-Rock Cam)
 router.get("/:id/scorecards", async (req, res, next) => {
@@ -2583,7 +2686,107 @@ router.get("/:id/scorecards/:scorecardId", async (req, res, next) => {
           .catch(() => null),
     });
     await req.commitTransaction!();
-    res.json({ scorecard });
+    // Whether to RENDER the approve/reject controls. A boolean, never the allowlist itself: that is
+    // authorization config, and shipping it would tell every CRM user who can sign off. The client must not
+    // re-derive the gate either — hiding the controls is UX, the route's 403 is the guarantee.
+    res.json({ scorecard: { ...scorecard, canApproveCorrectiveActions: canApproveCorrectiveActions(req) } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/scorecards/:scorecardId/corrective-actions/approve — approve specific items, or
+// every item awaiting approval when `itemIds` is omitted (approve-all).
+//
+// Authorization is TWO gates, both required: assertDealRouteAccess proves the caller can see this deal, and
+// the QC_APPROVER_EMAILS allowlist proves they may exercise the approval verb. The allowlist is global, so
+// the deal check is what keeps an approver from acting on records they cannot otherwise read.
+router.post("/:id/scorecards/:scorecardId/corrective-actions/approve", async (req, res, next) => {
+  try {
+    await assertDealRouteAccess(req, req.params.id);
+    const actor = assertCorrectiveActionApprover(req);
+    const itemIds = parseApproveItemIds(req.body);
+    // Which ATTEMPT the approver reviewed, so a response filed after they opened the page cannot be approved
+    // under their name. Absent from older clients, which keep the previous status-only behaviour.
+    const reviewedAttempts = parseReviewedAttempts(req.body);
+    // ...and which VERSION OF THE CARD they were looking at. An edit while it awaits approval moves no
+    // corrective-action event, so the attempt guard alone would let a stale click approve unseen content.
+    const reviewedGeneration = parseReviewedGeneration(req.body);
+    await assertScorecardBelongsToDeal(req.tenantDb!, req.params.id, req.params.scorecardId);
+
+    if (!req.officeSlug) throw new AppError(500, "Office context not available");
+    // approveAndNotify, not approveCorrectiveActionItems: a final approval CLOSES the card, and oversight
+    // must be told. Composed server-side so the route cannot do half of it silently.
+    const office = { id: req.user!.activeOfficeId, slug: req.officeSlug };
+    const outcome = await approveAndNotify(req.tenantDb!, {
+      office,
+      scorecardId: req.params.scorecardId,
+      itemIds,
+      actor,
+      reviewedAttempts,
+      reviewedGeneration,
+    });
+    await req.commitTransaction!();
+    // Refresh the artifact AFTER the commit, mirroring the responder route. An approval advances the card's
+    // generation, so the stored PDF is stale by definition — and the oversight worker only attaches one whose
+    // generation matches, so without this the "Approved" email silently loses its attachment unless someone
+    // happens to download the card during the delay. Only on a real change: an idempotent re-approve moved
+    // nothing, and re-rendering would re-download every evidence image for an unchanged generation.
+    if (outcome.changedItemIds.length > 0) {
+      void finalizeFieldScorecardArtifacts(office, req.user!.id, req.params.scorecardId).catch((err) => {
+        console.error("[CorrectiveActionApproval] Post-approval PDF refresh failed", {
+          scorecardId: req.params.scorecardId,
+          err,
+        });
+      });
+    }
+
+    res.json({ outcome });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/deals/:id/scorecards/:scorecardId/corrective-actions/:itemId/reject — send ONE item back with a
+// required reason. Only that item reopens; approved siblings keep their verdict.
+router.post("/:id/scorecards/:scorecardId/corrective-actions/:itemId/reject", async (req, res, next) => {
+  try {
+    await assertDealRouteAccess(req, req.params.id);
+    const actor = assertCorrectiveActionApprover(req);
+    const comment = parseRejectionComment(req.body);
+    const reviewedAttempt = parseReviewedAttempt(req.body);
+    const reviewedGeneration = parseReviewedGeneration(req.body);
+    await assertScorecardBelongsToDeal(req.tenantDb!, req.params.id, req.params.scorecardId);
+
+    if (!req.officeSlug) throw new AppError(500, "Office context not available");
+    // rejectAndRestart, not rejectCorrectiveActionItem: the responders' tokens were deleted when they
+    // submitted, so a rejection without a fresh cycle hands them a notice they cannot act on.
+    const office = { id: req.user!.activeOfficeId, slug: req.officeSlug };
+    const outcome = await rejectAndRestart(req.tenantDb!, {
+      office,
+      scorecardId: req.params.scorecardId,
+      itemId: req.params.itemId,
+      comment,
+      actor,
+      reviewedAttempt,
+      reviewedGeneration,
+    });
+    await req.commitTransaction!();
+    // Refresh the artifact AFTER the commit, mirroring the responder route. A rejection advances the card's
+    // generation and restarts the responders' cycle, so the stored PDF is stale by definition — and the
+    // responder notice that follows carries the record they are being asked to correct. Only on a real
+    // change: an idempotent re-reject moved nothing, and re-rendering would re-download every evidence image
+    // for an unchanged generation.
+    if (outcome.changedItemIds.length > 0) {
+      void finalizeFieldScorecardArtifacts(office, req.user!.id, req.params.scorecardId).catch((err) => {
+        console.error("[CorrectiveActionApproval] Post-approval PDF refresh failed", {
+          scorecardId: req.params.scorecardId,
+          err,
+        });
+      });
+    }
+
+    res.json({ outcome });
   } catch (err) {
     next(err);
   }
@@ -2599,6 +2802,17 @@ router.get("/:id/scorecards/:scorecardId/download", async (req, res, next) => {
     const office = { id: req.user!.activeOfficeId, slug: req.officeSlug };
     const userId = req.user!.id;
     await req.commitTransaction!();
+    // A NEWER renderer's artifact whose generation has since moved. This instance cannot supersede it (its
+    // publish CAS is lte(version, CURRENT)) and must not serve it either — doing so silently reproduces the
+    // exact "PDF omits the corrective action" defect for every download that lands on an old instance during
+    // a rolling deploy. Retryable, so the retry can reach an upgraded instance that CAN re-render.
+    if (isFutureRendererArtifactStale(artifact)) {
+      throw new AppError(
+        503,
+        "This scorecard's PDF is being updated by a newer release. Please try the download again shortly.",
+        "SCORECARD_PDF_AWAITING_NEWER_RENDERER",
+      );
+    }
     let pdfR2Key = artifact.pdfR2Key;
     const storedObjectAvailable = artifact.needsRegeneration
       ? false
@@ -2628,6 +2842,25 @@ router.get("/:id/scorecards/:scorecardId/download", async (req, res, next) => {
       }
     }
     if (!pdfR2Key) throw new AppError(503, "The scorecard PDF is not available yet. Please try again shortly.");
+    // Re-read immediately before presigning. The artifact snapshot was taken inside a transaction that has
+    // since been released, and a corrective-action response committing in that window advances updated_at
+    // while retaining pdf_r2_key — so the snapshot's "current" verdict can be stale and this route would
+    // hand out a URL for the pre-response PDF. Retryable, because the next attempt regenerates.
+    const recheck = await recheckScorecardArtifactCurrency(office, req.params.scorecardId, pdfR2Key);
+    if (recheck === "awaiting-newer-renderer") {
+      throw new AppError(
+        503,
+        "This scorecard's PDF is being updated by a newer release. Please try the download again shortly.",
+        "SCORECARD_PDF_AWAITING_NEWER_RENDERER",
+      );
+    }
+    if (recheck !== "current") {
+      throw new AppError(
+        503,
+        "The scorecard changed while its PDF was being prepared. Please try the download again.",
+        "SCORECARD_PDF_STALE",
+      );
+    }
     const result = await presignDealScorecardPdf(req.params.scorecardId, pdfR2Key);
     res.json(result);
   } catch (err) {
@@ -3277,6 +3510,133 @@ router.post("/:id/estimating/manual-rows/:recommendationId/promote-local-catalog
 
     await req.commitTransaction!();
     res.status(200).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * The ONLY inbound way to create estimate extractions.
+ *
+ * Every other estimating route above edits, approves, or rejects rows that a parse run already
+ * produced — none of them can bring a row into existence. A TROCK Scope walkthrough arrives with its
+ * scope ALREADY extracted, so it has nothing to hand an OCR pipeline; it needs a door of its own.
+ * `ingestWalkthrough` synthesizes the whole file -> document -> parse-run -> extractions chain in one
+ * transaction (walkthrough-ingress-service.ts).
+ *
+ * Conventions here are lifted wholesale from the manual-rows handler directly above: tenant db off
+ * `req.tenantDb!`, actor off `req.user!.id`, the `getDealById` 404 guard, `req.commitTransaction!()`
+ * before the response, and every error to `next`. 201 rather than 200 because, unlike manual-rows,
+ * this call brings new resources into being.
+ *
+ * The request is IDEMPOTENT on `walkthroughId`: a retry after a lost response replays the ids of the
+ * chain the first call committed instead of building a second one (walkthrough-ingress-service.ts).
+ *
+ * THE CONTACT SHEET MUST ALREADY BE UPLOADED when this is posted, to the key the ingress DERIVES from
+ * (dealId, projectId, walkthroughId, contactSheetMimeType) — the body never carries a key. The ingress
+ * HEADs that object and compares its Content-Type and Content-Length to the declared ones before its
+ * first write, so a pre-upload that failed or is still in flight is a 400 naming the derived key rather
+ * than a 201 for a chain whose evidence 404s. The key composes `walkthroughId` percent-encoded as ONE
+ * path segment (R30), so both sides of the contract must encode it the same way.
+ *
+ * …AND A RETRY MUST NOT RE-UPLOAD IT (R31). The key is derived from walkthrough identity, so every
+ * attempt targets the SAME object: a retry that uploads again overwrites evidence this deal has already
+ * committed, before any drift check can look at it. A true retry has nothing to upload — the object is
+ * already there, byte-identical, from the attempt whose response was lost. The ingress HEADs the stored
+ * key on the replay path and 409s if the object no longer matches what the `files` row recorded.
+ *
+ * STATUS CODES THE SENDER MUST DISTINGUISH: a 400 means "your upload is not at the key, fix it" and is
+ * NOT retryable; a 503 means "we could not reach object storage to check" and IS (R33). Conflating the
+ * two is how a valid upload gets abandoned.
+ */
+router.post("/:id/estimating/walkthrough-extractions", async (req, res, next) => {
+  try {
+    // The WHOLE body is validated BEFORE the deal lookup, so a malformed export costs no query at all
+    // and can never reach a write. `validateWalkthroughIngressPayload` throws AppError(400, …) naming
+    // the offending field — a 400 the sender can act on, rather than a 500 from a NOT NULL violation
+    // or a `.toFixed` on a string deep inside the transaction. `ingestWalkthrough` runs the same
+    // validation again on its own input: the receiver does not trust the sender, and this route is not
+    // the only possible caller.
+    const payload = validateWalkthroughIngressPayload({
+      ...(req.body as Record<string, unknown> | undefined),
+      // Taken from the URL and the session, never from the body: otherwise a caller could aim a
+      // walkthrough at a deal it cannot see, or forge the uploader stamped on the contact-sheet file.
+      dealId: req.params.id,
+      userId: req.user!.id,
+    });
+
+    const deal = await getDealById(req.tenantDb!, req.params.id, req.user!.role, req.user!.id);
+    if (!deal) throw new AppError(404, "Deal not found");
+
+    // R23/R25. Object storage is INJECTED, not imported by the ingress module — it verifies the sender's
+    // pre-uploaded contact sheet at the derived key before its first write, and renders the list
+    // thumbnail through the same helpers `confirmUpload` uses. See walkthrough-contact-sheet-store.ts.
+    const result = await ingestWalkthrough({
+      tenantDb: req.tenantDb! as any,
+      payload,
+      contactSheetStore: createWalkthroughContactSheetStore(),
+    });
+
+    await req.commitTransaction!();
+    res.status(201).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+/*
+ * The glasses-walkthrough WRITE routes used to live here. They are now on the FIELD router
+ * (`/api/field/projects/:dealId/glasses-walkthroughs...`, server/src/modules/field/routes.ts).
+ *
+ * They had to move: TrockCam is their only caller and it authenticates through `/auth/field-login`,
+ * which mints a `surface: "field"` token that authMiddleware rejects on every CRM route by design.
+ * Mounted here, every upload returned 401 "This session is not valid for CRM access" — and the app,
+ * reading that as a dead session, signed the user out. A single undeliverable walk therefore locked
+ * the crew out of the app. Deliberately NOT left behind as a second CRM-side copy: one auth boundary
+ * for this path is the point.
+ *
+ * The READ below is the mirror image and belongs here for the same reason the writes do not: its caller
+ * is the CRM web app's deal page, held open by estimators with an ordinary CRM session. It shares no
+ * handler, no gate and no client with the field routes — only the feature.
+ */
+
+/**
+ * GET /api/deals/:id/glasses-walkthroughs — the deal page's AI-walk panel.
+ *
+ * Every glasses walk filed against this deal, each carrying whatever scope TROCK Scope has extracted from
+ * it, or the reason it cannot be shown. See glasses-walkthrough-scope-service.ts for what each `state`
+ * claims; the short version is that NO TROCK Scope failure may degrade this page, so an outage, a refused
+ * credential and a slow answer are all per-walk states rather than a non-200 from here.
+ *
+ * AUTHORISATION is `assertDealRouteAccess` — the same gate the neighbouring `GET /:id/estimating` reads
+ * use, and deliberately not a new rule. It resolves the deal through the caller's own tenant `search_path`
+ * and refuses a deal outside their office; a deal they cannot see is a 404 before any row is read.
+ *
+ * THE COMMIT SITS BETWEEN THE TWO CALLS, and that placement is the reason they are two calls.
+ * `tenantMiddleware` has pinned one of the pool's 20 connections and opened a transaction before this
+ * handler runs, and `commitTransaction` is what releases it. Fanning out to TROCK Scope before committing
+ * would hold that slot for the whole network wait — up to the 5s deadline — on an endpoint the deal page
+ * POLLS. That is the same pool-occupancy cost the ingest side reshaped its phases around
+ * (GLASSES_WALKTHROUGH_VERIFY_CONCURRENCY), on the side with far more traffic. After the commit the
+ * resolver touches no database at all, which is what makes committing early safe rather than merely
+ * faster.
+ */
+router.get("/:id/glasses-walkthroughs", async (req, res, next) => {
+  try {
+    await assertDealRouteAccess(req, req.params.id);
+    const rows = await loadDealGlassesWalkthroughRows(req.tenantDb! as any, req.params.id);
+    await req.commitTransaction!();
+
+    const walkthroughs = await resolveGlassesWalkthroughScope(rows, {
+      scopeReader: createGlassesWalkthroughScopeReader(),
+    });
+    // NO-STORE, because this body now carries PRESIGNED URLs. Frame and clip links are
+    // bearer-equivalent for as long as they are valid, and an ordinary cacheable JSON response leaves
+    // them in the browser's HTTP cache — and in any intermediary — after the render that needed them.
+    // It also defeats the panel's refresh control, which exists precisely to re-sign expired media: a
+    // cache hit would hand back the same stale signatures it is trying to replace.
+    res.setHeader("Cache-Control", "no-store, private");
+    res.status(200).json({ walkthroughs });
   } catch (err) {
     next(err);
   }

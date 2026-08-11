@@ -10,6 +10,7 @@ let db: PGlite;
 const client = () => ({ query: (sql: string, params?: unknown[]) => db.query(sql, params as unknown[]) }) as never;
 
 const DATE = "2026-06-12";
+const CO_DATE = "2026-06-13"; // its own day, so the change-order fixtures never move the DATE assertions
 const REP_A = "11111111-1111-1111-1111-111111111111";
 const REP_B = "11111111-1111-1111-1111-111111111112";
 const REP_C = "11111111-1111-1111-1111-111111111113"; // director — excluded from hourly
@@ -38,6 +39,7 @@ beforeAll(async () => {
       stage_id uuid,
       won_closed_date date,
       on_hold boolean,
+      is_change_order boolean DEFAULT false,
       awarded_amount numeric,
       bid_board_total_sales numeric,
       bid_estimate numeric,
@@ -77,6 +79,15 @@ beforeAll(async () => {
       ('${uuid(4)}', 'Test Deal',       '${REP_A}', '${ST_WON}', '2026-06-12', false, 99999,  NULL, true),
       ('${uuid(5)}', 'On Hold Won',     '${REP_A}', '${ST_WON}', '2026-06-12', true,  88888,  NULL, false),
       ('${uuid(6)}', 'Not A Won Stage', '${REP_A}', '${ST_EST}', '2026-06-12', NULL,  77777,  NULL, false);
+  `);
+
+  // ---- Change-order fixtures, on their OWN date so the day-of assertions above stay untouched ----
+  // CO children mirror prod: awarded_amount is the ONLY populated value column (all 30 in prod).
+  await db.exec(`
+    INSERT INTO office_test.deals (id, name, assigned_rep_id, stage_id, won_closed_date, on_hold, is_change_order, awarded_amount, is_test_data) VALUES
+      ('${uuid(7)}', 'CO Day Parent',    '${REP_A}', '${ST_WON}', '${CO_DATE}', false, false, 400000, false),
+      ('${uuid(8)}', 'CO Day Additive',  '${REP_A}', '${ST_WON}', '${CO_DATE}', false, true,   10000, false),
+      ('${uuid(9)}', 'CO Day Deductive', '${REP_A}', '${ST_WON}', '${CO_DATE}', false, true,  -25000, false);
   `);
 
   // ---- Advanced-today fixtures (stage history) ----
@@ -157,6 +168,24 @@ describe("readWonToday — canonical won_closed_date cohort + effective-won valu
     expect(names).not.toContain("Test Deal");
     expect(names).not.toContain("On Hold Won");
     expect(names).not.toContain("Not A Won Stage");
+  });
+});
+
+describe("readWonToday — change-order children are valued from awarded_amount verbatim", () => {
+  it("reports a deductive CO's NEGATIVE amount instead of silently pricing it at $0", async () => {
+    const won = await readWonToday(client(), "office_test", CO_DATE);
+    const byName = new Map(won.map((d) => [d.dealName, d.value]));
+
+    expect(byName.get("CO Day Deductive")).toBe(-25000);
+    expect(byName.get("CO Day Additive")).toBe(10000); // INERT for a positive CO
+    expect(byName.get("CO Day Parent")).toBe(400000); // INERT for a normal deal
+  });
+
+  it("the 5pm digest header nets the deduction out — the same basis Showcase/Region report", async () => {
+    const won = await readWonToday(client(), "office_test", CO_DATE);
+
+    expect(won.length).toBe(3);
+    expect(won.reduce((s, d) => s + d.value, 0)).toBe(385000); // 400000 + 10000 - 25000
   });
 });
 

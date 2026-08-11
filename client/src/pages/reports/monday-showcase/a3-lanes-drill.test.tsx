@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VariantA3Lanes } from "./variants";
 import { DrillProvider } from "./drill";
 import type { WeekMode } from "../week-mode";
+import { UNFILTERED_ROUTE_FILTER } from "./types";
 import type { MondayShowcaseData, ShowcaseWeek, EvidenceRequest } from "./types";
 
 // CodeRabbit P2 (reconciliation drift): A3 "Momentum Lanes" renders weeklyTrend, whose displayed value is
@@ -49,6 +50,7 @@ const dataFor = (mode: WeekMode): MondayShowcaseData => ({
   officeProjection: { bands: [], coverage: { n: 0, m: 0, undatedValue: 0 }, coverageCaption: "" },
   weeklyTrend: TREND,
   valueBases: { won_awarded_first: "x", open_best_estimate: "y" },
+  routeFilter: UNFILTERED_ROUTE_FILTER,
   notes: [],
 });
 

@@ -26,6 +26,7 @@ const user = {
   reportsTo: null,
   officeName: "Dallas",
   isActive: true,
+  generatesSales: true,
   extraOfficeCount: 0,
   commissionStructure: "solo" as const,
   capxRateSolo: 0.03,
@@ -73,6 +74,55 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+describe("UsersPage generates-sales toggle", () => {
+  function generatesSalesCheckbox(): HTMLInputElement {
+    // Found by ACCESSIBLE NAME, not by position. A checkbox alone in a table cell has no visible label,
+    // so if the name regresses this throws rather than quietly testing the wrong control — which is how
+    // the first version of this test passed against a checkbox that had no name at all.
+    const checkbox = container.querySelector<HTMLInputElement>(
+      'input[type=checkbox][aria-label="Adnaan Iqbal generates sales"]'
+    );
+    if (!checkbox) throw new Error("generates-sales checkbox not rendered with an accessible name");
+    return checkbox;
+  }
+
+  it("reflects the stored flag rather than the role", () => {
+    act(() => root.render(<UsersPage />));
+    // The fixture is role='admin' AND generatesSales=true — the combination the old role-based roster
+    // could not express. The control must follow the flag, or the two would be the same field again.
+    expect(generatesSalesCheckbox().checked).toBe(true);
+  });
+
+  it("sends the INVERTED flag, so unticking removes the person from the dashboard", async () => {
+    const updateUser = vi.fn().mockResolvedValue(undefined);
+    useAdminUsersMock.mockReturnValue({
+      users: [user],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      createUser: vi.fn(),
+      updateUser,
+      updateUsersBulk: vi.fn(),
+      importExternalUsers: vi.fn(),
+      sendInvite: vi.fn(),
+      previewInvite: vi.fn(),
+      revokeInvite: vi.fn(),
+      getLocalAuthEvents: vi.fn(),
+    });
+
+    act(() => root.render(<UsersPage />));
+    // async act: the handler awaits updateUser and then clears its own busy state, so a sync act()
+    // leaves that trailing setState outside the batch and React warns.
+    await act(async () => {
+      generatesSalesCheckbox().click();
+    });
+
+    // A boolean sent uninverted is the classic version of this bug: the click appears to do nothing,
+    // because the value written back is the value already stored.
+    expect(updateUser).toHaveBeenCalledWith("user-1", { generatesSales: false });
+  });
+});
+
 describe("UsersPage responsive table", () => {
   it("keeps wide-user data in one labelled horizontal region and stacks rate controls before the small breakpoint", () => {
     act(() => root.render(<UsersPage />));
@@ -90,7 +140,10 @@ describe("UsersPage responsive table", () => {
     expect(scrollBody?.getAttribute("role")).toBe("region");
     expect(scrollBody?.getAttribute("aria-label")).toContain("Scroll horizontally");
     expect(scrollBody?.getAttribute("tabindex")).toBe("0");
-    expect(table?.className).toContain("min-w-[76rem]");
+    // Widened from 76rem when the Generates Sales column was added. The number is pinned because the
+    // horizontal-scroll affordance above depends on the table genuinely overflowing its container —
+    // adding a column without widening it silently squeezes the existing ones instead.
+    expect(table?.className).toContain("min-w-[84rem]");
     expect(container.querySelector("[data-slot=table-container]")).toBeNull();
     expect(filterGrid?.className).toContain("grid-cols-1");
     expect(filterGrid?.className).toContain("sm:grid-cols-2");

@@ -93,7 +93,7 @@ export function ProjectReadinessPage() {
                   <tbody className="divide-y divide-slate-100">
                     {data.missingReadiness.map((deal) => (
                       <tr key={deal.dealId}>
-                        <td className="px-3 py-3"><DealLink dealId={deal.dealId}>{deal.dealName}</DealLink></td>
+                        <td className="px-3 py-3"><DealLink dealId={deal.dealId} dealName={deal.dealName} dealIsChangeOrder={deal.dealIsChangeOrder} /></td>
                         <td className="px-3 py-3">{deal.ownerName}</td>
                         <td className="px-3 py-3">{deal.stageName}</td>
                         <td className="px-3 py-3">{formatDays(deal.daysInStage)}</td>

@@ -10,16 +10,20 @@ import {
   Gauge,
   LineChart,
   MapPinned,
+  NotebookPen,
   PieChart,
   ShieldAlert,
   TrendingUp,
   UserRound,
+  UserRoundPlus,
   Users,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import { useMemo } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { PageHeader } from "@/components/layout/page-header";
 import { Card, CardContent } from "@/components/ui/card";
+import { useAuth } from "@/lib/auth";
 import type { UserRole } from "@trock-crm/shared/types";
 
 export function canViewDataMiningSection(role: UserRole | undefined) {
@@ -31,6 +35,17 @@ type ReportCard = {
   description: string;
   icon: LucideIcon;
   path?: string;
+  /**
+   * Marks a card whose report is limited to a named email allowlist rather than a role. Cards carrying
+   * this are dropped for anyone the server did not flag — see visibleReportCategories.
+   */
+  requiresFlag?: keyof ReportVisibilityContext;
+};
+
+/** What the index needs to know about the viewer. Only allowlist flags — role gating lives on the routes. */
+export type ReportVisibilityContext = {
+  canViewDailyActivityLog?: boolean;
+  canViewCanvassingReport?: boolean;
 };
 
 const reportCategories: Array<{ category: string; description: string; reports: ReportCard[] }> = [
@@ -80,6 +95,8 @@ const reportCategories: Array<{ category: string; description: string; reports: 
     reports: [
       { name: "Director Scorecard", description: "Executive view of targets, risk, and output.", icon: Gauge, path: "/reports/performance/director-scorecard" },
       { name: "Rep Activity", description: "Touchpoints, follow-ups, and stalled accounts.", icon: Activity, path: "/reports/performance/rep-activity" },
+      { name: "Canvassing Activity", description: "New companies, properties, contacts and leads entered by each person — weekly, monthly or quarterly — plus the notes they logged.", icon: UserRoundPlus, path: "/reports/performance/canvassing-activity", requiresFlag: "canViewCanvassingReport" },
+      { name: "Daily Activity Log", description: "The actual notes and updates reps logged, day by day — the readable record behind the Rep Activity counts.", icon: NotebookPen, path: "/reports/performance/daily-activity-log", requiresFlag: "canViewDailyActivityLog" },
       { name: "Forecast Accuracy", description: "Commit, best case, and pipeline reliability.", icon: LineChart, path: "/reports/performance/forecast-accuracy" },
       { name: "Platform Usage", description: "Active time, actions, and views per rep — daily and weekly.", icon: Activity, path: "/reports/performance/platform-usage" },
     ],
@@ -125,8 +142,35 @@ const reportCategories: Array<{ category: string; description: string; reports: 
   },
 ];
 
+/**
+ * The report index as THIS viewer should see it: allowlist-only cards are removed for anyone the server
+ * did not flag, and a category left with nothing is dropped rather than rendered as an empty heading.
+ *
+ * The counts at the top of the page read off the same filtered list, so the tally can never advertise a
+ * report the grid below does not offer.
+ */
+export function visibleReportCategories(ctx: ReportVisibilityContext) {
+  return reportCategories
+    .map((group) => ({
+      ...group,
+      reports: group.reports.filter((report) =>
+        report.requiresFlag ? ctx[report.requiresFlag] === true : true
+      ),
+    }))
+    .filter((group) => group.reports.length > 0);
+}
+
 export function ReportsPage() {
   const { search } = useLocation();
+  const { user } = useAuth();
+  const categories = useMemo(
+    () =>
+      visibleReportCategories({
+        canViewDailyActivityLog: user?.canViewDailyActivityLog,
+        canViewCanvassingReport: user?.canViewCanvassingReport,
+      }),
+    [user?.canViewDailyActivityLog, user?.canViewCanvassingReport]
+  );
 
   return (
     <div className="space-y-6">
@@ -137,7 +181,7 @@ export function ReportsPage() {
       />
 
       <section className="grid grid-cols-1 gap-4 md:grid-cols-4">
-        {reportCategories.map((group) => (
+        {categories.map((group) => (
           <Card key={group.category} className="relative overflow-hidden">
             <CardContent className="p-5">
               <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-slate-500">{group.category}</p>
@@ -150,7 +194,7 @@ export function ReportsPage() {
       </section>
 
       <section className="space-y-5">
-        {reportCategories.map((group) => (
+        {categories.map((group) => (
           <div key={group.category} className="space-y-3">
             <div>
               <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-slate-500">{group.category}</p>

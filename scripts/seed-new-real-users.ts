@@ -275,6 +275,10 @@ async function createUser(
       role,
       office_id,
       is_active,
+      -- Stated, not inherited from the column default (migration 0219). The role below is hardcoded
+      -- 'rep', so true is already correct -- but every other user-creation path sets this explicitly,
+      -- and a rule with no exceptions survives an edit that changes the role here.
+      generates_sales,
       notification_prefs,
       updated_at
     )
@@ -286,6 +290,7 @@ async function createUser(
       $5,
       'rep'::user_role,
       $6::uuid,
+      true,
       true,
       '{}'::jsonb,
       $7::timestamptz

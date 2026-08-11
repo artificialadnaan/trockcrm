@@ -32,7 +32,20 @@ import {
 import { getDealById } from "../deals/service.js";
 import { assertDealScopingWriteAllowed } from "../deals/scoping-service.js";
 import { getLeadById } from "../leads/service.js";
-import { getPhotoFeed, getNewPhotoCount, getProjectPhotoStats, getUnassignedCompanyCamProjects, getUnassignedCompanyCamPhotos, assignUnassignedCompanyCamProjectToDeal } from "./feed-service.js";
+import {
+  getPhotoFeed,
+  getNewPhotoCount,
+  getPhotoFeedFacets,
+  getProjectPhotoStats,
+  getUnassignedCompanyCamProjects,
+  getUnassignedCompanyCamPhotos,
+  assignUnassignedCompanyCamProjectToDeal,
+  PHOTO_FEED_SOURCES,
+  PROJECT_PHOTO_SORTS,
+  type PhotoFeedFilters,
+  type PhotoFeedSource,
+  type ProjectPhotoSort,
+} from "./feed-service.js";
 import { getPhotoAuditEvents, logPhotoEvent } from "./audit-log-service.js";
 import { emitUploadedFileEvent, recordUploadedFileSideEffects } from "./upload-workflow.js";
 import { parseFileDateParam } from "./file-constants.js";
@@ -610,12 +623,102 @@ router.get("/deal/:dealId/photos", async (req, res, next) => {
   }
 });
 
-// GET /api/files/photos/project-stats — photo counts and metadata grouped by project
+function optionalQueryString(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+const UUID_QUERY_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Absent stays absent; present-but-malformed is a 400 rather than a 500 from a failed uuid cast.
+ *
+ * Checked locally rather than by importing field/photos-service's `assertValidUuid`: that module pulls
+ * in the public-photo-token service, the upload workflow and the field projects service behind it, which
+ * is a lot of graph (and a plausible import cycle, since it imports files/service.js) to acquire one
+ * regex. `procore/routes.ts` and `internal-rfp/routes.ts` already keep their own local `isUuid` for the
+ * same reason.
+ */
+function optionalUuidQueryParam(raw: unknown, field: string): string | undefined {
+  const value = optionalQueryString(raw);
+  if (value === undefined) return undefined;
+  if (!UUID_QUERY_PATTERN.test(value)) throw new AppError(400, `${field} must be a valid uuid.`);
+  return value;
+}
+
+/**
+ * One parser for BOTH photo-feed tabs, so the Projects tab and the Photos tab can never interpret the
+ * same query string differently (a filter honoured on one tab and dropped on the other is exactly how
+ * the two surfaces end up reporting different totals for the same selection).
+ *
+ * Two different failure policies here, on purpose:
+ *
+ * DROPPED — the enum dimensions and the dates. These name a VALUE within a dimension, so a stale
+ * `?source=…` or `?dateFrom=…` from a bookmarked or shared URL should degrade to "unfiltered" rather
+ * than 400 a page the user did not do anything wrong to reach. Dates go through `parseFileDateParam`
+ * for the same reason the `photoCategory` predicate compares the cast COLUMN: the filter reaches SQL as
+ * `${value}::timestamptz`, so an unparseable string raises PG 22007 and surfaces as a 500.
+ *
+ * REJECTED — `dealId` and `uploadedBy`. These are compared against uuid COLUMNS (`files.deal_id`,
+ * `files.uploaded_by`), so a malformed value raises PG 22P02 and the generic handler turns it into a
+ * 500. Dropping them silently would be worse than 400-ing: the caller asked to narrow to one project
+ * and would get the WHOLE library back, presented as if it were filtered. A well-formed uuid that no
+ * longer exists still degrades quietly to an empty result, which is the stale-bookmark case that
+ * actually happens.
+ *
+ * Both hazards predate this change on `/photos/feed`, but this parser is what routes the same params
+ * into `/photos/project-stats`, which took no filters at all before.
+ */
+export function parseFeedFilterQuery(query: express.Request["query"]): PhotoFeedFilters {
+  const source = optionalQueryString(query.source);
+  return {
+    dealId: optionalUuidQueryParam(query.dealId, "dealId"),
+    uploadedBy: optionalUuidQueryParam(query.uploadedBy, "uploadedBy"),
+    subcategory: optionalQueryString(query.subcategory),
+    photoCategory: optionalQueryString(query.photoCategory),
+    source: PHOTO_FEED_SOURCES.includes(source as PhotoFeedSource) ? (source as PhotoFeedSource) : undefined,
+    dateFrom: parseFileDateParam(query.dateFrom),
+    dateTo: parseFileDateParam(query.dateTo),
+    page: query.page ? parseInt(query.page as string, 10) : undefined,
+    limit: query.limit ? parseInt(query.limit as string, 10) : undefined,
+  };
+}
+
+// GET /api/files/photos/project-stats — photo counts and metadata grouped by project, sorted and paged
+// SERVER-SIDE. The sort must not move to the client: it would only ever reorder the rows the server
+// already chose, so "most photos" would silently mean "most-photographed of the most recent page".
+// Paged by KEYSET CURSOR, not page number: the ordering keys (photo count, latest photo time) change
+// with every upload, and OFFSET over a moving set duplicates and skips rows.
 router.get("/photos/project-stats", async (req, res, next) => {
   try {
-    const result = await getProjectPhotoStats(req.tenantDb!);
+    const sort = optionalQueryString(req.query.sort);
+    const result = await getProjectPhotoStats(req.tenantDb!, {
+      ...parseFeedFilterQuery(req.query),
+      sort: PROJECT_PHOTO_SORTS.includes(sort as ProjectPhotoSort) ? (sort as ProjectPhotoSort) : undefined,
+      // "My Projects" resolves to the CALLER, never to a client-supplied id — otherwise the pill would
+      // double as an arbitrary rep filter that no other surface offers.
+      assignedRepId: req.query.mine === "1" ? req.user!.id : undefined,
+      search: optionalQueryString(req.query.q),
+      // Keyset position, opaque to the client. Validated in decodeProjectCursor, which drops anything
+      // malformed so a stale bookmark restarts the list instead of 400-ing or reaching a bad uuid cast.
+      cursor: optionalQueryString(req.query.cursor),
+    });
     await req.commitTransaction!();
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/files/photos/feed/facets — options for the feed's filter dropdowns. Separate from the row
+// endpoints (rather than embedded in every response) because the options are filter-independent, so the
+// client fetches them once per mount instead of on every sort/filter change.
+router.get("/photos/feed/facets", async (req, res, next) => {
+  try {
+    const facets = await getPhotoFeedFacets(req.tenantDb!);
+    await req.commitTransaction!();
+    res.json(facets);
   } catch (err) {
     next(err);
   }
@@ -673,17 +776,7 @@ router.post("/photos/unassigned-companycam/:companycamProjectId/assign", async (
 // GET /api/files/photos/feed — paginated cross-deal photo feed
 router.get("/photos/feed", async (req, res, next) => {
   try {
-    const filters = {
-      dealId: req.query.dealId as string | undefined,
-      uploadedBy: req.query.uploadedBy as string | undefined,
-      subcategory: req.query.subcategory as string | undefined,
-      dateFrom: req.query.dateFrom as string | undefined,
-      dateTo: req.query.dateTo as string | undefined,
-      page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
-      limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
-    };
-
-    const result = await getPhotoFeed(req.tenantDb!, req.user!.role, req.user!.id, filters);
+    const result = await getPhotoFeed(req.tenantDb!, req.user!.role, req.user!.id, parseFeedFilterQuery(req.query));
     await req.commitTransaction!();
     res.json(result);
   } catch (err) {

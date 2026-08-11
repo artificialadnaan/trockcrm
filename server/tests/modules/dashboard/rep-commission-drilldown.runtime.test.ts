@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
+import { dealSignedCommissions } from "@trock-crm/shared/schema";
+import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 import { getRepCommissionDashboard } from "../../../src/modules/commissions/reporting-service.js";
 import {
   getRepCommissionSummary,
@@ -30,6 +32,9 @@ const REP_OTHER = U("c02"); // owns the deal REP_MIX estimated.
 const REP_WL = U("c03"); // worklist rep: Won-family deals, some missing a contract date.
 const REP_NEG = U("c04"); // owns a +5000 deal AND a -1000 adjustment row -> direct 4000 (negative-row reconcile).
 const REP_NETNEG = U("c05"); // +1000 and -3000 -> net direct -2000 (rows must still show; snapshot-skip probe).
+// Owns two earned deals with the SAME name shape and OPPOSITE is_change_order values — the pair that
+// makes the commission-breakdown label provable rather than a syntax guess.
+const REP_CO = U("c06");
 const DIRECTOR = U("c0d"); // a director — used to prove repId drill-down works for non-rep callers.
 
 const ST_OPEN = U("58001"); // 'opportunity' (signed earned rows)
@@ -51,6 +56,8 @@ const D = {
   wlOnHold: U("e14"), // REP_WL Won, on_hold, no contract date -> excluded (setting a date releases no commission)
   netNegOwn: U("e12"), // REP_NETNEG owner dsc +1000
   netNegAdj: U("e13"), // REP_NETNEG owner dsc -3000 -> net direct -2000
+  coChild: U("e15"), // REP_CO, is_change_order = true, generated child name
+  coLookalike: U("e16"), // REP_CO, is_change_order = FALSE, but a human named it change-order-shaped
 };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -86,16 +93,18 @@ beforeAll(async () => {
       is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false,
       is_change_order boolean NOT NULL DEFAULT false,
       on_hold boolean NOT NULL DEFAULT false, contract_signed_at timestamptz, contract_signed_date date,
-      won_closed_date date, actual_close_date date, project_number text, expected_close_date date, stage_entered_at timestamptz, updated_at timestamptz,
+      won_closed_date date, actual_close_date date, project_number text, expected_close_date date, bid_due_date timestamptz, stage_entered_at timestamptz, updated_at timestamptz,
       created_at timestamptz, awarded_amount numeric, bid_board_total_sales numeric, bid_estimate numeric,
       dd_estimate numeric, change_order_total numeric
     );
-    CREATE TABLE deal_signed_commissions (
-      id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid, rep_user_id uuid,
-      source_value_kind text, source_value_amount numeric, applied_rate numeric, amount numeric,
-      attribution_role text NOT NULL DEFAULT 'owner', contract_signed_date_at_signing date
-    );
-
+  `);
+  // deal_signed_commissions from the REAL Drizzle table. The hand-rolled version this replaces modelled
+  // none of the table's CHECKs, which is how the negative-adjustment fixtures below came to carry
+  // applied_rate = -0.10 — a state prod's deal_signed_commissions_rate_bounds_chk (applied_rate BETWEEN
+  // 0 AND 1) forbids, and that no write path can produce (resolveAppliedRateForRole returns a rate ONLY
+  // when it is > 0). The real claw-back has the opposite shape: NEGATIVE money at a POSITIVE rate.
+  await pg.exec(tenantSchemaSql("public", [dealSignedCommissions]));
+  await pg.exec(`
     INSERT INTO pipeline_stage_config (id, slug) VALUES
       ('${ST_OPEN}', 'opportunity'), ('${ST_LOST}', 'lost'), ('${ST_WON}', '${WON_STAGE_SLUGS[0]}');
 
@@ -117,20 +126,23 @@ beforeAll(async () => {
     -- REP_MIX owns mixOwn (owner cut 5000). signed in window.
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, contract_signed_at, awarded_amount, created_at) VALUES
       ('${D.mixOwn}', 'MIX-1', 'Mix owned', '${REP_MIX}', '${ST_OPEN}', '2026-03-15T00:00:00Z', 50000, '2026-01-10T00:00:00Z');
-    INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
-      ('${D.mixOwn}', '${REP_MIX}', 50000, 0.10, 5000, 'owner', '2026-03-15');
+    INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_kind, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
+      ('${D.mixOwn}', '${REP_MIX}', 'awarded_amount', 50000, 0.10, 5000, 'owner', '2026-03-15');
 
     -- mixEst owned by REP_OTHER; REP_MIX is the estimator (estimator cut 1000), REP_OTHER owner cut 3000.
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, estimator_user_id, stage_id, contract_signed_at, awarded_amount, created_at) VALUES
       ('${D.mixEst}', 'MIX-2', 'Mix estimated', '${REP_OTHER}', '${REP_MIX}', '${ST_OPEN}', '2026-03-16T00:00:00Z', 30000, '2026-01-11T00:00:00Z');
-    INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
-      ('${D.mixEst}', '${REP_OTHER}', 30000, 0.10, 3000, 'owner', '2026-03-16'),
-      ('${D.mixEst}', '${REP_MIX}', 30000, 0.0333, 1000, 'estimator', '2026-03-16');
+    INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_kind, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
+      ('${D.mixEst}', '${REP_OTHER}', 'awarded_amount', 30000, 0.10, 3000, 'owner', '2026-03-16'),
+      ('${D.mixEst}', '${REP_MIX}', 'awarded_amount', 30000, 0.0333, 1000, 'estimator', '2026-03-16');
 
     -- REP_WL worklist fixtures.
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, is_test_data, contract_signed_at, contract_signed_date, won_closed_date, awarded_amount, created_at) VALUES
       ('${D.wlMissing}', 'WL-1', 'WL missing A', '${REP_WL}', '${ST_WON}', false, NULL, NULL, '2026-04-01', 70000, '2026-02-01T00:00:00Z'),
-      ('${D.wlMissing2}', 'WL-2', 'WL missing B', '${REP_WL}', '${ST_WON}', false, NULL, NULL, '2026-04-02', 40000, '2026-02-02T00:00:00Z'),
+      -- WL-2 is an ORDINARY deal a human named change-order-shaped. It is on the worklist precisely
+      -- because is_change_order is false (a real CO is excluded — see WL-6), so the label must not be
+      -- rewritten. Syntax alone cannot tell it apart from WL-6's name.
+      ('${D.wlMissing2}', 'WL-2', 'Lobby — Change Order 1', '${REP_WL}', '${ST_WON}', false, NULL, NULL, '2026-04-02', 40000, '2026-02-02T00:00:00Z'),
       ('${D.wlSigned}', 'WL-3', 'WL signed', '${REP_WL}', '${ST_WON}', false, '2026-04-03T00:00:00Z', NULL, '2026-04-03', 90000, '2026-02-03T00:00:00Z'),
       ('${D.wlLost}', 'WL-4', 'WL lost', '${REP_WL}', '${ST_LOST}', false, NULL, NULL, NULL, 90000, '2026-02-04T00:00:00Z'),
       ('${D.wlTest}', 'WL-5', 'WL test', '${REP_WL}', '${ST_WON}', true, NULL, NULL, '2026-04-05', 90000, '2026-02-05T00:00:00Z');
@@ -146,23 +158,44 @@ beforeAll(async () => {
     INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, on_hold, contract_signed_at, contract_signed_date, won_closed_date, awarded_amount, created_at) VALUES
       ('${D.wlOnHold}', 'WL-7', 'WL on hold', '${REP_WL}', '${ST_WON}', true, NULL, NULL, '2026-04-07', 80000, '2026-02-07T00:00:00Z');
 
+    -- REP_CO: two earned deals whose NAMES are the same shape and whose FLAGS differ. The commission
+    -- breakdown can only label both correctly by carrying deals.is_change_order out of the query.
+    INSERT INTO deals (id, deal_number, name, is_change_order, assigned_rep_id, stage_id, contract_signed_at, awarded_amount, created_at) VALUES
+      ('${D.coChild}', 'CO-1', 'Tides Park Lane — Change Order 2', true, '${REP_CO}', '${ST_OPEN}', '2026-03-20T00:00:00Z', 20000, '2026-01-20T00:00:00Z'),
+      ('${D.coLookalike}', 'CO-2', 'Lobby — Change Order 1', false, '${REP_CO}', '${ST_OPEN}', '2026-03-21T00:00:00Z', 10000, '2026-01-21T00:00:00Z');
+    INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_kind, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
+      ('${D.coChild}', '${REP_CO}', 'awarded_amount', 20000, 0.10, 2000, 'owner', '2026-03-20'),
+      ('${D.coLookalike}', '${REP_CO}', 'awarded_amount', 10000, 0.10, 1000, 'owner', '2026-03-21');
+
     -- REP_NEG: owner +5000 and a -1000 adjustment (clawback) -> direct = 4000. Proves the breakdown sum
     -- reconciles with directEarnedCommission even with a NEGATIVE row (which a >0 filter would drop).
-    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, contract_signed_at, awarded_amount, created_at) VALUES
-      ('${D.negOwn}', 'NEG-1', 'Neg owned', '${REP_NEG}', '${ST_OPEN}', '2026-03-15T00:00:00Z', 50000, '2026-01-10T00:00:00Z'),
-      ('${D.negAdj}', 'NEG-2', 'Neg adjustment', '${REP_NEG}', '${ST_OPEN}', '2026-03-16T00:00:00Z', 10000, '2026-01-11T00:00:00Z');
-    INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
-      ('${D.negOwn}', '${REP_NEG}', 50000, 0.10, 5000, 'owner', '2026-03-15'),
-      ('${D.negAdj}', '${REP_NEG}', 10000, -0.10, -1000, 'owner', '2026-03-16');
+    -- The adjustment is shaped like the ONLY thing that produces a negative row in production — a
+    -- deductive change order: negative source value (a -10000 CO) at the rep's ordinary POSITIVE rate.
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, is_change_order, contract_signed_at, awarded_amount, created_at) VALUES
+      ('${D.negOwn}', 'NEG-1', 'Neg owned', '${REP_NEG}', '${ST_OPEN}', false, '2026-03-15T00:00:00Z', 50000, '2026-01-10T00:00:00Z'),
+      ('${D.negAdj}', 'NEG-2', 'Neg deductive CO', '${REP_NEG}', '${ST_OPEN}', true, '2026-03-16T00:00:00Z', -10000, '2026-01-11T00:00:00Z');
+    INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_kind, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
+      ('${D.negOwn}', '${REP_NEG}', 'awarded_amount', 50000, 0.10, 5000, 'owner', '2026-03-15'),
+      ('${D.negAdj}', '${REP_NEG}', 'awarded_amount', -10000, 0.10, -1000, 'owner', '2026-03-16');
 
     -- REP_NETNEG: +1000 and -3000 -> NET direct -2000. The breakdown must STILL show both rows (not [])
     -- so Σ(rows) === directEarnedCommission == -2000 (the directEarnedCommission<=0 early-return is gone).
-    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, contract_signed_at, awarded_amount, created_at) VALUES
-      ('${D.netNegOwn}', 'NN-1', 'NetNeg owned', '${REP_NETNEG}', '${ST_OPEN}', '2026-03-15T00:00:00Z', 10000, '2026-01-10T00:00:00Z'),
-      ('${D.netNegAdj}', 'NN-2', 'NetNeg adjustment', '${REP_NETNEG}', '${ST_OPEN}', '2026-03-16T00:00:00Z', 30000, '2026-01-11T00:00:00Z');
-    INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
-      ('${D.netNegOwn}', '${REP_NETNEG}', 10000, 0.10, 1000, 'owner', '2026-03-15'),
-      ('${D.netNegAdj}', '${REP_NETNEG}', 30000, -0.10, -3000, 'owner', '2026-03-16');
+    --
+    -- Shape note (both constraints must hold at once, so this fixture is deliberate, not arbitrary):
+    --   • applied_rate must stay within [0,1] — deal_signed_commissions_rate_bounds_chk, and no write path
+    --     can produce a negative rate. So the deduction is a -10000 deductive CO at a POSITIVE rate.
+    --   • the rep's BOOK must stay at/above the rolling floor (0), or the floor gate zeroes
+    --     directEarnedCommission outright and this test would be pinning the gate, not the early return.
+    --     10000 + (-10000) = 0 -> floor met.
+    -- Net direct then reaches -2000 the only way it can in production: the rate CHANGED between the two
+    -- signings (0.10 on the parent, 0.30 when the CO was signed), and each dsc row snapshots the rate in
+    -- force at ITS signing.
+    INSERT INTO deals (id, deal_number, name, assigned_rep_id, stage_id, is_change_order, contract_signed_at, awarded_amount, created_at) VALUES
+      ('${D.netNegOwn}', 'NN-1', 'NetNeg owned', '${REP_NETNEG}', '${ST_OPEN}', false, '2026-03-15T00:00:00Z', 10000, '2026-01-10T00:00:00Z'),
+      ('${D.netNegAdj}', 'NN-2', 'NetNeg deductive CO', '${REP_NETNEG}', '${ST_OPEN}', true, '2026-03-16T00:00:00Z', -10000, '2026-01-11T00:00:00Z');
+    INSERT INTO deal_signed_commissions (deal_id, rep_user_id, source_value_kind, source_value_amount, applied_rate, amount, attribution_role, contract_signed_date_at_signing) VALUES
+      ('${D.netNegOwn}', '${REP_NETNEG}', 'awarded_amount', 10000, 0.10, 1000, 'owner', '2026-03-15'),
+      ('${D.netNegAdj}', '${REP_NETNEG}', 'awarded_amount', -10000, 0.30, -3000, 'owner', '2026-03-16');
   `);
   tdb = drizzle(pg);
 });
@@ -268,6 +301,35 @@ describe("Won-but-missing-contract worklist", () => {
   it("a rep with no stuck Won deals returns an empty worklist", async () => {
     const rows = await getRepWonMissingContractDate(tdb, REP_MIX);
     expect(rows).toEqual([]);
+  });
+
+  it("sends dealIsChangeOrder=false, which the WHERE clause guarantees, instead of leaving it undefined", async () => {
+    // The query filters `COALESCE(d.is_change_order, false) = false`, so every row here is provably not
+    // a change-order child — WL-6 proves the filter bites. Leaving the field undefined made the client
+    // fall back to reading the name, and WL-2 is named "Lobby — Change Order 1", so that fallback
+    // actively mislabelled a row the SQL had already settled.
+    const rows = await getRepWonMissingContractDate(tdb, REP_WL);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.every((r) => r.dealIsChangeOrder === false)).toBe(true);
+    const lookalike = rows.find((r) => r.dealNumber === "WL-2");
+    expect(lookalike?.dealName).toBe("Lobby — Change Order 1");
+    expect(lookalike?.dealIsChangeOrder).toBe(false);
+  });
+});
+
+describe("commission breakdown carries deals.is_change_order", () => {
+  it("returns the flag the query already selected, per deal, rather than dropping it in the mapper", async () => {
+    // HALF-WIRED REGRESSION (the inverse of the at-risk one): getCommissionDealRollups' SELECT projected
+    // `d.is_change_order AS deal_is_change_order` and the mapper never copied it, so the director and rep
+    // commission drilldowns rendered `deal.dealIsChangeOrder` as undefined and fell back to the name.
+    const { deals } = await getRepCommissionSummary(tdb, REP_CO, RANGE.from, RANGE.to);
+    expect(deals).toHaveLength(2);
+    const child = deals.find((d) => d.dealNumber === "CO-1");
+    const lookalike = deals.find((d) => d.dealNumber === "CO-2");
+    expect(child?.dealIsChangeOrder).toBe(true);
+    // The discriminating one: same name shape, opposite flag. Only the column can answer it.
+    expect(lookalike?.dealName).toBe("Lobby — Change Order 1");
+    expect(lookalike?.dealIsChangeOrder).toBe(false);
   });
 });
 

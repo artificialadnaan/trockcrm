@@ -122,6 +122,9 @@ const defaultDependencies: ImportServiceDependencies = {
         officeId: input.officeId,
         role: input.role,
         isActive: true,
+        // Explicit, not the column default (migration 0219): an import of managers/estimators must not
+        // silently repopulate the director-dashboard rosters. Same role-derived rule as createCrmUser.
+        generatesSales: input.role === "rep",
       })
       .returning({
         id: users.id,

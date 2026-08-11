@@ -102,7 +102,7 @@ beforeAll(async () => {
       on_hold_started_at timestamptz,
       on_hold_accumulated_seconds numeric NOT NULL DEFAULT 0,
       on_hold_accumulated_seconds_at_stage_entry numeric,
-      expected_close_date date,
+      expected_close_date date, bid_due_date timestamptz,
       won_closed_date date,
       awarded_amount numeric,
       bid_board_total_sales numeric,

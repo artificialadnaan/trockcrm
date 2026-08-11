@@ -196,6 +196,9 @@ export function createScorecardEditDraft(
     kind: detail.kind === "leadership" ? "leadership" : undefined,
     dealId: detail.dealId,
     dealName: projectName(detail),
+    // Carry the AUTHORITY with the name. Without it the draft's own `isChangeOrder` was undefined and
+    // the editor fell back to syntax — relabelling a flag-false project while the user edited it.
+    isChangeOrder: detail.isChangeOrder ?? undefined,
     projectNumber: detail.projectNumber,
     weekOf: detail.weekOf,
     superintendentName: detail.superintendentName ?? "",
@@ -225,7 +228,11 @@ export function createScorecardEditDraft(
     photos,
     criticalDeficiencies,
     deficiencyNotes,
-    actionItems: detail.kind === "leadership" ? [] : [...detail.actionItems],
+    // Hydrated for BOTH kinds. Blanking these for leadership meant opening a leadership card for edit
+    // presented an empty Action items list, and the full-replacement PUT below then sent that empty list —
+    // silently deleting the card's flagged items, and with them the corrective actions reconcile tracks
+    // against them.
+    actionItems: [...detail.actionItems],
     summary: detail.kind === "leadership" ? detail.summary ?? "" : undefined,
     evidenceUploadAttempted: false,
     // An edited project card requires fresh approval rather than silently reusing old signatures.
@@ -588,7 +595,9 @@ export function scorecardDraftToUpdate(draft: ScorecardDraft): ScorecardUpdatePa
             .map((key) => [key, draft.deficiencyNotes?.[key]?.trim() ?? ""])
             .filter(([, note]) => note.length > 0),
         ),
-    actionItems: leadership ? [] : draft.actionItems.map((item) => item.trim()).filter(Boolean),
+    // PUT is a FULL REPLACEMENT, so this must carry the leadership card's action items too — see the
+    // hydration note above for what sending `[]` here used to destroy.
+    actionItems: draft.actionItems.map((item) => item.trim()).filter(Boolean),
     superintendentSignature: leadership ? null : draft.superintendentSignature?.trim() || null,
     pmSignature: leadership ? null : draft.pmSignature?.trim() || null,
     summary: leadership ? draft.summary?.trim() || null : null,

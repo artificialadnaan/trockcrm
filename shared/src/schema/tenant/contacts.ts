@@ -48,12 +48,17 @@ export const contacts = pgTable(
     hubspotContactId: varchar("hubspot_contact_id", { length: 50 }),
     sourceRefs: jsonb("source_refs").$type<Record<string, unknown>>().default({}).notNull(),
     normalizedPhone: varchar("normalized_phone", { length: 20 }),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
     isTestData: boolean("is_test_data").default(false).notNull(),
     isActive: boolean("is_active").default(true).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
+    index("contacts_created_at_idx").on(table.createdAt),
+    index("contacts_attributed_created_at_idx")
+      .on(table.createdAt)
+      .where(sql`${table.createdByUserId} IS NOT NULL`),
     index("contacts_name_company_idx").on(table.companyName),
     index("contacts_role_idx").on(table.role),
     index("contacts_owner_id_idx").on(table.ownerId).where(sql`${table.ownerId} IS NOT NULL`),

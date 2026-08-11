@@ -16,6 +16,7 @@ import {
   MoreHorizontal,
   Plus,
   Users,
+  Wrench,
 } from "lucide-react";
 import { buttonVariants } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -36,6 +37,7 @@ import {
 import { DealStageBadge } from "@/components/deals/deal-stage-badge";
 import { LeadStageBadge } from "@/components/leads/lead-stage-badge";
 import { PropertyImageAvatar, PropertyPhotoButton } from "@/components/properties/property-image";
+import { EntityActivityTab } from "@/components/activities/entity-activity-tab";
 import {
   formatPropertyLabel,
   usePropertyDetail,
@@ -44,6 +46,7 @@ import {
   type PropertySurface,
 } from "@/hooks/use-properties";
 import { cn } from "@/lib/utils";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import { getEffectiveDealValue } from "@trock-crm/shared/types";
 
 type PropertyTab = "overview" | "photos" | "contacts" | "deals" | "leads" | "activity" | "files" | "companycam";
@@ -186,6 +189,21 @@ export function PropertyDetailPage() {
     newLeadParams.set("companyId", property.companyId);
   }
   newLeadParams.set("name", `${property.name} opportunity`);
+  // Service-opportunity prefill — same convention as the New lead link above (propertyId + companyId + name)
+  // so the property is already chosen on the deal side and nobody retypes the address into a second property
+  // record. `returnPropertyId` sends Back here instead of the deals list, and ?officeId rides along because
+  // office context is URL-driven (lib/api turns it into the x-office-id header for every call on that page).
+  const officeIdParam = new URLSearchParams(location.search).get("officeId")?.trim();
+  const serviceOpportunityParams = new URLSearchParams();
+  serviceOpportunityParams.set("propertyId", property.id);
+  if (property.companyId) {
+    serviceOpportunityParams.set("companyId", property.companyId);
+  }
+  serviceOpportunityParams.set("name", `${property.name} opportunity`);
+  serviceOpportunityParams.set("returnPropertyId", property.id);
+  if (officeIdParam) {
+    serviceOpportunityParams.set("officeId", officeIdParam);
+  }
   const activePipelineValue =
     formatCurrencyCompact(property.activePipelineValue) ??
     formatCurrencyCompact(activeDeals.reduce((sum, deal) => sum + getEffectiveDealValue(deal), 0));
@@ -307,6 +325,22 @@ export function PropertyDetailPage() {
               <Camera className="h-4 w-4" />
               CompanyCam
             </a>
+          ) : null}
+          {/* Kept as a visible action rather than an overflow entry: the ask is "much faster, and it keeps us
+              from creating duplicate addresses", and an action nobody finds prevents no duplicates. Outline
+              (not brand-red) so New lead stays the single dominant CTA, and the actions row already wraps at
+              mobile width with the same 44px touch target as its neighbours.
+              Hidden on a soft-deleted property (like Add photo above): the create endpoint only accepts an
+              ACTIVE property, so offering it here would hand the rep a fully prefilled form that can only
+              fail with "Property not found" at submit. */}
+          {property.isActive ? (
+            <Link
+              to={`/deals/service-opportunity/new?${serviceOpportunityParams.toString()}`}
+              className={cn(buttonVariants({ variant: "outline", size: "sm" }), "min-h-[44px] md:min-h-0")}
+            >
+              <Wrench className="h-4 w-4" />
+              New service opportunity
+            </Link>
           ) : null}
           <Link
             to={`/leads/new?${newLeadParams.toString()}`}
@@ -539,7 +573,32 @@ function PropertyTabContent({
     return <RelatedLeadsList leads={leads} />;
   }
 
-  const placeholders: Record<Exclude<PropertyTab, "overview" | "deals" | "leads">, { title: string; body: string }> = {
+  if (tab === "activity") {
+    // The SAME tab companies, leads and deals use — property was simply missing from its union. A
+    // property-specific copy would have been a third renderer to keep in step.
+    return (
+      <EntityActivityTab
+        entityType="property"
+        entityId={property.id}
+        emptyLabel="property"
+        /**
+         * A soft-deleted property is read-only everywhere else on this page, so the log form goes too.
+         *
+         * This is the UI half only. The authoritative check is server-side in createActivity, which
+         * refuses an activity whose property or company is inactive — added in #977 (`638ce173`),
+         * because that branch owns activities/service.ts and a main-based change would conflict. Until
+         * #977 lands, an authenticated caller can still POST directly; this hides the form, it does not
+         * secure the endpoint.
+         */
+        readOnly={!property.isActive}
+      />
+    );
+  }
+
+  const placeholders: Record<
+    Exclude<PropertyTab, "overview" | "deals" | "leads" | "activity">,
+    { title: string; body: string }
+  > = {
     photos: {
       title: "Photo gallery coming soon",
       body: companyCamUrl
@@ -551,10 +610,6 @@ function PropertyTabContent({
       body: property.companyName
         ? `Contacts will roll up from ${property.companyName} once property-contact linking ships.`
         : "No owner company is linked for contact rollup.",
-    },
-    activity: {
-      title: "Property activity feed coming soon",
-      body: "Activity will aggregate notes, stage movement, photos, files, and linked deal updates.",
     },
     files: {
       title: "Property files coming soon",
@@ -613,7 +668,20 @@ function RelatedDealsList({ deals }: { deals: PropertyDeal[] }) {
               className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 px-3 py-2 transition-colors hover:bg-slate-50"
             >
               <div className="min-w-0">
-                <p className="truncate text-sm font-black text-slate-950">{deal.name}</p>
+                {/* A change-order child is STORED "<Parent> — Change Order N" and this line truncates
+                    the suffix off. Display-only re-order; the stored name is untouched. */}
+                <p className="truncate text-sm font-black text-slate-950">{formatDealDisplayName(deal.name, deal.isChangeOrder)}</p>
+                {/* Every deal on a property page tends to carry the SAME name (the property's), so the
+                    scope title is the only thing that distinguishes the rows. */}
+                {deal.scopeTitle ? (
+                  <p
+                    className="truncate text-xs font-bold text-slate-600"
+                    title={deal.scopeTitle}
+                    data-testid="property-deal-scope-title"
+                  >
+                    {deal.scopeTitle}
+                  </p>
+                ) : null}
                 <p className="font-mono text-xs text-slate-500">{deal.dealNumber}</p>
               </div>
               <div className="flex items-center gap-2">

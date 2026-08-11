@@ -124,7 +124,7 @@ describe("recalculateRepCommissionsInOffice", () => {
       `INSERT INTO public.deal_signed_commissions
          (deal_id, rep_user_id, attribution_role, source_value_kind, source_value_amount,
           amount, applied_rate, contract_signed_date_at_signing, created_by)
-       VALUES ('${DEAL2}', '${REP2}', 'owner', 'awarded', 50000.00,
+       VALUES ('${DEAL2}', '${REP2}', 'owner', 'awarded_amount', 50000.00,
                1500.00, 0.030000, '2026-01-01', '${ADMIN}')`,
     );
 

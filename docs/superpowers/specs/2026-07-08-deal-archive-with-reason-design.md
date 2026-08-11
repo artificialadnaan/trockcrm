@@ -16,7 +16,7 @@
 
 1. **Who triggers RFP auto-archive:** **Either** reviewer (Adam OR Takashi) reconfirming the denial triggers it. Reuse the existing single-reviewer `reconfirmRfpDecline` path — no new dual-sign-off state.
 2. **Description write:** **Prepend, keep original.** Add an archive block on top; the deal's original description survives.
-3. **Rep manual-archive stage scope:** **Opportunity stage only.** Non-admin reps may archive only deals in the `opportunity` stage that they own. Admins keep the any-stage escape hatch.
+3. **Rep manual-archive stage scope:** ~~Opportunity stage only.~~ **SUPERSEDED 2026-07-30 — any stage.** An owner may archive their own deal at ANY stage; admins may archive any deal. The original rule admitted only `opportunity` and the legacy alias `dd`, and `dd` is seeded `is_active_pipeline=FALSE`, so the control was dead on nearly every real deal and reps reported the button doing nothing. Archiving a Won deal is now reachable by a rep — `is_active=false` removes it from Won rollups and from the revenue its commission rows were computed against. Accepted knowingly; ownership, the mandatory reason, and the admin-only change-order guard are what remain.
 4. **Reviewer reason:** **Required.** Adam/Takashi must provide a reason when reconfirming a denial (mirrors the already-enforced voter rule). That reason joins the notes written into the description.
 
 ---
@@ -56,20 +56,20 @@ export function buildArchivedDescription(
 
 ---
 
-## Feature A — Rep manual archive (opportunity-only, reason required)
+## Feature A — Rep manual archive (any stage they own, reason required)
 
 ### Rename
 - `filter-bar.tsx:63` label `"Removed"` → `"Archived"` (value stays `"inactive"`; update the adjacent comment). Server contract unchanged.
 
 ### Client (`deal-detail-page.tsx`)
-- Menu item **"Delete Deal" → "Archive Deal"**. Enabled when `admin || (viewerOwnsDeal && dealStageSlug === "opportunity")`. For an owner on a non-opportunity stage: render the item **disabled with a tooltip** ("Only opportunity-stage deals can be archived — ask an admin"), so it stays discoverable.
+- Menu item **"Delete Deal" → "Archive Deal"**. Enabled when `admin || viewerOwnsDeal` — stage is not a factor. **UPDATED 2026-07-30:** the disabled-with-tooltip branch is REMOVED; the item is now either clickable or absent. That branch was also where the bug surfaced — its disabled styling used Tailwind v4 syntax under a v3 build, so it rendered looking enabled and silently swallowed clicks.
 - Replace the `window.confirm` with a small **modal**: a required "Reason for archiving" textarea + Cancel/Archive. Archive is disabled until the reason is non-empty (mirrors the RFP vote-reason UX). On submit call the archive API with `{ reason }`.
 - Fix the misleading copy: the modal states the deal will be archived and hidden from active lists (no false "undone by an admin" promise; restore is out of scope).
 
 ### Server (`routes.ts` DELETE `/:id` + `deleteDeal`)
 - Thread the **real** caller role and a **reason** instead of the hardcoded `"admin"`. New signature (options object to avoid a positional churn):
   `deleteDeal(tenantDb, dealId, { actorRole, actorId, reason, enforceOpportunityStageForNonAdmin: true })`.
-- **Stage gate:** after loading the deal row `FOR UPDATE`, resolve its stage slug (via `pipeline_stage_config.slug` for `existing.stageId`). If `actorRole !== "admin"` and slug `!== "opportunity"` → `AppError(403, "Only opportunity-stage deals can be archived by reps.", "DEAL_ARCHIVE_STAGE_FORBIDDEN")`. Admins bypass the stage check.
+- **Stage gate:** ~~REMOVED 2026-07-30.~~ There is no stage check in `deleteDeal`. `DEAL_ARCHIVE_STAGE_FORBIDDEN` is no longer thrown anywhere. Ownership is enforced by the route (`assertDealOwnerRouteAccess`), and change orders remain admin-only.
 - **Reason required:** empty/whitespace reason → `AppError(400, "A reason is required to archive a deal.", "DEAL_ARCHIVE_REASON_REQUIRED")`.
 - **Description write:** in the same update that sets `is_active=false`, also set `description = buildArchivedDescription(existing.description, reason, now)`.
 - Route keeps `assertDealOwnerRouteAccess({ allowAdmin: true })` (owner-or-admin) and the CO-child admin-only reject. It now passes `req.user.role` through instead of `"admin"`. The dead `userRole !== "admin"` stub in `deleteDeal` is removed (replaced by the real gate above).
@@ -115,7 +115,7 @@ export function buildArchivedDescription(
 **Unit (`archive-description.test.ts`):** prepend with existing text; empty/whitespace original → block only; business-tz date stamp; reason trimming.
 
 **Server runtime (PGlite — these run in the CI gate; name `*.runtime.test.ts`):**
-- Manual archive: rep owner + opportunity → `is_active=false` **and** description prepended; rep owner + non-opportunity → 403 `DEAL_ARCHIVE_STAGE_FORBIDDEN`; non-owner → 403; admin + non-opportunity → archives; empty reason → 400.
+- Manual archive: rep owner, ANY stage → `is_active=false` **and** description prepended; non-owner non-admin → 403; admin, any stage → archives; empty reason → 400 `DEAL_ARCHIVE_REASON_REQUIRED`; non-admin on a change order → 403 `CHANGE_ORDER_ADMIN_ONLY`.
 - RFP reconfirm: empty reviewer reason → 400 `RFP_REVIEW_REASON_REQUIRED`; reconfirm by either reviewer → `is_active=false` + description contains both voter reasons and reviewer reason; override-approve → NOT archived; already-archived deal → guarded no-op.
 
 **Client:** archive menu item gating by stage+ownership (disabled tooltip off-stage); reason modal blocks submit until non-empty; filter label reads "Archived".

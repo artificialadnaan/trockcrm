@@ -65,6 +65,14 @@ export interface DealFilterBarInput {
    * reconcile to that count. Opt-in — omit to include on-hold (every non-Won caller, unchanged).
    */
   excludeOnHold?: boolean;
+  /**
+   * Reproduce the BOARD's population: drop OPEN rows whose Bid Board mirror has already reached a terminal
+   * stage. The kanban applies this and the stage-page SUMMARY applies it under `boardPopulation`; without
+   * it here, a stage page that opted its summary in would exclude a deal from the header and pagination
+   * while still rendering it in the list below (Codex P2 on #983). Opt-in, and callers must send it ONLY
+   * for non-terminal stages — a won/lost list is realized and legitimately carries terminal mirror slugs.
+   */
+  boardPopulation?: boolean;
 }
 
 /** Context shared by the gated/classified predicates (date + stalled). */
@@ -88,10 +96,28 @@ export function buildInvolvedRepCondition(repId: string): SQL {
   return or(eq(deals.assignedRepId, repId), eq(deals.estimatorUserId, repId)) as SQL;
 }
 
-/** assigned rep — matches assigned_rep OR estimator (id-or-id), or IS NULL for the Unassigned sentinel. */
+/**
+ * "Owns it": the deal's assigned rep IS the filtered person. The Unassigned sentinel maps to
+ * assigned_rep IS NULL, same as the involved variant.
+ *
+ * This is what a REP FILTER means — picking a person answers "show me that person's deals", and a deal
+ * belongs to whoever owns it. The estimator link is deliberately NOT consulted: `deals.estimator_user_id` is
+ * populated far beyond the handful of real estimators (it feeds the estimator report), so an estimator-OR
+ * filter shows a rep dozens of deals that are somebody else's book. It also can't reconcile with any surface
+ * that groups BY assigned rep — one deal would land on two people's rows and inflate the total.
+ *
+ * Use buildInvolvedRepCondition / buildAliasedInvolvedRepSql instead wherever the question really is "every
+ * deal this person touched" — commissions (estimators genuinely earn a cut) and the estimator report.
+ */
+export function buildOwnedRepCondition(repId: string): SQL {
+  if (repId === UNASSIGNED_FILTER_SENTINEL) return isNull(deals.assignedRepId);
+  return eq(deals.assignedRepId, repId);
+}
+
+/** assigned rep — OWNER only (see buildOwnedRepCondition), or IS NULL for the Unassigned sentinel. */
 export function buildAssignedRepPredicate(input: DealFilterBarInput): SQL | undefined {
   if (!input.assignedRepId) return undefined;
-  return buildInvolvedRepCondition(input.assignedRepId);
+  return buildOwnedRepCondition(input.assignedRepId);
 }
 
 /**
@@ -108,6 +134,19 @@ export function buildAliasedInvolvedRepSql(alias: string, repId: string): SQL {
   if (repId === UNASSIGNED_FILTER_SENTINEL) return sql`${repCol} is null`;
   const estCol = sql.raw(`${alias}.estimator_user_id`);
   return sql`(${repCol} = ${repId} OR ${estCol} = ${repId})`;
+}
+
+/**
+ * Raw-SQL OWNER-ONLY variant, for aliased queries — the aliased twin of buildOwnedRepCondition, and the one
+ * a rep FILTER should use. See that function for why the estimator arm is excluded here.
+ */
+export function buildAliasedOwnedRepSql(alias: string, repId: string): SQL {
+  if (!/^[a-z_][a-z0-9_]*$/i.test(alias)) {
+    throw new Error(`Invalid SQL alias for owned-rep predicate: ${alias}`);
+  }
+  const repCol = sql.raw(`${alias}.assigned_rep_id`);
+  if (repId === UNASSIGNED_FILTER_SENTINEL) return sql`${repCol} is null`;
+  return sql`${repCol} = ${repId}`;
 }
 
 /**
@@ -373,6 +412,15 @@ export function buildExcludeOnHoldPredicate(input: DealFilterBarInput): SQL | un
   return input.excludeOnHold ? aliasedActiveDealCountFilterSql("deals") : undefined;
 }
 
+/** The board's own mirror exclusion (nonTerminalMirroredStageCondition), opt-in via input.boardPopulation. */
+export function buildBoardPopulationPredicate(input: DealFilterBarInput): SQL | undefined {
+  if (!input.boardPopulation) return undefined;
+  return sql`COALESCE(${sql.raw("deals.bid_board_stage_slug")}, '') NOT IN (${sql.join(
+    TERMINAL_STAGE_SLUGS.map((slug) => sql`${slug}`),
+    sql`, `
+  )})`;
+}
+
 export type DealFilterPredicate = (
   input: DealFilterBarInput,
   ctx: DealFilterContext
@@ -389,6 +437,7 @@ export const DEAL_FILTER_PREDICATES: DealFilterPredicate[] = [
   (input, ctx) => buildStalledPredicate(input, ctx),
   (input, ctx) => buildOutcomeAwareDatePredicate(input, ctx),
   (input) => buildExcludeOnHoldPredicate(input),
+  (input) => buildBoardPopulationPredicate(input),
 ];
 
 /**

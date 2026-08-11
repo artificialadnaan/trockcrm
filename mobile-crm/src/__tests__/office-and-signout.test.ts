@@ -364,9 +364,10 @@ describe("failed-erasure retry semantics", () => {
   });
 
   it("reports a REPLACED record as no longer ours", async () => {
+    // Asserts the ACTUAL value, not merely "not the stale one" — a bug that returned null, or an empty
+    // string, would also satisfy `not.toBe("stale-token")` while breaking the comparison this feeds.
     const { mod } = storeWith(record("someone-elses-token"));
-    const stored = await mod.peekStoredToken();
-    expect(stored).not.toBe("stale-token");
+    await expect(mod.peekStoredToken()).resolves.toBe("someone-elses-token");
   });
 
   it.each([

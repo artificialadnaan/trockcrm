@@ -78,6 +78,7 @@ export async function getDealCopilotContext(
         d.proposal_status,
         d.last_activity_at,
         d.expected_close_date,
+        d.bid_due_date,
         COALESCE(
           d.bid_board_stage_entered_at,
           d.stage_entered_at,

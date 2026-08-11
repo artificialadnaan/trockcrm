@@ -34,6 +34,81 @@ describe("operations tier 3 reports", () => {
     clearOperationsReportsCache();
   });
 
+  it("projects deals.is_change_order on the deal queries AND carries it out through the mapper", async () => {
+    // Both ends together. The SELECT and the mapper live in DIFFERENT functions here (the queries are in
+    // getWorkflowBottlenecksReport, the mapping in mapWorkflowDeal), so a text assertion on the SQL is
+    // what pins the projection; the mapped output pins the hand-off.
+    //
+    // "Lobby — Change Order 1" with the flag FALSE is the discriminating row: syntax says change order,
+    // the column says otherwise, and only the column is authoritative.
+    const tenantDb = makeTenantDb([
+      [],
+      [
+        {
+          deal_id: "deal-plain",
+          deal_name: "Lobby — Change Order 1",
+          deal_is_change_order: false,
+          owner_name: "Avery Rep",
+          stage_name: "Estimating",
+          days_in_stage: 40,
+          days_since_last_activity: 4,
+          value: "10000",
+          project_number: null,
+        },
+      ],
+      [
+        {
+          deal_id: "deal-co",
+          deal_name: "Tides Park Lane — Change Order 2",
+          deal_is_change_order: true,
+          owner_name: "Avery Rep",
+          stage_name: "Contract",
+          days_in_stage: 22,
+          days_since_last_activity: 8,
+          value: "99000",
+          project_number: null,
+        },
+      ],
+    ]);
+
+    const report = await getWorkflowBottlenecksReport(tenantDb, { cacheScope: "co-tenant" });
+
+    expect(report.topStuckDeals[0]?.dealName).toBe("Lobby — Change Order 1");
+    expect(report.topStuckDeals[0]?.dealIsChangeOrder).toBe(false);
+    expect(report.handoffBlockages[0]?.dealIsChangeOrder).toBe(true);
+
+    const sqlText = tenantDb.execute.mock.calls.map(([arg]: [unknown]) => extractSqlText(arg)).join("\n");
+    expect(sqlText).toContain("d.is_change_order AS deal_is_change_order");
+  });
+
+  it("project readiness carries deals.is_change_order onto the missing-readiness rows", async () => {
+    const tenantDb = makeTenantDb([
+      [
+        {
+          deal_id: "deal-plain",
+          deal_name: "Lobby — Change Order 1",
+          deal_is_change_order: false,
+          owner_name: "Avery Rep",
+          stage_name: "Scoping",
+          stage_slug: "scoping",
+          days_in_stage: 30,
+          days_since_last_activity: 3,
+          value: "10000",
+          project_number: null,
+          proposal_status: null,
+        },
+      ],
+    ]);
+
+    const report = await getProjectReadinessReport(tenantDb, { cacheScope: "co-tenant-readiness" });
+    const row = report.missingReadiness.find((d) => d.dealId === "deal-plain");
+    expect(row?.dealName).toBe("Lobby — Change Order 1");
+    expect(row?.dealIsChangeOrder).toBe(false);
+
+    const sqlText = tenantDb.execute.mock.calls.map(([arg]: [unknown]) => extractSqlText(arg)).join("\n");
+    expect(sqlText).toContain("d.is_change_order AS deal_is_change_order");
+  });
+
   it("builds workflow bottlenecks with stage aging, stuck deals, and handoff blockages", async () => {
     const tenantDb = makeTenantDb([
       [

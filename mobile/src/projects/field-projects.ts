@@ -9,6 +9,14 @@ export type FieldProject = {
   /** The human-facing project number to display (canonical DFW/ATL), or null when pending. Server-resolved. */
   projectNumber: string | null;
   name: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel; never infer it from the name. */
+  isChangeOrder: boolean;
+  /**
+   * `deals.scope_title`. Travels WITH the flag: the relabel front-loads "Change Order N", and this is
+   * the only field left saying WHICH one. Also SEARCHED on the Projects list, so without it a crew can
+   * type the scope phrase, match, and get a row that cannot explain the hit.
+   */
+  scopeTitle: string | null;
   propertyName: string | null;
   propertyAddress: string | null;
   stage: string;
@@ -49,6 +57,10 @@ export type CorrectiveAffordance =
   | "open_status"
   | "closed_tappable"
   | "closed_status"
+  // Between open and closed since the approval gate: the responder has answered and an approver is
+  // reviewing. Never TAPPABLE — there is nothing for the responder to do until it comes back — but it must
+  // still show, or the project screen looks as though the workflow simply ended.
+  | "awaiting_status"
   | "none";
 
 export function correctiveAffordance(
@@ -56,6 +68,7 @@ export function correctiveAffordance(
   canRespond: boolean,
 ): CorrectiveAffordance {
   if (status === "corrective_action_open") return canRespond ? "open_tappable" : "open_status";
+  if (status === "corrective_action_submitted") return "awaiting_status";
   if (status === "corrective_action_closed") return canRespond ? "closed_tappable" : "closed_status";
   return "none";
 }
@@ -78,12 +91,39 @@ export type FieldCaptureTarget = {
   id: string;
   type: "lead" | "opportunity" | "deal";
   name: string;
+  /** `deals.is_change_order` — deal rows only; the AUTHORITY for the change-order display relabel. */
+  isChangeOrder?: boolean | null;
+  /** `deals.scope_title` — deal rows only, same gate as the flag above; a lead has no scope title. */
+  scopeTitle?: string | null;
   recordNumber: string | null;
   stageName: string | null;
   companyName: string | null;
   lastUpdatedAt: string;
   distanceMiles?: number | null;
 };
+
+/**
+ * The display name for a capture target, with the change-order relabel GATED on the target being a deal.
+ *
+ * A picker row mixes all three types, and only a `deal` can be a generated change-order child: a `lead` is
+ * a leads-table row named by a human, and the server explicitly excludes opportunities from the `deal`
+ * type (`d.pipeline_disposition IS DISTINCT FROM 'opportunity'` in field/projects-service.ts) while a CO
+ * child is always Won. Rewriting every type would mangle a lead someone legitimately called
+ * "Lobby — Change Order 1".
+ */
+export function captureTargetDisplayName(
+  target: Pick<FieldCaptureTarget, "type" | "name"> & { isChangeOrder?: boolean | null },
+): string {
+  // The type gate stays: only a deal can be a generated change-order child, and a lead a human named
+  // "Lobby — Change Order 1" must render as typed. `isChangeOrder` then makes the DEAL branch
+  // authoritative instead of syntactic.
+  //
+  // Capture-target search DOES carry the flag (files/service.ts mapDealRow projects
+  // `isChangeOrder: row.isChangeOrder === true`), so picker rows are authoritative, not guesses. The
+  // parameter stays optional only for callers holding a partial target; when it is absent the name
+  // fallback is the documented degradation, not the normal path.
+  return target.type === "deal" ? formatDealDisplayName(target.name, target.isChangeOrder) : target.name;
+}
 
 export type FieldPhoto = {
   id: string;
@@ -160,6 +200,87 @@ export function groupCaptureTargets(targets: FieldCaptureTarget[]) {
 export function projectNumberLabel(projectNumber: string | null | undefined): string {
   const trimmed = projectNumber?.trim();
   return trimmed ? `#${trimmed}` : "Project pending";
+}
+
+// Kept in sync with the shared source of truth (shared/src/types/deal-display-name.ts); the Expo bundle
+// can't import the workspace `shared` package, so this is a deliberate mirror — update both together.
+// A drift guard lives in shared/src/types/deal-display-name.test.ts, which reads this file.
+const EM_DASH = "—";
+// The ordinal is `[1-9]\d*` — exactly what nextChildOrdinal() can emit (`COUNT(*)::int + 1`, always a
+// positive unpadded decimal). "Change Order 0" / "Change Order 01" are human-typed and survive as-is.
+const CHANGE_ORDER_NAME_SUFFIX = /\s*—\s*Change Order\s+([1-9]\d*)\s*$/;
+
+/**
+ * The display form of a deal/project name. A change order is a real CHILD deal whose stored name is
+ * built by APPENDING "<parent> — Change Order N" (server/src/modules/deals/change-order-service.ts), so in
+ * the project list — where a row is one truncated line — a change order is indistinguishable from its
+ * parent. Move the label to the FRONT, where truncation can't eat it.
+ *
+ *     "Tides Park Lane — Change Order 1"  ->  "Change Order 1 — Tides Park Lane"
+ *
+ * It peels every generated trailing suffix rather than short-circuiting on a name that merely looks
+ * already-formatted, so a parent a human named "Change Order 7 — Lobby" still gets its child's real label
+ * moved to the front.
+ *
+ * POST-CONDITION — the output never ends in a generated suffix; that invariant is what makes this
+ * idempotent, and it is ENFORCED below rather than assumed. Rejoining the pieces can re-create a trailing
+ * suffix when what precedes it is itself label-shaped (" — Change Order 1 — Change Order 2" and
+ * "Change Order 1 — Change Order 2" both do), which would oscillate forever between two spellings. Such a
+ * degenerate name is returned UNCHANGED, which is trivially a fixed point.
+ *
+ * DISPLAY-ONLY: the stored `deals.name` is unchanged, so this must never be applied to a value that gets
+ * written back (a walk title, a scorecard draft's dealName, a report cover, a nav param) — only to the
+ * text a screen renders. Total, and it leaves every non-generated name byte for byte.
+ *
+ * `isChangeOrder` — pass it whenever the payload carries it. `deals.is_change_order` is the AUTHORITY;
+ * the name is only evidence. `false` returns the name unchanged whatever it looks like, `true` peels, and
+ * `undefined`/`null` falls back to syntax — an explicit degradation for payloads without the flag.
+ */
+export function formatDealDisplayName(name: string, isChangeOrder?: boolean | null): string;
+export function formatDealDisplayName(
+  name: string | null | undefined,
+  isChangeOrder?: boolean | null
+): string | null | undefined;
+export function formatDealDisplayName(
+  name: string | null | undefined,
+  isChangeOrder?: boolean | null
+): string | null | undefined {
+  if (typeof name !== "string" || name.length === 0) return name;
+  if (isChangeOrder === false) return name;
+  const labels: string[] = [];
+  let rest = name;
+  for (;;) {
+    const match = CHANGE_ORDER_NAME_SUFFIX.exec(rest);
+    if (!match) break;
+    labels.push(`Change Order ${match[1]}`);
+    rest = rest.slice(0, match.index);
+  }
+  if (labels.length === 0) return name;
+  const base = rest.trim();
+  const candidate = (base.length === 0 ? labels : [...labels, base]).join(` ${EM_DASH} `);
+  return CHANGE_ORDER_NAME_SUFFIX.test(candidate) ? name : candidate;
+}
+
+/**
+ * `deals.is_change_order` across a ROUTER PARAM, as a matched pair.
+ *
+ * Expo router params are strings, so the flag has to be encoded — and this is where it kept getting
+ * corrupted. `false` is AUTHORITATIVE downstream: it asserts "not a change order" and suppresses the
+ * relabel. So an UNKNOWN flag must never be encoded as something that decodes to `false`. Twice now an
+ * inline ternary got that backwards (`toStr(undefined)` -> `""` -> `"" === "1"` -> false), which is
+ * exactly the unknown-becomes-an-assertion bug, wearing a router param instead of a serializer.
+ *
+ * Encode returns `undefined` for unknown so the caller can OMIT the key; decode treats anything that is
+ * not exactly "1"/"0" — absent, "", junk — as unknown. Use these two rather than hand-rolling either half.
+ */
+export function encodeChangeOrderParam(flag: boolean | null | undefined): "1" | "0" | undefined {
+  return flag === true ? "1" : flag === false ? "0" : undefined;
+}
+
+export function decodeChangeOrderParam(value: string | string[] | undefined): boolean | undefined {
+  if (value === "1") return true;
+  if (value === "0") return false;
+  return undefined;
 }
 
 /**
@@ -246,7 +367,21 @@ export function photoTime(photo: FieldPhoto) {
 export function toDayString(value: string | null | undefined): string {
   if (!value) return "";
   const t = Date.parse(value);
-  return Number.isNaN(t) ? "" : new Date(t).toISOString().slice(0, 10);
+  if (Number.isNaN(t)) return "";
+  // LOCAL day, deliberately — not toISOString(), which is UTC.
+  //
+  // This value is the grouping key, while the heading beside it comes from `dateHeading`, which
+  // formats in local time. When those disagreed, one evening's photos split into two groups
+  // rendering the SAME heading: in Dallas everything shot after 7pm rolls into the next UTC day.
+  // That produced duplicate React keys and, worse, a gallery showing "Friday, July 31st" twice
+  // with the day's work divided between them.
+  //
+  // It is also the value compared against the date-range filter, whose bounds a crew picks in
+  // local terms — so a 9pm photo on the 31st was being excluded from a "31st" filter.
+  const d = new Date(t);
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${d.getFullYear()}-${month}-${day}`;
 }
 
 export function groupPhotos(photos: FieldPhoto[], grouping: PhotoGrouping) {

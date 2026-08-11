@@ -7,7 +7,10 @@ import {
   getFieldScorecardDetail,
   listFieldScorecardsForProject,
 } from "../../../src/modules/field/scorecards-service.js";
-import { fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, scorecardCorrectiveActions, dealTeamMembers, contacts } from "@trock-crm/shared/schema";
+// scorecardCorrectiveActionTokens is required even though these tests never read a token: reconcile deletes
+// the cycle's tokens on every create, so the table's ABSENCE only surfaced once a leadership card could
+// actually reach the seeding path — it 42P01'd on the first below-band leadership submission.
+import { fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, scorecardCorrectiveActions, scorecardCorrectiveActionEvents, scorecardCorrectiveActionTokens, dealTeamMembers, contacts } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
 // Leadership scorecard: a distinct KIND in the SAME tables — 4 categories rated 1-10 (average out of 10,
@@ -60,7 +63,7 @@ beforeAll(async () => {
   await pg.exec(`
     CREATE TABLE public.pipeline_stage_config (id uuid PRIMARY KEY, name text, slug text, is_terminal boolean DEFAULT false);
     CREATE TABLE deals (
-      id uuid PRIMARY KEY, name text, deal_number text, project_number text, stage_id uuid,
+      id uuid PRIMARY KEY, name text, scope_title text, is_change_order boolean NOT NULL DEFAULT false, deal_number text, project_number text, stage_id uuid,
       is_active boolean DEFAULT true, bid_board_stage_slug text,
       property_address text, property_city text, property_state text, property_zip text,
       last_activity_at timestamptz, updated_at timestamptz, created_at timestamptz DEFAULT now()
@@ -78,7 +81,7 @@ beforeAll(async () => {
     -- resolveScorecardTeamEmails checks users.is_active, so the island carries it (defaulting active).
     CREATE TABLE public.users (id uuid PRIMARY KEY, display_name text, email text, avatar_url text, is_active boolean DEFAULT true);
   `);
-  await pg.exec(tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, scorecardCorrectiveActions, dealTeamMembers, contacts]));
+  await pg.exec(tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, scorecardCorrectiveActions, scorecardCorrectiveActionEvents, scorecardCorrectiveActionTokens, dealTeamMembers, contacts]));
   await pg.exec(
     `ALTER TABLE public.field_scorecards ADD CONSTRAINT field_scorecards_csid_uniq UNIQUE (client_submission_id);`,
   );
@@ -223,5 +226,74 @@ describe("createFieldScorecard (leadership)", () => {
     expect(list.scorecards).toHaveLength(1);
     expect(list.scorecards[0].id).toBe(scorecard.id);
     expect(list.scorecards[0].kind).toBe("leadership");
+  });
+
+  // ── Action items: a leadership card's ONLY possible flagged item ───────────────────────────────────────
+  // It carries no critical deficiencies (rejected above), so before action items were persisted for this kind
+  // a below-band leadership card had zero flagged items and reconcile's gate
+  // (isCorrectiveActionBand && enumerateFlaggedItems().length > 0) could never fire. Three cards scored
+  // 3.5-6.5 in production and opened nothing. These are the regression tests for that.
+
+  it("persists action items on a leadership card, trimmed and blank-filtered", async () => {
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      leadershipSubmission({
+        clientSubmissionId: csid(9),
+        actionItems: ["  Rebuild the look-ahead  ", "", "   ", "Close the safety observations"],
+      }),
+    );
+    const detail = await getFieldScorecardDetail(tdb, scorecard.id, ACCESS);
+    expect(detail.actionItems).toEqual(["Rebuild the look-ahead", "Close the safety observations"]);
+  });
+
+  it("opens a corrective action per action item when a leadership card trips the band", async () => {
+    // 6/10 average → below the V2 corrective-action band (< 7).
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      leadershipSubmission({
+        clientSubmissionId: csid(10),
+        items: leadershipItems({ quality_control: 6, safety: 6, schedule_adherence: 6, site_staff_feedback: 6 }),
+        actionItems: ["Rebuild the look-ahead", "Close the safety observations"],
+      }),
+    );
+    expect(scorecard.rating).toBe("corrective_action");
+    // The card enters the responders' queue rather than completing as `submitted`.
+    const [card] = (await tdb.execute(
+      sql`SELECT status FROM field_scorecards WHERE id = ${scorecard.id}`,
+    )).rows as any[];
+    expect(card.status).toBe("corrective_action_open");
+    const items = (await tdb.execute(sql`
+      SELECT item_type, item_ref, item_label, status
+        FROM scorecard_corrective_actions WHERE scorecard_id = ${scorecard.id}
+       ORDER BY item_ref
+    `)).rows as any[];
+    // One per action item, refs are the ARRAY INDEX, all seeded open, labels captured verbatim.
+    expect(items).toEqual([
+      { item_type: "action_item", item_ref: "0", item_label: "Rebuild the look-ahead", status: "open" },
+      { item_type: "action_item", item_ref: "1", item_label: "Close the safety observations", status: "open" },
+    ]);
+  });
+
+  it("leaves a below-band leadership card with NO action items alone (nothing to ask, nothing opened)", async () => {
+    // The honest complement of the test above, and the state the mobile form now warns about at capture time:
+    // below band with nothing itemized cannot open a corrective action, so the card must stay `submitted`
+    // rather than land in a responder queue with no items to answer.
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      leadershipSubmission({
+        clientSubmissionId: csid(11),
+        items: leadershipItems({ quality_control: 6, safety: 6, schedule_adherence: 6, site_staff_feedback: 6 }),
+        actionItems: [],
+      }),
+    );
+    expect(scorecard.rating).toBe("corrective_action");
+    const [card] = (await tdb.execute(
+      sql`SELECT status FROM field_scorecards WHERE id = ${scorecard.id}`,
+    )).rows as any[];
+    expect(card.status).toBe("submitted");
+    const items = await tdb.execute(
+      sql`SELECT count(*)::int AS n FROM scorecard_corrective_actions WHERE scorecard_id = ${scorecard.id}`,
+    );
+    expect((items.rows as any[])[0].n).toBe(0);
   });
 });

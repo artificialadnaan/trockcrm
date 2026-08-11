@@ -79,6 +79,8 @@ export interface PropertyDeal {
   id: string;
   dealNumber: string;
   name: string;
+  /** `deals.scope_title` — on the wire already (the query returns the whole deal row). */
+  scopeTitle?: string | null;
   stageId: string;
   workflowRoute: "normal" | "service";
   assignedRepId: string;
@@ -108,6 +110,30 @@ export interface PropertyDeal {
   lostCompetitor: string | null;
   lostAt: string | null;
   expectedCloseDate: string | null;
+  // The estimating auto-park horizon (2026-07-27) and the CRM stage slug that selects it. Both are read by
+  // the property page's client-side getEffectiveDealValue sum; without them an estimating deal would price
+  // at full value on the property card while the deals board, company rollup and every report show $0.
+  bidDueDate: string | null;
+  // The CRM stage slug (pipeline_stage_config.slug for deals.stage_id) — deliberately NOT
+  // COALESCE(bid_board_stage_slug, psc.slug). The value rules classify "is this deal estimating?" from the
+  // CRM stage on EVERY surface (the shared SQL keys on deals.stage_id, getDealDetail selects the psc slug
+  // for stage_id, and the TS resolver reads stageSlug), so coalescing the mirror in here would make the
+  // property card the only place that prices a Bid-Board-estimating / CRM-opportunity deal on the bid-date
+  // and DD-over-bid rules — creating drift rather than closing it (CodeRabbit).
+  stageSlug: string | null;
+  // The Bid Board MIRROR stage, read SEPARATELY by getEffectiveDealValue for the terminal (won/lost)
+  // exemption: a mirrored deal can be terminal here while its CRM stage is still open, and a realized value
+  // must never be auto-parked. The API already ships it (the row spreads every deals column); declaring it
+  // keeps the exemption type-visible so a narrowed payload can't silently drop it.
+  bidBoardStageSlug: string | null;
+  // A change-order child (0156), read by getEffectiveDealValue to take awardedAmount verbatim — including
+  // NEGATIVE for a deductive CO — ahead of the `> 0` fallback chain. The API already ships it (the row
+  // spreads every deals column via getTableColumns(deals)); declaring it REQUIRED (not optional) keeps it
+  // type-visible so a narrowed payload can't silently drop it, the way stageSlug once did (server
+  // properties/service.ts:719-725). property-detail-page.tsx sums this array as "Active Pipeline Value" — a
+  // dropped flag would silently price a deductive CO at $0 there while every other CO-aware surface reads
+  // the negative.
+  isChangeOrder: boolean | null;
   actualCloseDate: string | null;
   lastActivityAt: string | null;
   stageEnteredAt: string;

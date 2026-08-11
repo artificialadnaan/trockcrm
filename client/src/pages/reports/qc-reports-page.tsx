@@ -25,6 +25,7 @@ import {
   type ScorecardKind,
   type ScorecardRating,
 } from "@trock-crm/shared/types";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import { useQcScorecards, type QcScorecardRow } from "@/hooks/use-qc-scorecards";
 import { fetchDealScorecardDetail, downloadDealScorecardPdf } from "@/hooks/use-deal-scorecards";
 import { LeadershipDetailView, ScorecardDetailView } from "@/pages/deals/deal-scorecards-tab";
@@ -59,8 +60,13 @@ export function correctiveActionCell(status: string | undefined): { label: strin
   if (status === "corrective_action_open") {
     return { label: "Open", className: "border-red-200 bg-red-50 text-brand-red" };
   }
+  if (status === "corrective_action_submitted") {
+    // Neither the responders' problem nor done — it is sitting in the approver's queue.
+    return { label: "Awaiting Approval", className: "border-amber-200 bg-amber-50 text-amber-700" };
+  }
   if (status === "corrective_action_closed") {
-    return { label: "Closed", className: "border-emerald-200 bg-emerald-50 text-emerald-700" };
+    // `corrective_action_closed` means APPROVED since the approval gate landed.
+    return { label: "Approved", className: "border-emerald-200 bg-emerald-50 text-emerald-700" };
   }
   return null;
 }
@@ -92,9 +98,10 @@ export default function QcReportsPage() {
   const [region, setRegion] = useState("");
   const [kind, setKind] = useState<"" | ScorecardKind>("");
   const [superintendent, setSuperintendent] = useState("");
+  const [projectManager, setProjectManager] = useState("");
   const [rating, setRating] = useState("");
   const [flaggedOnly, setFlaggedOnly] = useState(false);
-  const [correctiveActionStatus, setCorrectiveActionStatus] = useState<"" | "open" | "closed">("");
+  const [correctiveActionStatus, setCorrectiveActionStatus] = useState<"" | "open" | "awaiting_approval" | "closed">("");
   const [search, setSearch] = useState("");
 
   // Debounce the search box so keystrokes don't spam the server-side query.
@@ -104,10 +111,11 @@ export default function QcReportsPage() {
     return () => clearTimeout(t);
   }, [search]);
 
-  // ALL filters are applied server-side (before the row cap); `regions`/`superintendents` are the
-  // window-wide option lists so the dropdowns never empty each other.
-  const { scorecards, regions, superintendents, truncated, loading, error, refetch } = useQcScorecards({
-    from, to, region, kind: kind || undefined, superintendent, rating, flaggedOnly, search: debouncedSearch,
+  // ALL filters are applied server-side (before the row cap); `regions`/`superintendents`/`projectManagers`
+  // are the window-wide option lists so the dropdowns never empty each other.
+  const { scorecards, regions, superintendents, projectManagers, truncated, loading, error, refetch } = useQcScorecards({
+    from, to, region, kind: kind || undefined, superintendent, projectManager, rating, flaggedOnly,
+    search: debouncedSearch,
     correctiveActionStatus: correctiveActionStatus || undefined,
   });
   const rows = scorecards;
@@ -115,10 +123,13 @@ export default function QcReportsPage() {
   const stats = useMemo(() => {
     const avg = rows.length ? Math.round(rows.reduce((s, r) => s + scoreOutOfTen(r), 0) / rows.length * 10) / 10 : null;
     const corrective = rows.filter((r) => r.rating === "corrective_action");
+    // The approver's queue. Counted from the same `rows` the drill-down receives, so the KPI and its
+    // drill can never disagree — the reconciliation rule this dashboard is already held to.
+    const awaitingApproval = rows.filter((r) => r.status === "corrective_action_submitted");
     const flagged = rows.filter((r) => r.deficiencyCount > 0);
     const weekAgo = isoDaysAgo(7);
     const thisWeek = rows.filter((r) => r.submittedAt.slice(0, 10) >= weekAgo);
-    return { avg, corrective, flagged, thisWeek };
+    return { avg, corrective, awaitingApproval, flagged, thisWeek };
   }, [rows]);
 
   const [drill, setDrill] = useState<{ title: string; rows: QcScorecardRow[] } | null>(null);
@@ -155,6 +166,16 @@ export default function QcReportsPage() {
         />
         <StatCard
           tone="warn"
+          label="Awaiting Approval"
+          value={String(stats.awaitingApproval.length)}
+          meta="corrective actions in the approver's queue"
+          onClick={() =>
+            stats.awaitingApproval.length &&
+            setDrill({ title: "Awaiting Approval", rows: stats.awaitingApproval })
+          }
+        />
+        <StatCard
+          tone="warn"
           label="Deficiency-Flagged"
           value={String(stats.flagged.length)}
           meta="scorecards with a critical flag"
@@ -181,6 +202,7 @@ export default function QcReportsPage() {
           allLabel="All scorecards"
         />
         <FilterSelect label="Superintendent" value={superintendent} onChange={setSuperintendent} options={superintendents} allLabel="Anyone" />
+        <FilterSelect label="Project Manager" value={projectManager} onChange={setProjectManager} options={projectManagers} allLabel="Anyone" />
         <FilterSelect
           label="Rating"
           value={rating}
@@ -192,9 +214,11 @@ export default function QcReportsPage() {
         <FilterSelect
           label="Corrective Action Status"
           value={correctiveActionStatus}
-          onChange={(value) => setCorrectiveActionStatus(value as "" | "open" | "closed")}
-          options={["open", "closed"]}
-          renderOption={(v) => (v === "open" ? "Open" : "Closed")}
+          onChange={(value) => setCorrectiveActionStatus(value as "" | "open" | "awaiting_approval" | "closed")}
+          options={["open", "awaiting_approval", "closed"]}
+          renderOption={(v) =>
+            v === "open" ? "Open" : v === "awaiting_approval" ? "Awaiting Approval" : "Approved"
+          }
           allLabel="Any status"
         />
         <div className="flex items-center gap-1.5">
@@ -215,7 +239,7 @@ export default function QcReportsPage() {
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search project, number, superintendent…"
+            placeholder="Search project, number, superintendent, PM…"
             className="w-full rounded-lg border border-slate-200 bg-slate-50 py-2 pl-9 pr-3 text-[13px] font-medium"
           />
         </div>
@@ -331,6 +355,7 @@ function QcTable({ rows, onRowClick, compact }: { rows: QcScorecardRow[]; onRowC
           <Th>Project</Th>
           {!compact && <Th>Date</Th>}
           {!compact && <Th>Superintendent</Th>}
+          {!compact && <Th>Project Manager</Th>}
           <Th className="text-right">Score</Th>
           <Th className="text-center">Rating</Th>
           <Th className="text-center">Flags</Th>
@@ -355,12 +380,14 @@ function QcTable({ rows, onRowClick, compact }: { rows: QcScorecardRow[]; onRowC
             }}
             tabIndex={0}
             role="button"
-            aria-label={`Open ${kindLabel(r.kind).toLowerCase()} scorecard for ${r.projectName}, dated ${fmtWeek(r.weekOf)}`}
+            aria-label={`Open ${kindLabel(r.kind).toLowerCase()} scorecard for ${formatDealDisplayName(r.projectName, r.isChangeOrder)}, dated ${fmtWeek(r.weekOf)}`}
             className={`cursor-pointer border-b border-slate-100 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand-red/40 ${r.deficiencyCount > 0 ? "shadow-[inset_3px_0_0_var(--tw-shadow-color)] shadow-brand-red" : ""}`}
           >
             <td className="px-3.5 py-3">
               <div className="flex flex-wrap items-center gap-2">
-                <div className="font-semibold text-slate-950">{r.projectName}</div>
+                {/* A change-order child deal is STORED "<Parent> — Change Order N"; lead with the label. Display
+                    only — the scorecard snapshot and the PDF are generated from the stored value. */}
+                <div className="font-semibold text-slate-950">{formatDealDisplayName(r.projectName, r.isChangeOrder)}</div>
                 <Badge
                   variant="outline"
                   className={r.kind === "leadership"
@@ -376,6 +403,7 @@ function QcTable({ rows, onRowClick, compact }: { rows: QcScorecardRow[]; onRowC
             </td>
             {!compact && <td className="px-3.5 py-3 text-[13px] text-slate-500">{fmtWeek(r.weekOf)}</td>}
             {!compact && <td className="px-3.5 py-3 text-[13.5px]">{r.superintendentName ?? "—"}</td>}
+            {!compact && <td className="px-3.5 py-3 text-[13.5px]">{r.pmName ?? "—"}</td>}
             <td className={`px-3.5 py-3 text-right text-[19px] font-black tabular-nums ${SCORE_COLOR[r.rating] ?? "text-slate-800"}`}>
               {scoreOutOfTen(r).toFixed(1)}
               <span className="text-[11px] font-semibold text-slate-300">/10</span>
@@ -468,9 +496,15 @@ function QcDetailSheet({ row, onClose }: { row: QcScorecardRow | null; onClose: 
         {row && (
           <>
             <SheetHeader className="shrink-0 border-b border-slate-100 px-6 py-5">
-              <SheetTitle className="pr-8 leading-snug">{row.projectName}</SheetTitle>
+              <SheetTitle className="pr-8 leading-snug">{formatDealDisplayName(row.projectName, row.isChangeOrder)}</SheetTitle>
               <div className="text-[12.5px] text-slate-500">
-                {[kindLabel(row.kind), row.projectNumber, fmtWeek(row.weekOf), row.superintendentName ? `Supt. ${row.superintendentName}` : null].filter(Boolean).join(" · ")}
+                {[
+                  kindLabel(row.kind),
+                  row.projectNumber,
+                  fmtWeek(row.weekOf),
+                  row.superintendentName ? `Supt. ${row.superintendentName}` : null,
+                  row.pmName ? `PM ${row.pmName}` : null,
+                ].filter(Boolean).join(" · ")}
               </div>
             </SheetHeader>
 

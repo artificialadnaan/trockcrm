@@ -8,14 +8,22 @@
 import { describe, expect, it } from "vitest";
 import type { Deal, DealBoardColumn } from "@/hooks/use-deals";
 import {
+  AT_RISK_ROUTE_BUCKETS,
   activePipelineDrilldownFilter,
+  atRiskFilterForRouteBucket,
+  atRiskRouteBucketForFilter,
+  countAtRiskDeals,
   getActivePipelineSummary,
   getAtRiskBoardColumns,
   isEngineAtRiskDeal,
+  isServiceRouteDeal,
+  matchesAtRiskRouteBucket,
   sumNonOnHoldDealValues,
+  type AtRiskRouteBucket,
 } from "./deal-list-page";
 
-// Minimal Deal fixture: helpers only read atRisk / onHold / updatedAt / bidEstimate (→ effective value).
+// Minimal Deal fixture: helpers only read atRisk / onHold / updatedAt / bidEstimate (→ effective value)
+// and workflowRoute (→ route bucket).
 // bidEstimate is the sole value field set, so getEffectiveDealValue returns it verbatim for non-on-hold.
 // (`atRisk` here is a boolean toggle, distinct from Deal.atRisk's AtRiskResult shape it expands to.)
 function deal(o: {
@@ -24,6 +32,14 @@ function deal(o: {
   value?: number;
   onHold?: boolean;
   updatedAt?: string;
+  // OMIT the key entirely to model a wire payload that carries no route at all; pass null to model an
+  // explicit null. Neither is "service", so both must land in the non-service bucket.
+  workflowRoute?: "normal" | "service" | null;
+  // The PROJECT TYPE, which outranks the route. Omitted on most fixtures so the existing route-only
+  // assertions keep exercising the fallback tier.
+  projectType?: string | null;
+  // The CONFIGURED digit, shipped by the server. Most real deals are typed only by this.
+  projectTypeCode?: string | null;
 }): Deal {
   const { id, atRisk = false, value = 0, onHold = false, updatedAt = "2026-06-10T00:00:00.000Z" } = o;
   return {
@@ -31,6 +47,9 @@ function deal(o: {
     onHold,
     updatedAt,
     bidEstimate: value,
+    ...("workflowRoute" in o ? { workflowRoute: o.workflowRoute } : {}),
+    ...("projectType" in o ? { projectType: o.projectType } : {}),
+    ...("projectTypeCode" in o ? { projectTypeCode: o.projectTypeCode } : {}),
     atRisk: atRisk
       ? { isAtRisk: true, status: "at_risk", effectiveStageAgeDays: 30 }
       : { isAtRisk: false, status: "on_track", effectiveStageAgeDays: 1 },
@@ -143,6 +162,295 @@ describe("activePipelineDrilldownFilter — card links to the cohort it shows", 
     expect(activePipelineDrilldownFilter("active")).toBe("active_pipeline");
     expect(activePipelineDrilldownFilter("all")).toBe("active_pipeline");
     expect(activePipelineDrilldownFilter("won")).toBe("active_pipeline");
+  });
+
+  it("keeps the ROUTE on the at-risk drill-down: it shows the route-narrowed set, so it must link back to it", () => {
+    // On /deals?filter=at_risk_service the Active Pipeline card aggregates the service-only at-risk
+    // columns. Linking to the unsplit at_risk would open a strictly larger set than the number it prints.
+    expect(activePipelineDrilldownFilter("at_risk", "service")).toBe("at_risk_service");
+    expect(activePipelineDrilldownFilter("at_risk", "non_service")).toBe("at_risk_non_service");
+    expect(activePipelineDrilldownFilter("at_risk", "all")).toBe("at_risk");
+    // Off the at-risk board the route is irrelevant — still the full active pipeline.
+    expect(activePipelineDrilldownFilter("active", "service")).toBe("active_pipeline");
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------
+// The workflow-route split of the At-Risk card into Service / Non-service / All.
+//
+// The whole point of this block is the reconciliation constraint: each card's NUMBER and the ROWS on the
+// drill-down its link opens must come from the same at-risk predicate AND the same route filter, and the
+// two route cards must sum exactly to the All card. The tests below therefore always route through the
+// real ?filter round trip (atRiskFilterForRouteBucket → atRiskRouteBucketForFilter) rather than passing a
+// bucket straight to both sides, so a mismatch in that mapping cannot pass unnoticed.
+// ---------------------------------------------------------------------------------------------------
+
+/**
+ * A realistic MIXED board: both routes present in the same stage, at-risk and on-track deals of each
+ * route, an on-hold at-risk service deal, deals with an explicit null route and with the route key
+ * ABSENT entirely, and a terminal column that must stay excluded.
+ *
+ * At-risk deals by route:
+ *   service      → s1, s2, s3(on-hold)                       = 3
+ *   non-service  → n1, n2 (normal), x1 (null), x2 (absent)   = 4
+ *   TOTAL                                                     = 7
+ * Non-at-risk (must never be counted): so1, no1, xo1. Terminal: w1 (at-risk, but in 'won').
+ */
+function makeRouteMixedBoard(): DealBoardColumn[] {
+  return [
+    column("estimating", [
+      deal({ id: "s1", atRisk: true, value: 100_000, workflowRoute: "service" }),
+      deal({ id: "n1", atRisk: true, value: 80_000, workflowRoute: "normal" }),
+      deal({ id: "x1", atRisk: true, value: 40_000, workflowRoute: null }), // explicit null route
+      deal({ id: "so1", atRisk: false, value: 999_000, workflowRoute: "service" }), // on-track
+      deal({ id: "no1", atRisk: false, value: 888_000, workflowRoute: "normal" }), // on-track
+    ]),
+    column("contract", [
+      deal({ id: "s2", atRisk: true, value: 25_000, workflowRoute: "service" }),
+      deal({ id: "s3", atRisk: true, value: 60_000, onHold: true, workflowRoute: "service" }),
+      deal({ id: "n2", atRisk: true, value: 15_000, workflowRoute: "normal" }),
+      deal({ id: "x2", atRisk: true, value: 5_000 }), // route key ABSENT from the payload
+      deal({ id: "xo1", atRisk: false, value: 7_000 }), // on-track, no route
+    ]),
+    column("won", [
+      deal({ id: "w1", atRisk: true, value: 1_000_000, workflowRoute: "service" }), // terminal — excluded
+    ]),
+  ];
+}
+
+function cardIds(columns: DealBoardColumn[]): string[] {
+  return columns.flatMap((c) => c.cards.map((d) => (d as { id: string }).id)).sort();
+}
+
+/** The rows a drill-down actually renders for a ?filter, via the SAME path the page takes. */
+function drilldownCardIdsForFilter(
+  columns: DealBoardColumn[],
+  filter: ReturnType<typeof atRiskFilterForRouteBucket>
+): string[] {
+  return cardIds(getAtRiskBoardColumns(columns, atRiskRouteBucketForFilter(filter)));
+}
+
+describe("at-risk route bucketing — the predicate", () => {
+  it("treats ONLY workflowRoute === 'service' as service", () => {
+    expect(isServiceRouteDeal(deal({ id: "a", workflowRoute: "service" }))).toBe(true);
+    expect(isServiceRouteDeal(deal({ id: "b", workflowRoute: "normal" }))).toBe(false);
+    expect(isServiceRouteDeal(deal({ id: "c", workflowRoute: null }))).toBe(false);
+    expect(isServiceRouteDeal(deal({ id: "d" }))).toBe(false);
+  });
+
+  it("puts a NULL or ABSENT workflowRoute in NON-SERVICE (documented: not service ⇒ non-service)", () => {
+    // deals.workflow_route is `.default('normal').notNull()`, so a real row always has a route — but the
+    // client Deal type still allows null and a payload can omit the key. Such a deal is not service, so
+    // it belongs on the non-service side. Dropping it from BOTH buckets would silently break the sum.
+    for (const routeless of [deal({ id: "null-route", workflowRoute: null }), deal({ id: "no-route" })]) {
+      expect(matchesAtRiskRouteBucket(routeless, "non_service")).toBe(true);
+      expect(matchesAtRiskRouteBucket(routeless, "service")).toBe(false);
+      expect(matchesAtRiskRouteBucket(routeless, "all")).toBe(true);
+    }
+  });
+
+  it("is a TOTAL partition: every deal matches exactly one of service / non_service, and always all", () => {
+    const everyShape = [
+      deal({ id: "svc", workflowRoute: "service" }),
+      deal({ id: "nrm", workflowRoute: "normal" }),
+      deal({ id: "nul", workflowRoute: null }),
+      deal({ id: "abs" }),
+    ];
+    for (const d of everyShape) {
+      const inService = matchesAtRiskRouteBucket(d, "service");
+      const inNonService = matchesAtRiskRouteBucket(d, "non_service");
+      expect(inService !== inNonService).toBe(true); // exactly one side — never both, never neither
+      expect(matchesAtRiskRouteBucket(d, "all")).toBe(true);
+    }
+  });
+});
+
+describe("at-risk route bucketing — PROJECT TYPE outranks the route", () => {
+  // The Deals page and the Monday Showcase answer the same question with the same words, so they must not
+  // answer it differently. The showcase was fixed to resolve service from project_type (project_type wins,
+  // workflow_route is the fallback); this page tested workflow_route ALONE. Until both used the canonical
+  // definition, a deal whose own number reads DFW-4-… counted as service in one place and normal in the
+  // other — and 279 prod deals, $3.1M, are in exactly that state.
+
+  it("puts a typed-service deal in Service even when its route says normal", () => {
+    const d = deal({ id: "t1", atRisk: true, workflowRoute: "normal", projectType: "service" });
+    expect(isServiceRouteDeal(d)).toBe(true);
+    expect(matchesAtRiskRouteBucket(d, "service")).toBe(true);
+    expect(matchesAtRiskRouteBucket(d, "non_service")).toBe(false);
+  });
+
+  it("puts a typed-roofing deal in Non-service even when its route says service", () => {
+    // Precedence runs BOTH ways, or it is not precedence — otherwise this change would only ever grow
+    // the Service bucket rather than correct it.
+    const d = deal({ id: "t2", atRisk: true, workflowRoute: "service", projectType: "roofing" });
+    expect(isServiceRouteDeal(d)).toBe(false);
+    expect(matchesAtRiskRouteBucket(d, "non_service")).toBe(true);
+  });
+
+  it("normalizes case and whitespace the way the canonical resolver does", () => {
+    for (const spelling of ["Service", "  SERVICE  ", "\tservice\n"]) {
+      const d = deal({ id: `t-${spelling}`, workflowRoute: "normal", projectType: spelling });
+      expect({ spelling, service: isServiceRouteDeal(d) }).toEqual({ spelling, service: true });
+    }
+  });
+
+  it("uses the CONFIGURED code when there is no project type text — the majority shape", () => {
+    // Measured on production: 646 of 1,351 active deals carry no projectType text and are typed ONLY by
+    // the FK, and 277 of the 279 misclassified deals are in exactly this shape. Without this tier the
+    // client would fall back to the route for essentially the whole population being corrected — the
+    // fix would have looked done and changed almost nothing on this page.
+    const svc = deal({ id: "c1", atRisk: true, workflowRoute: "normal", projectType: null, projectTypeCode: "4" });
+    expect(isServiceRouteDeal(svc)).toBe(true);
+    expect(matchesAtRiskRouteBucket(svc, "service")).toBe(true);
+
+    // ...and a non-4 code is decisive the other way, so this cannot only ever add to Service.
+    const roof = deal({ id: "c2", atRisk: true, workflowRoute: "service", projectType: null, projectTypeCode: "3" });
+    expect(isServiceRouteDeal(roof)).toBe(false);
+  });
+
+  it("prefers the TEXT type over the configured code when both are present", () => {
+    // Tier order matters: project_type is what the platform treats as authoritative, and the code is the
+    // fallback for rows that never got the text written.
+    const d = deal({ id: "c3", workflowRoute: "normal", projectType: "roofing", projectTypeCode: "4" });
+    expect(isServiceRouteDeal(d)).toBe(false);
+  });
+
+  it("ignores a malformed or absent code rather than guessing", () => {
+    for (const code of [null, "", "  ", "0", "44", "x"]) {
+      const d = deal({ id: `c-${code}`, workflowRoute: "normal", projectType: null, projectTypeCode: code });
+      expect({ code, service: isServiceRouteDeal(d) }).toEqual({ code, service: false });
+    }
+  });
+
+  it("falls back to the route when the type is absent or unrecognised", () => {
+    // The fallback tier must survive: deals carrying no usable type are exactly the population the route
+    // column was carrying, and dropping it would lose them from Service entirely.
+    expect(isServiceRouteDeal(deal({ id: "f1", workflowRoute: "service", projectType: null }))).toBe(true);
+    expect(isServiceRouteDeal(deal({ id: "f2", workflowRoute: "service", projectType: "not a type" }))).toBe(true);
+    expect(isServiceRouteDeal(deal({ id: "f3", workflowRoute: "normal", projectType: "" }))).toBe(false);
+  });
+
+  it("keeps the split TOTAL — every deal lands in exactly one bucket", () => {
+    const deals = [
+      deal({ id: "a", workflowRoute: "normal", projectType: "service" }),
+      deal({ id: "b", workflowRoute: "service", projectType: "roofing" }),
+      deal({ id: "c", workflowRoute: "service" }),
+      deal({ id: "d", workflowRoute: null }),
+      deal({ id: "e" }),
+    ];
+    for (const d of deals) {
+      const inService = matchesAtRiskRouteBucket(d, "service");
+      const inNonService = matchesAtRiskRouteBucket(d, "non_service");
+      expect({ id: d.id, exactlyOne: inService !== inNonService }).toEqual({ id: d.id, exactlyOne: true });
+      expect(matchesAtRiskRouteBucket(d, "all")).toBe(true);
+    }
+  });
+});
+
+describe("at-risk route bucketing — the ?filter round trip (the card↔list contract)", () => {
+  it("atRiskRouteBucketForFilter inverts atRiskFilterForRouteBucket for every bucket", () => {
+    for (const bucket of AT_RISK_ROUTE_BUCKETS) {
+      expect(atRiskRouteBucketForFilter(atRiskFilterForRouteBucket(bucket))).toBe(bucket);
+    }
+    expect(atRiskFilterForRouteBucket("service")).toBe("at_risk_service");
+    expect(atRiskFilterForRouteBucket("non_service")).toBe("at_risk_non_service");
+    expect(atRiskFilterForRouteBucket("all")).toBe("at_risk");
+  });
+
+  it("every non-route filter reads as the 'all' bucket (stale and the base view included)", () => {
+    expect(atRiskRouteBucketForFilter("at_risk")).toBe("all");
+    expect(atRiskRouteBucketForFilter("stale")).toBe("all");
+    expect(atRiskRouteBucketForFilter("won")).toBe("all");
+    expect(atRiskRouteBucketForFilter(null)).toBe("all");
+  });
+});
+
+describe("at-risk route split — counts reconcile with the list each card links to", () => {
+  it("Service + Non-service === All (the sum identity) on a realistic mixed board", () => {
+    const columns = makeRouteMixedBoard();
+    const service = countAtRiskDeals(columns, "service");
+    const nonService = countAtRiskDeals(columns, "non_service");
+    const all = countAtRiskDeals(columns, "all");
+
+    expect(service).toBe(3); // s1, s2, s3(on-hold — still at risk, still counted)
+    expect(nonService).toBe(4); // n1, n2 + the null-route x1 + the route-less x2
+    expect(all).toBe(7);
+    expect(service + nonService).toBe(all);
+  });
+
+  it("the All card keeps EXACTLY the pre-split number (the old inline reduce)", () => {
+    const columns = makeRouteMixedBoard();
+    // Verbatim reproduction of the reduce the single "At risk" card used before the split.
+    const legacyCount = columns.reduce(
+      (sum, c) => sum + (c.stage.slug === "won" ? 0 : c.cards.filter(isEngineAtRiskDeal).length),
+      0
+    );
+    expect(countAtRiskDeals(columns, "all")).toBe(legacyCount);
+  });
+
+  it("each card's COUNT equals the number of ROWS on the drill-down its own link opens", () => {
+    // This is the constraint the whole feature hangs on. For each card we take the number it renders and
+    // the rows the ?filter it links to produces — through the real bucket→filter→bucket round trip — and
+    // require them to be the same set, not merely the same size.
+    const columns = makeRouteMixedBoard();
+    for (const bucket of AT_RISK_ROUTE_BUCKETS) {
+      const cardCount = countAtRiskDeals(columns, bucket);
+      const rows = drilldownCardIdsForFilter(columns, atRiskFilterForRouteBucket(bucket));
+      expect(rows).toHaveLength(cardCount);
+    }
+  });
+
+  it("the two route drill-downs PARTITION the All drill-down's rows — no deal lost, none double-counted", () => {
+    const columns = makeRouteMixedBoard();
+    const serviceRows = drilldownCardIdsForFilter(columns, "at_risk_service");
+    const nonServiceRows = drilldownCardIdsForFilter(columns, "at_risk_non_service");
+    const allRows = drilldownCardIdsForFilter(columns, "at_risk");
+
+    expect(serviceRows).toEqual(["s1", "s2", "s3"]);
+    expect(nonServiceRows).toEqual(["n1", "n2", "x1", "x2"]); // the null/absent-route deals are HERE
+    expect([...serviceRows, ...nonServiceRows].sort()).toEqual(allRows);
+    expect(serviceRows.filter((id) => nonServiceRows.includes(id))).toEqual([]); // disjoint
+    expect(allRows).not.toContain("w1"); // the terminal Won column stays excluded on every route
+    expect(allRows).not.toContain("so1"); // and on-track deals are still dropped by the at-risk predicate
+  });
+
+  it("narrowing by route does not touch the at-risk predicate — only WHICH at-risk deals are shown", () => {
+    const columns = makeRouteMixedBoard();
+    const all = getAtRiskBoardColumns(columns, "all");
+    for (const bucket of ["service", "non_service"] as AtRiskRouteBucket[]) {
+      const narrowed = getAtRiskBoardColumns(columns, bucket);
+      // Every card in a route view is a card of the unsplit at-risk view (a strict subset), and it is
+      // still an engine at-risk deal — the route filter can only remove, never admit.
+      expect(narrowed.flatMap((c) => c.cards).every(isEngineAtRiskDeal)).toBe(true);
+      for (const id of cardIds(narrowed)) expect(cardIds(all)).toContain(id);
+    }
+  });
+
+  it("recounts the route-narrowed columns the same way (on-hold out of count, in totalCount)", () => {
+    // s2 (active) + s3 (on-hold) both sit in 'contract'; the on-hold one still belongs to the at-risk
+    // cohort but must not inflate the active count or the $ — same rule as the unsplit view.
+    const contract = getAtRiskBoardColumns(makeRouteMixedBoard(), "service").find(
+      (c) => c.stage.slug === "contract"
+    )!;
+    expect(contract.totalCount).toBe(2); // s2 + s3
+    expect(contract.count).toBe(1); // s3 on-hold excluded
+    expect(contract.totalValue).toBe(25_000); // s3 contributes 0
+  });
+
+  it("holds the sum identity on EVERY board shape, including empty and single-route boards", () => {
+    const boards: DealBoardColumn[][] = [
+      [],
+      [column("estimating", [])],
+      [column("estimating", [deal({ id: "only-svc", atRisk: true, workflowRoute: "service" })])],
+      [column("estimating", [deal({ id: "only-routeless", atRisk: true })])],
+      [column("won", [deal({ id: "terminal", atRisk: true, workflowRoute: "service" })])],
+      makeRouteMixedBoard(),
+    ];
+    for (const board of boards) {
+      expect(countAtRiskDeals(board, "service") + countAtRiskDeals(board, "non_service")).toBe(
+        countAtRiskDeals(board, "all")
+      );
+    }
   });
 });
 

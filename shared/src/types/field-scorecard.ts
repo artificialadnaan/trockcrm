@@ -516,6 +516,8 @@ export interface FieldScorecardSummary {
   pmName: string | null;
   /** Current canonical deal/job name. Optional while older API deployments roll out. */
   projectName?: string | null;
+  /** `deals.is_change_order` for `projectName` — the AUTHORITY for the change-order display relabel. */
+  isChangeOrder?: boolean | null;
   projectNumber: string | null;
   criticalDeficiencyCount: number;
   submittedByName: string | null;
@@ -577,6 +579,21 @@ export interface CorrectiveActionResponsePhotoView {
  * corrective-action response, threaded under the original item on the deal Scorecards tab (spec §9). Mirrors
  * the server corrective-action-api.ts CorrectiveActionItemView.
  */
+/** One entry in an item's back-and-forth: a submission, an approval, or a rejection with its reason. */
+export interface CorrectiveActionEventView {
+  id: string;
+  /** The item this was about, snapshotted — the only way a DETACHED entry is readable. */
+  itemLabel?: string | null;
+  /** `submitted` | `approved` | `rejected` (a string, so a new value never breaks the parse). */
+  eventType: string;
+  actorName: string | null;
+  actorEmail: string | null;
+  comment: string | null;
+  createdAt: string | null;
+  /** Photos filed with THIS attempt. Empty for approvals and rejections. */
+  photos: CorrectiveActionResponsePhotoView[];
+}
+
 export interface CorrectiveActionItemView {
   id: string;
   /** `action_item` | `critical_deficiency` (varchar — kept a string so a new value never breaks the parse). */
@@ -585,7 +602,7 @@ export interface CorrectiveActionItemView {
   itemRef: string;
   /** The denormalized human label captured at seed time (action text / deficiency label). */
   itemLabel: string;
-  /** `open` | `resolved`. */
+  /** `open` | `submitted` | `approved` | `rejected` — see shared/types/corrective-action-status. */
   status: string;
   responseComment: string | null;
   respondedByUserId: string | null;
@@ -593,8 +610,26 @@ export interface CorrectiveActionItemView {
   responderEmail: string | null;
   respondedAt: string | null;
   photos: CorrectiveActionResponsePhotoView[];
+  /**
+   * The full thread, oldest first. The response columns above hold only the LATEST attempt — a resubmission
+   * overwrites them — so this is the only place a rejection and what it asked for survives. Optional so a
+   * client build can outlive a server that predates the thread.
+   */
+  events?: CorrectiveActionEventView[];
 }
 export interface FieldScorecardDetail extends FieldScorecardSummary {
+  /**
+   * Whether THIS caller may approve or reject this card's corrective actions. A capability boolean, never
+   * the allowlist — that is authorization config, and shipping it would disclose who can sign off. Absent on
+   * reads that do not carry a session (the field app).
+   */
+  canApproveCorrectiveActions?: boolean;
+  /**
+   * Thread entries whose flagged item a later edit removed. They have no item to thread under, but a
+   * rejection and the answer to it are things that happened — omitting them would make the record one of the
+   * items that survived editing rather than of what occurred.
+   */
+  removedItemEvents?: CorrectiveActionEventView[];
   items: FieldScorecardItemView[];
   criticalDeficiencies: string[];
   criticalDeficiencyNotes?: Record<string, string>;

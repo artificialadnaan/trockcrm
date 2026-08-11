@@ -53,7 +53,7 @@ beforeAll(async () => {
     CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, slug text UNIQUE NOT NULL);
     CREATE TABLE deals (
       id uuid PRIMARY KEY, sales_source_user_id uuid, stage_id uuid NOT NULL,
-      won_closed_date date, expected_close_date date, actual_close_date date,
+      won_closed_date date, expected_close_date date, bid_due_date timestamptz, actual_close_date date,
       lost_at timestamptz, contract_signed_at timestamptz, contract_signed_date date, updated_at timestamptz
     );
     INSERT INTO pipeline_stage_config (id, slug) VALUES

@@ -57,6 +57,14 @@ export const apiSpec = {
           bidEstimate: { type: "string", nullable: true, example: "480000.00" },
           awardedAmount: { type: "string", nullable: true, example: "495000.00" },
           changeOrderTotal: { type: "string", default: "0", example: "12500.00" },
+          scopeTitle: {
+            type: "string",
+            nullable: true,
+            maxLength: 120,
+            example: "Balcony Repair",
+            description:
+              "Short scope-of-work title used as the project title in accounting. Distinct from `description`, which is long-form notes. Trimmed on write; blank normalizes to null. Over 120 characters is rejected with 400 SCOPE_TITLE_INVALID.",
+          },
           description: { type: "string", nullable: true },
           propertyAddress: { type: "string", nullable: true },
           propertyCity: { type: "string", nullable: true },
@@ -119,7 +127,10 @@ export const apiSpec = {
           dealId: { type: "string", format: "uuid" },
           fromStageId: { type: "string", format: "uuid", nullable: true },
           toStageId: { type: "string", format: "uuid" },
-          changedBy: { type: "string", format: "uuid" },
+          // Nullable since migration 0207: a stage write with no session actor (script, sync, raw SQL)
+          // records the transition without naming anyone, rather than stamping the deal's assigned rep.
+          // Stays in `required` — the property is always present on the wire, it is its VALUE that is null.
+          changedBy: { type: "string", format: "uuid", nullable: true },
           overrideReason: { type: "string", nullable: true },
           createdAt: { type: "string", format: "date-time" },
         },
@@ -917,6 +928,13 @@ export const apiSpec = {
                   companyId: { type: "string", format: "uuid" },
                   ddEstimate: { type: "string", example: "250000.00" },
                   bidEstimate: { type: "string", example: "480000.00" },
+                  scopeTitle: {
+                    type: "string",
+                    nullable: true,
+                    maxLength: 120,
+                    example: "Balcony Repair",
+                    description: "Short scope-of-work title (the accounting/QuickBooks project title). Over 120 characters is rejected with 400 SCOPE_TITLE_INVALID.",
+                  },
                   description: { type: "string" },
                   propertyAddress: { type: "string" },
                   propertyCity: { type: "string" },
@@ -945,7 +963,7 @@ export const apiSpec = {
               },
             },
           },
-          400: { description: "name and stageId are required." },
+          400: { description: "name and stageId are required; or scopeTitle exceeded 120 characters (SCOPE_TITLE_INVALID)." },
         },
       },
     },
@@ -1040,6 +1058,14 @@ export const apiSpec = {
                   ddEstimate: { type: "string" },
                   bidEstimate: { type: "string" },
                   awardedAmount: { type: "string" },
+                  scopeTitle: {
+                    type: "string",
+                    nullable: true,
+                    maxLength: 120,
+                    example: "Balcony Repair",
+                    description:
+                      "Short scope-of-work title (the accounting/QuickBooks project title). Send null to CLEAR it; omit the key to leave it untouched. Trimmed on write; blank normalizes to null. Over 120 characters is rejected with 400 SCOPE_TITLE_INVALID.",
+                  },
                   description: { type: "string" },
                   propertyAddress: { type: "string" },
                   propertyCity: { type: "string" },
@@ -1070,6 +1096,7 @@ export const apiSpec = {
               },
             },
           },
+          400: { description: "Invalid field value — e.g. scopeTitle exceeded 120 characters (SCOPE_TITLE_INVALID)." },
           403: { description: "Access denied." },
           404: { description: "Deal not found." },
         },
@@ -1078,7 +1105,7 @@ export const apiSpec = {
         tags: ["Deals"],
         summary: "Archive (soft-delete) a deal",
         description:
-          "Archives the deal (is_active=false) and prepends the reason to the deal description. The assigned rep or an admin may archive; non-admins may only archive opportunity-stage deals. A non-empty reason is required.",
+          "Archives the deal (is_active=false) and prepends the reason to the deal description. The assigned rep may archive their own deal at ANY stage, and an admin may archive any deal. TWO admin-only exceptions, both because they void change-order commissions: a non-admin may not archive a change order itself, and may not archive a PARENT that still has active change-order children (archiving the parent cascades — every child is voided and its earned commission removed). A non-empty reason is required. Archiving a Won deal removes it from Won rollups and from the revenue its commission rows were computed against.",
         parameters: [{ name: "id", in: "path", required: true, schema: { type: "string", format: "uuid" } }],
         requestBody: {
           required: true,
@@ -1097,7 +1124,7 @@ export const apiSpec = {
         responses: {
           204: { description: "Deal archived." },
           400: { description: "A reason is required to archive a deal (DEAL_ARCHIVE_REASON_REQUIRED)." },
-          403: { description: "Not the assigned rep or an admin; a non-admin archiving a non-opportunity deal (DEAL_ARCHIVE_STAGE_FORBIDDEN); or a non-admin deleting a change order (CHANGE_ORDER_ADMIN_ONLY)." },
+          403: { description: "Not the assigned rep or an admin; or a non-admin archiving EITHER a change order OR a parent that still has active change-order children (CHANGE_ORDER_ADMIN_ONLY, both cases). An owner may otherwise archive their own deal at any stage." },
           404: { description: "Deal not found." },
         },
       },

@@ -4,6 +4,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import {
   aliasedActiveDealCountFilterSql,
   aliasedDealBestEstimateWithForecastSql,
+  aliasedIsServiceProjectSql,
   aliasedEffectiveDealValueSql,
   aliasedEffectiveWonDealValueSql,
   aliasedWonHsClosedWonDateSql,
@@ -203,6 +204,7 @@ export interface PipelineVelocityStageRow extends Record<string, unknown> {
   medianDaysInStage: number | string | null;
   oldestDealId: string | null;
   oldestDealName: string | null;
+  oldestDealIsChangeOrder?: boolean | null;
   oldestDealDays: number | string | null;
 }
 
@@ -215,6 +217,7 @@ export interface PipelineVelocityAgingRow extends Record<string, unknown> {
 export interface PipelineVelocityStuckRow extends Record<string, unknown> {
   dealId: string;
   dealName: string;
+  dealIsChangeOrder?: boolean | null;
   ownerName: string;
   stageName: string;
   daysInStage: number | string;
@@ -235,12 +238,13 @@ export interface PipelineVelocityOverview {
     totalValue: number;
     avgDaysInStage: number;
     medianDaysInStage: number;
-    oldestDeal: { dealId: string | null; dealName: string; daysInStage: number };
+    oldestDeal: { dealId: string | null; dealName: string; dealIsChangeOrder?: boolean | null; daysInStage: number };
   }>;
   agingBuckets: Array<{ bucket: string; label: string; dealCount: number; totalValue: number }>;
   stuckDeals: Array<{
     dealId: string;
     dealName: string;
+    dealIsChangeOrder?: boolean | null;
     ownerName: string;
     stageName: string;
     daysInStage: number;
@@ -273,6 +277,7 @@ export function buildPipelineVelocityOverviewFromRows(input: {
       oldestDeal: {
         dealId: row.oldestDealId,
         dealName: row.oldestDealName || "No open deal",
+        dealIsChangeOrder: row.oldestDealIsChangeOrder ?? undefined,
         daysInStage: round(numberValue(row.oldestDealDays)),
       },
     }));
@@ -283,6 +288,7 @@ export function buildPipelineVelocityOverviewFromRows(input: {
   const stuckDeals = input.stuckRows.map((row) => ({
     dealId: row.dealId,
     dealName: row.dealName,
+    dealIsChangeOrder: row.dealIsChangeOrder ?? undefined,
     ownerName: row.ownerName || "Unassigned",
     stageName: row.stageName || "Unassigned Stage",
     daysInStage: round(numberValue(row.daysInStage)),
@@ -316,11 +322,11 @@ export interface ClosedWonRevenueOverview {
     wonDeals: number;
     totalRevenue: number;
     avgDealSize: number;
-    largestWonDeal: { dealId: string | null; dealName: string; value: number };
+    largestWonDeal: { dealId: string | null; dealName: string; dealIsChangeOrder?: boolean | null; value: number };
   }>;
   byRegion: Array<{ regionName: string; wonDeals: number; totalRevenue: number; percentOfTotal: number }>;
   byWorkflowFamily: Array<{ workflowFamily: string; workflowFamilyName: string; wonDeals: number; totalRevenue: number }>;
-  topDeals: Array<{ dealId: string; dealName: string; ownerName: string; value: number; wonAt: string }>;
+  topDeals: Array<{ dealId: string; dealName: string; dealIsChangeOrder?: boolean | null; ownerName: string; value: number; wonAt: string }>;
 }
 
 function monthLabel(month: string) {
@@ -346,12 +352,13 @@ export function buildClosedWonRevenueOverviewFromRows(input: {
     totalRevenue: number | string | null;
     largestWonDealId: string | null;
     largestWonDealName: string | null;
+    largestWonDealIsChangeOrder?: boolean | null;
     largestWonDealValue: number | string | null;
   }>;
   regionRows: Array<{ regionName: string; wonDeals: number | string; totalRevenue: number | string | null }>;
   workflowRows: Array<{ workflowFamily: string; wonDeals: number | string; totalRevenue: number | string | null }>;
   monthlyRows: Array<{ month: string; totalRevenue: number | string | null; wonDeals: number | string }>;
-  topDeals: Array<{ dealId: string; dealName: string; ownerName: string; value: number | string | null; wonAt: string }>;
+  topDeals: Array<{ dealId: string; dealName: string; dealIsChangeOrder?: boolean | null; ownerName: string; value: number | string | null; wonAt: string }>;
 }): ClosedWonRevenueOverview {
   const summary = input.summaryRows[0] ?? { wonDeals: 0, lostDeals: 0, totalRevenue: 0 };
   const wonDealCount = numberValue(summary.wonDeals);
@@ -383,6 +390,7 @@ export function buildClosedWonRevenueOverviewFromRows(input: {
         largestWonDeal: {
           dealId: row.largestWonDealId,
           dealName: row.largestWonDealName || "No won deal",
+          dealIsChangeOrder: row.largestWonDealIsChangeOrder ?? undefined,
           value: numberValue(row.largestWonDealValue),
         },
       };
@@ -406,6 +414,7 @@ export function buildClosedWonRevenueOverviewFromRows(input: {
     topDeals: input.topDeals.map((row) => ({
       dealId: row.dealId,
       dealName: row.dealName,
+      dealIsChangeOrder: row.dealIsChangeOrder ?? undefined,
       ownerName: row.ownerName || "Unassigned",
       value: numberValue(row.value),
       wonAt: row.wonAt,
@@ -494,6 +503,7 @@ export async function getPipelineVelocityReport(
         SELECT
           d.id,
           d.name,
+          d.is_change_order,
           d.stage_id,
           d.on_hold,
           ${aliasedEffectiveDealValueSql("d", aliasedDealBestEstimateWithForecastSql("d"))} AS value,
@@ -528,6 +538,7 @@ export async function getPipelineVelocityReport(
         COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY days_in_stage) FILTER (WHERE ${aliasedActiveDealCountFilterSql("ranked")}), 0)::numeric AS "medianDaysInStage",
         (array_agg(id::text) FILTER (WHERE rn = 1 AND ${aliasedActiveDealCountFilterSql("ranked")}))[1] AS "oldestDealId",
         (array_agg(name) FILTER (WHERE rn = 1 AND ${aliasedActiveDealCountFilterSql("ranked")}))[1] AS "oldestDealName",
+        (array_agg(is_change_order) FILTER (WHERE rn = 1 AND ${aliasedActiveDealCountFilterSql("ranked")}))[1] AS "oldestDealIsChangeOrder",
         ((array_agg(days_in_stage) FILTER (WHERE rn = 1 AND ${aliasedActiveDealCountFilterSql("ranked")}))[1])::int AS "oldestDealDays"
       FROM ranked
       GROUP BY stage_id
@@ -564,6 +575,7 @@ export async function getPipelineVelocityReport(
       SELECT
         d.id::text AS "dealId",
         d.name AS "dealName",
+        d.is_change_order AS "dealIsChangeOrder",
         COALESCE(u.display_name, 'Unassigned') AS "ownerName",
         p.name AS "stageName",
         ${aliasedEffectiveStageAgeDaysSql("d")}::int AS "daysInStage",
@@ -611,6 +623,7 @@ export async function getClosedWonRevenueReport(
         SELECT
           d.id,
           d.name,
+          d.is_change_order,
           d.assigned_rep_id,
           COALESCE(u.display_name, 'Unassigned') AS owner_name,
           ${aliasedEffectiveWonDealValueSql("d")} AS value,
@@ -629,6 +642,7 @@ export async function getClosedWonRevenueReport(
         COALESCE(SUM(value), 0)::numeric AS "totalRevenue",
         (array_agg(id::text) FILTER (WHERE rn = 1))[1] AS "largestWonDealId",
         (array_agg(name) FILTER (WHERE rn = 1))[1] AS "largestWonDealName",
+        (array_agg(is_change_order) FILTER (WHERE rn = 1))[1] AS "largestWonDealIsChangeOrder",
         ((array_agg(value) FILTER (WHERE rn = 1))[1])::numeric AS "largestWonDealValue"
       FROM won_deals
       GROUP BY assigned_rep_id
@@ -679,7 +693,9 @@ export async function getClosedWonRevenueReport(
 
     const workflowRows = rowsFromExecute<any>(await tenantDb.execute(sql`
       SELECT
-        CASE WHEN d.workflow_route = 'service' THEN 'service_deal' ELSE 'standard_deal' END AS "workflowFamily",
+        -- Canonical service test, not the raw route, so this Won split agrees with the Monday
+        -- Showcase and the deals board instead of under-reporting service revenue.
+        CASE WHEN ${aliasedIsServiceProjectSql("d")} THEN 'service_deal' ELSE 'standard_deal' END AS "workflowFamily",
         COUNT(*)::int AS "wonDeals",
         COALESCE(SUM(${aliasedEffectiveWonDealValueSql("d")}), 0)::numeric AS "totalRevenue"
       FROM deals d
@@ -711,6 +727,7 @@ export async function getClosedWonRevenueReport(
       SELECT
         d.id::text AS "dealId",
         d.name AS "dealName",
+        d.is_change_order AS "dealIsChangeOrder",
         COALESCE(u.display_name, 'Unassigned') AS "ownerName",
         ${aliasedEffectiveWonDealValueSql("d")} AS value,
         ${aliasedWonHsClosedWonDateSql("d")}::date::text AS "wonAt"

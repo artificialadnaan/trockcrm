@@ -54,11 +54,15 @@ function capturingTenantDb() {
 const USER = "00000000-0000-0000-0000-0000000000a1";
 
 describe("buildDealOnHoldCondition — effective-on-hold predicate in isolation", () => {
-  it("emits stored on_hold OR a close target past the 90-day horizon, qualified to the deals relation", () => {
+  it("emits stored on_hold OR a hold horizon past the 90-day mark, qualified to the deals relation", () => {
     const text = render(buildDealOnHoldCondition("deals"));
     expect(text).toContain("coalesce(deals.on_hold, false) = true");
-    expect(text).toContain("deals.expected_close_date is not null");
+    expect(text).toContain("deals.expected_close_date");
     expect(text).toContain("interval '90 days'");
+    // In the genuine estimating stage the horizon is the BID due date, so the pill parks the same rows the
+    // board prices at $0 (2026-07-27).
+    expect(text).toContain("(deals.bid_due_date at time zone 'utc')::date");
+    expect(text).toContain("deals.stage_id in (select id from public.pipeline_stage_config");
     // SAME America/Chicago day boundary the forecast SQL + at-risk rule use, so the pill agrees to the day.
     expect(text).toContain("(now() at time zone 'america/chicago')::date");
     // It is NOT the Watched (subscription) or Mine (ownership) predicate.
@@ -69,7 +73,8 @@ describe("buildDealOnHoldCondition — effective-on-hold predicate in isolation"
   it("aliased form qualifies the columns to the query's alias", () => {
     const text = render(buildDealOnHoldCondition("d"));
     expect(text).toContain("coalesce(d.on_hold, false) = true");
-    expect(text).toContain("d.expected_close_date is not null");
+    expect(text).toContain("d.expected_close_date");
+    expect(text).toContain("(d.bid_due_date at time zone 'utc')::date");
     expect(text).toContain("interval '90 days'");
   });
 });

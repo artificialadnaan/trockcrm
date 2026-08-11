@@ -129,6 +129,9 @@ export default function LoginScreen() {
             disabled={!canSubmit}
             accessibilityRole="button"
             accessibilityLabel="Sign in"
+            // The spinner replacing the label is a VISUAL cue only — without this a screen reader
+            // announces a disabled button with no explanation of why.
+            accessibilityState={{ disabled: !canSubmit, busy }}
             style={[formStyles.button, !canSubmit && formStyles.buttonDisabled]}
           >
             {busy ? (

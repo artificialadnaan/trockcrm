@@ -39,6 +39,8 @@ export interface EmailThreadBinding {
   leadName: string | null;
   dealId: string | null;
   dealName: string | null;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   projectId: string | null;
   projectName: string | null;
   confidence: "high" | "medium" | "low";
@@ -403,7 +405,7 @@ export async function updateEmailAction(
 }
 
 export async function assignEmailThread(conversationId: string, dealId: string) {
-  return api<{ success: boolean; bindingId: string; thread: EmailThread }>(
+  return api<{ success: boolean; thread: EmailThread }>(
     `/email/thread/${encodeURIComponent(conversationId)}/assign`,
     {
       method: "POST",
@@ -413,7 +415,7 @@ export async function assignEmailThread(conversationId: string, dealId: string) 
 }
 
 export async function reassignEmailThread(conversationId: string, dealId: string) {
-  return api<{ success: boolean; bindingId: string; preview: EmailThreadPreview | null; thread: EmailThread }>(
+  return api<{ success: boolean; preview: EmailThreadPreview | null; thread: EmailThread }>(
     `/email/thread/${encodeURIComponent(conversationId)}/reassign`,
     {
       method: "POST",

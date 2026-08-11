@@ -5,6 +5,7 @@ import { theme } from "../theme/theme";
 import { Button, SectionLabel } from "./ui";
 import { RatingBadge } from "./RatingBadge";
 import type { FieldScorecardDetail, FieldScorecardPhotoView } from "../api/types";
+import { formatDealDisplayName } from "../projects/field-projects";
 import {
   deficiencyLabel,
   formatShortDate,
@@ -20,7 +21,15 @@ const GRID_COLUMNS = 3;
 const SIGNATURE_IMAGE_DATA_URL = /^data:image\/(?:png|jpe?g);base64,/i;
 const DATA_URL = /^data:/i;
 
-/** Handwritten signatures are stored as image data URLs; older records may contain a typed name instead. */
+/**
+ * Handwritten signatures are stored as image data URLs; older records may contain a typed name instead.
+ *
+ * The web CRM and the server PDF renderer share this rule via shared/types/field-scorecard-signature.ts.
+ * `mobile/` is a non-workspace Expo app and cannot import @trock-crm/shared, so this is a deliberate
+ * third copy. It is intentionally slightly more permissive — it does not validate the base64 body — which
+ * degrades a malformed payload to a broken image rather than to raw text. Keep the three in step: any
+ * change to the accepted media types belongs in all of them.
+ */
 export function isScorecardSignatureImage(value: string | null | undefined): boolean {
   return SIGNATURE_IMAGE_DATA_URL.test(value?.trim() ?? "");
 }
@@ -57,7 +66,9 @@ export function ScorecardDetailView({
   const isV2 = scorecard.formVersion === 2;
   const displayScore = isV2 ? (scorecard.averageScore ?? scorecard.totalScore / 10).toFixed(1) : String(scorecard.totalScore);
   const displayMax = isV2 ? "10" : String(SCORECARD_TOTAL_POINTS);
-  const canonicalProjectName = scorecard.projectName?.trim();
+  // A change-order child deal is stored "<Parent> — Change Order N"; move the label to the front so it
+  // survives the two-line clamp. Display-only — `scorecard.projectName` itself is untouched.
+  const canonicalProjectName = formatDealDisplayName(scorecard.projectName?.trim(), scorecard.isChangeOrder);
   const projectName =
     canonicalProjectName || (scorecard.projectNumber ? `Project ${scorecard.projectNumber}` : "Untitled project");
 
@@ -274,6 +285,22 @@ function LeadershipBody({
         <SectionLabel>Project summary</SectionLabel>
         <Text style={styles.bulletText}>{scorecard.summary?.trim() || "No summary provided."}</Text>
       </View>
+
+      {/* Action items — free text, render raw. Mirrors ProjectBody: without this the follow-up work the
+          evaluator just captured vanishes from the submitted-card view the moment it saves, which reads as
+          the save having dropped it. They are also a leadership card's only flagged items, so this is the
+          list its corrective-action cycle is built from. */}
+      {scorecard.actionItems.length > 0 ? (
+        <View style={{ gap: theme.space.sm }}>
+          <SectionLabel>Action items</SectionLabel>
+          {scorecard.actionItems.map((item, i) => (
+            <View key={`${i}-${item}`} style={styles.bulletRow}>
+              <Text style={styles.bulletDot}>•</Text>
+              <Text style={styles.bulletText}>{item}</Text>
+            </View>
+          ))}
+        </View>
+      ) : null}
 
       {/* Category and Project Summary evidence photos. A null url → placeholder tile (no broken Image). */}
       {photoSections.length > 0 ? (

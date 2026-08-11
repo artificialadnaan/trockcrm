@@ -12,7 +12,12 @@ import { theme } from "../theme/theme";
 export function Row({ label, value }: { label: string; value: string }) {
   return (
     <View style={styles.row}>
-      <Text style={styles.label}>{label}</Text>
+      {/* Labelled explicitly: `styles.label` uppercases by transform, and on iOS that transformed
+          string IS the accessible name unless a label overrides it. This row is the detail-list
+          primitive, so one missing label here silences a field name on every screen that uses it. */}
+      <Text accessibilityLabel={label} style={styles.label}>
+        {label}
+      </Text>
       <Text style={styles.value}>{value}</Text>
     </View>
   );
@@ -25,7 +30,13 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: theme.space.md,
   },
-  label: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary },
+  // caption over body for the LABEL: a tracked small-cap reads as a field name rather than as more
+  // prose, which is what let labels and values blur together at the old 14/14.
+  //
+  // textTransform is set HERE because the token deliberately omits it. Every label this renders is a
+  // mixed-case field name ("Days in stage", "Close date"), so spreading caption alone produced tiny
+  // tracked sentence-case — the tracking without the small-caps it exists to serve.
+  label: { ...theme.type.caption, textTransform: "uppercase", color: theme.color.textMuted },
   value: {
     flexShrink: 1,
     textAlign: "right",

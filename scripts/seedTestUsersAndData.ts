@@ -70,9 +70,10 @@ async function seedUsers(client: pg.Client): Promise<SeedContext["users"]> {
   const users: Partial<SeedContext["users"]> = {};
   for (const user of TEST_USERS) {
     const result = await client.query(`
-      INSERT INTO public.users (email, display_name, role, office_id, is_active, notification_prefs, updated_at)
-      VALUES ($1, $2, $3::user_role, $4, true, '{"testData":{"allowlisted":true}}'::jsonb, NOW())
+      INSERT INTO public.users (email, display_name, role, office_id, is_active, generates_sales, notification_prefs, updated_at)
+      VALUES ($1, $2, $3::user_role, $4, true, $5, '{"testData":{"allowlisted":true}}'::jsonb, NOW())
       ON CONFLICT (email) DO UPDATE SET
+        generates_sales = EXCLUDED.generates_sales,
         display_name = EXCLUDED.display_name,
         role = EXCLUDED.role,
         office_id = EXCLUDED.office_id,
@@ -80,7 +81,7 @@ async function seedUsers(client: pg.Client): Promise<SeedContext["users"]> {
         notification_prefs = COALESCE(public.users.notification_prefs, '{}'::jsonb) || EXCLUDED.notification_prefs,
         updated_at = NOW()
       RETURNING id
-    `, [user.email, user.displayName, user.role, officeId]);
+    `, [user.email, user.displayName, user.role, officeId, user.role === "rep"]);
     users[user.email] = result.rows[0].id;
   }
   return users as SeedContext["users"];

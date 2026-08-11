@@ -6,18 +6,21 @@ import { defineConfig } from "vitest/config";
 // test:runtime), so only *.runtime.test.ts execute in the gate; other worker *.test.ts stay local-only.
 export default defineConfig({
   resolve: {
-    alias: {
-      "@trock-crm/shared/schema": path.resolve(__dirname, "../shared/src/schema/index.ts"),
-      "@trock-crm/shared/types": path.resolve(__dirname, "../shared/src/types/index.ts"),
-      "@trock-crm/shared/utils": path.resolve(__dirname, "../shared/src/utils/normalize.ts"),
-      // lib/* aliases must come before the broad @trock-crm/shared alias to avoid the prefix being
-      // replaced with schema/index.ts (which would produce a non-existent path). Mirrors the server
-      // vitest.config.ts pattern; add one entry per lib file that worker tests import.
-      "@trock-crm/shared/lib/rfpReviewerEmails": path.resolve(__dirname, "../shared/src/lib/rfpReviewerEmails.ts"),
-      "@trock-crm/shared/lib/rfpVoterEmails": path.resolve(__dirname, "../shared/src/lib/rfpVoterEmails.ts"),
-      "@trock-crm/shared/lib/fieldScorecardEmails": path.resolve(__dirname, "../shared/src/lib/fieldScorecardEmails.ts"),
-      "@trock-crm/shared": path.resolve(__dirname, "../shared/src/schema/index.ts"),
-    },
+    alias: [
+      { find: "@trock-crm/shared/schema", replacement: path.resolve(__dirname, "../shared/src/schema/index.ts") },
+      { find: "@trock-crm/shared/types", replacement: path.resolve(__dirname, "../shared/src/types/index.ts") },
+      { find: "@trock-crm/shared/utils", replacement: path.resolve(__dirname, "../shared/src/utils/normalize.ts") },
+      // ONE regex for every shared lib module, instead of a hand-maintained line per file.
+      //
+      // The per-file list was a standing trap: the `@trock-crm/shared` catch-all below resolves to the SCHEMA
+      // barrel, so an UNLISTED lib subpath does not degrade gracefully — it fails to resolve and takes down
+      // every suite that transitively imports it. Adding one import to directoryDedup.ts broke 19 unrelated
+      // test files (csrf, admin, companies, email, dedup) for exactly that reason, and it was invisible under
+      // the DEFAULT vitest config, which resolves via the package's real exports map. A wildcard cannot be
+      // forgotten. It MUST stay above the catch-all: alias order is first-match-wins.
+      { find: /^@trock-crm\/shared\/lib\/(.*?)(\.js)?$/, replacement: path.resolve(__dirname, "../shared/src/lib/$1.ts") },
+      { find: "@trock-crm/shared", replacement: path.resolve(__dirname, "../shared/src/schema/index.ts") },
+    ],
   },
   test: {
     globals: false,

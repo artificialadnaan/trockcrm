@@ -9,6 +9,7 @@ import {
   fieldScorecardItems,
   fieldScorecardPhotos,
   scorecardCorrectiveActions,
+  scorecardCorrectiveActionEvents,
   scorecardCorrectiveActionTokens,
   contacts,
 } from "@trock-crm/shared/schema";
@@ -49,6 +50,7 @@ const TENANT_TABLES = [
   fieldScorecardItems,
   fieldScorecardPhotos,
   scorecardCorrectiveActions,
+  scorecardCorrectiveActionEvents,
   scorecardCorrectiveActionTokens,
   contacts,
 ];

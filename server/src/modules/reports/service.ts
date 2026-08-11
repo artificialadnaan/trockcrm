@@ -24,6 +24,7 @@ import { LOST_STAGE_SLUGS, TERMINAL_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shar
 import {
   aliasedActiveDealCountFilterSql,
   aliasedDealBestEstimateSql,
+  aliasedIsServiceProjectSql,
   aliasedEffectiveDealValueSql,
   aliasedEffectiveLostDealValueSql,
   aliasedEffectiveWonDealValueSql,
@@ -165,6 +166,8 @@ type StaleDealCandidateRow = {
   stage_slug: string | null;
   stage_entered_at: string | Date | null;
   expected_close_date?: string | Date | null;
+  /** The estimating hold horizon (2026-07-27 auto-park; 2026-07-28 at-risk SLA suppression too) — see AtRiskDealInput.bidDueDate. */
+  bid_due_date?: string | Date | null;
   workflow_route: string | null;
   on_hold?: boolean | null;
   on_hold_started_at?: string | Date | null;
@@ -184,6 +187,10 @@ function getDealStaleAtRisk(row: StaleDealCandidateRow, now: Date) {
       workflowRoute: normalizeWorkflowRoute(row.workflow_route),
       stageEnteredAt: row.stage_entered_at,
       expectedCloseDate: row.expected_close_date ?? null,
+      // Estimating rows auto-park off the BID due date (2026-07-27). Every one of these queries already
+      // sums ${aliasedEffectiveDealValueSql("d")}, which now zeroes those rows, so the stale list has to
+      // exclude the same rows or the report would list a "stale" deal it prices at $0.
+      bidDueDate: row.bid_due_date ?? null,
       // Honor a postponement (near today-or-future close target) so the Stale Deals report / regional
       // ownership / unified-workflow at-risk match the deal-detail "Postponed" state, not just 90+ day hold.
       applyCloseTargetSuppression: true,
@@ -317,6 +324,8 @@ export interface ForecastVarianceRepRollup {
 export interface ForecastVarianceDealRow {
   dealId: string;
   dealName: string;
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  dealIsChangeOrder?: boolean | null;
   repName: string;
   workflowRoute: WorkflowRoute;
   initialForecast: number;
@@ -516,6 +525,7 @@ export async function getForecastVarianceOverview(
       SELECT
         d.id AS deal_id,
         d.name AS deal_name,
+        d.is_change_order AS deal_is_change_order,
         cw.workflow_route,
         cw.assigned_rep_id,
         u.display_name AS rep_name,
@@ -546,6 +556,9 @@ export async function getForecastVarianceOverview(
     SELECT
       deal_id,
       deal_name,
+      -- Projected out of forecast_base explicitly: the CTE selected it and this outer SELECT dropped it,
+      -- so the mapper below was reading a column that never reached it.
+      deal_is_change_order,
       rep_name,
       workflow_route,
       initial_forecast,
@@ -589,6 +602,7 @@ export async function getForecastVarianceOverview(
     deals: dealRows.map((row) => ({
       dealId: row.deal_id,
       dealName: row.deal_name,
+      dealIsChangeOrder: row.deal_is_change_order === true ? true : row.deal_is_change_order === false ? false : undefined,
       repName: row.rep_name,
       workflowRoute: row.workflow_route,
       initialForecast: Number(row.initial_forecast ?? 0),
@@ -943,6 +957,22 @@ export interface StaleDealRow {
   dealId: string;
   dealNumber: string;
   dealName: string;
+  /**
+   * `deals.is_change_order` — the AUTHORITY for the change-order display relabel.
+   *
+   * Optional because this row has TWO producers and only one can answer: the dashboard's
+   * buildDashboardAtRiskStaleDeals carries the column out of its query, while this module's
+   * staleDealRowsFromEngine reads a candidate row that does not select it. `undefined` there is the
+   * honest answer — it degrades to the name-shape fallback rather than asserting "not a change order".
+   */
+  dealIsChangeOrder?: boolean | null;
+  /**
+   * `deals.scope_title` — travels with the flag above, and optional for the SAME reason: only the
+   * dashboard producer selects it. Once the relabel fires, this is the only field distinguishing one
+   * change order from another, so a surface that carries the flag and drops this renders siblings
+   * identically.
+   */
+  dealScopeTitle?: string | null;
   stageId: string;
   stageName: string;
   assignedRepId: string;
@@ -981,6 +1011,7 @@ export async function getStaleDeals(
       COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
       COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at) AS stage_entered_at,
       d.expected_close_date,
+      d.bid_due_date,
       d.on_hold,
       d.on_hold_started_at,
       d.on_hold_accumulated_seconds,
@@ -1751,6 +1782,7 @@ export async function getRegionalOwnershipOverview(
         COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
         COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at) AS stage_entered_at,
         d.expected_close_date,
+        d.bid_due_date,
         d.workflow_route,
         d.on_hold,
         d.on_hold_started_at,
@@ -2292,12 +2324,15 @@ export async function getUnifiedWorkflowOverview(
             AND ${aliasedActiveDealCountFilterSql("d")}
         )::int AS active_deal_count,
         COUNT(*) FILTER (
-          WHERE d.workflow_route = 'normal'
+          -- Canonical service test, not the raw route: project_type decides, workflow_route is the
+          -- fallback. Also NOT(service) rather than = 'normal', so the two counts partition the rows
+          -- instead of both dropping a NULL route.
+          WHERE NOT ${aliasedIsServiceProjectSql("d")}
             AND ${nonTerminalDealStageSql()}
             AND ${aliasedActiveDealCountFilterSql("d")}
         )::int AS standard_deal_count,
         COUNT(*) FILTER (
-          WHERE d.workflow_route = 'service'
+          WHERE ${aliasedIsServiceProjectSql("d")}
             AND ${nonTerminalDealStageSql()}
             AND ${aliasedActiveDealCountFilterSql("d")}
         )::int AS service_deal_count,
@@ -2375,6 +2410,7 @@ export async function getUnifiedWorkflowOverview(
         u.display_name AS rep_name,
         COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at) AS stage_entered_at,
         d.expected_close_date,
+        d.bid_due_date,
         d.on_hold,
         d.on_hold_started_at,
         d.on_hold_accumulated_seconds,
@@ -2402,6 +2438,7 @@ export async function getUnifiedWorkflowOverview(
         COALESCE(d.bid_board_stage_slug, psc.slug) AS stage_slug,
         COALESCE(d.bid_board_stage_entered_at, d.stage_entered_at) AS stage_entered_at,
         d.expected_close_date,
+        d.bid_due_date,
         d.on_hold,
         d.on_hold_started_at,
         d.on_hold_accumulated_seconds,
@@ -2567,6 +2604,10 @@ export async function getUnifiedWorkflowOverview(
       dealId: row.dealId,
       dealNumber: row.dealNumber,
       dealName: row.dealName,
+      // Carried rather than dropped. staleDealRowsFromEngine's candidate query does not select the
+      // column today, so this forwards `undefined` — the documented "unknown" state, not a false
+      // claim — and the chain is already complete the day that query starts projecting it.
+      dealIsChangeOrder: row.dealIsChangeOrder,
       stageName: row.stageName,
       workflowRoute: row.workflowRoute ?? "normal",
       repName: row.repName,

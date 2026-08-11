@@ -15,7 +15,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useDeals } from "@/hooks/use-deals";
-import { formatDealDisplayNumber } from "@/lib/deal-utils";
+import { formatDealDisplayName, formatDealDisplayNumber } from "@/lib/deal-utils";
 import {
   associateEmailToEntity,
   assignEmailThread,
@@ -25,10 +25,21 @@ import {
   type EmailThread,
 } from "@/hooks/use-emails";
 import { EmailManualAssignmentDialog } from "./email-manual-assignment-dialog";
+import { UNASSIGN_CONFIRMATION, UNASSIGN_SUCCESS } from "./email-unassign-copy";
 
 interface EmailThreadViewProps {
   conversationId: string;
   onBack: () => void;
+  /**
+   * Fired after this view moves the conversation to another deal or off one entirely.
+   *
+   * Needed because this view is rendered IN PLACE of the list that opened it (email-list.tsx) rather
+   * than on its own route, so the list's owner — DealEmailTab and its useDealEmails — never unmounts
+   * and never refetches. Without this, detaching here left the conversation still listed under the
+   * deal the moment the user pressed Back: the same stale-list symptom the row action's refetch
+   * exists to prevent, produced on the more prominent of the two buttons.
+   */
+  onThreadChanged?: () => void;
 }
 
 type AssignmentMode = "assign" | "reassign";
@@ -112,7 +123,9 @@ function ThreadAssignmentDialog({
                     onClick={() => setSelectedDealId(deal.id)}
                   >
                     <div className="min-w-0">
-                      <p className="truncate text-sm font-medium">{deal.name}</p>
+                      {/* A change-order child is STORED "<Parent> — Change Order N" and this line
+                          truncates the suffix off. Display-only; the stored name is untouched. */}
+                      <p className="truncate text-sm font-medium">{formatDealDisplayName(deal.name, deal.isChangeOrder)}</p>
                       <p className="text-xs text-muted-foreground">
                         {formatDealDisplayNumber(deal).label}
                         {deal.propertyAddress ? ` · ${deal.propertyAddress}` : ""}
@@ -132,7 +145,7 @@ function ThreadAssignmentDialog({
           {selectedDeal ? (
             <div className="rounded-lg border bg-muted/30 p-3 text-sm">
               <p className="font-medium">Selected deal</p>
-              <p>{selectedDeal.name}</p>
+              <p>{formatDealDisplayName(selectedDeal.name, selectedDeal.isChangeOrder)}</p>
               <p className="text-muted-foreground">
                 {formatDealDisplayNumber(selectedDeal).label}
                 {selectedDeal.propertyAddress ? ` · ${selectedDeal.propertyAddress}` : ""}
@@ -206,7 +219,9 @@ function ThreadAssignmentCard({
             <Badge variant="outline">{binding.confidence} confidence</Badge>
           </div>
           <div>
-            <p className="text-sm font-semibold">{binding.dealName ?? "Assigned deal"}</p>
+            {/* Same relabel as the deal picker above it — without this, a thread showed the front-loaded
+                name while choosing and then REVERTED to "<Parent> — Change Order N" once assigned. */}
+            <p className="text-sm font-semibold">{formatDealDisplayName(binding.dealName, binding.dealIsChangeOrder) ?? "Assigned deal"}</p>
             <p className="text-xs text-muted-foreground">
               Reason: {formatReason(binding.assignmentReason)}
             </p>
@@ -230,7 +245,7 @@ function ThreadAssignmentCard({
   );
 }
 
-export function EmailThreadView({ conversationId, onBack }: EmailThreadViewProps) {
+export function EmailThreadView({ conversationId, onBack, onThreadChanged }: EmailThreadViewProps) {
   const { thread, loading, error, setThread, refetch } = useEmailThread(conversationId);
   const [dialogMode, setDialogMode] = useState<AssignmentMode | null>(null);
   const [manualReassignEmailId, setManualReassignEmailId] = useState<string | null>(null);
@@ -250,6 +265,8 @@ export function EmailThreadView({ conversationId, onBack }: EmailThreadViewProps
       setThread(result.thread);
       setDialogMode(null);
       toast.success(dialogMode === "reassign" ? "Thread reassigned" : "Thread assigned to deal");
+      // The conversation has moved deals, so the list behind this view is now wrong in both directions.
+      onThreadChanged?.();
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Failed to save thread assignment");
     } finally {
@@ -258,11 +275,19 @@ export function EmailThreadView({ conversationId, onBack }: EmailThreadViewProps
   };
 
   const handleDetach = async () => {
+    // The SAME confirmation and success wording as the deal Emails tab's row action, from the same
+    // module. The two entry points are one click apart — the row action is on the list, this is on the
+    // view that same row opens — and both post to /thread/:id/detach. Detaching moves every message in
+    // the conversation off the deal, so having the guard on only one of the two was a real gap, not a
+    // cosmetic one.
+    if (!window.confirm(UNASSIGN_CONFIRMATION)) return;
+
     setSaving(true);
     try {
       const result = await detachEmailThread(conversationId);
       setThread(result.thread);
-      toast.success("Thread detached");
+      toast.success(UNASSIGN_SUCCESS);
+      onThreadChanged?.();
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Failed to detach thread");
     } finally {

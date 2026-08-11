@@ -69,15 +69,68 @@ describe("rep performance rollup period scoping", () => {
     await runRepPerformanceRollup(new Date("2026-05-07T12:00:00.000Z"));
 
     const insertSql = queries.find((query) => query.includes("INSERT INTO public.rep_performance_snapshots"));
-    const pipelineValueSql =
-      /COALESCE\(SUM\(COALESCE\([\s\S]*?CASE WHEN d\.awarded_amount > 0 THEN d\.awarded_amount END,[\s\S]*?0[\s\S]*?\)([\s\S]*?)\), 0\)::numeric AS pipeline_value/.exec(
-        insertSql ?? ""
-      )?.[1];
+    // The aggregate contains TWO independent period CASEs — one selecting the VALUE expression, one inside
+    // FILTER selecting the row predicate. Slice them apart first: searching the whole aggregate let the
+    // value CASE satisfy assertions meant for the filter (so a filter selector regressed to `WHEN false`
+    // still passed), and let the auto-park guard satisfy "present" from either arm (Codex P2 x2).
+    const pipelineAggregate = (() => {
+      const marker = ")::numeric AS pipeline_value";
+      const end = (insertSql ?? "").indexOf(marker);
+      if (end < 0) return undefined;
+      const start = (insertSql ?? "").lastIndexOf("COALESCE(SUM(", end);
+      return start < 0 ? undefined : (insertSql ?? "").slice(start, end);
+    })();
+    expect(pipelineAggregate).toBeDefined();
+
+    const filterAt = pipelineAggregate!.indexOf("FILTER (");
+    expect(filterAt).toBeGreaterThan(-1);
+    const valueExpression = pipelineAggregate!.slice(0, filterAt);
+    const filterClause = pipelineAggregate!.slice(filterAt);
+
+    // --- the VALUE expression: which arm gets the auto-park guard --------------------------------
+    // The nested value chain carries a CASE ... ELSE ... END of its own (the change-order branch), so
+    // "the first ELSE after the period THEN" is NOT the period CASE's ELSE. Walk CASE/END depth and split
+    // on the ELSE at depth 0 — the period CASE's own — instead of the first one textually.
+    const periodSelector = "CASE WHEN $1::text IN ('last_month', 'last_quarter', 'last_year') THEN";
+    const valueThenAt = valueExpression.indexOf(periodSelector);
+    expect(valueThenAt).toBeGreaterThan(-1);
+    const afterThen = valueExpression.slice(valueThenAt + periodSelector.length);
+    const elseAt = (() => {
+      const tokens = /\bCASE\b|\bEND\b|\bELSE\b/g;
+      let depth = 0;
+      let token: RegExpExecArray | null;
+      while ((token = tokens.exec(afterThen)) !== null) {
+        if (token[0] === "CASE") depth += 1;
+        else if (token[0] === "END") depth -= 1;
+        else if (depth === 0) return token.index;
+      }
+      return -1;
+    })();
+    expect(elseAt).toBeGreaterThan(-1);
+    const historicalValueArm = afterThen.slice(0, elseAt);
+    const currentValueArm = afterThen.slice(elseAt);
+
+    // Both arms sum the real deal-value chain, never a constant or closed_value's awarded-first chain.
+    for (const arm of [historicalValueArm, currentValueArm]) {
+      expect(arm).toContain("d.bid_board_total_sales");
+      expect(arm).toContain("d.bid_estimate");
+      expect(arm).toContain("d.dd_estimate");
+    }
+    // THE INVARIANT: the auto-park guard belongs to the CURRENT arm ONLY. If it ever appears in the
+    // historical arm, a closed snapshot would be recalculated against today's 90-day horizon — a deal won
+    // early with a stale far-future target would silently drop out of a period that already reported it.
+    expect(historicalValueArm).not.toContain("bid_board_stage_slug");
+    expect(historicalValueArm).not.toContain("90 days");
+    expect(currentValueArm).toContain("bid_board_stage_slug");
+    expect(currentValueArm).toContain("90 days");
+
+    // --- the FILTER: which rows each period counts ------------------------------------------------
+    // Extracted from filterClause ONLY, so a regressed filter selector cannot be satisfied by the value
+    // CASE above.
     const historicalPipelineValueBranch =
       /WHEN \$1::text IN \('last_month', 'last_quarter', 'last_year'\) THEN([\s\S]*?)ELSE d\.is_active = true AND NOT psc\.is_terminal AND psc\.is_active_pipeline/.exec(
-        pipelineValueSql ?? ""
+        filterClause
       )?.[1];
-
     expect(historicalPipelineValueBranch).toBeDefined();
     expect(historicalPipelineValueBranch).toContain("d.created_at::date <= $3::date");
     expect(historicalPipelineValueBranch).toContain(

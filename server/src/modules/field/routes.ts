@@ -1,5 +1,17 @@
 import express, { Router } from "express";
+import { sql } from "drizzle-orm";
 import { requireFieldContractor } from "../../middleware/field-auth.js";
+import { isAiReportConfigured, MAX_FOCUS_PROMPT_LENGTH } from "./ai-report-service.js";
+import {
+  AI_REPORT_JOB_TYPE,
+  AiReportDailyQuotaExceededError,
+  AiReportQuotaExceededError,
+  expireStaleAiReportRuns,
+  getAiReportRun,
+  getInFlightAiReportRun,
+  insertAiReportRunTx,
+  isInFlightRunConflict,
+} from "./ai-report-runs.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { tenantMiddleware } from "../../middleware/tenant.js";
 import { toFieldUserResponse } from "../field-users/service.js";
@@ -23,6 +35,7 @@ import {
 } from "./photo-tags-service.js";
 import {
   generateFieldPhotoReport,
+  getFieldProjectReportDetail,
   getFieldProjectReportDownload,
   listFieldProjectReports,
   previewFieldPhotoReport,
@@ -30,6 +43,10 @@ import {
 import {
   createFieldScorecard,
   finalizeFieldScorecardArtifacts,
+  recheckScorecardArtifactCurrency,
+} from "./scorecards-service.js";
+import { isFutureRendererArtifactStale } from "./scorecard-pdf-artifact.js";
+import {
   getFieldScorecardDetail,
   getFieldScorecardPdfArtifactState,
   isStoredScorecardPdfAvailable,
@@ -57,6 +74,7 @@ import {
   searchFieldCaptureTargets,
   starFieldProject,
   unstarFieldProject,
+  type FieldAccessContext,
   type FieldProject,
 } from "./projects-service.js";
 import { assertValidCaptureTargetIds, assertValidUuid } from "./photos-service.js";
@@ -82,6 +100,13 @@ import {
   assertScorecardEvidenceUploadAccess,
   discardScorecardEditEvidence,
 } from "./scorecard-evidence-upload.js";
+import {
+  ingestGlassesWalkthrough,
+  requestGlassesWalkthroughArtifactUploadUrl,
+  validateGlassesWalkthroughArtifactUploadUrlInput,
+  validateGlassesWalkthroughCompleteInput,
+} from "../walkthrough-capture/glasses-walkthrough-service.js";
+import { createGlassesWalkthroughArtifactStore } from "../walkthrough-capture/glasses-walkthrough-store.js";
 import { registerCorrectiveActionRoutes } from "./corrective-action-routes.js";
 
 // Default capture-target picker page size (mirrors searchPhotoUploadTargets' internal default), used as
@@ -701,6 +726,145 @@ fieldRoutes.delete("/photos/:photoId/tags/:tag", requireFieldContractor, async (
   }
 });
 
+/**
+ * The access gate BOTH glasses-walkthrough routes assert with, named once so the two can never drift onto
+ * different rules — a presign a completion would refuse (or the reverse) strands a walk halfway.
+ *
+ * It is `assertAccessibleFieldCaptureTarget`, NOT `getFieldProject`, and the difference is one predicate:
+ * `getFieldProject` carries `activeProjectWhere()`, which is the field BROWSING rule — active pipeline, or
+ * Won-family; never Lost/terminal — and exists so the project list and detail pages are not flooded with
+ * hundreds of dead jobs. That rule is right for browsing and wrong for FILING, because these two routes are
+ * not reads. They are the tail of an upload whose bytes drain long after the recording: a multi-gigabyte
+ * walk over a jobsite connection, or a phone that stayed offline, routinely spans hours or days, and mobile
+ * retries the completion for as long as it takes. A deal that moved to Lost inside that window turned every
+ * remaining attempt into a 404, and the walk — real evidence of a site visit that really happened, on a
+ * trip nobody is making again — died on the phone. The stage the deal reached AFTERWARDS says nothing about
+ * whether the visit occurred, and a lost bid is exactly when its record is most likely to be re-examined.
+ *
+ * Nothing is loosened beyond that. `assertAccessibleFieldCaptureTarget` is the gate the ordinary field
+ * PHOTO upload has always used for the identical act — a field user attaching captured evidence to a deal
+ * (photos-service.ts) — so this is the established rule for this operation, not a weaker one invented here.
+ * It still requires the deal to EXIST and to be `is_active` (an archived/soft-deleted deal is refused by
+ * both gates), and it is unscoped by rep in exactly the way the browsing gate already was, so no caller
+ * gains reach they did not have. The office is still resolved from the DEAL by `runFieldDealWrite` before
+ * this runs, so a deal in an office this session cannot reach never gets here at all.
+ *
+ * And it does NOT make a terminal deal browsable: no list, detail, photo-feed, report or scorecard read
+ * goes through this function — every one of them keeps `activeProjectWhere()`. A Lost deal remains
+ * invisible in the app and merely stays FILEABLE by someone who could already reach it.
+ */
+async function assertGlassesWalkthroughDealAccess(
+  officeDb: FieldTenantDb,
+  access: FieldAccessContext,
+  dealId: string,
+): Promise<void> {
+  await assertAccessibleFieldCaptureTarget(officeDb, {
+    dealId,
+    userId: access.userId,
+    userRole: access.userRole,
+  });
+}
+
+/**
+ * GLASSES WALKTHROUGH, step 1 of 2: presign one artifact's upload.
+ *
+ * These two routes live on the FIELD router, not the CRM deals router, because TrockCam — their only
+ * caller — signs in through `/auth/field-login` and carries a `surface: "field"` token. `authMiddleware`
+ * rejects those on every CRM route by design (#722: a field token must never be replayable against
+ * CRM/admin). Built on the CRM router, the feature could not work at all: every upload came back 401
+ * "This session is not valid for CRM access", and because the app read that as a dead session it signed
+ * the user out — so one undeliverable walk locked the crew out of the app entirely. Found on hardware,
+ * not in review.
+ *
+ * The office is resolved from the DEAL, never from the client, and the presigned key is scoped to that
+ * office's prefix — same rule the photo upload path follows.
+ */
+fieldRoutes.post(
+  "/projects/:dealId/glasses-walkthroughs/artifacts/upload-url",
+  requireFieldContractor,
+  async (req, res, next) => {
+    try {
+      const dealId = String(req.params.dealId);
+      // Format before resolution: a non-uuid would otherwise reach the resolver's per-office `::uuid`
+      // cast, fail in every office, and surface as a misleading 503 instead of a 400.
+      assertValidUuid(dealId, "dealId");
+      const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
+
+      const result = await runFieldDealWrite(
+        req,
+        { dealId },
+        async (officeDb, office) => {
+          // Access is asserted BEFORE a presigned URL is minted, so a URL scoped to the deal's R2 prefix
+          // is never handed to someone who cannot reach the deal.
+          await assertGlassesWalkthroughDealAccess(officeDb, access, dealId);
+          return requestGlassesWalkthroughArtifactUploadUrl({
+            // Presigning now asks the database whether this artifact is ALREADY filed, and refuses to hand
+            // out a writable URL for the live key if it is — bytes behind an immutable `files` row must not
+            // be replaceable by anyone who can reach the deal. Same office-scoped connection the completion
+            // route uses, so the check reads the same rows the completion would write.
+            tenantDb: officeDb as never,
+            officeSlug: office.slug,
+            // dealId comes from the PATH, never the body — otherwise a caller could presign an upload
+            // key under a deal it cannot see.
+            input: validateGlassesWalkthroughArtifactUploadUrlInput({
+              ...(req.body as Record<string, unknown> | undefined),
+              dealId,
+            }),
+            artifactStore: createGlassesWalkthroughArtifactStore(),
+          });
+        },
+        "Project not found",
+      );
+
+      res.status(200).json(result);
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+/**
+ * GLASSES WALKTHROUGH, step 2 of 2: the completed walk.
+ *
+ * Every artifact named here MUST already be uploaded to the key this route re-derives server-side — the
+ * body never carries a key. Files the walk into the project folder and hands the TROCK Scope forward to
+ * the job queue; see `ingestGlassesWalkthrough` for how those two destinations are decoupled and how
+ * per-artifact / per-walk idempotency works.
+ *
+ * dealId comes from the path and the identity from the session, never the body, for the same reason as
+ * every other write here: the body cannot forge who recorded this or which project it lands on.
+ */
+fieldRoutes.post("/projects/:dealId/glasses-walkthroughs", requireFieldContractor, async (req, res, next) => {
+  try {
+    const dealId = String(req.params.dealId);
+    assertValidUuid(dealId, "dealId");
+    const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
+
+    const result = await runFieldDealWrite(
+      req,
+      { dealId },
+      async (officeDb, office) => {
+        await assertGlassesWalkthroughDealAccess(officeDb, access, dealId);
+        const input = validateGlassesWalkthroughCompleteInput({
+          ...(req.body as Record<string, unknown> | undefined),
+          dealId,
+          userId: req.fieldUser!.id,
+          officeSlug: office.slug,
+          officeId: office.id,
+        });
+        return ingestGlassesWalkthrough(officeDb as never, input, {
+          artifactStore: createGlassesWalkthroughArtifactStore(),
+        });
+      },
+      "Project not found",
+    );
+
+    res.status(201).json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
 fieldRoutes.get("/projects/:dealId/tags", requireFieldContractor, async (req, res, next) => {
   try {
     const access = { userId: req.fieldUser!.id, userRole: req.fieldUser!.role };
@@ -869,6 +1033,199 @@ fieldRoutes.post("/reports/generate", requireFieldContractor, async (req, res, n
   }
 });
 
+// ─── AI report (async) ───────────────────────────────────────────────────────────────────────────
+// A 40-photo Claude vision pass runs 30-90s, so this cannot be a synchronous /reports/generate. The POST
+// creates a run row + a job_queue row IN ONE TRANSACTION and returns immediately; the phone polls
+// /reports/ai-status/:runId until the run reaches a terminal state.
+
+/** Bounds the per-report model spend (each photo is ~1.6k input tokens plus its findings output). */
+const AI_REPORT_MAX_PHOTOS = 60;
+
+/**
+ * Is an in-flight run the SAME request as the one being made now?
+ *
+ * Only an exact match may be handed back. The in-flight unique index keys on (deal, requester) alone, so a
+ * user who changes the focus, the selection or the title and taps again also collides — and returning the
+ * earlier run would open a PDF that answers a different question.
+ */
+function matchesRequest(
+  run: { photoIds: string[]; focusPrompt: string | null; reportTitle: string | null },
+  request: { photoIds: string[]; focusPrompt: string; reportTitle: string },
+): boolean {
+  return (
+    (run.focusPrompt ?? "") === request.focusPrompt &&
+    (run.reportTitle ?? "") === request.reportTitle &&
+    run.photoIds.length === request.photoIds.length &&
+    run.photoIds.every((id, index) => id === request.photoIds[index])
+  );
+}
+
+fieldRoutes.post("/reports/ai-generate", requireFieldContractor, async (req, res, next) => {
+  try {
+    if (!isAiReportConfigured()) {
+      throw new AppError(503, "AI reports are not available right now.");
+    }
+    // Normalised before anything reads through it. Under express 5, body-parser leaves req.body UNDEFINED
+    // when a request arrives without a JSON content-type, so reading a field off it directly turns a
+    // malformed request into a TypeError — a 500 — instead of reaching the 400s below.
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const projectId = String(body.projectId ?? "");
+    assertValidUuid(projectId, "projectId");
+    const rawPhotoIds: string[] = Array.isArray(body.photoIds)
+      ? body.photoIds.map((id: unknown) => String(id)).filter((id: string) => id.length > 0)
+      : [];
+    // De-duplicate but PRESERVE ORDER: this array is the report's print order and the order the model is
+    // shown the photographs in, so a Set round-trip that re-sorted it would mis-caption every page.
+    const photoIds = [...new Set(rawPhotoIds)];
+    if (photoIds.length === 0) {
+      throw new AppError(400, "Select at least one photo to build an AI report.");
+    }
+    if (photoIds.length > AI_REPORT_MAX_PHOTOS) {
+      throw new AppError(400, `An AI report can cover at most ${AI_REPORT_MAX_PHOTOS} photos at a time.`);
+    }
+    for (const photoId of photoIds) assertValidUuid(photoId, "photoId");
+    const reportTitle = typeof body.reportTitle === "string" ? body.reportTitle.trim().slice(0, 140) : "";
+    // Optional. Scopes both the executive summary's subject and what the per-photo findings may raise —
+    // blank means a general director's read of the whole set.
+    const focusPrompt =
+      typeof body.focusPrompt === "string" ? body.focusPrompt.trim().slice(0, MAX_FOCUS_PROMPT_LENGTH) : "";
+
+    // Release any slot held by an abandoned run (worker died mid-flight), across ALL of this user's
+    // projects. Without this the guards below would lock them out permanently.
+    const expired = await expireStaleAiReportRuns(req.fieldUser!.id);
+    if (expired > 0) {
+      console.warn("[field-ai-report] cleared abandoned run(s) before enqueue", {
+        userId: req.fieldUser!.id,
+        expired,
+      });
+    }
+
+    // Resolve an identical in-flight request BEFORE any quota is applied. A retry of the same request (a
+    // lost 202, a flaky connection) creates no new work and should simply resume polling the original run —
+    // rejecting it on quota would strip the client of the one run id it needs.
+    const alreadyRunning = await getInFlightAiReportRun(projectId, req.fieldUser!.id);
+    if (alreadyRunning && matchesRequest(alreadyRunning, { photoIds, focusPrompt, reportTitle })) {
+      res.status(202).json({ runId: alreadyRunning.id, status: alreadyRunning.status });
+      return;
+    }
+
+    let run;
+    try {
+      run = await runFieldDealWrite(
+        req,
+        { dealId: projectId },
+        async (db, office) => {
+          const project = await assertActiveFieldProject(
+            db,
+            { userId: req.fieldUser!.id, userRole: req.fieldUser!.role },
+            projectId,
+          );
+          const { run: created, replayed } = await insertAiReportRunTx(db, {
+            dealId: project.id,
+            officeId: office.id,
+            officeSlug: office.slug,
+            requestedBy: req.fieldUser!.id,
+            photoIds,
+            reportTitle: reportTitle || null,
+            focusPrompt: focusPrompt || null,
+            // Captured HERE, not re-read in the worker. The two run in separate processes with their own
+            // copy of the flag, and it can change while a run sits queued — so the worker would otherwise
+            // judge this run by a rule it was never accepted under.
+            officeGrantRequired: !isFieldCrossOfficeWritesEnabled(),
+          });
+          // A REPLAY gets no new delivery. The run it hands back is either still in flight (its original
+          // delivery is live) or already finished (nothing left to do), so enqueuing here would let repeated
+          // identical POSTs stack unbounded no-op jobs ahead of real reports — and the AI-report poller is
+          // dedicated and claims one at a time, so that queue is exactly where a legitimate run would wait.
+          if (!replayed) {
+            // Same transaction as the run row: if this rolls back, the run row must go with it, or the phone
+            // polls a 'queued' row no worker will ever claim.
+            await db.execute(sql`
+              INSERT INTO public.job_queue (job_type, payload, office_id, status, run_after)
+              VALUES (${AI_REPORT_JOB_TYPE}, ${JSON.stringify({ runId: created.id })}::jsonb, ${office.id}::uuid, 'pending', NOW())
+            `);
+          }
+          return created;
+        },
+        "Project not found",
+      );
+    } catch (err) {
+      // The INSERT's own quota predicate refused it — serialized by the advisory lock, so the count is
+      // authoritative rather than a snapshot.
+      // The cumulative cap. Distinct from the concurrency one because "wait for one to finish" is useless
+      // advice to someone who has hit the daily limit — nothing they wait for will free it up.
+      if (err instanceof AiReportDailyQuotaExceededError) {
+        throw new AppError(
+          429,
+          `You have started ${err.limit} AI reports today, which is the daily limit. Try again tomorrow.`,
+        );
+      }
+      if (err instanceof AiReportQuotaExceededError) {
+        // ...but an identical double-tap can still arrive HERE rather than at the unique-violation branch
+        // below. The pre-flight duplicate check ran before the concurrent request committed, so with the
+        // user's other runs already at the limit, the first tap's commit takes them to the ceiling and the
+        // lock makes this one observe the full count — the quota refuses it before the in-flight index ever
+        // gets to. Resolve it as the duplicate it is instead of reporting a quota the user did not hit.
+        const duplicate = await getInFlightAiReportRun(projectId, req.fieldUser!.id);
+        if (duplicate && matchesRequest(duplicate, { photoIds, focusPrompt, reportTitle })) {
+          res.status(202).json({ runId: duplicate.id, status: duplicate.status });
+          return;
+        }
+        throw new AppError(
+          429,
+          `You already have ${err.limit} AI reports being generated. Wait for one to finish before starting another.`,
+        );
+      }
+      // Lost the race on field_ai_report_runs_inflight_uidx — a concurrent request for this same project
+      // committed first (the identical-request case was already handled before the quota, above).
+      if (!isInFlightRunConflict(err)) throw err;
+      const existing = await getInFlightAiReportRun(projectId, req.fieldUser!.id);
+      if (!existing) throw err; // it finished in the gap — let the original error surface
+      if (!matchesRequest(existing, { photoIds, focusPrompt, reportTitle })) {
+        throw new AppError(
+          409,
+          "A different AI report is still being generated for this project. Wait for it to finish, then try again.",
+        );
+      }
+      res.status(202).json({ runId: existing.id, status: existing.status });
+      return;
+    }
+
+    res.status(202).json({ runId: run.id, status: run.status });
+  } catch (err) {
+    next(err);
+  }
+});
+
+fieldRoutes.get("/reports/ai-status/:runId", requireFieldContractor, async (req, res, next) => {
+  try {
+    const runId = String(req.params.runId);
+    assertValidUuid(runId, "runId");
+    const run = await getAiReportRun(runId);
+    // 404 rather than 403 for someone else's run: the id is opaque, so confirming it exists would leak that
+    // a report is being generated for a project this user may not be able to see.
+    if (!run || run.requestedBy !== req.fieldUser!.id) {
+      throw new AppError(404, "Report run not found");
+    }
+
+    if (run.status !== "succeeded" || !run.fileId) {
+      res.json({ runId: run.id, status: run.status, error: run.error ?? undefined });
+      return;
+    }
+
+    // Mint the presigned URL through the SAME gate as /reports/:reportId/download (tag + expiry + project
+    // access checks), bound to the office the run recorded — not the caller's active office. The payload
+    // carries the same `report` shape POST /reports/generate returns so the client reuses one success path.
+    const office = await getFieldOfficeById(run.officeId);
+    const detail = await runInOffice(office, (officeDb) =>
+      getFieldProjectReportDetail(officeDb, { userId: req.fieldUser!.id, userRole: req.fieldUser!.role }, run.fileId!),
+    );
+    res.json({ runId: run.id, status: run.status, ...detail });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // The capture-target picker feeds the photo-ATTACH (write) flow. It goes cross-office IN LOCKSTEP with
 // the writes (gated on the same flag): flag-on surfaces every active office's targets (so a user can
 // attach to a project in any office the now-cross-office write path can reach); flag-off stays single
@@ -881,17 +1238,28 @@ fieldRoutes.get("/photo-targets/search", requireFieldContractor, async (req, res
     // Scorecard picker: filter to deals server-side (before the caps) so a lead/opportunity-heavy result
     // set can't starve out matching deals.
     const dealsOnly = req.query.dealsOnly === "true";
+    // Walkthrough RECOVERY picker: the same deals-only narrowing WITHOUT the browsing stage rule, so an
+    // orphaned walk can be filed to the Lost deal it was recorded on — which is precisely the set the
+    // walkthrough upload routes already accept (assertAccessibleFieldCaptureTarget), so this reaches no
+    // record a caller could not already file to, and no wider. Opt-in and deals-scoped: ordinary
+    // browsing keeps excluding Lost/terminal, and on its own the flag does nothing (the all-types
+    // answer carries every active deal already).
+    const includeTerminalDeals = dealsOnly && req.query.includeTerminalDeals === "true";
 
     if (!isFieldCrossOfficeWritesEnabled()) {
       const office = await getFieldOfficeById(req.fieldUser!.tenantId);
-      const result = await runInOffice(office, (db) => searchFieldCaptureTargets(db, access, { search, limit, dealsOnly }));
+      const result = await runInOffice(office, (db) =>
+        searchFieldCaptureTargets(db, access, { search, limit, dealsOnly, includeTerminalDeals }),
+      );
       res.json(result);
       return;
     }
 
     const globalLimit = limit ?? FIELD_CAPTURE_TARGET_DEFAULT_LIMIT;
     const { results, failures } = assertFanOutNotFullyDegraded(
-      await fanOutActiveOffices((db) => searchFieldCaptureTargets(db, access, { search, limit: globalLimit, dealsOnly })),
+      await fanOutActiveOffices((db) =>
+        searchFieldCaptureTargets(db, access, { search, limit: globalLimit, dealsOnly, includeTerminalDeals }),
+      ),
     );
     const targets = mergeFieldCaptureTargets(
       results.map(({ office, value }) => ({ office, targets: value.targets })),
@@ -1180,6 +1548,17 @@ fieldRoutes.get("/scorecards/:id/download", requireFieldContractor, async (req, 
         }),
       "Scorecard not found",
     );
+    // A NEWER renderer's artifact whose generation has since moved. This instance cannot supersede it (its
+    // publish CAS is lte(version, CURRENT)) and must not serve it either — doing so silently reproduces the
+    // exact "PDF omits the corrective action" defect for every download that lands on an old instance during
+    // a rolling deploy. Retryable, so the retry can reach an upgraded instance that CAN re-render.
+    if (isFutureRendererArtifactStale(artifact)) {
+      throw new AppError(
+        503,
+        "This scorecard's PDF is being updated by a newer release. Please try the download again shortly.",
+        "SCORECARD_PDF_AWAITING_NEWER_RENDERER",
+      );
+    }
     let pdfR2Key = artifact.pdfR2Key;
     const storedObjectAvailable = artifact.needsRegeneration
       ? false
@@ -1205,6 +1584,24 @@ fieldRoutes.get("/scorecards/:id/download", requireFieldContractor, async (req, 
       }
     }
     if (!pdfR2Key) throw new AppError(503, "The scorecard PDF is not available yet. Please try again shortly.");
+    // Same pre-presign revalidation as the deal-tab download: the artifact snapshot was taken in a
+    // transaction that has since been released, and a corrective-action response committing in that window
+    // advances updated_at while retaining pdf_r2_key. Retryable — the next attempt regenerates.
+    const recheck = await recheckScorecardArtifactCurrency(office, id, pdfR2Key);
+    if (recheck === "awaiting-newer-renderer") {
+      throw new AppError(
+        503,
+        "This scorecard's PDF is being updated by a newer release. Please try the download again shortly.",
+        "SCORECARD_PDF_AWAITING_NEWER_RENDERER",
+      );
+    }
+    if (recheck !== "current") {
+      throw new AppError(
+        503,
+        "The scorecard changed while its PDF was being prepared. Please try the download again.",
+        "SCORECARD_PDF_STALE",
+      );
+    }
     const value = await presignFieldScorecardPdf(id, pdfR2Key);
     res.json(value);
   } catch (err) {

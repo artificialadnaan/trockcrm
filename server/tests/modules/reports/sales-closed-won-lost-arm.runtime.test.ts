@@ -34,12 +34,15 @@ beforeAll(async () => {
     CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, slug text UNIQUE NOT NULL);
     CREATE TABLE users (id uuid PRIMARY KEY, display_name text, email text, office_id uuid);
     CREATE TABLE offices (id uuid PRIMARY KEY, name text, slug text);
+    CREATE TABLE IF NOT EXISTS public.project_type_config (id uuid PRIMARY KEY, name text NOT NULL, code text);
     CREATE TABLE deals (
       id uuid PRIMARY KEY, sales_source_user_id uuid, name text, stage_id uuid NOT NULL, assigned_rep_id uuid,
-      is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
+      is_active boolean NOT NULL DEFAULT true, is_test_data boolean NOT NULL DEFAULT false, is_change_order boolean NOT NULL DEFAULT false, on_hold boolean NOT NULL DEFAULT false,
       won_closed_date date, actual_close_date date, lost_at timestamptz, stage_entered_at timestamptz,
       contract_signed_at timestamptz, updated_at timestamptz,
       region_classification text, property_city text, property_state text, office_code text, workflow_route text,
+      -- The canonical service test reads these; a report split on the raw route alone was the bug.
+      project_type text, project_type_id uuid,
       awarded_amount numeric, bid_board_total_sales numeric, bid_estimate numeric, dd_estimate numeric
     );
     INSERT INTO users (id, display_name) VALUES ('${REP}','Alice');

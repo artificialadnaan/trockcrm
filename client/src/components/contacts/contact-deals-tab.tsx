@@ -5,7 +5,7 @@ import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { DealStageBadge } from "@/components/deals/deal-stage-badge";
 import { ChangeOrderBadge } from "@/components/deals/change-order-badge";
-import { formatDealDisplayNumber } from "@/lib/deal-utils";
+import { formatDealDisplayName, formatDealDisplayNumber } from "@/lib/deal-utils";
 import type { Contact } from "@/hooks/use-contacts";
 import { useContactDeals, removeContactDealAssociation } from "@/hooks/use-contacts";
 
@@ -86,7 +86,21 @@ export function ContactDealsTab({ contactId, contact }: ContactDealsTabProps) {
                   <Badge variant="outline" className="text-xs">Primary</Badge>
                 )}
               </div>
-              <p className="font-medium truncate">{assoc.deal.name}</p>
+              {/* A change-order child is STORED "<Parent> — Change Order N"; this line truncates the
+                  suffix away, so a CO reads as its parent. Display-only; the stored name is unchanged. */}
+              <p className="font-medium truncate">{formatDealDisplayName(assoc.deal.name, assoc.deal.isChangeOrder)}</p>
+              {/* The third of the three "entity detail → deals" lists (Company and Property are the other
+                  two, and both show it). A contact is attached to several jobs at one property, so the
+                  name repeats and the title is the only thing that tells them apart. */}
+              {assoc.deal.scopeTitle ? (
+                <p
+                  className="truncate text-xs font-medium text-muted-foreground"
+                  title={assoc.deal.scopeTitle}
+                  data-testid="contact-deal-scope-title"
+                >
+                  {assoc.deal.scopeTitle}
+                </p>
+              ) : null}
               {assoc.role && (
                 <p className="text-xs text-muted-foreground">Role: {assoc.role}</p>
               )}

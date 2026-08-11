@@ -56,6 +56,7 @@ export async function getDealBlindSpotSignals(
           latest_current_stage_entered_at.entered_at
         ) AS stage_entered_at,
         d.expected_close_date,
+        d.bid_due_date,
         d.on_hold,
         d.on_hold_started_at,
         d.on_hold_accumulated_seconds,

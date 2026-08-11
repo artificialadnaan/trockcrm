@@ -19,6 +19,7 @@ function row(overrides: Partial<Parameters<typeof computeRepAtRiskCountsFromRows
     workflow_route: "normal",
     stage_entered_at: "2026-04-23T00:00:00.000Z",
     expected_close_date: null,
+    bid_due_date: null,
     on_hold: false,
     on_hold_started_at: null,
     on_hold_accumulated_seconds: 0,
@@ -76,6 +77,83 @@ describe("worker at-risk forwards expected_close_date (Codex P2 finding A)", () 
     // Historical periods (last_month/quarter/year) must stay deterministic: a postponement made today must
     // NOT retroactively drop a deal from a closed period's count. So near-term suppression is OFF for them and
     // the over-SLA deal is still counted at-risk.
+    expect(counts).toEqual([{ repId: "rep-1", atRiskCount: 1 }]);
+  });
+});
+
+describe("worker at-risk forwards bid_due_date for the estimating stage (2026-07-28)", () => {
+  // The worker is the easiest place for a rule like this to go missing: every row source hand-lists its
+  // columns, and forgetting one does not error — the row silently keeps the close-target rule and the job
+  // emails a "stale deal" alert about a deal every in-app surface prices at $0.
+  //
+  // SUPERSEDES the #966 scoping note this block used to carry ("the Move Close Date postponement rule
+  // stays keyed on expected_close_date in every stage and is deliberately NOT part of this change").
+  // As of 2026-07-28 BOTH legs read the same horizon date in the estimating stage — the bid due date,
+  // falling back to the close target — so a past close target no longer isolates the auto-park leg: the
+  // bid date alone decides. The cases below are re-pointed accordingly.
+  const asOf = new Date("2026-05-08T00:00:00.000Z");
+  const staleFor = (days: number) => new Date(asOf.getTime() - days * dayMs).toISOString();
+  const PAST_CLOSE = "2026-04-01";
+
+  it("does NOT count a stale estimating deal whose bid is not due for another quarter", () => {
+    const counts = computeRepAtRiskCountsFromRows(
+      [
+        row({
+          stage_entered_at: staleFor(60),
+          expected_close_date: PAST_CLOSE,
+          bid_due_date: "2099-12-31T00:00:00.000Z",
+        }),
+      ],
+      asOf
+    );
+    expect(counts).toEqual([]);
+  });
+
+  it("does NOT count a stale estimating deal whose bid is still ahead, even with a past close target", () => {
+    // The rollup writes the persisted per-rep at_risk_count, so this is the aggregate half of the rule:
+    // a bid that is not due for another 12 days quiets the stage-age nag exactly as it does on the card.
+    const counts = computeRepAtRiskCountsFromRows(
+      [
+        row({
+          stage_entered_at: staleFor(60),
+          expected_close_date: PAST_CLOSE,
+          bid_due_date: "2026-05-20T00:00:00.000Z",
+        }),
+      ],
+      asOf
+    );
+    expect(counts).toEqual([]);
+  });
+
+  it("DOES count a stale estimating deal whose bid is OVERDUE behind a future close target", () => {
+    // The motivating prod shape (office_dallas 2026-07-28): the close target is near-term enough to dodge
+    // the 90-day auto-park AND in the future, so the old rule quieted the deal on every surface while its
+    // bid had been due for weeks. The rollup must now count it.
+    const counts = computeRepAtRiskCountsFromRows(
+      [
+        row({
+          stage_entered_at: staleFor(60),
+          expected_close_date: "2026-06-15",
+          bid_due_date: "2026-04-20T00:00:00.000Z",
+        }),
+      ],
+      asOf
+    );
+    expect(counts).toEqual([{ repId: "rep-1", atRiskCount: 1 }]);
+  });
+
+  it("ignores bid_due_date outside the estimating stage", () => {
+    const counts = computeRepAtRiskCountsFromRows(
+      [
+        row({
+          stage_slug: "estimate_sent_to_client",
+          stage_entered_at: staleFor(60),
+          expected_close_date: PAST_CLOSE,
+          bid_due_date: "2099-12-31T00:00:00.000Z",
+        }),
+      ],
+      asOf
+    );
     expect(counts).toEqual([{ repId: "rep-1", atRiskCount: 1 }]);
   });
 });

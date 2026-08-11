@@ -71,6 +71,8 @@ export interface RegionMover {
   deltaWon: number;
 }
 export interface RegionMoverDeal {
+  /** `deals.is_change_order` — the AUTHORITY for the change-order display relabel. */
+  isChangeOrder?: boolean | null;
   id: string;
   dealNumber: string | null;
   name: string;
@@ -408,16 +410,32 @@ export async function getRegionReport(tenantDb: TenantDb, options: RegionReportO
   };
 }
 
+// The single selector behind all THREE "biggest ___" trophies on the movers strip (biggest new deal /
+// biggest win / biggest loss). Every one of them is a POSITIVE superlative, so the cohort is floored at
+// `> 0` HERE rather than per-caller — guarding only one would leave two cards on the same strip
+// contradicting the third.
+//
+// SIGN (deductive change orders): a CO child deal's value is its awarded_amount VERBATIM (no `> 0` gate in
+// the canonical chain), so a deductive CO is a legitimately NEGATIVE row in these cohorts. Ordering DESC
+// and taking the first row with no floor therefore put a deduction under a Trophy icon captioned "Biggest
+// win" (-$50,000) in any week with no positive Won contribution. Filtering — rather than adding a separate
+// "biggest deduction" mover — keeps this a four-card strip with one meaning per card; the honest answer for
+// a week with no positive win is the "—" empty state the chip already renders, not a superlative with the
+// wrong sign. A non-positive row is likewise not a "biggest" anything, so `> 0` (not `>= 0`) also stops a
+// $0/valueless deal being crowned when it is the only candidate.
+//
+// The MONEY is untouched: deductive COs stay in the region/office Won totals, the sparklines and the
+// evidence drills. This floors the SUPERLATIVE only.
 async function topMoverDeal(tenantDb: TenantDb, whereSql: SQL, valueSql: SQL): Promise<RegionMoverDeal | null> {
-  const rows = rowsFromExecute<{ id: string; deal_number: string | null; name: string; region: string; val: string }>(
+  const rows = rowsFromExecute<{ id: string; deal_number: string | null; name: string; is_change_order?: boolean | null; region: string; val: string }>(
     await tenantDb.execute(sql`
-      SELECT d.id AS id, d.deal_number AS deal_number, d.name AS name, ${REGION_NAME} AS region, ${valueSql} AS val
+      SELECT d.id AS id, d.deal_number AS deal_number, d.name AS name, d.is_change_order AS is_change_order, ${REGION_NAME} AS region, ${valueSql} AS val
       ${COMMON_JOINS}
-      WHERE ${whereSql}
+      WHERE ${whereSql} AND (${valueSql}) > 0
       ORDER BY val DESC NULLS LAST, d.created_at DESC, d.id DESC
       LIMIT 1`)
   );
   const row = rows[0];
   if (!row) return null;
-  return { id: String(row.id), dealNumber: row.deal_number == null ? null : String(row.deal_number), name: row.name, value: n(row.val), region: row.region };
+  return { id: String(row.id), dealNumber: row.deal_number == null ? null : String(row.deal_number), name: row.name, isChangeOrder: row.is_change_order ?? undefined, value: n(row.val), region: row.region };
 }

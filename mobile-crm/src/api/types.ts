@@ -102,6 +102,12 @@ export type PipelineStage = {
   displayOrder: number;
   isTerminal: boolean;
   isActivePipeline: boolean;
+  /**
+   * Which workflow this stage belongs to. `GET /deals/stages` returns BOTH deal families in one
+   * unfiltered list, so without this a service-only stage is indistinguishable from a standard one and
+   * gets offered to every deal. See eligibleStageTargets in src/stage-targets.ts.
+   */
+  workflowFamily: "standard_deal" | "service_deal" | "lead" | null;
   color: string | null;
 };
 
@@ -109,6 +115,15 @@ export type PipelineStage = {
 export type DealListItem = {
   id: string;
   name: string | null;
+  /**
+   * The short accounting title (QuickBooks scope phrase), already on the wire — the deal list/detail
+   * queries select `...getTableColumns(deals)`, so this arrives whether or not the app declares it.
+   *
+   * Mirrored here despite the "keep these narrow" rule above because a change-order child's `name` is
+   * the generic "<Parent> — Change Order N": without this field two change orders on one parent are
+   * indistinguishable on every native screen, which is the specific thing the column was added for.
+   */
+  scopeTitle: string | null;
   description: string | null;
   dealNumber: string | null;
   stageId: string | null;
@@ -129,6 +144,13 @@ export type DealListItem = {
   updatedAt: string | null;
   onHold: boolean | null;
   isActive: boolean | null;
+  /**
+   * A change order is a Won CHILD deal, and the stage-change route rejects one unconditionally with a
+   * 409 CHANGE_ORDER_STAGE_LOCKED (stage-change.ts:161-167) — moving it off Won would silently drop its
+   * value from every Won report. Preflight does NOT apply that lock, so without this field the app can
+   * show a green "Ready to move" and then fail on commit.
+   */
+  isChangeOrder: boolean | null;
   atRisk: AtRiskResult | null;
   /**
    * SERVER verdicts. Do not recompute either of these on device.
@@ -141,6 +163,13 @@ export type DealListItem = {
    */
   effectiveOnHold: boolean | null;
   effectiveValue: number | null;
+  /**
+   * OPTIONAL because it is not on every shape: pipeline board cards and the deal detail carry it, the
+   * plain /deals list row does not. It decides whether a stage move is offered at all, so a type that
+   * claimed it was always present would invite gating on `undefined === userId` — permanently false,
+   * silently hiding the action from the one person allowed to take it.
+   */
+  assignedRepId?: string | null;
   /**
    * The stage to DISPLAY. A Bid Board-owned deal can advance, or close, in Bid Board while its CRM
    * `stageSlug` still reads an earlier stage; the web detail already switches to bidBoardStageSlug.
@@ -158,6 +187,12 @@ export type DealListResponse = {
     totalPages: number;
   };
 };
+
+/**
+ * Present on pipeline BOARD cards and the deal detail, absent from the plain list. Ownership decides
+ * whether a stage move is even offered — the commit route is strictly owner-only.
+ */
+export type DealOwnership = { assignedRepId: string | null };
 
 export type DealDetail = DealListItem & {
   assignedRepId: string | null;
@@ -334,3 +369,132 @@ export type ContactDealAssociation = {
   role?: string | null;
   deal: AssociatedDeal | null;
 };
+
+/**
+ * A lead row as the LIST returns it.
+ *
+ * Narrow on purpose, same reasoning as DealListItem: the server sends every column of tenant.leads via
+ * getTableColumns(leads) plus a decoration pass, and a phone renders a handful.
+ *
+ * `projectType` is an OBJECT here and a STRING on writes. The list decorator resolves the id against
+ * projectTypeMap and attaches the row (service.ts:702), while POST/PATCH take `projectTypeId`. Reading
+ * this as a name renders "[object Object]"; sending it back as one is a 400.
+ */
+export type LeadListItem = {
+  id: string;
+  name: string | null;
+  stageId: string | null;
+  stageName: string | null;
+  status: string | null;
+  isActive: boolean | null;
+  assignedRepId: string | null;
+  assignedRepName: string | null;
+  companyId: string | null;
+  companyName: string | null;
+  primaryContactName: string | null;
+  primaryContactTitle: string | null;
+  projectTypeId: string | null;
+  projectType: { id: string; name: string } | null;
+  property: { id: string; name: string | null; address: string | null; city: string | null; state: string | null } | null;
+  estimatedValue: string | number | null;
+  /**
+   * THREE source columns, and which one is populated depends on a server flag.
+   *
+   * Under lead-edit-v2 a lead's source is written to sourceCategory/sourceDetail and the legacy `source`
+   * column is deliberately left null — so reading `source` alone shows "—" for every lead created since
+   * that flag went on, despite the record plainly having a source.
+   */
+  source: string | null;
+  sourceCategory: string | null;
+  sourceDetail: string | null;
+  /** The outcome-aware display axis the server also FILTERS on — already YYYY-MM-DD or null. */
+  displayDate: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  /** Lifecycle timestamps. The DETAIL response has these; it does not have the list's `displayDate`. */
+  convertedAt?: string | null;
+  disqualifiedAt?: string | null;
+  stageEnteredAt?: string | null;
+  /** Set once the lead has been converted; the pair is how a converted lead links to its deal. */
+  convertedDealId: string | null;
+  convertedDealNumber: string | null;
+};
+
+/** The detail read adds these on top of the list shape. */
+export type LeadDetail = LeadListItem & {
+  isWatching?: boolean;
+  description?: string | null;
+  notes?: string | null;
+  expectedCloseDate?: string | null;
+  /**
+   * ONLY present when the server's lead-edit-v2 flag is on (leads/routes.ts:289-305). Its absence is a
+   * server configuration, not an error and not an empty questionnaire — rendering "no questions" for it
+   * would state something this client cannot know.
+   */
+  leadQuestionnaire?: unknown;
+};
+
+/** A lead-family pipeline stage. Same table as deal stages, different workflow family. */
+export type LeadStage = {
+  id: string;
+  name: string;
+  slug: string;
+  displayOrder: number;
+  isTerminal: boolean;
+  isActivePipeline: boolean;
+  workflowFamily: string | null;
+  color: string | null;
+};
+
+/**
+ * The stage-transition result. THE RESULT IS THE BODY — there is no envelope — and a refusal arrives as
+ * HTTP 409 carrying this same shape (leads/routes.ts:539).
+ */
+export type LeadTransitionRefusal = {
+  ok: false;
+  reason: string;
+  code?: string | null;
+  targetStageId?: string | null;
+  /** Where the WHOLE transition must be resolved when the per-field hints are not enough. */
+  resolution?: "detail" | "inline" | null;
+  /** What the lead still needs. Each entry says whether it can be fixed inline or only on the record. */
+  missing?: Array<{ key: string; label: string; resolution: "detail" | "inline" }>;
+};
+
+/**
+ * The fields the SERVER'S DECORATOR adds — not columns on the leads table.
+ *
+ * decorateLeads (leads/service.ts:682-708) builds each of these from a joined lookup, and one of them
+ * collides with a real column of the SAME NAME and a DIFFERENT TYPE: `project_type` is a legacy TEXT
+ * column, while the decorated `projectType` is a `{ id, name }` object. A raw row and a decorated read
+ * therefore disagree about what `lead.projectType` even is, and nothing in the type system notices,
+ * because only the decorated shape was ever modelled here.
+ *
+ * Listed once, as data, so the raw-row type and the runtime merge cannot drift apart.
+ */
+export const DECORATED_LEAD_FIELDS = [
+  "stageName",
+  "assignedRepName",
+  "companyName",
+  "primaryContactName",
+  "primaryContactTitle",
+  "property",
+  "projectType",
+  "convertedDealId",
+  "convertedDealNumber",
+  // Computed in the LIST query's SELECT, so it is absent from any raw row as well.
+  "displayDate",
+] as const;
+
+export type DecoratedLeadField = (typeof DECORATED_LEAD_FIELDS)[number];
+
+/**
+ * What a WRITE returns: updateLead's raw row — every lead COLUMN, none of the decoration.
+ *
+ * Typing this as LeadDetail was a lie the compiler then defended: it asserted `projectType` was an
+ * object about a value that is a string, so spreading a transition response over a cached detail
+ * downgraded the field with no error at any layer. See mergeLeadDetail.
+ */
+export type LeadRawRow = Omit<LeadDetail, DecoratedLeadField>;
+
+export type LeadTransitionResult = { ok: true; lead: LeadRawRow } | LeadTransitionRefusal;

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { deals, files, jobQueue, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
@@ -12,7 +12,9 @@ import {
   isR2Configured,
 } from "../../lib/r2-client.js";
 import { activeLatestFileConditions, buildDealFileScopeCondition } from "../files/service.js";
-import { buildNormalizedRfpRequestBody, buildRfpAttachmentsFromFiles, buildRfpRequestDeliveryPayload, resolveSyncHubCreateFromRfpUrl, resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
+import { PUBLIC_VIEWER_PAGE_SIZE, generatePublicToken, isPublicProxyServable } from "../public-photo-tokens/service.js";
+import { publicPhotoShareUrlFromEnv, publicViewerBaseUrlFromEnv } from "../public-photo-tokens/public-share-url.js";
+import { buildNormalizedRfpRequestBody, buildRfpAttachments, buildRfpRequestDeliveryPayload, resolveSyncHubCreateFromRfpUrl, resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -21,6 +23,13 @@ type TenantDb = NodePgDatabase<typeof schema>;
 // store/display the link to a human reviewer later, so we mint long-lived URLs
 // (7 days — the SigV4 presigned maximum) rather than the default 1h.
 const RFP_ATTACHMENT_URL_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+// The photo share link is streamed by our own server, so unlike the presigned attachments above it
+// is NOT bound by the 7-day SigV4 maximum. It is nonetheless an UNAUTHENTICATED link that travels in
+// an approval email, so it is deliberately scoped to the review window rather than the field
+// module's 90-day client-share default: 30 days comfortably outlasts an RFP review while limiting
+// how long a forwarded email keeps working. It is revocable (public_photo_tokens.revoked_at).
+const RFP_PHOTO_SHARE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 export interface EnqueueOpportunityRfpInput {
   tenantDb: TenantDb;
@@ -44,6 +53,8 @@ export interface InsertOpportunityRfpJobInput {
   deal: typeof deals.$inferSelect;
   officeId: string | null;
   eventId: string;
+  /** Who triggered the RFP. Used to mint the photo share link; omitted -> photos ship individually. */
+  userId?: string;
 }
 
 /**
@@ -110,11 +121,13 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, deal: { id: string }) {
            concat_ws(' ', pc.first_name, pc.last_name) AS "contactName",
            pc.email AS "clientEmail",
            pc.phone AS "clientPhone",
-           l.bid_due_date AS "sourceLeadBidDueDate"
+           l.bid_due_date AS "sourceLeadBidDueDate",
+           ptc.code AS "projectTypeCode"
       FROM deals d
       LEFT JOIN companies c ON c.id = d.company_id
       LEFT JOIN contacts pc ON pc.id = d.primary_contact_id
       LEFT JOIN leads l ON l.id = d.source_lead_id
+      LEFT JOIN public.project_type_config ptc ON ptc.id = d.project_type_id
      WHERE d.id = ${deal.id}
      LIMIT 1
   `);
@@ -140,6 +153,9 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, deal: { id: string }) {
     dealNumber: (row.deal_number as string | null) ?? "",
     projectNumber: (row.project_number as string | null) ?? null,
     projectType: (row.project_type as string | null) ?? null,
+    // The CONFIGURED digit. Without it the payload ships type 9 for a deal typed only by project_type_id
+    // -- the common import shape -- telling SyncHub a service job is residential work.
+    projectTypeCode: (row.projectTypeCode as string | null) ?? null,
     workflowRoute: (row.workflow_route as "normal" | "service" | null) ?? null,
     awardedAmount: row.awarded_amount ?? null,
     bidEstimate: row.bid_estimate ?? null,
@@ -175,30 +191,80 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, deal: { id: string }) {
  * versions (activeLatestFileConditions), so the RFP attachments match the files
  * a reviewer sees on the deal.
  */
-export async function loadRfpAttachmentsForDeal(tenantDb: TenantDb, dealId: string) {
+export async function loadRfpAttachmentsForDeal(
+  tenantDb: TenantDb,
+  dealId: string,
+  // Identity needed to mint the photo share token (public_photo_tokens.created_by_user_id and
+  // .tenant_id are both NOT NULL). Omitted -> photos ship individually, as before; the body-size
+  // cap in buildNormalizedRfpRequestBody still guarantees SyncHub can parse the result.
+  share?: { userId: string; officeId: string | null }
+) {
   const scopeCondition = await buildDealFileScopeCondition(tenantDb, dealId);
   const rows = await tenantDb
     .select({
+      id: files.id,
       displayName: files.displayName,
       fileExtension: files.fileExtension,
       mimeType: files.mimeType,
+      fileSizeBytes: files.fileSizeBytes,
       r2Key: files.r2Key,
+      category: files.category,
     })
     .from(files)
-    .where(and(scopeCondition, ...activeLatestFileConditions()));
+    .where(and(scopeCondition, ...activeLatestFileConditions()))
+    // Newest first: the body-size cap drops from the TAIL, so the most recent documents survive.
+    .orderBy(desc(files.createdAt));
 
-  return buildRfpAttachmentsFromFiles(rows, async ({ r2Key, filename }) =>
-    isR2Configured()
-      ? await generateDownloadUrl(r2Key, RFP_ATTACHMENT_URL_TTL_SECONDS, filename)
-      : generateMockDownloadUrl(r2Key)
-  );
+  return buildRfpAttachments(rows, {
+    resolveUrl: async ({ r2Key, filename }) =>
+      isR2Configured()
+        ? await generateDownloadUrl(r2Key, RFP_ATTACHMENT_URL_TTL_SECONDS, filename)
+        : generateMockDownloadUrl(r2Key),
+    // Only photos the public viewer can actually serve may be collapsed into the link: it refuses
+    // HEIC/HEIF outright and will not transcode an oversized raster, so collapsing one of those
+    // would leave the reviewer a placeholder and no file at all.
+    canViewerServe: (file) => isPublicProxyServable(file.mimeType, file.fileExtension, file.fileSizeBytes),
+    // The viewer renders a single page with no pagination, so anything past it stays individual.
+    viewerPhotoLimit: PUBLIC_VIEWER_PAGE_SIZE,
+    mintPhotoShareUrl: async (photoIds) => {
+      if (!share?.userId || !share.officeId) return null;
+      // Cheap pre-check: without a configured viewer host the link would resolve nowhere, so skip
+      // the token INSERT entirely rather than leave an orphan row behind.
+      if (!publicViewerBaseUrlFromEnv()) return null;
+      try {
+        // Scoped to exactly the photo ids the link will list, so the "Project Photos (N)" label can
+        // never promise more than the viewer will show.
+        // NOTE: this writes to public.public_photo_tokens on the GLOBAL connection, so it is not
+        // part of the caller's tenant transaction. A rollback after this point leaves an unused
+        // token row, which is inert (it grants nothing that the deal's own photos don't) and ages
+        // out on its own — preferable to holding the tenant transaction open across this write.
+        const created = await generatePublicToken({
+          dealId,
+          createdByUserId: share.userId,
+          tenantId: share.officeId,
+          photoIds,
+          expiresAt: new Date(Date.now() + RFP_PHOTO_SHARE_TTL_MS),
+        });
+        return publicPhotoShareUrlFromEnv(created.rawToken);
+      } catch (err) {
+        // A share link is an enhancement, never a reason to fail the RFP: fall back to per-photo
+        // attachments (the cap still bounds the body).
+        console.error(`[RFP] Failed to mint photo share link for deal ${dealId}:`, err);
+        return null;
+      }
+    },
+  });
 }
 
 export async function insertOpportunityRfpRequestJob(
   input: InsertOpportunityRfpJobInput
 ): Promise<{ jobId: number }> {
   const rfpPayloadDeal = await loadRfpPayloadDeal(input.tenantDb, input.deal);
-  const attachments = await loadRfpAttachmentsForDeal(input.tenantDb, input.deal.id);
+  const attachments = await loadRfpAttachmentsForDeal(
+    input.tenantDb,
+    input.deal.id,
+    input.userId ? { userId: input.userId, officeId: input.officeId } : undefined
+  );
   const jobRows = await input.tenantDb
     .insert(jobQueue)
     .values({
@@ -251,6 +317,7 @@ export async function enqueueOpportunityRfpIfNeeded(
     },
     officeId: input.officeId,
     eventId,
+    userId: input.userId,
   });
 
   return {

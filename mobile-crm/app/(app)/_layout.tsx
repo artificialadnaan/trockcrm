@@ -1,15 +1,24 @@
 import React from "react";
+import { ActivityIndicator, View } from "react-native";
 import { Redirect, Stack } from "expo-router";
 import { useAuth } from "../../src/auth/AuthContext";
+import { formStyles } from "../../src/theme/formStyles";
+import { theme } from "../../src/theme/theme";
 
 /**
- * Authenticated shell. The tab bar arrives with the feature screens in later PRs; this PR ships the
- * auth spine and one landing screen, so a Stack is enough and avoids a tab bar with a single tab.
+ * The authenticated shell: auth gates, then the tab bar.
+ *
+ * Gates run in a deliberate order — restoring, signed-out, forced password change, onboarding — and each
+ * one owns exactly one redirect. The tab bar renders only once every gate has passed, so no tab can be
+ * reached by a session that should have been sent elsewhere.
  */
 export default function AppLayout() {
   const { session, gate } = useAuth();
 
-  if (session === undefined) return null;
+  // A SPINNER, not a blank screen. Two things land here: the SecureStore restore on cold start, and
+  // the gate check below with its 3s grace. Rendering nothing for up to that long reads as a crash or a
+  // frozen app — on a job site the reasonable response is to force-quit, which restarts the wait.
+  if (session === undefined) return <Restoring />;
   if (!session) return <Redirect href="/login" />;
   if (session.user.mustChangePassword) return <Redirect href="/change-password" />;
 
@@ -26,12 +35,36 @@ export default function AppLayout() {
    * instead of locking a rep out of the CRM from a site with no signal. That is the honest trade: this
    * gate is an operational cleanup nag, not a security boundary, and the server treats it as one too.
    */
-  if (gate === "checking") return null;
+  if (gate === "checking") return <Restoring />;
 
   // Enforced HERE, not only on the index route: index is just the launch redirect, and a deep link or a
   // restored navigation state can mount a screen inside this group without ever passing through it. A
   // gate that only guards the front door is not a gate.
   if (session.user.requiresOnboarding) return <Redirect href="/onboarding-required" />;
 
-  return <Stack screenOptions={{ headerShown: false }} />;
+  /**
+   * A STACK that CONTAINS the tab bar, not a bare tab navigator.
+   *
+   * The tab bar is one screen inside this stack ((tabs)); detail screens are siblings pushed OVER it.
+   * That ordering is the whole point: when a rep opens a linked deal from a contact, the deal is pushed
+   * onto the CURRENT stack, so Back returns to the contact they came from.
+   *
+   * With the tab navigator at the root instead, pushing a deal switched to the Deals tab and Back went
+   * to the deals list — losing the context the rep was actually working in. That was a regression this
+   * PR introduced by adding tabs, and it is structural: no amount of care at the call site fixes it,
+   * because the destination's tab ownership decides where Back goes.
+   */
+  return (
+    <Stack screenOptions={{ headerShown: false }}>
+      <Stack.Screen name="(tabs)" />
+    </Stack>
+  );
+}
+
+function Restoring() {
+  return (
+    <View style={[formStyles.safe, formStyles.centre]}>
+      <ActivityIndicator color={theme.color.brandRed} />
+    </View>
+  );
 }

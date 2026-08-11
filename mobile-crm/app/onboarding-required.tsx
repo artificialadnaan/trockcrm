@@ -27,10 +27,49 @@ export default function OnboardingRequiredScreen() {
 
   async function checkAgain() {
     setChecking(true);
+    setLinkError(null);
     try {
       await revalidate();
+    } catch {
+      // revalidate() has no reachable rejection path today, but it is invoked as `void checkAgain()`,
+      // so anything that starts throwing in there becomes an unhandled rejection with no user-visible
+      // symptom on the one screen a blocked user is stuck reading. The gate === "stale" line below
+      // covers the ordinary offline case; this covers the unexpected one.
+      setLinkError("Couldn't check just now. Try again in a moment.");
     } finally {
       setChecking(false);
+    }
+  }
+
+  /**
+   * https only — plus http on loopback in development.
+   *
+   * `cleanupUrl` arrives from the server (cleanupAppUrl()) and is handed straight to the OS, so a
+   * misconfigured or malformed value could open an arbitrary scheme rather than a web page. Nothing
+   * suggests it is attacker-controlled today, but validating the one thing this button is for costs a
+   * line, and "the server sent it" is not a property the OS checks.
+   *
+   * The loopback exception exists because the server's development default is `http://localhost:5175`
+   * (auth/service.ts:60-65). A flat https-only rule nulled that out and removed the button entirely, so
+   * the one flow this screen exists for could not be exercised locally at all — a rule strict enough to
+   * block its own development setup. Gated on __DEV__ and on the host actually being loopback, so a
+   * release build still refuses plain http, and a dev build still refuses http to anywhere else.
+   */
+  function safeCleanupUrl(raw: string | null | undefined): string | null {
+    if (!raw) return null;
+    try {
+      const url = new URL(raw);
+      if (url.protocol === "https:") return raw;
+      // `[::1]` with the brackets: WHATWG URL keeps them in `hostname` for an IPv6 literal, so a plain
+      // "::1" comparison never matches and a dev box on IPv6 loopback loses the button entirely.
+      const isLoopback =
+        url.hostname === "localhost" ||
+        url.hostname === "127.0.0.1" ||
+        url.hostname === "::1" ||
+        url.hostname === "[::1]";
+      return __DEV__ && url.protocol === "http:" && isLoopback ? raw : null;
+    } catch {
+      return null;
     }
   }
 
@@ -59,12 +98,16 @@ export default function OnboardingRequiredScreen() {
   const rawPending = session.user.onboardingPendingCount;
   const pendingKnown = typeof rawPending === "number" && rawPending >= 0;
   const pending = pendingKnown ? rawPending : 0;
-  const cleanupUrl = session.user.cleanupUrl ?? null;
+  const cleanupUrl = safeCleanupUrl(session.user.cleanupUrl);
 
   return (
     <SafeAreaView style={styles.safe}>
       <View style={styles.body}>
-        <Text style={styles.kicker}>Onboarding required</Text>
+        {/* Labelled, because `kicker` uppercases by transform and on iOS that transformed string is
+            what VoiceOver reads. This is the first line of a screen a locked-out user cannot leave. */}
+        <Text accessibilityLabel="Onboarding required" style={styles.kicker}>
+          Onboarding required
+        </Text>
         <Text style={styles.title}>Finish cleanup before using the CRM</Text>
         <Text style={styles.copy}>
           {pendingKnown
@@ -95,6 +138,7 @@ export default function OnboardingRequiredScreen() {
           onPress={() => void checkAgain()}
           disabled={checking || gate === "checking"}
           accessibilityRole="button"
+          accessibilityState={{ busy: checking || gate === "checking" }}
           style={styles.secondary}
         >
           {checking ? (
@@ -132,35 +176,40 @@ export default function OnboardingRequiredScreen() {
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: theme.color.surfaceMuted },
+  safe: { flex: 1, backgroundColor: theme.color.canvas },
   center: { flex: 1, alignItems: "center", justifyContent: "center" },
   body: { flex: 1, justifyContent: "center", padding: theme.space.xl, gap: theme.space.md },
   kicker: {
-    fontFamily: theme.font.bold,
-    fontSize: 12,
+        ...theme.type.caption,
     letterSpacing: 1,
     textTransform: "uppercase",
-    color: theme.color.brandRed,
+    color: theme.color.redText,
   },
-  title: { fontFamily: theme.font.bold, fontSize: 26, color: theme.color.inkNavy },
-  copy: { fontFamily: theme.font.regular, fontSize: 15, lineHeight: 22, color: theme.color.textSecondary },
+  title: { ...theme.type.h1, color: theme.color.textPrimary },
+  copy: { ...theme.type.body, lineHeight: 22, color: theme.color.textSecondary },
   button: {
+    minHeight: 44,
+    justifyContent: "center",
     marginTop: theme.space.md,
     backgroundColor: theme.color.brandRed,
     borderRadius: theme.radius.md,
     paddingVertical: theme.space.md,
     alignItems: "center",
   },
-  buttonText: { fontFamily: theme.font.bold, fontSize: 15, color: theme.color.textInverse },
+  buttonText: { ...theme.type.body, color: theme.color.textInverse },
   secondary: {
+    minHeight: 44,
+    justifyContent: "center",
     borderWidth: 1,
     borderColor: theme.color.brandRed,
     borderRadius: theme.radius.md,
     paddingVertical: theme.space.md,
     alignItems: "center",
   },
-  secondaryText: { fontFamily: theme.font.bold, fontSize: 15, color: theme.color.brandRed },
-  note: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.textMuted, textAlign: "center" },
-  signOut: { marginTop: theme.space.sm, alignItems: "center", paddingVertical: theme.space.md },
-  signOutText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textSecondary },
+  secondaryText: { ...theme.type.body, color: theme.color.redText },
+  note: { ...theme.type.label, color: theme.color.textMuted, textAlign: "center" },
+  signOut: {
+    minHeight: 44,
+    justifyContent: "center", marginTop: theme.space.sm, alignItems: "center", paddingVertical: theme.space.md },
+  signOutText: { ...theme.type.body, color: theme.color.textSecondary },
 });

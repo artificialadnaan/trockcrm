@@ -9,15 +9,21 @@ import {
   View,
 } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import { useGoBack } from "../../../src/lib/go-back";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError } from "../../../src/api/client";
 import * as dealsApi from "../../../src/api/endpoints/deals";
+import * as pipelineApi from "../../../src/api/endpoints/pipeline";
 import { useAuth } from "../../../src/auth/AuthContext";
 import { useQueryScope } from "../../../src/auth/useOfficeId";
-import { displayAmount, showsAtRisk } from "../../../src/components/DealCard";
+import { BackLink } from "../../../src/components/BackLink";
+import { displayAmount, showsAtRisk } from "../../../src/deal-value";
 import { Badge } from "../../../src/components/Badge";
+import { RetryNotice } from "../../../src/components/RetryNotice";
 import { Row } from "../../../src/components/Row";
+import { activityTypeLabel } from "../../../src/activity-label";
+import { resolveListState } from "../../../src/list-state";
 import { mailtoUrl, telUrl } from "../../../src/contact-links";
 import { buildStageIndex, stageLabelFor } from "../../../src/stage-label";
 import { openLink } from "../../../src/lib/open-link";
@@ -29,7 +35,11 @@ export default function DealDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const dealId = typeof id === "string" ? id : "";
   const router = useRouter();
-  const { fetcher } = useAuth();
+  // Back needs a destination: this screen is reachable by deep link and by restored
+  // navigation state, where goBack() is a no-op and the control would do nothing.
+  const goBack = useGoBack("/(app)/deals");
+  // `session` is this branch's addition — the change-order lock and the ownership gate both need it.
+  const { fetcher, session } = useAuth();
   const scope = useQueryScope();
   const queryClient = useQueryClient();
   const [note, setNote] = useState("");
@@ -66,6 +76,15 @@ export default function DealDetailScreen() {
     staleTime: 30 * 60_000,
   });
 
+  // The SAME state machine the lists use — see resolveListState for the four ways this branching has
+  // been got wrong. It was hand-rolled here, which is exactly the duplication that module exists to end.
+  const activityState = resolveListState({
+    isLoading: activitiesQuery.isLoading,
+    data: activitiesQuery.data,
+    error: activitiesQuery.error,
+    isFetchNextPageError: activitiesQuery.isFetchNextPageError,
+  });
+
   const activities = useMemo(
     () => (activitiesQuery.data?.pages ?? []).flatMap((p) => p.activities),
     [activitiesQuery.data],
@@ -87,17 +106,33 @@ export default function DealDetailScreen() {
     },
   });
 
+  // Derived once, above the JSX: the press guard and the greyed style ask the same question, and two
+  // spellings of it is two chances for the button to look dead while still taking a press.
+  const noteBlocked = note.trim().length === 0 || logNote.isPending;
+
   const watch = useMutation({
     mutationFn: (next: boolean) =>
       next ? dealsApi.watchDeal(fetcher, dealId) : dealsApi.unwatchDeal(fetcher, dealId),
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: qk.deal(scope, dealId) });
-      // The Watched list is derived from this flag, so it must be invalidated too — otherwise an
-      // already-mounted list keeps showing an unwatched deal (or hiding a newly watched one).
+      // CONCURRENT. invalidateQueries resolves only once the active queries have refetched, and
+      // watch.isPending stays true for the whole handler — so awaiting four in series left the star
+      // disabled for four sequential round trips after the toggle had already succeeded. The move screen
+      // was made concurrent one commit ago and this was left serial in the same breath, having just
+      // gained two more entries.
       //
-      // Scoped: a bare ["deals"] prefix-matches EVERY user/office/role variant sitting in the cache, so
-      // toggling one watch would refetch lists that this action cannot have changed.
-      await queryClient.invalidateQueries({ queryKey: ["deals", scope] });
+      // All four are derived from the watch flag: the deal itself, the Watched list, and — via their
+      // Mine/Watched scopes — the board and the stage drill-down. Those two are separate cache prefixes
+      // that stay mounted underneath this screen, and refetchOnWindowFocus is off, so without them an
+      // unwatched deal sits visibly on the Watched board until a manual pull.
+      //
+      // SCOPED, not a bare ["deals"]: that prefix-matches every user/office/role variant in the cache,
+      // so one toggle would refetch lists this action cannot have changed.
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: qk.deal(scope, dealId) }),
+        queryClient.invalidateQueries({ queryKey: ["deals", scope] }),
+        queryClient.invalidateQueries({ queryKey: ["pipeline", scope] }),
+        queryClient.invalidateQueries({ queryKey: ["stage-deals", scope] }),
+      ]);
     },
   });
 
@@ -135,7 +170,7 @@ export default function DealDetailScreen() {
               <Text style={styles.backBtnText}>Try again</Text>
             </Pressable>
           ) : null}
-          <Pressable onPress={() => router.back()} accessibilityRole="button" style={styles.backBtn}>
+          <Pressable onPress={() => goBack()} accessibilityRole="button" style={styles.backBtn}>
             <Text style={styles.backBtnText}>Go back</Text>
           </Pressable>
         </View>
@@ -151,9 +186,12 @@ export default function DealDetailScreen() {
   const location = formatLocation(deal.propertyCity, deal.propertyState);
   // Data is on screen but the last refresh failed — say so without taking the screen away.
   const refreshFailed = Boolean(dealQuery.error);
-  // Both columns, coalesced the way every other contact surface does. Projecting only `phone` hid the
-  // call action entirely for a contact reachable only on a mobile number.
-  const contactPhone = deal.primaryContactPhone ?? deal.primaryContactMobile;
+  // MOBILE FIRST, matching contactPhone() on the contact surfaces. This read `phone ?? mobile`, so the
+  // same person could be called on a different number depending on which screen you started from — and
+  // the deal detail would pick the landline while the contact screen picked the mobile. The reason the
+  // contacts helper prefers mobile is the reason it should win here too: it is the one that reaches
+  // someone standing on a roof.
+  const contactPhone = deal.primaryContactMobile ?? deal.primaryContactPhone;
   // Shared with the list, so the two can never disagree about which stage a deal is in.
   const stageLabel = stageLabelFor(deal, buildStageIndex(stagesQuery.data)) ?? "—";
 
@@ -162,9 +200,7 @@ export default function DealDetailScreen() {
       {/* Without "handled", the first tap on Save only dismisses the keyboard and never reaches the
           button — so the rep's opening tap on the app's primary action silently does nothing. */}
       <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
-        <Pressable onPress={() => router.back()} accessibilityRole="button" accessibilityLabel="Back">
-          <Text style={styles.back}>‹ Deals</Text>
-        </Pressable>
+        <BackLink label="Deals" onPress={() => goBack()} />
 
         {refreshFailed ? (
           <Pressable
@@ -178,6 +214,13 @@ export default function DealDetailScreen() {
         ) : null}
 
         <Text style={styles.name}>{deal.name ?? "Untitled deal"}</Text>
+        {/* Directly under the name, because for a change order the name is only the parent's: the
+            screen you land on after tapping a search result must still show what search matched on. */}
+        {deal.scopeTitle ? (
+          <Text testID="deal-scope-title" style={styles.scopeTitle}>
+            {deal.scopeTitle}
+          </Text>
+        ) : null}
         {deal.companyName ? <Text style={styles.company}>{deal.companyName}</Text> : null}
 
         <View style={styles.badgeRow}>
@@ -192,7 +235,10 @@ export default function DealDetailScreen() {
           onPress={() => watch.mutate(!deal.isWatching)}
           disabled={watch.isPending}
           accessibilityRole="button"
-          accessibilityState={{ selected: deal.isWatching }}
+          /* `busy`, not `disabled`. RN merges the `disabled` PROP into the accessibility state and it
+             takes precedence (Pressable.js:228), so writing it here would be a no-op — but `busy` is
+             not derived from anything, and mid-toggle is exactly when it is worth saying. */
+          accessibilityState={{ selected: deal.isWatching, busy: watch.isPending }}
           style={styles.watchBtn}
         >
           <Text style={styles.watchText}>{deal.isWatching ? "★ Watching" : "☆ Watch"}</Text>
@@ -207,6 +253,24 @@ export default function DealDetailScreen() {
                 ? watch.error.message
                 : "Couldn't update your watch setting."}
           </Text>
+        ) : null}
+
+        {/* Offered only to the assigned rep: the commit route is owner-only with no admin or director
+            bypass, so showing this to anyone else is an invitation to a 403.
+            AND not at all for a deal the route locks outright — a change order is rejected with a 409
+            no matter who asks, while preflight would still report it as ready. */}
+        {!pipelineApi.stageMoveLock(deal).locked &&
+        deal.assignedRepId &&
+        deal.assignedRepId === session?.user.id ? (
+          <Pressable
+            testID="open-move-stage"
+            onPress={() => router.push({ pathname: "/(app)/deals/move", params: { dealId } })}
+            accessibilityRole="button"
+            accessibilityLabel="Move this deal to another stage"
+            style={styles.moveBtn}
+          >
+            <Text style={styles.moveText}>Move stage</Text>
+          </Pressable>
         ) : null}
 
         <Section title="Details">
@@ -269,16 +333,16 @@ export default function DealDetailScreen() {
                 : "Couldn't save that note."}
             </Text>
           ) : null}
+          {/* One predicate, two consumers. It was already written twice — the press guard and the
+              greyed style — which is two chances for the button to look dead while still pressable. */}
           <Pressable
             testID="save-note"
             onPress={() => logNote.mutate(note.trim())}
-            disabled={note.trim().length === 0 || logNote.isPending}
+            disabled={noteBlocked}
             accessibilityRole="button"
             accessibilityLabel="Save note"
-            style={[
-              styles.saveNote,
-              (note.trim().length === 0 || logNote.isPending) && styles.saveNoteDisabled,
-            ]}
+            accessibilityState={{ busy: logNote.isPending }}
+            style={[styles.saveNote, noteBlocked && styles.saveNoteDisabled]}
           >
             {logNote.isPending ? (
               <ActivityIndicator color={theme.color.textInverse} />
@@ -289,9 +353,24 @@ export default function DealDetailScreen() {
         </Section>
 
         <Section title="Activity">
-          {activitiesQuery.isLoading ? (
+          {/* A failed background REFRESH belongs at the top of the section, beside the heading — not
+              under the timeline. The two failures are read in different places: a refresh fails while
+              the user is looking at the newest entries at the top, so a notice below fifty rows is
+              off-screen and the stale data reads as freshly loaded. A failed LOAD-MORE is the opposite
+              — the user is at the bottom, which is where that one stays. Same reasoning RetryNotice's
+              `placement` encodes; both were bottom, so only one of them was right. */}
+          {activityState.kind === "loaded" && activityState.refreshFailed ? (
+            <RetryNotice
+              testID="retry-activities-inline"
+              message="Couldn't refresh activity — tap to retry"
+              onRetry={() => void activitiesQuery.refetch()}
+              placement="top"
+            />
+          ) : null}
+
+          {activityState.kind === "loading" ? (
             <ActivityIndicator color={theme.color.brandRed} />
-          ) : activitiesQuery.error && activitiesQuery.data === undefined ? (
+          ) : activityState.kind === "blocking-error" ? (
             // A failed timeline request is NOT an empty timeline. Claiming "nothing logged" on a 5xx
             // presents a failure as authoritative CRM data, and a rep would believe it.
             //
@@ -313,7 +392,8 @@ export default function DealDetailScreen() {
             activities.map((a) => (
               <View key={a.id} style={styles.activity}>
                 <Text style={styles.activityMeta}>
-                  {a.type}
+                  {/* The LABEL, not the column. A rep was reading "site_visit" and "stage_change". */}
+                  {activityTypeLabel(a.type)}
                   {a.performedByUserName ? ` · ${a.performedByUserName}` : ""}
                   {a.occurredAt ?? a.createdAt ? ` · ${formatDate(a.occurredAt ?? a.createdAt)}` : ""}
                 </Text>
@@ -324,8 +404,13 @@ export default function DealDetailScreen() {
             ))
           )}
 
-          {/* Older history is reachable rather than silently truncated at the server's 50-row page. */}
-          {activities.length > 0 && activitiesQuery.hasNextPage ? (
+          {/* Older history is reachable rather than silently truncated at the server's 50-row page.
+              HIDDEN once a page fetch has failed: hasNextPage stays true after a failure, so this sat
+              directly above the RetryNotice offering the same action in different words — two controls,
+              one of them not acknowledging that anything went wrong. The notice is the retry while a
+              failure is outstanding; this returns as soon as one succeeds. */}
+          {activities.length > 0 && activitiesQuery.hasNextPage &&
+          !(activityState.kind === "loaded" && activityState.pageFailed) ? (
             <Pressable
               testID="load-more-activities"
               onPress={() => {
@@ -333,6 +418,7 @@ export default function DealDetailScreen() {
               }}
               disabled={activitiesQuery.isFetchingNextPage}
               accessibilityRole="button"
+              accessibilityState={{ busy: activitiesQuery.isFetchingNextPage }}
               style={styles.retry}
             >
               {activitiesQuery.isFetchingNextPage ? (
@@ -343,29 +429,18 @@ export default function DealDetailScreen() {
             </Pressable>
           ) : null}
 
-          {/* A background failure once the timeline has loaded: never replace what is on screen, just
-              say so. Gated on `data !== undefined` rather than on row count — the blocking branch above
-              already keys on that, and requiring rows here meant a deal with NO activity reported its
-              failed refresh nowhere at all: no notice, no retry, just the unchanged "Nothing logged
-              yet". Silently wrong in exactly the state the empty message claims to be authoritative
-              about. */}
-          {activitiesQuery.data !== undefined && activitiesQuery.error ? (
-            <Pressable
-              testID="retry-activities-inline"
-              onPress={() =>
-                void (activitiesQuery.isFetchNextPageError
-                  ? activitiesQuery.fetchNextPage()
-                  : activitiesQuery.refetch())
-              }
-              accessibilityRole="button"
-              style={styles.retry}
-            >
-              <Text style={styles.retryText}>
-                {activitiesQuery.isFetchNextPageError
-                  ? "Couldn't load older activity — tap to retry"
-                  : "Couldn't refresh activity — tap to retry"}
-              </Text>
-            </Pressable>
+          {/* A failed load-more, at the bottom where the user asked for it. Gated on `data !== undefined`
+              rather than on row count — the blocking branch above already keys on that, and requiring
+              rows here meant a deal with NO activity reported its failed refresh nowhere at all: no
+              notice, no retry, just the unchanged "Nothing logged yet". Silently wrong in exactly the
+              state the empty message claims to be authoritative about. */}
+          {activityState.kind === "loaded" && activityState.pageFailed ? (
+            <RetryNotice
+              testID="retry-activities-page"
+              message="Couldn't load older activity — tap to retry"
+              onRetry={() => void activitiesQuery.fetchNextPage()}
+              placement="bottom"
+            />
           ) : null}
         </Section>
       </ScrollView>
@@ -376,7 +451,11 @@ export default function DealDetailScreen() {
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <View style={styles.section}>
-      <Text style={styles.sectionTitle}>{title}</Text>
+      {/* `header` so the rotor can jump between sections, and an explicit label because
+          `sectionTitle` uppercases by transform — which on iOS becomes the accessible name itself. */}
+      <Text accessibilityRole="header" accessibilityLabel={title} style={styles.sectionTitle}>
+        {title}
+      </Text>
       <View style={styles.sectionBody}>{children}</View>
     </View>
   );
@@ -411,18 +490,33 @@ function ContactAction({
 }
 
 const styles = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: theme.color.surfaceMuted },
+  safe: { flex: 1, backgroundColor: theme.color.canvas },
   body: { padding: theme.space.lg, gap: theme.space.sm, paddingBottom: theme.space.xxl },
   center: { flex: 1, alignItems: "center", justifyContent: "center", gap: theme.space.md },
-  back: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.brandRed },
   name: { fontFamily: theme.font.bold, fontSize: 24, color: theme.color.inkNavy, marginTop: theme.space.sm },
+  // 17 semibold: below the 24pt name, above the 15pt company — the scope outranks the company on a
+  // change order, where it is the only line that differs between siblings.
+  scopeTitle: { fontFamily: theme.font.semibold, fontSize: 17, color: theme.color.textPrimary },
   company: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textSecondary },
   badgeRow: { flexDirection: "row", alignItems: "center", gap: theme.space.sm, marginTop: theme.space.xs },
   amount: { fontFamily: theme.font.bold, fontSize: 20, color: theme.color.textPrimary },
   badgeText: { fontFamily: theme.font.semibold, fontSize: 12 },
-  badgeTextAmber: { color: "#92400E" },
-  badgeTextRed: { color: theme.color.brandRedDeep },
+  badgeTextAmber: { color: theme.color.amberText },
+  badgeTextRed: { color: theme.color.redText },
+  moveBtn: {
+    minHeight: 44,
+    justifyContent: "center",
+    marginTop: theme.space.sm,
+    borderWidth: 1,
+    borderColor: theme.color.brandRed,
+    borderRadius: theme.radius.md,
+    paddingVertical: theme.space.md,
+    alignItems: "center",
+  },
+  moveText: { fontFamily: theme.font.bold, fontSize: 15, color: theme.color.redText },
   watchBtn: {
+    minHeight: 44,
+    justifyContent: "center",
     alignSelf: "flex-start",
     borderWidth: 1,
     borderColor: theme.color.border,
@@ -450,18 +544,19 @@ const styles = StyleSheet.create({
     gap: theme.space.sm,
   },
   contactRow: {
+    minHeight: 44,
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
     gap: theme.space.md,
   },
   contactLabel: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary },
-  linkError: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.brandRedDeep },
+  linkError: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.redText },
   rowValue: { flexShrink: 1, textAlign: "right", fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
-  link: { color: theme.color.brandRed },
+  link: { color: theme.color.redText },
   noteInput: {
     borderWidth: 1,
-    borderColor: theme.color.border,
+    borderColor: theme.color.borderControl,
     borderRadius: theme.radius.md,
     padding: theme.space.md,
     minHeight: 88,
@@ -470,22 +565,26 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: theme.color.textPrimary,
   },
-  noteError: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.brandRedDeep },
+  noteError: { fontFamily: theme.font.regular, fontSize: 13, color: theme.color.redText },
   watchError: {
     marginTop: theme.space.xs,
     fontFamily: theme.font.regular,
     fontSize: 13,
-    color: theme.color.brandRedDeep,
+    color: theme.color.redText,
   },
   staleBanner: {
+    minHeight: 44,
+    justifyContent: "center",
     marginTop: theme.space.sm,
     borderRadius: theme.radius.md,
-    backgroundColor: "#FEF3C7",
+    backgroundColor: theme.color.amberSurface,
     paddingHorizontal: theme.space.md,
     paddingVertical: theme.space.sm,
   },
-  staleText: { fontFamily: theme.font.semibold, fontSize: 13, color: "#92400E" },
+  staleText: { fontFamily: theme.font.semibold, fontSize: 13, color: theme.color.amberText },
   saveNote: {
+    minHeight: 44,
+    justifyContent: "center",
     backgroundColor: theme.color.brandRed,
     borderRadius: theme.radius.md,
     paddingVertical: theme.space.md,
@@ -494,20 +593,27 @@ const styles = StyleSheet.create({
   saveNoteDisabled: { opacity: 0.5 },
   saveNoteText: { fontFamily: theme.font.bold, fontSize: 15, color: theme.color.textInverse },
   retry: {
+    minHeight: 44,
+    justifyContent: "center",
     borderWidth: 1,
     borderColor: theme.color.border,
     borderRadius: theme.radius.md,
     paddingVertical: theme.space.md,
     alignItems: "center",
   },
-  retryText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
+  retryText: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.redText },
   emptyActivity: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textMuted },
   activity: { gap: 2, paddingVertical: theme.space.sm },
-  activityMeta: { fontFamily: theme.font.regular, fontSize: 12, color: theme.color.textMuted },
+  // textSecondary (8.3:1 on surface), not textMuted (4.99:1): this is the smallest text on the screen
+  // and outdoors it is the first thing to become unreadable. Ratios are against the DARK surface — the
+  // "on white" figures this comment used to carry described the light theme.
+  activityMeta: { fontFamily: theme.font.regular, fontSize: 12, color: theme.color.textSecondary },
   activitySubject: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textPrimary },
   activityNotes: { fontFamily: theme.font.regular, fontSize: 14, color: theme.color.textSecondary },
   errorTitle: { fontFamily: theme.font.bold, fontSize: 17, color: theme.color.inkNavy },
   backBtn: {
+    minHeight: 44,
+    justifyContent: "center",
     borderWidth: 1,
     borderColor: theme.color.border,
     borderRadius: theme.radius.md,

@@ -5,11 +5,11 @@ import { deals, files, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
 import { deleteObject, generateDownloadUrl, putObject } from "../../lib/r2-client.js";
-import { getFileById, getFileDownloadUrl } from "../files/service.js";
+import { buildFileDownloadUrlFromRecord, getFileById } from "../files/service.js";
 import { buildDealPhotoTimelineConditions } from "../files/photo-timeline-filters.js";
 import type { FieldAccessContext, FieldPhoto, FieldProject } from "./projects-service.js";
 import { assertActiveFieldProject, listFieldProjectPhotos } from "./projects-service.js";
-import { renderFieldPhotoReportPdf, type ReportRenderSection } from "./pdf-layout.js";
+import { renderFieldPhotoReportPdf, type ReportPhotoLayout, type ReportRenderSection } from "./pdf-layout.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -203,6 +203,9 @@ async function loadReportRenderPhotos(
   r2Key: string | null;
   externalUrl: string | null;
   externalThumbnailUrl: string | null;
+  // Declared, not just selected: the renderer reads it to decide whether a HEIC original needs transcoding,
+  // and omitting it here dropped it from the type the moment these rows were spread into a render photo.
+  mimeType: string | null;
 }>> {
   // Keep report rendering aligned with the project timeline scope so converted
   // lead-origin photos survive final rendering and out-of-scope photos do not.
@@ -221,6 +224,8 @@ async function loadReportRenderPhotos(
       r2Key: files.r2Key,
       externalUrl: files.externalUrl,
       externalThumbnailUrl: files.externalThumbnailUrl,
+      // Drives the renderer's transcode decision — a HEIC original embeds as "Image unavailable" otherwise.
+      mimeType: files.mimeType,
     })
     .from(files)
     .leftJoin(users, eq(users.id, files.uploadedBy))
@@ -237,11 +242,14 @@ async function loadReportRenderPhotos(
   }]));
 }
 
-export async function generateFieldPhotoReport(
+/**
+ * Read the project and photo rows and assemble everything the renderer needs. DB-only — this is the part
+ * that must run inside the office transaction.
+ */
+export async function prepareFieldPhotoReport(
   tenantDb: TenantDb,
   access: FieldAccessContext,
   input: {
-    officeSlug: string;
     projectId: string;
     reportTitle: string;
     executiveSummary?: string | null;
@@ -256,6 +264,13 @@ export async function generateFieldPhotoReport(
       photoIds: string[];
       photoOverrides?: Array<{ id: string; description?: string | null }>;
     }>;
+    /**
+     * Per-photo page layout. Omitted (the mobile/web "Generate PDF" path) keeps the 3-per-page grid.
+     * The AI report passes "findings" so each photo gets a full page with its bulleted assessment.
+     */
+    photoLayout?: ReportPhotoLayout;
+    /** Overrides the file's displayName/description wording so an AI report is labelled as one. */
+    fileDescription?: string | null;
   },
 ) {
   const project = await assertActiveFieldProject(tenantDb, access, input.projectId);
@@ -303,15 +318,70 @@ export async function generateFieldPhotoReport(
   // Cap the free-form summary so a pathological payload can't balloon the PDF into hundreds of pages;
   // blank/whitespace collapses to null (renderer adds no page for it).
   const executiveSummary = input.executiveSummary?.trim() ? input.executiveSummary.trim().slice(0, 5000) : null;
-  const pdfBuffer = await renderFieldPhotoReportPdf({ cover, sections: renderSections, executiveSummary });
+  return {
+    project,
+    title,
+    cover,
+    renderSections,
+    executiveSummary,
+    photoLayout: input.photoLayout,
+    fileDescription: input.fileDescription ?? null,
+    now,
+  };
+}
+
+export type PreparedFieldPhotoReport = Awaited<ReturnType<typeof prepareFieldPhotoReport>>;
+
+/**
+ * Render the PDF and put it in R2. Touches NO database — deliberately, so the caller can run this outside a
+ * transaction. Rendering a 60-page report downloads and decodes every original and then uploads the result,
+ * which is minutes of work; doing it while holding a pooled client leaves a connection idle-in-transaction
+ * for the duration, and a worker pool is small. Returns everything the file row needs.
+ */
+export async function renderAndStoreFieldPhotoReportPdf(
+  prepared: PreparedFieldPhotoReport,
+  officeSlug: string,
+  /** Bounds every object read and transcode the render performs. Omitted by the human path. */
+  signal?: AbortSignal,
+) {
+  const { project, title, cover, renderSections, executiveSummary, photoLayout, now } = prepared;
+  const pdfBuffer = await renderFieldPhotoReportPdf({
+    cover,
+    sections: renderSections,
+    executiveSummary,
+    photoLayout,
+    signal,
+  });
   const bucketName = process.env.R2_BUCKET_NAME || "trock-crm-files";
   const fileExtension = ".pdf";
   const systemFilename = `${slugify(title)}-${now.toISOString().slice(0, 10)}-${crypto.randomUUID().slice(0, 8)}${fileExtension}`;
   const yearMonth = now.toISOString().slice(0, 7);
-  const r2Key = `office_${input.officeSlug}/deals/${project.dealNumber}/documents/photo-reports/${yearMonth}/${systemFilename}`;
+  const r2Key = `office_${officeSlug}/deals/${project.dealNumber}/documents/photo-reports/${yearMonth}/${systemFilename}`;
   const expiresAt = new Date(now.getTime() + REPORT_RETENTION_MS).toISOString();
   const pdfUrl = await generateDownloadUrl(r2Key, REPORT_DOWNLOAD_EXPIRY_SECONDS, `${title}${fileExtension}`);
-  await putObject(r2Key, pdfBuffer, "application/pdf");
+  // The upload carries the SAME deadline as the render that produced it. Bounding the reads and transcodes
+  // but not the PUT just moves the stall one line down: an accepted-then-stalled upload leaves this function
+  // pending forever, and the AI-report poller is single-in-flight, so every later report queues behind it
+  // with nothing able to free the handler.
+  await putObject(r2Key, pdfBuffer, "application/pdf", { signal });
+
+  return { r2Key, pdfUrl, expiresAt, systemFilename, yearMonth, bucketName, fileExtension, byteLength: pdfBuffer.byteLength };
+}
+
+export type StoredFieldPhotoReport = Awaited<ReturnType<typeof renderAndStoreFieldPhotoReportPdf>>;
+
+/**
+ * Record the uploaded PDF as a `files` row. The only step here that needs a transaction — kept short on
+ * purpose. On failure the R2 object is deleted so a failed insert cannot leave an orphaned upload.
+ */
+export async function recordFieldPhotoReportFile(
+  tenantDb: TenantDb,
+  access: FieldAccessContext,
+  prepared: PreparedFieldPhotoReport,
+  stored: StoredFieldPhotoReport,
+) {
+  const { project, title, fileDescription } = prepared;
+  const { r2Key, pdfUrl, expiresAt, systemFilename, yearMonth, bucketName, fileExtension, byteLength } = stored;
 
   let file;
   try {
@@ -324,12 +394,12 @@ export async function generateFieldPhotoReport(
       systemFilename,
       originalFilename: `${slugify(title)}${fileExtension}`,
       mimeType: "application/pdf",
-      fileSizeBytes: pdfBuffer.byteLength,
+      fileSizeBytes: byteLength,
       fileExtension,
       r2Key,
       r2Bucket: bucketName,
       dealId: project.id,
-      description: `Generated photo report for ${project.name}`,
+      description: fileDescription?.trim() || `Generated photo report for ${project.name}`,
       uploadedBy: access.userId,
     }).returning();
   } catch (error) {
@@ -346,6 +416,23 @@ export async function generateFieldPhotoReport(
       createdAt: new Date(file.createdAt).toISOString(),
     },
   };
+}
+
+/**
+ * The synchronous path (POST /reports/generate): prepare, render+upload, record — all on the caller's
+ * connection, exactly as before this was split. Behaviour is unchanged for the human "Generate PDF" flow.
+ *
+ * The AI report deliberately does NOT use this wrapper: it runs the render+upload step between two short
+ * transactions instead, so a 60-photo render cannot hold a pooled client idle-in-transaction for minutes.
+ */
+export async function generateFieldPhotoReport(
+  tenantDb: TenantDb,
+  access: FieldAccessContext,
+  input: Parameters<typeof prepareFieldPhotoReport>[2] & { officeSlug: string },
+) {
+  const prepared = await prepareFieldPhotoReport(tenantDb, access, input);
+  const stored = await renderAndStoreFieldPhotoReportPdf(prepared, input.officeSlug);
+  return recordFieldPhotoReportFile(tenantDb, access, prepared, stored);
 }
 
 export async function listFieldProjectReports(
@@ -388,7 +475,43 @@ export async function listFieldProjectReports(
   };
 }
 
-export async function getFieldProjectReportDownload(
+/**
+ * The download URL for an existing report PLUS the metadata the app shows beside it, in exactly the shape
+ * POST /reports/generate returns. Lets the AI report's status poll hand the client the same `report` object
+ * the synchronous path does, so the mobile success handler is shared rather than duplicated.
+ *
+ * Access is delegated to getFieldProjectReportDownload — same report-tag, expiry and project-access gate as
+ * a direct download; the metadata read below only runs once that has passed.
+ */
+export async function getFieldProjectReportDetail(
+  tenantDb: TenantDb,
+  access: FieldAccessContext,
+  reportId: string,
+) {
+  // Gate and metadata come from ONE read. Calling getFieldProjectReportDownload and then re-fetching the
+  // same row fetched it twice for a single poll.
+  const file = await assertReadableFieldProjectReport(tenantDb, access, reportId);
+  const download = await buildFileDownloadUrlFromRecord(file);
+  return {
+    report: {
+      id: file.id,
+      title: file.displayName,
+      pdfUrl: download.url,
+      expiresAt: readReportExpiryFromTags(file.tags),
+      createdAt: new Date(file.createdAt).toISOString(),
+    },
+  };
+}
+
+/**
+ * The report-tag, expiry and project-access gate, returning the row it had to read anyway.
+ *
+ * Shared by the download and detail paths so a caller that also needs the file's metadata does not fetch the
+ * same row a second time. Every rejection here is deliberate: a non-report file 404s rather than 403s (the
+ * id is opaque; confirming it exists leaks that a report was generated), an expired one 410s, and project
+ * access is checked LAST so it cannot be used to probe for report ids.
+ */
+async function assertReadableFieldProjectReport(
   tenantDb: TenantDb,
   access: FieldAccessContext,
   reportId: string,
@@ -402,5 +525,17 @@ export async function getFieldProjectReportDownload(
     throw new AppError(410, "Report has expired");
   }
   await assertActiveFieldProject(tenantDb, access, file.dealId);
-  return getFileDownloadUrl(tenantDb, reportId);
+  return file;
+}
+
+export async function getFieldProjectReportDownload(
+  tenantDb: TenantDb,
+  access: FieldAccessContext,
+  reportId: string,
+) {
+  // The gate already read the row, so the URL is built FROM it rather than through getFileDownloadUrl,
+  // which would fetch the same file a second time. The builder's default disposition is "attachment" —
+  // the same one getFileDownloadUrl was passing through.
+  const file = await assertReadableFieldProjectReport(tenantDb, access, reportId);
+  return buildFileDownloadUrlFromRecord(file);
 }

@@ -9,10 +9,16 @@ import {
 } from "drizzle-orm/pg-core";
 
 // Per-office (cloned into every office_* schema). One row per flagged item on a below-band scorecard,
-// seeded `open` at submit; flips to `resolved` when the super/PM documents corrective action. The
-// scorecard auto-closes once no `open` rows remain. FKs (scorecard_id -> field_scorecards) and the
-// (scorecard_id, item_type, item_ref) uniqueness are owned by migration 0192; Drizzle keeps bare uuid
-// columns to match the closeout-checklist / field-scorecards convention.
+// seeded `open` at submit; flips to `submitted` when the super/PM documents corrective action, then to
+// `approved` or `rejected` once the approver rules on it (migration 0202). The card closes only when no
+// OUTSTANDING row remains — `open` OR `rejected`, since a rejection returns the item to the responder.
+//
+// These response columns hold the LATEST attempt only: a resubmission overwrites them. The full
+// back-and-forth lives in scorecard_corrective_action_events, which is what the PDF and the CRM render.
+//
+// FKs (scorecard_id -> field_scorecards) and the (scorecard_id, item_type, item_ref) uniqueness are owned
+// by migration 0192; Drizzle keeps bare uuid columns to match the closeout-checklist / field-scorecards
+// convention.
 export const scorecardCorrectiveActions = pgTable(
   "scorecard_corrective_actions",
   {
@@ -24,7 +30,7 @@ export const scorecardCorrectiveActions = pgTable(
     itemRef: text("item_ref").notNull(),
     /** Denormalized human label captured at seed time (action text / deficiency label). */
     itemLabel: text("item_label").notNull(),
-    /** 'open' | 'resolved' */
+    /** 'open' | 'submitted' | 'approved' | 'rejected' — see shared/types/corrective-action-status. */
     status: text("status").default("open").notNull(),
     responseComment: text("response_comment"),
     respondedByUserId: uuid("responded_by_user_id"),
@@ -41,10 +47,13 @@ export const scorecardCorrectiveActions = pgTable(
       table.itemRef,
     ),
     index("scorecard_corrective_actions_scorecard_idx").on(table.scorecardId),
-    // Partial index over open items — mirrors migration 0192's scorecard_corrective_actions_open_idx so
-    // db:generate sees parity. Backs the closure check (any `open` rows left for this scorecard?).
-    index("scorecard_corrective_actions_open_idx")
+    // Partial index over OUTSTANDING items — mirrors migration 0202's
+    // scorecard_corrective_actions_outstanding_idx so db:generate sees parity. Backs the closure check
+    // (is anything left for the responder to do?). `rejected` belongs here alongside `open`: the approver
+    // sent it back, so it is still outstanding. Keep in step with
+    // CORRECTIVE_ACTION_OUTSTANDING_STATUSES in shared/types/corrective-action-status.
+    index("scorecard_corrective_actions_outstanding_idx")
       .on(table.scorecardId)
-      .where(sql`${table.status} = 'open'`),
+      .where(sql`${table.status} IN ('open', 'rejected')`),
   ],
 );

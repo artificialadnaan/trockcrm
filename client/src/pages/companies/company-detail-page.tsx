@@ -54,6 +54,7 @@ import { EntityActivityTab } from "@/components/activities/entity-activity-tab";
 import { CompanyEmailTab } from "@/components/email/company-email-tab";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { formatDealDisplayName } from "@/lib/deal-utils";
 import { formatPropertyLabel, useProperties } from "@/hooks/use-properties";
 import type { Activity } from "@/hooks/use-activities";
 import { CRM_OWNED_LEAD_STAGE_SLUGS } from "@trock-crm/shared/types";
@@ -776,9 +777,21 @@ function CompanyDealsTab({ companyId, companyName }: { companyId: string; compan
             #{deal.dealNumber}
           </Badge>
 
-          {/* Deal name */}
+          {/* Deal name. A change-order child is STORED "<Parent> — Change Order N" and this line
+              truncates the suffix off; formatDealDisplayName is DISPLAY-only, the stored name stands. */}
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-semibold text-foreground truncate">{deal.name}</p>
+            <p className="text-sm font-semibold text-foreground truncate">{formatDealDisplayName(deal.name, deal.isChangeOrder)}</p>
+            {/* Same reason as the property page: a company's deals repeat the property name, and the
+                scope title is what separates "which job is this". */}
+            {deal.scopeTitle ? (
+              <p
+                className="truncate text-xs font-medium text-muted-foreground"
+                title={deal.scopeTitle}
+                data-testid="company-deal-scope-title"
+              >
+                {deal.scopeTitle}
+              </p>
+            ) : null}
           </div>
 
           {/* Stage pill */}
@@ -1075,7 +1088,19 @@ function CompanyPortfolioTab({ companyId, companyName }: { companyId: string; co
                 >
                   <div className="flex items-start justify-between gap-3">
                     <div>
-                      <p className="text-sm font-medium">{deal.name}</p>
+                      <p className="text-sm font-medium">{formatDealDisplayName(deal.name, deal.isChangeOrder)}</p>
+                      {/* The SECOND deal list on this page, off the same useCompanyDeals hook as the
+                          Deals tab above. Showing the title on one and not the other is the drift this
+                          sweep exists to close. */}
+                      {deal.scopeTitle ? (
+                        <p
+                          className="truncate text-xs font-medium text-muted-foreground"
+                          title={deal.scopeTitle}
+                          data-testid="company-portfolio-deal-scope-title"
+                        >
+                          {deal.scopeTitle}
+                        </p>
+                      ) : null}
                       <p className="text-xs text-muted-foreground font-mono">{deal.dealNumber}</p>
                     </div>
                     {opensLeadDetail ? (

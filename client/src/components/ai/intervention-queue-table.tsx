@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { displayNameOrFallback } from "@/lib/display-identifiers";
-import { formatDealDisplayNumber } from "@/lib/deal-utils";
+import { formatDealDisplayName, formatDealDisplayNumber } from "@/lib/deal-utils";
 
 const severityClassNames: Record<string, string> = {
   critical: "border-red-200 bg-red-50 text-red-700",
@@ -85,7 +85,9 @@ export function InterventionQueueTable(props: {
                       {item.deal ? (
                         <Link to={`/deals/${item.deal.id}`} className="text-sm font-semibold text-brand-red hover:underline">
                           {formatDealDisplayNumber(item.deal).label === "Pending" ? "" : `${formatDealDisplayNumber(item.deal).label} `}
-                          {item.deal.name}
+                          {/* A change-order child is STORED "<Parent> — Change Order N"; lead with the
+                              label so it isn't read as its parent. Display-only, stored name unchanged. */}
+                          {formatDealDisplayName(item.deal.name, item.deal.isChangeOrder)}
                         </Link>
                       ) : (
                         <div className="text-sm font-semibold">Unlinked disconnect case</div>

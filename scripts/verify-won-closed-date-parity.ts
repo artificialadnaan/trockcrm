@@ -38,12 +38,14 @@ const WON_STAGE_SLUGS = [
 const HS_EXPR =
   "public.try_parse_hs_close_date(NULLIF(NULLIF(d.hubspot_extra_properties->>'hs_closed_won_date',''),'0'))";
 
-// aliasedEffectiveWonDealValueSql: awarded-first chain, zeroed when on hold.
-const VALUE_EXPR = `CASE WHEN COALESCE(d.on_hold,false) THEN 0 ELSE COALESCE(
+// aliasedEffectiveWonDealValueSql: awarded-first chain, zeroed when on hold, with its change-order branch
+// (a CO child carries its value ONLY in awarded_amount, NEGATIVE for a deductive CO, so it is taken
+// verbatim ahead of the `> 0` candidates — otherwise this parity audit would disagree with the app).
+const VALUE_EXPR = `CASE WHEN COALESCE(d.on_hold,false) THEN 0 ELSE CASE WHEN COALESCE(d.is_change_order,false) THEN COALESCE(d.awarded_amount,0) ELSE COALESCE(
   CASE WHEN d.awarded_amount>0 THEN d.awarded_amount END,
   CASE WHEN d.bid_board_total_sales>0 THEN d.bid_board_total_sales END,
   CASE WHEN d.bid_estimate>0 THEN d.bid_estimate END,
-  CASE WHEN d.dd_estimate>0 THEN d.dd_estimate END, 0) END`;
+  CASE WHEN d.dd_estimate>0 THEN d.dd_estimate END, 0) END END`;
 
 function quoteIdent(value: string): string {
   return `"${value.replace(/"/g, '""')}"`;

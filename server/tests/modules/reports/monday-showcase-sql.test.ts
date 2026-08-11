@@ -5,6 +5,14 @@ import {
   buildProjectionCoverageSql,
   buildWeeklyCohortTrendSql,
   buildLeadStatusSql,
+  buildWonEvidenceSql,
+  buildStageEntryEvidenceSql,
+  buildProjectionEvidenceSql,
+  buildUndatedEvidenceSql,
+  buildStaleEvidenceSql,
+  buildNoDateEvidenceSql,
+  buildPipelineEvidenceSql,
+  buildLeadEvidenceSql,
   eightWeekStartsEndingAt,
 } from "../../../src/modules/reports/monday-showcase-service.js";
 import { SENT_STAGE_SLUGS, ESTIMATED_STAGE_SLUGS } from "../../../src/modules/reports/foundations.js";
@@ -98,6 +106,86 @@ describe("Monday showcase SQL builders compose F1-F5", () => {
       const prev = new Date(`${weeks[i - 1]}T00:00:00Z`).getTime();
       const cur = new Date(`${weeks[i]}T00:00:00Z`).getTime();
       expect((cur - prev) / 86_400_000).toBe(7);
+    }
+  });
+});
+
+// The Service / Other narrowing, asserted at the SQL level across EVERY builder at once. The runtime
+// suite proves the numbers reconcile; this proves no builder was left un-threaded (a missed one would
+// still "work" -- it would just quietly return the unfiltered set beside filtered neighbours), and that
+// the default emits literally no predicate.
+describe("the Service / Other route filter reaches every deal-sourced builder", () => {
+  // Each entry: a name, and a factory taking the selection. Adding a builder without adding it here is
+  // the mistake this list exists to make loud.
+  const DEAL_BUILDERS: Array<[string, (routes?: readonly ("service" | "other")[]) => unknown]> = [
+    ["stageEntryCohort(sent)", (r) => buildStageEntryCohortSql(SENT_STAGE_SLUGS, "2026-06-01", "2026-06-07", r)],
+    ["stageEntryCohort(estimated)", (r) => buildStageEntryCohortSql(ESTIMATED_STAGE_SLUGS, "2026-06-01", "2026-06-07", r)],
+    ["projectionBands", (r) => buildProjectionBandsSql(r)],
+    ["projectionCoverage", (r) => buildProjectionCoverageSql(r)],
+    ["weeklyCohortTrend", (r) => buildWeeklyCohortTrendSql("2026-05-01", "2026-06-07", undefined, r)],
+    ["wonEvidence", (r) => buildWonEvidenceSql("2026-06-01", "2026-06-07", undefined, undefined, r)],
+    ["stageEntryEvidence", (r) => buildStageEntryEvidenceSql(SENT_STAGE_SLUGS, "2026-06-01", "2026-06-07", undefined, undefined, r)],
+    ["projectionEvidence", (r) => buildProjectionEvidenceSql(undefined, undefined, undefined, r)],
+    ["undatedEvidence", (r) => buildUndatedEvidenceSql(undefined, r)],
+    ["staleEvidence", (r) => buildStaleEvidenceSql(undefined, r)],
+    ["noDateEvidence", (r) => buildNoDateEvidenceSql(undefined, r)],
+    ["pipelineEvidence", (r) => buildPipelineEvidenceSql(undefined, undefined, undefined, r)],
+  ];
+
+  // The signature of the CANONICAL predicate -- its configured-code tier, which nothing else emits.
+  //
+  // Deliberately NOT "project_type_config": the evidence builders already LEFT JOIN that table for their
+  // deal_type display column, so asserting on its name would pass whether or not the filter was applied
+  // -- a vacuous test dressed as a strict one. And deliberately not a long literal spanning the alias:
+  // extractSqlText joins queryChunks with a SPACE, so an interpolated `sql.raw("d")` splits any substring
+  // written across it (`COALESCE( d .project_type`), and such an assertion fails for the wrong reason.
+  const CANONICAL_PROJECT_TYPE_TEST = "~ '^[1-9]$'";
+
+  it.each(DEAL_BUILDERS)("%s narrows on the canonical project-type test, not the raw route column", (_name, build) => {
+    const service = extractSqlText(build(["service"]));
+    // THE FIX. Every one of these builders used to narrow on `workflow_route` alone -- the input the
+    // canonical resolution consults LAST -- so a service deal typed correctly (and stamped DFW-4-… in its
+    // deal number) was counted as normal work. They must now ask project_type FIRST.
+    expect(service).toContain(CANONICAL_PROJECT_TYPE_TEST);
+    expect(service).toContain(".project_type");
+    // ...while workflow_route survives as the final fallback, for deals carrying no type at all.
+    expect(service).toContain("workflow_route = 'service'");
+
+    const other = extractSqlText(build(["other"]));
+    // "other" is the strict COMPLEMENT of "service", which is what keeps the partition total. The old
+    // spelling needed an explicit `IS NULL` leg because a bare `<>` is UNKNOWN for a NULL row and would
+    // drop it from BOTH buckets; the canonical predicate COALESCEs to false, so NOT is total by
+    // construction and the null leg is no longer a thing that can be forgotten.
+    expect(other).toContain("AND NOT");
+    expect(other).toContain(CANONICAL_PROJECT_TYPE_TEST);
+    // That the two buckets are exact complements (and therefore additive) is proven behaviourally, on
+    // real rows, by the "additivity: service-only + other-only === both-selected" suite in
+    // monday-showcase-route-filter.runtime.test.ts. It is NOT asserted here by string shape: several of
+    // these builders legitimately contain their own "AND NOT" for date predicates, so a text test would
+    // be measuring the wrong thing.
+  });
+
+  it.each(DEAL_BUILDERS)("%s emits NO route predicate by default or with both buckets", (_name, build) => {
+    expect(extractSqlText(build(undefined))).not.toContain(CANONICAL_PROJECT_TYPE_TEST);
+    expect(extractSqlText(build(["service", "other"]))).not.toContain(CANONICAL_PROJECT_TYPE_TEST);
+    expect(extractSqlText(build(undefined))).not.toContain("workflow_route");
+    expect(extractSqlText(build(["service", "other"]))).not.toContain("workflow_route");
+    // Byte-identical, not merely "both lack the column name": the default page load must issue the exact
+    // query the report issued before this filter existed.
+    expect(extractSqlText(build(["service", "other"]))).toBe(extractSqlText(build(undefined)));
+    expect(extractSqlText(build(["other", "service"]))).toBe(extractSqlText(build(undefined)));
+  });
+
+  it("leaves the LEAD builders alone -- the leads table has no workflow_route to filter on", () => {
+    expect(extractSqlText(buildLeadStatusSql())).not.toContain("workflow_route");
+    expect(extractSqlText(buildLeadEvidenceSql())).not.toContain("workflow_route");
+  });
+
+  it("refuses to build SQL for an empty selection instead of emitting a false predicate", () => {
+    // A `false` predicate would return zeros that read like measurements. The request layer 400s first;
+    // this is the backstop that keeps a zeroed report unreachable even from a direct service call.
+    for (const [, build] of DEAL_BUILDERS) {
+      expect(() => build([])).toThrow(/at least one/i);
     }
   });
 });

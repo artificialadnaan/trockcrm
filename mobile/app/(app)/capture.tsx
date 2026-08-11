@@ -13,6 +13,11 @@ import { qk } from "../../src/query/keys";
 import { assignPhotoTarget, getTranscriptionConfig, type Fetcher } from "../../src/api/endpoints";
 import { apiFetch } from "../../src/api/client";
 import type { FieldCaptureTarget } from "../../src/api/types";
+// Display-only change-order prefix, GATED on the target's type (a capture target may be a lead or an
+// opportunity, neither of which can be a generated change-order child). Applied at the RENDER sites below
+// and nowhere else: `target.name` is forwarded raw into the /walk nav param, where it becomes a walk
+// title persisted to the server.
+import { captureTargetDisplayName, decodeChangeOrderParam, encodeChangeOrderParam } from "../../src/projects/field-projects";
 import { extractExifMetadata, getLiveGps, type PhotoMetadata } from "../../src/capture/metadata";
 import { type CaptureTargetRef, type CaptureUploadInput } from "../../src/capture/upload";
 import {
@@ -44,7 +49,15 @@ import { ReviewTray } from "../../src/components/ReviewTray";
 // a physical-device-only surface; the iOS Simulator has no camera).
 const CameraCapture = React.lazy(() => import("../../src/capture/CameraCapture"));
 
-type SelectedTarget = { id: string; type: "deal" | "lead" | "opportunity"; name: string };
+// `isChangeOrder` is present only when this target arrived from the project detail route, which has
+// the authoritative `deals.is_change_order`. A target picked in TargetPicker has no flag on its payload,
+// so it stays undefined and the display helper falls back to reading the name.
+type SelectedTarget = {
+  id: string;
+  type: "deal" | "lead" | "opportunity";
+  name: string;
+  isChangeOrder?: boolean;
+};
 
 function targetRef(t: SelectedTarget | null): CaptureTargetRef {
   if (!t) return {};
@@ -76,6 +89,7 @@ export default function CaptureScreen() {
   const params = useLocalSearchParams<{
     dealId?: string;
     targetName?: string;
+    isChangeOrder?: string;
     projectNumber?: string;
     stage?: string;
     propertyAddress?: string;
@@ -102,7 +116,12 @@ export default function CaptureScreen() {
 
   const initialTarget: SelectedTarget | null =
     typeof params.dealId === "string" && params.dealId
-      ? { id: params.dealId, type: "deal", name: typeof params.targetName === "string" ? params.targetName : "Project" }
+      ? {
+          id: params.dealId,
+          type: "deal",
+          name: typeof params.targetName === "string" ? params.targetName : "Project",
+          isChangeOrder: decodeChangeOrderParam(params.isChangeOrder),
+        }
       : null;
 
   const [target, setTarget] = useState<SelectedTarget | null>(initialTarget);
@@ -115,9 +134,10 @@ export default function CaptureScreen() {
         id: params.dealId,
         type: "deal",
         name: typeof params.targetName === "string" ? params.targetName : "Project",
+        isChangeOrder: decodeChangeOrderParam(params.isChangeOrder),
       });
     }
-  }, [params.dealId, params.targetName]);
+  }, [params.dealId, params.targetName, params.isChangeOrder]);
 
   const [pickerOpen, setPickerOpen] = useState(false);
   const [assigningPhotoId, setAssigningPhotoId] = useState<string | null>(null);
@@ -261,11 +281,15 @@ export default function CaptureScreen() {
 
   function detailParamsFor(
     t: SelectedTarget,
-  ): { id: string; name: string; projectNumber?: string; stage?: string; propertyAddress?: string } {
-    const out: { id: string; name: string; projectNumber?: string; stage?: string; propertyAddress?: string } = {
+  ): { id: string; name: string; isChangeOrder?: string; projectNumber?: string; stage?: string; propertyAddress?: string } {
+    const out: { id: string; name: string; isChangeOrder?: string; projectNumber?: string; stage?: string; propertyAddress?: string } = {
       id: t.id,
       name: t.name,
     };
+    // Carry the AUTHORITY to the detail header alongside the name. Omitted when unknown — an absent param
+    // falls back to reading the name, whereas "0" would assert "not a change order" and hide a real label.
+    const encoded = encodeChangeOrderParam(t.isChangeOrder);
+    if (encoded) out.isChangeOrder = encoded;
     if (typeof params.dealId === "string" && params.dealId === t.id) {
       if (typeof params.projectNumber === "string") out.projectNumber = params.projectNumber;
       if (typeof params.stage === "string") out.stage = params.stage;
@@ -995,7 +1019,7 @@ export default function CaptureScreen() {
       );
       void pendingQuery.refetch();
       if (t.type === "deal") invalidateDealPhotos(t.id);
-      setNotice({ tone: "success", text: `Photo assigned to ${t.name}.` });
+      setNotice({ tone: "success", text: `Photo assigned to ${captureTargetDisplayName(t)}.` });
     } catch {
       setNotice({ tone: "error", text: "Couldn't assign that photo." });
     }
@@ -1022,7 +1046,7 @@ export default function CaptureScreen() {
           <View style={{ flex: 1 }}>
             <Text style={styles.targetLabel}>Project</Text>
             <Text style={styles.targetName} numberOfLines={1}>
-              {target ? target.name : "No project — uploads to Pending"}
+              {target ? captureTargetDisplayName(target) : "No project — uploads to Pending"}
             </Text>
           </View>
           <View style={styles.targetActions}>
@@ -1147,13 +1171,42 @@ export default function CaptureScreen() {
           />
         </View>
 
+        {/* A walk always belongs to a deal (session.ts), so this only shows once a deal target is
+            selected — a lead/opportunity target or no target has nowhere for the walk to attach. */}
+        {target?.type === "deal" ? (
+          <Button
+            title="Start AI walk"
+            variant="ghost"
+            icon={<Ionicons name="glasses-outline" size={18} color={theme.color.textPrimary} />}
+            onPress={() =>
+              router.push({
+                pathname: "/(app)/walk",
+                // propertyAddress only carries over when it's the SAME deal this screen's own
+                // route params describe (same guard as detailParamsFor) — a target picked via
+                // TargetPicker has no address on it, so the walk screen falls back to "" (no
+                // prompt; see walk-meta.ts) rather than a stale/wrong address from a prior deal.
+                params: {
+                  dealId: target.id,
+                  targetName: target.name,
+                  // Forward the authority too — the walk screen's headline would otherwise re-guess.
+                  isChangeOrder: encodeChangeOrderParam(target.isChangeOrder),
+                  ...(typeof params.dealId === "string" && params.dealId === target.id && typeof params.propertyAddress === "string"
+                    ? { propertyAddress: params.propertyAddress }
+                    : {}),
+                },
+              })
+            }
+            accessibilityLabel="Start AI walk"
+          />
+        ) : null}
+
         {queuedCount === 0 && !draining && failedShots.length === 0 && pending.length === 0 ? (
           <View style={styles.emptyWrap}>
             <EmptyState
               title={target ? "Ready to capture" : "No project selected"}
               subtitle={
                 target
-                  ? `Every photo uploads to ${target.name} the moment you take it.`
+                  ? `Every photo uploads to ${captureTargetDisplayName(target)} the moment you take it.`
                   : "Choose a project above, or shoot now — photos upload to Pending and you can assign them after."
               }
             />
@@ -1269,7 +1322,9 @@ export default function CaptureScreen() {
         visible={pickerOpen}
         onClose={() => setPickerOpen(false)}
         onSelect={(t) => {
-          setTarget({ id: t.id, type: t.type, name: t.name });
+          // Keep the flag the picker already had: dropping it here blanked the /walk nav param and
+          // sent the target card + AI-walk headline back to guessing from the name.
+          setTarget({ id: t.id, type: t.type, name: t.name, isChangeOrder: t.isChangeOrder ?? undefined });
           setPickerOpen(false);
         }}
       />

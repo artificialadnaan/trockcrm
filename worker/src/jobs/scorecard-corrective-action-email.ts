@@ -15,6 +15,7 @@ import {
   WON_DEAL_STAGE_SLUGS,
   LOST_DEAL_STAGE_SLUGS,
 } from "@trock-crm/shared/types";
+import { CORRECTIVE_ACTION_OUTSTANDING_SQL_LIST } from "@trock-crm/shared/types";
 
 const SCORECARD_RATING_SET = new Set<string>(FIELD_SCORECARD_RATINGS);
 
@@ -28,15 +29,15 @@ const SCORECARD_RATING_SET = new Set<string>(FIELD_SCORECARD_RATINGS);
 // the Won/Lost slug text[] arrays (passed as query params so the fragment carries no interpolated values).
 // DRIFT RISK: if the server changes activeProjectWhere's shape (e.g. adds a clause), this copy must be updated in
 // lockstep — it is only kept honest by shared slug constants + the finding-C tests, not by a compile-time link.
-const BROWSABLE_PROJECT_SQL = `
+export const BROWSABLE_PROJECT_SQL = `
     d.is_active = true
     AND (
       COALESCE(psc.is_terminal, false) = false
       OR COALESCE(psc.slug, d.bid_board_stage_slug, '') = ANY($1::text[])
     )
     AND COALESCE(psc.slug, d.bid_board_stage_slug, '') <> ALL($2::text[])`;
-const WON_BROWSABLE_SLUGS = [...WON_DEAL_STAGE_SLUGS];
-const LOST_EXCLUDED_SLUGS = [...LOST_DEAL_STAGE_SLUGS];
+export const WON_BROWSABLE_SLUGS = [...WON_DEAL_STAGE_SLUGS];
+export const LOST_EXCLUDED_SLUGS = [...LOST_DEAL_STAGE_SLUGS];
 
 export const SCORECARD_CORRECTIVE_ACTION_EMAIL_JOB = "scorecard_corrective_action_email";
 
@@ -96,9 +97,51 @@ interface ResolvedRecipient {
 interface FlaggedItem {
   itemType: string;
   itemLabel: string;
+  /** 'open' | 'rejected' — both outstanding, but only one means the approver sent it back. */
+  status?: string;
+  /** The approver's most recent reason for returning this item, when there is one. */
+  latestRejection?: string | null;
 }
 
-function basicValidEmail(email: string): boolean {
+// Bounds an approver's rejection reason in the email body. Nothing caps its length, and mail clients clip
+// the END of a long body — which is where the response link lives.
+const MAX_EMAIL_REASON_CHARS = 280;
+
+/**
+ * The outstanding corrective-action rows for a card, with each item's most recent rejection reason.
+ *
+ * ONE definition because there are TWO reads — an initial load and a mandatory pre-send refresh — and they
+ * must not drift. When the refresh projected fewer columns than the load, the mapper silently dropped
+ * `status` and `latest_rejection`, so `isReturn` was always false in the real send path and the changes-
+ * requested wording only ever appeared in a direct unit test of the body builder.
+ *
+ * Ordered by seq, not created_at: events written in one transaction share a timestamp to the microsecond and
+ * the uuid PK is random, so a timestamp sort picks an arbitrary "latest".
+ */
+function outstandingItemsSql(tenantSchema: string): string {
+  return `SELECT id, item_type, item_label, status,
+                 (SELECT e.comment
+                    FROM ${tenantSchema}.scorecard_corrective_action_events e
+                   WHERE e.corrective_action_id = scorecard_corrective_actions.id
+                     AND e.event_type = 'rejected'
+                   ORDER BY e.seq DESC
+                   LIMIT 1) AS latest_rejection
+            FROM ${tenantSchema}.scorecard_corrective_actions
+           WHERE scorecard_id = $1::uuid AND status IN (${CORRECTIVE_ACTION_OUTSTANDING_SQL_LIST})
+           ORDER BY item_type, item_ref`;
+}
+
+/** The one mapper for both reads, so a column added to the SELECT reaches the body from either path. */
+function toFlaggedItem(row: Record<string, unknown>): FlaggedItem {
+  return {
+    itemType: String(row.item_type),
+    itemLabel: String(row.item_label),
+    status: String(row.status ?? "open"),
+    latestRejection: row.latest_rejection == null ? null : String(row.latest_rejection),
+  };
+}
+
+export function basicValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
@@ -125,6 +168,23 @@ function basicValidEmail(email: string): boolean {
  *
  * Nothing here writes deal_team_members — the precedence is applied entirely at read time.
  */
+/**
+ * Which super/PM roles are ASSIGNED AT ALL on a deal, regardless of whether the identity currently resolves
+ * to a usable email. Paired with `recipientResolutionSql`: a role in here but not in there is an assigned
+ * responder this run cannot reach, which is what makes the job throw rather than stamp.
+ *
+ * Exported so anything that has to predict whether a cycle will notify everyone it owes — the backfill
+ * script does, before it commits irreversible mail — asks the same question with the same SQL instead of
+ * re-deriving it and drifting.
+ */
+export function assignedRolesSql(tenantSchema: string): string {
+  return `SELECT DISTINCT dtm.role AS role
+       FROM ${tenantSchema}.deal_team_members dtm
+      WHERE dtm.deal_id = $1::uuid
+        AND dtm.is_active = TRUE
+        AND dtm.role IN ('superintendent', 'project_manager')`;
+}
+
 export function recipientResolutionSql(tenantSchema: string): string {
   // Both branches cast role to TEXT. They are DIFFERENT types in production — field_responders.role is a bare
   // text column with an IN-list CHECK (migration 0198), deal_team_members.role is the deal_team_role ENUM
@@ -450,14 +510,7 @@ export async function handleScorecardCorrectiveActionEmail(
   // whose pick has gone inactive falls back to that same deal-team row, so a genuinely unreachable assignee
   // still blocks. Adding picked-but-unresolvable roles here instead would block forever on a deactivated
   // roster person nobody can replace from the field app — a dead-letter, not a fix.
-  const assignedRes = await query(
-    `SELECT DISTINCT dtm.role AS role
-       FROM ${tenantSchema}.deal_team_members dtm
-      WHERE dtm.deal_id = $1::uuid
-        AND dtm.is_active = TRUE
-        AND dtm.role IN ('superintendent', 'project_manager')`,
-    [dealId]
-  );
+  const assignedRes = await query(assignedRolesSql(tenantSchema), [dealId]);
   const assignedRoles = new Set<RecipientRole>();
   for (const row of assignedRes.rows as any[]) {
     const role = row.role as RecipientRole;
@@ -468,20 +521,15 @@ export async function handleScorecardCorrectiveActionEmail(
 
   // Flagged items for the email body (the open corrective-action rows). We also select each row's id to
   // derive the per-cycle fingerprint below (reuses this one query — no extra round-trip).
-  const flaggedRes = await query(
-    `SELECT id, item_type, item_label FROM ${tenantSchema}.scorecard_corrective_actions
-      WHERE scorecard_id = $1::uuid AND status = 'open'
-      ORDER BY item_type, item_ref`,
-    [scorecardId]
-  );
+  const flaggedRes = await query(outstandingItemsSql(tenantSchema), [scorecardId]);
+
   // NOTE: flaggedRows/flagged are RE-READ + rebuilt from the live open set immediately before send (P2) so the
   // emailed body + the stamp's emitted-id array never carry an item resolved after this initial load. Declared
   // `let` so that fresh read can replace them.
   let flaggedRows = flaggedRes.rows as any[];
-  let flagged: FlaggedItem[] = flaggedRows.map((r) => ({
-    itemType: String(r.item_type),
-    itemLabel: String(r.item_label),
-  }));
+  // toFlaggedItem, not an inline copy — the whole point of that helper is that the two reads cannot drift,
+  // and a duplicated mapping here is exactly the drift it was written to prevent.
+  let flagged: FlaggedItem[] = flaggedRows.map(toFlaggedItem);
 
   // Empty-open-set race (finding 5). We read `scorecard.status` at the TOP of this run, THEN queried the open
   // corrective-action rows above. If the LAST open item is resolved AFTER that status read but BEFORE this
@@ -585,7 +633,7 @@ export async function handleScorecardCorrectiveActionEmail(
     `SELECT status,
             EXISTS (
               SELECT 1 FROM ${tenantSchema}.scorecard_corrective_actions
-               WHERE scorecard_id = $1::uuid AND status = 'open'
+               WHERE scorecard_id = $1::uuid AND status IN (${CORRECTIVE_ACTION_OUTSTANDING_SQL_LIST})
             ) AS has_open
        FROM ${tenantSchema}.field_scorecards WHERE id = $1::uuid LIMIT 1`,
     [scorecardId]
@@ -608,12 +656,8 @@ export async function handleScorecardCorrectiveActionEmail(
   // emitted-id array from the CURRENT open rows makes recipients get an accurate list. If the fresh set is now
   // empty (every item resolved in a tighter race than the has_open recheck caught), bail via the same
   // nothing-to-notify guard — never send the empty-fallback item text, never stamp (a later reopen re-notifies).
-  const freshFlaggedRes = await query(
-    `SELECT id, item_type, item_label FROM ${tenantSchema}.scorecard_corrective_actions
-      WHERE scorecard_id = $1::uuid AND status = 'open'
-      ORDER BY item_type, item_ref`,
-    [scorecardId]
-  );
+  const freshFlaggedRes = await query(outstandingItemsSql(tenantSchema), [scorecardId]);
+
   flaggedRows = freshFlaggedRes.rows as any[];
   if (flaggedRows.length === 0) {
     logger.log(
@@ -622,10 +666,7 @@ export async function handleScorecardCorrectiveActionEmail(
     );
     return;
   }
-  flagged = flaggedRows.map((r) => ({
-    itemType: String(r.item_type),
-    itemLabel: String(r.item_label),
-  }));
+  flagged = flaggedRows.map(toFlaggedItem);
 
   // Per-cycle dimension for the CRM (no-token) idempotency key, computed from the FRESH open set (P2) so a legacy
   // (no-nonce) job's key hashes exactly the ids it is emailing. The preferred `nonce` (read above) is unaffected
@@ -947,11 +988,11 @@ export async function handleScorecardCorrectiveActionEmail(
         AND status = 'corrective_action_open'
         AND EXISTS (
           SELECT 1 FROM ${tenantSchema}.scorecard_corrective_actions
-           WHERE scorecard_id = $1::uuid AND status = 'open'
+           WHERE scorecard_id = $1::uuid AND status IN (${CORRECTIVE_ACTION_OUTSTANDING_SQL_LIST})
         )
         AND NOT EXISTS (
           SELECT 1 FROM ${tenantSchema}.scorecard_corrective_actions
-           WHERE scorecard_id = $1::uuid AND status = 'open' AND NOT (id = ANY($2::uuid[]))
+           WHERE scorecard_id = $1::uuid AND status IN (${CORRECTIVE_ACTION_OUTSTANDING_SQL_LIST}) AND NOT (id = ANY($2::uuid[]))
         )${nonceClause}`,
     stampParams as any[]
   );
@@ -967,7 +1008,7 @@ export async function handleScorecardCorrectiveActionEmail(
       `SELECT corrective_action_email_sent_at,
               EXISTS (
                 SELECT 1 FROM ${tenantSchema}.scorecard_corrective_actions
-                 WHERE scorecard_id = $1::uuid AND status = 'open' AND NOT (id = ANY($2::uuid[]))
+                 WHERE scorecard_id = $1::uuid AND status IN (${CORRECTIVE_ACTION_OUTSTANDING_SQL_LIST}) AND NOT (id = ANY($2::uuid[]))
               ) AS has_new_open
          FROM ${tenantSchema}.field_scorecards WHERE id = $1::uuid LIMIT 1`,
       [scorecardId, emailedIds]
@@ -990,17 +1031,58 @@ export function buildCorrectiveActionEmail(input: {
   flagged: FlaggedItem[];
   link: string;
 }) {
-  const subject = input.projectNumber
-    ? `Corrective action required: ${input.projectNumber} — ${input.scoreText}`
-    : `Corrective action required: ${input.dealName} — ${input.scoreText}`;
+  // DERIVED from state, never carried in the payload. This job runs ~120s after enqueue and the payload
+  // cannot be re-checked, while state can — the same reasoning that put the browsable gate and the status
+  // guard at delivery time rather than enqueue time. If anything is `rejected` when we send, the approver
+  // sent work back and the responder needs to be told that, not asked afresh.
+  const isReturn = input.flagged.some((f) => f.status === "rejected");
+  const where = input.projectNumber ? input.projectNumber : input.dealName;
+  const subject = isReturn
+    ? `Changes requested: ${where} — corrective action returned`
+    : `Corrective action required: ${where} — ${input.scoreText}`;
+
+  // Everything the reader actually sees has to agree with that subject. A returned card whose body still
+  // opens "came in below standard… please document the corrective action taken" reads as a duplicate of the
+  // first request, so the responder has no way to tell a re-send from a rework — and the one thing they need
+  // (what the approver asked for) looks like decoration next to it.
+  const heading = isReturn ? "Changes Requested" : "Corrective Action Required";
+  const leadIn = isReturn
+    ? `Your corrective action for <strong>${escapeHtml(input.dealName)}</strong>${input.projectNumber ? ` (${escapeHtml(input.projectNumber)})` : ""} was reviewed and sent back. Please address the comments below and resubmit:`
+    : `A field scorecard for <strong>${escapeHtml(input.dealName)}</strong>${input.projectNumber ? ` (${escapeHtml(input.projectNumber)})` : ""} came in below standard (${escapeHtml(input.scoreText)}${input.ratingLabel ? ` · ${escapeHtml(input.ratingLabel)}` : ""}). Please document the corrective action taken for each flagged item:`;
+  const textLeadIn = isReturn
+    ? `Your corrective action for ${input.dealName}${input.projectNumber ? ` (${input.projectNumber})` : ""} was reviewed and sent back. ` +
+      `Please address the comments below and resubmit:`
+    : `A field scorecard for ${input.dealName}${input.projectNumber ? ` (${input.projectNumber})` : ""} came in below standard ` +
+      `(${input.scoreText}${input.ratingLabel ? ` · ${input.ratingLabel}` : ""}). Please document the corrective action taken for each flagged item:`;
+  const cta = isReturn ? "Update Corrective Action" : "Document Corrective Action";
+
+  // The reason is bounded for the same reason the oversight email bounds its comments: nothing caps an
+  // approver's comment length, and a long one would push the CTA past where mail clients clip.
+  const reason = (f: FlaggedItem) => {
+    const text = f.latestRejection?.trim();
+    if (!text) return null;
+    return text.length <= MAX_EMAIL_REASON_CHARS
+      ? text
+      : `${text.slice(0, MAX_EMAIL_REASON_CHARS).trimEnd()}… (full comment in the CRM)`;
+  };
 
   const itemsList = input.flagged.length
-    ? input.flagged.map((f) => `• ${f.itemLabel}`).join("\n")
+    ? input.flagged
+        .map((f) => {
+          const why = reason(f);
+          return why ? `• ${f.itemLabel}\n    Sent back: ${why}` : `• ${f.itemLabel}`;
+        })
+        .join("\n")
     : "• (see the CRM for the flagged items)";
 
   const htmlItems = input.flagged.length
     ? `<ul style="margin:8px 0 0 0;padding-left:20px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#111111;">${input.flagged
-        .map((f) => `<li>${escapeHtml(f.itemLabel)}</li>`)
+        .map((f) => {
+          const why = reason(f);
+          return why
+            ? `<li>${escapeHtml(f.itemLabel)}<br /><span style="color:#CC0000;">Sent back:</span> <span style="color:#475569;">${escapeHtml(why)}</span></li>`
+            : `<li>${escapeHtml(f.itemLabel)}</li>`;
+        })
         .join("")}</ul>`
     : `<p style="margin:8px 0 0 0;font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#64748b;">See the CRM for the flagged items.</p>`;
 
@@ -1011,7 +1093,7 @@ export function buildCorrectiveActionEmail(input: {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Corrective action required</title>
+  <title>${heading}</title>
 </head>
 <body style="margin:0;padding:0;background-color:#f4f4f5;">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f4f4f5;">
@@ -1026,19 +1108,19 @@ export function buildCorrectiveActionEmail(input: {
           </tr>
           <tr>
             <td align="center" style="padding:4px 24px 0 24px;">
-              <h1 style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:20px;line-height:26px;color:#111111;font-weight:bold;">Corrective Action Required</h1>
+              <h1 style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:20px;line-height:26px;color:#111111;font-weight:bold;">${heading}</h1>
             </td>
           </tr>
           <tr>
             <td style="padding:12px 28px 0 28px;">
               <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#111111;">Hi ${escapeHtml(input.recipientName)},</p>
-              <p style="margin:12px 0 0 0;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#111111;">A field scorecard for <strong>${escapeHtml(input.dealName)}</strong>${input.projectNumber ? ` (${escapeHtml(input.projectNumber)})` : ""} came in below standard (${escapeHtml(input.scoreText)}${input.ratingLabel ? ` · ${escapeHtml(input.ratingLabel)}` : ""}). Please document the corrective action taken for each flagged item:</p>
+              <p style="margin:12px 0 0 0;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:20px;color:#111111;">${leadIn}</p>
               ${htmlItems}
             </td>
           </tr>
           <tr>
             <td align="center" style="padding:24px;">
-              <a href="${safeLink}" style="display:inline-block;background-color:#CC0000;color:#ffffff;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;line-height:44px;text-align:center;text-decoration:none;width:280px;border-radius:4px;">Document Corrective Action</a>
+              <a href="${safeLink}" style="display:inline-block;background-color:#CC0000;color:#ffffff;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;line-height:44px;text-align:center;text-decoration:none;width:280px;border-radius:4px;">${cta}</a>
             </td>
           </tr>
           <tr>
@@ -1054,12 +1136,11 @@ export function buildCorrectiveActionEmail(input: {
 </html>`;
 
   const text =
-    `Corrective action required\n\n` +
+    `${heading}\n\n` +
     `Hi ${input.recipientName},\n\n` +
-    `A field scorecard for ${input.dealName}${input.projectNumber ? ` (${input.projectNumber})` : ""} came in below standard ` +
-    `(${input.scoreText}${input.ratingLabel ? ` · ${input.ratingLabel}` : ""}). Please document the corrective action taken for each flagged item:\n\n` +
+    `${textLeadIn}\n\n` +
     `${itemsList}\n\n` +
-    `Document the corrective action: ${input.link}`;
+    `${isReturn ? "Update the corrective action" : "Document the corrective action"}: ${input.link}`;
 
   return { subject, html, text };
 }

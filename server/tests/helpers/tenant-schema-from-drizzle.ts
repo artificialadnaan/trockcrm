@@ -10,10 +10,15 @@
 // prod-accurate BY CONSTRUCTION — enum value sets, NOT NULL, defaults and PKs come straight from the
 // table definitions, so they cannot silently diverge again.
 //
-// Scope (deliberate): column TYPES, enum value sets, NOT NULL, column defaults and PRIMARY KEYs are
-// reproduced verbatim. FOREIGN KEYS and INDEXES are intentionally omitted — test tables are islands
-// (we don't stand up the users/companies/deals graph just to insert a usage row), and types are what
-// caused the bugs. Enum types are created in their PROD namespace: shared business enums (audit_action,
+// Scope (deliberate): column TYPES, enum value sets, NOT NULL, column defaults, PRIMARY KEYs and CHECK
+// constraints are reproduced verbatim. FOREIGN KEYS, INDEXES and UNIQUE constraints are intentionally
+// omitted — those are GRAPH/topology concerns and test tables are islands (we don't stand up the
+// users/companies/deals graph just to insert a usage row). A CHECK is the opposite: by definition it
+// cannot join, so it is a pure single-row validity rule that holds on an island exactly as it holds in
+// prod. Leaving CHECKs out was the same blindness as leaving types out — it let fixtures seed rows prod
+// would reject, and a write path that the DB rejects still passed (the deductive change order's negative
+// commission claw-back tripped deal_signed_commissions' 0062 amount >= 0 CHECK, SQLSTATE 23514, which no
+// fixture modelled). Enum types are created in their PROD namespace: shared business enums (audit_action,
 // activity_type, …) in `public`, genuinely tenant-scoped ones (lead_office) in the tenant schema — see
 // TENANT_SCOPED_BARE_ENUMS — so the type relationship matches prod rather than collapsing both.
 
@@ -83,6 +88,24 @@ function renderDefault(column: ReturnType<typeof getTableConfig>["columns"][numb
   return ` DEFAULT '${JSON.stringify(def).replace(/'/g, "''")}'`;
 }
 
+/** Render a Drizzle `check(...)` expression as a table-constraint body.
+ *
+ *  Two adjustments to the dialect's raw output are required:
+ *   • Drizzle renders a column reference QUALIFIED ("deal_signed_commissions"."amount"). Inside a
+ *     CREATE TABLE constraint Postgres rejects that ("invalid reference to FROM-clause entry"), so the
+ *     owning table's qualifier is stripped, leaving the bare "amount". Only THIS table's qualifier is
+ *     stripped — a check can't reference another table anyway, so nothing else should appear.
+ *   • Any bound parameters are inlined: a `CHECK ($1)` placeholder is meaningless in DDL. Checks in this
+ *     repo are written with literals inside the template, so params are normally empty; inlining keeps
+ *     that from becoming a silent trap if one is ever written with an interpolated value.
+ */
+function renderCheck(tableName: string, value: unknown): string {
+  const sqlObj = value as { inlineParams?: () => unknown };
+  const inlined = typeof sqlObj.inlineParams === "function" ? sqlObj.inlineParams() : value;
+  const rendered = dialect.sqlToQuery(inlined as never).sql;
+  return rendered.replaceAll(`"${tableName}".`, "");
+}
+
 /**
  * Generate `CREATE SCHEMA` + `CREATE TYPE` (enums) + `CREATE TABLE` DDL for the given Drizzle tables,
  * all under `schemaName`. Run the result with `db.exec(...)`. Call once per office schema (and once
@@ -123,6 +146,14 @@ export function tenantSchemaSql(schemaName: string, tables: readonly PgTable[]):
       cfg.primaryKeys[0]?.columns.map((c) => `"${c.name}"`) ??
       cfg.columns.filter((c) => c.primary).map((c) => `"${c.name}"`);
     if (pkColumns.length > 0) colDDL.push(`PRIMARY KEY (${pkColumns.join(", ")})`);
+
+    // CHECK constraints, verbatim from the Drizzle `check(...)` entries. A CHECK cannot reference another
+    // table, so it transfers to an island fixture unchanged — and it is exactly the rule class that decides
+    // whether a row prod would REJECT can be seeded (or written) in a test. See renderCheck for why the
+    // table qualifier is stripped.
+    for (const chk of cfg.checks) {
+      colDDL.push(`CONSTRAINT "${chk.name}" CHECK (${renderCheck(cfg.name, chk.value)})`);
+    }
 
     tableDDL.push(`CREATE TABLE ${schemaName}."${cfg.name}" (\n  ${colDDL.join(",\n  ")}\n);`);
   }

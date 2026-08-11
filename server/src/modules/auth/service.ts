@@ -6,6 +6,7 @@ import { db } from "../../db.js";
 import { offices, users, userOfficeAccess } from "@trock-crm/shared/schema";
 import type { JwtClaims } from "@trock-crm/shared/types";
 import { getUserLocalAuthGate } from "./local-auth-service.js";
+import { getOfficeAccess } from "./office-access.js";
 
 function getJwtSecret(): string {
   const secret = process.env.JWT_SECRET;
@@ -782,25 +783,10 @@ export async function canAccessOffice(userId: string, officeId: string): Promise
  * Check office access AND return the role_override if one exists.
  * Primary office always has access with no override.
  */
-export async function getOfficeAccess(
-  userId: string,
-  officeId: string,
-): Promise<{ hasAccess: boolean; roleOverride?: string }> {
-  const user = await getUserById(userId);
-  if (!user) return { hasAccess: false };
-  if (user.officeId === officeId) return { hasAccess: true }; // Primary office, no override
-
-  // Check user_office_access for cross-office access + role override
-  const rows = await db
-    .select()
-    .from(userOfficeAccess)
-    .where(eq(userOfficeAccess.userId, userId))
-    .limit(100);
-
-  const access = rows.find((a) => a.officeId === officeId);
-  if (!access) return { hasAccess: false };
-  return { hasAccess: true, roleOverride: access.roleOverride || undefined };
-}
+// Implementation lives in ./office-access.js so background work can apply the same rule without pulling
+// this module's graph (jsonwebtoken, the local-auth gate) in behind it. Re-exported so every existing
+// caller is unchanged; canAccessOffice above uses the imported binding.
+export { getOfficeAccess };
 
 export async function getAccessibleOffices(
   userId: string,

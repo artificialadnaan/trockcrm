@@ -1,0 +1,62 @@
+-- Migration 0213: partial UNIQUE index on public.job_queue that makes a duplicate glasses-walkthrough
+-- forward impossible rather than merely unlikely.
+--
+-- ROOT CAUSE: ingestGlassesWalkthrough (server/src/modules/walkthrough-capture/
+-- glasses-walkthrough-service.ts) decided whether to enqueue by READING first —
+-- findGlassesWalkthroughForwardJobState, then an unconditional INSERT. Nothing between those two
+-- statements serialised anything: the read takes no lock, and 0211's index is not unique. Two completion
+-- requests for the same (walkId, dealId) that OVERLAP — mobile's ordinary retry after its first response
+-- times out in flight — therefore both observed "no live forward" and both inserted. The result is two
+-- remote walkthroughs in TROCK Scope, two transcriptions and two Anthropic scope extractions, all really
+-- billed, for one walk, with nothing anywhere recording that it happened. A check-then-act guard cannot be
+-- fixed by checking harder; the constraint has to live on the table.
+--
+-- WHY (walkId, dealId) AND NOT walkId: a walkId is minted on the phone and is not unique across deals. One
+-- physical walk is legitimately completed against two deals (a mis-tagged walk corrected, two deals sharing
+-- one site visit), and each of those MUST get its own forward. A unique index on walkId alone would turn
+-- the second deal's forward into a silent no-op — a 201, a full project folder, and no scope — which is a
+-- worse failure than the duplicate this file exists to prevent.
+--
+-- WHY PARTIAL ON status <> 'dead': a dead-lettered walk IS re-enqueued (a site visit is not repeatable, so
+-- a walk must never be permanently stuck), and the replacement inherits the dead row's TROCK Scope
+-- checkpoint. So a dead row and its live replacement coexist for one pair BY DESIGN, as do several dead
+-- rows from successive attempts. Constraining every status would make the one recovery path this feature
+-- has fail with a 23505. 'completed' and 'processing' stay INSIDE the index deliberately: the dedupe's
+-- existing meaning of "already scheduled" is any non-dead row, and a completed forward must not be bought
+-- twice by a late retry either.
+--
+-- WHY THIS IS NOT A REPLACEMENT FOR 0211'S INDEX, despite covering the same two expressions: they are
+-- partial on opposite halves of the same table and neither one can do the other's job.
+--   - 0211 is non-unique and NOT status-partial because the lookup it backs must read DEAD rows — the dead
+--     row is where the inherited scopeWalkthroughId / scopeCreatePendingRef checkpoint lives.
+--   - this one must EXCLUDE dead rows, for the reason above.
+-- Making 0211 unique would break dead-row re-enqueue; adding status <> 'dead' to it would hide the
+-- checkpoints the completion path exists to inherit and buy a second scope extraction per dead-lettered
+-- walk. Two narrow partial indexes on a job type that sees a handful of rows per walk is the cheap side of
+-- that trade.
+--
+-- CONCURRENTLY: same reasoning as 0189/0210/0211. public.job_queue is written continuously (API enqueues +
+-- worker status flips), so a plain CREATE UNIQUE INDEX would hold a SHARE lock and block every insert and
+-- status update for the whole build. CREATE INDEX CONCURRENTLY cannot run inside a transaction block, but
+-- the migration runner (server/src/migrations/runner.ts) executes each .sql file with a bare
+-- client.query(sql) — no BEGIN/COMMIT wrapper — and this file is a SINGLE statement, so PostgreSQL runs it
+-- in autocommit and CONCURRENTLY is permitted.
+--
+-- IF THIS MIGRATION FAILS, IT HAS FOUND THE DEFECT, NOT CAUSED IT. The build errors if two non-dead
+-- forwards already exist for one (walkId, dealId) — i.e. if the race already fired in production, which is
+-- possible: this feature has run end-to-end on real hardware (see 0212). Deciding WHICH of two duplicate
+-- forwards actually reached TROCK Scope, and which remote walkthrough to keep, is a reconciliation only a
+-- human can make; a migration that silently picked one would be choosing which billed transcription to
+-- disown. Mark the losing row 'dead' by hand, then re-run. As with 0189/0210/0211, an interrupted
+-- CONCURRENTLY build can leave an INVALID index stub that IF NOT EXISTS would then skip — reindex/drop-
+-- invalid is the same ops step it is for those.
+--
+-- Schema source of truth: shared/src/schema/public/job-queue.ts must carry the matching
+-- uniqueIndex("job_queue_glasses_walkthrough_forward_live_uniq") entry, ALONGSIDE (not replacing) the
+-- existing index("job_queue_glasses_walkthrough_forward_idx"), so db:generate sees parity rather than
+-- drift. That file was outside this change's allowed paths and the entry is NOT yet added — see the PR
+-- notes; it must land before the next db:generate.
+
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS job_queue_glasses_walkthrough_forward_live_uniq
+  ON public.job_queue ((payload->>'walkId'), (payload->>'dealId'))
+  WHERE job_type = 'glasses_walkthrough_forward' AND status <> 'dead';

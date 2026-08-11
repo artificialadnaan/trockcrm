@@ -4,6 +4,7 @@ import { CheckCircle2, Loader2, Upload, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { isApiError } from "@/lib/api";
+import { isCorrectiveActionOutstanding } from "@trock-crm/shared/types";
 import {
   useCorrectiveActions,
   submitCorrectiveActionResponse,
@@ -67,8 +68,18 @@ export default function CorrectiveActionResponderPage() {
 
   const { items, loading, error, errorStatus, refetch } = useCorrectiveActions(id, token);
 
-  const openCount = useMemo(() => items.filter((i) => i.status !== "resolved").length, [items]);
-  const allResolved = items.length > 0 && openCount === 0;
+  // OUTSTANDING = open or rejected. Counting "anything not resolved" as open broke twice over after
+  // migration 0202: `resolved` no longer exists, so every settled item counted as open — and a rejected item
+  // genuinely IS still theirs to fix, which the old predicate could not express.
+  const openCount = useMemo(
+    () => items.filter((i) => isCorrectiveActionOutstanding(i.status)).length,
+    [items],
+  );
+  // NOTHING LEFT FOR THE RESPONDER is not the same as APPROVED. When the last outstanding item is submitted
+  // the card sits at corrective_action_submitted, and an approver can still send it back — telling the
+  // responder it is "resolved" would be a promise this page cannot keep.
+  const nothingOutstanding = items.length > 0 && openCount === 0;
+  const allApproved = nothingOutstanding && items.every((i) => i.status === "approved");
 
   // A missing token is as unusable as an expired one — the server would 401 anyway; short-circuit with the
   // same clear message so the recipient knows to use the link from their email.
@@ -101,21 +112,38 @@ export default function CorrectiveActionResponderPage() {
         <p className="text-xs font-semibold uppercase tracking-wide text-brand-red">T Rock · Corrective Action</p>
         <h1 className="mt-1 text-2xl font-semibold">Document the corrective actions</h1>
         <p className="mt-1 text-sm text-slate-600">
-          Add a photo and a short note for each flagged item below. Once every item has a response, this
-          scorecard is automatically marked resolved.
+          Add a photo and a short note for each flagged item below. Once every item has a response it goes to
+          an approver, who either accepts it or sends it back with a note saying what still needs doing.
         </p>
+        {/* Counts what is ANSWERED, and says so — the old copy promised the scorecard would be "automatically
+            marked resolved", which stopped being true the moment an approver could send work back, and
+            directly contradicted the awaiting-approval banner immediately below it. */}
         <p className="mt-2 text-sm font-medium text-slate-700">
-          {items.length - openCount} of {items.length} resolved
+          {items.filter((i) => i.status === "approved").length} of {items.length} approved
+          {openCount > 0 ? ` · ${openCount} still needing a response` : ""}
         </p>
       </header>
 
       <div className="mx-auto max-w-2xl space-y-4 px-4 py-6 sm:px-6">
-        {allResolved && (
+        {allApproved && (
           <div className="flex items-center gap-3 rounded-lg border border-emerald-200 bg-emerald-50 p-4 text-emerald-800">
             <CheckCircle2 className="h-6 w-6 shrink-0" />
             <div>
-              <p className="font-semibold">All corrective actions complete</p>
-              <p className="text-sm">Thank you — this scorecard has been marked resolved.</p>
+              <p className="font-semibold">All corrective actions approved</p>
+              <p className="text-sm">Thank you — this scorecard is complete.</p>
+            </div>
+          </div>
+        )}
+
+        {nothingOutstanding && !allApproved && (
+          <div className="flex items-center gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 text-amber-900">
+            <CheckCircle2 className="h-6 w-6 shrink-0" />
+            <div>
+              <p className="font-semibold">Submitted — awaiting approval</p>
+              <p className="text-sm">
+                Your responses have been sent for review. If anything needs more work you will get another
+                email with the reason.
+              </p>
             </div>
           </div>
         )}
@@ -201,7 +229,15 @@ function ItemCard({
   const discardArgsRef = useRef({ scorecardId, token });
   discardArgsRef.current = { scorecardId, token };
 
-  const isResolved = item.status === "resolved";
+  // Settled = submitted (with the approver) or approved. Only an OUTSTANDING item keeps an active form;
+  // otherwise a responder could post repeatedly over work already sitting in the approver's queue.
+  const isResolved = !isCorrectiveActionOutstanding(item.status);
+  // The approver's most recent reason, read from the thread the API already returns. Only shown while the
+  // item is theirs to fix — once resubmitted, the thread below carries the full history.
+  const latestRejection =
+    item.status === "rejected"
+      ? [...(item.events ?? [])].reverse().find((e) => e.eventType === "rejected") ?? null
+      : null;
 
   const onPickFiles = useCallback(
     async (files: FileList | null) => {
@@ -381,34 +417,104 @@ function ItemCard({
         </div>
         <span
           className={`shrink-0 rounded-full border px-2.5 py-0.5 text-xs font-semibold ${
-            isResolved
+            item.status === "approved"
               ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-              : "border-amber-200 bg-amber-50 text-amber-700"
+              : item.status === "submitted"
+                ? "border-slate-200 bg-slate-50 text-slate-700"
+                : item.status === "rejected"
+                  ? "border-red-200 bg-red-50 text-red-700"
+                  : "border-amber-200 bg-amber-50 text-amber-700"
           }`}
         >
-          {isResolved ? "Resolved" : "Open"}
+          {item.status === "approved"
+            ? "Approved"
+            : item.status === "submitted"
+              ? "Awaiting approval"
+              : item.status === "rejected"
+                ? "Changes requested"
+                : "Open"}
         </span>
       </div>
 
-      {isResolved ? (
-        <div className="mt-3 border-l-2 border-slate-200 pl-3">
-          <p className="text-xs text-slate-500">
-            {item.responderName ?? item.responderEmail ?? "Responder"}
-            {item.respondedAt ? ` · ${new Date(item.respondedAt).toLocaleDateString()}` : ""}
+      {/* WHY it came back, on the form where the rework happens. Preserving the rejection history in the API
+          achieves nothing if the responder has to go back to their email to read it. */}
+      {latestRejection && (
+        <div className="mt-3 rounded-md border border-red-200 bg-red-50 p-3">
+          <p className="text-[11px] font-bold uppercase tracking-wide text-red-700">
+            {latestRejection.actorName ? `Sent back by ${latestRejection.actorName}` : "Sent back"}
           </p>
-          {item.responseComment && <p className="mt-1 text-sm text-slate-900">{item.responseComment}</p>}
-          {item.photos.length > 0 && (
-            <div className="mt-2 grid grid-cols-3 gap-2 sm:grid-cols-4">
-              {item.photos.map((p) =>
-                p.url ? (
-                  <a key={p.id} href={p.url} target="_blank" rel="noopener noreferrer">
-                    <img
-                      src={p.url}
-                      alt="Corrective action"
-                      className="aspect-square w-full rounded-md object-cover ring-1 ring-slate-200"
-                    />
-                  </a>
-                ) : null,
+          <p className="mt-1 whitespace-pre-wrap text-sm text-red-900">{latestRejection.comment}</p>
+        </div>
+      )}
+
+      {isResolved ? (
+        /* The THREAD, per attempt. Pairing the latest responseComment with item.photos — the aggregate of
+           every photo ever linked — showed the rejected attempt's evidence as if it belonged to the newest
+           response, while the earlier comment and the approver's verdict vanished. The API already returns
+           per-attempt sets; use them. Falls back to the stored columns for a card the 0202 seed did not
+           reach, which has no thread to render. */
+        <div className="mt-3 space-y-3">
+          {(item.events?.length ?? 0) > 0 ? (
+            item.events!.map((event) => (
+              <div key={event.id} className="border-l-2 border-slate-200 pl-3">
+                <p className="text-xs text-slate-500">
+                  <span
+                    className={
+                      event.eventType === "approved"
+                        ? "font-semibold text-emerald-700"
+                        : event.eventType === "rejected"
+                          ? "font-semibold text-red-700"
+                          : "font-semibold text-slate-700"
+                    }
+                  >
+                    {event.eventType === "approved"
+                      ? "Approved"
+                      : event.eventType === "rejected"
+                        ? "Sent back"
+                        : "Submitted"}
+                  </span>
+                  {` · ${event.actorName ?? event.actorEmail ?? "Unknown"}`}
+                  {event.createdAt ? ` · ${new Date(event.createdAt).toLocaleDateString()}` : ""}
+                </p>
+                {event.comment && <p className="mt-1 text-sm text-slate-900">{event.comment}</p>}
+                {event.photos.length > 0 && (
+                  <div className="mt-2 grid grid-cols-3 gap-2 sm:grid-cols-4">
+                    {event.photos.map((p) =>
+                      p.url ? (
+                        <a key={p.id} href={p.url} target="_blank" rel="noopener noreferrer">
+                          <img
+                            src={p.url}
+                            alt="Corrective action"
+                            className="aspect-square w-full rounded-md object-cover ring-1 ring-slate-200"
+                          />
+                        </a>
+                      ) : null,
+                    )}
+                  </div>
+                )}
+              </div>
+            ))
+          ) : (
+            <div className="border-l-2 border-slate-200 pl-3">
+              <p className="text-xs text-slate-500">
+                {item.responderName ?? item.responderEmail ?? "Responder"}
+                {item.respondedAt ? ` · ${new Date(item.respondedAt).toLocaleDateString()}` : ""}
+              </p>
+              {item.responseComment && <p className="mt-1 text-sm text-slate-900">{item.responseComment}</p>}
+              {item.photos.length > 0 && (
+                <div className="mt-2 grid grid-cols-3 gap-2 sm:grid-cols-4">
+                  {item.photos.map((p) =>
+                    p.url ? (
+                      <a key={p.id} href={p.url} target="_blank" rel="noopener noreferrer">
+                        <img
+                          src={p.url}
+                          alt="Corrective action"
+                          className="aspect-square w-full rounded-md object-cover ring-1 ring-slate-200"
+                        />
+                      </a>
+                    ) : null,
+                  )}
+                </div>
               )}
             </div>
           )}

@@ -1,16 +1,19 @@
-import React, { useMemo, useState } from "react";
-import { Linking, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
+import React, { useEffect, useMemo, useState } from "react";
+import { FlatList, Linking, Pressable, RefreshControl, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { theme } from "../../../src/theme/theme";
 import { useQuery } from "@tanstack/react-query";
 import { useProjectPhotos, useProjectReports, useProjectScorecards } from "../../../src/query/hooks";
 import { useAuth } from "../../../src/auth/AuthContext";
-import { getReportDownload, getTranscriptionConfig } from "../../../src/api/endpoints";
+import { getAiReportStatus, getReportDownload, getTranscriptionConfig } from "../../../src/api/endpoints";
 import {
   categoryLabel,
   correctiveAffordance,
+  decodeChangeOrderParam,
+  encodeChangeOrderParam,
   filterPhotos,
+  formatDealDisplayName,
   groupPhotos,
   isProjectOffOffice,
   projectNumberLabel,
@@ -22,7 +25,7 @@ import {
 import { Badge, Button, Chip, EmptyState, LoadingState, SectionLabel } from "../../../src/components/ui";
 import { Banner } from "../../../src/components/Banner";
 import { ScreenHeader } from "../../../src/components/ScreenHeader";
-import { PhotoGrid } from "../../../src/components/PhotoGrid";
+import { PHOTO_GRID_COLUMNS, PhotoGridRow, usePhotoTileSize } from "../../../src/components/PhotoGrid";
 import { PhotoViewerModal } from "../../../src/components/PhotoViewerModal";
 import { ReportBuilder } from "../../../src/components/ReportBuilder";
 import { PhotoShareModal } from "../../../src/components/PhotoShareModal";
@@ -30,12 +33,41 @@ import { Ionicons } from "@expo/vector-icons";
 import { RatingBadge } from "../../../src/components/RatingBadge";
 import { formatShortDate } from "../../../src/scorecards/detail-view";
 
+/** A row of the virtualized gallery: either a group heading or one row of thumbnails. */
+type GalleryItem =
+  | { kind: "label"; key: string; label: string }
+  | { kind: "row"; key: string; photos: FieldPhoto[] };
+
 const GROUPINGS: { value: PhotoGrouping; label: string }[] = [
   { value: "date", label: "Date" },
   { value: "category", label: "Category" },
   { value: "uploader", label: "Uploader" },
   { value: "none", label: "None" },
 ];
+
+/**
+ * How the screen follows a run the builder stopped watching.
+ *
+ * The interval is slow on purpose — this is a background courtesy, not the foreground poll. The window
+ * comfortably outlasts the server's own total deadline, so a run that is going to file at all has filed by
+ * the time it closes.
+ */
+const AWAIT_REPORT_POLL_MS = 10_000;
+/**
+ * Sized from the SERVER's lifecycle rather than picked to feel long enough — but deliberately NOT sized for
+ * its absolute worst case.
+ *
+ * It covers a normal run comfortably: the model phase runs to a 12-minute default with a 15-minute
+ * configurable ceiling (server ai-report-limits.ts), plus the render and upload that follow. A ten-minute
+ * watch gave up well inside that and left healthy runs' reports to be found by hand.
+ *
+ * It does NOT cover every path, and that is a choice. A run queued behind others on the serial poller, or
+ * one reclaimed after a worker died (STALE_RUN_MINUTES, then the queue's own reclaim deferral, then a fresh
+ * attempt), can outlast this. Sizing for that would mean polling a phone every ten seconds for the better
+ * part of an hour, which costs the user more than it returns — the report still lands, and still shows on
+ * the next visit or pull-to-refresh. What this window guarantees is that the watcher always terminates.
+ */
+const AWAIT_REPORT_WINDOW_MS = 30 * 60_000;
 
 function toStr(v: string | string[] | undefined): string {
   return Array.isArray(v) ? v[0] ?? "" : v ?? "";
@@ -45,6 +77,8 @@ export default function ProjectDetailScreen() {
   const params = useLocalSearchParams<{
     id: string;
     name?: string;
+    /** "1"/"0" from the list row — `deals.is_change_order`, the authority for the name relabel. */
+    isChangeOrder?: string;
     projectNumber?: string;
     propertyAddress?: string;
     stage?: string;
@@ -52,6 +86,10 @@ export default function ProjectDetailScreen() {
     officeSlug?: string;
   }>();
   const dealId = toStr(params.id);
+  // `deals.is_change_order`, forwarded by the list row as "1"/"0". Anything else — absent on a direct
+  // deep link, or an empty string — decodes to UNDEFINED, so the display helper reads the name instead
+  // of being told "not a change order".
+  const changeOrderParam = decodeChangeOrderParam(params.isChangeOrder);
   const router = useRouter();
   const { fetcher, user, activeOfficeId } = useAuth();
   // Off-office projects are view-only until cross-office writes ship: the single-office report/capture
@@ -89,6 +127,8 @@ export default function ProjectDetailScreen() {
   // filter change can never desync the viewer onto a different photo.
   const [viewer, setViewer] = useState<{ photos: FieldPhoto[]; index: number } | null>(null);
   const [reportOpen, setReportOpen] = useState(false);
+  // The run id the builder handed back when it stopped waiting on a generation — see the effect below.
+  const [backgroundRunId, setBackgroundRunId] = useState<string | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
   const [notice, setNotice] = useState<{ message: string; tone: "success" | "error" } | null>(null);
 
@@ -125,26 +165,85 @@ export default function ProjectDetailScreen() {
     }
   }
 
+  // The gallery flattened into list rows: a label per group, then that group's photos chunked into rows of
+  // PHOTO_GRID_COLUMNS. Keys are derived from photo ids (stable across refetches) rather than the index, so
+  // a refetch doesn't remount every row. The group label is part of the label key because two groups can
+  // legitimately share a name once a filter narrows them.
+  const tileSize = usePhotoTileSize();
+  const galleryItems = useMemo(() => {
+    const items: GalleryItem[] = [];
+    for (const [index, group] of groups.entries()) {
+      if (group.photos.length === 0) continue;
+      // Indexed, not keyed on the label text. Two groups sharing a label should not happen now
+      // that grouping and headings both use the local day, but a duplicate key here does not
+      // warn harmlessly — React may drop or duplicate rows, so the gallery would quietly lose
+      // photos. The index costs nothing and makes that impossible regardless.
+      items.push({ kind: "label", key: `label:${index}:${group.label}`, label: group.label });
+      for (let i = 0; i < group.photos.length; i += PHOTO_GRID_COLUMNS) {
+        const rowPhotos = group.photos.slice(i, i + PHOTO_GRID_COLUMNS);
+        items.push({ kind: "row", key: `row:${group.label}:${rowPhotos[0].id}`, photos: rowPhotos });
+      }
+    }
+    return items;
+  }, [groups]);
+
+  // A generation the builder stopped waiting on — the sheet was closed, or its foreground poll timed out —
+  // still finishes server-side and files its report. Nothing here would ever notice: useProjectReports has
+  // no polling interval and refreshes only from onGenerated or a manual pull, so "the report will appear in
+  // this project's reports when it finishes" held only if the user happened to pull to refresh.
+  //
+  // The RUN is followed, not the report count. A count only says "some report arrived", so an unrelated
+  // report filed against this project in the meantime would end the watch on the wrong event — and the
+  // refetch that ended it would not yet contain the AI report. Only the run says whether THIS one landed.
+  // Bounded by a window so an abandoned run cannot leave a timer going indefinitely.
+  // reportsQuery/fetcher are deliberately not dependencies: they change identity on every fetch and would
+  // restart the poll each time.
+  useEffect(() => {
+    if (!backgroundRunId) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const startedAt = Date.now();
+
+    const check = async () => {
+      if (cancelled) return;
+      try {
+        const status = await getAiReportStatus(fetcher, backgroundRunId);
+        if (cancelled) return;
+        if (status.status === "succeeded") {
+          setBackgroundRunId(null);
+          void reportsQuery.refetch();
+          setNotice({ message: "Your AI report is ready.", tone: "success" });
+          return;
+        }
+        if (status.status === "failed") {
+          setBackgroundRunId(null);
+          setNotice({ message: status.error || "The AI report could not be generated.", tone: "error" });
+          return;
+        }
+      } catch {
+        // A dropped poll on jobsite LTE is not a verdict — keep waiting until the window closes.
+      }
+      if (cancelled) return;
+      if (Date.now() - startedAt > AWAIT_REPORT_WINDOW_MS) {
+        setBackgroundRunId(null);
+        return;
+      }
+      timer = setTimeout(check, AWAIT_REPORT_POLL_MS);
+    };
+
+    timer = setTimeout(check, AWAIT_REPORT_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [backgroundRunId]);
+
   const refreshing = photosQuery.isRefetching || reportsQuery.isRefetching || scorecardsQuery.isRefetching;
 
-  return (
-    <SafeAreaView style={styles.safe} edges={["top"]}>
-      <ScreenHeader onBack={() => router.back()} title={toStr(params.name) || "Project"} />
-
-      <ScrollView
-        contentContainerStyle={styles.body}
-        refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={() => {
-              void photosQuery.refetch();
-              void reportsQuery.refetch();
-              void scorecardsQuery.refetch();
-            }}
-            tintColor={theme.color.brandRed}
-          />
-        }
-      >
+  // Everything above the gallery, handed to the list as its header so it scrolls with the photos.
+  const galleryHeader = (
+    <View style={styles.headerStack}>
         {/* Name lives in the persistent header band now; the body leads with stage + address + meta. */}
         <View style={{ gap: theme.space.xs }}>
           {params.stage ? <Badge label={toStr(params.stage)} /> : null}
@@ -168,6 +267,9 @@ export default function ProjectDetailScreen() {
                   params: {
                     dealId,
                     targetName: toStr(params.name),
+                    // Forward the AUTHORITY, not just the name — but only when we actually have one.
+                    // `toStr(undefined)` was emitting "", which capture then read as an assertive FALSE.
+                    isChangeOrder: encodeChangeOrderParam(changeOrderParam),
                     projectNumber: toStr(params.projectNumber),
                     stage: toStr(params.stage),
                     propertyAddress: toStr(params.propertyAddress),
@@ -209,6 +311,154 @@ export default function ProjectDetailScreen() {
         ) : null}
 
         {notice ? <Banner message={notice.message} tone={notice.tone} /> : null}
+
+        {/* Reports — ABOVE the gallery deliberately. A project accumulates hundreds of photos, so a reports
+            list sitting underneath them was several screens of scrolling away and effectively
+            undiscoverable; the generated PDF is what most people open this screen to fetch. */}
+        <View style={{ gap: theme.space.sm }}>
+          <SectionLabel>Reports</SectionLabel>
+          {reportsQuery.isLoading ? (
+            <LoadingState label="Loading reports…" />
+          ) : (reportsQuery.data?.reports ?? []).length === 0 ? (
+            <Text style={styles.meta}>
+              {offOffice
+                ? "No reports yet."
+                : allPhotos.length === 0
+                  ? "No reports yet. Build one once you've added photos."
+                  // "below", not "above": the gallery now sits underneath this section.
+                  : "No reports yet. Build one from the photos below."}
+            </Text>
+          ) : (
+            (reportsQuery.data?.reports ?? []).map((report) => (
+              <Pressable
+                key={report.id}
+                onPress={() => openReport(report.id)}
+                style={({ pressed }) => [styles.reportRow, pressed && { opacity: 0.7 }]}
+              >
+                <Text style={styles.reportTitle} numberOfLines={1}>
+                  {report.title}
+                </Text>
+                <Text style={styles.link}>Open PDF</Text>
+              </Pressable>
+            ))
+          )}
+        </View>
+
+        {/* Scorecards — count on detail is the sole discoverability surface (no list badge, per non-goals).
+            ABOVE the gallery, directly under Reports, for the same reason Reports moved there: these rows
+            use the same styling as report rows and field users read them as reports too, so leaving them
+            under a few thousand photo tiles made the one section with an outstanding corrective action the
+            hardest thing on the screen to reach. Keep both lists together above the photo-scoped controls. */}
+        <View style={{ gap: theme.space.sm }}>
+          <SectionLabel>Scorecards ({scorecards.length})</SectionLabel>
+          {scorecardsQuery.isLoading ? (
+            <LoadingState label="Loading scorecards…" />
+          ) : scorecardsQuery.isError ? (
+            // Don't let a load failure read as a genuinely-empty project — pull-to-refresh re-runs the query.
+            <Text style={styles.meta}>Couldn't load scorecards. Pull to refresh.</Text>
+          ) : scorecards.length === 0 ? (
+            <Text style={styles.meta}>No scorecards yet.</Text>
+          ) : (
+            scorecards.map((s) => {
+              // Kind-aware, exactly like the Scorecards submitted list: a leadership card's totalScore is
+              // averageScore*10, so it must render as `X.X/10` (never `90/100`) and be labeled leadership.
+              // The summary DTO carries kind + averageScore; fall back to totalScore/10 defensively so a
+              // missing value never renders "undefined/10". Project rows are unchanged.
+              const isLeadership = s.kind === "leadership";
+              const scoreText = isLeadership
+                ? `${(s.averageScore ?? s.totalScore / 10).toFixed(1)}/10`
+                : `${s.totalScore}/100`;
+              // The responder endpoint is restricted to the assigned super/PM or an admin/director, so the
+              // affordance is TAPPABLE only when the server says this viewer can respond (else it 403s → a
+              // load error). correctiveAffordance encodes all four (open/closed × can/can't) cases.
+              const affordance = correctiveAffordance(s.status, s.canRespondToCorrectiveAction === true);
+              // Derive the SPOKEN corrective wording from the same affordance value that drives the VISIBLE
+              // affordance below (open_* → "required", awaiting → "awaiting approval", closed_* →
+              // "approved", none → silent) so screen-reader semantics stay aligned with what's rendered
+              // rather than re-deriving from raw s.status.
+              const correctiveA11y =
+                affordance === "open_tappable" || affordance === "open_status"
+                  ? ", corrective action required"
+                  : affordance === "awaiting_status"
+                    ? ", corrective action awaiting approval"
+                    : affordance === "closed_tappable" || affordance === "closed_status"
+                      ? ", corrective action approved"
+                      : "";
+              return (
+                // The corrective controls are SIBLINGS of the row Pressable (not nested inside it): a nested
+                // Pressable's press still bubbles to the parent row's onPress on RN, so tapping "Corrective
+                // action required" would queue the responder route AND the parent's detail route → detail
+                // wins and the responder never shows. As siblings, only the tapped control's onPress fires.
+                <View key={s.id} style={styles.scorecardRowGroup}>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={`${isLeadership ? "Leadership scorecard" : "Scorecard"}, week of ${formatShortDate(s.weekOf)}, ${scoreText}, ${s.ratingLabel}${correctiveA11y}`}
+                    onPress={() => router.push({ pathname: "/(app)/scorecards/view/[id]", params: { id: s.id } })}
+                    style={({ pressed }) => [styles.reportRow, pressed && { opacity: 0.7 }]}
+                  >
+                    <View style={{ flex: 1, gap: 4 }}>
+                      <Text style={styles.reportTitle} numberOfLines={1}>
+                        {isLeadership ? "Leadership · " : ""}Week of {formatShortDate(s.weekOf)}
+                        {s.submittedByName ? ` · ${s.submittedByName}` : ""}
+                        {s.criticalDeficiencyCount > 0
+                          ? ` · ${s.criticalDeficiencyCount} critical ${s.criticalDeficiencyCount === 1 ? "deficiency" : "deficiencies"}`
+                          : ""}
+                      </Text>
+                      <RatingBadge rating={s.rating} label={`${scoreText} · ${s.ratingLabel}`} />
+                    </View>
+                  </Pressable>
+                  {/* Corrective-action affordance, gated on server authorization (canRespond). A viewer who
+                      CAN respond gets a TAPPABLE prompt (open card) / "Resolved" badge (closed card) that
+                      routes to the itemized response screen. A viewer who CANNOT respond sees the same
+                      status as read-only text with NO route — the responder endpoint would 403 them, so
+                      routing there would only produce a load error. Both tappable variants route to the
+                      response screen (read-only for a resolved card), not the detail view. Rendered as a
+                      SIBLING of the row Pressable above so a tap here can't bubble into the detail route. */}
+                  {affordance === "open_tappable" ? (
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Document the corrective action"
+                      onPress={() => router.push({ pathname: "/(app)/scorecards/corrective-action/[id]", params: { id: s.id } })}
+                      style={({ pressed }) => [styles.correctivePrompt, pressed && { opacity: 0.75 }]}
+                    >
+                      <Ionicons name="alert-circle" size={16} color={theme.color.brandRed} />
+                      <Text style={styles.correctivePromptText}>Corrective action required</Text>
+                      <Text style={styles.correctiveChevron}>›</Text>
+                    </Pressable>
+                  ) : affordance === "open_status" ? (
+                    <View accessibilityRole="text" accessibilityLabel="Corrective action required" style={styles.correctiveStatus}>
+                      <Ionicons name="alert-circle" size={16} color={theme.color.brandRed} />
+                      <Text style={styles.correctivePromptText}>Corrective action required</Text>
+                    </View>
+                  ) : affordance === "awaiting_status" ? (
+                    // Visible but NOT tappable: the responder has answered and an approver is reviewing, so
+                    // there is nothing for them to do — but hiding it entirely made the workflow look ended.
+                    <View accessibilityRole="text" accessibilityLabel="Corrective action awaiting approval" style={styles.correctiveStatus}>
+                      <Ionicons name="time-outline" size={16} color="#B45309" />
+                      <Text style={styles.correctivePromptText}>Awaiting approval</Text>
+                    </View>
+                  ) : affordance === "closed_tappable" ? (
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Review the approved corrective action"
+                      onPress={() => router.push({ pathname: "/(app)/scorecards/corrective-action/[id]", params: { id: s.id } })}
+                      style={({ pressed }) => [styles.correctiveResolved, pressed && { opacity: 0.75 }]}
+                    >
+                      <Ionicons name="checkmark-circle" size={14} color="#166534" />
+                      <Text style={styles.correctiveResolvedText}>Approved</Text>
+                      <Text style={styles.correctiveResolvedChevron}>›</Text>
+                    </Pressable>
+                  ) : affordance === "closed_status" ? (
+                    <View accessibilityRole="text" accessibilityLabel="Corrective action approved" style={styles.correctiveResolved}>
+                      <Ionicons name="checkmark-circle" size={14} color="#166534" />
+                      <Text style={styles.correctiveResolvedText}>Approved</Text>
+                    </View>
+                  ) : null}
+                </View>
+              );
+            })
+          )}
+        </View>
 
         {/* Grouping + filters — only meaningful once there are photos to group/filter (#13). */}
         {allPhotos.length > 0 ? (
@@ -271,157 +521,61 @@ export default function ProjectDetailScreen() {
             ) : null}
           </View>
         ) : null}
+    </View>
+  );
 
-        {/* Gallery */}
-        {photosQuery.isLoading ? (
-          <LoadingState label="Loading photos…" />
-        ) : flattened.length === 0 ? (
-          <EmptyState
-            title="No photos"
-            subtitle={allPhotos.length === 0 ? "Capture photos to see them here." : "No photos match these filters."}
+  return (
+    <SafeAreaView style={styles.safe} edges={["top"]}>
+      {/* Display-only change-order prefix. The `params.name` value itself stays RAW — it is forwarded on
+          to /capture and then /walk, where it becomes a walk title PERSISTED to the server. */}
+      <ScreenHeader onBack={() => router.back()} title={formatDealDisplayName(toStr(params.name), changeOrderParam) || "Project"} />
+
+      {/* The gallery is VIRTUALIZED. It used to be a ScrollView rendering every photo of every group,
+          which on a project with thousands of photos mounted thousands of native image views and held
+          each decoded thumbnail for as long as the screen stayed open — memory the photo viewer then had
+          to allocate its full-size decode on top of. A row at a time lets offscreen ones unmount. */}
+      <FlatList
+        data={galleryItems}
+        keyExtractor={(item) => item.key}
+        renderItem={({ item }) =>
+          item.kind === "label" ? (
+            <Text style={styles.groupLabel}>{item.label}</Text>
+          ) : (
+            <View style={styles.galleryRow}>
+              <PhotoGridRow photos={item.photos} size={tileSize} onPress={openPhoto} />
+            </View>
+          )
+        }
+        ListHeaderComponent={galleryHeader}
+        ListEmptyComponent={
+          photosQuery.isLoading ? (
+            <LoadingState label="Loading photos…" />
+          ) : (
+            <EmptyState
+              title="No photos"
+              subtitle={allPhotos.length === 0 ? "Capture photos to see them here." : "No photos match these filters."}
+            />
+          )
+        }
+        contentContainerStyle={styles.listContent}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => {
+              void photosQuery.refetch();
+              void reportsQuery.refetch();
+              void scorecardsQuery.refetch();
+            }}
+            tintColor={theme.color.brandRed}
           />
-        ) : (
-          <View style={{ gap: theme.space.lg }}>
-            {groups.map((group) => (
-              <View key={group.label} style={{ gap: theme.space.sm }}>
-                <Text style={styles.groupLabel}>{group.label}</Text>
-                <PhotoGrid photos={group.photos} onPress={openPhoto} />
-              </View>
-            ))}
-          </View>
-        )}
-
-        {/* Reports */}
-        <View style={{ gap: theme.space.sm }}>
-          <SectionLabel>Reports</SectionLabel>
-          {reportsQuery.isLoading ? (
-            <LoadingState label="Loading reports…" />
-          ) : (reportsQuery.data?.reports ?? []).length === 0 ? (
-            <Text style={styles.meta}>
-              {offOffice
-                ? "No reports yet."
-                : allPhotos.length === 0
-                  ? "No reports yet. Build one once you've added photos."
-                  : "No reports yet. Build one from the photos above."}
-            </Text>
-          ) : (
-            (reportsQuery.data?.reports ?? []).map((report) => (
-              <Pressable
-                key={report.id}
-                onPress={() => openReport(report.id)}
-                style={({ pressed }) => [styles.reportRow, pressed && { opacity: 0.7 }]}
-              >
-                <Text style={styles.reportTitle} numberOfLines={1}>
-                  {report.title}
-                </Text>
-                <Text style={styles.link}>Open PDF</Text>
-              </Pressable>
-            ))
-          )}
-        </View>
-
-        {/* Scorecards — count on detail is the sole discoverability surface (no list badge, per non-goals). */}
-        <View style={{ gap: theme.space.sm }}>
-          <SectionLabel>Scorecards ({scorecards.length})</SectionLabel>
-          {scorecardsQuery.isLoading ? (
-            <LoadingState label="Loading scorecards…" />
-          ) : scorecardsQuery.isError ? (
-            // Don't let a load failure read as a genuinely-empty project — pull-to-refresh re-runs the query.
-            <Text style={styles.meta}>Couldn't load scorecards. Pull to refresh.</Text>
-          ) : scorecards.length === 0 ? (
-            <Text style={styles.meta}>No scorecards yet.</Text>
-          ) : (
-            scorecards.map((s) => {
-              // Kind-aware, exactly like the Scorecards submitted list: a leadership card's totalScore is
-              // averageScore*10, so it must render as `X.X/10` (never `90/100`) and be labeled leadership.
-              // The summary DTO carries kind + averageScore; fall back to totalScore/10 defensively so a
-              // missing value never renders "undefined/10". Project rows are unchanged.
-              const isLeadership = s.kind === "leadership";
-              const scoreText = isLeadership
-                ? `${(s.averageScore ?? s.totalScore / 10).toFixed(1)}/10`
-                : `${s.totalScore}/100`;
-              // The responder endpoint is restricted to the assigned super/PM or an admin/director, so the
-              // affordance is TAPPABLE only when the server says this viewer can respond (else it 403s → a
-              // load error). correctiveAffordance encodes all four (open/closed × can/can't) cases.
-              const affordance = correctiveAffordance(s.status, s.canRespondToCorrectiveAction === true);
-              // Derive the SPOKEN corrective wording from the same affordance value that drives the VISIBLE
-              // affordance below (open_* → "required", closed_* → "resolved", none → silent) so screen-reader
-              // semantics stay aligned with what's rendered rather than re-deriving from raw s.status.
-              const correctiveA11y =
-                affordance === "open_tappable" || affordance === "open_status"
-                  ? ", corrective action required"
-                  : affordance === "closed_tappable" || affordance === "closed_status"
-                    ? ", corrective action resolved"
-                    : "";
-              return (
-                // The corrective controls are SIBLINGS of the row Pressable (not nested inside it): a nested
-                // Pressable's press still bubbles to the parent row's onPress on RN, so tapping "Corrective
-                // action required" would queue the responder route AND the parent's detail route → detail
-                // wins and the responder never shows. As siblings, only the tapped control's onPress fires.
-                <View key={s.id} style={styles.scorecardRowGroup}>
-                  <Pressable
-                    accessibilityRole="button"
-                    accessibilityLabel={`${isLeadership ? "Leadership scorecard" : "Scorecard"}, week of ${formatShortDate(s.weekOf)}, ${scoreText}, ${s.ratingLabel}${correctiveA11y}`}
-                    onPress={() => router.push({ pathname: "/(app)/scorecards/view/[id]", params: { id: s.id } })}
-                    style={({ pressed }) => [styles.reportRow, pressed && { opacity: 0.7 }]}
-                  >
-                    <View style={{ flex: 1, gap: 4 }}>
-                      <Text style={styles.reportTitle} numberOfLines={1}>
-                        {isLeadership ? "Leadership · " : ""}Week of {formatShortDate(s.weekOf)}
-                        {s.submittedByName ? ` · ${s.submittedByName}` : ""}
-                        {s.criticalDeficiencyCount > 0
-                          ? ` · ${s.criticalDeficiencyCount} critical ${s.criticalDeficiencyCount === 1 ? "deficiency" : "deficiencies"}`
-                          : ""}
-                      </Text>
-                      <RatingBadge rating={s.rating} label={`${scoreText} · ${s.ratingLabel}`} />
-                    </View>
-                  </Pressable>
-                  {/* Corrective-action affordance, gated on server authorization (canRespond). A viewer who
-                      CAN respond gets a TAPPABLE prompt (open card) / "Resolved" badge (closed card) that
-                      routes to the itemized response screen. A viewer who CANNOT respond sees the same
-                      status as read-only text with NO route — the responder endpoint would 403 them, so
-                      routing there would only produce a load error. Both tappable variants route to the
-                      response screen (read-only for a resolved card), not the detail view. Rendered as a
-                      SIBLING of the row Pressable above so a tap here can't bubble into the detail route. */}
-                  {affordance === "open_tappable" ? (
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityLabel="Document the corrective action"
-                      onPress={() => router.push({ pathname: "/(app)/scorecards/corrective-action/[id]", params: { id: s.id } })}
-                      style={({ pressed }) => [styles.correctivePrompt, pressed && { opacity: 0.75 }]}
-                    >
-                      <Ionicons name="alert-circle" size={16} color={theme.color.brandRed} />
-                      <Text style={styles.correctivePromptText}>Corrective action required</Text>
-                      <Text style={styles.correctiveChevron}>›</Text>
-                    </Pressable>
-                  ) : affordance === "open_status" ? (
-                    <View accessibilityRole="text" accessibilityLabel="Corrective action required" style={styles.correctiveStatus}>
-                      <Ionicons name="alert-circle" size={16} color={theme.color.brandRed} />
-                      <Text style={styles.correctivePromptText}>Corrective action required</Text>
-                    </View>
-                  ) : affordance === "closed_tappable" ? (
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityLabel="Review the resolved corrective action"
-                      onPress={() => router.push({ pathname: "/(app)/scorecards/corrective-action/[id]", params: { id: s.id } })}
-                      style={({ pressed }) => [styles.correctiveResolved, pressed && { opacity: 0.75 }]}
-                    >
-                      <Ionicons name="checkmark-circle" size={14} color="#166534" />
-                      <Text style={styles.correctiveResolvedText}>Resolved</Text>
-                      <Text style={styles.correctiveResolvedChevron}>›</Text>
-                    </Pressable>
-                  ) : affordance === "closed_status" ? (
-                    <View accessibilityRole="text" accessibilityLabel="Corrective action resolved" style={styles.correctiveResolved}>
-                      <Ionicons name="checkmark-circle" size={14} color="#166534" />
-                      <Text style={styles.correctiveResolvedText}>Resolved</Text>
-                    </View>
-                  ) : null}
-                </View>
-              );
-            })
-          )}
-        </View>
-      </ScrollView>
+        }
+        // Row heights vary (a group label vs a thumbnail row), so no getItemLayout — these keep the
+        // mounted window small without it.
+        windowSize={7}
+        initialNumToRender={9}
+        maxToRenderPerBatch={9}
+        removeClippedSubviews
+      />
 
       {viewer !== null ? (
         <PhotoViewerModal photos={viewer.photos} initialIndex={viewer.index} visible projectDealId={dealId} onClose={() => setViewer(null)} />
@@ -438,6 +592,9 @@ export default function ProjectDetailScreen() {
           void reportsQuery.refetch();
           if (report.pdfUrl) void Linking.openURL(report.pdfUrl);
         }}
+        onLeftRunning={(runId) => setBackgroundRunId(runId)}
+        // The watcher owns the lock: it is the only thing that learns when the run reaches a terminal state.
+        backgroundRunActive={backgroundRunId !== null}
       />
 
       <PhotoShareModal
@@ -453,7 +610,12 @@ export default function ProjectDetailScreen() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: theme.color.surfaceApp },
-  body: { padding: theme.space.lg, gap: theme.space.lg, paddingBottom: theme.space.xxl },
+  // Replaces the old `body` style, which carried gap:lg. As a LIST content container that gap would apply
+  // between every row, spacing thumbnail rows 16pt apart instead of the grid's 4 — so spacing is per item
+  // now: rows sit tight on the grid's own gutter, group headings get real separation.
+  listContent: { padding: theme.space.lg, paddingBottom: theme.space.xxl },
+  headerStack: { gap: theme.space.lg, marginBottom: theme.space.lg },
+  galleryRow: { marginBottom: 4 },
   address: { fontFamily: theme.font.body, fontSize: 14, color: theme.color.textMuted },
   meta: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted },
   actions: { flexDirection: "row", gap: theme.space.md },
@@ -462,7 +624,14 @@ const styles = StyleSheet.create({
   // Muted so the "Filters" toggle doesn't compete with the red primary "Add photos".
   linkMuted: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.textMuted },
   chipRow: { flexDirection: "row", flexWrap: "wrap", gap: theme.space.sm },
-  groupLabel: { fontFamily: theme.font.semibold, fontSize: 15, color: theme.color.textPrimary },
+  groupLabel: {
+    fontFamily: theme.font.semibold,
+    fontSize: 15,
+    color: theme.color.textPrimary,
+    // Was inherited from the old nested gaps; now that every group heading is a list row it carries its own.
+    marginTop: theme.space.md,
+    marginBottom: theme.space.sm,
+  },
   reportRow: {
     flexDirection: "row",
     alignItems: "center",

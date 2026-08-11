@@ -63,6 +63,13 @@ export const fieldScorecards = pgTable(
     pdfGeneratedAt: timestamp("pdf_generated_at", { withTimezone: true }),
     /** Renderer revision used for the stored PDF artifact. Version 1 covers legacy/unversioned PDFs. */
     pdfRenderVersion: smallint("pdf_render_version").default(1).notNull(),
+    /**
+     * The scorecard `updated_at` the stored PDF artifact was rendered from (migration 0200). Written in the
+     * same guarded CAS UPDATE that publishes pdf_r2_key. needsScorecardPdfRegeneration compares it against
+     * the live updated_at, so any content change — including a corrective-action response — invalidates the
+     * cached artifact. NULL on every pre-migration row, which reads as stale.
+     */
+    pdfContentGeneration: timestamp("pdf_content_generation", { withTimezone: true }),
     emailSentAt: timestamp("email_sent_at", { withTimezone: true }),
     // Idempotency stamp for the below-band corrective-action notification (migration 0193). Mirrors
     // email_sent_at: the scorecard_corrective_action_email worker handler stamps this once after sending to
@@ -76,6 +83,37 @@ export const fieldScorecards = pgTable(
     // current cycle's matching-nonce job stamps. Nullable: legacy cards + legacy in-flight jobs (no payload
     // nonce) fall back to the pre-guard stamp behavior.
     correctiveActionCycleNonce: uuid("corrective_action_cycle_nonce"),
+    /**
+     * Per-cycle idempotency stamps for the OVERSIGHT notification (migration 0201) — the
+     * FIELD_SCORECARD_EMAIL_RECIPIENTS watchers, told once when a corrective action opens and once when it
+     * completes. Separate from correctiveActionEmailSentAt on purpose: that stamp drives the RESPONDER
+     * state machine, and an oversight-send failure must not be able to corrupt responder delivery.
+     *
+     * These stamps — NOT the cycle nonce — are the oversight handler's dedup. The responder worker rotates
+     * corrective_action_cycle_nonce on its self-repair path, so gating oversight on a nonce match would
+     * strand a pending "opened" notice. Cleared wherever a fresh cycle starts, so a reopen re-notifies.
+     */
+    correctiveActionOversightOpenedAt: timestamp("corrective_action_oversight_opened_at", { withTimezone: true }),
+    correctiveActionOversightClosedAt: timestamp("corrective_action_oversight_closed_at", { withTimezone: true }),
+    /**
+     * "The approver has been told this cycle needs review." The THIRD phase stamp — each phase dedups on its
+     * OWN column, so reusing either oversight stamp would make an approval request suppress the opened or the
+     * completion notice for the same cycle. Cleared, like the others, when a genuine reopen mints a new cycle.
+     */
+    correctiveActionApprovalRequestedAt: timestamp("corrective_action_approval_requested_at", {
+      withTimezone: true,
+    }),
+    /**
+     * INDEPENDENT supersession marker for the oversight flow (migration 0201), rotated ONLY where a genuinely
+     * new corrective-action cycle begins.
+     *
+     * correctiveActionCycleNonce cannot serve this purpose: the responder worker's self-repair rotates it
+     * without starting a new cycle, so a handler gating its SEND on that nonce could not tell "superseded by
+     * a reopen" (skip) from "the responder job repaired itself" (must still send). This one is unambiguous,
+     * which lets the oversight handler refuse to send before delivery — the only thing that closes the window
+     * where a job already CLAIMED by a worker would otherwise duplicate a notice.
+     */
+    correctiveActionOversightCycle: uuid("corrective_action_oversight_cycle"),
     isActive: boolean("is_active").default(true).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
@@ -117,6 +155,13 @@ export const fieldScorecardPhotos = pgTable(
     // row is deleted (a removed flag's row is purged on edit), its RESPONSE-photo LINK rows go with it, so a
     // null-corrective_action_id row is never left behind to be mis-read as original section evidence.
     correctiveActionId: uuid("corrective_action_id"),
+    /**
+     * The specific response ATTEMPT these photos document (migration 0202), so "the photos from attempt 2"
+     * stays answerable after attempt 3. Null for original evidence and for every pre-approval response
+     * photo; correctiveActionId still means "photos for this item" in aggregate. ON DELETE SET NULL, not
+     * CASCADE: losing an event row must not delete the photo LINK, which the item-level id still governs.
+     */
+    correctiveActionEventId: uuid("corrective_action_event_id"),
     fileId: uuid("file_id").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },

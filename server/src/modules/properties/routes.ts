@@ -5,6 +5,7 @@ import { requestAuditContext, writeSoftDeleteAuditLog } from "../../lib/soft-del
 import { redactDealList, shouldIncludeHubspotId } from "../deals/redact.js";
 import { createProperty, deleteProperty, getPropertyDetail, listProperties, updateProperty } from "./service.js";
 import { parseMoneyBound } from "./query-params.js";
+import { matchProperties } from "./match-service.js";
 import { randomUUID } from "node:crypto";
 import {
   PROPERTY_IMAGE_MAX_BYTES,
@@ -20,6 +21,20 @@ import { deleteObject, isR2Configured, putObject } from "../../lib/r2-client.js"
 import { generateAndStoreThumbnail, probeStorableImageFormat, transcodeHeicToStorableJpeg } from "../../lib/image-thumbnail.js";
 
 const router = Router();
+
+/**
+ * A query-string coordinate, or null.
+ *
+ * `Number("")` is 0, not NaN, so a blank `?lat=` reads as the equator: a bad position that matches
+ * nothing rather than an absent one that degrades to address-only matching. Blank-checked BEFORE
+ * coercion for that reason.
+ */
+function readCoordinateParam(raw: unknown, limit: number): number | null {
+  if (typeof raw !== "string" || raw.trim() === "") return null;
+  const value = Number(raw);
+  return Number.isFinite(value) && Math.abs(value) <= limit ? value : null;
+}
+
 
 router.get("/", async (req, res, next) => {
   try {
@@ -44,9 +59,41 @@ router.get("/", async (req, res, next) => {
   }
 });
 
+/**
+ * GET /api/properties/match?lat=&lng=&address= — the property a rep is standing at.
+ *
+ * Deliberately a READ that returns candidates rather than a create-or-get. The field capture shows what
+ * matched and why, and only offers "add a new property" when this comes back empty — because the
+ * alternative, creating on a near-miss, is how ~94 duplicate property groups happen faster.
+ *
+ * Returns [] rather than erroring when there is nothing to match on; see matchProperties.
+ */
+router.get("/match", async (req, res, next) => {
+  try {
+    const matches = await matchProperties(req.tenantDb!, {
+      lat: readCoordinateParam(req.query.lat, 90),
+      lng: readCoordinateParam(req.query.lng, 180),
+      address: typeof req.query.address === "string" ? req.query.address : null,
+      // Locality can only DISPROVE an address match — "100 Main St" exists in every city, and without
+      // these the copy two towns over outranks the building the rep is standing on.
+      city: typeof req.query.city === "string" ? req.query.city : null,
+      state: typeof req.query.state === "string" ? req.query.state : null,
+      zip: typeof req.query.zip === "string" ? req.query.zip : null,
+    });
+    // Commit like every sibling handler. Without it this tenant-scoped request falls through to the
+    // close-event rollback and holds its pooled client until the response finishes — avoidable pool
+    // pressure on the one route a rep hits at every stop.
+    await req.commitTransaction!();
+    res.json({ matches });
+  } catch (err) {
+    next(err);
+  }
+});
+
 router.post("/", async (req, res, next) => {
   try {
-    const { companyId, name, address, city, state, zip, buildYear, unitCount, notes } = req.body;
+    const { companyId, name, address, city, state, zip, buildYear, unitCount, notes, lat, lng } =
+      req.body;
     if (!companyId) {
       throw new AppError(400, "companyId is required");
     }
@@ -63,6 +110,13 @@ router.post("/", async (req, res, next) => {
       buildYear,
       unitCount,
       notes,
+      // Optional and additive — every existing caller omits them and is unchanged. Field capture sends
+      // the Mapbox geocode so the property is findable by distance next time someone stands there.
+      lat,
+      lng,
+      // Who keyed it in. Properties have no owner column, so this is the ONLY record of authorship.
+      // Taken from the session, never the body, so it can't be spoofed by a crafted request.
+      createdByUserId: req.user!.id,
     });
     await req.commitTransaction!();
     res.status(201).json({ property });
@@ -73,7 +127,11 @@ router.post("/", async (req, res, next) => {
 
 router.patch("/:id", async (req, res, next) => {
   try {
-    const allowedFields = ["address", "city", "state", "zip", "buildYear", "unitCount"] as const;
+    // lat/lng included so a cleared geocode can be RESTORED. An address edit wipes the pair (a geocode
+    // of the old line is worse than none), and without a write path here the only way to set
+    // coordinates was creation — leaving every edited or legacy property permanently address-only, and
+    // making the "the next field visit repopulates it" note a promise nothing could keep.
+    const allowedFields = ["address", "city", "state", "zip", "buildYear", "unitCount", "lat", "lng"] as const;
     const input: Parameters<typeof updateProperty>[2] = {};
     for (const field of allowedFields) {
       if (Object.prototype.hasOwnProperty.call(req.body, field)) {

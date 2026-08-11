@@ -38,12 +38,15 @@ beforeAll(async () => {
   await pg.exec(`SET TimeZone='UTC';`);
   await pg.exec(`
     CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, name text, slug text UNIQUE, is_terminal boolean NOT NULL DEFAULT false);
+    -- The deal projections resolve the configured project-type digit through this table (it is what
+    -- the At Risk service split reads), so every fixture exercising them needs it present.
+    CREATE TABLE IF NOT EXISTS public.project_type_config (id uuid PRIMARY KEY, name text NOT NULL, code text);
     CREATE TABLE deals (
       id uuid PRIMARY KEY,
       deal_number varchar(50), name varchar(500), stage_id uuid, assigned_rep_id uuid,
       primary_contact_id uuid, billing_contact_id uuid, billing_contact_required_at timestamptz, company_id uuid, property_id uuid, source_lead_id uuid,
       dd_estimate numeric(14, 2), bid_estimate numeric(14, 2), awarded_amount numeric(14, 2),
-      awarded_amount_overridden boolean, dd_estimate_overridden boolean, change_order_total numeric(14, 2), description text,
+      awarded_amount_overridden boolean, dd_estimate_overridden boolean, change_order_total numeric(14, 2), scope_title varchar(120), description text,
       estimator text, property_address text, property_city varchar(255), property_state varchar(2),
       property_zip varchar(10), property_country text, office_code text, project_type text,
       project_type_id uuid, region_id uuid, source varchar(100), win_probability integer,

@@ -30,7 +30,26 @@ export const qk = {
   contacts: (scope: QueryScope, params?: Record<string, unknown>) =>
     ["contacts", scope, params ?? {}] as const,
   contact: (scope: QueryScope, id: string) => ["contact", scope, id] as const,
+  leads: (scope: QueryScope, params?: Record<string, unknown>) =>
+    ["leads", scope, params ?? {}] as const,
+  lead: (scope: QueryScope, id: string) => ["lead", scope, id] as const,
+  /** One payload per period mode — the whole showcase arrives in a single request. */
+  mondayShowcase: (scope: QueryScope, mode: string) => ["monday-showcase", scope, mode] as const,
+  showcaseEvidence: (scope: QueryScope, metric: string, mode: string) =>
+    ["showcase-evidence", scope, metric, mode] as const,
+  properties: (scope: QueryScope, params?: Record<string, unknown>) =>
+    ["properties", scope, params ?? {}] as const,
+  property: (scope: QueryScope, id: string) => ["property", scope, id] as const,
+  companies: (scope: QueryScope, params?: Record<string, unknown>) =>
+    ["companies", scope, params ?? {}] as const,
+  company: (scope: QueryScope, id: string) => ["company", scope, id] as const,
+  globalSearch: (scope: QueryScope, q: string) => ["global-search", scope, q] as const,
+  tasks: (scope: QueryScope, params?: Record<string, unknown>) =>
+    ["tasks", scope, params ?? {}] as const,
+  taskCounts: (scope: QueryScope) => ["task-counts", scope] as const,
   stages: (scope: QueryScope) => ["stages", scope] as const,
+  /** Lead stages are a SEPARATE workflow family from deal stages — different endpoint, different rows. */
+  leadStages: (scope: QueryScope) => ["lead-stages", scope] as const,
   dealActivities: (scope: QueryScope, dealId: string) =>
     ["deal-activities", scope, dealId] as const,
   contactDeals: (scope: QueryScope, contactId: string) =>

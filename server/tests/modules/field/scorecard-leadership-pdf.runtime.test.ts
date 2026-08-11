@@ -34,7 +34,7 @@ function leadershipInput(over: Record<string, unknown> = {}) {
 }
 
 describe("leadership scorecard PDF", () => {
-  it("builds a leadership render model: 4 categories, no deficiencies/actions/signatures, a summary", () => {
+  it("builds a leadership render model: 4 categories, no deficiencies/signatures, a summary", () => {
     const data = buildScorecardPdfData(leadershipInput());
     expect(data.kind).toBe("leadership");
     expect(data.formVersion).toBe(2);
@@ -45,11 +45,40 @@ describe("leadership scorecard PDF", () => {
       "Site Staff Feedback",
     ]);
     expect(data.deficiencies).toHaveLength(0);
+    // Empty because the FIXTURE sends none, not because the kind strips them — see the next test.
     expect(data.actionItems).toHaveLength(0);
     expect(data.superintendentSignature).toBeNull();
     expect(data.pmSignature).toBeNull();
     expect(data.summary).toBe("Strong leadership week; keep reinforcing daily huddles.");
     expect(data.ratingLabel).toBe("Meets Standard");
+  });
+
+  it("carries a leadership card's action items into the render model, trimmed and blank-filtered", () => {
+    // This used to be hardcoded to `[]` for leadership, so the PDF omitted the Action Items block while the
+    // Corrective Actions block beneath it referenced those same items by label — a report that named work
+    // with nothing above it to name. The block itself was already kind-agnostic; only the strip was not.
+    const data = buildScorecardPdfData(
+      leadershipInput({
+        actionItems: ["  Rebuild the look-ahead  ", "", "   ", "Close the safety observations"],
+      }),
+    );
+    expect(data.actionItems).toEqual(["Rebuild the look-ahead", "Close the safety observations"]);
+  });
+
+  it("renders a below-band leadership PDF carrying action items", async () => {
+    const buffer = await renderFieldScorecardPdf(
+      buildScorecardPdfData(
+        leadershipInput({
+          totalScore: 60,
+          averageScore: 6,
+          rating: "corrective_action" as const,
+          actionItems: ["Rebuild the look-ahead", "Close the safety observations"],
+        }),
+      ),
+    );
+    // A real PDF, not a stub — the renderer must survive the newly-reachable leadership + action-items combo.
+    expect(buffer.subarray(0, 5).toString("latin1")).toBe("%PDF-");
+    expect(buffer.length).toBeGreaterThan(1000);
   });
 
   it("routes category and project_summary photos into their corresponding evidence groups", () => {

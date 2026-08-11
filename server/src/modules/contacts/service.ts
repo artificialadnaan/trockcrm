@@ -63,6 +63,10 @@ export interface CreateContactInput {
   // The user creating the contact becomes its owner ("whoever creates it owns it"). Optional +
   // null-safe so non-interactive callers (imports/sync) can omit it and leave the contact unowned.
   ownerUserId?: string | null;
+  // Who keyed the record in. Kept SEPARATE from ownerUserId even though the two start equal here:
+  // ownership moves as accounts are reassigned, authorship does not, and the canvassing report counts
+  // what a person entered. Null for machine callers, which the report reads as unattributed.
+  createdByUserId?: string | null;
 }
 
 function validateEmailInput(email: string | null | undefined): void {
@@ -146,6 +150,8 @@ export interface DedupCheckResult {
     lastName: string;
     email: string | null;
     companyName: string | null;
+    /** Joined from companies — authoritative, unlike the nullable free-text `companyName`. */
+    linkedCompanyName: string | null;
     // Candidates include soft-deleted contacts (email/name hard-block applies regardless of is_active), so
     // surface this flag — a "use this instead" consumer must not offer an inactive record (Codex P2).
     isActive: boolean;
@@ -274,6 +280,13 @@ function levenshteinDistance(a: string, b: string): number {
   return prev[n];
 }
 
+/** True only when BOTH sides name a company and they agree. undefined === undefined is not a match. */
+function bothNameSameCompany(a: string | null | undefined, b: string | null | undefined): boolean {
+  const left = a?.trim().toLowerCase() ?? "";
+  const right = b?.trim().toLowerCase() ?? "";
+  return left.length > 0 && left === right;
+}
+
 /**
  * Check for duplicate contacts before creation.
  *
@@ -333,7 +346,13 @@ export async function checkForDuplicates(
   if (input.companyName && input.companyName.trim().length > 0) {
     fuzzyConditions.push(
       and(
-        sql`LOWER(${contacts.companyName}) = LOWER(${input.companyName.trim()})`,
+        /* EITHER company name. A contact linked by companyId usually has nothing in the free-text
+           column, so matching on that alone left real duplicates outside the candidate set — and with
+           LIMIT 50 they could be crowded out before the Levenshtein pass ever saw them. */
+        or(
+          sql`LOWER(${contacts.companyName}) = LOWER(${input.companyName.trim()})`,
+          sql`LOWER(${companies.name}) = LOWER(${input.companyName.trim()})`,
+        ),
         sql`LOWER(${contacts.lastName}) = LOWER(${input.lastName.trim()})`
       )
     );
@@ -346,13 +365,39 @@ export async function checkForDuplicates(
       lastName: contacts.lastName,
       email: contacts.email,
       companyName: contacts.companyName,
+      /**
+       * The AUTHORITATIVE employer, joined rather than read off the free-text column.
+       *
+       * `contacts.companyName` is nullable text that a linked contact often does not carry at all —
+       * and the field-capture screen sets only `companyId`, so its own contacts reach a duplicate
+       * prompt with no company and no email. Two active people with the same name then render as two
+       * identical rows, the rep picks blind, and the chosen id is attached to the visit permanently.
+       */
+      linkedCompanyName: companies.name,
       isActive: contacts.isActive,
     })
     .from(contacts)
+    .leftJoin(companies, eq(companies.id, contacts.companyId))
     // Only ACTIVE contacts are offered as "use this instead" suggestions — a soft-deleted/merged record is
     // not assignable, and returning only-inactive matches would leave the caller unable to create at all
     // (the exact-email/name HARD-block below still considers inactive, independently).
     .where(and(...conditions, or(...fuzzyConditions), eq(contacts.isActive, true)))
+    /**
+     * COMPANY MATCHES FIRST, because the cap is applied before the JS pass.
+     *
+     * `lastName OR (company AND lastName)` simplifies to `lastName`, so widening the predicate to the
+     * joined company name could not by itself change which rows survive: in an office with more than
+     * 50 active contacts sharing a surname, the actual same-company duplicate was still crowded out by
+     * an unordered LIMIT, and the Levenshtein filter never saw it. Ordering is what makes the new
+     * predicate matter.
+     */
+    .orderBy(
+      input.companyName?.trim()
+        ? desc(
+            sql`CASE WHEN LOWER(COALESCE(${companies.name}, ${contacts.companyName})) = LOWER(${input.companyName.trim()}) THEN 1 ELSE 0 END`
+          )
+        : sql`1`
+    )
     .limit(50); // fetch more candidates; JS Levenshtein narrows below
 
   // JS: filter by first-name Levenshtein distance < 3 to catch typos/nicknames
@@ -367,7 +412,12 @@ export async function checkForDuplicates(
     matchReason:
       normalizeName(match.firstName, match.lastName) === normalizedInput
         ? "Exact name match"
-        : match.companyName?.toLowerCase() === input.companyName?.toLowerCase()
+        : // TRIMMED on both sides, matching the SQL predicate above, and BOTH must be non-empty.
+          // Untrimmed input meant "Acme " could satisfy the query and then be labelled "Same name";
+          // and with optional chaining, a contact with no company against an input with no company
+          // compared undefined to undefined and claimed "Same last name + company" for two records
+          // sharing nothing but a surname.
+          bothNameSameCompany(match.linkedCompanyName ?? match.companyName, input.companyName)
           ? "Same last name + company"
           : "Same name",
   }));
@@ -631,11 +681,38 @@ export async function createContact(
 
   // Run dedup check unless explicitly skipped
   if (!skipDedupCheck) {
+    /**
+     * Resolve the company NAME from the id when the caller only sent one.
+     *
+     * Dedup matches and ranks on the company name, but the field capture creates a contact with
+     * `companyId` alone — it has picked a company record, not typed a string. So the strongest signal
+     * available was dropped on the one path most likely to be re-entering a person: same-company
+     * candidates were neither preferred by the predicate nor ordered ahead of the 50-row cap.
+     */
+    /**
+     * The LINKED company wins whenever there is one.
+     *
+     * Resolving the id only as a fallback let a stale free-text `companyName` override a valid
+     * `companyId` — so the input side matched and ranked on one name while every candidate carried the
+     * joined one, and a genuine same-company duplicate could sit behind the 50-row cap. The id names a
+     * record; the text is whatever was typed once.
+     */
+    const linkedCompanyName = input.companyId
+      ? (
+          await tenantDb
+            .select({ name: companies.name })
+            .from(companies)
+            .where(eq(companies.id, input.companyId))
+            .limit(1)
+        )[0]?.name
+      : undefined;
+    const companyNameForDedup = linkedCompanyName ?? input.companyName?.trim();
+
     const dedupResult = await checkForDuplicates(tenantDb, {
       firstName: input.firstName,
       lastName: input.lastName,
       email: input.email,
-      companyName: input.companyName,
+      companyName: companyNameForDedup ?? undefined,
     });
 
     if (dedupResult.hardBlock) {
@@ -678,6 +755,7 @@ export async function createContact(
         procoreContactId: input.procoreContactId ?? null,
         hubspotContactId: input.hubspotContactId ?? null,
         ownerId: input.ownerUserId ?? null,
+        createdByUserId: input.createdByUserId ?? null,
       })
       .returning();
   } catch (err: any) {

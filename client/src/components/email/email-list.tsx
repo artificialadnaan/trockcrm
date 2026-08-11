@@ -15,6 +15,25 @@ interface EmailListProps {
   error: string | null;
   onPageChange: (page: number) => void;
   emptyMessage?: string;
+  /**
+   * Per-row reassign/unassign, forwarded straight to EmailRow. Both are OPTIONAL and there is no
+   * client-side permission check behind them: EmailRow renders its overflow menu only when at least
+   * one is supplied, so a consumer that passes neither (the company, lead and contact tabs — the deal
+   * tab is the only one that passes them, and the inbox uses a different list component entirely)
+   * gets exactly the row it got before. Whether the acting user may actually move the thread is the
+   * server's call — a denial comes back as a 403 the handler surfaces as a toast.
+   */
+  onReassign?: (email: Email) => void;
+  onUnassign?: (email: Email) => void;
+  /**
+   * Fired when the thread view opened from this list moves a conversation off, or onto, a deal.
+   *
+   * This list swaps ITSELF for EmailThreadView rather than routing to it, so the component that owns
+   * the email query never unmounts and its data goes stale behind the thread view. A consumer whose
+   * list is scoped to one deal must pass its refetch here or a move made in the thread view is
+   * invisible until the tab is left and re-entered.
+   */
+  onThreadChanged?: () => void;
 }
 
 export function EmailList({
@@ -24,6 +43,9 @@ export function EmailList({
   error,
   onPageChange,
   emptyMessage = "No emails yet",
+  onReassign,
+  onUnassign,
+  onThreadChanged,
 }: EmailListProps) {
   const [selectedEmail, setSelectedEmail] = useState<Email | null>(null);
   const [manualDialogOpen, setManualDialogOpen] = useState(false);
@@ -57,6 +79,7 @@ export function EmailList({
       <EmailThreadView
         conversationId={selectedEmail.graphConversationId}
         onBack={() => setSelectedEmail(null)}
+        onThreadChanged={onThreadChanged}
       />
     );
   }
@@ -126,6 +149,8 @@ export function EmailList({
             key={email.id}
             email={email}
             onClick={handleSelectEmail}
+            onReassign={onReassign}
+            onUnassign={onUnassign}
           />
         ))}
       </div>

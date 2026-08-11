@@ -10,6 +10,7 @@ import {
   fieldScorecardPhotos,
   fieldScorecardEditUploads,
   scorecardCorrectiveActions,
+  scorecardCorrectiveActionEvents,
   scorecardCorrectiveActionTokens,
   scorecardCorrectiveActionUploads,
   dealTeamMembers,
@@ -26,7 +27,9 @@ const USER = "33333333-3333-3333-3333-333333333333";
 // A non-terminal (browsable) pipeline stage so both deals pass the active-scorecard/browsable-project gate
 // (authorizeCorrectiveAction now applies it — finding P2).
 const STAGE_ACTIVE = "cccccccc-0000-0000-0000-000000000001";
-const OFFICE = { id: "office-1", slug: "test" };
+// A real UUID: job_queue.office_id is `uuid` in prod, and closing a corrective action now enqueues the
+// oversight notification, so a placeholder string id would fail the insert here but never in production.
+const OFFICE = { id: "00000000-0000-0000-0000-0000000000f1", slug: "test" };
 
 // The identity requireFieldContractor injects for the SESSION path.
 let sessionUser: { id: string; role: string } = { id: USER, role: "field_contractor" };
@@ -129,6 +132,7 @@ beforeAll(async () => {
       // such binding row (the lookup no-ops), but the table must exist for the query to run.
       fieldScorecardEditUploads,
       scorecardCorrectiveActions,
+  scorecardCorrectiveActionEvents,
       scorecardCorrectiveActionTokens,
       scorecardCorrectiveActionUploads,
       dealTeamMembers,
@@ -285,7 +289,7 @@ describe("token-scoped corrective-action photo upload", () => {
       .send({ comment: "fixed with photo", photoFileIds: [fileId] });
     expect(resp.status).toBe(200);
     const resolved = resp.body.items.find((i: any) => i.id === itemId);
-    expect(resolved.status).toBe("resolved");
+    expect(resolved.status).toBe("submitted");
     expect(resolved.photos.map((p: any) => p.fileId)).toContain(fileId);
   });
 

@@ -99,7 +99,7 @@ import { cn } from "@/lib/utils";
 import { buildProcoreBidBoardProjectUrl } from "@/lib/procore";
 import { isDealScopeReadOnlyAfterRfp } from "@/lib/deal-scope-lock";
 import { isRfpDetailPollActive } from "@/lib/rfp-detail-poll";
-import { formatCurrency, bestEstimateCaptionLabel, formatDealDisplayNumber, resolveBestEstimate, resolveDealValueKind, LOST_BID_VALUE_LABEL } from "@/lib/deal-utils";
+import { formatCurrency, bestEstimateCaptionLabel, formatDealDisplayName, formatDealDisplayNumber, resolveBestEstimate, resolveDealValueKind, LOST_BID_VALUE_LABEL } from "@/lib/deal-utils";
 import {
   getCanonicalDealStageSlugs,
   getDealStageLabelBySlug,
@@ -117,6 +117,8 @@ import {
   toCanonicalDealStageSlug,
   type AtRiskResult,
   type UserRole,
+  isGenuineEstimatingDealStageSlug,
+  resolveAtRiskSuppressionDay,
 } from "@trock-crm/shared/types";
 
 function bidBoardSyncTimeAgo(date: string | null | undefined) {
@@ -282,6 +284,13 @@ function getDealDetailSlaResult(
       onHoldAccumulatedSecondsAtStageEntry: deal.onHoldAccumulatedSecondsAtStageEntry,
       // A today-or-future close target postpones the at-risk verdict (mirrors the server path).
       expectedCloseDate: deal.expectedCloseDate,
+      // In the estimating stage the 90-day auto-park horizon is the BID due date (2026-07-27). This is the
+      // deal-detail RESOLVED bid due date (getDealDetail resolves it lead-first for a lead-backed deal),
+      // which is the SAME value getDealDetail feeds into the server-stamped `deal.atRisk` taken above — so
+      // this fallback and the server verdict can never disagree about the horizon. The SQL surfaces still
+      // read deals.bid_due_date directly; prod has zero drift between the two on estimating deals today, and
+      // closing it needs a lead→deal write-through (its own PR, see the known limitation in #966).
+      bidDueDate: deal.bidDueDate,
     },
     normalizeUserRole(userRole),
     new Date()
@@ -304,10 +313,28 @@ function getSlaStatusValue(atRisk: AtRiskResult | null) {
   return atRisk.isAtRisk ? "Overdue" : "Current";
 }
 
-function getSlaCaptionContext(atRisk: AtRiskResult | null, expectedCloseDate?: string | null) {
+/**
+ * Name the date the SUPPRESSION was actually measured against, not the close target by assumption. In the
+ * genuine estimating stage the horizon is the deal's BID due date (2026-07-28), so printing the close
+ * target there could show a date months in the PAST that played no part in the verdict.
+ */
+function getSlaCaptionContext(
+  atRisk: AtRiskResult | null,
+  deal?: { expectedCloseDate?: string | null; bidDueDate?: string | null; workflowRoute?: string | null } | null,
+  slaStageSlug?: string | null
+) {
   if (!atRisk) return "SLA unavailable";
-  if (atRisk.reason === "close_target_pending" && expectedCloseDate) {
-    return `Postponed until ${formatDateOnly(expectedCloseDate)}`;
+  if (atRisk.reason === "close_target_pending" && deal) {
+    const workflowRoute = deal.workflowRoute === "normal" || deal.workflowRoute === "service" ? deal.workflowRoute : null;
+    const suppressedUntil = resolveAtRiskSuppressionDay({
+      expectedCloseDate: deal.expectedCloseDate,
+      bidDueDate: deal.bidDueDate,
+      // Classify from the RESOLVED SLA stage (resolveDetailSlaStageSlug — the same slug this page feeds
+      // the engine), not the raw CRM slug: a Bid Board deal can sit at `opportunity` in stage_id while its
+      // mirror reads estimating, and the raw slug would caption a bid-date verdict with the close target.
+      isEstimating: isGenuineEstimatingDealStageSlug(slaStageSlug ?? null, workflowRoute),
+    });
+    if (suppressedUntil) return `Postponed until ${formatDateOnly(suppressedUntil)}`;
   }
   return atRisk.thresholdDays == null ? "No SLA threshold" : `SLA ${atRisk.thresholdDays} days`;
 }
@@ -759,10 +786,22 @@ export function DealDetailPage() {
   };
 
   const slaResult = getDealDetailSlaResult(deal, currentStage, user?.role);
+  // The stage the SLA verdict is actually ABOUT (Bid Board mirror-aware) — the same slug
+  // getDealDetailSlaResult feeds the engine. Everything that DESCRIBES the verdict classifies from this.
+  const slaStageSlug = deal ? resolveDetailSlaStageSlug(deal, currentStage) : null;
+  const slaWorkflowRoute =
+    deal?.workflowRoute === "normal" || deal?.workflowRoute === "service" ? deal.workflowRoute : null;
+  const isEstimatingSlaStage = isGenuineEstimatingDealStageSlug(slaStageSlug, slaWorkflowRoute);
+  // The bid date only GOVERNS the SLA when there is a usable one — the engine deliberately falls back to
+  // the close target otherwise, in which case moving the close date really does still pause the SLA
+  // (Codex P2). Reuses the engine's own parser so "usable" means exactly what the verdict meant.
+  const slaFollowsBidDueDate =
+    isEstimatingSlaStage &&
+    resolveAtRiskSuppressionDay({ bidDueDate: deal?.bidDueDate, isEstimating: true }) != null;
   const stageAgeDays = slaResult?.effectiveStageAgeDays ?? null;
   const slaCaptionLabel = getSlaCaptionLabel(slaResult);
   const slaStatusValue = getSlaStatusValue(slaResult);
-  const slaCaptionContext = getSlaCaptionContext(slaResult, deal.expectedCloseDate);
+  const slaCaptionContext = getSlaCaptionContext(slaResult, deal, slaStageSlug);
   const isSlaBreached = slaResult?.isAtRisk === true;
   // Detail header value uses the deal's stage (server now provides stageSlug; fall back to the loaded
   // currentStage) so an estimating deal shows the DD-over-bid value, matching the board/list (Codex P2).
@@ -1024,13 +1063,17 @@ export function DealDetailPage() {
               Move back to Opportunity
             </DropdownMenuItem>
           ) : null}
-          {canArchiveDeal({ stageSlug: deal.stageSlug ?? currentStage?.slug ?? null, assignedRepId: deal.assignedRepId }, user) ? (
+          {canArchiveDeal(
+            {
+              assignedRepId: deal.assignedRepId,
+              isChangeOrder: deal.isChangeOrder,
+              // CHILD deals only. A legacy deal_change_orders row carries no childDealId and does not
+              // cascade on archive, so counting it would hide the action where the server would allow it.
+              activeChangeOrderChildCount: (deal.dealChangeOrders ?? []).filter((co) => co.childDealId).length,
+            },
+            user,
+          ) ? (
             <DropdownMenuItem onClick={() => setArchiveOpen(true)} className="text-red-600">
-              <Trash2 className="h-4 w-4 mr-2" />
-              Archive Deal
-            </DropdownMenuItem>
-          ) : viewerOwnsDeal ? (
-            <DropdownMenuItem disabled title="Only opportunity-stage deals can be archived — ask an admin">
               <Trash2 className="h-4 w-4 mr-2" />
               Archive Deal
             </DropdownMenuItem>
@@ -1168,6 +1211,9 @@ export function DealDetailPage() {
           emptyLabel="deal"
           showRecordings
           closeTargetDate={deal.expectedCloseDate}
+          // In the genuine estimating stage the at-risk SLA is measured from the BID due date, so the
+          // dialog must stop promising that moving the close target pauses it (2026-07-28).
+          slaFollowsBidDueDate={slaFollowsBidDueDate}
           onDealChanged={refetch}
           // Owner-only: the PATCH that writes expected_close_date is gated to the assigned rep on the
           // server (assertDealOwnerRouteAccess, no allowAdmin), so a non-owner admin would 403.
@@ -1201,16 +1247,20 @@ export function DealDetailPage() {
     </div>
   );
 
+  // A change-order child is STORED as "<Parent> — Change Order N", which buries the label at the end of
+  // the H1 and the breadcrumb. Display-only reorder; every write path still uses the stored name.
+  const displayName = formatDealDisplayName(deal.name, deal.isChangeOrder);
+
   return (
     <div>
       <DetailPageShell
         parentLabel="Deals"
         parentHref="/deals"
-        currentLabel={deal.name}
+        currentLabel={displayName}
         iconSlot={<Briefcase className="h-9 w-9" />}
         typeBadge={typeBadge}
         statusBadge={statusBadge}
-        title={deal.name}
+        title={displayName}
         subtitleSlot={subtitleSlot}
         actionsSlot={actionsSlot}
         kpis={kpis}
