@@ -2124,3 +2124,90 @@ describe("returnDealToOpportunity — request-less states are all local", () => 
     expect(result.rfpSubmissionMayExist).toBe(true);
   });
 });
+
+// Between the create's 2xx and SyncHub's bid-board-created callback the deal is not linked and nothing
+// is processing — so a move-back in that interval used to record wasBidBoardLinked=false. The callback
+// is then refused by the cleared RFP status, and the already-created project sits there with no standing
+// "delete this from the Bid Board" banner and no warning in the toast.
+describe("returnDealToOpportunity — a completed create is evidence a project exists", () => {
+  it("records wasBidBoardLinked for a COMPLETED create job on this round", async () => {
+    const D = U("dc11");
+    const ROUND = U("ec11");
+    await seedBidBoardDeal(D);
+    await pg.exec(
+      `UPDATE public.deals
+          SET is_bid_board_owned = false, procore_bid_id = NULL, synchub_bid_board_id = NULL,
+              bid_board_project_number = NULL, bid_board_linked_at = NULL, read_only_synced_at = NULL,
+              rfp_approval_status = 'approved', rfp_approval_request_event_id = '${ROUND}'
+        WHERE id = '${D}'`
+    );
+    // The create job's payload prefixes the round differently from the delivery job's.
+    await pg.exec(
+      `INSERT INTO public.job_queue (job_type, payload, status, run_after, office_id)
+       VALUES ('rfp_bidboard_create',
+               '{"dealId":"${D}","body":{"sourceEventId":"crm:rfp-vote:approved:${ROUND}"}}'::jsonb,
+               'completed', now(), '${OFFICE}')`
+    );
+
+    const result = await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Moved during the callback gap", officeId: OFFICE, auditContext,
+    });
+
+    expect(result.wasBidBoardLinked).toBe(true);
+
+    // …and it PERSISTS, so the banner survives a reload rather than living only in the toast.
+    const { rows } = await pg.query<{ bid_board_detached_was_linked: boolean | null }>(
+      `SELECT bid_board_detached_was_linked FROM public.deals WHERE id = '${D}'`
+    );
+    expect(rows[0]?.bid_board_detached_was_linked).toBe(true);
+  });
+
+  it("ignores a completed create belonging to a DIFFERENT round", async () => {
+    const D = U("dc12");
+    await seedBidBoardDeal(D);
+    await pg.exec(
+      `UPDATE public.deals
+          SET is_bid_board_owned = false, procore_bid_id = NULL, synchub_bid_board_id = NULL,
+              bid_board_project_number = NULL, bid_board_linked_at = NULL, read_only_synced_at = NULL,
+              rfp_approval_status = 'approved', rfp_approval_request_event_id = '${U("ec12")}'
+        WHERE id = '${D}'`
+    );
+    await pg.exec(
+      `INSERT INTO public.job_queue (job_type, payload, status, run_after, office_id)
+       VALUES ('rfp_bidboard_create',
+               '{"dealId":"${D}","body":{"sourceEventId":"crm:rfp-vote:approved:${U("ec13")}"}}'::jsonb,
+               'completed', now(), '${OFFICE}')`
+    );
+
+    const result = await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Old round's create", officeId: OFFICE, auditContext,
+    });
+
+    expect(result.wasBidBoardLinked).toBe(false);
+  });
+
+  it("ignores a CANCELLED create for this round", async () => {
+    const D = U("dc13");
+    const ROUND = U("ec14");
+    await seedBidBoardDeal(D);
+    await pg.exec(
+      `UPDATE public.deals
+          SET is_bid_board_owned = false, procore_bid_id = NULL, synchub_bid_board_id = NULL,
+              bid_board_project_number = NULL, bid_board_linked_at = NULL, read_only_synced_at = NULL,
+              rfp_approval_status = 'approved', rfp_approval_request_event_id = '${ROUND}'
+        WHERE id = '${D}'`
+    );
+    await pg.exec(
+      `INSERT INTO public.job_queue (job_type, payload, status, run_after, office_id)
+       VALUES ('rfp_bidboard_create',
+               '{"dealId":"${D}","cancelledBy":"return_to_opportunity","body":{"sourceEventId":"crm:rfp-vote:approved:${ROUND}"}}'::jsonb,
+               'completed', now(), '${OFFICE}')`
+    );
+
+    const result = await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Cancelled create", officeId: OFFICE, auditContext,
+    });
+
+    expect(result.wasBidBoardLinked).toBe(false);
+  });
+});

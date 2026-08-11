@@ -400,7 +400,7 @@ function isCanonicalBidBoardProjectNumberUniqueViolation(err: unknown): boolean 
   );
 }
 
-function dealMatchSelectSql(schemaName: string, detached = false): string {
+function dealMatchSelectSql(schemaName: string): string {
   return `
     SELECT d.id,
            d.name,
@@ -448,15 +448,19 @@ function dealMatchSelectSql(schemaName: string, detached = false): string {
      -- class). This base WHERE feeds all three match tiers (procore_bid_id, project_number/deal_number,
      -- name+date), so the one predicate covers every path that keys on project_number.
      --
-     -- Same shape for the DETACH marker (migration 0200): a deal moved back to Opportunity keeps every
-     -- identity column (nulling them would make the SyncHub webhook INSERT a twin), so the ONLY thing
-     -- stopping the export from re-claiming it is this predicate — and it has to sit in the base WHERE
-     -- so it covers all three tiers, including the name+created_at tier the deal becomes eligible for
-     -- once bid_board_project_number is cleared. The detached=true flag inverts it for the
-     -- classification lookup that tells "deliberately detached" apart from "no CRM deal at all".
+     -- The DETACH marker (migration 0200) is deliberately NOT filtered here. A deal moved back to
+     -- Opportunity keeps every identity column — nulling them would make the SyncHub webhook INSERT a
+     -- twin — so the marker is the only thing stopping the export re-claiming it, and the caller acts on
+     -- it. It used to be a WHERE predicate flipped between two separate queries per tier, which under
+     -- READ COMMITTED could lose a deal ENTIRELY: a bid-board-created callback reattaching it between
+     -- the two statements makes the attached query miss it (still detached when that ran) and the
+     -- detached query miss it too (marker cleared by the time this ran). The row then fell to a weaker
+     -- identity tier and could bind to a DIFFERENT deal, mirroring one project's name, estimate and
+     -- stage onto another's. Selecting bid_board_detached_at and partitioning in memory means both
+     -- halves come from ONE snapshot, so no attachment transition can make a high-confidence match
+     -- disappear between them.
      WHERE d.is_active = true
-       AND COALESCE(d.is_change_order, false) = false
-       AND d.bid_board_detached_at IS ${detached ? "NOT NULL" : "NULL"}`;
+       AND COALESCE(d.is_change_order, false) = false`;
 }
 
 /**
@@ -469,12 +473,12 @@ function dealMatchSelectSql(schemaName: string, detached = false): string {
 function dealMatchTiers(
   schemaName: string,
   row: NormalizedBidBoardRow
-): Array<{ sql: (detached: boolean) => string; params: unknown[] }> {
-  const tiers: Array<{ sql: (detached: boolean) => string; params: unknown[] }> = [];
+): Array<{ sql: string; params: unknown[] }> {
+  const tiers: Array<{ sql: string; params: unknown[] }> = [];
 
   if (row.bidBoardProjectId) {
     tiers.push({
-      sql: (detached) => `${dealMatchSelectSql(schemaName, detached)}
+      sql: `${dealMatchSelectSql(schemaName)}
        AND d.procore_bid_id = $1::bigint`,
       params: [row.bidBoardProjectId],
     });
@@ -483,7 +487,7 @@ function dealMatchTiers(
   const projectNumber = normalizeBidBoardProjectNumber(row.bidBoardProjectNumber);
   if (projectNumber) {
     tiers.push({
-      sql: (detached) => `${dealMatchSelectSql(schemaName, detached)}
+      sql: `${dealMatchSelectSql(schemaName)}
        AND (
             ${canonicalProjectNumberSql("d.project_number")} = $1 OR
             ${canonicalProjectNumberSql("d.deal_number")} = $1 OR
@@ -495,7 +499,7 @@ function dealMatchTiers(
 
   if (row.bidBoardCreatedAt) {
     tiers.push({
-      sql: (detached) => `${dealMatchSelectSql(schemaName, detached)}
+      sql: `${dealMatchSelectSql(schemaName)}
         AND d.bid_board_project_number IS NULL
         AND LOWER(TRIM(d.name)) = LOWER(TRIM($1))
         AND d.bid_board_created_at = $2::timestamptz`,
@@ -536,17 +540,21 @@ async function resolveDealMatches(
   row: NormalizedBidBoardRow
 ): Promise<{ matches: DealMatch[]; detached: DealMatch[] }> {
   for (const tier of dealMatchTiers(schemaName, row)) {
-    const attached = await client.query(tier.sql(false), tier.params);
-    const detached = await client.query(tier.sql(true), tier.params);
-    const total = attached.rows.length + detached.rows.length;
+    // ONE statement per tier, partitioned here. Two statements could straddle a reattachment and lose
+    // the deal from both halves — see dealMatchSelectSql.
+    const result = await client.query(tier.sql, tier.params);
+    const rows = result.rows as DealMatch[];
+    const attached = rows.filter((match) => match.bid_board_detached_at == null);
+    const detached = rows.filter((match) => match.bid_board_detached_at != null);
+    const total = rows.length;
 
     if (total === 0) continue;
     // Ambiguous ACROSS the partition — hand the whole set back as matches so the caller's multi-match
     // guard refuses the write. A detached deal counts toward ambiguity deliberately: "this identifier
     // also belongs to a deal someone deliberately disconnected" is a reason to stop, not to proceed.
-    if (total > 1) return { matches: [...attached.rows, ...detached.rows], detached: [] };
-    if (detached.rows.length === 1) return { matches: [], detached: detached.rows };
-    return { matches: attached.rows, detached: [] };
+    if (total > 1) return { matches: [...attached, ...detached], detached: [] };
+    if (detached.length === 1) return { matches: [], detached };
+    return { matches: attached, detached: [] };
   }
 
   return { matches: [], detached: [] };

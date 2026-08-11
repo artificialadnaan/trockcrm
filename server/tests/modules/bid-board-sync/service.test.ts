@@ -88,8 +88,8 @@ describe("Bid Board sync service", () => {
   });
 
   it("matches by stored Procore Bid Board id before project number", async () => {
-    // The matcher probes the ATTACHED partition then the DETACHED one at each tier, so the default
-    // answer is "no rows" and the first call is the attached hit.
+    // ONE query per tier now, with both partitions in it — two statements could straddle a
+    // reattachment and lose the deal from both halves. The default answer is "no rows".
     const query = vi.fn().mockResolvedValue({ rows: [] });
     query.mockResolvedValueOnce({ rows: [{ id: "deal-123" }] });
     const normalized = normalizeBidBoardRow({
@@ -102,11 +102,14 @@ describe("Bid Board sync service", () => {
     const ids = await findDealIds({ query }, "office_dallas", normalized);
 
     expect(ids).toEqual(["deal-123"]);
-    // Two calls, not one: the attached hit plus the detached probe at the SAME tier, which is what
-    // keeps an attached/detached collision visible to the multi-match guard.
-    expect(query).toHaveBeenCalledTimes(2);
+    // ONE call at the winning tier, and it must NOT filter on the detach marker — both partitions come
+    // back together so an attached/detached collision stays visible to the multi-match guard, and no
+    // concurrent reattachment can hide a high-confidence match between two statements.
+    expect(query).toHaveBeenCalledTimes(1);
     expect(query.mock.calls[0][0]).toContain("procore_bid_id = $1::bigint");
-    expect(String(query.mock.calls[1][0]).toLowerCase()).toContain("bid_board_detached_at is not null");
+    expect(String(query.mock.calls[0][0]).toLowerCase()).not.toContain("bid_board_detached_at is null");
+    expect(String(query.mock.calls[0][0]).toLowerCase()).not.toContain("bid_board_detached_at is not null");
+    expect(String(query.mock.calls[0][0])).toContain("d.bid_board_detached_at");
     expect(query.mock.calls[0][1]).toEqual(["987654"]);
   });
 
@@ -123,7 +126,8 @@ describe("Bid Board sync service", () => {
     const ids = await findDealIds({ query }, "office_dallas", normalized);
 
     expect(ids).toEqual(["deal-by-project-number"]);
-    expect(query).toHaveBeenCalledTimes(2);
+    // One statement at the winning tier, carrying both partitions.
+    expect(query).toHaveBeenCalledTimes(1);
     expect(query.mock.calls[0][0]).toContain("project_number");
     expect(query.mock.calls[0][0]).toContain("deal_number");
     expect(query.mock.calls[0][0]).toContain("bid_board_project_number");

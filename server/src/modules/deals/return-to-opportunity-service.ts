@@ -364,7 +364,12 @@ async function probeInFlightRfpJobs(
   roundEventId: string | null,
   /** Same shared-queue scoping as the cancellation; see tenantJobScopeSql. */
   officeId: string | null | undefined
-): Promise<{ deliveryInFlight: boolean; createInFlight: boolean; deliveryEnqueuedForRound: boolean }> {
+): Promise<{
+  deliveryInFlight: boolean;
+  createInFlight: boolean;
+  deliveryEnqueuedForRound: boolean;
+  createEvidenceForRound: boolean;
+}> {
   // Every status, not just 'processing'. The two in-flight flags still key on 'processing' exactly as
   // before; the extra columns are what tell a REQUEST-BACKED round apart from a purely local one.
   const rows = await tenantDb.execute(sql`
@@ -383,8 +388,13 @@ async function probeInFlightRfpJobs(
     jobRows.filter((row) => row.status === "processing").map((row) => row.job_type)
   );
 
-  // The round this deal is on, in the form enqueueRfpRequestDelivery writes into the payload.
-  const roundSourceEventId = roundEventId ? `crm:deal-stage:opportunity:${roundEventId}` : null;
+  // Matched on the ROUND SUFFIX rather than a whole string, because the two job types prefix it
+  // differently: the delivery writes `crm:deal-stage:opportunity:<round>` and the Bid Board create writes
+  // `crm:rfp-vote:approved:<round>`. Comparing whole strings worked for delivery and would silently never
+  // match a create.
+  const roundSuffix = roundEventId ? `:${roundEventId}` : null;
+  const matchesRound = (sourceEventId: string | null | undefined) =>
+    roundSuffix != null && typeof sourceEventId === "string" && sourceEventId.endsWith(roundSuffix);
 
   return {
     deliveryInFlight: claimed.has("rfp_request_delivery"),
@@ -403,10 +413,26 @@ async function probeInFlightRfpJobs(
      */
     deliveryEnqueuedForRound: jobRows.some(
       (row) =>
-        row.job_type === "rfp_request_delivery" &&
+        row.job_type === "rfp_request_delivery" && !row.cancelled_by && matchesRound(row.source_event_id)
+    ),
+    /**
+     * A Bid Board project may EXIST for this round — the create job either is running or has finished.
+     *
+     * `createInFlight` alone was too narrow. Once the create has had its 2xx and the queue has marked the
+     * job completed, but SyncHub has not yet delivered the bid-board-created callback, the deal is not
+     * linked and nothing is processing — so a move-back in that interval recorded wasBidBoardLinked=false
+     * and the callback was then refused by the cleared RFP status. The project stayed out there with no
+     * standing "delete this from the Bid Board" banner and no warning in the toast.
+     *
+     * `processing` remains its own signal, because "a POST may be happening right now" is a different
+     * claim from "a project may already exist" and the audit trail records them separately.
+     */
+    createEvidenceForRound: jobRows.some(
+      (row) =>
+        row.job_type === "rfp_bidboard_create" &&
         !row.cancelled_by &&
-        roundSourceEventId != null &&
-        row.source_event_id === roundSourceEventId
+        (row.status === "processing" || row.status === "completed") &&
+        matchesRound(row.source_event_id)
     ),
   };
 }
@@ -726,7 +752,7 @@ export async function returnDealToOpportunity(
   // audit trail can never disagree with the instruction the operator was given.
   // Probe BEFORE the detach UPDATE: an in-flight Bid Board create changes what this deal can honestly
   // claim about its linkage, and the UPDATE persists that claim.
-  const { deliveryInFlight, createInFlight, deliveryEnqueuedForRound } = await probeInFlightRfpJobs(
+  const { deliveryInFlight, createInFlight, deliveryEnqueuedForRound, createEvidenceForRound } = await probeInFlightRfpJobs(
     tenantDb,
     input.dealId,
     deal.rfpApprovalRequestEventId ?? null,
@@ -747,7 +773,7 @@ export async function returnDealToOpportunity(
   //
   // The audit metadata records bidBoardCreateInFlight separately, so the trail can still distinguish
   // "a project definitely existed" from "one may have just been created".
-  const wasBidBoardLinked = isDealBidBoardLinked(deal) || createInFlight;
+  const wasBidBoardLinked = isDealBidBoardLinked(deal) || createInFlight || createEvidenceForRound;
 
   // Clearing the contract-signed date alongside the commission void is NOT optional. The Contracts
   // Signed YTD/MTD query (buildRepContractsSignedSql, dashboard/service.ts) has NO stage predicate at
