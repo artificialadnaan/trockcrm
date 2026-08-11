@@ -368,6 +368,19 @@ describe("window parsing", () => {
     expect(parsed.from.toISOString()).toBe("2026-08-06T05:00:00.000Z");
   });
 
+  // An earlier revision skipped the calendar check whenever the input did NOT end in Z, on the grounds
+  // that an offset legitimately shifts the day — which exempted every explicit-offset timestamp. These
+  // two normalise silently and were both accepted. Components are now validated AS WRITTEN, before the
+  // offset is applied, which settles it for every offset.
+  it("refuses an impossible calendar day even when it carries an offset", () => {
+    expect(() => parseWindow({ from: "2026-02-30T00:00:00-05:00", to: "2026-03-05T00:00:00Z" })).toThrow(/ISO-8601/);
+  });
+
+  it("refuses an out-of-range clock component", () => {
+    expect(() => parseWindow({ from: "2026-08-06T24:00:00-05:00", to: "2026-08-08T00:00:00Z" })).toThrow(/ISO-8601/);
+    expect(() => parseWindow({ from: "2026-08-06T00:60:00Z", to: "2026-08-08T00:00:00Z" })).toThrow(/ISO-8601/);
+  });
+
   it("refuses an inverted or empty window", () => {
     expect(() => parseWindow({ from: "2026-08-07T00:00:00Z", to: "2026-08-06T00:00:00Z" })).toThrow(/after/);
     expect(() => parseWindow({ from: "2026-08-06T00:00:00Z", to: "2026-08-06T00:00:00Z" })).toThrow(/after/);

@@ -1465,7 +1465,20 @@ internalRfpRoutes.post(
   express.raw({ type: "application/json", limit: "16kb" }),
   async (req, res, next) => {
     try {
-      const rawBody = req.body as Buffer;
+      // `express.raw({ type: "application/json" })` SKIPS parsing for any other content type — and for a
+      // request with no Content-Type at all — leaving `req.body` undefined. The cast below does not
+      // create a Buffer, so `Hmac.update(undefined)` THROWS and the outer catch reports a 500: an
+      // unsupported media type surfaced as a server fault, reachable without a valid signature. Guarded
+      // the same way scope-ingest-routes.ts guards it. The route tests invoke the handler directly, so
+      // this middleware behaviour is not otherwise observable from them.
+      if (!Buffer.isBuffer(req.body)) {
+        res.status(415).json({
+          success: false,
+          error: "Content-Type must be application/json; the body is read as raw bytes for signing.",
+        });
+        return;
+      }
+      const rawBody = req.body;
       const signature = req.headers["x-rfp-request-signature"] as string | undefined;
       if (!verifySignature(rawBody, signature)) {
         res.status(401).json({ success: false, error: "invalid_signature" });

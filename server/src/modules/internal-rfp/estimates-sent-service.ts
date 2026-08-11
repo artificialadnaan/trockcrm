@@ -161,29 +161,50 @@ export async function loadEstimatesSent(
 /** Upper bound on the window a single request may ask for, so a bad `from` cannot sweep all of history. */
 export const MAX_WINDOW_DAYS = 31;
 
+/** Days in a given month, so 2026-02-30 can be refused on its own terms rather than after normalisation. */
+function daysInMonth(year: number, month: number): number {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
 /**
- * ISO-8601 instant, round-tripped.
+ * ISO-8601 instant, validated COMPONENT BY COMPONENT before any offset is applied.
  *
  * `new Date(String(x))` is far too permissive to guard a window with: a JSON number 0 stringifies to "0"
  * and parses as 2000-01-01, and "2026-02-30T00:00:00Z" normalises to March 2 — so a caller with a
  * date-construction bug would get a SUCCESSFUL report covering a period it never asked for, which is
- * worse than the 422 it should have received. Requiring a string, matching the shape, and comparing the
- * parsed instant back to the input is what separates "parses" from "means what it says".
+ * worse than the 422 it should have received.
+ *
+ * Checking the parsed instant's round-trip is not enough on its own, and an earlier revision of this
+ * function got that wrong: a non-UTC offset legitimately shifts the calendar day, so the round-trip was
+ * skipped whenever the input did not end in `Z` — which exempted every explicit-offset timestamp from
+ * the check. "2026-02-30T00:00:00-05:00" and "2026-08-06T24:00:00-05:00" both normalise silently and
+ * both were accepted. Validating year/month/day/hour/minute/second as WRITTEN settles it for every
+ * offset, because those components mean the same thing before the offset is applied.
  */
 function parseIsoInstant(value: unknown): Date | null {
   if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/.test(trimmed)) return null;
-  // Postgres has no year zero; a 0000 date parses here and then fails at the ::date cast downstream.
-  if (trimmed.startsWith("0000")) return null;
-  const parsed = new Date(trimmed);
-  if (Number.isNaN(parsed.getTime())) return null;
-  // Round-trip the CALENDAR DAY: 2026-02-30 parses (as March 2) but is not the day that was asked for.
-  if (parsed.toISOString().slice(0, 10) !== trimmed.slice(0, 10)) {
-    // A non-UTC offset legitimately shifts the day, so only reject when the input was itself UTC.
-    if (trimmed.endsWith("Z")) return null;
-  }
-  return parsed;
+  const match =
+    /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/.exec(
+      value.trim()
+    );
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+  const second = match[6] ? Number(match[6]) : 0;
+
+  // Postgres has no year zero: it parses here and then fails at the ::date cast as a 500 where the route
+  // means to answer 400. The report service's own isRealIsoDate rejects 0000 for the same reason.
+  if (year < 1) return null;
+  if (month < 1 || month > 12) return null;
+  if (day < 1 || day > daysInMonth(year, month)) return null;
+  if (hour > 23 || minute > 59 || second > 59) return null;
+
+  const parsed = new Date(value.trim());
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
 export function parseWindow(payload: Record<string, unknown>): { from: Date; to: Date } {

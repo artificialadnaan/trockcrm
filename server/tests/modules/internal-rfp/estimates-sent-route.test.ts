@@ -36,6 +36,28 @@ function sign(raw: string): string {
   return `sha256=${crypto.createHmac("sha256", SECRET).update(Buffer.from(raw)).digest("hex")}`;
 }
 
+async function callWithBody(body: unknown, signature?: string) {
+  const req = {
+    body,
+    headers: signature ? { "x-rfp-request-signature": signature } : {},
+  } as any;
+  const res = {
+    statusCode: 200,
+    body: undefined as any,
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload: any) {
+      this.body = payload;
+      return this;
+    },
+  } as any;
+  const next = vi.fn();
+  await findRouteHandler("/estimates-sent")(req, res, next);
+  return { res, next };
+}
+
 async function call(raw: string, signature?: string) {
   const req = {
     body: Buffer.from(raw),
@@ -115,6 +137,27 @@ describe("POST /api/internal/estimates-sent — the signature is the whole bound
     const { res } = await call(WINDOW, sign(WINDOW));
 
     expect(res.statusCode).toBe(401);
+    expect(queryMock).not.toHaveBeenCalled();
+  });
+});
+
+// express.raw({ type: "application/json" }) SKIPS parsing for any other content type, and for a request
+// with no Content-Type at all, leaving req.body undefined. Hmac.update(undefined) then throws and the
+// outer catch reports a 500 — an unsupported media type surfaced as a server fault, reachable without a
+// valid signature. Not observable through `call` above, which hands the handler a real Buffer.
+describe("POST /api/internal/estimates-sent — a body the raw parser skipped", () => {
+  it("answers 415 rather than throwing into a 500", async () => {
+    const { res, next } = await callWithBody(undefined, sign(WINDOW));
+
+    expect(res.statusCode).toBe(415);
+    expect(next).not.toHaveBeenCalled();
+    expect(queryMock).not.toHaveBeenCalled();
+  });
+
+  it("answers 415 for a body another parser already turned into an object", async () => {
+    const { res } = await callWithBody({ from: "2026-08-06T00:00:00Z" }, sign(WINDOW));
+
+    expect(res.statusCode).toBe(415);
     expect(queryMock).not.toHaveBeenCalled();
   });
 });
