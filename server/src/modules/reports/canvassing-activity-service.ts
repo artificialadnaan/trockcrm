@@ -439,7 +439,10 @@ export function labelForBucket(bucket: CanvassingBucket, startIso: string): stri
   // The year is carried on the week label too. Without it a range crossing a year boundary renders two
   // columns reading "Jan 5 – Jan 11", indistinguishable in the chart and both period tables. The export
   // headers were given the year two rounds ago; the on-screen labels were left behind.
-  return `${fmt.format(start)} – ${fmt.format(end)}, ${start.getUTCFullYear()}`;
+  // Both years when the week straddles New Year: "Dec 28 – Jan 3, 2025" reads as though Jan 3 is in 2025.
+  return start.getUTCFullYear() === end.getUTCFullYear()
+    ? `${fmt.format(start)} – ${fmt.format(end)}, ${start.getUTCFullYear()}`
+    : `${fmt.format(start)}, ${start.getUTCFullYear()} – ${fmt.format(end)}, ${end.getUTCFullYear()}`;
 }
 
 /**
@@ -582,6 +585,14 @@ export async function getCanvassingActivityReport(
       JOIN users u ON u.id = a.responsible_user_id
      WHERE ${NOTES_ONLY}
        AND COALESCE(u.is_test_data, false) = false
+       -- A REAL user logging against a TEST record is still test activity. Every other query filters test
+       -- data on the row itself; these filtered only the author, so QA work reached both the count and the
+       -- feed while the records it was about were excluded from the counts beside it.
+       AND NOT EXISTS (SELECT 1 FROM companies tc WHERE tc.id = a.company_id AND tc.is_test_data = true)
+       AND NOT EXISTS (SELECT 1 FROM properties tp WHERE tp.id = a.property_id AND tp.is_test_data = true)
+       AND NOT EXISTS (SELECT 1 FROM contacts tct WHERE tct.id = a.contact_id AND tct.is_test_data = true)
+       AND NOT EXISTS (SELECT 1 FROM leads tl WHERE tl.id = a.lead_id AND tl.is_test_data = true)
+       AND NOT EXISTS (SELECT 1 FROM deals td WHERE td.id = a.deal_id AND td.is_test_data = true)
        AND ${businessWindowSql("a.occurred_at", filters.dateFrom, filters.dateTo)}
      GROUP BY 1, 2
   `);
@@ -912,6 +923,11 @@ async function loadNotes(
       LEFT JOIN deals de     ON de.id = a.deal_id
      WHERE ${NOTES_ONLY}
        AND COALESCE(u.is_test_data, false) = false
+       AND NOT EXISTS (SELECT 1 FROM companies tc WHERE tc.id = a.company_id AND tc.is_test_data = true)
+       AND NOT EXISTS (SELECT 1 FROM properties tp WHERE tp.id = a.property_id AND tp.is_test_data = true)
+       AND NOT EXISTS (SELECT 1 FROM contacts tct WHERE tct.id = a.contact_id AND tct.is_test_data = true)
+       AND NOT EXISTS (SELECT 1 FROM leads tl WHERE tl.id = a.lead_id AND tl.is_test_data = true)
+       AND NOT EXISTS (SELECT 1 FROM deals td WHERE td.id = a.deal_id AND td.is_test_data = true)
        AND ${businessWindowSql("a.occurred_at", filters.dateFrom, filters.dateTo)}
        ${userFilter}
      ORDER BY a.occurred_at DESC, a.id DESC

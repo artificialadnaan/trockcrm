@@ -263,16 +263,23 @@ function CanvassingActivityReportView() {
           { key: "total", header: "Total", type: "number" as const },
         ],
         rows: data.people.flatMap((person) =>
-          (["all", ...CANVASSING_KINDS] as const).map((kind) => {
-            const read = (counts: CanvassingCounts) => (kind === "all" ? counts.total : counts[kind]);
+          // Notes included: the grid can show them per period and the server computes them, so a manager
+          // exporting the Notes view was getting every dimension EXCEPT the one they were looking at.
+          (["all", ...CANVASSING_KINDS, "notes"] as const).map((kind) => {
             const row: Record<string, unknown> = {
               person: person.displayName,
-              kind: kind === "all" ? "All" : KIND_LABELS[kind],
-              total: read(person.counts),
+              kind: kind === "all" ? "All" : kind === "notes" ? "Notes logged" : KIND_LABELS[kind],
+              total: kind === "notes" ? person.notesLogged : kind === "all" ? person.counts.total : person.counts[kind],
             };
             for (const period of data.buckets) {
               const cell = period.perUser.find((entry) => entry.userId === person.userId);
-              row[period.bucketStart] = cell ? read(cell.counts) : 0;
+              row[period.bucketStart] = !cell
+                ? 0
+                : kind === "notes"
+                  ? cell.notesLogged
+                  : kind === "all"
+                    ? cell.counts.total
+                    : cell.counts[kind];
             }
             return row;
           })
@@ -592,11 +599,14 @@ function CanvassingActivityReportView() {
                         was recorded then — only zeros on or after that date mean the person entered nothing.
                       </>
                     ) : (
-                      // Nothing has been attributed at all yet, so every zero here is "not recorded" and
-                      // none of them mean anyone was idle. Naming a date would be worse than naming none.
+                      // The hint deliberately ignores leads (they were attributed long before the other
+                      // three), so a null here means no COMPANY, PROPERTY OR CONTACT has an author yet —
+                      // not that nothing in the office does. Saying the latter would be false wherever a
+                      // lead has been attributed.
                       <>
-                        No record in this office names its author yet, so every zero below means the
-                        information was never recorded — not that nothing was entered.
+                        No company, property or contact in this office names its author yet, so zeros in
+                        those columns mean the information was never recorded — not that nothing was
+                        entered. Leads have been attributed for longer and are unaffected.
                       </>
                     )
                   ) : (

@@ -1169,3 +1169,35 @@ describe("canvassing activity — the feed says WHY it is short", () => {
     expect(report.notes).toHaveLength(3);
   });
 });
+
+describe("canvassing activity — notes on test records, and cross-year weeks", () => {
+  // Every other query filters test data on the ROW; the notes queries filtered only the author, so a real
+  // person logging against a test company was counted and shown while the company itself was excluded from
+  // the counts sitting beside it.
+  it("ignores a note logged by a real user against a TEST record", async () => {
+    const TEST_CO = U("7e57c0");
+    const NOTE = U("7e57a1");
+    await pg.exec(`
+      INSERT INTO public.companies (id, name, slug, category, created_by_user_id, is_active, is_test_data, created_at)
+      VALUES ('${TEST_CO}', 'QA Fixture Co', 'qa-fixture-co', 'client', NULL, true, true, '2026-06-01T12:00:00Z');
+      INSERT INTO public.activities
+        (id, type, source_entity_type, source_entity_id, responsible_user_id, company_id, subject, body, occurred_at, created_at)
+      VALUES ('${NOTE}', 'note', 'company', '${TEST_CO}', '${ED}', '${TEST_CO}',
+              'QA note', 'Logged against a fixture.', '2026-06-04T14:00:00Z', '2026-06-04T14:00:00Z');
+    `);
+
+    try {
+      const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF, viewerRole: "director" }));
+      expect(report.notesLogged).toBe(3);
+      expect(report.notes.map((n) => n.subject)).not.toContain("QA note");
+    } finally {
+      await pg.exec(`DELETE FROM public.activities WHERE id = '${NOTE}'; DELETE FROM public.companies WHERE id = '${TEST_CO}';`);
+    }
+  });
+
+  // "Dec 28 – Jan 3, 2025" reads as though Jan 3 falls in 2025.
+  it("names both years on a week that straddles New Year", () => {
+    expect(labelForBucket("week", "2025-12-28")).toBe("Dec 28, 2025 – Jan 3, 2026");
+    expect(labelForBucket("week", "2026-06-07")).toBe("Jun 7 – Jun 13, 2026");
+  });
+});
