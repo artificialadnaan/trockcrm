@@ -45,14 +45,39 @@ type DefaultRange = "30" | "60" | "90" | "6m" | "12m" | "qtd" | "ytd";
  */
 const BUSINESS_TIMEZONE = "America/Chicago";
 
-/** YYYY-MM-DD for an instant, read in business time. */
+/**
+ * YYYY-MM-DD from a Date's LOCAL calendar fields.
+ *
+ * Deliberately not toISOString() (a UTC conversion) and not toLocaleDateString with a timeZone (another
+ * conversion). Both of those cross a zone boundary, and crossing one HERE while `businessNow` crosses
+ * another is what produced two successive off-by-one bugs: read the same fields the arithmetic below
+ * writes, and there is no boundary left to get wrong.
+ */
 function toDateInput(date: Date) {
-  return date.toLocaleDateString("en-CA", { timeZone: BUSINESS_TIMEZONE });
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
-/** "Now", as a Date whose LOCAL fields are the business-time calendar fields — safe for date arithmetic. */
+/**
+ * "Today" in business time, as a Date whose LOCAL fields hold that calendar date.
+ *
+ * The zone is crossed exactly ONCE, here, to read today's Chicago date; everything downstream —
+ * setDate/getMonth in rangeDates, subtractMonthsClamped, toDateInput — then operates on local fields and
+ * never converts again. Round-tripping a Chicago date string back through `new Date("...T00:00:00")`
+ * parses it as LOCAL midnight, which for any zone ahead of Chicago (UTC, Eastern, Tokyo) formats back one
+ * day early — verified in all four.
+ */
 function businessNow(): Date {
-  return new Date(`${toDateInput(new Date())}T00:00:00`);
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: BUSINESS_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const get = (type: string) => Number(parts.find((part) => part.type === type)?.value);
+  return new Date(get("year"), get("month") - 1, get("day"));
 }
 
 export function subtractMonthsClamped(date: Date, months: number) {
@@ -69,6 +94,11 @@ export function subtractMonthsClamped(date: Date, months: number) {
     date.getSeconds(),
     date.getMilliseconds()
   );
+}
+
+/** Exported for report-filter-bar-dates.runtime.test.tsx — the anchor has been wrong twice. */
+export function rangeDatesForTest(range: string) {
+  return rangeDates(range);
 }
 
 function rangeDates(range: string) {

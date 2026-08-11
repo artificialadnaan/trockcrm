@@ -16,9 +16,11 @@ import { ReportFilterBar, useReportFilters } from "@/components/reports/report-f
 import { ExportExcelButton } from "@/components/reports/export-excel-button";
 import { useAuth } from "@/lib/auth";
 import {
+  CANVASSING_KINDS,
   useCanvassingActivityReport,
   type CanvassingBucket,
   type CanvassingCounts,
+  type CanvassingKind,
 } from "@/hooks/use-reports";
 import {
   EmptyState,
@@ -108,6 +110,20 @@ function CanvassingActivityReportView() {
   const rangeReachesBeforeAttribution =
     !data?.attributionStartHint || (data ? data.range.from < data.attributionStartHint : false);
 
+  // Which kind the person x period grid shows. "all" is the combined total; the rest narrow to one column
+  // of the server's per-user counts, so the grid can answer "how many CONTACTS did this person add that
+  // week" — which neither the whole-range person table nor the kinds-without-people period table could.
+  const kindParam = searchParams.get("kind");
+  const gridKind: CanvassingKind | "all" =
+    kindParam && (CANVASSING_KINDS as readonly string[]).includes(kindParam) ? (kindParam as CanvassingKind) : "all";
+
+  function setGridKind(next: CanvassingKind | "all") {
+    const params = new URLSearchParams(searchParams);
+    if (next === "all") params.delete("kind");
+    else params.set("kind", next);
+    setSearchParams(params, { replace: false });
+  }
+
   const chartData = useMemo(
     () =>
       (data?.buckets ?? []).map((row) => ({
@@ -127,7 +143,13 @@ function CanvassingActivityReportView() {
     if (!data) return [];
     // Keyed by bucketStart, which is unique by construction; the LABEL is only a header. Weekly labels omit
     // the year, so keying by label collapsed e.g. 2020-01-05 and 2025-01-05 into one column.
-    const periodColumns = data.buckets.map((row) => ({ key: row.bucketStart, header: row.label, type: "number" as const }));
+    const periodColumns = data.buckets.map((row) => ({
+      key: row.bucketStart,
+      // The on-screen label omits the year for weeks and says nothing about clipping. A spreadsheet has no
+      // legend beside it, so the header carries the bucket start and the partial marker outright.
+      header: `${row.label} (${row.bucketStart})${row.partial ? " — partial" : ""}`,
+      type: "number" as const,
+    }));
     return [
       {
         name: "By person",
@@ -175,7 +197,7 @@ function CanvassingActivityReportView() {
           ...(filteredToPeople ? [] : [{ key: "unattributed", header: "No author recorded", type: "number" as const }]),
         ],
         rows: data.buckets.map((row) => ({
-          period: row.label,
+          period: `${row.label}${row.partial ? " (partial)" : ""}`,
           companies: row.counts.company,
           properties: row.counts.property,
           contacts: row.counts.contact,
@@ -355,6 +377,24 @@ function CanvassingActivityReportView() {
           </ReportPanel>
 
           <ReportPanel title={`Each person, by ${bucket}`}>
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <span className="text-xs font-black uppercase tracking-[0.14em] text-slate-500">Showing</span>
+              {(["all", ...CANVASSING_KINDS] as const).map((kind) => (
+                <button
+                  key={kind}
+                  type="button"
+                  onClick={() => setGridKind(kind)}
+                  aria-pressed={gridKind === kind}
+                  className={
+                    gridKind === kind
+                      ? "rounded-full bg-slate-950 px-3 py-1 text-xs font-black uppercase tracking-[0.12em] text-white"
+                      : "rounded-full bg-white px-3 py-1 text-xs font-black uppercase tracking-[0.12em] text-slate-600 ring-1 ring-slate-200 hover:bg-slate-50"
+                  }
+                >
+                  {kind === "all" ? "All" : `${kind}s`}
+                </button>
+              ))}
+            </div>
             {data.buckets.length === 0 || data.people.length === 0 ? (
               <EmptyState label="Nothing entered in this window." />
             ) : (
@@ -378,7 +418,7 @@ function CanvassingActivityReportView() {
                         <td className="py-3 pr-4 font-semibold text-slate-900">{person.displayName}</td>
                         {data.buckets.map((row) => {
                           const cell = row.perUser.find((entry) => entry.userId === person.userId);
-                          const value = cell?.counts.total ?? 0;
+                          const value = cell ? cell.counts[gridKind === "all" ? "total" : gridKind] : 0;
                           return (
                             <td
                               key={row.bucketStart}
@@ -389,14 +429,14 @@ function CanvassingActivityReportView() {
                           );
                         })}
                         <td className="px-2 text-right font-semibold text-slate-900">
-                          {formatNumber(person.counts.total)}
+                          {formatNumber(person.counts[gridKind === "all" ? "total" : gridKind])}
                         </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
                 <p className="mt-2 text-xs font-semibold text-slate-500">
-                  New companies, properties, contacts and leads combined.{" "}
+                  {gridKind === "all" ? "New companies, properties, contacts and leads combined." : `New ${gridKind}s only.`}{" "}
                   {rangeReachesBeforeAttribution ? (
                     <>
                       Periods before {formatDay(data.attributionStartHint)} read as zero because no creator was
