@@ -38,6 +38,8 @@ async function seedOffices(schemas: string[]) {
       CREATE TABLE ${schema}.properties (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), created_at timestamptz NOT NULL DEFAULT now());
       CREATE TABLE ${schema}.contacts   (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), created_at timestamptz NOT NULL DEFAULT now());
       CREATE TABLE ${schema}.leads      (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), created_by_user_id uuid, created_at timestamptz NOT NULL DEFAULT now());
+      -- 0220 also indexes activities for the notes half of the report; every real tenant has this table.
+      CREATE TABLE ${schema}.activities (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), type text, occurred_at timestamptz NOT NULL DEFAULT now());
     `);
   }
 }

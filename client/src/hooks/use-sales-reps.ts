@@ -24,8 +24,12 @@ export interface UseSalesRepsOptions {
    *                         can't offer a choice that 422s on submit (and a plain rep sees the full office
    *                         roster, not just themselves). Same set as deal-reassignment today; kept a
    *                         distinct purpose for intent + future divergence.
+   *   "canvassing-report" — the Canvassing Activity report's owner filter. A viewer on that report's
+   *                         allowlist may hold the `rep` role, and needs the office roster to filter a
+   *                         scoreboard that already shows them everyone. The SERVER gates this purpose on
+   *                         the same allowlist, so the string alone grants a rep nothing.
    */
-  purpose?: "deal-reassignment" | "lead-reassignment" | "sales-source";
+  purpose?: "deal-reassignment" | "lead-reassignment" | "sales-source" | "canvassing-report";
 }
 
 export function useSalesReps(officeId?: string, options: UseSalesRepsOptions = {}) {

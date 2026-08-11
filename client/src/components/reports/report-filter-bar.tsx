@@ -38,7 +38,11 @@ export interface ReportOwnerOption {
 type DefaultRange = "30" | "60" | "90" | "6m" | "12m" | "qtd" | "ytd";
 
 function toDateInput(date: Date) {
-  return date.toISOString().slice(0, 10);
+  // en-CA renders YYYY-MM-DD, and no timeZone argument means the VIEWER's zone — which is what the
+  // surrounding `setDate`/`getMonth` arithmetic already operates in. toISOString() here was a UTC
+  // conversion applied to a local-time Date: after 6pm Central both bounds advanced a day, so "last 90
+  // days" quietly meant a window ending tomorrow and starting a day late.
+  return date.toLocaleDateString("en-CA");
 }
 
 export function subtractMonthsClamped(date: Date, months: number) {
@@ -154,7 +158,8 @@ export function useReportFilters(options: { defaultRange?: DefaultRange } = {}) 
 export function ReportFilterBar({
   defaultRange = "90",
   showOffice = true,
-}: { defaultRange?: DefaultRange; showOffice?: boolean } = {}) {
+  ownerPickerPurpose,
+}: { defaultRange?: DefaultRange; showOffice?: boolean; ownerPickerPurpose?: "canvassing-report" } = {}) {
   const [searchParams, setSearchParams] = useSearchParams();
   const { filters } = useReportFilters({ defaultRange });
   const [draft, setDraft] = useState<ReportFilters>(filters);
@@ -172,7 +177,7 @@ export function ReportFilterBar({
   // canonicalize a legacy `?office=dallas` URL into its UUID, leaking
   // unrelated reps into the owner picker.
   const salesRepsEnabled = !showOffice ? true : offices.length > 0 || draft.office === "all";
-  const { salesReps } = useSalesReps(canonicalOfficeId, { enabled: salesRepsEnabled });
+  const { salesReps } = useSalesReps(canonicalOfficeId, { enabled: salesRepsEnabled, purpose: ownerPickerPurpose });
 
   useEffect(() => {
     setDraft(hydrateOwnerSelection(filters, salesReps));

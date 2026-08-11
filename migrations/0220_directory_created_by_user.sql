@@ -91,6 +91,17 @@ BEGIN
       );
     END IF;
 
+    -- The notes half of the report groups activities by type + occurred_at across the WHOLE office, with no
+    -- user constraint. Every existing activities index leads with a user or entity id, so none of them can
+    -- narrow an office-wide time range and each request scanned the activity history.
+    IF to_regclass(format('%I.activities', schema_name)) IS NOT NULL THEN
+      EXECUTE format(
+        'CREATE INDEX IF NOT EXISTS activities_type_occurred_at_idx
+           ON %I.activities (type, occurred_at)',
+        schema_name
+      );
+    END IF;
+
     -- leads.created_by_user_id already exists (0128); it only lacks the reporting index.
     IF to_regclass(format('%I.leads', schema_name)) IS NOT NULL THEN
       EXECUTE format(
@@ -136,4 +147,7 @@ CREATE INDEX IF NOT EXISTS contacts_attributed_created_at_idx
 
 CREATE INDEX IF NOT EXISTS leads_created_at_idx
   ON office_dallas.leads (created_at);
+
+CREATE INDEX IF NOT EXISTS activities_type_occurred_at_idx
+  ON office_dallas.activities (type, occurred_at);
 -- TENANT_SCHEMA_END

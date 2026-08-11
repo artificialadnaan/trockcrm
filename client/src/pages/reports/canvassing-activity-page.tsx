@@ -125,7 +125,9 @@ function CanvassingActivityReportView() {
   // the reason this report exists — was the one thing missing from the download.
   const exportSheets = useMemo(() => {
     if (!data) return [];
-    const periodColumns = data.buckets.map((row) => ({ key: row.label, header: row.label }));
+    // Keyed by bucketStart, which is unique by construction; the LABEL is only a header. Weekly labels omit
+    // the year, so keying by label collapsed e.g. 2020-01-05 and 2025-01-05 into one column.
+    const periodColumns = data.buckets.map((row) => ({ key: row.bucketStart, header: row.label }));
     return [
       {
         name: "By person",
@@ -154,7 +156,7 @@ function CanvassingActivityReportView() {
         rows: data.people.map((person) => {
           const row: Record<string, unknown> = { person: person.displayName, total: person.counts.total };
           for (const period of data.buckets) {
-            row[period.label] = period.perUser.find((entry) => entry.userId === person.userId)?.counts.total ?? 0;
+            row[period.bucketStart] = period.perUser.find((entry) => entry.userId === person.userId)?.counts.total ?? 0;
           }
           return row;
         }),
@@ -210,7 +212,15 @@ function CanvassingActivityReportView() {
         description="New companies, properties, contacts and leads entered by each person — plus the notes they logged."
       />
       {/* No office select: these tables are per-office schemas with no office column, so it could not narrow anything. */}
-      <ReportFilterBar defaultRange="90" showOffice={false} />
+      <ReportFilterBar
+        defaultRange="90"
+        showOffice={false}
+        // A viewer on this report's allowlist may hold the `rep` role (Tim does). /users/sales-reps returns
+        // ONLY the caller to a rep unless a purpose says otherwise, so without this the person who most
+        // needs to compare the team could filter to nobody but themselves — on a report that already shows
+        // them everyone's numbers. The server gates this purpose on the same allowlist.
+        ownerPickerPurpose="canvassing-report"
+      />
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
