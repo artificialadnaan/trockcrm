@@ -23,6 +23,12 @@ export type DealBidBoardLinkageFields = {
   bidBoardProjectNumber: string | null;
   bidBoardLinkedAt: Date | string | null;
   readOnlySyncedAt: Date | string | null;
+  /**
+   * Part of the COMPOSITE identity the export matcher's third tier resolves on (name +
+   * bid_board_created_at, for a deal with no bid_board_project_number). A deal carrying only this still
+   * gets reclaimed by the next export, so it is linked for every purpose this predicate serves.
+   */
+  bidBoardCreatedAt: Date | string | null;
 };
 
 /**
@@ -44,6 +50,12 @@ export function isDealBidBoardLinked(deal: DealBidBoardLinkageFields): boolean {
       deal.synchubBidBoardId != null ||
       deal.bidBoardProjectNumber != null ||
       deal.bidBoardLinkedAt != null ||
-      deal.readOnlySyncedAt != null
+      deal.readOnlySyncedAt != null ||
+      // The composite matcher identity. Without it a deal whose only remaining footprint is
+      // bid_board_created_at read as UNLINKED: at Opportunity the eligibility check then called the move
+      // a no-op and refused to detach it, while the next export could still match it by name + date and
+      // reclaim it; from any other stage the detach ran but suppressed the "delete this project"
+      // warning. See bid-board-sync/service.ts's third tier.
+      deal.bidBoardCreatedAt != null
   );
 }

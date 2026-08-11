@@ -1823,6 +1823,8 @@ export function buildBidBoardOwnershipState(
     bidBoardProjectNumber?: string | null;
     bidBoardLinkedAt?: Date | string | null;
     readOnlySyncedAt?: Date | string | null;
+    /** Half of the export matcher's composite identity — see isDealBidBoardLinked. */
+    bidBoardCreatedAt?: Date | string | null;
   }
 ): DealBidBoardOwnershipState {
   // A detached deal is CRM-owned by definition, whatever the stored flag says. Forcing it here (rather
@@ -1861,6 +1863,7 @@ export function buildBidBoardOwnershipState(
     bidBoardProjectNumber: deal.bidBoardProjectNumber ?? null,
     bidBoardLinkedAt: deal.bidBoardLinkedAt ?? null,
     readOnlySyncedAt: deal.readOnlySyncedAt ?? null,
+    bidBoardCreatedAt: deal.bidBoardCreatedAt ?? null,
   });
 
   return {

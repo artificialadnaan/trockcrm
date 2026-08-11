@@ -384,9 +384,6 @@ async function probeInFlightRfpJobs(
   `);
   type JobRow = { job_type?: string; status?: string; cancelled_by?: string | null; source_event_id?: string | null };
   const jobRows = (((rows as unknown as { rows?: JobRow[] }).rows ?? []) as JobRow[]);
-  const claimed = new Set(
-    jobRows.filter((row) => row.status === "processing").map((row) => row.job_type)
-  );
 
   // Matched on the ROUND SUFFIX rather than a whole string, because the two job types prefix it
   // differently: the delivery writes `crm:deal-stage:opportunity:<round>` and the Bid Board create writes
@@ -395,6 +392,16 @@ async function probeInFlightRfpJobs(
   const roundSuffix = roundEventId ? `:${roundEventId}` : null;
   const matchesRound = (sourceEventId: string | null | undefined) =>
     roundSuffix != null && typeof sourceEventId === "string" && sourceEventId.endsWith(roundSuffix);
+  // ROUND-SCOPED, like the completed/enqueued evidence below. A `processing` job from an EARLIER round
+  // cannot send anything — the workers' own round guards skip it — so counting it made the current round
+  // look in-flight: a false SyncHub warning, or worse, a persisted bid_board_detached_was_linked=true and
+  // a permanent instruction to delete a Bid Board project that was never created.
+  const claimed = new Set(
+    jobRows
+      .filter((row) => row.status === "processing" && !row.cancelled_by && matchesRound(row.source_event_id))
+      .map((row) => row.job_type)
+  );
+
 
   return {
     deliveryInFlight: claimed.has("rfp_request_delivery"),

@@ -1157,6 +1157,9 @@ describe("returnDealToOpportunity — queued RFP work is cancelled with the cycl
     status = "pending",
     options: { roundEventId?: string; cancelledBy?: string } = {}
   ) {
+    // NOTE: in-flight evidence is round-scoped, so a `processing` fixture without a roundEventId is
+    // deliberately NOT evidence — it models a stale job from an earlier round, which the workers' own
+    // guards would skip.
     const payload: Record<string, unknown> = { dealId };
     if (options.roundEventId) {
       payload.body = { sourceEventId: `crm:deal-stage:opportunity:${options.roundEventId}` };
@@ -1310,10 +1313,18 @@ describe("returnDealToOpportunity — queued RFP work is cancelled with the cycl
       `UPDATE public.deals
           SET is_bid_board_owned = false, bid_board_project_number = NULL,
               bid_board_linked_at = NULL, read_only_synced_at = NULL,
-              procore_bid_id = NULL, synchub_bid_board_id = NULL, procore_company_id = NULL
+              procore_bid_id = NULL, synchub_bid_board_id = NULL, procore_company_id = NULL,
+              -- bid_board_created_at is half the export matcher's composite identity, so it counts as
+              -- linkage now; a "no footprint" fixture has to clear it too or it is not that case.
+              bid_board_created_at = NULL
         WHERE id = '${D}'`
     );
-    await queueRfpJob(D, "rfp_bidboard_create", "processing");
+    // Stamped with the deal's current round: in-flight evidence is round-scoped, since a claimed job
+    // from an earlier round cannot create anything (the worker's own guard skips it).
+    await pg.exec(
+      `UPDATE public.deals SET rfp_approval_request_event_id = '${U("e611")}' WHERE id = '${D}'`
+    );
+    await queueRfpJob(D, "rfp_bidboard_create", "processing", { roundEventId: U("e611") });
 
     const result = await returnDealToOpportunity(tdb, {
       dealId: D, userId: ADMIN, userRole: "admin", reason: "Moved while a create was claimed", auditContext,
@@ -1396,9 +1407,16 @@ describe("returnDealToOpportunity — queued RFP work is cancelled with the cycl
   // the worker's recheck declines instead, and the two are indistinguishable from here.
   it("reports a possible SyncHub submission when a delivery job was CLAIMED at move time", async () => {
     const D = U("d605");
+    const ROUND = U("e605");
     await seedBidBoardDeal(D);
-    await pg.exec(`UPDATE public.deals SET rfp_approval_status = 'pending_outbox' WHERE id = '${D}'`);
-    await queueRfpJob(D, "rfp_request_delivery", "processing");
+    await pg.exec(
+      `UPDATE public.deals
+          SET rfp_approval_status = 'pending_outbox', rfp_approval_request_event_id = '${ROUND}'
+        WHERE id = '${D}'`
+    );
+    // Belongs to THIS round — in-flight evidence is round-scoped, because a claimed job from an earlier
+    // round cannot send anything (the workers' own guards skip it).
+    await queueRfpJob(D, "rfp_request_delivery", "processing", { roundEventId: ROUND });
 
     const result = await returnDealToOpportunity(tdb, {
       dealId: D, userId: ADMIN, userRole: "admin", reason: "Moved while a send was claimed", auditContext,
@@ -1849,7 +1867,10 @@ describe("previewReturnToOpportunity", () => {
     await pg.exec(
       `UPDATE public.deals SET is_bid_board_owned = false, bid_board_linked_at = NULL,
          bid_board_project_number = NULL, read_only_synced_at = NULL, is_read_only_mirror = false,
-         synchub_bid_board_id = NULL, procore_bid_id = NULL, procore_company_id = NULL
+         synchub_bid_board_id = NULL, procore_bid_id = NULL, procore_company_id = NULL,
+         -- bid_board_created_at is half the export matcher's composite identity and now counts as
+         -- linkage, so "no footprint at all" has to clear it as well.
+         bid_board_created_at = NULL
        WHERE id = '${D}'`
     );
 
@@ -2138,6 +2159,7 @@ describe("returnDealToOpportunity — a completed create is evidence a project e
       `UPDATE public.deals
           SET is_bid_board_owned = false, procore_bid_id = NULL, synchub_bid_board_id = NULL,
               bid_board_project_number = NULL, bid_board_linked_at = NULL, read_only_synced_at = NULL,
+              bid_board_created_at = NULL,
               rfp_approval_status = 'approved', rfp_approval_request_event_id = '${ROUND}'
         WHERE id = '${D}'`
     );
@@ -2169,6 +2191,7 @@ describe("returnDealToOpportunity — a completed create is evidence a project e
       `UPDATE public.deals
           SET is_bid_board_owned = false, procore_bid_id = NULL, synchub_bid_board_id = NULL,
               bid_board_project_number = NULL, bid_board_linked_at = NULL, read_only_synced_at = NULL,
+              bid_board_created_at = NULL,
               rfp_approval_status = 'approved', rfp_approval_request_event_id = '${U("ec12")}'
         WHERE id = '${D}'`
     );
@@ -2194,6 +2217,7 @@ describe("returnDealToOpportunity — a completed create is evidence a project e
       `UPDATE public.deals
           SET is_bid_board_owned = false, procore_bid_id = NULL, synchub_bid_board_id = NULL,
               bid_board_project_number = NULL, bid_board_linked_at = NULL, read_only_synced_at = NULL,
+              bid_board_created_at = NULL,
               rfp_approval_status = 'approved', rfp_approval_request_event_id = '${ROUND}'
         WHERE id = '${D}'`
     );
