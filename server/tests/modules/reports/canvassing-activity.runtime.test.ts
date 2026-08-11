@@ -726,8 +726,8 @@ describe("canvassing activity — the default roster", () => {
   // Built only from people WITH activity, someone who canvassed nothing all week simply vanished — you
   // cannot notice an absence that is not drawn, and a visible zero is what this report is for. But
   // "every active office member" would list admins and construction staff at zero forever and bury the
-  // handful it is about. generates_sales (migration 0219) already means "expected to produce sales
-  // activity", so that is the line.
+  // handful it is about. Client-facing ROLE is the line: it covers the reps and a canvassing director,
+  // and unlike the deal-carrier flag it is not a decision someone took about a different report.
   it("lists the office's sales carriers even when they entered nothing", async () => {
     const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF }));
 
@@ -738,11 +738,11 @@ describe("canvassing activity — the default roster", () => {
     expect(owner?.notesLogged).toBe(0);
   });
 
-  it("leaves off someone who does not carry sales", async () => {
+  it("leaves off someone whose role is not client-facing", async () => {
     const BACKOFFICE = U("bac1");
     await pg.exec(`
-      INSERT INTO public.users (id, email, display_name, role, office_id, is_active, generates_sales)
-      VALUES ('${BACKOFFICE}', 'ops@example.com', 'Back Office', 'admin', '${OFF}', true, false);
+      INSERT INTO public.users (id, email, display_name, role, office_id, is_active)
+      VALUES ('${BACKOFFICE}', 'ops@example.com', 'Back Office', 'admin', '${OFF}', true);
     `);
 
     const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF }));
@@ -751,13 +751,13 @@ describe("canvassing activity — the default roster", () => {
     await pg.exec(`DELETE FROM public.users WHERE id = '${BACKOFFICE}';`);
   });
 
-  it("still credits a non-carrier who DID create something", async () => {
-    // The flag decides who is listed by default, never who gets credit: real work always counts.
+  it("still credits someone off the roster who DID create something", async () => {
+    // Role decides who is LISTED by default, never who gets CREDIT: real work always counts.
     const BACKOFFICE = U("bac2");
     const THEIR_CO = U("bac2c0");
     await pg.exec(`
-      INSERT INTO public.users (id, email, display_name, role, office_id, is_active, generates_sales)
-      VALUES ('${BACKOFFICE}', 'ops2@example.com', 'Back Office Two', 'admin', '${OFF}', true, false);
+      INSERT INTO public.users (id, email, display_name, role, office_id, is_active)
+      VALUES ('${BACKOFFICE}', 'ops2@example.com', 'Back Office Two', 'admin', '${OFF}', true);
       INSERT INTO public.companies (id, name, slug, category, created_by_user_id, is_active, is_test_data, created_at)
       VALUES ('${THEIR_CO}', 'Ops Co', 'ops-co', 'client', '${BACKOFFICE}', true, false, '2026-06-02T12:00:00Z');
     `);
@@ -962,6 +962,56 @@ describe("canvassing activity — explicit ids beat a shared display name", () =
       expect(report.people.map((p) => p.userId)).toEqual([CAL]);
     } finally {
       await pg.exec(`DELETE FROM public.users WHERE id = '${TWIN}';`);
+    }
+  });
+});
+
+
+describe("canvassing activity — the roster does not borrow another report's flag", () => {
+  // generates_sales means "appears on the director dashboard's rep performance views". Unticking someone
+  // there is a statement about THAT surface, so keying this roster on it made an active canvasser vanish
+  // from this report because of a decision taken about a different one.
+  it("lists a canvasser who has been unticked from the deal-carrier roster", async () => {
+    const UNTICKED = U("0f11");
+    await pg.exec(`
+      INSERT INTO public.users (id, email, display_name, role, office_id, is_active, generates_sales)
+      VALUES ('${UNTICKED}', 'unticked@example.com', 'Unticked Rep', 'rep', '${OFF}', true, false);
+    `);
+
+    try {
+      const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF }));
+      expect(report.people.find((p) => p.userId === UNTICKED)).toBeDefined();
+      expect(report.people.find((p) => p.userId === UNTICKED)?.counts.total).toBe(0);
+    } finally {
+      await pg.exec(`DELETE FROM public.users WHERE id = '${UNTICKED}';`);
+    }
+  });
+});
+
+describe("canvassing activity — the far edge of the date domain", () => {
+  // 9999-12-31 is a legal bound whose next period is a five-digit year. Guarding only the enumeration loop
+  // left bucketEndExclusive still producing "10000-01-01" for isPartialBucket.
+  it("does not emit an unrepresentable bucket key at year 9999", async () => {
+    const report = await getCanvassingActivityReport(tdb, {
+      ...normalizeCanvassingFilters({ dateFrom: "9995-01-01", dateTo: "9999-12-31", bucket: "quarter" }),
+      officeId: OFF,
+    });
+
+    for (const bucket of report.buckets) {
+      expect(bucket.bucketStart).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(bucket.label).not.toContain("NaN");
+    }
+  });
+
+  it("does the same for months and weeks", async () => {
+    for (const bucket of ["month", "week"] as const) {
+      const report = await getCanvassingActivityReport(tdb, {
+        ...normalizeCanvassingFilters({ dateFrom: "9999-11-01", dateTo: "9999-12-31", bucket }),
+        officeId: OFF,
+      });
+      for (const row of report.buckets) {
+        expect(row.bucketStart, `${bucket} ${row.bucketStart}`).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      }
     }
   });
 });

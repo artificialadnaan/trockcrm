@@ -8,13 +8,14 @@
 // surface here therefore prints the unattributed count beside the attributed one, and the header carries
 // the date attribution actually starts.
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { PageHeader } from "@/components/layout/page-header";
 import { ReportFilterBar, useReportFilters } from "@/components/reports/report-filter-bar";
 import { ExportExcelButton } from "@/components/reports/export-excel-button";
 import { useAuth } from "@/lib/auth";
+import { useOfficeScopeId } from "@/hooks/use-office-scope";
 import {
   CANVASSING_KINDS,
   useCanvassingActivityReport,
@@ -79,7 +80,24 @@ function labelForType(type: string) {
 
 /** Access gate. Wrapping keeps the report's hooks — and its request — from running for a denied user. */
 export function CanvassingActivityPage() {
-  const { user } = useAuth();
+  const { user, refreshUser } = useAuth();
+  const officeScopeKey = useOfficeScopeId();
+
+  // The access flag is computed from the viewer's role in their ACTIVE office and fetched once, when
+  // AuthProvider mounts. Switching ?officeId changes the effective role without refetching, so the gate
+  // would keep answering for the office the session started in — hiding the report from someone who may
+  // open it here, or offering it to someone the endpoint will refuse. The server is still the boundary;
+  // this keeps the UI from disagreeing with it.
+  const refreshedForOffice = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    if (refreshedForOffice.current === undefined) {
+      refreshedForOffice.current = officeScopeKey;
+      return;
+    }
+    if (refreshedForOffice.current === officeScopeKey) return;
+    refreshedForOffice.current = officeScopeKey;
+    void refreshUser();
+  }, [officeScopeKey, refreshUser]);
 
   if (!user?.canViewCanvassingReport) {
     return (
@@ -250,7 +268,9 @@ function CanvassingActivityReportView() {
         })),
       },
       {
-        name: "Notes",
+        // Named so a truncated export cannot be mistaken for the whole record — the sheet tab itself says
+        // it is a slice, because a spreadsheet carries no "showing the most recent 200" caption.
+        name: data.notesTruncated ? `Notes (newest ${data.notes.length})` : "Notes",
         columns: [
           { key: "when", header: "When" },
           { key: "person", header: "Person" },

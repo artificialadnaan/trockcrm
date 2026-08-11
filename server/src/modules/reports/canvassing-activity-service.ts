@@ -222,13 +222,9 @@ function bucketStartsInRange(bucket: CanvassingBucket, from: string, to: string)
     const month = bucket === "month" ? m : Math.floor((m - 1) / 3) * 3 + 1;
     return `${String(y).padStart(4, "0")}-${String(month).padStart(2, "0")}-01`;
   };
-  const next = (iso: string): string => {
-    if (bucket === "week") return shiftBusinessDate(iso, 7);
-    const [y, m] = iso.split("-").map(Number);
-    const step = bucket === "month" ? 1 : 3;
-    const raw = m - 1 + step;
-    return `${String(y + Math.floor(raw / 12)).padStart(4, "0")}-${String((raw % 12) + 1).padStart(2, "0")}-01`;
-  };
+  // One definition of "the next period", shared with isPartialBucket, so the two cannot disagree about the
+  // edge of the representable range.
+  const next = (iso: string): string => bucketEndExclusive(bucket, iso);
 
   const out: string[] = [];
   // Bounded independently of the loop body: a malformed range must not be able to spin here.
@@ -238,7 +234,7 @@ function bucketStartsInRange(bucket: CanvassingBucket, from: string, to: string)
   // "10000-01-01", which no consumer of these keys can parse.
   for (let cursor = startOf(from); cursor <= to && out.length < 4096; cursor = next(cursor)) {
     out.push(cursor);
-    if (next(cursor).length > 10) break;
+    if (next(cursor) === cursor || next(cursor) >= MAX_ISO_DATE) break;
   }
   return out;
 }
@@ -376,12 +372,28 @@ function businessWindowSql(tsExpr: string, from: string, to: string): SQL {
          AND ${col} < ((${to}::date + 1) AT TIME ZONE ${BUSINESS_TIMEZONE})`;
 }
 
-/** The exclusive end of the calendar period beginning at `start`. */
+/** The last date any of this code will represent. Postgres dates go further; a 4-digit ISO string does not. */
+const MAX_ISO_DATE = "9999-12-31";
+
+/**
+ * The exclusive end of the calendar period beginning at `start`, clamped to the representable domain.
+ *
+ * Clamped HERE rather than at each call site: guarding only the enumeration loop last round left this
+ * helper still handing "10000-01-01" to isPartialBucket and shiftBusinessDate, which is the same
+ * fix-the-instance-not-the-class mistake one layer down.
+ */
 function bucketEndExclusive(bucket: CanvassingBucket, start: string): string {
-  if (bucket === "week") return shiftBusinessDate(start, 7);
+  if (bucket === "week") {
+    const end = shiftBusinessDate(start, 7);
+    // Checked by SHAPE, not by comparison: past year 9999 JS switches to the extended form "+010000-01-08",
+    // and "+0..." sorts BELOW "9999-12-31" as a string, so `end > MAX_ISO_DATE` silently let it through.
+    return ISO_DATE.test(end) && end <= MAX_ISO_DATE ? end : MAX_ISO_DATE;
+  }
   const [y, m] = start.split("-").map(Number);
   const raw = m - 1 + (bucket === "month" ? 1 : 3);
-  return `${String(y + Math.floor(raw / 12)).padStart(4, "0")}-${String((raw % 12) + 1).padStart(2, "0")}-01`;
+  const year = y + Math.floor(raw / 12);
+  if (year > 9999) return MAX_ISO_DATE;
+  return `${String(year).padStart(4, "0")}-${String((raw % 12) + 1).padStart(2, "0")}-01`;
 }
 
 /** Whether the requested range clips this calendar period at either end. */
@@ -587,10 +599,16 @@ export async function getCanvassingActivityReport(
   // activity", migration 0219), so the default roster is the office's sales carriers — 10 people, not 40.
   // A pinned selection overrides it, because then the caller has said who they want.
   if (!pinned) {
+    // ROLE, not the deal-carrier flag. An earlier revision used users.generates_sales, but that flag means
+    // "appears on the director dashboard's rep performance views" — unticking someone there is a deliberate
+    // statement about THAT surface, and borrowing it here made an active canvasser disappear from this
+    // report because of a decision taken about a different one. Role is the stable answer to "is this
+    // person client-facing", and it covers a canvassing director (Chris) as well as the reps.
+    //
+    // Test users are excluded here as well as in the counting queries — otherwise a QA account would be
+    // drawn onto the scoreboard as a permanent zero row.
     rosterPredicates.push(
-      // Test users are excluded here as well as in the counting queries — otherwise a QA account would be
-      // drawn onto the scoreboard as a permanent zero row.
-      sql`(u.is_active = true AND u.generates_sales = true
+      sql`(u.is_active = true AND u.role IN ('rep', 'director')
            AND COALESCE(u.is_test_data, false) = false AND ${membership})`
     );
   }
