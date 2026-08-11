@@ -99,6 +99,8 @@ export interface CanvassingActivityFilters {
    * active flag returned as a zero-count row — reading the global directory through a tenant report.
    */
   officeId?: string | null;
+  /** Set by the normalizer when it shortened an over-long window. */
+  rangeClamped?: boolean;
   /**
    * The viewer's HOME role (users.role), NOT the per-office effective one.
    *
@@ -163,7 +165,14 @@ export interface CanvassingNoteRow {
 }
 
 export interface CanvassingActivityReport {
+  /** The window actually reported on — which is not always the one requested; see `rangeClamped`. */
   range: { from: string; to: string };
+  /**
+   * True when the requested window was longer than the supported maximum and `range.from` was moved
+   * forward. The filter bar keeps displaying what was typed, so without this the page would show one
+   * window and describe another.
+   */
+  rangeClamped: boolean;
   bucket: CanvassingBucket;
   totals: CanvassingCounts;
   unattributed: CanvassingCounts;
@@ -285,7 +294,8 @@ export function normalizeCanvassingFilters(query: Record<string, unknown>): Canv
   // of a grid that promises every one of them, and the gap had no explanation anywhere in the payload; the
   // returned `range` reflects this clamp, so the page always describes the window it actually reports on.
   const earliest = shiftBusinessDate(to, -(MAX_RANGE_DAYS - 1));
-  if (from < earliest) from = earliest;
+  const rangeClamped = from < earliest;
+  if (rangeClamped) from = earliest;
 
   const rawUserIds = pick(query.userIds)
     .split(",")
@@ -307,6 +317,7 @@ export function normalizeCanvassingFilters(query: Record<string, unknown>): Canv
     dateFrom: from,
     dateTo: to,
     bucket,
+    rangeClamped,
     userIds: userIds.length > 0 ? userIds : userIdsWereRequested ? [UNRESOLVABLE_OWNER] : undefined,
     ownerNames: ownerNames.length > 0 ? ownerNames : undefined,
     ownerEmails: ownerEmails.length > 0 ? ownerEmails : undefined,
@@ -602,17 +613,31 @@ export async function getCanvassingActivityReport(
   // — or REPORTING — on users.role alone judges a multi-office person by whichever office they call home.
   // Used by both the predicate and the SELECT, so a person listed because of their override is not then
   // labelled with the role they do not hold here.
+  //
+  // The override is ignored for someone's OWN office, matching authMiddleware, which only consults
+  // user_office_access when the requested office differs from users.office_id. A stray access row for a
+  // home office must not change how this report classifies them when a live request would not.
   const effectiveRole = filters.officeId
-    ? sql`COALESCE((
-        SELECT uo.role_override FROM user_office_access uo
-         WHERE uo.user_id = u.id AND uo.office_id = ${filters.officeId} AND uo.role_override IS NOT NULL
-         LIMIT 1
-      ), u.role)`
+    ? sql`CASE
+            WHEN u.office_id = ${filters.officeId} THEN u.role
+            ELSE COALESCE((
+              SELECT uo.role_override FROM user_office_access uo
+               WHERE uo.user_id = u.id AND uo.office_id = ${filters.officeId}
+                 AND uo.role_override IS NOT NULL
+               LIMIT 1
+            ), u.role)
+          END`
     : sql`u.role`;
 
   const rosterPredicates: SQL[] = [];
   if (discovered.length) rosterPredicates.push(sql`u.id = ANY(${idArray(discovered)})`);
-  if (pinnedOnly.length) rosterPredicates.push(sql`(u.id = ANY(${idArray(pinnedOnly)}) AND ${membership})`);
+  if (pinnedOnly.length) {
+    // Test users are excluded here too. Every counting query filters them and the default roster filters
+    // them; leaving the pinned path open let a QA account be selected onto the scoreboard by id.
+    rosterPredicates.push(
+      sql`(u.id = ANY(${idArray(pinnedOnly)}) AND COALESCE(u.is_test_data, false) = false AND ${membership})`
+    );
+  }
   // UNFILTERED, the roster is everyone who is SUPPOSED to be canvassing, not merely everyone who did.
   //
   // Building it only from people with activity meant someone who canvassed nothing all week vanished from
@@ -774,6 +799,7 @@ export async function getCanvassingActivityReport(
 
   return {
     range: { from: filters.dateFrom, to: filters.dateTo },
+    rangeClamped: filters.rangeClamped === true,
     bucket: filters.bucket,
     totals,
     unattributed,

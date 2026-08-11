@@ -30,6 +30,26 @@ afterEach(() => {
 });
 
 describe("report filter defaults", () => {
+  // The zone is a PARAMETER now, not a platform-wide guess. Four rounds were spent picking one answer for a
+  // shared control when the reports genuinely differ: the Daily Activity Log buckets in UTC so it
+  // reconciles with Rep Activity, Canvassing Activity windows in America/Chicago. Each declares its own.
+  it("anchors on the zone the consuming report declares", () => {
+    vi.useFakeTimers();
+    // 03:00 UTC on Jun 15 is still Jun 14 in Chicago — the instant that separates the two answers.
+    vi.setSystemTime(new Date("2026-06-15T03:00:00Z"));
+
+    expect(rangeDatesForTest("90", "America/Chicago").dateTo).toBe("2026-06-14");
+    expect(rangeDatesForTest("90", "UTC").dateTo).toBe("2026-06-15");
+  });
+
+  it("spans the requested days in the declared zone too", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-06-15T03:00:00Z"));
+
+    const { dateFrom, dateTo } = rangeDatesForTest("30", "America/Chicago");
+    expect(daysBetween(dateFrom, dateTo)).toBe(30);
+  });
+
   // Instants chosen to straddle midnight in several zones at once, which is where a mixed-zone calculation
   // shows itself: 03:00 UTC is still yesterday in Chicago, and 23:00 UTC is already tomorrow in Tokyo.
   const INSTANTS = ["2026-06-15T03:00:00Z", "2026-06-15T14:00:00Z", "2026-06-15T23:00:00Z"];

@@ -551,6 +551,8 @@ export interface CanvassingNoteRow {
 
 export interface CanvassingActivityReport {
   range: { from: string; to: string };
+  /** The requested window was longer than supported and `range.from` was moved forward. */
+  rangeClamped: boolean;
   bucket: CanvassingBucket;
   totals: CanvassingCounts;
   unattributed: CanvassingCounts;

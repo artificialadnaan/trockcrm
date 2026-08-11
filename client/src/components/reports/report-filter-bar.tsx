@@ -66,8 +66,19 @@ function toDateInput(date: Date) {
  * is doing local-field arithmetic and then serialising through toISOString(): that mixes two zones inside
  * one calculation and lands a day out for everyone west of UTC every evening.
  */
-function viewerToday(): Date {
-  return new Date();
+function viewerToday(dateTimezone?: string): Date {
+  if (!dateTimezone) return new Date();
+  // Cross the boundary exactly ONCE, here, and hand back a Date whose LOCAL fields are that zone's calendar
+  // fields — everything downstream (setDate/getMonth, subtractMonthsClamped, toDateInput) then stays in
+  // local fields. Reparsing a formatted string instead lands a day out for anyone ahead of the target zone.
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: dateTimezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const get = (type: string) => Number(parts.find((part) => part.type === type)?.value);
+  return new Date(get("year"), get("month") - 1, get("day"));
 }
 
 export function subtractMonthsClamped(date: Date, months: number) {
@@ -87,12 +98,12 @@ export function subtractMonthsClamped(date: Date, months: number) {
 }
 
 /** Exported for report-filter-bar-dates.runtime.test.tsx — the anchor has been wrong twice. */
-export function rangeDatesForTest(range: string) {
-  return rangeDates(range);
+export function rangeDatesForTest(range: string, dateTimezone?: string) {
+  return rangeDates(range, dateTimezone);
 }
 
-function rangeDates(range: string) {
-  const today = viewerToday();
+function rangeDates(range: string, dateTimezone?: string) {
+  const today = viewerToday(dateTimezone);
   const from = new Date(today);
 
   if (range === "6m") {
@@ -112,8 +123,8 @@ function rangeDates(range: string) {
   return { dateFrom: toDateInput(subtractMonthsClamped(today, 12)), dateTo: toDateInput(today) };
 }
 
-function defaultFilters(defaultRange: DefaultRange = "90"): ReportFilters {
-  const dates = rangeDates(defaultRange);
+function defaultFilters(defaultRange: DefaultRange = "90", dateTimezone?: string): ReportFilters {
+  const dates = rangeDates(defaultRange, dateTimezone);
   return { range: defaultRange, ...dates, office: "all", ownerIds: [], ownerNames: [], ownerEmails: [] };
 }
 
@@ -147,10 +158,10 @@ export function hydrateOwnerSelection(filters: ReportFilters, owners: ReportOwne
   };
 }
 
-export function useReportFilters(options: { defaultRange?: DefaultRange } = {}) {
+export function useReportFilters(options: { defaultRange?: DefaultRange; dateTimezone?: string } = {}) {
   const [searchParams] = useSearchParams();
   const filters = useMemo<ReportFilters>(() => {
-    const defaults = defaultFilters(options.defaultRange);
+    const defaults = defaultFilters(options.defaultRange, options.dateTimezone);
     const range = searchParams.get("range") || defaults.range;
     return {
       range,
@@ -190,6 +201,7 @@ export function ReportFilterBar({
   showOffice = true,
   ownerPickerPurpose,
   ownerLabel = "Owner",
+  dateTimezone,
 }: {
   defaultRange?: DefaultRange;
   showOffice?: boolean;
@@ -200,9 +212,17 @@ export function ReportFilterBar({
    * control "Owner" told a reader the numbers meant something they do not.
    */
   ownerLabel?: string;
+  /**
+   * The zone the CONSUMING report interprets these dates in, so the defaults describe the same day the
+   * numbers are computed for. Omitted means the viewer's own calendar, which is what a date picker means
+   * to a person and what every report used before this. Reports disagree here on purpose — the Daily
+   * Activity Log buckets in UTC so it reconciles with Rep Activity — so this is a parameter, not a
+   * platform-wide choice.
+   */
+  dateTimezone?: string;
 } = {}) {
   const [searchParams, setSearchParams] = useSearchParams();
-  const { filters } = useReportFilters({ defaultRange });
+  const { filters } = useReportFilters({ defaultRange, dateTimezone });
   const [draft, setDraft] = useState<ReportFilters>(filters);
   const { offices } = useAccessibleOffices();
   const activeOfficeId = useOfficeScopeId();
@@ -248,7 +268,7 @@ export function ReportFilterBar({
   }, [showOffice, activeOfficeId, searchParams, setSearchParams]);
 
   function updateRange(range: string) {
-    const dates = range === "custom" ? { dateFrom: draft.dateFrom, dateTo: draft.dateTo } : rangeDates(range);
+    const dates = range === "custom" ? { dateFrom: draft.dateFrom, dateTo: draft.dateTo } : rangeDates(range, dateTimezone);
     setDraft((current) => ({ ...current, range, ...dates }));
   }
 
@@ -296,7 +316,7 @@ export function ReportFilterBar({
   }
 
   function resetFilters() {
-    const defaults = defaultFilters(defaultRange);
+    const defaults = defaultFilters(defaultRange, dateTimezone);
     setDraft(defaults);
     applyFilters(defaults);
   }

@@ -1045,9 +1045,13 @@ describe("canvassing activity — the roster reads the office's effective role",
   // whichever office they call home.
   it("includes someone whose home role is not client-facing but who holds a rep override here", async () => {
     const OVERRIDDEN = U("0e3a");
+    const HOME_OFFICE = U("0ff9");
+    // Their HOME office is elsewhere; the override belongs to THIS office. That is the only shape in which
+    // authMiddleware consults role_override at all, so it is the only shape worth asserting.
     await pg.exec(`
+      INSERT INTO public.offices (id, name, slug) VALUES ('${HOME_OFFICE}', 'Elsewhere', 'elsewhere');
       INSERT INTO public.users (id, email, display_name, role, office_id, is_active)
-      VALUES ('${OVERRIDDEN}', 'override@example.com', 'Overridden User', 'construction', '${OFF}', true);
+      VALUES ('${OVERRIDDEN}', 'override@example.com', 'Overridden User', 'construction', '${HOME_OFFICE}', true);
       INSERT INTO public.user_office_access (user_id, office_id, role_override)
       VALUES ('${OVERRIDDEN}', '${OFF}', 'rep');
     `);
@@ -1056,15 +1060,17 @@ describe("canvassing activity — the roster reads the office's effective role",
       const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF }));
       expect(report.people.find((p) => p.userId === OVERRIDDEN)).toBeDefined();
     } finally {
-      await pg.exec(`DELETE FROM public.user_office_access WHERE user_id = '${OVERRIDDEN}'; DELETE FROM public.users WHERE id = '${OVERRIDDEN}';`);
+      await pg.exec(`DELETE FROM public.user_office_access WHERE user_id = '${OVERRIDDEN}'; DELETE FROM public.users WHERE id = '${OVERRIDDEN}'; DELETE FROM public.offices WHERE id = '${HOME_OFFICE}';`);
     }
   });
 
   it("excludes someone whose home role is client-facing but who is overridden to a back-office role here", async () => {
     const DEMOTED = U("0e42");
+    const HOME_OFFICE = U("0ffa");
     await pg.exec(`
+      INSERT INTO public.offices (id, name, slug) VALUES ('${HOME_OFFICE}', 'Elsewhere Two', 'elsewhere-two');
       INSERT INTO public.users (id, email, display_name, role, office_id, is_active)
-      VALUES ('${DEMOTED}', 'demoted@example.com', 'Demoted User', 'rep', '${OFF}', true);
+      VALUES ('${DEMOTED}', 'demoted@example.com', 'Demoted User', 'rep', '${HOME_OFFICE}', true);
       INSERT INTO public.user_office_access (user_id, office_id, role_override)
       VALUES ('${DEMOTED}', '${OFF}', 'construction');
     `);
@@ -1073,7 +1079,54 @@ describe("canvassing activity — the roster reads the office's effective role",
       const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF }));
       expect(report.people.find((p) => p.userId === DEMOTED)).toBeUndefined();
     } finally {
-      await pg.exec(`DELETE FROM public.user_office_access WHERE user_id = '${DEMOTED}'; DELETE FROM public.users WHERE id = '${DEMOTED}';`);
+      await pg.exec(`DELETE FROM public.user_office_access WHERE user_id = '${DEMOTED}'; DELETE FROM public.users WHERE id = '${DEMOTED}'; DELETE FROM public.offices WHERE id = '${HOME_OFFICE}';`);
     }
+  });
+});
+
+
+describe("canvassing activity — a role override on someone's OWN office is ignored", () => {
+  // authMiddleware only consults user_office_access when the requested office differs from users.office_id
+  // (auth.ts), so a stray access row for a home office must not change how this report classifies someone
+  // when a live request would not.
+  it("classifies a home-office user by users.role, whatever an access row says", async () => {
+    const HOME_USER = U("0be1");
+    await pg.exec(`
+      INSERT INTO public.users (id, email, display_name, role, office_id, is_active)
+      VALUES ('${HOME_USER}', 'home@example.com', 'Home User', 'construction', '${OFF}', true);
+      INSERT INTO public.user_office_access (user_id, office_id, role_override)
+      VALUES ('${HOME_USER}', '${OFF}', 'rep');
+    `);
+
+    try {
+      const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF }));
+      // The override says rep; their home office is this one, so their real role stands and they are out.
+      expect(report.people.find((p) => p.userId === HOME_USER)).toBeUndefined();
+    } finally {
+      await pg.exec(`DELETE FROM public.user_office_access WHERE user_id = '${HOME_USER}'; DELETE FROM public.users WHERE id = '${HOME_USER}';`);
+    }
+  });
+});
+
+describe("canvassing activity — a pinned test account", () => {
+  it("cannot be selected onto the scoreboard by id", async () => {
+    const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF, userIds: [TESTER] }));
+    expect(report.people).toEqual([]);
+  });
+});
+
+describe("canvassing activity — an over-long range says it was shortened", () => {
+  it("reports the clamp rather than quietly moving the start", async () => {
+    const parsed = normalizeCanvassingFilters({ dateFrom: "2000-01-01", dateTo: "2026-12-31" });
+    expect(parsed.rangeClamped).toBe(true);
+
+    const report = await getCanvassingActivityReport(tdb, { ...parsed, officeId: OFF });
+    expect(report.rangeClamped).toBe(true);
+    expect(report.range.from).toBe(parsed.dateFrom);
+  });
+
+  it("does not claim a clamp on an ordinary range", async () => {
+    const report = await getCanvassingActivityReport(tdb, filters({ officeId: OFF }));
+    expect(report.rangeClamped).toBe(false);
   });
 });

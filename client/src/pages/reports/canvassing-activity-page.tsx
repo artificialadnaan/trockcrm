@@ -33,6 +33,9 @@ import {
 } from "./performance-report-ui";
 
 /** Plurals, spelled out — `${kind}s` produced "companys" and "propertys". */
+/** The zone this report windows, buckets and renders in — server/src/lib/period.ts calls it canonical. */
+const BUSINESS_TIMEZONE = "America/Chicago";
+
 const KIND_LABELS: Record<CanvassingKind, string> = {
   company: "Companies",
   property: "Properties",
@@ -70,7 +73,7 @@ function formatClock(iso: string) {
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
-    timeZone: "America/Chicago",
+    timeZone: BUSINESS_TIMEZONE,
   }).format(new Date(iso));
 }
 
@@ -83,7 +86,7 @@ function formatExportTimestamp(iso: string) {
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-    timeZone: "America/Chicago",
+    timeZone: BUSINESS_TIMEZONE,
   }).format(new Date(iso))} CT`;
 }
 
@@ -141,7 +144,9 @@ export function CanvassingActivityPage() {
 }
 
 function CanvassingActivityReportView() {
-  const { query } = useReportFilters({ defaultRange: "90" });
+  // This report windows and buckets in America/Chicago, so its defaults are anchored there too —
+  // otherwise the range offered describes a different day from the one the numbers are computed for.
+  const { query } = useReportFilters({ defaultRange: "90", dateTimezone: BUSINESS_TIMEZONE });
   const [searchParams, setSearchParams] = useSearchParams();
 
   // The bucket lives in the URL for the same reason the filter bar's values do: the bar's Apply rewrites
@@ -348,6 +353,7 @@ function CanvassingActivityReportView() {
         // life while authorship is not, so the shared "Owner" label named a different — and mutable —
         // column than the one the numbers come from.
         ownerLabel="Entered by"
+        dateTimezone={BUSINESS_TIMEZONE}
       />
 
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -384,6 +390,14 @@ function CanvassingActivityReportView() {
             who added a record, so any earlier period reads as zero. Saying so here is the difference between
             "the team did nothing in June" and "June cannot be answered".
           */}
+          {data.rangeClamped ? (
+            <div className="rounded-lg border border-sky-200 bg-sky-50 p-3 text-sm text-sky-900">
+              That range is longer than this report supports, so it is showing{" "}
+              <strong>{formatDay(data.range.from)}</strong> to <strong>{formatDay(data.range.to)}</strong>. The
+              filter above still shows what you asked for.
+            </div>
+          ) : null}
+
           <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
             {data.attributionStartHint ? (
               <>
