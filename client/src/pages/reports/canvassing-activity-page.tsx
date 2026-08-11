@@ -945,6 +945,13 @@ function CanvassingActivityReportView() {
       ) : null}
 
       <CanvassingEvidenceDialog
+        // The person selection is part of the drill's scope: a change to it moves the numbers a drill
+        // was opened from just as surely as a bucket or date change does.
+        peopleScopeKey={[
+          ...(query.ownerIds ?? []),
+          ...(query.ownerNames ?? []),
+          ...(query.ownerEmails ?? []),
+        ].join(",")}
         target={evidenceTarget}
         bucket={bucket}
         dateFrom={query.dateFrom}

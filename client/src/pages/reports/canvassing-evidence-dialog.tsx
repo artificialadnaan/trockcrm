@@ -63,12 +63,22 @@ export function CanvassingEvidenceDialog({
   dateFrom,
   dateTo,
   onClose,
+  peopleScopeKey,
 }: {
   target: CanvassingEvidenceTarget | null;
   bucket: CanvassingBucket;
   dateFrom?: string;
   dateTo?: string;
   onClose: () => void;
+  /**
+   * Identity of the PERSON SELECTION the report is currently under.
+   *
+   * Part of the drill's scope for the same reason the bucket and dates are: an office-wide KPI drill
+   * left open while the report becomes person-filtered goes on showing office-wide records and an
+   * office-wide expected count for a figure that is now one person's. Bucket and date changes are not
+   * the only way the numbers underneath a drill move.
+   */
+  peopleScopeKey?: string;
 }) {
   const [data, setData] = useState<CanvassingEvidenceResult | null>(null);
   const [loading, setLoading] = useState(false);
@@ -82,7 +92,7 @@ export function CanvassingEvidenceDialog({
   const requestedForOffice = useRef<string | null>(null);
   /** Likewise for the report's own scope: the bucket and date range the drill was opened under. */
   const openedForScope = useRef<string | null>(null);
-  const currentScope = `${bucket}|${dateFrom ?? ""}|${dateTo ?? ""}`;
+  const currentScope = `${bucket}|${dateFrom ?? ""}|${dateTo ?? ""}|${peopleScopeKey ?? ""}`;
 
   // Close the drill if the REPORT SCOPE moves out from under it.
   //
@@ -235,7 +245,9 @@ export function CanvassingEvidenceDialog({
                           <p className="text-sm font-semibold text-slate-900">{row.label}</p>
                         )}
                         {/* Only on the combined list: "Acme Roofing" alone does not say company or lead. */}
-                        {target?.kind === "all" && row.kind ? (
+                        {/* Both combined lists mix kinds — `unattributed` is a union of the same four
+                            tables, so "Acme Roofing" is as ambiguous there as it is under `all`. */}
+                        {(target?.kind === "all" || target?.kind === "unattributed") && row.kind ? (
                           <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-semibold text-slate-600">
                             {KIND_BADGES[row.kind] ?? row.kind}
                           </span>

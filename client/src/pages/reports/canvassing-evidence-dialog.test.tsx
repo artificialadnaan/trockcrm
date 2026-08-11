@@ -67,7 +67,12 @@ function NavigationHandle() {
 function tree(
   search: string,
   onClose: () => void,
-  scope: { bucket?: "week" | "month" | "quarter"; dateFrom?: string; dateTo?: string } = {}
+  scope: {
+    bucket?: "week" | "month" | "quarter";
+    dateFrom?: string;
+    dateTo?: string;
+    peopleScopeKey?: string;
+  } = {}
 ) {
   return createElement(
     MemoryRouter,
@@ -81,6 +86,7 @@ function tree(
         bucket: scope.bucket ?? ("week" as const),
         dateFrom: scope.dateFrom ?? "2026-06-01",
         dateTo: scope.dateTo ?? "2026-06-30",
+        peopleScopeKey: scope.peopleScopeKey ?? "",
         onClose,
       })
     )
@@ -218,6 +224,20 @@ describe("CanvassingEvidenceDialog — the report scope moving under an open dri
 
     await act(async () => {
       root!.render(tree("?officeId=office-atlanta", onClose, { dateFrom: "2026-05-01" }));
+    });
+
+    expect(onClose).toHaveBeenCalled();
+  });
+
+  // An office-wide KPI drill left open while the report becomes person-filtered would keep showing
+  // office-wide records, and an office-wide expected count, for a figure that is now one person's.
+  it("closes when the person selection changes", async () => {
+    const onClose = vi.fn();
+    await renderDialog("?officeId=office-atlanta", COMBINED_RESULT, onClose);
+    expect(onClose).not.toHaveBeenCalled();
+
+    await act(async () => {
+      root!.render(tree("?officeId=office-atlanta", onClose, { peopleScopeKey: "user-ed" }));
     });
 
     expect(onClose).toHaveBeenCalled();
