@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { RotateCcw, SlidersHorizontal } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -189,7 +189,18 @@ export function ReportFilterBar({
   defaultRange = "90",
   showOffice = true,
   ownerPickerPurpose,
-}: { defaultRange?: DefaultRange; showOffice?: boolean; ownerPickerPurpose?: "canvassing-report" } = {}) {
+  ownerLabel = "Owner",
+}: {
+  defaultRange?: DefaultRange;
+  showOffice?: boolean;
+  ownerPickerPurpose?: "canvassing-report";
+  /**
+   * What the person picker is filtering ON. Most reports filter by current OWNER; Canvassing Activity
+   * filters by who CREATED the record, and those diverge as accounts are reassigned — so labelling that
+   * control "Owner" told a reader the numbers meant something they do not.
+   */
+  ownerLabel?: string;
+} = {}) {
   const [searchParams, setSearchParams] = useSearchParams();
   const { filters } = useReportFilters({ defaultRange });
   const [draft, setDraft] = useState<ReportFilters>(filters);
@@ -212,6 +223,27 @@ export function ReportFilterBar({
   useEffect(() => {
     setDraft(hydrateOwnerSelection(filters, salesReps));
   }, [filters, salesReps]);
+
+  // Person ids are per-tenant. With the office control hidden the report follows ?officeId, so a switch
+  // re-pointed the roster at the new office while the previously selected ids stayed in the URL — ids the
+  // new tenant cannot resolve, giving an empty report under a picker that still showed a selection.
+  const clearedForOffice = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    if (showOffice) return;
+    if (clearedForOffice.current === undefined) {
+      clearedForOffice.current = activeOfficeId;
+      return;
+    }
+    if (clearedForOffice.current === activeOfficeId) return;
+    clearedForOffice.current = activeOfficeId;
+
+    const next = new URLSearchParams(searchParams);
+    if (!next.has("ownerIds") && !next.has("owners") && !next.has("ownerEmails")) return;
+    next.delete("ownerIds");
+    next.delete("owners");
+    next.delete("ownerEmails");
+    setSearchParams(next, { replace: true });
+  }, [showOffice, activeOfficeId, searchParams, setSearchParams]);
 
   function updateRange(range: string) {
     const dates = range === "custom" ? { dateFrom: draft.dateFrom, dateTo: draft.dateTo } : rangeDates(range);
@@ -365,10 +397,10 @@ export function ReportFilterBar({
         </label>
         ) : null}
         <div className="space-y-2">
-          <p className="text-sm font-semibold text-slate-700">Owner</p>
+          <p className="text-sm font-semibold text-slate-700">{ownerLabel}</p>
           <div className="flex max-h-28 flex-wrap gap-2 overflow-y-auto rounded-md border border-slate-200 bg-slate-50 p-2">
             {salesReps.length === 0 ? (
-              <span className="text-xs font-medium text-slate-500">All owners</span>
+              <span className="text-xs font-medium text-slate-500">{ownerLabel === "Owner" ? "All owners" : "Everyone"}</span>
             ) : salesReps.map((owner) => (
               <label key={owner.id} className="inline-flex items-center gap-2 rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-700 ring-1 ring-slate-200">
                 <Checkbox

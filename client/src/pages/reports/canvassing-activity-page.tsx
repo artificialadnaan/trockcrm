@@ -8,7 +8,7 @@
 // surface here therefore prints the unattributed count beside the attributed one, and the header carries
 // the date attribution actually starts.
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { PageHeader } from "@/components/layout/page-header";
@@ -74,6 +74,19 @@ function formatClock(iso: string) {
   }).format(new Date(iso));
 }
 
+/** Full, unambiguous timestamp for the workbook: the panel caption that supplies the zone is not exported. */
+function formatExportTimestamp(iso: string) {
+  if (!iso) return "";
+  return `${new Intl.DateTimeFormat("en-US", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZone: "America/Chicago",
+  }).format(new Date(iso))} CT`;
+}
+
 function labelForType(type: string) {
   return type.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
@@ -89,6 +102,7 @@ export function CanvassingActivityPage() {
   // open it here, or offering it to someone the endpoint will refuse. The server is still the boundary;
   // this keeps the UI from disagreeing with it.
   const refreshedForOffice = useRef<string | null | undefined>(undefined);
+  const [awaitingRefresh, setAwaitingRefresh] = useState(false);
   useEffect(() => {
     if (refreshedForOffice.current === undefined) {
       refreshedForOffice.current = officeScopeKey;
@@ -96,8 +110,21 @@ export function CanvassingActivityPage() {
     }
     if (refreshedForOffice.current === officeScopeKey) return;
     refreshedForOffice.current = officeScopeKey;
-    void refreshUser();
+    setAwaitingRefresh(true);
+    void refreshUser().finally(() => setAwaitingRefresh(false));
   }, [officeScopeKey, refreshUser]);
+
+  // Ordered deliberately: while a refresh is in flight after an office switch, neither answer is
+  // trustworthy — the flag still describes the previous office. Showing the denial first would flash
+  // "restricted" at someone who may open it here, so hold until the refreshed answer arrives.
+  if (awaitingRefresh) {
+    return (
+      <div className="space-y-6">
+        <PageHeader eyebrow="Performance" title="Canvassing Activity" description="Checking access…" />
+        <LoadingState />
+      </div>
+    );
+  }
 
   if (!user?.canViewCanvassingReport) {
     return (
@@ -160,10 +187,12 @@ function CanvassingActivityReportView() {
   // of the server's per-user counts, so the grid can answer "how many CONTACTS did this person add that
   // week" — which neither the whole-range person table nor the kinds-without-people period table could.
   const kindParam = searchParams.get("kind");
-  const gridKind: CanvassingKind | "all" =
-    kindParam && (CANVASSING_KINDS as readonly string[]).includes(kindParam) ? (kindParam as CanvassingKind) : "all";
+  const gridKind: CanvassingKind | "all" | "notes" =
+    kindParam && [...CANVASSING_KINDS, "notes"].includes(kindParam)
+      ? (kindParam as CanvassingKind | "notes")
+      : "all";
 
-  function setGridKind(next: CanvassingKind | "all") {
+  function setGridKind(next: CanvassingKind | "all" | "notes") {
     const params = new URLSearchParams(searchParams);
     if (next === "all") params.delete("kind");
     else params.set("kind", next);
@@ -283,7 +312,9 @@ function CanvassingActivityReportView() {
         rows: data.notes.map((note) => ({
           // Central, matching the feed and the zone the server filtered in. A raw UTC ISO string put a note
           // near midnight on a different calendar day in the workbook than on the page it came from.
-          when: formatClock(note.occurredAt),
+          // Self-contained: the feed's formatter drops the year and leans on the panel's "(times Central)"
+          // caption, which a spreadsheet does not carry.
+          when: formatExportTimestamp(note.occurredAt),
           person: note.userName ?? "",
           // The feed distinguishes who a note is ATTRIBUTED to from who actually entered it; a workbook
           // without that column reads every on-behalf-of note as the assignee's own work.
@@ -313,6 +344,10 @@ function CanvassingActivityReportView() {
         // needs to compare the team could filter to nobody but themselves — on a report that already shows
         // them everyone's numbers. The server gates this purpose on the same allowlist.
         ownerPickerPurpose="canvassing-report"
+        // This report filters created_by_user_id, not owner_id. Ownership is reassigned over an account's
+        // life while authorship is not, so the shared "Owner" label named a different — and mutable —
+        // column than the one the numbers come from.
+        ownerLabel="Entered by"
       />
 
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -450,7 +485,7 @@ function CanvassingActivityReportView() {
           <ReportPanel title={`Each person, by ${bucket}`}>
             <div className="mb-3 flex flex-wrap items-center gap-2">
               <span className="text-xs font-black uppercase tracking-[0.14em] text-slate-500">Showing</span>
-              {(["all", ...CANVASSING_KINDS] as const).map((kind) => (
+              {(["all", ...CANVASSING_KINDS, "notes"] as const).map((kind) => (
                 <button
                   key={kind}
                   type="button"
@@ -462,7 +497,7 @@ function CanvassingActivityReportView() {
                       : "rounded-full bg-white px-3 py-1 text-xs font-black uppercase tracking-[0.12em] text-slate-600 ring-1 ring-slate-200 hover:bg-slate-50"
                   }
                 >
-                  {kind === "all" ? "All" : KIND_LABELS[kind]}
+                  {kind === "all" ? "All" : kind === "notes" ? "Notes" : KIND_LABELS[kind]}
                 </button>
               ))}
             </div>
@@ -489,7 +524,11 @@ function CanvassingActivityReportView() {
                         <td className="py-3 pr-4 font-semibold text-slate-900">{person.displayName}</td>
                         {data.buckets.map((row) => {
                           const cell = row.perUser.find((entry) => entry.userId === person.userId);
-                          const value = cell ? cell.counts[gridKind === "all" ? "total" : gridKind] : 0;
+                          const value = cell
+                            ? gridKind === "notes"
+                              ? cell.notesLogged
+                              : cell.counts[gridKind === "all" ? "total" : gridKind]
+                            : 0;
                           return (
                             <td
                               key={row.bucketStart}
@@ -500,7 +539,11 @@ function CanvassingActivityReportView() {
                           );
                         })}
                         <td className="px-2 text-right font-semibold text-slate-900">
-                          {formatNumber(person.counts[gridKind === "all" ? "total" : gridKind])}
+                          {formatNumber(
+                            gridKind === "notes"
+                              ? person.notesLogged
+                              : person.counts[gridKind === "all" ? "total" : gridKind]
+                          )}
                         </td>
                       </tr>
                     ))}
@@ -509,7 +552,9 @@ function CanvassingActivityReportView() {
                 <p className="mt-2 text-xs font-semibold text-slate-500">
                   {gridKind === "all"
                     ? "New companies, properties, contacts and leads combined."
-                    : `New ${KIND_LABELS[gridKind].toLowerCase()} only.`}{" "}
+                    : gridKind === "notes"
+                      ? "Notes logged, not records created."
+                      : `New ${KIND_LABELS[gridKind].toLowerCase()} only.`}{" "}
                   {rangeReachesBeforeAttribution ? (
                     data.attributionStartHint ? (
                       <>

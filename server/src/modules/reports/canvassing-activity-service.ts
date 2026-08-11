@@ -597,6 +597,19 @@ export async function getCanvassingActivityReport(
       ))`
     : sql`TRUE`;
 
+  // The EFFECTIVE role in the selected office, not the global one. `users` is a single global table and
+  // user_office_access.role_override is what authMiddleware resolves a request's role from, so classifying
+  // — or REPORTING — on users.role alone judges a multi-office person by whichever office they call home.
+  // Used by both the predicate and the SELECT, so a person listed because of their override is not then
+  // labelled with the role they do not hold here.
+  const effectiveRole = filters.officeId
+    ? sql`COALESCE((
+        SELECT uo.role_override FROM user_office_access uo
+         WHERE uo.user_id = u.id AND uo.office_id = ${filters.officeId} AND uo.role_override IS NOT NULL
+         LIMIT 1
+      ), u.role)`
+    : sql`u.role`;
+
   const rosterPredicates: SQL[] = [];
   if (discovered.length) rosterPredicates.push(sql`u.id = ANY(${idArray(discovered)})`);
   if (pinnedOnly.length) rosterPredicates.push(sql`(u.id = ANY(${idArray(pinnedOnly)}) AND ${membership})`);
@@ -618,16 +631,6 @@ export async function getCanvassingActivityReport(
     //
     // Test users are excluded here as well as in the counting queries — otherwise a QA account would be
     // drawn onto the scoreboard as a permanent zero row.
-    // The EFFECTIVE role in the selected office, not the global one. `users` is a single global table and
-    // user_office_access.role_override is what authMiddleware resolves a request's role from, so
-    // classifying on users.role alone judges a multi-office person by whichever office they call home.
-    const effectiveRole = filters.officeId
-      ? sql`COALESCE((
-          SELECT uo.role_override FROM user_office_access uo
-           WHERE uo.user_id = u.id AND uo.office_id = ${filters.officeId} AND uo.role_override IS NOT NULL
-           LIMIT 1
-        ), u.role)`
-      : sql`u.role`;
     rosterPredicates.push(
       sql`(u.is_active = true AND ${effectiveRole} IN ('rep', 'director')
            AND COALESCE(u.is_test_data, false) = false AND ${membership})`
@@ -642,7 +645,7 @@ export async function getCanvassingActivityReport(
         role: string | null;
         is_active: boolean;
       }>(sql`
-        SELECT u.id::text AS id, u.display_name, u.email, u.role::text AS role, u.is_active
+        SELECT u.id::text AS id, u.display_name, u.email, ${effectiveRole}::text AS role, u.is_active
           FROM users u
          WHERE ${sql.join(rosterPredicates, sql` OR `)}
       `)
