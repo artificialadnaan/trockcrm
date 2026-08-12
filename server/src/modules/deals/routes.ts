@@ -4135,6 +4135,7 @@ router.post(
         acknowledgedCommissionTotal,
         acknowledgedCommissionRowCount,
         officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
+        tenantSchema: req.officeSlug ? `office_${req.officeSlug}` : null,
         auditContext: buildRouteAuditContext(req),
       });
 

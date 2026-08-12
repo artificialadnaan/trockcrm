@@ -2061,7 +2061,8 @@ describe("returnDealToOpportunity — the shared job queue is tenant-scoped", ()
     );
 
     await returnDealToOpportunity(tdb, {
-      dealId: D, userId: ADMIN, userRole: "admin", reason: "Scoped cancel", officeId: OFFICE, auditContext,
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Scoped cancel",
+      officeId: OFFICE, tenantSchema: "public", auditContext,
     });
 
     const { rows } = await pg.query<{ status: string; office_id: string | null }>(
@@ -2079,15 +2080,17 @@ describe("returnDealToOpportunity — the shared job queue is tenant-scoped", ()
       `INSERT INTO public.job_queue (job_type, payload, status, run_after, office_id)
        VALUES ('rfp_request_delivery', '{"dealId":"${D}"}'::jsonb, 'pending', now(), '${OFFICE}')`
     );
-    // office_id NULL: nothing says which tenant it belongs to, so excluding it would leave a real job of
-    // this deal's uncancelled — a certain miss traded for a remote collision.
+    // office_id NULL, but the payload carries the tenant schema — which is exactly why those rows are
+    // identifiable at all. The internal RFP callback and the override service both enqueue them this way.
     await pg.exec(
       `INSERT INTO public.job_queue (job_type, payload, status, run_after, office_id)
-       VALUES ('rfp_bidboard_create', '{"dealId":"${D}"}'::jsonb, 'pending', now(), NULL)`
+       VALUES ('rfp_bidboard_create',
+               '{"dealId":"${D}","tenantSchema":"public"}'::jsonb, 'pending', now(), NULL)`
     );
 
     await returnDealToOpportunity(tdb, {
-      dealId: D, userId: ADMIN, userRole: "admin", reason: "Scoped cancel", officeId: OFFICE, auditContext,
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Scoped cancel",
+      officeId: OFFICE, tenantSchema: "public", auditContext,
     });
 
     // Scoped to the two RFP job types this cancels; the action enqueues other work for the deal that is
@@ -2233,5 +2236,82 @@ describe("returnDealToOpportunity — a completed create is evidence a project e
     });
 
     expect(result.wasBidBoardLinked).toBe(false);
+  });
+});
+
+// A NULL office_id is not "belongs to everyone". Those rows carry payload.tenantSchema precisely so the
+// tenant stays identifiable, and matching on it is what stops one office cancelling another's work when
+// two schemas reuse a deal id.
+describe("returnDealToOpportunity — NULL-office jobs are matched by tenant schema", () => {
+  it("leaves a NULL-office job belonging to ANOTHER tenant alone", async () => {
+    const D = U("dd21");
+    await seedBidBoardDeal(D);
+    await pg.exec(`UPDATE public.deals SET rfp_approval_status = 'pending_outbox' WHERE id = '${D}'`);
+    await pg.exec(
+      `INSERT INTO public.job_queue (job_type, payload, status, run_after, office_id)
+       VALUES ('rfp_request_delivery',
+               '{"dealId":"${D}","tenantSchema":"office_atlanta"}'::jsonb, 'pending', now(), NULL)`
+    );
+
+    await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Scoped cancel",
+      officeId: OFFICE, tenantSchema: "public", auditContext,
+    });
+
+    const { rows } = await pg.query<{ status: string }>(
+      `SELECT status FROM public.job_queue
+        WHERE payload->>'dealId' = '${D}' AND payload->>'tenantSchema' = 'office_atlanta'`
+    );
+    expect(rows[0]?.status, "another tenant's NULL-office job must be untouched").toBe("pending");
+  });
+});
+
+// The workers fail OPEN on an unknown round — a missing round on either side counts as authorized, and
+// they can still POST. So an unknown-round claimed delivery has to stay visible here, or the operator is
+// told there is no possible SyncHub submission for a send that then goes out.
+describe("returnDealToOpportunity — unknown-round claimed jobs stay visible", () => {
+  it("warns for a CLAIMED delivery whose round cannot be read", async () => {
+    const D = U("dd31");
+    await seedBidBoardDeal(D);
+    await pg.exec(
+      `UPDATE public.deals
+          SET rfp_approval_status = 'pending_outbox', rfp_approval_request_event_id = '${U("ed31")}'
+        WHERE id = '${D}'`
+    );
+    // No body.sourceEventId at all — a historical payload the worker would still act on.
+    await pg.exec(
+      `INSERT INTO public.job_queue (job_type, payload, status, run_after, office_id)
+       VALUES ('rfp_request_delivery', '{"dealId":"${D}"}'::jsonb, 'processing', now(), '${OFFICE}')`
+    );
+
+    const result = await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Unknown round, claimed",
+      officeId: OFFICE, tenantSchema: "public", auditContext,
+    });
+
+    expect(result.rfpSubmissionMayExist).toBe(true);
+  });
+
+  it("still ignores a claimed delivery from a KNOWN, different round", async () => {
+    const D = U("dd32");
+    await seedBidBoardDeal(D);
+    await pg.exec(
+      `UPDATE public.deals
+          SET rfp_approval_status = 'pending_outbox', rfp_approval_request_event_id = '${U("ed32")}'
+        WHERE id = '${D}'`
+    );
+    await pg.exec(
+      `INSERT INTO public.job_queue (job_type, payload, status, run_after, office_id)
+       VALUES ('rfp_request_delivery',
+               '{"dealId":"${D}","body":{"sourceEventId":"crm:deal-stage:opportunity:${U("ed33")}"}}'::jsonb,
+               'processing', now(), '${OFFICE}')`
+    );
+
+    const result = await returnDealToOpportunity(tdb, {
+      dealId: D, userId: ADMIN, userRole: "admin", reason: "Old round, claimed",
+      officeId: OFFICE, tenantSchema: "public", auditContext,
+    });
+
+    expect(result.rfpSubmissionMayExist).toBe(false);
   });
 });

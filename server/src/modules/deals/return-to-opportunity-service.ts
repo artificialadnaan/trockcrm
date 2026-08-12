@@ -72,6 +72,13 @@ export interface ReturnToOpportunityInput {
    * callers keep working; when absent the queue predicates behave exactly as they did before.
    */
   officeId?: string | null;
+  /**
+   * This request's tenant schema (`office_<slug>`), for the shared public.job_queue.
+   *
+   * Jobs enqueued with a NULL office_id carry it in `payload.tenantSchema`, so it is the only thing that
+   * identifies their tenant — see tenantJobScopeSql.
+   */
+  tenantSchema?: string | null;
   auditContext?: AuditContext;
 }
 
@@ -299,14 +306,24 @@ function buildRfpCycleReset() {
  * When the caller supplies no office at all the predicate is omitted entirely, which is the behaviour
  * this had before.
  */
-function tenantJobScopeSql(officeId: string | null | undefined): SQL {
-  return officeId ? sql`AND (office_id = ${officeId} OR office_id IS NULL)` : sql``;
+function tenantJobScopeSql(officeId: string | null | undefined, schemaName: string | null | undefined): SQL {
+  if (!officeId && !schemaName) return sql``;
+  // A NULL office_id is not "belongs to everyone". Those rows are enqueued deliberately — the internal
+  // RFP callback and the override service both do it — and they carry `payload.tenantSchema` precisely so
+  // the tenant is still identifiable. Matching on that instead of waving every NULL through is what stops
+  // one office cancelling another's notifications when two schemas reuse a deal id.
+  const byOffice = officeId ? sql`office_id = ${officeId}` : sql`FALSE`;
+  const bySchema = schemaName
+    ? sql`(office_id IS NULL AND payload->>'tenantSchema' = ${schemaName})`
+    : sql`FALSE`;
+  return sql`AND (${byOffice} OR ${bySchema})`;
 }
 
 async function cancelQueuedRfpJobs(
   tenantDb: TenantDb,
   dealId: string,
-  officeId: string | null | undefined
+  officeId: string | null | undefined,
+  schemaName: string | null | undefined
 ): Promise<number> {
   // The deal_rfp_delivery lock that serializes this with the RFP workers is NOT taken here. It is taken
   // by the caller as one of the transaction's first statements, BEFORE the deal row lock — see
@@ -331,7 +348,7 @@ async function cancelQueuedRfpJobs(
      WHERE job_type IN ${[...RFP_ROUND_SCOPED_JOB_TYPES]}
        AND status IN ('pending', 'dead')
        AND payload->>'dealId' = ${dealId}
-       ${tenantJobScopeSql(officeId)}
+       ${tenantJobScopeSql(officeId, schemaName)}
   `);
 
   return (result as unknown as { rowCount?: number }).rowCount ?? 0;
@@ -363,7 +380,8 @@ async function probeInFlightRfpJobs(
   /** The round this move-back is retiring — deals.rfp_approval_request_event_id. */
   roundEventId: string | null,
   /** Same shared-queue scoping as the cancellation; see tenantJobScopeSql. */
-  officeId: string | null | undefined
+  officeId: string | null | undefined,
+  schemaName: string | null | undefined
 ): Promise<{
   deliveryInFlight: boolean;
   createInFlight: boolean;
@@ -380,7 +398,7 @@ async function probeInFlightRfpJobs(
       FROM public.job_queue
      WHERE job_type IN ('rfp_request_delivery', 'rfp_bidboard_create')
        AND payload->>'dealId' = ${dealId}
-       ${tenantJobScopeSql(officeId)}
+       ${tenantJobScopeSql(officeId, schemaName)}
   `);
   type JobRow = { job_type?: string; status?: string; cancelled_by?: string | null; source_event_id?: string | null };
   const jobRows = (((rows as unknown as { rows?: JobRow[] }).rows ?? []) as JobRow[]);
@@ -396,11 +414,16 @@ async function probeInFlightRfpJobs(
   // cannot send anything — the workers' own round guards skip it — so counting it made the current round
   // look in-flight: a false SyncHub warning, or worse, a persisted bid_board_detached_was_linked=true and
   // a permanent instruction to delete a Bid Board project that was never created.
-  const claimed = new Set(
-    jobRows
-      .filter((row) => row.status === "processing" && !row.cancelled_by && matchesRound(row.source_event_id))
-      .map((row) => row.job_type)
-  );
+  // FAIL OPEN on an unknown round, exactly as the workers' own pre-send guards do: they treat a missing
+  // round on either side as authorized and can still POST. Excluding an unparseable or absent
+  // sourceEventId here would report "no possible SyncHub submission" for a send that then went out, and
+  // the operator would get no cleanup warning at all. A KNOWN, DIFFERENT round is still excluded — that
+  // job genuinely cannot send.
+  const claimedInFlight = (row: JobRow) =>
+    row.status === "processing" &&
+    !row.cancelled_by &&
+    (roundSuffix == null || row.source_event_id == null || matchesRound(row.source_event_id));
+  const claimed = new Set(jobRows.filter(claimedInFlight).map((row) => row.job_type));
 
 
   return {
@@ -763,7 +786,8 @@ export async function returnDealToOpportunity(
     tenantDb,
     input.dealId,
     deal.rfpApprovalRequestEventId ?? null,
-    input.officeId
+    input.officeId,
+    input.tenantSchema
   );
 
   // "Was this deal bound to a real Bid Board project?" — now including "…or may have just become bound,
@@ -834,7 +858,7 @@ export async function returnDealToOpportunity(
   // payload and write the cycle straight back. Cancelled in THIS transaction so it commits atomically
   // with the reset — a job cancelled but a reset that rolled back, or vice versa, is the incoherent
   // outcome. See cancelQueuedRfpJobs for why the worker carries the other half of this guard.
-  await cancelQueuedRfpJobs(tenantDb, input.dealId, input.officeId);
+  await cancelQueuedRfpJobs(tenantDb, input.dealId, input.officeId, input.tenantSchema);
 
   // Did this move-back retire a cycle SyncHub already has a copy of? The CRM cannot withdraw a
   // submission, so — exactly as with the Bid Board project this action also cannot delete — the honest
