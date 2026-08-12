@@ -12,10 +12,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { PageHeader } from "@/components/layout/page-header";
+import { Card, CardContent } from "@/components/ui/card";
 import { ReportFilterBar, useReportFilters } from "@/components/reports/report-filter-bar";
 import { ExportExcelButton } from "@/components/reports/export-excel-button";
 import { useAuth } from "@/lib/auth";
 import { useOfficeScopeId } from "@/hooks/use-office-scope";
+import {
+  CanvassingEvidenceDialog,
+  type CanvassingEvidenceTarget,
+} from "./canvassing-evidence-dialog";
 import {
   CANVASSING_KINDS,
   useCanvassingActivityReport,
@@ -94,6 +99,61 @@ function labelForType(type: string) {
   return type.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+/**
+ * KpiCard's markup with a drillable number.
+ *
+ * Local rather than a change to the shared KpiCard: that component takes `value: string` and is rendered
+ * by several other reports, none of which have an evidence endpoint to open.
+ */
+function DrillKpiCard({
+  label,
+  value,
+  onOpen,
+}: {
+  label: string;
+  value: number;
+  onOpen: (() => void) | null;
+}) {
+  return (
+    <Card className="border-slate-200 bg-white">
+      <CardContent className="p-5">
+        <p className="text-[11px] font-black uppercase tracking-[0.18em] text-slate-500">{label}</p>
+        <div className="mt-2 text-2xl font-black tracking-tight text-slate-950">
+          {onOpen ? <DrillNumber value={value} onOpen={onOpen} className="text-slate-950" /> : formatNumber(value)}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+/**
+ * A number that opens its own records.
+ *
+ * Zero renders as plain text rather than a dead button: there is nothing behind it, and offering a click
+ * that returns an empty dialog is a worse answer than not offering one.
+ */
+function DrillNumber({
+  value,
+  onOpen,
+  className,
+}: {
+  value: number;
+  onOpen: () => void;
+  className?: string;
+}) {
+  if (value === 0) return <span className={className ?? "text-slate-400"}>{formatNumber(value)}</span>;
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className={`underline decoration-dotted underline-offset-4 hover:text-brand-red focus:outline-none focus:ring-2 focus:ring-brand-red focus:ring-offset-1 ${className ?? ""}`}
+      title="Show the records behind this number"
+    >
+      {formatNumber(value)}
+    </button>
+  );
+}
+
 /** Access gate. Wrapping keeps the report's hooks — and its request — from running for a denied user. */
 export function CanvassingActivityPage() {
   const { user, refreshUser } = useAuth();
@@ -148,6 +208,7 @@ function CanvassingActivityReportView() {
   // otherwise the range offered describes a different day from the one the numbers are computed for.
   const { query } = useReportFilters({ defaultRange: "90", dateTimezone: BUSINESS_TIMEZONE });
   const [searchParams, setSearchParams] = useSearchParams();
+  const [evidenceTarget, setEvidenceTarget] = useState<CanvassingEvidenceTarget | null>(null);
 
   // The bucket lives in the URL for the same reason the filter bar's values do: the bar's Apply rewrites
   // the query string from a copy of the current params, so component state would be silently dropped.
@@ -185,6 +246,23 @@ function CanvassingActivityReportView() {
 
   // Whether the window reaches back past the point creator tracking existed. True for the default view for
   // a while after migration 0220, and it changes what a zero in this grid is allowed to claim.
+  /**
+   * The scope a WHOLE-SELECTION figure (a KPI card, an office-totals cell) drills as, or null when there
+   * is no faithful one.
+   *
+   *   no person filter        -> office-wide, no userId;
+   *   exactly ONE person      -> that person's id. An exact scope the endpoint already accepts, so
+   *                              disabling the drill here was needless — the reconciliation concern that
+   *                              applies to office-wide requests does not apply to it;
+   *   two or more people      -> null. The endpoint narrows to one person or to none, so any drill would
+   *                              answer a different question from the cell; those stay plain text.
+   */
+  const totalsDrillScope: { userId: string | null; label: string } | null = !filteredToPeople
+    ? { userId: null, label: "Office-wide" }
+    : data && data.people.length === 1
+      ? { userId: data.people[0]!.userId, label: data.people[0]!.displayName }
+      : null;
+
   const rangeReachesBeforeAttribution =
     !data?.attributionStartHint || (data ? data.range.from < data.attributionStartHint : false);
 
@@ -432,20 +510,74 @@ function CanvassingActivityReportView() {
             {data.unattributed.total > 0 && !filteredToPeople ? (
               <>
                 {" "}
-                <strong>{formatNumber(data.unattributed.total)}</strong> record
+                {/* Drillable for the WHOLE RANGE, not only period by period. This is the figure the
+                    caveat is about, so it is the one a reader most wants to look behind — and
+                    kind=unattributed without a bucketStart is exactly that question. */}
+                <strong>
+                  <DrillNumber
+                    value={data.unattributed.total}
+                    className="font-bold"
+                    onOpen={() =>
+                      setEvidenceTarget({
+                        kind: "unattributed",
+                        userId: null,
+                        personName: "No author recorded",
+                        bucketStart: null,
+                        periodLabel: null,
+                        expected: data.unattributed.total,
+                      })
+                    }
+                  />
+                </strong>{" "}
+                record
                 {data.unattributed.total === 1 ? "" : "s"} created in this window name no author (imported or
                 system-created) and are excluded from every person's totals.
               </>
             ) : null}
           </div>
 
+          {/*
+            The scope a whole-selection figure drills as.
+              - no person filter  -> office-wide (no userId);
+              - exactly ONE person selected -> that person's id, which is an exact scope the endpoint
+                already accepts, so there is no reason to disable the drill;
+              - two or more -> no faithful scope, because the endpoint narrows to one person or to none.
+                Those figures stay plain text rather than quietly answering for everybody.
+          */}
           <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-6">
-            <KpiCard label="New Companies" value={formatNumber(data.totals.company)} />
-            <KpiCard label="New Properties" value={formatNumber(data.totals.property)} />
-            <KpiCard label="New Contacts" value={formatNumber(data.totals.contact)} />
-            <KpiCard label="New Leads" value={formatNumber(data.totals.lead)} />
-            <KpiCard label="Total Entered" value={formatNumber(data.totals.total)} />
-            <KpiCard label="Notes Logged" value={formatNumber(data.notesLogged)} />
+            {/*
+              Drillable only when the report is NOT narrowed to particular people. These figures follow the
+              person filter, but an office-wide drill carries no userId and would answer for EVERYONE — a
+              different question from the one the cell is showing. The evidence endpoint narrows to one
+              person or to none, so a multi-person selection has no faithful drill and stays plain text.
+            */}
+            {([
+              ["New Companies", "company", data.totals.company],
+              ["New Properties", "property", data.totals.property],
+              ["New Contacts", "contact", data.totals.contact],
+              ["New Leads", "lead", data.totals.lead],
+              ["Total Entered", "all", data.totals.total],
+              ["Notes Logged", "notes", data.notesLogged],
+            ] as const).map(([label, kind, value]) => (
+              <DrillKpiCard
+                key={label}
+                label={label}
+                value={value}
+                onOpen={
+                  totalsDrillScope === null
+                    ? null
+                    : () =>
+                        setEvidenceTarget({
+                          kind,
+                          userId: totalsDrillScope.userId,
+                          personName: totalsDrillScope.label,
+                          bucketStart: null,
+                          periodLabel: null,
+                          expected: value,
+                        })
+                }
+              />
+            ))}
           </section>
 
           <ReportPanel title={`New records by ${bucket}`}>
@@ -498,12 +630,57 @@ function CanvassingActivityReportView() {
                             </span>
                           )}
                         </td>
-                        <td>{formatNumber(person.counts.company)}</td>
-                        <td>{formatNumber(person.counts.property)}</td>
-                        <td>{formatNumber(person.counts.contact)}</td>
-                        <td>{formatNumber(person.counts.lead)}</td>
-                        <td className="font-semibold text-slate-900">{formatNumber(person.counts.total)}</td>
-                        <td>{formatNumber(person.notesLogged)}</td>
+                        {CANVASSING_KINDS.map((kind) => (
+                          <td key={kind}>
+                            <DrillNumber
+                              value={person.counts[kind]}
+                              onOpen={() =>
+                                setEvidenceTarget({
+                                  kind,
+                                  userId: person.userId,
+                                  personName: person.displayName,
+                                  bucketStart: null,
+                                  periodLabel: null,
+                                  expected: person.counts[kind],
+                                })
+                              }
+                            />
+                          </td>
+                        ))}
+                        {/* The total is the four beside it summed, so its drill is the four UNIONed — the
+                            same population, not an invented one. That is why it is `all` rather than a
+                            re-count: counts.total and the combined evidence read the same row sources. */}
+                        <td className="font-semibold text-slate-900">
+                          <DrillNumber
+                            value={person.counts.total}
+                            className="font-semibold text-slate-900"
+                            onOpen={() =>
+                              setEvidenceTarget({
+                                kind: "all",
+                                userId: person.userId,
+                                personName: person.displayName,
+                                bucketStart: null,
+                                periodLabel: null,
+                                expected: person.counts.total,
+                              })
+                            }
+                          />
+                        </td>
+                        <td>
+                          <DrillNumber
+                            value={person.notesLogged}
+                            onOpen={() =>
+                              setEvidenceTarget({
+                                kind: "notes",
+                                userId: person.userId,
+                                personName: person.displayName,
+                                bucketStart: null,
+                                periodLabel: null,
+                                expected: person.notesLogged,
+                              })
+                            }
+                          />
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -560,20 +737,52 @@ function CanvassingActivityReportView() {
                               : cell.counts[gridKind === "all" ? "total" : gridKind]
                             : 0;
                           return (
-                            <td
-                              key={row.bucketStart}
-                              className={value === 0 ? "px-2 text-right text-slate-400" : "px-2 text-right text-slate-900"}
-                            >
-                              {formatNumber(value)}
+                            <td key={row.bucketStart} className="px-2 text-right">
+                              <DrillNumber
+                                value={value}
+                                className={value === 0 ? "text-slate-400" : "text-slate-900"}
+                                onOpen={() =>
+                                  setEvidenceTarget({
+                                    // `all` is its own evidence kind. Sending `company` for a combined cell
+                                    // listed companies only and then flagged a mismatch against a figure
+                                    // that counted all four — on every cell holding anything else.
+                                    kind: gridKind,
+                                    userId: person.userId,
+                                    personName: person.displayName,
+                                    bucketStart: row.bucketStart,
+                                    periodLabel: row.label,
+                                    expected: value,
+                                  })
+                                }
+                              />
                             </td>
                           );
                         })}
+                        {/* The row's whole-range figure for whichever kind the grid is showing — drills the
+                            same way its period cells do, with no bucket. */}
                         <td className="px-2 text-right font-semibold text-slate-900">
-                          {formatNumber(
-                            gridKind === "notes"
-                              ? person.notesLogged
-                              : person.counts[gridKind === "all" ? "total" : gridKind]
-                          )}
+                          {(() => {
+                            const rowTotal =
+                              gridKind === "notes"
+                                ? person.notesLogged
+                                : person.counts[gridKind === "all" ? "total" : gridKind];
+                            return (
+                              <DrillNumber
+                                value={rowTotal}
+                                className="font-semibold text-slate-900"
+                                onOpen={() =>
+                                  setEvidenceTarget({
+                                    kind: gridKind,
+                                    userId: person.userId,
+                                    personName: person.displayName,
+                                    bucketStart: null,
+                                    periodLabel: null,
+                                    expected: rowTotal,
+                                  })
+                                }
+                              />
+                            );
+                          })()}
                         </td>
                       </tr>
                     ))}
@@ -657,13 +866,54 @@ function CanvassingActivityReportView() {
                             </span>
                           ) : null}
                         </td>
-                        <td>{formatNumber(row.counts.company)}</td>
-                        <td>{formatNumber(row.counts.property)}</td>
-                        <td>{formatNumber(row.counts.contact)}</td>
-                        <td>{formatNumber(row.counts.lead)}</td>
-                        <td className="font-semibold text-slate-900">{formatNumber(row.counts.total)}</td>
+                        {/* Same rule as the KPI cards: an office-wide drill is faithful only when the
+                            report is not narrowed to particular people. */}
+                        {(["company", "property", "contact", "lead", "all"] as const).map((kind) => {
+                          const value = kind === "all" ? row.counts.total : row.counts[kind];
+                          return (
+                            <td key={kind} className={kind === "all" ? "font-semibold text-slate-900" : undefined}>
+                              {totalsDrillScope === null ? (
+                                formatNumber(value)
+                              ) : (
+                                <DrillNumber
+                                  value={value}
+                                  className={kind === "all" ? "font-semibold text-slate-900" : undefined}
+                                  onOpen={() =>
+                                    setEvidenceTarget({
+                                      kind,
+                                      userId: totalsDrillScope.userId,
+                                      personName: totalsDrillScope.label,
+                                      bucketStart: row.bucketStart,
+                                      periodLabel: row.label,
+                                      expected: value,
+                                    })
+                                  }
+                                />
+                              )}
+                            </td>
+                          );
+                        })}
                         {filteredToPeople ? null : (
-                          <td className="text-slate-500">{formatNumber(row.unattributed.total)}</td>
+                          <td className="text-slate-500">
+                            {/* The one nonzero figure on this page that could not be inspected — and the
+                                one a reader most needs to, since the whole report turns on telling "nobody
+                                did anything" apart from "nobody was recorded doing it". Never
+                                person-narrowed: by definition these rows have nobody to narrow to. */}
+                            <DrillNumber
+                              value={row.unattributed.total}
+                              className="text-slate-500"
+                              onOpen={() =>
+                                setEvidenceTarget({
+                                  kind: "unattributed",
+                                  userId: null,
+                                  personName: "No author recorded",
+                                  bucketStart: row.bucketStart,
+                                  periodLabel: row.label,
+                                  expected: row.unattributed.total,
+                                })
+                              }
+                            />
+                          </td>
                         )}
                       </tr>
                     ))}
@@ -712,6 +962,21 @@ function CanvassingActivityReportView() {
           </ReportPanel>
         </>
       ) : null}
+
+      <CanvassingEvidenceDialog
+        // The person selection is part of the drill's scope: a change to it moves the numbers a drill
+        // was opened from just as surely as a bucket or date change does.
+        peopleScopeKey={[
+          ...(query.ownerIds ?? []),
+          ...(query.ownerNames ?? []),
+          ...(query.ownerEmails ?? []),
+        ].join(",")}
+        target={evidenceTarget}
+        bucket={bucket}
+        dateFrom={query.dateFrom}
+        dateTo={query.dateTo}
+        onClose={() => setEvidenceTarget(null)}
+      />
     </div>
   );
 }

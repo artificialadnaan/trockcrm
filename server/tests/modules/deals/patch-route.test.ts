@@ -15,6 +15,9 @@ const scopingServiceMocks = vi.hoisted(() => ({
 const auditMocks = vi.hoisted(() => ({
   writeAuditLog: vi.fn(),
 }));
+const lineageMocks = vi.hoisted(() => ({
+  writeResolvedDealFields: vi.fn(),
+}));
 const accessMocks = vi.hoisted(() => ({
   assertDealCollaboratorAccess: vi.fn(),
   assertDealOwnerAccess: vi.fn(),
@@ -61,6 +64,14 @@ vi.mock("../../../src/modules/deals/scoping-service.js", async () => {
 vi.mock("../../../src/lib/audit-log.js", () => ({
   writeAuditLog: auditMocks.writeAuditLog,
 }));
+
+vi.mock("../../../src/modules/deals/lineage-resolver.js", async () => {
+  const actual = await vi.importActual("../../../src/modules/deals/lineage-resolver.js");
+  return {
+    ...(actual as Record<string, unknown>),
+    writeResolvedDealFields: lineageMocks.writeResolvedDealFields,
+  };
+});
 
 vi.mock("../../../src/lib/collaboration-access.js", () => ({
   assertDealCollaboratorAccess: accessMocks.assertDealCollaboratorAccess,
@@ -1486,5 +1497,101 @@ describe("PATCH /api/deals/:id empty-string uuid hardening", () => {
     await invokePatch({ companyId: null }, createUser("rep"));
     const input = updateInput()!;
     expect(input).toHaveProperty("companyId", null);
+  });
+});
+
+// The bid due date was UNCHANGEABLE from the deal, and worse than unchangeable: the route VALIDATED it
+// (validateDealPayload 400s a malformed value) and then dropped it, because UpdateDealInput has no such
+// member. A well-formed edit answered 200 and changed nothing — the only way to find out was to reload.
+//
+// It cannot simply be added to updateDeal either, because the field is LEAD-OWNED. For a lead-backed deal
+// getDealById resolves the banner from leads.bid_due_date, so writing the deal column would have been a
+// second silent no-op one layer down. The route therefore hands it to writeResolvedDealFields, the writer
+// that already knows the ownership rule — asserted here because a route that calls no writer at all is
+// exactly the shape of the original bug.
+describe("PATCH /api/deals/:id bid due date", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    accessMocks.assertDealCollaboratorAccess.mockResolvedValue({ id: "deal-1", assignedRepId: "rep-1", officeId: "office-1" });
+    accessMocks.assertDealOwnerAccess.mockResolvedValue({ id: "deal-1", assignedRepId: "rep-1", officeId: "office-1" });
+    scopingServiceMocks.assertDealScopingWriteAllowed.mockResolvedValue({
+      adminOverride: false,
+      lockState: { locked: false, submittedAt: null, reason: null },
+    });
+    lineageMocks.writeResolvedDealFields.mockResolvedValue({});
+    dealsServiceMocks.getDealById.mockResolvedValue(baseDeal());
+    dealsServiceMocks.updateDeal.mockImplementation(async (_tenantDb, dealId, input) => ({
+      id: dealId,
+      ...baseDeal(),
+      ...input,
+    }));
+  });
+
+  function resolvedPatch() {
+    return lineageMocks.writeResolvedDealFields.mock.calls[0]?.[2] as Record<string, unknown> | undefined;
+  }
+  function updateInput() {
+    return dealsServiceMocks.updateDeal.mock.calls[0]?.[2] as Record<string, unknown> | undefined;
+  }
+
+  it("hands a new bid due date to the resolved writer, which owns the lead-vs-deal rule", async () => {
+    const { error } = await invokePatch({ bidDueDate: "2026-09-15" }, createUser("rep"));
+
+    expect(error).toBeNull();
+    expect(lineageMocks.writeResolvedDealFields).toHaveBeenCalledTimes(1);
+    expect(resolvedPatch()).toEqual({ bidDueDate: "2026-09-15" });
+  });
+
+  it("passes the deal id and the acting user, not just the value", async () => {
+    await invokePatch({ bidDueDate: "2026-09-15" }, createUser("rep"));
+
+    const call = lineageMocks.writeResolvedDealFields.mock.calls[0]!;
+    expect(call[1]).toBe("deal-1");
+    expect(call[3]).toMatchObject({ userId: "rep-1", role: "rep" });
+  });
+
+  // An empty box is a deliberate clear, and the read path honours a cleared lead value ("a present source
+  // lead owns it, INCLUDING a deliberately cleared null"). Sending "" through would fail the date cast.
+  it("treats an empty string as a clear rather than as a malformed date", async () => {
+    const { error } = await invokePatch({ bidDueDate: "" }, createUser("rep"));
+
+    expect(error).toBeNull();
+    expect(resolvedPatch()).toEqual({ bidDueDate: null });
+  });
+
+  it("forwards an explicit null clear unchanged", async () => {
+    await invokePatch({ bidDueDate: null }, createUser("rep"));
+    expect(resolvedPatch()).toEqual({ bidDueDate: null });
+  });
+
+  // The field is sent only when it changed, so the overwhelmingly common save must not touch the lead —
+  // writing it every time would rewrite the source lead, and log an audit entry, on every unrelated edit.
+  it("does not touch the resolved writer when the field is absent", async () => {
+    await invokePatch({ expectedCloseDate: "2026-09-15" }, createUser("rep"));
+
+    expect(lineageMocks.writeResolvedDealFields).not.toHaveBeenCalled();
+  });
+
+  it("keeps bidDueDate out of the updateDeal patch, so no second writer can disagree", async () => {
+    await invokePatch({ bidDueDate: "2026-09-15", expectedCloseDate: "2026-09-20" }, createUser("rep"));
+
+    expect(updateInput()).not.toHaveProperty("bidDueDate");
+    expect(updateInput()).toMatchObject({ expectedCloseDate: "2026-09-20" });
+  });
+
+  // The pre-existing validation still runs first, so a malformed value never reaches any writer.
+  it("still rejects a malformed date without writing anything", async () => {
+    const { error } = await invokePatch({ bidDueDate: "15/09/2026" }, createUser("rep"));
+
+    expect((error as { statusCode?: number } | null)?.statusCode).toBe(400);
+    expect(lineageMocks.writeResolvedDealFields).not.toHaveBeenCalled();
+    expect(dealsServiceMocks.updateDeal).not.toHaveBeenCalled();
+  });
+
+  it("still rejects an ISO-shaped impossible date", async () => {
+    const { error } = await invokePatch({ bidDueDate: "2026-02-30" }, createUser("rep"));
+
+    expect((error as { statusCode?: number } | null)?.statusCode).toBe(400);
+    expect(lineageMocks.writeResolvedDealFields).not.toHaveBeenCalled();
   });
 });

@@ -3197,6 +3197,32 @@ router.patch("/:id", async (req, res, next) => {
       removeDealLocationFields(body);
     }
 
+    // bidDueDate is LEAD-OWNED (DEAL_FIELD_OWNERSHIP), so it does not go through updateDeal.
+    //
+    // It was already being VALIDATED here by validateDealPayload — a malformed value 400s — but
+    // UpdateDealInput has no such member, so a well-formed one was accepted, answered 200, and silently
+    // discarded. That is the worst shape a field can have: the API looks like it supports it, and the only
+    // way to discover otherwise is to reload the page.
+    //
+    // Delegated to writeResolvedDealFields rather than adding a column write to updateDeal, because the
+    // ownership rule is not "write deals.bid_due_date". For a lead-backed deal the AUTHORITATIVE value is
+    // leads.bid_due_date — getDealById resolves the banner from the lead whenever one exists — so a deal-row
+    // write would have changed nothing visible and reintroduced the same silent no-op one layer down. The
+    // resolved writer already targets the source lead and mirrors the deal snapshot; keeping one writer means
+    // the two cannot drift. bidDueDate is not in SCOPE_LOCKED_RESOLVED_FIELDS, so no scope guard applies, and
+    // it is not a relationship field, so the lineage checks the /resolved-fields route runs do not either.
+    const bidDueDatePatch = Object.prototype.hasOwnProperty.call(body, "bidDueDate")
+      ? { bidDueDate: body.bidDueDate === "" ? null : body.bidDueDate }
+      : null;
+    delete body.bidDueDate;
+    if (bidDueDatePatch) {
+      await writeResolvedDealFields(req.tenantDb!, req.params.id, bidDueDatePatch, {
+        userId: req.user!.id,
+        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+        role: req.user!.role,
+      });
+    }
+
     const patchToApply = {
       ...body,
       ...propertyAddressSync,

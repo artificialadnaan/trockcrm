@@ -15,6 +15,15 @@ const PASSWORD_RESET_MAX_LENGTH = 256;
 const MAX_FAILED_LOGIN_ATTEMPTS = 5;
 const LOCKOUT_WINDOW_MINUTES = 15;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * The T Rock brand red, as documented in server/src/modules/daily-summary/email-template.ts.
+ *
+ * These two templates had been using Tailwind's red-700 (#b91c1c) instead, so the two places a customer
+ * actually receives email from us rendered a different red from each other. Named once here so the next
+ * template added to this file cannot drift again.
+ */
+const BRAND_RED = "#CC0000";
 // FIELD session: long-lived so crews don't re-authenticate every time they open T-Rock Cam. Safe to
 // apply to EVERY field-app role (incl. CRM-capable admin/director/rep/construction) because field tokens
 // carry surface:"field" and CRM auth (authMiddleware) rejects that surface outright — so a field token
@@ -119,7 +128,7 @@ export function buildInviteEmail(input: {
       <p>Hi ${input.inviteeName},</p>
       <p>${input.inviterName} invited you to join T Rock Field so you can access project photos and field workflows.</p>
       <p>
-        <a href="${input.inviteUrl}" style="display:inline-block;background:#b91c1c;color:#ffffff;padding:10px 14px;border-radius:6px;text-decoration:none;font-weight:600">
+        <a href="${input.inviteUrl}" style="display:inline-block;background:${BRAND_RED};color:#ffffff;padding:10px 14px;border-radius:6px;text-decoration:none;font-weight:600">
           Accept invite
         </a>
       </p>
@@ -156,7 +165,7 @@ export function buildFieldPasswordResetEmail(input: {
     <div style="font-family:Arial,Helvetica,sans-serif;line-height:1.5;color:#111827">
       <p>Hi ${escapeHtml(firstName)},</p>
       <p>An administrator created a secure password reset for your T-Rock Cam account.</p>
-      <p><a href="${escapeHtml(input.resetUrl)}" style="display:inline-block;background:#b91c1c;color:#ffffff;padding:10px 14px;border-radius:6px;text-decoration:none;font-weight:600">Set a new password</a></p>
+      <p><a href="${escapeHtml(input.resetUrl)}" style="display:inline-block;background:${BRAND_RED};color:#ffffff;padding:10px 14px;border-radius:6px;text-decoration:none;font-weight:600">Set a new password</a></p>
       <p>This single-use link expires in 30 minutes.</p>
       <p>If you did not request help signing in, contact your administrator.</p>
     </div>

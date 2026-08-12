@@ -15,6 +15,10 @@ import {
   BID_BOARD_INGEST_MIGRATION,
   runBidBoardIngestIndexMigration,
 } from "./bid-board-ingest-indexes.js";
+import {
+  DEAL_STAGE_HISTORY_CREATED_AT_MIGRATION,
+  runDealStageHistoryCreatedAtIndexMigration,
+} from "./deal-stage-history-created-at-index.js";
 
 dotenv.config({
   path: join(dirname(fileURLToPath(import.meta.url)), "../../../.env"),
@@ -61,6 +65,14 @@ async function runMigrations(): Promise<void> {
         // SQL file, so build the per-tenant index here first; then the SQL file's
         // `CREATE UNIQUE INDEX IF NOT EXISTS` becomes a no-op on existing tenants.
         await runProjectNumberFirstSetIndexMigration(client);
+        const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
+        await client.query(sql);
+      } else if (file === DEAL_STAGE_HISTORY_CREATED_AT_MIGRATION) {
+        // Same reason as the two below: a plain CREATE INDEX over every tenant's deal_stage_history holds
+        // write-blocking locks for the whole DO block, and that table is on the deal hot path. Build each
+        // tenant's index CONCURRENTLY first; the file's plain statement then no-ops on existing schemas
+        // while remaining the marker the office provisioner replays for new ones.
+        await runDealStageHistoryCreatedAtIndexMigration(client);
         const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
         await client.query(sql);
       } else if (file === BID_BOARD_INGEST_MIGRATION) {

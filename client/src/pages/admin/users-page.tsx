@@ -664,8 +664,13 @@ export function UsersPage() {
           <TableBody>
             {filteredUsers.map((user) => {
               const commissionStructure = user.commissionStructure ?? "solo";
+              // An inactive row is muted by BACKGROUND, not opacity. `opacity-50` here composited every
+              // cell against the page: the Inactive badge fell to 2.24:1, the primary text to 3.41 and the
+              // secondary text to 1.97 — so the row a reader is least likely to look closely at was the
+              // only one failing AA, in every column at once. A child cannot opt out of an ancestor's
+              // opacity, so the badge's own colour could not be fixed while this stayed.
               return (
-              <TableRow key={user.id} className={!user.isActive ? "opacity-50" : ""}>
+              <TableRow key={user.id} className={!user.isActive ? "bg-slate-50" : ""}>
                 <TableCell>
                   <Checkbox
                     checked={selectedUserIds.includes(user.id)}
@@ -739,7 +744,7 @@ export function UsersPage() {
                   )}
                 </TableCell>
                 <TableCell>
-                  <Badge className={user.isActive ? "bg-green-100 text-xs text-green-800" : "bg-gray-100 text-xs text-gray-500"}>
+                  <Badge className={user.isActive ? "bg-green-100 text-xs text-green-800" : "bg-gray-100 text-xs text-gray-600"}>
                     {user.isActive ? "Active" : "Inactive"}
                   </Badge>
                 </TableCell>

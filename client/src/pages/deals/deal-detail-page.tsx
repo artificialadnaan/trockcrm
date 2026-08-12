@@ -1098,7 +1098,12 @@ export function DealDetailPage() {
   );
   const tabContent = (
     <div className="space-y-4">
-      <BidDueDateBanner bidDueDate={deal.bidDueDate} />
+      <BidDueDateBanner
+        bidDueDate={deal.bidDueDate}
+        /* Only the assigned rep can save the form this links to; a collaborator would fill it in and
+           be refused on PATCH. Same gate as the Edit Deal control above. */
+        editHref={viewerOwnsDeal ? appendOfficeIdSearch(`/deals/${deal.id}/edit`, detailOfficeId) : null}
+      />
       {/* Standing reminder, not a toast. The CRM cannot delete the Bid Board project, so the ONE manual
           step this action depends on has to survive a page reload — a single toast at move time gets
           missed and the Bid Board keeps showing a phantom active project.
