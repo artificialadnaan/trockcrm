@@ -38,7 +38,7 @@ const STATUS_BADGE: Record<string, string> = {
   promoted: "bg-red-100 text-red-800",
   needs_review: "bg-amber-100 text-amber-800",
   invalid: "bg-red-100 text-red-800",
-  rejected: "bg-gray-100 text-gray-500",
+  rejected: "bg-gray-100 text-gray-600",
   pending: "bg-gray-100 text-gray-600",
 };
 
