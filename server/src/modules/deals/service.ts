@@ -2645,19 +2645,24 @@ export async function getDealDetail(
 }
 
 /**
- * Create a new deal.
+ * Derive the workflow route (and the configured project-type code behind it) a create request will land
+ * on, using the SAME precedence createDeal applies below: an explicit route always wins — lead
+ * conversion, the SyncHub ingest and the Bid Board all state a route deliberately — and derivation from
+ * the project type only fills the gap where the caller left it unset.
+ *
+ * NON-THROWING on purpose. The validating `assertValidProjectType` stays exactly where it was, inside
+ * createDeal, further down: hoisting it would put project-type validation AHEAD of the stage check, the
+ * creation policy and the awarded-amount role gate, changing which error a rejected caller sees first and
+ * letting an unauthorized one probe type validity. An unrecognised type simply yields null here and
+ * routes normal; the assert below still rejects it with the same message, in the same order, as before
+ * this function existed.
+ *
+ * Exported so a caller that needs to know the route BEFORE createDeal runs (the POST /deals contact
+ * guard in routes.ts) asks this exact question rather than a second, hand-rolled copy that could drift.
  */
-export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
-  // The workflow route is derived from the project type, so the type has to be known before the stage is
-  // looked up. `workflow_route` is NOT NULL DEFAULT 'normal', so a deal created without one used to look
-  // like a confident "not service" rather than "nobody said" — and nothing anywhere derived it from the
-  // type. That is why service work whose own deal number reads DFW-4-… sat in the Normal pipeline.
-  //
-  // NON-THROWING on purpose. The validating `assertValidProjectType` stays exactly where it was, further
-  // down: hoisting it would put project-type validation AHEAD of the stage check, the creation policy and
-  // the awarded-amount role gate, changing which error a rejected caller sees first and letting an
-  // unauthorized one probe type validity. An unrecognised type simply yields null here and routes normal;
-  // the assert below still rejects it with the same message, in the same order, as before this change.
+export async function deriveWorkflowRouteForCreate(
+  input: Pick<CreateDealInput, "workflowRoute" | "projectType" | "projectTypeId">
+): Promise<{ workflowRoute: WorkflowRoute; projectTypeCode: string | null }> {
   const derivedProjectType = input.projectType
     ? await resolveActiveProjectTypeValue(input.projectType)
     : null;
@@ -2666,15 +2671,26 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
   // code-4 deal with a normal route, a normal pipeline_type_snapshot and a residential deal NUMBER — the
   // row internally contradicting itself the moment it is inserted. Same tier order as everywhere else:
   // text first, configured code second.
-  const derivedProjectTypeCode = input.projectTypeId
+  const projectTypeCode = input.projectTypeId
     ? (await resolveProjectTypeConfigById(input.projectTypeId))?.code ?? null
     : null;
 
-  // An EXPLICIT route from the caller always wins: lead conversion, the SyncHub ingest and the Bid Board
-  // all state a route deliberately, and this must not overrule them. The derivation only fills the gap
-  // where the route would otherwise have defaulted silently.
-  const requestedRoute =
-    input.workflowRoute ?? workflowRouteForProjectType(derivedProjectType, derivedProjectTypeCode);
+  return {
+    workflowRoute: input.workflowRoute ?? workflowRouteForProjectType(derivedProjectType, projectTypeCode),
+    projectTypeCode,
+  };
+}
+
+/**
+ * Create a new deal.
+ */
+export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
+  // The workflow route is derived from the project type, so the type has to be known before the stage is
+  // looked up. `workflow_route` is NOT NULL DEFAULT 'normal', so a deal created without one used to look
+  // like a confident "not service" rather than "nobody said" — and nothing anywhere derived it from the
+  // type. That is why service work whose own deal number reads DFW-4-… sat in the Normal pipeline.
+  const { workflowRoute: requestedRoute, projectTypeCode: derivedProjectTypeCode } =
+    await deriveWorkflowRouteForCreate(input);
 
   // A stage belongs to ONE workflow family, so a derived service route can fail against a stage the caller
   // chose from the standard family. getStageByIdForWorkflowRoute already accepts the SHARED canonical

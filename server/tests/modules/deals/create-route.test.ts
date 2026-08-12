@@ -328,13 +328,60 @@ describe("POST /api/deals create context", () => {
     expect(dealsServiceMocks.createDeal).not.toHaveBeenCalled();
   });
 
-  it("does NOT require a point of contact on the generic deal endpoint", async () => {
-    // The guard must not leak. Bid Board sync, RFP ingestion, imports and lead conversion all create
-    // contact-less deals through POST /deals, and every one of them would break if it did.
+  it("does NOT require a point of contact for a non-Service deal on the generic deal endpoint", async () => {
+    // The guard must not leak into a blanket requirement. validBody() carries no projectType/projectTypeId,
+    // so it derives to the "normal" route — Bid Board sync, RFP ingestion, imports and lead conversion all
+    // create contact-less deals this way through POST /deals (via createDeal directly, not this route, but
+    // the route must not be stricter than they need it to be either), and every one of them would break if
+    // this became unconditional.
     const res = await request(createApp("dallas")).post("/api/deals").send(validBody());
 
     expect(res.status).toBe(201);
     expect(dealsServiceMocks.createDeal).toHaveBeenCalled();
+  });
+
+  it("rejects a Service-typed create with no point of contact on the generic deal endpoint", async () => {
+    // /deals/new (the generic deal form) lets a rep pick project type Service + stage Opportunity and
+    // submit here — the door bd81e938e's /service-opportunity guard did not close. projectTypeId resolves
+    // through the SAME getActiveProjectTypes() config used everywhere else (code "4" == service).
+    const res = await request(createApp("dallas"))
+      .post("/api/deals")
+      .send(validBody({ projectTypeId: "type-service" }));
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toBe("Point of contact is required");
+    // The deal must not be created — a 400 that still wrote the row would be worse than no guard.
+    expect(dealsServiceMocks.createDeal).not.toHaveBeenCalled();
+  });
+
+  it("creates a Service-typed deal on the generic deal endpoint when a point of contact is provided", async () => {
+    const res = await request(createApp("dallas"))
+      .post("/api/deals")
+      .send(validBody({ projectTypeId: "type-service", primaryContactId: "contact-1" }));
+
+    expect(res.status).toBe(201);
+    expect(dealsServiceMocks.createDeal).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        projectTypeId: "type-service",
+        primaryContactId: "contact-1",
+      })
+    );
+  });
+
+  it("rejects an explicit workflowRoute: 'service' with no point of contact, even with a non-Service project type", async () => {
+    // Lead conversion, SyncHub ingest and Bid Board all state workflowRoute explicitly, and an explicit
+    // route always wins over the derived one (createDeal's own precedence). The guard has to honor that
+    // SAME precedence — asking only "did this derive to service" and ignoring an explicit route would
+    // both miss real service creates that set the route directly and, worse, invert the precedence rule
+    // the rest of the create path depends on.
+    const res = await request(createApp("dallas"))
+      .post("/api/deals")
+      .send(validBody({ workflowRoute: "service" }));
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toBe("Point of contact is required");
+    expect(dealsServiceMocks.createDeal).not.toHaveBeenCalled();
   });
 
   it("rejects a non-Service project type on the Service opportunity endpoint", async () => {

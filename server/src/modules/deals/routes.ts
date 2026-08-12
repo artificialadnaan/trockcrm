@@ -26,6 +26,7 @@ import {
   getRequiredEstimatingBoundaryStage,
   isBidBoardOwnedDownstreamStage,
   createDeal,
+  deriveWorkflowRouteForCreate,
   updateDeal,
   startProposalDraft,
   deleteDeal,
@@ -2469,6 +2470,24 @@ router.post("/", async (req, res, next) => {
     } = body;
     if (!name || !stageId) {
       throw new AppError(400, "Name and stageId are required");
+    }
+
+    // /deals/new (the generic deal form) lets a rep pick project type Service + stage Opportunity and
+    // submit here, landing a Service Opportunity with nobody to call — the door the /service-opportunity
+    // guard above (bd81e938e) did not close, because this route is a second, independent way to create
+    // the same kind of deal. Guarded HERE, on the route, rather than inside createDeal: createDeal is
+    // also called directly by lead conversion, Bid Board sync, SyncHub ingest and the import scripts, all
+    // of which legitimately create contact-less service deals, and a check inside createDeal would reject
+    // every one of them. deriveWorkflowRouteForCreate mirrors createDeal's own precedence exactly
+    // (explicit workflowRoute wins over one derived from project type), so this guard can never fire on a
+    // different verdict than the create it is guarding.
+    const { workflowRoute: derivedRoute } = await deriveWorkflowRouteForCreate({
+      workflowRoute: rest.workflowRoute,
+      projectType: rest.projectType,
+      projectTypeId: rest.projectTypeId,
+    });
+    if (derivedRoute === "service" && !rest.primaryContactId) {
+      throw new AppError(400, "Point of contact is required");
     }
 
     // Rep ownership enforcement:
