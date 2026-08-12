@@ -14,8 +14,30 @@ let an opportunity through without one.
 Create time only. Existing Service Opportunities are left exactly as they are — no backfill, no prompt,
 no migration. The gap closes going forward.
 
-The requirement applies to **one route and one form**. Every other way a deal is created — Bid Board
-sync, RFP ingestion, HubSpot import, the generic deal form, lead conversion — is untouched.
+The requirement is enforced on the **HTTP routes a person can reach**, and deliberately not below them.
+
+**Amended 2026-08-12 after code review.** The original scope was "one route and one form". A reviewer
+found that incomplete: `/deals/new` — the generic deal form, reachable from "Convert to Deal" in
+`lead-form.tsx` — lets a rep pick project type **Service** and stage **Opportunity**, and `createDeal`
+then derives `workflowRoute: "service"` from the project-type code (`workflowRouteForProjectType`
+returns `"service"` for configured code `4`). That produced a contact-less Service Opportunity through
+the UI, bypassing the guard entirely, so the feature did not deliver what it claimed.
+
+`POST /deals` is therefore **also** guarded, but only when the deal would land on the service route,
+using the same precedence `createDeal` uses — an explicit `workflowRoute` in the payload wins over the
+derived one, because lead conversion, SyncHub ingest and Bid Board all state a route deliberately.
+
+**Both guards live on the HTTP routes, never inside `createDeal`.** A census established that
+`POST /deals` has exactly one HTTP caller — `client/src/components/deals/deal-form.tsx:383` — and that
+lead conversion (`leads/conversion-service.ts:318`), Bid Board sync, SyncHub ingest and the import
+scripts all call the `createDeal()` **function** directly. Guarding the function would break every one
+of them; guarding the routes closes the doors a person can walk through and leaves the integrations
+alone. That is the intended boundary, not an accident of implementation.
+
+**Still reachable, and knowingly accepted:** `PATCH /deals/:id` can flip an existing contact-less deal
+onto the service route, and lead conversion can produce a contact-less Service Opportunity if the lead's
+`primaryContactId` was cleared first. Closing those was considered and deliberately deferred — they are
+edit/integration paths rather than the create flow this feature is about.
 
 ## What already exists
 
