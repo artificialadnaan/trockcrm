@@ -1620,6 +1620,59 @@ export function useCanvassingActivityReport(options: CanvassingActivityQueryOpti
   );
 }
 
+/* -------------------------------------------------------------------------------------------------
+ * Canvassing Activity drill-to-evidence — the records behind ONE number.
+ * ---------------------------------------------------------------------------------------------- */
+
+/** `all` is the grid's combined column — counts.total — and returns the four kinds in one list. */
+export type CanvassingEvidenceKind = CanvassingKind | "all" | "unattributed" | "notes";
+
+export interface CanvassingEvidenceRecord {
+  id: string;
+  label: string;
+  sublabel: string | null;
+  occurredAt: string;
+  href: string | null;
+  /** Which of the four this row is. Present on record drills; the combined list needs it to be readable. */
+  kind?: CanvassingKind;
+  /** What a NOTE was attached to — the deal, contact, company, lead or property it documents. */
+  attachedTo?: string | null;
+}
+
+export interface CanvassingEvidenceResult {
+  kind: CanvassingEvidenceKind;
+  /** Null for an office-wide drill. */
+  userId: string | null;
+  bucketStart: string | null;
+  /** The figure the drill was opened from. Counted with the report's own predicate, not rows.length. */
+  total: number;
+  rows: CanvassingEvidenceRecord[];
+  truncated: boolean;
+  /** Rows narrowed to the viewer's own notes; `total` still describes everyone's. */
+  restrictedToSelf: boolean;
+}
+
+/** Fetched on demand when a cell is clicked, rather than prefetched for every cell on the page. */
+export async function fetchCanvassingEvidence(input: {
+  kind: CanvassingEvidenceKind;
+  /** Omitted for an office-wide figure — a KPI card or an "Office totals by period" cell. */
+  userId?: string | null;
+  bucketStart?: string | null;
+  bucket: CanvassingBucket;
+  dateFrom?: string;
+  dateTo?: string;
+  ownerIds?: string[];
+}): Promise<CanvassingEvidenceResult> {
+  const params = new URLSearchParams();
+  params.set("kind", input.kind);
+  if (input.userId) params.set("userId", input.userId);
+  params.set("bucket", input.bucket);
+  if (input.bucketStart) params.set("bucketStart", input.bucketStart);
+  if (input.dateFrom) params.set("dateFrom", input.dateFrom);
+  if (input.dateTo) params.set("dateTo", input.dateTo);
+  return (await api<{ data: CanvassingEvidenceResult }>(`/reports/canvassing-activity/evidence?${params.toString()}`)).data;
+}
+
 export function useForecastAccuracyReport(options: PerformanceReportQueryOptions = {}) {
   return usePerformanceReport<ForecastAccuracyReport>(
     "forecast-accuracy",
