@@ -34,6 +34,7 @@ const D_ESTIMATING = "33333333-3333-3333-3333-33333333000a";
 const D_DEDUCTIVE = "33333333-3333-3333-3333-33333333000b";
 const D_HUBSPOT_OWNER = "33333333-3333-3333-3333-33333333000c";
 const D_CREATOR_OWNER = "33333333-3333-3333-3333-33333333000d";
+const D_TEST_CREATOR = "33333333-3333-3333-3333-33333333000e";
 
 const WINDOW_FROM = new Date("2026-08-06T00:00:00.000Z");
 const WINDOW_TO = new Date("2026-08-07T00:00:00.000Z");
@@ -117,7 +118,10 @@ beforeAll(async () => {
     INSERT INTO office_dallas.deals
       (id, name, deal_number, assigned_rep_id, created_by_user_id, hubspot_owner_email, bid_estimate, is_active, is_test_data) VALUES
       ('${D_HUBSPOT_OWNER}', 'HubSpot Owned', 'DFW-11', NULL, NULL,        'legacy@trockgc.com', 11000, true, false),
-      ('${D_CREATOR_OWNER}', 'Creator Owned', 'DFW-12', NULL, '${REP_B}',  NULL,                 12000, true, false);
+      ('${D_CREATOR_OWNER}', 'Creator Owned', 'DFW-12', NULL, '${REP_B}',  NULL,                 12000, true, false),
+      -- No rep, no HubSpot owner, and the CREATOR is a test user: the fallback selects them, so the row
+      -- must be excluded rather than reported under a test identity.
+      ('${D_TEST_CREATOR}', 'Created By QA', 'DFW-13', NULL, '${REP_TEST}', NULL,                13000, true, false);
 
     INSERT INTO office_atlanta.deals
       (id, name, deal_number, project_number, assigned_rep_id, awarded_amount, bid_estimate, dd_estimate, on_hold, is_active, is_test_data) VALUES
@@ -145,7 +149,8 @@ beforeAll(async () => {
       ${historyRow("44444444-4444-4444-4444-44444444000d", D_FIRST, ST_SENT, "2026-08-07T00:00:00Z")},
       ${historyRow("44444444-4444-4444-4444-44444444000e", D_DEDUCTIVE, ST_SENT, "2026-08-06T12:36:00Z")},
       ${historyRow("44444444-4444-4444-4444-44444444000f", D_HUBSPOT_OWNER, ST_SENT, "2026-08-06T12:34:00Z")},
-      ${historyRow("44444444-4444-4444-4444-444444440010", D_CREATOR_OWNER, ST_SENT, "2026-08-06T12:32:00Z")};
+      ${historyRow("44444444-4444-4444-4444-444444440010", D_CREATOR_OWNER, ST_SENT, "2026-08-06T12:32:00Z")},
+      ${historyRow("44444444-4444-4444-4444-444444440011", D_TEST_CREATOR, ST_SENT, "2026-08-06T12:30:00Z")};
 
     INSERT INTO office_atlanta.deal_stage_history (id, deal_id, to_stage_id, changed_by, created_at) VALUES
       ${historyRow("44444444-4444-4444-4444-4444444400a1", D_ATL, ST_SENT, "2026-08-06T12:53:00Z")};
@@ -301,6 +306,13 @@ describe("estimates sent — the fields the email prints", () => {
     const row = rows.find((entry) => entry.name === "Creator Owned");
     expect(row?.ownerEmail).toBe("cburling@trockgc.com");
     expect(row?.ownerName).toBe("Colby Burling");
+  });
+
+  // The assigned-rep exclusion was not enough: with no rep and no HubSpot owner the chain selects the
+  // CREATOR, and a test creator was reported under their own identity — against this feed's own rule.
+  it("excludes a send whose owner resolves to a TEST user through the creator fallback", async () => {
+    const rows = await load();
+    expect(rows.map((row) => row.name)).not.toContain("Created By QA");
   });
 
   it("still prefers the assigned rep over both fallbacks", async () => {

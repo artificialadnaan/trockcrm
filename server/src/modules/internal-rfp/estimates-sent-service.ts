@@ -106,6 +106,14 @@ export function estimatesSentQuery(schemaName: string): string {
        AND d.is_active = true
        AND COALESCE(d.is_test_data, false) = false
        AND NOT EXISTS (SELECT 1 FROM public.users tu WHERE tu.id = d.assigned_rep_id AND tu.is_test_data = true)
+       -- …and the same exclusion for whoever the FALLBACK chain actually selected. Checking only the
+       -- assigned rep let a deal with no rep and no HubSpot owner through carrying a TEST user's identity,
+       -- which contradicts this feed's own "test rows never appear" rule.
+       AND NOT (
+             COALESCE(cu.is_test_data, false) = true
+         AND u.email IS NULL
+         AND NULLIF(BTRIM(d.hubspot_owner_email), '') IS NULL
+       )
      ORDER BY h.created_at DESC, d.id DESC`;
 }
 
