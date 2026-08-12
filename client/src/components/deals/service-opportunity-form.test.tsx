@@ -131,6 +131,28 @@ vi.mock("@/components/properties/property-selector", () => ({
   },
 }));
 
+// Drives the field directly instead of through Base UI's portal — the form's own logic (payload wiring,
+// clear-on-company-change) is what these tests exercise, not the picker's internals (covered separately).
+vi.mock("@/components/contacts/point-of-contact-field", () => ({
+  PointOfContactField: ({
+    companyId,
+    value,
+    onChange,
+  }: {
+    companyId: string;
+    value: string;
+    onChange: (id: string) => void;
+  }) => (
+    <div>
+      <span data-testid="poc-company">{companyId}</span>
+      <span data-testid="poc-value">{value}</span>
+      <button type="button" data-testid="poc-pick" onClick={() => onChange("contact-1")}>
+        pick contact
+      </button>
+    </div>
+  ),
+}));
+
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 function setupCommonMocks() {
@@ -287,6 +309,9 @@ describe("ServiceOpportunityForm", () => {
       Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Select property")?.click();
     });
     await act(async () => {
+      container.querySelector<HTMLButtonElement>("[data-testid='poc-pick']")?.click();
+    });
+    await act(async () => {
       container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
 
@@ -295,6 +320,7 @@ describe("ServiceOpportunityForm", () => {
         name: "SMOKE TEST DELETE Service Opportunity",
         companyId: "company-1",
         propertyId: "property-1",
+        primaryContactId: "contact-1",
         assignedRepId: "rep-1",
         projectTypeId: "type-service",
         projectType: "service",
@@ -304,6 +330,8 @@ describe("ServiceOpportunityForm", () => {
     );
   });
 
+  // Also picks the point of contact — required since Task 4 — so every test built on this helper still
+  // reaches the endpoint call it means to assert on, rather than tripping the new guard instead.
   async function selectAndSubmit(container: HTMLElement) {
     await act(async () => {
       setInputValue(container.querySelector("#name") as HTMLInputElement, "SMOKE TEST DELETE Service Opportunity");
@@ -311,6 +339,9 @@ describe("ServiceOpportunityForm", () => {
     await act(async () => {
       Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Select company")?.click();
       Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Select property")?.click();
+    });
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("[data-testid='poc-pick']")?.click();
     });
     await act(async () => {
       container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
@@ -448,7 +479,11 @@ describe("ServiceOpportunityForm", () => {
     expect(selectorValue(container, "property")).toBe("property-9");
     expect((container.querySelector("#name") as HTMLInputElement).value).toBe("Cedar Springs opportunity");
 
-    // Submit WITHOUT touching either picker — the prefill alone must be enough.
+    // Submit WITHOUT touching either picker — the prefill alone must be enough. The point of contact still
+    // has to be picked: nothing prefills it (a contact isn't part of the property-page hand-off).
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("[data-testid='poc-pick']")?.click();
+    });
     await act(async () => {
       container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
@@ -458,6 +493,7 @@ describe("ServiceOpportunityForm", () => {
         name: "Cedar Springs opportunity",
         companyId: "company-7",
         propertyId: "property-9",
+        primaryContactId: "contact-1",
         // The prefilled property resolves like a picked one, so region still auto-detects from its state.
         regionId: "region-central",
       }),
@@ -516,6 +552,11 @@ describe("ServiceOpportunityForm", () => {
     containers.push(container);
     roots.push(root);
 
+    // Pick the point of contact first so this submit attempt trips the property-resolution guard under
+    // test, not the (also-required) point-of-contact guard.
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("[data-testid='poc-pick']")?.click();
+    });
     await act(async () => {
       container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
@@ -560,6 +601,13 @@ describe("ServiceOpportunityForm", () => {
       clickButton(container, "Restore property");
     });
 
+    // The company swap above was a real change, so it cleared the point of contact along with the property
+    // (restorePreloadedSelection puts the company/property pair back but does not resurrect the contact —
+    // it wasn't part of the property-page prefill to begin with). Pick it again so this submit trips the
+    // property-resolution guard under test, not the point-of-contact guard.
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("[data-testid='poc-pick']")?.click();
+    });
     await act(async () => {
       container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
@@ -582,6 +630,9 @@ describe("ServiceOpportunityForm", () => {
     expect(container.querySelector('[data-testid="company-office"]')?.textContent).toBe("office-atlanta");
     expect(container.querySelector('[data-testid="property-office"]')?.textContent).toBe("office-atlanta");
 
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("[data-testid='poc-pick']")?.click();
+    });
     await act(async () => {
       container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
@@ -692,6 +743,9 @@ describe("ServiceOpportunityForm", () => {
     roots.push(root);
 
     await act(async () => {
+      container.querySelector<HTMLButtonElement>("[data-testid='poc-pick']")?.click();
+    });
+    await act(async () => {
       container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
 
@@ -758,5 +812,71 @@ describe("ServiceOpportunityForm", () => {
     await selectAndSubmit(container);
     expect(mocks.createServiceOpportunity).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Loading regions");
+  });
+
+  it("refuses to create without a point of contact", async () => {
+    const { container, root } = await renderForm();
+    containers.push(container);
+    roots.push(root);
+
+    await act(async () => {
+      setInputValue(container.querySelector("#name") as HTMLInputElement, "SMOKE TEST DELETE No Contact");
+    });
+    await act(async () => {
+      Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Select company")?.click();
+      Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Select property")?.click();
+    });
+    await act(async () => {
+      container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+
+    expect(mocks.createServiceOpportunity).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Point of contact is required");
+  });
+
+  it("sends the chosen point of contact to the API", async () => {
+    mocks.createServiceOpportunity.mockResolvedValue({ deal: { id: "deal-1" } });
+    const { container, root } = await renderForm();
+    containers.push(container);
+    roots.push(root);
+
+    await act(async () => {
+      setInputValue(container.querySelector("#name") as HTMLInputElement, "SMOKE TEST DELETE With Contact");
+    });
+    await act(async () => {
+      Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Select company")?.click();
+      Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Select property")?.click();
+    });
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("[data-testid='poc-pick']")?.click();
+    });
+    await act(async () => {
+      container.querySelector("form")?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+
+    expect(mocks.createServiceOpportunity).toHaveBeenCalledWith(
+      expect.objectContaining({ primaryContactId: "contact-1" }),
+      expect.anything()
+    );
+  });
+
+  it("clears the point of contact when the company changes", async () => {
+    const { container, root } = await renderForm();
+    containers.push(container);
+    roots.push(root);
+
+    await act(async () => {
+      Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Select company")?.click();
+    });
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("[data-testid='poc-pick']")?.click();
+    });
+    expect(container.querySelector("[data-testid='poc-value']")?.textContent).toBe("contact-1");
+
+    await act(async () => {
+      Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "Select other company")?.click();
+    });
+
+    expect(container.querySelector("[data-testid='poc-value']")?.textContent).toBe("");
   });
 });

@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/select";
 import { CompanySelector } from "@/components/companies/company-selector";
 import { PropertySelector } from "@/components/properties/property-selector";
+import { PointOfContactField } from "@/components/contacts/point-of-contact-field";
 import { useAccessibleOffices } from "@/hooks/use-accessible-offices";
 import { useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
@@ -98,6 +99,7 @@ export function ServiceOpportunityForm({
     name: initialValues?.name ?? "",
     companyId: initialValues?.companyId ?? "",
     propertyId: initialValues?.propertyId ?? "",
+    primaryContactId: "",
     scopeTitle: "",
     description: "",
     assignedRepId: user?.role === "rep" ? user.id : "",
@@ -228,6 +230,10 @@ export function ServiceOpportunityForm({
       if (field === "companyId" && value !== prev.companyId) {
         next.propertyId = "";
         next.propertyState = "";
+        // A contact belongs to exactly one company and the server rejects a mismatched pair, so a company
+        // switch must drop it for the same reason it drops the property. Guarded on an ACTUAL change: the
+        // picker re-emits the company it is already showing on value resolution and remount.
+        next.primaryContactId = "";
       }
       // Clearing the property must drop its captured state too, so region auto-detect doesn't keep deriving
       // from a property that's no longer selected (onPropertySelected only fires on a NEW selection).
@@ -272,6 +278,10 @@ export function ServiceOpportunityForm({
     }
     if (!formData.companyId || !formData.propertyId) {
       setError("Company and property are required");
+      return;
+    }
+    if (!formData.primaryContactId) {
+      setError("Point of contact is required");
       return;
     }
     if (!formData.assignedRepId) {
@@ -321,6 +331,7 @@ export function ServiceOpportunityForm({
           name: formData.name.trim(),
           companyId: formData.companyId,
           propertyId: formData.propertyId,
+          primaryContactId: formData.primaryContactId,
           assignedRepId: formData.assignedRepId,
           salesSourceUserId: formData.salesSourceUserId || null,
           scopeTitle: formData.scopeTitle.trim() || null,
@@ -444,6 +455,21 @@ export function ServiceOpportunityForm({
                 required
               />
             </div>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="primaryContactId">
+              Point of Contact <span className="text-red-500">*</span>
+            </Label>
+            <PointOfContactField
+              companyId={formData.companyId}
+              value={formData.primaryContactId}
+              onChange={(contactId) => handleChange("primaryContactId", contactId)}
+              officeId={effectiveOfficeId ?? null}
+            />
+            <p className="text-xs text-muted-foreground">
+              Who the service crew should call about this job.
+            </p>
           </div>
 
           <div className="space-y-2">
