@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -6,6 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useCompanyContacts } from "@/hooks/use-companies";
 import { createContact } from "@/hooks/use-contacts";
+import { getContactCompanyName } from "@/lib/contact-utils";
 
 export interface PointOfContactFieldProps {
   /** The company the opportunity is being created for. Empty string when none is chosen yet. */
@@ -27,6 +28,10 @@ type Suggestion = {
   lastName: string;
   email: string | null;
   companyName: string | null;
+  // Joined server-side from companies — authoritative over the nullable free-text companyName above. The
+  // create endpoint's response type doesn't declare this field, but the route returns it (it forwards
+  // dedupResult.fuzzySuggestions verbatim, which does carry it), so it's cast in here rather than left off.
+  linkedCompanyName?: string | null;
   matchReason?: string;
   isActive?: boolean;
 };
@@ -47,18 +52,44 @@ export function PointOfContactField({
   disabled = false,
 }: PointOfContactFieldProps) {
   // undefined rather than "" — useCompanyContacts short-circuits on a falsy id and never fetches.
-  const { contacts, loading, refetch } = useCompanyContacts(companyId || undefined, { officeId });
+  const { contacts, loading, error, refetch } = useCompanyContacts(companyId || undefined, { officeId });
   const [dialogOpen, setDialogOpen] = useState(false);
   const [draft, setDraft] = useState(EMPTY_CONTACT);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
+  // True once the LAST create attempt was blocked by dedup — tracked separately from `suggestions` because
+  // every returned match can be inactive, leaving `suggestions` empty with nothing to offer even though
+  // dedup did fire. Drives the Save button's "Create anyway" label and the next attempt's force flag, and
+  // (like `suggestions`) is cleared on every field edit so a forced create can never reuse a dedup verdict
+  // for a name the server has never actually checked.
+  const [dedupBlocked, setDedupBlocked] = useState(false);
+  // Bumped whenever the dialog session ends by any means OTHER than the save that's in flight resolving
+  // (closeDialog covers Cancel, a suggestion pick, and success). A create response that lands after its own
+  // seq has been superseded is stale and must not call onChange — otherwise a rep who reconsiders and picks
+  // a suggestion while "Create anyway" is still in flight could have that pick silently overwritten by the
+  // freshly created duplicate once the request resolves.
+  const saveSeq = useRef(0);
 
   const closeDialog = () => {
+    ++saveSeq.current;
     setDialogOpen(false);
     setDraft(EMPTY_CONTACT);
     setSaveError(null);
     setSuggestions([]);
+    setDedupBlocked(false);
+  };
+
+  // Single change handler for all five dialog fields — routes through here so editing the draft ALWAYS
+  // drops the stale dedup verdict (suggestions + dedupBlocked) alongside the value. Without this, editing
+  // the name after a dedup warning leaves the "Create anyway" force flag armed for a name dedup never saw,
+  // which is exactly the silent-duplicate path this feature exists to prevent. Ported from
+  // deal-billing-tab.tsx's field() onChange (Codex-flagged there for the same reason).
+  const updateDraft = (field: keyof typeof EMPTY_CONTACT, fieldValue: string) => {
+    setDraft((prev) => ({ ...prev, [field]: fieldValue }));
+    setSuggestions([]);
+    setDedupBlocked(false);
+    setSaveError(null);
   };
 
   // `force` re-submits past the dedup warning. The first attempt never skips dedup — that is the whole
@@ -68,6 +99,7 @@ export function PointOfContactField({
       setSaveError("First and last name are required");
       return;
     }
+    const seq = ++saveSeq.current;
     setSaving(true);
     setSaveError(null);
     try {
@@ -86,6 +118,9 @@ export function PointOfContactField({
         },
         { officeId }
       );
+      // The dialog session this request belongs to has already ended (e.g. the rep picked a suggestion
+      // while this was in flight) — applying it now would overwrite that choice.
+      if (seq !== saveSeq.current) return;
       if (result.contact) {
         await refetch();
         onChange(result.contact.id);
@@ -93,16 +128,27 @@ export function PointOfContactField({
         return;
       }
       if (result.dedupWarning && result.suggestions?.length) {
+        setDedupBlocked(true);
         // The dedup path can surface soft-deleted or merged records; pointing the deal at one would tie it
-        // to a stale contact.
-        setSuggestions((result.suggestions as Suggestion[]).filter((s) => s.isActive !== false));
+        // to a stale contact, so only ACTIVE matches are offerable.
+        const active = (result.suggestions as Suggestion[]).filter((s) => s.isActive !== false);
+        if (active.length > 0) {
+          setSuggestions(active);
+        } else {
+          // Every match dedup found was archived — there is nothing to offer, but leaving Save unchanged
+          // would silently dead-end the rep on a button that repeats this exact same result forever.
+          setSuggestions([]);
+          setSaveError('A similar contact already exists but is archived (deleted or merged). "Create anyway" will add this person.');
+        }
         return;
       }
       setSaveError("Contact was not created.");
     } catch (err) {
+      if (seq !== saveSeq.current) return;
       setSaveError(err instanceof Error ? err.message : "Could not create the contact.");
     } finally {
-      setSaving(false);
+      // Don't clear `saving` for a stale attempt — a newer save may genuinely still be in flight.
+      if (seq === saveSeq.current) setSaving(false);
     }
   };
 
@@ -118,7 +164,7 @@ export function PointOfContactField({
   );
 
   const selectedLabel = items.find((item) => item.value === (value || NONE))?.label ?? "Select a point of contact";
-  const hasNoContacts = Boolean(companyId) && !loading && contacts.length === 0;
+  const hasNoContacts = Boolean(companyId) && !loading && !error && contacts.length === 0;
 
   return (
     <div className="space-y-2">
@@ -143,7 +189,20 @@ export function PointOfContactField({
         </SelectContent>
       </Select>
 
-      {hasNoContacts ? (
+      {error ? (
+        // A failed load renders `contacts: []` just like "no contacts on this company yet" — without this,
+        // the empty state below would confidently tell the rep to create a contact that likely already
+        // exists.
+        <div
+          className="flex items-center justify-between gap-2 rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-xs text-red-700"
+          data-testid="poc-load-error"
+        >
+          <span>Could not load contacts for this company — please try again.</span>
+          <Button type="button" variant="outline" size="sm" data-testid="poc-retry" onClick={() => refetch()}>
+            Retry
+          </Button>
+        </div>
+      ) : hasNoContacts ? (
         <p className="text-xs text-muted-foreground">
           No contacts on this company yet — add the person the service crew should call.
         </p>
@@ -159,6 +218,7 @@ export function PointOfContactField({
           setDraft(EMPTY_CONTACT);
           setSaveError(null);
           setSuggestions([]);
+          setDedupBlocked(false);
           setDialogOpen(true);
         }}
       >
@@ -177,7 +237,8 @@ export function PointOfContactField({
                 id="poc-first-name"
                 data-testid="poc-first-name"
                 value={draft.firstName}
-                onChange={(e) => setDraft((prev) => ({ ...prev, firstName: e.target.value }))}
+                disabled={saving}
+                onChange={(e) => updateDraft("firstName", e.target.value)}
               />
             </div>
             <div className="space-y-1">
@@ -186,7 +247,8 @@ export function PointOfContactField({
                 id="poc-last-name"
                 data-testid="poc-last-name"
                 value={draft.lastName}
-                onChange={(e) => setDraft((prev) => ({ ...prev, lastName: e.target.value }))}
+                disabled={saving}
+                onChange={(e) => updateDraft("lastName", e.target.value)}
               />
             </div>
             <div className="space-y-1">
@@ -195,7 +257,8 @@ export function PointOfContactField({
                 id="poc-email"
                 data-testid="poc-email"
                 value={draft.email}
-                onChange={(e) => setDraft((prev) => ({ ...prev, email: e.target.value }))}
+                disabled={saving}
+                onChange={(e) => updateDraft("email", e.target.value)}
               />
             </div>
             <div className="space-y-1">
@@ -204,7 +267,8 @@ export function PointOfContactField({
                 id="poc-phone"
                 data-testid="poc-phone"
                 value={draft.phone}
-                onChange={(e) => setDraft((prev) => ({ ...prev, phone: e.target.value }))}
+                disabled={saving}
+                onChange={(e) => updateDraft("phone", e.target.value)}
               />
             </div>
             <div className="space-y-1 sm:col-span-2">
@@ -213,7 +277,8 @@ export function PointOfContactField({
                 id="poc-job-title"
                 data-testid="poc-job-title"
                 value={draft.jobTitle}
-                onChange={(e) => setDraft((prev) => ({ ...prev, jobTitle: e.target.value }))}
+                disabled={saving}
+                onChange={(e) => updateDraft("jobTitle", e.target.value)}
               />
             </div>
           </div>
@@ -223,25 +288,42 @@ export function PointOfContactField({
               <p className="text-amber-900">
                 Someone with this name already exists. Use them instead of creating a duplicate:
               </p>
-              {suggestions.map((s) => (
-                <div key={s.id} className="flex items-center justify-between gap-2" data-testid="poc-suggestion">
-                  <span>
-                    {s.firstName} {s.lastName}
-                    {s.companyName ? ` · ${s.companyName}` : ""}
-                  </span>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    onClick={() => {
-                      onChange(s.id);
-                      closeDialog();
-                    }}
-                  >
-                    Use this contact
-                  </Button>
-                </div>
-              ))}
+              {suggestions.map((s) => {
+                // The suggestions payload carries no companyId, so "is this match in the selected company"
+                // is inferred from whether its id appears in the already-loaded, company-scoped `contacts`
+                // list — the only signal available client-side. Cross-company matches are still SHOWN (that
+                // is dedup's whole job) but not pickable: onChange-ing to a Company-B contact would set
+                // `value` to an id this field's own picker doesn't list, so the trigger would silently show
+                // "Select a point of contact" while a save-time 400 waits ("Primary contact does not belong
+                // to the company") — contradicting the "no out-of-company escape hatch" doc comment above.
+                const inCompany = contacts.some((c) => c.id === s.id);
+                const companyLabel = getContactCompanyName(s);
+                return (
+                  <div key={s.id} className="flex items-center justify-between gap-2" data-testid="poc-suggestion">
+                    <span>
+                      {s.firstName} {s.lastName}
+                      {companyLabel ? ` · ${companyLabel}` : ""}
+                      {!inCompany ? " — different company; a new record will be created for this one" : ""}
+                    </span>
+                    {inCompany ? (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        // A pick while "Create anyway" is in flight must not be racable — see saveSeq above
+                        // for the corresponding guard on the resolution side.
+                        disabled={saving}
+                        onClick={() => {
+                          onChange(s.id);
+                          closeDialog();
+                        }}
+                      >
+                        Use this contact
+                      </Button>
+                    ) : null}
+                  </div>
+                );
+              })}
             </div>
           ) : null}
 
@@ -255,9 +337,9 @@ export function PointOfContactField({
               type="button"
               data-testid="poc-save"
               disabled={saving}
-              onClick={() => saveNewContact(suggestions.length > 0)}
+              onClick={() => saveNewContact(dedupBlocked)}
             >
-              {saving ? "Saving..." : suggestions.length ? "Create anyway" : "Save contact"}
+              {saving ? "Saving..." : dedupBlocked ? "Create anyway" : "Save contact"}
             </Button>
           </DialogFooter>
         </DialogContent>

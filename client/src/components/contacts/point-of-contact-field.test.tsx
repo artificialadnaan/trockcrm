@@ -165,4 +165,163 @@ describe("PointOfContactField", () => {
     expect(mocks.createContact).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain("First and last name are required");
   });
+
+  // CRITICAL 1 (review of 13fee5bdb): editing the draft after a dedup warning must drop the warning, so a
+  // later save on a DIFFERENT, unreviewed name cannot silently reuse "Create anyway" and skip dedup.
+  it("forces past dedup for the reviewed name, but reverts to a real dedup check after the name is edited", async () => {
+    mocks.useCompanyContacts.mockReturnValue({ contacts: [], loading: false, error: null, refetch: vi.fn() });
+    mocks.createContact.mockResolvedValue({
+      contact: null,
+      dedupWarning: true,
+      suggestions: [
+        { id: "contact-5", firstName: "Ada", lastName: "Lowe", email: null, companyName: "Acme", linkedCompanyName: null, matchReason: "same name", isActive: true },
+      ],
+    });
+    render();
+
+    act(() => container.querySelector<HTMLButtonElement>("[data-testid='poc-add-button']")!.click());
+    setFieldValue("poc-first-name", "Ada");
+    setFieldValue("poc-last-name", "Lowe");
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>("[data-testid='poc-save']")!.click();
+    });
+    expect(mocks.createContact.mock.calls[0][0].skipDedupCheck).toBeFalsy();
+
+    // "Create anyway" on the SAME (reviewed) name forces past the warning it just saw.
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>("[data-testid='poc-save']")!.click();
+    });
+    expect(mocks.createContact.mock.calls[1][0].skipDedupCheck).toBe(true);
+
+    // The rep realizes it's the wrong person and edits the name — dedup has never evaluated "Adam Lowell",
+    // so this save must NOT inherit the "Create anyway" force from the stale warning.
+    setFieldValue("poc-first-name", "Adam");
+    setFieldValue("poc-last-name", "Lowell");
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>("[data-testid='poc-save']")!.click();
+    });
+    expect(mocks.createContact.mock.calls[2][0].skipDedupCheck).toBeFalsy();
+  });
+
+  // CRITICAL 2 (review of 13fee5bdb): when dedup fires but every match it found is inactive (soft-deleted or
+  // merged), there is nothing left to OFFER — but the rep must still get a visible message and a way forward,
+  // not a "Save contact" button that repeats the same silent no-op forever.
+  it("tells the rep about an archived match and offers 'Create anyway' when every dedup suggestion is inactive", async () => {
+    mocks.useCompanyContacts.mockReturnValue({ contacts: [], loading: false, error: null, refetch: vi.fn() });
+    mocks.createContact.mockResolvedValue({
+      contact: null,
+      dedupWarning: true,
+      suggestions: [
+        { id: "contact-6", firstName: "Ada", lastName: "Lowe", email: null, companyName: "Old", linkedCompanyName: null, matchReason: "same name", isActive: false },
+      ],
+    });
+    render();
+
+    act(() => container.querySelector<HTMLButtonElement>("[data-testid='poc-add-button']")!.click());
+    setFieldValue("poc-first-name", "Ada");
+    setFieldValue("poc-last-name", "Lowe");
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>("[data-testid='poc-save']")!.click();
+    });
+
+    // Nothing pickable is offered (the only match is archived) ...
+    expect(document.querySelectorAll("[data-testid='poc-suggestion']").length).toBe(0);
+    // ... but the rep is told why, and the button has switched to force past it.
+    expect(document.body.textContent).toContain("archived");
+    expect(document.querySelector<HTMLButtonElement>("[data-testid='poc-save']")!.textContent).toContain("Create anyway");
+  });
+
+  // CRITICAL 4 (review of 13fee5bdb): a suggestion from another company is informational only. Picking it
+  // would set `value` to an id the company-scoped picker doesn't list (the trigger would show "Select a
+  // point of contact" while `value` is silently set to someone else's company), and saving would 400.
+  it("offers 'Use this contact' only for an in-company suggestion, not a cross-company one", async () => {
+    mocks.useCompanyContacts.mockReturnValue({
+      contacts: [{ id: "contact-1", firstName: "Dana", lastName: "Reyes", email: null, phone: null, jobTitle: null, category: "client" }],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    mocks.createContact.mockResolvedValue({
+      contact: null,
+      dedupWarning: true,
+      suggestions: [
+        // Same id as a contact already in the company-scoped list above — in-company.
+        { id: "contact-1", firstName: "Dana", lastName: "Reyes", email: null, companyName: null, linkedCompanyName: "Acme Co", matchReason: "same name", isActive: true },
+        // Not in the company-scoped list — cross-company.
+        { id: "contact-7", firstName: "Dana", lastName: "Reyes", email: null, companyName: null, linkedCompanyName: "Other Co", matchReason: "same name", isActive: true },
+      ],
+    });
+    render();
+
+    act(() => container.querySelector<HTMLButtonElement>("[data-testid='poc-add-button']")!.click());
+    setFieldValue("poc-first-name", "Dana");
+    setFieldValue("poc-last-name", "Reyes");
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>("[data-testid='poc-save']")!.click();
+    });
+
+    const rows = Array.from(document.querySelectorAll("[data-testid='poc-suggestion']"));
+    expect(rows.length).toBe(2);
+    const inCompanyRow = rows.find((r) => r.textContent?.includes("Acme Co"));
+    const crossCompanyRow = rows.find((r) => r.textContent?.includes("Other Co"));
+    expect(inCompanyRow?.querySelector("button")).not.toBeNull();
+    expect(crossCompanyRow?.querySelector("button")).toBeNull();
+  });
+
+  // IMPORTANT 5 (review of 13fee5bdb): a failed contacts load must not look identical to "this company
+  // genuinely has no contacts" — that message tells the rep to create someone who probably already exists.
+  it("shows a retryable error state, not the empty-company state, when loading contacts fails", () => {
+    const refetch = vi.fn();
+    mocks.useCompanyContacts.mockReturnValue({ contacts: [], loading: false, error: "network error", refetch });
+    render();
+
+    expect(container.textContent).not.toContain("No contacts on this company yet");
+    const errorBox = container.querySelector("[data-testid='poc-load-error']");
+    expect(errorBox).not.toBeNull();
+    act(() => container.querySelector<HTMLButtonElement>("[data-testid='poc-retry']")!.click());
+    expect(refetch).toHaveBeenCalled();
+  });
+
+  // IMPORTANT 3 (review of 13fee5bdb): a suggestion pick must not be racable against an in-flight
+  // "Create anyway" — the button that would fire onChange with a freshly minted duplicate is disabled while
+  // that request is outstanding.
+  it("disables 'Use this contact' while a create is saving", async () => {
+    // In-company (id present in the company-scoped list) so "Use this contact" actually renders — a
+    // cross-company suggestion never gets that button at all (Critical 4).
+    mocks.useCompanyContacts.mockReturnValue({
+      contacts: [{ id: "contact-5", firstName: "Ada", lastName: "Lowe", email: null, phone: null, jobTitle: null, category: "client" }],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    mocks.createContact.mockResolvedValueOnce({
+      contact: null,
+      dedupWarning: true,
+      suggestions: [
+        { id: "contact-5", firstName: "Ada", lastName: "Lowe", email: null, companyName: "Acme", linkedCompanyName: null, matchReason: "same name", isActive: true },
+      ],
+    });
+    render();
+
+    act(() => container.querySelector<HTMLButtonElement>("[data-testid='poc-add-button']")!.click());
+    setFieldValue("poc-first-name", "Ada");
+    setFieldValue("poc-last-name", "Lowe");
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>("[data-testid='poc-save']")!.click();
+    });
+
+    // "Create anyway" kicks off a second create that won't resolve during this assertion.
+    let resolveSecond: (v: unknown) => void = () => {};
+    mocks.createContact.mockImplementationOnce(() => new Promise((resolve) => { resolveSecond = resolve; }));
+    act(() => {
+      document.querySelector<HTMLButtonElement>("[data-testid='poc-save']")!.click();
+    });
+
+    const suggestionButton = document.querySelector<HTMLButtonElement>("[data-testid='poc-suggestion'] button");
+    expect(suggestionButton?.disabled).toBe(true);
+
+    await act(async () => {
+      resolveSecond({ contact: { id: "contact-9", firstName: "Ada", lastName: "Lowe" } });
+    });
+  });
 });
