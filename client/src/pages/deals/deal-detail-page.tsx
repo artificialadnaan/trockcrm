@@ -1038,7 +1038,12 @@ export function DealDetailPage() {
   );
   const tabContent = (
     <div className="space-y-4">
-      <BidDueDateBanner bidDueDate={deal.bidDueDate} />
+      <BidDueDateBanner
+        bidDueDate={deal.bidDueDate}
+        /* Only the assigned rep can save the form this links to; a collaborator would fill it in and
+           be refused on PATCH. Same gate as the Edit Deal control above. */
+        editHref={viewerOwnsDeal ? appendOfficeIdSearch(`/deals/${deal.id}/edit`, detailOfficeId) : null}
+      />
       {!viewerOwnsDeal ? (
         <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-600">
           Assigned to {deal.assignedRepName ?? deal.assignedRepId ?? "another rep"}. You can collaborate with notes, activity, files, photos, and emails, but only the assigned rep can edit.

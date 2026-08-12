@@ -31,6 +31,7 @@ import {
   resolveDefaultOfficeCode,
 } from "@/lib/office-selection";
 import { applyDealRegionAutoSelection } from "./deal-region-auto-select";
+import { toBidDueDateInputValue } from "@/pages/deals/bid-due-date-banner";
 import { isDealScopeReadOnlyAfterRfp, isDealBidBoardHandoff } from "@/lib/deal-scope-lock";
 
 // Shown on scope-defining fields (Deal Name, Project Type) once a deal is locked — the server rejects
@@ -124,6 +125,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
     sourceDetail: initialSourceIsCategory ? "" : initialSource,
     winProbability: deal?.winProbability?.toString() ?? "",
     expectedCloseDate: deal?.expectedCloseDate ?? "",
+    bidDueDate: toBidDueDateInputValue(deal?.bidDueDate),
   });
 
   const [submitting, setSubmitting] = useState(false);
@@ -327,6 +329,15 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
       }
       if (formData.propertyId) {
         payload.propertyId = formData.propertyId;
+      }
+
+      // Sent only when it CHANGED. bidDueDate is lead-owned, so the server routes it to the source lead
+      // rather than the deal row; sending it on every save would rewrite the lead — and write an audit
+      // entry — each time anyone saved any unrelated field on the deal. An empty box is a deliberate
+      // clear (null), which the resolved writer honours, so it has to be distinguishable from "unchanged"
+      // rather than folded into it.
+      if (formData.bidDueDate !== toBidDueDateInputValue(deal?.bidDueDate)) {
+        payload.bidDueDate = formData.bidDueDate || null;
       }
 
       // DD estimate is editable on EVERY deal (incl. bid-board-owned) — always send it. A manual edit is
@@ -683,15 +694,32 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
             </div>
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="expectedCloseDate">Expected Close Date</Label>
-            <Input
-              id="expectedCloseDate"
-              type="date"
-              value={formData.expectedCloseDate}
-              onChange={(e) => handleChange("expectedCloseDate", e.target.value)}
-            />
-            {closeDateWarning && <p className="text-xs text-amber-600">{closeDateWarning}</p>}
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-2">
+              <Label htmlFor="expectedCloseDate">Expected Close Date</Label>
+              <Input
+                id="expectedCloseDate"
+                type="date"
+                value={formData.expectedCloseDate}
+                onChange={(e) => handleChange("expectedCloseDate", e.target.value)}
+              />
+              {closeDateWarning && <p className="text-xs text-amber-600">{closeDateWarning}</p>}
+            </div>
+
+            {/* The date the banner on the deal shows. It was previously changeable ONLY from the Scoping
+                tab's Project Overview section, which is not where anyone looks for it. */}
+            <div className="space-y-2">
+              <Label htmlFor="bidDueDate">Bid Due Date</Label>
+              <Input
+                id="bidDueDate"
+                type="date"
+                value={formData.bidDueDate}
+                onChange={(e) => handleChange("bidDueDate", e.target.value)}
+              />
+              <p className="text-xs text-muted-foreground">
+                Shown on the deal banner. Clear the field to remove the banner.
+              </p>
+            </div>
           </div>
         </CardContent>
       </Card>
