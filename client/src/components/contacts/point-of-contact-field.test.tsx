@@ -52,11 +52,16 @@ function render(props: Partial<React.ComponentProps<typeof PointOfContactField>>
 }
 
 describe("PointOfContactField", () => {
-  it("tells the rep to pick a company first, and disables the add button, when there is no company", () => {
+  it("tells the rep to pick a company first, and disables the add button and the select trigger, when there is no company", () => {
     render({ companyId: "" });
     expect(container.textContent).toContain("Select a company first");
     const addButton = container.querySelector<HTMLButtonElement>("[data-testid='poc-add-button']");
     expect(addButton?.disabled).toBe(true);
+    // The trigger renders as a real <button> (Base UI's SelectTrigger with nativeButton, verified by
+    // inspecting the rendered DOM), so the native `disabled` property reflects the Select's own
+    // `disabled` prop directly — not just the add button's independently-computed one.
+    const selectTrigger = container.querySelector<HTMLButtonElement>("[data-testid='poc-select']");
+    expect(selectTrigger?.disabled).toBe(true);
   });
 
   it("does not query for contacts when no company is selected", () => {
@@ -66,9 +71,13 @@ describe("PointOfContactField", () => {
     expect(mocks.useCompanyContacts).toHaveBeenCalledWith(undefined, { officeId: "office-1" });
   });
 
-  it("scopes the contact list to the selected company", () => {
+  it("scopes the contact list to the selected company, and enables the select trigger", () => {
     render({ companyId: "company-1" });
     expect(mocks.useCompanyContacts).toHaveBeenCalledWith("company-1", { officeId: "office-1" });
+    // Mirror of the no-company case above: without this, a trigger disabled unconditionally
+    // (rather than on `!companyId`) would still pass every other assertion in this suite.
+    const selectTrigger = container.querySelector<HTMLButtonElement>("[data-testid='poc-select']");
+    expect(selectTrigger?.disabled).toBe(false);
   });
 
   it("offers adding a contact when the company has none", () => {
