@@ -279,6 +279,7 @@ describe("POST /api/deals create context", () => {
         assignedRepId: "rep-1",
         companyId: "company-1",
         propertyId: "property-1",
+        primaryContactId: "contact-1",
         projectTypeId: "type-service",
       });
 
@@ -292,6 +293,7 @@ describe("POST /api/deals create context", () => {
         assignedRepId: "rep-1",
         companyId: "company-1",
         propertyId: "property-1",
+        primaryContactId: "contact-1",
         projectType: "service",
         projectTypeId: "type-service",
         workflowRoute: "service",
@@ -309,6 +311,32 @@ describe("POST /api/deals create context", () => {
     );
   });
 
+  it("rejects a Service opportunity with no point of contact", async () => {
+    const res = await request(createApp("dallas"))
+      .post("/api/deals/service-opportunity")
+      .send({
+        name: "SMOKE TEST DELETE No Contact",
+        assignedRepId: "rep-1",
+        companyId: "company-1",
+        propertyId: "property-1",
+        projectTypeId: "type-service",
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toBe("Point of contact is required");
+    // The deal must not be created — a 400 that still wrote the row would be worse than no guard.
+    expect(dealsServiceMocks.createDeal).not.toHaveBeenCalled();
+  });
+
+  it("does NOT require a point of contact on the generic deal endpoint", async () => {
+    // The guard must not leak. Bid Board sync, RFP ingestion, imports and lead conversion all create
+    // contact-less deals through POST /deals, and every one of them would break if it did.
+    const res = await request(createApp("dallas")).post("/api/deals").send(validBody());
+
+    expect(res.status).toBe(201);
+    expect(dealsServiceMocks.createDeal).toHaveBeenCalled();
+  });
+
   it("rejects a non-Service project type on the Service opportunity endpoint", async () => {
     const res = await request(createApp("dallas"))
       .post("/api/deals/service-opportunity")
@@ -317,6 +345,7 @@ describe("POST /api/deals create context", () => {
         assignedRepId: "rep-1",
         companyId: "company-1",
         propertyId: "property-1",
+        primaryContactId: "contact-1",
         projectTypeId: "type-roofing",
       });
 
@@ -338,6 +367,7 @@ describe("POST /api/deals create context", () => {
         assignedRepId: "rep-1",
         companyId: "company-1",
         propertyId: "property-1",
+        primaryContactId: "contact-1",
         projectTypeId: "type-service",
       });
 
@@ -354,6 +384,7 @@ describe("POST /api/deals create context", () => {
         assignedRepId: "rep-1",
         companyId: "company-1",
         propertyId: "property-1",
+        primaryContactId: "contact-1",
         projectTypeId: "type-service",
         creationContext: "migration",
         migrationMode: true,
@@ -393,6 +424,7 @@ describe("POST /api/deals create context", () => {
         assignedRepId: "rep-1",
         companyId: "company-1",
         propertyId: "property-1",
+        primaryContactId: "contact-1",
         projectTypeId: "type-service",
         bidDueDate: "2026-06-01",
       },
@@ -416,6 +448,7 @@ describe("POST /api/deals create context", () => {
         assignedRepId: "rep-1",
         companyId: "company-1",
         propertyId: "property-1",
+        primaryContactId: "contact-1",
         projectTypeId: "type-service",
         regionId: "region-central",
         winProbability: 65,

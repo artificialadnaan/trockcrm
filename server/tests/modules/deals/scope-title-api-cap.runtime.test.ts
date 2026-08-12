@@ -148,6 +148,7 @@ function postServiceOpportunity(body: Record<string, unknown>) {
       assignedRepId: REP_ID,
       companyId: COMPANY_ID,
       propertyId: PROPERTY_ID,
+      primaryContactId: "contact-1",
       ...body,
     });
 }

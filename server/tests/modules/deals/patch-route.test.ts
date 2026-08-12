@@ -474,6 +474,7 @@ describe("PATCH /api/deals/:id cleanup legacy handling", () => {
         name: "Service opportunity",
         companyId: "company-1",
         propertyId: "property-1",
+        primaryContactId: "contact-1",
         projectNumber: "  ATL-2-54321-ab  ",
       },
       createUser("director")
@@ -499,6 +500,7 @@ describe("PATCH /api/deals/:id cleanup legacy handling", () => {
         name: "Service opportunity",
         companyId: "company-1",
         propertyId: "property-1",
+        primaryContactId: "contact-1",
         projectNumber: "   ",
       },
       createUser("admin")

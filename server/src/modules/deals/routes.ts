@@ -2351,6 +2351,14 @@ router.post("/service-opportunity", async (req, res, next) => {
     if (!companyId || !propertyId) {
       throw new AppError(400, "Company and property are required");
     }
+    // A Service Opportunity with no person on it leaves the service crew with a job, an address and nobody
+    // to call. Enforced HERE rather than on the column: every other deal path — Bid Board sync, RFP
+    // ingestion, imports, lead conversion — legitimately creates contact-less deals, so this is a property
+    // of this create flow, not of the record. validateDealPrimaryContact (called inside createDeal) still
+    // does the exists/active/belongs-to-company checks.
+    if (!primaryContactId) {
+      throw new AppError(400, "Point of contact is required");
+    }
     await assertServiceOpportunityHierarchy(req.tenantDb!, { companyId, propertyId });
 
     const serviceProjectType = await resolveServiceProjectType(projectTypeId, projectType);
