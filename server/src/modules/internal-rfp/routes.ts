@@ -6,6 +6,7 @@ import { buildAuditActorFromSystem } from "../audit/audit-logger.js";
 import { logActivityWithPgClient } from "../audit/pg-activity-logger.js";
 import { INTERNAL_RFP_RECEIVER } from "../audit/system-processes.js";
 import { applyRfpDeclineToDeal } from "../deals/rfp-decline-service.js";
+import { loadEstimatesSent, parseWindow } from "./estimates-sent-service.js";
 import { resolveRfpDealAmount } from "../deals/rfp-payload.js";
 
 export const internalRfpRoutes = Router();
@@ -1443,6 +1444,84 @@ internalRfpRoutes.post(
       }
 
       res.json({ success: true, dealId: sourceDealId, bidboardProjectId });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// POST /api/internal/estimates-sent — the deals that went out to a client in a window.
+//
+// Consumed by SyncHub's RFP Report email, which has no read path into the CRM's tenant schemas and so asks
+// for this at compose time. Lives on the internal router because that is where the HMAC verification and the
+// tenant-schema sweep already are; it is not an RFP route, but duplicating those two helpers to give it a
+// prettier home would be the worse trade.
+//
+// A POST rather than a GET despite being a read: the signature covers the raw BODY, exactly as every other
+// internal route does, and a GET has no body to sign. Making it a GET would mean inventing a second signing
+// scheme over the query string — a new way to get authentication subtly wrong, for a cosmetic gain.
+internalRfpRoutes.post(
+  "/estimates-sent",
+  express.raw({ type: "application/json", limit: "16kb" }),
+  async (req, res, next) => {
+    try {
+      // `express.raw({ type: "application/json" })` SKIPS parsing for any other content type — and for a
+      // request with no Content-Type at all — leaving `req.body` undefined. The cast below does not
+      // create a Buffer, so `Hmac.update(undefined)` THROWS and the outer catch reports a 500: an
+      // unsupported media type surfaced as a server fault, reachable without a valid signature. Guarded
+      // the same way scope-ingest-routes.ts guards it. The route tests invoke the handler directly, so
+      // this middleware behaviour is not otherwise observable from them.
+      if (!Buffer.isBuffer(req.body)) {
+        res.status(415).json({
+          success: false,
+          error: "Content-Type must be application/json; the body is read as raw bytes for signing.",
+        });
+        return;
+      }
+      const rawBody = req.body;
+      const signature = req.headers["x-rfp-request-signature"] as string | undefined;
+      if (!verifySignature(rawBody, signature)) {
+        res.status(401).json({ success: false, error: "invalid_signature" });
+        return;
+      }
+
+      let payload: any;
+      try {
+        payload = parseBody(rawBody);
+      } catch {
+        res.status(400).json({ success: false, error: "invalid_json" });
+        return;
+      }
+
+      let window: { from: Date; to: Date };
+      try {
+        window = parseWindow(payload ?? {});
+      } catch (err) {
+        res.status(422).json({
+          success: false,
+          error: "invalid_window",
+          message: err instanceof Error ? err.message : "invalid window",
+        });
+        return;
+      }
+
+      const schemas = await listTenantSchemas();
+      const deals = await loadEstimatesSent(
+        (text, params) => pool.query(text, params as any[]),
+        schemas,
+        window.from,
+        window.to
+      );
+
+      res.json({
+        success: true,
+        from: window.from.toISOString(),
+        to: window.to.toISOString(),
+        // Echoed so the email can say what it covered rather than restating the window it asked for — if
+        // these ever disagree with the request, the report is describing a different question than it ran.
+        count: deals.length,
+        deals,
+      });
     } catch (err) {
       next(err);
     }

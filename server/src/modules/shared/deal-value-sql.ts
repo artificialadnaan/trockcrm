@@ -307,6 +307,30 @@ export function aliasedDealBestEstimateSql(alias: string): SQL {
   return aliasedDealValueChainSql(alias, DEAL_VALUE_PRIORITY_CHAIN);
 }
 
+/**
+ * The same awarded-first chain as plain SQL TEXT, for callers that build query strings rather than drizzle
+ * fragments — the tenant-sweeping internal routes run raw `pool.query` across every office schema.
+ *
+ * Exported as a rendering of DEAL_VALUE_PRIORITY_CHAIN rather than a hand-written COALESCE, so a change to
+ * the chain reaches string callers too. A restated copy is how the platform ends up quoting two different
+ * numbers for the same deal.
+ *
+ * INCLUDING the change-order branch, which the first draft of this function omitted. Without it the
+ * positive-only chain drops a DEDUCTIVE change order's negative awarded_amount and renders 0 — so this
+ * would not have been the same value chain at all, merely a similar-looking one, and the two would have
+ * disagreed on precisely the rows where being wrong is most visible. Same REQUIRED COLUMN as the drizzle
+ * twin: `is_change_order` must exist at `alias`.
+ */
+export function aliasedDealBestEstimateSqlText(alias: string): string {
+  if (!/^[a-z_][a-z0-9_]*$/i.test(alias)) {
+    throw new Error(`Invalid SQL alias: ${alias}`);
+  }
+  const chain = `COALESCE(${DEAL_VALUE_PRIORITY_CHAIN.map((column) =>
+    aliasedPositiveDealValueCandidateSql(alias, column)
+  ).join(", ")}, 0)`;
+  return `CASE WHEN COALESCE(${alias}.is_change_order, false) THEN COALESCE(${alias}.awarded_amount, 0) ELSE ${chain} END`;
+}
+
 // 'estimating' stage only: DD outranks bid (awarded > dd > bid_board > bid). See ESTIMATING_VALUE_CHAIN.
 export function aliasedDealEstimatingValueSql(alias: string): SQL {
   return aliasedDealValueChainSql(alias, ESTIMATING_VALUE_CHAIN);
