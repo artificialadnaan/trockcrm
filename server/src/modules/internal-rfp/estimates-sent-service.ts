@@ -106,9 +106,19 @@ export function estimatesSentQuery(schemaName: string): string {
        AND d.is_active = true
        AND COALESCE(d.is_test_data, false) = false
        AND NOT EXISTS (SELECT 1 FROM public.users tu WHERE tu.id = d.assigned_rep_id AND tu.is_test_data = true)
-       -- …and the same exclusion for whoever the FALLBACK chain actually selected. Checking only the
-       -- assigned rep let a deal with no rep and no HubSpot owner through carrying a TEST user's identity,
-       -- which contradicts this feed's own "test rows never appear" rule.
+       -- …and the same exclusion for whoever the FALLBACK chain actually selected, at EVERY tier.
+       -- Checking only the assigned rep let a deal with no rep through carrying a test user's identity —
+       -- via the synced HubSpot address, or via the creator — which contradicts this feed's own "test rows
+       -- never appear" rule. Each clause fires only when that tier is the one supplying the owner.
+       AND NOT (
+             u.email IS NULL
+         AND NULLIF(BTRIM(d.hubspot_owner_email), '') IS NOT NULL
+         AND EXISTS (
+               SELECT 1 FROM public.users hu
+                WHERE LOWER(hu.email) = LOWER(BTRIM(d.hubspot_owner_email))
+                  AND hu.is_test_data = true
+             )
+       )
        AND NOT (
              COALESCE(cu.is_test_data, false) = true
          AND u.email IS NULL

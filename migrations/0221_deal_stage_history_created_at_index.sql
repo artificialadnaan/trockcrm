@@ -9,6 +9,13 @@
 --
 -- (created_at, to_stage_id): created_at leads because it is the selective predicate; to_stage_id rides
 -- along so the stage-slug join can be answered from the index rather than a heap fetch per row.
+--
+-- BUILT CONCURRENTLY FOR EXISTING TENANTS, by the runner, not here. deal_stage_history is written on the
+-- deal hot path, and a plain CREATE INDEX inside this DO block takes a write-blocking SHARE lock that is
+-- held until the LAST tenant finishes — stage transitions across every office would queue behind it and
+-- start failing on the app's 30/45s timeouts. CREATE INDEX CONCURRENTLY cannot run inside a transaction
+-- block, so server/src/migrations/deal-stage-history-created-at-index.ts builds each tenant's index first
+-- and the loop below no-ops via IF NOT EXISTS. (Same interception as 0138 and 0188.)
 DO $tenant$
 DECLARE
   schema_name text;
