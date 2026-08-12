@@ -60,8 +60,14 @@ directly after Company/Property, because it depends on the company.
   wider list would offer choices that fail on save. The escape hatch is "Add new contact", below.
 - **"Add new contact"** opens a dialog over the page. The created contact gets `companyId` pre-set to
   the selected company and is then auto-selected.
-- The inline create runs `checkDuplicates` first, so the shortcut does not quietly mint a second copy of
-  a person already in the CRM.
+- Dedup is left **on**: `createContact` already runs the duplicate check server-side in the same call,
+  returning `contact: null` plus `suggestions` when it blocks. The dialog surfaces those (active ones
+  only) so the rep can pick the existing person, with an explicit "create anyway" as the second step.
+  This is one round trip rather than a separate `checkDuplicates` call, and it cannot race.
+
+  Note `lead-form.tsx`, which has the equivalent field, passes `skipDedupCheck: true`. That divergence is
+  deliberate here — a one-click shortcut that quietly mints a second copy of an existing person is the
+  thing that makes contact data untrustworthy.
 - A client-side guard mirrors the server's, following the form's existing ordered `setError` pattern:
   after the company/property check, before the assigned-rep check.
 
