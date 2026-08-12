@@ -19,6 +19,7 @@ import { isRfpReviewerEmail } from "@trock-crm/shared/lib/rfpReviewerEmails";
 import { isRfpVoterEmail } from "@trock-crm/shared/lib/rfpVoterEmails";
 import { isDailyActivityLogViewerEmail } from "@trock-crm/shared/lib/dailyActivityLogViewers";
 import { isCanvassingReportViewerEmail } from "@trock-crm/shared/lib/canvassingReportViewers";
+import { isDealMoveBackApproverEmail } from "@trock-crm/shared/lib/dealMoveBackApprovers";
 
 /**
  * The role floor both allowlisted report routes sit behind (requireAnyRole). Shared by the two flags below
@@ -52,6 +53,9 @@ import {
 import { loginMobileUser } from "./mobile-auth-service.js";
 import { fieldUserAuthRouter } from "../field-users/routes.js";
 import { isAuthDemoBootstrapEnabled } from "../../config/feature-flags.js";
+
+/** The role floor on the return-to-opportunity routes, kept beside the flag that mirrors it. */
+const MOVE_BACK_ROLES = new Set(["admin", "director"]);
 
 const router = Router();
 
@@ -204,6 +208,10 @@ async function withOnboardingGate<T extends { id: string; email: string; officeI
       REPORT_SURFACE_ROLES.has(user.role) && isDailyActivityLogViewerEmail(user.email, process.env),
     canViewCanvassingReport:
       REPORT_SURFACE_ROLES.has(user.role) && isCanvassingReportViewerEmail(user.email, process.env),
+    // Same two-guard rule, for the destructive move-back action: the admin/director floor AND the
+    // DEAL_MOVE_BACK_APPROVER_EMAILS allowlist, so the deal menu never offers what the endpoint refuses.
+    canMoveDealBackToOpportunity:
+      MOVE_BACK_ROLES.has(user.role) && isDealMoveBackApproverEmail(user.email, process.env),
   };
 }
 

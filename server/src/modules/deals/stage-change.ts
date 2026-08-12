@@ -3,7 +3,6 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   deals,
   dealStageHistory,
-  dealApprovals,
   jobQueue,
   tasks,
 } from "@trock-crm/shared/schema";
@@ -19,6 +18,7 @@ import {
   isContractStageSelectionEnabled,
 } from "../../config/feature-flags.js";
 import { validateStageGate, isStageRequiredFieldSatisfied } from "./stage-gate.js";
+import { retireDealApprovals } from "./approval-retirement.js";
 import type { UserRole } from "@trock-crm/shared/types";
 import { createStageTimers } from "./timer-service.js";
 import { activateDealScopingIntake, evaluateDealScopingReadiness } from "./scoping-service.js";
@@ -225,6 +225,7 @@ export async function changeDealStage(
     bidBoardMirrorSourceEnteredAt: currentDeal[0].bidBoardMirrorSourceEnteredAt,
     isReadOnlyMirror: currentDeal[0].isReadOnlyMirror,
     readOnlySyncedAt: currentDeal[0].readOnlySyncedAt,
+    bidBoardDetachedAt: currentDeal[0].bidBoardDetachedAt,
   });
   const estimatingBoundary = await getEstimatingBoundaryStage(currentDeal[0].workflowRoute);
   if (inferredOwnership.isBidBoardOwned && !estimatingBoundary) {
@@ -345,7 +346,31 @@ export async function changeDealStage(
     dealUpdates.readOnlySyncedAt = null;
   }
 
-  if (isEstimatingBoundaryStageSlug(targetStage.slug, currentDeal[0].workflowRoute)) {
+  // BID BOARD HANDOFF on entering the estimating boundary — SKIPPED ENTIRELY while the deal is detached.
+  //
+  // THE INVARIANT: a deal re-attaches to Bid Board sync only when a specific Bid Board project
+  // demonstrably exists for it, evidenced by an identity recorded at the moment of attachment. Advancing
+  // a stage is not evidence — changeDealStage neither creates nor links a project — so this path cannot
+  // satisfy the invariant and therefore must not re-attach. (It used to; that was wrong.) The one path
+  // that can is the internal-RFP `bid-board-created` callback, which is handed the new project's id and
+  // writes it in the same statement that clears the marker. That callback also performs its own stage
+  // transition, so a detached deal's legitimate route back into estimating goes through it, not here.
+  //
+  // Re-attaching here produced two concrete failures. If the operator had followed the dialog and deleted
+  // the old project, the deal became Bid-Board-owned and read-only with no counterpart to sync against.
+  // If they had not, the preserved identity let the very next export reclaim the OLD project and silently
+  // undo the move-back.
+  //
+  // Skipping the whole block — not just the marker clear — matters just as much: is_bid_board_owned,
+  // bid_board_stage_slug and read_only_synced_at are three of the ten conditions POST /:id/trigger-rfp's
+  // atomic reservation requires to be empty. Setting them on a detached deal would leave it unable to be
+  // re-submitted, which is precisely the "re-trigger silently impossible" dead end this feature exists to
+  // remove. A detached deal simply advances as a CRM-owned deal and waits for a real project.
+  const isDetachedFromBidBoard = currentDeal[0].bidBoardDetachedAt != null;
+  if (
+    isEstimatingBoundaryStageSlug(targetStage.slug, currentDeal[0].workflowRoute) &&
+    !isDetachedFromBidBoard
+  ) {
     dealUpdates.isBidBoardOwned = true;
     dealUpdates.bidBoardStageSlug = targetStage.slug;
     dealUpdates.readOnlySyncedAt = new Date();
@@ -410,11 +435,17 @@ export async function changeDealStage(
     dealUpdates.lostAt = new Date();
   }
 
-  // Reopen handling: invalidate old approvals so they can't be reused
+  // Reopen handling: retire the closed cycle's approvals so they can't be reused.
+  //
+  // This used to mark approved rows `rejected` in place, which left the deal UNABLE to request that
+  // approval again (the retained row still occupies the (deal_id, target_stage_id, required_role)
+  // unique key that the bare-INSERT request route has no onConflict for) and left any still-`pending`
+  // row resolvable to `approved` for the very cycle just closed. Both owners of this rule — here and
+  // "Move back to Opportunity" — now go through retireDealApprovals, which states the requirement and
+  // itemizes each retired approval into audit_log. Fixing only the move-back would have left the
+  // terminal-reopen path with the identical defect.
   if (isReopen) {
-    await tenantDb.update(dealApprovals)
-      .set({ status: "rejected", resolvedAt: new Date(), notes: "Auto-invalidated on deal reopen" })
-      .where(and(eq(dealApprovals.dealId, dealId), eq(dealApprovals.status, "approved")));
+    await retireDealApprovals(tenantDb, dealId, userId, "deal reopen");
   }
 
   // Tell the deal_stage_history backstop trigger (migration 0143) to stand down for this

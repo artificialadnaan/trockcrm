@@ -640,6 +640,7 @@ function buildBidBoardOwnershipInput(
     bidBoardMirrorSourceEnteredAt: deal.bidBoardMirrorSourceEnteredAt,
     isReadOnlyMirror: deal.isReadOnlyMirror,
     readOnlySyncedAt: deal.readOnlySyncedAt,
+    bidBoardDetachedAt: deal.bidBoardDetachedAt,
   };
 }
 

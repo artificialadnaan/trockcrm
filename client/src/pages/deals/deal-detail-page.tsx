@@ -22,6 +22,7 @@ import {
   ExternalLink,
   Users,
   Send,
+  Undo2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -78,6 +79,7 @@ import { DealEstimatingSubstage } from "./deal-estimating-substage";
 import { LeadForm } from "@/components/leads/lead-form";
 import { LeadTimelineTab } from "@/components/leads/lead-timeline-tab";
 import { StageChangeDialog } from "@/components/deals/stage-change-dialog";
+import { ReturnToOpportunityDialog } from "@/components/deals/return-to-opportunity-dialog";
 import { TaskCreateDialog } from "@/components/tasks/task-create-dialog";
 import {
   useDealDetail,
@@ -94,6 +96,7 @@ import { useSalesReps, type SalesRepOption } from "@/hooks/use-sales-reps";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { buildProcoreBidBoardProjectUrl } from "@/lib/procore";
 import { isDealScopeReadOnlyAfterRfp } from "@/lib/deal-scope-lock";
 import { isRfpDetailPollActive } from "@/lib/rfp-detail-poll";
 import { formatCurrency, bestEstimateCaptionLabel, formatDealDisplayName, formatDealDisplayNumber, resolveBestEstimate, resolveDealValueKind, LOST_BID_VALUE_LABEL } from "@/lib/deal-utils";
@@ -108,6 +111,7 @@ import {
   getDealAtRiskResult,
   getCanonicalEstimatingBoundaryStageSlug,
   getOwnerInitialColor,
+  isReturnToOpportunityNoOp,
   pendingRfpSubStateForStatus,
   resolveEffectiveStageEnteredAt,
   toCanonicalDealStageSlug,
@@ -162,8 +166,7 @@ function formatBidBoardEstimate(value: string | number | null | undefined) {
 }
 
 export function buildBidBoardProjectUrl(deal: Pick<DealDetail, "procoreCompanyId" | "procoreBidId">) {
-  if (!deal.procoreCompanyId || !deal.procoreBidId) return null;
-  return `https://us02.procore.com/webclients/host/companies/${deal.procoreCompanyId}/tools/bid-board/project/${deal.procoreBidId}/details`;
+  return buildProcoreBidBoardProjectUrl(deal.procoreCompanyId, deal.procoreBidId);
 }
 
 type Tab = "overview" | "lead" | "scoping" | "files" | "photos" | "scorecards" | "email" | "activity" | "timeline" | "history" | "team" | "billing" | "estimates" | "punch_list" | "closeout";
@@ -423,6 +426,10 @@ export function DealDetailPage() {
   const [rfpReadinessRefreshKey, setRfpReadinessRefreshKey] = useState(0);
   const [watchPending, setWatchPending] = useState(false);
   const [holdTogglePending, setHoldTogglePending] = useState(false);
+  const [returnToOpportunityOpen, setReturnToOpportunityOpen] = useState(false);
+  // Mirrors BOTH guards on the route: the admin/director floor and the approver allowlist. Absent reads as
+  // "no", which only ever hides an action the endpoint would have refused.
+  const canMoveBackToOpportunity = user?.canMoveDealBackToOpportunity === true;
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [archiveReason, setArchiveReason] = useState("");
   const [archiving, setArchiving] = useState(false);
@@ -529,6 +536,12 @@ export function DealDetailPage() {
 
   const currentStageSlug = currentStage?.slug ?? "";
   const isOpportunityStage = canonicalCurrentStageSlug === "opportunity";
+  // The SERVER's linkage answer, not a client re-derivation. The first version of this guard rebuilt
+  // the predicate here and promptly drifted — it omitted synchub_bid_board_id and read_only_synced_at,
+  // so a SyncHub-created deal that had been walked backward could reach a stable-id-only state where
+  // the next webhook could still reclaim it while the UI hid the only action that would stop that.
+  // buildBidBoardOwnershipState now publishes isBidBoardLinked from the same test the service uses.
+  const isDealStillBidBoardLinked = Boolean(deal?.bidBoardOwnership?.isBidBoardLinked);
   const opportunityStage = dealStages.find(
     (stage) =>
       stage.slug === "opportunity" &&
@@ -1006,6 +1019,53 @@ export function DealDetailPage() {
               Edit Deal
             </DropdownMenuItem>
           )}
+          {/* "Move back to Opportunity" sits between Edit and Archive: amber, one step below Archive's red.
+              Deliberately NOT on the PipelineProgress strip — that is the ordinary stage-click path, and
+              this is not an ordinary stage change (it severs Bid Board sync and can void commission).
+              Only the coarse role check lives here; the authoritative eligibility (Won/commission tier,
+              change-order children, already-Opportunity) comes from the dialog's server preview, which
+              renders the exact block reason rather than silently hiding the option.
+
+              Hidden on the SHARED no-op predicate, not on the stage: the Bid Board applies backward moves,
+              so it can park a still-owned — and even a signed, commission-carrying — deal on Opportunity,
+              and hiding the action there left an admin unable to sever a sync that kept reclaiming it.
+              `isReturnToOpportunityNoOp` is the same function the service blocks on, so the menu and the
+              route cannot disagree. Commission rows are server-only knowledge and the detail response does
+              not carry the count, so it is passed as UNDEFINED rather than 0. Zero would be a claim, and
+              the wrong one: an unlinked, unsigned Opportunity deal that still carries commission rows is
+              exactly the case the server ALLOWS (the rows must be voided), and a substituted 0 satisfies
+              every leg of the predicate and hides the item before the preview can say so. */}
+          {!isReturnToOpportunityNoOp({
+            stageSlug: canonicalCurrentStageSlug,
+            isBidBoardLinked: isDealStillBidBoardLinked,
+            commissionRowCount: undefined,
+            effectiveContractSignedDate: deal.contractSignedDate ?? deal.contractSignedAt ?? null,
+          }) && canMoveBackToOpportunity ? (
+            <DropdownMenuItem
+              onClick={() => setReturnToOpportunityOpen(true)}
+              className="text-amber-600"
+            >
+              <Undo2 className="h-4 w-4 mr-2" />
+              Move back to Opportunity
+            </DropdownMenuItem>
+          ) : !isReturnToOpportunityNoOp({
+              stageSlug: canonicalCurrentStageSlug,
+              isBidBoardLinked: isDealStillBidBoardLinked,
+              commissionRowCount: undefined,
+              effectiveContractSignedDate: deal.contractSignedDate ?? deal.contractSignedAt ?? null,
+            }) && (isDirectorOrAdmin || viewerOwnsDeal) ? (
+            <DropdownMenuItem
+              disabled
+              title={
+                isDirectorOrAdmin
+                  ? "Moving a deal back to Opportunity is limited to designated approvers"
+                  : "Only a director or an admin can move a deal back to Opportunity"
+              }
+            >
+              <Undo2 className="h-4 w-4 mr-2" />
+              Move back to Opportunity
+            </DropdownMenuItem>
+          ) : null}
           {canArchiveDeal(
             {
               assignedRepId: deal.assignedRepId,
@@ -1044,6 +1104,39 @@ export function DealDetailPage() {
            be refused on PATCH. Same gate as the Edit Deal control above. */
         editHref={viewerOwnsDeal ? appendOfficeIdSearch(`/deals/${deal.id}/edit`, detailOfficeId) : null}
       />
+      {/* Standing reminder, not a toast. The CRM cannot delete the Bid Board project, so the ONE manual
+          step this action depends on has to survive a page reload — a single toast at move time gets
+          missed and the Bid Board keeps showing a phantom active project.
+
+          Gated on the SERVER's detachedFromLinkedProject, not on the marker alone: the action stamps
+          bid_board_detached_at on any deal it moves back, including a CRM-only one that never had a Bid
+          Board project. Keying on the marker would put a permanent "go delete the project" banner on a
+          deal with no project, contradicting the dialog and the success toast — both of which already
+          follow the same server-side linkage answer. The client cannot derive this itself: the detach
+          nulls bidBoardLinkedAt and bidBoardProjectNumber by design. */}
+      {deal.bidBoardDetachedAt && deal.bidBoardOwnership?.detachedFromLinkedProject ? (
+        <div
+          className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900"
+          role="status"
+        >
+          <span className="font-black uppercase tracking-[0.06em]">Disconnected from Bid Board</span>
+          <span className="ml-2">
+            on {formatDate(deal.bidBoardDetachedAt)} — Bid Board exports no longer update this deal.
+            Delete this project from the Bid Board if you have not already.
+          </span>
+          {buildBidBoardProjectUrl(deal) ? (
+            <a
+              className="ml-2 inline-flex items-center gap-1 font-semibold underline"
+              href={buildBidBoardProjectUrl(deal) as string}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open in Bid Board
+              <ExternalLink className="h-3.5 w-3.5" />
+            </a>
+          ) : null}
+        </div>
+      ) : null}
       {!viewerOwnsDeal ? (
         <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-600">
           Assigned to {deal.assignedRepName ?? deal.assignedRepId ?? "another rep"}. You can collaborate with notes, activity, files, photos, and emails, but only the assigned rep can edit.
@@ -1212,6 +1305,41 @@ export function DealDetailPage() {
           onSuccess={handleStageChangeSuccess}
         />
       )}
+
+      {/* Move back to Opportunity */}
+      <ReturnToOpportunityDialog
+        dealId={deal.id}
+        dealName={deal.name}
+        open={returnToOpportunityOpen}
+        onOpenChange={setReturnToOpportunityOpen}
+        onSuccess={async (result) => {
+          // The Bid Board reminder is the dialog's own conditional block repeated as a toast, so it
+          // follows the SERVER's wasBidBoardLinked — never assumed. A deal with no Bid Board footprint
+          // gets no instruction to go delete a project that was never there.
+          const bidBoardReminder = result.wasBidBoardLinked
+            ? " Remember to delete it from Bid Board."
+            : "";
+          // Same shape, same reason, for the OTHER external side effect this action cannot undo: if the
+          // RFP had already gone to SyncHub (or a delivery was mid-flight), the submission outlives the
+          // cycle we just cleared and only the operator can cancel it there. Server-decided, like the
+          // Bid Board clause — the page never guesses.
+          const rfpReminder = result.rfpSubmissionMayExist
+            ? " An RFP submission may still exist in SyncHub — cancel it there."
+            : "";
+          toast.success(
+            result.commissionRowsVoided > 0
+              ? `Moved back to Opportunity — ${result.commissionRowsVoided} commission row(s) voided.${bidBoardReminder}${rfpReminder}`
+              : `Moved back to Opportunity.${bidBoardReminder}${rfpReminder}`
+          );
+          // Keep the move's success separate from a later refetch failure: the write already committed,
+          // so a failed reload is a "refresh the page" hint, never a "the move failed" error.
+          try {
+            await refetch();
+          } catch {
+            toast.info("Moved back to Opportunity. Refresh the page to see the updated deal.");
+          }
+        }}
+      />
 
       {/* Archive Deal Dialog */}
       <Dialog open={archiveOpen} onOpenChange={(open) => { if (!archiving) setArchiveOpen(open); }}>

@@ -170,6 +170,31 @@ export const deals = pgTable(
     projectNumber: text("project_number"),
     bidBoardLinkedAt: timestamp("bid_board_linked_at", { withTimezone: true }),
     bidBoardLastUpdatedAt: timestamp("bid_board_last_updated_at", { withTimezone: true }),
+    // Bid Board DETACH marker (migration 0200) — set by "Move back to Opportunity". While non-null the
+    // deal is invisible to every Bid Board ingress (the export matcher's base WHERE + all four of its
+    // write sites + the SyncHub /opportunities webhook), so the next export cannot drag it forward
+    // again. The procore/synchub identity columns above are deliberately PRESERVED: nulling them would
+    // make the webhook miss and INSERT a bid-board-owned twin of the same project. Cleared only when a
+    // NEW Bid Board project is genuinely created for the deal (the internal-RFP bid-board-created
+    // callback), which is the one moment re-attachment is correct.
+    bidBoardDetachedAt: timestamp("bid_board_detached_at", { withTimezone: true }),
+    bidBoardDetachedBy: uuid("bid_board_detached_by"),
+    bidBoardDetachReason: text("bid_board_detach_reason"),
+    // Did the detach sever a REAL Bid Board project? PERSISTED at detach time rather than derived
+    // afterwards: the answer counts is_bid_board_owned / bid_board_project_number /
+    // bid_board_linked_at / read_only_synced_at, and the detach CLEARS all four, so nothing on the row
+    // afterwards can reconstruct it. The preserved procore/synchub identity is not a substitute — most
+    // Bid Board linked deals in prod carry neither. Drives the standing "delete this project from the
+    // Bid Board" reminder, which must not appear on a CRM-only deal and must not vanish on a real one.
+    //
+    // SEMANTIC (the field name implies neither, so it is stated here): "was there a real Bid Board
+    // project at the moment this deal was DISCONNECTED" — a property of the RETIRED project, not of the
+    // deal's live state and not "was ever linked at any point in its history". A repeat detach
+    // therefore preserves the stored answer rather than recomputing it, and only a genuine
+    // re-attachment (the internal-RFP bid-board-created callback) resets it to NULL so the next detach
+    // computes fresh. Those two readings cannot diverge today — a detached deal cannot become linked
+    // again without passing through that callback — which is why preserving is safe.
+    bidBoardDetachedWasLinked: boolean("bid_board_detached_was_linked"),
     // Assigned PM is not present in the Bid Board export; role polling can populate this after portfolio handoff.
     bidBoardAssignedPm: text("bid_board_assigned_pm"),
     intendedProjectNumber: text("intended_project_number"),
@@ -299,5 +324,13 @@ export const deals = pgTable(
     index("deals_property_active_idx")
       .on(table.propertyId)
       .where(sql`${table.isActive} = TRUE`),
+    // Partial index over the DETACHED deals only — the small side. Source-of-truth mirror of migration
+    // 0200. It backs the Bid Board sync's classification lookup (the "was this deliberately detached,
+    // or is there genuinely no CRM deal?" re-query that runs only after a match miss); the hot matcher
+    // path uses it as an anti-join filter on rows it already located, so it neither needs nor would use
+    // an index on the NULL side.
+    index("deals_bid_board_detached_idx")
+      .on(table.bidBoardDetachedAt)
+      .where(sql`${table.bidBoardDetachedAt} IS NOT NULL`),
   ]
 );

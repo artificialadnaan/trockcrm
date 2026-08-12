@@ -38,6 +38,11 @@ interface User {
    * server enforces the same allowlist, so treating a missing flag as "no" only hides a dead link.
    */
   canViewCanvassingReport?: boolean;
+  /**
+   * True iff this user may move a deal back to Opportunity. Hides the menu item; the server enforces the
+   * same allowlist, so treating a missing flag as "no" only hides an action that would have 403'd.
+   */
+  canMoveDealBackToOpportunity?: boolean;
 }
 
 interface AuthContextValue {

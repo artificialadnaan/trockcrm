@@ -67,6 +67,10 @@ interface IngestionMetrics {
   appliedTerminalExit: number;
   skippedTerminal: number;
   skippedNoStageChange: number;
+  // Rows whose CRM deal exists but was moved back to Opportunity (detached from Bid Board, migration
+  // 0200). Kept OUT of noMatch on purpose: folding them in would flip every later run to
+  // 'completed_with_unmatched' and append the same project number to unmatched_project_numbers forever.
+  skippedDetached: number;
   estimateUpdated: number;
   estimateUpdatedHigher: number;
   estimateUpdatedLower: number;
@@ -117,6 +121,8 @@ interface DealMatch {
   won_closed_date: string | null;
   contract_signed_date: string | null;
   contract_signed_at: string | null;
+  /** Non-null once "Move back to Opportunity" severed this deal from Bid Board sync (migration 0200). */
+  bid_board_detached_at: string | null;
 }
 
 type BidBoardAuditDeal = Pick<DealMatch, "id" | "name" | "deal_number" | "project_number">;
@@ -328,6 +334,11 @@ export function buildBidBoardDealUpdateSql(schemaName: string): string {
            bid_board_last_updated_at = $15::timestamptz,
            updated_at = NOW()
      WHERE id = $1
+       -- Belt-and-braces: the matcher already excludes detached deals, but this mirror UPDATE keys on a
+       -- bare id, so any future caller that bypasses findDealMatches would silently overwrite a detached
+       -- deal's name and mirror fields. Repeating the predicate at the write site makes the invariant
+       -- local instead of depending on one caller staying correct.
+       AND bid_board_detached_at IS NULL
        AND (
             name IS DISTINCT FROM $2 OR
             bid_board_estimator IS DISTINCT FROM $3 OR
@@ -425,6 +436,7 @@ function dealMatchSelectSql(schemaName: string): string {
            d.won_closed_date,
            d.contract_signed_date,
            d.contract_signed_at,
+           d.bid_board_detached_at,
            psc.slug AS stage_slug,
            psc.display_order AS stage_display_order,
            psc.is_terminal AS stage_is_terminal
@@ -435,8 +447,117 @@ function dealMatchSelectSql(schemaName: string): string {
      -- return parent+child as a multi-match and silently skip the PARENT's writeback (the Onyx desync
      -- class). This base WHERE feeds all three match tiers (procore_bid_id, project_number/deal_number,
      -- name+date), so the one predicate covers every path that keys on project_number.
+     --
+     -- The DETACH marker (migration 0200) is deliberately NOT filtered here. A deal moved back to
+     -- Opportunity keeps every identity column — nulling them would make the SyncHub webhook INSERT a
+     -- twin — so the marker is the only thing stopping the export re-claiming it, and the caller acts on
+     -- it. It used to be a WHERE predicate flipped between two separate queries per tier, which under
+     -- READ COMMITTED could lose a deal ENTIRELY: a bid-board-created callback reattaching it between
+     -- the two statements makes the attached query miss it (still detached when that ran) and the
+     -- detached query miss it too (marker cleared by the time this ran). The row then fell to a weaker
+     -- identity tier and could bind to a DIFFERENT deal, mirroring one project's name, estimate and
+     -- stage onto another's. Selecting bid_board_detached_at and partitioning in memory means both
+     -- halves come from ONE snapshot, so no attachment transition can make a high-confidence match
+     -- disappear between them.
      WHERE d.is_active = true
        AND COALESCE(d.is_change_order, false) = false`;
+}
+
+/**
+ * The three identity tiers, in DESCENDING confidence, as (sql, params) pairs so each can be run against
+ * attached or detached deals without the tier logic being written twice.
+ *  1. procore_bid_id — the Bid Board's own key.
+ *  2. project_number / deal_number / bid_board_project_number, canonicalized.
+ *  3. name + bid_board_created_at, for a deal with no bid_board_project_number.
+ */
+function dealMatchTiers(
+  schemaName: string,
+  row: NormalizedBidBoardRow
+): Array<{ sql: string; params: unknown[] }> {
+  const tiers: Array<{ sql: string; params: unknown[] }> = [];
+
+  if (row.bidBoardProjectId) {
+    tiers.push({
+      sql: `${dealMatchSelectSql(schemaName)}
+       AND d.procore_bid_id = $1::bigint`,
+      params: [row.bidBoardProjectId],
+    });
+  }
+
+  const projectNumber = normalizeBidBoardProjectNumber(row.bidBoardProjectNumber);
+  if (projectNumber) {
+    tiers.push({
+      sql: `${dealMatchSelectSql(schemaName)}
+       AND (
+            ${canonicalProjectNumberSql("d.project_number")} = $1 OR
+            ${canonicalProjectNumberSql("d.deal_number")} = $1 OR
+            ${canonicalProjectNumberSql("d.bid_board_project_number")} = $1
+       )`,
+      params: [projectNumber],
+    });
+  }
+
+  if (row.bidBoardCreatedAt) {
+    tiers.push({
+      sql: `${dealMatchSelectSql(schemaName)}
+        AND d.bid_board_project_number IS NULL
+        AND LOWER(TRIM(d.name)) = LOWER(TRIM($1))
+        AND d.bid_board_created_at = $2::timestamptz`,
+      params: [row.name, row.bidBoardCreatedAt],
+    });
+  }
+
+  return tiers;
+}
+
+/**
+ * Resolve an export row to a CRM deal, TIER BY TIER, evaluating BOTH partitions (attached and detached)
+ * at each tier before dropping to a weaker one.
+ *
+ * Two separate invariants live here, and both were learned the hard way:
+ *
+ *  1. TIER PRIORITY. Running every attached tier first and only then looking for detached deals loses
+ *     tier priority: an export row whose exact `procore_bid_id` belongs to a detached deal would fall
+ *     through tier 1 and could then bind to a DIFFERENT deal on the weaker project-number or
+ *     name+created-at tiers — writing one project's name, estimate and stage onto another project's
+ *     deal. A detached hit at a higher-confidence tier IS the answer; the search stops there.
+ *
+ *  2. AMBIGUITY. The detach predicate partitions what used to be one result set, so ambiguity has to be
+ *     judged across BOTH halves or the partition itself hides it. If an attached and a detached deal
+ *     share an identifier at the same tier, the attached half alone looks like a clean single match —
+ *     and the caller's `matches.length > 1` guard, which exists precisely to refuse an ambiguous write,
+ *     never fires. Both queries always run at a tier that matches anything, and their rows are counted
+ *     together: >1 is returned as `matches` so the caller's existing multi-match guard skips the row and
+ *     an operator reconciles it, exactly as it would have before deals could be detached.
+ *
+ * Cost: two indexed lookups per tier examined instead of one, bounded at three tiers. The detached side
+ * is served by the partial `deals_bid_board_detached_idx` over a near-empty set, and this is a batched
+ * import job, so the trade for not silently writing an ambiguous row is a good one.
+ */
+async function resolveDealMatches(
+  client: { query: Function },
+  schemaName: string,
+  row: NormalizedBidBoardRow
+): Promise<{ matches: DealMatch[]; detached: DealMatch[] }> {
+  for (const tier of dealMatchTiers(schemaName, row)) {
+    // ONE statement per tier, partitioned here. Two statements could straddle a reattachment and lose
+    // the deal from both halves — see dealMatchSelectSql.
+    const result = await client.query(tier.sql, tier.params);
+    const rows = result.rows as DealMatch[];
+    const attached = rows.filter((match) => match.bid_board_detached_at == null);
+    const detached = rows.filter((match) => match.bid_board_detached_at != null);
+    const total = rows.length;
+
+    if (total === 0) continue;
+    // Ambiguous ACROSS the partition — hand the whole set back as matches so the caller's multi-match
+    // guard refuses the write. A detached deal counts toward ambiguity deliberately: "this identifier
+    // also belongs to a deal someone deliberately disconnected" is a reason to stop, not to proceed.
+    if (total > 1) return { matches: [...attached, ...detached], detached: [] };
+    if (detached.length === 1) return { matches: [], detached };
+    return { matches: attached, detached: [] };
+  }
+
+  return { matches: [], detached: [] };
 }
 
 async function findDealMatches(
@@ -444,41 +565,7 @@ async function findDealMatches(
   schemaName: string,
   row: NormalizedBidBoardRow
 ): Promise<DealMatch[]> {
-  if (row.bidBoardProjectId) {
-    const byBidBoardId = await client.query(
-      `${dealMatchSelectSql(schemaName)}
-       AND d.procore_bid_id = $1::bigint`,
-      [row.bidBoardProjectId]
-    );
-    if (byBidBoardId.rows.length > 0) return byBidBoardId.rows;
-  }
-
-  const projectNumber = normalizeBidBoardProjectNumber(row.bidBoardProjectNumber);
-  if (projectNumber) {
-    const byProject = await client.query(
-      `${dealMatchSelectSql(schemaName)}
-       AND (
-            ${canonicalProjectNumberSql("d.project_number")} = $1 OR
-            ${canonicalProjectNumberSql("d.deal_number")} = $1 OR
-            ${canonicalProjectNumberSql("d.bid_board_project_number")} = $1
-       )`,
-      [projectNumber]
-    );
-    if (byProject.rows.length > 0) return byProject.rows;
-  }
-
-  if (row.bidBoardCreatedAt) {
-    const byComposite = await client.query(
-      `${dealMatchSelectSql(schemaName)}
-        AND d.bid_board_project_number IS NULL
-        AND LOWER(TRIM(d.name)) = LOWER(TRIM($1))
-        AND d.bid_board_created_at = $2::timestamptz`,
-      [row.name, row.bidBoardCreatedAt]
-    );
-    return byComposite.rows;
-  }
-
-  return [];
+  return (await resolveDealMatches(client, schemaName, row)).matches;
 }
 
 export async function findDealIds(client: { query: Function }, schemaName: string, row: NormalizedBidBoardRow) {
@@ -604,7 +691,11 @@ async function updateBidBoardStageMetadata(
             read_only_synced_at = NOW(),
             updated_at = NOW()
       WHERE id = $1
-        AND stage_id = $5`,
+        AND stage_id = $5
+        -- This is the easy one to miss: it fires on a cycle where the CRM stage ALREADY equals the
+        -- mapped Bid Board stage, and it re-asserts is_bid_board_owned = true. Without the predicate a
+        -- detached deal that happens to sit at the mapped stage would be silently re-owned.
+        AND bid_board_detached_at IS NULL`,
     [deal.id, targetStageSlug, stageFamilyForSlug(targetStageSlug), status, expectedStageId]
   );
   const updated = (result.rowCount ?? 0) > 0;
@@ -693,6 +784,10 @@ async function writeEstimateIfNeeded(
        SELECT bid_estimate
          FROM ${schemaName}.deals
         WHERE id = $1
+          -- Detached deals keep their own estimate: without this the Bid Board would keep overwriting
+          -- bid_estimate on a deal it no longer owns (the CTE returns no row, so the caller reads
+          -- skippedNoChange and nothing is written).
+          AND bid_board_detached_at IS NULL
         FOR UPDATE
      ), updated AS (
        UPDATE ${schemaName}.deals d
@@ -883,6 +978,10 @@ export async function writeStageIfSafe(
             updated_at = NOW()
       WHERE id = $10
         AND stage_id = $11
+        -- THE stage dragger: this is the write that would undo "Move back to Opportunity" on the very
+        -- next export (backward and terminal-exit moves are APPLIED here, not pinned). Repeated at the
+        -- write site so the feature cannot be silently defeated by a future caller.
+        AND bid_board_detached_at IS NULL
       RETURNING id`,
     [
       targetStage.id,
@@ -977,6 +1076,7 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
     appliedTerminalExit: 0,
     skippedTerminal: 0,
     skippedNoStageChange: 0,
+    skippedDetached: 0,
     estimateUpdated: 0,
     estimateUpdatedHigher: 0,
     estimateUpdatedLower: 0,
@@ -1048,7 +1148,27 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
         continue;
       }
 
-      const matches = await findDealMatches(client, schemaName, normalized);
+      // Tier-by-tier across attached AND detached deals (see resolveDealMatches). A detached deal is
+      // deliberately invisible to the matcher, but it must be reported as a deliberate SKIP rather than
+      // as "no CRM deal matched": folding it into noMatch would (a) lie to the operator, (b) flip every
+      // run from here on to 'completed_with_unmatched', and (c) fill unmatched_project_numbers with rows
+      // nobody should act on. The warning it gets instead is the actionable one — the project is still
+      // sitting on the Bid Board and needs deleting by hand, which the CRM cannot do.
+      const { matches, detached: detachedMatches } = await resolveDealMatches(
+        client,
+        schemaName,
+        normalized
+      );
+      if (detachedMatches.length > 0) {
+        metrics.skippedDetached++;
+        // toDateOnlyString, not String(...).slice(0,10) — node-pg hands back a Date for timestamptz,
+        // whose default string form is "Mon Jul 20 2026 …", so a naive slice prints a weekday.
+        const detachedAt = toDateOnlyString(detachedMatches[0].bid_board_detached_at);
+        warnings.push(
+          `Skipped Bid Board Project # ${normalized.bidBoardProjectNumber} (${normalized.name}): CRM deal ${detachedMatches[0].id} was moved back to Opportunity${detachedAt ? ` on ${detachedAt}` : ""} and is detached from Bid Board sync. Delete this project from the Bid Board.`
+        );
+        continue;
+      }
       if (matches.length === 0) {
         metrics.noMatch++;
         if (unmatchedProjectNumbers.length < MAX_UNMATCHED_PROJECT_NUMBERS) {
@@ -1241,7 +1361,8 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
               estimate_skipped_no_value_count = $21,
               estimate_skipped_no_change_count = $22,
               estimate_warning_count = $23,
-              estimate_skipped_terminal_count = $24
+              estimate_skipped_terminal_count = $24,
+              skipped_detached_count = $25
         WHERE id = $1`,
       [
         runId,
@@ -1272,6 +1393,7 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
         metrics.estimateSkippedNoChange,
         metrics.estimateWarnings,
         metrics.estimateSkippedTerminal,
+        metrics.skippedDetached,
       ]
     );
     await client.query("COMMIT");

@@ -170,6 +170,10 @@ export interface Deal {
   projectTypeCode?: string | null;
   bidBoardProjectNumber?: string | null;
   bidBoardLinkedAt?: string | null;
+  // Set once "Move back to Opportunity" disconnected the deal from Bid Board sync. Drives the standing
+  // "delete it from the Bid Board yourself" reminder — the CRM cannot delete the Bid Board project.
+  bidBoardDetachedAt?: string | null;
+  bidBoardDetachReason?: string | null;
   intendedProjectNumber?: string | null;
   regionId: string | null;
   isReadOnlyMirror?: boolean;
@@ -279,6 +283,18 @@ export interface DealDetail extends Deal {
     mirroredInCrm: string[];
     reason: string;
     message: string;
+    detachedAt?: string | null;
+    /**
+     * True only when the detach severed a REAL Bid Board project. Server-derived from the identity
+     * columns the detach deliberately preserves — the client cannot work this out for itself, because
+     * the detach nulls bidBoardLinkedAt and bidBoardProjectNumber.
+     */
+    detachedFromLinkedProject?: boolean;
+    /**
+     * Does the deal still have a live Bid Board footprint to sever? Server-derived from the same
+     * predicate the return-to-opportunity service uses, so the menu item and the route agree.
+     */
+    isBidBoardLinked?: boolean;
   };
   stageHistory: Array<{
     id: string;
@@ -924,6 +940,9 @@ export async function preflightStageCheck(dealId: string, targetStageId: string)
       mirroredInCrm: string[];
       reason: string;
       message: string;
+      detachedAt?: string | null;
+      detachedFromLinkedProject?: boolean;
+      isBidBoardLinked?: boolean;
     } | null;
   }>(`/deals/${dealId}/stage/preflight`, {
     method: "POST",
@@ -933,6 +952,54 @@ export async function preflightStageCheck(dealId: string, targetStageId: string)
 
 export async function deleteDeal(dealId: string, reason: string) {
   return api<{ success: boolean }>(`/deals/${dealId}`, { method: "DELETE", json: { reason } });
+}
+
+export interface ReturnToOpportunityPreview {
+  dealId: string;
+  dealName: string;
+  currentStageSlug: string | null;
+  currentStageName: string | null;
+  allowed: boolean;
+  blockCode: string | null;
+  blockReason: string | null;
+  voidsCommission: boolean;
+  commissionRowCount: number;
+  commissionTotal: string;
+  isWonFamily: boolean;
+  requiredRole: "admin" | "director";
+  isBidBoardLinked: boolean;
+  bidBoardDetachedAt: string | null;
+  procoreCompanyId: string | null;
+  procoreBidId: string | null;
+  effectiveContractSignedDate: string | null;
+}
+
+/** What the confirm dialog needs BEFORE the operator commits — above all the exact commission total. */
+export async function getReturnToOpportunityPreview(dealId: string) {
+  return api<ReturnToOpportunityPreview>(`/deals/${dealId}/return-to-opportunity/preview`);
+}
+
+/**
+ * `acknowledgedCommissionTotal` + `acknowledgedCommissionRowCount` are the two numbers the dialog SHOWED
+ * the operator ("$26,250.00 across 2 rows"), echoed back. The server refuses the move when either no
+ * longer matches the live rows, so a stale dialog can never destroy an amount — or a set of rows —
+ * nobody agreed to.
+ */
+export async function returnDealToOpportunity(
+  dealId: string,
+  input: {
+    reason: string;
+    acknowledgedCommissionTotal?: string | null;
+    acknowledgedCommissionRowCount?: number | null;
+  }
+) {
+  return api<{
+    commissionRowsVoided: number;
+    commissionTotalVoided: string;
+    contractSignedDateCleared: string | null;
+    wasBidBoardLinked: boolean;
+    rfpSubmissionMayExist: boolean;
+  }>(`/deals/${dealId}/return-to-opportunity`, { method: "POST", json: input });
 }
 
 export async function getDealScopingIntake(dealId: string) {

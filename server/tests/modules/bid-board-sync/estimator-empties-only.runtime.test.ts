@@ -37,6 +37,9 @@ describe("Bid Board sync — empties-only estimator preservation (Codex #741 P2)
       // System actor lookup (joins offices) vs the active-user set (plain users select).
       if (s.includes("from public.users") && s.includes("public.offices")) return { rows: [{ id: "sys" }], rowCount: 1 };
       if (s.includes("from public.users")) return { rows: [{ id: NEW_ID }], rowCount: 1 };
+      // The matcher probes the DETACHED partition at each identity tier; a deal is in exactly one
+      // partition, so the detached probe for this (attached) fixture must answer empty.
+      if (s.includes("bid_board_detached_at is not null")) return { rows: [], rowCount: 0 };
       if (s.includes("from office_dallas.deals")) {
         return {
           rows: [
@@ -87,6 +90,9 @@ describe("Bid Board sync — empties-only estimator preservation (Codex #741 P2)
       if (s.includes("update office_dallas.bid_board_sync_runs")) return { rows: [], rowCount: 1 };
       if (s.includes("from public.users") && s.includes("public.offices")) return { rows: [{ id: "sys" }], rowCount: 1 };
       if (s.includes("from public.users")) return { rows: [{ id: NEW_ID }], rowCount: 1 };
+      // The matcher probes the DETACHED partition at each identity tier; a deal is in exactly one
+      // partition, so the detached probe for this (attached) fixture must answer empty.
+      if (s.includes("bid_board_detached_at is not null")) return { rows: [], rowCount: 0 };
       if (s.includes("from office_dallas.deals")) {
         return {
           rows: [
@@ -138,6 +144,9 @@ describe("Bid Board sync — empties-only estimator preservation (Codex #741 P2)
       if (s.includes("update office_dallas.bid_board_sync_runs")) return { rows: [], rowCount: 1 };
       if (s.includes("from public.users") && s.includes("public.offices")) return { rows: [{ id: "sys" }], rowCount: 1 };
       if (s.includes("from public.users")) return { rows: [{ id: NEW_ID }], rowCount: 1 };
+      // The matcher probes the DETACHED partition at each identity tier; a deal is in exactly one
+      // partition, so the detached probe for this (attached) fixture must answer empty.
+      if (s.includes("bid_board_detached_at is not null")) return { rows: [], rowCount: 0 };
       if (s.includes("from office_dallas.deals")) {
         return {
           rows: [
@@ -198,6 +207,9 @@ describe("Bid Board sync — empties-only estimator preservation (Codex #741 P2)
       if (s.includes("update office_dallas.bid_board_sync_runs")) return { rows: [], rowCount: 1 };
       if (s.includes("from public.users") && s.includes("public.offices")) return { rows: [{ id: "sys" }], rowCount: 1 };
       if (s.includes("from public.users")) return { rows: [{ id: NEW_ID }], rowCount: 1 };
+      // The matcher probes the DETACHED partition at each identity tier; a deal is in exactly one
+      // partition, so the detached probe for this (attached) fixture must answer empty.
+      if (s.includes("bid_board_detached_at is not null")) return { rows: [], rowCount: 0 };
       if (s.includes("from office_dallas.deals")) {
         return {
           rows: [
@@ -260,6 +272,9 @@ describe("Bid Board sync — empties-only estimator preservation (Codex #741 P2)
       if (s.includes("update office_dallas.bid_board_sync_runs")) return { rows: [], rowCount: 1 };
       if (s.includes("from public.users") && s.includes("public.offices")) return { rows: [{ id: "sys" }], rowCount: 1 };
       if (s.includes("from public.users")) return { rows: [{ id: NEW_ID }], rowCount: 1 };
+      // The matcher probes the DETACHED partition at each identity tier; a deal is in exactly one
+      // partition, so the detached probe for this (attached) fixture must answer empty.
+      if (s.includes("bid_board_detached_at is not null")) return { rows: [], rowCount: 0 };
       if (s.includes("from office_dallas.deals")) {
         // The findDealMatches snapshot still shows SNAPSHOT_ID...
         return {
@@ -322,6 +337,9 @@ describe("Bid Board sync — empties-only estimator preservation (Codex #741 P2)
       if (s.includes("from public.users") && s.includes("public.offices")) return { rows: [{ id: "sys" }], rowCount: 1 };
       // Active-user set does NOT include INACTIVE_ID -> the resolved id is degraded to null.
       if (s.includes("from public.users")) return { rows: [], rowCount: 0 };
+      // The matcher probes the DETACHED partition at each identity tier; a deal is in exactly one
+      // partition, so the detached probe for this (attached) fixture must answer empty.
+      if (s.includes("bid_board_detached_at is not null")) return { rows: [], rowCount: 0 };
       if (s.includes("from office_dallas.deals")) {
         return {
           rows: [
@@ -366,6 +384,9 @@ describe("Bid Board sync — empties-only estimator preservation (Codex #741 P2)
       if (s.includes("update office_dallas.bid_board_sync_runs")) return { rows: [], rowCount: 1 };
       if (s.includes("from public.users") && s.includes("public.offices")) return { rows: [{ id: "sys" }], rowCount: 1 };
       if (s.includes("from public.users")) return { rows: [], rowCount: 0 };
+      // The matcher probes the DETACHED partition at each identity tier; a deal is in exactly one
+      // partition, so the detached probe for this (attached) fixture must answer empty.
+      if (s.includes("bid_board_detached_at is not null")) return { rows: [], rowCount: 0 };
       if (s.includes("from office_dallas.deals")) {
         return {
           rows: [

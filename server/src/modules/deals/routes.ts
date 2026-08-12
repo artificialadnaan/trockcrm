@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import { and, eq, desc, getTableColumns, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { companies, dealApprovals, dealHistory, dealScopingIntake, deals, dealSubscriptions, jobQueue, properties } from "@trock-crm/shared/schema";
-import { requireRole, requireRfpReviewer } from "../../middleware/rbac.js";
+import { requireRole, requireRfpReviewer , requireDealMoveBackApprover } from "../../middleware/rbac.js";
 import {
   addDealChangeOrder,
   deleteDealChangeOrder,
@@ -42,6 +42,10 @@ import { listDealDescriptionHistory } from "./deal-description-history.js";
 import { toJsonSafe } from "../../lib/json-safe.js";
 import { redactDealList, redactDealResponse, shouldIncludeHubspotId, stripPrivateDealFieldsForViewer } from "./redact.js";
 import { activateServiceHandoff, changeDealStage } from "./stage-change.js";
+import {
+  previewReturnToOpportunity,
+  returnDealToOpportunity,
+} from "./return-to-opportunity-service.js";
 import { validateOptionalExpectedCloseDateInput } from "./expected-close-date-input.js";
 import { stripBlankUuidPatchFields } from "./uuid-patch-coercion.js";
 import { resolveMineVisibilityFeatures } from "../shared/mine-visibility.js";
@@ -797,6 +801,7 @@ async function buildTriggerRfpConflict(
     bidBoardMirrorSourceEnteredAt: latest.bidBoardMirrorSourceEnteredAt,
     isReadOnlyMirror: latest.isReadOnlyMirror,
     readOnlySyncedAt: latest.readOnlySyncedAt,
+    bidBoardDetachedAt: latest.bidBoardDetachedAt,
   });
   if (latest.isBidBoardOwned || inferredOwnership.isBidBoardOwned) {
     return new AppError(
@@ -1301,6 +1306,30 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
       ? toCanonicalDealStageSlug(stageSlug, deal.workflowRoute)
       : null;
     if (canonicalStageSlug !== "opportunity") {
+      // A DETACHED deal past Opportunity is the one case where this rejection is genuinely confusing, so
+      // it gets told what to do rather than left to infer it.
+      //
+      // After a move back to Opportunity the deal is CRM-owned with no Bid Board project, and this route
+      // is the ONLY path that can create a replacement one (the callback it drives writes the new
+      // project's id in the same statement that clears the detach marker). Every Bid Board ingress skips
+      // detached rows, and changeDealStage deliberately no longer re-attaches on the estimating boundary.
+      // So if someone advances such a deal by hand, "trigger RFP" is unavailable until it comes back —
+      // recoverable (this feature is itself the way back), but not guessable from a bare stage error.
+      //
+      // Deliberately NOT blocking the forward stage move instead: a detached deal in estimating is
+      // CRM-owned and works fine, it simply has no Bid Board project. Blocking would remove a transition
+      // that is legitimate today and would strand deals that belong in estimating without one, to
+      // prevent a recoverable annoyance. The cheaper, non-destructive half of the fix is to make the
+      // failure legible — same 400, same RFP_WRONG_STAGE code (nothing keys on it), better sentence.
+      if (deal.bidBoardDetachedAt) {
+        throw new AppError(
+          400,
+          "RFP review can only be triggered from Opportunity stage. This deal was moved back to " +
+            "Opportunity and disconnected from Bid Board sync, so it has no Bid Board project — move it " +
+            "back to Opportunity again, then trigger RFP review to create a replacement project.",
+          "RFP_WRONG_STAGE"
+        );
+      }
       throw new AppError(400, "RFP review can only be triggered from Opportunity stage.", "RFP_WRONG_STAGE");
     }
 
@@ -1320,6 +1349,7 @@ router.post("/:id/trigger-rfp", async (req, res, next) => {
       bidBoardMirrorSourceEnteredAt: deal.bidBoardMirrorSourceEnteredAt,
       isReadOnlyMirror: deal.isReadOnlyMirror,
       readOnlySyncedAt: deal.readOnlySyncedAt,
+      bidBoardDetachedAt: deal.bidBoardDetachedAt,
     });
     if (deal.isBidBoardOwned || inferredOwnership.isBidBoardOwned) {
       throw new AppError(
@@ -3995,6 +4025,7 @@ router.post("/:id/stage/preflight", async (req, res, next) => {
           bidBoardMirrorSourceEnteredAt: deal.bidBoardMirrorSourceEnteredAt,
           isReadOnlyMirror: deal.isReadOnlyMirror,
           readOnlySyncedAt: deal.readOnlySyncedAt,
+          bidBoardDetachedAt: deal.bidBoardDetachedAt,
         })
       : null;
     const bidBoardOwnership = deal
@@ -4043,6 +4074,135 @@ router.post("/:id/stage/preflight", async (req, res, next) => {
     next(err);
   }
 });
+
+// GET /api/deals/:id/return-to-opportunity/preview — what the confirm dialog needs BEFORE committing:
+// eligibility, whether the move voids commission, and the exact dollar amount it would destroy. The
+// dialog must name that number, and the commit path requires it echoed back, so this endpoint is part
+// of the safety mechanism, not a convenience.
+router.get(
+  "/:id/return-to-opportunity/preview",
+  requireRole("admin", "director"),
+  // Same allowlist as the commit below: someone who cannot perform the move has no reason to be shown the
+  // dollar figure it would destroy, and gating only the commit would leave the dialog openable.
+  requireDealMoveBackApprover,
+  async (req, res, next) => {
+    try {
+      const dealId = req.params.id as string;
+      // Office-scope check still runs (the tenant schema is the boundary, but a missing office is a 403).
+      await assertDealOwnerRouteAccess(req, dealId, {
+        allowAdmin: true,
+        allowDirector: true,
+      });
+      const preview = await previewReturnToOpportunity(req.tenantDb!, {
+        dealId,
+        userRole: req.user!.role,
+      });
+      await req.commitTransaction!();
+      res.json(toJsonSafe(preview));
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// POST /api/deals/:id/return-to-opportunity — "Move back to Opportunity": sever the Bid Board linkage,
+// reset the RFP cycle, void any booked commission, and run the backward stage move, all in this
+// request's transaction.
+//
+// requireRole("admin","director") is the OUTER gate; the inner service re-evaluates the same shared
+// predicate and narrows to admin-only when the move would void commission — never trust the route
+// alone (changeDealStage sets that precedent with its own rep-ownership check).
+router.post(
+  "/:id/return-to-opportunity",
+  requireRole("admin", "director"),
+  // The role floor admits every admin and director; this narrows to the named approvers who may destroy
+  // booked commission. The service still re-evaluates its own eligibility on top of both.
+  requireDealMoveBackApprover,
+  async (req, res, next) => {
+    try {
+      const dealId = req.params.id as string;
+      await assertDealOwnerRouteAccess(req, dealId, {
+        allowAdmin: true,
+        allowDirector: true,
+      });
+      const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
+      if (reason.length === 0) {
+        throw new AppError(
+          400,
+          "A reason is required to move a deal back to Opportunity.",
+          "MOVE_BACK_REASON_REQUIRED"
+        );
+      }
+      const acknowledgedCommissionTotal =
+        typeof req.body?.acknowledgedCommissionTotal === "string"
+          ? req.body.acknowledgedCommissionTotal
+          : typeof req.body?.acknowledgedCommissionTotal === "number"
+            ? String(req.body.acknowledgedCommissionTotal)
+            : null;
+      // The row count the dialog displayed next to the total. Both are checked server-side; a
+      // non-numeric or absent value stays null so the service refuses rather than guesses.
+      const rawAcknowledgedRowCount = req.body?.acknowledgedCommissionRowCount;
+      const parsedAcknowledgedRowCount =
+        typeof rawAcknowledgedRowCount === "number"
+          ? rawAcknowledgedRowCount
+          : typeof rawAcknowledgedRowCount === "string" && rawAcknowledgedRowCount.trim() !== ""
+            ? Number(rawAcknowledgedRowCount)
+            : null;
+      const acknowledgedCommissionRowCount =
+        parsedAcknowledgedRowCount != null && Number.isInteger(parsedAcknowledgedRowCount)
+          ? parsedAcknowledgedRowCount
+          : null;
+
+      const result = await returnDealToOpportunity(req.tenantDb!, {
+        dealId,
+        userId: req.user!.id,
+        userRole: req.user!.role,
+        reason,
+        acknowledgedCommissionTotal,
+        acknowledgedCommissionRowCount,
+        officeId: req.user!.activeOfficeId ?? req.user!.officeId ?? null,
+        tenantSchema: req.officeSlug ? `office_${req.officeSlug}` : null,
+        auditContext: buildRouteAuditContext(req),
+      });
+
+      // Same copilot refresh the ordinary stage change enqueues — the deal's stage and its whole RFP /
+      // Bid Board context just changed, so a cached brief would be stale.
+      await req.tenantDb!.insert(jobQueue).values({
+        jobType: "ai_refresh_copilot",
+        payload: {
+          dealId,
+          reason: "deal_returned_to_opportunity",
+          requestedBy: req.user!.id,
+        },
+        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+        status: "pending",
+        runAfter: new Date(),
+      });
+
+      await req.commitTransaction!();
+      emitLocalDealEvents(result._eventsToEmit ?? [], {
+        officeId: req.user!.activeOfficeId ?? req.user!.officeId,
+        userId: req.user!.id,
+      });
+
+      res.json(
+        toJsonSafe({
+          deal: redactDealResponse(result.deal, {
+            includeHubspotId: shouldIncludeHubspotId(req.query, req.user!.role),
+          }),
+          stageHistory: result.stageChange.stageHistory,
+          commissionRowsVoided: result.commissionRowsVoided,
+          commissionTotalVoided: result.commissionTotalVoided,
+          contractSignedDateCleared: result.contractSignedDateCleared,
+          wasBidBoardLinked: result.wasBidBoardLinked,
+          rfpSubmissionMayExist: result.rfpSubmissionMayExist,
+        })
+      );
+    } catch (err) {
+      next(err);
+    }
+  }
+);
 
 // POST /api/deals/:id/service-handoff/activate — activate service workflow once scoping is ready
 router.post("/:id/service-handoff/activate", async (req, res, next) => {

@@ -39,6 +39,7 @@ import {
 import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { isDealBidBoardLinked } from "./bid-board-linkage.js";
 import { isCrmUserRole } from "../../middleware/field-auth.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
 import { isUndefinedFunctionError } from "../../lib/db-errors.js";
@@ -1193,6 +1194,21 @@ export interface DealBidBoardOwnershipState {
   mirroredInCrm: readonly string[];
   reason: string;
   message: string;
+  /** ISO timestamp when "Move back to Opportunity" severed this deal from Bid Board sync (else null). */
+  detachedAt: string | null;
+  /**
+   * True only when the detach severed a REAL Bid Board project (the preserved procore / SyncHub
+   * identity proves one exists). Gates the standing "delete this project from the Bid Board" reminder,
+   * which must not appear on a CRM-only deal that was moved back but never had a project.
+   */
+  detachedFromLinkedProject: boolean;
+  /**
+   * Does the deal STILL have a live Bid Board footprint to sever? The server's own answer, so the
+   * "Move back to Opportunity" menu item can be hidden on exactly the deals the service would refuse.
+   * Re-deriving this client-side drifted once already (it omitted synchub_bid_board_id and
+   * read_only_synced_at, hiding the action on deals a webhook could still reclaim).
+   */
+  isBidBoardLinked: boolean;
 }
 
 /**
@@ -1799,9 +1815,56 @@ function mapDealStageWorkspaceRow(
 }
 
 export function buildBidBoardOwnershipState(
-  deal: Pick<typeof deals.$inferSelect, "isBidBoardOwned" | "workflowRoute">
+  deal: Pick<typeof deals.$inferSelect, "isBidBoardOwned" | "workflowRoute"> & {
+    bidBoardDetachedAt?: Date | string | null;
+    bidBoardDetachedWasLinked?: boolean | null;
+    procoreBidId?: number | string | null;
+    synchubBidBoardId?: string | null;
+    bidBoardProjectNumber?: string | null;
+    bidBoardLinkedAt?: Date | string | null;
+    readOnlySyncedAt?: Date | string | null;
+    /** Half of the export matcher's composite identity — see isDealBidBoardLinked. */
+    bidBoardCreatedAt?: Date | string | null;
+  }
 ): DealBidBoardOwnershipState {
-  const isOwned = deal.isBidBoardOwned;
+  // A detached deal is CRM-owned by definition, whatever the stored flag says. Forcing it here (rather
+  // than trusting the detach to have nulled is_bid_board_owned) means a stale/reintroduced flag can
+  // never make the UI claim Bid Board owns a deal the sync is no longer allowed to touch.
+  const detachedAt = deal.bidBoardDetachedAt ?? null;
+  const isDetached = detachedAt != null;
+  const isOwned = isDetached ? false : deal.isBidBoardOwned;
+  // Was there a real Bid Board project behind this detach?
+  //
+  // The action stamps bid_board_detached_at on ANY deal it moves back, including a CRM-only one that
+  // never touched the Bid Board — so the marker alone cannot drive the standing "go delete the project"
+  // reminder, or a deal with no project sends the operator hunting for one, contradicting the dialog
+  // (which correctly omits the warning) and the success toast.
+  //
+  // Read from the PERSISTED answer the detach recorded, never recomputed. Half of what makes a deal
+  // "linked" (is_bid_board_owned, bid_board_project_number, bid_board_linked_at, read_only_synced_at)
+  // is cleared by the detach itself, and the preserved procore/synchub identity is not a stand-in:
+  // 315 of Dallas's 1,294 active deals are Bid Board linked while carrying neither, so deriving it
+  // afterwards would silently drop the reminder on the majority of real cases. The identity fallback
+  // below only covers a row detached before the column existed (none in practice — the column ships
+  // with the feature), and errs toward showing the reminder rather than hiding it.
+  const detachedFromLinkedProject =
+    isDetached &&
+    (deal.bidBoardDetachedWasLinked ??
+      (deal.procoreBidId != null || deal.synchubBidBoardId != null));
+  // THE footprint test, imported rather than restated: detached wins over everything, then any live
+  // ownership/mirror/identity signal counts. This was an inline copy of the return-to-opportunity
+  // service's predicate, which is how the two drifted the last time (the preview counted procore_bid_id
+  // and the audit flag did not). Published so the UI consumes one server answer, computed one way.
+  const isBidBoardLinked = isDealBidBoardLinked({
+    bidBoardDetachedAt: deal.bidBoardDetachedAt ?? null,
+    isBidBoardOwned: deal.isBidBoardOwned ?? null,
+    procoreBidId: deal.procoreBidId ?? null,
+    synchubBidBoardId: deal.synchubBidBoardId ?? null,
+    bidBoardProjectNumber: deal.bidBoardProjectNumber ?? null,
+    bidBoardLinkedAt: deal.bidBoardLinkedAt ?? null,
+    readOnlySyncedAt: deal.readOnlySyncedAt ?? null,
+    bidBoardCreatedAt: deal.bidBoardCreatedAt ?? null,
+  });
 
   return {
     isOwned,
@@ -1810,12 +1873,22 @@ export function buildBidBoardOwnershipState(
     downstreamStagesReadOnly: isOwned,
     canEditInCrm: BID_BOARD_CRM_EDITABLE_FIELDS,
     mirroredInCrm: BID_BOARD_MIRRORED_FIELDS,
-    reason: isOwned
-      ? "Bid Board now owns downstream progression after the deal entered estimating."
-      : "CRM still owns manual stage progression before estimating handoff.",
-    message: isOwned
-      ? "Bid Board is now the source of truth once this deal entered estimating."
-      : "CRM remains the source of truth until the deal is handed off into estimating.",
+    reason: isDetached
+      ? "This deal was moved back to Opportunity and is disconnected from Bid Board sync."
+      : isOwned
+        ? "Bid Board now owns downstream progression after the deal entered estimating."
+        : "CRM still owns manual stage progression before estimating handoff.",
+    message: isDetached
+      ? detachedFromLinkedProject
+        ? "Bid Board exports no longer update this deal. Delete the project from the Bid Board if you have not already."
+        : "Bid Board exports no longer update this deal."
+      : isOwned
+        ? "Bid Board is now the source of truth once this deal entered estimating."
+        : "CRM remains the source of truth until the deal is handed off into estimating.",
+    detachedAt:
+      detachedAt instanceof Date ? detachedAt.toISOString() : detachedAt ? String(detachedAt) : null,
+    detachedFromLinkedProject,
+    isBidBoardLinked,
   };
 }
 

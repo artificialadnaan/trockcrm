@@ -57,6 +57,16 @@ export function registerJobHandler(jobType: string, handler: JobHandler) {
   jobHandlers.set(jobType, handler);
 }
 
+/**
+ * Every job type currently registered. Exists so an invariant test can check a hand-maintained list
+ * against the REAL registry rather than against a grep — see
+ * worker/tests/jobs/rfp-round-scoped-jobs.invariant.test.ts, which asserts that every registered
+ * `rfp_*` job is classified in RFP_ROUND_SCOPED_JOB_TYPES. Read-only view; the map itself stays private.
+ */
+export function listRegisteredJobTypes(): string[] {
+  return [...jobHandlers.keys()];
+}
+
 export function deadJob(error: string): Extract<JobHandlerResult, { status: "dead" }> {
   return { status: "dead", error };
 }

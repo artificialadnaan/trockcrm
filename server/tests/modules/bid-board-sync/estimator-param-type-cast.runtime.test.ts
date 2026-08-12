@@ -99,6 +99,7 @@ beforeAll(async () => {
       estimator_user_id uuid,
       sales_source_user_id uuid,
       bid_board_last_updated_at timestamptz,
+      bid_board_detached_at timestamptz,
       updated_at timestamptz DEFAULT now()
     );
   `);

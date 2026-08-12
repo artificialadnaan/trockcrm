@@ -60,4 +60,9 @@ export interface AuthenticatedUser {
    * allowlist); hides the report card + route. Absent/false must be read as "no".
    */
   canViewCanvassingReport?: boolean;
+  /**
+   * True iff this user may move a deal back to Opportunity (DEAL_MOVE_BACK_APPROVER_EMAILS allowlist AND
+   * the admin/director floor). Hides the menu item; the route enforces both regardless.
+   */
+  canMoveDealBackToOpportunity?: boolean;
 }

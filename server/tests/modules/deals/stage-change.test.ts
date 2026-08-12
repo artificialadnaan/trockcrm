@@ -147,6 +147,24 @@ function createTenantDb(overrides?: Partial<FakeDeal>) {
     stageHistory: [] as Array<Record<string, unknown>>,
     auditLog: [] as Array<Record<string, unknown>>,
     jobs: [] as Array<Record<string, unknown>>,
+    // Approvals the deal carries into the transition. The reopen branch retires these, so the fake has
+    // to hold real rows for the retirement's audit itemization to have anything to itemize.
+    approvals: [
+      {
+        id: "approval-1",
+        targetStageId: "stage-closed-won",
+        requiredRole: "director",
+        status: "approved",
+        approvedBy: "user-9",
+      },
+      {
+        id: "approval-2",
+        targetStageId: "stage-estimating",
+        requiredRole: "admin",
+        status: "pending",
+        approvedBy: null,
+      },
+    ] as Array<Record<string, unknown>>,
     ops: [] as string[],
   };
 
@@ -216,6 +234,23 @@ function createTenantDb(overrides?: Partial<FakeDeal>) {
                   throw new Error(`Unexpected update on ${name}`);
                 },
               };
+            },
+          };
+        },
+      };
+    },
+    delete(table: unknown) {
+      const name = tableName(table);
+      return {
+        where() {
+          return {
+            returning() {
+              if (name === tableName(dealApprovals)) {
+                state.ops.push("delete:deal_approvals");
+                return Promise.resolve(state.approvals.splice(0));
+              }
+
+              throw new Error(`Unexpected delete on ${name}`);
             },
           };
         },
@@ -1467,6 +1502,67 @@ describe("changeDealStage", () => {
         readOnlySyncedAt: result.deal.readOnlySyncedAt,
       }).ownershipModel
     ).toBe("crm");
+  });
+
+  // The SECOND owner of the approval-retirement rule. "Move back to Opportunity" hit this defect first,
+  // but the terminal-reopen path here has always had it too: marking approved rows `rejected` in place
+  // left them occupying the (deal_id, target_stage_id, required_role) unique key that the bare-INSERT
+  // request route cannot get past, so the reopened deal could never re-request that approval; and a row
+  // still `pending` was not matched at all, so it stayed resolvable to `approved` for the closed cycle.
+  // Fixing only the move-back would have left this owner wrong, so both now call retireDealApprovals.
+  it("RETIRES the closed cycle's approvals on reopen — pending ones too — instead of rejecting them in place", async () => {
+    const tenantDb = createTenantDb({
+      stageId: "stage-closed-won",
+      isBidBoardOwned: true,
+      actualCloseDate: "2026-04-21",
+    });
+
+    vi.mocked(validateStageGate).mockResolvedValue({
+      allowed: true,
+      isBackwardMove: true,
+      requiresOverride: false,
+      targetStage: {
+        id: "stage-opportunity",
+        name: "Opportunity",
+        slug: "opportunity",
+        isTerminal: false,
+        isActivePipeline: true,
+        displayOrder: 0,
+      },
+      currentStage: {
+        id: "stage-closed-won",
+        name: "Sent to Production",
+        slug: "sent_to_production",
+        isTerminal: true,
+        isActivePipeline: true,
+        displayOrder: 10,
+      },
+    } as never);
+
+    await changeDealStage(tenantDb as never, {
+      dealId: "deal-1",
+      targetStageId: "stage-opportunity",
+      userId: "user-1",
+      userRole: "director",
+    });
+
+    // Rows GONE — both the approved one and the pending one. Rejecting in place leaves both behind.
+    expect(tenantDb.state.approvals).toHaveLength(0);
+    expect(tenantDb.state.ops).toContain("delete:deal_approvals");
+
+    // …itemized into audit_log, because a delete has to leave the forensic record somewhere.
+    const approvalAudits = tenantDb.state.auditLog.filter(
+      (row) => row.tableName === "deal_approvals" && row.action === "delete"
+    );
+    expect(approvalAudits).toHaveLength(2);
+    expect(approvalAudits.map((row) => row.recordId).sort()).toEqual(["approval-1", "approval-2"]);
+    expect(
+      approvalAudits.every(
+        (row) =>
+          (row.changes as Record<string, { from: unknown; to: unknown }>).retiredBecause.to ===
+          "deal reopen"
+      )
+    ).toBe(true);
   });
 
   it("fails closed when the estimating boundary stage config is missing for an owned deal", async () => {

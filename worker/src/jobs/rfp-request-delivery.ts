@@ -12,6 +12,13 @@ type PoolLike = Queryable & {
   connect?: () => Promise<Queryable & { release: () => void }>;
 };
 
+/**
+ * Advisory-lock namespace shared with "Move back to Opportunity"'s job cancellation, so a cancellation
+ * and a send-authorization for the same deal serialize instead of racing. Distinct from the commission
+ * lock namespace: these are different invariants and must not block each other.
+ */
+export const DEAL_RFP_DELIVERY_LOCK_NAMESPACE = "deal_rfp_delivery:";
+
 type OfficeSchemaOptions = {
   requireActive?: boolean;
 };
@@ -52,6 +59,20 @@ async function resolveOfficeSchema(
   return `office_${slug}`;
 }
 
+/**
+ * The RFP round a delivery payload belongs to, or null when it is unknown (a payload predating the
+ * format, or a malformed one). Every round check FAILS OPEN on null — an over-eager guard here would
+ * silently stop legitimate work, which is worse than the drift it prevents.
+ *
+ * Extracted so the pre-send recheck and the dead-letter sweep derive the round IDENTICALLY. They used
+ * to differ: the sweep derived nothing at all and wrote by deal id alone.
+ */
+function parseRoundEventId(body: unknown): string | null {
+  return (
+    /^crm:deal-stage:opportunity:(.+)$/.exec(String((body as any)?.sourceEventId ?? ""))?.[1] ?? null
+  );
+}
+
 function signBody(rawBody: string, secret: string): string {
   const digest = crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
   return `sha256=${digest}`;
@@ -61,7 +82,8 @@ async function updateDealPending(
   db: Queryable,
   schemaName: string,
   dealId: string,
-  body: Record<string, any>
+  body: Record<string, any>,
+  roundEventId: string | null
 ) {
   await db.query(
     `UPDATE ${quoteIdent(schemaName)}.deals
@@ -83,8 +105,23 @@ async function updateDealPending(
             rfp_override_state = NULL,
             rfp_override_error = NULL,
             updated_at = NOW()
-      WHERE id = $3`,
-    [body.requestId ?? body.id ?? null, body.token ?? null, dealId]
+      WHERE id = $3
+        -- ROUND GUARD, two predicates that do different jobs.
+        --
+        -- (1) STATUS: this job writes back BY DEAL ID from a payload snapshot, so a delivery already in
+        -- flight would repopulate an RFP cycle since cleared by "Move back to Opportunity" — and a
+        -- non-null status is what re-arms the bid-board-created resurrection guard.
+        --
+        -- (2) ROUND IDENTITY: status alone is not identity. A move-back FOLLOWED BY a fresh trigger puts
+        -- the NEW round back into pending_outbox, so a stale response would satisfy the status predicate
+        -- and overwrite the new round's request id/token with the old one's. rfp_bidboard_create already
+        -- binds its recheck this way; this mirrors it. FAIL-OPEN when either side is unknown (a payload
+        -- with no parseable sourceEventId, or a deal with no round stamped): an over-eager guard here
+        -- would silently stop every delivery, which is far worse than the drift it prevents.
+        AND rfp_approval_status IN ('pending_outbox', 'pending')
+        AND ($4::text IS NULL OR rfp_approval_request_event_id IS NULL
+             OR rfp_approval_request_event_id::text = $4::text)`,
+    [body.requestId ?? body.id ?? null, body.token ?? null, dealId, roundEventId]
   );
 }
 
@@ -92,7 +129,8 @@ async function updateDealConflict(
   db: Queryable,
   schemaName: string,
   dealId: string,
-  body: Record<string, any>
+  body: Record<string, any>,
+  roundEventId: string | null
 ) {
   await db.query(
     `UPDATE ${quoteIdent(schemaName)}.deals
@@ -101,8 +139,13 @@ async function updateDealConflict(
             rfp_conflict_with = $2::jsonb,
             rfp_last_attempt_error = NULL,
             updated_at = NOW()
-      WHERE id = $3`,
-    [body.error ?? "conflict", JSON.stringify(body.conflict ?? body), dealId]
+      WHERE id = $3
+        -- Same two-part round guard as the success path: a conflict verdict must neither resurrect a
+        -- cleared cycle nor mark a DIFFERENT, later round conflicted.
+        AND rfp_approval_status IN ('pending_outbox', 'pending')
+        AND ($4::text IS NULL OR rfp_approval_request_event_id IS NULL
+             OR rfp_approval_request_event_id::text = $4::text)`,
+    [body.error ?? "conflict", JSON.stringify(body.conflict ?? body), dealId, roundEventId]
   );
 }
 
@@ -134,6 +177,66 @@ export async function handleRfpRequestDelivery(
   }
 
   const schemaName = await resolveOfficeSchema(db, officeId);
+
+  // The round this job was built for. Mirrors rfp_bidboard_create's binding; null when the payload
+  // predates the format or is malformed, in which case every round check below fails OPEN.
+  const roundEventId = parseRoundEventId(payload.body);
+
+  // AUTHORIZE THE SEND under the deal's advisory lock, then POST outside it.
+  //
+  // The write-back guards below stop a stale delivery from corrupting the deal, but only declining to
+  // send stops an ORPHAN RFP submission being created in SyncHub for a cancelled cycle — one the
+  // operator would have to chase down externally. "Move back to Opportunity" cancels still-queued jobs
+  // inside its own transaction; this covers the job it could not reach because this worker had already
+  // claimed it.
+  //
+  // Taking the SAME deal-scoped advisory lock that action holds is what makes the check meaningful
+  // rather than advisory: an unlocked read could observe `pending_outbox` a microsecond before the
+  // move-back commits and send anyway. Serialising on the lock means we either read the pre-move state
+  // and send while the move-back waits, or we wait and then read the cleared cycle and skip. Held only
+  // across the read — a database transaction must not span an outbound HTTP call.
+  const authClient: Queryable & { release?: () => void } = db.connect ? await db.connect() : db;
+  let authorized = true;
+  let observedStatus: string | null = null;
+  let observedRound: string | null = null;
+  try {
+    await authClient.query("BEGIN");
+    await authClient.query("SELECT pg_advisory_xact_lock(hashtext($1))", [
+      `${DEAL_RFP_DELIVERY_LOCK_NAMESPACE}${payload.dealId}`,
+    ]);
+    const current = await authClient.query(
+      `SELECT rfp_approval_status, rfp_approval_request_event_id
+         FROM ${quoteIdent(schemaName)}.deals WHERE id = $1`,
+      [payload.dealId]
+    );
+    if (current.rows.length > 0) {
+      observedStatus = current.rows[0].rfp_approval_status ?? null;
+      observedRound = current.rows[0].rfp_approval_request_event_id ?? null;
+      const awaiting = observedStatus === "pending_outbox" || observedStatus === "pending";
+      // Fail-open on an unknown round, exactly as the SQL guards do.
+      const sameRound = roundEventId == null || observedRound == null || observedRound === roundEventId;
+      authorized = awaiting && sameRound;
+    }
+    await authClient.query("COMMIT");
+  } catch (err) {
+    // Fail OPEN on a recheck error (DB blip / schema resolve), matching rfp_bidboard_create: better to
+    // attempt a legitimate send, since the write-back guards still reject a stale response.
+    await authClient.query("ROLLBACK").catch(() => {});
+    console.warn(
+      `[Worker:rfp_request_delivery] Pre-send recheck failed for deal ${payload.dealId}; proceeding (write-back guards still apply):`,
+      err
+    );
+  } finally {
+    authClient.release?.();
+  }
+
+  if (!authorized) {
+    console.info(
+      `[Worker:rfp_request_delivery] Skipping delivery for deal ${payload.dealId}: no longer awaiting THIS round (status=${observedStatus ?? "cleared"}, round=${observedRound ?? "null"} vs payload=${roundEventId ?? "null"})`
+    );
+    return;
+  }
+
   const rawBody = JSON.stringify(payload.body);
   let response: Response;
   try {
@@ -152,7 +255,7 @@ export async function handleRfpRequestDelivery(
   const responseBody = await parseResponseBody(response);
 
   if (response.status === 201 || response.status === 200) {
-    await updateDealPending(db, schemaName, payload.dealId, responseBody);
+    await updateDealPending(db, schemaName, payload.dealId, responseBody, roundEventId);
     if (response.status === 200) {
       console.info(`[Worker:rfp_request_delivery] Idempotent replay accepted for deal ${payload.dealId}`);
     }
@@ -160,7 +263,7 @@ export async function handleRfpRequestDelivery(
   }
 
   if (response.status === 409) {
-    await updateDealConflict(db, schemaName, payload.dealId, responseBody);
+    await updateDealConflict(db, schemaName, payload.dealId, responseBody, roundEventId);
     return;
   }
 
@@ -232,13 +335,34 @@ export async function runRfpRequestDeadLetterSweep(
         }
 
         const schemaName = await resolveOfficeSchema(client, job.office_id, { requireActive: false });
+        // GUARDED ON THE SWEEP'S OWN WRITE, not on whoever queued the job.
+        //
+        // This wrote `WHERE id = $2` alone — the only writer of rfp_approval_status in this worker that
+        // carried no predicate at all. `dealHandled` on the payload does protect the jobs "Move back to
+        // Opportunity" could reach, but it cancels only status IN ('pending','dead'); a job already
+        // CLAIMED ('processing') when the move-back ran is never stamped, and when it later exhausts its
+        // retries and lands 'dead' this sweep picks it up and writes `send_failed` onto a deal whose
+        // cycle was cleared. That repopulates rfp_approval_status, which re-locks the deal's scope
+        // (resolveDealScopeLockState), re-arms the callback's `rfp_approval_status IS NOT NULL`
+        // resurrection guard, and blocks re-triggering — the exact dead end this feature removes.
+        //
+        // Same two-part predicate the success and conflict write-backs use, so all three writers now
+        // agree: only touch a deal still AWAITING delivery, and only for THIS round. Fails open on an
+        // unknown round, matching its siblings.
         await client.query(
           `UPDATE ${quoteIdent(schemaName)}.deals
               SET rfp_approval_status = 'send_failed',
                   rfp_last_attempt_error = $1,
                   updated_at = NOW()
-            WHERE id = $2`,
-          [job.last_error ?? "RFP delivery exhausted retries", payload.dealId]
+            WHERE id = $2
+              AND rfp_approval_status IN ('pending_outbox', 'pending')
+              AND ($3::text IS NULL OR rfp_approval_request_event_id IS NULL
+                   OR rfp_approval_request_event_id::text = $3::text)`,
+          [
+            job.last_error ?? "RFP delivery exhausted retries",
+            payload.dealId,
+            parseRoundEventId(payload.body),
+          ]
         );
         await client.query(
           "UPDATE public.job_queue SET payload = jsonb_set(payload, '{dealHandled}', 'true'::jsonb, true) WHERE id = $1",
