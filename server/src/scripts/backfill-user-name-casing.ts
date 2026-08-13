@@ -31,7 +31,19 @@ import { toProperCaseName } from "../lib/person-name.js";
  */
 const CURATED_OVERRIDES: Record<string, string> = {
   "corey mcshane": "Corey McShane",
+  // The surname column needs its own entry: it is corrected independently of display_name, so without
+  // this the same person would be stored as "Corey McShane" with a last_name of "Mcshane".
+  mcshane: "McShane",
 };
+
+export interface UserNameRow {
+  id: string;
+  email: string;
+  role: string;
+  display_name: string | null;
+  first_name: string | null;
+  last_name: string | null;
+}
 
 export interface NameCasingChange {
   id: string;
@@ -40,25 +52,58 @@ export interface NameCasingChange {
   before: string;
   after: string;
   source: "curated" | "rule";
+  /** Which of the three name columns this row rewrites; unchanged columns are omitted. */
+  fields: {
+    displayName?: { before: string; after: string };
+    firstName?: { before: string; after: string };
+    lastName?: { before: string; after: string };
+  };
 }
 
-export function planNameCasingChanges(
-  rows: Array<{ id: string; email: string; role: string; display_name: string | null }>
-): NameCasingChange[] {
+function correct(value: string | null): { before: string; after: string } | null {
+  const before = value ?? "";
+  if (!before.trim()) return null;
+  const curated = CURATED_OVERRIDES[before.trim().toLowerCase()];
+  const after = curated ?? toProperCaseName(before);
+  return after === before ? null : { before, after };
+}
+
+/**
+ * ALL THREE NAME COLUMNS, not just display_name (Codex P2).
+ *
+ * The field-invite path — the source of most of these rows — writes first_name and last_name alongside
+ * display_name, and the Admin → Field Users table renders `{firstName} {lastName}` directly rather than
+ * the display name. Correcting only display_name would leave exactly the people this cleanup is for still
+ * visibly lowercased on that screen and in the field app's identity UI.
+ */
+export function planNameCasingChanges(rows: UserNameRow[]): NameCasingChange[] {
   const changes: NameCasingChange[] = [];
   for (const row of rows) {
-    const before = row.display_name ?? "";
-    if (!before.trim()) continue;
-    const curated = CURATED_OVERRIDES[before.trim().toLowerCase()];
-    const after = curated ?? toProperCaseName(before);
-    if (after === before) continue;
+    const displayName = correct(row.display_name);
+    const firstName = correct(row.first_name);
+    const lastName = correct(row.last_name);
+    if (!displayName && !firstName && !lastName) continue;
+
+    const fields: NameCasingChange["fields"] = {};
+    if (displayName) fields.displayName = displayName;
+    if (firstName) fields.firstName = firstName;
+    if (lastName) fields.lastName = lastName;
+
+    // A row whose display_name is already correct can still need its parts fixed; label it by whatever
+    // name we do have so the review output never prints an empty before/after.
+    const headline = displayName ?? { before: row.display_name ?? row.email, after: row.display_name ?? row.email };
+    const usedCurated = [displayName, firstName, lastName].some(
+      (change) => change && CURATED_OVERRIDES[change.before.trim().toLowerCase()] === change.after
+    );
+
     changes.push({
       id: row.id,
       email: row.email,
       role: row.role,
-      before,
-      after,
-      source: curated ? "curated" : "rule",
+      before: headline.before,
+      after: headline.after,
+      source: usedCurated ? "curated" : "rule",
+      fields,
     });
   }
   return changes;
@@ -72,17 +117,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   const client = new pg.Client({ connectionString });
   await client.connect();
   try {
-    const { rows } = await client.query<{
-      id: string;
-      email: string;
-      role: string;
-      display_name: string | null;
-    }>(
+    const { rows } = await client.query<UserNameRow>(
       // Test-data accounts are excluded, not merely unimportant: they are already out of every roster this
       // change feeds, and one of them is literally named "SMOKE TEST DELETE …" in caps — re-casing that to
       // "Smoke Test Delete …" would file the serial numbers off a deliberate warning label. Inactive REAL
       // users are still corrected, so reactivating someone does not resurrect the old spelling.
-      `SELECT id, email, role::text AS role, display_name
+      `SELECT id, email, role::text AS role, display_name, first_name, last_name
          FROM public.users
         WHERE COALESCE(is_test_data, false) = false
         ORDER BY lower(display_name)`
@@ -98,7 +138,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 
     for (const change of changes) {
       const marker = change.source === "curated" ? " [curated]" : "";
-      console.log(`  ${change.before}  →  ${change.after}   (${change.role}, ${change.email})${marker}`);
+      console.log(`  ${change.email}  (${change.role})${marker}`);
+      for (const [column, field] of Object.entries(change.fields)) {
+        console.log(`      ${column.padEnd(11)} ${field.before}  →  ${field.after}`);
+      }
     }
 
     if (!execute) {
@@ -106,17 +149,32 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       return;
     }
 
-    // One statement per row rather than a bulk CASE: the set is tiny, and a per-row UPDATE keeps the
-    // WHERE bound to the id AND the exact value we previewed, so a row edited between the dry-run and the
-    // write is skipped rather than silently overwritten with a stale decision.
+    // One statement per row rather than a bulk CASE: the set is tiny, and a per-row UPDATE keeps the WHERE
+    // bound to the id AND every value we previewed, so a row edited between the dry-run and the write is
+    // skipped whole rather than half-written from a stale decision. Only the columns that actually change
+    // are assigned, so this cannot blank a NULL first/last name into "".
     let updated = 0;
     for (const change of changes) {
+      const sets: string[] = [];
+      const wheres: string[] = ["id = $1"];
+      const params: unknown[] = [change.id];
+      for (const [column, field] of [
+        ["display_name", change.fields.displayName],
+        ["first_name", change.fields.firstName],
+        ["last_name", change.fields.lastName],
+      ] as const) {
+        if (!field) continue;
+        params.push(field.after);
+        sets.push(`${column} = $${params.length}`);
+        params.push(field.before);
+        wheres.push(`${column} = $${params.length}`);
+      }
       const result = await client.query(
-        `UPDATE public.users SET display_name = $1, updated_at = now() WHERE id = $2 AND display_name = $3`,
-        [change.after, change.id, change.before]
+        `UPDATE public.users SET ${sets.join(", ")}, updated_at = now() WHERE ${wheres.join(" AND ")}`,
+        params
       );
       if (result.rowCount === 0) {
-        console.warn(`  SKIPPED ${change.email}: display_name changed since the preview`);
+        console.warn(`  SKIPPED ${change.email}: a name column changed since the preview`);
         continue;
       }
       updated += 1;

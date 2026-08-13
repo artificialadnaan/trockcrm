@@ -21,11 +21,35 @@ describe("toProperCaseName", () => {
     expect(toProperCaseName("Takashi Yamashita")).toBe("Takashi Yamashita");
   });
 
-  it("preserves deliberate internal capitals token by token", () => {
-    // Mixed input: one token an admin cased on purpose, one they did not.
-    expect(toProperCaseName("shawn McDonald")).toBe("Shawn McDonald");
-    expect(toProperCaseName("DeShawn smith")).toBe("DeShawn Smith");
-    expect(toProperCaseName("O'Brien connor")).toBe("O'Brien Connor");
+  it("leaves lowercase name particles alone in an already-cased name (Codex P2)", () => {
+    // The regression that a per-TOKEN intent test caused: judged alone, "van" and "de" look like unstyled
+    // words, so a correctly-stored Dutch or Spanish name came back mangled. Because this helper runs on
+    // EVERY user write, that meant merely saving one of these rows corrupted it.
+    expect(toProperCaseName("van der Berg")).toBe("van der Berg");
+    expect(toProperCaseName("de la Cruz")).toBe("de la Cruz");
+    expect(toProperCaseName("Ludwig van Beethoven")).toBe("Ludwig van Beethoven");
+    expect(toProperCaseName("Vincent van Gogh")).toBe("Vincent van Gogh");
+    expect(toProperCaseName("Oscar de la Renta")).toBe("Oscar de la Renta");
+  });
+
+  it("keeps particles lowercase when it DOES have to case an all-lowercase name", () => {
+    // Here there is no intent to preserve, so the name is rewritten — and the particle list keeps that
+    // rewrite from producing "Van Der Berg".
+    expect(toProperCaseName("van der berg")).toBe("Van der Berg");
+    expect(toProperCaseName("oscar de la renta")).toBe("Oscar de la Renta");
+  });
+
+  it("capitalises a leading particle, which is a given name far more often", () => {
+    expect(toProperCaseName("van johnson")).toBe("Van Johnson");
+    expect(toProperCaseName("al jackson")).toBe("Al Jackson");
+  });
+
+  it("leaves a half-cased name as typed rather than guessing", () => {
+    // The acknowledged cost of testing intent across the whole name. "shawn McDonald" is ambiguous —
+    // leaving a human's text alone beats guessing which half they meant.
+    expect(toProperCaseName("shawn McDonald")).toBe("shawn McDonald");
+    expect(toProperCaseName("DeShawn smith")).toBe("DeShawn smith");
+    expect(toProperCaseName("O'Brien connor")).toBe("O'Brien connor");
   });
 
   it("re-cases an all-uppercase name", () => {

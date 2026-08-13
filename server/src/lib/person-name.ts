@@ -5,20 +5,44 @@
  * every surface that lists people and gets it wrong in a way nobody can override. Stored names are edited
  * by an admin who can see the result, so the data is the right place to fix.
  *
- * DELIBERATELY CONSERVATIVE. A token that already carries an internal capital is returned UNTOUCHED:
- * "McCarty", "DeSantis", "O'Brien", "van der Berg" survive verbatim. Only an all-lowercase or all-uppercase
- * token is re-cased, which is exactly the mess this exists for ("nick reyes", "COREY MCSHANE") and nothing
- * else. The rule matters more than it looks: a naive title-case pass turns the correctly-stored "Edward
- * McCarty" into "Edward Mccarty", i.e. it CORRUPTS good data to fix bad data.
+ * THE TEST OF INTENT IS THE WHOLE NAME, NOT EACH WORD.
  *
- * No Mc/Mac special case, on purpose. "mcshane" therefore becomes "Mcshane", not "McShane" — a real but
- * bounded miss. The alternative heuristic breaks more than it fixes ("macey" → "MacEy"), and an admin who
- * types "McShane" keeps it, because mixed case is preserved. Existing rows are corrected by hand in the
- * one-time backfill, where a human is reading each name.
+ * A name containing BOTH an uppercase and a lowercase letter is returned completely untouched: somebody
+ * reached for the shift key, and we do not get to second-guess where they put it. Only a UNIFORMLY cased
+ * name — all lower ("nick reyes") or all upper ("COREY SANCHEZ") — is rewritten, because uniform case
+ * carries no information about intent and is exactly the mess this exists for.
+ *
+ * The first draft applied that test per TOKEN, which read as more helpful and was quietly destructive
+ * (Codex P2): each word was judged alone, so the lowercase particles in "van der Berg" and "de la Cruz"
+ * looked like unstyled words and came back "Van Der Berg" and "De La Cruz". Since this runs on EVERY user
+ * write, saving an already-correct name would have silently corrupted it — the precise failure the
+ * conservative design was meant to rule out. Judging the whole string makes that unreachable.
+ *
+ * The cost is honest: "shawn McDonald" now stays as typed rather than becoming "Shawn McDonald". Half-
+ * cased input is ambiguous, and leaving a human's text alone beats guessing at it.
+ *
+ * No Mc/Mac special case, on purpose. An all-lowercase "mcshane" becomes "Mcshane", not "McShane" — a real
+ * but bounded miss. The alternative heuristic breaks more than it fixes ("macey" → "MacEy"), and an admin
+ * who types "McShane" keeps it, because mixed case is preserved. Existing rows are corrected by hand in
+ * the one-time backfill, where a human is reading each name.
  */
 
 /** Word separators that start a new capitalised part: spaces are handled by the token split. */
 const INTRA_TOKEN_SEPARATORS = /([-'’.])/;
+
+/**
+ * Surname particles that stay lowercase when they are not the first word.
+ *
+ * Only consulted on the uniform-case path — a name with any intentional casing never reaches here — so an
+ * incomplete list can only ever under-correct an all-lowercase name, never corrupt a correct one.
+ *
+ * Position matters: "van johnson" capitalises "Van", because a leading particle is someone's given name
+ * far more often than a dangling preposition.
+ */
+const LOWERCASE_PARTICLES = new Set([
+  "van", "von", "der", "den", "de", "del", "della", "di", "da", "das", "dos",
+  "du", "la", "le", "los", "las", "bin", "ibn", "al", "ter", "ten", "af", "av",
+]);
 
 function capitalizeFirstLetter(part: string): string {
   if (!part) return part;
@@ -29,20 +53,18 @@ function capitalizeFirstLetter(part: string): string {
   return part.slice(0, index) + part[index]!.toUpperCase() + part.slice(index + 1);
 }
 
-function hasInternalCapital(token: string): boolean {
-  const letters = token.match(/\p{L}/gu);
-  if (!letters || letters.length < 2) return false;
-  // An ALL-CAPS token is not a casing decision, it is shouting — "COREY" must still normalise to "Corey".
-  // Requiring a lowercase letter somewhere is what separates the two: "McCarty" has one, "COREY" does not.
-  const hasLower = letters.some((letter) => letter !== letter.toUpperCase());
-  if (!hasLower) return false;
-  // An uppercase letter after the first cased character means a human made a casing decision here.
-  return letters.slice(1).some((letter) => letter !== letter.toLowerCase());
+/**
+ * Did a human case this name deliberately?
+ *
+ * Both an uppercase and a lowercase letter ⇒ yes, somewhere, and we leave the entire string alone. All
+ * upper or all lower ⇒ no signal, so it is ours to fix.
+ */
+function hasIntentionalCasing(name: string): boolean {
+  return /\p{Lu}/u.test(name) && /\p{Ll}/u.test(name);
 }
 
 function properCaseToken(token: string): string {
   if (!token) return token;
-  if (hasInternalCapital(token)) return token;
   const lowered = token.toLowerCase();
   return lowered
     .split(INTRA_TOKEN_SEPARATORS)
@@ -60,5 +82,12 @@ export function toProperCaseName<T extends string | null | undefined>(value: T):
   if (typeof value !== "string") return value;
   const collapsed = value.trim().replace(/\s+/g, " ");
   if (!collapsed) return collapsed as T;
-  return collapsed.split(" ").map(properCaseToken).join(" ") as T;
+  // Whitespace is still collapsed for an intentionally-cased name; only the LETTERS are left untouched.
+  if (hasIntentionalCasing(collapsed)) return collapsed as T;
+  return collapsed
+    .split(" ")
+    .map((token, index) =>
+      index > 0 && LOWERCASE_PARTICLES.has(token.toLowerCase()) ? token.toLowerCase() : properCaseToken(token)
+    )
+    .join(" ") as T;
 }
