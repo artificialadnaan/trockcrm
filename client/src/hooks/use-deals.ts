@@ -789,6 +789,7 @@ export type CreateServiceOpportunityInput = Partial<Pick<
   | "scopeTitle"
   | "expectedCloseDate"
   | "officeCode"
+  | "primaryContactId"
   | "projectNumber"
   | "projectType"
   | "projectTypeId"

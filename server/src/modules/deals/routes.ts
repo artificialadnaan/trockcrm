@@ -26,6 +26,7 @@ import {
   getRequiredEstimatingBoundaryStage,
   isBidBoardOwnedDownstreamStage,
   createDeal,
+  deriveWorkflowRouteForCreate,
   updateDeal,
   startProposalDraft,
   deleteDeal,
@@ -2351,6 +2352,14 @@ router.post("/service-opportunity", async (req, res, next) => {
     if (!companyId || !propertyId) {
       throw new AppError(400, "Company and property are required");
     }
+    // A Service Opportunity with no person on it leaves the service crew with a job, an address and nobody
+    // to call. Enforced HERE rather than on the column: every other deal path — Bid Board sync, RFP
+    // ingestion, imports, lead conversion — legitimately creates contact-less deals, so this is a property
+    // of this create flow, not of the record. validateDealPrimaryContact (called inside createDeal) still
+    // does the exists/active/belongs-to-company checks.
+    if (!primaryContactId) {
+      throw new AppError(400, "Point of contact is required");
+    }
     await assertServiceOpportunityHierarchy(req.tenantDb!, { companyId, propertyId });
 
     const serviceProjectType = await resolveServiceProjectType(projectTypeId, projectType);
@@ -2461,6 +2470,32 @@ router.post("/", async (req, res, next) => {
     } = body;
     if (!name || !stageId) {
       throw new AppError(400, "Name and stageId are required");
+    }
+
+    // /deals/new (the generic deal form) lets a rep pick project type Service + stage Opportunity and
+    // submit here, landing a Service Opportunity with nobody to call — the door the /service-opportunity
+    // guard above (bd81e938e) did not close, because this route is a second, independent way to create
+    // the same kind of deal. Guarded HERE, on the route, rather than inside createDeal: createDeal is
+    // also called directly by lead conversion, Bid Board sync, SyncHub ingest and the import scripts, all
+    // of which legitimately create contact-less service deals, and a check inside createDeal would reject
+    // every one of them.
+    //
+    // The question this asks is "is this SERVICE WORK", not "what will the workflow_route column end up
+    // saying". deriveWorkflowRouteForCreate mirrors createDeal's project-type precedence exactly (an
+    // explicit workflowRoute wins over a derived one), but createDeal can still downgrade the route to
+    // 'normal' later, when a Service-typed deal is started on a standard stage with no service-family
+    // equivalent (service.ts, "Only if no equivalent exists do we fall back to 'normal'"). Such a deal is
+    // STILL service work — it keeps project_type 'service', and isServiceProjectDeal's first tier (which
+    // the reports and the client both use) classifies it as service regardless of this column. So the
+    // crew still needs someone to call, and the guard deliberately fires on the project type rather than
+    // waiting for a column that is not what "is this a service deal" is answered from.
+    const { workflowRoute: derivedRoute } = await deriveWorkflowRouteForCreate({
+      workflowRoute: rest.workflowRoute,
+      projectType: rest.projectType,
+      projectTypeId: rest.projectTypeId,
+    });
+    if (derivedRoute === "service" && !rest.primaryContactId) {
+      throw new AppError(400, "Point of contact is required");
     }
 
     // Rep ownership enforcement:

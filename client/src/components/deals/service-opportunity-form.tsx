@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/select";
 import { CompanySelector } from "@/components/companies/company-selector";
 import { PropertySelector } from "@/components/properties/property-selector";
+import { PointOfContactField } from "@/components/contacts/point-of-contact-field";
 import { useAccessibleOffices } from "@/hooks/use-accessible-offices";
 import { useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
@@ -98,6 +99,7 @@ export function ServiceOpportunityForm({
     name: initialValues?.name ?? "",
     companyId: initialValues?.companyId ?? "",
     propertyId: initialValues?.propertyId ?? "",
+    primaryContactId: "",
     scopeTitle: "",
     description: "",
     assignedRepId: user?.role === "rep" ? user.id : "",
@@ -228,6 +230,10 @@ export function ServiceOpportunityForm({
       if (field === "companyId" && value !== prev.companyId) {
         next.propertyId = "";
         next.propertyState = "";
+        // A contact belongs to exactly one company and the server rejects a mismatched pair, so a company
+        // switch must drop it for the same reason it drops the property. Guarded on an ACTUAL change: the
+        // picker re-emits the company it is already showing on value resolution and remount.
+        next.primaryContactId = "";
       }
       // Clearing the property must drop its captured state too, so region auto-detect doesn't keep deriving
       // from a property that's no longer selected (onPropertySelected only fires on a NEW selection).
@@ -256,6 +262,21 @@ export function ServiceOpportunityForm({
       // PropertySelector re-emits the resolved record whenever its value changes, so the state (and with it
       // the auto-detected region) refills on its own — blanking it here just avoids a frame of stale region.
       propertyState: "",
+      // This restores a DIFFERENT company by writing state directly, bypassing handleChange's
+      // company-change branch — so a contact picked for the company being restored FROM would survive and
+      // be submitted against the restored one, earning a server 400 ("Primary contact does not belong to
+      // the company") while the picker itself looked unselected, since the contact is not in the restored
+      // company's list.
+      // Restore writes state directly, bypassing handleChange's company-change branch, so a contact picked
+      // for the company being restored FROM would otherwise survive and be submitted against the restored
+      // one — a server 400 ("Primary contact does not belong to the company") while the picker looked
+      // unselected, since that contact is not in the restored company's list.
+      //
+      // Guarded on an ACTUAL company change, exactly as handleChange guards it. The restore button also
+      // appears after a same-company PROPERTY swap (its condition is a pure property mismatch), and there
+      // the contact was never invalidated — blanking it unconditionally would make the rep re-pick a
+      // perfectly valid contact and hit "Point of contact is required" for no reason.
+      primaryContactId: preloaded.companyId !== prev.companyId ? "" : prev.primaryContactId,
     }));
     // …and because the state is blank again, the record counts as un-held until that re-emit arrives, or a
     // Create fired in between would slip through the region guard exactly as it would on a fresh prefill.
@@ -272,6 +293,10 @@ export function ServiceOpportunityForm({
     }
     if (!formData.companyId || !formData.propertyId) {
       setError("Company and property are required");
+      return;
+    }
+    if (!formData.primaryContactId) {
+      setError("Point of contact is required");
       return;
     }
     if (!formData.assignedRepId) {
@@ -321,6 +346,7 @@ export function ServiceOpportunityForm({
           name: formData.name.trim(),
           companyId: formData.companyId,
           propertyId: formData.propertyId,
+          primaryContactId: formData.primaryContactId,
           assignedRepId: formData.assignedRepId,
           salesSourceUserId: formData.salesSourceUserId || null,
           scopeTitle: formData.scopeTitle.trim() || null,
@@ -444,6 +470,21 @@ export function ServiceOpportunityForm({
                 required
               />
             </div>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="primaryContactId">
+              Point of Contact <span className="text-red-500">*</span>
+            </Label>
+            <PointOfContactField
+              companyId={formData.companyId}
+              value={formData.primaryContactId}
+              onChange={(contactId) => handleChange("primaryContactId", contactId)}
+              officeId={effectiveOfficeId ?? null}
+            />
+            <p className="text-xs text-muted-foreground">
+              Who the service crew should call about this job.
+            </p>
           </div>
 
           <div className="space-y-2">
