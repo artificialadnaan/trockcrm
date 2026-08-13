@@ -1104,6 +1104,50 @@ describe("DealForm direct-create context", () => {
     );
   }, 30000);
 
+  it("keeps the contact when the company selector re-emits the company already shown", async () => {
+    // CompanySelector echoes its current value on resolution and remount. An unguarded reset would discard
+    // a valid contact — including one the entry point prefilled — for a company that never changed.
+    withServiceProjectType();
+    const { container, root } = await renderForm({
+      name: "SMOKE TEST DELETE service same-company echo",
+      companyId: "company-1",
+      propertyId: "property-1",
+      projectTypeId: "type-service",
+      primaryContactId: "contact-7",
+    });
+    containers.push(container);
+    roots.push(root);
+
+    await act(async () => {
+      mocks.companySelectorProps?.onChange("company-1");
+    });
+
+    expect(container.querySelector("[data-testid='poc-value']")?.textContent).toBe("contact-7");
+  }, 30000);
+
+  it("sends a prefilled contact even before project types resolve", async () => {
+    // Until useProjectTypes returns, projectTypeOptions is empty and isServiceCreate is false — but
+    // projectTypeId is still sent, and the server classifies from it independently. Withholding the
+    // contact in that window produces exactly the unsatisfiable 400 this field exists to prevent.
+    mocks.useProjectTypes.mockReturnValue({ hierarchy: [] });
+    const { container, root } = await renderForm({
+      name: "SMOKE TEST DELETE types still loading",
+      companyId: "company-1",
+      propertyId: "property-1",
+      projectTypeId: "type-service",
+      primaryContactId: "contact-7",
+    });
+    containers.push(container);
+    roots.push(root);
+
+    await submit(container);
+
+    expect(mocks.createDeal).toHaveBeenCalledWith(
+      expect.objectContaining({ projectTypeId: "type-service", primaryContactId: "contact-7" }),
+      expect.anything()
+    );
+  }, 30000);
+
   it("clears a chosen point of contact when the company changes", async () => {
     withServiceProjectType();
     const { container, root } = await renderForm({

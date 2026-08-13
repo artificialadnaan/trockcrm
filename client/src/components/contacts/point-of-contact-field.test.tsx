@@ -379,6 +379,56 @@ describe("PointOfContactField", () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
+  it("can still name a contact it created when the refetch that should return it fails", async () => {
+    // useCompanyContacts.refetch swallows its own failure and clears `contacts`, so a successful create
+    // followed by a failed refetch used to leave the trigger reading "Select a point of contact" while the
+    // parent held the id — an invisible selection on the one field whose job is to say who to call.
+    const refetch = vi.fn(async () => {});
+    mocks.useCompanyContacts.mockReturnValue({ contacts: [], loading: false, error: null, refetch });
+    mocks.createContact.mockResolvedValue({
+      contact: { id: "contact-9", firstName: "Ada", lastName: "Lowe", email: null, phone: null, jobTitle: null, category: "client" },
+    });
+    const onChange = vi.fn();
+    render({ onChange });
+
+    act(() => container.querySelector<HTMLButtonElement>("[data-testid='poc-add-button']")!.click());
+    setFieldValue("poc-first-name", "Ada");
+    setFieldValue("poc-last-name", "Lowe");
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>("[data-testid='poc-save']")!.click();
+    });
+
+    expect(onChange).toHaveBeenCalledWith("contact-9");
+    // Re-render as the parent would, now holding the new id, with the refetch still returning nothing.
+    render({ onChange, value: "contact-9" });
+    expect(container.querySelector("[data-testid='poc-select']")?.textContent).toContain("Ada Lowe");
+  });
+
+  it("does not carry a contact created for one company into another company's list", async () => {
+    const refetch = vi.fn(async () => {});
+    mocks.useCompanyContacts.mockReturnValue({ contacts: [], loading: false, error: null, refetch });
+    mocks.createContact.mockResolvedValue({
+      contact: { id: "contact-9", firstName: "Ada", lastName: "Lowe", email: null, phone: null, jobTitle: null, category: "client" },
+    });
+    render({ companyId: "company-1" });
+
+    act(() => container.querySelector<HTMLButtonElement>("[data-testid='poc-add-button']")!.click());
+    setFieldValue("poc-first-name", "Ada");
+    setFieldValue("poc-last-name", "Lowe");
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>("[data-testid='poc-save']")!.click();
+    });
+
+    // Switching company must not keep offering a contact the server would reject for it. Asserted with the
+    // id SELECTED, because the trigger renders only the selected item's label — the closed dropdown is not
+    // mounted, so a `value: ""` assertion here could never see a leaked contact and would prove nothing.
+    render({ companyId: "company-2", value: "contact-9" });
+    expect(container.querySelector("[data-testid='poc-select']")?.textContent).not.toContain("Ada Lowe");
+    expect(container.querySelector("[data-testid='poc-select']")?.textContent).toContain(
+      "Select a point of contact"
+    );
+  });
+
   it("will not open the add dialog while the company's contacts are unavailable", () => {
     // Membership is decided by looking a suggestion up in `contacts` (a suggestion carries no companyId),
     // so an empty list — errored OR still loading — would brand a contact that genuinely belongs to this

@@ -207,7 +207,11 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
   const handleChange = (field: string, value: string) => {
     setFormData((prev) => {
       const next = { ...prev, [field]: value };
-      if (field === "companyId") {
+      // Guarded on an ACTUAL change, as the Service Opportunity form guards it: CompanySelector re-emits
+      // the company it is already showing on value resolution and remount, and an unguarded reset would
+      // silently discard a valid contact — including one the entry point prefilled — for a company that
+      // never changed.
+      if (field === "companyId" && value !== prev.companyId) {
         next.propertyId = "";
         // A contact belongs to exactly one company and the server rejects a mismatched pair, so it goes
         // with the property.
@@ -415,9 +419,14 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
         if (selectedProjectType) {
           payload.projectType = selectedProjectType.name;
         }
-        // Only on a Service create — the one case the server requires it. OMITTED rather than sent empty
-        // for every other type: an empty string in a uuid column raises Postgres 22P02.
-        if (isServiceCreate && formData.primaryContactId) {
+        // Sent whenever one is HELD, deliberately not gated on isServiceCreate. The server classifies the
+        // deal independently from projectTypeId — which is always sent — so a window where the client has
+        // not classified it as Service but the server does is a window where withholding the contact
+        // produces the unsatisfiable 400 this field exists to prevent. That window is real: until
+        // useProjectTypes resolves, projectTypeOptions is empty and isServiceCreate is false, while
+        // /deals/new can arrive with BOTH ?projectTypeId and ?primaryContactId already prefilled.
+        // Still OMITTED when empty — an empty string in a uuid column raises Postgres 22P02.
+        if (formData.primaryContactId) {
           payload.primaryContactId = formData.primaryContactId;
         }
         payload.creationContext = "direct";

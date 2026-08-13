@@ -4,7 +4,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { useCompanyContacts } from "@/hooks/use-companies";
+import { useCompanyContacts, type CompanyContact } from "@/hooks/use-companies";
 import { createContact } from "@/hooks/use-contacts";
 import { getContactCompanyName } from "@/lib/contact-utils";
 
@@ -64,6 +64,12 @@ export function PointOfContactField({
   // (like `suggestions`) is cleared on every field edit so a forced create can never reuse a dedup verdict
   // for a name the server has never actually checked.
   const [dedupBlocked, setDedupBlocked] = useState(false);
+  // A contact created through the dialog, kept locally so the picker can name it even if the refetch that
+  // should have brought it back does not. `useCompanyContacts.refetch` swallows its own failure and clears
+  // `contacts`, so without this a successful create followed by a failed refetch left the field reading
+  // "Select a point of contact" while the parent held the id — an invisible selection the rep cannot see
+  // or correct, on a field whose whole job is to say who the crew should call.
+  const [justCreated, setJustCreated] = useState<{ companyId: string; contact: CompanyContact } | null>(null);
   // Bumped whenever the dialog session ends by any means OTHER than the save that's in flight resolving
   // (closeDialog covers Cancel, a suggestion pick, and success). A create response that lands after its own
   // seq has been superseded is stale and must not call onChange — otherwise a rep who reconsiders and picks
@@ -127,13 +133,29 @@ export function PointOfContactField({
       // while this was in flight) — applying it now would overwrite that choice.
       if (seq !== saveSeq.current) return;
       if (result.contact) {
+        const created = result.contact;
         await refetch();
         // Checked AGAIN after the await. The dialog's own close button and Escape stay live during the
         // refetch, and closing bumps saveSeq — so without this a rep who closes and switches company mid
         // refetch would have the previous company's brand-new contact silently selected underneath them,
         // then fail the server's company-membership check on create.
         if (seq !== saveSeq.current) return;
-        onChange(result.contact.id);
+        // Held locally BEFORE selecting it. refetch() swallows its own failure and clears `contacts`, so
+        // selecting on the strength of the refetch alone could leave the field unable to name the contact
+        // it is holding.
+        setJustCreated({
+          companyId,
+          contact: {
+            id: created.id,
+            firstName: created.firstName,
+            lastName: created.lastName,
+            email: created.email ?? null,
+            phone: created.phone ?? null,
+            jobTitle: created.jobTitle ?? null,
+            category: created.category ?? "client",
+          },
+        });
+        onChange(created.id);
         closeDialog();
         return;
       }
@@ -162,15 +184,25 @@ export function PointOfContactField({
     }
   };
 
+  // The refetched list plus any contact this dialog just created that the refetch did not bring back. On a
+  // healthy refetch the created contact is already in `contacts`, so it de-duplicates to nothing.
+  const knownContacts = useMemo(() => {
+    // Scoped to the company it was created under: carrying it into another company's list would offer a
+    // contact the server would reject, which is the whole failure this field is built to avoid.
+    if (!justCreated || justCreated.companyId !== companyId) return contacts;
+    if (contacts.some((contact) => contact.id === justCreated.contact.id)) return contacts;
+    return [...contacts, justCreated.contact];
+  }, [contacts, justCreated, companyId]);
+
   const items = useMemo(
     () => [
       { value: NONE, label: companyId ? "Select a point of contact" : "Select a company first" },
-      ...contacts.map((contact) => ({
+      ...knownContacts.map((contact) => ({
         value: contact.id,
         label: `${contact.firstName} ${contact.lastName}`.trim(),
       })),
     ],
-    [contacts, companyId]
+    [knownContacts, companyId]
   );
 
   const selectedLabel = items.find((item) => item.value === (value || NONE))?.label ?? "Select a point of contact";
@@ -190,7 +222,7 @@ export function PointOfContactField({
         </SelectTrigger>
         <SelectContent>
           <SelectItem value={NONE}>{companyId ? "Select a point of contact" : "Select a company first"}</SelectItem>
-          {contacts.map((contact) => (
+          {knownContacts.map((contact) => (
             <SelectItem key={contact.id} value={contact.id}>
               {contact.firstName} {contact.lastName}
               {contact.jobTitle ? ` · ${contact.jobTitle}` : ""}
@@ -311,7 +343,7 @@ export function PointOfContactField({
                 // `value` to an id this field's own picker doesn't list, so the trigger would silently show
                 // "Select a point of contact" while a save-time 400 waits ("Primary contact does not belong
                 // to the company") — contradicting the "no out-of-company escape hatch" doc comment above.
-                const inCompany = contacts.some((c) => c.id === s.id);
+                const inCompany = knownContacts.some((c) => c.id === s.id);
                 const companyLabel = getContactCompanyName(s);
                 return (
                   <div key={s.id} className="flex items-center justify-between gap-2" data-testid="poc-suggestion">
