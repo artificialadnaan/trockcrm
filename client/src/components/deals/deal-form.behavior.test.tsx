@@ -1045,6 +1045,31 @@ describe("DealForm direct-create context", () => {
     expect("primaryContactId" in payload).toBe(false);
   }, 30000);
 
+  it("keeps a point of contact supplied by the entry point", async () => {
+    // DealNewPage threads ?primaryContactId into initialValues, so a create started FROM a contact already
+    // knows the answer. Dropping it left the picker empty and blocked submit until the rep re-picked the
+    // contact they had literally just come from.
+    withServiceProjectType();
+    const { container, root } = await renderForm({
+      name: "SMOKE TEST DELETE service prefilled contact",
+      companyId: "company-1",
+      propertyId: "property-1",
+      projectTypeId: "type-service",
+      primaryContactId: "contact-7",
+    });
+    containers.push(container);
+    roots.push(root);
+
+    expect(container.querySelector("[data-testid='poc-value']")?.textContent).toBe("contact-7");
+
+    await submit(container);
+
+    expect(mocks.createDeal).toHaveBeenCalledWith(
+      expect.objectContaining({ primaryContactId: "contact-7" }),
+      expect.anything()
+    );
+  }, 30000);
+
   it("clears a chosen point of contact when the company changes", async () => {
     withServiceProjectType();
     const { container, root } = await renderForm({

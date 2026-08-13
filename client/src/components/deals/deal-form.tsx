@@ -50,6 +50,7 @@ interface DealFormProps {
     scopeTitle: string;
     description: string;
     projectTypeId: string;
+    primaryContactId: string;
     source: string;
   }>;
 }
@@ -121,7 +122,10 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
     propertyZip: deal?.propertyZip ?? "",
     officeCode: initialOfficeCode,
     projectTypeId: deal?.projectTypeId ?? initialValues?.projectTypeId ?? "",
-    primaryContactId: deal?.primaryContactId ?? "",
+    // DealNewPage threads ?primaryContactId through initialValues, so a create started FROM a contact
+    // already knows who the point of contact is. Ignoring it left that picker empty and blocked submission
+    // until the rep re-picked the contact they had just come from.
+    primaryContactId: deal?.primaryContactId ?? initialValues?.primaryContactId ?? "",
     regionId: deal?.regionId ?? "",
     source: initialSourceIsCategory || !initialSource ? initialSource : "Other",
     sourceDetail: initialSourceIsCategory ? "" : initialSource,

@@ -346,6 +346,39 @@ describe("PointOfContactField", () => {
     expect(document.querySelector<HTMLInputElement>("[data-testid='poc-first-name']")?.disabled).toBe(false);
   });
 
+  it("does not select a newly created contact if the dialog was closed during the refetch", async () => {
+    // The dialog's own close button and Escape stay live while refetch() is pending, and closing bumps
+    // saveSeq. Without a SECOND sequence check after that await, a rep who closes and switches company mid
+    // refetch gets the previous company's brand-new contact selected underneath them — then fails the
+    // server's company-membership check on create.
+    let resolveRefetch: (v?: unknown) => void = () => {};
+    const refetch = vi.fn(() => new Promise((resolve) => { resolveRefetch = resolve; }));
+    mocks.useCompanyContacts.mockReturnValue({ contacts: [], loading: false, error: null, refetch });
+    mocks.createContact.mockResolvedValue({ contact: { id: "contact-9", firstName: "Ada", lastName: "Lowe" } });
+    const onChange = vi.fn();
+    render({ onChange });
+
+    act(() => container.querySelector<HTMLButtonElement>("[data-testid='poc-add-button']")!.click());
+    setFieldValue("poc-first-name", "Ada");
+    setFieldValue("poc-last-name", "Lowe");
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>("[data-testid='poc-save']")!.click();
+    });
+
+    // The rep closes the dialog while the refetch is still in flight — via the DialogContent's OWN close
+    // button, which unlike Cancel and Save is not disabled by `saving`, so this really is reachable.
+    const builtInClose = document.querySelector<HTMLButtonElement>('[data-slot="dialog-close"]');
+    expect(builtInClose).not.toBeNull();
+    act(() => {
+      builtInClose!.click();
+    });
+    await act(async () => {
+      resolveRefetch();
+    });
+
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
   it("will not open the add dialog while the company's contacts are unavailable", () => {
     // Membership is decided by looking a suggestion up in `contacts` (a suggestion carries no companyId),
     // so an empty list — errored OR still loading — would brand a contact that genuinely belongs to this

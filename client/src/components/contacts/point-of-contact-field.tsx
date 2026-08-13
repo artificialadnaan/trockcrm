@@ -128,6 +128,11 @@ export function PointOfContactField({
       if (seq !== saveSeq.current) return;
       if (result.contact) {
         await refetch();
+        // Checked AGAIN after the await. The dialog's own close button and Escape stay live during the
+        // refetch, and closing bumps saveSeq — so without this a rep who closes and switches company mid
+        // refetch would have the previous company's brand-new contact silently selected underneath them,
+        // then fail the server's company-membership check on create.
+        if (seq !== saveSeq.current) return;
         onChange(result.contact.id);
         closeDialog();
         return;
