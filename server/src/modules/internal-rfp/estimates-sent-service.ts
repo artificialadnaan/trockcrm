@@ -22,6 +22,7 @@
 // those is a real send worth reporting. `priorEntryCount` says how many times it had been sent before this
 // one, so a re-send reads as a re-send rather than as new business.
 
+import { buildProcoreBidBoardProjectUrl } from "@trock-crm/shared/lib/procoreBidBoard";
 import { SENT_STAGE_SLUGS } from "../reports/foundations.js";
 import { aliasedDealBestEstimateSqlText } from "../shared/deal-value-sql.js";
 
@@ -52,7 +53,7 @@ export interface EstimateSentDeal {
    * and the office id is mandatory: the deal page derives its tenant from the query string, so a link
    * without it lands a reader on "not found" for a deal that exists.
    */
-  dealUrl: string;
+  dealUrl: string | null;
   /**
    * Absolute link to the same project on Procore's Bid Board, or null when this deal has no Bid Board
    * record. Roughly half of all historical estimate-sent deals have none — but that is almost entirely one
@@ -69,25 +70,18 @@ function frontendBaseUrl(): string {
 }
 
 /**
- * Procore's WEB app, which is regional and is NOT api.procore.com (the only Procore host this codebase
- * otherwise knows). Overridable because the region is a deployment fact, not a code one.
- */
-function procoreAppBaseUrl(): string {
-  return (process.env.PROCORE_APP_BASE_URL?.trim() || "https://us02.procore.com").replace(/\/+$/, "");
-}
-
-/**
- * The Bid Board deep link, or null when either identifier is missing.
+ * The Bid Board deep link, from the SHARED builder rather than a local copy of the formula.
  *
- * BOTH are required: the path names a company AND a project, and a URL missing either is a 404 dressed up
- * as a link. `procore_bid_id` is the Bid Board project id — verified against SyncHub's own
- * bidboard_sync_state.project_id, which is what its automation drives.
+ * `client/src/lib/procore.ts` already owned this and says in its own header that it exists so the URL is
+ * built in one place; writing it again here would have made the third copy it warns about. Both
+ * identifiers are required — the path names a company AND a project, so a row missing either yields null
+ * rather than a 404 dressed up as a link. `procore_bid_id` is the right one: its values match SyncHub's
+ * bidboard_sync_state.project_id, which is what drives its automation.
  */
-export function buildBidBoardUrl(companyId: unknown, bidId: unknown): string | null {
+function bidBoardUrlFor(companyId: unknown, bidId: unknown): string | null {
   const company = String(companyId ?? "").trim();
   const bid = String(bidId ?? "").trim();
-  if (!company || !bid) return null;
-  return `${procoreAppBaseUrl()}/webclients/host/companies/${encodeURIComponent(company)}/tools/bid-board/project/${encodeURIComponent(bid)}/details`;
+  return buildProcoreBidBoardProjectUrl(company || null, bid || null);
 }
 
 const TENANT_SCHEMA_REGEX = /^office_[a-z][a-z0-9_]*$/;
@@ -213,10 +207,14 @@ export async function loadEstimatesSent(
         ownerName: row.owner_name ?? null,
         ownerEmail: row.owner_email ?? null,
         priorEntryCount: Number(row.prior_entry_count ?? 0),
-        dealUrl: `${frontendBaseUrl()}/deals/${encodeURIComponent(String(row.deal_id))}${
-          row.office_id ? `?officeId=${encodeURIComponent(String(row.office_id))}` : ""
-        }`,
-        bidBoardUrl: buildBidBoardUrl(row.procore_company_id, row.procore_bid_id),
+        // NULL, not a link without ?officeId. The deal page resolves its tenant from that parameter, so a
+        // URL missing it is worse than no URL: it takes the reader to "not found" for a deal that exists,
+        // and reads as a CRM bug rather than a missing link. The row itself still appears — an unresolved
+        // office is no reason to omit a real estimate from the report.
+        dealUrl: row.office_id
+          ? `${frontendBaseUrl()}/deals/${encodeURIComponent(String(row.deal_id))}?officeId=${encodeURIComponent(String(row.office_id))}`
+          : null,
+        bidBoardUrl: bidBoardUrlFor(row.procore_company_id, row.procore_bid_id),
       });
     }
   }

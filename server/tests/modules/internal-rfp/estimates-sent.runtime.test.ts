@@ -449,7 +449,7 @@ describe("the links the email renders", () => {
       // The office id is not decoration: the deal page derives its tenant from it, so a link without one
       // lands the reader on "not found" for a deal that exists.
       expect(row.dealUrl).toMatch(/\?officeId=[0-9a-f-]{36}$/);
-      expect(row.dealUrl.startsWith("https://")).toBe(true);
+      expect(row.dealUrl!.startsWith("https://")).toBe(true);
     }
   });
 
@@ -463,5 +463,24 @@ describe("the links the email renders", () => {
     // Half of all historical estimate-sent deals have no Bid Board record — null must render as "no link"
     // rather than a dead one.
     expect(unlinked?.bidBoardUrl).toBeNull();
+  });
+
+  it("emits NO deal link rather than one the deal page cannot resolve", async () => {
+    // An office row the schema cannot be mapped to means no ?officeId. A URL without it takes the reader
+    // to "not found" for a deal that plainly exists, which reads as a CRM bug — worse than no link. The
+    // estimate itself must still be reported.
+    await db.query("DELETE FROM public.offices WHERE slug = 'dallas'");
+    try {
+      const rows = await loadEstimatesSent(query, SCHEMAS, WINDOW_FROM, WINDOW_TO);
+      const dallas = rows.filter((r) => r.officeSlug === "dallas");
+      expect(dallas.length).toBeGreaterThan(0);
+      expect(dallas.every((r) => r.dealUrl === null)).toBe(true);
+      // Scoped to the office we broke: Atlanta still resolves, and its links must be unaffected.
+      expect(rows.filter((r) => r.officeSlug === "atlanta").every((r) => r.dealUrl !== null)).toBe(true);
+      // …and the Bid Board link is unaffected: it does not depend on the office.
+      expect(rows.find((r) => r.dealId === D_FIRST)?.bidBoardUrl).toContain("/tools/bid-board/");
+    } finally {
+      await db.query("INSERT INTO public.offices (id, slug) VALUES ('44444444-4444-4444-4444-444444440001','dallas')");
+    }
   });
 });
