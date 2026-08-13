@@ -82,14 +82,19 @@ vi.mock("@/components/contacts/point-of-contact-field", () => ({
     companyId,
     value,
     onChange,
+    officeId,
   }: {
     companyId: string;
     value: string;
     onChange: (id: string) => void;
+    officeId: string | null;
   }) => (
     <div>
       <span data-testid="poc-company">{companyId}</span>
       <span data-testid="poc-value">{value}</span>
+      {/* Exposed so a wrong office on the field is catchable: the picker reads the company's contacts
+          office-scoped, and the create must target the same tenant the contact was resolved in. */}
+      <span data-testid="poc-office">{officeId ?? ""}</span>
       <button type="button" data-testid="poc-pick" onClick={() => onChange("contact-1")}>
         pick contact
       </button>
@@ -1002,6 +1007,10 @@ describe("DealForm direct-create context", () => {
 
     // The field is offered…
     expect(container.querySelector("[data-testid='poc-pick']")).not.toBeNull();
+    // …scoped to the same company and office the create will target. The picker resolves contacts
+    // office-scoped, so a mismatch here would offer contacts from a tenant the deal is not created in.
+    expect(container.querySelector("[data-testid='poc-company']")?.textContent).toBe("company-1");
+    expect(container.querySelector("[data-testid='poc-office']")?.textContent).toBe("office-dallas");
     await submit(container);
 
     // …and the create is blocked, matching what the server would have done.

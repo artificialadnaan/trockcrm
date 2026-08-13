@@ -196,9 +196,10 @@ describe("POST /api/deals create context", () => {
       { id: "type-service", name: "Service", slug: "service", code: "4", isActive: true },
       { id: "type-roofing", name: "Roofing", slug: "roofing", code: "9", isActive: true },
     ]);
-    // Faithful to the real one for the values these tests use: it echoes a recognised active type back and
-    // yields null for anything else. The CODE is then resolved by the pure resolveProjectTypeCode, which is
-    // the logic actually under test here.
+    // Faithful about the ONE thing these tests turn on: a recognised active type resolves to a value and
+    // anything else resolves to null, so the route derivation runs its real tier order. It is deliberately
+    // NOT a full stand-in — the real one also matches on slug and normalises differently — but the code is
+    // then resolved by the pure resolveProjectTypeCode, which is the logic actually under test.
     pipelineServiceMocks.resolveActiveProjectTypeValue.mockImplementation(async (value: unknown) => {
       const text = String(value ?? "").trim().toLowerCase();
       if (text === "service") return "Service";
