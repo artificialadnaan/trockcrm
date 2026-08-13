@@ -380,9 +380,11 @@ describe("PointOfContactField", () => {
   });
 
   it("can still name a contact it created when the refetch that should return it fails", async () => {
-    // useCompanyContacts.refetch swallows its own failure and clears `contacts`, so a successful create
-    // followed by a failed refetch used to leave the trigger reading "Select a point of contact" while the
-    // parent held the id — an invisible selection on the one field whose job is to say who to call.
+    // A refetch that resolves without returning the new contact — the shape a failed or lagging refetch
+    // leaves behind, since useCompanyContacts catches its own error and clears `contacts`. Without the
+    // local fallback the trigger reads "Select a point of contact" while the parent holds the id: an
+    // invisible selection on the one field whose job is to say who to call. (A genuine network failure
+    // also sets `error`, which routes to the retry banner; this pins the naming, not the banner.)
     const refetch = vi.fn(async () => {});
     mocks.useCompanyContacts.mockReturnValue({ contacts: [], loading: false, error: null, refetch });
     mocks.createContact.mockResolvedValue({

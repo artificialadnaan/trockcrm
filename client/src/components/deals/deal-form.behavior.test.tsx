@@ -105,6 +105,14 @@ vi.mock("@/components/contacts/point-of-contact-field", () => ({
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 function setupCommonMocks() {
+  // A DEFAULT, so a test that does not care about offices is not silently order-dependent: clearAllMocks
+  // resets calls but NOT implementations, so without this a test inherits whatever the previous one left
+  // and passes or explodes depending on the order it ran in. Tests that care still override it.
+  mocks.useAccessibleOffices.mockReturnValue({
+    offices: [{ id: "office-dallas", name: "Dallas", slug: "dallas" }],
+    loading: false,
+    error: null,
+  });
   mocks.useAuth.mockReturnValue({
     user: {
       id: "rep-1",
@@ -1166,6 +1174,29 @@ describe("DealForm direct-create context", () => {
       expect.objectContaining({ projectTypeId: "type-service", primaryContactId: "contact-7" }),
       expect.anything()
     );
+  }, 30000);
+
+  it("does not ship a prefilled contact on a non-Service create", async () => {
+    // /deals/new has always read ?primaryContactId, and main never sent it. Sending it for a non-Service
+    // type would be a new way to fail: validateDealPrimaryContact rejects a contact that does not belong
+    // to the company, on a form where the picker is hidden and the rep has nothing to clear.
+    withServiceProjectType();
+    const { container, root } = await renderForm({
+      name: "SMOKE TEST DELETE roofing with prefilled contact",
+      companyId: "company-1",
+      propertyId: "property-1",
+      projectTypeId: "type-roofing",
+      primaryContactId: "contact-7",
+    });
+    containers.push(container);
+    roots.push(root);
+
+    await submit(container);
+
+    expect(mocks.createDeal).toHaveBeenCalled();
+    const payload = mocks.createDeal.mock.calls[0][0] as Record<string, unknown>;
+    expect(payload.projectType).toBe("Roofing");
+    expect("primaryContactId" in payload).toBe(false);
   }, 30000);
 
   it("clears a chosen point of contact when the company changes", async () => {

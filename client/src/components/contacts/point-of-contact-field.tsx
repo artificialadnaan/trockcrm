@@ -206,7 +206,7 @@ export function PointOfContactField({
   );
 
   const selectedLabel = items.find((item) => item.value === (value || NONE))?.label ?? "Select a point of contact";
-  const hasNoContacts = Boolean(companyId) && !loading && !error && contacts.length === 0;
+  const hasNoContacts = Boolean(companyId) && !loading && !error && knownContacts.length === 0;
 
   return (
     <div className="space-y-2">
