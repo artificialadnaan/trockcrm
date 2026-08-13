@@ -7,6 +7,7 @@ import { sendSystemEmail } from "../../lib/resend-client.js";
 import { hashPassword, verifyPassword } from "../auth/local-auth-service.js";
 import { signJwt } from "../auth/service.js";
 import { getFieldAppUrl } from "../auth/http-config.js";
+import { toProperCaseName } from "../../lib/person-name.js";
 
 const INVITE_TOKEN_BYTES = 32;
 const INVITE_TTL_DAYS = 7;
@@ -259,6 +260,14 @@ export async function inviteFieldUser(input: {
     throw new AppError(409, "A pending invite already exists for this email");
   }
 
+  // Normalised HERE, not only at acceptance (Codex P2). The invite row is not a private staging record:
+  // listFieldUsers returns pending invites and the Admin → Field Users table renders these columns
+  // directly, resends reuse them, and the invitation email greets the recipient by this name. Fixing the
+  // casing only on accept left the badly-cased version on all three surfaces until the person signed up —
+  // and the invite is exactly where a hand-typed lowercase name enters the system.
+  const firstName = toProperCaseName(input.firstName.trim());
+  const lastName = toProperCaseName(input.lastName.trim(), { surname: true });
+
   const rawToken = generateInviteToken();
   const tokenHash = hashInviteToken(rawToken);
   const expiresAt = inviteExpiry();
@@ -278,8 +287,8 @@ export async function inviteFieldUser(input: {
       ${email},
       ${input.tenantId}::uuid,
       ${tokenHash},
-      ${input.firstName.trim()},
-      ${input.lastName.trim()},
+      ${firstName},
+      ${lastName},
       ${input.phone?.trim() || null},
       ${input.invitedByUserId}::uuid,
       ${expiresAt},
@@ -294,7 +303,8 @@ export async function inviteFieldUser(input: {
   `);
   const inviter = ((inviterResult as any).rows ?? inviterResult)[0];
   const emailContent = buildInviteEmail({
-    inviteeName: `${input.firstName.trim()} ${input.lastName.trim()}`.trim(),
+    // The normalised names, so the email greets them the way the record will spell them.
+    inviteeName: `${firstName} ${lastName}`.trim(),
     inviterName: inviter?.display_name ?? "T Rock",
     inviteUrl: fieldInviteUrl(rawToken),
   });
@@ -813,8 +823,11 @@ export async function acceptFieldInvite(input: { token: string; password: string
   const user = {
     id: crypto.randomUUID(),
     email: invite.email,
-    first_name: invite.first_name,
-    last_name: invite.last_name,
+    // Capitalised here rather than at the INSERT so the API response, the JWT-bearing payload and the row
+    // all carry the same spelling. This is the path that produced most of the lowercase names in
+    // production — an invite is typed by hand, and nothing downstream ever corrected it.
+    first_name: toProperCaseName(invite.first_name),
+    last_name: toProperCaseName(invite.last_name, { surname: true }),
     role: "field_contractor",
     office_id: invite.tenant_id,
     is_active: true,
@@ -850,9 +863,9 @@ export async function acceptFieldInvite(input: { token: string; password: string
         VALUES (
           ${user.id}::uuid,
           ${invite.email},
-          ${`${invite.first_name} ${invite.last_name}`.trim()},
-          ${invite.first_name},
-          ${invite.last_name},
+          ${`${user.first_name} ${user.last_name}`.trim()},
+          ${user.first_name},
+          ${user.last_name},
           ${invite.phone},
           'field_contractor',
           ${invite.tenant_id}::uuid,

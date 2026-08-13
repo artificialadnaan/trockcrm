@@ -7,7 +7,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { MetricCard } from "@/components/shared/metric-card";
 import { ScopeToggle, type ScopeToggleOption } from "@/components/shared/scope-toggle";
 import { USD_COMPACT } from "@/components/shared/formatters";
+import { useRepRoster } from "@/hooks/use-rep-roster";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
+import { buildRepFilterOptions } from "@/lib/rep-filter-options";
 import { useAuth } from "@/lib/auth";
 import {
   LEAD_BOARD_STAGE_SLUGS,
@@ -274,10 +276,40 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
   const bucket = searchParams.get("bucket");
   const search = searchParams.get("search") ?? "";
   const selectedOwnerId = role === "rep" || scope === "mine" ? "" : searchParams.get("assignedRepId") ?? "";
+  // The sales roster fills the dropdown; the wide assignee feed names whoever is currently selected. This
+  // page has no saved-preference hydration to prune a stale owner, so an off-roster ?assignedRepId simply
+  // stays applied — and without a name for it the control would claim "All reps" while the board is
+  // narrowed to one person (Codex P2). See buildRepFilterOptions.
+  //
+  // Gated on the rep filters being VISIBLE at all (Codex P3). The header select is suppressed for a rep
+  // or under scope=mine (see selectedOwnerId above), and the nested bar drops its Rep dimension on the
+  // same condition — so for those viewers the roster was fetched, and its deal_owners scan paid for, with
+  // nothing to render it in. The condition is written once here and reused for the bar's dimensions below
+  // so the two cannot disagree about when a rep filter exists.
+  const repFilterVisible = (role === "admin" || role === "director") && scope !== "mine";
+  const { reps: roster } = useRepRoster({ enabled: repFilterVisible });
   const { assignees } = useTaskAssignees();
   const { projectTypes } = useProjectTypes();
+  const assigneeNameById = useMemo(
+    () => new Map(assignees.map((assignee) => [assignee.id, assignee.displayName])),
+    [assignees]
+  );
+  const repOptions = useMemo(
+    () => buildRepFilterOptions(roster, selectedOwnerId, (id) => assigneeNameById.get(id)),
+    [roster, selectedOwnerId, assigneeNameById]
+  );
+  // The nested list keys off its OWN ll_-prefixed param (LEADS_LIST_PARAM_PREFIX), which is independent
+  // of the page-level one above — so it needs its own reconciliation, exactly as the deals page does for
+  // dl_assignedRepId. filterBarValueToLeadFilters still forwards the namespaced value, so a bookmarked
+  // off-roster ll_assignedRepId keeps the list filtered while FilterSelect, unable to match it, labels
+  // the control "All reps" (Codex P2).
+  const nestedOwnerId = searchParams.get("ll_assignedRepId") || undefined;
+  const nestedRepOptions = useMemo(
+    () => buildRepFilterOptions(roster, nestedOwnerId, (id) => assigneeNameById.get(id)),
+    [roster, nestedOwnerId, assigneeNameById]
+  );
   const selectedOwnerLabel = selectedOwnerId
-    ? assignees.find((assignee) => assignee.id === selectedOwnerId)?.displayName ?? "Selected rep"
+    ? repOptions.find((rep) => rep.id === selectedOwnerId)?.displayName ?? "Selected rep"
     : "All reps";
   // No-blank: keep the previously-loaded board visible during a search/scope refetch (the
   // hook already retains data + sequences responses via its requestId guard; this gates the
@@ -350,14 +382,14 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <ScopeToggle options={scopeOptions} value={scope} onChange={updateScope} ariaLabel="Lead scope" />
-          {(role === "admin" || role === "director") && scope !== "mine" ? (
+          {repFilterVisible ? (
             <Select value={selectedOwnerId || "__all__"} onValueChange={updateOwner}>
               <SelectTrigger className="w-44">
                 <SelectValue placeholder="All reps">{selectedOwnerLabel}</SelectValue>
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="__all__">All reps</SelectItem>
-                {assignees.map((assignee) => (
+                {repOptions.map((assignee) => (
                   <SelectItem key={assignee.id} value={assignee.id}>
                     {assignee.displayName}
                   </SelectItem>
@@ -435,12 +467,12 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
         filterBar={{
           // Mirror the page's owner-filter gating: the Rep dimension is only useful to admins/directors
           // on a non-"mine" scope (a rep viewing "mine" sees only their own leads).
-          dimensions:
-            (role === "admin" || role === "director") && scope !== "mine"
+          dimensions: repFilterVisible
               ? LEAD_LIST_FILTERBAR_DIMENSIONS
               : LEAD_LIST_FILTERBAR_DIMENSIONS.filter((dimension) => dimension !== "rep"),
           options: {
-            reps: assignees.map((assignee) => ({ value: assignee.id, label: assignee.displayName })),
+            // Reconciled against ll_assignedRepId, the param this bar actually writes — not the page's.
+            reps: nestedRepOptions.map((rep) => ({ value: rep.id, label: rep.displayName })),
             projectTypes: projectTypes.map((projectType) => ({ value: projectType.id, label: projectType.name })),
             stages: (board?.columns ?? [])
               .filter((column) =>

@@ -11,9 +11,11 @@ import {
   isCommissionEvidenceMetric,
   getRepDetail,
   getRepPerformanceSnapshots,
+  getRepRosterOptions,
   REP_PERFORMANCE_PERIOD_KINDS,
   type RepPerformancePeriodKind,
 } from "./service.js";
+import { getAccessibleOffices } from "../auth/service.js";
 import {
   getRepCommissionDashboard,
   normalizeCommissionPeriod,
@@ -36,6 +38,48 @@ router.get("/rep", async (req, res, next) => {
     });
     await req.commitTransaction!();
     res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/dashboard/rep-roster -- the reps a board filter may offer (deals dashboard, leads list).
+//
+// NOT role-gated, deliberately. It replaces GET /tasks/assignees as the source for those dropdowns, and
+// that endpoint is open to every authenticated user — gating this one harder would take the rep filter
+// away from the reps who use it, and the response is a strict SUBSET of what they can already read there.
+//
+// Office resolution mirrors resolveRequestedTaskOfficeId: an x-office-id header wins (the dashboard sends
+// the office the VIEW is on, which is not always the user's active office), but only after it is checked
+// against the caller's accessible offices — otherwise the header alone would read another office's roster.
+router.get("/rep-roster", async (req, res, next) => {
+  try {
+    const requestedOfficeId = req.headers["x-office-id"] as string | undefined;
+    const accessibleOffices = await getAccessibleOffices(
+      req.user!.id,
+      req.user!.role,
+      req.user!.activeOfficeId ?? req.user!.officeId
+    );
+    if (requestedOfficeId && !accessibleOffices.some((office) => office.id === requestedOfficeId)) {
+      throw new AppError(403, "Requested office is not accessible");
+    }
+    const officeId = requestedOfficeId ?? req.user!.activeOfficeId ?? req.user!.officeId;
+    // REQUIRED, not optional. dashboardRosterMembershipSql degrades its office test to TRUE when given no
+    // office, and `users` lives in public — so an undefined officeId here would return every
+    // generates_sales user in EVERY office, which is the D-5 cross-office leak that predicate's own
+    // comment warns about. Refuse instead, exactly as GET /tasks/assignees does.
+    if (!officeId) {
+      throw new AppError(400, "Office context is required. Specify x-office-id.");
+    }
+    // The RESOLVED office is re-checked, not just a supplied header: a stale activeOfficeId from a revoked
+    // office grant would otherwise read a roster the caller can no longer see.
+    if (!accessibleOffices.some((office) => office.id === officeId)) {
+      throw new AppError(403, "Requested office is not accessible");
+    }
+
+    const users = await getRepRosterOptions(req.tenantDb!, officeId);
+    await req.commitTransaction!();
+    res.json({ users });
   } catch (err) {
     next(err);
   }

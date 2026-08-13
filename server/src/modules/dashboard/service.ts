@@ -981,6 +981,56 @@ export function dashboardRosterMembershipSql(officeId?: string): SQL {
         )`;
 }
 
+/**
+ * The rep list a BOARD FILTER may offer — the deals dashboard and the leads list.
+ *
+ * Those two dropdowns used to be fed by `GET /tasks/assignees`, i.e. every active account in the office:
+ * field contractors who have never owned a deal, admins, dormant logins, test accounts. 32 names to pick
+ * from where 11 people actually carry deals. It was the wrong feed rather than a stale one — "who may be
+ * assigned a task" and "who runs deals" are different questions that happened to share a shape.
+ *
+ * So the answer comes from the SAME predicate the director dashboard's rep cards and funnel use, which is
+ * the definition of this roster — see dashboardRosterMembershipSql. Deliberately not a near-copy: the
+ * comment there records two separate occasions where a duplicated roster rule drifted from its original,
+ * and a filter that offers a different set of people than the performance views is that same bug wearing
+ * a dropdown.
+ *
+ * THE FLAG IS ABSOLUTE HERE TOO. Unticking "Generates Sales" removes someone from this filter even while
+ * they still own live deals, which is the point of the control and was chosen knowingly: their deals stay
+ * visible on the board, they just stop being a thing you can filter BY. The stale-filter guard on the
+ * deals dashboard already drops a saved rep who is no longer offered, so an unticked person cannot leave
+ * a board silently narrowed to them.
+ */
+export async function getRepRosterOptions(
+  tenantDb: TenantDb,
+  officeId?: string
+): Promise<Array<{ id: string; displayName: string }>> {
+  const result = await tenantDb.execute(sql`
+    WITH deal_owners AS (
+      -- Verbatim from the funnel roster. deals is a TENANT table (search_path office_slug,public), so
+      -- this is already bounded to THIS office by schema isolation, not left unconstrained.
+      SELECT DISTINCT d.assigned_rep_id AS rep_id
+      FROM deals d
+      WHERE d.assigned_rep_id IS NOT NULL
+    )
+    SELECT u.id, u.display_name
+    FROM users u
+    LEFT JOIN deal_owners owner_rows ON owner_rows.rep_id = u.id
+    WHERE u.is_active = true
+      -- Matches the rep-card and funnel rosters: flagged smoke-test / duplicate accounts stay out.
+      AND COALESCE(u.is_test_data, false) = false
+      AND ${dashboardRosterMembershipSql(officeId)}
+    -- lower() so the order does not depend on capitalisation. Names are normalised on save now, but a
+    -- row written before that would otherwise sort into its own case-segregated block.
+    ORDER BY lower(u.display_name) ASC, u.id ASC
+  `);
+
+  return ((result as any).rows ?? result).map((row: any) => ({
+    id: String(row.id),
+    displayName: String(row.display_name ?? ""),
+  }));
+}
+
 async function getDirectorFunnelSummary(
   tenantDb: TenantDb,
   officeId?: string

@@ -22,6 +22,15 @@ const mocks = vi.hoisted(() => ({
   useDealsMock: vi.fn(),
   usePipelineStagesMock: vi.fn(),
   useTaskAssigneesMock: vi.fn(),
+  // `reps` is typed rather than left to infer from the empty literal — otherwise it widens to never[] and
+  // any test supplying an actual roster fails to compile.
+  useRepRosterMock: vi.fn(() => ({
+    reps: [] as Array<{ id: string; displayName: string }>,
+    loading: false,
+    error: null as string | null,
+    loadedOfficeId: null as string | null,
+    refetch: vi.fn(),
+  })),
   apiMock: vi.fn(),
 }));
 
@@ -35,6 +44,13 @@ vi.mock("@/hooks/use-pipeline-config", () => ({
 
 vi.mock("@/hooks/use-task-assignees", () => ({
   useTaskAssignees: mocks.useTaskAssigneesMock,
+}));
+
+// The owner FILTER now reads the sales roster while the name map still reads the assignee list. Mocked to
+// an empty roster because these tests are about search/export/sort behaviour — left unmocked, the real
+// hook issues its own api() call and the "last api call" assertions below start reading that request.
+vi.mock("@/hooks/use-rep-roster", () => ({
+  useRepRoster: mocks.useRepRosterMock,
 }));
 
 vi.mock("@/lib/api", () => ({
@@ -694,6 +710,26 @@ describe("DealsListSection", () => {
     } finally {
       await cleanup();
     }
+  });
+
+  it("names a roster rep the assignee feed has never heard of (Codex P2)", () => {
+    // getRepRosterOptions admits someone through its owner_rows branch — owns a deal in THIS tenant —
+    // even with no primary-office row or access grant, while listUsers(officeId) behind useTaskAssignees
+    // does not. Such a rep is offered in the dropdown under their real name; resolving the trigger label
+    // from the assignee feed alone rendered them as "Selected rep" permanently once picked.
+    mocks.useRepRosterMock.mockReturnValue({
+      reps: [{ id: "rep-owner-only", displayName: "Cross Office Owner" }],
+      loading: false,
+      error: null,
+      loadedOfficeId: null,
+      refetch: vi.fn(),
+    });
+    mocks.useTaskAssigneesMock.mockReturnValue({ assignees: [{ id: "rep-1", displayName: "Brett Jones" }] });
+
+    const html = render({ lockedOwnerId: "rep-owner-only" });
+
+    expect(html).toContain("Cross Office Owner");
+    expect(html).not.toContain("Selected rep");
   });
 
   it("forwards updatedFrom and updatedTo into the CSV export request", async () => {

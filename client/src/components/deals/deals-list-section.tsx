@@ -19,6 +19,8 @@ import { buildDealsQueryParams, useDeals, type Deal, type DealFilters } from "@/
 import { SearchInput } from "@/components/ui/search-input";
 import { useKeepPreviousData } from "@/hooks/use-keep-previous-data";
 import { usePipelineStages, type PipelineStage } from "@/hooks/use-pipeline-config";
+import { useRepRoster } from "@/hooks/use-rep-roster";
+import { buildRepFilterOptions } from "@/lib/rep-filter-options";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { DealValue } from "@/components/deals/deal-value";
 import {
@@ -746,6 +748,24 @@ export function DealsListSection({
   const effectiveAssignedRepId = lockedOwnerId ?? (hideOwnerFilter ? undefined : ownerId === "__all__" ? undefined : ownerId);
 
   const { stages, loading: stagesLoading, error: stagesError } = usePipelineStages(workflowFamily);
+  // TWO feeds, because there are two questions here and conflating them is a bug in either direction.
+  //
+  //   repOptions   — who the owner FILTER may offer: the sales roster, matching the deals dashboard's Rep
+  //                  filter directly above this list and the director dashboard's rosters.
+  //   assignees    — who a name can be resolved FOR: every assignable account. This map is the fallback
+  //                  when a deal row arrives without assignedRepName, and it feeds the CSV export. Narrowed
+  //                  to the roster it would render a real owner as "Unassigned" the moment that person was
+  //                  unticked — turning a filter-scope decision into wrong data on screen and in exports.
+  //
+  // The roster request is GATED on this section actually drawing the owner dropdown. It renders only
+  // outside FilterBar mode (see the `!filterBarMode &&` guard on the legacy controls) and only when the
+  // owner filter is not hidden — so on the stage page, the director rep detail and the base /deals view
+  // the roster was fetched and immediately discarded, once per mount, duplicating the request AND its
+  // deal_owners scan that the parent page had already made (Codex P3).
+  //
+  // `assignees` is NOT gated: its map resolves owner names for the rows and the CSV export, which every
+  // mode renders.
+  const { reps: repOptions } = useRepRoster({ enabled: !filterBarMode && !hideOwnerFilter });
   const { assignees } = useTaskAssignees();
 
   const stageFilterOptions = useMemo(() => {
@@ -952,8 +972,25 @@ export function DealsListSection({
     () => new Map(assignees.map((assignee) => [assignee.id, assignee.displayName])),
     [assignees]
   );
+  // A drill-down or a locked owner can pin this list to someone outside the roster. Offering them as an
+  // extra option keeps the control able to name and clear that selection; the roster decides what the
+  // dropdown offers for every OTHER choice, which is the point of the change.
+  const ownerFilterOptions = useMemo(
+    () =>
+      buildRepFilterOptions(repOptions, ownerId === "__all__" ? undefined : ownerId, (id) =>
+        assigneeNameById.get(id)
+      ),
+    [repOptions, ownerId, assigneeNameById]
+  );
+  // Resolved from the OPTIONS, not from the assignee feed alone (Codex P2). getRepRosterOptions admits
+  // someone through its owner_rows branch — owns a deal in this tenant — even with no primary-office row
+  // or access grant, while listUsers(officeId) behind useTaskAssignees does not. Such a rep appears in
+  // this dropdown under their real name and would then render as "Selected rep" forever once picked,
+  // because the fallback feed has never heard of them. The options already carry the name; use it.
   const selectedOwnerLabel =
-    ownerId === "__all__" ? "All reps" : assigneeNameById.get(ownerId) ?? "Selected rep";
+    ownerId === "__all__"
+      ? "All reps"
+      : ownerFilterOptions.find((rep) => rep.id === ownerId)?.displayName ?? "Selected rep";
   const derivedCountSummary =
     paginationCountSummary ??
     (typeof pagination.activeCount === "number"
@@ -1318,9 +1355,9 @@ export function DealsListSection({
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="__all__">All reps</SelectItem>
-                {assignees.map((assignee) => (
-                  <SelectItem key={assignee.id} value={assignee.id}>
-                    {assignee.displayName}
+                {ownerFilterOptions.map((rep) => (
+                  <SelectItem key={rep.id} value={rep.id}>
+                    {rep.displayName}
                   </SelectItem>
                 ))}
               </SelectContent>
