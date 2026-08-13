@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api } from "@/lib/api";
 import { getOfficeRequestOptions, type OfficeRequestOptions } from "@/lib/office-selection";
 
@@ -37,6 +38,15 @@ export interface UseRepRosterOptions extends OfficeRequestOptions {
 
 export function useRepRoster(options: UseRepRosterOptions = {}) {
   const { enabled = true } = options;
+  // Office context is URL-driven: lib/api reads ?officeId itself and sends it as x-office-id, so the
+  // REQUEST was always correct — what was missing is reactivity (Codex P2). Callers that omit `officeId`
+  // (the leads list, the legacy owner control in the deals list section) depended only on that undefined
+  // value, so switching ?officeId in place never re-ran the effect and the dropdown kept offering the
+  // PREVIOUS tenant's owners. Reading the param here makes the URL a dependency; an explicit officeId
+  // from the caller still wins, so deal-list-page's effectiveOfficeId behaviour is unchanged.
+  const [searchParams] = useSearchParams();
+  const urlOfficeId = searchParams.get("officeId");
+  const effectiveOfficeId = options.officeId ?? urlOfficeId ?? null;
   const [reps, setReps] = useState<RepRosterOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -45,7 +55,7 @@ export function useRepRoster(options: UseRepRosterOptions = {}) {
 
   const load = useCallback(async () => {
     const requestId = ++requestRef.current;
-    const requestOfficeId = options.officeId ?? null;
+    const requestOfficeId = effectiveOfficeId;
     if (!enabled) {
       setReps([]);
       setError(null);
@@ -77,7 +87,7 @@ export function useRepRoster(options: UseRepRosterOptions = {}) {
         setLoadedOfficeId(requestOfficeId);
       }
     }
-  }, [options.officeId, enabled]);
+  }, [effectiveOfficeId, options.officeId, enabled]);
 
   useEffect(() => {
     load();

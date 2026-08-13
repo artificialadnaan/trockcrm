@@ -24,13 +24,24 @@ export interface RepFilterOption {
  * that cannot resolve it (a deactivated or deleted user) the honest fallback is "Selected rep": vague, but
  * it still tells the truth that SOMETHING is selected.
  */
+/**
+ * Filter values that are NOT user ids and must never be appended as a person.
+ *
+ * `__unassigned__` is the deals FilterBar's own option — it prepends
+ * `{ value: "__unassigned__", label: "Unassigned" }` itself. Treating it as an off-roster user produced a
+ * SECOND option with the same value, so the control rendered "Unassigned" and "Selected rep" side by side
+ * on duplicate keys; on the leads list, where the adapter deliberately drops the sentinel from the query,
+ * a bookmarked value showed as a selected person while filtering nothing (Codex P2).
+ */
+const RESERVED_FILTER_VALUES = new Set(["__all__", "__unassigned__"]);
+
 export function buildRepFilterOptions(
   roster: RepFilterOption[],
   selectedId: string | null | undefined,
   resolveName: (id: string) => string | undefined,
   fallbackLabel = "Selected rep"
 ): RepFilterOption[] {
-  if (!selectedId || selectedId === "__all__") return roster;
+  if (!selectedId || RESERVED_FILTER_VALUES.has(selectedId)) return roster;
   if (roster.some((rep) => rep.id === selectedId)) return roster;
   return [...roster, { id: selectedId, displayName: resolveName(selectedId) ?? fallbackLabel }];
 }

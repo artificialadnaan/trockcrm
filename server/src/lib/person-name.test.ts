@@ -100,6 +100,13 @@ describe("toProperCaseName", () => {
     expect(toProperCaseName("marco di")).toBe("Marco Di");
   });
 
+  it("preserves punctuation on a suffix (Codex P2)", () => {
+    // The set holds bare numerals, so comparing the whole token left the conventionally written
+    // "JOHN SMITH III." as "John Smith Iii.".
+    expect(toProperCaseName("JOHN SMITH III.")).toBe("John Smith III.");
+    expect(toProperCaseName("john smith ii.")).toBe("John Smith II.");
+  });
+
   it("does not mistake a name for a suffix", () => {
     // "Vi" is a common given name, so the suffix rule is anchored to the LAST token of a multi-word name.
     expect(toProperCaseName("vi nguyen")).toBe("Vi Nguyen");

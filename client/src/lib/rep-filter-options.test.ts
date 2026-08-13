@@ -25,6 +25,14 @@ describe("buildRepFilterOptions", () => {
     expect(buildRepFilterOptions(ROSTER, "__all__", resolve)).toEqual(ROSTER);
   });
 
+  it("treats the unassigned sentinel as a filter value, not a person (Codex P2)", () => {
+    // FilterBar prepends its own { value: "__unassigned__", label: "Unassigned" }. Appending a second
+    // option with that value rendered "Unassigned" AND "Selected rep" on duplicate keys; on the leads
+    // list, where the adapter drops the sentinel from the query, it showed as a selected person while
+    // filtering nothing.
+    expect(buildRepFilterOptions(ROSTER, "__unassigned__", resolve)).toEqual(ROSTER);
+  });
+
   it("returns the roster untouched when the selection is already on it", () => {
     expect(buildRepFilterOptions(ROSTER, "rep-2", resolve)).toEqual(ROSTER);
   });

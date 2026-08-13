@@ -4,6 +4,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { createElement } from "react";
+import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useRepRoster } from "./use-rep-roster";
 
@@ -36,7 +37,10 @@ async function mountHook(officeId?: string): Promise<{ current: Captured }> {
   return mountHookWith(officeId === undefined ? {} : { officeId });
 }
 
-async function mountHookWith(options: Parameters<typeof useRepRoster>[0]): Promise<{ current: Captured }> {
+async function mountHookWith(
+  options: Parameters<typeof useRepRoster>[0],
+  initialUrl = "/deals"
+): Promise<{ current: Captured }> {
   const captured = { current: undefined as unknown as Captured };
   function Probe() {
     captured.current = useRepRoster(options);
@@ -46,7 +50,8 @@ async function mountHookWith(options: Parameters<typeof useRepRoster>[0]): Promi
   document.body.appendChild(container);
   root = createRoot(container);
   await act(async () => {
-    root?.render(createElement(Probe));
+    // Router-wrapped because the hook reads ?officeId to stay reactive to office switches.
+    root?.render(createElement(MemoryRouter, { initialEntries: [initialUrl] }, createElement(Probe)));
   });
   return captured;
 }
@@ -104,6 +109,26 @@ describe("useRepRoster", () => {
     expect(captured.current.loading).toBe(false);
     // Settled, so a caller gating on loadedOfficeId is not left waiting for a load that never comes.
     expect(captured.current.loadedOfficeId).toBe("office-1");
+  });
+
+  it("tracks the URL office when the caller passes none (Codex P2)", async () => {
+    // Office context is URL-driven, so callers that omit officeId — the leads list, the legacy owner
+    // control in the deals list section — previously depended only on that undefined value. Switching
+    // ?officeId never re-ran the effect and the dropdown kept offering the PREVIOUS tenant's owners.
+    apiMock.mockResolvedValue({ users: [] });
+
+    const captured = await mountHookWith({}, "/leads?officeId=office-atlanta");
+
+    expect(captured.current.loadedOfficeId).toBe("office-atlanta");
+  });
+
+  it("lets an explicit officeId win over the URL", async () => {
+    // deal-list-page passes its own effectiveOfficeId; that must keep precedence.
+    apiMock.mockResolvedValue({ users: [] });
+
+    const captured = await mountHookWith({ officeId: "office-explicit" }, "/deals?officeId=office-atlanta");
+
+    expect(captured.current.loadedOfficeId).toBe("office-explicit");
   });
 
   it("records which office the loaded list belongs to", async () => {

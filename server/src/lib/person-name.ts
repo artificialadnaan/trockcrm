@@ -147,8 +147,15 @@ export function toProperCaseName<T extends string | null | undefined>(
       const lowered = token.toLowerCase();
       // Generational suffix: last token of a multi-word name. Checked before the particle rule so the
       // two sets can never both claim a token.
-      if (index > 0 && index === tokens.length - 1 && UPPERCASE_SUFFIXES.has(lowered)) {
-        return lowered.toUpperCase();
+      //
+      // Trailing punctuation is split off for the lookup and restored afterwards — the set holds bare
+      // numerals, so comparing the whole token left the conventionally written "JOHN SMITH III." as
+      // "John Smith Iii." (Codex P2).
+      if (index > 0 && index === tokens.length - 1) {
+        const [, bareSuffix = "", trailingPunctuation = ""] = /^([\p{L}]*)([.,]*)$/u.exec(lowered) ?? [];
+        if (bareSuffix && UPPERCASE_SUFFIXES.has(bareSuffix)) {
+          return bareSuffix.toUpperCase() + trailingPunctuation;
+        }
       }
       // A particle needs a name AFTER it to attach to. In final position there is nothing to precede, so
       // the token is the surname itself — "marco di" is Marco Di, not Marco with a dangling preposition.
