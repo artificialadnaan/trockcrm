@@ -260,6 +260,14 @@ export async function inviteFieldUser(input: {
     throw new AppError(409, "A pending invite already exists for this email");
   }
 
+  // Normalised HERE, not only at acceptance (Codex P2). The invite row is not a private staging record:
+  // listFieldUsers returns pending invites and the Admin → Field Users table renders these columns
+  // directly, resends reuse them, and the invitation email greets the recipient by this name. Fixing the
+  // casing only on accept left the badly-cased version on all three surfaces until the person signed up —
+  // and the invite is exactly where a hand-typed lowercase name enters the system.
+  const firstName = toProperCaseName(input.firstName.trim());
+  const lastName = toProperCaseName(input.lastName.trim(), { surname: true });
+
   const rawToken = generateInviteToken();
   const tokenHash = hashInviteToken(rawToken);
   const expiresAt = inviteExpiry();
@@ -279,8 +287,8 @@ export async function inviteFieldUser(input: {
       ${email},
       ${input.tenantId}::uuid,
       ${tokenHash},
-      ${input.firstName.trim()},
-      ${input.lastName.trim()},
+      ${firstName},
+      ${lastName},
       ${input.phone?.trim() || null},
       ${input.invitedByUserId}::uuid,
       ${expiresAt},
@@ -295,7 +303,8 @@ export async function inviteFieldUser(input: {
   `);
   const inviter = ((inviterResult as any).rows ?? inviterResult)[0];
   const emailContent = buildInviteEmail({
-    inviteeName: `${input.firstName.trim()} ${input.lastName.trim()}`.trim(),
+    // The normalised names, so the email greets them the way the record will spell them.
+    inviteeName: `${firstName} ${lastName}`.trim(),
     inviterName: inviter?.display_name ?? "T Rock",
     inviteUrl: fieldInviteUrl(rawToken),
   });

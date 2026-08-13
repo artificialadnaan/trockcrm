@@ -280,7 +280,14 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
   // page has no saved-preference hydration to prune a stale owner, so an off-roster ?assignedRepId simply
   // stays applied — and without a name for it the control would claim "All reps" while the board is
   // narrowed to one person (Codex P2). See buildRepFilterOptions.
-  const { reps: roster } = useRepRoster();
+  //
+  // Gated on the rep filters being VISIBLE at all (Codex P3). The header select is suppressed for a rep
+  // or under scope=mine (see selectedOwnerId above), and the nested bar drops its Rep dimension on the
+  // same condition — so for those viewers the roster was fetched, and its deal_owners scan paid for, with
+  // nothing to render it in. The condition is written once here and reused for the bar's dimensions below
+  // so the two cannot disagree about when a rep filter exists.
+  const repFilterVisible = (role === "admin" || role === "director") && scope !== "mine";
+  const { reps: roster } = useRepRoster({ enabled: repFilterVisible });
   const { assignees } = useTaskAssignees();
   const { projectTypes } = useProjectTypes();
   const assigneeNameById = useMemo(
@@ -375,7 +382,7 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <ScopeToggle options={scopeOptions} value={scope} onChange={updateScope} ariaLabel="Lead scope" />
-          {(role === "admin" || role === "director") && scope !== "mine" ? (
+          {repFilterVisible ? (
             <Select value={selectedOwnerId || "__all__"} onValueChange={updateOwner}>
               <SelectTrigger className="w-44">
                 <SelectValue placeholder="All reps">{selectedOwnerLabel}</SelectValue>
@@ -460,8 +467,7 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
         filterBar={{
           // Mirror the page's owner-filter gating: the Rep dimension is only useful to admins/directors
           // on a non-"mine" scope (a rep viewing "mine" sees only their own leads).
-          dimensions:
-            (role === "admin" || role === "director") && scope !== "mine"
+          dimensions: repFilterVisible
               ? LEAD_LIST_FILTERBAR_DIMENSIONS
               : LEAD_LIST_FILTERBAR_DIMENSIONS.filter((dimension) => dimension !== "rep"),
           options: {
