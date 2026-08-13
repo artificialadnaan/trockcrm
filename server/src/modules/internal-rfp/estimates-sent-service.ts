@@ -22,6 +22,7 @@
 // those is a real send worth reporting. `priorEntryCount` says how many times it had been sent before this
 // one, so a re-send reads as a re-send rather than as new business.
 
+import { buildProcoreBidBoardProjectUrl } from "@trock-crm/shared/lib/procoreBidBoard";
 import { SENT_STAGE_SLUGS } from "../reports/foundations.js";
 import { aliasedDealBestEstimateSqlText } from "../shared/deal-value-sql.js";
 
@@ -44,6 +45,43 @@ export interface EstimateSentDeal {
   ownerEmail: string | null;
   /** Sends of THIS deal strictly before this one. 0 on a first send, 2 on a third. */
   priorEntryCount: number;
+  /**
+   * Absolute link to the deal in the CRM, carrying ?officeId.
+   *
+   * Built HERE rather than in SyncHub. The report is composed in another repo that has no read path into
+   * these schemas and no idea what an office id is — handing it a ready URL keeps one copy of the shape,
+   * and the office id is mandatory: the deal page derives its tenant from the query string, so a link
+   * without it lands a reader on "not found" for a deal that exists.
+   */
+  dealUrl: string | null;
+  /**
+   * Absolute link to the same project on Procore's Bid Board, or null when this deal has no Bid Board
+   * record. Roughly half of all historical estimate-sent deals have none — but that is almost entirely one
+   * import batch from a single week in May 2026. Every such deal created since is linked (96 of 96 at the
+   * time of writing), so in a daily window this is populated in practice; null still has to render as
+   * "no link" rather than a dead one.
+   */
+  bidBoardUrl: string | null;
+}
+
+/** Where the CRM lives, for links that leave the building. Mirrors modules/tasks/notifications.ts. */
+function frontendBaseUrl(): string {
+  return (process.env.FRONTEND_URL?.trim() || "https://trockcrm.com").replace(/\/+$/, "");
+}
+
+/**
+ * The Bid Board deep link, from the SHARED builder rather than a local copy of the formula.
+ *
+ * `client/src/lib/procore.ts` already owned this and says in its own header that it exists so the URL is
+ * built in one place; writing it again here would have made the third copy it warns about. Both
+ * identifiers are required — the path names a company AND a project, so a row missing either yields null
+ * rather than a 404 dressed up as a link. `procore_bid_id` is the right one: its values match SyncHub's
+ * bidboard_sync_state.project_id, which is what drives its automation.
+ */
+function bidBoardUrlFor(companyId: unknown, bidId: unknown): string | null {
+  const company = String(companyId ?? "").trim();
+  const bid = String(bidId ?? "").trim();
+  return buildProcoreBidBoardProjectUrl(company || null, bid || null);
 }
 
 const TENANT_SCHEMA_REGEX = /^office_[a-z][a-z0-9_]*$/;
@@ -67,6 +105,9 @@ export function estimatesSentQuery(schemaName: string): string {
   const slugList = SENT_STAGE_SLUGS.map((slug) => `'${slug}'`).join(", ");
   return `
     SELECT d.id::text                            AS deal_id,
+           o.id::text                            AS office_id,
+           d.procore_company_id::text            AS procore_company_id,
+           d.procore_bid_id::text                AS procore_bid_id,
            d.name                                AS name,
            d.deal_number                         AS deal_number,
            d.project_number                      AS project_number,
@@ -97,6 +138,9 @@ export function estimatesSentQuery(schemaName: string): string {
       JOIN ${schema}.deals d               ON d.id = h.deal_id
       LEFT JOIN public.users u             ON u.id = d.assigned_rep_id
       LEFT JOIN public.users cu            ON cu.id = d.created_by_user_id
+      -- The office UUID the deal link needs. The schema name only gives the slug, and the deal page keys
+      -- its tenant off the id.
+      LEFT JOIN public.offices o           ON o.slug = '${schemaName.replace(/^office_/, "")}'
      WHERE ps.slug IN (${slugList})
        AND h.created_at >= $1
        AND h.created_at <  $2
@@ -163,6 +207,14 @@ export async function loadEstimatesSent(
         ownerName: row.owner_name ?? null,
         ownerEmail: row.owner_email ?? null,
         priorEntryCount: Number(row.prior_entry_count ?? 0),
+        // NULL, not a link without ?officeId. The deal page resolves its tenant from that parameter, so a
+        // URL missing it is worse than no URL: it takes the reader to "not found" for a deal that exists,
+        // and reads as a CRM bug rather than a missing link. The row itself still appears — an unresolved
+        // office is no reason to omit a real estimate from the report.
+        dealUrl: row.office_id
+          ? `${frontendBaseUrl()}/deals/${encodeURIComponent(String(row.deal_id))}?officeId=${encodeURIComponent(String(row.office_id))}`
+          : null,
+        bidBoardUrl: bidBoardUrlFor(row.procore_company_id, row.procore_bid_id),
       });
     }
   }

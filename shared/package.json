@@ -21,6 +21,10 @@
       "types": "./dist/lib/bidBoardStatusMap.d.ts",
       "default": "./dist/lib/bidBoardStatusMap.js"
     },
+    "./lib/procoreBidBoard": {
+      "types": "./dist/lib/procoreBidBoard.d.ts",
+      "default": "./dist/lib/procoreBidBoard.js"
+    },
     "./lib/editDistance": {
       "types": "./dist/lib/editDistance.d.ts",
       "default": "./dist/lib/editDistance.js"
