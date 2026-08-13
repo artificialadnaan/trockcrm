@@ -20,6 +20,7 @@ import { SearchInput } from "@/components/ui/search-input";
 import { useKeepPreviousData } from "@/hooks/use-keep-previous-data";
 import { usePipelineStages, type PipelineStage } from "@/hooks/use-pipeline-config";
 import { useRepRoster } from "@/hooks/use-rep-roster";
+import { buildRepFilterOptions } from "@/lib/rep-filter-options";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { DealValue } from "@/components/deals/deal-value";
 import {
@@ -962,9 +963,16 @@ export function DealsListSection({
     () => new Map(assignees.map((assignee) => [assignee.id, assignee.displayName])),
     [assignees]
   );
-  // Labelled from the WIDE map on purpose: a drill-down or a locked owner can pin this list to someone
-  // outside the roster, and naming them beats "Selected rep" — the roster decides what the dropdown
-  // OFFERS, not who the app is able to name.
+  // A drill-down or a locked owner can pin this list to someone outside the roster. Offering them as an
+  // extra option keeps the control able to name and clear that selection; the roster decides what the
+  // dropdown offers for every OTHER choice, which is the point of the change.
+  const ownerFilterOptions = useMemo(
+    () =>
+      buildRepFilterOptions(repOptions, ownerId === "__all__" ? undefined : ownerId, (id) =>
+        assigneeNameById.get(id)
+      ),
+    [repOptions, ownerId, assigneeNameById]
+  );
   const selectedOwnerLabel =
     ownerId === "__all__" ? "All reps" : assigneeNameById.get(ownerId) ?? "Selected rep";
   const derivedCountSummary =
@@ -1331,7 +1339,7 @@ export function DealsListSection({
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="__all__">All reps</SelectItem>
-                {repOptions.map((rep) => (
+                {ownerFilterOptions.map((rep) => (
                   <SelectItem key={rep.id} value={rep.id}>
                     {rep.displayName}
                   </SelectItem>

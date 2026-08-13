@@ -36,8 +36,9 @@ const INTRA_TOKEN_SEPARATORS = /([-'’.])/;
  * Only consulted on the uniform-case path — a name with any intentional casing never reaches here — so an
  * incomplete list can only ever under-correct an all-lowercase name, never corrupt a correct one.
  *
- * Position matters: "van johnson" capitalises "Van", because a leading particle is someone's given name
- * far more often than a dangling preposition.
+ * Position matters: in a FULL name "van johnson" capitalises "Van", because a leading particle there is
+ * someone's given name far more often than a dangling preposition. In a standalone SURNAME the opposite
+ * holds, which is what the `surname` option is for.
  */
 const LOWERCASE_PARTICLES = new Set([
   "van", "von", "der", "den", "de", "del", "della", "di", "da", "das", "dos",
@@ -78,7 +79,23 @@ function properCaseToken(token: string): string {
  * Collapses runs of whitespace and trims, so " nick   reyes " becomes "Nick Reyes". Returns the value
  * as-is for null/undefined/non-strings so callers can pass an optional field straight through.
  */
-export function toProperCaseName<T extends string | null | undefined>(value: T): T {
+export interface ProperCaseNameOptions {
+  /**
+   * Treat the value as a standalone SURNAME, so a particle in FIRST position stays lowercase.
+   *
+   * Without it the component columns contradict the full name (Codex P2): "ludwig van beethoven" gives a
+   * display_name of "Ludwig van Beethoven", but the surname "van beethoven" normalised on its own has
+   * "van" in first position and comes back "Van Beethoven" — and Admin → Field Users renders
+   * `{firstName} {lastName}`, so the same person reads "Ludwig Van Beethoven" there. The helper cannot
+   * infer which field it was handed; the caller knows, so the caller says.
+   */
+  surname?: boolean;
+}
+
+export function toProperCaseName<T extends string | null | undefined>(
+  value: T,
+  options: ProperCaseNameOptions = {}
+): T {
   if (typeof value !== "string") return value;
   const collapsed = value.trim().replace(/\s+/g, " ");
   if (!collapsed) return collapsed as T;
@@ -87,7 +104,9 @@ export function toProperCaseName<T extends string | null | undefined>(value: T):
   return collapsed
     .split(" ")
     .map((token, index) =>
-      index > 0 && LOWERCASE_PARTICLES.has(token.toLowerCase()) ? token.toLowerCase() : properCaseToken(token)
+      (index > 0 || options.surname) && LOWERCASE_PARTICLES.has(token.toLowerCase())
+        ? token.toLowerCase()
+        : properCaseToken(token)
     )
     .join(" ") as T;
 }

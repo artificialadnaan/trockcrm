@@ -818,7 +818,7 @@ export async function acceptFieldInvite(input: { token: string; password: string
     // all carry the same spelling. This is the path that produced most of the lowercase names in
     // production — an invite is typed by hand, and nothing downstream ever corrected it.
     first_name: toProperCaseName(invite.first_name),
-    last_name: toProperCaseName(invite.last_name),
+    last_name: toProperCaseName(invite.last_name, { surname: true }),
     role: "field_contractor",
     office_id: invite.tenant_id,
     is_active: true,

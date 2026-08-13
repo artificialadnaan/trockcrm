@@ -11,6 +11,8 @@ import { USD_COMPACT } from "@/components/shared/formatters";
 import { useDealBoard, type Deal, type DealBoardColumn } from "@/hooks/use-deals";
 import { usePipelineStages, useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
 import { useRepRoster } from "@/hooks/use-rep-roster";
+import { useTaskAssignees } from "@/hooks/use-task-assignees";
+import { buildRepFilterOptions } from "@/lib/rep-filter-options";
 import { buildCanonicalDealBoardColumns, buildCanonicalDealStageFamilies } from "@/lib/canonical-deal-board";
 import { isBoardVisibleStage, DEAL_LIST_SORT_OPTIONS } from "@/components/deals/deals-filterbar-adapter";
 import type { FilterDimension } from "@/components/filters/filter-bar";
@@ -1052,6 +1054,14 @@ function DealListPageContent({
     loading: repOptionsLoading,
     loadedOfficeId: repOptionsOfficeId,
   } = useRepRoster({ officeId: effectiveOfficeId });
+  // Name resolution only — never the dropdown's contents. An off-roster owner can still be pinned by a
+  // URL or a bookmark, and the shared FilterSelect labels an unmatched value with its allLabel, i.e. it
+  // renders "All reps" over a list that IS filtered (Codex P2). Naming them is what stops that.
+  const { assignees } = useTaskAssignees({ officeId: effectiveOfficeId });
+  const assigneeNameById = useMemo(
+    () => new Map(assignees.map((assignee) => [assignee.id, assignee.displayName])),
+    [assignees]
+  );
 
   // Remember the standing dashboard header filters (Rep + timeframe) per (user, effective office), the same
   // way Mine/All already persists — so opening a deal and returning to /deals restores the last selection.
@@ -1114,10 +1124,23 @@ function DealListPageContent({
   const selectedRepId =
     requestedScope === "team" ? "__all__" : searchParams.get("assignedRepId") || "__all__";
   const selectedRepFilter = selectedRepId === "__all__" ? undefined : selectedRepId;
+  // The roster plus the current selection when that falls outside it, so the control can name and clear a
+  // pinned off-roster owner instead of pretending nothing is selected.
+  const headerRepOptions = useMemo(
+    () => buildRepFilterOptions(repOptions, selectedRepFilter, (id) => assigneeNameById.get(id)),
+    [repOptions, selectedRepFilter, assigneeNameById]
+  );
+  // The nested FilterBar keys off its OWN dl_-prefixed param, not the header's, so it needs its own
+  // reconciliation — a bookmarked dl_assignedRepId is exactly where the "All reps" mislabel showed up.
+  const listRepFilterId = searchParams.get("dl_assignedRepId") || undefined;
+  const listRepOptions = useMemo(
+    () => buildRepFilterOptions(repOptions, listRepFilterId, (id) => assigneeNameById.get(id)),
+    [repOptions, listRepFilterId, assigneeNameById]
+  );
   const selectedRepLabel =
     selectedRepId === "__all__"
       ? "All reps"
-      : repOptions.find((rep) => rep.id === selectedRepId)?.displayName ?? "Selected rep";
+      : headerRepOptions.find((rep) => rep.id === selectedRepId)?.displayName ?? "Selected rep";
   const dashboardView = useMemo(
     () =>
       getDashboardDealListView({
@@ -1578,7 +1601,7 @@ function DealListPageContent({
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="__all__">All reps</SelectItem>
-              {repOptions.map((rep) => (
+              {headerRepOptions.map((rep) => (
                 <SelectItem key={rep.id} value={rep.id}>
                   {rep.displayName}
                 </SelectItem>
@@ -1938,7 +1961,7 @@ function DealListPageContent({
                   : DEALS_BASE_LIST_FILTERBAR_DIMENSIONS,
                 paramPrefix: "dl_",
                 options: {
-                  reps: repOptions.map((rep) => ({ value: rep.id, label: rep.displayName })),
+                  reps: listRepOptions.map((rep) => ({ value: rep.id, label: rep.displayName })),
                   regions: regions.map((region) => ({ value: region.id, label: region.name })),
                   projectTypes: projectTypes.map((type) => ({ value: type.id, label: type.name })),
                   stages: boardColumns

@@ -60,11 +60,11 @@ export interface NameCasingChange {
   };
 }
 
-function correct(value: string | null): { before: string; after: string } | null {
+function correct(value: string | null, options: { surname?: boolean } = {}): { before: string; after: string } | null {
   const before = value ?? "";
   if (!before.trim()) return null;
   const curated = CURATED_OVERRIDES[before.trim().toLowerCase()];
-  const after = curated ?? toProperCaseName(before);
+  const after = curated ?? toProperCaseName(before, options);
   return after === before ? null : { before, after };
 }
 
@@ -81,7 +81,9 @@ export function planNameCasingChanges(rows: UserNameRow[]): NameCasingChange[] {
   for (const row of rows) {
     const displayName = correct(row.display_name);
     const firstName = correct(row.first_name);
-    const lastName = correct(row.last_name);
+    // Surname context, so "van beethoven" stays "van Beethoven" and matches the display_name this same
+    // plan writes — otherwise the parts-based views would render "Ludwig Van Beethoven".
+    const lastName = correct(row.last_name, { surname: true });
     if (!displayName && !firstName && !lastName) continue;
 
     const fields: NameCasingChange["fields"] = {};

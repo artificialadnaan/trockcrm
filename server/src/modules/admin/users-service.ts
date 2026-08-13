@@ -278,7 +278,8 @@ export async function createCrmUser(input: CreateCrmUserInput, actorUserId: stri
         // "Adam Shaw" again. Mixed case an admin typed on purpose survives — see toProperCaseName.
         displayName: toProperCaseName(input.displayName.trim()),
         firstName: toProperCaseName(input.firstName?.trim()) || null,
-        lastName: toProperCaseName(input.lastName?.trim()) || null,
+        // `surname` so a particle-led surname agrees with the display name rather than contradicting it.
+        lastName: toProperCaseName(input.lastName?.trim(), { surname: true }) || null,
         role: input.role,
         officeId: input.officeId,
         reportsTo: input.reportsTo?.trim() || null,

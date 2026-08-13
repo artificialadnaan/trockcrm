@@ -8,6 +8,8 @@ import { MetricCard } from "@/components/shared/metric-card";
 import { ScopeToggle, type ScopeToggleOption } from "@/components/shared/scope-toggle";
 import { USD_COMPACT } from "@/components/shared/formatters";
 import { useRepRoster } from "@/hooks/use-rep-roster";
+import { useTaskAssignees } from "@/hooks/use-task-assignees";
+import { buildRepFilterOptions } from "@/lib/rep-filter-options";
 import { useAuth } from "@/lib/auth";
 import {
   LEAD_BOARD_STAGE_SLUGS,
@@ -274,10 +276,21 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
   const bucket = searchParams.get("bucket");
   const search = searchParams.get("search") ?? "";
   const selectedOwnerId = role === "rep" || scope === "mine" ? "" : searchParams.get("assignedRepId") ?? "";
-  // The sales roster, not every assignable account — same feed and same rule as the deals dashboard's Rep
-  // filter and the director dashboard's rosters. See useRepRoster.
-  const { reps: repOptions } = useRepRoster();
+  // The sales roster fills the dropdown; the wide assignee feed names whoever is currently selected. This
+  // page has no saved-preference hydration to prune a stale owner, so an off-roster ?assignedRepId simply
+  // stays applied — and without a name for it the control would claim "All reps" while the board is
+  // narrowed to one person (Codex P2). See buildRepFilterOptions.
+  const { reps: roster } = useRepRoster();
+  const { assignees } = useTaskAssignees();
   const { projectTypes } = useProjectTypes();
+  const assigneeNameById = useMemo(
+    () => new Map(assignees.map((assignee) => [assignee.id, assignee.displayName])),
+    [assignees]
+  );
+  const repOptions = useMemo(
+    () => buildRepFilterOptions(roster, selectedOwnerId, (id) => assigneeNameById.get(id)),
+    [roster, selectedOwnerId, assigneeNameById]
+  );
   const selectedOwnerLabel = selectedOwnerId
     ? repOptions.find((rep) => rep.id === selectedOwnerId)?.displayName ?? "Selected rep"
     : "All reps";

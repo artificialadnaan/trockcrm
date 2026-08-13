@@ -39,9 +39,32 @@ describe("toProperCaseName", () => {
     expect(toProperCaseName("oscar de la renta")).toBe("Oscar de la Renta");
   });
 
-  it("capitalises a leading particle, which is a given name far more often", () => {
+  it("capitalises a leading particle in a FULL name, which is a given name far more often", () => {
     expect(toProperCaseName("van johnson")).toBe("Van Johnson");
     expect(toProperCaseName("al jackson")).toBe("Al Jackson");
+  });
+
+  it("keeps a leading particle lowercase in a standalone surname (Codex P2)", () => {
+    // Without this the component columns contradict the full name: display_name normalises to
+    // "Ludwig van Beethoven" while last_name alone becomes "Van Beethoven", and Admin → Field Users
+    // renders `{firstName} {lastName}` — so that screen shows "Ludwig Van Beethoven".
+    expect(toProperCaseName("van beethoven", { surname: true })).toBe("van Beethoven");
+    expect(toProperCaseName("de la renta", { surname: true })).toBe("de la Renta");
+  });
+
+  it("agrees with the full name it was split from", () => {
+    const full = toProperCaseName("ludwig van beethoven");
+    const first = toProperCaseName("ludwig");
+    const last = toProperCaseName("van beethoven", { surname: true });
+
+    expect(full).toBe("Ludwig van Beethoven");
+    expect(`${first} ${last}`).toBe(full);
+  });
+
+  it("still capitalises an ordinary surname that merely starts with a non-particle", () => {
+    expect(toProperCaseName("posey", { surname: true })).toBe("Posey");
+    expect(toProperCaseName("reyes", { surname: true })).toBe("Reyes");
+    expect(toProperCaseName("sanchez", { surname: true })).toBe("Sanchez");
   });
 
   it("leaves a half-cased name as typed rather than guessing", () => {
