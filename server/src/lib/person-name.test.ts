@@ -70,6 +70,25 @@ describe("toProperCaseName", () => {
     expect(toProperCaseName("john smith iv")).toBe("John Smith IV");
   });
 
+  it("preserves compact initials in an all-caps name (Codex P2)", () => {
+    // "AJ SMITH" was stored as "Aj Smith" — a rule that assumed every uppercase run was shouting.
+    expect(toProperCaseName("AJ SMITH")).toBe("AJ Smith");
+    expect(toProperCaseName("TJ JONES")).toBe("TJ Jones");
+    expect(toProperCaseName("DJ BROWN")).toBe("DJ Brown");
+    // Longer tokens still normalise, so genuine shouting is still fixed.
+    expect(toProperCaseName("COREY SANCHEZ")).toBe("Corey Sanchez");
+  });
+
+  it("does NOT uppercase surnames that happen to be valid Roman numerals", () => {
+    // Why the suffix set is enumerated rather than syntax-checked. LI (51), XI (11), DI (501), MI (1001),
+    // CI (101) and VI (6) all parse as valid Roman numerals, and Li and Xi are among the most common
+    // surnames on earth — a syntax check would file "john li" as "John LI".
+    expect(toProperCaseName("john li")).toBe("John Li");
+    expect(toProperCaseName("jinping xi")).toBe("Jinping Xi");
+    expect(toProperCaseName("nguyen vi")).toBe("Nguyen Vi");
+    expect(toProperCaseName("marco di")).toBe("Marco Di");
+  });
+
   it("does not mistake a name for a suffix", () => {
     // "Vi" is a common given name, so the suffix rule is anchored to the LAST token of a multi-word name.
     expect(toProperCaseName("vi nguyen")).toBe("Vi Nguyen");

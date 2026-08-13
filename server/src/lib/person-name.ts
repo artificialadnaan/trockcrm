@@ -48,16 +48,39 @@ const LOWERCASE_PARTICLES = new Set([
 /**
  * Generational suffixes that are wholly uppercase — "John Smith III", not "John Smith Iii".
  *
- * MULTI-CHARACTER ONLY, and only in FINAL position. Both restrictions carry weight:
- *   • A single "V", "X" or "I" is far more likely an initial than a suffix, and it needs no help anyway —
- *     a one-letter token already comes back uppercase from properCaseToken.
- *   • "Vi" is a common given name. Anchoring to the last token of a multi-word name keeps "vi nguyen"
- *     as "Vi Nguyen" while still fixing "john smith vi".
+ * A SHORT, DELIBERATELY INCOMPLETE LIST, and the incompleteness is the point.
+ *
+ * The obvious improvement — validate Roman-numeral syntax instead of enumerating — makes this strictly
+ * worse, because short Roman numerals collide with real surnames. Checked, not assumed: LI (51), XI (11),
+ * DI (501), MI (1001), CI (101), VI (6), DIX (509) and MIX (1009) all parse as valid numerals, and Li and
+ * Xi are among the most common surnames on earth. A syntax check would file "john li" as "John LI".
+ *
+ * So the set covers the suffixes that actually occur and excludes every entry that is also a plausible
+ * surname — "vi" and "xi" were dropped for exactly that reason. The cost is that "john smith vi" stays
+ * "John Smith Vi" and XIV stays "Xiv"; a sixth- or fourteenth-generation namesake is rarer than a person
+ * named Xi, and mislabelling a living person's surname is the worse failure.
+ *
+ * MULTI-CHARACTER, and only in FINAL position of a multi-word name. A single "V" or "X" is likelier an
+ * initial than a suffix and needs no help regardless: a one-letter token already returns uppercase.
  * Only reachable on the uniform-case path, so a name a human already cased is never inspected for this.
  */
-const UPPERCASE_SUFFIXES = new Set([
-  "ii", "iii", "iv", "vi", "vii", "viii", "ix", "xi", "xii", "xiii",
-]);
+const UPPERCASE_SUFFIXES = new Set(["ii", "iii", "iv", "vii", "viii", "ix"]);
+
+/**
+ * In an ALL-CAPS name, a two-letter token is left exactly as typed.
+ *
+ * "AJ SMITH" was being stored as "Aj Smith" — compact initials (AJ, TJ, DJ, JJ, CJ, BJ, RJ) destroyed by
+ * a rule that assumed every uppercase run was shouting. Two letters is genuinely ambiguous between
+ * initials and a short given name, and nothing in the string resolves it, so the conservative move is to
+ * keep the characters the human typed.
+ *
+ * The acknowledged cost: "ED SMITH" stays "ED Smith" rather than becoming "Ed Smith". That is the user's
+ * own text preserved, not data invented — a smaller failure than rewriting someone's initials. Longer
+ * tokens still normalise, so "COREY SANCHEZ" → "Corey Sanchez" is unaffected.
+ */
+function isCompactInitials(token: string, nameIsAllCaps: boolean): boolean {
+  return nameIsAllCaps && token.length === 2 && /^\p{Lu}{2}$/u.test(token);
+}
 
 function capitalizeFirstLetter(part: string): string {
   if (!part) return part;
@@ -115,16 +138,26 @@ export function toProperCaseName<T extends string | null | undefined>(
   if (!collapsed) return collapsed as T;
   // Whitespace is still collapsed for an intentionally-cased name; only the LETTERS are left untouched.
   if (hasIntentionalCasing(collapsed)) return collapsed as T;
+  // hasIntentionalCasing already ruled out mixed case, so any uppercase letter means the WHOLE name is
+  // uppercase — the only state in which a two-letter run can be read as initials.
+  const nameIsAllCaps = /\p{Lu}/u.test(collapsed);
   const tokens = collapsed.split(" ");
   return tokens
     .map((token, index) => {
+      if (isCompactInitials(token, nameIsAllCaps)) return token;
       const lowered = token.toLowerCase();
       // Generational suffix: last token of a multi-word name. Checked before the particle rule so the
       // two sets can never both claim a token.
       if (index > 0 && index === tokens.length - 1 && UPPERCASE_SUFFIXES.has(lowered)) {
         return lowered.toUpperCase();
       }
-      if ((index > 0 || options.surname) && LOWERCASE_PARTICLES.has(lowered)) {
+      // A particle needs a name AFTER it to attach to. In final position there is nothing to precede, so
+      // the token is the surname itself — "marco di" is Marco Di, not Marco with a dangling preposition.
+      if (
+        (index > 0 || options.surname) &&
+        index < tokens.length - 1 &&
+        LOWERCASE_PARTICLES.has(lowered)
+      ) {
         return lowered;
       }
       return properCaseToken(token);

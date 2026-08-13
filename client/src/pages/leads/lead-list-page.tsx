@@ -291,6 +291,16 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
     () => buildRepFilterOptions(roster, selectedOwnerId, (id) => assigneeNameById.get(id)),
     [roster, selectedOwnerId, assigneeNameById]
   );
+  // The nested list keys off its OWN ll_-prefixed param (LEADS_LIST_PARAM_PREFIX), which is independent
+  // of the page-level one above — so it needs its own reconciliation, exactly as the deals page does for
+  // dl_assignedRepId. filterBarValueToLeadFilters still forwards the namespaced value, so a bookmarked
+  // off-roster ll_assignedRepId keeps the list filtered while FilterSelect, unable to match it, labels
+  // the control "All reps" (Codex P2).
+  const nestedOwnerId = searchParams.get("ll_assignedRepId") || undefined;
+  const nestedRepOptions = useMemo(
+    () => buildRepFilterOptions(roster, nestedOwnerId, (id) => assigneeNameById.get(id)),
+    [roster, nestedOwnerId, assigneeNameById]
+  );
   const selectedOwnerLabel = selectedOwnerId
     ? repOptions.find((rep) => rep.id === selectedOwnerId)?.displayName ?? "Selected rep"
     : "All reps";
@@ -455,7 +465,8 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
               ? LEAD_LIST_FILTERBAR_DIMENSIONS
               : LEAD_LIST_FILTERBAR_DIMENSIONS.filter((dimension) => dimension !== "rep"),
           options: {
-            reps: repOptions.map((rep) => ({ value: rep.id, label: rep.displayName })),
+            // Reconciled against ll_assignedRepId, the param this bar actually writes — not the page's.
+            reps: nestedRepOptions.map((rep) => ({ value: rep.id, label: rep.displayName })),
             projectTypes: projectTypes.map((projectType) => ({ value: projectType.id, label: projectType.name })),
             stages: (board?.columns ?? [])
               .filter((column) =>
