@@ -644,6 +644,36 @@ describe("ServiceOpportunityForm", () => {
     expect(container.querySelector("[data-testid='poc-value']")?.textContent).toBe("");
   });
 
+  it("keeps a still-valid contact when the restore follows a same-company property swap", async () => {
+    // The restore button's condition is a pure PROPERTY mismatch, so it also appears when the rep merely
+    // swapped properties within the same company. The contact was never invalidated there — the company
+    // never changed — so blanking it unconditionally would make the rep re-pick a perfectly good contact
+    // and hit "Point of contact is required" for no reason. The clear is guarded on an ACTUAL company
+    // change, exactly as handleChange guards it.
+    const { container, root } = await renderForm({
+      name: "Cedar Springs opportunity",
+      companyId: "company-7",
+      propertyId: "property-9",
+    });
+    containers.push(container);
+    roots.push(root);
+
+    // Same company throughout; only the property moves off the prefilled one.
+    await act(async () => {
+      clickButton(container, "Select property");
+    });
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("[data-testid='poc-pick']")?.click();
+    });
+    expect(container.querySelector("[data-testid='poc-value']")?.textContent).toBe("contact-1");
+
+    await act(async () => {
+      clickButton(container, "Restore property");
+    });
+
+    expect(container.querySelector("[data-testid='poc-value']")?.textContent).toBe("contact-1");
+  });
+
   it("works in the office the entry point supplied, not the rep's home office", async () => {
     // The property page threads ?officeId. A prefilled property lives in THAT office's schema, so the
     // pickers and the create must target it — the form's own x-office-id overrides lib/api's URL fallback,

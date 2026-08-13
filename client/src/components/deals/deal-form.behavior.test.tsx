@@ -978,11 +978,36 @@ describe("DealForm direct-create context", () => {
   function withServiceProjectType() {
     mocks.useProjectTypes.mockReturnValue({
       hierarchy: [
-        { id: "type-roofing", name: "Roofing", children: [] },
-        { id: "type-service", name: "Service", children: [] },
+        { id: "type-roofing", name: "Roofing", code: "9", children: [] },
+        { id: "type-service", name: "Service", code: "4", children: [] },
       ],
     });
   }
+
+  it("treats a type carrying the Service CODE as Service even when its name is not canonical", async () => {
+    // The server decides on the configured code whenever the name is not one of the canonical values
+    // (resolveProjectTypeCode tier 2). A form that classified by NAME alone would hide the field for a row
+    // like this, send no contact, and hand the rep the unsatisfiable 400 the field exists to prevent.
+    mocks.useProjectTypes.mockReturnValue({
+      hierarchy: [{ id: "type-service-call", name: "Service Call", code: "4", children: [] }],
+    });
+    const { container, root } = await renderForm({
+      name: "SMOKE TEST DELETE service-call no contact",
+      companyId: "company-1",
+      propertyId: "property-1",
+      projectTypeId: "type-service-call",
+    });
+    containers.push(container);
+    roots.push(root);
+
+    // The field is offered…
+    expect(container.querySelector("[data-testid='poc-pick']")).not.toBeNull();
+    await submit(container);
+
+    // …and the create is blocked, matching what the server would have done.
+    expect(mocks.createDeal).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Point of contact is required");
+  }, 30000);
 
   it("refuses to create a Service deal without a point of contact", async () => {
     withServiceProjectType();

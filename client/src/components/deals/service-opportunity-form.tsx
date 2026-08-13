@@ -267,7 +267,16 @@ export function ServiceOpportunityForm({
       // be submitted against the restored one, earning a server 400 ("Primary contact does not belong to
       // the company") while the picker itself looked unselected, since the contact is not in the restored
       // company's list.
-      primaryContactId: "",
+      // Restore writes state directly, bypassing handleChange's company-change branch, so a contact picked
+      // for the company being restored FROM would otherwise survive and be submitted against the restored
+      // one — a server 400 ("Primary contact does not belong to the company") while the picker looked
+      // unselected, since that contact is not in the restored company's list.
+      //
+      // Guarded on an ACTUAL company change, exactly as handleChange guards it. The restore button also
+      // appears after a same-company PROPERTY swap (its condition is a pure property mismatch), and there
+      // the contact was never invalidated — blanking it unconditionally would make the rep re-pick a
+      // perfectly valid contact and hit "Point of contact is required" for no reason.
+      primaryContactId: preloaded.companyId !== prev.companyId ? "" : prev.primaryContactId,
     }));
     // …and because the state is blank again, the record counts as un-held until that re-emit arrives, or a
     // Create fired in between would slip through the region guard exactly as it would on a fresh prefill.

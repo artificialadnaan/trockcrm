@@ -15,6 +15,7 @@ import { usePipelineStages, useProjectTypes, useRegions } from "@/hooks/use-pipe
 import { createDeal, updateDeal } from "@/hooks/use-deals";
 import type { Deal } from "@/hooks/use-deals";
 import { PointOfContactField } from "@/components/contacts/point-of-contact-field";
+import { isServiceProjectDeal } from "@trock-crm/shared/types";
 import {
   DEAL_SCOPE_TITLE_EXAMPLES,
   DEAL_SCOPE_TITLE_MAX_LENGTH,
@@ -88,8 +89,8 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
   const showRelationshipSelectors = !isEdit || !deal?.companyId || !deal?.propertyId;
   const activeStages = getNewDealStages(stages);
   const projectTypeOptions = projectTypeHierarchy.flatMap((parent) => [
-    { id: parent.id, name: parent.name },
-    ...parent.children.map((child) => ({ id: child.id, name: child.name })),
+    { id: parent.id, name: parent.name, code: parent.code ?? null },
+    ...parent.children.map((child) => ({ id: child.id, name: child.name, code: child.code ?? null })),
   ]);
   // The STABLE home office (primary office), NOT the switchable active office. The office picker is a
   // cosmetic project-number prefix, so pickers + create always operate on the rep's home data office —
@@ -139,10 +140,20 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
   // contact. This form is the other way to reach that route (the dedicated Service Opportunity form being
   // the first), so it has to OFFER the contact rather than let the rep hit a 400 the form gives them no way
   // to satisfy. Edits are untouched: the server guard is on create only.
+  const selectedProjectTypeOption = projectTypeOptions.find(
+    (option) => option.id === formData.projectTypeId
+  );
+  // Decided with the SHARED helper, not a name comparison, so the client asks the same question the server
+  // answers: a valid canonical name is decisive, otherwise the configured code. Comparing names alone would
+  // let a row named e.g. "Service Call" carrying code 4 route as service on the server while this form
+  // classified it as non-service, hid the field and sent no contact — reintroducing the exact
+  // 400-with-no-way-to-satisfy-it this field exists to prevent.
   const isServiceCreate =
     !isEdit &&
-    projectTypeOptions.find((option) => option.id === formData.projectTypeId)?.name.trim().toLowerCase() ===
-      "service";
+    isServiceProjectDeal({
+      projectType: selectedProjectTypeOption?.name ?? null,
+      projectTypeCode: selectedProjectTypeOption?.code ?? null,
+    });
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
