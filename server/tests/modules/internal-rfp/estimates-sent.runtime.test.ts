@@ -55,11 +55,16 @@ beforeAll(async () => {
       id uuid PRIMARY KEY, display_name text, email text, is_test_data boolean DEFAULT false
     );
     CREATE TABLE public.pipeline_stage_config (id uuid PRIMARY KEY, slug text NOT NULL);
+    -- PUBLIC, like the stage catalogue: the deal link needs the office UUID and the schema name only
+    -- carries the slug.
+    CREATE TABLE public.offices (id uuid PRIMARY KEY, slug text UNIQUE NOT NULL);
   `);
 
   for (const schema of SCHEMAS) {
     await db.exec(`
       CREATE TABLE ${schema}.deals (
+        procore_company_id text,
+        procore_bid_id text,
         id uuid PRIMARY KEY,
         name text,
         deal_number text,
@@ -98,6 +103,10 @@ beforeAll(async () => {
       ('${ST_BID_SENT}',     'bid_sent'),
       ('${ST_ESTIMATING}',   'estimating');
 
+    INSERT INTO public.offices (id, slug) VALUES
+      ('44444444-4444-4444-4444-444444440001', 'dallas'),
+      ('44444444-4444-4444-4444-444444440002', 'atlanta');
+
     INSERT INTO office_dallas.deals
       (id, name, deal_number, project_number, assigned_rep_id, awarded_amount, bid_estimate, dd_estimate, on_hold, is_active, is_test_data) VALUES
       ('${D_FIRST}',      'Elan at Bluffview',  'DFW-1', 'DFW-4-21826-ad', '${REP_A}', NULL,      120000.55, 90000, false, true,  false),
@@ -111,6 +120,12 @@ beforeAll(async () => {
       ('${D_ESTIMATING}', 'Still Estimating',   'DFW-9', NULL,             '${REP_A}', NULL,      30000,     NULL,  false, true,  false);
 
     -- A DEDUCTIVE change order: a negative awarded_amount the positive-only chain would drop to 0.
+    -- One linked project and one without, so both branches of the Bid Board link are exercised. The real
+    -- ids: procore_bid_id matches SyncHub's bidboard_sync_state.project_id.
+    UPDATE office_dallas.deals
+       SET procore_company_id = '598134325683880', procore_bid_id = '562949955993364'
+     WHERE id = '${D_FIRST}';
+
     INSERT INTO office_dallas.deals
       (id, name, deal_number, assigned_rep_id, is_change_order, awarded_amount, bid_estimate, is_active, is_test_data) VALUES
       ('${D_DEDUCTIVE}', 'Credit CO', 'DFW-10', '${REP_A}', true, -15000.00, 90000, true, false);
@@ -422,5 +437,31 @@ describe("schema guarding", () => {
     expect(() => quoteSchema('office_x"; DROP TABLE deals; --')).toThrow();
     expect(() => quoteSchema("Office_Dallas")).toThrow();
     expect(quoteSchema("office_dallas")).toBe('"office_dallas"');
+  });
+});
+
+describe("the links the email renders", () => {
+  it("gives every send an absolute CRM deal link carrying its office", async () => {
+    const rows = await loadEstimatesSent(query, SCHEMAS, WINDOW_FROM, WINDOW_TO);
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect(row.dealUrl).toContain(`/deals/${row.dealId}`);
+      // The office id is not decoration: the deal page derives its tenant from it, so a link without one
+      // lands the reader on "not found" for a deal that exists.
+      expect(row.dealUrl).toMatch(/\?officeId=[0-9a-f-]{36}$/);
+      expect(row.dealUrl.startsWith("https://")).toBe(true);
+    }
+  });
+
+  it("links a Bid Board project when the deal has one, and null when it does not", async () => {
+    const rows = await loadEstimatesSent(query, SCHEMAS, WINDOW_FROM, WINDOW_TO);
+    const linked = rows.find((r) => r.dealId === D_FIRST);
+    const unlinked = rows.find((r) => r.dealId === D_SERVICE);
+    expect(linked?.bidBoardUrl).toBe(
+      "https://us02.procore.com/webclients/host/companies/598134325683880/tools/bid-board/project/562949955993364/details"
+    );
+    // Half of all historical estimate-sent deals have no Bid Board record — null must render as "no link"
+    // rather than a dead one.
+    expect(unlinked?.bidBoardUrl).toBeNull();
   });
 });

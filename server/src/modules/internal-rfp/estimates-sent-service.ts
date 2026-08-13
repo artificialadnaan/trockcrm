@@ -44,6 +44,50 @@ export interface EstimateSentDeal {
   ownerEmail: string | null;
   /** Sends of THIS deal strictly before this one. 0 on a first send, 2 on a third. */
   priorEntryCount: number;
+  /**
+   * Absolute link to the deal in the CRM, carrying ?officeId.
+   *
+   * Built HERE rather than in SyncHub. The report is composed in another repo that has no read path into
+   * these schemas and no idea what an office id is — handing it a ready URL keeps one copy of the shape,
+   * and the office id is mandatory: the deal page derives its tenant from the query string, so a link
+   * without it lands a reader on "not found" for a deal that exists.
+   */
+  dealUrl: string;
+  /**
+   * Absolute link to the same project on Procore's Bid Board, or null when this deal has no Bid Board
+   * record. Roughly half of all historical estimate-sent deals have none — but that is almost entirely one
+   * import batch from a single week in May 2026. Every such deal created since is linked (96 of 96 at the
+   * time of writing), so in a daily window this is populated in practice; null still has to render as
+   * "no link" rather than a dead one.
+   */
+  bidBoardUrl: string | null;
+}
+
+/** Where the CRM lives, for links that leave the building. Mirrors modules/tasks/notifications.ts. */
+function frontendBaseUrl(): string {
+  return (process.env.FRONTEND_URL?.trim() || "https://trockcrm.com").replace(/\/+$/, "");
+}
+
+/**
+ * Procore's WEB app, which is regional and is NOT api.procore.com (the only Procore host this codebase
+ * otherwise knows). Overridable because the region is a deployment fact, not a code one.
+ */
+function procoreAppBaseUrl(): string {
+  return (process.env.PROCORE_APP_BASE_URL?.trim() || "https://us02.procore.com").replace(/\/+$/, "");
+}
+
+/**
+ * The Bid Board deep link, or null when either identifier is missing.
+ *
+ * BOTH are required: the path names a company AND a project, and a URL missing either is a 404 dressed up
+ * as a link. `procore_bid_id` is the Bid Board project id — verified against SyncHub's own
+ * bidboard_sync_state.project_id, which is what its automation drives.
+ */
+export function buildBidBoardUrl(companyId: unknown, bidId: unknown): string | null {
+  const company = String(companyId ?? "").trim();
+  const bid = String(bidId ?? "").trim();
+  if (!company || !bid) return null;
+  return `${procoreAppBaseUrl()}/webclients/host/companies/${encodeURIComponent(company)}/tools/bid-board/project/${encodeURIComponent(bid)}/details`;
 }
 
 const TENANT_SCHEMA_REGEX = /^office_[a-z][a-z0-9_]*$/;
@@ -67,6 +111,9 @@ export function estimatesSentQuery(schemaName: string): string {
   const slugList = SENT_STAGE_SLUGS.map((slug) => `'${slug}'`).join(", ");
   return `
     SELECT d.id::text                            AS deal_id,
+           o.id::text                            AS office_id,
+           d.procore_company_id::text            AS procore_company_id,
+           d.procore_bid_id::text                AS procore_bid_id,
            d.name                                AS name,
            d.deal_number                         AS deal_number,
            d.project_number                      AS project_number,
@@ -97,6 +144,9 @@ export function estimatesSentQuery(schemaName: string): string {
       JOIN ${schema}.deals d               ON d.id = h.deal_id
       LEFT JOIN public.users u             ON u.id = d.assigned_rep_id
       LEFT JOIN public.users cu            ON cu.id = d.created_by_user_id
+      -- The office UUID the deal link needs. The schema name only gives the slug, and the deal page keys
+      -- its tenant off the id.
+      LEFT JOIN public.offices o           ON o.slug = '${schemaName.replace(/^office_/, "")}'
      WHERE ps.slug IN (${slugList})
        AND h.created_at >= $1
        AND h.created_at <  $2
@@ -163,6 +213,10 @@ export async function loadEstimatesSent(
         ownerName: row.owner_name ?? null,
         ownerEmail: row.owner_email ?? null,
         priorEntryCount: Number(row.prior_entry_count ?? 0),
+        dealUrl: `${frontendBaseUrl()}/deals/${encodeURIComponent(String(row.deal_id))}${
+          row.office_id ? `?officeId=${encodeURIComponent(String(row.office_id))}` : ""
+        }`,
+        bidBoardUrl: buildBidBoardUrl(row.procore_company_id, row.procore_bid_id),
       });
     }
   }
