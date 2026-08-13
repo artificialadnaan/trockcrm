@@ -14,6 +14,7 @@ import {
 import { usePipelineStages, useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
 import { createDeal, updateDeal } from "@/hooks/use-deals";
 import type { Deal } from "@/hooks/use-deals";
+import { PointOfContactField } from "@/components/contacts/point-of-contact-field";
 import {
   DEAL_SCOPE_TITLE_EXAMPLES,
   DEAL_SCOPE_TITLE_MAX_LENGTH,
@@ -120,6 +121,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
     propertyZip: deal?.propertyZip ?? "",
     officeCode: initialOfficeCode,
     projectTypeId: deal?.projectTypeId ?? initialValues?.projectTypeId ?? "",
+    primaryContactId: deal?.primaryContactId ?? "",
     regionId: deal?.regionId ?? "",
     source: initialSourceIsCategory || !initialSource ? initialSource : "Other",
     sourceDetail: initialSourceIsCategory ? "" : initialSource,
@@ -127,6 +129,16 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
     expectedCloseDate: deal?.expectedCloseDate ?? "",
     bidDueDate: toBidDueDateInputValue(deal?.bidDueDate),
   });
+
+  // A Service-typed create lands on the SERVICE workflow route — the server derives that from the project
+  // type — and a service deal must name the person the crew calls, so POST /deals rejects one without a
+  // contact. This form is the other way to reach that route (the dedicated Service Opportunity form being
+  // the first), so it has to OFFER the contact rather than let the rep hit a 400 the form gives them no way
+  // to satisfy. Edits are untouched: the server guard is on create only.
+  const isServiceCreate =
+    !isEdit &&
+    projectTypeOptions.find((option) => option.id === formData.projectTypeId)?.name.trim().toLowerCase() ===
+      "service";
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -182,6 +194,9 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
       const next = { ...prev, [field]: value };
       if (field === "companyId") {
         next.propertyId = "";
+        // A contact belongs to exactly one company and the server rejects a mismatched pair, so it goes
+        // with the property.
+        next.primaryContactId = "";
       }
       // officeCode is a cosmetic prefix that no longer rescopes the data, so changing it must NOT clear the
       // company/property/rep selections (the pickers stay on the home office regardless of the prefix).
@@ -296,6 +311,12 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
       setError("Stage is required");
       return;
     }
+    // Mirrors the server guard on POST /deals so the rep sees this before a round trip, and only for the
+    // Service type that actually triggers it — every other project type still creates without a contact.
+    if (isServiceCreate && !formData.primaryContactId) {
+      setError("Point of contact is required");
+      return;
+    }
 
     if (!validateDealForm()) return;
 
@@ -378,6 +399,11 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
         payload.officeCode = formData.officeCode;
         if (selectedProjectType) {
           payload.projectType = selectedProjectType.name;
+        }
+        // Only on a Service create — the one case the server requires it. OMITTED rather than sent empty
+        // for every other type: an empty string in a uuid column raises Postgres 22P02.
+        if (isServiceCreate && formData.primaryContactId) {
+          payload.primaryContactId = formData.primaryContactId;
         }
         payload.creationContext = "direct";
         const resp = await createDeal(
@@ -665,6 +691,22 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
                 </SelectContent>
               </Select>
             </div>
+            {isServiceCreate ? (
+              <div className="space-y-2">
+                <Label htmlFor="primaryContactId">
+                  Point of Contact <span className="text-red-500">*</span>
+                </Label>
+                <PointOfContactField
+                  companyId={formData.companyId}
+                  value={formData.primaryContactId}
+                  onChange={(contactId) => handleChange("primaryContactId", contactId)}
+                  officeId={homeOfficeId}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Required for Service work — who the crew should call about this job.
+                </p>
+              </div>
+            ) : null}
             <div className="space-y-2">
               <Label htmlFor="region">Region</Label>
               <Select

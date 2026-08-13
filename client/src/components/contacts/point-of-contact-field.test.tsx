@@ -324,4 +324,39 @@ describe("PointOfContactField", () => {
       resolveSecond({ contact: { id: "contact-9", firstName: "Ada", lastName: "Lowe" } });
     });
   });
+
+  it("re-enables the dialog after a successful create, so a second contact can be added", async () => {
+    // closeDialog() bumps saveSeq, which is exactly what makes saveNewContact's `finally` skip its own
+    // setSaving(false) — so a successful create used to leave `saving` true forever and every later reopen
+    // came up with its inputs and Save button permanently disabled.
+    mocks.useCompanyContacts.mockReturnValue({ contacts: [], loading: false, error: null, refetch: vi.fn() });
+    mocks.createContact.mockResolvedValue({ contact: { id: "contact-9", firstName: "Ada", lastName: "Lowe" } });
+    render();
+
+    act(() => container.querySelector<HTMLButtonElement>("[data-testid='poc-add-button']")!.click());
+    setFieldValue("poc-first-name", "Ada");
+    setFieldValue("poc-last-name", "Lowe");
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>("[data-testid='poc-save']")!.click();
+    });
+
+    act(() => container.querySelector<HTMLButtonElement>("[data-testid='poc-add-button']")!.click());
+
+    expect(document.querySelector<HTMLButtonElement>("[data-testid='poc-save']")?.disabled).toBe(false);
+    expect(document.querySelector<HTMLInputElement>("[data-testid='poc-first-name']")?.disabled).toBe(false);
+  });
+
+  it("will not open the add dialog while the company's contacts are unavailable", () => {
+    // Membership is decided by looking a suggestion up in `contacts` (a suggestion carries no companyId),
+    // so an empty list — errored OR still loading — would brand a contact that genuinely belongs to this
+    // company as "different company", withhold "Use this contact", and walk the rep into force-creating
+    // the very duplicate this dialog exists to prevent.
+    mocks.useCompanyContacts.mockReturnValue({ contacts: [], loading: false, error: "boom", refetch: vi.fn() });
+    render();
+    expect(container.querySelector<HTMLButtonElement>("[data-testid='poc-add-button']")?.disabled).toBe(true);
+
+    mocks.useCompanyContacts.mockReturnValue({ contacts: [], loading: true, error: null, refetch: vi.fn() });
+    render();
+    expect(container.querySelector<HTMLButtonElement>("[data-testid='poc-add-button']")?.disabled).toBe(true);
+  });
 });

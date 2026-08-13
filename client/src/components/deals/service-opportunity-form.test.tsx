@@ -615,6 +615,35 @@ describe("ServiceOpportunityForm", () => {
     expect(container.textContent).toContain("Loading the property");
   });
 
+  it("drops a contact picked for the other company when the preloaded pair is restored", async () => {
+    // Restore writes company/property straight into state instead of going through handleChange, so it
+    // bypasses the company-change branch that clears the contact. Ordering is what makes this bite:
+    // switch to company B, pick a B contact, THEN restore A — the B contact would ride along and be
+    // submitted against A, earning the server's "Primary contact does not belong to the company" 400
+    // while the picker looked unselected, since that contact is not in A's list.
+    const { container, root } = await renderForm({
+      name: "Cedar Springs opportunity",
+      companyId: "company-7",
+      propertyId: "property-9",
+    });
+    containers.push(container);
+    roots.push(root);
+
+    await act(async () => {
+      clickButton(container, "Select other company");
+    });
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("[data-testid='poc-pick']")?.click();
+    });
+    expect(container.querySelector("[data-testid='poc-value']")?.textContent).toBe("contact-1");
+
+    await act(async () => {
+      clickButton(container, "Restore property");
+    });
+
+    expect(container.querySelector("[data-testid='poc-value']")?.textContent).toBe("");
+  });
+
   it("works in the office the entry point supplied, not the rep's home office", async () => {
     // The property page threads ?officeId. A prefilled property lives in THAT office's schema, so the
     // pickers and the create must target it — the form's own x-office-id overrides lib/api's URL fallback,

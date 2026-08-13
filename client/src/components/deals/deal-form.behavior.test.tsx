@@ -75,6 +75,28 @@ vi.mock("@/components/properties/property-selector", () => ({
   },
 }));
 
+// Driven directly rather than through the real picker: its Select renders into a Base UI portal outside
+// this container, and what these tests are about is the FORM's contract with the field, not the picker.
+vi.mock("@/components/contacts/point-of-contact-field", () => ({
+  PointOfContactField: ({
+    companyId,
+    value,
+    onChange,
+  }: {
+    companyId: string;
+    value: string;
+    onChange: (id: string) => void;
+  }) => (
+    <div>
+      <span data-testid="poc-company">{companyId}</span>
+      <span data-testid="poc-value">{value}</span>
+      <button type="button" data-testid="poc-pick" onClick={() => onChange("contact-1")}>
+        pick contact
+      </button>
+    </div>
+  ),
+}));
+
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 function setupCommonMocks() {
@@ -948,6 +970,103 @@ describe("DealForm direct-create context", () => {
 
     expect(container.textContent).toContain("Company and property are required");
     expect(mocks.createDeal).not.toHaveBeenCalled();
+  }, 30000);
+
+  // A Service-typed create here lands on the SERVICE workflow route (the server derives it from the
+  // project type), and that route rejects a deal with no point of contact. Without the field below, this
+  // form could reach a 400 it gave the rep no way to satisfy.
+  function withServiceProjectType() {
+    mocks.useProjectTypes.mockReturnValue({
+      hierarchy: [
+        { id: "type-roofing", name: "Roofing", children: [] },
+        { id: "type-service", name: "Service", children: [] },
+      ],
+    });
+  }
+
+  it("refuses to create a Service deal without a point of contact", async () => {
+    withServiceProjectType();
+    const { container, root } = await renderForm({
+      name: "SMOKE TEST DELETE service no contact",
+      companyId: "company-1",
+      propertyId: "property-1",
+      projectTypeId: "type-service",
+    });
+    containers.push(container);
+    roots.push(root);
+
+    await submit(container);
+
+    expect(mocks.createDeal).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Point of contact is required");
+  }, 30000);
+
+  it("sends the point of contact on a Service create", async () => {
+    withServiceProjectType();
+    const { container, root } = await renderForm({
+      name: "SMOKE TEST DELETE service with contact",
+      companyId: "company-1",
+      propertyId: "property-1",
+      projectTypeId: "type-service",
+    });
+    containers.push(container);
+    roots.push(root);
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("[data-testid='poc-pick']")?.click();
+    });
+    await submit(container);
+
+    expect(mocks.createDeal).toHaveBeenCalledWith(
+      expect.objectContaining({ projectType: "Service", primaryContactId: "contact-1" }),
+      expect.anything()
+    );
+  }, 30000);
+
+  it("does not require — or send — a point of contact for a non-Service deal", async () => {
+    withServiceProjectType();
+    const { container, root } = await renderForm({
+      name: "SMOKE TEST DELETE roofing no contact",
+      companyId: "company-1",
+      propertyId: "property-1",
+      projectTypeId: "type-roofing",
+    });
+    containers.push(container);
+    roots.push(root);
+
+    // The field is not even offered for a non-Service type…
+    expect(container.querySelector("[data-testid='poc-pick']")).toBeNull();
+    await submit(container);
+
+    // …and the create goes through, with primaryContactId OMITTED rather than sent empty — an empty
+    // string in a uuid column raises Postgres 22P02.
+    expect(mocks.createDeal).toHaveBeenCalled();
+    const payload = mocks.createDeal.mock.calls[0][0] as Record<string, unknown>;
+    expect("primaryContactId" in payload).toBe(false);
+  }, 30000);
+
+  it("clears a chosen point of contact when the company changes", async () => {
+    withServiceProjectType();
+    const { container, root } = await renderForm({
+      name: "SMOKE TEST DELETE service company switch",
+      companyId: "company-1",
+      propertyId: "property-1",
+      projectTypeId: "type-service",
+    });
+    containers.push(container);
+    roots.push(root);
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("[data-testid='poc-pick']")?.click();
+    });
+    expect(container.querySelector("[data-testid='poc-value']")?.textContent).toBe("contact-1");
+
+    // A contact belongs to exactly one company; carrying it across a switch would earn a server 400.
+    await act(async () => {
+      mocks.companySelectorProps?.onChange("company-2");
+    });
+
+    expect(container.querySelector("[data-testid='poc-value']")?.textContent).toBe("");
   }, 30000);
 });
 

@@ -78,6 +78,11 @@ export function PointOfContactField({
     setSaveError(null);
     setSuggestions([]);
     setDedupBlocked(false);
+    // MUST reset here, not only in saveNewContact's finally. Bumping saveSeq above is precisely what makes
+    // that finally skip its own `setSaving(false)` — so closing after a successful create used to leave
+    // `saving` true forever, and every later reopen of the dialog came up with its inputs and buttons
+    // permanently disabled. `saving` belongs to the dialog session this ends, so it is cleared with it.
+    setSaving(false);
   };
 
   // Single change handler for all five dialog fields — routes through here so editing the draft ALWAYS
@@ -213,7 +218,12 @@ export function PointOfContactField({
         variant="outline"
         size="sm"
         data-testid="poc-add-button"
-        disabled={disabled || !companyId}
+        // Also blocked while the company's contacts are loading or failed to load. Duplicate suggestions
+        // are classified in-company by looking them up in `contacts` (there is no companyId on a
+        // suggestion), so an empty list — whether not-yet-loaded or errored — would label a contact that
+        // genuinely belongs to this company as "different company", withhold "Use this contact", and walk
+        // the rep straight into force-creating the duplicate this dialog exists to prevent.
+        disabled={disabled || !companyId || loading || Boolean(error)}
         onClick={() => {
           setDraft(EMPTY_CONTACT);
           setSaveError(null);

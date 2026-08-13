@@ -8,6 +8,7 @@ const dealsServiceMocks = vi.hoisted(() => ({
 const pipelineServiceMocks = vi.hoisted(() => ({
   getStageBySlug: vi.fn(),
   getActiveProjectTypes: vi.fn(),
+  resolveActiveProjectTypeValue: vi.fn(),
 }));
 const accessMocks = vi.hoisted(() => ({
   assertDealCollaboratorAccess: vi.fn(),
@@ -39,6 +40,9 @@ vi.mock("../../../src/modules/pipeline/service.js", async () => {
     ...(actual as Record<string, unknown>),
     getStageBySlug: pipelineServiceMocks.getStageBySlug,
     getActiveProjectTypes: pipelineServiceMocks.getActiveProjectTypes,
+    // Reads project_type_config directly, so without this the TEXT tier of the route derivation dies on a
+    // DB call in this no-DB harness — a 500 that hides whether the guard would have fired.
+    resolveActiveProjectTypeValue: pipelineServiceMocks.resolveActiveProjectTypeValue,
   };
 });
 
@@ -192,6 +196,15 @@ describe("POST /api/deals create context", () => {
       { id: "type-service", name: "Service", slug: "service", code: "4", isActive: true },
       { id: "type-roofing", name: "Roofing", slug: "roofing", code: "9", isActive: true },
     ]);
+    // Faithful to the real one for the values these tests use: it echoes a recognised active type back and
+    // yields null for anything else. The CODE is then resolved by the pure resolveProjectTypeCode, which is
+    // the logic actually under test here.
+    pipelineServiceMocks.resolveActiveProjectTypeValue.mockImplementation(async (value: unknown) => {
+      const text = String(value ?? "").trim().toLowerCase();
+      if (text === "service") return "Service";
+      if (text === "roofing") return "Roofing";
+      return null;
+    });
     dealsServiceMocks.createDeal.mockImplementation(async (_tenantDb, input) => {
       if (input.officeCode !== "dfw" && input.officeCode !== "atl") {
         throw new AppError(400, "officeCode must be 'dfw' or 'atl'");
@@ -351,6 +364,19 @@ describe("POST /api/deals create context", () => {
     expect(res.status).toBe(400);
     expect(res.body.error.message).toBe("Point of contact is required");
     // The deal must not be created — a 400 that still wrote the row would be worse than no guard.
+    expect(dealsServiceMocks.createDeal).not.toHaveBeenCalled();
+  });
+
+  it("rejects a contact-less create classified as Service by the projectType TEXT, not just the id", async () => {
+    // The derivation has TWO tiers — resolveActiveProjectTypeValue(projectType) and the configured code
+    // behind projectTypeId — and the generic deal form sends the NAME. Covering only the id would leave
+    // the path the form actually uses unguarded.
+    const res = await request(createApp("dallas"))
+      .post("/api/deals")
+      .send(validBody({ projectType: "Service" }));
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toBe("Point of contact is required");
     expect(dealsServiceMocks.createDeal).not.toHaveBeenCalled();
   });
 

@@ -4,7 +4,23 @@
 
 **Goal:** A Service Opportunity cannot be created without a point of contact, and the rep can add a new contact without leaving the form.
 
-**Architecture:** One guard clause on the dedicated `POST /deals/service-opportunity` route (no other deal path, no migration, column stays nullable), plus a new self-contained `PointOfContactField` component on the create form. The component ports the pattern already proven in `lead-form.tsx`, which has shipped this exact interaction — company-scoped `Select` with an `items` prop and an inline "+ Add new contact" dialog.
+**Architecture:** Guard clauses on the two HTTP routes that create a service-routed deal (no migration, column stays nullable), plus a new self-contained `PointOfContactField` component used by both create forms. The component ports the pattern already proven in `lead-form.tsx`, which has shipped this exact interaction — company-scoped `Select` with an `items` prop and an inline "+ Add new contact" dialog.
+
+> **⚠️ SUPERSEDED IN PART — read this before following the tasks below.**
+>
+> Tasks 1-5 were written for a narrower scope: a guard on `POST /deals/service-opportunity` only. Review
+> found that incomplete. `/deals/new` (the generic deal form) lets a rep pick project type **Service** and
+> stage **Opportunity**, and `createDeal` derives `workflow_route: "service"` from the project-type code —
+> so a contact-less Service Opportunity could still be created through the UI.
+>
+> The delivered implementation therefore ALSO guards `POST /deals` when the derived route is service, via
+> an exported `deriveWorkflowRouteForCreate` shared with `createDeal` so the two cannot reach different
+> verdicts, and adds the contact field to `deal-form.tsx` for Service creates so that form can satisfy the
+> guard rather than dead-ending on a 400.
+>
+> **Anyone re-running this plan from the tasks alone would reintroduce the bypass.** The
+> [spec](../specs/2026-08-12-service-opportunity-required-contact-design.md) carries the amended scope and
+> is the authority; these task steps are kept as the record of how the first half was built.
 
 **Tech Stack:** TypeScript, React 19, Base UI `Select` (`@base-ui/react/select`), Express, Drizzle, Vitest (jsdom for client, supertest for server).
 
