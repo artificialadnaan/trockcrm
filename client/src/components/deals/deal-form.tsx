@@ -143,6 +143,11 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
   const selectedProjectTypeOption = projectTypeOptions.find(
     (option) => option.id === formData.projectTypeId
   );
+  // A type id we hold but cannot resolve — /deals/new can arrive with ?projectTypeId while
+  // /pipeline/project-types is still loading or has failed. Neither "Service" nor "not Service" is
+  // knowable in that state, and guessing "not Service" hides the contact field while the id still goes to
+  // a server that classifies from it. Submit is blocked instead (see handleSubmit).
+  const projectTypeUnresolved = Boolean(formData.projectTypeId) && !selectedProjectTypeOption;
   // Decided with the SHARED helper, not a name comparison, so the client asks the same question the server
   // answers: a valid canonical name is decisive, otherwise the configured code. Comparing names alone would
   // let a row named e.g. "Service Call" carrying code 4 route as service on the server while this form
@@ -332,6 +337,16 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
     }
     // Mirrors the server guard on POST /deals so the rep sees this before a round trip, and only for the
     // Service type that actually triggers it — every other project type still creates without a contact.
+    // A project type we cannot resolve is a classification we cannot make. The id is sent regardless and
+    // the SERVER classifies from it, so submitting here risks a Service deal with no contact and a 400 the
+    // form gave no way to satisfy — the picker is hidden precisely because the type never resolved. Hold
+    // the door until it lands, the same way the Service Opportunity form holds it for a property whose
+    // record has not arrived. If /pipeline/project-types is down rather than slow, this message persists
+    // and tells the rep to reload rather than letting them submit into a rejection.
+    if (!isEdit && projectTypeUnresolved) {
+      setError("Loading project types — one moment, then Create. Reload the page if this persists.");
+      return;
+    }
     if (isServiceCreate && !formData.primaryContactId) {
       setError("Point of contact is required");
       return;

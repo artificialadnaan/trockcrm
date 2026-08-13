@@ -1125,13 +1125,33 @@ describe("DealForm direct-create context", () => {
     expect(container.querySelector("[data-testid='poc-value']")?.textContent).toBe("contact-7");
   }, 30000);
 
-  it("sends a prefilled contact even before project types resolve", async () => {
-    // Until useProjectTypes returns, projectTypeOptions is empty and isServiceCreate is false — but
-    // projectTypeId is still sent, and the server classifies from it independently. Withholding the
-    // contact in that window produces exactly the unsatisfiable 400 this field exists to prevent.
+  it("refuses to submit a prefilled project type it cannot resolve", async () => {
+    // /deals/new can arrive with ?projectTypeId while /pipeline/project-types is slow or down. Neither
+    // "Service" nor "not Service" is knowable then, and guessing "not Service" hides the contact field
+    // while the id still goes to a server that classifies from it — the unsatisfiable 400 again. Submit is
+    // held until the type resolves.
     mocks.useProjectTypes.mockReturnValue({ hierarchy: [] });
     const { container, root } = await renderForm({
       name: "SMOKE TEST DELETE types still loading",
+      companyId: "company-1",
+      propertyId: "property-1",
+      projectTypeId: "type-service",
+    });
+    containers.push(container);
+    roots.push(root);
+
+    await submit(container);
+
+    expect(mocks.createDeal).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Loading project types");
+  }, 30000);
+
+  it("sends a prefilled contact once the project type resolves", async () => {
+    // The payload is deliberately not gated on the client's own Service classification: projectTypeId is
+    // always sent and the server classifies independently, so a contact in hand always travels with it.
+    withServiceProjectType();
+    const { container, root } = await renderForm({
+      name: "SMOKE TEST DELETE prefilled contact sent",
       companyId: "company-1",
       propertyId: "property-1",
       projectTypeId: "type-service",
