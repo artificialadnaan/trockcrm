@@ -45,6 +45,20 @@ const LOWERCASE_PARTICLES = new Set([
   "du", "la", "le", "los", "las", "bin", "ibn", "al", "ter", "ten", "af", "av",
 ]);
 
+/**
+ * Generational suffixes that are wholly uppercase — "John Smith III", not "John Smith Iii".
+ *
+ * MULTI-CHARACTER ONLY, and only in FINAL position. Both restrictions carry weight:
+ *   • A single "V", "X" or "I" is far more likely an initial than a suffix, and it needs no help anyway —
+ *     a one-letter token already comes back uppercase from properCaseToken.
+ *   • "Vi" is a common given name. Anchoring to the last token of a multi-word name keeps "vi nguyen"
+ *     as "Vi Nguyen" while still fixing "john smith vi".
+ * Only reachable on the uniform-case path, so a name a human already cased is never inspected for this.
+ */
+const UPPERCASE_SUFFIXES = new Set([
+  "ii", "iii", "iv", "vi", "vii", "viii", "ix", "xi", "xii", "xiii",
+]);
+
 function capitalizeFirstLetter(part: string): string {
   if (!part) return part;
   // Index the first CASED character rather than assuming position 0 — a leading "(" or quote would
@@ -101,12 +115,19 @@ export function toProperCaseName<T extends string | null | undefined>(
   if (!collapsed) return collapsed as T;
   // Whitespace is still collapsed for an intentionally-cased name; only the LETTERS are left untouched.
   if (hasIntentionalCasing(collapsed)) return collapsed as T;
-  return collapsed
-    .split(" ")
-    .map((token, index) =>
-      (index > 0 || options.surname) && LOWERCASE_PARTICLES.has(token.toLowerCase())
-        ? token.toLowerCase()
-        : properCaseToken(token)
-    )
+  const tokens = collapsed.split(" ");
+  return tokens
+    .map((token, index) => {
+      const lowered = token.toLowerCase();
+      // Generational suffix: last token of a multi-word name. Checked before the particle rule so the
+      // two sets can never both claim a token.
+      if (index > 0 && index === tokens.length - 1 && UPPERCASE_SUFFIXES.has(lowered)) {
+        return lowered.toUpperCase();
+      }
+      if ((index > 0 || options.surname) && LOWERCASE_PARTICLES.has(lowered)) {
+        return lowered;
+      }
+      return properCaseToken(token);
+    })
     .join(" ") as T;
 }

@@ -973,8 +973,15 @@ export function DealsListSection({
       ),
     [repOptions, ownerId, assigneeNameById]
   );
+  // Resolved from the OPTIONS, not from the assignee feed alone (Codex P2). getRepRosterOptions admits
+  // someone through its owner_rows branch — owns a deal in this tenant — even with no primary-office row
+  // or access grant, while listUsers(officeId) behind useTaskAssignees does not. Such a rep appears in
+  // this dropdown under their real name and would then render as "Selected rep" forever once picked,
+  // because the fallback feed has never heard of them. The options already carry the name; use it.
   const selectedOwnerLabel =
-    ownerId === "__all__" ? "All reps" : assigneeNameById.get(ownerId) ?? "Selected rep";
+    ownerId === "__all__"
+      ? "All reps"
+      : ownerFilterOptions.find((rep) => rep.id === ownerId)?.displayName ?? "Selected rep";
   const derivedCountSummary =
     paginationCountSummary ??
     (typeof pagination.activeCount === "number"

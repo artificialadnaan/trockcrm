@@ -61,6 +61,30 @@ describe("toProperCaseName", () => {
     expect(`${first} ${last}`).toBe(full);
   });
 
+  it("preserves Roman-numeral generational suffixes (Codex P2)", () => {
+    // Lowercasing the token and capitalising only its first letter stored "John Smith Iii" — corruption
+    // on the create, import and backfill paths alike, and permanent once written.
+    expect(toProperCaseName("JOHN SMITH III")).toBe("John Smith III");
+    expect(toProperCaseName("john smith iii")).toBe("John Smith III");
+    expect(toProperCaseName("john smith ii")).toBe("John Smith II");
+    expect(toProperCaseName("john smith iv")).toBe("John Smith IV");
+  });
+
+  it("does not mistake a name for a suffix", () => {
+    // "Vi" is a common given name, so the suffix rule is anchored to the LAST token of a multi-word name.
+    expect(toProperCaseName("vi nguyen")).toBe("Vi Nguyen");
+    expect(toProperCaseName("iii jones")).toBe("Iii Jones");
+    // A lone token is never a suffix either.
+    expect(toProperCaseName("vi")).toBe("Vi");
+  });
+
+  it("leaves single-letter suffixes alone, which never needed help", () => {
+    // A one-character token already comes back uppercase, so the suffix set excludes single letters and
+    // avoids competing with initials.
+    expect(toProperCaseName("JOHN SMITH V")).toBe("John Smith V");
+    expect(toProperCaseName("john smith x")).toBe("John Smith X");
+  });
+
   it("still capitalises an ordinary surname that merely starts with a non-particle", () => {
     expect(toProperCaseName("posey", { surname: true })).toBe("Posey");
     expect(toProperCaseName("reyes", { surname: true })).toBe("Reyes");
