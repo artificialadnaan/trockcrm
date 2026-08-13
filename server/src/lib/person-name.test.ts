@@ -79,6 +79,17 @@ describe("toProperCaseName", () => {
     expect(toProperCaseName("COREY SANCHEZ")).toBe("Corey Sanchez");
   });
 
+  it("reads a two-letter particle as a particle, not as initials (Codex P2)", () => {
+    // Ordering bug: "DE" and "LA" are two uppercase letters, so an initials-first rule claimed them and
+    // stored "JOHN DE LA CRUZ" as "John DE LA Cruz". A token the surrounding name proves is a particle
+    // is never initials — the ambiguous case the initials rule exists for is one with no such context.
+    expect(toProperCaseName("JOHN DE LA CRUZ")).toBe("John de la Cruz");
+    expect(toProperCaseName("DE LA CRUZ", { surname: true })).toBe("de la Cruz");
+    expect(toProperCaseName("JAN VAN DER BERG")).toBe("Jan van der Berg");
+    // ...while a two-letter token with no particle context is still preserved as initials.
+    expect(toProperCaseName("AJ SMITH")).toBe("AJ Smith");
+  });
+
   it("does NOT uppercase surnames that happen to be valid Roman numerals", () => {
     // Why the suffix set is enumerated rather than syntax-checked. LI (51), XI (11), DI (501), MI (1001),
     // CI (101) and VI (6) all parse as valid Roman numerals, and Li and Xi are among the most common

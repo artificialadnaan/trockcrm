@@ -144,7 +144,6 @@ export function toProperCaseName<T extends string | null | undefined>(
   const tokens = collapsed.split(" ");
   return tokens
     .map((token, index) => {
-      if (isCompactInitials(token, nameIsAllCaps)) return token;
       const lowered = token.toLowerCase();
       // Generational suffix: last token of a multi-word name. Checked before the particle rule so the
       // two sets can never both claim a token.
@@ -160,6 +159,11 @@ export function toProperCaseName<T extends string | null | undefined>(
       ) {
         return lowered;
       }
+      // AFTER the particle test, not before (Codex P2). "DE" and "LA" are two uppercase letters, so an
+      // initials-first ordering claimed them and stored "JOHN DE LA CRUZ" as "John DE LA Cruz". A token
+      // that the surrounding name proves is a particle is never initials; the ambiguous case this rule
+      // exists for is a token with no such context.
+      if (isCompactInitials(token, nameIsAllCaps)) return token;
       return properCaseToken(token);
     })
     .join(" ") as T;

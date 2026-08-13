@@ -20,7 +20,23 @@ export interface RepRosterOption {
  * pruned on that intermediate state would discard a perfectly valid saved filter. Callers must defer until
  * `loadedOfficeId === the office they asked for`.
  */
-export function useRepRoster(options: OfficeRequestOptions = {}) {
+export interface UseRepRosterOptions extends OfficeRequestOptions {
+  /**
+   * When false, no request is issued and `reps` stays empty.
+   *
+   * For callers that mount the hook unconditionally but only render a rep control in some modes — the
+   * deals list section draws its own owner dropdown only outside FilterBar mode, so on the stage page,
+   * the director rep detail and the base /deals view the result was fetched and then discarded, once per
+   * mount, duplicating the roster request (and its deal_owners scan) that the parent page already made.
+   *
+   * `loadedOfficeId` still settles to the requested office when disabled, so a caller gating on it is not
+   * left waiting forever for a load that will never happen.
+   */
+  enabled?: boolean;
+}
+
+export function useRepRoster(options: UseRepRosterOptions = {}) {
+  const { enabled = true } = options;
   const [reps, setReps] = useState<RepRosterOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -30,6 +46,13 @@ export function useRepRoster(options: OfficeRequestOptions = {}) {
   const load = useCallback(async () => {
     const requestId = ++requestRef.current;
     const requestOfficeId = options.officeId ?? null;
+    if (!enabled) {
+      setReps([]);
+      setError(null);
+      setLoading(false);
+      setLoadedOfficeId(requestOfficeId);
+      return;
+    }
     setLoading(true);
     setError(null);
     setReps([]);
@@ -54,7 +77,7 @@ export function useRepRoster(options: OfficeRequestOptions = {}) {
         setLoadedOfficeId(requestOfficeId);
       }
     }
-  }, [options.officeId]);
+  }, [options.officeId, enabled]);
 
   useEffect(() => {
     load();

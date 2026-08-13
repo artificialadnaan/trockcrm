@@ -756,7 +756,16 @@ export function DealsListSection({
   //                  when a deal row arrives without assignedRepName, and it feeds the CSV export. Narrowed
   //                  to the roster it would render a real owner as "Unassigned" the moment that person was
   //                  unticked — turning a filter-scope decision into wrong data on screen and in exports.
-  const { reps: repOptions } = useRepRoster();
+  //
+  // The roster request is GATED on this section actually drawing the owner dropdown. It renders only
+  // outside FilterBar mode (see the `!filterBarMode &&` guard on the legacy controls) and only when the
+  // owner filter is not hidden — so on the stage page, the director rep detail and the base /deals view
+  // the roster was fetched and immediately discarded, once per mount, duplicating the request AND its
+  // deal_owners scan that the parent page had already made (Codex P3).
+  //
+  // `assignees` is NOT gated: its map resolves owner names for the rows and the CSV export, which every
+  // mode renders.
+  const { reps: repOptions } = useRepRoster({ enabled: !filterBarMode && !hideOwnerFilter });
   const { assignees } = useTaskAssignees();
 
   const stageFilterOptions = useMemo(() => {

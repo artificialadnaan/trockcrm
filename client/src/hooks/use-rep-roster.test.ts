@@ -33,9 +33,13 @@ afterEach(() => {
 type Captured = ReturnType<typeof useRepRoster>;
 
 async function mountHook(officeId?: string): Promise<{ current: Captured }> {
+  return mountHookWith(officeId === undefined ? {} : { officeId });
+}
+
+async function mountHookWith(options: Parameters<typeof useRepRoster>[0]): Promise<{ current: Captured }> {
   const captured = { current: undefined as unknown as Captured };
   function Probe() {
-    captured.current = useRepRoster(officeId === undefined ? {} : { officeId });
+    captured.current = useRepRoster(options);
     return null;
   }
   container = document.createElement("div");
@@ -85,6 +89,21 @@ describe("useRepRoster", () => {
     expect(captured.current.reps).toEqual([]);
     expect(captured.current.error).toBe("network down");
     expect(captured.current.loading).toBe(false);
+  });
+
+  it("issues NO request when disabled (Codex P3)", async () => {
+    // The deals list section mounts this hook unconditionally but draws its own owner dropdown only
+    // outside FilterBar mode, so the stage page, the director rep detail and the base /deals view were
+    // fetching the roster — and its deal_owners scan — only to discard it, duplicating the parent's call.
+    apiMock.mockResolvedValue({ users: [{ id: "u1", displayName: "Colby Burling" }] });
+
+    const captured = await mountHookWith({ officeId: "office-1", enabled: false });
+
+    expect(apiMock).not.toHaveBeenCalled();
+    expect(captured.current.reps).toEqual([]);
+    expect(captured.current.loading).toBe(false);
+    // Settled, so a caller gating on loadedOfficeId is not left waiting for a load that never comes.
+    expect(captured.current.loadedOfficeId).toBe("office-1");
   });
 
   it("records which office the loaded list belongs to", async () => {
