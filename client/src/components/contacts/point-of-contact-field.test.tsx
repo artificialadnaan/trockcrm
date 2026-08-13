@@ -465,6 +465,67 @@ describe("PointOfContactField", () => {
     expect(container.querySelector("[data-testid='poc-select']")?.textContent).toContain("Ada Lowe");
   });
 
+  it("does not refetch on behalf of a dismissed save, which would clobber the current company", async () => {
+    // `refetch` is captured for the company the dialog was opened under, and useCompanyContacts shares one
+    // request counter across renders — so a late call from a dismissed save supersedes the CURRENT
+    // company's in-flight request and can repopulate the picker with the old company's contacts.
+    let resolveCreate: (v: unknown) => void = () => {};
+    const refetch = vi.fn(async () => {});
+    mocks.useCompanyContacts.mockReturnValue({ contacts: [], loading: false, error: null, refetch });
+    mocks.createContact.mockImplementation(() => new Promise((resolve) => { resolveCreate = resolve; }));
+    render({ onChange: vi.fn() });
+
+    act(() => container.querySelector<HTMLButtonElement>("[data-testid='poc-add-button']")!.click());
+    setFieldValue("poc-first-name", "Ada");
+    setFieldValue("poc-last-name", "Lowe");
+    act(() => {
+      document.querySelector<HTMLButtonElement>("[data-testid='poc-save']")!.click();
+    });
+    act(() => {
+      document.querySelector<HTMLButtonElement>('[data-slot="dialog-close"]')!.click();
+    });
+    await act(async () => {
+      resolveCreate({ contact: { id: "contact-9", firstName: "Ada", lastName: "Lowe", email: null, phone: null, jobTitle: null, category: "client" } });
+    });
+
+    expect(refetch).not.toHaveBeenCalled();
+  });
+
+  it("drops a held contact the loaded company list cannot account for", async () => {
+    // A prefilled ?primaryContactId that has since been archived or reassigned is not in the list, so the
+    // trigger falls back to "Select a point of contact" while the parent still holds the value — its
+    // required-field check passes and it submits a contact the rep cannot see.
+    const onChange = vi.fn();
+    mocks.useCompanyContacts.mockReturnValue({
+      contacts: [{ id: "contact-1", firstName: "Dana", lastName: "Reyes", email: null, phone: null, jobTitle: null, category: "client" }],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    await act(async () => {
+      render({ onChange, value: "contact-gone" });
+    });
+
+    expect(onChange).toHaveBeenCalledWith("");
+  });
+
+  it("keeps a held contact while the company list is still loading or errored", async () => {
+    // The mirror of the test above: an empty list mid-load, or after a failure, says NOTHING about whether
+    // the held contact is valid. Clearing there would discard a perfectly good prefill on a slow network.
+    const onChange = vi.fn();
+    mocks.useCompanyContacts.mockReturnValue({ contacts: [], loading: true, error: null, refetch: vi.fn() });
+    await act(async () => {
+      render({ onChange, value: "contact-7" });
+    });
+    expect(onChange).not.toHaveBeenCalled();
+
+    mocks.useCompanyContacts.mockReturnValue({ contacts: [], loading: false, error: "boom", refetch: vi.fn() });
+    await act(async () => {
+      render({ onChange, value: "contact-7" });
+    });
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
   it("will not open the add dialog while the company's contacts are unavailable", () => {
     // Membership is decided by looking a suggestion up in `contacts` (a suggestion carries no companyId),
     // so an empty list — errored OR still loading — would brand a contact that genuinely belongs to this

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -155,11 +155,17 @@ export function PointOfContactField({
             category: created.category ?? "client",
           },
         });
+        // NOT refetched when the session has ended. `refetch` is captured for the company this dialog was
+        // opened under, and useCompanyContacts shares one request counter across renders — so a late call
+        // from a dismissed save supersedes the CURRENT company's in-flight request and can repopulate the
+        // picker with the old company's contacts. The local cache above already keeps the new contact
+        // visible for its own company, which is all the dismissed path needs.
+        if (sessionEnded) return;
         await refetch();
         // Re-read AFTER the await as well: the dialog can be dismissed during the refetch too, and
         // selecting then would put the previous company's brand-new contact under a rep who has moved on,
         // failing the server's company-membership check on create.
-        if (sessionEnded || seq !== saveSeq.current) return;
+        if (seq !== saveSeq.current) return;
         onChange(created.id);
         closeDialog();
         return;
@@ -214,6 +220,17 @@ export function PointOfContactField({
   );
 
   const selectedLabel = items.find((item) => item.value === (value || NONE))?.label ?? "Select a point of contact";
+  // A held id the loaded list cannot account for is an INVISIBLE selection: the trigger falls back to
+  // "Select a point of contact" while the parent still holds the value, so its required-field check passes
+  // and it submits a contact the rep cannot see. Reachable from a prefilled ?primaryContactId that has
+  // since been archived or reassigned. Only once the list has genuinely loaded — never mid-load, and never
+  // on an error, where an empty list says nothing about the contact.
+  useEffect(() => {
+    if (!companyId || !value || loading || error) return;
+    if (knownContacts.some((contact) => contact.id === value)) return;
+    onChange("");
+  }, [companyId, value, loading, error, knownContacts, onChange]);
+
   const hasNoContacts = Boolean(companyId) && !loading && !error && knownContacts.length === 0;
 
   return (
