@@ -148,6 +148,10 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
   // knowable in that state, and guessing "not Service" hides the contact field while the id still goes to
   // a server that classifies from it. Submit is blocked instead (see handleSubmit).
   const projectTypeUnresolved = Boolean(formData.projectTypeId) && !selectedProjectTypeOption;
+  // A prefilled ?primaryContactId is a value this form did NOT pick, so it may be archived, reassigned or
+  // on another company. PointOfContactField reports while it still cannot say — submitting then sends an
+  // id the picker has not verified and earns a server 400 the rep cannot act on.
+  const [contactSelectionPending, setContactSelectionPending] = useState(false);
   // Decided with the SHARED helper, not a name comparison, so the client asks the same question the server
   // answers: a valid canonical name is decisive, otherwise the configured code. Comparing names alone would
   // let a row named e.g. "Service Call" carrying code 4 route as service on the server while this form
@@ -348,6 +352,10 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
     // and tells the rep to reload rather than letting them submit into a rejection.
     if (!isEdit && projectTypeUnresolved) {
       setError("Loading project types — one moment, then Create. Reload the page if this persists.");
+      return;
+    }
+    if (isServiceCreate && contactSelectionPending) {
+      setError("Checking the point of contact — one moment, then Create.");
       return;
     }
     if (isServiceCreate && !formData.primaryContactId) {
@@ -743,6 +751,7 @@ export function DealForm({ deal, onSuccess, initialValues }: DealFormProps) {
                   value={formData.primaryContactId}
                   onChange={(contactId) => handleChange("primaryContactId", contactId)}
                   officeId={homeOfficeId}
+                  onSelectionPendingChange={setContactSelectionPending}
                 />
                 <p className="text-xs text-muted-foreground">
                   Required for Service work — who the crew should call about this job.

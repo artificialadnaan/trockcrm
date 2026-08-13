@@ -83,15 +83,22 @@ vi.mock("@/components/contacts/point-of-contact-field", () => ({
     value,
     onChange,
     officeId,
+    onSelectionPendingChange,
   }: {
     companyId: string;
     value: string;
     onChange: (id: string) => void;
     officeId: string | null;
+    onSelectionPendingChange?: (pending: boolean) => void;
   }) => (
     <div>
       <span data-testid="poc-company">{companyId}</span>
       <span data-testid="poc-value">{value}</span>
+      {/* Lets a test drive the "held value not yet verified" window the real field reports while the
+          company's contacts are still loading. */}
+      <button type="button" data-testid="poc-pending" onClick={() => onSelectionPendingChange?.(true)}>
+        pending
+      </button>
       {/* Exposed so a wrong office on the field is catchable: the picker reads the company's contacts
           office-scoped, and the create must target the same tenant the contact was resolved in. */}
       <span data-testid="poc-office">{officeId ?? ""}</span>
@@ -1197,6 +1204,30 @@ describe("DealForm direct-create context", () => {
     const payload = mocks.createDeal.mock.calls[0][0] as Record<string, unknown>;
     expect(payload.projectType).toBe("Roofing");
     expect("primaryContactId" in payload).toBe(false);
+  }, 30000);
+
+  it("waits for a prefilled contact to be verified before creating", async () => {
+    // A prefilled ?primaryContactId is a value the form did not pick — it may be archived, reassigned or on
+    // another company. Submitting while the picker is still loading sends an id nothing has verified and
+    // earns a server 400 the rep cannot act on.
+    withServiceProjectType();
+    const { container, root } = await renderForm({
+      name: "SMOKE TEST DELETE unverified prefill",
+      companyId: "company-1",
+      propertyId: "property-1",
+      projectTypeId: "type-service",
+      primaryContactId: "contact-7",
+    });
+    containers.push(container);
+    roots.push(root);
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>("[data-testid='poc-pending']")?.click();
+    });
+    await submit(container);
+
+    expect(mocks.createDeal).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Checking the point of contact");
   }, 30000);
 
   it("clears a chosen point of contact when the company changes", async () => {

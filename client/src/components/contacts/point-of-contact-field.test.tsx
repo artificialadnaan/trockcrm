@@ -676,6 +676,30 @@ describe("PointOfContactField", () => {
     expect(onChange).toHaveBeenCalledWith("contact-1");
   });
 
+  it("reports a held value as unverified until the company's contacts settle", async () => {
+    // A parent can be handed a value it did not pick (a prefilled ?primaryContactId). Until the list
+    // loads, the field cannot say whether that id is real, on this company, or archived — and a parent
+    // that submits during the window sends something nothing has verified.
+    const onSelectionPendingChange = vi.fn();
+    mocks.useCompanyContacts.mockReturnValue({ contacts: [], loading: true, error: null, refetch: vi.fn() });
+    await act(async () => {
+      render({ value: "contact-7", onSelectionPendingChange });
+    });
+    expect(onSelectionPendingChange).toHaveBeenLastCalledWith(true);
+
+    // Settled AND accounted for -> verified.
+    mocks.useCompanyContacts.mockReturnValue({
+      contacts: [{ id: "contact-7", firstName: "Ada", lastName: "Lowe", email: null, phone: null, jobTitle: null, category: "client" }],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    await act(async () => {
+      render({ value: "contact-7", onSelectionPendingChange });
+    });
+    expect(onSelectionPendingChange).toHaveBeenLastCalledWith(false);
+  });
+
   it("will not open the add dialog while the company's contacts are unavailable", () => {
     // Membership is decided by looking a suggestion up in `contacts` (a suggestion carries no companyId),
     // so an empty list — errored OR still loading — would brand a contact that genuinely belongs to this

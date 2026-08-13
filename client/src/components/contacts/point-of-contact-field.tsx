@@ -17,6 +17,13 @@ export interface PointOfContactFieldProps {
   onChange: (contactId: string) => void;
   officeId: string | null;
   disabled?: boolean;
+  /**
+   * Reports whether the HELD value is still unverified — the company's contacts have not loaded yet, so
+   * the field cannot say if the id is real, on this company, or archived. A parent that can be handed a
+   * value it did not pick (a prefilled ?primaryContactId) must not submit during that window: the
+   * clearing effect below has not run, so an invalid id would go to the server and come back a 400.
+   */
+  onSelectionPendingChange?: (pending: boolean) => void;
 }
 
 const NONE = "__none__";
@@ -51,6 +58,7 @@ export function PointOfContactField({
   onChange,
   officeId,
   disabled = false,
+  onSelectionPendingChange,
 }: PointOfContactFieldProps) {
   // undefined rather than "" — useCompanyContacts short-circuits on a falsy id and never fetches.
   const { contacts, loading, error, refetch } = useCompanyContacts(companyId || undefined, { officeId });
@@ -286,6 +294,16 @@ export function PointOfContactField({
     if (knownContacts.some((contact) => contact.id === value)) return;
     onChange("");
   }, [companyId, value, loading, error, knownContacts, onChange]);
+
+  // Unverified while a value is held and the list has not settled — either still loading, or loaded but
+  // not yet reconciled by the clearing effect above. Not pending on an error: the list will never settle
+  // there, and holding the form hostage to a failed request is worse than letting the server have the
+  // final say.
+  const selectionPending = Boolean(companyId) && Boolean(value) && !error &&
+    (loading || !knownContacts.some((contact) => contact.id === value));
+  useEffect(() => {
+    onSelectionPendingChange?.(selectionPending);
+  }, [selectionPending, onSelectionPendingChange]);
 
   const hasNoContacts = Boolean(companyId) && !loading && !error && knownContacts.length === 0;
 
