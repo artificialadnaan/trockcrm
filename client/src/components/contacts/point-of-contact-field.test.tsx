@@ -526,46 +526,80 @@ describe("PointOfContactField", () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it("does not let an older create overwrite a newer one's fallback", async () => {
-    // Dismiss create A while pending, create and select B, then A resolves. With a single cache slot A's
-    // late write replaced B — so if B's refetch lagged or failed, the picker could not name the contact
-    // the parent was holding. The cache keeps both.
-    let resolveA: (v: unknown) => void = () => {};
-    const contactB = { id: "contact-b", firstName: "Bea", lastName: "Nolan", email: null, phone: null, jobTitle: null, category: "client" };
+  it("keeps every contact it creates, not just the most recent", async () => {
+    // Two sequential creates whose refetches never return them. A single cache slot would drop the first,
+    // so the picker could not name a contact the parent might still be holding.
     mocks.useCompanyContacts.mockReturnValue({ contacts: [], loading: false, error: null, refetch: vi.fn(async () => {}) });
-    mocks.createContact.mockImplementationOnce(() => new Promise((resolve) => { resolveA = resolve; }));
     const onChange = vi.fn();
     render({ onChange });
 
-    // A: started, then dismissed while pending.
+    mocks.createContact.mockResolvedValueOnce({
+      contact: { id: "contact-a", firstName: "Ada", lastName: "Lowe", email: null, phone: null, jobTitle: null, category: "client" },
+    });
     act(() => container.querySelector<HTMLButtonElement>("[data-testid='poc-add-button']")!.click());
     setFieldValue("poc-first-name", "Ada");
     setFieldValue("poc-last-name", "Lowe");
-    act(() => {
+    await act(async () => {
       document.querySelector<HTMLButtonElement>("[data-testid='poc-save']")!.click();
     });
-    act(() => {
-      document.querySelector<HTMLButtonElement>('[data-slot="dialog-close"]')!.click();
-    });
 
-    // B: created and selected while A is still in flight.
-    mocks.createContact.mockResolvedValueOnce({ contact: contactB });
+    mocks.createContact.mockResolvedValueOnce({
+      contact: { id: "contact-b", firstName: "Bea", lastName: "Nolan", email: null, phone: null, jobTitle: null, category: "client" },
+    });
     act(() => container.querySelector<HTMLButtonElement>("[data-testid='poc-add-button']")!.click());
     setFieldValue("poc-first-name", "Bea");
     setFieldValue("poc-last-name", "Nolan");
     await act(async () => {
       document.querySelector<HTMLButtonElement>("[data-testid='poc-save']")!.click();
     });
-    expect(onChange).toHaveBeenCalledWith("contact-b");
 
-    // A finally resolves, after B was already selected.
-    await act(async () => {
-      resolveA({ contact: { id: "contact-a", firstName: "Ada", lastName: "Lowe", email: null, phone: null, jobTitle: null, category: "client" } });
+    // The FIRST one must still be nameable — only the cache can supply it.
+    render({ onChange, value: "contact-a" });
+    expect(container.querySelector("[data-testid='poc-select']")?.textContent).toContain("Ada Lowe");
+  });
+
+  it("refuses to start a second create while one is still in flight", async () => {
+    // The dialog stays dismissable during a save, so a rep could close, reopen and submit the same person
+    // again. Both requests run their dedup check before either commits, and there is no uniqueness
+    // constraint — so that creates the duplicate this dialog exists to prevent.
+    let resolveFirst: (v: unknown) => void = () => {};
+    mocks.useCompanyContacts.mockReturnValue({ contacts: [], loading: false, error: null, refetch: vi.fn(async () => {}) });
+    mocks.createContact.mockImplementation(() => new Promise((resolve) => { resolveFirst = resolve; }));
+    render({ onChange: vi.fn() });
+
+    act(() => container.querySelector<HTMLButtonElement>("[data-testid='poc-add-button']")!.click());
+    setFieldValue("poc-first-name", "Ada");
+    setFieldValue("poc-last-name", "Lowe");
+    act(() => {
+      document.querySelector<HTMLButtonElement>("[data-testid='poc-save']")!.click();
     });
+    expect(mocks.createContact).toHaveBeenCalledTimes(1);
 
-    // B must still be nameable — the refetch never returned it, so only the cache can.
-    render({ onChange, value: "contact-b" });
-    expect(container.querySelector("[data-testid='poc-select']")?.textContent).toContain("Bea Nolan");
+    // Dismiss mid-flight and reopen.
+    act(() => {
+      document.querySelector<HTMLButtonElement>('[data-slot="dialog-close"]')!.click();
+    });
+    act(() => container.querySelector<HTMLButtonElement>("[data-testid='poc-add-button']")!.click());
+
+    // The reopened dialog must still show the request as running — Save disabled, inputs locked. This is
+    // the observable half: a click on a disabled button is a no-op, so asserting only the call count would
+    // pass even with the in-flight guard removed.
+    expect(document.querySelector<HTMLButtonElement>("[data-testid='poc-save']")?.disabled).toBe(true);
+    expect(document.querySelector<HTMLInputElement>("[data-testid='poc-first-name']")?.disabled).toBe(true);
+
+    // And the guard itself: invoked directly, bypassing the disabled button, it must still refuse.
+    setFieldValue("poc-first-name", "Ada");
+    setFieldValue("poc-last-name", "Lowe");
+    await act(async () => {
+      document.querySelector<HTMLFormElement>("[data-testid='poc-save']")?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true })
+      );
+    });
+    expect(mocks.createContact).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveFirst({ contact: { id: "contact-a", firstName: "Ada", lastName: "Lowe", email: null, phone: null, jobTitle: null, category: "client" } });
+    });
   });
 
   it("will not open the add dialog while the company's contacts are unavailable", () => {

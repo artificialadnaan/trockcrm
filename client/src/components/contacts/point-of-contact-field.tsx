@@ -84,11 +84,11 @@ export function PointOfContactField({
     setSaveError(null);
     setSuggestions([]);
     setDedupBlocked(false);
-    // MUST reset here, not only in saveNewContact's finally. Bumping saveSeq above is precisely what makes
-    // that finally skip its own `setSaving(false)` — so closing after a successful create used to leave
-    // `saving` true forever, and every later reopen of the dialog came up with its inputs and buttons
-    // permanently disabled. `saving` belongs to the dialog session this ends, so it is cleared with it.
-    setSaving(false);
+    // `saving` is deliberately NOT reset here. It tracks the in-flight REQUEST, not this dialog session:
+    // clearing it on dismiss is what let a rep close mid-save, reopen, and submit the same person again
+    // while the first POST was still running — and since both requests run their dedup check before either
+    // commits, and there is no uniqueness constraint, that creates the exact duplicate this dialog exists
+    // to prevent. The finally in saveNewContact always releases it.
   };
 
   // Single change handler for all five dialog fields — routes through here so editing the draft ALWAYS
@@ -106,6 +106,11 @@ export function PointOfContactField({
   // `force` re-submits past the dedup warning. The first attempt never skips dedup — that is the whole
   // point of running it, and a shortcut that silently duplicates people is worse than the friction.
   const saveNewContact = async (force: boolean) => {
+    // Defence in depth only, and NOT what actually stops the double-submit: `saving` survives a dismissal
+    // (see closeDialog), so the reopened dialog's Save button is disabled and a click is already a no-op —
+    // which is the behaviour the test pins. No DOM path reaches this line, so no test covers it; it is here
+    // for a future trigger that isn't disabled-aware (a keyboard shortcut, a programmatic call).
+    if (saving) return;
     if (!draft.firstName.trim() || !draft.lastName.trim()) {
       setSaveError("First and last name are required");
       return;
@@ -196,8 +201,10 @@ export function PointOfContactField({
       if (seq !== saveSeq.current) return;
       setSaveError(err instanceof Error ? err.message : "Could not create the contact.");
     } finally {
-      // Don't clear `saving` for a stale attempt — a newer save may genuinely still be in flight.
-      if (seq === saveSeq.current) setSaving(false);
+      // ALWAYS cleared, and only here. `saving` tracks the REQUEST, not the dialog session — see the guard
+      // at the top of this function — so it must outlive a dismissal and be released when the request
+      // settles, whichever way that goes.
+      setSaving(false);
     }
   };
 
