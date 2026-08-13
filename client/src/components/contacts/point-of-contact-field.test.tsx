@@ -431,6 +431,40 @@ describe("PointOfContactField", () => {
     );
   });
 
+  it("keeps a contact created while the dialog was dismissed mid-create, without selecting it", async () => {
+    // The dialog can be closed while createContact is still in flight, and the server creates the contact
+    // anyway. Dropping it here left the picker stale — a rep who reopened and retyped the same person hit
+    // dedup against a list missing them, which classifies the match as CROSS-company, withholds "Use this
+    // contact", and walks them into force-creating the duplicate. Cache and refresh regardless; only the
+    // SELECTION is session-scoped.
+    let resolveCreate: (v: unknown) => void = () => {};
+    mocks.useCompanyContacts.mockReturnValue({ contacts: [], loading: false, error: null, refetch: vi.fn(async () => {}) });
+    mocks.createContact.mockImplementation(() => new Promise((resolve) => { resolveCreate = resolve; }));
+    const onChange = vi.fn();
+    render({ onChange });
+
+    act(() => container.querySelector<HTMLButtonElement>("[data-testid='poc-add-button']")!.click());
+    setFieldValue("poc-first-name", "Ada");
+    setFieldValue("poc-last-name", "Lowe");
+    act(() => {
+      document.querySelector<HTMLButtonElement>("[data-testid='poc-save']")!.click();
+    });
+
+    // Dismissed via the dialog's own close button while the create is still pending.
+    act(() => {
+      document.querySelector<HTMLButtonElement>('[data-slot="dialog-close"]')!.click();
+    });
+    await act(async () => {
+      resolveCreate({ contact: { id: "contact-9", firstName: "Ada", lastName: "Lowe", email: null, phone: null, jobTitle: null, category: "client" } });
+    });
+
+    // Not selected — the rep had moved on.
+    expect(onChange).not.toHaveBeenCalled();
+    // But known: re-rendering with it selected must be able to name it, proving it is in the scoped list.
+    render({ onChange, value: "contact-9" });
+    expect(container.querySelector("[data-testid='poc-select']")?.textContent).toContain("Ada Lowe");
+  });
+
   it("will not open the add dialog while the company's contacts are unavailable", () => {
     // Membership is decided by looking a suggestion up in `contacts` (a suggestion carries no companyId),
     // so an empty list — errored OR still loading — would brand a contact that genuinely belongs to this

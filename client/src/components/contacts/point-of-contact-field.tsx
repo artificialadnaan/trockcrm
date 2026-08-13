@@ -129,20 +129,20 @@ export function PointOfContactField({
         },
         { officeId }
       );
-      // The dialog session this request belongs to has already ended (e.g. the rep picked a suggestion
-      // while this was in flight) — applying it now would overwrite that choice.
-      if (seq !== saveSeq.current) return;
+      // Whether this dialog session is still the current one. The dialog's own close button and Escape
+      // stay live while the request is in flight, and closing bumps saveSeq.
+      const sessionEnded = seq !== saveSeq.current;
       if (result.contact) {
         const created = result.contact;
-        await refetch();
-        // Checked AGAIN after the await. The dialog's own close button and Escape stay live during the
-        // refetch, and closing bumps saveSeq — so without this a rep who closes and switches company mid
-        // refetch would have the previous company's brand-new contact silently selected underneath them,
-        // then fail the server's company-membership check on create.
-        if (seq !== saveSeq.current) return;
-        // Held locally BEFORE selecting it. refetch() swallows its own failure and clears `contacts`, so
-        // selecting on the strength of the refetch alone could leave the field unable to name the contact
-        // it is holding.
+        // Cached and refreshed REGARDLESS of whether the session ended. The contact exists on the server
+        // either way, and discarding it here left the picker stale: the rep closed the dialog mid-create,
+        // reopened, retyped the same person, and dedup then matched a contact missing from the scoped list
+        // — classifying it CROSS-company and withholding "Use this contact", which walks them into force-
+        // creating the duplicate this dialog exists to prevent. Only the SELECTION below is session-scoped.
+        //
+        // Held locally before the refetch is trusted, because refetch() swallows its own failure and clears
+        // `contacts`, so selecting on the strength of the refetch alone could leave the field unable to
+        // name the contact it is holding.
         setJustCreated({
           companyId,
           contact: {
@@ -155,10 +155,18 @@ export function PointOfContactField({
             category: created.category ?? "client",
           },
         });
+        await refetch();
+        // Re-read AFTER the await as well: the dialog can be dismissed during the refetch too, and
+        // selecting then would put the previous company's brand-new contact under a rep who has moved on,
+        // failing the server's company-membership check on create.
+        if (sessionEnded || seq !== saveSeq.current) return;
         onChange(created.id);
         closeDialog();
         return;
       }
+      // Everything below only drives dialog UI (suggestions, errors), so it is pointless once the session
+      // has ended.
+      if (sessionEnded) return;
       if (result.dedupWarning && result.suggestions?.length) {
         setDedupBlocked(true);
         // The dedup path can surface soft-deleted or merged records; pointing the deal at one would tie it
