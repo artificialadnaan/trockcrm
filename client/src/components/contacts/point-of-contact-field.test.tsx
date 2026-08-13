@@ -608,7 +608,17 @@ describe("PointOfContactField", () => {
     // a partial unique index, so "create anyway" would only trade this error for a unique violation. The
     // matching contact belongs to another company, which this scoped picker cannot offer and the deal's
     // company-membership check would reject. Without an actionable message the rep just re-presses Save.
-    mocks.useCompanyContacts.mockReturnValue({ contacts: [], loading: false, error: null, refetch: vi.fn() });
+    // The company DOES have a contact — just not one with this email. Without that, "treat every duplicate
+    // email as same-company" would have nothing to wrongly offer and this test could not tell the branches
+    // apart.
+    mocks.useCompanyContacts.mockReturnValue({
+      contacts: [
+        { id: "contact-1", firstName: "Dana", lastName: "Reyes", email: "dana@acme.test", phone: null, jobTitle: null, category: "client" },
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
     mocks.createContact.mockRejectedValue(
       new ApiError(409, { message: 'A contact with email "ada@acme.test" already exists: Ada Lowe', code: "DUPLICATE_EMAIL" })
     );
@@ -628,6 +638,42 @@ describe("PointOfContactField", () => {
     expect(document.querySelector<HTMLButtonElement>("[data-testid='poc-save']")?.textContent).not.toContain(
       "Create anyway"
     );
+  });
+
+  it("offers the existing contact when the duplicate email is on THIS company", async () => {
+    // The server's email check is global and fires before any company-aware matching, so DUPLICATE_EMAIL
+    // can name a contact already in this picker. Telling that rep to change the email would have them
+    // create a second record for someone they could simply select.
+    mocks.useCompanyContacts.mockReturnValue({
+      contacts: [
+        { id: "contact-1", firstName: "Ada", lastName: "Lowe", email: "ada@acme.test", phone: null, jobTitle: null, category: "client" },
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    mocks.createContact.mockRejectedValue(
+      new ApiError(409, { message: 'A contact with email "ada@acme.test" already exists: Ada Lowe', code: "DUPLICATE_EMAIL" })
+    );
+    const onChange = vi.fn();
+    render({ onChange });
+
+    act(() => container.querySelector<HTMLButtonElement>("[data-testid='poc-add-button']")!.click());
+    setFieldValue("poc-first-name", "Ada");
+    setFieldValue("poc-last-name", "Lowe");
+    setFieldValue("poc-email", "ADA@Acme.test");
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>("[data-testid='poc-save']")!.click();
+    });
+
+    expect(document.body.textContent).toContain("already on this company");
+    // NOT the cross-company advice, which would produce the duplicate.
+    expect(document.body.textContent).not.toContain("clear or change the email");
+    // Offered as a pickable suggestion, so there is one click out.
+    const suggestion = document.querySelector<HTMLButtonElement>("[data-testid='poc-suggestion'] button");
+    expect(suggestion).not.toBeNull();
+    act(() => suggestion!.click());
+    expect(onChange).toHaveBeenCalledWith("contact-1");
   });
 
   it("will not open the add dialog while the company's contacts are unavailable", () => {

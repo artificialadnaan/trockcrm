@@ -208,6 +208,33 @@ export function PointOfContactField({
       // without an actionable message the rep is left pressing Save on the same failing request forever.
       // Email is optional here, so say the thing that actually gets them out.
       if (err instanceof ApiError && err.code === "DUPLICATE_EMAIL") {
+        // The blocking contact may be on THIS company — the server's email check is global and runs before
+        // any company-aware matching. Telling that rep to change the email would have them create a second
+        // record for someone already in this very picker, so offer the existing one instead. Matched off
+        // knownContacts because that is exactly the set this field can legitimately select from.
+        const typed = draft.email.trim().toLowerCase();
+        const alreadyHere = typed
+          ? knownContacts.find((contact) => (contact.email ?? "").trim().toLowerCase() === typed)
+          : undefined;
+        if (alreadyHere) {
+          // Rendered through the normal suggestion row, which gives it "Use this contact" — and NOT via
+          // dedupBlocked, because a forced create cannot beat the unique index on email.
+          setSuggestions([
+            {
+              id: alreadyHere.id,
+              firstName: alreadyHere.firstName,
+              lastName: alreadyHere.lastName,
+              email: alreadyHere.email,
+              companyName: null,
+              linkedCompanyName: null,
+              isActive: true,
+            },
+          ]);
+          setSaveError(
+            `${err.message}. They are already on this company — use them instead of creating a second record.`
+          );
+          return;
+        }
         setSaveError(
           `${err.message}. That contact belongs to another company, so it cannot be used on this deal — clear or change the email to add this person for this company.`
         );
