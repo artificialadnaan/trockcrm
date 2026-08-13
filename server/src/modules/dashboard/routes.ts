@@ -63,7 +63,19 @@ router.get("/rep-roster", async (req, res, next) => {
     if (requestedOfficeId && !accessibleOffices.some((office) => office.id === requestedOfficeId)) {
       throw new AppError(403, "Requested office is not accessible");
     }
-    const officeId = requestedOfficeId ?? req.user!.activeOfficeId ?? req.user!.officeId ?? undefined;
+    const officeId = requestedOfficeId ?? req.user!.activeOfficeId ?? req.user!.officeId;
+    // REQUIRED, not optional. dashboardRosterMembershipSql degrades its office test to TRUE when given no
+    // office, and `users` lives in public — so an undefined officeId here would return every
+    // generates_sales user in EVERY office, which is the D-5 cross-office leak that predicate's own
+    // comment warns about. Refuse instead, exactly as GET /tasks/assignees does.
+    if (!officeId) {
+      throw new AppError(400, "Office context is required. Specify x-office-id.");
+    }
+    // The RESOLVED office is re-checked, not just a supplied header: a stale activeOfficeId from a revoked
+    // office grant would otherwise read a roster the caller can no longer see.
+    if (!accessibleOffices.some((office) => office.id === officeId)) {
+      throw new AppError(403, "Requested office is not accessible");
+    }
 
     const users = await getRepRosterOptions(req.tenantDb!, officeId);
     await req.commitTransaction!();
