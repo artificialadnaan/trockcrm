@@ -526,6 +526,48 @@ describe("PointOfContactField", () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
+  it("does not let an older create overwrite a newer one's fallback", async () => {
+    // Dismiss create A while pending, create and select B, then A resolves. With a single cache slot A's
+    // late write replaced B — so if B's refetch lagged or failed, the picker could not name the contact
+    // the parent was holding. The cache keeps both.
+    let resolveA: (v: unknown) => void = () => {};
+    const contactB = { id: "contact-b", firstName: "Bea", lastName: "Nolan", email: null, phone: null, jobTitle: null, category: "client" };
+    mocks.useCompanyContacts.mockReturnValue({ contacts: [], loading: false, error: null, refetch: vi.fn(async () => {}) });
+    mocks.createContact.mockImplementationOnce(() => new Promise((resolve) => { resolveA = resolve; }));
+    const onChange = vi.fn();
+    render({ onChange });
+
+    // A: started, then dismissed while pending.
+    act(() => container.querySelector<HTMLButtonElement>("[data-testid='poc-add-button']")!.click());
+    setFieldValue("poc-first-name", "Ada");
+    setFieldValue("poc-last-name", "Lowe");
+    act(() => {
+      document.querySelector<HTMLButtonElement>("[data-testid='poc-save']")!.click();
+    });
+    act(() => {
+      document.querySelector<HTMLButtonElement>('[data-slot="dialog-close"]')!.click();
+    });
+
+    // B: created and selected while A is still in flight.
+    mocks.createContact.mockResolvedValueOnce({ contact: contactB });
+    act(() => container.querySelector<HTMLButtonElement>("[data-testid='poc-add-button']")!.click());
+    setFieldValue("poc-first-name", "Bea");
+    setFieldValue("poc-last-name", "Nolan");
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>("[data-testid='poc-save']")!.click();
+    });
+    expect(onChange).toHaveBeenCalledWith("contact-b");
+
+    // A finally resolves, after B was already selected.
+    await act(async () => {
+      resolveA({ contact: { id: "contact-a", firstName: "Ada", lastName: "Lowe", email: null, phone: null, jobTitle: null, category: "client" } });
+    });
+
+    // B must still be nameable — the refetch never returned it, so only the cache can.
+    render({ onChange, value: "contact-b" });
+    expect(container.querySelector("[data-testid='poc-select']")?.textContent).toContain("Bea Nolan");
+  });
+
   it("will not open the add dialog while the company's contacts are unavailable", () => {
     // Membership is decided by looking a suggestion up in `contacts` (a suggestion carries no companyId),
     // so an empty list — errored OR still loading — would brand a contact that genuinely belongs to this

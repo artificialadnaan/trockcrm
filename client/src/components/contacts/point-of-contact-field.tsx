@@ -69,7 +69,7 @@ export function PointOfContactField({
   // `contacts`, so without this a successful create followed by a failed refetch left the field reading
   // "Select a point of contact" while the parent held the id — an invisible selection the rep cannot see
   // or correct, on a field whose whole job is to say who the crew should call.
-  const [justCreated, setJustCreated] = useState<{ companyId: string; contact: CompanyContact } | null>(null);
+  const [justCreated, setJustCreated] = useState<Array<{ companyId: string; contact: CompanyContact }>>([]);
   // Bumped whenever the dialog session ends by any means OTHER than the save that's in flight resolving
   // (closeDialog covers Cancel, a suggestion pick, and success). A create response that lands after its own
   // seq has been superseded is stale and must not call onChange — otherwise a rep who reconsiders and picks
@@ -143,7 +143,10 @@ export function PointOfContactField({
         // Held locally before the refetch is trusted, because refetch() swallows its own failure and clears
         // `contacts`, so selecting on the strength of the refetch alone could leave the field unable to
         // name the contact it is holding.
-        setJustCreated({
+        setJustCreated((prev) =>
+          prev.some((entry) => entry.contact.id === created.id)
+            ? prev
+            : [...prev, {
           companyId,
           contact: {
             id: created.id,
@@ -154,7 +157,7 @@ export function PointOfContactField({
             jobTitle: created.jobTitle ?? null,
             category: created.category ?? "client",
           },
-        });
+        }]);
         // NOT refetched when the session has ended. `refetch` is captured for the company this dialog was
         // opened under, and useCompanyContacts shares one request counter across renders — so a late call
         // from a dismissed save supersedes the CURRENT company's in-flight request and can repopulate the
@@ -201,11 +204,16 @@ export function PointOfContactField({
   // The refetched list plus any contact this dialog just created that the refetch did not bring back. On a
   // healthy refetch the created contact is already in `contacts`, so it de-duplicates to nothing.
   const knownContacts = useMemo(() => {
-    // Scoped to the company it was created under: carrying it into another company's list would offer a
-    // contact the server would reject, which is the whole failure this field is built to avoid.
-    if (!justCreated || justCreated.companyId !== companyId) return contacts;
-    if (contacts.some((contact) => contact.id === justCreated.contact.id)) return contacts;
-    return [...contacts, justCreated.contact];
+    // Each entry is scoped to the company it was created under: carrying one into another company's list
+    // would offer a contact the server rejects, the very failure this field exists to avoid. A LIST rather
+    // than a single slot because creates can overlap — dismiss A while pending, create and select B, then
+    // A resolves — and a singleton would let the older create overwrite the newer one's fallback, leaving
+    // the picker unable to name the contact the parent is holding.
+    const extras = justCreated.filter(
+      (entry) =>
+        entry.companyId === companyId && !contacts.some((contact) => contact.id === entry.contact.id)
+    );
+    return extras.length ? [...contacts, ...extras.map((entry) => entry.contact)] : contacts;
   }, [contacts, justCreated, companyId]);
 
   const items = useMemo(

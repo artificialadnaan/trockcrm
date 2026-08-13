@@ -2478,9 +2478,17 @@ router.post("/", async (req, res, next) => {
     // the same kind of deal. Guarded HERE, on the route, rather than inside createDeal: createDeal is
     // also called directly by lead conversion, Bid Board sync, SyncHub ingest and the import scripts, all
     // of which legitimately create contact-less service deals, and a check inside createDeal would reject
-    // every one of them. deriveWorkflowRouteForCreate mirrors createDeal's own precedence exactly
-    // (explicit workflowRoute wins over one derived from project type), so this guard can never fire on a
-    // different verdict than the create it is guarding.
+    // every one of them.
+    //
+    // The question this asks is "is this SERVICE WORK", not "what will the workflow_route column end up
+    // saying". deriveWorkflowRouteForCreate mirrors createDeal's project-type precedence exactly (an
+    // explicit workflowRoute wins over a derived one), but createDeal can still downgrade the route to
+    // 'normal' later, when a Service-typed deal is started on a standard stage with no service-family
+    // equivalent (service.ts, "Only if no equivalent exists do we fall back to 'normal'"). Such a deal is
+    // STILL service work — it keeps project_type 'service', and isServiceProjectDeal's first tier (which
+    // the reports and the client both use) classifies it as service regardless of this column. So the
+    // crew still needs someone to call, and the guard deliberately fires on the project type rather than
+    // waiting for a column that is not what "is this a service deal" is answered from.
     const { workflowRoute: derivedRoute } = await deriveWorkflowRouteForCreate({
       workflowRoute: rest.workflowRoute,
       projectType: rest.projectType,
