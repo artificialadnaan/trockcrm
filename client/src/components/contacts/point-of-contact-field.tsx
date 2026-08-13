@@ -6,6 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useCompanyContacts, type CompanyContact } from "@/hooks/use-companies";
 import { createContact } from "@/hooks/use-contacts";
+import { ApiError } from "@/lib/api";
 import { getContactCompanyName } from "@/lib/contact-utils";
 
 export interface PointOfContactFieldProps {
@@ -86,9 +87,10 @@ export function PointOfContactField({
     setDedupBlocked(false);
     // `saving` is deliberately NOT reset here. It tracks the in-flight REQUEST, not this dialog session:
     // clearing it on dismiss is what let a rep close mid-save, reopen, and submit the same person again
-    // while the first POST was still running — and since both requests run their dedup check before either
-    // commits, and there is no uniqueness constraint, that creates the exact duplicate this dialog exists
-    // to prevent. The finally in saveNewContact always releases it.
+    // while the first POST was still running. Both requests run their dedup check before either commits,
+    // and the only uniqueness the database enforces is a partial index on a non-null email — so two
+    // email-less submissions both insert, creating the exact duplicate this dialog exists to prevent. The
+    // finally in saveNewContact always releases it.
   };
 
   // Single change handler for all five dialog fields — routes through here so editing the draft ALWAYS
@@ -199,6 +201,18 @@ export function PointOfContactField({
       setSaveError("Contact was not created.");
     } catch (err) {
       if (seq !== saveSeq.current) return;
+      // DUPLICATE_EMAIL is a HARD block thrown before any dedup suggestion, and it is NOT forceable: there
+      // is a partial unique index on contacts(email), so "create anyway" would only trade this error for a
+      // unique violation. The email belongs to a contact at another company — which this company-scoped
+      // picker cannot offer, and which the deal's company-membership check would reject anyway — so
+      // without an actionable message the rep is left pressing Save on the same failing request forever.
+      // Email is optional here, so say the thing that actually gets them out.
+      if (err instanceof ApiError && err.code === "DUPLICATE_EMAIL") {
+        setSaveError(
+          `${err.message}. That contact belongs to another company, so it cannot be used on this deal — clear or change the email to add this person for this company.`
+        );
+        return;
+      }
       setSaveError(err instanceof Error ? err.message : "Could not create the contact.");
     } finally {
       // ALWAYS cleared, and only here. `saving` tracks the REQUEST, not the dialog session — see the guard

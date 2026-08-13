@@ -5,6 +5,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PointOfContactField } from "./point-of-contact-field";
+import { ApiError } from "@/lib/api";
 
 const mocks = vi.hoisted(() => ({
   useCompanyContacts: vi.fn(),
@@ -600,6 +601,33 @@ describe("PointOfContactField", () => {
     await act(async () => {
       resolveFirst({ contact: { id: "contact-a", firstName: "Ada", lastName: "Lowe", email: null, phone: null, jobTitle: null, category: "client" } });
     });
+  });
+
+  it("tells the rep how to get past a cross-company duplicate email", async () => {
+    // DUPLICATE_EMAIL is thrown BEFORE any dedup suggestion and is not forceable — contacts(email) carries
+    // a partial unique index, so "create anyway" would only trade this error for a unique violation. The
+    // matching contact belongs to another company, which this scoped picker cannot offer and the deal's
+    // company-membership check would reject. Without an actionable message the rep just re-presses Save.
+    mocks.useCompanyContacts.mockReturnValue({ contacts: [], loading: false, error: null, refetch: vi.fn() });
+    mocks.createContact.mockRejectedValue(
+      new ApiError(409, { message: 'A contact with email "ada@acme.test" already exists: Ada Lowe', code: "DUPLICATE_EMAIL" })
+    );
+    render();
+
+    act(() => container.querySelector<HTMLButtonElement>("[data-testid='poc-add-button']")!.click());
+    setFieldValue("poc-first-name", "Ada");
+    setFieldValue("poc-last-name", "Lowe");
+    setFieldValue("poc-email", "ada@acme.test");
+    await act(async () => {
+      document.querySelector<HTMLButtonElement>("[data-testid='poc-save']")!.click();
+    });
+
+    // Names the way out — the email is optional, so clearing it creates the person for this company.
+    expect(document.body.textContent).toContain("clear or change the email");
+    // And must NOT offer a force, which cannot succeed against the unique index.
+    expect(document.querySelector<HTMLButtonElement>("[data-testid='poc-save']")?.textContent).not.toContain(
+      "Create anyway"
+    );
   });
 
   it("will not open the add dialog while the company's contacts are unavailable", () => {
