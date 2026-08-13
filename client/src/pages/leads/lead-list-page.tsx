@@ -7,7 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { MetricCard } from "@/components/shared/metric-card";
 import { ScopeToggle, type ScopeToggleOption } from "@/components/shared/scope-toggle";
 import { USD_COMPACT } from "@/components/shared/formatters";
-import { useTaskAssignees } from "@/hooks/use-task-assignees";
+import { useRepRoster } from "@/hooks/use-rep-roster";
 import { useAuth } from "@/lib/auth";
 import {
   LEAD_BOARD_STAGE_SLUGS,
@@ -274,10 +274,12 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
   const bucket = searchParams.get("bucket");
   const search = searchParams.get("search") ?? "";
   const selectedOwnerId = role === "rep" || scope === "mine" ? "" : searchParams.get("assignedRepId") ?? "";
-  const { assignees } = useTaskAssignees();
+  // The sales roster, not every assignable account — same feed and same rule as the deals dashboard's Rep
+  // filter and the director dashboard's rosters. See useRepRoster.
+  const { reps: repOptions } = useRepRoster();
   const { projectTypes } = useProjectTypes();
   const selectedOwnerLabel = selectedOwnerId
-    ? assignees.find((assignee) => assignee.id === selectedOwnerId)?.displayName ?? "Selected rep"
+    ? repOptions.find((rep) => rep.id === selectedOwnerId)?.displayName ?? "Selected rep"
     : "All reps";
   // No-blank: keep the previously-loaded board visible during a search/scope refetch (the
   // hook already retains data + sequences responses via its requestId guard; this gates the
@@ -357,7 +359,7 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="__all__">All reps</SelectItem>
-                {assignees.map((assignee) => (
+                {repOptions.map((assignee) => (
                   <SelectItem key={assignee.id} value={assignee.id}>
                     {assignee.displayName}
                   </SelectItem>
@@ -440,7 +442,7 @@ function LeadListPageContent({ role, userId }: { role: string; userId: string })
               ? LEAD_LIST_FILTERBAR_DIMENSIONS
               : LEAD_LIST_FILTERBAR_DIMENSIONS.filter((dimension) => dimension !== "rep"),
           options: {
-            reps: assignees.map((assignee) => ({ value: assignee.id, label: assignee.displayName })),
+            reps: repOptions.map((rep) => ({ value: rep.id, label: rep.displayName })),
             projectTypes: projectTypes.map((projectType) => ({ value: projectType.id, label: projectType.name })),
             stages: (board?.columns ?? [])
               .filter((column) =>

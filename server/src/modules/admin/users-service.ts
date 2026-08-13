@@ -17,6 +17,7 @@ import {
   planSessionInvalidation,
 } from "@trock-crm/shared/lib/userProvisioningGuards";
 import { resolveEffectiveCapxRate, resolveEffectiveServiceSourceRate } from "@trock-crm/shared/lib/commission-structure";
+import { toProperCaseName } from "../../lib/person-name.js";
 import {
   incrementTokenVersion,
   revokeLocalAuthOnDeactivate,
@@ -273,9 +274,11 @@ export async function createCrmUser(input: CreateCrmUserInput, actorUserId: stri
       .insert(users)
       .values({
         email,
-        displayName: input.displayName.trim(),
-        firstName: input.firstName?.trim() || null,
-        lastName: input.lastName?.trim() || null,
+        // Capitalised on the way in, so the roster/pickers cannot end up with "nick reyes" beside
+        // "Adam Shaw" again. Mixed case an admin typed on purpose survives — see toProperCaseName.
+        displayName: toProperCaseName(input.displayName.trim()),
+        firstName: toProperCaseName(input.firstName?.trim()) || null,
+        lastName: toProperCaseName(input.lastName?.trim()) || null,
         role: input.role,
         officeId: input.officeId,
         reportsTo: input.reportsTo?.trim() || null,
@@ -363,7 +366,9 @@ export async function updateUser(
     if (violation) throw new AppError(violation.status, violation.message);
 
     const updates: Record<string, unknown> = {};
-    if (input.displayName !== undefined) updates.displayName = input.displayName;
+    // Normalised on edit too, not just create — otherwise renaming someone reintroduces the casing this
+    // exists to prevent, and the admin screen is where the bad rows were typed in the first place.
+    if (input.displayName !== undefined) updates.displayName = toProperCaseName(input.displayName);
     if (input.role !== undefined) updates.role = input.role;
     if (input.officeId !== undefined) updates.officeId = input.officeId;
     if (input.reportsTo !== undefined) updates.reportsTo = input.reportsTo;

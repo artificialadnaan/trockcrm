@@ -19,6 +19,7 @@ import { buildDealsQueryParams, useDeals, type Deal, type DealFilters } from "@/
 import { SearchInput } from "@/components/ui/search-input";
 import { useKeepPreviousData } from "@/hooks/use-keep-previous-data";
 import { usePipelineStages, type PipelineStage } from "@/hooks/use-pipeline-config";
+import { useRepRoster } from "@/hooks/use-rep-roster";
 import { useTaskAssignees } from "@/hooks/use-task-assignees";
 import { DealValue } from "@/components/deals/deal-value";
 import {
@@ -746,6 +747,15 @@ export function DealsListSection({
   const effectiveAssignedRepId = lockedOwnerId ?? (hideOwnerFilter ? undefined : ownerId === "__all__" ? undefined : ownerId);
 
   const { stages, loading: stagesLoading, error: stagesError } = usePipelineStages(workflowFamily);
+  // TWO feeds, because there are two questions here and conflating them is a bug in either direction.
+  //
+  //   repOptions   — who the owner FILTER may offer: the sales roster, matching the deals dashboard's Rep
+  //                  filter directly above this list and the director dashboard's rosters.
+  //   assignees    — who a name can be resolved FOR: every assignable account. This map is the fallback
+  //                  when a deal row arrives without assignedRepName, and it feeds the CSV export. Narrowed
+  //                  to the roster it would render a real owner as "Unassigned" the moment that person was
+  //                  unticked — turning a filter-scope decision into wrong data on screen and in exports.
+  const { reps: repOptions } = useRepRoster();
   const { assignees } = useTaskAssignees();
 
   const stageFilterOptions = useMemo(() => {
@@ -952,6 +962,9 @@ export function DealsListSection({
     () => new Map(assignees.map((assignee) => [assignee.id, assignee.displayName])),
     [assignees]
   );
+  // Labelled from the WIDE map on purpose: a drill-down or a locked owner can pin this list to someone
+  // outside the roster, and naming them beats "Selected rep" — the roster decides what the dropdown
+  // OFFERS, not who the app is able to name.
   const selectedOwnerLabel =
     ownerId === "__all__" ? "All reps" : assigneeNameById.get(ownerId) ?? "Selected rep";
   const derivedCountSummary =
@@ -1318,9 +1331,9 @@ export function DealsListSection({
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="__all__">All reps</SelectItem>
-                {assignees.map((assignee) => (
-                  <SelectItem key={assignee.id} value={assignee.id}>
-                    {assignee.displayName}
+                {repOptions.map((rep) => (
+                  <SelectItem key={rep.id} value={rep.id}>
+                    {rep.displayName}
                   </SelectItem>
                 ))}
               </SelectContent>

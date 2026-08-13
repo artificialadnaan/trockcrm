@@ -10,7 +10,7 @@ import { ScopeToggle, type ScopeToggleOption } from "@/components/shared/scope-t
 import { USD_COMPACT } from "@/components/shared/formatters";
 import { useDealBoard, type Deal, type DealBoardColumn } from "@/hooks/use-deals";
 import { usePipelineStages, useProjectTypes, useRegions } from "@/hooks/use-pipeline-config";
-import { useTaskAssignees } from "@/hooks/use-task-assignees";
+import { useRepRoster } from "@/hooks/use-rep-roster";
 import { buildCanonicalDealBoardColumns, buildCanonicalDealStageFamilies } from "@/lib/canonical-deal-board";
 import { isBoardVisibleStage, DEAL_LIST_SORT_OPTIONS } from "@/components/deals/deals-filterbar-adapter";
 import type { FilterDimension } from "@/components/filters/filter-bar";
@@ -1042,13 +1042,16 @@ function DealListPageContent({
   // Team is not offered (see SCOPE_OPTIONS); coerce a stored/URL ?scope=team to a scope we actually render so
   // the toggle and board never reach the dead "team" placeholder state.
   const scope: PipelineScope = requestedScope === "team" ? "mine" : requestedScope;
-  // Key the assignee list to the effective office so it reloads when the view switches offices (?officeId=)
+  // Key the rep list to the effective office so it reloads when the view switches offices (?officeId=)
   // — otherwise a rep is validated / the picker is populated against the previous office's users.
+  //
+  // The sales ROSTER, not every assignable account: this filter used to offer all 32 active users in the
+  // office because it read the task-assignee feed. See useRepRoster.
   const {
-    assignees,
-    loading: assigneesLoading,
-    loadedOfficeId: assigneesOfficeId,
-  } = useTaskAssignees({ officeId: effectiveOfficeId });
+    reps: repOptions,
+    loading: repOptionsLoading,
+    loadedOfficeId: repOptionsOfficeId,
+  } = useRepRoster({ officeId: effectiveOfficeId });
 
   // Remember the standing dashboard header filters (Rep + timeframe) per (user, effective office), the same
   // way Mine/All already persists — so opening a deal and returning to /deals restores the last selection.
@@ -1065,18 +1068,20 @@ function DealListPageContent({
     // so drop it there; Watched/On Hold/All keep it. The timeframe is always restored.
     if (scope === "mine") delete stored.assignedRepId;
     if (stored.assignedRepId) {
-      // Don't inject a rep who is no longer a selectable assignee (deactivated, or not in this office) — it
-      // would show an unresolved "Selected rep" and silently narrow the board. Defer the WHOLE hydration
-      // until the assignee list has settled FOR THE CURRENT office: while loading, and while the loaded list
-      // still belongs to a previous office (on an office switch the hook briefly reports the old list with
-      // loading=false before its reload effect fires). Once settled — even to an empty or errored list —
-      // drop just the rep and still restore the office-independent timeframe.
-      if (assigneesLoading || assigneesOfficeId !== effectiveOfficeId) return;
-      if (!assignees.some((assignee) => assignee.id === stored.assignedRepId)) delete stored.assignedRepId;
+      // Don't inject a rep who is no longer selectable (deactivated, not in this office, or unticked from
+      // the sales roster) — it would show an unresolved "Selected rep" and silently narrow the board. That
+      // last case is how unticking "Generates Sales" takes effect for someone who still owns deals: their
+      // deals stay on the board, but a saved filter pinned to them is released rather than left stuck.
+      // Defer the WHOLE hydration until the rep list has settled FOR THE CURRENT office: while loading, and
+      // while the loaded list still belongs to a previous office (on an office switch the hook briefly
+      // reports the old list with loading=false before its reload effect fires). Once settled — even to an
+      // empty or errored list — drop just the rep and still restore the office-independent timeframe.
+      if (repOptionsLoading || repOptionsOfficeId !== effectiveOfficeId) return;
+      if (!repOptions.some((rep) => rep.id === stored.assignedRepId)) delete stored.assignedRepId;
     }
     const next = applyStoredDealView(searchParams.toString(), stored);
     if (next !== null) setSearchParams(next, { replace: true });
-  }, [searchParams, setSearchParams, userId, effectiveOfficeId, scope, assignees, assigneesLoading, assigneesOfficeId]);
+  }, [searchParams, setSearchParams, userId, effectiveOfficeId, scope, repOptions, repOptionsLoading, repOptionsOfficeId]);
 
   // Persist a single header control (Rep or timeframe) as a per-(user, office) preference. Per-key so
   // changing one control never drops the other — important on a drill-down whose URL omits ?period.
@@ -1112,7 +1117,7 @@ function DealListPageContent({
   const selectedRepLabel =
     selectedRepId === "__all__"
       ? "All reps"
-      : assignees.find((assignee) => assignee.id === selectedRepId)?.displayName ?? "Selected rep";
+      : repOptions.find((rep) => rep.id === selectedRepId)?.displayName ?? "Selected rep";
   const dashboardView = useMemo(
     () =>
       getDashboardDealListView({
@@ -1573,9 +1578,9 @@ function DealListPageContent({
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="__all__">All reps</SelectItem>
-              {assignees.map((assignee) => (
-                <SelectItem key={assignee.id} value={assignee.id}>
-                  {assignee.displayName}
+              {repOptions.map((rep) => (
+                <SelectItem key={rep.id} value={rep.id}>
+                  {rep.displayName}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -1933,7 +1938,7 @@ function DealListPageContent({
                   : DEALS_BASE_LIST_FILTERBAR_DIMENSIONS,
                 paramPrefix: "dl_",
                 options: {
-                  reps: assignees.map((assignee) => ({ value: assignee.id, label: assignee.displayName })),
+                  reps: repOptions.map((rep) => ({ value: rep.id, label: rep.displayName })),
                   regions: regions.map((region) => ({ value: region.id, label: region.name })),
                   projectTypes: projectTypes.map((type) => ({ value: type.id, label: type.name })),
                   stages: boardColumns

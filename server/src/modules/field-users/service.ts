@@ -7,6 +7,7 @@ import { sendSystemEmail } from "../../lib/resend-client.js";
 import { hashPassword, verifyPassword } from "../auth/local-auth-service.js";
 import { signJwt } from "../auth/service.js";
 import { getFieldAppUrl } from "../auth/http-config.js";
+import { toProperCaseName } from "../../lib/person-name.js";
 
 const INVITE_TOKEN_BYTES = 32;
 const INVITE_TTL_DAYS = 7;
@@ -813,8 +814,11 @@ export async function acceptFieldInvite(input: { token: string; password: string
   const user = {
     id: crypto.randomUUID(),
     email: invite.email,
-    first_name: invite.first_name,
-    last_name: invite.last_name,
+    // Capitalised here rather than at the INSERT so the API response, the JWT-bearing payload and the row
+    // all carry the same spelling. This is the path that produced most of the lowercase names in
+    // production — an invite is typed by hand, and nothing downstream ever corrected it.
+    first_name: toProperCaseName(invite.first_name),
+    last_name: toProperCaseName(invite.last_name),
     role: "field_contractor",
     office_id: invite.tenant_id,
     is_active: true,
@@ -850,9 +854,9 @@ export async function acceptFieldInvite(input: { token: string; password: string
         VALUES (
           ${user.id}::uuid,
           ${invite.email},
-          ${`${invite.first_name} ${invite.last_name}`.trim()},
-          ${invite.first_name},
-          ${invite.last_name},
+          ${`${user.first_name} ${user.last_name}`.trim()},
+          ${user.first_name},
+          ${user.last_name},
           ${invite.phone},
           'field_contractor',
           ${invite.tenant_id}::uuid,

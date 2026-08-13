@@ -16,6 +16,7 @@ import {
   type ProcoreUser,
 } from "../../lib/procore-client.js";
 import type { UserRole } from "@trock-crm/shared/types";
+import { toProperCaseName } from "../../lib/person-name.js";
 
 type ExternalUserSource = (typeof externalUserSourceEnum.enumValues)[number];
 type ImportableUserRole = Exclude<UserRole, "field_contractor">;
@@ -118,7 +119,8 @@ const defaultDependencies: ImportServiceDependencies = {
       .insert(users)
       .values({
         email: input.email,
-        displayName: input.displayName,
+        // Same normalisation as createCrmUser — an import is the other way a badly-cased name gets in.
+        displayName: toProperCaseName(input.displayName),
         officeId: input.officeId,
         role: input.role,
         isActive: true,

@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   useDealsMock: vi.fn(),
   usePipelineStagesMock: vi.fn(),
   useTaskAssigneesMock: vi.fn(),
+  useRepRosterMock: vi.fn(() => ({ reps: [], loading: false, error: null, loadedOfficeId: null, refetch: vi.fn() })),
   apiMock: vi.fn(),
 }));
 
@@ -35,6 +36,13 @@ vi.mock("@/hooks/use-pipeline-config", () => ({
 
 vi.mock("@/hooks/use-task-assignees", () => ({
   useTaskAssignees: mocks.useTaskAssigneesMock,
+}));
+
+// The owner FILTER now reads the sales roster while the name map still reads the assignee list. Mocked to
+// an empty roster because these tests are about search/export/sort behaviour — left unmocked, the real
+// hook issues its own api() call and the "last api call" assertions below start reading that request.
+vi.mock("@/hooks/use-rep-roster", () => ({
+  useRepRoster: mocks.useRepRosterMock,
 }));
 
 vi.mock("@/lib/api", () => ({

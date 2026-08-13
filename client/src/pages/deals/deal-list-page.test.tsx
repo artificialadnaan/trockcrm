@@ -111,7 +111,7 @@ const mocks = vi.hoisted(() => ({
   useDealBoardMock: vi.fn(),
   useDealsMock: vi.fn(),
   usePipelineStagesMock: vi.fn(),
-  useTaskAssigneesMock: vi.fn(),
+  useRepRosterMock: vi.fn(),
   readTerminalDateFilterMock: vi.fn(),
   buildDealStageWorkspacePathMock: vi.fn(),
   useAuthMock: vi.fn(),
@@ -129,8 +129,8 @@ vi.mock("@/hooks/use-pipeline-config", () => ({
   useProjectTypes: () => ({ projectTypes: [{ id: "type-1", name: "Multifamily" }] }),
 }));
 
-vi.mock("@/hooks/use-task-assignees", () => ({
-  useTaskAssignees: mocks.useTaskAssigneesMock,
+vi.mock("@/hooks/use-rep-roster", () => ({
+  useRepRoster: mocks.useRepRosterMock,
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -425,7 +425,7 @@ describe("DealListPage", () => {
     mocks.useDealBoardMock.mockReset();
     mocks.useDealsMock.mockReset();
     mocks.usePipelineStagesMock.mockReset();
-    mocks.useTaskAssigneesMock.mockReset();
+    mocks.useRepRosterMock.mockReset();
     mocks.readTerminalDateFilterMock.mockReset();
     mocks.buildDealStageWorkspacePathMock.mockReset();
     mocks.useAuthMock.mockReset();
@@ -436,8 +436,8 @@ describe("DealListPage", () => {
     }));
     mocks.buildDealStageWorkspacePathMock.mockReturnValue("/deals/stages/stage-won?scope=all");
 
-    mocks.useTaskAssigneesMock.mockReturnValue({
-      assignees: [
+    mocks.useRepRosterMock.mockReturnValue({
+      reps: [
         { id: "rep-1", displayName: "Brett Jones" },
         { id: "rep-9", displayName: "Nina Nine" },
       ],
@@ -643,8 +643,8 @@ describe("DealListPage", () => {
 
   it("defers hydration while the loaded assignees still belong to a previous office (office-switch race)", async () => {
     // Simulate the hook briefly reporting a stale office's list (loading:false) right after an office switch.
-    mocks.useTaskAssigneesMock.mockReturnValue({
-      assignees: [{ id: "rep-1", displayName: "Brett Jones" }],
+    mocks.useRepRosterMock.mockReturnValue({
+      reps: [{ id: "rep-1", displayName: "Brett Jones" }],
       loading: false,
       loadedOfficeId: "office-STALE",
     });
@@ -661,7 +661,7 @@ describe("DealListPage", () => {
   });
 
   it("still restores the timeframe when the assignee list has finished loading but is empty", async () => {
-    mocks.useTaskAssigneesMock.mockReturnValue({ assignees: [], loading: false, loadedOfficeId: "office-1" });
+    mocks.useRepRosterMock.mockReturnValue({ reps: [], loading: false, loadedOfficeId: "office-1" });
     window.localStorage.setItem(
       "deals-view-preference:user-1:office-1",
       JSON.stringify({ assignedRepId: "rep-9", period: "ytd" }),
@@ -1467,8 +1467,8 @@ describe("DealListPage", () => {
   });
 
   it("drops the Rep dimension entirely when the header pins a concrete rep (no no-op single-rep control, no misleading Unassigned) (Codex #589 P2)", () => {
-    mocks.useTaskAssigneesMock.mockReturnValue({
-      assignees: [
+    mocks.useRepRosterMock.mockReturnValue({
+      reps: [
         { id: "rep-1", displayName: "Brett Jones" },
         { id: "rep-2", displayName: "Adam Smith" },
       ],
