@@ -518,7 +518,7 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
       won: { preset: "all" },
       lost: { preset: "all" },
-    }, 1000, null, undefined);
+    }, 1000, null, undefined, undefined, undefined);
     expect(html).toContain("Deals Dashboard"); // relabeled to distinguish the dashboard from /pipeline
     expect(html).toContain('placeholder="Search deals"');
     expect(html).toContain("Opportunity");
@@ -702,7 +702,9 @@ describe("DealListPage", () => {
       { won: { preset: "all" }, lost: { preset: "all" } },
       1000,
       null,
-      "rep-1"
+      "rep-1",
+      undefined,
+      undefined
     );
     expect(mocks.dealsListSectionMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1061,7 +1063,7 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
       won: { preset: "all" },
       lost: { preset: "all" },
-    }, 1000, null, undefined);
+    }, 1000, null, undefined, undefined, undefined);
   });
 
   it("strips stale estimate_sent_* params from the URL on load — the removed control must not invisibly filter the board or a stage drill-down (Codex #600 P2)", async () => {
@@ -1080,7 +1082,7 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
       won: { preset: "all" },
       lost: { preset: "wtd" },
-    }, 1000, null, undefined);
+    }, 1000, null, undefined, undefined, undefined);
   });
 
   it("passes the selected page period to the board request so won aggregates match the drilldown window", () => {

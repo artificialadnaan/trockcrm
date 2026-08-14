@@ -954,6 +954,7 @@ router.get("/", async (req, res, next) => {
         ? (req.query.inactiveStageIds as string).split(",")
         : undefined,
       assignedRepId: req.query.assignedRepId as string | undefined,
+      estimatorId: req.query.estimatorId as string | undefined,
       projectTypeId: req.query.projectTypeId as string | undefined,
       regionId: req.query.regionId as string | undefined,
       source: req.query.source as string | undefined,
@@ -1050,6 +1051,7 @@ router.get("/pipeline", async (req, res, next) => {
     );
     const filters = {
       assignedRepId: req.query.assignedRepId as string | undefined,
+      estimatorId: req.query.estimatorId as string | undefined,
       estimateSentFrom,
       estimateSentTo,
       scope,

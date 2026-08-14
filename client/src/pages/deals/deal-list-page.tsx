@@ -4,7 +4,7 @@ import { ArrowRight, Briefcase, Plus, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { MetricCard } from "@/components/shared/metric-card";
 import { ScopeToggle, type ScopeToggleOption } from "@/components/shared/scope-toggle";
 import { USD_COMPACT } from "@/components/shared/formatters";
@@ -1096,7 +1096,7 @@ function DealListPageContent({
   // Persist a single header control (Rep or timeframe) as a per-(user, office) preference. Per-key so
   // changing one control never drops the other — important on a drill-down whose URL omits ?period.
   const persistDealViewParam = useCallback(
-    (key: "period" | "assignedRepId", value: string | null) => {
+    (key: "period" | "assignedRepId" | "estimatorId", value: string | null) => {
       const stored = readStoredDealView(userId, effectiveOfficeId);
       if (value) stored[key] = value;
       else delete stored[key];
@@ -1124,6 +1124,23 @@ function DealListPageContent({
   const selectedRepId =
     requestedScope === "team" ? "__all__" : searchParams.get("assignedRepId") || "__all__";
   const selectedRepFilter = selectedRepId === "__all__" ? undefined : selectedRepId;
+  // The ESTIMATOR dimension, a sibling of the rep one rather than a mode of it.
+  //
+  // Two params, mutually exclusive, because they ask different questions: ?assignedRepId means "deals this
+  // person OWNS" and ?estimatorId means "deals this person is ESTIMATING". Keeping them separate is what
+  // lets an estimator who owns nothing be reachable at all — a rep filter means OWNS (see
+  // buildOwnedRepCondition), so Sidney Gibson, owner of 0 deals and estimator on 137, returned an empty
+  // board from the only control that existed.
+  //
+  // The dropdown carries the group in its VALUE (`est:<id>`) rather than looking the id up in the roster,
+  // so the reader of the URL never has to re-derive which question was asked. Sales values stay bare ids,
+  // so every existing link, bookmark and saved preference keeps working untouched.
+  const selectedEstimatorFilter =
+    requestedScope === "team" ? undefined : searchParams.get("estimatorId") || undefined;
+  const ESTIMATOR_VALUE_PREFIX = "est:";
+  const selectedRosterValue = selectedEstimatorFilter
+    ? `${ESTIMATOR_VALUE_PREFIX}${selectedEstimatorFilter}`
+    : selectedRepId;
   // The roster plus the current selection when that falls outside it, so the control can name and clear a
   // pinned off-roster owner instead of pretending nothing is selected.
   const headerRepOptions = useMemo(
@@ -1137,8 +1154,24 @@ function DealListPageContent({
     () => buildRepFilterOptions(repOptions, listRepFilterId, (id) => assigneeNameById.get(id)),
     [repOptions, listRepFilterId, assigneeNameById]
   );
-  const selectedRepLabel =
-    selectedRepId === "__all__"
+  // Split once, rendered as two labelled groups. The server already orders sales-then-estimator and puts
+  // each person in exactly one group, so this only partitions — it never decides membership.
+  const salesRepOptions = useMemo(
+    () => headerRepOptions.filter((rep) => rep.group !== "estimator"),
+    [headerRepOptions]
+  );
+  const estimatorOptions = useMemo(
+    () => headerRepOptions.filter((rep) => rep.group === "estimator"),
+    [headerRepOptions]
+  );
+  // Named for what was actually selected, so the trigger cannot read "All reps" while an estimator narrows
+  // the board. The estimator branch is checked FIRST because a person could in principle appear under both
+  // if the server rule is ever relaxed, and the URL param is the authoritative statement of intent.
+  const selectedRepLabel = selectedEstimatorFilter
+    ? `${estimatorOptions.find((rep) => rep.id === selectedEstimatorFilter)?.displayName
+        ?? assigneeNameById.get(selectedEstimatorFilter)
+        ?? "Selected estimator"} (estimating)`
+    : selectedRepId === "__all__"
       ? "All reps"
       : headerRepOptions.find((rep) => rep.id === selectedRepId)?.displayName ?? "Selected rep";
   const dashboardView = useMemo(
@@ -1165,7 +1198,11 @@ function DealListPageContent({
     // SOURCE, even though the client no longer filters by it. Send no board period on this drill-down so
     // the at-risk cohort (card/kanban/list) is the full current set. (Won columns are hidden here anyway.)
     isAtRiskDrilldown ? null : selectedPeriodRange,
-    selectedRepFilter
+    selectedRepFilter,
+    // estimateSentDateRange is a board control this page does not drive; passed through as undefined so
+    // the estimator argument lands in the right position.
+    undefined,
+    selectedEstimatorFilter
   );
 
   // Sync the board's terminal (Won/Lost) date state from the URL — but key on the BOARD params only, so a
@@ -1205,13 +1242,25 @@ function DealListPageContent({
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
 
-  const updateSelectedRep = useCallback((repId: string) => {
-    const repValue = !repId || repId === "__all__" ? null : repId;
+  const updateSelectedRep = useCallback((rosterValue: string) => {
+    // One control, two params. An "est:"-prefixed value came from the Estimators group and writes
+    // ?estimatorId; anything else is a sales rep and writes ?assignedRepId exactly as before.
+    const raw = !rosterValue || rosterValue === "__all__" ? null : rosterValue;
+    const isEstimator = raw?.startsWith(ESTIMATOR_VALUE_PREFIX) ?? false;
+    const repValue = raw && !isEstimator ? raw : null;
+    const estimatorValue = raw && isEstimator ? raw.slice(ESTIMATOR_VALUE_PREFIX.length) : null;
+
     persistDealViewParam("assignedRepId", repValue); // remember the selection (incl. from a drill-down)
+    persistDealViewParam("estimatorId", estimatorValue);
     setSearchParams((current) => {
       const next = new URLSearchParams(current);
+      // ALWAYS clear the sibling. The two are mutually exclusive, and leaving a stale one behind would
+      // AND them server-side — "deals Sidney estimates that Colby also owns" — which is a question the
+      // control cannot express and the user never asked.
       if (repValue) next.set("assignedRepId", repValue);
       else next.delete("assignedRepId");
+      if (estimatorValue) next.set("estimatorId", estimatorValue);
+      else next.delete("estimatorId");
       return next;
     });
   }, [persistDealViewParam, setSearchParams]);
@@ -1489,6 +1538,9 @@ function DealListPageContent({
     () => ({
       ...layeredListBaseFilters,
       ...(selectedRepFilter ? { assignedRepId: selectedRepFilter } : {}),
+      // The estimator dimension travels with the rep one, or the list below the board would ignore it
+      // and show a different population than the kanban above (the reconciliation rule this page keeps).
+      ...(selectedEstimatorFilter ? { estimatorId: selectedEstimatorFilter } : {}),
       // Won drill-down: exclude on-hold (migration parking-lot) deals so the list reconciles to the Won
       // KPI / board column, both of which drop on-hold from the Won count (Codex P2).
       ...(dashboardView.filter === "won" ? { excludeOnHold: true } : {}),
@@ -1595,17 +1647,46 @@ function DealListPageContent({
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <Select value={selectedRepId} onValueChange={(value) => updateSelectedRep(value ?? "__all__")}>
+          <Select
+            value={selectedRosterValue}
+            onValueChange={(value) => updateSelectedRep(value ?? "__all__")}
+          >
             <SelectTrigger className="h-10 w-[13rem] bg-white">
               <SelectValue placeholder="All reps">{selectedRepLabel}</SelectValue>
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="__all__">All reps</SelectItem>
-              {headerRepOptions.map((rep) => (
-                <SelectItem key={rep.id} value={rep.id}>
-                  {rep.displayName}
-                </SelectItem>
-              ))}
+              {/* The group headings are only worth their space when there is something to distinguish —
+                  with no estimators ticked this renders exactly the flat list it always did. */}
+              {estimatorOptions.length === 0 ? (
+                salesRepOptions.map((rep) => (
+                  <SelectItem key={rep.id} value={rep.id}>
+                    {rep.displayName}
+                  </SelectItem>
+                ))
+              ) : (
+                <>
+                  <SelectGroup>
+                    <SelectLabel>Sales Reps</SelectLabel>
+                    {salesRepOptions.map((rep) => (
+                      <SelectItem key={rep.id} value={rep.id}>
+                        {rep.displayName}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                  <SelectGroup>
+                    <SelectLabel>Estimators</SelectLabel>
+                    {estimatorOptions.map((rep) => (
+                      // Prefixed so the handler knows which QUESTION was asked without re-deriving it
+                      // from the roster — picking someone here filters what they ESTIMATE, not what
+                      // they own.
+                      <SelectItem key={rep.id} value={`${ESTIMATOR_VALUE_PREFIX}${rep.id}`}>
+                        {rep.displayName}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </>
+              )}
             </SelectContent>
           </Select>
           <Select value={selectedPeriod ?? "__all__"} onValueChange={(value) => updatePeriod(value ?? "__all__")}>
@@ -1934,9 +2015,10 @@ function DealListPageContent({
               // laterDate/earlierDate (the merged date-floor), so the bar Date can't widen past ?period — the
               // same nesting model as Rep (period control).
               baseFilters={
-                selectedRepFilter || selectedPeriodRange?.from || selectedPeriodRange?.to
+                selectedRepFilter || selectedEstimatorFilter || selectedPeriodRange?.from || selectedPeriodRange?.to
                   ? {
                       ...(selectedRepFilter ? { assignedRepId: selectedRepFilter } : {}),
+                      ...(selectedEstimatorFilter ? { estimatorId: selectedEstimatorFilter } : {}),
                       ...(selectedPeriodRange?.from ? { dateFrom: selectedPeriodRange.from } : {}),
                       ...(selectedPeriodRange?.to ? { dateTo: selectedPeriodRange.to } : {}),
                     }

@@ -108,6 +108,7 @@ import { getWtdPeriod } from "../../lib/period.js";
 import {
   buildDealFilterBarConditions,
   buildOwnedRepCondition,
+  buildEstimatorCondition,
   buildAliasedOwnedRepSql,
   aliasedStageAwareEffectiveDealValueSql,
   aliasedEffectiveStageAgeDaysSql,
@@ -353,6 +354,9 @@ export interface DealFilters {
   stageIds?: string[];
   inactiveStageIds?: string[];
   assignedRepId?: string;
+  /** Deals this person is ESTIMATING (deals.estimator_user_id). Independent of assignedRepId — the two
+   *  answer different questions and are AND'd if both are somehow sent. See buildEstimatorPredicate. */
+  estimatorId?: string;
   projectTypeId?: string;
   regionId?: string;
   source?: string;
@@ -3702,6 +3706,8 @@ export async function getDealsForPipeline(
   userId: string,
   filters?: {
     assignedRepId?: string;
+    /** Deals this person is ESTIMATING. Applied alongside scope like assignedRepId, never instead of it. */
+    estimatorId?: string;
     estimateSentFrom?: string;
     estimateSentTo?: string;
     includeDd?: boolean;
@@ -3808,6 +3814,13 @@ export async function getDealsForPipeline(
   }
   if (filters?.assignedRepId && !assignedRepFilterHandled) {
     commonConditions.push(buildOwnedRepCondition(filters.assignedRepId));
+  }
+  // The estimator dimension. ANDed with everything above rather than replacing the rep branch: scope
+  // (mine/team) must keep applying, so picking an estimator narrows within the viewer's scope exactly as
+  // picking a rep does. The board and the drill-down list share this predicate via buildEstimatorCondition,
+  // which is what keeps the kanban and the list below it resolving the same set.
+  if (filters?.estimatorId) {
+    commonConditions.push(buildEstimatorCondition(filters.estimatorId));
   }
 
   // Office scope: mirror getDeals so the kanban board and the drill-down list

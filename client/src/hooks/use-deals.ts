@@ -1070,7 +1070,10 @@ export function useDealBoard(
   previewLimit: number | null = 8,
   wonPeriodRange?: { from?: string; to?: string } | null,
   assignedRepId?: string,
-  estimateSentDateRange?: { from?: string; to?: string }
+  estimateSentDateRange?: { from?: string; to?: string },
+  /** Deals this person is ESTIMATING (deals.estimator_user_id) — the sibling of assignedRepId, never
+   *  both at once. See the deals dashboard header control. */
+  estimatorId?: string
 ) {
   const [board, setBoard] = useState<DealBoardResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1105,6 +1108,9 @@ export function useDealBoard(
     if (assignedRepId) {
       params.set("assignedRepId", assignedRepId);
     }
+    if (estimatorId) {
+      params.set("estimatorId", estimatorId);
+    }
     if (estimateSentDateRange?.from) {
       params.set("estimateSentFrom", estimateSentDateRange.from);
     }
@@ -1129,6 +1135,7 @@ export function useDealBoard(
       });
   }, [
     assignedRepId,
+    estimatorId,
     estimateSentDateRange?.from,
     estimateSentDateRange?.to,
     includeDd,

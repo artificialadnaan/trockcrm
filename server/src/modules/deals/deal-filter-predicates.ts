@@ -26,6 +26,7 @@ import {
  *
  * PARAM CONTRACT (consumed here; emitted by RED's FilterBar frontend):
  *   assignedRepId  string | "__unassigned__"   eq, or IS NULL for the sentinel
+ *   estimatorId    string                       eq on estimator_user_id (no sentinel — see the predicate)
  *   regionId       string | "__unassigned__"   eq, or IS NULL for the sentinel
  *   projectTypeId  string                       eq
  *   workflowRoute  "normal" | "service"         eq (stored verbatim — no mapping)
@@ -44,6 +45,11 @@ export type DealStatusFilter = "active" | "on_hold" | "inactive" | "any";
 
 export interface DealFilterBarInput {
   assignedRepId?: string;
+  /**
+   * "Estimating it": deals whose estimator_user_id is this person. A SEPARATE dimension from
+   * assignedRepId on purpose — see buildEstimatorPredicate.
+   */
+  estimatorId?: string;
   regionId?: string;
   projectTypeId?: string;
   // Loosely typed on purpose: the predicate is the single validation point. A
@@ -118,6 +124,31 @@ export function buildOwnedRepCondition(repId: string): SQL {
 export function buildAssignedRepPredicate(input: DealFilterBarInput): SQL | undefined {
   if (!input.assignedRepId) return undefined;
   return buildOwnedRepCondition(input.assignedRepId);
+}
+
+/**
+ * "Estimating it": the deal's estimator IS the filtered person (deals.estimator_user_id).
+ *
+ * A THIRD predicate rather than a tweak to either existing one, because it answers a third question.
+ * buildOwnedRepCondition explains why a REP filter must stay owner-only; that reasoning is untouched
+ * here. This is what the "Estimators" group of the dropdown selects, and it is deliberately NOT
+ * owner-OR-estimator: the question is "what is Sidney estimating", and OR-ing in ownership would fold
+ * her own book back in and stop the two groups meaning different things.
+ *
+ * No Unassigned sentinel. The FilterBar's "__unassigned__" belongs to the assigned-rep dimension and
+ * means "nobody owns this"; there is no "unestimated" bucket in the UI, and silently mapping the
+ * sentinel to `estimator_user_id IS NULL` would answer a question nobody asked — on this dataset that is
+ * most of the board. An unrecognized sentinel therefore falls through to a plain equality against a
+ * value that matches no row, which is the safe direction (a no-match, never a widening).
+ */
+export function buildEstimatorCondition(estimatorId: string): SQL {
+  return eq(deals.estimatorUserId, estimatorId);
+}
+
+/** estimator — eq on deals.estimator_user_id; unset omits (no narrowing). */
+export function buildEstimatorPredicate(input: DealFilterBarInput): SQL | undefined {
+  if (!input.estimatorId) return undefined;
+  return buildEstimatorCondition(input.estimatorId);
 }
 
 /**
@@ -429,6 +460,7 @@ export type DealFilterPredicate = (
 /** The registry: one entry per FilterBar dimension, all AND-combinable. */
 export const DEAL_FILTER_PREDICATES: DealFilterPredicate[] = [
   (input) => buildAssignedRepPredicate(input),
+  (input) => buildEstimatorPredicate(input),
   (input) => buildRegionPredicate(input),
   (input) => buildProjectTypePredicate(input),
   (input) => buildWorkflowRoutePredicate(input),
