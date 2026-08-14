@@ -15,6 +15,12 @@ const MAX: Record<string, number> = {
 function fullItems(): { sectionKey: string; points: number }[] {
   return Object.entries(MAX).map(([sectionKey, points]) => ({ sectionKey, points }));
 }
+function v2Items(): { sectionKey: string; points: number }[] {
+  return [
+    "planning_precon", "jobsite_5s", "safety", "schedule",
+    "subcontractor", "quality", "communication", "financial",
+  ].map((sectionKey) => ({ sectionKey, points: 8 }));
+}
 function body(over: Record<string, unknown> = {}) {
   return {
     clientSubmissionId: CSID,
@@ -34,6 +40,28 @@ describe("parseScorecardSubmission", () => {
     expect(parsed.dealId).toBe(DEAL);
     expect(parsed.items).toHaveLength(7);
     expect(parsed.weekOf).toBe("2026-06-30");
+  });
+
+  it("keeps signature/evidence ownership on a V2 submission (weekOf is client-stamped + required)", () => {
+    const parsed = parseScorecardSubmission(body({
+      formVersion: 2,
+      weekOf: "2026-06-30",
+      items: v2Items(),
+      superintendentSignature: "Sam Super",
+      pmSignature: "Pat PM",
+      photos: [{ sectionKey: "critical_deficiency", deficiencyKey: "failed_inspection", clientUploadId: "cu-1" }],
+    }));
+    expect(parsed.formVersion).toBe(2);
+    expect(parsed.weekOf).toBe("2026-06-30");
+    expect(parsed.photos[0]).toMatchObject({ sectionKey: "critical_deficiency", deficiencyKey: "failed_inspection" });
+    expect(parsed.superintendentSignature).toBe("Sam Super");
+  });
+
+  it("rejects a blank / calendar-invalid weekOf for V2 AND leadership too (the client stamps it; the server no longer overwrites it, so a bad value must 400 here, not fail the DB date cast)", () => {
+    expect(() => parseScorecardSubmission(body({ formVersion: 2, weekOf: "", items: v2Items() }))).toThrow(/weekOf/i);
+    expect(() => parseScorecardSubmission(body({ formVersion: 2, weekOf: "2026-02-30", items: v2Items() }))).toThrow(/weekOf/i);
+    // weekOf is validated before items, so the (project) fullItems body still throws on the bad week first.
+    expect(() => parseScorecardSubmission(body({ kind: "leadership", weekOf: "" }))).toThrow(/weekOf/i);
   });
 
   it("rejects a non-uuid clientSubmissionId or dealId", () => {
@@ -102,5 +130,25 @@ describe("parseScorecardSubmission", () => {
     const parsed = parseScorecardSubmission(body({ superintendentName: "   ", pmName: "Dana" }));
     expect(parsed.superintendentName).toBeNull();
     expect(parsed.pmName).toBe("Dana");
+  });
+
+  it("rejects a leadership submission that carries critical deficiencies (or notes) — 400, not silent-drop", () => {
+    const leadership = {
+      kind: "leadership",
+      items: [
+        { sectionKey: "quality_control", points: 8 },
+        { sectionKey: "safety", points: 8 },
+        { sectionKey: "schedule_adherence", points: 8 },
+        { sectionKey: "site_staff_feedback", points: 8 },
+      ],
+    };
+    expect(() =>
+      parseScorecardSubmission(body({ ...leadership, criticalDeficiencies: ["failed_inspection"] })),
+    ).toThrow(/leadership/i);
+    expect(() =>
+      parseScorecardSubmission(body({ ...leadership, criticalDeficiencies: [], criticalDeficiencyNotes: { failed_inspection: "bad" } })),
+    ).toThrow(/leadership/i);
+    // A clean leadership body (no deficiencies) still parses.
+    expect(() => parseScorecardSubmission(body(leadership))).not.toThrow();
   });
 });

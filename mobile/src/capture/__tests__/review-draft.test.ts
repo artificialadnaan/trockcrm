@@ -253,3 +253,38 @@ describe("review-draft: serialization (no read-modify-write clobber)", () => {
     expect((await loadDraft("u1")).map((i) => i.key)).toEqual(["b"]);
   });
 });
+
+describe("review-draft: stale-container uri rebasing (heals a rotated iOS container on recovery)", () => {
+  // A manifest whose item uri was frozen under a DIFFERENT container UUID (file moved with the container).
+  function staleItem(id: string) {
+    return {
+      key: id,
+      clientUploadId: `cu-${id}`,
+      uri: `file:///var/mobile/Containers/Data/Application/OLD-UUID/Documents/review-draft/u1/cu-${id}.jpg`,
+      width: 100,
+      height: 200,
+      metadata: { takenAt: "t", latitude: 1, longitude: 2, addressSource: "exif" },
+      caption: "",
+      ctx: { target: { dealId: "d1" }, category: null, tags: [] },
+    };
+  }
+
+  it("rebases the manifest item uri onto the live review-draft dir on load", async () => {
+    fs.__store.set("file:///doc/review-draft/u1/manifest.json", JSON.stringify([staleItem("a")]));
+    const [only] = await loadDraft("u1");
+    expect(only.uri).toBe("file:///doc/review-draft/u1/cu-a.jpg");
+  });
+
+  it("heals a stale uri surfaced via the .tmp recovery path", async () => {
+    fs.__store.set("file:///doc/review-draft/u1/manifest.json.tmp", JSON.stringify([staleItem("a")]));
+    const [only] = await loadDraft("u1");
+    expect(only.uri).toBe("file:///doc/review-draft/u1/cu-a.jpg");
+  });
+
+  it("leaves a non-durable (remote/legacy) uri untouched", async () => {
+    const remote = { ...staleItem("a"), uri: "https://cdn.example.com/x.jpg?sig=y" };
+    fs.__store.set("file:///doc/review-draft/u1/manifest.json", JSON.stringify([remote]));
+    const [only] = await loadDraft("u1");
+    expect(only.uri).toBe("https://cdn.example.com/x.jpg?sig=y");
+  });
+});

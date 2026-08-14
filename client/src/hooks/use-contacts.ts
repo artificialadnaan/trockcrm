@@ -258,7 +258,7 @@ export async function createContact(
   input: Partial<Contact> & { firstName: string; lastName: string; category: string; skipDedupCheck?: boolean },
   options: OfficeRequestOptions = {}
 ) {
-  return api<{ contact: Contact | null; dedupWarning?: boolean; suggestions?: Array<{ id: string; firstName: string; lastName: string; email: string | null; companyName: string | null; matchReason: string }> }>("/contacts", {
+  return api<{ contact: Contact | null; dedupWarning?: boolean; suggestions?: Array<{ id: string; firstName: string; lastName: string; email: string | null; companyName: string | null; isActive?: boolean; matchReason: string }> }>("/contacts", {
     method: "POST",
     json: input,
     ...getOfficeRequestOptions(options.officeId),

@@ -7,6 +7,8 @@ import type { FieldPhoto, GeneratedReport, ReportGroupBy, ReportPreviewResponse 
 import { theme } from "../theme/theme";
 import { Button, Chip, SectionLabel, TextInput } from "./ui";
 import { Banner } from "./Banner";
+import { VoiceRecorder } from "./VoiceRecorder";
+import { buildGenerateReportRequest } from "./report-builder-request";
 
 const GROUP_OPTIONS: { value: ReportGroupBy; label: string }[] = [
   { value: "none", label: "No grouping" },
@@ -25,12 +27,16 @@ export function ReportBuilder({
   projectId,
   photos,
   onGenerated,
+  voiceEnabled = false,
 }: {
   visible: boolean;
   onClose: () => void;
   projectId: string;
   photos: FieldPhoto[];
   onGenerated: (report: GeneratedReport) => void;
+  // Gates the summary dictation button — true only when server transcription is configured, matching the
+  // capture/scorecard surfaces. When false the summary is typing-only (no dead mic button).
+  voiceEnabled?: boolean;
 }) {
   const { fetcher } = useAuth();
   const { width } = useWindowDimensions();
@@ -41,6 +47,9 @@ export function ReportBuilder({
   const [groupBy, setGroupBy] = useState<ReportGroupBy>("none");
   const [preview, setPreview] = useState<ReportPreviewResponse | null>(null);
   const [title, setTitle] = useState("");
+  const [execSummary, setExecSummary] = useState("");
+  // Held while the summary is being dictated/transcribed so Generate can't fire and drop the transcript.
+  const [summaryDictating, setSummaryDictating] = useState(false);
   const [sectionTitles, setSectionTitles] = useState<Record<string, string>>({});
   const [descriptions, setDescriptions] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
@@ -52,6 +61,8 @@ export function ReportBuilder({
     setGroupBy("none");
     setPreview(null);
     setTitle("");
+    setExecSummary("");
+    setSummaryDictating(false);
     setSectionTitles({});
     setDescriptions({});
     setError(null);
@@ -107,24 +118,18 @@ export function ReportBuilder({
     setError(null);
     setBusy(true);
     try {
-      const result = await generateReport(fetcher, {
-        projectId,
-        reportTitle: title,
-        coverData: {
-          creatorName: preview.cover.creatorName,
-          companyName: preview.cover.companyName,
-          reportDateLabel: preview.cover.reportDateLabel,
-          projectName: preview.cover.projectName,
-        },
-        sections: preview.sections.map((section) => ({
-          title: sectionTitles[section.id] ?? section.title,
-          photoIds: section.photos.map((p) => p.id),
-          photoOverrides: section.photos.map((p) => ({
-            id: p.id,
-            description: descriptions[p.id] ?? p.description ?? null,
-          })),
-        })),
-      });
+      const result = await generateReport(
+        fetcher,
+        buildGenerateReportRequest({
+          projectId,
+          reportTitle: title,
+          executiveSummary: execSummary,
+          cover: preview.cover,
+          sections: preview.sections,
+          sectionTitles,
+          descriptions,
+        }),
+      );
       onGenerated(result.report);
       close();
     } catch (e) {
@@ -137,11 +142,31 @@ export function ReportBuilder({
   const headerTitle = step === "select" ? "Build report" : "Edit report";
 
   return (
-    <Modal visible={visible} animationType="slide" onRequestClose={close} presentationStyle="pageSheet">
+    <Modal
+      visible={visible}
+      animationType="slide"
+      // Don't tear the sheet down (and drop the in-flight transcript) while dictation is running.
+      onRequestClose={() => {
+        if (!summaryDictating) close();
+      }}
+      presentationStyle="pageSheet"
+    >
       <SafeAreaView style={styles.container} edges={["top", "bottom"]}>
         <View style={styles.header}>
-          <Pressable onPress={step === "edit" ? () => setStep("select") : close} hitSlop={10}>
-            <Text style={styles.headerAction}>{step === "edit" ? "Back" : "Cancel"}</Text>
+          <Pressable
+            // Guarded like ReviewTray: a mid-dictation Back/Cancel would unmount VoiceRecorder and lose the
+            // transcript, so block teardown until dictation settles.
+            onPress={() => {
+              if (summaryDictating) return;
+              if (step === "edit") setStep("select");
+              else close();
+            }}
+            disabled={summaryDictating}
+            hitSlop={10}
+          >
+            <Text style={[styles.headerAction, summaryDictating && styles.headerActionDisabled]}>
+              {step === "edit" ? "Back" : "Cancel"}
+            </Text>
           </Pressable>
           <Text style={styles.headerTitle}>{headerTitle}</Text>
           <View style={{ width: 56 }} />
@@ -194,9 +219,28 @@ export function ReportBuilder({
             </View>
           </ScrollView>
         ) : (
-          <ScrollView contentContainerStyle={styles.body}>
+          <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
             <SectionLabel>Report title</SectionLabel>
             <TextInput value={title} onChangeText={setTitle} placeholder="Report title" />
+
+            <SectionLabel>Executive summary</SectionLabel>
+            <Text style={styles.hint}>Optional — appears right after the cover page.</Text>
+            <TextInput
+              value={execSummary}
+              onChangeText={setExecSummary}
+              placeholder="Summarize the project status, wins, and next steps…"
+              multiline
+              style={styles.summaryInput}
+            />
+            {voiceEnabled ? (
+              <VoiceRecorder
+                label="🎤 Dictate summary"
+                onBusyChange={setSummaryDictating}
+                onTranscript={(text) =>
+                  setExecSummary((prev) => (prev.trim() ? `${prev.trim()} ${text}` : text))
+                }
+              />
+            ) : null}
             {preview?.sections.map((section) => (
               <View key={section.id} style={{ gap: theme.space.sm, marginTop: theme.space.lg }}>
                 <SectionLabel>Section</SectionLabel>
@@ -235,7 +279,7 @@ export function ReportBuilder({
               disabled={selected.size === 0}
             />
           ) : (
-            <Button title="Generate PDF" onPress={runGenerate} loading={busy} />
+            <Button title="Generate PDF" onPress={runGenerate} loading={busy} disabled={summaryDictating} />
           )}
         </View>
       </SafeAreaView>
@@ -254,9 +298,12 @@ const styles = StyleSheet.create({
   },
   headerTitle: { fontFamily: theme.font.bold, fontSize: 18, color: theme.color.textPrimary },
   headerAction: { fontFamily: theme.font.semibold, fontSize: 16, color: theme.color.brandRed, width: 56 },
+  headerActionDisabled: { opacity: 0.4 },
   body: { padding: theme.space.lg, gap: theme.space.md, paddingBottom: theme.space.xxl },
   rowBetween: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   link: { fontFamily: theme.font.semibold, fontSize: 14, color: theme.color.brandRed },
+  hint: { fontFamily: theme.font.body, fontSize: 13, color: theme.color.textMuted, marginTop: -4 },
+  summaryInput: { minHeight: 110, textAlignVertical: "top", paddingTop: 10 },
   grid: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
   thumb: { width: "100%", height: "100%", borderRadius: theme.radius.sm, backgroundColor: theme.color.surfaceMuted },
   placeholder: { borderWidth: 1, borderColor: theme.color.border },

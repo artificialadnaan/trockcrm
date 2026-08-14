@@ -34,6 +34,8 @@ export interface ProjectionLadder {
   // undatedValue is that complement's open best-estimate $ — together they back the B4 "No future close
   // date" card so office M == Σ band counts (= n) + (m − n).
   coverage: { n: number; m: number; undatedValue: number };
+  /** Non-future-dated deals split into stale past dates and never-dated records. */
+  blindSpots?: { stale: { count: number; value: number }; noDate: { count: number; value: number } };
   coverageCaption: string;
 }
 
@@ -92,7 +94,7 @@ export interface MondayShowcaseData {
 // Client mirror of the server MondayShowcaseEvidence payload (monday-showcase-service.ts). Every showcase
 // number is clickable; the drawer shows these records and their total EQUALS the clicked number.
 
-export type EvidenceMetric = "won" | "sent" | "estimated" | "projection" | "pipeline" | "leads" | "undated";
+export type EvidenceMetric = "won" | "sent" | "estimated" | "projection" | "pipeline" | "leads" | "undated" | "no_date" | "stale";
 
 export interface EvidenceRecord {
   id: string;

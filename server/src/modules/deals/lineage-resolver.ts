@@ -11,6 +11,7 @@ import {
 import type * as schema from "@trock-crm/shared/schema";
 import type { WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
+import { redactPropertyImageKeys } from "../properties/property-image-service.js";
 import { applyProjectTypeChange, clearSalesSource, normalizeOptionalDealBidDueDate } from "./service.js";
 import { lockCurrentDealDescription, recordDescriptionHistoryChange } from "./deal-description-history.js";
 
@@ -79,7 +80,7 @@ export interface DealFieldWritePlan {
 export interface ResolvedDealView {
   deal: typeof deals.$inferSelect;
   sourceLead: typeof leads.$inferSelect | null;
-  property: typeof properties.$inferSelect | null;
+  property: Omit<typeof properties.$inferSelect, "imageR2Key" | "imageThumbnailR2Key"> | null;
   answersByKey: Record<string, unknown>;
   resolved: {
     projectTypeId: string | null;
@@ -209,9 +210,11 @@ export async function getResolvedDeal(
     : [null];
 
   const propertyId = sourceLead?.propertyId ?? deal.propertyId ?? null;
-  const [property] = propertyId
+  const [propertyRow] = propertyId
     ? await tenantDb.select().from(properties).where(eq(properties.id, propertyId)).limit(1)
     : [null];
+  // Redact the internal R2 image keys — this full property row is serialized to clients.
+  const property = propertyRow ? redactPropertyImageKeys(propertyRow) : null;
 
   const answersByKey = sourceLead ? await getQuestionAnswersByKey(tenantDb, sourceLead.id) : {};
   const workflowRoute =

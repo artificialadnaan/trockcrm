@@ -11,6 +11,10 @@ import {
   PROJECT_NUMBER_FIRST_SET_MIGRATION,
   runProjectNumberFirstSetIndexMigration,
 } from "./project-number-first-set-index.js";
+import {
+  BID_BOARD_INGEST_MIGRATION,
+  runBidBoardIngestIndexMigration,
+} from "./bid-board-ingest-indexes.js";
 
 dotenv.config({
   path: join(dirname(fileURLToPath(import.meta.url)), "../../../.env"),
@@ -57,6 +61,13 @@ async function runMigrations(): Promise<void> {
         // SQL file, so build the per-tenant index here first; then the SQL file's
         // `CREATE UNIQUE INDEX IF NOT EXISTS` becomes a no-op on existing tenants.
         await runProjectNumberFirstSetIndexMigration(client);
+        const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
+        await client.query(sql);
+      } else if (file === BID_BOARD_INGEST_MIGRATION) {
+        // CREATE INDEX CONCURRENTLY cannot run inside the file's implicit transaction, so build the two
+        // public.job_queue indexes CONCURRENTLY here first (never blocking enqueue/outcome writes on the
+        // accumulated prod queue); the file's plain `CREATE INDEX IF NOT EXISTS` then no-ops.
+        await runBidBoardIngestIndexMigration(client);
         const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
         await client.query(sql);
       } else {

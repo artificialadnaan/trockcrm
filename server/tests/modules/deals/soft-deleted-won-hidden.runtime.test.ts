@@ -13,7 +13,7 @@ import { getDealById, deleteDeal } from "../../../src/modules/deals/service.js";
  *     `projects` mirror row (which the self-FK never deactivated), while leaving another live
  *     deal's project untouched; a repeat delete is idempotent (returns null — no false success).
  *
- * The full 138-column deals table is required because getDealById/deleteDeal select every column
+ * The full deals table is required because getDealById/deleteDeal select every column
  * (getTableColumns(deals) / select()). DDL generated from shared/src/schema/tenant/deals.ts with
  * the project's custom enum + interval types coerced to text/loose types (column NAMES are what
  * the drizzle query references; the DB type is irrelevant to a SELECT/UPDATE-by-name).
@@ -44,7 +44,7 @@ beforeAll(async () => {
     CREATE TABLE deals (
       id uuid PRIMARY KEY,
       deal_number varchar(50), name varchar(500), stage_id uuid, assigned_rep_id uuid,
-      primary_contact_id uuid, billing_contact_id uuid, company_id uuid, property_id uuid, source_lead_id uuid,
+      primary_contact_id uuid, billing_contact_id uuid, billing_contact_required_at timestamptz, company_id uuid, property_id uuid, source_lead_id uuid,
       dd_estimate numeric(14, 2), bid_estimate numeric(14, 2), awarded_amount numeric(14, 2),
       awarded_amount_overridden boolean, dd_estimate_overridden boolean, change_order_total numeric(14, 2), description text,
       estimator text, property_address text, property_city varchar(255), property_state varchar(2),
@@ -57,7 +57,7 @@ beforeAll(async () => {
       next_step_due_at timestamptz, next_milestone_at timestamptz, support_needed_type text,
       support_needed_notes text, forecast_updated_at timestamptz, forecast_updated_by uuid,
       email_count integer, last_email_at timestamptz, procore_project_id bigint,
-      procore_company_id text, procore_bid_id bigint, procore_image_category_id bigint,
+      procore_company_id text, procore_bid_id bigint, synchub_bid_board_id text, procore_image_category_id bigint,
       procore_photo_link_id bigint, procore_photo_link_status varchar(50),
       procore_last_synced_at timestamptz, is_bid_board_owned boolean, bid_board_stage_slug varchar(100),
       bid_board_stage_family varchar(50), bid_board_stage_status varchar(50),

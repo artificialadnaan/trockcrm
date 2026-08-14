@@ -31,11 +31,14 @@ function createTransitionDb(initialTask: TaskState, rows: TaskState[] = []) {
 
   const selectChain: any = {
     from: vi.fn(),
+    // getTaskById joins `deals` so a task read by id carries its project name/number.
+    leftJoin: vi.fn(),
     where: vi.fn(),
     limit: vi.fn(),
     then: vi.fn((resolve: any) => resolve([currentTask])),
   };
   selectChain.from.mockReturnValue(selectChain);
+  selectChain.leftJoin.mockReturnValue(selectChain);
   selectChain.where.mockReturnValue(selectChain);
   selectChain.limit.mockReturnValue(selectChain);
 

@@ -47,7 +47,34 @@ describe("buildScorecardPdfData", () => {
 
   it("resolves critical-deficiency keys to their labels and drops unknown keys", () => {
     const data = buildScorecardPdfData(input({ criticalDeficiencyKeys: ["failed_inspection", "bogus_key"] }));
-    expect(data.deficiencies).toEqual(["Failed inspection"]);
+    expect(data.deficiencies).toEqual([{
+      key: "failed_inspection",
+      label: "Failed inspection",
+      note: null,
+      photos: [],
+    }]);
+  });
+
+  it("groups evidence and descriptions with their scorecard section or deficiency", () => {
+    const image = Buffer.from("evidence-image");
+    const data = buildScorecardPdfData(input({
+      formVersion: 2,
+      criticalDeficiencyKeys: ["failed_inspection"],
+      criticalDeficiencyNotes: { failed_inspection: "Framing inspection must be repeated." },
+      photos: [
+        { sectionKey: "quality", deficiencyKey: null, caption: "Framing detail", image },
+        { sectionKey: "critical_deficiency", deficiencyKey: "failed_inspection", caption: "Inspection tag", image },
+      ],
+    }));
+    expect(data.sections.find((section) => section.title === "Quality Control")?.photos).toEqual([
+      { sectionKey: "quality", deficiencyKey: null, caption: "Framing detail", image },
+    ]);
+    expect(data.deficiencies).toEqual([{
+      key: "failed_inspection",
+      label: "Failed inspection",
+      note: "Framing inspection must be repeated.",
+      photos: [{ sectionKey: "critical_deficiency", deficiencyKey: "failed_inspection", caption: "Inspection tag", image }],
+    }]);
   });
 
   it("derives the rating label from the rating band", () => {

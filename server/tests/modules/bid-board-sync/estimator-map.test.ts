@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   BID_BOARD_ESTIMATOR_USER_MAP_ENV,
+  estimatorRosterUserIds,
   existingEstimatorUserId,
   isEstimatorMapConfigured,
   resolveEstimatorUserId,
@@ -78,6 +79,43 @@ describe("existingEstimatorUserId (FK-safety)", () => {
     process.env[BID_BOARD_ESTIMATOR_USER_MAP_ENV] = JSON.stringify({ "Alex Koch": ALEX.toUpperCase() });
     expect(resolveEstimatorUserId("Alex Koch")).toBe(ALEX); // stored lowercased
     expect(existingEstimatorUserId("Alex Koch", new Set([ALEX]))).toBe(ALEX); // matches lowercase user set
+  });
+});
+
+describe("estimatorRosterUserIds (report roster)", () => {
+  afterEach(() => {
+    delete process.env[BID_BOARD_ESTIMATOR_USER_MAP_ENV];
+  });
+
+  it("is empty when the env is unset (report shows only Other + Missing buckets)", () => {
+    expect(estimatorRosterUserIds()).toEqual([]);
+  });
+
+  it("returns the distinct mapped user ids", () => {
+    process.env[BID_BOARD_ESTIMATOR_USER_MAP_ENV] = JSON.stringify({
+      "Alex Koch": ALEX,
+      "Sidney Gibson": SIDNEY,
+    });
+    expect(estimatorRosterUserIds().sort()).toEqual([ALEX, SIDNEY].sort());
+  });
+
+  it("collapses multiple name aliases that map to the same id into one roster entry", () => {
+    process.env[BID_BOARD_ESTIMATOR_USER_MAP_ENV] = JSON.stringify({
+      "Alex Koch": ALEX,
+      "A. Koch": ALEX,
+      "Sidney Gibson": SIDNEY,
+    });
+    const roster = estimatorRosterUserIds();
+    expect(roster).toHaveLength(2);
+    expect(new Set(roster)).toEqual(new Set([ALEX, SIDNEY]));
+  });
+
+  it("drops malformed entries (only valid mapped ids appear in the roster)", () => {
+    process.env[BID_BOARD_ESTIMATOR_USER_MAP_ENV] = JSON.stringify({
+      "Alex Koch": "not-a-uuid",
+      "Sidney Gibson": SIDNEY,
+    });
+    expect(estimatorRosterUserIds()).toEqual([SIDNEY]);
   });
 });
 

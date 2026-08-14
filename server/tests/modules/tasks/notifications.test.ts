@@ -10,6 +10,23 @@ vi.mock("../../../src/lib/resend-client.js", () => resendMocks);
 
 const { sendTaskAssignmentEmail } = await import("../../../src/modules/tasks/notifications.js");
 
+/** A tenantDb whose successive `.select()` calls resolve to the next queued row set. */
+function createSequencedDb(rowSets: unknown[][]) {
+  let call = 0;
+  return {
+    select: vi.fn(() => {
+      const rows = rowSets[call++] ?? [];
+      return {
+        from: () => ({
+          where: () => ({
+            limit: async () => rows,
+          }),
+        }),
+      };
+    }),
+  };
+}
+
 describe("task assignment notifications", () => {
   beforeEach(() => {
     resendMocks.sendSystemEmail.mockReset();
@@ -105,6 +122,100 @@ describe("task assignment notifications", () => {
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
     expect(html).toContain("Use &lt;b&gt;bold&lt;/b&gt;");
     expect(html).toContain("&lt;Morgan&gt; assigned you a task");
+  });
+
+  it("names the linked project so the assignee knows what the task is for", async () => {
+    // The assignee lookup runs first, the linked-deal lookup second.
+    const tenantDb = createSequencedDb([
+      [{ id: "assignee-1", email: "derek@trockgc.com", displayName: "Derek Barr", firstName: "Derek" }],
+      [{ id: "deal-1", name: "Palm Villas", dealNumber: "HS-324283495135", projectNumber: "DFW-1-12826-AH" }],
+    ]);
+
+    await sendTaskAssignmentEmail(tenantDb as any, {
+      task: {
+        id: "task-1",
+        title: "Need Property info",
+        description: "Do you have the property and unit information?",
+        dueDate: "2026-07-31",
+        dealId: "deal-1",
+      },
+      assigneeId: "assignee-1",
+      assigner: { id: "assigner-1", displayName: "Colby Burling", email: "colby@trockgc.com" },
+    });
+
+    const html = resendMocks.sendSystemEmail.mock.calls[0][2] as string;
+    const text = (resendMocks.sendSystemEmail.mock.calls[0][3] as { text: string }).text;
+    expect(html).toContain("Project: DFW-1-12826-AH - Palm Villas");
+    expect(text).toContain("Project: DFW-1-12826-AH - Palm Villas");
+    // The meaningless HubSpot id must never reach the recipient.
+    expect(html).not.toContain("HS-324283495135");
+  });
+
+  it("falls back to the deal name when the project number is still pending", async () => {
+    const tenantDb = createSequencedDb([
+      [{ id: "assignee-1", email: "derek@trockgc.com", displayName: "Derek Barr", firstName: "Derek" }],
+      [{ id: "deal-1", name: "Palm Villas", dealNumber: "HS-324283495135", projectNumber: null }],
+    ]);
+
+    await sendTaskAssignmentEmail(tenantDb as any, {
+      task: { id: "task-1", title: "Need Property info", description: null, dueDate: null, dealId: "deal-1" },
+      assigneeId: "assignee-1",
+      assigner: { id: "assigner-1", displayName: "Colby Burling", email: "colby@trockgc.com" },
+    });
+
+    const html = resendMocks.sendSystemEmail.mock.calls[0][2] as string;
+    expect(html).toContain("Project: Palm Villas");
+    expect(html).not.toContain("HS-324283495135");
+  });
+
+  it("tells the assignee no project is linked rather than staying silent", async () => {
+    const tenantDb = createSequencedDb([
+      [{ id: "assignee-1", email: "derek@trockgc.com", displayName: "Derek Barr", firstName: "Derek" }],
+    ]);
+
+    await sendTaskAssignmentEmail(tenantDb as any, {
+      task: { id: "task-1", title: "Need Property info", description: null, dueDate: null, dealId: null },
+      assigneeId: "assignee-1",
+      assigner: { id: "assigner-1", displayName: "Colby Burling", email: "colby@trockgc.com" },
+    });
+
+    const html = resendMocks.sendSystemEmail.mock.calls[0][2] as string;
+    expect(html).toContain("Project: No project linked");
+  });
+
+  it("still sends when the linked deal lookup fails", async () => {
+    const tenantDb = {
+      select: vi
+        .fn()
+        .mockImplementationOnce(() => ({
+          from: () => ({
+            where: () => ({
+              limit: async () => [
+                { id: "assignee-1", email: "derek@trockgc.com", displayName: "Derek Barr", firstName: "Derek" },
+              ],
+            }),
+          }),
+        }))
+        .mockImplementationOnce(() => ({
+          from: () => ({
+            where: () => ({
+              limit: async () => {
+                throw new Error("deal lookup exploded");
+              },
+            }),
+          }),
+        })),
+    };
+
+    const result = await sendTaskAssignmentEmail(tenantDb as any, {
+      task: { id: "task-1", title: "Need Property info", description: null, dueDate: null, dealId: "deal-1" },
+      assigneeId: "assignee-1",
+      assigner: { id: "assigner-1", displayName: "Colby Burling", email: "colby@trockgc.com" },
+    });
+
+    expect(result).toBe(true);
+    const html = resendMocks.sendSystemEmail.mock.calls[0][2] as string;
+    expect(html).toContain("Need Property info");
   });
 
   it("removes CRLF characters from the subject line", async () => {

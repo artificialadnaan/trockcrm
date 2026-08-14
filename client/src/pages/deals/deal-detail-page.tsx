@@ -554,13 +554,13 @@ export function DealDetailPage() {
     { key: "scoping", label: isOpportunityStage ? "Opportunity Scope" : "Scoping" },
     { key: "files", label: "Files" },
     { key: "photos", label: photoCount != null ? `Photos (${photoCount})` : "Photos" },
+    { key: "billing", label: "Billing" },
     { key: "scorecards", label: "Scorecards" },
     { key: "email", label: "Emails" },
     { key: "activity", label: "Activity" },
     { key: "timeline", label: "Timeline" },
     { key: "history", label: "History" },
     { key: "team", label: teamCount != null ? `Team (${teamCount})` : "Team" },
-    { key: "billing", label: "Billing" },
     { key: "estimates", label: "Estimates" },
     ...(showPunchList ? [{ key: "punch_list" as Tab, label: "Punch List" }] : []),
     ...(showCloseout ? [{ key: "closeout" as Tab, label: "Close-Out" }] : []),
@@ -967,13 +967,8 @@ export function DealDetailPage() {
               Edit Deal
             </DropdownMenuItem>
           )}
-          {canArchiveDeal({ stageSlug: deal.stageSlug ?? currentStage?.slug ?? null, assignedRepId: deal.assignedRepId }, user) ? (
+          {canArchiveDeal({ assignedRepId: deal.assignedRepId }, user) ? (
             <DropdownMenuItem onClick={() => setArchiveOpen(true)} className="text-red-600">
-              <Trash2 className="h-4 w-4 mr-2" />
-              Archive Deal
-            </DropdownMenuItem>
-          ) : viewerOwnsDeal ? (
-            <DropdownMenuItem disabled title="Only opportunity-stage deals can be archived — ask an admin">
               <Trash2 className="h-4 w-4 mr-2" />
               Archive Deal
             </DropdownMenuItem>
@@ -1097,7 +1092,9 @@ export function DealDetailPage() {
       {activeTab === "team" && (
         <DealTeamTab dealId={deal.id} onCountChange={setTeamCount} />
       )}
-      {activeTab === "billing" && <DealBillingTab deal={deal} onDealUpdated={refetch} />}
+      {/* canEdit is owner-only: the deal PATCH (billingContactId) is gated by assertDealOwnerRouteAccess with
+          no admin/director bypass, so a non-owner admin would get edit controls that 403 (Codex P2). */}
+      {activeTab === "billing" && <DealBillingTab deal={deal} onDealUpdated={refetch} canEdit={viewerOwnsDeal} officeId={detailOfficeId} />}
       {activeTab === "estimates" && (
         <DealEstimatesTab
           dealId={deal.id}

@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
+import { alias } from "drizzle-orm/pg-core";
 import type { PoolClient } from "pg";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
@@ -98,6 +99,16 @@ export function buildLeadDueDiligenceReviewUrl(token: string) {
   return `${baseApiUrl()}/api/public/lead-due-diligence/${encodeURIComponent(token)}`;
 }
 
+function normalizedDisplayName(value: unknown) {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim();
+  return normalized.length > 0 ? normalized : null;
+}
+
+function resolveSalesRepName(value: unknown) {
+  return normalizedDisplayName(value) ?? "Not available";
+}
+
 export async function getLeadDueDiligenceRecipients(tenantDb: TenantDb, key = GROUP_KEY) {
   const rows = await tenantDb
     .select({
@@ -125,6 +136,7 @@ export async function getLeadDueDiligenceRecipients(tenantDb: TenantDb, key = GR
 }
 
 async function getLeadSummary(tenantDb: TenantDb, leadId: string) {
+  const approvalRequester = alias(users, "lead_due_diligence_requester");
   const [row] = await tenantDb
     .select({
       leadId: leads.id,
@@ -146,12 +158,17 @@ async function getLeadSummary(tenantDb: TenantDb, leadId: string) {
       propertyUnitCount: properties.unitCount,
       propertyBuildYear: properties.buildYear,
       projectTypeName: projectTypeConfig.name,
+      salesRepName: approvalRequester.displayName,
     })
     .from(leads)
     .innerJoin(companies, eq(companies.id, leads.companyId))
     .innerJoin(properties, eq(properties.id, leads.propertyId))
     .leftJoin(contacts, eq(contacts.id, leads.primaryContactId))
     .leftJoin(projectTypeConfig, eq(projectTypeConfig.id, leads.projectTypeId))
+    // requestedBy captures the sales rep when DD is requested, so later lead reassignment cannot rewrite
+    // the attribution shown to reviewers.
+    .leftJoin(leadDueDiligenceApprovals, eq(leadDueDiligenceApprovals.leadId, leads.id))
+    .leftJoin(approvalRequester, eq(approvalRequester.id, leadDueDiligenceApprovals.requestedBy))
     .where(eq(leads.id, leadId))
     .limit(1);
 
@@ -221,6 +238,7 @@ export function buildLeadDueDiligenceEmail(input: {
   const contactLine = email ? `${contactName} (${role}) · ${email}` : `${contactName} (${role})`;
   const rows = [
     ["Lead", input.summary.leadName],
+    ["Sales rep", resolveSalesRepName(input.summary.salesRepName)],
     ["Company", `${input.summary.companyName} (${input.summary.companyVerificationStatus ?? "not_required"})`],
     ["Primary contact", contactLine],
     ["Property", formatAddress(input.summary)],
@@ -583,7 +601,12 @@ function assertPublicDecisionToken(token: string) {
   }
 }
 
-async function loadPublicDecisionSummary(client: PoolClient, tenantSchema: string, leadId: string) {
+async function loadPublicDecisionSummary(
+  client: PoolClient,
+  tenantSchema: string,
+  leadId: string,
+  requestedBy: string | null
+) {
   const schemaIdentifier = tenantSchemaIdentifier(tenantSchema);
   const result = await client.query(
     `
@@ -602,15 +625,17 @@ async function loadPublicDecisionSummary(client: PoolClient, tenantSchema: strin
         p.build_year,
         pt.name AS project_type_name,
         concat_ws(' ', ct.first_name, ct.last_name) AS primary_contact_name,
-        ct.email AS primary_contact_email
+        ct.email AS primary_contact_email,
+        approval_requester.display_name AS sales_rep_name
       FROM ${schemaIdentifier}.leads l
       JOIN ${schemaIdentifier}.companies c ON c.id = l.company_id
       JOIN ${schemaIdentifier}.properties p ON p.id = l.property_id
       LEFT JOIN ${schemaIdentifier}.contacts ct ON ct.id = l.primary_contact_id
       LEFT JOIN public.project_type_config pt ON pt.id = l.project_type_id
+      LEFT JOIN public.users approval_requester ON approval_requester.id = $2::uuid
       WHERE l.id = $1
     `,
-    [leadId]
+    [leadId, requestedBy]
   );
   return result.rows[0] ?? null;
 }
@@ -638,6 +663,7 @@ function renderDecisionHtml(input: {
     : detectionDetail;
   const rows = [
     ["Lead", input.summary.lead_name],
+    ["Sales rep", resolveSalesRepName(input.summary.sales_rep_name)],
     ["Company", input.summary.company_name],
     ["Primary contact", contactLine],
     ["Property", [input.summary.property_address, input.summary.property_city, input.summary.property_state, input.summary.property_zip].filter(Boolean).join(", ")],
@@ -746,7 +772,12 @@ export async function renderDueDiligenceDecisionPage(token: string, options: {
       throw new AppError(404, "Due Diligence decision not found");
     }
 
-    const summary = await loadPublicDecisionSummary(client, approval.tenant_schema, approval.lead_id);
+    const summary = await loadPublicDecisionSummary(
+      client,
+      approval.tenant_schema,
+      approval.lead_id,
+      approval.requested_by ?? null
+    );
     if (!summary) {
       logPublicTokenRejected("missing_summary", {
         token,

@@ -53,6 +53,22 @@ describe("dashboard At Risk summary", () => {
         expectedCloseDate: "2026-09-01",
       },
       {
+        // Over-SLA but POSTPONED to a near (11-day) target. A "Move Close Date" postponement quiets the
+        // SLA on the dashboard too (applyCloseTargetSuppression:true), matching the deal-detail "Postponed"
+        // state — so this deal must NOT be counted at-risk even though it's short of the 90-day auto-hold.
+        dealId: "near-postponed",
+        dealValue: 7000,
+        stageName: "Opportunity",
+        stageSlug: "opportunity",
+        workflowRoute: "normal",
+        stageEnteredAt: "2026-04-01T12:00:00.000Z",
+        onHold: false,
+        onHoldStartedAt: null,
+        onHoldAccumulatedSeconds: 0,
+        onHoldAccumulatedSecondsAtStageEntry: 0,
+        expectedCloseDate: "2026-06-02",
+      },
+      {
         dealId: "terminal",
         dealValue: 4000,
         stageSlug: "won",
@@ -79,6 +95,9 @@ describe("dashboard At Risk summary", () => {
     ]);
     expect(buildDashboardAtRiskDeals(rows, "rep", now)).not.toEqual(
       expect.arrayContaining([expect.objectContaining({ dealId: "auto-held-by-close-target" })])
+    );
+    expect(buildDashboardAtRiskDeals(rows, "rep", now)).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ dealId: "near-postponed" })])
     );
     expect(buildDashboardAtRiskDeals(rows, "rep", now)[1]).toMatchObject({
       dealId: "leadership-only-safe",

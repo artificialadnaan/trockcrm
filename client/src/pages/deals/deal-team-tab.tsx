@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Plus, X, Users } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -33,7 +33,11 @@ type TeamRole =
 interface TeamMember {
   id: string;
   dealId: string;
-  userId: string;
+  // Exactly one of userId / contactId is set (server one-of check): app-user members carry userId,
+  // CRM-contact members carry contactId. The server resolves displayName/email for BOTH, so the list
+  // renders them identically without branching on which id is present.
+  userId: string | null;
+  contactId: string | null;
   role: TeamRole;
   assignedBy: string | null;
   notes: string | null;
@@ -49,6 +53,15 @@ interface AdminUser {
   id: string;
   displayName: string;
   email: string;
+}
+
+// Shape returned by GET /contacts/search (same fields the Billing tab reads from that endpoint).
+interface ContactSuggestion {
+  id: string;
+  firstName: string;
+  lastName: string;
+  email: string | null;
+  companyName: string | null;
 }
 
 function getSelectedUserLabel(
@@ -76,6 +89,14 @@ const ROLE_LABELS: Record<TeamRole, string> = {
   foreman: "Foreman",
   other: "Other",
 };
+
+// A contact-backed estimator is rejected 400 by the server (an estimator must be a staff user, since
+// revision routing only picks estimator rows whose user_id IS NOT NULL). So the role picker only offers
+// Estimator in USER mode — filter it out in contact mode instead of letting the user fill a doomed form.
+function rolesForMode(mode: "user" | "contact"): TeamRole[] {
+  const roles = Object.keys(ROLE_LABELS) as TeamRole[];
+  return mode === "contact" ? roles.filter((r) => r !== "estimator") : roles;
+}
 
 const ROLE_BADGE_CLASSES: Record<TeamRole, string> = {
   superintendent: "bg-red-100 text-red-700 border-red-200",
@@ -242,6 +263,27 @@ function AddMemberDialog({
   const [notes, setNotes] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
+  // A member is EITHER an app user OR a CRM contact — the server (one-of check) accepts { userId, ... }
+  // or { contactId, ... }. Default to the existing user flow so nothing changes for that path.
+  const [mode, setMode] = useState<"user" | "contact">("user");
+  const [contactQuery, setContactQuery] = useState("");
+  const [contactResults, setContactResults] = useState<ContactSuggestion[]>([]);
+  const [selectedContact, setSelectedContact] = useState<ContactSuggestion | null>(null);
+  // Same stale-response guard the Billing tab uses: bump on every keystroke so a slow earlier
+  // /contacts/search response can't land after a newer query and overwrite it.
+  const searchSeq = useRef(0);
+
+  const resetFields = () => {
+    setUserId("");
+    setRole("");
+    setNotes("");
+    setMode("user");
+    setContactQuery("");
+    setContactResults([]);
+    setSelectedContact(null);
+    ++searchSeq.current;
+  };
+
   useEffect(() => {
     if (!open) return;
     setLoadingUsers(true);
@@ -251,22 +293,49 @@ function AddMemberDialog({
       .finally(() => setLoadingUsers(false));
   }, [dealId, open]);
 
+  // Copied from the Billing tab's contact search+select: GET /contacts/search?q=…&limit=10 → { contacts }.
+  // Under 2 chars clears results; a sequence guard drops out-of-order responses.
+  const runContactSearch = (q: string) => {
+    setContactQuery(q);
+    setSelectedContact(null);
+    const seq = ++searchSeq.current;
+    if (q.trim().length < 2) {
+      setContactResults([]);
+      return;
+    }
+    api<{ contacts: ContactSuggestion[] }>(
+      `/contacts/search?q=${encodeURIComponent(q.trim())}&limit=10`
+    ).then(
+      (res) => { if (seq === searchSeq.current) setContactResults(res.contacts); },
+      () => { if (seq === searchSeq.current) setContactResults([]); }
+    );
+  };
+
   const handleSubmit = async () => {
-    if (!userId || !role) {
-      toast.error("Please select a user and role");
+    if (!role) {
+      toast.error("Please select a role");
+      return;
+    }
+    if (mode === "user" && !userId) {
+      toast.error("Please select a user");
+      return;
+    }
+    if (mode === "contact" && !selectedContact) {
+      toast.error("Please select a contact");
       return;
     }
     setSubmitting(true);
     try {
       await api(`/deals/${dealId}/team`, {
         method: "POST",
-        json: { userId, role, notes: notes.trim() || null },
+        json:
+          mode === "contact"
+            ? { contactId: selectedContact!.id, role, notes: notes.trim() || null }
+            : { userId, role, notes: notes.trim() || null },
       });
       toast.success("Team member added");
       onOpenChange(false);
-      setUserId("");
-      setRole("");
-      setNotes("");
+      resetFields();
       onAdded();
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : "Failed to add team member");
@@ -290,23 +359,105 @@ function AddMemberDialog({
           <DialogTitle>Add Team Member</DialogTitle>
         </DialogHeader>
         <div className="space-y-4 pt-2">
+          {/* User / Contact segmented toggle: assign an app user OR a CRM contact. Switching clears the
+              other mode's selection so we never submit a stale id from the hidden picker. */}
           <div className="space-y-1.5">
-            <label id="team-user-label" htmlFor="team-user-select" className="text-sm font-medium">User</label>
-            <Select value={userId} onValueChange={(v) => setUserId(v ?? "")} disabled={loadingUsers}>
-              <SelectTrigger id="team-user-select" aria-labelledby="team-user-label">
-                <SelectValue placeholder={loadingUsers ? "Loading..." : "Select user"}>
-                  {getSelectedUserLabel(users, userId, loadingUsers)}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                {users.map((u) => (
-                  <SelectItem key={u.id} value={u.id}>
-                    {u.displayName}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
+            <span className="text-sm font-medium">Assign</span>
+            <div className="inline-flex rounded-md border p-0.5">
+              {(["user", "contact"] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => {
+                    setMode(m);
+                    setUserId("");
+                    setContactQuery("");
+                    setContactResults([]);
+                    setSelectedContact(null);
+                    ++searchSeq.current;
+                    // Estimator is user-only; clear it when switching to contact mode so the picker
+                    // and the submitted role stay consistent with what the server will accept.
+                    if (m === "contact") {
+                      setRole((prev) => (prev === "estimator" ? "" : prev));
+                    }
+                  }}
+                  className={`px-3 py-1 text-sm rounded ${
+                    mode === m
+                      ? "bg-[#CC0000] text-white"
+                      : "text-muted-foreground hover:bg-muted/50"
+                  }`}
+                >
+                  {m === "user" ? "User" : "Contact"}
+                </button>
+              ))}
+            </div>
           </div>
+
+          {mode === "user" ? (
+            <div className="space-y-1.5">
+              <label id="team-user-label" htmlFor="team-user-select" className="text-sm font-medium">User</label>
+              <Select value={userId} onValueChange={(v) => setUserId(v ?? "")} disabled={loadingUsers}>
+                <SelectTrigger id="team-user-select" aria-labelledby="team-user-label">
+                  <SelectValue placeholder={loadingUsers ? "Loading..." : "Select user"}>
+                    {getSelectedUserLabel(users, userId, loadingUsers)}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  {users.map((u) => (
+                    <SelectItem key={u.id} value={u.id}>
+                      {u.displayName}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              <label htmlFor="team-contact-search" className="text-sm font-medium">Contact</label>
+              {selectedContact ? (
+                <div className="flex items-center justify-between rounded-md border px-3 py-2 text-sm">
+                  <span className="truncate">
+                    {selectedContact.firstName} {selectedContact.lastName}
+                    {selectedContact.companyName ? ` — ${selectedContact.companyName}` : ""}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => { setSelectedContact(null); setContactQuery(""); setContactResults([]); ++searchSeq.current; }}
+                    className="ml-2 flex-shrink-0 text-muted-foreground hover:text-red-600"
+                    aria-label="Clear selected contact"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <input
+                    id="team-contact-search"
+                    type="search"
+                    placeholder="Search contacts…"
+                    value={contactQuery}
+                    onChange={(e) => runContactSearch(e.target.value)}
+                    className="w-full rounded-md border px-2 py-1.5 text-sm"
+                  />
+                  {contactResults.length > 0 ? (
+                    <ul className="mt-1 divide-y rounded-md border">
+                      {contactResults.map((c) => (
+                        <li key={c.id}>
+                          <button
+                            type="button"
+                            className="w-full px-2 py-1.5 text-left text-sm hover:bg-muted/50"
+                            onClick={() => { setSelectedContact(c); setContactResults([]); }}
+                          >
+                            {c.firstName} {c.lastName}{c.companyName ? ` — ${c.companyName}` : ""}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </>
+              )}
+            </div>
+          )}
 
           <div className="space-y-1.5">
             <label id="team-role-label" htmlFor="team-role-select" className="text-sm font-medium">Role</label>
@@ -315,7 +466,7 @@ function AddMemberDialog({
                 <SelectValue placeholder="Select role" />
               </SelectTrigger>
               <SelectContent>
-                {(Object.keys(ROLE_LABELS) as TeamRole[]).map((r) => (
+                {rolesForMode(mode).map((r) => (
                   <SelectItem key={r} value={r}>
                     {ROLE_LABELS[r]}
                   </SelectItem>
@@ -336,7 +487,7 @@ function AddMemberDialog({
           </div>
 
           <div className="flex justify-end gap-2 pt-2">
-            <Button variant="outline" onClick={() => onOpenChange(false)} disabled={submitting}>
+            <Button variant="outline" onClick={() => { onOpenChange(false); resetFields(); }} disabled={submitting}>
               Cancel
             </Button>
             <Button onClick={handleSubmit} disabled={submitting}>

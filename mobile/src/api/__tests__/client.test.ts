@@ -69,6 +69,25 @@ describe("apiFetch", () => {
     expect(onUnauthorized).not.toHaveBeenCalled(); // a 403 must never sign the user out
   });
 
+  it("preserves the server error code alongside its actionable message", async () => {
+    mockFetch(async () => ({
+      ok: false,
+      status: 409,
+      json: async () => ({
+        error: {
+          message: "This scorecard would contain more than 100 evidence photos.",
+          code: "SCORECARD_EDIT_PHOTO_LIMIT",
+        },
+      }),
+    }));
+
+    await expect(apiFetch("/field/scorecards/sc-1", { method: "PUT", body: {} })).rejects.toMatchObject({
+      status: 409,
+      code: "SCORECARD_EDIT_PHOTO_LIMIT",
+      message: "This scorecard would contain more than 100 evidence photos.",
+    });
+  });
+
   it("returns undefined for 204 No Content", async () => {
     mockFetch(async () => ({
       ok: true,

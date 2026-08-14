@@ -39,6 +39,13 @@ function mount(element: ReturnType<typeof createElement>) {
   });
 }
 
+async function flushAsyncUpdates() {
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
 describe("useSalesReps", () => {
   it("does not fetch when enabled is false", async () => {
     apiMock.mockResolvedValue({ users: [] });
@@ -59,25 +66,30 @@ describe("useSalesReps", () => {
       return null;
     }
     mount(createElement(Probe));
+    await flushAsyncUpdates();
     await vi.waitFor(() => expect(apiMock).toHaveBeenCalled());
     const [, init] = apiMock.mock.calls[0];
     expect(init?.headers).toBeUndefined();
     expect(init?.signal).toBeInstanceOf(AbortSignal);
   });
 
-  it("adds the reassignment purpose query only for deal reassignment pickers", async () => {
+  it.each(["deal-reassignment", "lead-reassignment"] as const)(
+    "adds the %s purpose query for owner pickers",
+    async (purpose) => {
     apiMock.mockResolvedValue({ users: [{ id: "u1", displayName: "Rep One" }] });
     function Probe() {
-      useSalesReps("office-a", { purpose: "deal-reassignment" });
+      useSalesReps("office-a", { purpose });
       return null;
     }
     mount(createElement(Probe));
+    await flushAsyncUpdates();
     await vi.waitFor(() => expect(apiMock).toHaveBeenCalled());
     const [path, init] = apiMock.mock.calls[0];
-    expect(path).toBe("/users/sales-reps?purpose=deal-reassignment");
+    expect(path).toBe(`/users/sales-reps?purpose=${purpose}`);
     expect(init?.headers).toEqual({ "x-office-id": "office-a" });
     expect(init?.signal).toBeInstanceOf(AbortSignal);
-  });
+    }
+  );
 
   it("aborts the in-flight fetch when officeId changes so a stale response cannot win", async () => {
     const signals: AbortSignal[] = [];

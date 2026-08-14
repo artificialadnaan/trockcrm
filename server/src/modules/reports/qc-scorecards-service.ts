@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type * as schema from "@trock-crm/shared/schema";
+import type { ScorecardKind } from "@trock-crm/shared/types";
 import { WON_STAGE_SLUGS, LOST_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -12,6 +13,7 @@ export interface QcScorecardsFilters {
   from: string; // yyyy-mm-dd (week_of lower bound)
   to: string; // yyyy-mm-dd (week_of upper bound)
   region?: string | null; // region NAME (matches region_config.name)
+  kind?: ScorecardKind | null;
   superintendent?: string | null;
   rating?: string | null;
   flaggedOnly?: boolean;
@@ -25,6 +27,9 @@ export interface QcScorecardRow {
   projectNumber: string | null;
   regionName: string | null;
   superintendentName: string | null;
+  kind: ScorecardKind;
+  formVersion: 1 | 2;
+  averageScore: number | null;
   totalScore: number;
   rating: string;
   deficiencyCount: number;
@@ -40,7 +45,7 @@ const MAX_ROWS = 1000;
 
 /**
  * Office-scoped QC report: every Field Scorecard whose week falls in [from, to], joined to its deal for the
- * project name/region, with server-side filters (region, superintendent, rating, flagged-only, search)
+ * project name/region, with server-side filters (region, kind, superintendent, rating, flagged-only, search)
  * applied BEFORE the row cap. Returns the flat list; the dashboard derives the stat strip + card drill-downs
  * client-side from it (so a KPI card always opens exactly the rows it counts). Newest submission first.
  */
@@ -78,6 +83,9 @@ export async function getQcScorecardsReport(
   // Interactive filters applied SERVER-SIDE (before the cap) so a match older than the most-recent cap
   // window is never dropped.
   if (filters.region) rowConditions.push(sql`rc.name = ${filters.region}`);
+  // Legacy rows predate the discriminator and are project scorecards. Keep the same fallback in both the
+  // response projection and this optional filter so "Project" is complete without misclassifying them.
+  if (filters.kind) rowConditions.push(sql`COALESCE(sc.kind, 'project') = ${filters.kind}`);
   if (filters.rating) rowConditions.push(sql`sc.rating = ${filters.rating}`);
   if (filters.flaggedOnly) rowConditions.push(sql`COALESCE(array_length(sc.critical_deficiencies, 1), 0) > 0`);
   // Exact match, not a contains-ILIKE: the dropdown options are verbatim names from this same column, so a
@@ -109,6 +117,9 @@ export async function getQcScorecardsReport(
       sc.project_number AS "projectNumber",
       rc.name AS "regionName",
       sc.superintendent_name AS "superintendentName",
+      COALESCE(sc.kind, 'project') AS "kind",
+      sc.form_version AS "formVersion",
+      sc.average_score AS "averageScore",
       sc.total_score AS "totalScore",
       sc.rating AS "rating",
       COALESCE(array_length(sc.critical_deficiencies, 1), 0) AS "deficiencyCount",
@@ -138,6 +149,9 @@ export async function getQcScorecardsReport(
       projectNumber: r.projectNumber ?? null,
       regionName: r.regionName ?? null,
       superintendentName: r.superintendentName ?? null,
+      kind: r.kind === "leadership" ? "leadership" : "project",
+      formVersion: Number(r.formVersion) === 2 ? 2 : 1,
+      averageScore: r.averageScore == null ? null : Number(r.averageScore),
       totalScore: Number(r.totalScore ?? 0),
       rating: String(r.rating),
       deficiencyCount: Number(r.deficiencyCount ?? 0),

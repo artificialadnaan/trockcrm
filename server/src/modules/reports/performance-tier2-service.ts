@@ -392,7 +392,9 @@ function buildDirectorScorecardAtRiskRows(
           workflowRoute: row.workflow_route ?? "normal",
           stageEnteredAt: row.bid_board_stage_entered_at ?? row.stage_entered_at,
           expectedCloseDate: row.expected_close_date,
-          applyCloseTargetSuppression: false,
+          // Honor a postponement (near today-or-future close target) so the Director Scorecard at-risk rows
+          // match the deal-detail "Postponed" state, not just the 90+ day auto-hold.
+          applyCloseTargetSuppression: true,
           onHold: row.on_hold,
           onHoldStartedAt: row.on_hold_started_at,
           onHoldAccumulatedSeconds:

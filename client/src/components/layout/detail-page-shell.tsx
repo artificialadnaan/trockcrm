@@ -139,8 +139,8 @@ export function DetailPageShell({
         <div className="min-w-0 space-y-4">
           <Card>
             <div className="border-b border-slate-100">
-              <div className="overflow-x-auto px-3 pt-3">
-                <div className="flex min-w-max items-center gap-1">
+              <div className="px-3 pt-3">
+                <div className="flex flex-wrap items-center gap-1">
                 {tabs.map((tab) => {
                   const label = formatTabLabel(tab);
                   const isActive = tab.id === activeTabId;
@@ -153,17 +153,18 @@ export function DetailPageShell({
                       onClick={() => onTabChange(tab.id)}
                       className={
                         isActive
-                          ? "relative inline-flex h-11 items-center gap-2 border-b-2 border-brand-red px-3 text-sm font-black uppercase tracking-[0.12em] text-brand-red"
-                          : "inline-flex h-11 items-center gap-2 border-b-2 border-transparent px-3 text-sm font-black uppercase tracking-[0.12em] text-slate-500 transition hover:border-slate-200 hover:text-slate-900"
+                          ? "relative inline-flex h-11 shrink-0 items-center gap-2 px-3 text-sm font-black uppercase tracking-[0.12em] text-brand-red focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red focus-visible:ring-offset-2"
+                          : "relative inline-flex h-11 shrink-0 items-center gap-2 px-3 text-sm font-black uppercase tracking-[0.12em] text-slate-500 transition hover:text-slate-900 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red focus-visible:ring-offset-2"
                       }
                     >
                       <span className="flex h-5 w-5 items-center justify-center">{tab.icon}</span>
-                      <span className="hidden sm:inline">{label}</span>
+                      <span>{label}</span>
                       {tab.count !== undefined ? (
                         <span className={isActive ? "rounded-full bg-red-50 px-2 py-0.5 text-xs text-brand-red" : "rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500"}>
                           {tab.count}
                         </span>
                       ) : null}
+                      {isActive ? <span className="absolute inset-x-2 bottom-0 h-0.5 rounded-full bg-brand-red" /> : null}
                     </button>
                   );
                 })}

@@ -11,6 +11,7 @@ import {
   relativeDate,
   selectNearbySource,
   tagsOf,
+  toDayString,
   uploadersOf,
   type FieldPhoto,
   type FieldProject,
@@ -250,5 +251,56 @@ describe("field-projects", () => {
   it("relativeDate handles null and today", () => {
     expect(relativeDate(null)).toBe("no recent activity");
     expect(relativeDate(new Date().toISOString())).toBe("today");
+  });
+});
+
+// Crash-proofing the photo filters (P0: "the filter button kicks me out of the app"). The filter code runs
+// with NO error boundary historically, so any throw here was an app-killing crash. These pin that malformed
+// data — non-string tags, an invalid timestamp — degrades gracefully instead of throwing.
+describe("filter crash-proofing", () => {
+  it("tagsOf ignores null / non-string / empty tags (no localeCompare crash, no invalid React child)", () => {
+    const photos = [
+      photo({ tags: ["Floor 1", null as any, "", 3 as any, "Elevation"] }),
+      photo({ tags: ["Floor 1"] }),
+    ];
+    expect(tagsOf(photos)).toEqual(["Elevation", "Floor 1"]);
+  });
+
+  it("tagsOf tolerates a non-ARRAY tags container (bare string, object, null) without iterating it", () => {
+    const photos = [
+      photo({ tags: "floor,elevation" as any }), // a string would otherwise yield 1-char "tags" via for..of
+      photo({ tags: { 0: "floor" } as any }), // a non-iterable object would otherwise throw in for..of
+      photo({ tags: null as any }),
+      photo({ tags: ["Real Tag"] }),
+    ];
+    const run = () => tagsOf(photos);
+    expect(run).not.toThrow();
+    expect(run()).toEqual(["Real Tag"]); // only the genuine array of strings contributes
+  });
+
+  it("filterPhotos by tag does not throw when a photo carries non-string tags, and still matches by string", () => {
+    const photos = [
+      photo({ id: "a", tags: ["Floor 1", null as any] }),
+      photo({ id: "b", tags: ["Elevation"] }),
+    ];
+    const run = () => filterPhotos(photos, { categories: [], tags: ["floor 1"], uploaderIds: [], from: "", to: "" });
+    expect(run).not.toThrow();
+    expect(run().map((p) => p.id)).toEqual(["a"]);
+  });
+
+  it("groupPhotos by date does not throw on a missing/invalid timestamp (falls into an Unknown date bucket)", () => {
+    const photos = [
+      photo({ id: "good", takenAt: "2026-01-02T00:00:00.000Z" }),
+      photo({ id: "bad", takenAt: "not-a-date", createdAt: "also-bad" }),
+    ];
+    const run = () => groupPhotos(photos, "date");
+    expect(run).not.toThrow();
+    expect(run().some((g) => g.label === "Unknown date")).toBe(true);
+  });
+
+  it("toDayString tolerates null / invalid values without throwing", () => {
+    expect(toDayString("2026-07-22T03:00:00.000Z")).toBe("2026-07-22");
+    expect(toDayString(null)).toBe("");
+    expect(toDayString("not-a-date")).toBe("");
   });
 });

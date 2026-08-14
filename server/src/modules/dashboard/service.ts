@@ -139,7 +139,9 @@ function buildDashboardAtRiskEvaluations(
         workflowRoute: row.workflowRoute ?? "normal",
         stageEnteredAt: row.stageEnteredAt ?? null,
         expectedCloseDate: row.expectedCloseDate ?? null,
-        applyCloseTargetSuppression: false,
+        // Honor a postponement (near today-or-future close target) so the dashboard KPI/list/per-rep counts
+        // match the deal-detail "Postponed" state, not just the 90+ day auto-hold.
+        applyCloseTargetSuppression: true,
         onHold: row.onHold,
         onHoldStartedAt: row.onHoldStartedAt,
         onHoldAccumulatedSeconds:

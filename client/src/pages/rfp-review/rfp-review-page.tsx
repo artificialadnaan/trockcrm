@@ -110,6 +110,7 @@ export function RfpReviewPage() {
   if (confirmedForKey !== targetKey) {
     setConfirmedForKey(targetKey);
     setConfirmedNoProject(false);
+    setNote("");
   }
 
   // While SyncHub is creating the Bid Board project, poll so the page flips to approved/failed when the
@@ -208,11 +209,19 @@ export function RfpReviewPage() {
     if (!dealId) return;
     setSubmitting("reconfirm");
     try {
-      await reconfirmRfpDecline(dealId, { note, officeId });
+      const result = await reconfirmRfpDecline(dealId, { note, officeId });
       toast.success("Denial re-confirmed — this RFP stays declined.");
       setNote("");
-      // Optimistically mark the terminal outcome so it sticks even if the follow-up refresh blips.
-      applyOptimistic({ reviewDecision: "denial_reconfirmed", overrideState: null, overrideError: null, actionable: false });
+      // Optimistically mark the terminal outcome so it sticks even if the follow-up refresh blips. `archived`
+      // drives the footer CTA: a normal reconfirm archives the deal (hide "Open the full deal" — it would 404),
+      // while the escape hatch leaves it active (keep the link).
+      applyOptimistic({
+        reviewDecision: "denial_reconfirmed",
+        overrideState: null,
+        overrideError: null,
+        actionable: false,
+        isActive: !result.archived,
+      });
       // Best-effort refresh, isolated so a refresh blip can't read as a re-confirm failure (the optimistic
       // terminal outcome already holds; the next load reconciles).
       try {
@@ -256,6 +265,8 @@ export function RfpReviewPage() {
               onReconfirm={onReconfirm}
               busy={busy}
               reconfirming={submitting === "reconfirm"}
+              note={note}
+              setNote={setNote}
             />
           ) : review.overrideState === "failed" ? (
             <>
@@ -276,7 +287,7 @@ export function RfpReviewPage() {
                 </p>
               </div>
               <div className="flex flex-col gap-1.5">
-                <Label htmlFor="rfp-override-note">Note (optional)</Label>
+                <Label htmlFor="rfp-override-note">Note (required to deny)</Label>
                 <Textarea
                   id="rfp-override-note"
                   value={note}
@@ -299,7 +310,7 @@ export function RfpReviewPage() {
                 <Button onClick={onApprove} disabled={busy || !confirmedNoProject}>
                   {submitting === "approve" ? "Submitting…" : "Confirmed no project — re-attempt"}
                 </Button>
-                <Button variant="destructive" onClick={onReconfirm} disabled={busy}>
+                <Button variant="destructive" onClick={onReconfirm} disabled={busy || note.trim().length === 0}>
                   {submitting === "reconfirm" ? "Confirming…" : "Re-confirm denial"}
                 </Button>
               </div>
@@ -307,7 +318,7 @@ export function RfpReviewPage() {
           ) : review.actionable ? (
             <>
               <div className="flex flex-col gap-1.5">
-                <Label htmlFor="rfp-override-note">Note (optional)</Label>
+                <Label htmlFor="rfp-override-note">Note (required to deny)</Label>
                 <Textarea
                   id="rfp-override-note"
                   value={note}
@@ -321,7 +332,7 @@ export function RfpReviewPage() {
                 <Button onClick={onApprove} disabled={busy}>
                   {submitting === "approve" ? "Submitting…" : "Approve override (create Bid Board project)"}
                 </Button>
-                <Button variant="destructive" onClick={onReconfirm} disabled={busy}>
+                <Button variant="destructive" onClick={onReconfirm} disabled={busy || note.trim().length === 0}>
                   {submitting === "reconfirm" ? "Confirming…" : "Re-confirm denial"}
                 </Button>
               </div>
@@ -331,9 +342,14 @@ export function RfpReviewPage() {
           )}
         </CardContent>
         <CardFooter>
-          <Link to={dealHref} className={buttonVariants({ variant: "ghost", size: "sm" })}>
-            Open the full deal
-          </Link>
+          {review.isActive ? (
+            <Link to={dealHref} className={buttonVariants({ variant: "ghost", size: "sm" })}>
+              Open the full deal
+            </Link>
+          ) : (
+            // Archived (re-confirmed denial): the deal detail 404s, so show a note instead of a dead link.
+            <p className="text-sm text-muted-foreground">This deal has been archived.</p>
+          )}
         </CardFooter>
       </Card>
     </PageFrame>
@@ -365,12 +381,16 @@ function ApprovingPanel({
   onReconfirm,
   busy,
   reconfirming,
+  note,
+  setNote,
 }: {
   review: RfpReviewDetail;
   onRefresh: () => void;
   onReconfirm: () => void;
   busy: boolean;
   reconfirming: boolean;
+  note: string;
+  setNote: (v: string) => void;
 }) {
   return (
     <div className="rounded-lg border border-border bg-muted/40 p-4 text-sm">
@@ -395,7 +415,18 @@ function ApprovingPanel({
           Taking much longer than a minute? SyncHub may not have received the request. You can uphold the denial
           instead — only do this if no Bid Board project was created (if one was, it’ll be reconciled separately).
         </p>
-        <Button variant="ghost" size="sm" className="mt-2" onClick={onReconfirm} disabled={busy}>
+        <div className="mt-2 flex flex-col gap-1.5">
+          <Label htmlFor="rfp-override-note-approving">Note (required to deny)</Label>
+          <Textarea
+            id="rfp-override-note-approving"
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            placeholder="Why are you upholding the denial?"
+            rows={3}
+            disabled={busy}
+          />
+        </div>
+        <Button variant="ghost" size="sm" className="mt-2" onClick={onReconfirm} disabled={busy || note.trim().length === 0}>
           {reconfirming ? "Confirming…" : "Uphold the denial instead"}
         </Button>
       </div>

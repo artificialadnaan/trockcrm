@@ -9,10 +9,13 @@ import {
 } from "../auth/http-config.js";
 import {
   acceptFieldInvite,
+  completeFieldUserPasswordReset,
   inviteFieldUser,
   listFieldUsers,
   loginFieldUser,
   previewFieldInvite,
+  previewFieldUserPasswordReset,
+  requestFieldUserPasswordReset,
   resendFieldUserInvite,
   revokeFieldUserInvite,
   setFieldUserActive,
@@ -63,6 +66,19 @@ fieldUserAdminRouter.post("/:id/resend-invite", requireAdmin, async (req: Reques
       tenantId: activeTenantId(req),
     });
     return res.json({ invite: result.invite });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+fieldUserAdminRouter.post("/:id/reset-password", requireAdmin, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const result = await requestFieldUserPasswordReset({
+      userId: req.params.id as string,
+      tenantId: activeTenantId(req),
+      resetByUserId: req.user!.id,
+    });
+    return res.json(result);
   } catch (err) {
     return next(err);
   }
@@ -166,6 +182,31 @@ fieldUserAuthRouter.get("/invite-preview", authLimiter, async (req, res, next) =
 
     const result = await previewFieldInvite({ token });
     res.json(result);
+  } catch (err) {
+    next(err);
+  }
+});
+
+fieldUserAuthRouter.get("/field-password-reset-preview", authLimiter, async (req, res, next) => {
+  try {
+    const token = typeof req.query?.token === "string" ? req.query.token : "";
+    if (!token) {
+      throw new AppError(400, "Token is required");
+    }
+    res.json(await previewFieldUserPasswordReset({ token }));
+  } catch (err) {
+    next(err);
+  }
+});
+
+fieldUserAuthRouter.post("/field-password-reset", authLimiter, async (req, res, next) => {
+  try {
+    const token = typeof req.body?.token === "string" ? req.body.token : "";
+    const newPassword = typeof req.body?.newPassword === "string" ? req.body.newPassword : "";
+    if (!token || !newPassword) {
+      throw new AppError(400, "Token and new password are required");
+    }
+    res.json(await completeFieldUserPasswordReset({ token, newPassword }));
   } catch (err) {
     next(err);
   }

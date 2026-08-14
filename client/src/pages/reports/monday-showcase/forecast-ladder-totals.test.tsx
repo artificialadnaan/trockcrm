@@ -142,6 +142,20 @@ const aliceSumValue = fixture.reps[0].projection.bands.reduce((s, b) => s + b.va
 const baileySumValue = fixture.reps[1].projection.bands.reduce((s, b) => s + b.value, 0); // 9499
 
 describe("B4 Forecast Ladder — Total of all timelines column", () => {
+  it("places Total at the far right after Stale date and No date for office and rep rows", () => {
+    render();
+    const ladders = [...container.querySelectorAll<HTMLDivElement>("div.grid.grid-cols-7")]
+      .filter((grid) => grid.children.length === 7);
+
+    expect(ladders).toHaveLength(3); // office, Alice, Bailey
+    for (const ladder of ladders) {
+      const columns = [...ladder.children].map((column) => column.textContent?.trim().toLowerCase() ?? "");
+      expect(columns[4]).toContain("stale date");
+      expect(columns[5]).toContain("no date");
+      expect(columns[6]).toContain("total");
+    }
+  });
+
   it("renders a Total cell on the office box summing $ and dated count across all bands", () => {
     render();
     const text = container.textContent ?? "";
@@ -191,8 +205,8 @@ describe("B4 Forecast Ladder — 'No future close date' (undated) card", () => {
   it("renders the office undated card with the M − N count and its $ (the SAFE usd)", () => {
     render();
     const text = container.textContent ?? "";
-    // office undated count = m − n = 9 − 6 = 3 (rendered "3 undated"); $ = coverage.undatedValue (5555).
-    expect(text).toContain("3 undated");
+    // Legacy fixtures without split metadata fall back to the complete no-date complement.
+    expect(text).toContain("3 no date");
     expect(text).toContain("$5,555");
     expect(text.toLowerCase()).toContain("no date"); // the card label
     expect(text).not.toContain("NaN");
@@ -202,9 +216,9 @@ describe("B4 Forecast Ladder — 'No future close date' (undated) card", () => {
   it("renders a per-rep undated card with that rep's M − N count and $ (sums to the office card)", () => {
     render();
     const text = container.textContent ?? "";
-    expect(text).toContain("2 undated"); // Alice: m − n = 5 − 3
+    expect(text).toContain("2 no date"); // Alice: m − n = 5 − 3
     expect(text).toContain("$2,222"); // Alice undatedValue
-    expect(text).toContain("1 undated"); // Bailey: m − n = 4 − 3
+    expect(text).toContain("1 no date"); // Bailey: m − n = 4 − 3
     expect(text).toContain("$3,333"); // Bailey undatedValue
     // the partition holds: office undated (3) == Σ per-rep undated (2 + 1); $ sums too (2222 + 3333 = 5555)
     expect(fixture.officeProjection.coverage.m - fixture.officeProjection.coverage.n).toBe(
@@ -230,7 +244,7 @@ describe("B4 Forecast Ladder — 'No future close date' (undated) card", () => {
     clickButtonContaining("$5,555"); // the office undated card $
     expect(open).toHaveBeenCalledTimes(1);
     const req = open.mock.calls[0][0];
-    expect(req.metric).toBe("undated");
+    expect(req.metric).toBe("no_date");
     expect(req.repId).toBeUndefined(); // office-wide
     expect(req.band).toBeUndefined(); // undated has no band
   });
@@ -240,7 +254,7 @@ describe("B4 Forecast Ladder — 'No future close date' (undated) card", () => {
     clickButtonContaining("$2,222"); // Alice undated card $
     expect(open).toHaveBeenCalledTimes(1);
     const req = open.mock.calls[0][0];
-    expect(req.metric).toBe("undated");
+    expect(req.metric).toBe("no_date");
     expect(req.repId).toBe("rep-1");
   });
 });

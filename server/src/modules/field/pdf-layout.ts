@@ -50,6 +50,19 @@ const META_FONT_SIZE = 8.5;
 const META_LINE_PITCH = 11;
 const META_BLOCK_HEIGHT = META_LINE_PITCH * 3;
 
+// --- Executive summary page(s) -------------------------------------------------------------------
+// The optional executive summary renders on its own page(s) immediately after the cover, before any
+// section dividers/photos. It flows across as many pages as the text needs (paginateTextByHeight).
+const SUMMARY_HEADING = "Executive Summary";
+const SUMMARY_HEADING_Y = 58;
+const SUMMARY_ACCENT_Y = 86;
+const SUMMARY_ACCENT_WIDTH = 54;
+const SUMMARY_BODY_TOP = 100; // first page: below the heading + red accent rule
+const SUMMARY_CONT_BODY_TOP = 58; // continuation pages: just under the header rule (no heading repeated)
+const SUMMARY_BODY_BOTTOM = 720; // stay clear of the footer (drawn at PAGE_HEIGHT - 44 = 748)
+const SUMMARY_BODY_FONT_SIZE = 11;
+const SUMMARY_LINE_GAP = 4;
+
 type ReportFontSet = {
   regular: string;
   bold: string;
@@ -99,6 +112,87 @@ function clampText(value: string, maxLength: number): string {
   const normalized = value.trim().replace(/\s+/g, " ");
   if (normalized.length <= maxLength) return normalized;
   return `${normalized.slice(0, Math.max(0, maxLength - 1)).trimEnd()}…`;
+}
+
+/**
+ * Break a single word that is taller than the page budget into character slices that each fit. PDFKit
+ * DOES char-wrap a space-less token (a pasted URL / base64 blob), so its rendered height can exceed a
+ * whole page — and an unbounded doc.text of such a chunk auto-creates continuation pages OUTSIDE the
+ * explicit pageMeta accounting, desyncing every following footer. Binary-searches the largest prefix
+ * that fits (always ≥ 1 char, so it can't loop). Returns the ordered slices; the caller emits all but
+ * the last as complete pages and keeps the last for further packing.
+ */
+function splitOversizedToken(token: string, maxHeight: number, measure: (chunk: string) => number): string[] {
+  const parts: string[] = [];
+  let rest = token;
+  while (measure(rest) > maxHeight && rest.length > 1) {
+    let lo = 1;
+    let hi = rest.length - 1;
+    let best = 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (measure(rest.slice(0, mid)) <= maxHeight) {
+        best = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    parts.push(rest.slice(0, best));
+    rest = rest.slice(best);
+  }
+  parts.push(rest);
+  return parts;
+}
+
+/**
+ * Split free-form text into page-sized chunks. `measure(chunk)` returns the rendered height of that
+ * chunk at the body column width; words are packed greedily until the next word would exceed
+ * `maxHeight`, then a new page starts. A single word taller than the budget is split by character
+ * across pages (splitOversizedToken) so NO emitted chunk ever exceeds the budget. Explicit newlines
+ * (paragraph breaks) are preserved. Exported for unit testing (the height measurer is injected so it
+ * needs no live PDFDocument).
+ */
+export function paginateTextByHeight(
+  text: string,
+  maxHeight: number,
+  measure: (chunk: string) => number,
+): string[] {
+  const normalized = text.replace(/\r\n?/g, "\n").replace(/[ \t]+/g, " ").trim();
+  if (!normalized) return [];
+  // Tokens are words; explicit newlines become standalone "\n" tokens so paragraph breaks survive.
+  const tokens = normalized.split("\n").flatMap((line, index) => {
+    const words = line.split(" ").filter((word) => word.length > 0);
+    return index === 0 ? words : ["\n", ...words];
+  });
+  const render = (toks: string[]) => toks.join(" ").replace(/ ?\n ?/g, "\n").trim();
+  const pages: string[] = [];
+  let current: string[] = [];
+  // Seed a fresh page with a single word, emitting full pages for and returning the residual of any word
+  // too tall to fit alone. A "\n" token never seeds a page (it renders empty at a page start).
+  const seedWord = (word: string): string[] => {
+    if (word === "\n" || measure(word) <= maxHeight) return word === "\n" ? [] : [word];
+    const parts = splitOversizedToken(word, maxHeight, measure);
+    for (let i = 0; i < parts.length - 1; i += 1) pages.push(parts[i]);
+    return [parts[parts.length - 1]];
+  };
+  for (const token of tokens) {
+    if (current.length === 0) {
+      current = seedWord(token);
+      continue;
+    }
+    if (measure(render([...current, token])) > maxHeight) {
+      pages.push(render(current));
+      current = seedWord(token);
+    } else {
+      current.push(token);
+    }
+  }
+  if (current.length > 0) {
+    const rendered = render(current);
+    if (rendered) pages.push(rendered);
+  }
+  return pages;
 }
 
 function formatPhotoDate(value: string | null, fallback: string): string {
@@ -202,6 +296,65 @@ function drawSectionTitlePage(
     align: "center",
   });
   doc.restore();
+}
+
+// The optional executive summary: its own page(s) right after the cover, in Trock brand colors + Geist.
+// The heading + red accent rule draw only on the first page; body text flows across pages as needed.
+// One pageMeta entry is pushed per page (IN ORDER) so the footer pass — which indexes pageMeta by page —
+// stays aligned; getting that wrong is the one way this feature would corrupt every page's footer.
+function drawExecutiveSummaryPages(
+  doc: PDFKit.PDFDocument,
+  fonts: ReportFontSet,
+  opts: { summary: string; reportTitle: string; dateLabel: string; projectName: string },
+  pageMeta: PageMeta[],
+) {
+  // Measure with the body font/size set on the doc BEFORE any drawing mutates the current font, so the
+  // injected height measurement matches how the body text actually renders below.
+  doc.font(fonts.regular).fontSize(SUMMARY_BODY_FONT_SIZE);
+  const measure = (chunk: string) =>
+    doc.heightOfString(chunk, { width: CONTENT_WIDTH, lineGap: SUMMARY_LINE_GAP });
+  // Budget on the (smaller) first-page text box so continuation pages, which start higher, never overflow.
+  const pages = paginateTextByHeight(opts.summary, SUMMARY_BODY_BOTTOM - SUMMARY_BODY_TOP, measure);
+  if (pages.length === 0) return;
+
+  pages.forEach((pageText, index) => {
+    doc.addPage();
+    pageMeta.push({
+      kind: "section",
+      footerLabel: pages.length > 1 ? `Executive Summary ${index + 1}` : "Executive Summary",
+      projectName: opts.projectName,
+      reportTitle: opts.reportTitle,
+      dateLabel: opts.dateLabel,
+    });
+    drawSectionHeader(doc, fonts, opts.reportTitle, opts.dateLabel);
+    let bodyTop = SUMMARY_CONT_BODY_TOP;
+    if (index === 0) {
+      doc.save();
+      doc.fillColor(BRAND_BLACK).font(fonts.bold).fontSize(20).text(SUMMARY_HEADING, PAGE_MARGIN, SUMMARY_HEADING_Y, {
+        width: CONTENT_WIDTH,
+        lineBreak: false,
+        height: 26,
+        ellipsis: true,
+      });
+      doc
+        .moveTo(PAGE_MARGIN, SUMMARY_ACCENT_Y)
+        .lineTo(PAGE_MARGIN + SUMMARY_ACCENT_WIDTH, SUMMARY_ACCENT_Y)
+        .lineWidth(3)
+        .strokeColor(BRAND_RED)
+        .stroke();
+      doc.restore();
+      bodyTop = SUMMARY_BODY_TOP;
+    }
+    doc.fillColor(BRAND_BLACK).font(fonts.regular).fontSize(SUMMARY_BODY_FONT_SIZE);
+    // Hard height cap so pdfkit can NEVER auto-create a continuation page outside the pageMeta accounting
+    // (which would desync every following footer). paginateTextByHeight already keeps each chunk within
+    // the budget, so this clamp only ever engages as a backstop and truncates nothing in practice.
+    doc.text(pageText, PAGE_MARGIN, bodyTop, {
+      width: CONTENT_WIDTH,
+      height: SUMMARY_BODY_BOTTOM - bodyTop,
+      lineGap: SUMMARY_LINE_GAP,
+    });
+  });
 }
 
 type OpenedImage = { width: number; height: number; orientation?: number };
@@ -347,6 +500,8 @@ function registerReportFonts(doc: PDFKit.PDFDocument): ReportFontSet {
 export async function renderFieldPhotoReportPdf(input: {
   cover: ReportCoverData;
   sections: ReportRenderSection[];
+  /** Optional free-form executive summary; rendered on its own page(s) right after the cover. */
+  executiveSummary?: string | null;
 }): Promise<Buffer> {
   const doc = new PDFDocument({
     autoFirstPage: true,
@@ -407,6 +562,22 @@ export async function renderFieldPhotoReportPdf(input: {
     footerLabel: "Cover Page",
     projectName: `${input.cover.projectName} - ${input.cover.reportTitle}`,
   });
+
+  // Executive summary page(s) sit BETWEEN the cover and the section/photo pages. paginateTextByHeight
+  // returns no pages for blank/whitespace-only input, so an empty summary adds nothing.
+  if (input.executiveSummary) {
+    drawExecutiveSummaryPages(
+      doc,
+      reportFonts,
+      {
+        summary: input.executiveSummary,
+        reportTitle: input.cover.reportTitle,
+        dateLabel: input.cover.reportDateLabel,
+        projectName: input.cover.projectName,
+      },
+      pageMeta,
+    );
+  }
 
   // A full-page section divider only earns its place when there's MORE THAN ONE section to separate; a
   // single-section report goes straight from the cover to the photos (no near-blank divider page).

@@ -24,8 +24,20 @@ function makeTenantDb(rows: any[], priorOverrideState: string | null = null) {
   const setArgs: any[] = [];
   const executed: any[] = [];
   const tenantDb = {
+    // The prior/pre-state read is chained two ways: requestOverrideApproval awaits `.limit(1)` directly, while
+    // reconfirmRfpDecline locks the row with `.limit(1).for("update")`. So `.limit()` returns a thenable that
+    // resolves to the rows AND carries a `.for()` returning the same rows — supporting both call sites.
     select: vi.fn(() => ({
-      from: vi.fn(() => ({ where: vi.fn(() => ({ limit: vi.fn(async () => [{ state: priorOverrideState }]) })) })),
+      from: vi.fn(() => ({
+        where: vi.fn(() => ({
+          limit: vi.fn(() => {
+            const stateRows = [{ state: priorOverrideState }];
+            const thenable: any = Promise.resolve(stateRows);
+            thenable.for = vi.fn(async () => stateRows);
+            return thenable;
+          }),
+        })),
+      })),
     })),
     update: vi.fn(() => ({
       set: vi.fn((value: any) => {
@@ -264,6 +276,16 @@ describe("getRfpReviewDetail (adds override state/error + actionable)", () => {
   it("an approved deal is not actionable", async () => {
     const detail = await getRfpReviewDetail(makeReadDb({ ...baseRow, rfpApprovalStatus: "approved" }), "deal-1");
     expect(detail?.actionable).toBe(false);
+  });
+
+  it("exposes is_active (false once archived) so the page can hide the full-deal link", async () => {
+    const active = await getRfpReviewDetail(makeReadDb(baseRow), "deal-1");
+    expect(active?.isActive).toBe(true);
+    const archived = await getRfpReviewDetail(
+      makeReadDb({ ...baseRow, reviewDecision: "denial_reconfirmed", isActive: false }),
+      "deal-1"
+    );
+    expect(archived?.isActive).toBe(false);
   });
 
   it("returns null when the deal is missing", async () => {

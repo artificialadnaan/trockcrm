@@ -4,6 +4,9 @@ import {
   varchar,
   text,
   integer,
+  jsonb,
+  numeric,
+  smallint,
   boolean,
   timestamp,
   date,
@@ -26,9 +29,22 @@ export const fieldScorecards = pgTable(
     projectNumber: text("project_number"),
     superintendentName: text("superintendent_name"),
     pmName: text("pm_name"),
+    /** 1 = original 100-point form; 2 = eight 1-10 categories with an average. */
+    formVersion: smallint("form_version").default(1).notNull(),
+    /** Discriminates the scorecard KIND sharing these tables: 'project' (default) | 'leadership'.
+     *  `text` to match migration 0183, which also carries CHECK (kind IN ('project','leadership')). */
+    kind: text("kind").default("project").notNull(),
+    /** V2's authoritative score. `totalScore` remains average * 10 for legacy rollups. */
+    averageScore: numeric("average_score", { precision: 3, scale: 1 }),
+    /** Leadership Project Summary free text (voice-dictatable). */
+    summary: text("summary"),
+    superintendentSignature: text("superintendent_signature"),
+    pmSignature: text("pm_signature"),
     totalScore: integer("total_score").notNull(),
     rating: varchar("rating", { length: 40 }).notNull(),
     criticalDeficiencies: text("critical_deficiencies").array().default([]).notNull(),
+    /** V2 supplemental description keyed by critical-deficiency key. */
+    criticalDeficiencyNotes: jsonb("critical_deficiency_notes").$type<Record<string, string>>().default({}).notNull(),
     actionItems: text("action_items").array().default([]).notNull(),
     status: varchar("status", { length: 20 }).default("submitted").notNull(),
     submittedBy: uuid("submitted_by").notNull(),
@@ -37,6 +53,8 @@ export const fieldScorecards = pgTable(
     pdfR2Key: text("pdf_r2_key"),
     pdfR2Bucket: text("pdf_r2_bucket"),
     pdfGeneratedAt: timestamp("pdf_generated_at", { withTimezone: true }),
+    /** Renderer revision used for the stored PDF artifact. Version 1 covers legacy/unversioned PDFs. */
+    pdfRenderVersion: smallint("pdf_render_version").default(1).notNull(),
     emailSentAt: timestamp("email_sent_at", { withTimezone: true }),
     isActive: boolean("is_active").default(true).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
@@ -69,11 +87,42 @@ export const fieldScorecardPhotos = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     scorecardId: uuid("scorecard_id").notNull(),
     sectionKey: varchar("section_key", { length: 40 }).notNull(),
+    /** V2 critical-deficiency evidence is attached to the exact selected deficiency. */
+    deficiencyKey: varchar("deficiency_key", { length: 40 }),
     fileId: uuid("file_id").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
   (table) => [
     uniqueIndex("field_scorecard_photos_card_file_key").on(table.scorecardId, table.fileId),
     index("field_scorecard_photos_card_idx").on(table.scorecardId),
+  ],
+);
+
+/**
+ * Durable ownership/state ledger for photos created while editing an already-submitted scorecard.
+ *
+ * This is deliberately separate from `files.tags`: tags are user-editable gallery metadata, while this
+ * row is a server-owned authorization/tombstone record. A globally unique client upload id can therefore
+ * never be replayed against another scorecard, and a discard that wins a race with confirm-upload remains
+ * durable across app/server restarts.
+ */
+export const fieldScorecardEditUploads = pgTable(
+  "field_scorecard_edit_uploads",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scorecardId: uuid("scorecard_id").notNull(),
+    dealId: uuid("deal_id").notNull(),
+    clientUploadId: varchar("client_upload_id", { length: 64 }).notNull(),
+    uploadedBy: uuid("uploaded_by").notNull(),
+    fileId: uuid("file_id"),
+    /** authorized -> confirmed -> linked; discard may move authorized/confirmed -> discarded. */
+    state: varchar("state", { length: 20 }).default("authorized").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("field_scorecard_edit_uploads_client_upload_key").on(table.clientUploadId),
+    index("field_scorecard_edit_uploads_card_idx").on(table.scorecardId),
+    index("field_scorecard_edit_uploads_file_idx").on(table.fileId),
   ],
 );

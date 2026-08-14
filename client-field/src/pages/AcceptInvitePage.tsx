@@ -5,7 +5,7 @@ import { useAuth } from "../lib/auth";
 import { Button, TextInput } from "../components/ui";
 import { BrandLogo } from "../components/BrandLogo";
 
-const MIN_PASSWORD_LENGTH = 8;
+const MIN_PASSWORD_LENGTH = 12;
 
 function PasswordField({
   name,
@@ -60,7 +60,7 @@ export function AcceptInvitePage() {
   const [error, setError] = useState<string | null>(token ? null : "This invite link is invalid. Please contact your administrator for a new invite.");
 
   const passwordHint = useMemo(() => {
-    if (!password) return "Use at least 8 characters.";
+    if (!password) return `Use at least ${MIN_PASSWORD_LENGTH} characters.`;
     if (password.length < MIN_PASSWORD_LENGTH) return "Password is too short.";
     if (confirmPassword && password !== confirmPassword) return "Passwords do not match.";
     return "Password looks ready.";
@@ -95,7 +95,7 @@ export function AcceptInvitePage() {
       return;
     }
     if (password.length < MIN_PASSWORD_LENGTH) {
-      setError("Password must be at least 8 characters.");
+      setError(`Password must be at least ${MIN_PASSWORD_LENGTH} characters.`);
       return;
     }
     if (password !== confirmPassword) {

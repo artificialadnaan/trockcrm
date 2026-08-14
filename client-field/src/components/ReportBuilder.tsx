@@ -3,6 +3,7 @@ import { ArrowLeft, CheckSquare, Download, FileText, Plus, Square, X } from "luc
 import type { FieldPhoto } from "../lib/field-projects";
 import { api } from "../lib/api";
 import { BrandLogo } from "./BrandLogo";
+import { LazyThumb } from "./LazyThumb";
 import { Button, TextInput } from "./ui";
 
 type ReportBuilderProps = {
@@ -294,7 +295,11 @@ export function ReportBuilder({ isOpen, projectId, projectName, creatorName, pho
               </div>
             </div>
 
-            <div className="grid flex-1 grid-cols-2 gap-3 overflow-y-auto px-4 py-4 sm:grid-cols-3 lg:grid-cols-4">
+            {/* auto-rows-max + content-start: this grid is a flex-1 child (definite height), so the default
+                grid-auto-rows:auto sized each row to the caption only — an aspect-square box contributes ~0 to
+                an auto row in a height-constrained grid — collapsing every thumbnail to a clipped sliver. Sizing
+                rows to their content (max-content) and packing from the top restores square cells + scroll. */}
+            <div className="grid flex-1 auto-rows-max content-start grid-cols-2 gap-3 overflow-y-auto px-4 py-4 sm:grid-cols-3 lg:grid-cols-4">
               {filteredPhotos.map((photo) => {
                 const checked = selectedIds.includes(photo.id);
                 return (
@@ -305,7 +310,7 @@ export function ReportBuilder({ isOpen, projectId, projectName, creatorName, pho
                     onClick={() => toggleSelected(photo.id)}
                   >
                     <div className="relative aspect-square bg-muted">
-                      {photo.imageUrl ? <img src={photo.imageUrl} alt={photo.displayName} loading="lazy" decoding="async" className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center text-muted-foreground"><FileText className="h-8 w-8" /></div>}
+                      {photo.imageUrl ? <LazyThumb src={photo.imageUrl} alt={photo.displayName} /> : <div className="flex h-full items-center justify-center text-muted-foreground"><FileText className="h-8 w-8" /></div>}
                       <span className={`absolute right-2 top-2 rounded-full px-2 py-1 text-xs font-black ${checked ? "bg-primary text-primary-foreground" : "bg-black/70 text-white"}`}>{checked ? "Selected" : "Pick"}</span>
                     </div>
                     <div className="space-y-2 p-3">
@@ -360,7 +365,7 @@ export function ReportBuilder({ isOpen, projectId, projectName, creatorName, pho
                     {section.photos.map((photo, photoIndex) => (
                       <div key={photo.id} className="grid gap-3 rounded-xl bg-muted/30 p-3 md:grid-cols-[88px_minmax(0,1fr)]">
                         <div className="aspect-square overflow-hidden rounded-xl bg-muted">
-                          {photo.imageUrl ? <img src={photo.imageUrl} alt={photo.displayName} loading="lazy" decoding="async" className="h-full w-full object-cover" /> : <div className="flex h-full items-center justify-center text-muted-foreground"><FileText className="h-6 w-6" /></div>}
+                          {photo.imageUrl ? <LazyThumb src={photo.imageUrl} alt={photo.displayName} /> : <div className="flex h-full items-center justify-center text-muted-foreground"><FileText className="h-6 w-6" /></div>}
                         </div>
                         <div className="space-y-2">
                           <div className="flex flex-wrap items-center gap-2">

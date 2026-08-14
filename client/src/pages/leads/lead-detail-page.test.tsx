@@ -5,16 +5,25 @@ import { createRoot, type Root } from "react-dom/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import type { ReactNode } from "react";
+import type { ReactNode, Ref } from "react";
 import { LeadDetailPage } from "./lead-detail-page";
 
 const mocks = vi.hoisted(() => ({
   useLeadDetailMock: vi.fn(),
   usePipelineStagesMock: vi.fn(),
   useAuthMock: vi.fn(),
+  useSalesRepsMock: vi.fn(),
+  deleteLeadMock: vi.fn(),
+  updateLeadMock: vi.fn(),
+  patchLeadMock: vi.fn(),
+  toastSuccessMock: vi.fn(),
+  toastErrorMock: vi.fn(),
+  toastInfoMock: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-leads", () => ({
+  deleteLead: mocks.deleteLeadMock,
+  updateLead: mocks.updateLeadMock,
   useLeadDetail: mocks.useLeadDetailMock,
   getLeadStageMetadata: vi.fn((stageId: string, stages: Array<{ id: string; name: string; slug: string }>) => {
     const stage = stages.find((entry) => entry.id === stageId) ?? null;
@@ -36,6 +45,18 @@ vi.mock("@/hooks/use-leads", () => ({
         .filter(Boolean)
         .join(" ")
   ),
+}));
+
+vi.mock("@/hooks/use-sales-reps", () => ({
+  useSalesReps: mocks.useSalesRepsMock,
+}));
+
+vi.mock("sonner", () => ({
+  toast: {
+    success: mocks.toastSuccessMock,
+    error: mocks.toastErrorMock,
+    info: mocks.toastInfoMock,
+  },
 }));
 
 vi.mock("@/hooks/use-pipeline-config", () => ({
@@ -93,6 +114,9 @@ vi.mock("@/components/ui/button", () => ({
     size,
     type,
     className,
+    disabled,
+    "aria-label": ariaLabel,
+    ref,
   }: {
     children: ReactNode;
     onClick?: () => void;
@@ -100,13 +124,19 @@ vi.mock("@/components/ui/button", () => ({
     size?: string;
     type?: "button" | "submit" | "reset";
     className?: string;
+    disabled?: boolean;
+    "aria-label"?: string;
+    ref?: Ref<HTMLButtonElement>;
   }) => (
     <button
+      ref={ref}
       type={type ?? "button"}
       data-variant={variant}
       data-size={size}
       className={className}
       onClick={onClick}
+      disabled={disabled}
+      aria-label={ariaLabel}
     >
       {children}
     </button>
@@ -207,6 +237,7 @@ function renderLeadDetail() {
       <MemoryRouter initialEntries={["/leads/lead-1"]}>
         <Routes>
           <Route path="/leads/:id" element={<LeadDetailPage />} />
+          <Route path="/leads" element={<div>Leads home</div>} />
         </Routes>
       </MemoryRouter>
     )
@@ -224,6 +255,7 @@ function mountLeadDetail() {
       <MemoryRouter initialEntries={["/leads/lead-1"]}>
         <Routes>
           <Route path="/leads/:id" element={<LeadDetailPage />} />
+          <Route path="/leads" element={<div>Leads home</div>} />
         </Routes>
       </MemoryRouter>
     );
@@ -238,10 +270,27 @@ function mountLeadDetail() {
   };
 }
 
+function findButton(text: string, root: ParentNode = document.body) {
+  return Array.from(root.querySelectorAll("button")).find((button) => button.textContent?.trim() === text) ?? null;
+}
+
+function findMenuItem(text: string) {
+  return Array.from(document.body.querySelectorAll<HTMLElement>('[role="menuitem"]')).find(
+    (item) => item.textContent?.trim() === text,
+  ) ?? null;
+}
+
+function setTextAreaValue(textarea: HTMLTextAreaElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+  setter?.call(textarea, value);
+  textarea.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 describe("LeadDetailPage", () => {
   let mounted: ReturnType<typeof mountLeadDetail> | null = null;
 
   beforeEach(() => {
+    vi.clearAllMocks();
     mocks.useAuthMock.mockReturnValue({
       user: {
         id: "rep-1",
@@ -254,6 +303,17 @@ describe("LeadDetailPage", () => {
     document.body.innerHTML = "";
     mocks.usePipelineStagesMock.mockReset();
     mocks.useLeadDetailMock.mockReset();
+    mocks.deleteLeadMock.mockResolvedValue(undefined);
+    mocks.updateLeadMock.mockResolvedValue({ lead: makeLead() });
+    mocks.useSalesRepsMock.mockReturnValue({
+      salesReps: [
+        { id: "rep-1", displayName: "Brett Rios" },
+        { id: "rep-2", displayName: "Taylor Reed" },
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
 
     mocks.usePipelineStagesMock.mockReturnValue({
       stages: [
@@ -270,6 +330,7 @@ describe("LeadDetailPage", () => {
       loading: false,
       error: null,
       refetch: vi.fn(),
+      patchLead: mocks.patchLeadMock,
     });
   });
 
@@ -470,6 +531,25 @@ describe("LeadDetailPage", () => {
     expect(mounted.container.textContent).not.toContain("Lead Timeline");
   });
 
+  it("hides reassignment while questionnaire edits are in progress", () => {
+    mocks.useLeadDetailMock.mockReturnValue({
+      lead: makeLead({ leadQuestionnaire: makeQuestionnaire() }),
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      patchLead: mocks.patchLeadMock,
+    });
+    mounted = mountLeadDetail();
+
+    expect(mounted.container.querySelector('select[aria-label="Reassign lead owner"]')).not.toBeNull();
+    const editButton = Array.from(mounted.container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Edit Sales Validation")
+    );
+    act(() => editButton?.click());
+
+    expect(mounted.container.querySelector('select[aria-label="Reassign lead owner"]')).toBeNull();
+  });
+
   it("confirms before leaving questionnaire edit mode through a tab change", () => {
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
     mocks.useLeadDetailMock.mockReturnValue({
@@ -603,5 +683,159 @@ describe("LeadDetailPage", () => {
 
     expect(html).toContain("Hidden lead records are read-only.");
     expect(html).not.toContain("Edit Lead");
+  });
+
+  it("shows archive to an active owner and admin, but not to non-owners or inactive leads", () => {
+    expect(renderLeadDetail()).toContain('aria-label="More lead actions"');
+
+    mocks.useAuthMock.mockReturnValue({ user: { id: "admin-1", role: "admin" } });
+    expect(renderLeadDetail()).toContain('aria-label="More lead actions"');
+
+    mocks.useAuthMock.mockReturnValue({ user: { id: "director-1", role: "director" } });
+    expect(renderLeadDetail()).not.toContain('aria-label="More lead actions"');
+
+    mocks.useAuthMock.mockReturnValue({ user: { id: "rep-1", role: "rep" } });
+    mocks.useLeadDetailMock.mockReturnValue({
+      lead: makeLead({ isActive: false }),
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    expect(renderLeadDetail()).not.toContain('aria-label="More lead actions"');
+  });
+
+  it("requires an archive reason and sends it before returning to leads", async () => {
+    mounted = mountLeadDetail();
+
+    const trigger = mounted.container.querySelector('button[aria-label="More lead actions"]') as HTMLButtonElement;
+    act(() => trigger.click());
+    const archiveMenuItem = findMenuItem("Archive Lead");
+    expect(archiveMenuItem).not.toBeNull();
+
+    act(() => archiveMenuItem?.click());
+    const archiveButton = findButton("Archive lead") as HTMLButtonElement;
+    expect(archiveButton.disabled).toBe(true);
+
+    const reason = document.body.querySelector("#lead-archive-reason") as HTMLTextAreaElement;
+    act(() => setTextAreaValue(reason, "Duplicate request"));
+    expect(archiveButton.disabled).toBe(false);
+
+    await act(async () => {
+      archiveButton.click();
+      await Promise.resolve();
+    });
+
+    expect(mocks.deleteLeadMock).toHaveBeenCalledWith("lead-1", "Duplicate request");
+    expect(mocks.toastSuccessMock).toHaveBeenCalledWith("Lead archived");
+    expect(document.body.textContent).toContain("Leads home");
+  });
+
+  it("keeps the archive dialog open and announces a server failure", async () => {
+    mocks.deleteLeadMock.mockRejectedValueOnce(new Error("Archive unavailable"));
+    mounted = mountLeadDetail();
+
+    act(() => (mounted?.container.querySelector('button[aria-label="More lead actions"]') as HTMLButtonElement).click());
+    act(() => findMenuItem("Archive Lead")?.click());
+    const reason = document.body.querySelector("#lead-archive-reason") as HTMLTextAreaElement;
+    act(() => setTextAreaValue(reason, "Duplicate"));
+
+    await act(async () => {
+      findButton("Archive lead")?.click();
+      await Promise.resolve();
+    });
+
+    expect(document.body.querySelector('[role="alert"]')?.textContent).toContain("Archive unavailable");
+    expect(document.body.textContent).toContain("Archive “Alpha Roofing Follow-Up”?");
+  });
+
+  it("moves focus into the archive dialog and restores it to the actions trigger on cancel", async () => {
+    mounted = mountLeadDetail();
+    const trigger = mounted.container.querySelector('button[aria-label="More lead actions"]') as HTMLButtonElement;
+    trigger.focus();
+
+    act(() => trigger.click());
+    act(() => findMenuItem("Archive Lead")?.click());
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const reason = document.body.querySelector("#lead-archive-reason") as HTMLTextAreaElement;
+    expect(document.activeElement).toBe(reason);
+
+    act(() => findButton("Cancel")?.click());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("reassigns the canonical and conversion-fallback owner fields from the Owner rail", async () => {
+    mocks.updateLeadMock.mockResolvedValueOnce({
+      lead: {
+        id: "lead-1",
+        assignedRepId: "rep-2",
+        salesRepId: "rep-2",
+        projectType: "legacy-project-type-text",
+      },
+    });
+    mounted = mountLeadDetail();
+    const select = mounted.container.querySelector('select[aria-label="Reassign lead owner"]') as HTMLSelectElement;
+    expect(select).not.toBeNull();
+
+    act(() => {
+      select.value = "rep-2";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(mocks.updateLeadMock).not.toHaveBeenCalled();
+
+    await act(async () => {
+      findButton("Save owner", mounted?.container)?.click();
+      await Promise.resolve();
+    });
+
+    expect(mocks.updateLeadMock).toHaveBeenCalledWith("lead-1", {
+      assignedRepId: "rep-2",
+    });
+    expect(mocks.patchLeadMock).toHaveBeenCalledOnce();
+    const applyOwnershipPatch = mocks.patchLeadMock.mock.calls[0]?.[0] as
+      | ((lead: ReturnType<typeof makeLead>) => ReturnType<typeof makeLead>)
+      | undefined;
+    const patchedLead = applyOwnershipPatch?.(makeLead({ description: "Newer concurrent detail state" }));
+    expect(patchedLead).toEqual(
+      expect.objectContaining({
+        assignedRepId: "rep-2",
+        salesRepId: "rep-2",
+        assignedRepName: "Taylor Reed",
+        description: "Newer concurrent detail state",
+        projectType: expect.objectContaining({ id: "project-type-1", name: "Re-Roof" }),
+      }),
+    );
+    expect(mocks.toastSuccessMock).toHaveBeenCalledWith("Lead owner updated");
+    expect(mocks.useSalesRepsMock).toHaveBeenCalledWith(undefined, {
+      purpose: "lead-reassignment",
+      enabled: true,
+    });
+  });
+
+  it("lets directors reassign a teammate lead while keeping the picker hidden from a non-owner rep", () => {
+    mocks.useAuthMock.mockReturnValue({ user: { id: "director-1", role: "director" } });
+    expect(renderLeadDetail()).toContain('aria-label="Reassign lead owner"');
+
+    mocks.useAuthMock.mockReturnValue({ user: { id: "rep-2", role: "rep" } });
+    expect(renderLeadDetail()).not.toContain('aria-label="Reassign lead owner"');
+  });
+
+  it("explains when no other eligible lead owner is available", () => {
+    mocks.useSalesRepsMock.mockReturnValue({
+      salesReps: [{ id: "rep-1", displayName: "Brett Rios" }],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    const html = renderLeadDetail();
+    expect(html).toContain("No other eligible owners in this office.");
+    expect(html).toContain('aria-label="Reassign lead owner"');
+    expect(html).toContain("disabled");
   });
 });

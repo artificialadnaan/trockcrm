@@ -6,7 +6,11 @@ import { theme } from "../../../../src/theme/theme";
 import { useAuth } from "../../../../src/auth/AuthContext";
 import { useScorecard } from "../../../../src/query/hooks";
 import { getScorecardDownload } from "../../../../src/api/endpoints";
-import { scorecardDownloadErrorMessage } from "../../../../src/scorecards/detail-view";
+import { scorecardDetailHeaderTitle, scorecardDownloadErrorMessage } from "../../../../src/scorecards/detail-view";
+import { createScorecardEditDraft, refreshScorecardEditPhotoUrls } from "../../../../src/scorecards/edit";
+import { listScorecardDrafts, saveScorecardDraft } from "../../../../src/scorecards/draft-store";
+import { newSubmissionId } from "../../../../src/scorecards/ids";
+import { newClientUploadId, uploadOwnerKey } from "../../../../src/capture/upload-queue";
 import { EmptyState, LoadingState } from "../../../../src/components/ui";
 import { Banner } from "../../../../src/components/Banner";
 import { ScreenHeader } from "../../../../src/components/ScreenHeader";
@@ -20,9 +24,10 @@ function toStr(v: string | string[] | undefined): string {
 export default function ScorecardDetailScreen() {
   const router = useRouter();
   const id = toStr(useLocalSearchParams<{ id: string }>().id);
-  const { fetcher } = useAuth();
+  const { fetcher, user, activeOfficeId } = useAuth();
   const query = useScorecard(id);
   const [downloading, setDownloading] = useState(false);
+  const [startingEdit, setStartingEdit] = useState(false);
   const [notice, setNotice] = useState<{ message: string; tone: "error" | "success" } | null>(null);
 
   // Presigned photo/PDF URLs are ~60 min. refetchOnWindowFocus is a NO-OP in RN (no focusManager/AppState
@@ -60,6 +65,50 @@ export default function ScorecardDetailScreen() {
     }
   }
 
+  async function editScorecard() {
+    const current = query.data?.scorecard;
+    if (!current?.canEdit || current.formVersion !== 2 || !user || startingEdit) return;
+    const editOfficeId = current.officeId ?? activeOfficeId ?? user.tenantId ?? null;
+    const ownerKey = uploadOwnerKey(user.id, editOfficeId);
+    if (!ownerKey) return;
+    setNotice(null);
+    setStartingEdit(true);
+    try {
+      // Resume an existing local edit instead of overwriting offline work. Local ids are intentionally random:
+      // draft-store tombstones deleted ids for the process, so a deterministic edit id could not be reused.
+      const localDrafts = await listScorecardDrafts(ownerKey);
+      let draft = localDrafts.find((item) => item.editingScorecardId === current.id);
+      if (draft) {
+        const refreshed = refreshScorecardEditPhotoUrls(draft, current);
+        if (refreshed !== draft) {
+          draft = refreshed;
+          await saveScorecardDraft(ownerKey, draft, Date.now());
+        }
+      } else {
+        draft = createScorecardEditDraft(current, {
+          id: newClientUploadId(),
+          clientSubmissionId: newSubmissionId(),
+          now: Date.now(),
+        });
+        await saveScorecardDraft(ownerKey, draft, Date.now());
+      }
+      const pathname = draft.kind === "leadership"
+        ? "/(app)/scorecards/leadership/[draftId]"
+        : "/(app)/scorecards/[draftId]";
+      router.push({
+        pathname,
+        params: { draftId: draft.id, officeId: editOfficeId ?? "" },
+      });
+    } catch (err) {
+      setNotice({
+        tone: "error",
+        message: err instanceof Error ? err.message : "Couldn’t start editing this scorecard.",
+      });
+    } finally {
+      setStartingEdit(false);
+    }
+  }
+
   const scorecard = query.data?.scorecard;
   const errorStatus = (query.error as { status?: number } | null | undefined)?.status;
   // The detail endpoint THROWS 404 when the scorecard row is gone OR its project went terminal
@@ -67,10 +116,11 @@ export default function ScorecardDetailScreen() {
   // (offline, 5xx, transient) is a load error the user should be able to retry, not "removed".
   const isMissing = query.isError && errorStatus === 404;
   const isLoadError = query.isError && !isMissing;
+  const headerTitle = scorecardDetailHeaderTitle(scorecard);
 
   return (
     <SafeAreaView style={styles.safe} edges={["top"]}>
-      <ScreenHeader onBack={() => router.back()} title="Scorecard" />
+      <ScreenHeader onBack={() => router.back()} title={headerTitle} />
       <ScrollView
         contentContainerStyle={styles.body}
         refreshControl={
@@ -101,6 +151,8 @@ export default function ScorecardDetailScreen() {
             onDownloadPdf={downloadPdf}
             downloadingPdf={downloading}
             onOpenPhoto={openPhoto}
+            onEditScorecard={scorecard.canEdit && scorecard.formVersion === 2 ? editScorecard : undefined}
+            startingEdit={startingEdit}
           />
         )}
       </ScrollView>

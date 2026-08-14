@@ -1,7 +1,8 @@
 import { eq } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { users } from "@trock-crm/shared/schema";
+import { deals, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
+import { formatDealDisplayNumber } from "@trock-crm/shared/types";
 import { sendSystemEmail } from "../../lib/resend-client.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -12,6 +13,7 @@ type TaskAssignmentEmailInput = {
     title: string;
     description?: string | null;
     dueDate?: string | Date | null;
+    dealId?: string | null;
   };
   assigneeId: string;
   assigner: {
@@ -20,6 +22,14 @@ type TaskAssignmentEmailInput = {
     email: string;
   };
 };
+
+type LinkedProject = {
+  name: string | null;
+  dealNumber: string | null;
+  projectNumber: string | null;
+};
+
+export const NO_PROJECT_LABEL = "No project linked";
 
 export type PreparedTaskAssignmentEmail = {
   to: string;
@@ -71,6 +81,42 @@ function formatDueDate(dueDate: string | Date | null | undefined) {
   return dueDate;
 }
 
+/**
+ * Human-facing label for the task's linked project, using the same resolver the web app uses so the
+ * email and the CRM never disagree — and so the meaningless HubSpot deal id is never shown.
+ */
+export function formatLinkedProjectLabel(project: LinkedProject | null): string {
+  if (!project) return NO_PROJECT_LABEL;
+
+  const display = formatDealDisplayNumber(project);
+  const name = project.name?.trim();
+
+  if (name) return display.isPending ? name : `${display.label} - ${name}`;
+  return display.isPending ? "Project linked (number pending)" : display.label;
+}
+
+async function getLinkedProject(tenantDb: TenantDb, dealId: string | null | undefined) {
+  if (!dealId) return null;
+
+  // Best-effort: a task assignment must still notify the assignee if this lookup fails.
+  try {
+    const [deal] = await tenantDb
+      .select({
+        name: deals.name,
+        dealNumber: deals.dealNumber,
+        projectNumber: deals.projectNumber,
+      })
+      .from(deals)
+      .where(eq(deals.id, dealId))
+      .limit(1);
+
+    return (deal ?? null) as LinkedProject | null;
+  } catch (err) {
+    console.error("[Tasks] Failed to resolve linked project for assignment email:", err);
+    return null;
+  }
+}
+
 async function getAssigneeEmailRecipient(tenantDb: TenantDb, assigneeId: string) {
   const [assignee] = await tenantDb
     .select({
@@ -90,9 +136,11 @@ export function buildTaskAssignmentEmail(input: {
   task: TaskAssignmentEmailInput["task"];
   assignee: AssigneeEmailRecipient;
   assignerName: string;
+  project?: LinkedProject | null;
 }) {
   const link = taskUrl(input.task.id);
   const due = formatDueDate(input.task.dueDate);
+  const project = formatLinkedProjectLabel(input.project ?? null);
   const assigneeFirstName = firstNameFor(input.assignee);
   const description = input.task.description?.trim() || null;
   const subject = `New task assigned: ${sanitizeSubject(input.task.title)}`;
@@ -108,6 +156,7 @@ export function buildTaskAssignmentEmail(input: {
     <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;padding:24px;color:#111827;line-height:1.5;">
       <p>Hi ${escapeHtml(assigneeFirstName)},</p>
       <p>${escapeHtml(input.assignerName)} assigned you a task: ${escapeHtml(input.task.title)}</p>
+      <p>Project: ${escapeHtml(project)}</p>
       <p>Due: ${escapeHtml(due)}</p>
       ${description ? `<p>Description: ${escapeHtml(description)}</p>` : ""}
       <p>Click here to open the task: <a href="${escapeHtml(link)}">${escapeHtml(link)}</a></p>
@@ -120,6 +169,7 @@ export function buildTaskAssignmentEmail(input: {
     `Hi ${assigneeFirstName},`,
     "",
     `${input.assignerName} assigned you a task: ${input.task.title}`,
+    `Project: ${project}`,
     `Due: ${due}`,
     ...(description ? [`Description: ${description}`] : []),
     `Click here to open the task: ${link}`,
@@ -138,10 +188,13 @@ export async function prepareTaskAssignmentEmail(
     return null;
   }
 
+  const project = await getLinkedProject(tenantDb, input.task.dealId);
+
   const email = buildTaskAssignmentEmail({
     task: input.task,
     assignee,
     assignerName: input.assigner.displayName,
+    project,
   });
 
   return {

@@ -114,6 +114,11 @@ const DirectorDashboardPage = lazy(() =>
 const RepCommissionsPage = lazy(() =>
   import("@/pages/commissions/rep-commissions-page").then((module) => ({ default: module.RepCommissionsPage }))
 );
+// Commissions temporarily disabled for reps — route renders a disabled notice
+// instead of RepCommissionsPage. Re-enable by swapping the element back below.
+const CommissionsDisabledPage = lazy(() =>
+  import("@/pages/commissions/commissions-disabled-page").then((module) => ({ default: module.CommissionsDisabledPage }))
+);
 const TeamCommissionsPage = lazy(() =>
   import("@/pages/commissions/team-commissions-page").then((module) => ({ default: module.TeamCommissionsPage }))
 );
@@ -123,6 +128,11 @@ const GlobalCommissionsPage = lazy(() =>
 const SharedPrimitivesHarness = lazy(() =>
   import("@/components/__harness__/shared-primitives-harness").then((module) => ({
     default: module.SharedPrimitivesHarness,
+  }))
+);
+const EstimatorPipelinePage = lazy(() =>
+  import("@/pages/reports/estimator-pipeline-page").then((module) => ({
+    default: module.EstimatorPipelinePage,
   }))
 );
 
@@ -360,6 +370,14 @@ export function App() {
                   </RequireRole>
                 )}
               />
+              <Route
+                path="/reports/operations/estimator-pipeline"
+                element={(
+                  <RequireRole allowedRoles={["admin", "director"]}>
+                    <EstimatorPipelinePage />
+                  </RequireRole>
+                )}
+              />
               {enableSharedPrimitivesHarness ? (
                 <Route path="/__harness__/shared-primitives" element={<SharedPrimitivesHarness />} />
               ) : null}
@@ -367,7 +385,7 @@ export function App() {
                 path="/commissions"
                 element={(
                   <RequireRole allowedRoles={["rep"]}>
-                    <RepCommissionsPage />
+                    <CommissionsDisabledPage />
                   </RequireRole>
                 )}
               />

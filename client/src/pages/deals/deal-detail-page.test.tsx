@@ -649,8 +649,9 @@ describe("DealDetailPage", () => {
     expect(html).toContain("History");
     expect(html).toContain("Team");
     expect(html).toContain("Estimates");
-    expect(html).toContain("overflow-x-auto");
-    expect(html).toContain("border-b-2 border-brand-red");
+    expect(html).toContain("Billing");
+    expect(html).toContain("flex-wrap"); // tab bar wraps onto rows instead of a horizontal scroll
+    expect(html).toContain("<span>Overview</span>"); // tab labels render as visible text, not hover-only tooltips
   });
 
   it("persists manually logged email activities from the Activity tab", async () => {
@@ -2388,9 +2389,10 @@ describe("DealDetailPage", () => {
 
   // ── Archive Deal menu item visibility (E) ─────────────────────────────────
 
-  it("shows a disabled Archive Deal item for an owner rep on a non-opportunity deal", () => {
-    // Deal is in estimating — canArchiveDeal returns false because stage ≠ opportunity.
-    // The owner still sees a disabled item (not null); non-owners see nothing at all.
+  it("shows an ENABLED Archive Deal item for an owner rep on a non-opportunity deal", () => {
+    // Deal is in estimating. This asserted a DISABLED item under the old opportunity-only rule; stage is no
+    // longer a factor, so an owner gets a working control here. The disabled branch is gone entirely — the
+    // item is either clickable (owner or admin) or absent (neither).
     mocks.useAuthMock.mockReturnValueOnce({
       user: { id: "rep-1", role: "rep" },
     });
@@ -2411,11 +2413,10 @@ describe("DealDetailPage", () => {
 
     const html = renderPage();
 
-    // The DropdownMenuItem mock renders a <button disabled> — the item is present for the owner
-    // (the non-owner case renders null, so this confirms viewerOwnsDeal=true path).
     expect(html).toContain("Archive Deal");
-    // The DropdownMenuItem mock sets data-disabled="true" for disabled items.
-    expect(html).toContain('data-disabled="true"');
+    // Would have been data-disabled="true" before. The mock sets that attribute only for disabled items, so
+    // its ABSENCE is what proves the control is live for an owner outside the opportunity stage.
+    expect(html).not.toContain('data-disabled="true"');
   });
 
   it("shows a clickable Archive Deal item for an owner rep on an opportunity deal", async () => {

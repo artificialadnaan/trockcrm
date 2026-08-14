@@ -28,12 +28,14 @@ export { userGraphTokens, graphTokenStatusEnum } from "./public/user-graph-token
 export { userExternalIdentities, externalUserSourceEnum } from "./public/user-external-identities.js";
 export { userLocalAuth } from "./public/user-local-auth.js";
 export { userLocalAuthEvents, localAuthEventTypeEnum } from "./public/user-local-auth-events.js";
+export { fieldUserPasswordResets } from "./public/field-user-password-resets.js";
 export { userCommissionSettings } from "./public/user-commission-settings.js";
 export {
   notificationRecipientGroups,
   notificationRecipientAssignments,
 } from "./public/notification-recipient-groups.js";
 export { jobQueue, jobStatusEnum } from "./public/job-queue.js";
+export { bidBoardIngestionInbox } from "./public/bid-board-ingestion-inbox.js";
 export { geocodingCache } from "./public/geocoding-cache.js";
 export * from "../types/sales-workflow.js";
 export * from "../types/workflow.js";
@@ -162,6 +164,7 @@ export {
   fieldScorecards,
   fieldScorecardItems,
   fieldScorecardPhotos,
+  fieldScorecardEditUploads,
 } from "./tenant/field-scorecards.js";
 export {
   projects,

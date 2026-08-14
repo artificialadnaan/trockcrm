@@ -1,6 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { MailPlus, RefreshCw, Search, UserCheck, UserX, X } from "lucide-react";
+import { KeyRound, MailPlus, RefreshCw, Search, UserCheck, UserX, X } from "lucide-react";
 import { toast } from "sonner";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
@@ -80,6 +80,8 @@ export function FieldUsersPage() {
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [inviteSubmitting, setInviteSubmitting] = useState(false);
   const [inviteForm, setInviteForm] = useState({ email: "", firstName: "", lastName: "", phone: "" });
+  const [resettingUserId, setResettingUserId] = useState<string | null>(null);
+  const resetInFlightRef = useRef(false);
 
   const totalPages = Math.max(1, Math.ceil(total / perPage));
   const status = (searchParams.get("status") as StatusFilter | null) ?? "all";
@@ -168,6 +170,26 @@ export function FieldUsersPage() {
     await api(`/admin/field-users/${row.userId ?? row.id}/reactivate`, { method: "POST" });
     toast.success("Field user reactivated");
     await fetchUsers();
+  }
+
+  async function resetPassword(row: FieldUserRow) {
+    const userId = row.userId ?? row.id;
+    if (resetInFlightRef.current) return;
+    if (!window.confirm(
+      `Send a password reset link to ${row.firstName} ${row.lastName} at ${row.email}? The single-use link will expire in 30 minutes.`
+    )) return;
+    resetInFlightRef.current = true;
+    setResettingUserId(userId);
+    try {
+      await api(`/admin/field-users/${userId}/reset-password`, { method: "POST" });
+      toast.success(`Password reset link sent to ${row.email}`);
+      await fetchUsers();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to reset password");
+    } finally {
+      resetInFlightRef.current = false;
+      setResettingUserId(null);
+    }
   }
 
   return (
@@ -270,9 +292,22 @@ export function FieldUsersPage() {
                       </>
                     )}
                     {row.inviteStatus === "accepted" && row.active && (
-                      <Button type="button" variant="ghost" size="sm" aria-label="Deactivate field user" onClick={() => deactivate(row)}>
-                        <UserX className="h-4 w-4" />
-                      </Button>
+                      <>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          aria-label="Reset field user password"
+                          disabled={Boolean(resettingUserId)}
+                          onClick={() => resetPassword(row)}
+                        >
+                          <KeyRound className="mr-1 h-4 w-4" />
+                          {resettingUserId === (row.userId ?? row.id) ? "Resetting…" : "Reset password"}
+                        </Button>
+                        <Button type="button" variant="ghost" size="sm" aria-label="Deactivate field user" onClick={() => deactivate(row)}>
+                          <UserX className="h-4 w-4" />
+                        </Button>
+                      </>
                     )}
                     {row.inviteStatus === "accepted" && !row.active && (
                       <Button type="button" variant="ghost" size="sm" aria-label="Reactivate field user" onClick={() => reactivate(row)}>

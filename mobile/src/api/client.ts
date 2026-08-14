@@ -2,10 +2,12 @@ import { API_BASE_URL, API_BASE_URL_MISSING_MESSAGE } from "../config";
 
 export class ApiError extends Error {
   status: number;
-  constructor(message: string, status: number) {
+  code?: string;
+  constructor(message: string, status: number, code?: string) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -105,17 +107,29 @@ export async function apiFetch<T = unknown>(path: string, opts: ApiFetchOptions 
     // must surface as an error without signing the user out — see onUnauthorized's doc above.
     if (res.status === 401) onUnauthorized?.();
     let message = `Request failed (${res.status})`;
+    let code: string | undefined;
     try {
-      const parsed = (await res.json()) as { error?: { message?: string } | string };
+      const parsed = (await res.json()) as {
+        error?: { message?: string; code?: string } | string;
+        code?: string;
+      };
       const err = (parsed as { error?: unknown }).error;
       if (typeof err === "string") message = err;
-      else if (err && typeof (err as { message?: string }).message === "string") {
-        message = (err as { message: string }).message;
+      else if (err && typeof err === "object") {
+        if (typeof (err as { message?: unknown }).message === "string") {
+          message = (err as { message: string }).message;
+        }
+        if (typeof (err as { code?: unknown }).code === "string") {
+          code = (err as { code: string }).code;
+        }
       }
+      // A few older field routes returned a top-level code. Preserve it as a compatibility fallback while
+      // preferring the standard error.code envelope emitted by errorHandler.
+      if (!code && typeof parsed.code === "string") code = parsed.code;
     } catch {
       /* keep default message */
     }
-    throw new ApiError(message, res.status);
+    throw new ApiError(message, res.status, code);
   }
 
   if (res.status === 204) return undefined as T;

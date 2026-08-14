@@ -110,7 +110,19 @@ export async function listUsers(officeId?: string) {
           u.id,
           u.email,
           u.display_name,
-          u.role,
+          CASE
+            WHEN u.office_id = ${officeId} THEN u.role
+            ELSE COALESCE(
+              (
+                SELECT uoa.role_override
+                FROM user_office_access uoa
+                WHERE uoa.user_id = u.id
+                  AND uoa.office_id = ${officeId}
+                LIMIT 1
+              ),
+              u.role
+            )
+          END AS role,
           u.office_id,
           u.reports_to,
           u.is_active,

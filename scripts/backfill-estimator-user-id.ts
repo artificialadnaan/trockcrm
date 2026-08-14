@@ -8,6 +8,13 @@
  *   node --import tsx scripts/backfill-estimator-user-id.ts --commit   # apply
  *
  * Requires DATABASE_URL and BID_BOARD_ESTIMATOR_USER_MAP in the environment.
+ *
+ * EXECUTION CONTRACT — this only sets the estimator_user_id COLUMN (mirroring the sync's write); like the
+ * sync, it does NOT mint the additive estimator commission ROW. For deals that are ALREADY signed, run
+ * server/src/scripts/backfill-estimator-commissions.ts --commit --actor=<uuid> AFTERWARD to mint the missing
+ * estimator commissions for everyone this newly linked. (Bid-Board-owned deals can't go through
+ * setDealEstimator — its first-fill guard blocks them — so this raw UPDATE + the commission sibling is the
+ * two-step equivalent of what the service does atomically for the non-Bid-Board estimator-column backfill.)
  */
 import { pathToFileURL } from "node:url";
 import pg from "pg";
@@ -49,9 +56,17 @@ export function planEstimatorBackfill(distinctEstimators: Array<string | null | 
   return plan;
 }
 
-/** Idempotent per-tenant UPDATE: fills estimator_user_id only where it is still NULL. */
+/**
+ * Idempotent per-tenant UPDATE: fills estimator_user_id only where it is still NULL AND the mapped user is
+ * not already the deal's sales source. This mirrors the Bid Board sync's own authoritative write —
+ *   estimator_user_id = COALESCE(estimator_user_id, NULLIF($16::uuid, sales_source_user_id))
+ * (server/src/modules/bid-board-sync/service.ts) — which REFUSES to set the estimator when it equals the
+ * sales source. That reciprocal state is a double-cut (the commission calc would mint the estimator cut and
+ * skip the sales-source cut, silently flipping the rep's rate), and is exactly what setDealEstimator's
+ * SALES_SOURCE_CONFLICT guard rejects too. $1 = mapped user id, $2 = free-text bid_board_estimator name.
+ */
 export function buildEstimatorBackfillUpdateSql(schemaName: string): string {
-  return `UPDATE ${assertSafeOfficeSchema(schemaName)}.deals SET estimator_user_id = $1 WHERE bid_board_estimator = $2 AND estimator_user_id IS NULL`;
+  return `UPDATE ${assertSafeOfficeSchema(schemaName)}.deals SET estimator_user_id = $1 WHERE bid_board_estimator = $2 AND estimator_user_id IS NULL AND (sales_source_user_id IS NULL OR sales_source_user_id <> $1)`;
 }
 
 async function main(): Promise<void> {
@@ -85,8 +100,8 @@ async function main(): Promise<void> {
           console.log(`[${schema}] ${item.estimator} -> ${item.userId}: ${res.rowCount ?? 0} deals`);
         } else {
           const { rows: cnt } = await pool.query<{ n: number }>(
-            `SELECT count(*)::int AS n FROM ${schema}.deals WHERE bid_board_estimator = $1 AND estimator_user_id IS NULL`,
-            [item.estimator]
+            `SELECT count(*)::int AS n FROM ${schema}.deals WHERE bid_board_estimator = $1 AND estimator_user_id IS NULL AND (sales_source_user_id IS NULL OR sales_source_user_id <> $2)`,
+            [item.estimator, item.userId]
           );
           console.log(`[${schema}] (dry-run) ${item.estimator} -> ${item.userId}: ${cnt[0]?.n ?? 0} deals`);
         }

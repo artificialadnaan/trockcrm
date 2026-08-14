@@ -224,9 +224,9 @@ export async function getFieldOfficeById(officeId: string): Promise<FieldOffice>
   return { id: row.id, slug: row.slug };
 }
 
-/** Resolve the office that owns a write target (deal/lead/file); 404 if none, 503 if a schema was unavailable. */
+/** Resolve the office that owns a write target (deal/lead/file/scorecard); 404 if none, 503 if a schema was unavailable. */
 export async function resolveWriteOffice(
-  kind: "deal" | "lead" | "file",
+  kind: "deal" | "lead" | "file" | "scorecard",
   id: string,
   notFoundMessage: string,
 ): Promise<FieldOffice> {

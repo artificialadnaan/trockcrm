@@ -3,6 +3,7 @@ import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import {
   contacts,
   contactDealAssociations,
+  dealTeamMembers,
   deals,
   duplicateQueue,
   emails,
@@ -12,6 +13,7 @@ import {
 } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
+import { billingAddressToAbsorb } from "../../lib/billing-address.js";
 import { transferAssociations } from "./association-service.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -141,6 +143,13 @@ export async function mergeContacts(
     .set({ primaryContactId: winnerId })
     .where(eq(deals.primaryContactId, loserId));
 
+  // 5b. Same for deals.billingContactId — otherwise a merged-away billing contact leaves deals pointing at
+  // the soft-deleted loser and Billing shows a stale record instead of the surviving contact (Codex P2).
+  await tenantDb
+    .update(deals)
+    .set({ billingContactId: winnerId })
+    .where(eq(deals.billingContactId, loserId));
+
   // 4b. Transfer emails (update contact_id from loser to winner)
   const emailResult = await tenantDb
     .update(emails)
@@ -168,6 +177,38 @@ export async function mergeContacts(
     .set({ contactId: winnerId })
     .where(eq(tasks.contactId, loserId));
 
+  // 4f. Repoint contact-backed deal_team_members rows from loser to winner. Mirrors transferAssociations'
+  // conflict handling: the partial unique index deal_team_members_deal_contact_role_uidx forbids two ACTIVE
+  // rows for the same (deal_id, contact_id, role), so where the winner is already an active member of the
+  // same deal+role, deactivate the loser's now-duplicate row instead of repointing it (which would collide);
+  // otherwise repoint. Inactive loser rows can always be repointed (the index only constrains active rows).
+  const loserTeamRows = await tenantDb
+    .select()
+    .from(dealTeamMembers)
+    .where(eq(dealTeamMembers.contactId, loserId));
+  if (loserTeamRows.length > 0) {
+    const winnerActiveRows = await tenantDb
+      .select({ dealId: dealTeamMembers.dealId, role: dealTeamMembers.role })
+      .from(dealTeamMembers)
+      .where(and(eq(dealTeamMembers.contactId, winnerId), eq(dealTeamMembers.isActive, true)));
+    const winnerActiveKeys = new Set(winnerActiveRows.map((r) => `${r.dealId}::${r.role}`));
+    for (const row of loserTeamRows) {
+      const collides = row.isActive && winnerActiveKeys.has(`${row.dealId}::${row.role}`);
+      if (collides) {
+        // Winner already covers this deal+role actively → drop the loser's duplicate instead of repointing.
+        await tenantDb
+          .update(dealTeamMembers)
+          .set({ isActive: false, updatedAt: new Date() })
+          .where(eq(dealTeamMembers.id, row.id));
+      } else {
+        await tenantDb
+          .update(dealTeamMembers)
+          .set({ contactId: winnerId, updatedAt: new Date() })
+          .where(eq(dealTeamMembers.id, row.id));
+      }
+    }
+  }
+
   // 6. Absorb missing fields from loser into winner
   const winnerContact = winnerContact0;
   const loserContact = loserContact0;
@@ -177,7 +218,11 @@ export async function mergeContacts(
   if (!winnerContact.mobile && loserContact.mobile) absorb.mobile = loserContact.mobile;
   if (!winnerContact.companyName && loserContact.companyName) absorb.companyName = loserContact.companyName;
   if (!winnerContact.jobTitle && loserContact.jobTitle) absorb.jobTitle = loserContact.jobTitle;
-  if (!winnerContact.address && loserContact.address) absorb.address = loserContact.address;
+  // Absorb the loser's mailing address: as a UNIT when the winner's is incomplete but the loser's is complete
+  // (so a merged billing contact isn't left with a partial/mixed address), otherwise field-by-field to fill the
+  // winner's empty fields — so a merge never DISCARDS the loser's partial address data. Fixes both the prior
+  // street-only absorption (dropped city/state/ZIP) and the regression that discarded partial data (Codex P2).
+  Object.assign(absorb, billingAddressToAbsorb(winnerContact, loserContact));
 
   // 7. Sum touchpoint counts and keep most recent last_contacted_at
   absorb.touchpointCount = (winnerContact.touchpointCount ?? 0) + (loserContact.touchpointCount ?? 0);

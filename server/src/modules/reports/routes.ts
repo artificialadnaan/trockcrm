@@ -1,4 +1,11 @@
 import { Router, type Request } from "express";
+import {
+  ESTIMATOR_PIPELINE_BUCKETS,
+  ESTIMATOR_PIPELINE_COHORTS,
+  type EstimatorPipelineBucket,
+  type EstimatorPipelineCohort,
+  type ScorecardKind,
+} from "@trock-crm/shared/types";
 import { requireRole, requireDirector } from "../../middleware/rbac.js";
 import { AppError } from "../../middleware/error-handler.js";
 import {
@@ -84,6 +91,11 @@ import { getAtRiskWatchlist } from "./at-risk-service.js";
 import { getRepPackData } from "./rep-pack-service.js";
 import { getRegionReport } from "./region-report-service.js";
 import { getQcScorecardsReport } from "./qc-scorecards-service.js";
+import {
+  getEstimatorPipelineEvidence,
+  getEstimatorPipelineReport,
+  type EstimatorPipelineEvidenceOptions,
+} from "./estimator-pipeline-service.js";
 import { resolveRepScope, weekDates, buildLiveDay, sumDays, resolveReps, USAGE_ROSTER_ROLES, readUsageDaily, buildTeamSummary, isWithinDrilldownWindow, classifyViewsState, readViewEvents, readViewEventsRange, readActionDetail, resolveDayKind, emptyUsageDay } from "../usage/read-service.js";
 import { businessToday, shiftBusinessDate, getWtdPeriod, type WeekMode } from "../../lib/period.js";
 
@@ -160,6 +172,65 @@ function readOptionalIsoDate(value: unknown, label: string) {
     throw new AppError(400, `${label} must be a valid ISO date`);
   }
   return raw;
+}
+
+function readPositiveInteger(value: unknown, label: string, fallback: number, maximum: number): number {
+  if (value === undefined || value === null || value === "") return fallback;
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (typeof raw !== "string" || !/^\d+$/.test(raw)) {
+    throw new AppError(400, `${label} must be a positive integer`);
+  }
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maximum) {
+    throw new AppError(400, `${label} must be between 1 and ${maximum}`);
+  }
+  return parsed;
+}
+
+export function parseEstimatorPipelineEvidenceQuery(
+  query: Record<string, unknown>,
+): EstimatorPipelineEvidenceOptions {
+  const cohortRaw = pickQueryValue(query.cohort) ?? "open";
+  if (!(ESTIMATOR_PIPELINE_COHORTS as readonly string[]).includes(cohortRaw)) {
+    throw new AppError(400, "cohort must be one of open or won");
+  }
+  const cohort = cohortRaw as EstimatorPipelineCohort;
+  const bucketRaw = pickQueryValue(query.bucket);
+  if (!bucketRaw || !(ESTIMATOR_PIPELINE_BUCKETS as readonly string[]).includes(bucketRaw)) {
+    throw new AppError(400, "bucket must be one of target, other, or missing");
+  }
+  const bucket = bucketRaw as EstimatorPipelineBucket;
+  // estimatorKey is now the estimator's CRM user id (a UUID). Validate its shape here; the service throws
+  // if the id is not a member of the dynamic BID_BOARD_ESTIMATOR_USER_MAP roster.
+  const estimatorKeyRaw = pickQueryValue(query.estimatorKey);
+  let estimatorKey: string | undefined;
+  if (bucket === "target") {
+    if (!estimatorKeyRaw || !UUID_PATTERN.test(estimatorKeyRaw)) {
+      throw new AppError(400, "estimatorKey must be a target estimator user id");
+    }
+    estimatorKey = estimatorKeyRaw;
+  } else if (estimatorKeyRaw !== undefined) {
+    throw new AppError(400, "estimatorKey is only valid when bucket=target");
+  }
+
+  const stageSlug = pickQueryValue(query.stageSlug);
+  if (stageSlug && !/^[a-z0-9_]{1,100}$/.test(stageSlug)) {
+    throw new AppError(400, "stageSlug must be a canonical pipeline stage slug");
+  }
+  const asOf = readOptionalIsoDate(query.asOf, "asOf");
+  if (asOf && cohort !== "won") {
+    throw new AppError(400, "asOf is only valid when cohort=won");
+  }
+
+  return {
+    cohort,
+    asOf,
+    bucket,
+    estimatorKey,
+    stageSlug,
+    page: readPositiveInteger(query.page, "page", 1, 100_000),
+    pageSize: readPositiveInteger(query.pageSize, "pageSize", 25, 100),
+  };
 }
 
 export function parseTier4Filters(query: Record<string, unknown>, user: { role: string; id: string }): AnalyticsTier4Filters {
@@ -307,11 +378,17 @@ router.get("/qc-scorecards", requireAnyRole, async (req, res, next) => {
     const to = rawTo ?? businessToday();
     const from = rawFrom ?? shiftBusinessDate(to, -56);
     if (from > to) throw new AppError(400, "'from' must be on or before 'to'.");
+    const rawKind = readQueryString(req.query.kind);
+    if (rawKind && rawKind !== "project" && rawKind !== "leadership") {
+      throw new AppError(400, "'kind' must be 'project' or 'leadership'.");
+    }
+    const kind = rawKind as ScorecardKind | undefined;
 
     const data = await getQcScorecardsReport(req.tenantDb!, {
       from,
       to,
       region: readQueryString(req.query.region),
+      kind,
       superintendent: readQueryString(req.query.superintendent),
       rating: readQueryString(req.query.rating),
       flaggedOnly: req.query.flaggedOnly === "true",
@@ -1064,7 +1141,7 @@ router.get("/monday-showcase", requireAnyRole, async (req, res, next) => {
 
 // Reports Part 3 -- drill-to-evidence. Returns the supporting records behind ONE showcase number
 // (metric x scope x band/lead-stage), with a total that EQUALS that number (same canonical cohort).
-const EVIDENCE_METRICS = ["won", "sent", "estimated", "projection", "pipeline", "leads", "undated"] as const;
+const EVIDENCE_METRICS = ["won", "sent", "estimated", "projection", "pipeline", "leads", "undated", "no_date", "stale"] as const;
 const PROJECTION_BANDS = ["0_30", "31_60", "61_90", "beyond_90"] as const;
 const UNASSIGNED_SENTINEL = "__unassigned__";
 
@@ -1113,7 +1190,7 @@ export function parseShowcaseEvidenceParams(query: Record<string, unknown>): Mon
   // no region and the region report has no leads section, so a region-scoped leads drill has no cohort to
   // reconcile against and is rejected — never returned as unfiltered rows under a region scope header.
   const regionName = pickQueryValue(query.regionName);
-  if (regionName !== undefined && (metric === "leads" || metric === "undated")) {
+  if (regionName !== undefined && (metric === "leads" || metric === "undated" || metric === "no_date" || metric === "stale")) {
     // Leads have no region, and the undated card is a showcase-only blind-spot list with no region-report
     // section to reconcile against — reject regionName rather than silently ignore it (the records would
     // otherwise come back unfiltered under a region header). buildUndatedEvidenceSql takes no regionName.
@@ -1172,6 +1249,30 @@ router.get("/monday-showcase/evidence", requireAnyRole, async (req, res, next) =
     const options = parseShowcaseEvidenceParams(req.query as Record<string, unknown>);
     assertShowcaseEvidenceAccess(options, req.user!.role === "admin" || req.user!.role === "director");
     const data = await getMondayShowcaseEvidence(req.tenantDb!, options);
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Live open-pipeline attribution plus a canonical Won-YTD cohort for the two configured estimators, with a
+// reconciled assignment-gap queue. Leadership-only because the evidence is office-wide and estimator edits
+// affect commissions.
+router.get("/estimator-pipeline", requireDirector, async (req, res, next) => {
+  try {
+    const data = await getEstimatorPipelineReport(req.tenantDb!);
+    await req.commitTransaction!();
+    res.json({ data });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.get("/estimator-pipeline/evidence", requireDirector, async (req, res, next) => {
+  try {
+    const options = parseEstimatorPipelineEvidenceQuery(req.query as Record<string, unknown>);
+    const data = await getEstimatorPipelineEvidence(req.tenantDb!, options);
     await req.commitTransaction!();
     res.json({ data });
   } catch (err) {

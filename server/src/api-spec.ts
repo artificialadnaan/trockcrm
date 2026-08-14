@@ -1035,6 +1035,7 @@ export const apiSpec = {
                   name: { type: "string" },
                   assignedRepId: { type: "string", format: "uuid", description: "Director/admin only." },
                   primaryContactId: { type: "string", format: "uuid" },
+                  billingContactId: { type: "string", format: "uuid", nullable: true },
                   companyId: { type: "string", format: "uuid" },
                   ddEstimate: { type: "string" },
                   bidEstimate: { type: "string" },
@@ -1096,7 +1097,7 @@ export const apiSpec = {
         responses: {
           204: { description: "Deal archived." },
           400: { description: "A reason is required to archive a deal (DEAL_ARCHIVE_REASON_REQUIRED)." },
-          403: { description: "Not the assigned rep or an admin; a non-admin archiving a non-opportunity deal (DEAL_ARCHIVE_STAGE_FORBIDDEN); or a non-admin deleting a change order (CHANGE_ORDER_ADMIN_ONLY)." },
+          403: { description: "Not the assigned rep or an admin; or a non-admin deleting a change order (CHANGE_ORDER_ADMIN_ONLY). An owner may archive their own deal at any stage." },
           404: { description: "Deal not found." },
         },
       },

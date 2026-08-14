@@ -27,9 +27,15 @@ jest.mock("expo-file-system/legacy", () => {
 });
 
 import * as FileSystem from "expo-file-system/legacy";
-import { saveScorecardDraft, listScorecardDrafts, deleteScorecardDraft } from "../draft-store";
-import type { ScorecardDraft, ScorecardDraftPhoto } from "../draft";
-import { FIELD_SCORECARD_SECTION_KEYS } from "../scoring";
+import {
+  saveScorecardDraft,
+  listScorecardDrafts,
+  loadScorecardDraft,
+  listScorecardDraftOwners,
+  listScorecardDraftsForUser,
+  deleteScorecardDraft,
+} from "../draft-store";
+import type { ScorecardDraft, NewScorecardDraftPhoto, ExistingScorecardDraftPhoto } from "../draft";
 
 const fs = FileSystem as unknown as { __store: Map<string, string>; __reset: () => void };
 
@@ -89,34 +95,6 @@ describe("draft-store: interrupted-write recovery (listScorecardDrafts read orde
   });
 });
 
-describe("draft-store: photo URI rebasing on resume (rotated iOS container)", () => {
-  // A stale container path from a PRIOR install (different UUID), including the /Documents/ segment so it
-  // reads as a durable-store uri. The mock's live documentDirectory is file:///doc/.
-  const STALE = "file:///var/mobile/Containers/Data/Application/OLD-1111/Documents/";
-  function photo(uri: string): ScorecardDraftPhoto {
-    return { key: "p1", uri, clientUploadId: "cu-1", sectionKey: FIELD_SCORECARD_SECTION_KEYS[0], caption: "" };
-  }
-  function draftWithPhoto(id: string, uri: string): ScorecardDraft {
-    return { ...draft(id), photos: [photo(uri)] };
-  }
-
-  it("rebases a stale-container photo uri onto the live per-draft directory on load", async () => {
-    await saveScorecardDraft("u1", draftWithPhoto("a", `${STALE}scorecard-drafts/u1/a/cu-1.jpg`), 1);
-    const loaded = await listScorecardDrafts("u1");
-    // Healed onto the live doc dir (file:///doc/scorecard-drafts/<owner>/a/), keeping the deterministic
-    // <clientUploadId><ext> filename — so the resumed draft's photo renders and submit's copyAsync succeeds.
-    expect(loaded[0].photos[0].uri).toMatch(/^file:\/\/\/doc\/scorecard-drafts\/.*\/a\/cu-1\.jpg$/);
-    expect(loaded[0].photos[0].uri).not.toContain("OLD-1111");
-  });
-
-  it("leaves an already-live photo uri unchanged (idempotent)", async () => {
-    await saveScorecardDraft("u1", draftWithPhoto("a", `${STALE}scorecard-drafts/u1/a/cu-1.jpg`), 1);
-    const liveUri = (await listScorecardDrafts("u1"))[0].photos[0].uri;
-    await saveScorecardDraft("u1", draftWithPhoto("a", liveUri), 2);
-    expect((await listScorecardDrafts("u1"))[0].photos[0].uri).toBe(liveUri);
-  });
-});
-
 describe("draft-store: serialization (no read-modify-write clobber)", () => {
   it("concurrent saves of different drafts BOTH persist (mutex)", async () => {
     await Promise.all([
@@ -135,16 +113,132 @@ describe("draft-store: serialization (no read-modify-write clobber)", () => {
     expect((await listScorecardDrafts("u1")).map((d) => d.id)).toEqual(["b"]);
   });
 
-  it("a concurrent save + delete of the SAME id leaves a consistent index (no duplicate / corruption)", async () => {
+  it("a concurrent save + delete of the SAME id lets deletion win", async () => {
     await saveScorecardDraft("u1", draft("a"), 1);
     await Promise.all([
       saveScorecardDraft("u1", draft("a"), 2), // re-save the same draft
       deleteScorecardDraft("u1", "a"), // ...while deleting it
     ]);
     const list = await listScorecardDrafts("u1");
-    // The mutex serializes the two RMWs, so the result is one clean state — never a duplicate or a
-    // half-written index. Either ends deleted (delete last) or present exactly once (save last).
-    expect(list.filter((d) => d.id === "a").length).toBeLessThanOrEqual(1);
-    expect([0, 1]).toContain(list.length);
+    expect(list).toEqual([]);
+  });
+
+  it("ignores an autosave that arrives after a draft was discarded", async () => {
+    await saveScorecardDraft("u1", draft("a"), 1);
+    await deleteScorecardDraft("u1", "a");
+    await saveScorecardDraft("u1", draft("a"), 2);
+    expect(await listScorecardDrafts("u1")).toEqual([]);
+  });
+});
+
+describe("draft-store: cross-office recovery", () => {
+  it("registers every office namespace and always includes the active fallback", async () => {
+    await saveScorecardDraft("recover-user:office-b", draft("cross-office"), 10);
+
+    await expect(listScorecardDraftOwners("recover-user", "recover-user:office-a")).resolves.toEqual([
+      { ownerKey: "recover-user:office-a", officeId: "office-a" },
+      { ownerKey: "recover-user:office-b", officeId: "office-b" },
+    ]);
+  });
+
+  it("aggregates drafts across office namespaces with the key needed to resume or discard them", async () => {
+    await saveScorecardDraft("aggregate-user:office-a", draft("primary"), 10);
+    await saveScorecardDraft("aggregate-user:office-b", draft("cross-office"), 20);
+
+    const located = await listScorecardDraftsForUser("aggregate-user", "aggregate-user:office-a");
+    expect(located.map(({ ownerKey, officeId, draft: item }) => ({ ownerKey, officeId, id: item.id }))).toEqual([
+      { ownerKey: "aggregate-user:office-a", officeId: "office-a", id: "primary" },
+      { ownerKey: "aggregate-user:office-b", officeId: "office-b", id: "cross-office" },
+    ]);
+  });
+
+  it("keeps another user's registered office namespaces isolated", async () => {
+    await saveScorecardDraft("isolation-user-a:office-a", draft("a"), 10);
+    await saveScorecardDraft("isolation-user-b:office-b", draft("b"), 20);
+
+    const located = await listScorecardDraftsForUser("isolation-user-a", "isolation-user-a:office-a");
+    expect(located.map((entry) => entry.draft.id)).toEqual(["a"]);
+  });
+
+  it("ignores corrupt registry entries whose owner key and office do not match", async () => {
+    fs.__store.set("file:///doc/scorecard-drafts/owners.json", JSON.stringify([
+      { userId: "registry-user", ownerKey: "another-user:office-b", officeId: "office-b" },
+      { userId: "registry-user", ownerKey: "registry-user:office-c", officeId: "wrong-office" },
+    ]));
+
+    await expect(listScorecardDraftOwners("registry-user", "registry-user:office-a")).resolves.toEqual([
+      { ownerKey: "registry-user:office-a", officeId: "office-a" },
+    ]);
+  });
+});
+
+describe("draft-store: stale-container photo uri rebasing (the James Helms resume bug)", () => {
+  const OWNER = "u1";
+  // A draft whose NEW-evidence photo uri was frozen under a DIFFERENT iOS container UUID (the file physically
+  // moved with the container; the baked uri is now dead). The live document dir is file:///doc/.
+  function draftWithStalePhoto(id: string): ScorecardDraft {
+    const stale: NewScorecardDraftPhoto = {
+      key: "p1",
+      uri: "file:///var/mobile/Containers/Data/Application/OLD-UUID/Documents/scorecard-drafts/u1/" + id + "/cu-1.jpg",
+      clientUploadId: "cu-1",
+      sectionKey: "schedule",
+      caption: "",
+    };
+    return { ...draft(id), photos: [stale] };
+  }
+  // Seed an index directly (bypassing saveScorecardDraft, which would stamp a fresh uri) to model a resume
+  // after a container rotation.
+  async function seedIndex(id: string): Promise<void> {
+    fs.__store.set(`file:///doc/scorecard-drafts/${OWNER}/index.json`, JSON.stringify([draftWithStalePhoto(id)]));
+  }
+
+  it("rebases a new-evidence photo uri onto the LIVE per-draft directory on load", async () => {
+    await seedIndex("d1");
+    const loaded = await loadScorecardDraft(OWNER, "d1");
+    expect(loaded?.photos[0].uri).toBe("file:///doc/scorecard-drafts/u1/d1/cu-1.jpg");
+  });
+
+  it("rebases via listScorecardDrafts too (same read core)", async () => {
+    await seedIndex("d1");
+    const [only] = await listScorecardDrafts(OWNER);
+    expect(only.photos[0].uri).toBe("file:///doc/scorecard-drafts/u1/d1/cu-1.jpg");
+  });
+
+  it("heals a stale uri surfaced via the .tmp recovery path", async () => {
+    fs.__store.set(
+      `file:///doc/scorecard-drafts/${OWNER}/index.json.tmp`,
+      JSON.stringify([draftWithStalePhoto("d1")]),
+    );
+    const loaded = await loadScorecardDraft(OWNER, "d1");
+    expect(loaded?.photos[0].uri).toBe("file:///doc/scorecard-drafts/u1/d1/cu-1.jpg");
+  });
+
+  it("leaves retained (existingScorecardPhotoId, presigned remote) evidence untouched", async () => {
+    const retained: ExistingScorecardDraftPhoto = {
+      key: "r1",
+      uri: "https://cdn.example.com/evidence/abc.jpg?sig=xyz",
+      existingScorecardPhotoId: "sp-1",
+      sectionKey: "schedule",
+      caption: "",
+    };
+    fs.__store.set(
+      `file:///doc/scorecard-drafts/${OWNER}/index.json`,
+      JSON.stringify([{ ...draft("d1"), photos: [retained] }]),
+    );
+    const loaded = await loadScorecardDraft(OWNER, "d1");
+    expect(loaded?.photos[0].uri).toBe("https://cdn.example.com/evidence/abc.jpg?sig=xyz");
+  });
+
+  it("leaves a photo already rooted at the live directory unchanged", async () => {
+    const already: NewScorecardDraftPhoto = {
+      key: "p1", uri: "file:///doc/scorecard-drafts/u1/d1/cu-1.jpg", clientUploadId: "cu-1",
+      sectionKey: "schedule", caption: "",
+    };
+    fs.__store.set(
+      `file:///doc/scorecard-drafts/${OWNER}/index.json`,
+      JSON.stringify([{ ...draft("d1"), photos: [already] }]),
+    );
+    const loaded = await loadScorecardDraft(OWNER, "d1");
+    expect(loaded?.photos[0].uri).toBe("file:///doc/scorecard-drafts/u1/d1/cu-1.jpg");
   });
 });

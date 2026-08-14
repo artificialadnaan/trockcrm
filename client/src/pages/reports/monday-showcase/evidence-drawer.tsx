@@ -173,7 +173,7 @@ function EvidenceTable({
 }: {
   ev: MondayShowcaseEvidence;
   onOpenRecord: (r: EvidenceRecord) => void;
-  /** present only for the `undated` metric: opens the inline close-date editor for that deal. */
+  /** Present for blind-spot metrics: opens the inline close-date editor for that deal. */
   onSetDate?: (r: EvidenceRecord) => void;
   /** Per-row edit gate: the inline close-date write hits the OWNER-ONLY PATCH /deals/:id, so the action
    *  is offered only on rows the viewer owns. Mirrors deal-detail's canMoveCloseDate={viewerOwnsDeal}. */
@@ -187,13 +187,13 @@ function EvidenceTable({
   const columns = columnsFor(ev);
   const rows = sortRecords(ev.records, sort);
   const canEdit = canEditRecord ?? (() => false);
-  // The undated ("No future close date") list gets a trailing action column to set a close date inline.
+  // Blind-spot lists get a trailing action column to set a close date inline.
   // It lives OUTSIDE the shared EVIDENCE_COLUMNS (so the CSV export is unaffected) — a display-only column.
   // The inline write hits the owner-only PATCH /deals/:id, and the office-wide undated drawer (which a rep
   // can open on the rep-accessible Showcase) lists EVERY rep's undated deals — so the column appears only
   // when the viewer owns at least one row here, and the button renders per-row only on owned rows. This
   // prevents the "click a coworker's row → 403" trap (hide the action rather than show-then-403).
-  const showAction = ev.metric === "undated" && !!onSetDate && ev.records.some((r) => canEdit(r));
+  const showAction = (ev.metric === "undated" || ev.metric === "no_date" || ev.metric === "stale") && !!onSetDate && ev.records.some((r) => canEdit(r));
   const ACTION_COL_WIDTH = 150;
   // Sum of the visible columns' floor widths (+ the action column when present). Applied as the table's
   // min-width so the columns keep their legible widths and the table OVERFLOWS the dialog instead of
@@ -398,7 +398,7 @@ export function EvidenceDrawer({
               <EvidenceTable
                 ev={data}
                 onOpenRecord={openRecord}
-                onSetDate={data.metric === "undated" ? setEditing : undefined}
+                onSetDate={data.metric === "undated" || data.metric === "no_date" || data.metric === "stale" ? setEditing : undefined}
                 canEditRecord={canEditRecord}
               />
             </ScrollSyncX>

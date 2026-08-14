@@ -111,6 +111,10 @@ export interface Deal {
   sourceLeadId: string | null;
   primaryContactId: string | null;
   billingContactId?: string | null;
+  /** Forward-only marker: when billing is missing on a Won card, drives the red attention alert. */
+  billingContactRequiredAt?: string | null;
+  /** Derived by the Won-board API; never blocks the Bid Board transition. */
+  billingAttentionRequired?: boolean;
   primaryContactName?: string | null;
   primaryContactTitle?: string | null;
   // Contact email/phone — surfaced by getDealDetail for read-only contact context (e.g. the RFP vote form).
@@ -123,6 +127,10 @@ export interface Deal {
   billingContactEmail?: string | null;
   billingContactPhone?: string | null;
   billingContactCompany?: string | null;
+  billingContactAddress?: string | null;
+  billingContactCity?: string | null;
+  billingContactState?: string | null;
+  billingContactZip?: string | null;
   ddEstimate: string | null;
   ddEstimateOverridden?: boolean | null;
   bidEstimate: string | null;
@@ -637,6 +645,18 @@ export function useDealDetail(dealId: string | undefined, options: OfficeRequest
   const [deal, setDeal] = useState<DealDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Monotonic request markers + the current key. `requestIdRef` stamps every request. `lastCommittedRef` holds the
+  // id of the request whose data last landed in state — a response may commit only if it is STRICTLY NEWER than that
+  // (so data yields to any newer request that actually COMMITTED, but a newer request that merely started and then
+  // FAILED never discards an older success). `latestNonSilentRef` tracks the latest EXPLICIT (non-silent) request,
+  // which owns the loading spinner / error banner. `keyRef` mirrors the current dealId|officeId so a response that
+  // resolves after a key/tenant change refuses to commit under the new key.
+  const requestIdRef = useRef(0);
+  const lastCommittedRef = useRef(0);
+  const latestNonSilentRef = useRef(0);
+  const currentKey = `${dealId ?? ""}|${options.officeId ?? ""}`;
+  const keyRef = useRef(currentKey);
+  keyRef.current = currentKey;
 
   const fetchDeal = useCallback(async (silent = false) => {
     if (!dealId) {
@@ -646,20 +666,47 @@ export function useDealDetail(dealId: string | undefined, options: OfficeRequest
     // A SILENT refetch (the RFP-pending poll) updates the deal IN PLACE without toggling loading/error, so the page
     // never blanks to a spinner every 5s — the vote tally just flips when it changes. A transient poll failure keeps
     // the last-good deal on screen instead of flashing an error banner.
+    //
+    // Two-tier request guard: a SILENT poll yields to ANY newer request, but a NON-SILENT refetch yields ONLY to a
+    // newer non-silent one. So a background poll (which may fail) can never discard a successful explicit reload
+    // (e.g. the refetch a "Cancel RFP" action awaits), and a stale response can't overwrite fresher deal state.
+    const myRequest = ++requestIdRef.current;
+    const myKey = `${dealId ?? ""}|${options.officeId ?? ""}`;
     if (!silent) {
+      latestNonSilentRef.current = myRequest;
       setLoading(true);
       setError(null);
     }
+    // Re-read guards at commit time (a newer request may have committed, or the deal/office key may have changed,
+    // during the await). A response may COMMIT deal state only if it is STRICTLY NEWER than the last committed one
+    // AND still for the current key — so a data commit yields to any newer request that actually committed (silent
+    // poll OR explicit refetch) and to a dealId/officeId change, while a newer request that merely started and then
+    // failed can't discard it. Loading/error ownership is tracked separately (latestNonSilentRef) so a background
+    // poll can't clear an explicit reload's spinner or error.
+    const canCommit = () => myRequest > lastCommittedRef.current && keyRef.current === myKey;
+    const ownsLoadError = () => !silent && latestNonSilentRef.current === myRequest && keyRef.current === myKey;
     try {
       const data = await api<{ deal: DealDetail }>(`/deals/${dealId}/detail`, {
         ...getOfficeRequestOptions(options.officeId),
       });
-      setDeal(data.deal);
-      if (silent) setError(null); // clear any stale error once a background poll succeeds
+      if (canCommit()) {
+        lastCommittedRef.current = myRequest;
+        setDeal(data.deal);
+        if (silent) setError(null); // clear any stale error once a background poll succeeds
+      }
     } catch (err: unknown) {
-      if (!silent) setError(err instanceof Error ? err.message : "Failed to load deal");
+      if (silent) {
+        // Keep the last-good deal on screen (no setError), but trace a real (non-superseded) poll failure.
+        if (canCommit()) console.error("[useDealDetail] silent refetch failed:", err);
+      } else if (ownsLoadError()) {
+        // Only the latest non-silent request for the current key surfaces the error banner.
+        setError(err instanceof Error ? err.message : "Failed to load deal");
+      }
     } finally {
-      if (!silent) setLoading(false);
+      // Only the LATEST non-silent request for the current key clears the spinner it raised: a superseded/off-key
+      // non-silent request leaves loading to the newer one (no premature clear / stale-null flash), and a silent
+      // poll never touches it.
+      if (ownsLoadError()) setLoading(false);
     }
   }, [dealId, options.officeId]);
 
@@ -936,8 +983,15 @@ export function useDealBoard(
   const [board, setBoard] = useState<DealBoardResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Latest-wins guard (mirrors useDeals): a stale response from a superseded request must never overwrite
+  // the board. This matters when params change in quick succession — e.g. a bare /deals mounts and then
+  // hydrates saved filters, firing an unfiltered then a filtered request; without this the slower
+  // unfiltered response could clobber the restored view. (useDeals already guards; useDealBoard did not.)
+  const boardRequestIdRef = useRef(0);
 
   const refetch = useCallback(() => {
+    const requestId = boardRequestIdRef.current + 1;
+    boardRequestIdRef.current = requestId;
     setLoading(true);
     setError(null);
     const params = new URLSearchParams({
@@ -968,15 +1022,19 @@ export function useDealBoard(
     return api<DealBoardApiResponse>(`/deals/pipeline?${params.toString()}`)
       .then((result) => {
         const normalized = normalizeDealBoardResponse(result);
-        setBoard(normalized);
+        if (requestId === boardRequestIdRef.current) setBoard(normalized);
         return normalized;
       })
       .catch((err: unknown) => {
-        setBoard(null);
-        setError(err instanceof Error ? err.message : "Failed to load deal board");
+        if (requestId === boardRequestIdRef.current) {
+          setBoard(null);
+          setError(err instanceof Error ? err.message : "Failed to load deal board");
+        }
         throw err;
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (requestId === boardRequestIdRef.current) setLoading(false);
+      });
   }, [
     assignedRepId,
     estimateSentDateRange?.from,

@@ -8,6 +8,7 @@ const { createAssignmentTaskIfNeeded } = await import(
   "../../../src/modules/assignment-tasks/service.js"
 );
 const { createLeadService } = await import("../../../src/modules/leads/service.js");
+const NEW_REP_ID = "00000000-0000-4000-8000-000000000002";
 
 function createSelectQueueDb(queue: unknown[]) {
   const existingLead = queue[0] as unknown[];
@@ -18,7 +19,7 @@ function createSelectQueueDb(queue: unknown[]) {
     if (tableName === "properties") {
       return [{ id: "property-1", name: "Oakwood Apartments", address: null, city: null, state: null, zip: null }];
     }
-    if (tableName === "users") return [{ id: "rep-new", isActive: true, officeId: "office-1" }];
+    if (tableName === "users") return [{ id: NEW_REP_ID, isActive: true, officeId: "office-1", role: "rep" }];
     if (tableName === "user_office_access") return [];
     return [];
   };
@@ -42,7 +43,7 @@ function createSelectQueueDb(queue: unknown[]) {
     {
       id: "lead-1",
       name: "Oakwood Roof Assessment",
-      assignedRepId: "rep-new",
+      assignedRepId: NEW_REP_ID,
       companyId: "company-1",
       propertyId: "property-1",
       primaryContactId: null,
@@ -100,7 +101,7 @@ describe("lead reassignment tasking", () => {
       [{ id: "company-1", name: "Oakwood" }],
       [{ id: "property-1", name: "Oakwood Apartments", address: null, city: null, state: null, zip: null }],
       [],
-      [{ id: "rep-new", isActive: true, officeId: "office-1" }],
+      [{ id: NEW_REP_ID, isActive: true, officeId: "office-1", role: "rep" }],
     ]);
     const service = createLeadService();
 
@@ -108,7 +109,7 @@ describe("lead reassignment tasking", () => {
       tenantDb as any,
       "lead-1",
       {
-        assignedRepId: "rep-new",
+        assignedRepId: NEW_REP_ID,
         officeId: "office-1",
       },
       "director",
@@ -121,7 +122,7 @@ describe("lead reassignment tasking", () => {
         entityType: "lead",
         entityId: "lead-1",
         previousAssignedRepId: "rep-old",
-        nextAssignedRepId: "rep-new",
+        nextAssignedRepId: NEW_REP_ID,
         actorUserId: "director-1",
       })
     );

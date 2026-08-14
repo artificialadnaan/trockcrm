@@ -21,6 +21,9 @@ beforeAll(async () => {
   pg = new PGlite();
   await pg.exec(`SET TimeZone='UTC';`);
   await pg.exec(tenantSchemaSql("public", [files]));
+  // Caption updates now check whether the file backs a scorecard before invalidating its PDF snapshot.
+  // This fixture has no scorecards, but the production relation still needs to exist for that lookup.
+  await pg.exec(`CREATE TABLE field_scorecard_photos (scorecard_id uuid NOT NULL, file_id uuid NOT NULL);`);
   tdb = drizzle(pg);
 }, 30000);
 

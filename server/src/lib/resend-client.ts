@@ -19,6 +19,10 @@ export interface SendEmailOptions {
   cc?: string | string[];
   bcc?: string | string[];
   text?: string;
+  /** Credential-bearing messages must not be copied to the global monitoring mailbox. */
+  suppressGlobalBcc?: boolean;
+  /** Fail closed instead of treating a missing mail transport as a successful dev send. */
+  requireConfiguredTransport?: boolean;
 }
 
 export interface SendEmailResult {
@@ -77,11 +81,13 @@ function applyOverride(
     // keyed-retry concern here — the worker sender handles that with an idempotency-conflict-as-delivered fallback.
     const seen = new Set([...originalTo, ...originalCc, ...originalBcc].map((address) => address.toLowerCase()));
     const globalBcc: string[] = [];
-    for (const address of resolveGlobalBcc()) {
-      const key = address.toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      globalBcc.push(address);
+    if (!options.suppressGlobalBcc) {
+      for (const address of resolveGlobalBcc()) {
+        const key = address.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        globalBcc.push(address);
+      }
     }
     return {
       to: originalTo,
@@ -138,6 +144,10 @@ export async function sendSystemEmailWithMetadata(
   const client = getClient();
 
   if (!client) {
+    if (options.requireConfiguredTransport) {
+      console.error("[Email] Required email transport is not configured");
+      return { success: false, messageId: null };
+    }
     console.log("[Email:dev] Would send email:");
     if (overridden.active) {
       console.log(`  [override active → ${overridden.to.join(", ")}]`);

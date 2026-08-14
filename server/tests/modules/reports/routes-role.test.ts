@@ -47,9 +47,20 @@ vi.mock("../../../src/modules/reports/monday-showcase-service.js", () => ({
   getMondayShowcaseEvidence: vi.fn(),
 }));
 
+vi.mock("../../../src/modules/reports/estimator-pipeline-service.js", () => ({
+  getEstimatorPipelineReport: vi.fn(),
+  getEstimatorPipelineEvidence: vi.fn(),
+}));
+
+vi.mock("../../../src/modules/reports/qc-scorecards-service.js", () => ({
+  getQcScorecardsReport: vi.fn(),
+}));
+
 import { errorHandler } from "../../../src/middleware/error-handler.js";
 import * as reportService from "../../../src/modules/reports/service.js";
 import * as mondayShowcaseService from "../../../src/modules/reports/monday-showcase-service.js";
+import * as estimatorPipelineService from "../../../src/modules/reports/estimator-pipeline-service.js";
+import * as qcScorecardsService from "../../../src/modules/reports/qc-scorecards-service.js";
 import { runReportBuilder } from "../../../src/modules/reports/report-builder-service.js";
 import * as savedReportsService from "../../../src/modules/reports/saved-reports-service.js";
 import { reportRoutes } from "../../../src/modules/reports/routes.js";
@@ -120,6 +131,78 @@ describe("report route role guards", () => {
       {},
       expect.objectContaining({ metric: "won", mode: "to_date" }),
     );
+  });
+
+  it("validates and forwards the QC scorecard kind filter", async () => {
+    const app = buildApp("rep");
+
+    const invalidResponse = await request(app).get("/api/reports/qc-scorecards?kind=safety");
+    expect(invalidResponse.status).toBe(400);
+    expect(invalidResponse.body).toEqual({
+      error: { message: "'kind' must be 'project' or 'leadership'." },
+    });
+    expect(qcScorecardsService.getQcScorecardsReport).not.toHaveBeenCalled();
+
+    vi.mocked(qcScorecardsService.getQcScorecardsReport).mockResolvedValueOnce({
+      scorecards: [],
+      regions: [],
+      superintendents: [],
+      truncated: false,
+    });
+    const validResponse = await request(app).get(
+      "/api/reports/qc-scorecards?from=2026-07-01&to=2026-07-31&kind=leadership",
+    );
+
+    expect(validResponse.status).toBe(200);
+    expect(qcScorecardsService.getQcScorecardsReport).toHaveBeenCalledWith({}, expect.objectContaining({
+      from: "2026-07-01",
+      to: "2026-07-31",
+      kind: "leadership",
+    }));
+  });
+
+  it("keeps estimator pipeline summaries and project evidence leadership-only", async () => {
+    const app = buildApp("rep");
+
+    const summaryResponse = await request(app).get("/api/reports/estimator-pipeline");
+    const evidenceResponse = await request(app).get(
+      "/api/reports/estimator-pipeline/evidence?bucket=missing",
+    );
+
+    expect(summaryResponse.status).toBe(403);
+    expect(evidenceResponse.status).toBe(403);
+    expect(estimatorPipelineService.getEstimatorPipelineReport).not.toHaveBeenCalled();
+    expect(estimatorPipelineService.getEstimatorPipelineEvidence).not.toHaveBeenCalled();
+  });
+
+  it("allows directors to load estimator summaries and validated evidence filters", async () => {
+    vi.mocked(estimatorPipelineService.getEstimatorPipelineReport).mockResolvedValueOnce({
+      pipeline: { count: 0, value: 0 },
+    } as any);
+    vi.mocked(estimatorPipelineService.getEstimatorPipelineEvidence).mockResolvedValueOnce({
+      records: [],
+    } as any);
+    const app = buildApp("director");
+
+    const estimatorId = "00000000-0000-0000-0000-000000005101";
+    const summaryResponse = await request(app).get("/api/reports/estimator-pipeline");
+    const evidenceResponse = await request(app).get(
+      `/api/reports/estimator-pipeline/evidence?bucket=target&estimatorKey=${estimatorId}&stageSlug=estimating&page=2&pageSize=50`,
+    );
+
+    expect(summaryResponse.status).toBe(200);
+    expect(summaryResponse.body).toEqual({ data: { pipeline: { count: 0, value: 0 } } });
+    expect(estimatorPipelineService.getEstimatorPipelineReport).toHaveBeenCalledWith({});
+    expect(evidenceResponse.status).toBe(200);
+    expect(estimatorPipelineService.getEstimatorPipelineEvidence).toHaveBeenCalledWith({}, {
+      cohort: "open",
+      asOf: undefined,
+      bucket: "target",
+      estimatorKey: estimatorId,
+      stageSlug: "estimating",
+      page: 2,
+      pageSize: 50,
+    });
   });
 
   it("blocks non-CRM roles from report-builder runs", async () => {

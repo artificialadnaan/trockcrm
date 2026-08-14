@@ -19,8 +19,11 @@ describe("App route guards", () => {
     expect(source).toContain('path="/help/admin-guide" element={( <RequireRole allowedRoles={["admin"]}> <AdminGuidePage />');
   });
 
-  it("keeps the personal commissions page rep-only", () => {
-    expect(source).toContain('path="/commissions" element={( <RequireRole allowedRoles={["rep"]}> <RepCommissionsPage />');
+  it("keeps the personal commissions route rep-only but renders the disabled notice", () => {
+    // Commissions are temporarily disabled for reps: the route stays behind the rep-only
+    // guard but renders CommissionsDisabledPage instead of RepCommissionsPage. Re-enable by
+    // swapping the element back to <RepCommissionsPage /> in App.tsx (and here).
+    expect(source).toContain('path="/commissions" element={( <RequireRole allowedRoles={["rep"]}> <CommissionsDisabledPage />');
   });
 
   it("opens migration tooling to directors and admins", () => {
@@ -46,6 +49,7 @@ describe("App route guards", () => {
     expect(source).toContain('path="/reports/operations/workflow-bottlenecks" element={( <RequireRole allowedRoles={["admin", "director"]}> <WorkflowBottlenecksPage />');
     expect(source).toContain('path="/reports/operations/project-readiness" element={( <RequireRole allowedRoles={["admin", "director"]}> <ProjectReadinessPage />');
     expect(source).toContain('path="/reports/operations/portfolio-load" element={( <RequireRole allowedRoles={["admin", "director"]}> <PortfolioLoadPage />');
+    expect(source).toContain('path="/reports/operations/estimator-pipeline" element={( <RequireRole allowedRoles={["admin", "director"]}> <EstimatorPipelinePage />');
   });
 
   it("preserves report route guards while export remains page-local", () => {

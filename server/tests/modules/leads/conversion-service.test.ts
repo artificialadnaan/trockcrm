@@ -574,6 +574,7 @@ interface FakeUserRow {
   id: string;
   officeId: string;
   isActive: boolean;
+  role: "admin" | "director" | "rep" | "construction" | "field_contractor";
 }
 
 interface FakeLeadRow {
@@ -761,16 +762,19 @@ function createFakeTenantDb(initialState?: Partial<FakeTenantState>) {
         id: "rep-1",
         officeId: "office-1",
         isActive: true,
+        role: "rep",
       },
       {
         id: "rep-2",
         officeId: "office-1",
         isActive: true,
+        role: "rep",
       },
       {
         id: "director-1",
         officeId: "office-1",
         isActive: true,
+        role: "director",
       },
     ],
     userOfficeAccess: [],

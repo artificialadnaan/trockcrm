@@ -112,6 +112,16 @@ describe("ReportBuilder", () => {
     expect(node.querySelectorAll('input[type="date"]').length).toBe(2);
   });
 
+  it("renders each selectable photo's thumbnail in the selection grid", async () => {
+    // Regression guard: the report-builder grid must actually surface thumbnails. It previously went blank —
+    // native loading="lazy" never fired inside the modal's nested scroll container — so photos load through
+    // LazyThumb now. (jsdom has no IntersectionObserver, so LazyThumb's eager fallback renders the <img>.)
+    const node = renderBuilder();
+    await vi.waitFor(() => expect(node.textContent).toContain("Front elevation crack"));
+    expect(node.querySelector('img[src="https://example.com/front.jpg"]')).toBeTruthy();
+    expect(node.querySelector('img[src="https://example.com/rear.jpg"]')).toBeTruthy();
+  });
+
   it("walks the user through preview and PDF generation", async () => {
     const onGenerated = vi.fn();
     apiMock

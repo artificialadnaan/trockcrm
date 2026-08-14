@@ -21,6 +21,7 @@ import {
   getFailedCount,
   getQueuedCount,
   getQueuedUploads,
+  getSchedulableCount,
   newClientUploadId,
   patchQueuedMetadata,
   uploadOwnerKey,
@@ -522,11 +523,19 @@ export default function CaptureScreen() {
           /* best-effort — the draft stays for the next resume */
         }
       }
-      const [n, failed] = await Promise.all([getQueuedCount(ownerKey), getFailedCount(ownerKey)]);
+      // The banner shows DRAINABLE count; the drain DECISION keys on SCHEDULABLE count (drainable + staging).
+      // A lone capture interrupted mid-enqueue is a `staging` row: 0 drainable (so the banner stays quiet) but
+      // 1 schedulable, so we still kick a drain — its reconciliation unsticks the row and ships the photo,
+      // instead of it staying hidden until some unrelated capture happens to trigger the next drain.
+      const [n, schedulable, failed] = await Promise.all([
+        getQueuedCount(ownerKey),
+        getSchedulableCount(ownerKey),
+        getFailedCount(ownerKey),
+      ]);
       if (cancelled) return;
       setQueuedCount(n);
       setFailedCount(failed);
-      if (n > 0) void kickDrainRef.current(true);
+      if (schedulable > 0) void kickDrainRef.current(true);
     };
     void resumeIfQueued();
     const sub = AppState.addEventListener("change", (state) => {

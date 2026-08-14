@@ -391,7 +391,12 @@ export function useLeadDetail(leadId: string | undefined) {
     fetchLead();
   }, [fetchLead]);
 
-  return { lead, loading, error, refetch: fetchLead };
+  const patchLead = useCallback((updater: (currentLead: LeadRecord) => LeadRecord) => {
+    setLead((currentLead) => currentLead ? updater(currentLead) : currentLead);
+    setError(null);
+  }, []);
+
+  return { lead, loading, error, refetch: fetchLead, patchLead };
 }
 
 export function useLeadQuestionnaireTemplate(projectTypeId: string | null | undefined) {
@@ -582,6 +587,13 @@ export async function updateLead(leadId: string, input: LeadUpdatePayload) {
   return api<{ lead: LeadRecord }>(`/leads/${leadId}`, {
     method: "PATCH",
     json: input,
+  });
+}
+
+export async function deleteLead(leadId: string, reason: string) {
+  return api<void>(`/leads/${leadId}`, {
+    method: "DELETE",
+    json: { reason },
   });
 }
 

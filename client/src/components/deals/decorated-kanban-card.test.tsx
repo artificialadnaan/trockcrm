@@ -123,6 +123,56 @@ function renderDeal(deal: Deal, stageSlug = "estimating") {
 }
 
 describe("DecoratedKanbanCard", () => {
+  it("renders a red billing-contact alert for a Won card requiring attention", () => {
+    const html = renderDeal(makeDeal({ billingAttentionRequired: true }), "won");
+
+    expect(html).toContain("Billing contact missing");
+    expect(html).toContain("bg-red-600");
+    expect(html).toContain("border-red-300");
+    expect(html).toContain('aria-label="Open deal Palm Villas: billing contact missing"');
+  });
+
+  it("does not render billing attention from raw contact state alone", () => {
+    const html = renderDeal(makeDeal({ billingContactId: null, billingAttentionRequired: false }), "won");
+
+    expect(html).not.toContain("Billing contact missing");
+    expect(html).not.toContain("bg-red-600");
+    expect(html).toContain('aria-label="Open deal Palm Villas"');
+  });
+
+  it("renders the deal description under the name so cards are identifiable without drilling in", () => {
+    const html = renderDeal(makeDeal({ name: "Milo at Mountain Park", description: "Reroof + gutters, 3 buildings" }));
+
+    expect(html).toContain("Reroof + gutters, 3 buildings");
+    expect(html).toContain('data-testid="decorated-kanban-card-description"');
+    // The name still renders above it.
+    expect(html).toContain("Milo at Mountain Park");
+    // The button's aria-label overrides descendant text, so the description must be folded into the
+    // accessible name for screen-reader users to tell similar cards apart.
+    expect(html).toContain('aria-label="Open deal Milo at Mountain Park. Reroof + gutters, 3 buildings"');
+  });
+
+  it("folds the description into the accessible name after the billing alert", () => {
+    const html = renderDeal(
+      makeDeal({ name: "Milo at Mountain Park", description: "Reroof + gutters", billingAttentionRequired: true }),
+      "won"
+    );
+
+    expect(html).toContain('aria-label="Open deal Milo at Mountain Park: billing contact missing. Reroof + gutters"');
+  });
+
+  it("omits the description block entirely when the deal has no description", () => {
+    const html = renderDeal(makeDeal({ description: null }));
+
+    expect(html).not.toContain('data-testid="decorated-kanban-card-description"');
+  });
+
+  it("does not render a description block for a whitespace-only description", () => {
+    const html = renderDeal(makeDeal({ description: "   " }));
+
+    expect(html).not.toContain('data-testid="decorated-kanban-card-description"');
+  });
+
   it("shows SLA context for active stages", () => {
     const html = render("opportunity");
 

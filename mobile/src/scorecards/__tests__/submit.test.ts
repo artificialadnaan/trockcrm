@@ -5,10 +5,21 @@ jest.mock("../../capture/upload-queue", () => ({
   enqueueUploads: jest.fn(async () => []),
   drainUploadQueue: jest.fn(async () => ({ succeeded: 0, failed: 0, remaining: 0 })),
   getQueuedUploads: jest.fn(async () => []),
+  removeQueuedUploadsAndWait: jest.fn(async () => undefined),
 }));
 jest.mock("../../api/endpoints", () => ({
   createScorecard: jest.fn(async () => ({ scorecard: { id: "sc-1", dealId: "deal-1" } })),
 }));
+// A tiny in-memory FS: default every file EXISTS (so the existing orchestration tests are unaffected), but
+// let a test mark specific uris missing to exercise the pre-enqueue existence guard.
+jest.mock("expo-file-system/legacy", () => {
+  const missing = new Set<string>();
+  return {
+    documentDirectory: "file:///doc/Documents/",
+    __setMissing: (uris: string[]) => { missing.clear(); for (const u of uris) missing.add(u); },
+    getInfoAsync: async (uri: string) => ({ exists: !missing.has(uri) }),
+  };
+});
 
 import {
   scorecardPhotoUploadInput,
@@ -16,9 +27,12 @@ import {
   classifyDraftPhotoUploads,
   submitScorecard,
 } from "../submit";
-import type { ScorecardDraft, ScorecardDraftPhoto } from "../draft";
+import { todayLocalIso, type ScorecardDraft, type ScorecardDraftPhoto } from "../draft";
 import { enqueueUploads, drainUploadQueue, getQueuedUploads } from "../../capture/upload-queue";
 import { createScorecard } from "../../api/endpoints";
+import * as FileSystem from "expo-file-system/legacy";
+
+const fsMock = FileSystem as unknown as { __setMissing: (uris: string[]) => void };
 
 describe("scorecardPhotoUploadInput", () => {
   it("targets the deal and auto-tags scorecard + section, trimming the caption", () => {
@@ -31,6 +45,17 @@ describe("scorecardPhotoUploadInput", () => {
     expect(input.caption).toBe("Slab crack");
     expect(input.clientUploadId).toBe("cu-1");
     expect(input.category).toBeNull();
+    expect(input.scorecardId).toBeUndefined();
+    expect(input.routeByTarget).toBeUndefined();
+  });
+
+  it("persists the scorecard scope only for submitted-card edit evidence", () => {
+    const photo: ScorecardDraftPhoto = {
+      key: "p1", uri: "file://p1", clientUploadId: "cu-1", sectionKey: "schedule", caption: "",
+    };
+    expect(scorecardPhotoUploadInput(photo, "deal-1", "scorecard-1")).toEqual(
+      expect.objectContaining({ scorecardId: "scorecard-1", routeByTarget: true }),
+    );
   });
 
   it("nulls a blank caption", () => {
@@ -86,8 +111,20 @@ describe("submitScorecard (orchestration)", () => {
     };
   }
 
+  // A photo whose durable file lives under the document directory (so the existence guard checks it).
+  function durablePhoto(id: string): ScorecardDraftPhoto {
+    return {
+      key: id,
+      uri: `file:///doc/Documents/scorecard-drafts/owner-1/d1/${id}.jpg`,
+      clientUploadId: id,
+      sectionKey: "schedule",
+      caption: "",
+    };
+  }
+
   beforeEach(() => {
     jest.clearAllMocks();
+    fsMock.__setMissing([]); // every file exists by default
     (getQueuedUploads as jest.Mock).mockResolvedValue([]);
     (createScorecard as jest.Mock).mockResolvedValue({ scorecard: { id: "sc-1", dealId: "deal-1" } });
   });
@@ -101,11 +138,37 @@ describe("submitScorecard (orchestration)", () => {
     expect(result).toEqual({ status: "submitted", scorecard: { id: "sc-1", dealId: "deal-1" } });
   });
 
+  it("POSTs a new or recovered draft through its office-pinned fetcher", async () => {
+    const neutralScorecardFetcher = jest.fn();
+    const draftOfficeFetcher = jest.fn();
+
+    await submitScorecard(neutralScorecardFetcher as any, "owner-1", draftWith([]), {
+      draftOfficeFetcher: draftOfficeFetcher as any,
+    });
+
+    expect(createScorecard).toHaveBeenCalledWith(draftOfficeFetcher, expect.any(Object));
+    expect(createScorecard).not.toHaveBeenCalledWith(neutralScorecardFetcher, expect.any(Object));
+  });
+
+  it("stamps Week Of = the LOCAL submit date, overriding a stale draft value", async () => {
+    // A draft seeded on an earlier day (offline, submitted later) must file under the SUBMIT day, not its
+    // creation day — the server no longer re-stamps, so the client owns the completion date.
+    const stale: ScorecardDraft = { ...draftWith([]), weekOf: "2020-01-01" };
+    await submitScorecard(fetcher, "owner-1", stale);
+    const payload = (createScorecard as jest.Mock).mock.calls[0][1];
+    expect(payload.weekOf).not.toBe("2020-01-01"); // the stale draft value is discarded
+    expect(payload.weekOf).toBe(todayLocalIso()); // the local completion date is stamped instead
+  });
+
   it("with photos all confirmed: enqueues, drains, then POSTs → submitted", async () => {
     (getQueuedUploads as jest.Mock).mockResolvedValue([]); // nothing left queued = all uploaded
     const result = await submitScorecard(fetcher, "owner-1", draftWith([photo("a"), photo("b")]));
     expect(enqueueUploads).toHaveBeenCalledTimes(1);
-    expect(drainUploadQueue).toHaveBeenCalledTimes(1);
+    expect(enqueueUploads).toHaveBeenCalledWith(
+      "owner-1",
+      expect.arrayContaining([expect.not.objectContaining({ routeByTarget: true })]),
+    );
+    expect(drainUploadQueue).toHaveBeenCalledWith("owner-1", fetcher, undefined);
     expect(createScorecard).toHaveBeenCalledTimes(1);
     expect(result.status).toBe("submitted");
   });
@@ -122,5 +185,33 @@ describe("submitScorecard (orchestration)", () => {
     const result = await submitScorecard(fetcher, "owner-1", draftWith([photo("a")]));
     expect(result).toEqual({ status: "photos_failed", failed: 1 });
     expect(createScorecard).not.toHaveBeenCalled();
+  });
+
+  it("with a durable photo whose FILE is missing: returns photos_missing, does NOT enqueue or POST", async () => {
+    // The stale-container / deleted-file case: the draft references a durable copy that no longer exists.
+    // Previously enqueueUploads' copyAsync would reject and bubble up as the opaque 'Couldn't submit' error;
+    // now we detect it up front and return an actionable outcome without throwing.
+    const p = durablePhoto("a");
+    fsMock.__setMissing([p.uri]);
+    const result = await submitScorecard(fetcher, "owner-1", draftWith([p]));
+    expect(result).toEqual({ status: "photos_missing", missing: 1 });
+    expect(enqueueUploads).not.toHaveBeenCalled();
+    expect(createScorecard).not.toHaveBeenCalled();
+  });
+
+  it("with all durable photo files present: proceeds to enqueue + POST", async () => {
+    const result = await submitScorecard(fetcher, "owner-1", draftWith([durablePhoto("a"), durablePhoto("b")]));
+    expect(enqueueUploads).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe("submitted");
+  });
+
+  it("does NOT existence-check remote/retained (non-durable) uris", async () => {
+    // A photo:// or presigned uri has no durable file to stat — treat it as present and continue.
+    const remote: ScorecardDraftPhoto = {
+      key: "r", uri: "https://cdn.example.com/x.jpg?sig=y", clientUploadId: "r", sectionKey: "schedule", caption: "",
+    };
+    fsMock.__setMissing(["https://cdn.example.com/x.jpg?sig=y"]);
+    const result = await submitScorecard(fetcher, "owner-1", draftWith([remote]));
+    expect(result.status).toBe("submitted");
   });
 });

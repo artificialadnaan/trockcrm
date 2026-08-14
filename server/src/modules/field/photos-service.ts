@@ -8,9 +8,7 @@ import { deleteObject, generateDownloadUrl, generateMockDownloadUrl, isR2Configu
 import {
   buildFileDownloadUrlFromRecord,
   confirmUpload,
-  discardPendingUpload,
   getDealPhotoTimeline,
-  getFileByClientUploadId,
   getFileDownloadUrl,
   getPendingUploadMetadata,
   requestUploadUrl,
@@ -19,6 +17,7 @@ import { recordUploadedFileSideEffects, type UploadAuditContext } from "../files
 import { logPhotoEvent } from "../files/audit-log-service.js";
 import { assertPhotosBelongToDeal } from "../public-photo-tokens/service.js";
 import { assertAccessibleFieldCaptureTarget, assertActiveFieldProject, type FieldPhoto } from "./projects-service.js";
+import { authorizeScorecardEditEvidenceUpload } from "./scorecard-evidence-upload.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
 
@@ -265,6 +264,10 @@ export async function requestFieldPhotoUploadUrl(
     photoCategory?: string | null;
     caption?: string | null;
     tags?: string[];
+    /** Present only for evidence added to an already-submitted scorecard edit. */
+    scorecardId?: string;
+    /** Required with scorecardId; durable queue id bound before the upload URL is returned. */
+    clientUploadId?: string;
   }
 ) {
   const normalizedTarget = normalizeCaptureTargetIds(input);
@@ -282,6 +285,14 @@ export async function requestFieldPhotoUploadUrl(
   assertUploadSize(input.sizeBytes);
   const photoCategory = cleanPhotoCategory(input.photoCategory);
   const ext = extensionForContentType(input.contentType);
+  const scorecardEditScope = input.scorecardId
+    ? await authorizeScorecardEditEvidenceUpload(tenantDb, {
+        scorecardId: input.scorecardId,
+        clientUploadId: input.clientUploadId ?? "",
+        userId: input.userId,
+        target: normalizedTarget,
+      })
+    : undefined;
   const result = await requestUploadUrl(tenantDb, input.officeSlug, input.userId, {
     originalFilename: `field-photo-${Date.now()}.${ext}`,
     mimeType: input.contentType,
@@ -293,6 +304,7 @@ export async function requestFieldPhotoUploadUrl(
     description: input.caption ?? undefined,
     photoCategory,
     tags: input.tags,
+    scorecardEditScope,
     allowUnassigned: !hasSelectedCaptureTarget(normalizedTarget),
   });
 
@@ -328,6 +340,8 @@ export async function confirmFieldPhotoUpload(
     objectKey: string;
     /** Idempotency key from the resilient upload queue — see ConfirmUploadInput.clientUploadId. */
     clientUploadId?: string;
+    /** Exact submitted-scorecard edit scope used when the upload URL was minted. */
+    scorecardId?: string;
     latitude?: number;
     longitude?: number;
     addressSource?: "exif" | "live_gps";
@@ -346,55 +360,45 @@ export async function confirmFieldPhotoUpload(
       userRole: input.userRole,
     });
   }
-  // Idempotency (resilient upload queue): a resumed/background upload may re-confirm one that already
-  // succeeded — by then the single-use token is gone, so the check below would wrongly 400. If a row
-  // already exists for this client id, return it. The access check above still gates this, so it can't be
-  // used to read another deal's photo. Decoupled from the token, so it survives a server restart too.
-  if (input.clientUploadId) {
-    const existing = await getFileByClientUploadId(tenantDb, input.clientUploadId, input.userId);
-    if (existing) {
-      // Idempotent retry: the client just minted a fresh token + PUT a NEW R2 object before this call.
-      // Clean up the superseded object — but ONLY the r2Key we can VALIDATE belongs to the supplied token
-      // (NEVER a client-supplied objectKey, which an authenticated caller could point at someone else's
-      // object). If the token is gone/invalid there's nothing safe to delete. Guard against the canonical key.
-      const pendingRetry = getPendingUploadMetadata(input.uploadToken);
-      if (pendingRetry && isR2Configured() && pendingRetry.r2Key !== existing.r2Key) {
-        await deleteObject(pendingRetry.r2Key).catch(() => undefined);
-      }
-      discardPendingUpload(input.uploadToken);
-      // If the row was soft-deleted after it confirmed, don't presign it — inactive files 404 on download,
-      // which would make the queue retry forever. Return it as terminal (null url) so the client clears it.
-      const existingUrl = existing.isActive ? (await getFileDownloadUrl(tenantDb, existing.id)).url : null;
-      return { photo: toFieldUploadedPhoto(existing, existingUrl) };
-    }
-  }
-
   const pending = getPendingUploadMetadata(input.uploadToken);
-  if (!pending) throw new AppError(400, "Invalid or expired upload token");
-  if (pending.r2Key !== input.objectKey) throw new AppError(400, "objectKey does not match the issued upload.");
+  if (pending && pending.r2Key !== input.objectKey) {
+    throw new AppError(400, "objectKey does not match the issued upload.");
+  }
   // Token-office integrity: the r2Key was built under the office this upload was issued for. If the
   // confirm resolved to a different office (token replayed under another active office), the prefix
   // won't match — reject rather than file the row in the wrong schema.
-  if (input.officeSlug && !pending.r2Key.startsWith(`office_${input.officeSlug}/`)) {
+  if (pending && input.officeSlug && !pending.r2Key.startsWith(`office_${input.officeSlug}/`)) {
     throw new AppError(409, "Upload token was issued for a different office.");
   }
   if (
-    pending.dealId !== (normalizedTarget.dealId ?? normalizedTarget.opportunityId ?? undefined) ||
+    pending && (pending.dealId !== (normalizedTarget.dealId ?? normalizedTarget.opportunityId ?? undefined) ||
     pending.leadId !== (normalizedTarget.leadId ?? undefined) ||
     pending.opportunityId !== (normalizedTarget.opportunityId ?? undefined) ||
-    pending.category !== "photo"
+    pending.category !== "photo")
   ) {
     throw new AppError(400, "Upload token does not match this project photo upload.");
   }
 
   const { file, created } = await confirmUpload(tenantDb, input.userId, {
     uploadToken: input.uploadToken,
-    clientUploadId: input.clientUploadId,
+    ...(input.clientUploadId ? { clientUploadId: input.clientUploadId } : {}),
+    ...(input.scorecardId && input.clientUploadId
+      ? {
+          scorecardEditScope: { scorecardId: input.scorecardId, clientUploadId: input.clientUploadId },
+          scorecardEditDealId: normalizedTarget.dealId,
+        }
+      : {}),
     latitude: input.latitude,
     longitude: input.longitude,
     addressSource: cleanAddressSource(input.addressSource),
     takenAt: input.takenAt,
   });
+
+  // An idempotent queue retry may have uploaded a second object under a fresh token. Only delete the
+  // server-trusted pending key, never the caller-provided objectKey; the canonical file remains intact.
+  if (!created && pending && isR2Configured() && pending.r2Key !== file.r2Key) {
+    await deleteObject(pending.r2Key).catch(() => undefined);
+  }
 
   // Only replay side effects for a FRESHLY created row. A deduped row (idempotent retry or a lost concurrent
   // race) already recorded them — re-running would double the audit event + domain_event job.
@@ -408,7 +412,9 @@ export async function confirmFieldPhotoUpload(
     });
   }
 
-  const imageUrl = (await getFileDownloadUrl(tenantDb, file.id)).url;
+  // A resumed ordinary queue upload may dedupe to a row soft-deleted after its first confirm. Treat that as
+  // terminal (null URL) so the queue clears instead of retrying a download that correctly 404s.
+  const imageUrl = file.isActive ? (await getFileDownloadUrl(tenantDb, file.id)).url : null;
   return { photo: toFieldUploadedPhoto(file, imageUrl) };
 }
 

@@ -8,7 +8,7 @@ import {
   listRecentFieldScorecards,
   getFieldScorecardDetail,
 } from "../../../src/modules/field/scorecards-service.js";
-import { fieldScorecards, fieldScorecardItems, fieldScorecardPhotos } from "@trock-crm/shared/schema";
+import { fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, dealTeamMembers, contacts } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 
 const DEAL = "11111111-1111-1111-1111-111111111111";
@@ -41,6 +41,12 @@ const MAX: Record<string, number> = {
 };
 function fullItems(overrides: Record<string, number> = {}) {
   return Object.entries(MAX).map(([sectionKey, m]) => ({ sectionKey, points: overrides[sectionKey] ?? m }));
+}
+function v2Items(overrides: Record<string, number> = {}) {
+  return [
+    "planning_precon", "jobsite_5s", "safety", "schedule",
+    "subcontractor", "quality", "communication", "financial",
+  ].map((sectionKey) => ({ sectionKey, points: overrides[sectionKey] ?? 8 }));
 }
 function submission(over: Partial<Parameters<typeof createFieldScorecard>[1]> = {}) {
   return {
@@ -83,8 +89,12 @@ beforeAll(async () => {
       last_error text, started_processing_at timestamptz, run_after timestamptz NOT NULL DEFAULT now(),
       created_at timestamptz NOT NULL DEFAULT now(), completed_at timestamptz
     );
+    -- createFieldScorecard resolves the deal's superintendent/PM emails from deal_team_members → user/contact
+    -- at enqueue time; these islands let that read run (no members inserted → both emails resolve null). The
+    -- resolver checks users.is_active, so the island carries it (defaulting active).
+    CREATE TABLE public.users (id uuid PRIMARY KEY, display_name text, email text, avatar_url text, is_active boolean DEFAULT true);
   `);
-  await pg.exec(tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos]));
+  await pg.exec(tenantSchemaSql("public", [fieldScorecards, fieldScorecardItems, fieldScorecardPhotos, dealTeamMembers, contacts]));
   await pg.exec(
     `ALTER TABLE public.field_scorecards ADD CONSTRAINT field_scorecards_csid_uniq UNIQUE (client_submission_id);`,
   );
@@ -119,6 +129,27 @@ beforeEach(async () => {
 });
 
 describe("createFieldScorecard", () => {
+  it("persists the V2 eight-category average and electronic signatures", async () => {
+    const { scorecard } = await createFieldScorecard(
+      tdb,
+      submission({
+        clientSubmissionId: csid(99),
+        formVersion: 2,
+        items: v2Items({ safety: 10, quality: 6 }),
+        superintendentSignature: "Marcus Reed",
+        pmSignature: "Dana Cole",
+      }),
+    );
+    expect(scorecard.formVersion).toBe(2);
+    expect(scorecard.averageScore).toBe(8);
+    expect(scorecard.totalScore).toBe(80);
+    expect(scorecard.ratingLabel).toBe("Meets Standard");
+    const detail = await getFieldScorecardDetail(tdb, scorecard.id, ACCESS);
+    expect(detail.items).toHaveLength(8);
+    expect(detail.superintendentSignature).toBe("Marcus Reed");
+    expect(detail.pmSignature).toBe("Dana Cole");
+  });
+
   it("persists a scorecard with server-computed total and rating", async () => {
     const { scorecard, created } = await createFieldScorecard(
       tdb,
@@ -128,6 +159,7 @@ describe("createFieldScorecard", () => {
     expect(scorecard.totalScore).toBe(85);
     expect(scorecard.rating).toBe("on_standard");
     expect(scorecard.ratingLabel).toBe("On Standard");
+    expect(scorecard.projectName).toBe("Maple St");
 
     const items = await tdb.execute(sql`SELECT count(*)::int AS n FROM field_scorecard_items`);
     expect(items.rows[0].n).toBe(7);
@@ -147,6 +179,7 @@ describe("createFieldScorecard", () => {
     expect(first.created).toBe(true);
     expect(second.created).toBe(false);
     expect(second.scorecard.id).toBe(first.scorecard.id);
+    expect(second.scorecard.projectName).toBe("Maple St");
 
     const cards = await tdb.execute(sql`SELECT count(*)::int AS n FROM field_scorecards`);
     expect(cards.rows[0].n).toBe(1);
@@ -241,6 +274,7 @@ describe("createFieldScorecard", () => {
     const retry = await createFieldScorecard(tdb, submission({ dealId: RETRY_DEAL, clientSubmissionId: csid(14) }));
     expect(retry.created).toBe(false);
     expect(retry.scorecard.id).toBe(first.scorecard.id);
+    expect(retry.scorecard.projectName).toBe("Retry Rd");
     await tdb.execute(sql`UPDATE deals SET stage_id = ${STAGE_ACTIVE} WHERE id = ${RETRY_DEAL}`); // restore for isolation
   });
 });
@@ -264,8 +298,10 @@ describe("reads", () => {
     expect(list.scorecards).toHaveLength(1);
     expect(list.scorecards[0].id).toBe(scorecard.id);
     expect(list.scorecards[0].criticalDeficiencyCount).toBe(1);
+    expect(list.scorecards[0].projectName).toBe("Maple St");
 
     const detail = await getFieldScorecardDetail(tdb, scorecard.id, ACCESS);
+    expect(detail.projectName).toBe("Maple St");
     expect(detail.items).toHaveLength(7);
     expect(detail.items[0].sectionKey).toBe("planning_precon"); // canonical section order
     expect(detail.criticalDeficiencies).toEqual(["failed_inspection"]);
@@ -281,6 +317,7 @@ describe("reads", () => {
     const ids = recent.scorecards.map((s) => s.id);
     expect(ids).toContain(active.scorecard.id);
     expect(ids).not.toContain(lostCard);
+    expect(recent.scorecards.find((s) => s.id === active.scorecard.id)?.projectName).toBe("Maple St");
   });
 
   it("404s a detail read for a card whose project is no longer browsable", async () => {

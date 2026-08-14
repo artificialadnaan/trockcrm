@@ -1,9 +1,10 @@
 import { eq, and, desc, asc, ilike, sql, or, not, isNull, inArray } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
-import { activities, companies, contacts, contactDealAssociations, deals, emails, tasks, users } from "@trock-crm/shared/schema";
+import { activities, companies, contacts, contactDealAssociations, dealTeamMembers, deals, emails, tasks, users } from "@trock-crm/shared/schema";
 import type * as schema from "@trock-crm/shared/schema";
 import { AppError } from "../../middleware/error-handler.js";
+import { updateBreaksBillingAddress } from "../../lib/billing-address.js";
 import { buildContactSearchCondition } from "../search/unified-search.js";
 
 type TenantDb = NodePgDatabase<typeof schema>;
@@ -142,6 +143,9 @@ export interface DedupCheckResult {
     lastName: string;
     email: string | null;
     companyName: string | null;
+    // Candidates include soft-deleted contacts (email/name hard-block applies regardless of is_active), so
+    // surface this flag — a "use this instead" consumer must not offer an inactive record (Codex P2).
+    isActive: boolean;
     matchReason: string;
   }>;
 }
@@ -339,9 +343,13 @@ export async function checkForDuplicates(
       lastName: contacts.lastName,
       email: contacts.email,
       companyName: contacts.companyName,
+      isActive: contacts.isActive,
     })
     .from(contacts)
-    .where(and(...conditions, or(...fuzzyConditions)))
+    // Only ACTIVE contacts are offered as "use this instead" suggestions — a soft-deleted/merged record is
+    // not assignable, and returning only-inactive matches would leave the caller unable to create at all
+    // (the exact-email/name HARD-block below still considers inactive, independently).
+    .where(and(...conditions, or(...fuzzyConditions), eq(contacts.isActive, true)))
     .limit(50); // fetch more candidates; JS Levenshtein narrows below
 
   // JS: filter by first-name Levenshtein distance < 3 to catch typos/nicknames
@@ -741,6 +749,35 @@ export async function updateContact(
     return existing;
   }
 
+  // Don't let a contact edit strip the address off a contact that's actively the billing contact on a deal —
+  // that would silently leave the deal with an un-invoiceable billing contact, bypassing the assign-time gate.
+  // Forward-only: only a complete -> incomplete change is blocked; an already-incomplete address isn't forced
+  // to be cleaned up (Codex P2).
+  if (updateBreaksBillingAddress(existing, updates)) {
+    // The pre-lock check above (against the unlocked getContactById snapshot) is a cheap gate. Now lock the
+    // contact row FOR UPDATE, RE-READ its current address under the lock, and re-decide — `existing` could be
+    // stale, and a concurrent deal billing-assignment locks the same contact via validateDealBillingContact, so
+    // this serializes the two (whoever grabs the lock first wins; the lock is held for the transaction). Only if
+    // the edit still breaks a currently-complete address do we block a contact that's billing on an active deal
+    // (Codex P2 TOCTOU).
+    const [locked] = await tenantDb
+      .select({ address: contacts.address, city: contacts.city, state: contacts.state, zip: contacts.zip })
+      .from(contacts)
+      .where(eq(contacts.id, contactId))
+      .limit(1)
+      .for("update");
+    if (locked && updateBreaksBillingAddress(locked, updates)) {
+      const [billingRef] = await tenantDb
+        .select({ id: deals.id })
+        .from(deals)
+        .where(and(eq(deals.billingContactId, contactId), eq(deals.isActive, true)))
+        .limit(1);
+      if (billingRef) {
+        throw new AppError(400, "This contact is the billing contact on an active deal — keep a complete mailing address (street, city, state, and ZIP).");
+      }
+    }
+  }
+
   const result = await tenantDb
     .update(contacts)
     .set(updates)
@@ -777,6 +814,20 @@ export async function deleteContact(tenantDb: TenantDb, contactId: string, userR
   if (result.length === 0) {
     throw new AppError(404, "Contact not found");
   }
+
+  // Soft-delete only flips is_active, so the deals FK ON DELETE SET NULL never fires. Clear this contact as a
+  // deal's BILLING contact so getDealDetail stops surfacing an archived contact and the future Won gate
+  // (billing_contact_id IS NULL) isn't falsely satisfied by a contact users can no longer select (Codex P2).
+  await tenantDb.update(deals).set({ billingContactId: null }).where(eq(deals.billingContactId, contactId));
+
+  // Deactivate this contact's active deal-team assignments. getTeamMembers already HIDES rows whose linked
+  // identity is inactive, so leaving them active leaves a phantom assignment admins can't remove from the UI.
+  // Flip is_active here (matching the deals update above + merge-service's dealTeamMembers writes) so the
+  // assignment is truly removed, not just masked; the getTeamMembers identity filter stays as a safety net.
+  await tenantDb
+    .update(dealTeamMembers)
+    .set({ isActive: false, updatedAt: new Date() })
+    .where(and(eq(dealTeamMembers.contactId, contactId), eq(dealTeamMembers.isActive, true)));
 
   return result[0];
 }

@@ -634,9 +634,49 @@ export async function getTaskById(
   userRole: string,
   userId: string
 ) {
+  // Mirrors the list projection in getTasks — a bare `select()` here returned the raw `tasks`
+  // columns only, so a task opened by id (e.g. from the assignment email's deep link) arrived
+  // with `dealId` but no deal name/number and no assignee name. The UI then rendered the
+  // "Project linked" / "Unassigned" fallbacks even for a correctly linked task.
+  const taskColumns = tasks as typeof tasks & {
+    scheduledFor: typeof tasks.dueDate;
+    waitingOn: typeof tasks.dueDate;
+    blockedBy: typeof tasks.dueDate;
+    startedAt: typeof tasks.createdAt;
+  };
+  const assignedToName = sql<string | null>`(SELECT display_name FROM public.users WHERE id = ${tasks.assignedTo})`.as("assignedToName");
+
   const result = await tenantDb
-    .select()
+    .select({
+      id: tasks.id,
+      title: tasks.title,
+      description: tasks.description,
+      type: tasks.type,
+      priority: tasks.priority,
+      status: tasks.status,
+      assignedTo: tasks.assignedTo,
+      assignedToName,
+      createdBy: tasks.createdBy,
+      dealId: tasks.dealId,
+      dealName: deals.name,
+      dealNumber: deals.dealNumber,
+      projectNumber: deals.projectNumber,
+      contactId: tasks.contactId,
+      emailId: tasks.emailId,
+      dueDate: tasks.dueDate,
+      dueTime: tasks.dueTime,
+      remindAt: tasks.remindAt,
+      scheduledFor: taskColumns.scheduledFor,
+      waitingOn: taskColumns.waitingOn,
+      blockedBy: taskColumns.blockedBy,
+      startedAt: taskColumns.startedAt,
+      completedAt: tasks.completedAt,
+      isOverdue: tasks.isOverdue,
+      createdAt: tasks.createdAt,
+      updatedAt: tasks.updatedAt,
+    })
     .from(tasks)
+    .leftJoin(deals, eq(tasks.dealId, deals.id))
     .where(eq(tasks.id, taskId))
     .limit(1);
 

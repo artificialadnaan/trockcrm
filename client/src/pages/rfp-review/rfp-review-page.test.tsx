@@ -26,7 +26,7 @@ vi.mock("react-router-dom", () => ({
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() } }));
 
 import { RfpReviewPage } from "./rfp-review-page";
-import { approveRfpOverride } from "@/hooks/use-rfp-review";
+import { approveRfpOverride, reconfirmRfpDecline } from "@/hooks/use-rfp-review";
 
 function baseReview(overrides: Record<string, unknown> = {}) {
   return {
@@ -50,6 +50,7 @@ function baseReview(overrides: Record<string, unknown> = {}) {
     overrideState: null,
     overrideError: null,
     actionable: true,
+    isActive: true,
     ...overrides,
   };
 }
@@ -116,6 +117,22 @@ describe("RfpReviewPage states", () => {
     expect(html).toContain("re-confirmed");
     expect(html).not.toContain("Approve override (create Bid Board project)");
   });
+
+  it("shows the 'Open the full deal' footer link while the deal is still active", () => {
+    authUser = { isRfpReviewer: true };
+    reviewState = baseReview();
+    const html = render();
+    expect(html).toContain("Open the full deal");
+    expect(html).not.toContain("This deal has been archived");
+  });
+
+  it("hides the full-deal link once archived (a re-confirmed denial) — it would 404", () => {
+    authUser = { isRfpReviewer: true };
+    reviewState = baseReview({ actionable: false, reviewDecision: "denial_reconfirmed", reviewedByName: "Adam", isActive: false });
+    const html = render();
+    expect(html).not.toContain("Open the full deal");
+    expect(html).toContain("This deal has been archived");
+  });
 });
 
 describe("RfpReviewPage — per-deal Procore-check confirmation reset", () => {
@@ -162,6 +179,127 @@ describe("RfpReviewPage — per-deal Procore-check confirmation reset", () => {
       root.render(<RfpReviewPage />);
     });
     expect(reattemptBtn()?.disabled).toBe(true);
+  });
+});
+
+describe("RfpReviewPage — Re-confirm denial button requires a note", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    currentDealId = "deal-1";
+  });
+
+  function mount() {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(<RfpReviewPage />);
+    });
+  }
+
+  const reconfirmBtn = () =>
+    [...container.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Re-confirm denial")
+    ) as HTMLButtonElement | undefined;
+
+  it("disables the Re-confirm denial button when note is empty, enables it once a note is typed (actionable panel)", () => {
+    authUser = { isRfpReviewer: true };
+    reviewState = baseReview({ actionable: true });
+    mount();
+
+    // Empty note → button must be disabled
+    expect(reconfirmBtn()?.disabled).toBe(true);
+
+    // Type a note → button must be enabled
+    act(() => {
+      const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
+      // Simulate typing by dispatching an input event with a non-empty value
+      Object.defineProperty(textarea, "value", { writable: true, value: "Some reason" });
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      // Also fire change so React's synthetic event picks it up
+      textarea.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(reconfirmBtn()?.disabled).toBe(false);
+  });
+
+  it("keeps the Re-confirm denial button DISABLED when the note is whitespace-only (mirrors note.trim().length === 0 guard)", () => {
+    authUser = { isRfpReviewer: true };
+    reviewState = baseReview({ actionable: true });
+    mount();
+
+    // Whitespace-only value — should not satisfy the trim guard.
+    act(() => {
+      const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
+      Object.defineProperty(textarea, "value", { writable: true, value: "   \n\t  " });
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      textarea.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    // Button must still be disabled because note.trim().length === 0.
+    expect(reconfirmBtn()?.disabled).toBe(true);
+  });
+});
+
+describe("RfpReviewPage — ApprovingPanel escape hatch requires a note", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    currentDealId = "deal-1";
+  });
+
+  function mount() {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(<RfpReviewPage />);
+    });
+  }
+
+  const upholdBtn = () =>
+    [...container.querySelectorAll("button")].find((b) =>
+      b.textContent?.includes("Uphold the denial instead")
+    ) as HTMLButtonElement | undefined;
+
+  it("disables 'Uphold the denial instead' button when note is empty, enables it once a note is typed (approving panel)", () => {
+    authUser = { isRfpReviewer: true };
+    reviewState = baseReview({ actionable: false, overrideState: "approving", reviewedByName: "Takashi" });
+    mount();
+
+    // The escape-hatch button must be present and disabled with an empty note
+    expect(upholdBtn()).toBeDefined();
+    expect(upholdBtn()?.disabled).toBe(true);
+
+    // Type a note into the approving-panel textarea → button must be enabled
+    act(() => {
+      const textarea = container.querySelector("#rfp-override-note-approving") as HTMLTextAreaElement;
+      expect(textarea).not.toBeNull();
+      Object.defineProperty(textarea, "value", { writable: true, value: "Stuck for 10 minutes" });
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      textarea.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(upholdBtn()?.disabled).toBe(false);
+  });
+
+  it("keeps 'Uphold the denial instead' disabled with whitespace-only note (mirrors trim guard)", () => {
+    authUser = { isRfpReviewer: true };
+    reviewState = baseReview({ actionable: false, overrideState: "approving", reviewedByName: "Takashi" });
+    mount();
+
+    act(() => {
+      const textarea = container.querySelector("#rfp-override-note-approving") as HTMLTextAreaElement;
+      Object.defineProperty(textarea, "value", { writable: true, value: "   \n\t  " });
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      textarea.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(upholdBtn()?.disabled).toBe(true);
   });
 });
 
@@ -217,5 +355,78 @@ describe("RfpReviewPage — approve override result handling (optimistic state)"
     });
 
     expect(applyOptimisticMock).toHaveBeenCalledWith(expect.objectContaining({ overrideState: "approving", actionable: false }));
+  });
+});
+
+describe("RfpReviewPage — reconfirm result handling (optimistic isActive drives the footer CTA)", () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  const reconfirmMock = reconfirmRfpDecline as unknown as ReturnType<typeof vi.fn>;
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    applyOptimisticMock.mockClear();
+    reconfirmMock.mockReset();
+    currentDealId = "deal-1";
+  });
+
+  function mount() {
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(<RfpReviewPage />);
+    });
+  }
+  const reconfirmBtn = () =>
+    [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("Re-confirm denial")) as
+      | HTMLButtonElement
+      | undefined;
+
+  function typeNote() {
+    act(() => {
+      const textarea = container.querySelector("textarea") as HTMLTextAreaElement;
+      Object.defineProperty(textarea, "value", { writable: true, value: "Upheld — no path to profit" });
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      textarea.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  }
+
+  it("a normal reconfirm (archived=true) optimistically marks the deal inactive so the footer link disappears", async () => {
+    authUser = { isRfpReviewer: true };
+    reviewState = baseReview({ actionable: true });
+    reconfirmMock.mockResolvedValue({ success: true, status: "declined", decision: "denial_reconfirmed", archived: true });
+    mount();
+    typeNote();
+
+    await act(async () => {
+      reconfirmBtn()!.click();
+    });
+
+    expect(applyOptimisticMock).toHaveBeenCalledWith(
+      expect.objectContaining({ reviewDecision: "denial_reconfirmed", actionable: false, isActive: false })
+    );
+  });
+
+  it("the escape hatch (archived=false) keeps the deal active so the footer link stays", async () => {
+    authUser = { isRfpReviewer: true };
+    reviewState = baseReview({ actionable: false, overrideState: "approving", reviewedByName: "Takashi" });
+    reconfirmMock.mockResolvedValue({ success: true, status: "declined", decision: "denial_reconfirmed", archived: false });
+    mount();
+    act(() => {
+      const textarea = container.querySelector("#rfp-override-note-approving") as HTMLTextAreaElement;
+      Object.defineProperty(textarea, "value", { writable: true, value: "Stuck — uphold" });
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      textarea.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    await act(async () => {
+      [...container.querySelectorAll("button")]
+        .find((b) => b.textContent?.includes("Uphold the denial instead"))!
+        .click();
+    });
+
+    expect(applyOptimisticMock).toHaveBeenCalledWith(expect.objectContaining({ isActive: true }));
   });
 });

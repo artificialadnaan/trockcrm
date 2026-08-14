@@ -101,6 +101,8 @@ export interface ProjectionBandCell {
 export interface ProjectionLadder {
   bands: ProjectionBandCell[];
   coverage: ProjectionCoverage;
+  /** Split of the non-future-dated complement: stale past dates vs never-dated deals. */
+  blindSpots?: { stale: { count: number; value: number }; noDate: { count: number; value: number } };
   coverageCaption: string;
 }
 
@@ -166,6 +168,7 @@ export interface CohortTotals {
 export interface RepProjection {
   bands: ProjectionBandCell[];
   coverage: ProjectionCoverage;
+  blindSpots?: { stale: { count: number; value: number }; noDate: { count: number; value: number } };
 }
 
 export interface AssembleInput {
@@ -211,6 +214,7 @@ function ladderFrom(projection: RepProjection): ProjectionLadder {
   return {
     bands: projection.bands,
     coverage: projection.coverage,
+    blindSpots: projection.blindSpots,
     coverageCaption: formatProjectionCoverageCaption(projection.coverage),
   };
 }
@@ -377,7 +381,11 @@ export function buildProjectionCoverageSql(): SQL {
     SELECT d.assigned_rep_id AS rep_id,
            COUNT(*) FILTER (WHERE ${futureDatedCloseDatePredicateSql("d.expected_close_date")})::int AS n,
            COUNT(*)::int AS m,
-           COALESCE(SUM(${openValueSql("d")}) FILTER (WHERE NOT (${futureDatedCloseDatePredicateSql("d.expected_close_date")})), 0)::numeric AS undated_value
+           COALESCE(SUM(${openValueSql("d")}) FILTER (WHERE NOT (${futureDatedCloseDatePredicateSql("d.expected_close_date")})), 0)::numeric AS undated_value,
+           COUNT(*) FILTER (WHERE d.expected_close_date IS NOT NULL AND d.expected_close_date < ${sql.raw("(now() AT TIME ZONE 'America/Chicago')::date")})::int AS stale_count,
+           COALESCE(SUM(${openValueSql("d")}) FILTER (WHERE d.expected_close_date IS NOT NULL AND d.expected_close_date < ${sql.raw("(now() AT TIME ZONE 'America/Chicago')::date")}), 0)::numeric AS stale_value,
+           COUNT(*) FILTER (WHERE d.expected_close_date IS NULL)::int AS no_date_count,
+           COALESCE(SUM(${openValueSql("d")}) FILTER (WHERE d.expected_close_date IS NULL), 0)::numeric AS no_date_value
     FROM ${deals} d
     JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
     WHERE COALESCE(d.is_test_data, false) = false
@@ -492,7 +500,7 @@ export async function computeWeeklyTrend(
 }
 
 function emptyRepProjection(): RepProjection {
-  return { bands: projectionBandKeys().map((band) => ({ band, count: 0, value: 0 })), coverage: { n: 0, m: 0, undatedValue: 0 } };
+  return { bands: projectionBandKeys().map((band) => ({ band, count: 0, value: 0 })), coverage: { n: 0, m: 0, undatedValue: 0 }, blindSpots: { stale: { count: 0, value: 0 }, noDate: { count: 0, value: 0 } } };
 }
 
 /**
@@ -508,6 +516,12 @@ export function foldOfficeProjection(repProjection: Map<string | null, RepProjec
     // the undated complement's $ (M − N rows) sums per-rep → office, the same way N/M do, so the office
     // "No future close date" card's $ equals Σ of the per-rep cards by construction.
     office.coverage.undatedValue += p.coverage.undatedValue;
+    if (p.blindSpots) {
+      office.blindSpots!.stale.count += p.blindSpots.stale.count;
+      office.blindSpots!.stale.value += p.blindSpots.stale.value;
+      office.blindSpots!.noDate.count += p.blindSpots.noDate.count;
+      office.blindSpots!.noDate.value += p.blindSpots.noDate.value;
+    }
     for (const cell of p.bands) {
       const officeCell = office.bands.find((b) => b.band === cell.band)!;
       officeCell.count += cell.count;
@@ -597,8 +611,12 @@ export async function getMondayShowcaseData(
       cell.value += num(r.val);
     }
   }
-  for (const r of rowsFromExecute<{ rep_id: string | null; n: unknown; m: unknown; undated_value: unknown }>(projCovRows)) {
+  for (const r of rowsFromExecute<{ rep_id: string | null; n: unknown; m: unknown; undated_value: unknown; stale_count: unknown; stale_value: unknown; no_date_count: unknown; no_date_value: unknown }>(projCovRows)) {
     ensureRep(r.rep_id).coverage = { n: num(r.n), m: num(r.m), undatedValue: num(r.undated_value) };
+    ensureRep(r.rep_id).blindSpots = {
+      stale: { count: num(r.stale_count), value: num(r.stale_value) },
+      noDate: { count: num(r.no_date_count), value: num(r.no_date_value) },
+    };
   }
   const officeProjection = foldOfficeProjection(repProjection);
 
@@ -643,7 +661,7 @@ export async function getMondayShowcaseData(
 // count, by construction. Locked by monday-showcase-evidence-sql.test.ts (predicate identity) and
 // monday-showcase-evidence-reconciliation.runtime.test.ts (real-SQL: evidence === aggregate).
 
-export type EvidenceMetric = "won" | "sent" | "estimated" | "projection" | "pipeline" | "leads" | "undated";
+export type EvidenceMetric = "won" | "sent" | "estimated" | "projection" | "pipeline" | "leads" | "undated" | "no_date" | "stale";
 
 /** A single supporting record (a deal, or a lead for the `leads` metric). */
 export interface EvidenceRecord {
@@ -868,6 +886,45 @@ export function buildUndatedEvidenceSql(repId?: string | null): SQL {
   `;
 }
 
+/** Evidence for open deals whose expected close date is explicitly in the past. */
+export function buildStaleEvidenceSql(repId?: string | null): SQL {
+  return sql`
+    SELECT ${dealEvidenceSelectSql(openValueSql("d"), "d.expected_close_date")}
+    FROM ${deals} d
+    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
+    LEFT JOIN ${users} u ON u.id = d.assigned_rep_id
+    LEFT JOIN companies c ON c.id = d.company_id
+    LEFT JOIN region_config rc ON rc.id = d.region_id
+    LEFT JOIN public.project_type_config ptc ON ptc.id = d.project_type_id
+    WHERE COALESCE(d.is_test_data, false) = false
+      AND ${aliasedReportableDealFilterSql("d")}
+      AND d.is_active = true
+      AND psc.is_terminal = false
+      AND d.expected_close_date IS NOT NULL
+      AND d.expected_close_date < (now() AT TIME ZONE 'America/Chicago')::date${repScopeSql("d", repId)}
+    ORDER BY value DESC, d.name
+  `;
+}
+
+/** Evidence for open deals that have never had an expected close date. */
+export function buildNoDateEvidenceSql(repId?: string | null): SQL {
+  return sql`
+    SELECT ${dealEvidenceSelectSql(openValueSql("d"), "d.expected_close_date")}
+    FROM ${deals} d
+    JOIN ${pipelineStageConfig} psc ON psc.id = d.stage_id
+    LEFT JOIN ${users} u ON u.id = d.assigned_rep_id
+    LEFT JOIN companies c ON c.id = d.company_id
+    LEFT JOIN region_config rc ON rc.id = d.region_id
+    LEFT JOIN public.project_type_config ptc ON ptc.id = d.project_type_id
+    WHERE COALESCE(d.is_test_data, false) = false
+      AND ${aliasedReportableDealFilterSql("d")}
+      AND d.is_active = true
+      AND psc.is_terminal = false
+      AND d.expected_close_date IS NULL${repScopeSql("d", repId)}
+    ORDER BY value DESC, d.name
+  `;
+}
+
 /**
  * Pipeline evidence: ALL open deals (active, non-terminal, reportable) with the SAME open best-estimate $
  * basis as the Reports-by-Region "Open Pipeline" number — so the drill reconciles to that snapshot. This is
@@ -935,6 +992,8 @@ const EVIDENCE_METRIC_LABEL: Record<EvidenceMetric, string> = {
   pipeline: "Open pipeline",
   leads: "Active leads",
   undated: "No future close date",
+  stale: "Stale close date",
+  no_date: "No close date",
 };
 
 const EVIDENCE_DATE_AXIS_LABEL: Record<EvidenceMetric, string> = {
@@ -947,6 +1006,8 @@ const EVIDENCE_DATE_AXIS_LABEL: Record<EvidenceMetric, string> = {
   // the undated cohort's date axis IS the missing/stale close date — null for never-dated, a past date
   // for stale-dated; both render honestly (an em dash / the old date) so the blind spot is legible.
   undated: "Expected close date (missing or stale)",
+  stale: "Expected close date (past)",
+  no_date: "Expected close date (never submitted)",
 };
 
 export interface MondayShowcaseEvidenceOptions {
@@ -1025,6 +1086,12 @@ export async function getMondayShowcaseEvidence(
       // The B4 "No future close date" card's complement (M − N): open deals lacking a future-dated close
       // date, scoped office-wide or to one rep — never a region drill, so regionName is intentionally unused.
       query = buildUndatedEvidenceSql(repId);
+      break;
+    case "stale":
+      query = buildStaleEvidenceSql(repId);
+      break;
+    case "no_date":
+      query = buildNoDateEvidenceSql(repId);
       break;
     case "pipeline":
       query = buildPipelineEvidenceSql(repId, regionName, stageSlug);

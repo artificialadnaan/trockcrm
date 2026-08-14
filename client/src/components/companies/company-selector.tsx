@@ -32,6 +32,9 @@ interface CompanySelectorProps {
   required?: boolean;
   officeId?: string | null;
   showOwnerLabel?: boolean;
+  // Fires while an inline "Add New Company" create is in flight (before onChange fires with the new id), so a
+  // parent can block its own submit until the linked company id is available.
+  onBusyChange?: (busy: boolean) => void;
 }
 
 interface CompanyOption {
@@ -84,7 +87,7 @@ async function submitInlineCompanyCreate(input: {
   }
 }
 
-export function CompanySelector({ value, onChange, required, officeId, showOwnerLabel = false }: CompanySelectorProps) {
+export function CompanySelector({ value, onChange, required, officeId, showOwnerLabel = false, onBusyChange }: CompanySelectorProps) {
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<CompanyOption[]>([]);
   const [searching, setSearching] = useState(false);
@@ -199,7 +202,10 @@ export function CompanySelector({ value, onChange, required, officeId, showOwner
       officeId,
       skipDedupCheck,
       onError: setCreateError,
-      onCreating: setCreating,
+      onCreating: (v) => {
+        setCreating(v);
+        onBusyChange?.(v);
+      },
       onDuplicates: setDedupSuggestions,
       onCreated: (company) => {
         setSelectedCompanyId(company.id);

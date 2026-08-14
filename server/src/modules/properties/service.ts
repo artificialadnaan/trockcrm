@@ -14,6 +14,8 @@ import {
   aliasedTerminalAwareEffectiveDealValueSql,
   aliasedTerminalDealBySlugSql,
 } from "../shared/deal-value-sql.js";
+import { generateDownloadUrl, isR2Configured } from "../../lib/r2-client.js";
+import { buildPropertyImageUrls, redactPropertyImageKeys } from "./property-image-service.js";
 
 // Property linked-value is a MIXED set (a property's active deals span open + realized won/lost), so the
 // value is terminal-aware: a realized won/lost deal keeps its value (stored-on_hold only) while an OPEN deal
@@ -614,7 +616,8 @@ export async function createProperty(tenantDb: TenantDb, input: CreatePropertyIn
     })
     .returning();
 
-  return property;
+  // Never expose the raw image keys — clients get presigned URLs from getPropertyDetail only.
+  return redactPropertyImageKeys(property);
 }
 
 export async function updateProperty(tenantDb: TenantDb, propertyId: string, input: UpdatePropertyInput) {
@@ -622,7 +625,8 @@ export async function updateProperty(tenantDb: TenantDb, propertyId: string, inp
 
   if (Object.keys(patch).length === 0) {
     const [existing] = await tenantDb.select().from(properties).where(eq(properties.id, propertyId)).limit(1);
-    return existing ?? null;
+    // Redact raw image keys — a plain read must not leak storage object names either.
+    return existing ? redactPropertyImageKeys(existing) : null;
   }
 
   const [property] = await tenantDb
@@ -634,7 +638,7 @@ export async function updateProperty(tenantDb: TenantDb, propertyId: string, inp
     .where(eq(properties.id, propertyId))
     .returning();
 
-  return property ?? null;
+  return property ? redactPropertyImageKeys(property) : null;
 }
 
 export async function deleteProperty(tenantDb: TenantDb, propertyId: string) {
@@ -689,6 +693,8 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
       companycamId: properties.companycamId,
       companycamProjectId: properties.companycamProjectId,
       hubspotPropertyId: properties.hubspotPropertyId,
+      imageR2Key: properties.imageR2Key,
+      imageThumbnailR2Key: properties.imageThumbnailR2Key,
       isActive: properties.isActive,
       createdAt: properties.createdAt,
       updatedAt: properties.updatedAt,
@@ -745,9 +751,13 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
   });
   const linkedValue = linkedValueRows[0]?.linkedValue ?? "0";
 
+  // Presign the cover-photo keys into short-lived inline URLs for the client; raw keys are never exposed.
+  const { imageR2Key, imageThumbnailR2Key, ...propertyWithoutImageKeys } = property;
+  const imageUrls = await buildPropertyImageUrls({ imageR2Key, imageThumbnailR2Key }, presignPropertyImage);
+
   return {
     property: {
-      ...property,
+      ...propertyWithoutImageKeys,
       ...relationshipCounts,
       lastActivityAt: buildPropertyLastActivityAt({
         persistedLastActivityAt: coerceTimestamp(property.lastActivityAt),
@@ -758,8 +768,27 @@ export async function getPropertyDetail(tenantDb: TenantDb, propertyId: string) 
       linkedValue,
       activePipelineValue: linkedValue,
       photosCount: Number(photoCountRows[0]?.photos_count ?? 0),
+      imageUrl: imageUrls.imageUrl,
+      imageThumbnailUrl: imageUrls.imageThumbnailUrl,
     },
     leads: relatedLeads,
     deals: relatedDeals,
   };
 }
+
+/**
+ * Presign a property cover-photo key for inline `<img>` display, or null when R2 isn't configured (tests /
+ * local without storage) so the detail payload stays valid — the client just shows the fallback icon.
+ */
+async function presignPropertyImage(r2Key: string): Promise<string | null> {
+  if (!isR2Configured()) return null;
+  try {
+    return await generateDownloadUrl(r2Key, PROPERTY_IMAGE_URL_TTL_SECONDS, undefined, "inline");
+  } catch {
+    return null;
+  }
+}
+
+// 24h so a full-size view opened from a long-lived detail page (well past a 1h TTL) doesn't hit an expired
+// URL. Cover photos aren't sensitive, so the longer-lived presigned URL is an acceptable trade-off.
+const PROPERTY_IMAGE_URL_TTL_SECONDS = 24 * 60 * 60;

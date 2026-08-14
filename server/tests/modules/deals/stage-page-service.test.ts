@@ -712,7 +712,7 @@ describe("listDealStagePage", () => {
     expect(rowsQueryText).toContain("d.id asc");
   });
 
-  it("relaxes active-only scope for date-filtered terminal stage drill-downs", async () => {
+  it("uses the board's live Won population for date-filtered stage drill-downs", async () => {
     dbState.responses = [
       [{ id: "stage-won", slug: "won", name: "Won", displayOrder: 7, isTerminal: true }],
     ];
@@ -738,7 +738,7 @@ describe("listDealStagePage", () => {
     } as any);
 
     const countQueryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
-    expect(countQueryText).not.toContain("d.is_active = true");
+    expect(countQueryText).toContain("d.is_active = true");
     expect(countQueryText).toContain("won_closed_date");
     expect(countQueryText).toContain("is not null");
     expect(countQueryText).not.toContain("contract_signed_at");
@@ -783,7 +783,7 @@ describe("listDealStagePage", () => {
     expect(countQueryText).toContain("<");
   });
 
-  it("keeps terminal scope active-state relaxed for all-time terminal stage drill-downs", async () => {
+  it("uses the board's live Won population for all-time stage drill-downs", async () => {
     dbState.responses = [
       [{ id: "stage-won", slug: "won", name: "Won", displayOrder: 7, isTerminal: true }],
     ];
@@ -808,7 +808,7 @@ describe("listDealStagePage", () => {
     } as any);
 
     const countQueryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
-    expect(countQueryText).not.toContain("d.is_active = true");
+    expect(countQueryText).toContain("d.is_active = true");
     expect(countQueryText).toContain("d.stage_id in");
     expect(countQueryText).not.toContain("bid_board_last_updated_at");
   });
@@ -1046,33 +1046,49 @@ describe("listDealStagePage", () => {
     expect(noneSql).toContain("avg(extract(day from now() - d.stage_entered_at)) filter (where coalesce(d.on_hold, false) = false)");
   });
 
-  it("counts terminal (Won/Lost) reportable rows in active_count without is_active gating when no status is set", async () => {
-    // Codex P2: a Won/Lost page WITHOUT a status intentionally includes inactive terminal deals as the
-    // reportable population (non-on-hold), so active_count must NOT be is_active-gated there — only the
-    // explicit status=inactive path requires is_active.
-    dbState.responses = [
-      [{ id: "stage-won", slug: "won", name: "Won", displayOrder: 8, isTerminal: true }],
-    ];
-    const tenantDb = {
-      select: createOfficeScopeSelectMock(),
-      execute: vi.fn()
-        .mockResolvedValueOnce({ rows: [{ total_count: "4", active_count: "4", total_value: "1" }] })
-        .mockResolvedValueOnce({ rows: [] }),
-    } as any;
-    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
-    await listDealStagePage(tenantDb, {
-      role: "admin",
-      userId: "admin-1",
-      activeOfficeId: "office-1",
-      scope: "all",
-      stageId: "stage-won",
-      page: 1,
-      pageSize: 25,
-      wonAllTime: true,
-    } as any);
-    const countSql = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
-    expect(countSql).toContain("count(*) filter (where coalesce(d.on_hold, false) = false)::int as active_count");
-    expect(countSql).not.toContain("d.is_active"); // terminal page: no is_active default, no is_active-gated count
+  it("uses the live Won population by default and keeps status=inactive as a diagnostic view", async () => {
+    const runWonStage = async (status?: "inactive") => {
+      dbState.responses = [
+        [{ id: "stage-won", slug: "won", name: "Won", displayOrder: 8, isTerminal: true }],
+      ];
+      const tenantDb = {
+        select: createOfficeScopeSelectMock(),
+        execute: vi.fn()
+          .mockResolvedValueOnce({ rows: [{ total_count: "0", active_count: "0", total_value: "0" }] })
+          .mockResolvedValueOnce({ rows: [] }),
+      } as any;
+      const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+      await listDealStagePage(tenantDb, {
+        role: "admin",
+        userId: "admin-1",
+        activeOfficeId: "office-1",
+        scope: "all",
+        stageId: "stage-won",
+        page: 1,
+        pageSize: 25,
+        wonAllTime: true,
+        ...(status ? { status } : {}),
+      } as any);
+      return {
+        countWhere: fromDealsWhereSql(extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase()),
+        rowWhere: fromDealsWhereSql(extractSqlText(tenantDb.execute.mock.calls[1][0]).toLowerCase()),
+      };
+    };
+
+    // The count aggregate and the rows behind the header share the board's live-record predicate,
+    // so a soft-deleted Won cannot make the stage header disagree with the board column.
+    const normal = await runWonStage();
+    expect(normal.countWhere).toContain("d.is_active = true");
+    expect(normal.rowWhere).toContain("d.is_active = true");
+    expect(normal.countWhere).toContain("coalesce(d.on_hold, false) = false");
+
+    // An explicit inactive filter remains available for diagnosis and must not be contradicted by the
+    // normal live-row predicate.
+    const inactive = await runWonStage("inactive");
+    expect(inactive.countWhere).toContain("d.is_active = false");
+    expect(inactive.rowWhere).toContain("d.is_active = false");
+    expect(inactive.countWhere).not.toContain("d.is_active = true");
+    expect(inactive.rowWhere).not.toContain("d.is_active = true");
   });
 
   it("applies the project-type filter to the summary", async () => {

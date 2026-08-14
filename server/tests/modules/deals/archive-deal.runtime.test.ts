@@ -12,6 +12,7 @@ const D_OPP = U("d001");
 const D_AWARDED = U("d002");
 const D_DD = U("d003");
 const D_INACTIVE = U("d004");  // seeded already-archived (is_active=false)
+const D_AWARDED_REP = U("d005"); // awarded stage, owned by REP — for the rep-archives-any-stage case
 const D_MISSING = U("dfff");   // never inserted
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -23,11 +24,11 @@ beforeAll(async () => {
   await pg.exec(`SET TimeZone='UTC';`);
   await pg.exec(`
     CREATE TABLE pipeline_stage_config (id uuid PRIMARY KEY, name text, slug text UNIQUE, is_terminal boolean NOT NULL DEFAULT false);
-    -- Full 138-column deals table so tenantDb.select().from(deals) doesn't miss any columns.
+    -- Full deals table so tenantDb.select().from(deals) doesn't miss any columns.
     CREATE TABLE deals (
       id uuid PRIMARY KEY,
       deal_number varchar(50), name varchar(500), stage_id uuid, assigned_rep_id uuid,
-      primary_contact_id uuid, billing_contact_id uuid, company_id uuid, property_id uuid, source_lead_id uuid,
+      primary_contact_id uuid, billing_contact_id uuid, billing_contact_required_at timestamptz, company_id uuid, property_id uuid, source_lead_id uuid,
       dd_estimate numeric(14, 2), bid_estimate numeric(14, 2), awarded_amount numeric(14, 2),
       awarded_amount_overridden boolean, dd_estimate_overridden boolean, change_order_total numeric(14, 2), description text,
       estimator text, property_address text, property_city varchar(255), property_state varchar(2),
@@ -40,7 +41,7 @@ beforeAll(async () => {
       next_step_due_at timestamptz, next_milestone_at timestamptz, support_needed_type text,
       support_needed_notes text, forecast_updated_at timestamptz, forecast_updated_by uuid,
       email_count integer, last_email_at timestamptz, procore_project_id bigint,
-      procore_company_id text, procore_bid_id bigint, procore_image_category_id bigint,
+      procore_company_id text, procore_bid_id bigint, synchub_bid_board_id text, procore_image_category_id bigint,
       procore_photo_link_id bigint, procore_photo_link_status varchar(50),
       procore_last_synced_at timestamptz, is_bid_board_owned boolean, bid_board_stage_slug varchar(100),
       bid_board_stage_family varchar(50), bid_board_stage_status varchar(50),
@@ -83,7 +84,8 @@ beforeAll(async () => {
       ('${D_OPP}',     'Opp Deal',     '${OPP_STAGE}',     'Original scope.', '${REP}', true, false, false, false, now(), now()),
       ('${D_AWARDED}', 'Awarded Deal', '${AWARDED_STAGE}',  'Original scope.', '${REP}', true, false, false, false, now(), now()),
       ('${D_DD}',      'DD Deal',      '${DD_STAGE}',       'Original scope.', '${REP}', true, false, false, false, now(), now()),
-      ('${D_INACTIVE}','Gone Deal',    '${OPP_STAGE}',      'Original scope.', '${REP}', false, false, false, false, now(), now());
+      ('${D_INACTIVE}','Gone Deal',    '${OPP_STAGE}',      'Original scope.', '${REP}', false, false, false, false, now(), now()),
+      ('${D_AWARDED_REP}','Awarded Own', '${AWARDED_STAGE}', 'Original scope.', '${REP}', true, false, false, false, now(), now());
     CREATE TABLE deal_history (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deal_id uuid NOT NULL, field_name text NOT NULL,
       old_value text, new_value text, changed_by uuid NOT NULL, source text, reason text,
@@ -111,10 +113,13 @@ describe("deleteDeal archive rules", () => {
     });
   });
 
-  it("blocks a rep archiving a non-opportunity deal", async () => {
-    await expect(
-      deleteDeal(tdb, D_AWARDED, { actorRole: "rep", actorId: REP, reason: "no" })
-    ).rejects.toMatchObject({ statusCode: 403, code: "DEAL_ARCHIVE_STAGE_FORBIDDEN" });
+  it("lets a rep archive a NON-opportunity deal they own — stage is no longer a gate", async () => {
+    // Replaces the old DEAL_ARCHIVE_STAGE_FORBIDDEN assertion. The stage rule admitted only `opportunity`
+    // and the legacy alias `dd` (itself seeded is_active_pipeline=FALSE), so the archive control was dead
+    // on nearly every real deal. Ownership, the mandatory reason and the admin-only change-order guard are
+    // what remain.
+    const row = await deleteDeal(tdb, D_AWARDED_REP, { actorRole: "rep", actorId: REP, reason: "Duplicate entry" });
+    expect(row?.isActive).toBe(false);
   });
 
   it("archives an opportunity deal for a rep, prepending the reason to the description", async () => {

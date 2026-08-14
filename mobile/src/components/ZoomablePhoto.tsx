@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Animated, StyleSheet } from "react-native";
+import { Image as ExpoImage } from "expo-image";
 import {
   PanGestureHandler,
   PinchGestureHandler,
@@ -139,15 +140,33 @@ export function ZoomablePhoto({
               onGestureEvent={onPinchEvent}
               onHandlerStateChange={onPinchStateChange}
             >
-              <Animated.Image
-                source={{ uri }}
-                resizeMode="contain"
+              {/* Transform lives on the Animated.View wrapper (always native-drivable) so the image
+                  itself can be expo-image. RN's core <Image> downsamples the decoded bitmap to ~view
+                  size — fine at 1x, but blurry the instant you pinch-zoom a detail-dense shot (design
+                  boards, punch defects). expo-image with allowDownscaling={false} decodes the FULL-res
+                  original at native resolution so zoom stays crisp; recyclingKey resets decode state as
+                  the pager recycles this view across photos.
+                  cachePolicy="disk" (NOT "memory-disk"): the in-memory cache would retain ~48MB full-res
+                  bitmaps for pages the FlatList has already unmounted, defeating the windowSize cap and
+                  jetsamming older iPhones after enough swiping. Disk-only keeps the compressed JPEG for
+                  offline re-open while bounding RAM to the mounted window; swipe-back re-decodes from
+                  local disk (cheap). */}
+              <Animated.View
                 style={{
                   width,
                   height,
                   transform: [{ translateX }, { translateY }, { scale }],
                 }}
-              />
+              >
+                <ExpoImage
+                  source={{ uri }}
+                  style={{ width, height }}
+                  contentFit="contain"
+                  allowDownscaling={false}
+                  cachePolicy="disk"
+                  recyclingKey={uri}
+                />
+              </Animated.View>
             </PinchGestureHandler>
           </Animated.View>
         </PanGestureHandler>

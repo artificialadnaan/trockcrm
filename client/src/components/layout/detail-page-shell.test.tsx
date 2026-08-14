@@ -97,6 +97,21 @@ describe("DetailPageShell", () => {
     act(() => root?.unmount());
   });
 
+  it("renders each tab with an always-visible text label beside its icon (no hover-only tooltip)", () => {
+    const html = normalize(renderToStaticMarkup(renderShell()));
+
+    // Labels are rendered as visible text, not just an aria-label/hover tooltip, so users can read
+    // each tab without hovering. (Regression: the tab strip was icon-only with a hover tooltip.)
+    expect(html).toContain("<span>Deals</span>");
+    expect(html).toContain("<span>Activity</span>");
+    expect(html).not.toContain('role="tooltip"');
+    expect(html).not.toContain("h-11 w-11");
+    // aria-label is still present for assistive tech and event targeting.
+    expect(html).toContain('aria-label="Deals"');
+    // Count badges still render.
+    expect(html).toContain(">3<");
+  });
+
   it("renders red-accent KPI cards with the brand-red treatment", () => {
     const html = normalize(renderToStaticMarkup(renderShell()));
 

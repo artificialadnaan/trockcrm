@@ -48,11 +48,11 @@ function getDigestAtRiskRows(rows: AiDigestAtRiskRow[], now: Date): AiDigestAtRi
         stageSlug: row.stage_slug,
         workflowRoute: normalizeWorkflowRoute(row.workflow_route),
         stageEnteredAt: row.stage_entered_at,
-        // Match the app's aggregate at-risk (applyCloseTargetSuppression:false): exclude the 90+ day
-        // auto-held case only, not a near close target, so the AI disconnect digest mirrors the deals
-        // list/dashboard (Codex P2).
+        // Match the app's at-risk (applyCloseTargetSuppression:true): a postponement (near today-or-future
+        // close target) quiets the nag too, so the AI disconnect digest mirrors the deals
+        // list/dashboard/detail — plus the 90+ day auto-held exclusion.
         expectedCloseDate: row.expected_close_date,
-        applyCloseTargetSuppression: false,
+        applyCloseTargetSuppression: true,
         onHold: row.on_hold,
         onHoldStartedAt: row.on_hold_started_at,
         onHoldAccumulatedSeconds: numberOrNull(row.on_hold_accumulated_seconds),

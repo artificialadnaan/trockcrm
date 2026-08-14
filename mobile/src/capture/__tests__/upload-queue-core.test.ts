@@ -2,13 +2,21 @@ import {
   MAX_UPLOAD_ATTEMPTS,
   applyGpsPatch,
   bumpAttempts,
+  collectEnqueueResults,
   createAsyncMutex,
+  createBoundedRunner,
   dedupeQueue,
   isDrainable,
+  isSchedulable,
+  isStagingFileName,
+  isTerminal,
   newClientUploadId,
   partitionResults,
   removeIds,
   sanitizeOwnerKey,
+  selectOrphanFiles,
+  selectUploadFetcher,
+  shouldRouteUploadByTarget,
   uploadOwnerKey,
   type QueuedUpload,
 } from "../upload-queue-core";
@@ -61,6 +69,25 @@ describe("upload-queue-core", () => {
     expect(uploadOwnerKey("u1", "office-a")).not.toBe(uploadOwnerKey("u1", "office-b"));
   });
 
+  it("routes only explicitly marked edit evidence by target", () => {
+    expect(shouldRouteUploadByTarget(item("legacy"))).toBe(false);
+    expect(shouldRouteUploadByTarget({ ...item("ordinary"), routeByTarget: false })).toBe(false);
+    expect(shouldRouteUploadByTarget({ ...item("edit"), routeByTarget: true })).toBe(true);
+
+    const officePinnedFetcher = { name: "office-pinned" };
+    const targetFetcher = { name: "target-resolved" };
+    expect(selectUploadFetcher(item("legacy"), officePinnedFetcher, targetFetcher)).toBe(officePinnedFetcher);
+    expect(
+      selectUploadFetcher({ ...item("ordinary"), routeByTarget: false }, officePinnedFetcher, targetFetcher),
+    ).toBe(officePinnedFetcher);
+    expect(
+      selectUploadFetcher({ ...item("edit"), routeByTarget: true }, officePinnedFetcher, targetFetcher),
+    ).toBe(targetFetcher);
+    expect(selectUploadFetcher({ ...item("edit-offline"), routeByTarget: true }, officePinnedFetcher)).toBe(
+      officePinnedFetcher,
+    );
+  });
+
   it("isDrainable / bumpAttempts implement the terminal retry cap", () => {
     expect(isDrainable(item("a", 0))).toBe(true);
     expect(isDrainable(item("a", MAX_UPLOAD_ATTEMPTS - 1))).toBe(true);
@@ -72,6 +99,69 @@ describe("upload-queue-core", () => {
     expect(bumped[1]).toMatchObject({ clientUploadId: "b", attempts: 1 }); // untouched
   });
 
+  it("isDrainable excludes rows still mid-enqueue-staging (so the drain can't double-compress)", () => {
+    // A fresh original persisted before compression finishes is NON-drainable until `staging` is cleared.
+    expect(isDrainable({ ...item("a", 0), staging: true })).toBe(false);
+    // Cleared / absent staging drains normally (a legacy or committed row has no `staging` field).
+    expect(isDrainable({ ...item("a", 0), staging: false })).toBe(true);
+    expect(isDrainable(item("a", 0))).toBe(true);
+    // Staging never RESURRECTS a terminal row — the retry cap still wins.
+    expect(isDrainable({ ...item("a", MAX_UPLOAD_ATTEMPTS), staging: false })).toBe(false);
+  });
+
+  it("isTerminal keys the failed count on retries-exhausted, NOT the transient staging state", () => {
+    expect(isTerminal(item("a", MAX_UPLOAD_ATTEMPTS))).toBe(true);
+    expect(isTerminal(item("a", MAX_UPLOAD_ATTEMPTS - 1))).toBe(false);
+    expect(isTerminal(item("a", 0))).toBe(false);
+    // A mid-enqueue staging row is non-drainable but NOT terminal — it must never be counted/cleared as failed.
+    expect(isTerminal({ ...item("a", 0), staging: true })).toBe(false);
+    expect(isDrainable({ ...item("a", 0), staging: true })).toBe(false);
+  });
+
+  it("isSchedulable counts drainable AND mid-enqueue staging rows (so a lone staging row still triggers a drain)", () => {
+    // Drainable rows are schedulable.
+    expect(isSchedulable(item("a", 0))).toBe(true);
+    expect(isSchedulable({ ...item("a", 0), staging: false })).toBe(true);
+    // A mid-enqueue staging row is NOT drainable, but IS schedulable — the drain's reconciliation unsticks it,
+    // so a lone interrupted capture must still schedule a drain (finding 2). This is the key divergence from
+    // isDrainable.
+    expect(isDrainable({ ...item("a", 0), staging: true })).toBe(false);
+    expect(isSchedulable({ ...item("a", 0), staging: true })).toBe(true);
+    // A terminal (retries-exhausted) row is neither drainable NOR schedulable — it only surfaces for dismissal.
+    expect(isSchedulable(item("a", MAX_UPLOAD_ATTEMPTS))).toBe(false);
+    expect(isSchedulable({ ...item("a", MAX_UPLOAD_ATTEMPTS), staging: true })).toBe(false);
+  });
+
+  it("isStagingFileName recognizes only queue staging files", () => {
+    expect(isStagingFileName("cu-abc.orig")).toBe(true);
+    expect(isStagingFileName("cu-abc.jpg")).toBe(true);
+    expect(isStagingFileName("index.json")).toBe(false);
+    expect(isStagingFileName("index.json.tmp")).toBe(false);
+    expect(isStagingFileName("index.json.bak")).toBe(false);
+  });
+
+  it("selectOrphanFiles reclaims unreferenced staging files but never the live/index ones", () => {
+    // 'a' committed to its .jpg (its .orig sibling is a leftover); 'b' still on .orig (mid-fallback).
+    const queue: QueuedUpload[] = [
+      { ...item("a"), uri: "file:///queue/o1/a.jpg" },
+      { ...item("b"), uri: "file:///queue/o1/b.orig" },
+    ];
+    const onDisk = [
+      "a.jpg", // referenced by 'a' → keep
+      "a.orig", // 'a' switched away from it → orphan
+      "b.orig", // referenced by 'b' → keep
+      "c.jpg", // no row at all (killed mid-copy before the row landed) → orphan
+      "index.json", // never a staging file → keep
+      "index.json.bak",
+    ];
+    expect(selectOrphanFiles(onDisk, queue).sort()).toEqual(["a.orig", "c.jpg"]);
+  });
+
+  it("selectOrphanFiles keeps everything when every staging file is referenced", () => {
+    const queue: QueuedUpload[] = [{ ...item("a"), uri: "file:///queue/o1/a.jpg" }];
+    expect(selectOrphanFiles(["a.jpg", "index.json"], queue)).toEqual([]);
+  });
+
   it("partitionResults splits succeeded vs failed by settled status (positional)", () => {
     const items = [item("a"), item("b"), item("c")];
     const results: Array<PromiseSettledResult<unknown>> = [
@@ -80,6 +170,31 @@ describe("upload-queue-core", () => {
       { status: "fulfilled", value: 3 },
     ];
     expect(partitionResults(items, results)).toEqual({ succeededIds: ["a", "c"], failedIds: ["b"] });
+  });
+
+  it("collectEnqueueResults returns queued items in order and drops skipped (null) entries", () => {
+    const a = item("a");
+    const c = item("c");
+    const settled: Array<PromiseSettledResult<QueuedUpload | null>> = [
+      { status: "fulfilled", value: a },
+      { status: "fulfilled", value: null }, // skipped: already queued
+      { status: "fulfilled", value: c },
+    ];
+    expect(collectEnqueueResults(settled)).toEqual([a, c]);
+  });
+
+  it("collectEnqueueResults rethrows the first rejection even when later items succeeded", () => {
+    const boom = new Error("copy failed");
+    const settled: Array<PromiseSettledResult<QueuedUpload | null>> = [
+      { status: "fulfilled", value: item("a") },
+      { status: "rejected", reason: boom },
+      { status: "fulfilled", value: item("c") },
+    ];
+    expect(() => collectEnqueueResults(settled)).toThrow(boom);
+  });
+
+  it("collectEnqueueResults returns [] for an empty batch", () => {
+    expect(collectEnqueueResults([])).toEqual([]);
   });
 });
 
@@ -148,5 +263,28 @@ describe("createAsyncMutex", () => {
       expect(queue[1].metadata).toMatchObject({ latitude: 32.7, longitude: -96.8 });
     });
   });
-});
 
+  describe("createBoundedRunner", () => {
+    it("runs at most `max` tasks concurrently across calls and drains the rest", async () => {
+      const run = createBoundedRunner(2);
+      let active = 0;
+      let peak = 0;
+      const task = () =>
+        run(async () => {
+          active++;
+          peak = Math.max(peak, active);
+          await new Promise((r) => setTimeout(r, 5));
+          active--;
+        });
+      await Promise.all([task(), task(), task(), task(), task()]);
+      expect(peak).toBe(2); // never more than 2 in flight, even with 5 queued
+    });
+
+    it("frees a slot even when a task throws", async () => {
+      const run = createBoundedRunner(1);
+      await expect(run(async () => Promise.reject(new Error("boom")))).rejects.toThrow("boom");
+      // The slot must be released — a follow-up task still runs.
+      await expect(run(async () => "ok")).resolves.toBe("ok");
+    });
+  });
+});

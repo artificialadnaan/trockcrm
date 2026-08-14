@@ -81,6 +81,7 @@ const confirmedFile = {
   takenAt: new Date("2026-05-05T12:00:00.000Z"),
   createdAt: new Date("2026-05-05T12:01:00.000Z"),
   uploadedBy: FIELD_USER_ID,
+  isActive: true,
   latitude: "35.123456",
   longitude: "-97.123456",
   address: "123 Main St",

@@ -21,6 +21,12 @@ const dueDiligenceMocks = vi.hoisted(() => ({
   dispatchPendingDueDiligenceEmail: vi.fn(),
   getLeadDueDiligenceApprovalForLead: vi.fn(),
 }));
+const auditMocks = vi.hoisted(() => ({
+  logActivity: vi.fn(),
+  buildAuditActorFromUser: vi.fn((user: { userId: string; role: string }) => user),
+}));
+const TARGET_REP_ID = "00000000-0000-4000-8000-000000000002";
+const OTHER_REP_ID = "00000000-0000-4000-8000-000000000003";
 
 class TestLeadCreateRequirementsError extends Error {
   statusCode = 400;
@@ -85,6 +91,10 @@ vi.mock("../../../src/lib/collaboration-access.js", () => ({
   getCollaborativeReadRole: accessMocks.getCollaborativeReadRole,
   normalizeCollaborativeScope: accessMocks.normalizeCollaborativeScope,
 }));
+vi.mock("../../../src/modules/audit/audit-logger.js", () => ({
+  logActivity: auditMocks.logActivity,
+  buildAuditActorFromUser: auditMocks.buildAuditActorFromUser,
+}));
 
 async function loadLeadRoutes() {
   vi.resetModules();
@@ -128,12 +138,16 @@ async function loadLeadRoutes() {
     getCollaborativeReadRole: accessMocks.getCollaborativeReadRole,
     normalizeCollaborativeScope: accessMocks.normalizeCollaborativeScope,
   }));
+  vi.doMock("../../../src/modules/audit/audit-logger.js", () => ({
+    logActivity: auditMocks.logActivity,
+    buildAuditActorFromUser: auditMocks.buildAuditActorFromUser,
+  }));
 
   const { leadRoutes } = await import("../../../src/modules/leads/routes.js");
   return leadRoutes;
 }
 
-function findRouteHandler(routes: unknown, method: "get" | "post", path: string) {
+function findRouteHandler(routes: unknown, method: "get" | "post" | "patch" | "delete", path: string) {
   const layer = (routes as any).stack.find(
     (entry: any) => entry.route?.path === path && entry.route?.methods?.[method]
   );
@@ -281,7 +295,11 @@ async function invokeLeadCreateRoute(
   return { req, res, next };
 }
 
-async function invokeLeadPatchRoute(body: Record<string, unknown>, leadRoutes?: unknown) {
+async function invokeLeadPatchRoute(
+  body: Record<string, unknown>,
+  leadRoutes?: unknown,
+  userOverride: Record<string, unknown> = {},
+) {
   const routes = leadRoutes ?? (await loadLeadRoutes());
   const handler = findRouteHandler(routes, "patch", "/:id");
   const req = {
@@ -292,6 +310,7 @@ async function invokeLeadPatchRoute(body: Record<string, unknown>, leadRoutes?: 
       id: "rep-1",
       role: "rep",
       activeOfficeId: "office-1",
+      ...userOverride,
     },
     commitTransaction: vi.fn(async () => {}),
   } as any;
@@ -306,6 +325,42 @@ async function invokeLeadPatchRoute(body: Record<string, unknown>, leadRoutes?: 
       this.body = payload;
       return this;
     },
+  } as any;
+  const next = vi.fn((err?: unknown) => {
+    if (err) throw err;
+  });
+
+  await handler(req, res, next);
+  return { req, res, next };
+}
+
+async function invokeLeadDeleteRoute(
+  body: Record<string, unknown>,
+  leadRoutes?: unknown,
+  userOverride: Record<string, unknown> = {},
+) {
+  const routes = leadRoutes ?? (await loadLeadRoutes());
+  const handler = findRouteHandler(routes, "delete", "/:id");
+  const req = {
+    params: { id: "lead-1" },
+    body,
+    headers: {},
+    tenantDb: {},
+    user: {
+      id: "rep-1",
+      role: "rep",
+      activeOfficeId: "office-1",
+      ...userOverride,
+    },
+    commitTransaction: vi.fn(async () => {}),
+  } as any;
+  const res = {
+    statusCode: 200,
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    send: vi.fn(),
   } as any;
   const next = vi.fn((err?: unknown) => {
     if (err) throw err;
@@ -922,6 +977,98 @@ describe("lead stage transition route", () => {
         name: "Updated Lead",
       },
     });
+  });
+
+  it("makes the canonical owner win when the current rep transfers their lead", async () => {
+    const leadRoutes = await loadLeadRoutes();
+    serviceMocks.updateLead.mockResolvedValueOnce({ id: "lead-1", assignedRepId: TARGET_REP_ID, salesRepId: TARGET_REP_ID });
+
+    const { req } = await invokeLeadPatchRoute(
+      { assignedRepId: TARGET_REP_ID, salesRepId: OTHER_REP_ID },
+      leadRoutes,
+    );
+
+    expect(accessMocks.assertLeadCollaboratorAccess).toHaveBeenCalled();
+    expect(serviceMocks.updateLead).toHaveBeenCalledWith(
+      req.tenantDb,
+      "lead-1",
+      expect.objectContaining({ assignedRepId: TARGET_REP_ID, salesRepId: TARGET_REP_ID }),
+      "rep",
+      "rep-1",
+    );
+  });
+
+  it("allows a director to reassign a teammate lead", async () => {
+    const leadRoutes = await loadLeadRoutes();
+    accessMocks.assertLeadCollaboratorAccess.mockResolvedValueOnce({ id: "lead-1", assignedRepId: "rep-1" });
+    serviceMocks.updateLead.mockResolvedValueOnce({ id: "lead-1", assignedRepId: TARGET_REP_ID });
+
+    const { req } = await invokeLeadPatchRoute(
+      { assignedRepId: TARGET_REP_ID, salesRepId: TARGET_REP_ID },
+      leadRoutes,
+      { id: "director-1", role: "director" },
+    );
+
+    expect(serviceMocks.updateLead).toHaveBeenCalledWith(
+      req.tenantDb,
+      "lead-1",
+      expect.objectContaining({ assignedRepId: TARGET_REP_ID, salesRepId: TARGET_REP_ID }),
+      "director",
+      "director-1",
+    );
+  });
+
+  it("blocks a non-owner rep from reassigning a teammate lead", async () => {
+    const leadRoutes = await loadLeadRoutes();
+    accessMocks.assertLeadCollaboratorAccess.mockResolvedValueOnce({ id: "lead-1", assignedRepId: "rep-9" });
+
+    await expect(
+      invokeLeadPatchRoute(
+        { assignedRepId: TARGET_REP_ID, salesRepId: TARGET_REP_ID },
+        leadRoutes,
+      )
+    ).rejects.toMatchObject({ statusCode: 403, code: "LEAD_REASSIGNMENT_FORBIDDEN" });
+    expect(serviceMocks.updateLead).not.toHaveBeenCalled();
+  });
+
+  it("rejects a malformed reassignment id before it reaches the database service", async () => {
+    const leadRoutes = await loadLeadRoutes();
+
+    await expect(
+      invokeLeadPatchRoute({ assignedRepId: "not-a-uuid" }, leadRoutes),
+    ).rejects.toMatchObject({ statusCode: 400 });
+    expect(serviceMocks.updateLead).not.toHaveBeenCalled();
+  });
+
+  it("requires an archive reason and forwards the real actor to the service", async () => {
+    const leadRoutes = await loadLeadRoutes();
+
+    await expect(invokeLeadDeleteRoute({}, leadRoutes)).rejects.toMatchObject({
+      statusCode: 400,
+      code: "LEAD_ARCHIVE_REASON_REQUIRED",
+    });
+    expect(serviceMocks.deleteLead).not.toHaveBeenCalled();
+
+    serviceMocks.deleteLead.mockResolvedValueOnce(null);
+    const { req, res } = await invokeLeadDeleteRoute({ reason: "  Duplicate  " }, leadRoutes);
+    expect(serviceMocks.deleteLead).toHaveBeenCalledWith(req.tenantDb, "lead-1", {
+      actorRole: "rep",
+      actorId: "rep-1",
+      reason: "Duplicate",
+    });
+    expect(req.commitTransaction).toHaveBeenCalledOnce();
+    expect(res.statusCode).toBe(204);
+
+    serviceMocks.deleteLead.mockResolvedValueOnce({ id: "lead-1", name: "Lead One" });
+    const success = await invokeLeadDeleteRoute({ reason: "No longer pursuing" }, leadRoutes);
+    expect(auditMocks.logActivity).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tenantDb: success.req.tenantDb,
+        action: "soft_delete",
+        entity: expect.objectContaining({ recordId: "lead-1", nameSnapshot: "Lead One" }),
+      }),
+    );
+    expect(success.req.commitTransaction).toHaveBeenCalledOnce();
   });
 });
 

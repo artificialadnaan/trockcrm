@@ -176,4 +176,16 @@ describe("SYSTEM_EMAIL_BCC (global monitoring bcc)", () => {
     const payload = sendMock.mock.calls[0][0];
     expect(payload.bcc).toEqual(["monitor@example.com", "audit@example.com"]); // duplicate Monitor@ dropped
   });
+
+  it("suppresses the global monitoring BCC for credential-bearing email", async () => {
+    vi.stubEnv("SYSTEM_EMAIL_BCC", "monitor@example.com");
+
+    await sendSystemEmail("alice@example.com", "Reset password", "<p>Reset link</p>", {
+      suppressGlobalBcc: true,
+    });
+
+    const payload = sendMock.mock.calls[0][0];
+    expect(payload.to).toEqual(["alice@example.com"]);
+    expect(payload.bcc).toBeUndefined();
+  });
 });

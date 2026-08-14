@@ -17,6 +17,8 @@ export const localAuthEventTypeEnum = pgEnum("local_auth_event_type", [
   "login_locked",
   "password_changed",
   "password_change_forced",
+  "password_reset_requested",
+  "password_reset_completed",
 ]);
 
 export const userLocalAuthEvents = pgTable("user_local_auth_events", {

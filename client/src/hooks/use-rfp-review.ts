@@ -25,6 +25,9 @@ export interface RfpReviewDetail {
   overrideError: string | null;
   /** True when a reviewer can act now: declined, not currently approving, and not already a re-confirmed denial. */
   actionable: boolean;
+  /** deals.is_active — false once archived (a re-confirmed denial). The footer "Open the full deal" link is
+   *  hidden when false, since the deal detail 404s an archived deal. */
+  isActive: boolean;
   votes: Array<{
     voterUserId: string | null;
     voterName: string | null;
@@ -101,12 +104,13 @@ export async function approveRfpOverride(
   );
 }
 
-/** Re-confirm the denial → the RFP stays declined and is marked reviewed so it is not re-flagged. */
+/** Re-confirm the denial → the RFP stays declined and is marked reviewed so it is not re-flagged. `archived`
+ *  reports whether this reconfirm soft-deleted the deal (false only for the stuck-approving escape hatch). */
 export async function reconfirmRfpDecline(
   dealId: string,
   input: { note?: string | null; officeId?: string | null }
-): Promise<{ success: boolean; status: string; decision: string }> {
-  return api<{ success: boolean; status: string; decision: string }>(
+): Promise<{ success: boolean; status: string; decision: string; archived: boolean }> {
+  return api<{ success: boolean; status: string; decision: string; archived: boolean }>(
     `/deals/${dealId}/rfp-override/reconfirm-decline`,
     { method: "POST", json: { note: input.note ?? null }, ...getOfficeRequestOptions(input.officeId) }
   );

@@ -2,6 +2,7 @@ import * as FileSystem from "expo-file-system/legacy";
 // Pure manifest helpers + createAsyncMutex/sanitizeOwnerKey from the queue core (no native deps) — this
 // module's only native dependency is expo-file-system, exactly like the upload queue + scorecard drafts.
 import { createAsyncMutex, sanitizeOwnerKey } from "./upload-queue-core";
+import { isDurableStoreUri, reconstructDurablePhotoUri } from "./doc-dir-uri";
 import { addManifestItem, patchManifestCaption, patchManifestMetadata, removeManifestItems, type StagedDraftItem } from "./review-draft-core";
 import type { PhotoMetadata } from "./metadata";
 import type { SessionPhoto } from "./session-photo";
@@ -69,6 +70,20 @@ async function readManifestFile(file: string): Promise<StagedDraftItem[] | null>
   }
 }
 
+// Rebase each staged item's uri onto the LIVE owner directory. stageDraftPhoto froze an ABSOLUTE uri
+// (rooted at documentDirectory) into the manifest; the iOS container UUID in that path rotates across an app
+// update/reinstall/restore, so a recovered draft's baked uri would fail its FileSystem.copyAsync at Done.
+// Durable copies are named deterministically (`<ownerDir>/<clientUploadId><ext>`), so rebuild the current
+// path from the live ownerDir + clientUploadId. Non-durable/legacy uris are left untouched.
+function rebaseManifestUris(ownerKey: string, items: StagedDraftItem[]): StagedDraftItem[] {
+  const dir = ownerDir(ownerKey);
+  return items.map((item) => {
+    if (!isDurableStoreUri(item.uri, FileSystem.documentDirectory)) return item;
+    const rebased = reconstructDurablePhotoUri(item.uri, dir, item.clientUploadId);
+    return rebased === item.uri ? item : { ...item, uri: rebased };
+  });
+}
+
 async function readManifest(ownerKey: string): Promise<StagedDraftItem[]> {
   const file = manifestFile(ownerKey);
   // A leftover .tmp exists ONLY when a write was interrupted before its final rename — and it holds the
@@ -76,11 +91,11 @@ async function readManifest(ownerKey: string): Promise<StagedDraftItem[]> {
   // returns null for a partial/corrupt one → fall through), then the live manifest, then the .bak from the
   // previous successful write. Empty only when ALL are unreadable.
   const temp = await readManifestFile(`${file}.tmp`);
-  if (temp !== null) return temp;
+  if (temp !== null) return rebaseManifestUris(ownerKey, temp);
   const primary = await readManifestFile(file);
-  if (primary !== null) return primary;
+  if (primary !== null) return rebaseManifestUris(ownerKey, primary);
   const backup = await readManifestFile(`${file}.bak`);
-  return backup ?? [];
+  return backup ? rebaseManifestUris(ownerKey, backup) : [];
 }
 
 // Crash-safe manifest write: serialize to a temp file FIRST (so the live manifest is never observed

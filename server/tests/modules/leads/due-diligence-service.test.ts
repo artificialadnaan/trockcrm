@@ -110,6 +110,7 @@ function makeLeadSummary() {
     propertyUnitCount: 120,
     propertyBuildYear: 1998,
     projectTypeName: "Roofing",
+    salesRepName: "Jordan Sales",
   };
 }
 
@@ -130,6 +131,7 @@ function makePublicSummary(overrides: Record<string, unknown> = {}) {
     project_type_name: "Roofing",
     primary_contact_name: "Ada Lovelace",
     primary_contact_email: "ada@example.com",
+    sales_rep_name: "Jordan Sales",
     ...overrides,
   };
 }
@@ -496,6 +498,35 @@ describe("buildLeadDueDiligenceEmail", () => {
 
     expect(email.html).toContain("Ada Lovelace (Property Manager) · ada@example.com");
   });
+
+  it("includes and escapes the sales rep name", () => {
+    const email = buildLeadDueDiligenceEmail({
+      summary: {
+        ...makeLeadSummary(),
+        salesRepName: "Jordan <Sales>",
+      } as never,
+      token: "a".repeat(64),
+      detectionSignal: null,
+    });
+
+    expect(email.html).toContain("Sales rep");
+    expect(email.html).toContain("Jordan &lt;Sales&gt;");
+    expect(email.html).not.toContain("Jordan <Sales>");
+  });
+
+  it("uses a safe fallback when sales rep attribution is unavailable", () => {
+    const email = buildLeadDueDiligenceEmail({
+      summary: {
+        ...makeLeadSummary(),
+        salesRepName: null,
+      } as never,
+      token: "a".repeat(64),
+      detectionSignal: null,
+    });
+
+    expect(email.html).toContain("Sales rep");
+    expect(email.html).toContain("Not available");
+  });
 });
 
 describe("createLeadDueDiligenceApproval", () => {
@@ -622,6 +653,8 @@ describe("dispatchPendingDueDiligenceEmail", () => {
       expect.stringContaining("Review and decide")
     );
     const sentHtml = vi.mocked(sendSystemEmailWithMetadata).mock.calls[0][2];
+    expect(sentHtml).toContain("Sales rep");
+    expect(sentHtml).toContain("Jordan Sales");
     const href = sentHtml.match(/href="([^"]+)"/)?.[1];
     expect(href).toContain("/api/public/lead-due-diligence/");
     const tokenFromEmail = new URL(href ?? "").pathname.split("/").pop();
@@ -1092,9 +1125,30 @@ describe("renderDueDiligenceDecisionPage", () => {
     expect(html).toContain('name="decision" value="reject"');
     expect(html).toContain('textarea id="reason" name="reason" minlength="10" required');
     expect(html).toContain("Ada Lovelace (Property Manager) · ada@example.com");
+    expect(html).toContain("Sales rep");
+    expect(html).toContain("Jordan Sales");
     expect(html).toContain("Budgeted Q1");
     expect(html).not.toContain("property_manager");
     expect(html).not.toContain("budgeted_q1");
+  });
+
+  it("renders the sales rep captured by the approval request", async () => {
+    const client = makePoolClient({
+      approval: makeApproval({ tenant_schema: "office_atlanta", requested_by: "requester-1" }),
+      summary: makePublicSummary({
+        sales_rep_name: "Legacy Sales Rep",
+      }),
+    });
+
+    const html = await renderDueDiligenceDecisionPage("a".repeat(64));
+
+    expect(html).toContain("Sales rep");
+    expect(html).toContain("Legacy Sales Rep");
+    const summaryQuery = client.calls.find((call) =>
+      call.text.includes('FROM "office_atlanta".leads')
+    );
+    expect(summaryQuery?.text).toContain("LEFT JOIN public.users approval_requester");
+    expect(summaryQuery?.params).toEqual(["lead-1", "requester-1"]);
   });
 
   it("renders already-decided approval with no action buttons", async () => {
@@ -1127,6 +1181,7 @@ describe("renderDueDiligenceDecisionPage", () => {
       }),
       summary: makePublicSummary({
         company_name: "Acme & Sons",
+        sales_rep_name: "Jordan <Sales>",
       }),
     });
 
@@ -1137,6 +1192,8 @@ describe("renderDueDiligenceDecisionPage", () => {
     expect(html).not.toContain("(company/deal)");
     expect(html).toContain("Acme &amp; Sons");
     expect(html).not.toContain("Acme &amp;amp; Sons");
+    expect(html).toContain("Jordan &lt;Sales&gt;");
+    expect(html).not.toContain("Jordan <Sales>");
   });
 
   it("renders inline error and notice states with decision page styling", async () => {

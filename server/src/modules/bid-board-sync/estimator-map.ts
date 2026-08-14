@@ -62,6 +62,27 @@ function currentMap(): Map<string, string> {
   return cachedMap;
 }
 
+/** Distinct CRM user ids in BID_BOARD_ESTIMATOR_USER_MAP — the estimator roster. Empty until the env is
+ *  configured. Multiple name aliases collapse to one id. */
+export function estimatorRosterUserIds(): string[] {
+  return [...new Set(currentMap().values())];
+}
+
+/**
+ * The estimator roster as {userId, name} pairs — each distinct roster user id paired with the best display
+ * name the map carries for it (the longest alias, most likely the full name; the name is the normalized,
+ * lowercased map key). Lets the estimator report show a human-readable name for a roster id that has NO
+ * matching CRM user (a misconfigured map entry) instead of a raw UUID. Empty until the env is configured.
+ */
+export function estimatorRosterEntries(): Array<{ userId: string; name: string }> {
+  const bestNameById = new Map<string, string>();
+  for (const [name, userId] of currentMap().entries()) {
+    const existing = bestNameById.get(userId);
+    if (!existing || name.length > existing.length) bestNameById.set(userId, name);
+  }
+  return [...bestNameById.entries()].map(([userId, name]) => ({ userId, name }));
+}
+
 /** Resolve a Bid Board estimator name to a CRM user id, or null if unmapped/blank/unset. */
 export function resolveEstimatorUserId(estimatorName: unknown): string | null {
   const key = normalizeEstimatorKey(estimatorName);

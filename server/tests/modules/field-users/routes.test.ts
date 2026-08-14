@@ -2,14 +2,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const fieldUserMocks = vi.hoisted(() => ({
   acceptFieldInvite: vi.fn(),
+  completeFieldUserPasswordReset: vi.fn(),
   inviteFieldUser: vi.fn(),
   listFieldUsers: vi.fn(),
   loginFieldUser: vi.fn(),
   previewFieldInvite: vi.fn(),
+  previewFieldUserPasswordReset: vi.fn(),
+  requestFieldUserPasswordReset: vi.fn(),
   resendFieldUserInvite: vi.fn(),
   revokeFieldUserInvite: vi.fn(),
   setFieldUserActive: vi.fn(),
 }));
+const TEST_CREDENTIAL = "<redacted - test creds in ops vault>";
 
 vi.mock("../../../src/modules/field-users/service.js", () => fieldUserMocks);
 vi.mock("../../../src/middleware/rate-limit.js", () => ({
@@ -78,6 +82,19 @@ describe("field user routes", () => {
     fieldUserMocks.inviteFieldUser.mockResolvedValue({ invite: { id: "invite-1", email: "field@example.com", expiresAt: "2026-05-12" } });
     fieldUserMocks.listFieldUsers.mockResolvedValue({ users: [], total: 0, page: 1, perPage: 25 });
     fieldUserMocks.resendFieldUserInvite.mockResolvedValue({ invite: { id: "invite-1", email: "field@example.com", expiresAt: "2026-05-12" } });
+    fieldUserMocks.requestFieldUserPasswordReset.mockResolvedValue({
+      user: { id: "field-1", email: "field@example.com" },
+      expiresAt: "2026-05-05T12:30:00.000Z",
+    });
+    fieldUserMocks.previewFieldUserPasswordReset.mockResolvedValue({
+      firstName: "Field",
+      lastName: "User",
+      email: "field@example.com",
+    });
+    fieldUserMocks.completeFieldUserPasswordReset.mockResolvedValue({
+      success: true,
+      user: { id: "field-1", email: "field@example.com" },
+    });
     fieldUserMocks.revokeFieldUserInvite.mockResolvedValue({ invite: { id: "invite-1", email: "field@example.com", expiresAt: "2026-05-12" } });
     fieldUserMocks.setFieldUserActive.mockResolvedValue({ user: { id: "field-1", active: false } });
     fieldUserMocks.acceptFieldInvite.mockResolvedValue({ user: { id: "field-1" }, token: "jwt" });
@@ -133,6 +150,10 @@ describe("field user routes", () => {
       params: { id: "invite-1" },
       user: { id: "admin-1", role: "admin", activeOfficeId: "office-1", officeId: "office-1" },
     });
+    await invokeHandlers(findRoute(fieldUserAdminRouter, "post", "/:id/reset-password"), {
+      params: { id: "field-1" },
+      user: { id: "admin-1", role: "admin", activeOfficeId: "office-1", officeId: "office-1" },
+    });
     await invokeHandlers(findRoute(fieldUserAdminRouter, "post", "/invites/:id/revoke"), {
       params: { id: "invite-1" },
       user: { id: "admin-1", role: "admin", activeOfficeId: "office-1", officeId: "office-1" },
@@ -148,9 +169,27 @@ describe("field user routes", () => {
 
     expect(fieldUserMocks.listFieldUsers).toHaveBeenCalledWith(expect.objectContaining({ tenantId: "office-1", search: "field", status: "active", page: 2, perPage: 10 }));
     expect(fieldUserMocks.resendFieldUserInvite).toHaveBeenCalledWith({ id: "invite-1", tenantId: "office-1" });
+    expect(fieldUserMocks.requestFieldUserPasswordReset).toHaveBeenCalledWith({
+      userId: "field-1",
+      tenantId: "office-1",
+      resetByUserId: "admin-1",
+    });
     expect(fieldUserMocks.revokeFieldUserInvite).toHaveBeenCalledWith({ inviteId: "invite-1", tenantId: "office-1" });
     expect(fieldUserMocks.setFieldUserActive).toHaveBeenCalledWith({ userId: "field-1", tenantId: "office-1", active: false });
     expect(fieldUserMocks.setFieldUserActive).toHaveBeenCalledWith({ userId: "field-1", tenantId: "office-1", active: true });
+  });
+
+  it("denies non-admin password reset requests", async () => {
+    const { nextError } = await invokeHandlers(
+      findRoute(fieldUserAdminRouter, "post", "/:id/reset-password"),
+      {
+        params: { id: "field-1" },
+        user: { id: "rep-1", role: "rep", activeOfficeId: "office-1", officeId: "office-1" },
+      }
+    );
+
+    expect(nextError).toBeInstanceOf(Error);
+    expect(fieldUserMocks.requestFieldUserPasswordReset).not.toHaveBeenCalled();
   });
 
   it("accepts field invites and sets a token cookie", async () => {
@@ -219,5 +258,24 @@ describe("field user routes", () => {
       lastName: "User",
       email: "field@example.com",
     });
+  });
+
+  it("previews and completes field password reset links", async () => {
+    const preview = await invokeHandlers(
+      findRoute(fieldUserAuthRouter, "get", "/field-password-reset-preview"),
+      { query: { token: "reset-token" } }
+    );
+    expect(fieldUserMocks.previewFieldUserPasswordReset).toHaveBeenCalledWith({ token: "reset-token" });
+    expect(preview.res.body.email).toBe("field@example.com");
+
+    const completed = await invokeHandlers(
+      findRoute(fieldUserAuthRouter, "post", "/field-password-reset"),
+      { body: { token: "reset-token", newPassword: TEST_CREDENTIAL } }
+    );
+    expect(fieldUserMocks.completeFieldUserPasswordReset).toHaveBeenCalledWith({
+      token: "reset-token",
+      newPassword: TEST_CREDENTIAL,
+    });
+    expect(completed.res.body.success).toBe(true);
   });
 });

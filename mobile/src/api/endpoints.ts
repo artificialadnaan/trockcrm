@@ -26,12 +26,14 @@ import type {
   ReportDownloadResponse,
   ShareLinkResponse,
   CreateScorecardResponse,
+  UpdateScorecardResponse,
   RecentScorecardsResponse,
   ProjectScorecardsResponse,
   ScorecardDetailResponse,
   ScorecardDownloadResponse,
+  DealTeamResponse,
 } from "./types";
-import type { ScorecardSubmissionPayload } from "../scorecards/draft";
+import type { ScorecardSubmissionPayload, ScorecardUpdatePayload } from "../scorecards/draft";
 
 /**
  * A `Fetcher` is `apiFetch` already bound to the current token / officeId /
@@ -159,6 +161,32 @@ export const getReportDownload = (f: Fetcher, reportId: string) =>
 export const createScorecard = (f: Fetcher, body: ScorecardSubmissionPayload) =>
   f<CreateScorecardResponse>("/field/scorecards", { method: "POST", body });
 
+export const updateScorecard = (f: Fetcher, id: string, body: ScorecardUpdatePayload) =>
+  f<UpdateScorecardResponse>(`/field/scorecards/${id}`, { method: "PUT", body });
+
+const SCORECARD_EDIT_DISCARD_CHUNK = 100;
+
+/**
+ * Reconcile an append-only edit ledger without assuming it can never exceed the scorecard's current
+ * 100-photo limit. Repeated replace/retry cycles can accumulate more ids, so send bounded sequential
+ * chunks and only let the caller delete its local draft after every chunk succeeds.
+ */
+export async function discardScorecardEditEvidence(
+  f: Fetcher,
+  id: string,
+  clientUploadIds: string[],
+): Promise<{ discarded: number }> {
+  let discarded = 0;
+  for (let offset = 0; offset < clientUploadIds.length; offset += SCORECARD_EDIT_DISCARD_CHUNK) {
+    const result = await f<{ discarded: number }>(`/field/scorecards/${id}/discard-edit-evidence`, {
+      method: "POST",
+      body: { clientUploadIds: clientUploadIds.slice(offset, offset + SCORECARD_EDIT_DISCARD_CHUNK) },
+    });
+    discarded += result.discarded;
+  }
+  return { discarded };
+}
+
 // Recent submitted cards across accessible offices — the Scorecard tab landing.
 export const getRecentScorecards = (f: Fetcher, limit = 50) =>
   f<RecentScorecardsResponse>("/field/scorecards", { query: { limit } });
@@ -173,3 +201,11 @@ export const getScorecard = (f: Fetcher, id: string) =>
 // (view/[id].tsx) turns that into a "still generating" toast rather than a crash.
 export const getScorecardDownload = (f: Fetcher, id: string) =>
   f<ScorecardDownloadResponse>(`/field/scorecards/${id}/download`);
+
+// The deal's assigned Superintendent + PM NAMES — used ONLY to best-effort pre-fill a new scorecard's
+// header. FIELD-scoped route (/field/...): T-Rock Cam authenticates with surface:"field", which CRM auth
+// rejects on /deals routes, so the old /deals/:id/team could never be reached from the app — this field
+// route can. Any failure (network, timeout, a non-browsable deal) is swallowed by the caller and the names
+// simply stay empty, as they were before.
+export const getDealTeam = (f: Fetcher, dealId: string) =>
+  f<DealTeamResponse>(`/field/projects/${dealId}/team`);

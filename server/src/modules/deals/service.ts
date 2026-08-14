@@ -26,7 +26,6 @@ import {
   getDealAtRiskResult,
   isGenuineEstimatingDealStageSlug,
   isGenuineWonDealStageSlug,
-  isOpportunityStageSlug,
   resolveEffectiveStageEnteredAt,
   USER_ROLES,
   type AtRiskResult,
@@ -41,6 +40,7 @@ import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { isCrmUserRole } from "../../middleware/field-auth.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
+import { isUndefinedFunctionError } from "../../lib/db-errors.js";
 import {
   calculateCommissionForDeal,
   mintEstimatorCommissionForDeal,
@@ -71,6 +71,7 @@ import { listDealChangeOrders, softDeleteChangeOrderChildren, sumDealChangeOrder
 import { loadRfpVoteDetail, type RfpVoteView } from "./rfp-vote-detail.js";
 import { isServiceRfp } from "./rfp-vote-service.js";
 import { computeRfpVoteState } from "@trock-crm/shared/lib/rfpVoteState";
+import { isCompleteBillingAddress } from "../../lib/billing-address.js";
 import { recordDescriptionHistoryChange } from "./deal-description-history.js";
 import { buildArchivedDescription } from "./archive-description.js";
 import { LOST_STAGE_SLUGS, TERMINAL_STAGE_SLUGS, WON_STAGE_SLUGS } from "../shared/pipeline-terminal-stages.js";
@@ -100,6 +101,7 @@ import {
 import { resolveWonClosedDateWriteThrough } from "../shared/won-close-date.js";
 import { buildDealSearchCondition } from "../search/unified-search.js";
 import { isRfpVotingEnabled, isStageEntryDateFilterEnabled } from "../../config/feature-flags.js";
+import { getWtdPeriod } from "../../lib/period.js";
 import {
   buildDealFilterBarConditions,
   buildInvolvedRepCondition,
@@ -118,6 +120,15 @@ const contractSignedDateForReporting = sql`COALESCE(contract_signed_at::date, co
 const DEFAULT_PIPELINE_CARDS_PER_STAGE_LIMIT = 100;
 const MAX_PIPELINE_CARDS_PER_STAGE_LIMIT = 1000;
 
+// This is the published definition of the main Deals board's global Won YTD column. Keep the
+// version and hash in step with any change to its membership, date, or value predicate. The
+// snapshot is intentionally recorded only for the stable all-reps YTD board, never for a
+// user-specific scope or a custom date range.
+const DEALS_DASHBOARD_WON_YTD_DEFINITION_VERSION = "2026-07-14-v1";
+const DEALS_DASHBOARD_WON_YTD_DEFINITION_HASH = "deals-dashboard-won-ytd-v1";
+const DEALS_DASHBOARD_WON_YTD_RELEASE_REFERENCE =
+  "P0 remediation 2026-07-14: Main Deals Dashboard Won YTD definition snapshot.";
+
 function sqlStringList(values: readonly string[]) {
   return sql.join(values.map((value) => sql`${value}`), sql`, `);
 }
@@ -130,7 +141,7 @@ function normalizeAtRiskViewerRole(role: string | null | undefined): UserRole | 
   return USER_ROLES.includes(role as UserRole) ? (role as UserRole) : null;
 }
 
-function attachAtRiskResult<T extends {
+export function attachAtRiskResult<T extends {
   stageId?: string | null;
   stageSlug?: string | null;
   bidBoardStageSlug?: string | null;
@@ -171,10 +182,12 @@ function attachAtRiskResult<T extends {
           deal.onHoldAccumulatedSecondsAtStageEntry == null
             ? null
             : Number(deal.onHoldAccumulatedSecondsAtStageEntry),
-        // Forward the close target everywhere so 90+ day targets count as effective hold. The
-        // shorter today-or-future SLA pause remains opt-in for detail-style messaging.
+        // Forward the close target everywhere so 90+ day targets count as effective hold, AND a near
+        // today-or-future postponement ("Move Close Date") quiets the stage-age SLA — the same suppression
+        // the deal-detail view shows as "Postponed". Defaults ON so the list/board/drill-down callers (which
+        // omit options) match detail; a caller can still opt OUT with { applyCloseTargetSuppression: false }.
         expectedCloseDate: deal.expectedCloseDate ?? null,
-        applyCloseTargetSuppression: options?.applyCloseTargetSuppression === true,
+        applyCloseTargetSuppression: options?.applyCloseTargetSuppression !== false,
       },
       normalizeAtRiskViewerRole(viewerRole),
       new Date()
@@ -612,6 +625,59 @@ export function resolvePipelineTerminalDateFilters(input: PipelineTerminalDateFi
   };
 }
 
+function isGlobalCurrentWonYtdBoardRequest(input: {
+  scope: WorkspaceScope | undefined;
+  assignedRepId: string | undefined;
+  wonPeriodFrom: string | null;
+  wonPeriodTo: string | null;
+  wonSince: string | null;
+  wonUntil: string | null;
+  now: Date;
+}) {
+  const ytd = getWtdPeriod("ytd", input.now);
+
+  // `wonPeriod*` is the board-wide window. The terminal Won filters may be absent (the normal
+  // board view) or repeat the same YTD bounds (a Won drill-down); either form still renders the
+  // exact published metric. Reject narrower/wider custom terminal filters so they cannot overwrite
+  // the stable definition snapshot.
+  const terminalBoundsMatchYtd =
+    (input.wonSince == null || input.wonSince === ytd.from) &&
+    (input.wonUntil == null || input.wonUntil === ytd.to);
+
+  return (
+    input.scope === "all" &&
+    !input.assignedRepId &&
+    input.wonPeriodFrom === ytd.from &&
+    input.wonPeriodTo === ytd.to &&
+    terminalBoundsMatchYtd
+  );
+}
+
+async function recordDealsDashboardWonYtdDefinition(
+  tenantDb: TenantDb,
+  won: { count: number; totalValue: number },
+): Promise<void> {
+  try {
+    await tenantDb.execute(sql`
+      SELECT public.record_won_metric_definition_snapshot(
+        current_schema()::text,
+        ${"deals_dashboard.won_ytd"},
+        ${DEALS_DASHBOARD_WON_YTD_DEFINITION_VERSION},
+        ${DEALS_DASHBOARD_WON_YTD_DEFINITION_HASH},
+        ${won.count},
+        ${won.totalValue},
+        ${DEALS_DASHBOARD_WON_YTD_RELEASE_REFERENCE}
+      )
+    `);
+  } catch (error) {
+    // A rolling deploy can serve this API before migration 0184 has added the function. Only that
+    // PostgreSQL "undefined function" compatibility case is safe to ignore; every other failure
+    // must remain visible to callers instead of silently disabling reduction alerts.
+    if (isUndefinedFunctionError(error)) return;
+    throw error;
+  }
+}
+
 async function assertValidProjectType(value: string | null | undefined): Promise<string> {
   const normalized = await resolveActiveProjectTypeValue(value);
   if (!normalized) {
@@ -922,7 +988,10 @@ function buildDealListColumnOrder(
   }
 }
 
-function buildPipelineStageCardsOrder(effectiveValueSql: ReturnType<typeof dealPipelineValueSql>) {
+function buildPipelineStageCardsOrder(
+  effectiveValueSql: ReturnType<typeof dealPipelineValueSql>,
+  options: { prioritizeBillingAttention?: boolean } = {}
+) {
   // Two-tier order: active, non-zero cards on top; on-hold / $0 cards sink to the
   // bottom of the column. This is sort-only — every card still loads (the preview
   // limit is the board's effective-all 1000), nothing is hidden. The tier uses the
@@ -931,7 +1000,24 @@ function buildPipelineStageCardsOrder(effectiveValueSql: ReturnType<typeof dealP
   const tier = aliasedActiveNonZeroDealSortTierSql("deals", effectiveValueSql);
   // Sort before preview limiting so each column shows the actual newest cards,
   // not an arbitrary subset from a tied timestamp group.
-  return [asc(tier), desc(deals.createdAt), desc(deals.id)] as const;
+  return [
+    // This is intentionally a sort-only attention queue: Bid Board may still move a project to Won.
+    // The persisted marker makes it forward-only; pre-release and change-order rows stay normally ordered.
+    ...(options.prioritizeBillingAttention
+      ? [
+          asc(sql`CASE
+            WHEN ${deals.billingContactRequiredAt} IS NOT NULL
+              AND ${deals.billingContactId} IS NULL
+              AND ${deals.isChangeOrder} = false
+            THEN 0
+            ELSE 1
+          END`),
+        ]
+      : []),
+    asc(tier),
+    desc(deals.createdAt),
+    desc(deals.id),
+  ];
 }
 
 function buildStagePageOrder(sort: StagePageSort | undefined, stage: PipelineStageRow) {
@@ -1407,10 +1493,20 @@ async function buildDealWorkspaceScope(
     typeof (input as DealStagePageInput).status === "string" &&
     (input as DealStagePageInput).status !== "" &&
     (input as DealStagePageInput).status !== "any";
+  const isWonTerminalScope =
+    terminalScope &&
+    WON_TERMINAL_STAGE_SLUGS.includes(stage?.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number]);
   if (!terminalScope) {
     if (!explicitStatus) filters.unshift(sql`d.is_active = true`);
   } else {
     filters.push(...terminalDateConditions);
+    // The Deals Dashboard Won column is a live-record figure: `is_active=false` is a soft-delete
+    // marker and must not reappear after a user drills into that column. Keep the explicit inactive
+    // status path as an administrator diagnostic view, but make every normal Won stage-page load use
+    // the same live-row population as the board's count and value.
+    if (isWonTerminalScope && (input as DealStagePageInput).status !== "inactive") {
+      filters.unshift(sql`d.is_active = true`);
+    }
   }
 
   const mineVisibility =
@@ -1581,6 +1677,49 @@ async function validateDealPrimaryContact(
   if (contact.companyId !== companyId) {
     throw new AppError(400, "Primary contact does not belong to the company");
   }
+}
+
+// Billing contact is GLOBAL scope (any CRM contact, not tied to the deal's company), so unlike the primary
+// contact there is no company-membership check — but the contact must still EXIST and be ACTIVE. The FK
+// permits soft-deleted contacts, so without this a stale/archived id (e.g. a search result deleted or merged
+// between select and save) would persist as the deal's billing contact (Codex P2).
+// Exported for the runtime SQL test (deal-billing-contact-validation.runtime.test.ts).
+// Locks + validates the contact is active (throws otherwise) and RETURNS whether its mailing address is
+// complete. It does NOT throw on an incomplete address — the caller decides whether to enforce that, because
+// the forward-only rule (require a complete address only on a NEW assignment) depends on the deal's CURRENT
+// billing contact, which must be read from the LOCKED deal row to avoid a stale-read race (Codex P2).
+export async function validateDealBillingContact(
+  tenantDb: TenantDb,
+  billingContactId?: string | null,
+): Promise<{ addressComplete: boolean }> {
+  if (!billingContactId) {
+    return { addressComplete: true };
+  }
+
+  // FOR UPDATE locks the active contact row for the rest of updateDeal's transaction so a concurrent
+  // soft-delete (deleteContact UPDATEs the row) OR merge (mergeContacts locks the loser row first, then
+  // repoints deals) can't slip an inactive/merged-away id through between this check and the deals write —
+  // whoever grabs the row lock first serializes the other. If the delete/merge wins, this SELECT (is_active
+  // = true) finds nothing and throws; if the PATCH wins, the merge's later deals-repoint sees the committed
+  // reference and moves it to the winner (Codex P2 TOCTOU).
+  const [contact] = await tenantDb
+    .select({
+      id: contacts.id,
+      address: contacts.address,
+      city: contacts.city,
+      state: contacts.state,
+      zip: contacts.zip,
+    })
+    .from(contacts)
+    .where(and(eq(contacts.id, billingContactId), eq(contacts.isActive, true)))
+    .limit(1)
+    .for("update");
+
+  if (!contact) {
+    throw new AppError(400, "Billing contact not found or is inactive");
+  }
+
+  return { addressComplete: isCompleteBillingAddress(contact) };
 }
 
 async function assertSourceLeadLineageAvailable(
@@ -2050,7 +2189,11 @@ export async function getDealDetail(
       billingContactTitle: billingContact.jobTitle,
       billingContactEmail: billingContact.email,
       billingContactPhone: billingContact.phone,
-      billingContactCompany: sql<string | null>`COALESCE(${billingContact.companyName}, (SELECT name FROM companies WHERE id = ${billingContact.companyId}))`,
+      billingContactCompany: sql<string | null>`COALESCE((SELECT name FROM companies WHERE id = ${billingContact.companyId}), ${billingContact.companyName})`,
+      billingContactAddress: billingContact.address,
+      billingContactCity: billingContact.city,
+      billingContactState: billingContact.state,
+      billingContactZip: billingContact.zip,
       projectType: sql<string | null>`COALESCE(${projectTypeConfig.name}, ${deals.projectType})`,
       // The deal's canonical stage slug (deals has no stage_slug column) so the detail header's value
       // resolver (resolveBestEstimate) applies the stage-aware chain — estimating DD-over-bid — and the
@@ -2270,6 +2413,9 @@ export async function createDeal(tenantDb: TenantDb, input: CreateDealInput) {
       expectedCloseDate: input.expectedCloseDate ?? null,
       salesSourceUserId: input.salesSourceUserId ?? null,
       workflowRoute,
+      // Forward-only: normal CRM-created and lead-converted projects must eventually carry a billing
+      // contact. Historical/migration imports deliberately remain exempt and there is no backfill.
+      billingContactRequiredAt: creationPolicy.origin === "migration" ? null : createdAt,
       createdAt,
       updatedAt: createdAt,
     })
@@ -2348,6 +2494,33 @@ export async function updateDeal(
   userId: string,
   officeId?: string,
 ) {
+  // Validate + row-lock the billing contact BEFORE locking the deal row below. deleteContact/mergeContacts
+  // lock the CONTACT row first and then rewrite deals.billing_contact_id (locking the deal), so if we locked
+  // the deal first and the contact second we'd be an ABBA deadlock against them whenever a deal that already
+  // references the contact is PATCHed while that contact is being deleted/merged. Locking contact->deal here
+  // matches their order and breaks the cycle. The FOR UPDATE is held for the rest of the transaction, so the
+  // TOCTOU guard is unchanged, and updates.billingContactId is set verbatim from input.billingContactId (no
+  // normalization), so validating input.billingContactId here is equivalent to the old post-lock call (Codex P2).
+  if (input.billingContactId !== undefined) {
+    // Lock + validate the contact FIRST (contact-before-deal order avoids an ABBA deadlock with deleteContact/
+    // mergeContacts) and capture whether its address is complete. THEN lock the deal row so the "is this a NEW
+    // assignment?" decision reads the AUTHORITATIVE current billing contact — a pre-lock read could be stale
+    // under concurrent PATCHes and let an incomplete contact overwrite a freshly-assigned complete one. The
+    // complete-address requirement is forward-only: enforced only on a genuine change, so re-saving a deal that
+    // keeps its existing (legacy, address-less) billing contact stays valid (Codex P2).
+    const { addressComplete } = await validateDealBillingContact(tenantDb, input.billingContactId ?? null);
+    const [currentDeal] = await tenantDb
+      .select({ billingContactId: deals.billingContactId })
+      .from(deals)
+      .where(eq(deals.id, dealId))
+      .limit(1)
+      .for("update");
+    const isNewBillingContact = (input.billingContactId ?? null) !== (currentDeal?.billingContactId ?? null);
+    if (input.billingContactId != null && isNewBillingContact && !addressComplete) {
+      throw new AppError(400, "Billing contact needs a complete mailing address (street, city, state, and ZIP).");
+    }
+  }
+
   // Lock the deal row before deriving hold timing so stage changes and hold
   // toggles cannot race on a stale snapshot.
   const lockedDealQuery = tenantDb
@@ -2618,6 +2791,9 @@ export async function updateDeal(
       (updates.primaryContactId ?? existing.primaryContactId ?? null) as string | null
     );
   }
+
+  // (Billing contact was validated + row-locked at the top of updateDeal, before the deal lock, to avoid an
+  // ABBA deadlock with deleteContact/mergeContacts — see that block.)
 
   if (existing.isBidBoardOwned) {
     for (const [field, label] of Object.entries(BID_BOARD_OWNED_UPDATE_FIELD_LABELS) as Array<
@@ -2973,17 +3149,21 @@ export async function deleteDeal(
     return null;
   }
 
-  // Non-admins may only archive opportunity-stage deals (admins keep the any-stage escape hatch).
-  if (opts.actorRole !== "admin") {
-    const [stageRow] = await tenantDb
-      .select({ slug: pipelineStageConfig.slug })
-      .from(pipelineStageConfig)
-      .where(eq(pipelineStageConfig.id, existing.stageId))
-      .limit(1);
-    if (!isOpportunityStageSlug(stageRow?.slug)) {
-      throw new AppError(403, "Only opportunity-stage deals can be archived by reps.", "DEAL_ARCHIVE_STAGE_FORBIDDEN");
-    }
-  }
+  // NO STAGE GATE. An owner may archive their own deal at ANY stage.
+  //
+  // This deliberately replaces the earlier "opportunity stage only" rule for reps. That rule made the
+  // control dead on nearly every real deal — `opportunity` and the legacy alias `dd` were the only slugs it
+  // admitted, and `dd` is seeded is_active_pipeline=FALSE — so a rep with work in estimating, contract or
+  // production could not archive any of it.
+  //
+  // ARCHIVING A WON DEAL IS NOW REACHABLE BY A REP, and that is not a neutral act: is_active=false is the
+  // canonical "soft-deleted" marker for a Won deal, which removes it from Won rollups and from the revenue
+  // its commission rows were computed against. Ownership, the mandatory reason, and the admin-only guard on
+  // change orders are what remain between a rep and that outcome. Widening this was an explicit product
+  // decision made with that consequence stated.
+  //
+  // Callers that must NOT be widened: the change-order guard in the DELETE route (admin-only) is separate
+  // and still applies, because voiding a CO removes its commission outright.
 
   const archivedDescription = buildArchivedDescription(existing.description, reason, new Date());
 
@@ -3093,7 +3273,10 @@ export async function getDealsForPipeline(
     .where(inArray(pipelineStageConfig.workflowFamily, ["standard_deal", "service_deal"]))
     .orderBy(asc(pipelineStageConfig.displayOrder));
 
-  const terminalFilters = resolvePipelineTerminalDateFilters(filters);
+  // Resolve all period predicates from one clock so an API request spanning the Central-midnight
+  // boundary cannot compare a YTD board window against a different day's definition snapshot.
+  const pipelineNow = filters?.now ?? new Date();
+  const terminalFilters = resolvePipelineTerminalDateFilters({ ...(filters ?? {}), now: pipelineNow });
   const wonPeriodRange = resolvePipelineWonPeriodRange(filters ?? {});
   const canonicalWonStageId = stages.find((stage) => stage.slug === "won" && stage.isActivePipeline)?.id ?? null;
   const canonicalLostStageId = stages.find((stage) => stage.slug === "lost" && stage.isActivePipeline)?.id ?? null;
@@ -3322,7 +3505,9 @@ export async function getDealsForPipeline(
       .leftJoin(companies, eq(companies.id, deals.companyId))
       .leftJoin(users, eq(users.id, deals.assignedRepId))
       .where(where)
-      .orderBy(...buildPipelineStageCardsOrder(columnEffectiveValue))
+      .orderBy(...buildPipelineStageCardsOrder(columnEffectiveValue, {
+        prioritizeBillingAttention: isWonTerminalStage,
+      }))
       .limit(pipelineCardsPerStageLimit);
     dealsByStage.set(stage.id, stageDeals);
 
@@ -3342,6 +3527,14 @@ export async function getDealsForPipeline(
       // bid-first while the server-computed stage-aware column total shows DD-first — breaking the
       // bucket==sum-of-cards invariant. The card is IN this stage's column, so stage.slug is authoritative.
       stageSlug: stage.slug,
+      // A non-blocking attention flag for the CRM Won column. The requirement marker is set only at
+      // post-release normal-project creation; a deleted billing contact becomes missing again via the
+      // existing FK SET NULL and correctly resurfaces the alert.
+      billingAttentionRequired:
+        WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number]) &&
+        deal.billingContactRequiredAt != null &&
+        deal.billingContactId == null &&
+        deal.isChangeOrder !== true,
     })),
     totalValue: valueByStage.get(stage.id) ?? 0,
     count: activeCountByStage.get(stage.id) ?? 0,
@@ -3358,6 +3551,24 @@ export async function getDealsForPipeline(
       totalCount: totalCountByStage.get(stage.id) ?? 0,
       totalValue: valueByStage.get(stage.id) ?? 0,
     }));
+
+  const currentWonColumn = pipelineColumns.find((column) =>
+    WON_TERMINAL_STAGE_SLUGS.includes(column.stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])
+  );
+  if (
+    currentWonColumn &&
+    isGlobalCurrentWonYtdBoardRequest({
+      scope: filters?.scope,
+      assignedRepId: filters?.assignedRepId,
+      wonPeriodFrom,
+      wonPeriodTo,
+      wonSince: wonSignedDateSince,
+      wonUntil: wonSignedDateUntil,
+      now: pipelineNow,
+    })
+  ) {
+    await recordDealsDashboardWonYtdDefinition(tenantDb, currentWonColumn);
+  }
 
   return { pipelineColumns, terminalStages };
 }

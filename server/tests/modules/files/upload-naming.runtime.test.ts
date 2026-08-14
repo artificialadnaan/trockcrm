@@ -3,7 +3,7 @@ import { drizzle } from "drizzle-orm/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { files } from "@trock-crm/shared/schema";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
-import { requestUploadUrl, uploadNewVersion } from "../../../src/modules/files/service.js";
+import { getPendingUploadMetadata, requestUploadUrl, uploadNewVersion } from "../../../src/modules/files/service.js";
 
 /**
  * REAL-SQL (PGlite) proof of the displayName SEED rule, keyed on the SYNTHETIC-PHOTO sentinel
@@ -53,6 +53,20 @@ async function seed(input: Partial<Parameters<typeof requestUploadUrl>[3]> & {
 }
 
 describe("displayName seed (synthetic-photo sentinel)", () => {
+  it("binds submitted-scorecard edit scope to the server-side pending upload token", async () => {
+    const scorecardEditScope = {
+      scorecardId: "00000000-0000-4000-8000-0000000000c1",
+      clientUploadId: "scorecard-edit-upload-1",
+    };
+    const result = await seed({
+      originalFilename: "field-photo-1699999998.jpg",
+      mimeType: "image/jpeg",
+      category: "photo",
+      scorecardEditScope,
+    });
+    expect(getPendingUploadMetadata(result.uploadToken)?.scorecardEditScope).toEqual(scorecardEditScope);
+  });
+
   it("(i) a web/desktop PHOTO keeps its real filename, NOT the deal-number scheme", async () => {
     const r = await seed({ originalFilename: "Kitchen Damage.jpg", mimeType: "image/jpeg", category: "photo" });
     expect(r.displayName).toBe("Kitchen Damage");

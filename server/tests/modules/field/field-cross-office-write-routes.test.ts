@@ -22,6 +22,12 @@ const photoMocks = vi.hoisted(() => ({
 }));
 vi.mock("../../../src/modules/field/photos-service.js", () => photoMocks);
 
+const scorecardEvidenceMocks = vi.hoisted(() => ({
+  assertScorecardEvidenceUploadAccess: vi.fn(async () => undefined),
+  discardScorecardEditEvidence: vi.fn(async () => ({ discarded: 1 })),
+}));
+vi.mock("../../../src/modules/field/scorecard-evidence-upload.js", () => scorecardEvidenceMocks);
+
 // File-targeted write services (tags / transcription) — mocked so we can assert the route resolves the
 // PHOTO's office (via runFieldFileWrite → resolveWriteOffice("file", …)) and runs the edit there.
 const tagMocks = vi.hoisted(() => ({
@@ -151,6 +157,99 @@ describe("cross-office write re-binding (flag ON)", () => {
 });
 
 describe("write path is single-office when the flag is OFF (default — merge is inert)", () => {
+  it("discard cleanup resolves by scorecard id and passes only the authenticated user's client ids", async () => {
+    const res = await request(buildApp())
+      .post("/api/field/scorecards/scorecard-b/discard-edit-evidence")
+      .send({ clientUploadIds: ["cu-1", "cu-1"] });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ discarded: 1 });
+    expect(xoMocks.resolveWriteOffice).toHaveBeenCalledWith("scorecard", "scorecard-b", "Scorecard not found");
+    expect(scorecardEvidenceMocks.discardScorecardEditEvidence).toHaveBeenCalledWith(
+      expect.anything(),
+      { scorecardId: "scorecard-b", userId: "user-1", clientUploadIds: ["cu-1"] },
+    );
+  });
+
+  it("rejects malformed discard ledgers before resolving an office", async () => {
+    const res = await request(buildApp())
+      .post("/api/field/scorecards/scorecard-b/discard-edit-evidence")
+      .send({ clientUploadIds: [""] });
+
+    expect(res.status).toBe(400);
+    expect(scorecardEvidenceMocks.discardScorecardEditEvidence).not.toHaveBeenCalled();
+  });
+
+  it("upload-url resolves submitted-edit evidence by scorecard id without enabling generic cross-office writes", async () => {
+    xoMocks.enabled = false;
+    const res = await request(buildApp())
+      .post("/api/field/photos/upload-url")
+      .send({
+        scorecardId: "scorecard-b",
+        clientUploadId: "cu-scorecard-1",
+        dealId: "deal-b",
+        contentType: "image/jpeg",
+        sizeBytes: 100,
+        tags: ["safety"],
+      });
+
+    expect(res.status).toBe(200);
+    expect(xoMocks.resolveWriteOffice).toHaveBeenCalledWith("scorecard", "scorecard-b", "Scorecard not found");
+    expect(scorecardEvidenceMocks.assertScorecardEvidenceUploadAccess).toHaveBeenCalledWith(
+      expect.anything(),
+      { scorecardId: "scorecard-b", userId: "user-1", target: { dealId: "deal-b" } },
+    );
+    expect(photoMocks.requestFieldPhotoUploadUrl).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        officeSlug: "atlanta",
+        dealId: "deal-b",
+        scorecardId: "scorecard-b",
+        clientUploadId: "cu-scorecard-1",
+        tags: ["safety"],
+      }),
+    );
+  });
+
+  it("requires an exact client upload id before authorizing submitted-edit evidence", async () => {
+    const res = await request(buildApp())
+      .post("/api/field/photos/upload-url")
+      .send({ scorecardId: "scorecard-b", dealId: "deal-b", contentType: "image/jpeg", sizeBytes: 100 });
+
+    expect(res.status).toBe(400);
+    expect(scorecardEvidenceMocks.assertScorecardEvidenceUploadAccess).not.toHaveBeenCalled();
+    expect(photoMocks.requestFieldPhotoUploadUrl).not.toHaveBeenCalled();
+  });
+
+  it("confirm-upload re-authorizes and resolves submitted-edit evidence by scorecard id", async () => {
+    xoMocks.enabled = false;
+    const res = await request(buildApp())
+      .post("/api/field/photos/confirm-upload")
+      .send({
+        scorecardId: "scorecard-b",
+        clientUploadId: "cu-scorecard-1",
+        dealId: "deal-b",
+        uploadToken: "t",
+        objectKey: "k",
+      });
+
+    expect(res.status).toBe(201);
+    expect(scorecardEvidenceMocks.assertScorecardEvidenceUploadAccess).toHaveBeenCalledWith(
+      expect.anything(),
+      { scorecardId: "scorecard-b", userId: "user-1", target: { dealId: "deal-b" } },
+    );
+    expect(photoMocks.confirmFieldPhotoUpload).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        officeId: "id-atlanta",
+        officeSlug: "atlanta",
+        dealId: "deal-b",
+        scorecardId: "scorecard-b",
+        clientUploadId: "cu-scorecard-1",
+      }),
+    );
+  });
+
   it("upload-url binds the UPLOADER's office even with a cross-office deal target", async () => {
     xoMocks.enabled = false;
     const res = await request(buildApp())
@@ -163,6 +262,21 @@ describe("write path is single-office when the flag is OFF (default — merge is
       expect.anything(),
       expect.objectContaining({ officeSlug: "dallas" }),
     );
+    expect(scorecardEvidenceMocks.assertScorecardEvidenceUploadAccess).not.toHaveBeenCalled();
+  });
+
+  it("confirm-upload remains in the UPLOADER's office when no scorecard scope is supplied", async () => {
+    xoMocks.enabled = false;
+    const res = await request(buildApp())
+      .post("/api/field/photos/confirm-upload")
+      .send({ dealId: "deal-b", uploadToken: "t", objectKey: "k" });
+
+    expect(res.status).toBe(201);
+    expect(photoMocks.confirmFieldPhotoUpload).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ officeId: "id-dallas", officeSlug: "dallas", dealId: "deal-b" }),
+    );
+    expect(scorecardEvidenceMocks.assertScorecardEvidenceUploadAccess).not.toHaveBeenCalled();
   });
 
   it("assign-target does NOT 409 cross-office when the flag is off (no cross-office resolution at all)", async () => {

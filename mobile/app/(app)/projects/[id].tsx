@@ -3,9 +3,10 @@ import { Linking, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View 
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { theme } from "../../../src/theme/theme";
+import { useQuery } from "@tanstack/react-query";
 import { useProjectPhotos, useProjectReports, useProjectScorecards } from "../../../src/query/hooks";
 import { useAuth } from "../../../src/auth/AuthContext";
-import { getReportDownload } from "../../../src/api/endpoints";
+import { getReportDownload, getTranscriptionConfig } from "../../../src/api/endpoints";
 import {
   categoryLabel,
   filterPhotos,
@@ -63,6 +64,15 @@ export default function ProjectDetailScreen() {
   const photosQuery = useProjectPhotos(dealId);
   const reportsQuery = useProjectReports(dealId);
   const scorecardsQuery = useProjectScorecards(dealId);
+  // Only offer voice dictation when transcription is actually configured (OPENAI_API_KEY present);
+  // otherwise the mic button would record and 503 every time. Shared key/staleTime with the capture +
+  // scorecard surfaces so react-query dedupes the probe.
+  const transcribeConfig = useQuery({
+    queryKey: ["transcribe-config"],
+    queryFn: () => getTranscriptionConfig(fetcher),
+    staleTime: 5 * 60_000,
+  });
+  const voiceEnabled = transcribeConfig.data?.configured ?? false;
   const scorecards = scorecardsQuery.data?.scorecards ?? [];
   const allPhotos = useMemo(() => photosQuery.data?.photos ?? [], [photosQuery.data]);
   // Some photo pages failed to load — the gallery still shows what loaded, but report/share are blocked so
@@ -320,26 +330,36 @@ export default function ProjectDetailScreen() {
           ) : scorecards.length === 0 ? (
             <Text style={styles.meta}>No scorecards yet.</Text>
           ) : (
-            scorecards.map((s) => (
-              <Pressable
-                key={s.id}
-                accessibilityRole="button"
-                accessibilityLabel={`Scorecard, week of ${formatShortDate(s.weekOf)}, ${s.totalScore} out of 100, ${s.ratingLabel}`}
-                onPress={() => router.push({ pathname: "/(app)/scorecards/view/[id]", params: { id: s.id } })}
-                style={({ pressed }) => [styles.reportRow, pressed && { opacity: 0.7 }]}
-              >
-                <View style={{ flex: 1, gap: 4 }}>
-                  <Text style={styles.reportTitle} numberOfLines={1}>
-                    Week of {formatShortDate(s.weekOf)}
-                    {s.submittedByName ? ` · ${s.submittedByName}` : ""}
-                    {s.criticalDeficiencyCount > 0
-                      ? ` · ${s.criticalDeficiencyCount} critical ${s.criticalDeficiencyCount === 1 ? "deficiency" : "deficiencies"}`
-                      : ""}
-                  </Text>
-                  <RatingBadge rating={s.rating} label={`${s.totalScore}/100 · ${s.ratingLabel}`} />
-                </View>
-              </Pressable>
-            ))
+            scorecards.map((s) => {
+              // Kind-aware, exactly like the Scorecards submitted list: a leadership card's totalScore is
+              // averageScore*10, so it must render as `X.X/10` (never `90/100`) and be labeled leadership.
+              // The summary DTO carries kind + averageScore; fall back to totalScore/10 defensively so a
+              // missing value never renders "undefined/10". Project rows are unchanged.
+              const isLeadership = s.kind === "leadership";
+              const scoreText = isLeadership
+                ? `${(s.averageScore ?? s.totalScore / 10).toFixed(1)}/10`
+                : `${s.totalScore}/100`;
+              return (
+                <Pressable
+                  key={s.id}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${isLeadership ? "Leadership scorecard" : "Scorecard"}, week of ${formatShortDate(s.weekOf)}, ${scoreText}, ${s.ratingLabel}`}
+                  onPress={() => router.push({ pathname: "/(app)/scorecards/view/[id]", params: { id: s.id } })}
+                  style={({ pressed }) => [styles.reportRow, pressed && { opacity: 0.7 }]}
+                >
+                  <View style={{ flex: 1, gap: 4 }}>
+                    <Text style={styles.reportTitle} numberOfLines={1}>
+                      {isLeadership ? "Leadership · " : ""}Week of {formatShortDate(s.weekOf)}
+                      {s.submittedByName ? ` · ${s.submittedByName}` : ""}
+                      {s.criticalDeficiencyCount > 0
+                        ? ` · ${s.criticalDeficiencyCount} critical ${s.criticalDeficiencyCount === 1 ? "deficiency" : "deficiencies"}`
+                        : ""}
+                    </Text>
+                    <RatingBadge rating={s.rating} label={`${scoreText} · ${s.ratingLabel}`} />
+                  </View>
+                </Pressable>
+              );
+            })
           )}
         </View>
       </ScrollView>
@@ -353,6 +373,7 @@ export default function ProjectDetailScreen() {
         onClose={() => setReportOpen(false)}
         projectId={dealId}
         photos={filtered}
+        voiceEnabled={voiceEnabled}
         onGenerated={(report) => {
           setNotice({ message: `Report "${report.title}" generated.`, tone: "success" });
           void reportsQuery.refetch();

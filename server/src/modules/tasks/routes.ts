@@ -79,6 +79,7 @@ async function prepareTaskAssignmentEmailBestEffort(
     title: string;
     description?: string | null;
     dueDate?: string | Date | null;
+    dealId?: string | null;
   },
   assigneeId: string
 ) {

@@ -5,7 +5,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { createProperty } from "@/hooks/use-properties";
+import { toast } from "sonner";
+import { createProperty, uploadPropertyImage } from "@/hooks/use-properties";
 import { CompanySelector } from "@/components/companies/company-selector";
 import { AddressAutocomplete } from "./address-autocomplete";
 import { useCompanyDetail } from "@/hooks/use-companies";
@@ -36,6 +37,7 @@ export function PropertyCreateDialog({
   const [open, setOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [imageFile, setImageFile] = useState<File | null>(null);
   const [formData, setFormData] = useState({
     companyId: initialCompanyId ?? "",
     name: "",
@@ -63,6 +65,7 @@ export function PropertyCreateDialog({
         notes: "",
       });
       setError(null);
+      setImageFile(null);
     }
   }, [initialCompanyId, open]);
 
@@ -122,8 +125,21 @@ export function PropertyCreateDialog({
         },
         { officeId }
       );
+      // Best-effort: the property is already created, so an image failure must not block creation. On
+      // success, carry the upload response forward so consumers get the cover URLs; on failure, tell the
+      // user (the photo can always be added later from the property page).
+      let createdProperty = result.property;
+      if (imageFile) {
+        try {
+          const uploaded = await uploadPropertyImage(result.property.id, imageFile, { officeId });
+          createdProperty = uploaded.property;
+        } catch (imageErr) {
+          console.warn("Property created but cover photo upload failed", imageErr);
+          toast.error("Property created, but the cover photo failed to upload. You can add it from the property page.");
+        }
+      }
       setOpen(false);
-      onCreated?.(result.property);
+      onCreated?.(createdProperty);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to create property");
     } finally {
@@ -240,6 +256,20 @@ export function PropertyCreateDialog({
               value={formData.notes}
               onChange={(event) => setFormData((prev) => ({ ...prev, notes: event.target.value }))}
             />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="property-image">Cover photo (optional)</Label>
+            <Input
+              id="property-image"
+              type="file"
+              accept="image/*"
+              onChange={(event) => setImageFile(event.target.files?.[0] ?? null)}
+            />
+            {imageFile ? (
+              <p className="text-xs text-slate-500">Selected: {imageFile.name}</p>
+            ) : (
+              <p className="text-xs text-slate-500">Added after the property is created; you can change it anytime.</p>
+            )}
           </div>
           <div className="flex justify-end gap-2">
             <Button type="button" variant="ghost" onClick={() => setOpen(false)}>

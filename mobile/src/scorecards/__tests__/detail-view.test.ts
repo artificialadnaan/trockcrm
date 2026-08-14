@@ -1,10 +1,20 @@
 import {
   deficiencyLabel,
   formatShortDate,
+  scorecardDetailHeaderTitle,
   scorecardDownloadErrorMessage,
+  scorecardLeadershipPhotoSections,
   scorecardPhotoSections,
   scorecardSectionRows,
 } from "../detail-view";
+
+describe("scorecardDetailHeaderTitle", () => {
+  it("preserves the form type while detail data loads and after it resolves", () => {
+    expect(scorecardDetailHeaderTitle(undefined)).toBe("Scorecard");
+    expect(scorecardDetailHeaderTitle({ kind: "project" })).toBe("Project Scorecard");
+    expect(scorecardDetailHeaderTitle({ kind: "leadership" })).toBe("Leadership Scorecard");
+  });
+});
 import type { FieldScorecardItemView, FieldScorecardPhotoView } from "../../api/types";
 
 describe("deficiencyLabel", () => {
@@ -18,19 +28,19 @@ describe("deficiencyLabel", () => {
 });
 
 describe("scorecardSectionRows", () => {
-  it("returns all 7 sections in canonical order with points merged from items", () => {
+  it("returns all 8 V2 sections in canonical order with points merged from items", () => {
     const items: FieldScorecardItemView[] = [
       { sectionKey: "quality", points: 15, note: "minor rework" },
       { sectionKey: "planning_precon", points: 10, note: null },
     ];
     const rows = scorecardSectionRows(items);
     expect(rows.map((r) => r.key)).toEqual([
-      "planning_precon", "jobsite_5s", "schedule", "subcontractor", "quality", "communication", "financial",
+      "planning_precon", "jobsite_5s", "safety", "schedule", "subcontractor", "quality", "communication", "financial",
     ]);
     expect(rows[0]).toMatchObject({ key: "planning_precon", points: 10, maxPoints: 10, note: null });
-    expect(rows[4]).toMatchObject({ key: "quality", points: 15, maxPoints: 20, note: "minor rework" });
+    expect(rows[5]).toMatchObject({ key: "quality", points: 15, maxPoints: 10, note: "minor rework" });
     // A section with no scored item shows 0 / maxPoints and never crashes.
-    expect(rows[1]).toMatchObject({ key: "jobsite_5s", points: 0, maxPoints: 15, note: null });
+    expect(rows[1]).toMatchObject({ key: "jobsite_5s", points: 0, maxPoints: 10, note: null });
   });
 });
 
@@ -47,6 +57,19 @@ describe("scorecardPhotoSections", () => {
   });
   it("returns [] when there are no photos", () => {
     expect(scorecardPhotoSections([])).toEqual([]);
+  });
+});
+
+describe("scorecardLeadershipPhotoSections", () => {
+  it("groups category evidence in leadership order and places Project Summary last", () => {
+    const photos: FieldScorecardPhotoView[] = [
+      { id: "p1", sectionKey: "project_summary", fileId: "f1", url: "u1", caption: null },
+      { id: "p2", sectionKey: "safety", fileId: "f2", url: "u2", caption: "PPE station" },
+      { id: "p3", sectionKey: "quality_control", fileId: "f3", url: "u3", caption: null },
+    ];
+    const sections = scorecardLeadershipPhotoSections(photos);
+    expect(sections.map((section) => section.key)).toEqual(["quality_control", "safety", "project_summary"]);
+    expect(sections.map((section) => section.title)).toEqual(["Quality Control", "Safety", "Project Summary"]);
   });
 });
 

@@ -16,9 +16,11 @@ interface ScrollSyncXProps {
   className?: string;
   /** the scrollable body's classes — the caller controls its height/overflow (e.g. `min-h-0 flex-1 overflow-auto`). */
   bodyClassName?: string;
+  /** Gives the real scroll region an accessible name and makes it reachable by keyboard. */
+  bodyLabel?: string;
 }
 
-export function ScrollSyncX({ children, className, bodyClassName = "overflow-auto" }: ScrollSyncXProps) {
+export function ScrollSyncX({ children, className, bodyClassName = "overflow-auto", bodyLabel }: ScrollSyncXProps) {
   const topRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
   // For the top rail to scroll in lockstep with the body, their scroll RANGES (scrollWidth − clientWidth)
@@ -83,7 +85,14 @@ export function ScrollSyncX({ children, className, bodyClassName = "overflow-aut
       >
         <div style={{ width: contentWidth || undefined, height: 1 }} />
       </div>
-      <div ref={bodyRef} data-testid="scrollsync-body" className={bodyClassName}>
+      <div
+        ref={bodyRef}
+        data-testid="scrollsync-body"
+        className={bodyClassName}
+        role={bodyLabel ? "region" : undefined}
+        aria-label={bodyLabel}
+        tabIndex={bodyLabel ? 0 : undefined}
+      >
         {children}
       </div>
     </div>

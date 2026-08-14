@@ -1,4 +1,4 @@
-import { Clock, GripVertical, MapPin } from "lucide-react";
+import { AlertCircle, Clock, GripVertical, MapPin } from "lucide-react";
 import { DealValue } from "@/components/deals/deal-value";
 import type { Deal } from "@/hooks/use-deals";
 import { cn } from "@/lib/utils";
@@ -58,6 +58,9 @@ export function DecoratedKanbanCard({
   const showSla = !isTerminalStage(stageSlug) && slaDays !== null;
   const isOverSla = showSla && slaDays > 0 && days > slaDays;
   const location = locationLine(deal);
+  // Surface the deal description on the card so users can tell deals apart without drilling in (it is
+  // already shown in the list view). Trimmed + clamped so long text can't inflate the card height.
+  const description = deal.description?.trim() ?? "";
   const ownerColor = getOwnerInitialColor(deal.assignedRepId ?? deal.assignedRepName);
   // The column slug is authoritative (a board row may omit deal.stageSlug). Stamp it ONCE and use the
   // same object for the value AND the badge, so the won-aware hold check and the value can't disagree
@@ -66,19 +69,39 @@ export function DecoratedKanbanCard({
   const dealForValue = { ...deal, stageSlug };
   const now = new Date();
   const effectivelyHeld = isDealValueEffectivelyOnHold(dealForValue, now);
+  const billingAttentionRequired = deal.billingAttentionRequired === true;
+  // The button's aria-label overrides its descendant text, so fold the description into the accessible
+  // name — otherwise screen-reader users can't use it to tell similar cards apart (the whole point of
+  // showing it). Appended after any billing alert; omitted when there is no description.
+  const descriptionSuffix = description ? `. ${description}` : "";
+  const accessibleName = billingAttentionRequired
+    ? `Open deal ${deal.name}: billing contact missing${descriptionSuffix}`
+    : `Open deal ${deal.name}${descriptionSuffix}`;
 
   return (
     <button
       type="button"
       onClick={onClick}
-      className="group flex w-full items-start gap-2 rounded-md border border-slate-200 bg-white p-3 text-left shadow-sm transition-colors hover:border-brand-red/40 hover:bg-brand-red/[0.03] focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red"
-      aria-label={`Open deal ${deal.name}`}
+      className={cn(
+        "group relative flex w-full items-start gap-2 overflow-hidden rounded-md border border-slate-200 bg-white p-3 text-left shadow-sm transition-colors hover:border-brand-red/40 hover:bg-brand-red/[0.03] focus:outline-none focus-visible:ring-2 focus-visible:ring-brand-red",
+        billingAttentionRequired && "border-red-300"
+      )}
+      aria-label={accessibleName}
     >
+      {billingAttentionRequired ? (
+        <span className="absolute inset-x-0 top-0 h-1 bg-red-600" aria-hidden="true" />
+      ) : null}
       <GripVertical
-        className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-300 group-hover:text-slate-500"
+        className={cn("mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-300 group-hover:text-slate-500", billingAttentionRequired && "mt-1")}
         aria-hidden="true"
       />
-      <div className="min-w-0 flex-1 space-y-2">
+      <div className={cn("min-w-0 flex-1 space-y-2", billingAttentionRequired && "pt-1")}>
+        {billingAttentionRequired ? (
+          <span className="inline-flex items-center gap-1 rounded-sm bg-red-50 px-1.5 py-0.5 text-[10px] font-black tracking-[0.12em] text-red-700 uppercase">
+            <AlertCircle className="h-3 w-3" aria-hidden="true" />
+            Billing contact missing
+          </span>
+        ) : null}
         <div className="flex items-start justify-between gap-3">
           <p
             className={cn(
@@ -106,6 +129,16 @@ export function DecoratedKanbanCard({
         <ChangeOrderBadge isChangeOrder={deal.isChangeOrder} compact />
 
         <p className="line-clamp-2 text-sm font-black leading-5 text-slate-950">{deal.name}</p>
+
+        {description ? (
+          <p
+            className="line-clamp-2 text-xs font-medium leading-4 text-slate-500"
+            title={description}
+            data-testid="decorated-kanban-card-description"
+          >
+            {description}
+          </p>
+        ) : null}
 
         <div className="flex items-center gap-2 text-xs text-slate-500">
           <span

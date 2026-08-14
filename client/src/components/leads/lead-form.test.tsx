@@ -77,6 +77,17 @@ const officeMocks = vi.hoisted(() => ({
 const routerMocks = vi.hoisted(() => ({
   navigate: vi.fn(),
 }));
+const salesRepHookMocks = vi.hoisted(() => ({
+  useSalesReps: vi.fn(() => ({
+    salesReps: [
+      { id: "rep-1", displayName: "Rep One" },
+      { id: "rep-2", displayName: "Rep Two" },
+    ],
+    loading: false,
+    error: null,
+    refetch: vi.fn(),
+  })),
+}));
 
 vi.mock("react-router-dom", async () => {
   const actual = await vi.importActual<typeof import("react-router-dom")>("react-router-dom");
@@ -140,16 +151,8 @@ vi.mock("@/hooks/use-files", () => ({
   uploadFile: fileHookMocks.uploadFile,
 }));
 
-vi.mock("@/hooks/use-task-assignees", () => ({
-  useTaskAssignees: () => ({
-    assignees: [
-      { id: "rep-1", displayName: "Rep One" },
-      { id: "rep-2", displayName: "Rep Two" },
-    ],
-    loading: false,
-    error: null,
-    refetch: vi.fn(),
-  }),
+vi.mock("@/hooks/use-sales-reps", () => ({
+  useSalesReps: salesRepHookMocks.useSalesReps,
 }));
 
 vi.mock("@/lib/auth", () => ({
@@ -624,6 +627,14 @@ describe("LeadForm", () => {
     });
   }
 
+  it("loads the CRM-owner roster for the create-form Sales Rep field", () => {
+    renderCreateForm();
+
+    expect(salesRepHookMocks.useSalesReps).toHaveBeenCalledWith("office-dallas", {
+      purpose: "lead-reassignment",
+    });
+  });
+
   async function submitForm() {
     const form = container.querySelector("form");
     expect(form).toBeTruthy();
@@ -826,7 +837,7 @@ describe("LeadForm", () => {
     expect(container.innerHTML).toContain('data-select-value="contact-1"');
   });
 
-  it("renders editable sales rep assignment on the lead summary card", () => {
+  it("keeps the lead summary read-only now that reassignment lives in the detail owner rail", () => {
     authMocks.user.role = "admin";
     const html = renderToStaticMarkup(
       <MemoryRouter>
@@ -859,9 +870,8 @@ describe("LeadForm", () => {
       </MemoryRouter>
     );
 
-    expect(html).toContain("Sales Rep");
-    expect(html).toContain("Rep Two");
-    expect(html).toContain("Save Assignment");
+    expect(html).toContain("Lead Summary");
+    expect(html).not.toContain("Save Assignment");
   });
 
   it("renders the selected project type label in edit mode instead of the raw id", () => {
