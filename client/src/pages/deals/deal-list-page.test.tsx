@@ -3068,4 +3068,105 @@ describe("DealListPage", () => {
 
     expect(html).toContain("No deals in selected range");
   });
+
+  describe("Estimators section in the rep filter", () => {
+    // The bug this exists for: a rep filter matches the OWNER only (buildOwnedRepCondition), so Sidney
+    // Gibson — owner of 0 deals, estimator on 137 — returned an empty board from the only control there
+    // was. The fix is a SECOND dimension, not a loosened rep filter.
+    function rosterWithEstimator() {
+      mocks.useRepRosterMock.mockReturnValue({
+        reps: [
+          { id: "rep-1", displayName: "Brett Jones", group: "sales" },
+          { id: "est-1", displayName: "Sidney Gibson", group: "estimator" },
+        ],
+        loading: false,
+        loadedOfficeId: "office-1",
+      });
+    }
+
+    it("names the selection as estimating, so the trigger cannot read 'All reps' while the board is narrowed", () => {
+      rosterWithEstimator();
+
+      const html = renderPage("/deals?scope=all&estimatorId=est-1", "director");
+
+      expect(html).toContain("Sidney Gibson (estimating)");
+      expect(html).not.toContain(">All reps</");
+    });
+
+    it("sends estimatorId to the board as its own argument, leaving the owner argument unset", () => {
+      rosterWithEstimator();
+
+      renderPage("/deals?scope=all&estimatorId=est-1", "director");
+
+      // 6th = assignedRepId, 8th = estimatorId. The owner slot MUST stay undefined: the server ANDs the
+      // two, so a value in both asks "deals Sidney estimates that Brett also owns" — a question the
+      // control cannot express and the user never asked.
+      expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith(
+        "all",
+        true,
+        expect.any(Object),
+        1000,
+        null,
+        undefined,
+        undefined,
+        "est-1"
+      );
+    });
+
+    it("renders one flat list when no estimators are ticked — the group headings are not worth their space", async () => {
+      mocks.useRepRosterMock.mockReturnValue({
+        reps: [{ id: "rep-1", displayName: "Brett Jones", group: "sales" }],
+        loading: false,
+        loadedOfficeId: "office-1",
+      });
+
+      const view = await renderPageDom("/deals?scope=all", "director");
+
+      expect(view.container.innerHTML).not.toContain("Estimators");
+      expect(view.container.innerHTML).not.toContain("Sales Reps");
+
+      await view.cleanup();
+    });
+
+    it("splits the dropdown into Sales Reps and Estimators once an estimator exists", async () => {
+      rosterWithEstimator();
+
+      const view = await renderPageDom("/deals?scope=all", "director");
+      const trigger = view.container.querySelector<HTMLButtonElement>('button[aria-label="Rep filter"]');
+      await act(async () => {
+        trigger?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+        trigger?.click();
+      });
+
+      const rendered = document.body.innerHTML;
+      expect(rendered).toContain("Sales Reps");
+      expect(rendered).toContain("Estimators");
+
+      await view.cleanup();
+    });
+
+    it("picking an estimator writes ?estimatorId and CLEARS a stale ?assignedRepId", async () => {
+      rosterWithEstimator();
+
+      const view = await renderPageDomWithLocation("/deals?scope=all&assignedRepId=rep-1", "director");
+      const trigger = view.container.querySelector<HTMLButtonElement>('button[aria-label="Rep filter"]');
+      await act(async () => {
+        trigger?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+        trigger?.click();
+      });
+      await act(async () => {
+        const option = Array.from(document.querySelectorAll<HTMLElement>('[role="option"]')).find(
+          (el) => el.textContent?.trim() === "Sidney Gibson"
+        );
+        option?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+        option?.click();
+      });
+
+      expect(lastSearch(view.searches)).toContain("estimatorId=est-1");
+      // The sibling must go. Left behind, the server ANDs them into an intersection nobody asked for.
+      expect(lastSearch(view.searches)).not.toContain("assignedRepId");
+
+      await view.cleanup();
+    });
+  });
 });

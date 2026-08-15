@@ -1651,7 +1651,11 @@ function DealListPageContent({
             value={selectedRosterValue}
             onValueChange={(value) => updateSelectedRep(value ?? "__all__")}
           >
-            <SelectTrigger className="h-10 w-[13rem] bg-white">
+            {/* Named like its neighbours (Period, Won/Lost date range). Without this the control's only
+                accessible name is its current VALUE, so a screen reader announces "Brett Jones" with no
+                indication of what the control does — and now that it filters by two different questions,
+                the value alone is genuinely ambiguous. */}
+            <SelectTrigger className="h-10 w-[13rem] bg-white" aria-label="Rep filter">
               <SelectValue placeholder="All reps">{selectedRepLabel}</SelectValue>
             </SelectTrigger>
             <SelectContent>

@@ -25,7 +25,7 @@ const mocks = vi.hoisted(() => ({
   // `reps` is typed rather than left to infer from the empty literal — otherwise it widens to never[] and
   // any test supplying an actual roster fails to compile.
   useRepRosterMock: vi.fn(() => ({
-    reps: [] as Array<{ id: string; displayName: string }>,
+    reps: [] as Array<{ id: string; displayName: string; group?: "sales" | "estimator" }>,
     loading: false,
     error: null as string | null,
     loadedOfficeId: null as string | null,
@@ -730,6 +730,32 @@ describe("DealsListSection", () => {
 
     expect(html).toContain("Cross Office Owner");
     expect(html).not.toContain("Selected rep");
+  });
+
+  it("omits estimators from the owner control — picking one could only ever return nothing", async () => {
+    // This control writes an OWNER filter (effectiveAssignedRepId -> assignedRepId). A pure estimator
+    // owns no deals, so offering them here reproduces exactly the bug the Estimators group was added to
+    // fix on the deals dashboard: a name you can pick that always returns an empty list. The estimator
+    // dimension lives on the dashboard header, which writes ?estimatorId instead.
+    mocks.useRepRosterMock.mockReturnValue({
+      reps: [
+        // Deliberately NOT the fixture's "Brett Jones" — that name is already on the deal row, so it
+        // would satisfy the positive assertion even if the dropdown rendered nothing at all.
+        { id: "rep-7", displayName: "Chase Kelly", group: "sales" },
+        { id: "est-1", displayName: "Sidney Gibson", group: "estimator" },
+      ],
+      loading: false,
+      error: null,
+      loadedOfficeId: null,
+      refetch: vi.fn(),
+    });
+
+    // The ui/select module is mocked at the top of this file, so every SelectItem renders inline as a
+    // plain div — the offered options are in the markup without opening anything.
+    const html = render();
+
+    expect(html).toContain("Chase Kelly");
+    expect(html).not.toContain("Sidney Gibson");
   });
 
   it("forwards updatedFrom and updatedTo into the CSV export request", async () => {
