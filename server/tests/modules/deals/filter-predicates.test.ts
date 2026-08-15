@@ -21,6 +21,7 @@ const text = (value: SQL | undefined) => (value ? dialect.sqlToQuery(value).sql.
 import {
   UNASSIGNED_FILTER_SENTINEL,
   buildAssignedRepPredicate,
+  buildEstimatorPredicate,
   buildAliasedInvolvedRepSql,
   buildAliasedOwnedRepSql,
   buildAliasedInvolvedRepInListSql,
@@ -54,6 +55,32 @@ describe("assigned-rep predicate", () => {
     expect(sql).toContain("is null");
     expect(sql).not.toContain("estimator_user_id");
     expect(sql).not.toContain(UNASSIGNED_FILTER_SENTINEL);
+  });
+});
+
+describe("estimator predicate", () => {
+  it("omits when unset", () => {
+    expect(buildEstimatorPredicate({})).toBeUndefined();
+  });
+  it("omits for an empty string rather than matching everyone with no estimator", () => {
+    expect(buildEstimatorPredicate({ estimatorId: "" })).toBeUndefined();
+  });
+  it("matches estimator_user_id and never consults the owner column", () => {
+    // The sibling of the rep filter, and deliberately a SEPARATE dimension. Asking "who is estimating
+    // this" is a different question from "whose deal is this"; the two are ANDed when both are sent, so
+    // an owner arm leaking in here would quietly turn an estimator filter into an owner-or-estimator one
+    // — the exact widening buildOwnedRepCondition exists to prevent.
+    const sql = text(buildEstimatorPredicate({ estimatorId: "user-1" }));
+    expect(sql).toContain("estimator_user_id");
+    expect(sql).not.toContain("assigned_rep_id");
+  });
+  it("does NOT special-case the Unassigned sentinel — it stays a plain equality", () => {
+    // No sentinel arm on purpose. Mapping it to estimator_user_id IS NULL would answer a question nobody
+    // asked, and on this dataset that is most of the board. Falling through to an equality against a value
+    // no row holds is the safe direction: a no-match, never a widening.
+    const sql = text(buildEstimatorPredicate({ estimatorId: UNASSIGNED_FILTER_SENTINEL }));
+    expect(sql).toContain("estimator_user_id");
+    expect(sql).not.toContain("is null");
   });
 });
 

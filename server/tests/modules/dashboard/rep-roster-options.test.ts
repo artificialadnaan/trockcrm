@@ -67,9 +67,11 @@ describe("getRepRosterOptions", () => {
       { id: "u2", display_name: "Derek Barr" },
     ]);
 
+    // A row with no `grp` maps to "sales", not to undefined — the sales leg is the default so a shape the
+    // mapper does not recognise still lands in a section the client renders.
     expect(result).toEqual([
-      { id: "u1", displayName: "Colby Burling" },
-      { id: "u2", displayName: "Derek Barr" },
+      { id: "u1", displayName: "Colby Burling", group: "sales" },
+      { id: "u2", displayName: "Derek Barr", group: "sales" },
     ]);
   });
 
@@ -109,7 +111,28 @@ describe("getRepRosterOptions", () => {
   it("orders case-insensitively so a badly-cased row cannot form its own block", async () => {
     const { sql } = await runRoster([]);
 
-    expect(sql).toContain("order by lower(u.display_name)");
+    expect(sql).toContain("lower(display_name) asc");
+  });
+
+  it("wraps the UNION in a subquery so the ORDER BY may use an expression", async () => {
+    // Postgres restricts a TOP-LEVEL ORDER BY on a UNION to bare result-column names: "ORDER BY grp DESC,
+    // lower(display_name)" applied straight to the union fails with "Only result column names can be used,
+    // not expressions or functions". The wrapper is what makes the ordering legal, and nothing else in the
+    // suite would notice its removal — tsc cannot see inside the template and every other test here runs
+    // against a MOCKED execute that never parses the SQL. This assertion is the only guard.
+    const { sql } = await runRoster([], "office-1");
+
+    // Adjacency is the point: the ORDER BY must sit outside the closing paren of the wrapper.
+    expect(sql).toContain(") roster order by");
+    expect(sql).toContain("select id, display_name, grp from (");
+  });
+
+  it("puts sales before estimators, then orders by name within each section", async () => {
+    const { sql } = await runRoster([], "office-1");
+
+    // 'sales' > 'estimator' lexically, so DESC is what places the sales block first. An ASC here would
+    // silently invert the two sections.
+    expect(sql).toContain("order by grp desc, lower(display_name) asc, id asc");
   });
 
   it("bounds the owner leg to this tenant's deals only", async () => {
@@ -127,13 +150,63 @@ describe("getRepRosterOptions", () => {
     } as any;
 
     await expect(getRepRosterOptions(tenantDb, "office-1")).resolves.toEqual([
-      { id: "u1", displayName: "Chase Kelly" },
+      { id: "u1", displayName: "Chase Kelly", group: "sales" },
     ]);
   });
 
   it("never emits undefined for a row missing a display name", async () => {
     const { result } = await runRoster([{ id: "u1", display_name: null }]);
 
-    expect(result).toEqual([{ id: "u1", displayName: "" }]);
+    expect(result).toEqual([{ id: "u1", displayName: "", group: "sales" }]);
+  });
+
+  it("selects estimators by the flag and bounds the estimator CTE to this tenant", async () => {
+    const { sql } = await runRoster([], "office-1");
+
+    expect(sql).toContain("u.estimates_jobs = true");
+    // The estimator equivalent of the owner CTE — deals is a TENANT table, so this is bounded by schema
+    // isolation rather than by an office column that does not exist there.
+    expect(sql).toContain("select distinct d.estimator_user_id");
+    expect(sql).toContain("'estimator' as grp");
+  });
+
+  it("enforces SALES WINS in SQL — an estimator who also sells is excluded from the estimator leg", async () => {
+    // Adnaan's decision: one person appears in exactly ONE section, and when both flags are ticked Sales
+    // wins. Enforcing it here rather than de-duplicating in JS is deliberate — it means no caller can
+    // reassemble a double listing. He accepted, knowing it makes Timothy Mitchell's 97 and Colby Burling's
+    // 54 estimated-for-others deals unreachable through this control.
+    const { sql } = await runRoster([], "office-1");
+
+    // Adjacency again: "contains generates_sales = false" alone passes just as happily under an OR, which
+    // is the mutation that puts a sales rep in both sections at once.
+    expect(sql).toContain("u.estimates_jobs = true and u.generates_sales = false");
+    expect(sql).not.toContain("u.estimates_jobs = true or u.generates_sales = false");
+  });
+
+  it("widens estimator office membership by estimating here, mirroring the owner leg", async () => {
+    // Membership still comes from the FLAG; this only lets someone estimating in this tenant qualify
+    // without an office row, exactly as owner_rows does on the sales side.
+    const { sql } = await runRoster([], "office-1");
+
+    expect(sql).toContain("est_rows.rep_id is not null");
+  });
+
+  it("maps the estimator group through from the SQL, not from a JS re-derivation", async () => {
+    const { result } = await runRoster([
+      { id: "u1", display_name: "Timothy Mitchell", grp: "sales" },
+      { id: "u2", display_name: "Sidney Gibson", grp: "estimator" },
+    ]);
+
+    expect(result).toEqual([
+      { id: "u1", displayName: "Timothy Mitchell", group: "sales" },
+      { id: "u2", displayName: "Sidney Gibson", group: "estimator" },
+    ]);
+  });
+
+  it("treats an unrecognised grp as sales rather than dropping the person", async () => {
+    // The client renders two sections; a group it does not know would put this row in neither.
+    const { result } = await runRoster([{ id: "u1", display_name: "Alex Koch", grp: "something-else" }]);
+
+    expect(result).toEqual([{ id: "u1", displayName: "Alex Koch", group: "sales" }]);
   });
 });
