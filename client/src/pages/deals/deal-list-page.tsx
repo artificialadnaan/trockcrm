@@ -1101,7 +1101,15 @@ function DealListPageContent({
       // reports the old list with loading=false before its reload effect fires). Once settled — even to an
       // empty or errored list — drop just the rep and still restore the office-independent timeframe.
       if (repOptionsLoading || repOptionsOfficeId !== effectiveOfficeId) return;
-      if (!repOptions.some((rep) => rep.id === stored.assignedRepId)) delete stored.assignedRepId;
+      // GROUP-AWARE, not just id membership. Plain id membership was sufficient while this roster was
+      // sales-only — the two were the same test. Adding the Estimators group broke that equivalence: a
+      // saved owner who has since been reclassified (generates_sales off, estimates_jobs on) is still IN
+      // the roster, so an id check passes and restores ?assignedRepId, while their only menu value is now
+      // `est:<id>`. The board ends up narrowed by an owner filter the dropdown cannot display or clear.
+      // A missing group counts as sales (RepFilterOption.group), so appended off-roster ids still pass.
+      if (!repOptions.some((rep) => rep.id === stored.assignedRepId && rep.group !== "estimator")) {
+        delete stored.assignedRepId;
+      }
     }
     if (stored.estimatorId) {
       // The same settle-then-validate discipline, but against the ESTIMATOR group specifically. Persisting

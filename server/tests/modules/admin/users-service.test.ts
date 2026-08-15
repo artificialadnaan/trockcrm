@@ -137,4 +137,39 @@ describe("listUsers", () => {
     expect(tx.update).toHaveBeenCalledOnce();
     expect(tx.insert).not.toHaveBeenCalled();
   });
+
+  it("refuses a role change into field_contractor before any flag guard can matter (Codex #1067 P2)", async () => {
+    // Codex suggested re-running the roster-flag guards on a role-only PATCH, on the theory that
+    // `PATCH { role: "field_contractor" }` skips them and strands estimates_jobs=true on a contractor.
+    // That transition never lands: evaluateUpdateUserGuards 403s ANY move into or out of field_contractor
+    // (isFieldContractorTransition), because contractors are managed by the field-invite flow. This test
+    // pins the guard that makes a re-validation block unnecessary — if this 403 is ever relaxed, the flag
+    // invariant needs a role-change arm and this test is where that will surface.
+    const existingEstimator = {
+      id: "user-2",
+      email: "estimator@example.com",
+      displayName: "Sidney Gibson",
+      role: "rep",
+      officeId: "office-1",
+      reportsTo: null,
+      isActive: true,
+      generatesSales: false,
+      estimatesJobs: true,
+      notificationPrefs: {},
+      createdAt: "2026-04-21T12:00:00.000Z",
+      updatedAt: "2026-04-21T12:00:00.000Z",
+    };
+
+    const tx = {
+      select: vi.fn().mockImplementationOnce(() => createSelectChain([existingEstimator])),
+      update: vi.fn(),
+      insert: vi.fn(),
+    };
+    dbMocks.transaction.mockImplementationOnce(async (callback: (trx: typeof tx) => Promise<unknown>) => callback(tx));
+
+    await expect(updateUser("user-2", { role: "field_contractor" }, "admin-1")).rejects.toThrow(
+      /Field contractors are managed in the field-user flow/
+    );
+    expect(tx.update).not.toHaveBeenCalled();
+  });
 });

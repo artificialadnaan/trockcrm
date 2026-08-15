@@ -3284,6 +3284,49 @@ describe("DealListPage", () => {
       await view.cleanup();
     });
 
+    it("releases a saved OWNER who has since become an estimator (Codex #1067 P2)", async () => {
+      // A regression this PR created: the owner guard checked plain id membership, which was the same
+      // test as "is on the sales roster" only while the roster WAS sales-only. Widening it to include
+      // estimators broke that equivalence — the id still matches, so the owner filter restores, while the
+      // dropdown now offers this person solely as `est:<id>`. The board ends up narrowed by an owner
+      // filter the control can neither display nor clear.
+      mocks.useRepRosterMock.mockReturnValue({
+        reps: [
+          { id: "rep-1", displayName: "Brett Jones", group: "sales" },
+          { id: "rep-9", displayName: "Nina Nine", group: "estimator" },
+        ],
+        loading: false,
+        loadedOfficeId: "office-1",
+      });
+      window.localStorage.setItem(
+        "deals-view-preference:user-1:office-1",
+        JSON.stringify({ assignedRepId: "rep-9", period: "ytd" })
+      );
+
+      const view = await renderPageDomWithLocation("/deals?scope=all", "director");
+
+      expect(view.searches.every((s) => !s.includes("assignedRepId=rep-9"))).toBe(true);
+      expect(view.searches.some((s) => s.includes("period=ytd"))).toBe(true);
+
+      await view.cleanup();
+    });
+
+    it("still restores a saved owner who remains on the sales side", async () => {
+      // The guard must not become a blanket reject: a missing group counts as sales, so appended
+      // off-roster ids and ordinary sales reps both still hydrate.
+      rosterWithEstimator();
+      window.localStorage.setItem(
+        "deals-view-preference:user-1:office-1",
+        JSON.stringify({ assignedRepId: "rep-1" })
+      );
+
+      const view = await renderPageDomWithLocation("/deals?scope=all", "director");
+
+      expect(view.searches.some((s) => s.includes("assignedRepId=rep-1"))).toBe(true);
+
+      await view.cleanup();
+    });
+
     it("restores a saved estimator who IS still in the Estimators group", async () => {
       rosterWithEstimator();
       window.localStorage.setItem(

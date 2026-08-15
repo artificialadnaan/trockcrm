@@ -214,11 +214,14 @@ export function UsersPage() {
       // lists each person exactly once and the estimator leg of the UNION requires generates_sales = false,
       // so ticking this on someone who also generates sales moves nothing in the filter. Say that here
       // rather than let an admin tick it, look at the dropdown and conclude the checkbox does nothing.
+      // Sales-wins cuts BOTH ways, so the untick branch needs the same caveat as the tick branch. For
+      // someone who also generates sales the estimator leg never listed them, so "Removed from the
+      // Estimators filter" would confirm a roster change that never happened.
       toast.success(
-        estimatesJobs
-          ? "Removed from the Estimators filter"
-          : generatesSales
-            ? "Saved — they stay under Sales in the filter, which lists each person once"
+        generatesSales
+          ? "Saved — they stay under Sales in the filter, which lists each person once"
+          : estimatesJobs
+            ? "Removed from the Estimators filter"
             : "Now listed under Estimators in the deals dashboard filter"
       );
     } catch (err) {
@@ -659,7 +662,7 @@ export function UsersPage() {
         bodyClassName="overflow-x-auto overscroll-x-contain"
         bodyLabel="Users table. Scroll horizontally to view all user details and actions."
       >
-        <table className="w-full min-w-[84rem] caption-bottom text-sm">
+        <table className="w-full min-w-[90rem] caption-bottom text-sm">
           <TableHeader>
             <TableRow>
               <TableHead className="w-10">

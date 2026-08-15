@@ -421,6 +421,12 @@ export async function updateUser(
       assertEstimatesJobsAllowedForRole(input.estimatesJobs, nextRole ?? existingUser.role);
       updates.estimatesJobs = input.estimatesJobs;
     }
+    // NO role-change re-validation of the flags here, deliberately. Both asserts above reject exactly one
+    // role — field_contractor — and evaluateUpdateUserGuards has already rejected ANY transition into or
+    // out of that role with a 403 (isFieldContractorTransition), because contractors are created and
+    // managed solely by the field-invite flow. A role-only PATCH therefore cannot strand a true flag on a
+    // contractor through this path, and a re-validation block here would be unreachable. See the test
+    // pinning that 403, which is what makes this omission safe rather than an oversight.
     if (input.notificationPrefs !== undefined) updates.notificationPrefs = input.notificationPrefs;
 
     const hasBaseUserPatch = Object.keys(updates).length > 0;
