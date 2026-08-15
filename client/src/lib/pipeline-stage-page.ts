@@ -3,6 +3,10 @@ import { normalizeDealStageSlug, workflowRouteFromStage } from "@/lib/pipeline-o
 
 export interface StagePageFilters {
   assignedRepId?: string;
+  /** Deals this person is ESTIMATING, inherited from the board. Deliberately NOT in
+   *  STAGE_ROUTE_FILTER_KEYS: those are translated into the bar's fb_ namespace and stripped on mount, and
+   *  the bar has no estimator dimension — listing it there would DELETE the filter instead of applying it. */
+  estimatorId?: string;
   estimateSentFrom?: string;
   estimateSentTo?: string;
   staleOnly: boolean;
@@ -101,6 +105,7 @@ export function normalizeStagePageQuery(input: Record<string, string | undefined
     search: input.search?.trim() ?? "",
     filters: {
       assignedRepId: input.assignedRepId,
+      estimatorId: input.estimatorId,
       estimateSentFrom,
       estimateSentTo: input.estimateSentTo ?? input.estimate_sent_until ?? estimateSentPresetRangeValue?.to,
       staleOnly: input.staleOnly === "true",

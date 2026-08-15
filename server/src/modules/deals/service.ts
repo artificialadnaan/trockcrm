@@ -110,6 +110,7 @@ import {
   buildOwnedRepCondition,
   buildEstimatorCondition,
   buildAliasedOwnedRepSql,
+  buildAliasedEstimatorSql,
   aliasedStageAwareEffectiveDealValueSql,
   aliasedEffectiveStageAgeDaysSql,
   UNASSIGNED_FILTER_SENTINEL,
@@ -981,6 +982,8 @@ export interface DealStagePageInput extends DealBoardInput {
   sort?: StagePageSort;
   search?: string;
   assignedRepId?: string;
+  /** Deals this person is ESTIMATING — the drill-down twin of the board's estimatorId. */
+  estimatorId?: string;
   estimateSentFrom?: string;
   estimateSentTo?: string;
   regionId?: string;
@@ -4134,6 +4137,12 @@ export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePage
     // The Unassigned FilterBar option sends the sentinel; map it to IS NULL like the list (getDeals /
     // buildAssignedRepPredicate), not a literal equality that would error on the UUID column (Codex P2).
     conditions.push(buildAliasedOwnedRepSql("d", input.assignedRepId));
+  }
+  if (input.estimatorId) {
+    // The estimator dimension follows the board into its drill-down. Without this a stage column counted
+    // under "Sidney is estimating" opens a stage page listing every estimator's deals, so the page total
+    // disagrees with the card that opened it.
+    conditions.push(buildAliasedEstimatorSql("d", input.estimatorId));
   }
   if (input.regionId) {
     conditions.push(

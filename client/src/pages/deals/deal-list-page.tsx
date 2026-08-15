@@ -623,6 +623,10 @@ export function buildDealsPageKpiDrilldownPath(
       if (!value) continue;
       if (
         key === "assignedRepId" ||
+        // The estimator dimension travels with the owner one. A card counted under "Sidney's estimated
+        // deals" must open a destination holding exactly those; forwarding only assignedRepId widens the
+        // drill-down back to every estimator and the destination stops reconciling with the card.
+        key === "estimatorId" ||
         // Office context is URL-driven: api() reads ?officeId from window.location.search and sends it as
         // x-office-id. A KPI card that drops it silently returns a cross-office viewer to their ACTIVE
         // office, so the drill-down lists a DIFFERENT office's deals than the card counted. Forward it on
@@ -1089,6 +1093,18 @@ function DealListPageContent({
       if (repOptionsLoading || repOptionsOfficeId !== effectiveOfficeId) return;
       if (!repOptions.some((rep) => rep.id === stored.assignedRepId)) delete stored.assignedRepId;
     }
+    if (stored.estimatorId) {
+      // The same settle-then-validate discipline, but against the ESTIMATOR group specifically. Persisting
+      // this param without the check would re-apply a saved estimator after they are deactivated, moved out
+      // of the office, or simply have "Estimates Jobs" unticked — leaving the board narrowed to someone the
+      // dropdown no longer offers, with no visible control to clear it. Checking the GROUP (not just id
+      // membership) also releases the pick when Sales-wins moves them: ticking "Generates Sales" makes them
+      // a Sales entry, and a saved `?estimatorId` for them would otherwise still ask the estimator question.
+      if (repOptionsLoading || repOptionsOfficeId !== effectiveOfficeId) return;
+      if (!repOptions.some((rep) => rep.id === stored.estimatorId && rep.group === "estimator")) {
+        delete stored.estimatorId;
+      }
+    }
     const next = applyStoredDealView(searchParams.toString(), stored);
     if (next !== null) setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams, userId, effectiveOfficeId, scope, repOptions, repOptionsLoading, repOptionsOfficeId]);
@@ -1150,9 +1166,17 @@ function DealListPageContent({
   // The nested FilterBar keys off its OWN dl_-prefixed param, not the header's, so it needs its own
   // reconciliation — a bookmarked dl_assignedRepId is exactly where the "All reps" mislabel showed up.
   const listRepFilterId = searchParams.get("dl_assignedRepId") || undefined;
+  // SALES ONLY, like every other control whose value maps to the OWNER dimension. This bar writes
+  // `dl_assignedRepId`, so offering a pure estimator here would search for deals they OWN and hand back an
+  // empty list — the very bug the Estimators group exists to fix, reintroduced one control over. The
+  // header dropdown is the only place the estimator dimension is selectable.
+  const salesOnlyRoster = useMemo(
+    () => repOptions.filter((rep) => rep.group !== "estimator"),
+    [repOptions]
+  );
   const listRepOptions = useMemo(
-    () => buildRepFilterOptions(repOptions, listRepFilterId, (id) => assigneeNameById.get(id)),
-    [repOptions, listRepFilterId, assigneeNameById]
+    () => buildRepFilterOptions(salesOnlyRoster, listRepFilterId, (id) => assigneeNameById.get(id)),
+    [salesOnlyRoster, listRepFilterId, assigneeNameById]
   );
   // Split once, rendered as two labelled groups. The server already orders sales-then-estimator and puts
   // each person in exactly one group, so this only partitions — it never decides membership.
@@ -1222,6 +1246,11 @@ function DealListPageContent({
     const next = new URLSearchParams(searchParams);
     next.set("scope", "mine");
     next.delete("assignedRepId");
+    // The estimator sibling must go with it. selectedEstimatorFilter suppresses it while the URL still
+    // says scope=team, but this rewrite flips scope to mine — so a retained estimatorId springs back to
+    // life on the next render and silently narrows the Mine board, the exact stale-filter behaviour the
+    // owner half of this coercion exists to prevent.
+    next.delete("estimatorId");
     setSearchParams(next, { replace: true });
   }, [requestedScope, searchParams, setSearchParams]);
 

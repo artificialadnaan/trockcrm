@@ -1595,6 +1595,14 @@ describe("DealListPage", () => {
     expect(buildDealsPageKpiDrilldownPath("at_risk", "mine")).toBe(
       "/deals?filter=at_risk&scope=mine"
     );
+    // Codex #1067 P1: the estimator dimension travels with the owner one. Forwarding only assignedRepId
+    // widened every KPI drill-down back to all estimators, so a card counted under "Sidney is estimating"
+    // opened a destination that no longer reconciled with it.
+    expect(
+      buildDealsPageKpiDrilldownPath("active_pipeline", "all", null, {
+        queryParams: new URLSearchParams("estimatorId=est-1&search=roof"),
+      })
+    ).toBe("/deals?filter=active_pipeline&scope=all&estimatorId=est-1");
     // SLA drill-downs (at_risk / stale) must DROP ?period even when the page URL carries it: there period
     // becomes updatedFrom/updatedTo (matchesUpdatedRange), a different axis than the SLA card count, so a
     // perioded at-risk link would show a different cohort than the card (Codex #600 P2). Rep still preserved.
@@ -3165,6 +3173,78 @@ describe("DealListPage", () => {
       expect(lastSearch(view.searches)).toContain("estimatorId=est-1");
       // The sibling must go. Left behind, the server ANDs them into an intersection nobody asked for.
       expect(lastSearch(view.searches)).not.toContain("assignedRepId");
+
+      await view.cleanup();
+    });
+
+    it("drops a parked ?estimatorId when a Team bookmark is coerced to Mine (Codex #1067 P2)", async () => {
+      rosterWithEstimator();
+
+      // Team is unsupported, so selectedEstimatorFilter suppresses the value on the first render — but the
+      // coercion effect then rewrites scope to Mine. A retained estimatorId springs back to life under the
+      // new scope and silently narrows the board, which is exactly what the owner half of this coercion
+      // already prevents for ?assignedRepId.
+      const view = await renderPageDomWithLocation("/deals?scope=team&estimatorId=est-1", "director");
+
+      const finalParams = new URLSearchParams(lastSearch(view.searches));
+      expect(finalParams.get("scope")).toBe("mine");
+      expect(finalParams.has("estimatorId")).toBe(false);
+
+      await view.cleanup();
+    });
+
+    it("keeps estimators OUT of the nested list bar, which writes an owner param (Codex #1067 P2)", () => {
+      rosterWithEstimator();
+
+      renderPage("/deals?scope=all", "director");
+
+      const props = mocks.dealsListSectionMock.mock.calls[
+        mocks.dealsListSectionMock.mock.calls.length - 1
+      ][0] as { filterBar: { options: { reps: Array<{ value: string; label: string }> } } };
+      const labels = props.filterBar.options.reps.map((rep) => rep.label);
+      // The bar's Rep dimension writes dl_assignedRepId — an OWNER filter. Offering Sidney here searches
+      // for deals she OWNS (zero) and reproduces the empty-result bug one control over.
+      expect(labels).toContain("Brett Jones");
+      expect(labels).not.toContain("Sidney Gibson");
+    });
+
+    it("releases a saved estimator who is no longer in the Estimators group (Codex #1067 P2)", async () => {
+      // "Estimates Jobs" unticked, the person deactivated, or Sales-wins moving them across: the roster no
+      // longer offers them, so a restored preference would narrow the board to a selection with no visible
+      // control to clear it. The roster below deliberately still CONTAINS est-1 — as a sales entry — so the
+      // assertion proves the guard checks the GROUP, not mere id membership.
+      mocks.useRepRosterMock.mockReturnValue({
+        reps: [
+          { id: "rep-1", displayName: "Brett Jones", group: "sales" },
+          { id: "est-1", displayName: "Sidney Gibson", group: "sales" },
+        ],
+        loading: false,
+        loadedOfficeId: "office-1",
+      });
+      window.localStorage.setItem(
+        "deals-view-preference:user-1:office-1",
+        JSON.stringify({ estimatorId: "est-1", period: "ytd" })
+      );
+
+      const view = await renderPageDomWithLocation("/deals?scope=all", "director");
+
+      expect(view.searches.every((s) => !s.includes("estimatorId=est-1"))).toBe(true);
+      // The office-independent timeframe still restores — only the stale person is dropped.
+      expect(view.searches.some((s) => s.includes("period=ytd"))).toBe(true);
+
+      await view.cleanup();
+    });
+
+    it("restores a saved estimator who IS still in the Estimators group", async () => {
+      rosterWithEstimator();
+      window.localStorage.setItem(
+        "deals-view-preference:user-1:office-1",
+        JSON.stringify({ estimatorId: "est-1" })
+      );
+
+      const view = await renderPageDomWithLocation("/deals?scope=all", "director");
+
+      expect(view.searches.some((s) => s.includes("estimatorId=est-1"))).toBe(true);
 
       await view.cleanup();
     });

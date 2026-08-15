@@ -976,6 +976,41 @@ describe("listDealStagePage", () => {
     expect(countQueryText).toContain("rep-team-2");
   });
 
+  it("applies estimatorId so a drill-down keeps the board's estimator filter (Codex #1067 P1)", async () => {
+    // The board forwards ?estimatorId into /deals/stages/:id. Without this the stage page listed every
+    // estimator's deals, so its total disagreed with the card that opened it — the same reconciliation
+    // break the owner filter avoids by being applied here.
+    dbState.responses = [
+      [{ id: "stage-estimating", slug: "estimating", name: "Estimating", displayOrder: 4, isTerminal: false }],
+    ];
+
+    const tenantDb = {
+      select: createOfficeScopeSelectMock(),
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ total_count: "1", active_count: "1", total_value: "0" }] })
+        .mockResolvedValueOnce({ rows: [] }),
+    } as any;
+
+    const { listDealStagePage } = await import("../../../src/modules/deals/service.js");
+    await listDealStagePage(tenantDb, {
+      role: "admin",
+      userId: "admin-1",
+      activeOfficeId: "office-1",
+      scope: "all",
+      stageId: "stage-estimating",
+      page: 1,
+      pageSize: 25,
+      estimatorId: "user-est-1",
+    } as any);
+
+    const countQueryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
+    expect(countQueryText).toContain("estimator_user_id");
+    expect(countQueryText).toContain("user-est-1");
+    // The estimator dimension must not drag the owner column in with it — they answer different questions
+    // and the server ANDs them, so a stray owner arm here would silently intersect two filters.
+    expect(countQueryText).not.toContain("assigned_rep_id = ");
+  });
+
   it("layers Estimate Sent filters and zeroes on-hold deals in stage summaries", async () => {
     dbState.responses = [
       [{ id: "stage-sent", slug: "estimate_sent_to_client", name: "Estimate Sent to Client", displayOrder: 5, isTerminal: false }],

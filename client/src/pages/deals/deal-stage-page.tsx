@@ -234,6 +234,10 @@ export function DealStagePage() {
         visibleStages={[stage]}
         baseFilters={{
           stageIds: listStageIds,
+          // Inherited from the board. It is not a bar dimension, so it stays a base filter — that keeps the
+          // list narrowed to the same set the card counted, and matches the summary above (which receives
+          // it through route.query.filters).
+          ...(route.query.filters.estimatorId ? { estimatorId: route.query.filters.estimatorId } : {}),
           ...(excludeOnHold ? { excludeOnHold: true } : {}),
           // Pair with the summary's boardPopulation so the header/pagination and this list describe ONE
           // population. Non-terminal only: a won/lost list is realized and legitimately carries terminal

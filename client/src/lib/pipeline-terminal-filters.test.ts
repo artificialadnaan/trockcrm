@@ -16,6 +16,7 @@ import {
   readTerminalDateFiltersFromSearchParams,
   readTerminalDateFilter,
   writeTerminalDateFilter,
+  buildDealStageWorkspacePath,
 } from "./pipeline-terminal-filters";
 
 describe("pipeline terminal filters", () => {
@@ -195,5 +196,39 @@ describe("resolveDatePreset (canonical platform-wide date-preset resolver)", () 
     for (const preset of ["wtd", "mtd", "qtd", "ytd"] as const) {
       expect(toDatePresetRange(preset, now)).toEqual(resolveDatePreset(preset, now));
     }
+  });
+});
+
+describe("buildDealStageWorkspacePath (board column -> stage drill-down)", () => {
+  const noDates = {
+    won: { preset: "all" as const },
+    lost: { preset: "all" as const },
+  };
+
+  it("forwards estimatorId alongside assignedRepId", () => {
+    // Codex #1067 P1. A stage column counted under an estimator filter opened a stage page holding every
+    // estimator's deals, so the page total disagreed with the card that opened it. The server half of this
+    // (readStageInput + listDealStagePage) is what makes the forwarded param actually narrow the list —
+    // forwarding alone would only have moved the discrepancy one layer down.
+    const path = buildDealStageWorkspacePath({
+      stageId: "stage-1",
+      scope: "all",
+      filters: noDates,
+      queryParams: new URLSearchParams("estimatorId=est-1&assignedRepId=rep-1"),
+    });
+    expect(path).toContain("estimatorId=est-1");
+    expect(path).toContain("assignedRepId=rep-1");
+  });
+
+  it("still drops unrelated params, so the allowlist has not become a pass-through", () => {
+    const path = buildDealStageWorkspacePath({
+      stageId: "stage-1",
+      scope: "all",
+      filters: noDates,
+      queryParams: new URLSearchParams("estimatorId=est-1&search=roof&period=mtd"),
+    });
+    expect(path).toContain("estimatorId=est-1");
+    expect(path).not.toContain("search=");
+    expect(path).not.toContain("period=");
   });
 });

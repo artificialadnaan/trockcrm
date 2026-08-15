@@ -181,6 +181,22 @@ export function buildAliasedOwnedRepSql(alias: string, repId: string): SQL {
 }
 
 /**
+ * Raw-SQL ESTIMATOR variant, the aliased twin of buildEstimatorCondition — for the stage-page query, which
+ * aliases deals as "d" and so cannot use the unaliased Drizzle object.
+ *
+ * NO Unassigned sentinel, for the reason buildEstimatorCondition gives: mapping it to
+ * `estimator_user_id IS NULL` would answer a question nobody asked, and on this dataset that is most of
+ * the board. `alias` is interpolated raw so it MUST be a trusted internal identifier (validated below);
+ * `estimatorId` is parameterized.
+ */
+export function buildAliasedEstimatorSql(alias: string, estimatorId: string): SQL {
+  if (!/^[a-z_][a-z0-9_]*$/i.test(alias)) {
+    throw new Error(`Invalid SQL alias for estimator predicate: ${alias}`);
+  }
+  return sql`${sql.raw(`${alias}.estimator_user_id`)} = ${estimatorId}`;
+}
+
+/**
  * IN-list ("team" / multi-rep / owner) variant of the involved-rep predicate for aliased raw queries.
  * Emits `(<alias>.assigned_rep_id IN (<ids>) OR <alias>.estimator_user_id IN (<ids>))` so a multi-rep
  * filter surfaces deals any listed person OWNS or ESTIMATED — the IN-list generalization of

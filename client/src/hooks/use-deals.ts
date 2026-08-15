@@ -397,6 +397,11 @@ export interface DealFilters {
   stageIds?: string[];
   inactiveStageIds?: string[];
   assignedRepId?: string;
+  /** Deals this person is ESTIMATING. The sibling of assignedRepId — the server ANDs them, and the header
+   *  control writes one or the other, never both. Must be declared here AND serialized below: a spread of
+   *  `{ estimatorId }` into baseFilters type-checks either way, so omitting it drops the filter silently
+   *  and the list, totals and CSV keep every estimator's deals under a filtered board. */
+  estimatorId?: string;
   projectTypeId?: string;
   regionId?: string;
   source?: string;
@@ -563,6 +568,7 @@ export function buildDealsQueryParams(filters: DealFilters): URLSearchParams {
   if (filters.stageIds?.length) params.set("stageIds", filters.stageIds.join(","));
   if (filters.inactiveStageIds?.length) params.set("inactiveStageIds", filters.inactiveStageIds.join(","));
   if (filters.assignedRepId) params.set("assignedRepId", filters.assignedRepId);
+  if (filters.estimatorId) params.set("estimatorId", filters.estimatorId);
   if (filters.projectTypeId) params.set("projectTypeId", filters.projectTypeId);
   if (filters.regionId) params.set("regionId", filters.regionId);
   if (filters.source) params.set("source", filters.source);

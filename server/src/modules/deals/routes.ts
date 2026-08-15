@@ -671,6 +671,9 @@ function readStageInput(req: Parameters<typeof router.get>[1] extends never ? ne
     sort: normalizeStagePageSort(req.query.sort as string | undefined),
     search: req.query.search as string | undefined,
     assignedRepId: req.query.assignedRepId as string | undefined,
+    // Carried from the board through buildDealStageWorkspacePath so the drill-down keeps the estimator
+    // filter the card was counted under.
+    estimatorId: req.query.estimatorId as string | undefined,
     estimateSentFrom: assertOptionalIsoDateQueryParam(
       (req.query.estimateSentFrom as string | undefined) ?? (req.query.estimate_sent_since as string | undefined),
       "estimateSentFrom"

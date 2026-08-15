@@ -328,7 +328,9 @@ export function buildDealStageWorkspacePath(input: {
         : Object.entries(input.queryParams);
     for (const [key, value] of entries) {
       if (!value) continue;
-      if (key === "assignedRepId" || key.startsWith("estimate_sent_")) {
+      // estimatorId rides along with assignedRepId: a stage column counted under an estimator filter must
+      // open a stage page holding the same set, or the drill-down stops reconciling with the board.
+      if (key === "assignedRepId" || key === "estimatorId" || key.startsWith("estimate_sent_")) {
         params.set(key, value);
       }
     }
