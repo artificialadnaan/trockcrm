@@ -673,7 +673,7 @@ function readStageInput(req: Parameters<typeof router.get>[1] extends never ? ne
     assignedRepId: req.query.assignedRepId as string | undefined,
     // Carried from the board through buildDealStageWorkspacePath so the drill-down keeps the estimator
     // filter the card was counted under.
-    estimatorId: req.query.estimatorId as string | undefined,
+    estimatorId: readOptionalStringParam(req.query.estimatorId, "estimatorId"),
     estimateSentFrom: assertOptionalIsoDateQueryParam(
       (req.query.estimateSentFrom as string | undefined) ?? (req.query.estimate_sent_since as string | undefined),
       "estimateSentFrom"
@@ -957,7 +957,7 @@ router.get("/", async (req, res, next) => {
         ? (req.query.inactiveStageIds as string).split(",")
         : undefined,
       assignedRepId: req.query.assignedRepId as string | undefined,
-      estimatorId: req.query.estimatorId as string | undefined,
+      estimatorId: readOptionalStringParam(req.query.estimatorId, "estimatorId"),
       projectTypeId: req.query.projectTypeId as string | undefined,
       regionId: req.query.regionId as string | undefined,
       source: req.query.source as string | undefined,
@@ -1054,7 +1054,7 @@ router.get("/pipeline", async (req, res, next) => {
     );
     const filters = {
       assignedRepId: req.query.assignedRepId as string | undefined,
-      estimatorId: req.query.estimatorId as string | undefined,
+      estimatorId: readOptionalStringParam(req.query.estimatorId, "estimatorId"),
       estimateSentFrom,
       estimateSentTo,
       scope,

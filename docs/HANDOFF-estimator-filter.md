@@ -1,8 +1,23 @@
 # Handoff — Estimator pipeline filter (deals dashboard)
 
-**Branch:** `feat/estimator-pipeline-filter` · **WIP commit:** `bc963c5b7` (pushed) · **Base:** `main` @ `8186c374c`
+> ## ⚠️ HISTORICAL — do not follow §4 as a task list
+>
+> This was a mid-work handoff written at commit `bc963c5b7`, when the server was complete and the client
+> was half-wired. **It is kept for the decisions and the production measurements in §1–§3, not as
+> instructions.**
+>
+> Superseded by **PR #1067**. Everything §4 lists as outstanding is done: the stale board-hook assertions,
+> the Admin → Users "Estimates Jobs" checkbox, the server and client tests, and the mutation passes. The
+> filter also gained work this document never anticipated, across four rounds of bot review — the list and
+> CSV serialization, drill-down propagation into the stage page, the Won-YTD snapshot guard, a uuid guard
+> against 22P02, and owner/estimator precedence for URLs carrying both.
+>
+> §4.5 (the `generates_sales` untick) is the one item still OPEN, and it carries an unresolved question:
+> decision 3 unticks Kason Reeder, but the verified roster in §3 lists him under Sales, which requires that
+> flag true. With `estimates_jobs` false he would appear in neither section. That needs a human call.
+
+**Branch:** `feat/estimator-pipeline-filter` · **WIP commit at time of writing:** `bc963c5b7` · **Base:** `main` @ `8186c374c`
 **Worktree:** `/Users/adnaaniqbal/Developer/trockcrm/.claude/worktrees/estimator-filter` (deps installed, `shared` built)
-**No PR opened yet.**
 
 ---
 
