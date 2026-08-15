@@ -729,6 +729,8 @@ export function resolvePipelineTerminalDateFilters(input: PipelineTerminalDateFi
 function isGlobalCurrentWonYtdBoardRequest(input: {
   scope: WorkspaceScope | undefined;
   assignedRepId: string | undefined;
+  /** Any estimator narrowing disqualifies the request, exactly as an owner filter does — see below. */
+  estimatorId: string | undefined;
   wonPeriodFrom: string | null;
   wonPeriodTo: string | null;
   wonSince: string | null;
@@ -748,6 +750,10 @@ function isGlobalCurrentWonYtdBoardRequest(input: {
   return (
     input.scope === "all" &&
     !input.assignedRepId &&
+    // The snapshot is the PUBLISHED all-reps baseline, so every narrowing dimension must disqualify it,
+    // not just the owner one. An estimator-filtered all/YTD board would otherwise write that person's
+    // subset over deals_dashboard.won_ytd and hold it there until the next unfiltered YTD request.
+    !input.estimatorId &&
     input.wonPeriodFrom === ytd.from &&
     input.wonPeriodTo === ytd.to &&
     terminalBoundsMatchYtd
@@ -4028,6 +4034,7 @@ export async function getDealsForPipeline(
     isGlobalCurrentWonYtdBoardRequest({
       scope: filters?.scope,
       assignedRepId: filters?.assignedRepId,
+      estimatorId: filters?.estimatorId,
       wonPeriodFrom,
       wonPeriodTo,
       wonSince: wonSignedDateSince,

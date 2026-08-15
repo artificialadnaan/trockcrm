@@ -186,6 +186,20 @@ function StageWindowDepsProbe() {
   return null;
 }
 
+let hookStageEstimatorId: string | undefined = "est-1";
+function StageEstimatorProbe() {
+  useDealStagePage({
+    stageId: "stage-estimating",
+    scope: "all",
+    page: 1,
+    pageSize: 25,
+    sort: "newest",
+    search: "",
+    filters: { staleOnly: false, estimatorId: hookStageEstimatorId },
+  });
+  return null;
+}
+
 function StageListFiltersProbe() {
   useDealStagePage({
     stageId: "stage-estimating",
@@ -968,6 +982,47 @@ describe("normalizeDealBoardResponse", () => {
     expect(requestPath).toContain("projectTypeId=type-1");
     expect(requestPath).toContain("valueMin=1000");
     expect(requestPath).toContain("valueMax=50000");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("sends estimatorId on the stage summary request, and refetches when it changes", async () => {
+    // Codex #1067 round-2 P1. The stage LIST was narrowed by the estimator while this summary hook — which
+    // computes the header count and value above it — still asked for every estimator's deals. Two failure
+    // modes, so two assertions: the param must be serialized, and it must be in the effect deps or the
+    // header keeps a stale total when only the estimator changes.
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValue({
+      stage: { id: "stage-estimating", name: "Estimating", slug: "estimating" },
+      summary: { count: 1, totalValue: 15000, averageDaysInStage: 3 },
+      pagination: { page: 1, pageSize: 25, total: 1, totalPages: 1 },
+      rows: [],
+    });
+    hookStageEstimatorId = "est-1";
+
+    const { document } = installFakeDom();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(StageEstimatorProbe));
+      await flushEffects();
+    });
+
+    expect(String(apiMock.mock.calls[0]?.[0])).toContain("estimatorId=est-1");
+
+    hookStageEstimatorId = "est-2";
+    await act(async () => {
+      root.render(createElement(StageEstimatorProbe));
+      await flushEffects();
+    });
+
+    expect(apiMock.mock.calls.length).toBeGreaterThan(1);
+    expect(String(apiMock.mock.calls[apiMock.mock.calls.length - 1]?.[0])).toContain("estimatorId=est-2");
 
     await act(async () => {
       root.unmount();

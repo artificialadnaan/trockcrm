@@ -1176,6 +1176,10 @@ export function useDealStagePage(input: StagePageQuery & { stageId: string; scop
       sort: input.sort,
       search: input.search,
       ...(input.filters.assignedRepId ? { assignedRepId: input.filters.assignedRepId } : {}),
+      // The summary must narrow with the list it heads. Without this the stage page shows one estimator's
+      // deals under a count and value computed across every estimator — the same half-applied filtering
+      // this PR removed from the dashboard, reappearing one page over.
+      ...(input.filters.estimatorId ? { estimatorId: input.filters.estimatorId } : {}),
       ...(input.filters.estimateSentFrom ? { estimateSentFrom: input.filters.estimateSentFrom } : {}),
       ...(input.filters.estimateSentTo ? { estimateSentTo: input.filters.estimateSentTo } : {}),
       ...(input.filters.staleOnly ? { staleOnly: "true" } : {}),
@@ -1239,6 +1243,9 @@ export function useDealStagePage(input: StagePageQuery & { stageId: string; scop
     };
   }, [
     input.filters.assignedRepId,
+    // Without this the summary keeps a stale count when only the estimator changes: the request is built
+    // inside the effect, so a value the deps do not watch never triggers the refetch that would apply it.
+    input.filters.estimatorId,
     input.filters.estimateSentFrom,
     input.filters.estimateSentTo,
     input.filters.source,
