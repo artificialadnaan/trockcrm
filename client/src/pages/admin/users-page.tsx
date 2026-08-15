@@ -202,6 +202,32 @@ export function UsersPage() {
     }
   };
 
+  const handleToggleEstimatesJobs = async (
+    userId: string,
+    estimatesJobs: boolean,
+    generatesSales: boolean
+  ) => {
+    setUpdatingId(userId);
+    try {
+      await updateUser(userId, { estimatesJobs: !estimatesJobs });
+      // Name the consequence, as above. The case that reads as a broken toggle is SALES-WINS: the roster
+      // lists each person exactly once and the estimator leg of the UNION requires generates_sales = false,
+      // so ticking this on someone who also generates sales moves nothing in the filter. Say that here
+      // rather than let an admin tick it, look at the dropdown and conclude the checkbox does nothing.
+      toast.success(
+        estimatesJobs
+          ? "Removed from the Estimators filter"
+          : generatesSales
+            ? "Saved — they stay under Sales in the filter, which lists each person once"
+            : "Now listed under Estimators in the deals dashboard filter"
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update estimating");
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
   const handleManagerChange = async (userId: string, managerId: string) => {
     setUpdatingId(userId);
     try {
@@ -652,6 +678,12 @@ export function UsersPage() {
                   Shows on rep performance views
                 </span>
               </TableHead>
+              <TableHead>
+                Estimates Jobs
+                <span className="block text-xs font-normal text-gray-500">
+                  Shows in the Estimators filter
+                </span>
+              </TableHead>
               <TableHead>Sources</TableHead>
               <TableHead>Extra Offices</TableHead>
               <TableHead>Status</TableHead>
@@ -721,6 +753,23 @@ export function UsersPage() {
                       String(user.role) === "field_contractor"
                     }
                     aria-label={`${user.displayName} generates sales`}
+                  />
+                </TableCell>
+                <TableCell>
+                  <Checkbox
+                    checked={user.estimatesJobs}
+                    onCheckedChange={() =>
+                      void handleToggleEstimatesJobs(user.id, user.estimatesJobs, user.generatesSales)
+                    }
+                    // Same role invariant as Generates Sales: a field contractor never estimates, and
+                    // updateUser rejects a tick regardless (assertEstimatesJobsAllowedForRole). Disabling
+                    // here only spares an admin a pointless error — the guard lives on the server.
+                    disabled={
+                      updatingId === user.id ||
+                      bulkUpdating ||
+                      String(user.role) === "field_contractor"
+                    }
+                    aria-label={`${user.displayName} estimates jobs`}
                   />
                 </TableCell>
                 <TableCell>
@@ -967,7 +1016,9 @@ export function UsersPage() {
 
             {filteredUsers.length === 0 && !loading && (
               <TableRow>
-                <TableCell colSpan={11} className="py-8 text-center text-gray-400">
+                {/* Spans every column so the empty-state message stays centred across the full table.
+                    Was 11 against 12 columns before Estimates Jobs was added — stale by one already. */}
+                <TableCell colSpan={13} className="py-8 text-center text-gray-400">
                   No users match the current filters
                 </TableCell>
               </TableRow>
