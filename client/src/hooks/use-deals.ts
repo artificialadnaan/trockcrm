@@ -645,6 +645,12 @@ export function useDeals(filters: DealFilters = {}, options: { enabled?: boolean
     filters.stageIds?.join(","),
     filters.inactiveStageIds?.join(","),
     filters.assignedRepId,
+    // This list is EXPLICIT SCALARS, not the filters object, so a field missing here is not merely a lint
+    // nit: fetchDeals keeps its identity, the effect that calls it never re-runs, and the list holds its
+    // previous rows, pagination and value total while the board above refetches. That is the real
+    // mechanism behind "the list does not follow the estimator" — distinct from the outer drill-down memo,
+    // which re-runs anyway because searchParams changes identity.
+    filters.estimatorId,
     filters.projectTypeId,
     filters.regionId,
     filters.source,

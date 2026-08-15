@@ -186,6 +186,12 @@ function StageWindowDepsProbe() {
   return null;
 }
 
+let hookDealsEstimatorId: string | undefined;
+function DealsEstimatorProbe() {
+  useDeals({ estimatorId: hookDealsEstimatorId, scope: "all" });
+  return null;
+}
+
 let hookStageEstimatorId: string | undefined = "est-1";
 function StageEstimatorProbe() {
   useDealStagePage({
@@ -982,6 +988,41 @@ describe("normalizeDealBoardResponse", () => {
     expect(requestPath).toContain("projectTypeId=type-1");
     expect(requestPath).toContain("valueMin=1000");
     expect(requestPath).toContain("valueMax=50000");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("refetches the LIST when estimatorId changes (its dep list is explicit scalars)", async () => {
+    // Codex #1067 round-4 P1. useDeals memoizes fetchDeals on an explicit scalar dep list rather than the
+    // filters object, so a field missing there is not a lint nit: fetchDeals keeps its identity, the
+    // effect never re-runs, and the list holds its previous rows, pagination and value total while the
+    // board above refetches with the new estimator.
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValue({ deals: [], pagination: { page: 1, limit: 50, total: 0, totalPages: 0 } });
+    hookDealsEstimatorId = undefined;
+
+    const { document } = installFakeDom();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(DealsEstimatorProbe));
+      await flushEffects();
+    });
+    const callsBefore = apiMock.mock.calls.length;
+
+    hookDealsEstimatorId = "est-1";
+    await act(async () => {
+      root.render(createElement(DealsEstimatorProbe));
+      await flushEffects();
+    });
+
+    expect(apiMock.mock.calls.length).toBeGreaterThan(callsBefore);
+    expect(String(apiMock.mock.calls[apiMock.mock.calls.length - 1]?.[0])).toContain("estimatorId=est-1");
 
     await act(async () => {
       root.unmount();

@@ -619,8 +619,12 @@ export function buildDealsPageKpiDrilldownPath(
       queryParams instanceof URLSearchParams
         ? Array.from(queryParams.entries())
         : Object.entries(queryParams);
+    // Same estimator-wins precedence the page applies when READING these two, so a drill-down link built
+    // from a URL carrying both cannot hand on the owner param the page suppressed.
+    const hasEstimator = entries.some(([key, value]) => key === "estimatorId" && Boolean(value));
     for (const [key, value] of entries) {
       if (!value) continue;
+      if (key === "assignedRepId" && hasEstimator) continue;
       if (
         key === "assignedRepId" ||
         // The estimator dimension travels with the owner one. A card counted under "Sidney's estimated
@@ -1081,6 +1085,12 @@ function DealListPageContent({
     // preference can flip to from another page) it intersects the viewer's own deals and empties the board,
     // so drop it there; Watched/On Hold/All keep it. The timeframe is always restored.
     if (scope === "mine") delete stored.assignedRepId;
+    // The estimator sibling is dropped under Mine too. The owner rationale (an intersection that EMPTIES
+    // the board) is admittedly weaker here — "my deals that Sidney estimates" is a coherent, often
+    // non-empty question — but a bare /deals return should show the viewer's board, not a silently
+    // narrowed slice of it, and having the two header dimensions behave identically under scope coercion
+    // is far easier to reason about than a split rule. Re-picking is one click.
+    if (scope === "mine") delete stored.estimatorId;
     if (stored.assignedRepId) {
       // Don't inject a rep who is no longer selectable (deactivated, not in this office, or unticked from
       // the sales roster) — it would show an unresolved "Selected rep" and silently narrow the board. That

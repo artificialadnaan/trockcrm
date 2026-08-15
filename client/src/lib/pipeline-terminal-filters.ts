@@ -326,8 +326,14 @@ export function buildDealStageWorkspacePath(input: {
       input.queryParams instanceof URLSearchParams
         ? Array.from(input.queryParams.entries())
         : Object.entries(input.queryParams);
+    // ESTIMATOR WINS, mirroring how the dashboard reads these two. The caller hands us the RAW
+    // searchParams, so a shared or hand-edited URL carrying both dimensions would otherwise re-introduce
+    // the owner param that the dashboard just suppressed — and the stage page consumes it, giving a
+    // drill-down narrower than the board that opened it.
+    const hasEstimator = entries.some(([key, value]) => key === "estimatorId" && Boolean(value));
     for (const [key, value] of entries) {
       if (!value) continue;
+      if (key === "assignedRepId" && hasEstimator) continue;
       // estimatorId rides along with assignedRepId: a stage column counted under an estimator filter must
       // open a stage page holding the same set, or the drill-down stops reconciling with the board.
       if (key === "assignedRepId" || key === "estimatorId" || key.startsWith("estimate_sent_")) {

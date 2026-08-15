@@ -1603,6 +1603,13 @@ describe("DealListPage", () => {
         queryParams: new URLSearchParams("estimatorId=est-1&search=roof"),
       })
     ).toBe("/deals?filter=active_pipeline&scope=all&estimatorId=est-1");
+    // Estimator wins when a URL carries both, matching how the page reads them — otherwise a shared
+    // drill-down link hands on the owner param the page had suppressed.
+    expect(
+      buildDealsPageKpiDrilldownPath("active_pipeline", "all", null, {
+        queryParams: new URLSearchParams("assignedRepId=rep-1&estimatorId=est-1"),
+      })
+    ).toBe("/deals?filter=active_pipeline&scope=all&estimatorId=est-1");
     // SLA drill-downs (at_risk / stale) must DROP ?period even when the page URL carries it: there period
     // becomes updatedFrom/updatedTo (matchesUpdatedRange), a different axis than the SLA card count, so a
     // perioded at-risk link would show a different cohort than the card (Codex #600 P2). Rep still preserved.
@@ -3253,6 +3260,25 @@ describe("DealListPage", () => {
 
       expect(view.searches.every((s) => !s.includes("estimatorId=est-1"))).toBe(true);
       // The office-independent timeframe still restores — only the stale person is dropped.
+      expect(view.searches.some((s) => s.includes("period=ytd"))).toBe(true);
+
+      await view.cleanup();
+    });
+
+    it("does NOT restore a saved estimator under Mine scope (Codex #1067 P2)", async () => {
+      rosterWithEstimator();
+      window.localStorage.setItem(
+        "deals-view-preference:user-1:office-1",
+        JSON.stringify({ estimatorId: "est-1", period: "ytd" })
+      );
+      // The shared scope preference can flip to Mine from another page; a bare return should then show the
+      // viewer's own board rather than a silently narrowed slice of it, matching the owner sibling.
+      window.localStorage.setItem("pipeline-scope-preference:user-1", "mine");
+
+      const view = await renderPageDomWithLocation("/deals", "director");
+
+      expect(view.searches.every((s) => !s.includes("estimatorId=est-1"))).toBe(true);
+      // The office-independent timeframe is still restored — only the person-narrowing filter is dropped.
       expect(view.searches.some((s) => s.includes("period=ytd"))).toBe(true);
 
       await view.cleanup();

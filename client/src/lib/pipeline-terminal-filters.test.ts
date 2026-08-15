@@ -205,7 +205,7 @@ describe("buildDealStageWorkspacePath (board column -> stage drill-down)", () =>
     lost: { preset: "all" as const },
   };
 
-  it("forwards estimatorId alongside assignedRepId", () => {
+  it("forwards estimatorId to the stage drill-down", () => {
     // Codex #1067 P1. A stage column counted under an estimator filter opened a stage page holding every
     // estimator's deals, so the page total disagreed with the card that opened it. The server half of this
     // (readStageInput + listDealStagePage) is what makes the forwarded param actually narrow the list —
@@ -214,9 +214,32 @@ describe("buildDealStageWorkspacePath (board column -> stage drill-down)", () =>
       stageId: "stage-1",
       scope: "all",
       filters: noDates,
-      queryParams: new URLSearchParams("estimatorId=est-1&assignedRepId=rep-1"),
+      queryParams: new URLSearchParams("estimatorId=est-1"),
     });
     expect(path).toContain("estimatorId=est-1");
+  });
+
+  it("gives the estimator precedence when the URL carries BOTH dimensions", () => {
+    // The caller hands over the RAW searchParams. The dashboard suppresses the owner param at read time,
+    // so forwarding both here would re-introduce it — and the stage page consumes assignedRepId, making
+    // the drill-down narrower than the board that opened it.
+    const path = buildDealStageWorkspacePath({
+      stageId: "stage-1",
+      scope: "all",
+      filters: noDates,
+      queryParams: new URLSearchParams("assignedRepId=rep-1&estimatorId=est-1"),
+    });
+    expect(path).toContain("estimatorId=est-1");
+    expect(path).not.toContain("assignedRepId");
+  });
+
+  it("still forwards assignedRepId when NO estimator is present", () => {
+    const path = buildDealStageWorkspacePath({
+      stageId: "stage-1",
+      scope: "all",
+      filters: noDates,
+      queryParams: new URLSearchParams("assignedRepId=rep-1"),
+    });
     expect(path).toContain("assignedRepId=rep-1");
   });
 
