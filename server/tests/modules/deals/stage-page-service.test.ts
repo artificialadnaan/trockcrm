@@ -1000,12 +1000,12 @@ describe("listDealStagePage", () => {
       stageId: "stage-estimating",
       page: 1,
       pageSize: 25,
-      estimatorId: "user-est-1",
+      estimatorId: "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
     } as any);
 
     const countQueryText = extractSqlText(tenantDb.execute.mock.calls[0][0]).toLowerCase();
     expect(countQueryText).toContain("estimator_user_id");
-    expect(countQueryText).toContain("user-est-1");
+    expect(countQueryText).toContain("3f2504e0-4f89-41d3-9a0c-0305e82c3301");
     // The estimator dimension must not drag the owner column in with it — they answer different questions
     // and the server ANDs them, so a stray owner arm here would silently intersect two filters.
     expect(countQueryText).not.toContain("assigned_rep_id = ");

@@ -3177,6 +3177,29 @@ describe("DealListPage", () => {
       await view.cleanup();
     });
 
+    it("lets the estimator WIN when a URL carries both dimensions (Codex #1067 P2)", () => {
+      rosterWithEstimator();
+
+      // The control cannot produce this state — it always clears the sibling — but a hand-edited, shared
+      // or half-migrated bookmark can. The server ANDs the two, so sending both showed
+      // "Sidney Gibson (estimating)" over deals Sidney estimated AND rep-1 owns: usually empty, and the
+      // label gave no hint why. The label's precedence and the query must agree.
+      const html = renderPage("/deals?scope=all&assignedRepId=rep-1&estimatorId=est-1", "director");
+
+      expect(html).toContain("Sidney Gibson (estimating)");
+      // 6th arg = assignedRepId, 8th = estimatorId. The owner slot must be neutralised.
+      expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith(
+        "all",
+        true,
+        expect.any(Object),
+        1000,
+        null,
+        undefined,
+        undefined,
+        "est-1"
+      );
+    });
+
     it("drops a parked ?estimatorId when a Team bookmark is coerced to Mine (Codex #1067 P2)", async () => {
       rosterWithEstimator();
 

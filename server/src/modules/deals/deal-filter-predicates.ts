@@ -126,6 +126,9 @@ export function buildAssignedRepPredicate(input: DealFilterBarInput): SQL | unde
   return buildOwnedRepCondition(input.assignedRepId);
 }
 
+/** Same shape the leads module already uses to keep malformed filter ids out of uuid comparisons. */
+const ESTIMATOR_ID_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
  * "Estimating it": the deal's estimator IS the filtered person (deals.estimator_user_id).
  *
@@ -138,10 +141,18 @@ export function buildAssignedRepPredicate(input: DealFilterBarInput): SQL | unde
  * No Unassigned sentinel. The FilterBar's "__unassigned__" belongs to the assigned-rep dimension and
  * means "nobody owns this"; there is no "unestimated" bucket in the UI, and silently mapping the
  * sentinel to `estimator_user_id IS NULL` would answer a question nobody asked — on this dataset that is
- * most of the board. An unrecognized sentinel therefore falls through to a plain equality against a
- * value that matches no row, which is the safe direction (a no-match, never a widening).
+ * most of the board.
+ *
+ * MALFORMED IDS ARE REJECTED IN SQL, NOT LEFT TO FALL THROUGH. An earlier version of this comment claimed
+ * an unrecognized value "falls through to a plain equality against a value that matches no row, which is
+ * the safe direction". That was WRONG, and Codex was right to call it: `estimator_user_id` is a uuid
+ * column, so Postgres casts the bound string and raises 22P02 `invalid input syntax for type uuid` on
+ * anything that is not a uuid — including "__unassigned__". A hand-edited or shared URL therefore turned
+ * both the board and the list into 500s rather than an empty result. Emitting `false` for a malformed
+ * value restores the intent the comment described: a no-match, never a widening, and never an error.
  */
 export function buildEstimatorCondition(estimatorId: string): SQL {
+  if (!ESTIMATOR_ID_UUID_RE.test(estimatorId)) return sql`false`;
   return eq(deals.estimatorUserId, estimatorId);
 }
 
@@ -193,6 +204,9 @@ export function buildAliasedEstimatorSql(alias: string, estimatorId: string): SQ
   if (!/^[a-z_][a-z0-9_]*$/i.test(alias)) {
     throw new Error(`Invalid SQL alias for estimator predicate: ${alias}`);
   }
+  // Same 22P02 exposure as the unaliased twin — the stage drill-down takes this id straight off the query
+  // string, so it must reject a malformed value rather than hand it to a uuid comparison.
+  if (!ESTIMATOR_ID_UUID_RE.test(estimatorId)) return sql`false`;
   return sql`${sql.raw(`${alias}.estimator_user_id`)} = ${estimatorId}`;
 }
 

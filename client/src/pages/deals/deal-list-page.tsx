@@ -1137,8 +1137,20 @@ function DealListPageContent({
   // When a parked ?scope=team bookmark is coerced to mine, drop any stale owner filter from
   // the URL too -- otherwise the Mine board (the viewer's deals) is intersected with another
   // rep's owner filter and renders empty instead of the intended Mine view (D-12b).
+  // Read the estimator FIRST, because it takes precedence over the owner param — see below.
+  const requestedEstimatorId =
+    requestedScope === "team" ? undefined : searchParams.get("estimatorId") || undefined;
+  // ESTIMATOR WINS when a URL somehow carries both. The control cannot produce that state
+  // (updateSelectedRep always clears the sibling), but a hand-edited, shared or half-migrated bookmark
+  // can. Left alone, both params reach the board and the list, the server ANDs them, and the trigger
+  // reads "Sidney Gibson (estimating)" over deals Sidney estimated AND some hidden rep owns — usually
+  // empty, and lying about why. Matching the precedence the label already uses keeps the control and the
+  // result telling the same story. Normalized at READ so no extra history entry is written; the next
+  // interaction rewrites the URL cleanly anyway.
   const selectedRepId =
-    requestedScope === "team" ? "__all__" : searchParams.get("assignedRepId") || "__all__";
+    requestedScope === "team" || requestedEstimatorId
+      ? "__all__"
+      : searchParams.get("assignedRepId") || "__all__";
   const selectedRepFilter = selectedRepId === "__all__" ? undefined : selectedRepId;
   // The ESTIMATOR dimension, a sibling of the rep one rather than a mode of it.
   //
@@ -1151,8 +1163,7 @@ function DealListPageContent({
   // The dropdown carries the group in its VALUE (`est:<id>`) rather than looking the id up in the roster,
   // so the reader of the URL never has to re-derive which question was asked. Sales values stay bare ids,
   // so every existing link, bookmark and saved preference keeps working untouched.
-  const selectedEstimatorFilter =
-    requestedScope === "team" ? undefined : searchParams.get("estimatorId") || undefined;
+  const selectedEstimatorFilter = requestedEstimatorId;
   const ESTIMATOR_VALUE_PREFIX = "est:";
   const selectedRosterValue = selectedEstimatorFilter
     ? `${ESTIMATOR_VALUE_PREFIX}${selectedEstimatorFilter}`
@@ -1574,7 +1585,12 @@ function DealListPageContent({
       // KPI / board column, both of which drop on-hold from the Won count (Codex P2).
       ...(dashboardView.filter === "won" ? { excludeOnHold: true } : {}),
     }),
-    [layeredListBaseFilters, selectedRepFilter, dashboardView.filter]
+    // selectedEstimatorFilter is read in the body, so it belongs here for exhaustive-deps hygiene.
+    // It is NOT load-bearing today: the estimator lives in the URL, dashboardView memoizes on
+    // [searchParams], and searchParams takes a new identity on every URL change — so
+    // dashboardView.listBaseFilters -> drilldownBaseFilters -> layeredListBaseFilters all change identity
+    // and this memo re-runs anyway. Listed so it stays correct if any of those are ever stabilized.
+    [layeredListBaseFilters, selectedRepFilter, selectedEstimatorFilter, dashboardView.filter]
   );
 
   const updateScope = (nextScope: PipelineScope) => {

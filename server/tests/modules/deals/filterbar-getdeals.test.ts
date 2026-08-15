@@ -149,11 +149,11 @@ describe("getDeals — FilterBar wiring", () => {
     const { db, capturedWheres } = createTenantDbCapturingWhere();
     const { getDeals } = await import("../../../src/modules/deals/service.js");
 
-    await getDeals(db, { estimatorId: "user-1", scope: "all" }, "director", "director-1");
+    await getDeals(db, { estimatorId: "3f2504e0-4f89-41d3-9a0c-0305e82c3301", scope: "all" }, "director", "director-1");
 
     const query = render(capturedWheres[capturedWheres.length - 1]);
     expect(query.sql.toLowerCase()).toContain("estimator_user_id");
-    expect(query.params).toContain("user-1");
+    expect(query.params).toContain("3f2504e0-4f89-41d3-9a0c-0305e82c3301");
   });
 
   it("value sort uses the effective value chain (on_hold), not raw awarded_amount", async () => {
