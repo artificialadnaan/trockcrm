@@ -141,6 +141,21 @@ describe("getDeals — FilterBar wiring", () => {
     expect(query.params).not.toContain(UNASSIGNED_FILTER_SENTINEL);
   });
 
+  it("estimatorId reaches the SQL through getDeals, not just through the predicate registry", async () => {
+    // getDeals hands the WHOLE filters object to buildDealFilterBarConditions, so estimatorId arrives
+    // structurally rather than by an explicit line of wiring. That is easy to break silently: drop the
+    // field from DealFilters and the route still accepts ?estimatorId, the predicate still passes its own
+    // unit tests, and the filter just stops narrowing anything.
+    const { db, capturedWheres } = createTenantDbCapturingWhere();
+    const { getDeals } = await import("../../../src/modules/deals/service.js");
+
+    await getDeals(db, { estimatorId: "user-1", scope: "all" }, "director", "director-1");
+
+    const query = render(capturedWheres[capturedWheres.length - 1]);
+    expect(query.sql.toLowerCase()).toContain("estimator_user_id");
+    expect(query.params).toContain("user-1");
+  });
+
   it("value sort uses the effective value chain (on_hold), not raw awarded_amount", async () => {
     const { db, capturedOrderBys } = createTenantDbCapturingWhere();
     const { getDeals } = await import("../../../src/modules/deals/service.js");
