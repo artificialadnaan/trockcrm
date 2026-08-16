@@ -241,6 +241,16 @@ export function assertCreatableCrmUser(input: CreateCrmUserInput): asserts input
   }
   if (input.role === "field_contractor") throw new AppError(400, "Field contractors are created in the field-user flow");
   if (!isAssignableCrmRole(input.role)) throw new AppError(400, `Invalid role: ${input.role}`);
+  // The roster flags get the same boolean check the PATCH path applies. The create route hands req.body
+  // straight to the insert, so without this a non-boolean reaches Postgres: some values coerce (`1`
+  // enrols the person in a roster nobody ticked them into) and others fail as a 500, where the update
+  // path answers a clean 400. Both flags are checked — generatesSales carried the identical gap.
+  if (input.generatesSales !== undefined && typeof input.generatesSales !== "boolean") {
+    throw new AppError(400, "generatesSales must be a boolean");
+  }
+  if (input.estimatesJobs !== undefined && typeof input.estimatesJobs !== "boolean") {
+    throw new AppError(400, "estimatesJobs must be a boolean");
+  }
 }
 
 /**

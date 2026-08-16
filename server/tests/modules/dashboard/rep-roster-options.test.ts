@@ -177,10 +177,30 @@ describe("getRepRosterOptions", () => {
     // 54 estimated-for-others deals unreachable through this control.
     const { sql } = await runRoster([], "office-1");
 
-    // Adjacency again: "contains generates_sales = false" alone passes just as happily under an OR, which
-    // is the mutation that puts a sales rep in both sections at once.
-    expect(sql).toContain("u.estimates_jobs = true and u.generates_sales = false");
-    expect(sql).not.toContain("u.estimates_jobs = true or u.generates_sales = false");
+    // Adjacency again: asserting the operator is the whole point — "contains the flag test" alone passes
+    // just as happily under an OR, which is the mutation that puts a sales rep in both sections at once.
+    expect(sql).toContain("u.estimates_jobs = true and not (u.generates_sales = true");
+    expect(sql).not.toContain("u.estimates_jobs = true or not (u.generates_sales = true");
+  });
+
+  it("applies Sales-wins against THIS OFFICE's sales leg, not the global flag (Codex #1067 P2)", async () => {
+    // A bare `generates_sales = false` is STRICTER than "appears under Sales here", because the sales leg
+    // also demands office membership or an owned deal in this tenant. A multi-office person flagged for
+    // sales globally, with neither of those here but estimating a deal here, fell out of the sales leg for
+    // want of membership AND out of this one for holding the flag — landing in NEITHER section, the exact
+    // opposite of the one-person-one-section rule. Negating the sales leg's own predicate is what keeps
+    // the two legs asking the same question.
+    const { sql } = await runRoster([], "office-1");
+    // Scoped to the ESTIMATOR ARM. Asserting against the whole statement is what made the first version of
+    // this test vacuous: the SALES leg carries its own `left join deal_owners`, so a whole-SQL toContain
+    // passed even with the join deleted from the estimator arm — which would leave that arm referencing an
+    // unjoined owner_rows, i.e. a hard SQL error no mocked-execute test can see.
+    const estimatorArm = sql.slice(sql.indexOf("'estimator' as grp"));
+
+    // The negation must carry the MEMBERSHIP test with it, not just the flag.
+    expect(estimatorArm).toContain("not (u.generates_sales = true and (");
+    expect(estimatorArm).toContain("owner_rows.rep_id is not null");
+    expect(estimatorArm).toContain("left join deal_owners owner_rows on owner_rows.rep_id = u.id");
   });
 
   it("widens estimator office membership by estimating here, mirroring the owner leg", async () => {

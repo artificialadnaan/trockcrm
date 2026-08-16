@@ -1065,12 +1065,21 @@ export async function getRepRosterOptions(
       SELECT u.id, u.display_name, 'estimator' AS grp
       FROM users u
       LEFT JOIN deal_estimators est_rows ON est_rows.rep_id = u.id
+      -- Joined only so the Sales-wins test below can ask the SAME question the sales leg asks.
+      LEFT JOIN deal_owners owner_rows ON owner_rows.rep_id = u.id
       WHERE u.is_active = true
         AND COALESCE(u.is_test_data, false) = false
         AND u.estimates_jobs = true
-        -- SALES WINS: excluded here rather than de-duplicated in JS, so the SQL itself states the
-        -- one-person-one-section rule and no caller can reassemble a double listing.
-        AND u.generates_sales = false
+        -- SALES WINS — but only over someone the SALES LEG ACTUALLY LISTS IN THIS OFFICE, which is why
+        -- this negates that leg's own predicate instead of testing the global flag. A bare
+        -- generates_sales = false is STRICTER than "appears under Sales here": the sales leg also
+        -- requires office membership or an owned deal in this tenant. A multi-office person flagged for
+        -- sales globally, with neither of those here but estimating a deal here, was excluded from the
+        -- sales leg for want of membership AND from this one for having the flag — landing in NEITHER
+        -- section, which is the opposite of the one-person-one-section rule this line exists to enforce.
+        -- Still enforced in SQL, so no caller can reassemble a double listing.
+        -- Both flags are NOT NULL, so this NOT cannot go three-valued and silently drop rows.
+        AND NOT (${dashboardRosterMembershipSql(officeId)})
         AND (${officeMembership} OR est_rows.rep_id IS NOT NULL)
     ) roster
     -- Sales before estimators ('sales' > 'estimator' descending), then by name. lower() so the order does
