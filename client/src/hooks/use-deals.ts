@@ -1363,7 +1363,16 @@ export function usePendingRfp() {
     const isCurrent = () => requestId === requestIdRef.current;
     setLoading(true);
     setError(null);
-    return api<{ deals: PendingRfpDeal[] }>("/deals/pending-rfp")
+    // Carry the estimator filter through. The board's Pending RFP column IS narrowed by it (the predicate
+    // is ANDed into getDealsForPipeline's common conditions), and openStage forwards the whole query
+    // string here — so requesting the unfiltered queue made the destination list every pending RFP under
+    // a count that had been scoped to one estimator. `search` is already this callback's dependency, so
+    // changing the filter refetches.
+    const estimatorId = new URLSearchParams(search).get("estimatorId");
+    const path = estimatorId
+      ? `/deals/pending-rfp?estimatorId=${encodeURIComponent(estimatorId)}`
+      : "/deals/pending-rfp";
+    return api<{ deals: PendingRfpDeal[] }>(path)
       .then((r) => {
         if (isCurrent()) setDeals(r.deals);
         return r.deals;

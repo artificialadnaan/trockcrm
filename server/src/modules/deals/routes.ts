@@ -1022,7 +1022,10 @@ router.get("/", async (req, res, next) => {
 // Sales-role gated: this is a cross-rep read, so keep non-sales CRM roles (e.g. construction) out.
 router.get("/pending-rfp", requireRole("admin", "director", "rep"), async (req, res, next) => {
   try {
-    const deals = await getPendingRfpDeals(req.tenantDb!);
+    const deals = await getPendingRfpDeals(req.tenantDb!, {
+      // Forwarded from the board's Pending RFP column so the destination matches the count that opened it.
+      estimatorId: readOptionalStringParam(req.query.estimatorId, "estimatorId"),
+    });
     await req.commitTransaction!();
     res.json({ deals });
   } catch (err) {
