@@ -57,7 +57,11 @@ export function buildStageSummaryFilters(
     if (raw === undefined || raw.trim() === "") return undefined;
     return Number.isFinite(Number(raw)) ? raw : undefined;
   };
-  const assignedRepId = options.ownRep
+  // Estimator wins here too. The summary reads the bare param directly for the pre-redirect first paint,
+  // so without this a direct URL carrying both would compute the header against owner AND estimator while
+  // the page shows one control — the same dual-filter trap the redirect and the parser now close.
+  const estimatorId = baseFilters.estimatorId ?? (searchParams.get("estimatorId") || undefined);
+  const assignedRepId = options.ownRep && !estimatorId
     ? fb("assignedRepId") ?? (searchParams.get("assignedRepId") || undefined)
     : undefined;
   // Resolve the bar's date the SAME way the list does (withResolvedDateWindow): a relative preset such
