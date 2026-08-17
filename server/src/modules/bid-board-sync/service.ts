@@ -93,6 +93,8 @@ interface IngestionMetrics {
    * bidDueDateUpdated because no value moved, and from bidDueDateSkippedNoChange because something did.
    */
   bidDueDateProvenanceStamped: number;
+  /** Matched rows whose due-date write was refused for lack of an admin/director to attribute it to. */
+  bidDueDateSkippedNoAttributor: number;
 }
 
 interface DealMatch {
@@ -283,7 +285,10 @@ function parseExportDateStringUtc(text: string): { recognized: boolean; date: Da
 
 export function parseBidBoardDueDate(
   value: unknown,
-  projectName = "unknown project"
+  projectName = "unknown project",
+  // What the ingest will DO with the unusable value, so the warning can describe the write that actually
+  // happens. Defaults to false = main's behaviour (the mirror column is overwritten with NULL).
+  options: { preserveBlankDueDate?: boolean } = {}
 ): { value: string | null; warning: string | null } {
   if (value == null || value === "") return { value: null, warning: null };
   // A string in a KNOWN export shape is resolved by this parser and never by `new Date(...)` — including
@@ -300,10 +305,19 @@ export function parseBidBoardDueDate(
           ? parsedText.date ?? new Date(NaN)
           : new Date(String(value));
 
+  // The operator reads these warnings to decide whether the sync did something surprising, so they must
+  // name the write that ACTUALLY happened. With the read-back on, an unusable value is not stored at all:
+  // bid_board_due_date goes through COALESCE($11::date, bid_board_due_date), so the last date the Board
+  // gave us survives — and "was stored as NULL" would describe a write that did not occur, which is worse
+  // than saying nothing. With the flag off the column really is cleared, and the original wording holds.
+  const outcome = options.preserveBlankDueDate
+    ? "was ignored (the previously synced Bid Board due date is left unchanged)"
+    : "was stored as NULL";
+
   if (Number.isNaN(date.getTime())) {
     return {
       value: null,
-      warning: `Due Date for ${projectName} could not be parsed and was stored as NULL`,
+      warning: `Due Date for ${projectName} could not be parsed and ${outcome}`,
     };
   }
 
@@ -311,7 +325,7 @@ export function parseBidBoardDueDate(
   if (year < 2020 || year > 2050) {
     return {
       value: null,
-      warning: `Due Date for ${projectName} is outside accepted range (${year}) and was stored as NULL`,
+      warning: `Due Date for ${projectName} is outside accepted range (${year}) and ${outcome}`,
     };
   }
 
@@ -836,10 +850,18 @@ interface EstimateWritebackResult {
   warning: string | null;
 }
 
+/**
+ * The per-row outcome. EXACTLY ONE of `updated` / `provenanceStamped` / `skippedNoValue` /
+ * `skippedNoChange` / `skippedNoAttributor` is true, so the metrics they feed sum to `matched` over a run
+ * (the one documented exception being a row whose mirror UPDATE hit the canonical-project-number unique
+ * violation and `continue`d before this function was reached).
+ */
 interface BidDueDateWritebackResult {
   updated: boolean;
   skippedNoValue: boolean;
   skippedNoChange: boolean;
+  /** No admin/director to attribute the deal_history row to, so the write was refused. */
+  skippedNoAttributor?: boolean;
   /** The value was already correct, but the Board's confirmation was newly recorded (the 0223 stamps). */
   provenanceStamped?: boolean;
   warning: string | null;
@@ -1003,16 +1025,28 @@ async function writeBidDueDateIfNeeded(
   // out-of-range, which the caller has already warned about).
   const nextDay = row.bidBoardDueDate;
   if (!nextDay) {
-    return { updated: false, skippedNoValue: true, skippedNoChange: false, warning: null };
+    return {
+      updated: false,
+      skippedNoValue: true,
+      skippedNoChange: false,
+      provenanceStamped: false,
+      warning: null,
+    };
   }
 
   if (!changedByUserId) {
     // Same posture as the estimate path: deal_history.changed_by is the audit trail for a value change
     // that moves money, so we skip the write entirely rather than record an unattributable one.
+    //
+    // Counted under its OWN metric. Previously this path incremented nothing, so a run where no
+    // admin/director existed produced per-row outcomes that silently failed to add up to `matched` —
+    // the looseness that made the double-count above hard to notice.
     return {
       updated: false,
       skippedNoValue: false,
       skippedNoChange: false,
+      skippedNoAttributor: true,
+      provenanceStamped: false,
       warning: `Skipped Bid Board bid due date update for deal ${deal.id}: no active admin/director user available for audit history`,
     };
   }
@@ -1085,16 +1119,31 @@ async function writeBidDueDateIfNeeded(
   );
 
   const rowResult = updateResult.rows[0];
-  // No `updated` row at all (detached mid-sync, or already stamped for this project with the right day)
-  // OR a stamp-only pass: either way the VALUE did not move, so there is no deal_history row to write and
-  // nothing for the operator's changed-count to include. `provenanceStamped` distinguishes "the Board
-  // confirmed a date that was already right" from "nothing happened", which is otherwise invisible.
+  // THREE distinct outcomes below the value write, and they are MUTUALLY EXCLUSIVE so the counters sum.
+  //
+  //   value_changed === false -> the UPDATE fired as a STAMP-ONLY pass. A row that was genuinely written
+  //                              is NOT a no-change row; counting it as both inflated skippedNoChange and
+  //                              made the per-row outcomes stop reconciling against `matched`.
+  //   value_changed == null   -> no `updated` row at all: either `existing` returned nothing (the deal was
+  //                              detached mid-sync) or neither guard was true. Nothing happened.
+  //
+  // Either way the VALUE did not move, so there is no deal_history row and nothing for the operator's
+  // changed-count to include.
+  if (rowResult?.value_changed === false) {
+    return {
+      updated: false,
+      skippedNoValue: false,
+      skippedNoChange: false,
+      provenanceStamped: true,
+      warning: null,
+    };
+  }
   if (rowResult?.value_changed !== true) {
     return {
       updated: false,
       skippedNoValue: false,
       skippedNoChange: true,
-      provenanceStamped: rowResult?.value_changed === false,
+      provenanceStamped: false,
       warning: null,
     };
   }
@@ -1127,7 +1176,7 @@ async function writeBidDueDateIfNeeded(
     updated: true,
     skippedNoValue: false,
     skippedNoChange: false,
-    provenanceStamped: true,
+    provenanceStamped: false,
     warning: null,
   };
 }
@@ -1360,6 +1409,7 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
     bidDueDateSkippedNoValue: 0,
     bidDueDateSkippedNoChange: 0,
     bidDueDateProvenanceStamped: 0,
+    bidDueDateSkippedNoAttributor: 0,
   };
 
   // Resolved ONCE per run, not per row: a flag flipped mid-run would otherwise write the date on some of
@@ -1415,7 +1465,9 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
         continue;
       }
 
-      const dueDate = parseBidBoardDueDate(rawRow["Due Date"], normalized.name);
+      const dueDate = parseBidBoardDueDate(rawRow["Due Date"], normalized.name, {
+        preserveBlankDueDate: bidDueDateReadbackEnabled,
+      });
       if (dueDate.warning) {
         metrics.invalidDueDates++;
         warnings.push(dueDate.warning);
@@ -1593,12 +1645,12 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
           normalized,
           changedByUserId
         );
+        // Exactly one of these fires per matched row — see BidDueDateWritebackResult.
         if (bidDueDateResult.updated) metrics.bidDueDateUpdated++;
+        if (bidDueDateResult.provenanceStamped) metrics.bidDueDateProvenanceStamped++;
         if (bidDueDateResult.skippedNoValue) metrics.bidDueDateSkippedNoValue++;
         if (bidDueDateResult.skippedNoChange) metrics.bidDueDateSkippedNoChange++;
-        if (bidDueDateResult.provenanceStamped && !bidDueDateResult.updated) {
-          metrics.bidDueDateProvenanceStamped++;
-        }
+        if (bidDueDateResult.skippedNoAttributor) metrics.bidDueDateSkippedNoAttributor++;
         if (bidDueDateResult.warning) warnings.push(bidDueDateResult.warning);
       }
 

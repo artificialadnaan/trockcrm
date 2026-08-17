@@ -271,6 +271,9 @@ describe("Bid Board Due Date -> deals.bid_due_date (flag ON)", () => {
     expect(new Date(after.bid_due_date).toISOString()).toBe("2026-09-01T00:00:00.000Z");
     expect(result.metrics.bidDueDateUpdated).toBe(0);
     expect(result.metrics.bidDueDateProvenanceStamped).toBe(1);
+    // NOT also counted as a skip: a row that was genuinely written is not a no-change row. The two
+    // counters are mutually exclusive so the per-row outcomes reconcile against `matched`.
+    expect(result.metrics.bidDueDateSkippedNoChange).toBe(0);
     // No history row and no audit entry: nothing a human reads changed. (`updated_at` is deliberately
     // NOT asserted — the ingest's own mirror UPDATE stamps it on every matched row regardless, so an
     // assertion here would be pinning someone else's behaviour, exactly as noted on the no-op case above.
@@ -435,7 +438,10 @@ describe("Bid Board Due Date -> deals.bid_due_date (flag ON)", () => {
     const result = await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
 
     expect(result.metrics.bidDueDateUpdated).toBe(0);
-    expect(result.metrics.bidDueDateSkippedNoChange).toBe(1);
+    // Stamped, not skipped: provenance was stale on this first sync. The VALUE not moving is the property
+    // under test, and the absent history row is what proves it.
+    expect(result.metrics.bidDueDateProvenanceStamped).toBe(1);
+    expect(result.metrics.bidDueDateSkippedNoChange).toBe(0);
     const history = (await historyRows()).filter((h) => h.field_name === "bid_due_date");
     expect(history).toHaveLength(0);
     // The instant is left exactly as it was; the day is all any surface reads.
@@ -506,6 +512,96 @@ describe("Bid Board Due Date -> deals.bid_due_date (flag ON)", () => {
     expect(new Date((await dealRow()).bid_due_date).toISOString()).toBe("2026-10-15T00:00:00.000Z");
   });
 
+  // ★ RECONCILIATION. Exactly one outcome fires per matched row, so the five counters sum to `matched`.
+  // This is the invariant the double-count broke, and the null-attributor path used to break silently.
+  it("reports exactly one outcome per matched row — the counters sum to `matched`", async () => {
+    await pg.exec(`DELETE FROM ${SCHEMA}.deals;`);
+    await pg.query(
+      `INSERT INTO ${SCHEMA}.deals
+         (id, name, stage_id, stage_entered_at, workflow_route, deal_number, project_number,
+          bid_board_project_number, bid_estimate, is_active, bid_due_date, updated_at)
+       VALUES
+         ($1, 'Changes',   $4, now(), 'normal', 'P-1', 'P-1', 'P-1', 1, true, '2026-01-01T00:00:00Z', now()),
+         ($2, 'Confirmed', $4, now(), 'normal', 'P-2', 'P-2', 'P-2', 1, true, '2026-09-01T00:00:00Z', now()),
+         ($3, 'Blank',     $4, now(), 'normal', 'P-3', 'P-3', 'P-3', 1, true, NULL, now())`,
+      [U("e0001"), U("e0002"), U("e0003"), ST_ESTIMATING]
+    );
+
+    const result = await ingestBidBoardRows({
+      office_slug: "test",
+      rows: [
+        exportRow({ Name: "Changes", "Project #": "P-1" }),
+        exportRow({ Name: "Confirmed", "Project #": "P-2" }),
+        exportRow({ Name: "Blank", "Project #": "P-3", "Due Date": "" }),
+      ],
+    });
+
+    const m = result.metrics;
+    expect(m.matched).toBe(3);
+    expect(m.bidDueDateUpdated).toBe(1); // the date moved
+    expect(m.bidDueDateProvenanceStamped).toBe(1); // already right, newly confirmed
+    expect(m.bidDueDateSkippedNoValue).toBe(1); // blank export cell
+    expect(m.bidDueDateSkippedNoChange).toBe(0);
+    expect(m.bidDueDateSkippedNoAttributor).toBe(0);
+    expect(
+      m.bidDueDateUpdated +
+        m.bidDueDateProvenanceStamped +
+        m.bidDueDateSkippedNoValue +
+        m.bidDueDateSkippedNoChange +
+        m.bidDueDateSkippedNoAttributor
+    ).toBe(m.matched);
+
+    // A second identical sync: nothing left to do, and the no-change counter is where they land.
+    const second = await ingestBidBoardRows({
+      office_slug: "test",
+      rows: [
+        exportRow({ Name: "Changes", "Project #": "P-1" }),
+        exportRow({ Name: "Confirmed", "Project #": "P-2" }),
+        exportRow({ Name: "Blank", "Project #": "P-3", "Due Date": "" }),
+      ],
+    });
+    expect(second.metrics.bidDueDateSkippedNoChange).toBe(2);
+    expect(second.metrics.bidDueDateProvenanceStamped).toBe(0);
+    expect(
+      second.metrics.bidDueDateUpdated +
+        second.metrics.bidDueDateProvenanceStamped +
+        second.metrics.bidDueDateSkippedNoValue +
+        second.metrics.bidDueDateSkippedNoChange +
+        second.metrics.bidDueDateSkippedNoAttributor
+    ).toBe(second.metrics.matched);
+  });
+
+  it("counts the null-attributor refusal under its own metric, keeping the sum intact", async () => {
+    await pg.exec(`UPDATE public.users SET is_active = false WHERE id = '${ADMIN}'`);
+    try {
+      const result = await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
+
+      expect(result.metrics.matched).toBe(1);
+      expect(result.metrics.bidDueDateSkippedNoAttributor).toBe(1);
+      expect(result.metrics.bidDueDateUpdated).toBe(0);
+      expect(result.metrics.bidDueDateProvenanceStamped).toBe(0);
+      expect(result.metrics.bidDueDateSkippedNoChange).toBe(0);
+    } finally {
+      await pg.exec(`UPDATE public.users SET is_active = true WHERE id = '${ADMIN}'`);
+    }
+  });
+
+  // ★ THE WARNING MUST DESCRIBE THE WRITE THAT HAPPENED. With the read-back on, an unusable Due Date is
+  // not stored at all — the mirror goes through COALESCE and keeps its previous value — so "was stored as
+  // NULL" would describe a write that never occurred, on the exact message an operator reads to decide
+  // whether the sync did something surprising.
+  it("says the value was IGNORED, not 'stored as NULL', when the mirror is preserved", async () => {
+    const result = await ingestBidBoardRows({
+      office_slug: "test",
+      rows: [exportRow({ "Due Date": "TBD" })],
+    });
+
+    const warning = result.warnings.find((w) => w.includes("could not be parsed"));
+    expect(warning).toContain("was ignored");
+    expect(warning).toContain("previously synced Bid Board due date is left unchanged");
+    expect(warning).not.toContain("stored as NULL");
+  });
+
   it("also leaves it alone when the Due Date is present but UNPARSEABLE (the parser's null)", async () => {
     await seedDeals("2026-06-01T00:00:00.000Z");
 
@@ -537,7 +633,10 @@ describe("Bid Board Due Date -> deals.bid_due_date (flag ON)", () => {
     expect((await historyRows()).filter((h) => h.field_name === "bid_due_date")).toHaveLength(0);
     expect((await auditFieldChanges()).filter((c) => "bidDueDate" in c)).toHaveLength(0);
     expect(result.metrics.bidDueDateUpdated).toBe(0);
-    expect(result.metrics.bidDueDateSkippedNoChange).toBe(1);
+    // On a FIRST sync this row still gets a stamp-only pass (its provenance is stale), so it is counted as
+    // stamped rather than skipped — the value is what did not change, and that is what this test is about.
+    expect(result.metrics.bidDueDateProvenanceStamped).toBe(1);
+    expect(result.metrics.bidDueDateSkippedNoChange).toBe(0);
   });
 
   it("is idempotent across two consecutive syncs of the same export", async () => {
