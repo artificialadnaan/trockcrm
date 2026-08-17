@@ -40,9 +40,25 @@ export function WeeklyReportSettingsDialog({ onClose }: { onClose: () => void })
   };
 
   const onSave = async () => {
+    // A typed-but-not-added address counts. Saving `emails` alone discarded it, showed a success
+    // toast and closed — so the user was told their recipient was saved while it was thrown away,
+    // and the person they had just added would never receive the digest. A malformed draft is
+    // reported rather than silently dropped for the same reason.
+    const pending = draft.trim().toLowerCase();
+    let toSave = emails;
+    if (pending) {
+      if (!EMAIL_PATTERN.test(pending)) {
+        toast.error("That doesn't look like an email address");
+        return;
+      }
+      if (!emails.includes(pending)) toSave = [...emails, pending];
+    }
+
     setSaving(true);
     try {
-      await saveWeeklyReportSettings(emails);
+      await saveWeeklyReportSettings(toSave);
+      setEmails(toSave);
+      setDraft("");
       toast.success("Settings saved");
       onClose();
     } catch (err) {
