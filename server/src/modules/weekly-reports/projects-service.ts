@@ -132,8 +132,17 @@ export interface WeeklyReportProjectInput {
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+/**
+ * `null`/`undefined` mean "clear it"; a string is trimmed. Anything else is REJECTED.
+ *
+ * Coercing a supplied non-string to null made `{"clientName": 123}` a successful request that wiped
+ * the client's name — a malformed payload silently destroying data instead of being refused.
+ */
 function normalizeText(value: unknown): string | null {
-  if (typeof value !== "string") return null;
+  if (value == null) return null;
+  if (typeof value !== "string") {
+    throw new AppError(400, "Expected a text value");
+  }
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
 }
@@ -335,7 +344,8 @@ export async function createWeeklyReportProject(
        $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
        $12::uuid, $13::uuid, $14::date, $15, $16::date, $17, $18::date, $19,
        $20, $21, $22::date, $23::date, $24, $25::uuid
-     ) RETURNING id`,
+     ) ON CONFLICT DO NOTHING
+       RETURNING id`,
     [
       input.dealId,
       values.propertyDisplayName,
@@ -364,6 +374,13 @@ export async function createWeeklyReportProject(
       actorUserId,
     ],
   );
+
+  // ON CONFLICT rather than trusting the existence check above: that SELECT serialises nothing, so two
+  // concurrent setups for the same deal both pass it and one hits weekly_report_projects_deal_uidx —
+  // surfacing a raw 23505 as a 500 instead of the 409 this case already has an answer for.
+  if (result.rows.length === 0) {
+    throw new AppError(409, "This project already has a weekly report setup");
+  }
 
   const created = await getWeeklyReportProject(client, result.rows[0].id);
   if (!created) throw new AppError(500, "Weekly report project could not be read back after creation");
@@ -613,6 +630,32 @@ export interface WeeklyReportAssignableUser {
  * this a rep could set themselves as the PM of any project and thereby grant themselves the approval
  * powers the whole review gate exists to withhold. The FK alone does not care: any real user id passes it.
  */
+/**
+ * Who counts as a member of this office, and in what role.
+ *
+ * ONE definition, shared by the picker and by the write-side validation — if the two could drift, the
+ * form would offer somebody the API then rejects, or worse, accept somebody the form never offered.
+ *
+ * Office membership is NOT just `users.office_id`. A multi-office PM or director holds a
+ * `public.user_office_access` grant, and authentication already lets them act in the granted office —
+ * so keying only on the primary office rejects exactly the people most likely to run a second office's
+ * projects. The grant may also carry a `role_override`, which is then the role that applies here.
+ * (The same omission has produced a bug in this codebase before, in the deal-reassign guard.)
+ */
+const OFFICE_MEMBER_SQL = `
+  FROM public.users u
+  LEFT JOIN public.user_office_access uoa
+         ON uoa.user_id = u.id AND uoa.office_id = $OFFICE$::uuid
+ WHERE (u.office_id = $OFFICE$::uuid OR uoa.user_id IS NOT NULL)
+   AND u.is_active = true
+   AND COALESCE(u.is_test_data, false) = false
+   AND COALESCE(uoa.role_override, u.role)::text = ANY($ROLES$::text[])
+`;
+
+function officeMemberSql(officeParam: number, rolesParam: number): string {
+  return OFFICE_MEMBER_SQL.replaceAll("$OFFICE$", `$${officeParam}`).replaceAll("$ROLES$", `$${rolesParam}`);
+}
+
 async function assertAssignableUser(
   client: QueryExecutor,
   officeId: string,
@@ -621,14 +664,7 @@ async function assertAssignableUser(
 ): Promise<void> {
   if (!userId) return;
   const result = await client.query(
-    `SELECT 1
-       FROM public.users
-      WHERE id = $1::uuid
-        AND office_id = $2::uuid
-        AND is_active = true
-        AND COALESCE(is_test_data, false) = false
-        AND role::text = ANY($3::text[])
-      LIMIT 1`,
+    `SELECT 1 ${officeMemberSql(2, 3)} AND u.id = $1::uuid LIMIT 1`,
     [userId, officeId, [...ASSIGNABLE_ROLES]],
   );
   if (result.rows.length === 0) {
@@ -640,16 +676,13 @@ export async function listWeeklyReportAssignableUsers(
   client: QueryExecutor,
   officeId: string,
 ): Promise<WeeklyReportAssignableUser[]> {
+  // ::text on the role, because users.role is the user_role ENUM: comparing it to a text[] raises
+  // "operator does not exist: user_role = text" rather than quietly returning nothing.
   const result = await client.query(
-    `SELECT id, display_name, email, role
-       FROM public.users
-      WHERE office_id = $1::uuid
-        AND is_active = true
-        AND COALESCE(is_test_data, false) = false
-        -- role::text, because users.role is the user_role ENUM: comparing it to a text[] raises
-        -- "operator does not exist: user_role = text" rather than quietly returning nothing.
-        AND role::text = ANY($2::text[])
-      ORDER BY display_name ASC`,
+    `SELECT DISTINCT u.id, u.display_name, u.email,
+            COALESCE(uoa.role_override, u.role) AS role
+     ${officeMemberSql(1, 2)}
+     ORDER BY u.display_name ASC`,
     [officeId, [...ASSIGNABLE_ROLES]],
   );
   return result.rows.map((row) => ({

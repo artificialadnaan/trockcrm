@@ -10,7 +10,7 @@
 
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { deals, files, offices, users } from "@trock-crm/shared/schema";
+import { deals, files, offices, userOfficeAccess, users } from "@trock-crm/shared/schema";
 import { WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import { migrationSql } from "../../helpers/migration-sql.js";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
@@ -131,7 +131,8 @@ beforeAll(async () => {
   await pg.exec(`CREATE SCHEMA IF NOT EXISTS office_dallas;`);
   // Prerequisite graph, derived from the SAME Drizzle definitions prod is generated from rather than
   // hand-rolled, so a column type here cannot drift from production.
-  await pg.exec(tenantSchemaSql("public", [offices, users]));
+  // user_office_access carries the multi-office grants the assignee roster must honour.
+  await pg.exec(tenantSchemaSql("public", [offices, users, userOfficeAccess]));
   await pg.exec(tenantSchemaSql("office_dallas", [deals, files]));
   // Weekly reports may only be set up on a WON deal, so the suite needs the stage graph the check reads.
   await pg.exec(
@@ -1225,6 +1226,104 @@ describe("review findings, round two", () => {
     // Asked on Aug 17, a Thursday cadence starting Sep 17 must not report Aug 20 — the board
     // correctly generates no obligation for that date, and the two must agree.
     expect(summary!.nextDueWeekOf).toBe("2026-09-17");
+  });
+});
+
+// Third Codex pass on 1a000d1a. Seven findings, all real.
+describe("review findings, round three", () => {
+  const GRANTED = U("22226");
+  const OTHER_OFFICE = U("00004");
+
+  it("includes a multi-office member holding a user_office_access grant", async () => {
+    // Office membership is not just users.office_id. A PM whose primary office is elsewhere but who
+    // holds a grant here is exactly the person most likely to run a second office's projects — and
+    // authentication already lets them act in it. The same omission has bitten the deal-reassign guard.
+    await pg.query(`INSERT INTO public.offices (id, name, slug) VALUES ($1::uuid, 'Atlanta', 'atl2')`, [OTHER_OFFICE]);
+    await pg.query(
+      `INSERT INTO public.users (id, display_name, email, role, office_id)
+       VALUES ($1::uuid, 'Visiting PM', 'visiting@example.com', 'construction', $2::uuid)`,
+      [GRANTED, OTHER_OFFICE],
+    );
+    // Without the grant they are correctly rejected.
+    await expectAppError(seedProject({ trockPmUserId: GRANTED }), 400, /project team/i);
+
+    await pg.query(
+      `INSERT INTO public.user_office_access (user_id, office_id) VALUES ($1::uuid, $2::uuid)`,
+      [GRANTED, OFFICE],
+    );
+    expect((await listWeeklyReportAssignableUsers(db, OFFICE)).map((u) => u.id)).toContain(GRANTED);
+    await expect(seedProject({ trockPmUserId: GRANTED })).resolves.toMatchObject({ trockPmUserId: GRANTED });
+
+    await pg.query(`DELETE FROM public.user_office_access WHERE user_id = $1::uuid`, [GRANTED]);
+    await pg.query(`DELETE FROM public.users WHERE id = $1::uuid`, [GRANTED]);
+    await pg.query(`DELETE FROM public.offices WHERE id = $1::uuid`, [OTHER_OFFICE]);
+  });
+
+  it("applies a grant's role_override when deciding assignability", async () => {
+    // A sales rep granted into this office AS construction is assignable here even though their
+    // primary role is not.
+    await pg.query(
+      `INSERT INTO public.user_office_access (user_id, office_id, role_override)
+       VALUES ($1::uuid, $2::uuid, 'construction')`,
+      [STRANGER, OFFICE],
+    );
+    expect((await listWeeklyReportAssignableUsers(db, OFFICE)).map((u) => u.id)).toContain(STRANGER);
+    await pg.query(`DELETE FROM public.user_office_access WHERE user_id = $1::uuid`, [STRANGER]);
+  });
+
+  it("keeps an intentionally cleared caption cleared", async () => {
+    // `??` treated a deliberately blank caption as absent and restored the capture description, so a
+    // user could not remove a caption and have it stay removed.
+    const project = await seedProject();
+    const id = await seedDraft(project.id);
+    const photo = await seedPhoto({ takenAt: "2026-08-11", description: "as captured" });
+
+    await replaceWeeklyReportPhotos(db, id, [{ fileId: photo, caption: null }], SUPER_ACTOR);
+    const candidates = await listWeeklyReportPhotoCandidates(db, id);
+    const match = candidates.find((c) => c.fileId === photo);
+    expect(match?.selected).toBe(true);
+    expect(match?.caption).toBeNull();
+    // The original description is still reported separately, so the UI can offer it back.
+    expect(match?.originalDescription).toBe("as captured");
+  });
+
+  it("refuses to approve or send a report whose work-completed was cleared after submit", async () => {
+    // The PM may edit a report in review; a check that ran only on draft submission let the section be
+    // emptied afterwards and an empty report delivered to the client.
+    const project = await seedProject();
+    const id = await seedDraft(project.id);
+    await transitionWeeklyReport(db, id, "pending_review", SUPER_ACTOR);
+    await updateWeeklyReportContent(db, id, { workCompleted: null }, PM_ACTOR);
+
+    await expectAppError(transitionWeeklyReport(db, id, "approved", PM_ACTOR), 400, /work completed/i);
+  });
+
+  it("refuses to send an approved report whose work-completed was cleared", async () => {
+    const project = await seedProject();
+    const id = await seedDraft(project.id);
+    await transitionWeeklyReport(db, id, "pending_review", SUPER_ACTOR);
+    await transitionWeeklyReport(db, id, "approved", PM_ACTOR);
+    await updateWeeklyReportContent(db, id, { workCompleted: null }, PM_ACTOR);
+
+    await expectAppError(transitionWeeklyReport(db, id, "sent", PM_ACTOR), 400, /work completed/i);
+  });
+
+  it("rejects a non-string field instead of silently clearing it", async () => {
+    // {"clientName": 123} previously succeeded and wiped the client's name.
+    const project = await seedProject();
+    await expectAppError(
+      updateWeeklyReportProject(db, project.id, { clientName: 123 as never }, OFFICE),
+      400,
+      /text value/i,
+    );
+    expect((await getWeeklyReportProject(db, project.id))!.clientName).toBe("Mack Real Estate Group");
+  });
+
+  it("answers a duplicate setup with a conflict even when the pre-flight check is bypassed", async () => {
+    // The existence SELECT serialises nothing; the unique index is what actually holds. Reaching the
+    // INSERT with a live row present must still be a 409, not a raw 23505 surfaced as a 500.
+    await seedProject();
+    await expectAppError(seedProject(), 409, /already has a weekly report setup/i);
   });
 });
 

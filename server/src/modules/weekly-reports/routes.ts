@@ -231,8 +231,11 @@ router.post("/projects/:id/dismiss", async (req, res, next) => {
 
 router.get("/reports", async (req, res, next) => {
   try {
+    // UUID-guarded like every path and body id: listWeeklyReports casts this with ::uuid, so a
+    // malformed filter raised 22P02 and answered 500 instead of a 400 the caller can act on.
+    const projectIdFilter = readQueryString(req.query.projectId);
     const reports = await listWeeklyReports(req.tenantClient!, {
-      projectId: readQueryString(req.query.projectId),
+      projectId: projectIdFilter ? requireUuid(projectIdFilter, "projectId") : null,
       status: readQueryString(req.query.status),
       from: readQueryString(req.query.from),
       to: readQueryString(req.query.to),

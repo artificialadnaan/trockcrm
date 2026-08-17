@@ -264,7 +264,15 @@ export async function createWeeklyReportDraft(
   input: CreateWeeklyReportInput,
   actor: WeeklyReportActor,
 ): Promise<{ report: WeeklyReportDetail; created: boolean }> {
-  const projectRow = await getWeeklyReportProjectRow(client, input.weeklyReportProjectId);
+  // FOR UPDATE: the status and cadence read here decide whether the draft may exist and which week it
+  // belongs to. Without the lock a pause or a cadence change committing before the INSERT leaves a
+  // draft that the dashboard no longer generates a slot for — present in the table, invisible on the
+  // board, and the week it covers still reading as missing.
+  const locked = await client.query(
+    `SELECT * FROM weekly_report_projects WHERE id = $1::uuid AND is_active FOR UPDATE`,
+    [input.weeklyReportProjectId],
+  );
+  const projectRow = locked.rows[0];
   if (!projectRow) throw new AppError(404, "Weekly report project not found");
   if (projectRow.status !== "active") {
     throw new AppError(409, `Weekly reporting is ${projectRow.status} for this project`);
@@ -618,9 +626,11 @@ export async function listWeeklyReportPhotoCandidates(
 
   return result.rows.map((row) => ({
     fileId: row.file_id,
-    // The picker pre-fills the caption from the capture-time description; once the user edits it the
-    // stored caption wins. Falling back the other way would silently revert their edit on every reload.
-    caption: row.selected_caption ?? row.original_description ?? null,
+    // For an ALREADY-SELECTED photo the stored caption wins outright, null included: `??` treated a
+    // deliberately cleared caption as absent and restored the capture description, so the user could
+    // not blank a caption and have it stay blank. The description is only a default for photos the
+    // user has not selected yet.
+    caption: row.selected ? (row.selected_caption ?? null) : (row.original_description ?? null),
     originalDescription: row.original_description ?? null,
     sortOrder: Number(row.selected_sort_order ?? 0),
     takenAt: toIsoTimestamp(row.taken_at ?? row.created_at),
@@ -657,12 +667,14 @@ export async function transitionWeeklyReport(
   const assignments = [`status = $1`];
   const params: unknown[] = [to];
 
+  // Re-checked at EVERY forward gate, not just the first submit. PM-authorised users may edit a report
+  // in pending_review or approved, so a check that ran only on draft submission let the work-completed
+  // section be cleared afterwards and the empty report approved and sent to the client.
+  if ((to === "pending_review" || to === "approved" || to === "sent") && !reportRow.work_completed) {
+    throw new AppError(400, "Add the work completed before this report can move forward");
+  }
+
   if (to === "pending_review") {
-    // A report cannot be reviewed until it says something. Catching this at the gate rather than at
-    // send keeps an empty report out of the PM's queue entirely.
-    if (!reportRow.work_completed && reportRow.status === "draft") {
-      throw new AppError(400, "Add the work completed before submitting for review");
-    }
     if (reportRow.status === "draft") {
       const remaining = weeklyReportRemainingWeeks({
         projectedDurationWeeks: projectRow.projected_duration_weeks,
