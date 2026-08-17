@@ -14,11 +14,26 @@
 -- unpersisted. A blank/unchanged row is the NORMAL case on almost every sync; a column for it would be
 -- noise, whereas "n deals had their bid due date rewritten" is the number that explains a pipeline swing.
 --
--- bid_board_sync_runs is a per-tenant office_* table, so this needs BOTH halves: the DO-loop retro-fits
--- every schema that exists now, and the TENANT_SCHEMA block is what the office provisioner replays for
--- schemas created after this deploy. Either half alone leaves some office without the column — and this
--- one is written unconditionally by every ingest run, so a missing column is a hard failure of the whole
--- sync for that office, not a silent degradation.
+-- bid_board_sync_runs is a per-tenant office_* table, so this ships both halves of the tenant convention:
+-- the DO-loop retro-fits every schema that exists now, and the TENANT_SCHEMA block is what the office
+-- provisioner replays for schemas created after this deploy.
+--
+-- HONEST NOTE on what the tenant block can and cannot deliver here, because the usual "either half alone
+-- leaves an office without the column" claim is NOT true for this table: bid_board_sync_runs is created
+-- only inside migration 0063's DO-loop and has no TENANT_SCHEMA block of its own, so for a brand-new
+-- office the table does not exist at the moment the provisioner replays these blocks and this ALTER would
+-- raise `relation does not exist` rather than adding anything. Migration 0200 has the identical latent
+-- issue for its own bid_board_sync_runs column, so this is precedent-consistent and deliberately not
+-- diverged from here — fixing it belongs with 0063's provisioning gap, not with a counter column. (New-
+-- office provisioning is separately known to fail earlier than this, at 0120.) The DO-loop is what
+-- actually delivers the column to every office that exists; the block is kept for convention and applies
+-- idempotently to office_dallas at migration time.
+--
+-- The column IS load-bearing for existing offices: with BID_BOARD_DUE_DATE_READBACK on, every ingest run
+-- writes it inside the run's transaction, so a missing column would roll back that office's entire sync
+-- rather than degrade quietly. The writer references the column only when the flag is on, precisely so a
+-- worker deployed ahead of the API (migrations run on API deploy; the worker does not run them) cannot
+-- break the sync before the feature is turned on.
 --
 -- Additive and idempotent (ADD COLUMN IF NOT EXISTS), NOT NULL DEFAULT 0 so existing run rows read as
 -- "zero deals moved" rather than NULL, matching skipped_detached_count / applied_backward_count.

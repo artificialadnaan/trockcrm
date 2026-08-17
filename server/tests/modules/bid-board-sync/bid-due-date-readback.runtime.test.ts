@@ -267,6 +267,72 @@ describe("Bid Board Due Date -> deals.bid_due_date (flag ON)", () => {
     expect((await historyRows()).filter((h) => h.field_name === "bid_due_date")).toHaveLength(0);
   });
 
+  // ★ THE REAL EXPORT FORMAT. Procore ships US "M/D/YYYY" (the pre-existing fixtures in service.test.ts
+  // use "4/30/2026" for exactly that reason), and an ISO-only suite cannot catch what goes wrong with it:
+  // `new Date("4/30/2026")` is parsed in the SESSION timezone, so the old parser produced 2026-04-30 under
+  // TZ=UTC and 2026-04-29 under Europe/Berlin. That was survivable while the value only fed a column
+  // nobody read; it is not survivable now that the parsed day is written to deals.bid_due_date, where one
+  // wrong day flips an estimating deal's hold verdict and zeroes (or restores) its reported value.
+  //
+  // Asserted under BOTH timezones, because a test that only runs under UTC is precisely the test that
+  // cannot see this bug. TZ is restored in the finally so no later suite inherits it.
+  it.each(["UTC", "Europe/Berlin", "America/Chicago", "Pacific/Auckland"])(
+    "writes the correct calendar day from a US-format Due Date under TZ=%s",
+    async (timeZone) => {
+      const originalTz = process.env.TZ;
+      process.env.TZ = timeZone;
+      try {
+        await seedDeals();
+        const result = await ingestBidBoardRows({
+          office_slug: "test",
+          rows: [exportRow({ "Due Date": "4/30/2026" })],
+        });
+
+        expect(result.metrics.invalidDueDates).toBe(0);
+        expect(result.metrics.bidDueDateUpdated).toBe(1);
+        const { rows } = await pg.query<{ day: string }>(
+          `SELECT (bid_due_date AT TIME ZONE 'UTC')::date::text AS day FROM ${SCHEMA}.deals WHERE id = '${DEAL}'`
+        );
+        expect(rows[0].day).toBe("2026-04-30");
+      } finally {
+        if (originalTz === undefined) delete process.env.TZ;
+        else process.env.TZ = originalTz;
+      }
+    }
+  );
+
+  it("rejects an IMPOSSIBLE US-format date instead of rolling it over into a plausible day", async () => {
+    // 13/01/2026 and 2/31/2026 would silently become 2027-01-01 and 2026-03-03 through Date.UTC, which is
+    // worse than a null: a wrong-but-plausible horizon is invisible.
+    await seedDeals("2026-06-01T00:00:00.000Z");
+
+    const result = await ingestBidBoardRows({
+      office_slug: "test",
+      rows: [exportRow({ "Due Date": "2/31/2026" })],
+    });
+
+    expect(new Date((await dealRow()).bid_due_date).toISOString()).toBe("2026-06-01T00:00:00.000Z");
+    expect(result.metrics.bidDueDateUpdated).toBe(0);
+    expect(result.metrics.invalidDueDates).toBe(1);
+  });
+
+  // The guard compares CALENDAR DAYS, not instants. A legacy row stored at 14:30 on the right day needs no
+  // correction — and rewriting it would emit a deal_history entry reading "2026-09-01 -> 2026-09-01",
+  // because the guard compared instants while the history renders days. That row looks like a bug to
+  // whoever audits the first enabled run.
+  it("treats a legacy NON-MIDNIGHT instant on the correct day as no change — no 'X -> X' history row", async () => {
+    await seedDeals("2026-09-01T14:30:00.000Z");
+
+    const result = await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
+
+    expect(result.metrics.bidDueDateUpdated).toBe(0);
+    expect(result.metrics.bidDueDateSkippedNoChange).toBe(1);
+    const history = (await historyRows()).filter((h) => h.field_name === "bid_due_date");
+    expect(history).toHaveLength(0);
+    // The instant is left exactly as it was; the day is all any surface reads.
+    expect(new Date((await dealRow()).bid_due_date).toISOString()).toBe("2026-09-01T14:30:00.000Z");
+  });
+
   it("also leaves it alone when the Due Date is present but UNPARSEABLE (the parser's null)", async () => {
     await seedDeals("2026-06-01T00:00:00.000Z");
 

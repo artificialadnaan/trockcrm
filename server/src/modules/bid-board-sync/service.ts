@@ -230,17 +230,69 @@ function toIsoTimestamp(value: unknown): string | null {
   return date.toISOString();
 }
 
+/**
+ * Parse the calendar day out of a Bid Board export date STRING as a UTC instant, timezone-independently.
+ *
+ * `new Date(str)` is only safe for the two forms it defines as UTC: a bare "YYYY-MM-DD" and an
+ * offset-qualified timestamp. The Procore export's real shape is US "M/D/YYYY", which V8 parses in the
+ * SESSION timezone — so `new Date("4/30/2026").toISOString().slice(0, 10)` is 2026-04-30 under TZ=UTC and
+ * 2026-04-29 under Europe/Berlin. Prod runs Etc/UTC today, so this has been latent; it stops being
+ * acceptable now that the parsed day is written to `deals.bid_due_date`, which is the auto-park horizon
+ * for estimating deals — one wrong day there flips a deal's hold verdict and zeroes (or restores) its
+ * reported value. Reading the day off the string rather than off a locally-parsed instant removes the
+ * dependency entirely instead of relying on a deployment detail.
+ *
+ * `recognized` is deliberately separate from `date`: a string that MATCHES a known shape but names an
+ * impossible day (2/31/2026, 13/01/2026) must be reported as invalid, NOT handed to `new Date(...)`, which
+ * silently rolls it over into a different, entirely plausible day (2026-03-03). A wrong-but-plausible
+ * horizon is worse than a null one — the null is visible in invalidDueDates and never written, while the
+ * rollover would park or un-park a real deal against a date nobody entered.
+ */
+function parseExportDateStringUtc(text: string): { recognized: boolean; date: Date | null } {
+  /** Date.UTC, but null for a day that does not exist rather than the rolled-over neighbour. */
+  const utcDay = (year: number, month: number, day: number): Date | null => {
+    const probe = new Date(Date.UTC(year, month - 1, day));
+    if (
+      probe.getUTCFullYear() !== year ||
+      probe.getUTCMonth() !== month - 1 ||
+      probe.getUTCDate() !== day
+    ) {
+      return null;
+    }
+    return probe;
+  };
+
+  const iso = /^(\d{4})-(\d{2})-(\d{2})(?:[T\s]|$)/.exec(text);
+  if (iso) {
+    return { recognized: true, date: utcDay(Number(iso[1]), Number(iso[2]), Number(iso[3])) };
+  }
+  // US M/D/YYYY (or MM/DD/YYYY), optionally followed by a time we deliberately discard — the business
+  // value is a calendar day.
+  const us = /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[\s,]|$)/.exec(text);
+  if (us) {
+    return { recognized: true, date: utcDay(Number(us[3]), Number(us[1]), Number(us[2])) };
+  }
+  return { recognized: false, date: null };
+}
+
 export function parseBidBoardDueDate(
   value: unknown,
   projectName = "unknown project"
 ): { value: string | null; warning: string | null } {
   if (value == null || value === "") return { value: null, warning: null };
+  // A string in a KNOWN export shape is resolved by this parser and never by `new Date(...)` — including
+  // when it is invalid, so an impossible day is reported rather than rolled over. Only an unrecognised
+  // shape falls through to the engine's own parsing, preserving whatever the export used to accept.
+  const parsedText =
+    typeof value === "string" ? parseExportDateStringUtc(value.trim()) : { recognized: false, date: null };
   const date =
     typeof value === "number"
       ? parseExcelSerialDate(value)
       : value instanceof Date
         ? value
-        : new Date(String(value));
+        : parsedText.recognized
+          ? parsedText.date ?? new Date(NaN)
+          : new Date(String(value));
 
   if (Number.isNaN(date.getTime())) {
     return {
@@ -943,7 +995,17 @@ async function writeBidDueDateIfNeeded(
               updated_at = NOW()
          FROM existing
         WHERE d.id = $1
-          AND existing.bid_due_date IS DISTINCT FROM $2::timestamptz
+          -- Compared on the CALENDAR DAY, not the instant, and against an explicit date parameter ($3)
+          -- rather than a cast of $2 (casting a timestamptz to date resolves in the SESSION timezone —
+          -- the exact trap AT TIME ZONE 'UTC' exists to avoid).
+          --
+          -- Two reasons the day is the right unit. First, the day is the entire business value and the
+          -- only thing holdHorizonDateSql reads, so a legacy row stored at 14:30 on the correct day needs
+          -- no correction. Second, an instant comparison would rewrite that row and then emit a
+          -- deal_history entry reading "2026-06-01 -> 2026-06-01", because the guard compared instants
+          -- while the history renders days — a row that looks like a bug to whoever audits the first
+          -- enabled run. Any write that does happen still normalizes the column to UTC midnight via $2.
+          AND (existing.bid_due_date AT TIME ZONE 'UTC')::date IS DISTINCT FROM $3::date
         RETURNING existing.bid_due_date AS old_bid_due_date,
                   d.bid_due_date AS new_bid_due_date
      )
@@ -952,7 +1014,7 @@ async function writeBidDueDateIfNeeded(
             updated.new_bid_due_date
        FROM existing
        LEFT JOIN updated ON true`,
-    [deal.id, nextValue]
+    [deal.id, nextValue, nextDay]
   );
 
   const rowResult = updateResult.rows[0];
@@ -1488,6 +1550,22 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
     }
 
     metrics.warnings = warnings.length;
+    // The 0222 counter column is written ONLY when the feature is on, and is appended at the END of the
+    // SET list / parameter array when it is.
+    //
+    // This is not tidiness — it is the difference between a disabled feature and a broken office.
+    // Migrations run on API deploy and the WORKER does not run them (it is the process that calls this),
+    // so a worker running ahead of the API against a schema that has not yet received 0222 would fail this
+    // statement on an unknown column — INSIDE the run's BEGIN, rolling back that office's ENTIRE sync
+    // (mirror, estimate and stage writebacks included) with the feature switched off. Referencing the
+    // column only when the flag is on means the feature cannot break the sync before it is turned on.
+    //
+    // Appending rather than inserting also keeps the existing positional params stable: the string-mock
+    // suites assert $6 = status and $24 = estimate_skipped_terminal_count.
+    const bidDueDateRunColumnSql = bidDueDateReadbackEnabled
+      ? `,
+              bid_due_date_updated_count = $26`
+      : "";
     await client.query(
       `UPDATE ${schemaName}.bid_board_sync_runs
           SET updated_count = $2,
@@ -1513,11 +1591,7 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
               estimate_skipped_no_change_count = $22,
               estimate_warning_count = $23,
               estimate_skipped_terminal_count = $24,
-              skipped_detached_count = $25,
-              -- Appended at the END of the parameter list on purpose: the existing positional params are
-              -- asserted by the string-mock suites ($6 = status, $24 = estimate_skipped_terminal_count),
-              -- so inserting in the middle would silently renumber them.
-              bid_due_date_updated_count = $26
+              skipped_detached_count = $25${bidDueDateRunColumnSql}
         WHERE id = $1`,
       [
         runId,
@@ -1549,7 +1623,7 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
         metrics.estimateWarnings,
         metrics.estimateSkippedTerminal,
         metrics.skippedDetached,
-        metrics.bidDueDateUpdated,
+        ...(bidDueDateReadbackEnabled ? [metrics.bidDueDateUpdated] : []),
       ]
     );
     await client.query("COMMIT");
