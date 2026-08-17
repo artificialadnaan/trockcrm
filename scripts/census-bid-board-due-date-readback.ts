@@ -76,6 +76,25 @@ export function parseCensusArgs(argv = process.argv): CensusArgs {
     );
   }
 
+  // Every argument must be CONSUMED by a known flag. A typo (`--offce=atlanta`) that is silently ignored
+  // makes the script fall back to the default office and then report a confident number for the WRONG one
+  // — the same failure class as the incomplete-run contract: this artifact gates a production write, so it
+  // must never look authoritative when it isn't.
+  const KNOWN_VALUE_FLAGS = ["office", "limit"] as const;
+  const KNOWN_BOOLEAN_FLAGS = ["--all", "--json"] as const;
+  const unrecognized = args.filter(
+    (arg) =>
+      !KNOWN_BOOLEAN_FLAGS.includes(arg as (typeof KNOWN_BOOLEAN_FLAGS)[number]) &&
+      !KNOWN_VALUE_FLAGS.some((key) => arg.startsWith(`--${key}=`))
+  );
+  if (unrecognized.length > 0) {
+    throw new Error(
+      `Unrecognized argument(s): ${unrecognized.join(", ")}. ` +
+        `Supported: --office=<slug[,slug]> | --all | --limit=<n> | --json. ` +
+        `(Refusing to run rather than silently censusing the default office.)`
+    );
+  }
+
   const value = (key: string): string | null => {
     const match = args.find((arg) => arg.startsWith(`--${key}=`));
     return match ? match.slice(key.length + 3) : null;
@@ -161,6 +180,9 @@ export function buildCensusSql(schemaName: string): string {
              psc.slug AS stage_slug,
              COALESCE(psc.is_terminal, false) AS stage_is_terminal,
              COALESCE(d.on_hold, false) AS stored_on_hold,
+             -- See the is_test_data predicate below: TR-DEMO-* rows bypass the flag, so they are FLAGGED
+             -- rather than silently trusted or silently dropped.
+             (COALESCE(d.deal_number, '') LIKE 'TR-DEMO-%' OR COALESCE(d.project_number, '') LIKE 'TR-DEMO-%') AS demo_shaped,
              COALESCE(${value}, 0) AS deal_value
         FROM ${schemaName}.deals d
         LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
@@ -170,6 +192,15 @@ export function buildCensusSql(schemaName: string): string {
          AND COALESCE(d.is_change_order, false) = false
          AND d.bid_board_detached_at IS NULL
          AND d.bid_board_due_date IS NOT NULL
+         -- Every production value query excludes test deals, so a census quoting the dollar delta that
+         -- gates a prod flag flip must too, or the number is inflated by fixtures.
+         --
+         -- KNOWN GAP, deliberately not papered over: the demo seeder inserts TR-DEMO-* deals into the REAL
+         -- tenant schema WITHOUT setting is_test_data, so this predicate cannot remove them. Excluding by
+         -- deal-number shape instead would make the census disagree with the app it is predicting, which
+         -- is worse. They are counted separately and reported (demoShapedRows) so the operator can see
+         -- whether the population is actually clean rather than assuming it.
+         AND COALESCE(d.is_test_data, false) = false
     ), writes AS (
       -- The write-through's own guard, reproduced EXACTLY: it compares CALENDAR DAYS
       -- ((bid_due_date AT TIME ZONE 'UTC')::date IS DISTINCT FROM $3::date), not instants. Comparing
@@ -193,6 +224,7 @@ export function buildCensusSql(schemaName: string): string {
            w.next_bid_due_date,
            w.stored_on_hold,
            w.bid_board_last_updated_at,
+           w.demo_shaped,
            (w.current_bid_due_date IS NULL) AS from_null,
            (w.stage_slug IN (${sqlStringList(GENUINE_ESTIMATING_DEAL_STAGE_SLUGS)})) AS is_genuine_estimating,
            -- Terminal EITHER by the CRM stage or by the Bid Board mirror, matching
@@ -220,6 +252,7 @@ export interface CensusRow {
   next_bid_due_date: Date | string | null;
   stored_on_hold: boolean;
   bid_board_last_updated_at: Date | string | null;
+  demo_shaped: boolean;
   from_null: boolean;
   is_genuine_estimating: boolean;
   is_terminal: boolean;
@@ -243,6 +276,8 @@ export interface CensusMover {
 export interface CensusSummary {
   schemaName: string;
   wouldWrite: number;
+  /** Rows that look like demo seed data (TR-DEMO-*) but carry no is_test_data flag — counted, NOT excluded. */
+  demoShapedRows: number;
   fromNull: number;
   fromDifferentDate: number;
   genuineEstimating: number;
@@ -277,6 +312,7 @@ export function summarizeCensus(schemaName: string, rows: CensusRow[], limit: nu
   const summary: CensusSummary = {
     schemaName,
     wouldWrite: rows.length,
+    demoShapedRows: 0,
     fromNull: 0,
     fromDifferentDate: 0,
     genuineEstimating: 0,
@@ -290,6 +326,7 @@ export function summarizeCensus(schemaName: string, rows: CensusRow[], limit: nu
 
   const movers: CensusMover[] = [];
   for (const row of rows) {
+    if (row.demo_shaped) summary.demoShapedRows += 1;
     if (row.from_null) summary.fromNull += 1;
     else summary.fromDifferentDate += 1;
     if (row.is_genuine_estimating) summary.genuineEstimating += 1;
@@ -357,6 +394,12 @@ function printSummary(summary: CensusSummary): void {
       `  (null->date: ${summary.fromNull}, date->different-date: ${summary.fromDifferentDate})`
   );
   console.log(`  (b) of those, in a genuine estimating stage: ${summary.genuineEstimating}`);
+  if (summary.demoShapedRows > 0) {
+    console.log(
+      `      ⚠️  ${summary.demoShapedRows} of them look like TR-DEMO-* seed data with no is_test_data flag — ` +
+        `counted above, because excluding them would make this disagree with the app. Review before flipping.`
+    );
+  }
   console.log(
     `  (c) would_park: ${summary.wouldPark} (${money(summary.parkedValue)} removed)` +
       `  |  would_unpark: ${summary.wouldUnpark} (${money(summary.unparkedValue)} restored)`

@@ -27,6 +27,7 @@ function row(partial: Partial<CensusRow>): CensusRow {
     next_bid_due_date: new Date("2026-09-01T00:00:00.000Z"),
     stored_on_hold: false,
     bid_board_last_updated_at: null,
+    demo_shaped: false,
     from_null: true,
     is_genuine_estimating: true,
     is_terminal: false,
@@ -62,6 +63,30 @@ describe("census-bid-board-due-date-readback — arguments", () => {
     }
   );
 
+  // A typo that is silently ignored makes the script census the DEFAULT office and report a confident
+  // number for the wrong one — on the artifact that gates a prod flag flip.
+  it("REFUSES an unrecognized flag rather than falling back to the default office", () => {
+    expect(() => parseCensusArgs(["node", "census", "--offce=atlanta"])).toThrow(/Unrecognized argument/);
+    expect(() => parseCensusArgs(["node", "census", "--office=dallas", "--verbose"])).toThrow(
+      /Unrecognized argument/
+    );
+    expect(() => parseCensusArgs(["node", "census", "--limit"])).toThrow(/Unrecognized argument/);
+    // A bare positional is a typo too (a forgotten `--office=`), not an office name.
+    expect(() => parseCensusArgs(["node", "census", "atlanta"])).toThrow(/Unrecognized argument/);
+    // …and the error names what it did not understand, plus what it does support.
+    expect(() => parseCensusArgs(["node", "census", "--offce=atlanta"])).toThrow(/--offce=atlanta/);
+    expect(() => parseCensusArgs(["node", "census", "--offce=atlanta"])).toThrow(/--office=/);
+  });
+
+  it("still accepts every supported flag in combination", () => {
+    expect(parseCensusArgs(["node", "census", "--office=dallas,atlanta", "--limit=5", "--json"])).toEqual({
+      offices: ["dallas", "atlanta"],
+      limit: 5,
+      json: true,
+    });
+    expect(parseCensusArgs(["node", "census", "--all", "--json"])).toMatchObject({ offices: "all" });
+  });
+
   it("rejects an injection-shaped office slug and a bad limit", () => {
     expect(() => parseCensusArgs(["node", "census", "--office=dallas; DROP SCHEMA public"])).toThrow(
       /Invalid office slug/
@@ -94,6 +119,9 @@ describe("census-bid-board-due-date-readback — SQL", () => {
   });
 
   it("only considers rows the ingest's loop could actually reach, and only real changes", () => {
+    // Production value queries exclude test deals; a census quoting the dollar delta that gates a prod
+    // flag flip must too, or fixtures inflate the number.
+    expect(sql).toContain("COALESCE(d.is_test_data, false) = false");
     expect(sql).toContain("d.is_active = true");
     expect(sql).toContain("COALESCE(d.is_change_order, false) = false");
     expect(sql).toContain("d.bid_board_detached_at IS NULL");
@@ -184,6 +212,19 @@ describe("census-bid-board-due-date-readback — summary", () => {
     expect(summary.wouldWrite).toBe(2);
     expect(summary.wouldPark).toBe(0);
     expect(summary.netValueDelta).toBe(0);
+  });
+
+  // TR-DEMO-* seed rows land in the REAL tenant schema without is_test_data set, so the column predicate
+  // cannot remove them. Excluding them by deal-number shape would make the census disagree with the app it
+  // is predicting, so they are COUNTED and reported instead of silently trusted or silently dropped.
+  it("counts demo-shaped rows separately without excluding them", () => {
+    const summary = summarizeCensus(
+      "office_dallas",
+      [row({ demo_shaped: true }), row({ demo_shaped: true }), row({ demo_shaped: false })],
+      10
+    );
+    expect(summary.wouldWrite).toBe(3);
+    expect(summary.demoShapedRows).toBe(2);
   });
 
   it("orders the movers by value, caps them at the limit, and renders horizons as calendar days", () => {
