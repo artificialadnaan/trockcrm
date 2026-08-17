@@ -148,7 +148,13 @@ export function buildCanonicalDealBoardColumns(
    * cards this response happened to carry — which is what lets the board request a small card slice
    * without the column silently under-reporting.
    */
-  boardSummary?: DealBoardSummary | null
+  boardSummary?: DealBoardSummary | null,
+  /**
+   * The Pending RFP column's OWN preview cards, fetched server-side. The client used to filter them out
+   * of the flattened Opportunity slice, which lost every pending deal ranked below the per-column cap —
+   * a column whose header count said 42 rendering 2 cards. Falls back to the carve-out when absent.
+   */
+  pendingRfpCards?: Deal[] | null
 ): DealBoardColumn[] {
   const deals = dedupeDealsById((rawColumns ?? []).flatMap((column) => column.cards));
 
@@ -175,7 +181,7 @@ export function buildCanonicalDealBoardColumns(
   // far-future zeroing, bidBoardTotalSales) + at-risk decoration. The complete cross-rep shared queue is
   // the dedicated /deals/pending-rfp dashboard. (The board passes BOARD_CARDS_PER_STAGE_LIMIT=1000, so
   // `deals` is the full Opportunity set in practice — no preview-truncation undercount.)
-  const pendingRfpCards = deals.filter(isPendingRfpCard);
+  const carvedPendingRfpCards = deals.filter(isPendingRfpCard);
 
   const columns: DealBoardColumn[] = getDealBoardStageSlugs().map((slug) => {
     const matchingRawColumns = (rawColumns ?? []).filter((column) => {
@@ -208,6 +214,14 @@ export function buildCanonicalDealBoardColumns(
       shouldPickSingleAggregate(slug) && matchingRawColumns.length > 1
         ? selectCanonicalRawColumn(matchingRawColumns as RawColumnRouteLike[], slug)
         : null;
+    // Carry the API's REAL row total through. This used to be dropped, so every canonical column fell
+    // back to `count` — the ACTIVE figure — while `cards` includes on-hold rows. That is what let a
+    // truncated column report fewer "total" rows than it had cards and hide its own "view all".
+    const rawTotalCount = hasBackendAggregate
+      ? aggregateColumn !== null
+        ? aggregateColumn.totalCount ?? aggregateColumn.count
+        : matchingRawColumns.reduce((sum, column) => sum + (column.totalCount ?? column.count), 0)
+      : cards.length;
 
     return {
       stage: {
@@ -224,6 +238,11 @@ export function buildCanonicalDealBoardColumns(
           ? aggregateColumn.count
           : matchingRawColumns.reduce((sum, column) => sum + column.count, 0)
         : cards.length,
+      totalCount: rawTotalCount,
+      // What a stage drill-down opened from this column will list. Identical to `totalCount` everywhere
+      // except Opportunity, whose totals get the Pending RFP bucket subtracted below while the stage
+      // page it opens does not filter that bucket out.
+      drilldownTotalCount: rawTotalCount,
       totalValue: hasBackendAggregate
         ? aggregateColumn !== null
           ? aggregateColumn.totalValue
@@ -243,8 +262,11 @@ export function buildCanonicalDealBoardColumns(
   // carried, so with a capped per-column card slice both the Pending RFP column AND the Opportunity
   // column it is subtracted from would under-report. The server counts the same predicate over every
   // matching row. The card-derived numbers remain the fallback for a response without a summary.
-  const activePendingRfp = pendingRfpCards.filter((d) => !d.onHold);
+  // The column's CARDS: the server's dedicated preview when present, else the historical carve-out.
+  const pendingRfpColumnCards = pendingRfpCards ?? carvedPendingRfpCards;
+  const activePendingRfp = carvedPendingRfpCards.filter((d) => !d.onHold);
   const pendingRfpCount = boardSummary?.pendingRfp.count ?? activePendingRfp.length;
+  const pendingRfpTotalCount = boardSummary?.pendingRfp.totalCount ?? carvedPendingRfpCards.length;
   const pendingRfpValue =
     boardSummary?.pendingRfp.totalValue ??
     activePendingRfp.reduce((sum, d) => sum + getDealValue(d, "opportunity"), 0);
@@ -260,6 +282,12 @@ export function buildCanonicalDealBoardColumns(
     columns[oppIndex] = {
       ...opp,
       count: Math.max(0, opp.count - pendingRfpCount),
+      // `totalCount` is partitioned too, so it still describes the cards THIS column renders (which
+      // exclude the pending bucket) — that is the denominator the truncation notice needs.
+      totalCount: Math.max(0, (opp.totalCount ?? opp.count) - pendingRfpTotalCount),
+      // `drilldownTotalCount` is deliberately NOT reduced: "view all" opens the Opportunity stage page,
+      // which filters by stage id and therefore still lists the pending-RFP deals. Advertising the
+      // partitioned number there would send a user to a page holding more rows than the link promised.
       totalValue: opp.totalValue - pendingRfpValue,
     };
     columns.splice(oppIndex + 1, 0, {
@@ -273,8 +301,13 @@ export function buildCanonicalDealBoardColumns(
         isTerminal: false,
       },
       count: pendingRfpCount,
+      totalCount: pendingRfpTotalCount,
+      // No drill-down count: this column's "view all" opens /deals/pending-rfp, which is the office-wide
+      // CROSS-REP queue by design (PR #834), while this column is scope-filtered. The board cannot know
+      // that queue's size, so it must not put a number on the link.
+      drilldownTotalCount: undefined,
       totalValue: pendingRfpValue,
-      cards: pendingRfpCards,
+      cards: pendingRfpColumnCards,
     });
   }
   return columns;

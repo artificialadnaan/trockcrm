@@ -1090,6 +1090,14 @@ router.get("/pipeline", async (req, res, next) => {
       // both from the cards it received, which was only correct while it asked for 1000 cards per
       // column — shrink that slice and the numbers silently under-report.
       boardSummary: result.boardSummary,
+      // The synthetic Pending RFP column's OWN cards. It used to be carved out of the Opportunity
+      // column's slice on the client, which silently lost every pending deal ranked below the cap.
+      // Redacted on the same path as the column cards — these are full deal rows.
+      pendingRfpDeals: redactDealList((result.pendingRfpDeals ?? []) as never, { includeHubspotId }).map((deal) =>
+        stripPrivateDealFieldsForViewer(deal as Record<string, unknown>, {
+          isOwner: (deal as { assignedRepId?: string | null }).assignedRepId === req.user!.id,
+        })
+      ),
     });
   } catch (err) {
     next(err);
@@ -1098,7 +1106,9 @@ router.get("/pipeline", async (req, res, next) => {
 
 router.get("/stages", async (req, res, next) => {
   try {
-    const stages = await getAllStages("deal");
+    // On the request's tenant client, not the global pool — see getAllStages. This route runs inside the
+    // tenant transaction, so reading through `db` made it hold two pool slots at once.
+    const stages = await getAllStages("deal", req.tenantDb);
     await req.commitTransaction!();
     res.json({ stages });
   } catch (err) {

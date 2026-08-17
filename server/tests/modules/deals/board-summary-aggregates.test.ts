@@ -114,9 +114,31 @@ function summaryRow(index: number, options: RowOptions = {}) {
   };
 }
 
-function buildBoard(summaryRows: any[], aggregates: { totalCount: number; activeCount: number; totalValue: number }) {
+/** The Pending RFP preview is the only query selecting the `pendingTotalCount` window aggregate. */
+function isPendingRfpChain(chain: any): boolean {
+  return (chain._selectArgs?.[0] as Record<string, unknown> | undefined)?.pendingTotalCount !== undefined;
+}
+
+function buildBoard(
+  summaryRows: any[],
+  aggregates: { totalCount: number; activeCount: number; totalValue: number },
+  pending?: {
+    rows: any[];
+    pendingTotalCount: number;
+    pendingActiveCount: number;
+    pendingTotalValue: number;
+  }
+) {
   const chains: any[] = [];
   const decorated = summaryRows.map((row) => ({ ...row, ...aggregates }));
+  // Window aggregates are evaluated BEFORE LIMIT, so the real query returns the FULL bucket totals on
+  // every one of the (capped) preview rows. The mock reproduces that: totals independent of row count.
+  const pendingDecorated = (pending?.rows ?? []).map((row) => ({
+    ...row,
+    pendingTotalCount: pending?.pendingTotalCount ?? 0,
+    pendingActiveCount: pending?.pendingActiveCount ?? 0,
+    pendingTotalValue: pending?.pendingTotalValue ?? 0,
+  }));
   const tenantDb = {
     select: vi.fn((...selectArgs: unknown[]) => {
       const chain = createChainableMock();
@@ -124,6 +146,7 @@ function buildBoard(summaryRows: any[], aggregates: { totalCount: number; active
       chains.push(chain);
       chain.then.mockImplementation((resolve: (value: any[]) => unknown) => {
         if (chain._isStageConfigQuery) return resolve(dbState.stages);
+        if (isPendingRfpChain(chain)) return resolve(pendingDecorated.slice(0, CARD_LIMIT));
         // The CARDS query is the joined one, and it is the ONLY thing the preview limit applies to.
         if (chain.leftJoin.mock.calls.length > 0) return resolve(decorated.slice(0, CARD_LIMIT));
         return resolve(decorated);
@@ -134,13 +157,20 @@ function buildBoard(summaryRows: any[], aggregates: { totalCount: number; active
   return { tenantDb, chains };
 }
 
-async function runBoard(tenantDb: any) {
+async function runBoard(tenantDb: any, overrides: Record<string, unknown> = {}) {
   const { getDealsForPipeline } = await import("../../../src/modules/deals/service.js");
   return getDealsForPipeline(
     tenantDb,
     "director",
     "director-1",
-    { scope: "all", activeOfficeId: null, previewLimit: CARD_LIMIT, wonAllTime: true, lostAllTime: true },
+    {
+      scope: "all",
+      activeOfficeId: null,
+      previewLimit: CARD_LIMIT,
+      wonAllTime: true,
+      lostAllTime: true,
+      ...overrides,
+    },
     "director"
   );
 }
@@ -171,24 +201,82 @@ describe("getDealsForPipeline — boardSummary counts ALL matching rows, not the
     expect(total).toBeGreaterThan(CARD_LIMIT);
   });
 
-  it("counts and sums the Pending RFP column over all matching rows, excluding on-hold", async () => {
+  it("buckets at-risk pending-RFP deals under pending_rfp, NOT opportunity", async () => {
+    // The stage-scoped `?filter=opportunities` view renders the opportunity column WITHOUT the synthetic
+    // pending_rfp one, and its card-derived count never included pending deals. Folding them into the
+    // `opportunity` bucket therefore inflated that view's three At-Risk cards while the main board (which
+    // sums both) stayed right — a wrong number visible on exactly one route.
     dbState.stages = [OPPORTUNITY_STAGE];
     const rows = [
-      // 9 live pending-RFP deals at $1,000 each.
-      ...Array.from({ length: 9 }, (_, i) => summaryRow(i, { pendingRfp: true, value: "1000" })),
-      // 2 on-hold pending-RFP deals: members of the column, but excluded from count AND $ (the board's
-      // count/totalValue are the ACTIVE figures on every column).
-      ...Array.from({ length: 2 }, (_, i) => summaryRow(50 + i, { pendingRfp: true, onHold: true })),
-      // Plus ordinary opportunity rows that are not pending RFP at all.
-      ...Array.from({ length: 6 }, (_, i) => summaryRow(200 + i)),
+      summaryRow(1),                                  // at-risk, ordinary opportunity
+      summaryRow(2, { pendingRfp: true }),            // at-risk, pending RFP
+      summaryRow(3, { pendingRfp: true }),            // at-risk, pending RFP
     ];
-    const { tenantDb } = buildBoard(rows, { totalCount: 17, activeCount: 15, totalValue: 15000 });
+    const { tenantDb } = buildBoard(rows, { totalCount: 3, activeCount: 3, totalValue: 3000 });
 
     const result = await runBoard(tenantDb);
 
-    expect(result.boardSummary.pendingRfp.count).toBe(9);
-    expect(result.boardSummary.pendingRfp.totalValue).toBe(9000);
-    expect(result.boardSummary.pendingRfp.count).toBeGreaterThan(CARD_LIMIT);
+    expect(result.boardSummary.atRiskByStageSlug.opportunity).toEqual({ service: 0, nonService: 1 });
+    expect(result.boardSummary.atRiskByStageSlug.pending_rfp).toEqual({ service: 0, nonService: 2 });
+    // Summing the rendered columns still gives the whole cohort, so the main board is unchanged.
+    const total = Object.values(result.boardSummary.atRiskByStageSlug).reduce(
+      (sum, bucket) => sum + bucket.service + bucket.nonService,
+      0
+    );
+    expect(total).toBe(3);
+  });
+
+  it("ships the Pending RFP column its OWN card slice, not a carve-out of Opportunity's", async () => {
+    // The bug this pins: the client built that column by filtering the Opportunity slice, so with a
+    // capped slice every pending deal ranked below the cap vanished — a column whose header said 11
+    // rendering 0 cards. It now gets a dedicated preview, capped independently.
+    dbState.stages = [OPPORTUNITY_STAGE];
+    // Opportunity's own slice is entirely NON-pending, exactly the case that used to starve the column.
+    const opportunityRows = Array.from({ length: 40 }, (_, i) => summaryRow(200 + i));
+    const pendingRows = Array.from({ length: 11 }, (_, i) => summaryRow(i, { pendingRfp: true }));
+    const { tenantDb } = buildBoard(
+      opportunityRows,
+      { totalCount: 51, activeCount: 49, totalValue: 51000 },
+      { rows: pendingRows, pendingTotalCount: 11, pendingActiveCount: 9, pendingTotalValue: 9000 }
+    );
+
+    const result = await runBoard(tenantDb);
+
+    // Cards arrive independently of the Opportunity slice, capped at the preview limit.
+    expect(result.pendingRfpDeals).toHaveLength(CARD_LIMIT);
+    expect(result.pendingRfpDeals.every((deal: any) => deal.rfpApprovalStatus === "pending")).toBe(true);
+    // ...and each is decorated the same way a column card is, so the client can render it directly.
+    expect(result.pendingRfpDeals[0]).toHaveProperty("atRisk");
+    expect(result.pendingRfpDeals[0]).toHaveProperty("stageSlug", "opportunity");
+    // Totals come from window aggregates on the same query: ACTIVE count/$ plus the all-rows total that
+    // the truncation notice needs as its denominator.
+    expect(result.boardSummary.pendingRfp).toEqual({ count: 9, totalCount: 11, totalValue: 9000 });
+    expect(result.boardSummary.pendingRfp.totalCount).toBeGreaterThan(CARD_LIMIT);
+  });
+
+  it("scopes the Pending RFP preview with the SAME conditions as the board columns", async () => {
+    // Not an office-wide overlay: a cross-rep column cannot reconcile with a scope-filtered board, which
+    // is why the cross-rep version was reverted (PR #834). The preview must carry commonConditions.
+    dbState.stages = [OPPORTUNITY_STAGE];
+    const { tenantDb, chains } = buildBoard([summaryRow(1)], {
+      totalCount: 1,
+      activeCount: 1,
+      totalValue: 1000,
+    });
+
+    await runBoard(tenantDb, { assignedRepId: "rep-77" });
+
+    const pendingChain = chains.find(isPendingRfpChain);
+    expect(pendingChain).toBeDefined();
+    const where = pendingChain.where.mock.calls[0]?.[0];
+    expect(containsValue(where, "rep-77")).toBe(true);
+    const text = renderSql(where);
+    expect(text).toContain("rfp_approval_status");
+    expect(text).toContain("is_bid_board_owned");
+    expect(text).toContain("denial_reconfirmed");
+    expect(text).toContain("is_test_data");
+    // Capped like any other preview — it is a card slice, not the whole bucket.
+    expect(pendingChain.limit).toHaveBeenCalledWith(CARD_LIMIT);
   });
 
   it("never applies the preview limit to the summary query — only to the cards query", async () => {

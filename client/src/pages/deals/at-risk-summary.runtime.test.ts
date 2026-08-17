@@ -528,3 +528,40 @@ describe("countAtRiskDeals — server board summary outranks the (capped) card a
     expect(countAtRiskDeals(columns, "all", undefined)).toBe(3);
   });
 });
+
+describe("countAtRiskDeals — the Pending RFP bucket is keyed to the column that RENDERS it", () => {
+  /**
+   * The regression this pins. On `?filter=opportunities` the board narrows to slugs ["opportunity"],
+   * which does NOT include the synthetic pending_rfp column. The card-derived count never saw pending
+   * deals there (buildCanonicalDealBoardColumns strips them out of the opportunity card array), so
+   * folding them into the server's `opportunity` bucket made all three At-Risk cards jump on that route
+   * while the main board — where both columns are summed — stayed correct and hid the bug.
+   */
+  const opportunityOnlyView = () => [column("opportunity", [deal({ id: "o1", atRisk: true })])];
+  const wholeBoard = () => [
+    column("opportunity", [deal({ id: "o1", atRisk: true })]),
+    column("pending_rfp", [deal({ id: "p1", atRisk: true }), deal({ id: "p2", atRisk: true })]),
+  ];
+  // 3 at-risk opportunity-canonical deals, 2 of them pending RFP — the reviewer's executed fixture.
+  const serverCounts = {
+    opportunity: { service: 0, nonService: 1 },
+    pending_rfp: { service: 0, nonService: 2 },
+  };
+
+  it("counts ONLY the non-pending deals on the opportunities drill-down (pre-PR behaviour)", () => {
+    expect(countAtRiskDeals(opportunityOnlyView(), "all", serverCounts)).toBe(1);
+    expect(countAtRiskDeals(opportunityOnlyView(), "service", serverCounts)).toBe(0);
+    expect(countAtRiskDeals(opportunityOnlyView(), "non_service", serverCounts)).toBe(1);
+  });
+
+  it("still counts all three on the main board, where both columns are rendered", () => {
+    expect(countAtRiskDeals(wholeBoard(), "all", serverCounts)).toBe(3);
+  });
+
+  it("keeps Service + Non-service === All on the narrowed view too", () => {
+    const cols = opportunityOnlyView();
+    expect(
+      countAtRiskDeals(cols, "service", serverCounts) + countAtRiskDeals(cols, "non_service", serverCounts)
+    ).toBe(countAtRiskDeals(cols, "all", serverCounts));
+  });
+});

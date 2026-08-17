@@ -1238,10 +1238,15 @@ describe("buildCanonicalDealBoardColumns", () => {
     expect(columns[oppIndex]!.totalValue).toBe(80000);
   });
 
-  it("does not carry totalCount on canonical columns, so the visibleCount rollup uses the adjusted active count", () => {
-    // buildCanonicalDealBoardColumns rebuilds columns and intentionally omits totalCount (the backend
-    // aggregate is dropped), so the Active Pipeline visibleCount rollup falls back to `count`. The split
-    // must therefore reconcile on the COUNT axis alone: opp.count + synthetic.count == pre-split active.
+  it("CARRIES totalCount onto canonical columns and partitions it across the Pending RFP split", () => {
+    // This used to assert the opposite — that buildCanonicalDealBoardColumns DROPS the backend
+    // totalCount — which is the defect itself, written down as an expectation. With it dropped, every
+    // consumer fell back to `count`, the ACTIVE figure, while `cards` includes on-hold rows: the
+    // truncation notice then compared a card count against an active count and could conclude a
+    // truncated column was complete, hiding its "view all" and with it every deal past the slice.
+    //
+    // Both axes must reconcile now: active counts partition the pre-split active total, and totalCount
+    // partitions the pre-split ALL-ROWS total.
     const columns = buildCanonicalDealBoardColumns(
       [
         {
@@ -1261,13 +1266,19 @@ describe("buildCanonicalDealBoardColumns", () => {
     const oppIndex = columns.findIndex((col) => col.stage.slug === "opportunity");
     const prfpIndex = columns.findIndex((col) => col.stage.slug === "pending_rfp");
 
-    // totalCount is dropped on BOTH columns → the rollup uses `totalCount ?? count` == count.
-    expect(columns[oppIndex]!.totalCount).toBeUndefined();
-    expect(columns[prfpIndex]!.totalCount).toBeUndefined();
     // Count axis reconciles: opp loses the active pending (2→1), synthetic gets it (1), sum == pre-split.
     expect(columns[oppIndex]!.count).toBe(1);
     expect(columns[prfpIndex]!.count).toBe(1);
     expect(columns[oppIndex]!.count + columns[prfpIndex]!.count).toBe(2);
+    // Row axis reconciles too: 4 rows in the stage, 2 of them pending (p1 active + p2 on hold).
+    expect(columns[prfpIndex]!.totalCount).toBe(2);
+    expect(columns[oppIndex]!.totalCount).toBe(2);
+    expect(columns[oppIndex]!.totalCount! + columns[prfpIndex]!.totalCount!).toBe(4);
+    // The DRILL-DOWN count is deliberately NOT partitioned: Opportunity's "view all" opens the stage
+    // page, which filters by stage id and still lists the pending-RFP deals.
+    expect(columns[oppIndex]!.drilldownTotalCount).toBe(4);
+    // ...and the synthetic column names no drill-down count at all: its target is the cross-rep queue.
+    expect(columns[prfpIndex]!.drilldownTotalCount).toBeUndefined();
   });
 });
 
@@ -1308,7 +1319,7 @@ describe("Pending RFP column — server aggregate over ALL rows beats the (cappe
   it("uses the server's Pending RFP count/$ and subtracts exactly that from Opportunity", () => {
     const columns = buildCanonicalDealBoardColumns(rawColumns(), stages, {
       atRiskByStageSlug: {},
-      pendingRfp: { count: 42, totalValue: 420_000 },
+      pendingRfp: { count: 42, totalCount: 42, totalValue: 420_000 },
     });
 
     const opp = columns.find((col) => col.stage.slug === "opportunity")!;

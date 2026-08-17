@@ -469,7 +469,24 @@ export interface DealBoardColumn {
   };
   count: number;
   activeCount?: number;
+  /**
+   * EVERY matching row in this column, on-hold included — the population `cards` is a slice OF.
+   *
+   * The only honest denominator for the "Showing N of M" notice. `count` is the ACTIVE figure (the
+   * server filters `COALESCE(on_hold,false)=false`) while the card query applies no such filter, so
+   * comparing `cards.length` against `count` can make a truncated column look complete: 70 rows with 25
+   * on hold gives count=45 against 50 cards, and `50 < 45` is false — no "view all", 20 deals invisible.
+   */
   totalCount?: number;
+  /**
+   * How many rows this column's "view all" target will list, when that target is a stage drill-down.
+   *
+   * Separate from `totalCount` because they legitimately differ on Opportunity: its cards (and therefore
+   * `totalCount`) exclude the Pending RFP bucket, which the stage page does NOT filter out. Undefined
+   * when the column has no stage drill-down that can be counted — the synthetic Pending RFP column opens
+   * the office-wide cross-rep queue, whose size a scope-filtered board cannot know.
+   */
+  drilldownTotalCount?: number;
   totalValue: number;
   cards: Deal[];
 }
@@ -498,7 +515,13 @@ export interface DealBoardSummary {
    */
   atRiskByStageSlug: Record<string, { service: number; nonService: number }>;
   /** The synthetic Pending RFP column's ACTIVE (non-on-hold) count and $. */
-  pendingRfp: { count: number; totalValue: number };
+  pendingRfp: {
+    /** ACTIVE (non-on-hold) count — the column header figure, and what Opportunity's is reduced by. */
+    count: number;
+    /** Every pending-RFP row incl. on-hold: the population the preview cards are a slice of. */
+    totalCount: number;
+    totalValue: number;
+  };
 }
 
 export interface DealBoardResponse {
@@ -512,6 +535,11 @@ export interface DealBoardResponse {
     deals?: Deal[];
   }>;
   summary: DealBoardSummary | null;
+  /**
+   * The synthetic Pending RFP column's own card slice, fetched server-side rather than carved out of the
+   * Opportunity column's (capped) slice — where every pending deal below the cap used to disappear.
+   */
+  pendingRfpCards: Deal[];
 }
 
 export interface DealStagePageResponse {
@@ -555,6 +583,7 @@ interface DealBoardApiResponse {
   terminalStages: DealBoardResponse["terminalStages"];
   columns?: DealBoardApiColumn[];
   boardSummary?: DealBoardSummary;
+  pendingRfpDeals?: Deal[];
 }
 
 export function normalizeDealBoardResponse(result: DealBoardApiResponse): DealBoardResponse {
@@ -579,6 +608,7 @@ export function normalizeDealBoardResponse(result: DealBoardApiResponse): DealBo
     // Guard the SHAPE, not just presence: a malformed payload here would otherwise be read as
     // "0 at risk" — a wrong number rendered confidently — where a null falls back to counting cards.
     summary: normalizeDealBoardSummary(result.boardSummary),
+    pendingRfpCards: Array.isArray(result.pendingRfpDeals) ? result.pendingRfpDeals : [],
   };
 }
 
@@ -587,7 +617,13 @@ function normalizeDealBoardSummary(summary: DealBoardSummary | undefined): DealB
   const atRisk = summary.atRiskByStageSlug;
   const pending = summary.pendingRfp;
   if (!atRisk || typeof atRisk !== "object" || !pending || typeof pending !== "object") return null;
-  if (!Number.isFinite(pending.count) || !Number.isFinite(pending.totalValue)) return null;
+  if (
+    !Number.isFinite(pending.count) ||
+    !Number.isFinite(pending.totalCount) ||
+    !Number.isFinite(pending.totalValue)
+  ) {
+    return null;
+  }
   return summary;
 }
 

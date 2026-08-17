@@ -3069,6 +3069,209 @@ describe("DealListPage", () => {
     expect(html).toContain("No deals in selected range");
   });
 
+
+
+  describe("At-Risk KPI on the ?filter=opportunities drill-down (server bucket == the rendered column)", () => {
+    /**
+     * That route narrows the board to slugs ["opportunity"], which EXCLUDES the synthetic pending_rfp
+     * column. The pre-PR count came from opportunity.cards, and buildCanonicalDealBoardColumns strips
+     * every pending-RFP card out of that array — so pending deals were never counted there. Bucketing
+     * them under `opportunity` server-side made all three cards jump on this one route while the main
+     * board (which sums both columns) stayed right and hid it.
+     */
+    function boardWithAtRisk(atRiskByStageSlug: Record<string, { service: number; nonService: number }>) {
+      mocks.useDealBoardMock.mockReturnValue({
+        board: {
+          columns: [
+            {
+              stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+              count: 3,
+              activeCount: 3,
+              totalCount: 3,
+              totalValue: 300000,
+              cards: [
+                makeDeal({ id: "o1" }),
+                makeDeal({ id: "p1", rfpApprovalStatus: "pending", isBidBoardOwned: false }),
+                makeDeal({ id: "p2", rfpApprovalStatus: "pending", isBidBoardOwned: false }),
+              ],
+            },
+          ],
+          terminalStages: [],
+          summary: { atRiskByStageSlug, pendingRfp: { count: 2, totalCount: 2, totalValue: 200000 } },
+          pendingRfpCards: [],
+        },
+        loading: false,
+        error: null,
+      });
+    }
+
+    // 3 at-risk opportunity-canonical deals, 2 of them pending RFP — the reviewer's executed fixture.
+    const SERVER_BUCKETS = {
+      opportunity: { service: 0, nonService: 1 },
+      pending_rfp: { service: 0, nonService: 2 },
+    };
+
+    it("counts 1, not 3 — the pending-RFP deals belong to a column this view does not render", () => {
+      boardWithAtRisk(SERVER_BUCKETS);
+
+      const html = renderPage("/deals?scope=all&filter=opportunities", "director");
+
+      expect(html).toContain("Opportunities");
+      // The At-Risk headline renders its count in a text-4xl block; assert the number that block holds.
+      const atRiskBlock = html.match(/text-4xl[^>]*>(\d+)</);
+      expect(atRiskBlock?.[1]).toBe("1");
+    });
+
+    it("counts all 3 on the main board, where the pending_rfp column IS rendered", () => {
+      boardWithAtRisk(SERVER_BUCKETS);
+
+      const html = renderPage("/deals?scope=all", "director");
+
+      const atRiskBlock = html.match(/text-4xl[^>]*>(\d+)</);
+      expect(atRiskBlock?.[1]).toBe("3");
+    });
+  });
+
+  describe("truncation affordance — the ONLY route to the deals the card slice hides", () => {
+    /**
+     * The board renders a SLICE ordered by tier then `created_at DESC` — the 50 NEWEST live deals, not
+     * the 50 largest. A column's biggest deals can therefore be entirely absent from it, which makes
+     * "view all" load-bearing rather than decorative. These pin the two ways it failed:
+     *   - it did not render at all when enough of the column was on hold, because the denominator was
+     *     the ACTIVE count while the cards include held rows;
+     *   - it advertised a number the drill-down target does not list (Opportunity, pending-RFP split).
+     */
+    function boardWith(column: Record<string, unknown>, extra: Record<string, unknown> = {}) {
+      mocks.useDealBoardMock.mockReturnValue({
+        board: {
+          columns: [{ stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" }, ...column }],
+          terminalStages: [],
+          summary: null,
+          pendingRfpCards: [],
+          ...extra,
+        },
+        loading: false,
+        error: null,
+      });
+    }
+
+    it("renders when a column is truncated, using the ALL-ROWS total as the denominator", () => {
+      boardWith({
+        // 70 matching rows, 25 of them on hold -> active count 45, cards 50 (held rows included).
+        count: 45,
+        activeCount: 45,
+        totalCount: 70,
+        totalValue: 900000,
+        cards: Array.from({ length: 50 }, (_, i) => makeDeal({ id: `deal-${i}` })),
+      });
+
+      const html = renderPage("/deals?scope=all");
+
+      // Against the ACTIVE count this read `50 < 45` — false — and the control never rendered: 20 deals
+      // unreachable behind a page that looked complete.
+      expect(html).toContain("Showing 50 of 70");
+      expect(html).toContain("view all 70");
+    });
+
+    it("renders for an on-hold-heavy column under ?scope=on_hold, where every row is held", () => {
+      boardWith({
+        // scope=on_hold: the active count is 0 by construction, the column is still full of cards.
+        count: 0,
+        activeCount: 0,
+        totalCount: 312,
+        totalValue: 0,
+        cards: Array.from({ length: 50 }, (_, i) => makeDeal({ id: `held-${i}`, onHold: true })),
+      });
+
+      const html = renderPage("/deals?scope=on_hold");
+
+      expect(html).toContain("Showing 50 of 312");
+    });
+
+    it("does NOT render when the column is complete", () => {
+      boardWith({
+        count: 3,
+        activeCount: 3,
+        totalCount: 3,
+        totalValue: 1000,
+        cards: Array.from({ length: 3 }, (_, i) => makeDeal({ id: `deal-${i}` })),
+      });
+
+      const html = renderPage("/deals?scope=all");
+
+      expect(html).not.toContain("Showing 3 of");
+      expect(html).not.toContain("view all");
+    });
+
+    it("advertises the count the Opportunity drill-down will actually list (pending RFP included)", () => {
+      // The stage page filters by Opportunity stage ids and does NOT exclude the pending bucket, so the
+      // link must name the UNADJUSTED stage total even though this column's own cards/total exclude it.
+      mocks.useDealBoardMock.mockReturnValue({
+        board: {
+          columns: [
+            {
+              stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+              count: 100,
+              activeCount: 100,
+              totalCount: 120,
+              totalValue: 1000000,
+              cards: Array.from({ length: 50 }, (_, i) => makeDeal({ id: `deal-${i}` })),
+            },
+          ],
+          terminalStages: [],
+          summary: {
+            atRiskByStageSlug: {},
+            pendingRfp: { count: 18, totalCount: 20, totalValue: 18000 },
+          },
+          pendingRfpCards: [],
+        },
+        loading: false,
+        error: null,
+      });
+
+      const html = renderPage("/deals?scope=all");
+
+      // Cards + totalCount are partitioned (120 - 20 pending = 100 rows this column renders from)...
+      expect(html).toContain("Showing 50 of 100");
+      // ...while the link names what the stage page lists: all 120.
+      expect(html).toContain("view all 120");
+    });
+
+    it("puts NO number on the Pending RFP link — its target is the office-wide cross-rep queue", () => {
+      mocks.useDealBoardMock.mockReturnValue({
+        board: {
+          columns: [
+            {
+              stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+              count: 5,
+              activeCount: 5,
+              totalCount: 5,
+              totalValue: 1000,
+              cards: [makeDeal({ id: "opp-1" })],
+            },
+          ],
+          terminalStages: [],
+          summary: {
+            atRiskByStageSlug: {},
+            pendingRfp: { count: 60, totalCount: 63, totalValue: 60000 },
+          },
+          pendingRfpCards: Array.from({ length: 50 }, (_, i) =>
+            makeDeal({ id: `pending-${i}`, rfpApprovalStatus: "pending", isBidBoardOwned: false })
+          ),
+        },
+        loading: false,
+        error: null,
+      });
+
+      const html = renderPage("/deals?scope=all");
+
+      expect(html).toContain("Showing 50 of 63");
+      expect(html).toContain("open full queue");
+      // A scope-filtered board cannot know the cross-rep queue's size, so it must not claim one.
+      expect(html).not.toContain("view all 63");
+    });
+  });
+
   describe("board request duplication — /deals must not ask for the pipeline more than once per view", () => {
     // GET /api/deals/pipeline measured 1.6-2.5s in production and the page was firing it 2-3x per load.
     // Two independent causes, both pinned here:

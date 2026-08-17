@@ -776,7 +776,9 @@ export function DealsListSection({
   const { reps: repOptions } = useRepRoster({ enabled: !filterBarMode && !hideOwnerFilter });
   // The assignee feed is likewise GATED when the mounting page already has it: /deals loads
   // /tasks/assignees for its own header Rep control and hands the result down, so the page no longer
-  // issues the same request twice on every load. Un-passed mounts fetch it themselves, unchanged.
+  // issues the same request twice on every load. Un-passed mounts fetch it themselves, unchanged — and
+  // that is also the FALLBACK path: /deals passes `undefined` when its own load errored, so a failed
+  // parent request hands the fetch back here instead of silently leaving every owner name unresolved.
   const { assignees: fetchedAssignees } = useTaskAssignees({ enabled: assigneesFromParent == null });
   const assignees = assigneesFromParent ?? fetchedAssignees;
 

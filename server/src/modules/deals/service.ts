@@ -71,6 +71,7 @@ import { resolveDealCreationPolicy, type DealCreationOrigin } from "./direct-cre
 import { logActivity, type AuditContext } from "../audit/audit-logger.js";
 import { listDealChangeOrders, softDeleteChangeOrderChildren, sumDealChangeOrders } from "./change-order-service.js";
 import { loadRfpVoteDetail, type RfpVoteView } from "./rfp-vote-detail.js";
+import { aliasedPendingRfpBucketCondition } from "./pending-rfp-service.js";
 import { isServiceRfp } from "./rfp-vote-service.js";
 import { computeRfpVoteState } from "@trock-crm/shared/lib/rfpVoteState";
 import {
@@ -152,8 +153,10 @@ const MAX_PIPELINE_CARDS_PER_STAGE_LIMIT = 1000;
  *   at-risk (attachAtRiskResult → getDealAtRiskResult): stage identity + the hold-timing set +
  *                                                       expectedCloseDate/bidDueDate
  *   route split (isServiceProjectDeal):                 projectType, projectTypeCode, workflowRoute
- *   pending RFP (isPendingRfpBoardCard):                isBidBoardOwned + the three rfp_* columns
- *   pending RFP $ (getEffectiveDealValue):              the four value candidates + isChangeOrder
+ *
+ * The Pending RFP column is NOT derived from these rows. It gets its own query (see the preview below),
+ * because it needs CARDS as well as a count and because bucketing it from here would classify by the
+ * canonical-slug rule while the cards were selected by stage id — two populations, one number.
  */
 function boardSummaryRowColumns() {
   return {
@@ -229,12 +232,19 @@ interface BoardSummaryRow {
  */
 export interface DealBoardSummary {
   atRiskByStageSlug: Record<string, { service: number; nonService: number }>;
-  /** The synthetic Pending RFP column: count and $ over ALL matching rows, not the card slice. */
-  pendingRfp: { count: number; totalValue: number };
+  /**
+   * The synthetic Pending RFP column, over ALL matching rows rather than a card slice.
+   *
+   * `count` / `totalValue` are the ACTIVE figures (stored `on_hold` excluded), matching every other
+   * board column and the Opportunity aggregate these are subtracted from. `totalCount` is every row
+   * including held ones — the population the column's CARDS are drawn from, so it is the only honest
+   * denominator for a "showing N of M" notice.
+   */
+  pendingRfp: { count: number; totalCount: number; totalValue: number };
 }
 
 function createDealBoardSummary(): DealBoardSummary {
-  return { atRiskByStageSlug: {}, pendingRfp: { count: 0, totalValue: 0 } };
+  return { atRiskByStageSlug: {}, pendingRfp: { count: 0, totalCount: 0, totalValue: 0 } };
 }
 
 /**
@@ -262,10 +272,10 @@ function canonicalBoardStageSlugForRow(
  * Fold one open column's rows into the board summary.
  *
  * Every verdict here comes from the SAME function the card decoration uses — `attachAtRiskResult` for
- * at-risk, `isServiceProjectDeal` for the route split, `isPendingRfpBoardCard` + `getEffectiveDealValue`
- * for Pending RFP. That is deliberate: a SQL twin of the SLA engine would be a second implementation of
- * a rule that has moved repeatedly, and its failure mode is a KPI that disagrees with the drill-down it
- * links to. Running the real predicate over a narrow row set costs one pass of pure computation.
+ * at-risk, `isServiceProjectDeal` for the route split. That is deliberate: a SQL twin of the SLA engine
+ * would be a second implementation of a rule that has moved repeatedly, and its failure mode is a KPI
+ * that disagrees with the drill-down it links to. Running the real predicate over a narrow row set costs
+ * one pass of pure computation.
  */
 function accumulateBoardSummaryRows(
   summary: DealBoardSummary,
@@ -281,24 +291,22 @@ function accumulateBoardSummaryRows(
     const decorated = attachAtRiskResult(row, atRiskViewerRole, crmStageSlug);
     // isEngineAtRiskDeal, verbatim: the client's one at-risk membership test.
     if (decorated.atRisk.isAtRisk === true && decorated.atRisk.status === "at_risk" && canonicalSlug) {
-      const bucket = (summary.atRiskByStageSlug[canonicalSlug] ??= { service: 0, nonService: 0 });
+      // Bucket by the column the client RENDERS the card in, which for the Pending RFP bucket is the
+      // synthetic `pending_rfp` column, NOT `opportunity`.
+      //
+      // This is load-bearing on the stage-scoped drill-downs. `?filter=opportunities` narrows the board
+      // to slugs ["opportunity"], which does not include the synthetic column — so folding pending-RFP
+      // deals into the `opportunity` bucket made that view's three At-Risk cards count deals the card
+      // array had always excluded (buildCanonicalDealBoardColumns strips every pending-RFP card out of
+      // the opportunity column). On the main board both columns are summed, so the total was right and
+      // the regression was invisible there. Keying on the rendered column reproduces the card-derived
+      // number on EVERY view, which is the whole contract of this map.
+      const renderedSlug = isPendingRfpBoardCard(row, canonicalSlug) ? "pending_rfp" : canonicalSlug;
+      const bucket = (summary.atRiskByStageSlug[renderedSlug] ??= { service: 0, nonService: 0 });
       if (isServiceProjectDeal(row)) bucket.service += 1;
       else bucket.nonService += 1;
     }
 
-    // `count`/`totalValue` on a board column are the ACTIVE figures, so a STORED-on-hold pending RFP is
-    // a member of the column but contributes to neither.
-    //
-    // The `on_hold` flag ALONE, deliberately — not the effective-hold verdict. That is what the client's
-    // `activePendingRfp` filters on (`!d.onHold`) and what the column aggregates filter on in SQL
-    // (`COALESCE(on_hold, false) = false`). A deal parked only by a far-future close target therefore
-    // still COUNTS here and contributes getEffectiveDealValue's $0 — same as it does on its card and in
-    // the Opportunity column total this number is subtracted from. Tightening it to effective hold would
-    // make Opportunity + Pending RFP stop adding back up to the Opportunity aggregate.
-    if (isPendingRfpBoardCard(row, canonicalSlug) && row.onHold !== true) {
-      summary.pendingRfp.count += 1;
-      summary.pendingRfp.totalValue += getEffectiveDealValue({ ...row, stageSlug: "opportunity" });
-    }
   }
 }
 
@@ -1529,8 +1537,15 @@ async function getStageByIdForWorkflowRoute(stageId: string, workflowRoute: Work
   return isServiceRouteStandardFamilyStage(standardStage) ? standardStage : null;
 }
 
-async function listDealStages() {
-  return db
+/**
+ * On the REQUEST's tenant client, for the same reason getDealsForPipeline's stage read is: the tenant
+ * middleware already holds one pooled connection for the whole request, so reading this through the
+ * global `db` pool made the request occupy TWO slots at once — and once every slot is held by a tenant
+ * client, the second acquire can never succeed. `pipeline_stage_config` lives only in `public`, which the
+ * tenant search_path covers, so the rows are identical.
+ */
+async function listDealStages(tenantDb: TenantDb) {
+  return tenantDb
     .select()
     .from(pipelineStageConfig)
     .where(inArray(pipelineStageConfig.workflowFamily, ["standard_deal", "service_deal"]))
@@ -1542,8 +1557,8 @@ async function listDealStages() {
 // terminal deal is held ONLY by its stored on_hold flag, never by a stale forecast date (mirrors the value
 // helpers + the TS isDealEffectivelyOnHold twin). Resolved from the stage config so the on_hold scope
 // filter classifies rows without a pipeline_stage_config join at the count/list query.
-async function resolveTerminalStageIds(): Promise<string[]> {
-  const stages = await listDealStages();
+async function resolveTerminalStageIds(tenantDb: TenantDb): Promise<string[]> {
+  const stages = await listDealStages(tenantDb);
   const terminalSlugs = TERMINAL_STAGE_SLUGS as readonly string[];
   return stages.filter((stage) => terminalSlugs.includes(stage.slug)).map((stage) => stage.id);
 }
@@ -1918,7 +1933,7 @@ async function buildDealWorkspaceScope(
     // On Hold = effectively on hold (stored on_hold OR, for an OPEN deal, a close target more than 90 days
     // out). TERMINAL-aware: won/lost rows are realized/preserved (held only by the stored flag), so pass the
     // terminal id set to exempt them. Base columns, so no capability gate.
-    filters.push(buildDealOnHoldCondition("d", await resolveTerminalStageIds()));
+    filters.push(buildDealOnHoldCondition("d", await resolveTerminalStageIds(tenantDb)));
   } else if (input.scope === "team") {
     const teamRepIds = await resolveTeamRepIds(tenantDb, input.userId, input.activeOfficeId);
     filters.push(teamRepIds.length > 0 ? sql`d.assigned_rep_id IN (${sqlList(teamRepIds)})` : sql`false`);
@@ -2256,7 +2271,7 @@ export async function getDeals(
   let wonClosedStageIds: string[] | null = null;
   const resolveWonClosedStageIds = async (stages?: Awaited<ReturnType<typeof listDealStages>>) => {
     if (wonClosedStageIds) return wonClosedStageIds;
-    const wonStages = stages ?? await listDealStages();
+    const wonStages = stages ?? await listDealStages(tenantDb);
     wonClosedStageIds = wonStages
       .filter((stage) =>
         WON_TERMINAL_STAGE_SLUGS.includes(stage.slug as (typeof WON_TERMINAL_STAGE_SLUGS)[number])
@@ -2331,7 +2346,7 @@ export async function getDeals(
     // On Hold = effectively on hold (stored on_hold OR, for an OPEN deal, a close target more than 90 days
     // out). TERMINAL-aware: won/lost rows are realized/preserved (held only by the stored flag), so pass the
     // terminal id set to exempt them. Base columns, so no capability gate.
-    conditions.push(buildDealOnHoldCondition("deals", await resolveTerminalStageIds()));
+    conditions.push(buildDealOnHoldCondition("deals", await resolveTerminalStageIds(tenantDb)));
   } else if (scope === "team") {
     const teamUserIds = await resolveTeamRepIds(tenantDb, userId, filters.activeOfficeId ?? null);
     conditions.push(teamUserIds.length > 0 ? inArray(deals.assignedRepId, teamUserIds) : sql`false`);
@@ -2378,7 +2393,7 @@ export async function getDeals(
     filters.status === "on_hold" ||
     Boolean(filters.includeValueTotal);
   if (needsStageClassification) {
-    const stages = await listDealStages();
+    const stages = await listDealStages(tenantDb);
     const wonSlugs = WON_STAGE_SLUGS as readonly string[];
     const lostSlugs = LOST_STAGE_SLUGS as readonly string[];
     wonStageIds = stages.filter((stage) => wonSlugs.includes(stage.slug)).map((stage) => stage.id);
@@ -4011,6 +4026,15 @@ export async function getDealsForPipeline(
   const activeCountByStage = new Map<string, number>();
   const totalCountByStage = new Map<string, number>();
   const valueByStage = new Map<string, number>();
+  // The OPEN columns' stage-entry window, hoisted out of the per-stage loop: the Pending RFP preview
+  // below has to reproduce the open columns' population exactly, and re-deriving the window there would
+  // be a second copy of the D-11 rule. Null when the flag is off or no period is requested.
+  const openStageEntryWindow = stageEntryDateEnabled
+    ? buildStageEntryDateWindow(
+        { from: wonPeriodFrom ?? undefined, to: wonPeriodTo ?? undefined },
+        aliasedDealDateScopeColumns("deals")
+      )
+    : undefined;
   // Board-wide verdict counts computed over EVERY matching row (see accumulateBoardSummaryRows), so the
   // At-Risk KPI cards and the Pending RFP column no longer depend on how many cards a column returns.
   const boardSummary = createDealBoardSummary();
@@ -4088,13 +4112,7 @@ export async function getDealsForPipeline(
       // < to::date + 1 day, via the shared buildStageEntryDateWindow). The main
       // kanban sends no period (won_all_time) so this only affects the dashboard
       // drill-down. Won/Lost columns are unaffected.
-      if (stageEntryDateEnabled) {
-        const openWindow = buildStageEntryDateWindow(
-          { from: wonPeriodFrom ?? undefined, to: wonPeriodTo ?? undefined },
-          aliasedDealDateScopeColumns("deals")
-        );
-        if (openWindow) stageConditions.push(openWindow);
-      }
+      if (openStageEntryWindow) stageConditions.push(openStageEntryWindow);
     }
     if (isEstimateSentStage) {
       // Estimate Sent has its own column date window. Keep that filter local to
@@ -4125,11 +4143,18 @@ export async function getDealsForPipeline(
     // under-report — a dashboard that is confidently wrong, which is worse than a slow one. Counting
     // them here, over every matching row, decouples them from the slice entirely.
     //
-    // Still ONE query per open column, not two: `count(*) OVER ()` / `SUM(...) FILTER (...) OVER ()`
-    // return the identical aggregates the plain GROUP-less form did (same expression, same row set,
-    // same numeric arithmetic in Postgres — NOT re-summed in JS, which could drift by cents).
-    // TERMINAL columns keep the pure aggregate: at-risk is not-applicable there by definition and the
-    // Won column can hold every deal ever won, which is not a row set worth shipping to the API process.
+    // Query COUNT is unchanged — still summary + cards per column. What collapsed is the aggregate INTO
+    // the summary: `count(*) OVER ()` / `SUM(...) FILTER (...) OVER ()` return the identical numbers the
+    // plain GROUP-less form did (same expression, same row set, same numeric arithmetic in Postgres —
+    // NOT re-summed in JS, which could drift by cents), so the rows come along for free rather than
+    // costing a third round trip.
+    //
+    // The summary itself DID get more expensive: it now returns every matching row uncapped, ~20 columns
+    // each plus a correlated project_type_config subquery per row, so a scope=all + includeDd board ships
+    // the whole open pipeline into the API process on every load. That is still a large net win against
+    // 153 columns x up to 1000 rows x 12 columns of CARD payload, but it is not free and the comment
+    // should not imply it is. TERMINAL columns keep the pure aggregate: at-risk is not-applicable there
+    // by definition and the Won column can hold every deal ever won.
     const isSummaryRowStage = !stage.isTerminal;
     const summaryRows = isSummaryRowStage
       ? await tenantDb
@@ -4187,6 +4212,93 @@ export async function getDealsForPipeline(
     valueByStage.set(stage.id, Number(summaryRows[0]?.totalValue ?? 0));
   }
 
+  /**
+   * The synthetic Pending RFP column's OWN card slice — not a carve-out of the Opportunity slice.
+   *
+   * The client builds that column by filtering the Opportunity column's cards. That worked only while
+   * the board fetched 1000 cards per column: with a capped slice, any pending-RFP deal ranked below the
+   * cap never reaches the client, so the column rendered a correct server-side COUNT above an empty or
+   * near-empty card list. Numbers right, board wrong — its own kind of lie.
+   *
+   * One query gives both the preview AND the exact totals: window aggregates are evaluated before LIMIT,
+   * so `count(*) OVER ()` is the FULL bucket size even though only `previewLimit` rows come back. That
+   * also removes the divergence risk of counting the bucket in one place and selecting it in another.
+   *
+   * SCOPE-FILTERED, deliberately: `commonConditions` carries the viewer's scope/rep/test-data filters,
+   * exactly as the Opportunity column does. An office-wide overlay here would re-introduce the reverted
+   * PR #834 bug — a cross-rep column cannot reconcile with a scope-filtered board, and this column IS
+   * part of the Active-Pipeline and At-Risk rollups.
+   *
+   * Ordered oldest-request-first, matching /deals/pending-rfp — the queue this column's "view all"
+   * opens — so the cards a user sees here are the head of the same list.
+   */
+  const pendingRfpStageIds = responseStages
+    .filter(
+      (stage) =>
+        !stage.isTerminal &&
+        normalizeDealBoardStageSlug(stage.slug, dealRouteForStageFamily(stage.workflowFamily)) ===
+          "opportunity"
+    )
+    .map((stage) => stage.id);
+  let pendingRfpDeals: Array<Record<string, unknown>> = [];
+  if (pendingRfpStageIds.length > 0) {
+    const pendingCountedFilter = aliasedActiveDealCountFilterSql("deals");
+    // The SAME value expression the Opportunity column totals with, so the client's
+    // `opportunity.totalValue - pendingRfp.totalValue` split still reconciles to the stage total.
+    const pendingValueSql = aliasedEffectiveDealValueSql(
+      "deals",
+      dealPipelineValueSql(pipelineValueSourceForStageSlug("opportunity", "normal"))
+    );
+    const pendingWhere = and(
+      eq(deals.isActive, true),
+      inArray(deals.stageId, pendingRfpStageIds),
+      nonTerminalMirroredStageCondition(),
+      ...(openStageEntryWindow ? [openStageEntryWindow] : []),
+      aliasedPendingRfpBucketCondition("deals"),
+      ...commonConditions
+    );
+    const pendingRows = await tenantDb
+      .select({
+        ...getTableColumns(deals),
+        companyName: companies.name,
+        assignedRepName: users.displayName,
+        projectTypeCode: sql<string | null>`(SELECT code FROM public.project_type_config WHERE id = ${deals.projectTypeId})`,
+        pendingTotalCount: sql<number>`count(*) over ()`,
+        pendingActiveCount: sql<number>`count(*) filter (where ${pendingCountedFilter}) over ()`,
+        pendingTotalValue: sql<number>`COALESCE(SUM(${pendingValueSql}) FILTER (WHERE ${pendingCountedFilter}) over (), 0)`,
+      })
+      .from(deals)
+      .leftJoin(companies, eq(companies.id, deals.companyId))
+      .leftJoin(users, eq(users.id, deals.assignedRepId))
+      .where(pendingWhere)
+      .orderBy(asc(deals.rfpApprovalRequestedAt), desc(deals.id))
+      .limit(pipelineCardsPerStageLimit);
+
+    const pendingHead = pendingRows[0] as
+      | { pendingTotalCount?: unknown; pendingActiveCount?: unknown; pendingTotalValue?: unknown }
+      | undefined;
+    boardSummary.pendingRfp = {
+      count: Number(pendingHead?.pendingActiveCount ?? 0),
+      totalCount: Number(pendingHead?.pendingTotalCount ?? 0),
+      totalValue: Number(pendingHead?.pendingTotalValue ?? 0),
+    };
+    pendingRfpDeals = pendingRows.map((row) => {
+      // Drop the three window-aggregate columns; they are board-level totals, not card fields.
+      const { pendingTotalCount: _c, pendingActiveCount: _a, pendingTotalValue: _v, ...deal } =
+        row as Record<string, unknown> & {
+          pendingTotalCount?: unknown;
+          pendingActiveCount?: unknown;
+          pendingTotalValue?: unknown;
+        };
+      // Stamp the row's OWN stage slug (opportunity or the `dd` alias), the same authority the per-column
+      // cards get — the value/at-risk resolvers fall to a default chain without it.
+      const ownStageSlug =
+        (typeof deal.stageId === "string" ? stageSlugById.get(deal.stageId) : undefined) ?? "opportunity";
+      const card = deal as Record<string, unknown> & { bidDueDate: string | Date | null };
+      return { ...attachAtRiskResult(card, atRiskViewerRole, ownStageSlug), stageSlug: ownStageSlug };
+    });
+  }
+
   // Build response: active pipeline stages + date-filtered terminal stages.
   const pipelineColumns = responseStages.map((stage) => ({
     stage,
@@ -4241,11 +4353,11 @@ export async function getDealsForPipeline(
     await recordDealsDashboardWonYtdDefinition(tenantDb, currentWonColumn);
   }
 
-  return { pipelineColumns, terminalStages, boardSummary };
+  return { pipelineColumns, terminalStages, boardSummary, pendingRfpDeals };
 }
 
 export async function listDealStagePage(tenantDb: TenantDb, input: DealStagePageInput) {
-  const stages = await listDealStages();
+  const stages = await listDealStages(tenantDb);
   const [stage] = stages.filter((item) => item.id === input.stageId);
   if (!stage) throw new AppError(404, "Deal stage not found");
 

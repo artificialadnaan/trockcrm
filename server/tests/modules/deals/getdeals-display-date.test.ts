@@ -16,17 +16,26 @@ import { PgDialect } from "drizzle-orm/pg-core";
 
 // listDealStages() reads the module-level db (not the tenantDb arg). Stub it so
 // the date path can resolve won/lost stage ids without a real database.
+const STAGES = [
+  { id: "won-1", slug: "won", workflowFamily: "standard_deal" },
+  { id: "lost-1", slug: "lost", workflowFamily: "standard_deal" },
+  { id: "op-1", slug: "opportunity", workflowFamily: "standard_deal" },
+];
+
+/** Drizzle's own name symbol, so the check needs no import inside a hoisted mock factory. */
+function isPipelineStageConfigTable(table: unknown): boolean {
+  if (!table || typeof table !== "object") return false;
+  return (table as Record<symbol, unknown>)[Symbol.for("drizzle:Name")] === "pipeline_stage_config";
+}
+
+// listDealStages() reads pipeline_stage_config on the REQUEST's tenant client now (through the global
+// pool it made one request hold two slots at once). Kept so importing db.js stays harmless.
 vi.mock("../../../src/db.js", () => {
-  const stages = [
-    { id: "won-1", slug: "won", workflowFamily: "standard_deal" },
-    { id: "lost-1", slug: "lost", workflowFamily: "standard_deal" },
-    { id: "op-1", slug: "opportunity", workflowFamily: "standard_deal" },
-  ];
   const chain: Record<string, unknown> = {};
   chain.select = () => chain;
   chain.from = () => chain;
   chain.where = () => chain;
-  chain.orderBy = () => Promise.resolve(stages);
+  chain.orderBy = () => Promise.resolve(STAGES);
   return { db: chain, pool: {} };
 });
 
@@ -37,8 +46,15 @@ const renderText = (value: unknown) => dialect.sqlToQuery(value as never).sql.to
 // dealRows query's `displayDate` expression (the count queries select {count}).
 function createTenantDbCapturingSelect() {
   const capturedSelects: Array<Record<string, unknown>> = [];
+  // The stage-config read needs its own chain, and its projection must NOT be captured — the
+  // assertions below look for the one select that carries `displayDate`.
+  const stageChain: Record<string, unknown> = {};
+  stageChain.where = () => stageChain;
+  stageChain.orderBy = () => Promise.resolve(STAGES);
+  (stageChain as { then: unknown }).then = (resolve: (rows: unknown[]) => unknown) => resolve(STAGES);
+
   const dataChain: Record<string, unknown> = {};
-  dataChain.from = () => dataChain;
+  dataChain.from = (table: unknown) => (isPipelineStageConfigTable(table) ? stageChain : dataChain);
   dataChain.leftJoin = () => dataChain;
   dataChain.where = () => dataChain;
   dataChain.orderBy = () => dataChain;
