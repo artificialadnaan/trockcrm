@@ -995,10 +995,18 @@ function DealsBoardColumn({
    * last resort for a payload without a total; `Math.max` keeps the notice from ever claiming fewer
    * rows than it is visibly rendering.
    */
-  const cardPopulationCount = Math.max(column.totalCount ?? column.count, visibleCardCount);
+  const cardPopulationCount =
+    column.totalCount === undefined ? undefined : Math.max(column.totalCount, visibleCardCount);
   /** What the "view all" target will list; undefined when that target's size is unknowable (Pending RFP). */
   const drilldownTotalCount = column.drilldownTotalCount;
-  const isTruncated = visibleCardCount < cardPopulationCount;
+  /**
+   * Only claim truncation when the row total is KNOWN. An API that does not send totalCount leaves this
+   * undefined, and inventing a denominator from `count` is the exact bug the notice exists to fix — so
+   * the notice stays hidden rather than quoting a number that might be wrong. That window is also the
+   * one where the board stops truncating at all (see the preview-limit latch on DealListPageContent),
+   * so there is nothing to escape from.
+   */
+  const isTruncated = cardPopulationCount !== undefined && visibleCardCount < cardPopulationCount;
   const terminalOutcome = isTerminalOutcomeSlug(column.stage.slug) ? column.stage.slug : null;
   const hasBoardDate = periodValue != null && periodValue !== "__all__";
   const emptyText = terminalOutcome && hasBoardDate ? "No deals in selected range" : "No deals";
@@ -1160,6 +1168,23 @@ function DealListPageContent({
    * shows; it stops the page from asking for the wrong thing first.
    */
   const [storedViewResolved, setStoredViewResolved] = useState(false);
+  /**
+   * Latched true once a board response comes back WITHOUT a usable `boardSummary`.
+   *
+   * A client and a server ship in one PR but deploy as two services at different moments. During a
+   * rolling deploy — or if the frontend rolls first — this bundle talks to an API that predates
+   * `boardSummary`, and then EVERY aggregate on this page falls back to counting the card array: the
+   * three At-Risk KPI counts, the Pending RFP column, and the Opportunity total it is subtracted from.
+   * Those fallbacks are correct, but only over an UNTRUNCATED card set — which is what they had before
+   * this PR shrank the slice to 50. Left alone they would quietly under-report for the length of the
+   * deploy, and an under-reported KPI is displayed to someone as if it were true.
+   *
+   * So when the server cannot supply the aggregates, the board stops truncating and asks for the full
+   * per-stage set again, exactly as it did before this PR. One extra request, once, inside the deploy
+   * window; the latch is monotonic so a failed refetch (which nulls `board`) cannot oscillate the limit,
+   * and it never engages against an API that sends the summary.
+   */
+  const [serverOmitsBoardSummary, setServerOmitsBoardSummary] = useState(false);
 
   // Remember the standing dashboard header filters (Rep + timeframe) per (user, effective office), the same
   // way Mine/All already persists — so opening a deal and returning to /deals restores the last selection.
@@ -1260,7 +1285,9 @@ function DealListPageContent({
     scope,
     true,
     terminalDateFilters,
-    isAtRiskDrilldown ? SLA_DRILLDOWN_PREVIEW_LIMIT : BOARD_CARDS_PER_STAGE_LIMIT,
+    isAtRiskDrilldown || serverOmitsBoardSummary
+      ? SLA_DRILLDOWN_PREVIEW_LIMIT
+      : BOARD_CARDS_PER_STAGE_LIMIT,
     // Deals-at-Risk is a CURRENT-STATE view: ?period is a no-op. The board period serializes as
     // won_period_from/to, which the server applies to OPEN columns as a stage-entry-date window
     // (getDealsForPipeline) — so sending it here would still drop at-risk deals outside the window at the
@@ -1271,6 +1298,12 @@ function DealListPageContent({
     undefined,
     { enabled: storedViewResolved }
   );
+
+  useEffect(() => {
+    // `summary === null` covers both "field absent" and "field malformed" — either way the client cannot
+    // trust a truncated card set, so widen the request. Monotonic: never set back to false.
+    if (board !== null && board.summary === null) setServerOmitsBoardSummary(true);
+  }, [board]);
 
   // Sync the board's terminal (Won/Lost) date state from the URL — but key on the BOARD params only, so a
   // list-namespaced (dl_/fb_) FilterBar edit never churns this state and refetches the kanban above it

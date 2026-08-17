@@ -538,8 +538,14 @@ export interface DealBoardResponse {
   /**
    * The synthetic Pending RFP column's own card slice, fetched server-side rather than carved out of the
    * Opportunity column's (capped) slice — where every pending deal below the cap used to disappear.
+   *
+   * OPTIONAL, and the distinction is load-bearing: `undefined` means "this API does not send the field"
+   * and MUST fall back to carving the cards out of Opportunity; `[]` means "the server looked and the
+   * bucket is empty". Normalizing absence to `[]` would make the fallback unreachable and render an
+   * empty Pending RFP column under a non-zero header count — which is exactly the window a rolling
+   * deploy opens, where a new bundle talks to an API that predates the field.
    */
-  pendingRfpCards: Deal[];
+  pendingRfpCards?: Deal[];
 }
 
 export interface DealStagePageResponse {
@@ -592,7 +598,11 @@ export function normalizeDealBoardResponse(result: DealBoardApiResponse): DealBo
     return {
       ...column,
       activeCount: sourceColumn.activeCount ?? sourceColumn.count,
-      totalCount: sourceColumn.totalCount ?? sourceColumn.count,
+      // NOT `?? count`. `count` is the ACTIVE figure while `cards` includes on-hold rows, so substituting
+      // it produces exactly the denominator that hid the truncation notice. An API that does not send
+      // totalCount leaves it undefined, and the consumers that need a real row total say "unknown"
+      // instead of quoting a number they cannot substantiate.
+      totalCount: sourceColumn.totalCount,
       cards: sourceColumn.cards ?? sourceColumn.deals ?? [],
     };
   });
@@ -608,7 +618,9 @@ export function normalizeDealBoardResponse(result: DealBoardApiResponse): DealBo
     // Guard the SHAPE, not just presence: a malformed payload here would otherwise be read as
     // "0 at risk" — a wrong number rendered confidently — where a null falls back to counting cards.
     summary: normalizeDealBoardSummary(result.boardSummary),
-    pendingRfpCards: Array.isArray(result.pendingRfpDeals) ? result.pendingRfpDeals : [],
+    // ABSENT stays absent. `Array.isArray(...) ? ... : []` collapsed "the API predates this field" into
+    // "the bucket is empty", and `[]` never triggers the `?? carvedPendingRfpCards` fallback.
+    pendingRfpCards: Array.isArray(result.pendingRfpDeals) ? result.pendingRfpDeals : undefined,
   };
 }
 

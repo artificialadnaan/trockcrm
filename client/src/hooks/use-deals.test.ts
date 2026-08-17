@@ -336,6 +336,71 @@ function GatedBoardProbe() {
   return null;
 }
 
+
+describe("normalizeDealBoardResponse — absent vs empty across the deploy window", () => {
+  /**
+   * The whole point: a client and a server ship in one PR but deploy as two services at different
+   * moments. Every field this PR added has to answer "does an API that predates it produce a WRONG
+   * board, or merely a degraded one?" — and anything that silently reads as a real value gets the
+   * absent-vs-empty treatment, because during the window it is shown to someone as if it were true.
+   */
+  const legacyPayload = () => ({
+    pipelineColumns: [
+      {
+        stage: { id: "stage-1", name: "Opportunity", slug: "opportunity" },
+        count: 45,
+        totalValue: 1000,
+        deals: [],
+      },
+    ],
+    terminalStages: [],
+  });
+
+  it("keeps an ABSENT pendingRfpDeals undefined so the carve-out fallback can fire", () => {
+    const normalized = normalizeDealBoardResponse(legacyPayload() as never);
+    expect(normalized.pendingRfpCards).toBeUndefined();
+  });
+
+  it("keeps an EXPLICITLY EMPTY pendingRfpDeals as an empty array", () => {
+    const normalized = normalizeDealBoardResponse({
+      ...legacyPayload(),
+      pendingRfpDeals: [],
+    } as never);
+    expect(normalized.pendingRfpCards).toEqual([]);
+    expect(normalized.pendingRfpCards).not.toBeUndefined();
+  });
+
+  it("keeps an ABSENT column totalCount undefined instead of substituting the ACTIVE count", () => {
+    const normalized = normalizeDealBoardResponse(legacyPayload() as never);
+    // `count` is the non-on-hold figure while `cards` includes held rows, so quoting it as a row total
+    // is what let a truncated column look complete.
+    expect(normalized.columns[0]!.totalCount).toBeUndefined();
+    expect(normalized.columns[0]!.count).toBe(45);
+  });
+
+  it("nulls an ABSENT or MALFORMED boardSummary so consumers take their card-derived fallback", () => {
+    expect(normalizeDealBoardResponse(legacyPayload() as never).summary).toBeNull();
+    // A summary missing the totalCount this PR added is not usable either — better to fall back wholly
+    // than to read a missing field as zero.
+    expect(
+      normalizeDealBoardResponse({
+        ...legacyPayload(),
+        boardSummary: { atRiskByStageSlug: {}, pendingRfp: { count: 1, totalValue: 2 } },
+      } as never).summary
+    ).toBeNull();
+  });
+
+  it("passes a COMPLETE boardSummary through untouched", () => {
+    const summary = {
+      atRiskByStageSlug: { opportunity: { service: 1, nonService: 2 } },
+      pendingRfp: { count: 3, totalCount: 4, totalValue: 5 },
+    };
+    expect(normalizeDealBoardResponse({ ...legacyPayload(), boardSummary: summary } as never).summary).toEqual(
+      summary
+    );
+  });
+});
+
 describe("useDealBoard — the enabled gate", () => {
   beforeEach(() => {
     latestGatedResult = null;

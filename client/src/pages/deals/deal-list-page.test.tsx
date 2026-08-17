@@ -3272,6 +3272,113 @@ describe("DealListPage", () => {
     });
   });
 
+
+  describe("rolling deploy — a board response without boardSummary must not be truncated", () => {
+    /**
+     * The client and the server ship in one PR but deploy as two services. Against an API that predates
+     * `boardSummary`, EVERY aggregate on this page falls back to counting the card array — the three
+     * At-Risk KPI counts, the Pending RFP column, and the Opportunity total it is subtracted from.
+     * Those fallbacks are correct only over an UNTRUNCATED set, which is what they had before this PR
+     * shrank the slice to 50. So a summary-less response widens the request back to the full set for
+     * the rest of the session, rather than quietly under-reporting for the length of the deploy.
+     */
+    function boardWithoutSummary() {
+      mocks.useDealBoardMock.mockReturnValue({
+        board: {
+          columns: [
+            {
+              stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+              count: 45,
+              activeCount: 45,
+              totalCount: 70,
+              totalValue: 900000,
+              cards: Array.from({ length: 50 }, (_, i) => makeDeal({ id: `deal-${i}` })),
+            },
+          ],
+          terminalStages: [],
+          summary: null,
+          // Absent, exactly as an older API sends it.
+          pendingRfpCards: undefined,
+        },
+        loading: false,
+        error: null,
+      });
+    }
+
+    const previewLimitsRequested = () =>
+      mocks.useDealBoardMock.mock.calls.map((call) => call[3] as number);
+
+    it("re-requests the FULL per-stage set once it sees a summary-less response", async () => {
+      boardWithoutSummary();
+      const view = await renderPageDom("/deals?scope=all", "director");
+      try {
+        const limits = previewLimitsRequested();
+        // It starts at the small slice...
+        expect(limits[0]).toBe(50);
+        // ...and settles on the pre-PR full set once the response proves the API cannot aggregate.
+        expect(limits[limits.length - 1]).toBe(1000);
+      } finally {
+        await view.cleanup();
+      }
+    });
+
+    it("does NOT widen when the server DOES send a summary", async () => {
+      mocks.useDealBoardMock.mockReturnValue({
+        board: {
+          columns: [
+            {
+              stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+              count: 45,
+              activeCount: 45,
+              totalCount: 70,
+              totalValue: 900000,
+              cards: Array.from({ length: 50 }, (_, i) => makeDeal({ id: `deal-${i}` })),
+            },
+          ],
+          terminalStages: [],
+          summary: { atRiskByStageSlug: {}, pendingRfp: { count: 0, totalCount: 0, totalValue: 0 } },
+          pendingRfpCards: [],
+        },
+        loading: false,
+        error: null,
+      });
+
+      const view = await renderPageDom("/deals?scope=all", "director");
+      try {
+        expect(new Set(previewLimitsRequested())).toEqual(new Set([50]));
+      } finally {
+        await view.cleanup();
+      }
+    });
+
+    it("hides the truncation notice when the row total is UNKNOWN rather than inventing one", () => {
+      mocks.useDealBoardMock.mockReturnValue({
+        board: {
+          columns: [
+            {
+              stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+              count: 45, // ACTIVE only; no totalCount on the wire
+              activeCount: 45,
+              totalValue: 900000,
+              cards: Array.from({ length: 50 }, (_, i) => makeDeal({ id: `deal-${i}` })),
+            },
+          ],
+          terminalStages: [],
+          summary: null,
+          pendingRfpCards: undefined,
+        },
+        loading: false,
+        error: null,
+      });
+
+      const html = renderPage("/deals?scope=all");
+
+      // Quoting `count` here would read "Showing 50 of 45". Say nothing instead.
+      expect(html).not.toContain("Showing 50 of");
+      expect(html).not.toContain("view all");
+    });
+  });
+
   describe("board request duplication — /deals must not ask for the pipeline more than once per view", () => {
     // GET /api/deals/pipeline measured 1.6-2.5s in production and the page was firing it 2-3x per load.
     // Two independent causes, both pinned here:

@@ -217,10 +217,19 @@ export function buildCanonicalDealBoardColumns(
     // Carry the API's REAL row total through. This used to be dropped, so every canonical column fell
     // back to `count` — the ACTIVE figure — while `cards` includes on-hold rows. That is what let a
     // truncated column report fewer "total" rows than it had cards and hide its own "view all".
+    //
+    // UNDEFINED when the payload carried no totalCount at all (an API predating it). Substituting
+    // `count` here would reintroduce that same wrong denominator silently, so "unknown" stays unknown
+    // and the consumers decide what to do with it.
+    const rawColumnsWithTotal = matchingRawColumns.filter(
+      (column) => typeof column.totalCount === "number"
+    );
     const rawTotalCount = hasBackendAggregate
-      ? aggregateColumn !== null
-        ? aggregateColumn.totalCount ?? aggregateColumn.count
-        : matchingRawColumns.reduce((sum, column) => sum + (column.totalCount ?? column.count), 0)
+      ? rawColumnsWithTotal.length === 0
+        ? undefined
+        : aggregateColumn !== null
+          ? aggregateColumn.totalCount ?? aggregateColumn.count
+          : matchingRawColumns.reduce((sum, column) => sum + (column.totalCount ?? column.count), 0)
       : cards.length;
 
     return {
@@ -266,6 +275,11 @@ export function buildCanonicalDealBoardColumns(
   const pendingRfpColumnCards = pendingRfpCards ?? carvedPendingRfpCards;
   const activePendingRfp = carvedPendingRfpCards.filter((d) => !d.onHold);
   const pendingRfpCount = boardSummary?.pendingRfp.count ?? activePendingRfp.length;
+  // Without a summary this falls back to counting the carved-out cards, which is a POPULATION only
+  // because the page stops truncating in exactly that case: `serverOmitsBoardSummary` latches the
+  // request back to the full per-stage set, so a no-summary board is a complete board. Both halves of
+  // that pairing have to stay true together — shrinking the slice without the latch would turn this
+  // back into a rendered-card count presented as a row total.
   const pendingRfpTotalCount = boardSummary?.pendingRfp.totalCount ?? carvedPendingRfpCards.length;
   const pendingRfpValue =
     boardSummary?.pendingRfp.totalValue ??
@@ -284,7 +298,8 @@ export function buildCanonicalDealBoardColumns(
       count: Math.max(0, opp.count - pendingRfpCount),
       // `totalCount` is partitioned too, so it still describes the cards THIS column renders (which
       // exclude the pending bucket) — that is the denominator the truncation notice needs.
-      totalCount: Math.max(0, (opp.totalCount ?? opp.count) - pendingRfpTotalCount),
+      totalCount:
+        opp.totalCount === undefined ? undefined : Math.max(0, opp.totalCount - pendingRfpTotalCount),
       // `drilldownTotalCount` is deliberately NOT reduced: "view all" opens the Opportunity stage page,
       // which filters by stage id and therefore still lists the pending-RFP deals. Advertising the
       // partitioned number there would send a user to a page holding more rows than the link promised.

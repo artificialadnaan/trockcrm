@@ -1353,3 +1353,82 @@ describe("Pending RFP column — server aggregate over ALL rows beats the (cappe
     expect(pendingFromNull.totalValue).toBe(pendingFromUndefined.totalValue);
   });
 });
+
+describe("Pending RFP preview — ABSENT is not EMPTY (the rolling-deploy window)", () => {
+  /**
+   * A client and a server ship in one PR but deploy as two services at different moments. During a
+   * rolling deploy — or if the frontend rolls first — this bundle talks to an API that predates
+   * `pendingRfpDeals`. Collapsing that absence to `[]` makes the documented carve-out fallback
+   * unreachable and renders an EMPTY Pending RFP column under a non-zero header count.
+   */
+  const pendingCard = (id: string) => ({
+    id,
+    stageId: "opp-stage",
+    workflowRoute: "normal",
+    isBidBoardOwned: false,
+    bidBoardStageSlug: null,
+    readOnlySyncedAt: null,
+    rfpApprovalStatus: "pending",
+    rfpOverrideDecision: null,
+    rfpOverrideState: null,
+    bidEstimate: "10000",
+    ddEstimate: null,
+    awardedAmount: null,
+    onHold: false,
+  });
+  const rawColumns = () =>
+    [
+      {
+        stage: { id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false },
+        count: 3,
+        totalCount: 3,
+        totalValue: 30000,
+        cards: [pendingCard("p1"), pendingCard("p2"), { ...pendingCard("o1"), rfpApprovalStatus: null }],
+      },
+    ] as any;
+  const stages = [{ id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false }] as any;
+
+  it("ABSENT (undefined) falls back to carving the cards out of Opportunity", () => {
+    const columns = buildCanonicalDealBoardColumns(rawColumns(), stages, null, undefined);
+    const pending = columns.find((col) => col.stage.slug === "pending_rfp")!;
+    // The pre-field API sends nothing, so the client reconstructs the column from what it does have.
+    expect(pending.cards.map((d) => d.id)).toEqual(["p1", "p2"]);
+    expect(pending.count).toBe(2);
+  });
+
+  it("EXPLICITLY EMPTY ([]) renders an empty column and does NOT fall back", () => {
+    const columns = buildCanonicalDealBoardColumns(rawColumns(), stages, null, []);
+    const pending = columns.find((col) => col.stage.slug === "pending_rfp")!;
+    // The server looked and found nothing. Carving cards out of Opportunity here would resurrect deals
+    // the server has already excluded from the bucket.
+    expect(pending.cards).toEqual([]);
+  });
+
+  it("a supplied preview WINS over the carve-out, even when both are non-empty", () => {
+    const serverCards = [{ ...pendingCard("server-1") }, { ...pendingCard("server-2") }] as any;
+    const columns = buildCanonicalDealBoardColumns(rawColumns(), stages, null, serverCards);
+    const pending = columns.find((col) => col.stage.slug === "pending_rfp")!;
+    expect(pending.cards.map((d) => d.id)).toEqual(["server-1", "server-2"]);
+  });
+});
+
+describe("column totalCount — ABSENT is not ZERO and not the ACTIVE count", () => {
+  it("leaves totalCount undefined when the payload carried none, rather than substituting count", () => {
+    const columns = buildCanonicalDealBoardColumns(
+      [
+        {
+          stage: { id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false },
+          count: 45, // the ACTIVE figure — substituting it is the denominator bug this PR fixed
+          totalValue: 10000,
+          cards: [],
+        },
+      ] as any,
+      [{ id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false }] as any
+    );
+    const opp = columns.find((col) => col.stage.slug === "opportunity")!;
+    expect(opp.totalCount).toBeUndefined();
+    expect(opp.drilldownTotalCount).toBeUndefined();
+    // The ACTIVE aggregate is still carried — it is a real server number, just not a row total.
+    expect(opp.count).toBe(45);
+  });
+})
