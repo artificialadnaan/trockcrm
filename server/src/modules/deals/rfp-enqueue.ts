@@ -12,7 +12,7 @@ import {
   isR2Configured,
 } from "../../lib/r2-client.js";
 import { activeLatestFileConditions, buildDealFileScopeCondition } from "../files/service.js";
-import { resolveRfpPayloadBidDueDate } from "./bid-due-date.js";
+import { resolveRfpPayloadDueDates } from "./bid-due-date.js";
 import { PUBLIC_VIEWER_PAGE_SIZE, generatePublicToken, isPublicProxyServable } from "../public-photo-tokens/service.js";
 import { publicPhotoShareUrlFromEnv, publicViewerBaseUrlFromEnv } from "../public-photo-tokens/public-share-url.js";
 import { buildNormalizedRfpRequestBody, buildRfpAttachments, buildRfpRequestDeliveryPayload, resolveSyncHubCreateFromRfpUrl, resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
@@ -144,6 +144,15 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, deal: { id: string }) {
     return { id: deal.id, name: "", dealNumber: "", rfpApprovalRequestEventId: null, ownerName: null, ownerEmail: null };
   }
 
+  // BOTH date fields come from ONE decision — see the comment at their use below.
+  const dueDates = resolveRfpPayloadDueDates({
+    bidBoardDueDate: row.bid_board_due_date ?? null,
+    bidBoardDetachedAt: row.bid_board_detached_at ?? null,
+    hasSourceLead: (row.sourceLeadRowId as string | null) != null,
+    leadBidDueDate: row.sourceLeadBidDueDate ?? null,
+    dealBidDueDate: row.bid_due_date ?? null,
+  });
+
   // Owner resolved from the DB row's authoritative owner columns (never a caller-passed object, which may be a
   // sparse projection). Priority: assigned rep → HubSpot owner email → deal creator (see resolveDealOwner).
   const owner = await resolveDealOwner(tenantDb, {
@@ -174,24 +183,21 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, deal: { id: string }) {
     propertyZip: (row.property_zip as string | null) ?? null,
     propertyCountry: (row.property_country as string | null) ?? null,
     description: (row.description as string | null) ?? null,
+    // BOTH date fields come from one decision, because buildNormalizedRfpRequestBody's `dueDate` is
+    // `cleanIso(bidDueDate) ?? cleanIso(bidBoardDueDate)` — so passing the mirror independently would let a
+    // value the resolver REJECTED reach SyncHub through the fallback and be typed into the Procore Bid
+    // Board project's Due Date field.
+    //
     // FULLY gated on BID_BOARD_DUE_DATE_READBACK — including the lead/deal ordering, which this site has
     // always had backwards relative to the deal-detail banner and getResolvedDeal. Flag OFF reproduces
-    // `row.bid_due_date ?? row.sourceLeadBidDueDate ?? null` verbatim; flag ON switches to the shared
-    // precedence (Bid Board mirror -> lead -> deal column).
+    // `row.bid_due_date ?? row.sourceLeadBidDueDate ?? null` plus the untouched mirror fallback, verbatim.
     //
     // The backwards ordering is a real bug, and it is deliberately NOT fixed ahead of the flag: this value
-    // leaves the CRM for SyncHub and ends up typed into the Procore Bid Board project's Due Date, so
-    // correcting it ungated would write a new date into an external system before anyone had read the
-    // census. See resolveRfpPayloadBidDueDate for the full reasoning — do not collapse it into
-    // resolveDealBidDueDateForRead.
-    bidDueDate: resolveRfpPayloadBidDueDate({
-      bidBoardDueDate: row.bid_board_due_date ?? null,
-      bidBoardDetachedAt: row.bid_board_detached_at ?? null,
-      hasSourceLead: (row.sourceLeadRowId as string | null) != null,
-      leadBidDueDate: row.sourceLeadBidDueDate ?? null,
-      dealBidDueDate: row.bid_due_date ?? null,
-    }),
-    bidBoardDueDate: row.bid_board_due_date ?? null,
+    // leaves the CRM for an external system, so correcting it ungated would write a new date into Procore
+    // before anyone had read the census. See resolveRfpPayloadDueDates for the full reasoning — do not
+    // collapse it into resolveDealBidDueDateForRead.
+    bidDueDate: dueDates.bidDueDate,
+    bidBoardDueDate: dueDates.bidBoardDueDate,
     createdAt: row.created_at ?? null,
     // Round-precise event id for enqueueRfpBidBoardCreate's sourceEventId (authoritative, from the DB row).
     rfpApprovalRequestEventId: (row.rfp_approval_request_event_id as string | null) ?? null,

@@ -216,13 +216,29 @@ export function resolveDealBidDueDateForRead(
  * Bid Board's landed date both branches return that column, so only a lead-backed deal whose column has
  * NOT received the write-through can differ — which is exactly the lead-vs-column ordering being gated.
  */
-export function resolveRfpPayloadBidDueDate(
+export function resolveRfpPayloadDueDates(
   input: DealBidDueDateInput,
   env: NodeJS.ProcessEnv = process.env
-): Date | string | null {
+): { bidDueDate: Date | string | null; bidBoardDueDate: Date | string | null } {
   if (!isBidBoardDueDateReadbackEnabled(env)) {
-    // Verbatim legacy precedence, raw values and all: `row.bid_due_date ?? row.sourceLeadBidDueDate ?? null`.
-    return input.dealBidDueDate ?? input.leadBidDueDate ?? null;
+    // Verbatim legacy: `row.bid_due_date ?? row.sourceLeadBidDueDate ?? null`, and the mirror passed
+    // through untouched so buildNormalizedRfpRequestBody's existing
+    // `cleanIso(bidDueDate) ?? cleanIso(bidBoardDueDate)` fallback behaves exactly as it does on main.
+    return {
+      bidDueDate: input.dealBidDueDate ?? input.leadBidDueDate ?? null,
+      bidBoardDueDate: input.bidBoardDueDate ?? null,
+    };
   }
-  return resolveDealBidDueDate(input).raw;
+  // Flag ON, the resolver's decision is FINAL — which means withholding the mirror.
+  //
+  // buildNormalizedRfpRequestBody falls back to `bidBoardDueDate` when `bidDueDate` is null. Passing the
+  // mirror here would let a value the resolver just REJECTED as non-authoritative reach the payload
+  // anyway: a lead-backed deal with a cleared lead value and an UNLANDED mirror resolves to null (the rep
+  // deliberately has no bid date), and the fallback would then send the board's date to SyncHub, where it
+  // is typed into the Procore Bid Board project's Due Date field. A rejected value must not come back in
+  // through a side door — the payload's fallback has to agree with the decision, not second-guess it.
+  //
+  // Note the landed case needs no fallback anyway: `raw` is then the deal column, which already carries
+  // the board's date.
+  return { bidDueDate: resolveDealBidDueDate(input).raw, bidBoardDueDate: null };
 }

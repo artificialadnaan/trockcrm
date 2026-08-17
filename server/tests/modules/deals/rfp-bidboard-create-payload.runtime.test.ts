@@ -232,5 +232,50 @@ describe("enqueueRfpBidBoardCreate — DB-authoritative payload from a sparse { 
       // Falls back to the corrected legacy chain (lead-first), never to the board's date.
       expect(await dueDateFor({ env: "true", landed: "2026-12-24", detached: true })).toContain("2026-09-15");
     });
+
+    // ★ THE LEAK. buildNormalizedRfpRequestBody computes
+    // `dueDate: cleanIso(bidDueDate) ?? cleanIso(bidBoardDueDate)`. With a CLEARED lead and an UNLANDED
+    // mirror the resolver returns null — the deal deliberately has no bid due date — and if the payload
+    // still carried the mirror, that fallback would send the board's REJECTED date to SyncHub, which types
+    // it into the Procore Bid Board project's Due Date field. The end of the chain is what this asserts:
+    // the job payload itself, not the resolver's return value.
+    it("flag ON: a rejected mirror does NOT reappear through the payload's dueDate fallback", async () => {
+      pg = await setup();
+      await pg!.query(
+        `UPDATE deals SET bid_board_due_date = '2026-12-24' WHERE id = $1`,
+        [DEAL]
+      );
+      // Clear the lead's value — the deal is lead-backed, so the lead owns the field and its clear wins.
+      await pg!.query(`UPDATE leads SET bid_due_date = NULL WHERE id = $1`, [LEAD]);
+      const tdb: any = drizzle(pg as any);
+      process.env.BID_BOARD_DUE_DATE_READBACK = "true";
+      try {
+        await enqueueRfpBidBoardCreate({ tenantDb: tdb, officeId: null, deal: { id: DEAL } });
+      } finally {
+        delete process.env.BID_BOARD_DUE_DATE_READBACK;
+      }
+
+      const jobs = (await pg!.query(`SELECT payload FROM public.job_queue`)).rows as any[];
+      const deal = jobs[0].payload.body.deal;
+      expect(deal.dueDate).toBeNull();
+      // The value that must never have travelled.
+      expect(JSON.stringify(deal)).not.toContain("2026-12-24");
+    });
+
+    it("flag OFF: the SAME fixture keeps the legacy mirror fallback, byte-for-byte", async () => {
+      // Parity in the other direction: on main, a null deal column and a null lead DO fall through to the
+      // mirror. Flag-off must keep doing that, or this PR would be changing outbound RFP bodies while
+      // switched off.
+      pg = await setup();
+      await pg!.query(`UPDATE deals SET bid_board_due_date = '2026-12-24', bid_due_date = NULL WHERE id = $1`, [DEAL]);
+      await pg!.query(`UPDATE leads SET bid_due_date = NULL WHERE id = $1`, [LEAD]);
+      const tdb: any = drizzle(pg as any);
+      delete process.env.BID_BOARD_DUE_DATE_READBACK;
+
+      await enqueueRfpBidBoardCreate({ tenantDb: tdb, officeId: null, deal: { id: DEAL } });
+
+      const jobs = (await pg!.query(`SELECT payload FROM public.job_queue`)).rows as any[];
+      expect(jobs[0].payload.body.deal.dueDate).toContain("2026-12-24");
+    });
   });
 });
