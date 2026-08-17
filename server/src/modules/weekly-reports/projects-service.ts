@@ -1,6 +1,7 @@
 import type { PoolClient } from "pg";
 import {
   WEEKLY_REPORT_PROJECT_STATUSES,
+  WON_DEAL_STAGE_SLUGS,
   isIsoDateString,
   type WeeklyReportProjectStatus,
 } from "@trock-crm/shared/types";
@@ -277,11 +278,35 @@ export async function createWeeklyReportProject(
 ): Promise<WeeklyReportProject> {
   const values = normalizeWeeklyReportProjectInput(input);
 
-  // The deal must exist in THIS office. Without the check a bad id produces an FK violation the API
-  // surfaces as a 500; with it the form gets a 404 it can explain.
-  const deal = await client.query(`SELECT id FROM deals WHERE id = $1::uuid LIMIT 1`, [input.dealId]);
-  if (!deal.rows[0]) {
+  // The deal must exist in THIS office, be live, and be WON.
+  //
+  // Weekly reports are a construction-phase deliverable — a client does not receive a weekly progress
+  // update on a job that was never awarded. Enforced server-side rather than left to the picker: the
+  // picker is one caller, and a cadence attached to an open or lost deal quietly generates outstanding
+  // weeks that leadership then chases somebody about.
+  const deal = await client.query(
+    `SELECT d.id,
+            COALESCE(psc.slug, '') AS stage_slug,
+            COALESCE(d.bid_board_stage_slug, '') AS bid_board_stage_slug
+       FROM deals d
+       LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+      WHERE d.id = $1::uuid
+        AND d.is_active = true
+        AND COALESCE(d.is_test_data, false) = false
+      LIMIT 1`,
+    [input.dealId],
+  );
+  const dealRow = deal.rows[0];
+  if (!dealRow) {
     throw new AppError(404, "Deal not found");
+  }
+  // Either side of the dual-record model counts: a Bid Board-owned deal carries its terminal state in
+  // bid_board_stage_slug while its CRM stage_id can still point at a non-terminal stage.
+  const isWon =
+    WON_DEAL_STAGE_SLUGS.includes(dealRow.stage_slug) ||
+    WON_DEAL_STAGE_SLUGS.includes(dealRow.bid_board_stage_slug);
+  if (!isWon) {
+    throw new AppError(400, "Weekly reports can only be set up on a Won project");
   }
 
   const existing = await client.query(
@@ -475,6 +500,51 @@ export async function deactivateWeeklyReportProject(client: QueryExecutor, id: s
     [id],
   );
   if (!result.rows[0]) throw new AppError(404, "Weekly report project not found");
+}
+
+/**
+ * Roles that can hold the PM or superintendent slot on a weekly report.
+ *
+ * `field_contractor` is the T-Rock Cam login role, `construction` is its CRM-side counterpart, and
+ * admin/director are included because leadership genuinely does carry projects. `rep` is excluded: the
+ * sales roster would bury the handful of real candidates.
+ *
+ * Deliberately NOT sourced from `field_responders` (0198), whose ids belong to a per-office roster table
+ * rather than to `public.users` — and `weekly_report_projects.trock_*_user_id` is a `public.users` FK
+ * that the authorisation check compares against the acting user's id. Nor from `deal_team_members`,
+ * which is empty in production.
+ */
+const ASSIGNABLE_ROLES = ["field_contractor", "construction", "admin", "director"] as const;
+
+export interface WeeklyReportAssignableUser {
+  id: string;
+  displayName: string;
+  email: string;
+  role: string;
+}
+
+export async function listWeeklyReportAssignableUsers(
+  client: QueryExecutor,
+  officeId: string,
+): Promise<WeeklyReportAssignableUser[]> {
+  const result = await client.query(
+    `SELECT id, display_name, email, role
+       FROM public.users
+      WHERE office_id = $1::uuid
+        AND is_active = true
+        AND COALESCE(is_test_data, false) = false
+        -- role::text, because users.role is the user_role ENUM: comparing it to a text[] raises
+        -- "operator does not exist: user_role = text" rather than quietly returning nothing.
+        AND role::text = ANY($2::text[])
+      ORDER BY display_name ASC`,
+    [officeId, [...ASSIGNABLE_ROLES]],
+  );
+  return result.rows.map((row) => ({
+    id: row.id,
+    displayName: row.display_name,
+    email: row.email,
+    role: row.role,
+  }));
 }
 
 export interface WeeklyReportSettings {

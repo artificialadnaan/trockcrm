@@ -4,6 +4,7 @@ import {
   weeklyReportWeekOf,
   type WeeklyReportWeekState,
 } from "@trock-crm/shared/types";
+import { AppError } from "../../middleware/error-handler.js";
 import type { QueryExecutor } from "./projects-service.js";
 
 /**
@@ -103,7 +104,15 @@ export async function getWeeklyReportDashboard(
   options: { asOf: string; lookbackWeeks?: number },
 ): Promise<WeeklyReportDashboard> {
   const asOf = options.asOf;
-  const lookbackWeeks = Math.max(1, Math.min(options.lookbackWeeks ?? DEFAULT_OUTSTANDING_LOOKBACK_WEEKS, 260));
+  // A non-integer must not reach the arithmetic below. `NaN` (from `?lookbackWeeks=abc`) survives both
+  // Math.min and Math.max, makes `expected.length - NaN` NaN, and turns both loops into no-ops — the
+  // board renders EMPTY, which reads as "nothing outstanding". A fractional value indexes the expected
+  // array at a fraction and reads undefined.
+  const requested = options.lookbackWeeks;
+  const lookbackWeeks =
+    requested == null || !Number.isFinite(requested)
+      ? DEFAULT_OUTSTANDING_LOOKBACK_WEEKS
+      : Math.max(1, Math.min(Math.trunc(requested), 260));
 
   const projectsResult = await client.query(
     `SELECT wrp.id, wrp.deal_id, wrp.property_display_name, wrp.client_name,
@@ -220,9 +229,15 @@ export async function getWeeklyReportDashboard(
     }
   }
 
-  // Most overdue first, then the projects with the most at stake this week. A director opens this page
-  // to find what is broken, not to browse alphabetically.
-  rows.sort((a, b) => b.daysLate - a.daysLate || a.projectName.localeCompare(b.projectName));
+  // Most overdue first, then SOONEST DUE, then alphabetical. The middle term matters: before their
+  // deadlines every row has daysLate === 0, so falling straight to the name would put a Saturday
+  // report above one due tomorrow purely because of how it is spelled.
+  rows.sort(
+    (a, b) =>
+      b.daysLate - a.daysLate ||
+      a.weekOf.localeCompare(b.weekOf) ||
+      a.projectName.localeCompare(b.projectName),
+  );
 
   return { asOf, rows, olderOutstandingCounts, lookbackWeeks };
 }
@@ -232,7 +247,8 @@ export interface WeeklyReportProjectSummary {
   reportsSent: number;
   lastSentAt: string | null;
   lastSentWeekOf: string | null;
-  nextDueWeekOf: string;
+  /** Null when reporting has stopped — paused, completed, or past its cadence end date. */
+  nextDueWeekOf: string | null;
 }
 
 /** Per-project counters for the Projects tab. One query, aggregated in SQL. */
@@ -243,6 +259,8 @@ export async function listWeeklyReportProjectSummaries(
   const result = await client.query(
     `SELECT wrp.id,
             wrp.cadence_weekday,
+            wrp.cadence_end_date,
+            wrp.status,
             COUNT(wr.id) FILTER (WHERE wr.status = 'sent')::int AS reports_sent,
             MAX(wr.sent_at) FILTER (WHERE wr.status = 'sent')   AS last_sent_at,
             MAX(wr.week_of) FILTER (WHERE wr.status = 'sent')   AS last_sent_week_of
@@ -250,22 +268,75 @@ export async function listWeeklyReportProjectSummaries(
        LEFT JOIN weekly_reports wr
               ON wr.weekly_report_project_id = wrp.id AND wr.is_active
       WHERE wrp.is_active
-      GROUP BY wrp.id, wrp.cadence_weekday`,
+      GROUP BY wrp.id, wrp.cadence_weekday, wrp.cadence_end_date, wrp.status`,
   );
 
-  return result.rows.map((row) => ({
-    weeklyReportProjectId: row.id,
-    reportsSent: Number(row.reports_sent ?? 0),
-    lastSentAt: toIsoTimestamp(row.last_sent_at),
-    lastSentWeekOf: toIsoDate(row.last_sent_week_of),
-    nextDueWeekOf: weeklyReportWeekOf(Number(row.cadence_weekday), asOf),
-  }));
+  return result.rows.map((row) => {
+    // A paused, completed or past-its-end-date project owes nothing. Printing a next-due date for one
+    // would contradict the board, which excludes it from the cadence entirely.
+    const nextDue = weeklyReportWeekOf(Number(row.cadence_weekday), asOf);
+    const endDate = toIsoDate(row.cadence_end_date);
+    const stopped = row.status !== "active" || (endDate != null && nextDue > endDate);
+
+    return {
+      weeklyReportProjectId: row.id,
+      reportsSent: Number(row.reports_sent ?? 0),
+      lastSentAt: toIsoTimestamp(row.last_sent_at),
+      lastSentWeekOf: toIsoDate(row.last_sent_week_of),
+      nextDueWeekOf: stopped ? null : nextDue,
+    };
+  });
 }
 
+/**
+ * Write off a week that was genuinely missed.
+ *
+ * Validated rather than trusted, because an unchecked insert lets a caller PRE-dismiss a future date:
+ * the week later enters the generated board already settled, having never been missed and never been
+ * anybody's problem. That is exactly the accountability the ledger exists to create, so the three
+ * conditions below are the feature, not defensive noise — the week must be a real cadence date for
+ * this project, it must already be due, and it must not already have a live report.
+ */
 export async function dismissWeeklyReportWeek(
   client: QueryExecutor,
-  input: { weeklyReportProjectId: string; weekOf: string; reason: string; actorUserId: string },
+  input: {
+    weeklyReportProjectId: string;
+    weekOf: string;
+    reason: string;
+    actorUserId: string;
+    asOf: string;
+  },
 ): Promise<void> {
+  const projectResult = await client.query(
+    `SELECT cadence_weekday, cadence_start_date, cadence_end_date
+       FROM weekly_report_projects WHERE id = $1::uuid AND is_active LIMIT 1`,
+    [input.weeklyReportProjectId],
+  );
+  const project = projectResult.rows[0];
+  if (!project) throw new AppError(404, "Weekly report project not found");
+
+  const cadenceWeekday = Number(project.cadence_weekday);
+  if (weeklyReportWeekOf(cadenceWeekday, input.weekOf) !== input.weekOf) {
+    throw new AppError(400, "That date is not one of this project's reporting days");
+  }
+  const start = toIsoDate(project.cadence_start_date)!;
+  const end = toIsoDate(project.cadence_end_date);
+  if (input.weekOf < start || (end && input.weekOf > end)) {
+    throw new AppError(400, "That week falls outside this project's reporting window");
+  }
+  if (input.weekOf > input.asOf) {
+    throw new AppError(400, "A future week cannot be dismissed before it is due");
+  }
+
+  const existing = await client.query(
+    `SELECT id FROM weekly_reports
+      WHERE weekly_report_project_id = $1::uuid AND week_of = $2::date AND is_active
+      LIMIT 1`,
+    [input.weeklyReportProjectId, input.weekOf],
+  );
+  if (existing.rows[0]) {
+    throw new AppError(409, "That week already has a report — finish or discard it instead");
+  }
   // ON CONFLICT DO UPDATE rather than DO NOTHING: re-dismissing a week with a better reason should
   // replace the note, not silently keep the first one somebody typed.
   await client.query(

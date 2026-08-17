@@ -198,7 +198,15 @@ export function canEditWeeklyReport(
   // the client may already have opened the link, and silently rewriting what they read is the one
   // outcome this feature must never produce.
   if (reportRow.status === "sent") return false;
-  return isAssignedSuper(projectRow, actor) || isAssignedPm(projectRow, actor) || isElevated(actor);
+
+  const pmPowers = isAssignedPm(projectRow, actor) || isElevated(actor);
+  // Once APPROVED, only the PM may still edit. Letting the superintendent rewrite the narrative or swap
+  // the photos of an already-approved report would let them put content in front of a client that the
+  // PM never saw, while the status still reads "approved" — which defeats the review gate entirely
+  // rather than merely bending it.
+  if (reportRow.status === "approved") return pmPowers;
+
+  return isAssignedSuper(projectRow, actor) || pmPowers;
 }
 
 /**
@@ -280,11 +288,16 @@ export async function createWeeklyReportDraft(
     throw new AppError(409, "A report already exists for this week");
   }
 
+  // ON CONFLICT DO NOTHING rather than trusting the pre-flight SELECTs. Those two lookups do not
+  // serialise anything: two retries of the same submit, or two people opening the same week, can both
+  // observe no row and both reach this INSERT. Without this the loser gets a raw 23505 surfaced as a
+  // 500, which is precisely the flaky-LTE case the idempotency key exists to make boring.
   const result = await client.query(
     `INSERT INTO weekly_reports (
        client_submission_id, weekly_report_project_id, deal_id, week_of,
        projected_duration_weeks, authored_by, authored_at
      ) VALUES ($1::uuid, $2::uuid, $3::uuid, $4::date, $5, $6::uuid, now())
+     ON CONFLICT DO NOTHING
      RETURNING id`,
     [
       input.clientSubmissionId,
@@ -295,6 +308,21 @@ export async function createWeeklyReportDraft(
       actor.id,
     ],
   );
+
+  if (result.rows.length === 0) {
+    // Somebody won the race. Which conflict it was decides the answer: the SAME submission id is this
+    // caller retrying (200, idempotent), a DIFFERENT one is two people starting the same week (409).
+    const bySubmission = await client.query(
+      `SELECT id FROM weekly_reports WHERE client_submission_id = $1::uuid LIMIT 1`,
+      [input.clientSubmissionId],
+    );
+    if (bySubmission.rows[0]) {
+      const report = await getWeeklyReportDetail(client, bySubmission.rows[0].id);
+      if (!report) throw new AppError(404, "Weekly report not found");
+      return { report, created: false };
+    }
+    throw new AppError(409, "A report already exists for this week");
+  }
 
   const report = await getWeeklyReportDetail(client, result.rows[0].id);
   if (!report) throw new AppError(500, "Weekly report could not be read back after creation");
@@ -623,6 +651,14 @@ export async function transitionWeeklyReport(
     // make the dashboard and the per-project counters disagree with the status they are reading.
     params.push(actor.id);
     assignments.push(`sent_by = $${params.length}::uuid`, `sent_at = now()`);
+
+    // FREEZE THE HEADER. Everything the report prints about the client, the team and the schedule is
+    // read live from weekly_report_projects until this moment. Without the snapshot, swapping a PM or
+    // correcting a contract date in September silently rewrites the header of every report already
+    // delivered in August — including the PDF regenerated from it and the page behind the client's
+    // 180-day link, which they may already have read.
+    params.push(JSON.stringify(await buildWeeklyReportSnapshot(client, projectRow)));
+    assignments.push(`snapshot = $${params.length}::jsonb`);
   }
   if (to === "draft") {
     // Bounced back for rework: clear the review stamps so the dashboard does not claim it was reviewed.
@@ -630,15 +666,76 @@ export async function transitionWeeklyReport(
   }
 
   params.push(id);
-  await client.query(
+  const idParam = params.length;
+  params.push(reportRow.status);
+
+  // CONDITIONED ON THE STATUS WE VALIDATED, with the row count checked. The permission and ladder
+  // checks above ran against a row read in an earlier statement; two concurrent requests on an
+  // `approved` report could otherwise both pass validation — one choosing `sent`, the other
+  // `pending_review` — and the later write would win, pulling a report back out of a terminal state
+  // after it had already gone to the client.
+  // RETURNING id rather than trusting `rowCount`: the check is then driver-independent, and the test
+  // harness cannot accidentally report a different number of affected rows than production does.
+  const result = await client.query(
     `UPDATE weekly_reports SET ${assignments.join(", ")}, updated_at = now()
-      WHERE id = $${params.length}::uuid AND is_active`,
+      WHERE id = $${idParam}::uuid AND is_active AND status = $${params.length}
+      RETURNING id`,
     params,
   );
+  if (result.rows.length === 0) {
+    throw new AppError(409, "This report changed while you were working on it — reload and try again");
+  }
 
   const updated = await getWeeklyReportDetail(client, id);
   if (!updated) throw new AppError(404, "Weekly report not found");
   return updated;
+}
+
+/**
+ * The header block as it stood at send time.
+ *
+ * Stored on the report so a sent report renders from its own frozen copy rather than from the live
+ * project row. Names are resolved and stored here rather than left as ids: the point is to preserve
+ * what the client was actually told, not a pointer that later resolves to somebody else.
+ */
+export async function buildWeeklyReportSnapshot(
+  client: QueryExecutor,
+  projectRow: Record<string, any>,
+): Promise<Record<string, unknown>> {
+  const names = await client.query(
+    `SELECT
+       (SELECT display_name FROM public.users WHERE id = $1::uuid) AS pm_name,
+       (SELECT display_name FROM public.users WHERE id = $2::uuid) AS super_name`,
+    [projectRow.trock_pm_user_id, projectRow.trock_super_user_id],
+  );
+  const row = names.rows[0] ?? {};
+
+  return {
+    propertyDisplayName: projectRow.property_display_name ?? null,
+    clientName: projectRow.client_name ?? null,
+    clientTeam: {
+      doc: { name: projectRow.client_doc_name ?? null, email: projectRow.client_doc_email ?? null },
+      pm: { name: projectRow.client_pm_name ?? null, email: projectRow.client_pm_email ?? null },
+      rm: { name: projectRow.client_rm_name ?? null, email: projectRow.client_rm_email ?? null },
+      cm: { name: projectRow.client_cm_name ?? null, email: projectRow.client_cm_email ?? null },
+    },
+    trockTeam: {
+      pmUserId: projectRow.trock_pm_user_id ?? null,
+      pmName: row.pm_name ?? null,
+      superUserId: projectRow.trock_super_user_id ?? null,
+      superName: row.super_name ?? null,
+    },
+    schedule: {
+      contractDate: toIsoDate(projectRow.contract_date),
+      contractDateNote: projectRow.contract_date_note ?? null,
+      projectStartDate: toIsoDate(projectRow.project_start_date),
+      projectStartDateNote: projectRow.project_start_date_note ?? null,
+      projectCompletionDate: toIsoDate(projectRow.project_completion_date),
+      projectCompletionDateNote: projectRow.project_completion_date_note ?? null,
+      projectedDurationWeeks: projectRow.projected_duration_weeks ?? null,
+    },
+    snapshotVersion: 1,
+  };
 }
 
 export async function listWeeklyReports(

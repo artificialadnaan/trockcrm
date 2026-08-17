@@ -11,6 +11,7 @@
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { deals, files, offices, users } from "@trock-crm/shared/schema";
+import { WON_DEAL_STAGE_SLUGS } from "@trock-crm/shared/types";
 import { migrationSql } from "../../helpers/migration-sql.js";
 import { tenantSchemaSql } from "../../helpers/tenant-schema-from-drizzle.js";
 import { AppError } from "../../../src/middleware/error-handler.js";
@@ -19,6 +20,7 @@ import {
   deactivateWeeklyReportProject,
   getWeeklyReportProject,
   getWeeklyReportSettings,
+  listWeeklyReportAssignableUsers,
   listWeeklyReportProjects,
   updateWeeklyReportProject,
   updateWeeklyReportSettings,
@@ -47,6 +49,9 @@ const PM = U("22221");
 const SUPER = U("22222");
 const DIRECTOR = U("22223");
 const STRANGER = U("22224");
+const OPEN_DEAL = U("11113");
+const WON_STAGE = U("33331");
+const OPEN_STAGE = U("33332");
 
 const PM_ACTOR = { id: PM, role: "construction" };
 const SUPER_ACTOR = { id: SUPER, role: "construction" };
@@ -60,11 +65,21 @@ const PRIOR_WEEK = "2026-08-06";
 
 let pg: PGlite;
 
-/** PGlite exposes `query`; the services only need that much of a PoolClient. */
+/**
+ * PGlite exposes `query`; the services only need that much of a PoolClient.
+ *
+ * `rowCount` comes from PGlite's own `affectedRows`, NOT from `rows.length`. Deriving it from the rows
+ * reports 0 for every UPDATE without a RETURNING clause, which is the opposite of what node-postgres
+ * does — a harness that lies in that direction makes "the write was rejected" and "the write succeeded"
+ * indistinguishable.
+ */
 const db = {
   query: async (text: string, params?: unknown[]) => {
     const result = await pg.query(text, params as any[]);
-    return { rows: result.rows as any[], rowCount: result.rows.length } as any;
+    return {
+      rows: result.rows as any[],
+      rowCount: (result as { affectedRows?: number }).affectedRows ?? result.rows.length,
+    } as any;
   },
 };
 
@@ -97,6 +112,10 @@ beforeAll(async () => {
   // hand-rolled, so a column type here cannot drift from production.
   await pg.exec(tenantSchemaSql("public", [offices, users]));
   await pg.exec(tenantSchemaSql("office_dallas", [deals, files]));
+  // Weekly reports may only be set up on a WON deal, so the suite needs the stage graph the check reads.
+  await pg.exec(
+    `CREATE TABLE IF NOT EXISTS public.pipeline_stage_config (id uuid PRIMARY KEY, slug text);`,
+  );
 
   // The migration under test — DO-loop, public tables and TENANT_SCHEMA block, verbatim from disk.
   await pg.exec(migrationSql("0222_weekly_reports"));
@@ -108,9 +127,13 @@ beforeAll(async () => {
       ('${SUPER}', 'Steve Sanchez', 'super@example.com', 'construction', '${OFFICE}'),
       ('${DIRECTOR}', 'Takashi', 'director@example.com', 'director', '${OFFICE}'),
       ('${STRANGER}', 'Nobody', 'nobody@example.com', 'rep', '${OFFICE}');
+    INSERT INTO public.pipeline_stage_config (id, slug) VALUES
+      ('${WON_STAGE}', '${WON_DEAL_STAGE_SLUGS[0]}'),
+      ('${OPEN_STAGE}', 'estimating');
     INSERT INTO office_dallas.deals (id, name, deal_number, stage_id, project_number) VALUES
-      ('${DEAL}', '4123 Cedar Springs', 'DFW-10432', '${U("33331")}', 'DFW-10432'),
-      ('${OTHER_DEAL}', 'Some Other Job', 'DFW-10433', '${U("33331")}', 'DFW-10433');
+      ('${DEAL}', '4123 Cedar Springs', 'DFW-10432', '${WON_STAGE}', 'DFW-10432'),
+      ('${OTHER_DEAL}', 'Some Other Job', 'DFW-10433', '${WON_STAGE}', 'DFW-10433'),
+      ('${OPEN_DEAL}', 'Still Bidding', 'DFW-10434', '${OPEN_STAGE}', 'DFW-10434');
     SET search_path TO office_dallas, public;
   `);
 });
@@ -790,6 +813,7 @@ describe("dashboard", () => {
       weekOf: "2026-07-30",
       reason: "Site closed for the holiday",
       actorUserId: DIRECTOR,
+      asOf: WEEK_OF,
     });
     const dashboard = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
     expect(dashboard.rows.some((r) => r.weekOf === "2026-07-30")).toBe(false);
@@ -831,6 +855,220 @@ describe("dashboard", () => {
       lastSentWeekOf: PRIOR_WEEK,
       nextDueWeekOf: WEEK_OF,
     });
+  });
+});
+
+// Every case below closes a defect Codex raised on #1070.
+describe("review findings", () => {
+  it("refuses a setup on a deal that was never won", async () => {
+    // A weekly client progress report on an open or lost job is nonsense, and the cadence would start
+    // generating outstanding weeks leadership then chases somebody about.
+    await expectAppError(seedProject({ dealId: OPEN_DEAL }), 400, /Won project/i);
+  });
+
+  it("refuses a setup on an archived deal", async () => {
+    await pg.query(`UPDATE office_dallas.deals SET is_active = false WHERE id = $1::uuid`, [OTHER_DEAL]);
+    await expectAppError(seedProject({ dealId: OTHER_DEAL }), 404, /not found/i);
+    await pg.query(`UPDATE office_dallas.deals SET is_active = true WHERE id = $1::uuid`, [OTHER_DEAL]);
+  });
+
+  it("stops the super editing once the PM has approved", async () => {
+    // Otherwise the super can rewrite the narrative or swap the photos of an approved report and the PM
+    // sends content they never reviewed — the approval gate defeated rather than merely bent.
+    const project = await seedProject();
+    const id = await seedDraft(project.id);
+    await transitionWeeklyReport(db, id, "pending_review", SUPER_ACTOR);
+    await transitionWeeklyReport(db, id, "approved", PM_ACTOR);
+
+    await expectAppError(
+      updateWeeklyReportContent(db, id, { workCompleted: "snuck in" }, SUPER_ACTOR),
+      403,
+      /permission/i,
+    );
+    await expectAppError(replaceWeeklyReportPhotos(db, id, [], SUPER_ACTOR), 403, /permission/i);
+    // The PM may still fix it.
+    await expect(
+      updateWeeklyReportContent(db, id, { workCompleted: "PM correction" }, PM_ACTOR),
+    ).resolves.toMatchObject({ workCompleted: "PM correction" });
+  });
+
+  it("freezes the header on send, so later edits cannot rewrite a delivered report", async () => {
+    const project = await seedProject();
+    const id = await seedDraft(project.id);
+    await transitionWeeklyReport(db, id, "pending_review", SUPER_ACTOR);
+    await transitionWeeklyReport(db, id, "approved", PM_ACTOR);
+    await transitionWeeklyReport(db, id, "sent", PM_ACTOR);
+
+    const sent = await getWeeklyReportDetail(db, id);
+    expect(sent!.snapshot).toMatchObject({
+      clientName: "Mack Real Estate Group",
+      trockTeam: { pmName: "Adam Sherwood", superName: "Steve Sanchez" },
+    });
+
+    // Swap the PM and the client AFTER delivery. The client already read the old header.
+    await updateWeeklyReportProject(db, project.id, { trockPmUserId: DIRECTOR, clientName: "New Owner LLC" });
+    const reread = await getWeeklyReportDetail(db, id);
+    expect(reread!.snapshot).toMatchObject({
+      clientName: "Mack Real Estate Group",
+      trockTeam: { pmName: "Adam Sherwood" },
+    });
+  });
+
+  it("rejects a transition raced against a status that has since moved on", async () => {
+    const project = await seedProject();
+    const id = await seedDraft(project.id);
+    await transitionWeeklyReport(db, id, "pending_review", SUPER_ACTOR);
+    await transitionWeeklyReport(db, id, "approved", PM_ACTOR);
+
+    // Simulate the losing half of a concurrent pair: validation passed against `approved`, but the row
+    // moved before the write landed. Without the status predicate the update would happily pull an
+    // already-sent report back into review.
+    await pg.query(`UPDATE office_dallas.weekly_reports SET status = 'sent' WHERE id = $1::uuid`, [id]);
+    await expectAppError(transitionWeeklyReport(db, id, "sent", PM_ACTOR), 409, /cannot move/i);
+  });
+
+  it("rejects a malformed photo payload instead of clearing the selection", async () => {
+    const project = await seedProject();
+    const id = await seedDraft(project.id);
+    const photo = await seedPhoto({ takenAt: "2026-08-11" });
+    await replaceWeeklyReportPhotos(db, id, [{ fileId: photo }], SUPER_ACTOR);
+
+    await expectAppError(replaceWeeklyReportPhotos(db, id, "oops" as never, SUPER_ACTOR), 400, /array/i);
+    // The selection must survive the rejected call.
+    expect((await getWeeklyReportDetail(db, id))!.photos).toHaveLength(1);
+  });
+
+  it("will not pre-dismiss a week that is not yet due", async () => {
+    // A future date dismissed in advance enters the board already settled, having never been missed —
+    // which is precisely the accountability the ledger exists to create.
+    const project = await seedProject();
+    await expectAppError(
+      dismissWeeklyReportWeek(db, {
+        weeklyReportProjectId: project.id,
+        weekOf: "2026-08-20",
+        reason: "getting ahead",
+        actorUserId: DIRECTOR,
+        asOf: WEEK_OF,
+      }),
+      400,
+      /future week/i,
+    );
+  });
+
+  it("will not dismiss a date that is not one of the project's reporting days", async () => {
+    const project = await seedProject();
+    await expectAppError(
+      dismissWeeklyReportWeek(db, {
+        weeklyReportProjectId: project.id,
+        weekOf: "2026-08-05",
+        reason: "wrong day",
+        actorUserId: DIRECTOR,
+        asOf: WEEK_OF,
+      }),
+      400,
+      /reporting days/i,
+    );
+  });
+
+  it("will not dismiss a week that already has a report", async () => {
+    const project = await seedProject();
+    await seedDraft(project.id, PRIOR_WEEK, U("d1111"));
+    await expectAppError(
+      dismissWeeklyReportWeek(db, {
+        weeklyReportProjectId: project.id,
+        weekOf: PRIOR_WEEK,
+        reason: "tidying up",
+        actorUserId: DIRECTOR,
+        asOf: WEEK_OF,
+      }),
+      409,
+      /already has a report/i,
+    );
+  });
+
+  it("falls back to the default lookback rather than rendering an empty board", async () => {
+    // `?lookbackWeeks=abc` produced NaN, which survived Math.min/Math.max, turned both loops into
+    // no-ops and rendered a board that read as "nothing outstanding".
+    await seedProject();
+    const dashboard = await getWeeklyReportDashboard(db, { asOf: WEEK_OF, lookbackWeeks: Number("abc") });
+    expect(dashboard.rows.length).toBeGreaterThan(0);
+    expect(dashboard.lookbackWeeks).toBe(26);
+  });
+
+  it("truncates a fractional lookback instead of indexing at a fraction", async () => {
+    await seedProject();
+    const dashboard = await getWeeklyReportDashboard(db, { asOf: WEEK_OF, lookbackWeeks: 1.5 });
+    expect(dashboard.lookbackWeeks).toBe(1);
+    expect(dashboard.rows).toHaveLength(1);
+  });
+
+  it("sorts by soonest due before falling back to the alphabet", async () => {
+    // Before their deadlines every row has daysLate === 0, so a name-only tiebreak puts a Saturday
+    // report above one due tomorrow purely because of how it is spelled.
+    await seedProject({ propertyDisplayName: "Zulu Tower", cadenceWeekday: THURSDAY });
+    await createWeeklyReportProject(
+      db,
+      baseProjectInput({
+        dealId: OTHER_DEAL,
+        propertyDisplayName: "Alpha Plaza",
+        cadenceWeekday: 6, // Saturday — due later than Thursday
+      }),
+      DIRECTOR,
+    );
+
+    const dashboard = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    const current = dashboard.rows.filter((row) => row.isCurrentWeek);
+    expect(current.map((row) => row.projectName)).toEqual(["Zulu Tower", "Alpha Plaza"]);
+  });
+
+  it("reports no next-due date once reporting has stopped", async () => {
+    const project = await seedProject();
+    await updateWeeklyReportProject(db, project.id, { status: "completed" });
+    const [summary] = await listWeeklyReportProjectSummaries(db, WEEK_OF);
+    expect(summary!.nextDueWeekOf).toBeNull();
+  });
+
+  it("reports no next-due date past the cadence end date", async () => {
+    const project = await seedProject();
+    await updateWeeklyReportProject(db, project.id, { cadenceEndDate: "2026-08-06" });
+    const [summary] = await listWeeklyReportProjectSummaries(db, WEEK_OF);
+    expect(summary!.nextDueWeekOf).toBeNull();
+  });
+});
+
+describe("assignable users", () => {
+  it("returns public.users ids, which is what the assignment columns reference", async () => {
+    const users = await listWeeklyReportAssignableUsers(db, OFFICE);
+    const ids = users.map((user) => user.id);
+    // If these were field_responders ids (a different table entirely), no assignment would ever
+    // authorise anyone — canTransitionAs compares them against the acting user's id.
+    expect(ids).toContain(PM);
+    expect(ids).toContain(SUPER);
+  });
+
+  it("excludes the sales roster, which would bury the real candidates", async () => {
+    const users = await listWeeklyReportAssignableUsers(db, OFFICE);
+    expect(users.map((user) => user.id)).not.toContain(STRANGER); // role 'rep'
+  });
+
+  it("includes leadership, who do carry projects", async () => {
+    const users = await listWeeklyReportAssignableUsers(db, OFFICE);
+    expect(users.map((user) => user.id)).toContain(DIRECTOR);
+  });
+
+  it("omits deactivated and test-data accounts", async () => {
+    await pg.query(`UPDATE public.users SET is_active = false WHERE id = $1::uuid`, [SUPER]);
+    expect((await listWeeklyReportAssignableUsers(db, OFFICE)).map((u) => u.id)).not.toContain(SUPER);
+    await pg.query(`UPDATE public.users SET is_active = true WHERE id = $1::uuid`, [SUPER]);
+  });
+
+  it("does not leak another office's roster", async () => {
+    const otherOffice = U("00002");
+    await pg.query(`INSERT INTO public.offices (id, name, slug) VALUES ($1::uuid, 'Atlanta', 'atlanta')`, [
+      otherOffice,
+    ]);
+    expect(await listWeeklyReportAssignableUsers(db, otherOffice)).toEqual([]);
+    await pg.query(`DELETE FROM public.offices WHERE id = $1::uuid`, [otherOffice]);
   });
 });
 

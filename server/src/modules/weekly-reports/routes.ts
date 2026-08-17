@@ -7,6 +7,7 @@ import {
   deactivateWeeklyReportProject,
   getWeeklyReportProject,
   getWeeklyReportSettings,
+  listWeeklyReportAssignableUsers,
   listWeeklyReportProjects,
   updateWeeklyReportProject,
   updateWeeklyReportSettings,
@@ -30,6 +31,20 @@ import { isIsoDateString } from "@trock-crm/shared/types";
 
 const router = Router();
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * The whole router is CRM-STAFF ONLY — not merely "a CRM user".
+ *
+ * `requireCrmUser` on the tenant mount admits `construction`, which is how superintendents reach the
+ * CRM at all. Without this line every superintendent could read the office-wide leadership board, every
+ * project's client contact details and the digest recipients, and could edit or deactivate any setup
+ * and dismiss arbitrary weeks — i.e. delete the record of their own missed reports.
+ *
+ * The allow-list matches the client route guard on /projects/weekly-reports exactly, so the two cannot
+ * drift into a UI that hides a page the API still serves. A superintendent's surface is T-Rock Cam via
+ * /api/field, which is a separate mount with its own authorisation.
+ */
+router.use(requireRole("admin", "director", "rep"));
 
 function requireUuid(value: unknown, label: string): string {
   if (typeof value !== "string" || !UUID_PATTERN.test(value)) {
@@ -111,6 +126,22 @@ router.get("/projects", async (req, res, next) => {
   }
 });
 
+/**
+ * The PM / superintendent picker feed. Any CRM user may read it — a PM setting up their own project
+ * cannot be sent through the admin-only `/admin/field-users` route.
+ */
+router.get("/assignable-users", async (req, res, next) => {
+  try {
+    const officeId = req.user?.activeOfficeId;
+    if (!officeId) throw new AppError(400, "Office context not available");
+    const users = await listWeeklyReportAssignableUsers(req.tenantClient!, officeId);
+    await req.commitTransaction!();
+    res.json({ users });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.post("/projects", async (req, res, next) => {
   try {
     const actor = actorFrom(req);
@@ -178,6 +209,7 @@ router.post("/projects/:id/dismiss", async (req, res, next) => {
       weekOf,
       reason: reason.slice(0, 500),
       actorUserId: actor.id,
+      asOf: asOfFrom(req),
     });
     await req.commitTransaction!();
     res.status(204).end();
@@ -267,10 +299,13 @@ router.get("/reports/:id/photo-candidates", async (req, res, next) => {
 
 router.put("/reports/:id/photos", async (req, res, next) => {
   try {
+    // Passed through UNCOERCED. Substituting `[]` for a malformed payload made the service's own
+    // Array.isArray check unreachable, so `{"photos": "oops"}` would answer 200 and silently delete
+    // every photo on the report instead of 400. An intentional clear is an explicit empty array.
     const report = await replaceWeeklyReportPhotos(
       req.tenantClient!,
       requireUuid(req.params.id, "id"),
-      Array.isArray(req.body?.photos) ? req.body.photos : [],
+      req.body?.photos,
       actorFrom(req),
     );
     await req.commitTransaction!();
