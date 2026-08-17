@@ -1,6 +1,22 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
+
+// Lets one test force a throw from the (pure) formatter, which is the ONLY thing that runs after the
+// savepoint is released — the seam where a stale `savepointHeld` would issue `ROLLBACK TO` a savepoint
+// that no longer exists and poison the tenant transaction. importActual keeps every other test real.
+const ctl = vi.hoisted(() => ({ formatterThrows: false }));
+vi.mock("../../../src/modules/deals/bid-board-activity-note.js", async (importActual) => {
+  const actual = await importActual<typeof import("../../../src/modules/deals/bid-board-activity-note.js")>();
+  return {
+    ...actual,
+    formatBidBoardActivityNote: (input: Parameters<typeof actual.formatBidBoardActivityNote>[0]) => {
+      if (ctl.formatterThrows) throw new Error("formatter blew up after RELEASE SAVEPOINT");
+      return actual.formatBidBoardActivityNote(input);
+    },
+  };
+});
+
 import {
   enqueueRfpBidBoardCreate,
   enqueueRfpVoteInvitation,
@@ -23,14 +39,22 @@ import {
  */
 const DEAL = "00000000-0000-0000-0000-0000000000d1";
 const EMPTY_DEAL = "00000000-0000-0000-0000-0000000000d2";
+const LEAD_DEAL = "00000000-0000-0000-0000-0000000000d3";
 const REP = "00000000-0000-0000-0000-0000000000a1";
 const ESTIMATOR = "00000000-0000-0000-0000-0000000000a2";
 const EVENT = "00000000-0000-0000-0000-0000000000f1";
+const LEAD = "00000000-0000-0000-0000-0000000000e1";
 
 let pg: PGlite | null = null;
+beforeEach(() => {
+  // loadCrmActivityLog warns when it cannot take a savepoint, which is expected for the tests that run
+  // outside a transaction. Silenced so the suite output stays readable; asserted where it matters.
+  vi.spyOn(console, "warn").mockImplementation(() => {});
+});
 afterEach(async () => {
   await pg?.close();
   pg = null;
+  ctl.formatterThrows = false;
   vi.restoreAllMocks();
 });
 
@@ -70,7 +94,7 @@ async function setup() {
     -- Only the columns loadDealActivityNoteEntries reads. responsible_user_id is NOT NULL in the real
     -- tenant schema, and performed_by_user_id is the optional override — the actor COALESCEs the two.
     CREATE TABLE activities (
-      id uuid PRIMARY KEY, type text NOT NULL, deal_id uuid,
+      id uuid PRIMARY KEY, type text NOT NULL, deal_id uuid, lead_id uuid,
       responsible_user_id uuid NOT NULL, performed_by_user_id uuid,
       subject text, body text, outcome text, duration_minutes integer,
       occurred_at timestamptz NOT NULL DEFAULT now(), created_at timestamptz NOT NULL DEFAULT now()
@@ -89,15 +113,21 @@ async function setup() {
     [ESTIMATOR],
   );
 
-  for (const [id, number] of [
-    [DEAL, "TR-2001"],
-    [EMPTY_DEAL, "TR-2002"],
+  await db.query(`INSERT INTO leads (id, bid_due_date) VALUES ($1, NULL)`, [LEAD]);
+
+  for (const [id, number, sourceLead] of [
+    [DEAL, "TR-2001", null],
+    [EMPTY_DEAL, "TR-2002", null],
+    // A lead-converted deal. Nothing re-points activities.deal_id at conversion, so its prospecting
+    // history is still lead-scoped — exactly the case the note used to drop on the floor.
+    [LEAD_DEAL, "TR-2003", LEAD],
   ] as const) {
     await db.query(
       `INSERT INTO deals (id, name, deal_number, project_number, project_type, workflow_route,
-                          awarded_amount, description, rfp_approval_request_event_id, assigned_rep_id)
-       VALUES ($1, 'Jason Ranches', $2, $2, 'roofing', 'normal', '125000.00', 'Full roof replacement', $3, $4)`,
-      [id, number, EVENT, REP],
+                          awarded_amount, description, rfp_approval_request_event_id, assigned_rep_id,
+                          source_lead_id)
+       VALUES ($1, 'Jason Ranches', $2, $2, 'roofing', 'normal', '125000.00', 'Full roof replacement', $3, $4, $5)`,
+      [id, number, EVENT, REP, sourceLead],
     );
   }
 
@@ -114,16 +144,19 @@ async function setup() {
       subject?: string | null;
       outcome?: string | null;
       duration?: number | null;
+      dealId?: string | null;
+      leadId?: string | null;
     } = {},
   ) =>
     db.query(
-      `INSERT INTO activities (id, type, deal_id, responsible_user_id, performed_by_user_id,
+      `INSERT INTO activities (id, type, deal_id, lead_id, responsible_user_id, performed_by_user_id,
                                subject, body, outcome, duration_minutes, occurred_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
       [
         id,
         type,
-        DEAL,
+        extra.dealId === undefined ? DEAL : extra.dealId,
+        extra.leadId ?? null,
         extra.responsible ?? REP,
         extra.actor ?? null,
         extra.subject ?? null,
@@ -146,6 +179,41 @@ async function setup() {
     // No performed_by_user_id: the actor must fall back to responsible_user_id.
     responsible: REP,
   });
+
+  // PRIVACY fixture. In the CRM this row is visible only to its mailbox owner, and the body is real
+  // message text (email/service.ts stores up to 1000 chars of it). A Procore note has no viewer.
+  await activity(
+    "00000000-0000-0000-0000-00000000ac04",
+    "email",
+    "2026-08-15T16:00:00Z",
+    "CONFIDENTIAL-EMAIL-BODY: our walk-away number on this is 89k, do not share.",
+    { actor: REP, subject: "Re: pricing" },
+  );
+
+  // Pre-conversion prospecting on the SOURCE LEAD, with no deal_id at all.
+  await activity(
+    "00000000-0000-0000-0000-00000000ac05",
+    "call",
+    "2026-07-02T16:00:00Z",
+    "Cold call to the property manager; asked us to bid.",
+    { dealId: null, leadId: LEAD, actor: REP },
+  );
+  // …and an email on the lead, which must be excluded on that path too.
+  await activity(
+    "00000000-0000-0000-0000-00000000ac06",
+    "email",
+    "2026-07-03T16:00:00Z",
+    "CONFIDENTIAL-LEAD-EMAIL: internal thread",
+    { dealId: null, leadId: LEAD, actor: REP },
+  );
+  // A deal-scoped entry on the lead-backed deal, so the note proves it MERGES both sources.
+  await activity(
+    "00000000-0000-0000-0000-00000000ac07",
+    "site_visit",
+    "2026-07-20T16:00:00Z",
+    "Measured the north elevation.",
+    { dealId: LEAD_DEAL, actor: ESTIMATOR },
+  );
 
   return db;
 }
@@ -185,6 +253,51 @@ describe("RFP payload carries the CRM activity log (real SQL)", () => {
 
     // It must NOT leak into the description — Procore renders that as Project Description.
     expect(jobs[0].payload.body.deal.description).toBe("Full roof replacement");
+  });
+
+  it("NEVER exports email activities — they are mailbox-owner-only in the CRM", async () => {
+    // The strongest assertion in this file. `activities` of type email carry up to 1000 characters of
+    // real message body, and the CRM shows them only to the responsible user. A Procore Bid Board note
+    // has no viewer — every Bid Board user in the company can read it — so the per-viewer rule cannot
+    // be honoured and the type has to be dropped outright. If this test fails, private mail is being
+    // published to an external system.
+    pg = await setup();
+    const tdb: any = drizzle(pg as any);
+
+    await enqueueRfpBidBoardCreate({ tenantDb: tdb, officeId: null, deal: { id: DEAL } });
+
+    const jobs = (await pg.query(`SELECT payload FROM public.job_queue`)).rows as any[];
+    const serialized = JSON.stringify(jobs[0].payload);
+
+    expect(serialized).not.toContain("CONFIDENTIAL-EMAIL-BODY");
+    expect(serialized).not.toContain("Re: pricing");
+    expect(serialized).not.toContain("· Email ·");
+    // The email is the NEWEST activity on this deal, so a missing filter would have put it first.
+    expect(activityLogFor(jobs[0])).toContain("Owner confirmed scope");
+  });
+
+  it("includes the SOURCE LEAD's activities, like the CRM's own deal Activity tab", async () => {
+    // Nothing re-points activities.deal_id at conversion, so a lead-converted deal's pre-conversion
+    // prospecting stays lead-scoped — and that is exactly the history the estimator is asking for.
+    // getActivities ORs in lead_id for the same reason, as does loadRfpAttachmentsForDeal for files.
+    pg = await setup();
+    const tdb: any = drizzle(pg as any);
+
+    await enqueueRfpBidBoardCreate({ tenantDb: tdb, officeId: null, deal: { id: LEAD_DEAL } });
+
+    const jobs = (await pg.query(`SELECT payload FROM public.job_queue`)).rows as any[];
+    const note = activityLogFor(jobs[0])!;
+
+    expect(note).toContain("Cold call to the property manager");   // lead-scoped
+    expect(note).toContain("Measured the north elevation.");        // deal-scoped
+    // Merged into ONE newest-first sequence, not concatenated per source.
+    expect(note.indexOf("Measured the north elevation")).toBeLessThan(
+      note.indexOf("Cold call to the property manager"),
+    );
+    // The exclusion applies on the lead path too.
+    expect(JSON.stringify(jobs[0].payload)).not.toContain("CONFIDENTIAL-LEAD-EMAIL");
+    // And a deal with no source lead must not pick up this lead's rows.
+    expect(note).not.toContain("Owner confirmed scope");
   });
 
   it("enqueues crmActivityLog: null for a deal with no activity at all", async () => {
@@ -251,23 +364,87 @@ describe("RFP payload carries the CRM activity log (real SQL)", () => {
     expect(logged).toHaveBeenCalled();
   });
 
-  it("never reaches the voter invitation EMAIL", async () => {
+  it("does not poison the transaction when the formatter throws AFTER the savepoint is released", async () => {
+    // Once RELEASE has run the savepoint no longer exists, so a later throw must NOT route into
+    // `ROLLBACK TO` it: that raises "savepoint does not exist", aborts the tenant transaction, and
+    // kills the job_queue INSERT — the precise failure the savepoint exists to prevent, inverted.
+    pg = await setup();
+    const tdb: any = drizzle(pg as any);
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    ctl.formatterThrows = true;
+
+    await pg.exec("BEGIN");
+    await enqueueRfpBidBoardCreate({ tenantDb: tdb, officeId: null, deal: { id: DEAL } });
+    await pg.exec("COMMIT");
+
+    const jobs = (await pg.query(`SELECT payload FROM public.job_queue`)).rows as any[];
+    expect(jobs).toHaveLength(1); // the RFP survived a post-release throw
+    expect(activityLogFor(jobs[0])).toBeNull();
+    expect(logged).toHaveBeenCalled();
+    // The rest of the payload is intact, i.e. the transaction was never aborted.
+    expect(jobs[0].payload.body.deal.amount).toBe(125000);
+  });
+
+  it("never reaches the voter invitation EMAIL, which still gets its dealSummary", async () => {
     // enqueueRfpVoteInvitation copies a FIXED field list into dealSummary. That is deliberate and must
     // stay true: an 8 KB activity dump in the invitation would bury the decision the voter is there to
     // make. This test is the guard against someone "helpfully" spreading the payload deal in.
+    //
+    // It runs inside BEGIN/COMMIT on purpose. Without one, enqueueRfpVoteInvitation's own SAVEPOINT
+    // throws, dealSummary comes out null, and a "does not contain crmActivityLog" assertion passes
+    // because there is no summary AT ALL — it would still pass if someone spread the whole payload
+    // deal in. Asserting a POPULATED summary is what makes the exclusion meaningful.
     pg = await setup();
     const tdb: any = drizzle(pg as any);
 
+    await pg.exec("BEGIN");
     await enqueueRfpVoteInvitation({
       tenantDb: tdb,
       officeId: null,
       deal: { id: DEAL, dealNumber: "TR-2001", name: "Jason Ranches", rfpApprovalRequestEventId: EVENT },
       recipients: ["voter@trockgc.com"],
     });
+    await pg.exec("COMMIT");
 
     const jobs = (await pg.query(`SELECT job_type, payload FROM public.job_queue`)).rows as any[];
     expect(jobs[0].job_type).toBe("rfp_vote_invitation");
+
+    const summary = jobs[0].payload.dealSummary;
+    expect(summary).not.toBeNull();
+    expect(summary.projectNumber).toBe("TR-2001");
+    expect(summary.amount).toBe(125000);
+    expect(summary.description).toBe("Full roof replacement");
+
+    // Now the exclusion means something: a fully-populated summary that still carries no activity log.
+    expect(summary).not.toHaveProperty("crmActivityLog");
     expect(JSON.stringify(jobs[0].payload)).not.toContain("crmActivityLog");
     expect(JSON.stringify(jobs[0].payload)).not.toContain("CRM Activity Log");
+    // And nothing from the deal's activity history leaked in by any other route.
+    expect(JSON.stringify(jobs[0].payload)).not.toContain("Owner confirmed scope");
+  });
+
+  it("does not even QUERY activities for the vote invitation", async () => {
+    // The invitation shares loadRfpPayloadDeal purely for dealSummary's fixed field list. Rendering a
+    // note for it would mean fetching up to 200 rows with unbounded bodies and building an 8 KB string
+    // inside the tenant transaction — on a pooled client, under a statement_timeout — to then discard
+    // it. Dropping the `activities` table proves the query is skipped rather than merely ignored.
+    pg = await setup();
+    const tdb: any = drizzle(pg as any);
+    await pg.exec("DROP TABLE activities");
+
+    await pg.exec("BEGIN");
+    await enqueueRfpVoteInvitation({
+      tenantDb: tdb,
+      officeId: null,
+      deal: { id: DEAL, dealNumber: "TR-2001", name: "Jason Ranches", rfpApprovalRequestEventId: EVENT },
+      recipients: ["voter@trockgc.com"],
+    });
+    await pg.exec("COMMIT");
+
+    const jobs = (await pg.query(`SELECT payload FROM public.job_queue`)).rows as any[];
+    // A summary still built: the loader never touched activities, so nothing failed and no savepoint
+    // rollback discarded the summary work.
+    expect(jobs[0].payload.dealSummary).not.toBeNull();
+    expect(jobs[0].payload.dealSummary.projectNumber).toBe("TR-2001");
   });
 });

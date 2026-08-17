@@ -131,13 +131,26 @@ async function loadCrmActivityLog(
   try {
     await tenantDb.execute(sql`SAVEPOINT rfp_activity_log`);
     savepointHeld = true;
-  } catch {
+  } catch (err) {
+    // Expected when the caller is not inside a transaction block; anything else is a real problem and
+    // must not be invisible, so it is logged either way rather than swallowed.
     savepointHeld = false;
+    console.warn(
+      `[RFP] No savepoint for the CRM activity note on deal ${dealId} (not in a transaction block?):`,
+      err
+    );
   }
 
   try {
     const { entries, olderCount, olderCountIsFloor } = await loadDealActivityNoteEntries(tenantDb, dealId);
-    if (savepointHeld) await tenantDb.execute(sql`RELEASE SAVEPOINT rfp_activity_log`);
+    if (savepointHeld) {
+      await tenantDb.execute(sql`RELEASE SAVEPOINT rfp_activity_log`);
+      // Cleared IMMEDIATELY: once released, the savepoint no longer exists, so a later throw must not
+      // send us into `ROLLBACK TO` it. That would raise "savepoint does not exist", poison the tenant
+      // transaction, and take the job_queue INSERT down with it — the exact failure this guard exists
+      // to prevent, inverted.
+      savepointHeld = false;
+    }
     return formatBidBoardActivityNote({ projectLabel, generatedAt, entries, olderCount, olderCountIsFloor });
   } catch (err) {
     // Roll back only the activity work; the outer tenant txn stays usable so the RFP still enqueues.
@@ -155,7 +168,16 @@ async function loadCrmActivityLog(
  * and a bare `{ id }` produce an identical payload. (Previously the deal's own columns — projectType, amounts,
  * address, description, estimator, … — were taken from the passed object, so a sparse row yielded an empty payload.)
  */
-async function loadRfpPayloadDeal(tenantDb: TenantDb, deal: { id: string }) {
+async function loadRfpPayloadDeal(
+  tenantDb: TenantDb,
+  deal: { id: string },
+  // The activity note is only ever consumed by the two BID BOARD CREATE paths. enqueueRfpVoteInvitation
+  // shares this loader purely for the email's dealSummary and copies a fixed field list, so rendering
+  // the note for it means fetching up to 200 activity rows with unbounded bodies and building an 8 KB
+  // string inside the tenant transaction — on a pooled client, under a 30s statement_timeout, in a repo
+  // with a known pool-exhaustion failure mode — only to throw it away. It opts out.
+  options: { includeActivityLog?: boolean } = {}
+) {
   const result = await tenantDb.execute(sql`
     SELECT d.*,
            c.name AS "companyName",
@@ -205,12 +227,15 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, deal: { id: string }) {
       projectNumber: (row.project_number as string | null) ?? null,
       dealNumber: (row.deal_number as string | null) ?? null,
     }) ?? ((row.name as string | null) ?? "").trim();
-  const crmActivityLog = await loadCrmActivityLog(
-    tenantDb,
-    row.id as string,
-    projectLabel.length > 0 ? projectLabel : "Untitled Deal",
-    new Date()
-  );
+  const crmActivityLog =
+    options.includeActivityLog === false
+      ? null
+      : await loadCrmActivityLog(
+          tenantDb,
+          row.id as string,
+          projectLabel.length > 0 ? projectLabel : "Untitled Deal",
+          new Date()
+        );
 
   return {
     id: row.id as string,
@@ -429,7 +454,14 @@ export async function enqueueRfpVoteInvitation(input: {
     // "current transaction is aborted"), blocking the round from opening. This keeps the "never block the round"
     // promise true.
     await input.tenantDb.execute(sql`SAVEPOINT rfp_vote_summary`);
-    const rfpPayloadDeal = await loadRfpPayloadDeal(input.tenantDb, { id: input.deal.id });
+    // No activity note: dealSummary below copies a FIXED field list, so rendering one here would be
+    // paid for inside the tenant transaction and then discarded. (It must also never reach a voter's
+    // inbox — an 8 KB activity dump would bury the decision they are being asked to make.)
+    const rfpPayloadDeal = await loadRfpPayloadDeal(
+      input.tenantDb,
+      { id: input.deal.id },
+      { includeActivityLog: false }
+    );
     const body = buildNormalizedRfpRequestBody({ deal: rfpPayloadDeal, sourceEventId: "" });
     const addr = body.deal.address;
     dealSummary = {
