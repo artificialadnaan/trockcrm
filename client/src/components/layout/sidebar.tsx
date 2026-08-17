@@ -33,6 +33,7 @@ import {
   Ticket,
   Hourglass,
   type LucideIcon,
+  CalendarClock,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
@@ -260,7 +261,7 @@ export function Sidebar() {
 
       <nav className="flex-1 px-2 space-y-1">
         {visibleNavItems.map((item) => {
-          // Projects gets an on-hover flyout submenu (All Projects · QC Reports).
+          // Projects gets an on-hover flyout submenu (All Projects · QC Reports · Weekly Reports · Field Team).
           if (!item.external && item.to === "/projects") {
             const subItemClass = ({ isActive }: { isActive: boolean }) =>
               `flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13px] font-semibold transition-colors ${
@@ -282,6 +283,9 @@ export function Sidebar() {
                     </NavLink>
                     <NavLink to="/projects/qc-reports" className={subItemClass}>
                       <ClipboardCheck className="h-4 w-4" /> QC Reports
+                    </NavLink>
+                    <NavLink to="/projects/weekly-reports" className={subItemClass}>
+                      <CalendarClock className="h-4 w-4" /> Weekly Reports
                     </NavLink>
                     <NavLink to="/projects/field-team" className={subItemClass}>
                       <Users className="h-4 w-4" /> Field Team
