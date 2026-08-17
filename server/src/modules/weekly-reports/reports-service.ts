@@ -8,7 +8,12 @@ import {
   type WeeklyReportStatus,
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
-import { getWeeklyReportProjectRow, type QueryExecutor } from "./projects-service.js";
+import {
+  getWeeklyReportProject,
+  getWeeklyReportProjectRow,
+  type QueryExecutor,
+  type WeeklyReportProject,
+} from "./projects-service.js";
 
 /** Who is acting. `role` only ever GRANTS extra power (admin/director); it never removes assignment rights. */
 export interface WeeklyReportActor {
@@ -211,6 +216,31 @@ export function canEditWeeklyReport(
 }
 
 /**
+ * May READ the report.
+ *
+ * Separate from `canEditWeeklyReport` because a SENT report is readable by everyone who could ever act on
+ * it and editable by nobody — collapsing the two would either hide a delivered report from the crew that
+ * wrote it or reopen it for editing. The author is included alongside the two assignments so a report
+ * survives a reassignment: whoever wrote it can still open what they wrote.
+ *
+ * This exists for the field surface. The CRM router is gated to admin/director/rep as a whole, but
+ * /api/field admits every superintendent in the company, so without a per-report check any of them could
+ * read any project's report by id — including the client contact block frozen into its snapshot.
+ */
+export function canViewWeeklyReport(
+  projectRow: Record<string, any>,
+  reportRow: Record<string, any>,
+  actor: WeeklyReportActor,
+): boolean {
+  return (
+    isAssignedSuper(projectRow, actor) ||
+    isAssignedPm(projectRow, actor) ||
+    isElevated(actor) ||
+    reportRow.authored_by === actor.id
+  );
+}
+
+/**
  * May move the report to `to`.
  *
  * The PM gate lives here: `approved` and `sent` are reachable only by the assigned PM or an
@@ -243,6 +273,60 @@ export function canTransitionAs(
     default:
       return false;
   }
+}
+
+/**
+ * What this actor may do with this report, resolved SERVER-SIDE and shipped with the payload.
+ *
+ * Both clients render the same wizard, so if each one re-derived "can I approve this?" from a status and
+ * a pair of user ids, the two would eventually disagree with each other and with the service that
+ * actually enforces it — and the visible failure is a button that 403s. One answer, computed by the same
+ * predicates the mutations use.
+ */
+export interface WeeklyReportPermissions {
+  canEdit: boolean;
+  canSubmit: boolean;
+  canApprove: boolean;
+  canReturnToDraft: boolean;
+}
+
+export interface WeeklyReportForActor {
+  report: WeeklyReportDetail;
+  project: WeeklyReportProject;
+  permissions: WeeklyReportPermissions;
+}
+
+/**
+ * Load a report for someone, refusing it outright if they have no business seeing it.
+ *
+ * 404 rather than 403 on a report the actor cannot view: a 403 confirms the id names a real report on a
+ * project they are not on, which is exactly the probe a per-report check exists to defeat.
+ */
+export async function getWeeklyReportForActor(
+  client: QueryExecutor,
+  id: string,
+  actor: WeeklyReportActor,
+): Promise<WeeklyReportForActor> {
+  const { reportRow, projectRow } = await loadReportWithProject(client, id);
+  if (!canViewWeeklyReport(projectRow, reportRow, actor)) {
+    throw new AppError(404, "Weekly report not found");
+  }
+
+  const report = await getWeeklyReportDetail(client, id);
+  if (!report) throw new AppError(404, "Weekly report not found");
+  const project = await getWeeklyReportProject(client, reportRow.weekly_report_project_id);
+  if (!project) throw new AppError(404, "Weekly report project not found");
+
+  return {
+    report,
+    project,
+    permissions: {
+      canEdit: canEditWeeklyReport(projectRow, reportRow, actor),
+      canSubmit: canTransitionAs(projectRow, reportRow, "pending_review", actor),
+      canApprove: canTransitionAs(projectRow, reportRow, "approved", actor),
+      canReturnToDraft: canTransitionAs(projectRow, reportRow, "draft", actor),
+    },
+  };
 }
 
 export interface CreateWeeklyReportInput {
@@ -563,6 +647,15 @@ export async function replaceWeeklyReportPhotos(
 
 const MAX_REPORT_PHOTOS = 60;
 const MAX_CAPTION_CHARS = 500;
+/**
+ * Cap on the picker's candidate set, newest first.
+ *
+ * A busy jobsite produces hundreds of photos in a fortnight, and the field route presigns two URLs for
+ * every candidate it returns — so an unbounded set is a large JSON body on precisely the LTE connection
+ * the rest of this feature is shaped around. Five times the per-report photo cap is more than anyone
+ * scrolls, and the newest-first ordering means what is dropped is the far end of the window.
+ */
+const MAX_PHOTO_CANDIDATES = 300;
 
 function normalizeCaption(value: unknown): string | null {
   if (value == null) return null;
@@ -620,7 +713,8 @@ export async function listWeeklyReportPhotoCandidates(
         AND f.is_active = true
         AND f.deleted_at IS NULL
         AND (COALESCE(f.taken_at, f.created_at))::date BETWEEN $3::date AND $4::date
-      ORDER BY COALESCE(f.taken_at, f.created_at) DESC`,
+      ORDER BY COALESCE(f.taken_at, f.created_at) DESC
+      LIMIT ${MAX_PHOTO_CANDIDATES}`,
     [reportId, reportRow.deal_id, window.from, window.to, weekOf],
   );
 

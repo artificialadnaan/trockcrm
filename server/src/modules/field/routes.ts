@@ -108,6 +108,7 @@ import {
 } from "../walkthrough-capture/glasses-walkthrough-service.js";
 import { createGlassesWalkthroughArtifactStore } from "../walkthrough-capture/glasses-walkthrough-store.js";
 import { registerCorrectiveActionRoutes } from "./corrective-action-routes.js";
+import { weeklyReportFieldRoutes } from "../weekly-reports/field-routes.js";
 
 // Default capture-target picker page size (mirrors searchPhotoUploadTargets' internal default), used as
 // the GLOBAL cap when the cross-office picker merges per-office results.
@@ -119,6 +120,13 @@ export const fieldRoutes = Router();
 // on the field router; the token path intentionally bypasses requireFieldContractor (email-only responders
 // have no session) and authorizes via the scorecard's office + the ?token instead.
 registerCorrectiveActionRoutes(fieldRoutes);
+
+// Weekly Reports — the superintendent's authoring surface and the PM's review queue. Mounted HERE rather
+// than as its own top-level app.use so it inherits /api/field's field-session policy automatically; the
+// route-access-policy test asserts /api/field is the only field-accessible mount, and a sibling mount
+// would be a second one nobody had to declare. Its own router applies requireFieldContractor +
+// tenantMiddleware, so it needs no middleware from this file.
+fieldRoutes.use("/weekly-reports", weeklyReportFieldRoutes);
 
 function parseOptionalPositiveInt(value: unknown): number | undefined {
   if (typeof value !== "string") return undefined;
