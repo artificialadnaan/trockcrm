@@ -223,6 +223,93 @@ describe("cap performance and priority", () => {
   });
 });
 
+describe("crmActivityLog is the FIRST thing surrendered", () => {
+  // The activity log is a second unbounded input alongside the description, and it is the most
+  // expendable field in the body: purely informational, with the full history one click away in the
+  // CRM. Its build-time caps (MAX_NOTE_CHARS = 8000) mean the limiter is a backstop here rather than
+  // the normal path — these fixtures deliberately exceed those caps to exercise it.
+
+  it("drops the log WHOLE and leaves the description untouched when that is enough", () => {
+    const description = "D".repeat(20_000);
+    const body = buildNormalizedRfpRequestBody({
+      deal: { ...baseDeal, description, crmActivityLog: "A".repeat(80_000) },
+      sourceEventId: "crm:deal-stage:opportunity:evt-1",
+      attachments: [],
+    });
+
+    expect(bodyBytes(body)).toBeLessThanOrEqual(RFP_BODY_BYTE_BUDGET);
+    expect(body.deal.crmActivityLog).toBeNull();
+    // The ordering assertion: byte-for-byte intact, no "truncated" marker. If the log were left to
+    // SACRIFICIAL_DEAL_FIELDS, the description shrink would run first and mangle the deal's actual
+    // scope in order to preserve an activity log — backwards.
+    expect(body.deal.description).toBe(description);
+    expect(body.deal.description).not.toContain("truncated");
+  });
+
+  it("still shrinks the description when the description ALONE is what blows the budget", () => {
+    // Control for the test above: proves the description shrink is live, so "description intact"
+    // there really is the log's removal doing the work.
+    const body = buildNormalizedRfpRequestBody({
+      deal: { ...baseDeal, description: "D".repeat(200_000), crmActivityLog: null },
+      sourceEventId: "crm:deal-stage:opportunity:evt-1",
+      attachments: [],
+    });
+
+    expect(bodyBytes(body)).toBeLessThanOrEqual(RFP_BODY_BYTE_BUDGET);
+    expect(body.deal.description).toContain("truncated");
+  });
+
+  it("bounds the body when the log alone is pathological", () => {
+    const body = buildNormalizedRfpRequestBody({
+      deal: { ...baseDeal, crmActivityLog: "A".repeat(200_000) },
+      sourceEventId: "crm:deal-stage:opportunity:evt-1",
+      attachments: [],
+    });
+
+    expect(bodyBytes(body)).toBeLessThanOrEqual(RFP_BODY_BYTE_BUDGET);
+    expect(body.deal.crmActivityLog).toBeNull();
+  });
+
+  it("keeps the log when the body already fits", () => {
+    const note = "CRM Activity Log — 25-1234 (as of Aug 17, 2026)\n\nAug 14, 2026 · Call · Jane Rep\n  Scope confirmed.";
+    const body = buildNormalizedRfpRequestBody({
+      deal: { ...baseDeal, crmActivityLog: note },
+      sourceEventId: "crm:deal-stage:opportunity:evt-1",
+      attachments: [makeAttachment(0)],
+    });
+
+    expect(body.deal.crmActivityLog).toBe(note);
+  });
+
+  it("gives up the log before evicting a single attachment", () => {
+    // Attachments are the reviewer's actual documents; a display extra must never be what pushes one
+    // of them off the list.
+    const attachments = Array.from({ length: 100 }, (_, i) => makeAttachment(i));
+
+    // Size the log off the MEASURED headroom rather than guessing: exactly big enough that the body
+    // is over budget with it and under budget without it.
+    const withoutLog = buildNormalizedRfpRequestBody({
+      deal: baseDeal,
+      sourceEventId: "crm:deal-stage:opportunity:evt-1",
+      attachments,
+    });
+    expect(withoutLog.attachments).toHaveLength(100);
+    const headroom = RFP_BODY_BYTE_BUDGET - bodyBytes(withoutLog);
+    expect(headroom).toBeGreaterThan(0);
+
+    const body = buildNormalizedRfpRequestBody({
+      deal: { ...baseDeal, crmActivityLog: "A".repeat(headroom + 1_000) },
+      sourceEventId: "crm:deal-stage:opportunity:evt-1",
+      attachments,
+    });
+
+    expect(bodyBytes(body)).toBeLessThanOrEqual(RFP_BODY_BYTE_BUDGET);
+    expect(body.deal.crmActivityLog).toBeNull();
+    expect(body.attachments).toHaveLength(100);
+    expect(body.attachmentsOmitted).toBe(0);
+  });
+});
+
 describe("capRfpRequestBody (retry path)", () => {
   it("re-caps a body whose attachments were swapped in after the original pass", () => {
     // The retry route splices freshly-minted attachment URLs into the DEAD job's already-capped
@@ -256,6 +343,46 @@ describe("capRfpRequestBody (retry path)", () => {
 
     expect(recapped.attachmentsOmitted).toBe(0);
     expect(recapped.attachments).toHaveLength(1);
+  });
+
+  it("carries crmActivityLog through the shallow clone, and still drops it first", () => {
+    const original = buildNormalizedRfpRequestBody({
+      deal: { ...baseDeal, crmActivityLog: "kept" },
+      sourceEventId: "crm:deal-stage:opportunity:evt-1",
+      attachments: [makeAttachment(0)],
+    });
+    expect(original.deal.crmActivityLog).toBe("kept");
+
+    // Under budget: the field survives the re-cap untouched.
+    expect(capRfpRequestBody(original).deal.crmActivityLog).toBe("kept");
+
+    // Over budget: it is the first thing surrendered, exactly as on the build path.
+    const recapped = capRfpRequestBody({
+      ...original,
+      deal: { ...original.deal, crmActivityLog: "A".repeat(200_000) },
+      attachments: [makeAttachment(0)],
+    });
+    expect(recapped.deal.crmActivityLog).toBeNull();
+    expect(bodyBytes(recapped)).toBeLessThanOrEqual(RFP_BODY_BYTE_BUDGET);
+  });
+
+  it("round-trips a stored body that predates the field without inventing one", () => {
+    // The retry route feeds us a body read back out of job_queue. A dead job enqueued before this
+    // field existed simply has no key — it must stay absent, never become the string "undefined".
+    const stored = buildNormalizedRfpRequestBody({
+      deal: baseDeal,
+      sourceEventId: "crm:deal-stage:opportunity:evt-1",
+      attachments: [makeAttachment(0)],
+    });
+    const legacyDeal = { ...stored.deal } as Record<string, unknown>;
+    delete legacyDeal.crmActivityLog;
+    const legacy = { ...stored, deal: legacyDeal } as unknown as typeof stored;
+
+    const recapped = capRfpRequestBody(legacy);
+
+    expect("crmActivityLog" in recapped.deal).toBe(false);
+    expect(JSON.stringify(recapped)).not.toContain("crmActivityLog");
+    expect(bodyBytes(recapped)).toBeLessThanOrEqual(RFP_BODY_BYTE_BUDGET);
   });
 
   it("does not mutate the body it was given", () => {

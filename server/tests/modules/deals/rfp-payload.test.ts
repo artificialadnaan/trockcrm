@@ -132,6 +132,41 @@ describe("RFP normalized payload builder", () => {
     expect(payload.deal.ownerEmail).toBeNull();
   });
 
+  describe("crmActivityLog (the Bid Board project Note)", () => {
+    it("carries the pre-rendered activity block through to SyncHub", () => {
+      const note =
+        "CRM Activity Log — TR-26-0412 (as of Aug 17, 2026)\n\nAug 14, 2026 · Call · Jane Rep\n  Owner confirmed scope.";
+      const payload = buildNormalizedRfpRequestBody({
+        sourceEventId: "crm:event-activity",
+        deal: { id: "deal-activity", name: "Has History", dealNumber: "dfw-3-12345-aa", crmActivityLog: note },
+      });
+
+      expect(payload.deal.crmActivityLog).toBe(note);
+      // It must NOT leak into the description — Procore renders that as Project Description, which stays
+      // the deal's scope only.
+      expect(payload.deal.description).toBeNull();
+    });
+
+    it("emits null (not undefined) when the deal has no activity", () => {
+      const payload = buildNormalizedRfpRequestBody({
+        sourceEventId: "crm:event-noactivity",
+        deal: { id: "deal-noactivity", name: "No History", dealNumber: "dfw-3-12346-aa" },
+      });
+
+      expect(payload.deal.crmActivityLog).toBeNull();
+      expect(JSON.parse(JSON.stringify(payload)).deal).toHaveProperty("crmActivityLog", null);
+    });
+
+    it("treats a whitespace-only render as absent", () => {
+      const payload = buildNormalizedRfpRequestBody({
+        sourceEventId: "crm:event-blankactivity",
+        deal: { id: "deal-blank", name: "Blank", dealNumber: "dfw-3-12347-aa", crmActivityLog: "   \n  " },
+      });
+
+      expect(payload.deal.crmActivityLog).toBeNull();
+    });
+  });
+
   it("falls back from CRM-native fields to Bid Board mirror fields", () => {
     const payload = buildNormalizedRfpRequestBody({
       sourceEventId: "crm:event-2",
