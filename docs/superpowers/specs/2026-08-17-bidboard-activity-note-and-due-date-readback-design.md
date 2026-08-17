@@ -374,6 +374,26 @@ human gate between deploy and the first mass write, and that write moves reporte
 thing that makes change 2 expensive"). Sequence: ship inert → run the census → flip the flag in
 Railway → watch the next run's metrics.
 
+**The flag is a STOP, not an UNDO — verified on a live local stack, not reasoned about.** Turning it
+back off after a sync has written stops further change, but the already-written `deals.bid_due_date`
+persists and keeps driving every raw-column surface. Measured on the fixture deal after one flag-on
+ingest, with the flag then turned off:
+
+| surface | `bidDueDate` | effectively on hold | value |
+| --- | --- | --- | --- |
+| `GET /deals/:id/detail` (goes through the resolver) | `2026-09-16` (the lead's) | false | $250,000 |
+| `GET /deals/:id` (reads the raw column, as do board / lists / dashboards / at-risk / worker rollups) | `2027-03-05` | true | **$0** |
+
+That split is inherent to write-through plus a flag that gates reads, not a defect — but it means a
+rollback is a DATA operation, not an env-var one. To genuinely revert, restore `deals.bid_due_date`
+from the `deal_history` rows this feature writes (`field_name = 'bid_due_date'`,
+`source = 'bid_board_sync'`, which carry the exact `old_value`). Adnaan runs that, per
+[[prod-write-division-of-labor]].
+
+The corollary: while the flag is ON the two surfaces AGREE (both read the deal column), so the drift
+exists only in the rolled-back state. Do not flip off and walk away assuming the CRM is back to where
+it started.
+
 ### Census (before the flag is flipped)
 
 A read-only script (`scripts/`-style, run by Adnaan against prod — Claude does dry-run/census only)
