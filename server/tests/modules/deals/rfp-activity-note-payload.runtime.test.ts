@@ -94,7 +94,7 @@ async function setup() {
     -- Only the columns loadDealActivityNoteEntries reads. responsible_user_id is NOT NULL in the real
     -- tenant schema, and performed_by_user_id is the optional override — the actor COALESCEs the two.
     CREATE TABLE activities (
-      id uuid PRIMARY KEY, type text NOT NULL, deal_id uuid, lead_id uuid,
+      id uuid PRIMARY KEY, type text NOT NULL, deal_id uuid, lead_id uuid, email_id uuid,
       responsible_user_id uuid NOT NULL, performed_by_user_id uuid,
       subject text, body text, outcome text, duration_minutes integer,
       occurred_at timestamptz NOT NULL DEFAULT now(), created_at timestamptz NOT NULL DEFAULT now()
@@ -146,17 +146,19 @@ async function setup() {
       duration?: number | null;
       dealId?: string | null;
       leadId?: string | null;
+      emailId?: string | null;
     } = {},
   ) =>
     db.query(
-      `INSERT INTO activities (id, type, deal_id, lead_id, responsible_user_id, performed_by_user_id,
+      `INSERT INTO activities (id, type, deal_id, lead_id, email_id, responsible_user_id, performed_by_user_id,
                                subject, body, outcome, duration_minutes, occurred_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
       [
         id,
         type,
         extra.dealId === undefined ? DEAL : extra.dealId,
         extra.leadId ?? null,
+        extra.emailId ?? null,
         extra.responsible ?? REP,
         extra.actor ?? null,
         extra.subject ?? null,
@@ -190,6 +192,16 @@ async function setup() {
     { actor: REP, subject: "Re: pricing" },
   );
 
+  // The type check alone is one careless caller away from leaking: the generic createActivity takes an
+  // arbitrary emailId with ANY type, so a 'note' row can carry a message body. Belt-and-braces fixture.
+  await activity(
+    "00000000-0000-0000-0000-00000000ac08",
+    "note",
+    "2026-08-16T16:00:00Z",
+    "CONFIDENTIAL-MISTYPED-EMAIL: forwarded thread pasted into a note",
+    { actor: REP, emailId: "00000000-0000-0000-0000-0000000000ee" },
+  );
+
   // Pre-conversion prospecting on the SOURCE LEAD, with no deal_id at all.
   await activity(
     "00000000-0000-0000-0000-00000000ac05",
@@ -213,6 +225,16 @@ async function setup() {
     "2026-07-20T16:00:00Z",
     "Measured the north elevation.",
     { dealId: LEAD_DEAL, actor: ESTIMATOR },
+  );
+  // A lead-scoped entry NEWER than that deal-scoped one. Without this the two visible rows were deal
+  // Jul 20 then lead Jul 2, an order a deal-first CONCATENATION reproduces exactly — so the "merged"
+  // assertion proved nothing. This forces a genuine interleave: lead, deal, lead.
+  await activity(
+    "00000000-0000-0000-0000-00000000ac09",
+    "note",
+    "2026-07-25T16:00:00Z",
+    "Lead follow-up after the walkthrough.",
+    { dealId: null, leadId: LEAD, actor: REP },
   );
 
   return db;
@@ -272,8 +294,27 @@ describe("RFP payload carries the CRM activity log (real SQL)", () => {
     expect(serialized).not.toContain("CONFIDENTIAL-EMAIL-BODY");
     expect(serialized).not.toContain("Re: pricing");
     expect(serialized).not.toContain("· Email ·");
-    // The email is the NEWEST activity on this deal, so a missing filter would have put it first.
+    // Belt and braces: a row that is NOT typed 'email' but carries an email_id is dropped too. The
+    // generic createActivity accepts that combination, so the type check alone is one careless caller
+    // away from publishing a message body.
+    expect(serialized).not.toContain("CONFIDENTIAL-MISTYPED-EMAIL");
+    // Both are the NEWEST activities on this deal, so a missing filter would have put them first.
     expect(activityLogFor(jobs[0])).toContain("Owner confirmed scope");
+  });
+
+  it("pulls in NO lead activity for a deal with a null source_lead_id", async () => {
+    // The subquery yields NULL for a non-converted deal, so `a.lead_id = NULL` is null, i.e. false.
+    // Nothing pinned that before, and a coalesce-to-something mistake here would cross-link deals.
+    pg = await setup();
+    const tdb: any = drizzle(pg as any);
+
+    await enqueueRfpBidBoardCreate({ tenantDb: tdb, officeId: null, deal: { id: DEAL } });
+
+    const jobs = (await pg.query(`SELECT payload FROM public.job_queue`)).rows as any[];
+    const note = activityLogFor(jobs[0])!;
+    expect(note).not.toContain("Cold call to the property manager");
+    expect(note).not.toContain("Lead follow-up after the walkthrough");
+    expect(note).toContain("Owner confirmed scope"); // its own rows are still there
   });
 
   it("includes the SOURCE LEAD's activities, like the CRM's own deal Activity tab", async () => {
@@ -288,9 +329,15 @@ describe("RFP payload carries the CRM activity log (real SQL)", () => {
     const jobs = (await pg.query(`SELECT payload FROM public.job_queue`)).rows as any[];
     const note = activityLogFor(jobs[0])!;
 
-    expect(note).toContain("Cold call to the property manager");   // lead-scoped
-    expect(note).toContain("Measured the north elevation.");        // deal-scoped
-    // Merged into ONE newest-first sequence, not concatenated per source.
+    expect(note).toContain("Cold call to the property manager");   // lead-scoped, oldest
+    expect(note).toContain("Measured the north elevation.");        // deal-scoped, middle
+    expect(note).toContain("Lead follow-up after the walkthrough."); // lead-scoped, NEWEST
+    // Merged into ONE newest-first sequence, not concatenated per source. The lead row is newer than
+    // the deal row, so a deal-first concatenation produces a DIFFERENT order and fails here — which the
+    // earlier version of this assertion could not detect.
+    expect(note.indexOf("Lead follow-up after the walkthrough")).toBeLessThan(
+      note.indexOf("Measured the north elevation"),
+    );
     expect(note.indexOf("Measured the north elevation")).toBeLessThan(
       note.indexOf("Cold call to the property manager"),
     );
@@ -427,9 +474,17 @@ describe("RFP payload carries the CRM activity log (real SQL)", () => {
     // The invitation shares loadRfpPayloadDeal purely for dealSummary's fixed field list. Rendering a
     // note for it would mean fetching up to 200 rows with unbounded bodies and building an 8 KB string
     // inside the tenant transaction — on a pooled client, under a statement_timeout — to then discard
-    // it. Dropping the `activities` table proves the query is skipped rather than merely ignored.
+    // it.
+    //
+    // Dropping the table is NOT sufficient on its own: if the opt-out were ignored, loadCrmActivityLog
+    // would take its nested savepoint, fail the SELECT, ROLLBACK TO, recover the transaction and return
+    // null — and "dealSummary is populated" would STILL hold (the sibling test above demonstrates
+    // exactly that degradation). The discriminator is that nothing was logged, because nothing failed,
+    // because nothing ran.
     pg = await setup();
     const tdb: any = drizzle(pg as any);
+    const errored = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warned = vi.spyOn(console, "warn").mockImplementation(() => {});
     await pg.exec("DROP TABLE activities");
 
     await pg.exec("BEGIN");
@@ -441,9 +496,13 @@ describe("RFP payload carries the CRM activity log (real SQL)", () => {
     });
     await pg.exec("COMMIT");
 
+    // No failed activity SELECT, and no savepoint taken for one.
+    expect(errored).not.toHaveBeenCalled();
+    expect(
+      warned.mock.calls.some((call) => String(call[0]).includes("CRM activity note"))
+    ).toBe(false);
+
     const jobs = (await pg.query(`SELECT payload FROM public.job_queue`)).rows as any[];
-    // A summary still built: the loader never touched activities, so nothing failed and no savepoint
-    // rollback discarded the summary work.
     expect(jobs[0].payload.dealSummary).not.toBeNull();
     expect(jobs[0].payload.dealSummary.projectNumber).toBe("TR-2001");
   });

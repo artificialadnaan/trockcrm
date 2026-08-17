@@ -47,6 +47,11 @@ export const ACTIVITY_NOTE_FETCH_LIMIT = 200;
  */
 export const MAX_LABEL_CHARS = 120;
 export const MAX_ACTOR_CHARS = 80;
+/**
+ * `activities.outcome` is `varchar(100)`, so the DB can never exceed this — the clamp is unreachable
+ * from the ingest path and is kept only because formatBidBoardActivityNote is an exported PURE function
+ * whose `outcome` is typed `string`. It bounds the function's own contract, not the column.
+ */
 export const MAX_OUTCOME_CHARS = 100;
 
 /**
@@ -137,10 +142,29 @@ function cleanText(value: unknown): string | null {
   return text.length > 0 ? text : null;
 }
 
+/**
+ * `String.prototype.slice` counts UTF-16 code UNITS, so cutting at an arbitrary index can land BETWEEN
+ * the two halves of an astral character — an emoji, a CJK extension — and leave a lone high surrogate
+ * at the end. That string has no valid UTF-8 encoding: `JSON.stringify` emits a bare `"\ud83d"` and the
+ * `job_queue` INSERT then dies with `invalid input syntax for type json`.
+ *
+ * Which matters far more than it looks, because of WHERE it fails. loadCrmActivityLog's SAVEPOINT covers
+ * the SELECT and the formatter only — the INSERT happens in the caller, OUTSIDE it. So a split pair does
+ * not degrade to a null note: it 500s the RFP trigger/approve route and aborts the tenant transaction,
+ * which is precisely the failure the savepoint exists to prevent, arriving by a route it cannot see.
+ *
+ * Every cut in this module therefore goes through here.
+ */
+function sliceWithoutSplittingPair(value: string, end: number): string {
+  const cut = value.slice(0, end);
+  // A trailing high surrogate has just lost its low half to the cut — drop it rather than emit it alone.
+  return /[\uD800-\uDBFF]$/.test(cut) ? cut.slice(0, -1) : cut;
+}
+
 /** Clamps a string so the RESULT (the `…` marker included) is at most `max` characters. */
 function clampTo(value: string, max: number): string {
   if (value.length <= max) return value;
-  return value.slice(0, max - 1) + "…";
+  return sliceWithoutSplittingPair(value, max - 1) + "…";
 }
 
 /** Clamps a body so the RESULT (marker included) is at most MAX_BODY_CHARS characters. */
@@ -263,8 +287,10 @@ export function formatBidBoardActivityNote(input: FormatBidBoardActivityNoteInpu
   }
   // Absolute backstop, so the cap is an INVARIANT rather than an argument about which inputs are
   // bounded. Unreachable once the label/actor/outcome/body clamps above are in place: heading +
-  // trailer is a few hundred characters. Slicing keeps the marker (the first line) intact.
-  return note.length > MAX_NOTE_CHARS ? note.slice(0, MAX_NOTE_CHARS) : note;
+  // trailer is a few hundred characters. Slicing keeps the marker (the first line) intact, and goes
+  // through the pair-safe cut — a lone surrogate here would fail the job_queue INSERT outside the
+  // savepoint, taking the whole RFP with it.
+  return note.length > MAX_NOTE_CHARS ? sliceWithoutSplittingPair(note, MAX_NOTE_CHARS) : note;
 }
 
 export interface LoadDealActivityNoteEntriesResult {
@@ -291,8 +317,9 @@ export interface LoadDealActivityNoteEntriesResult {
  *    `type <> 'email' OR responsible_user_id = <viewer>`), and their bodies carry up to 1000
  *    characters of real message text lifted from the email body. A Procore Bid Board note has no
  *    "viewer" — every Bid Board user in the company can read it — so the per-viewer rule cannot be
- *    honoured here and the only safe answer is to drop the type entirely.
- *    DO NOT "restore completeness" by removing this predicate.
+ *    honoured here and the only safe answer is to drop the type entirely. Anything carrying an
+ *    `email_id` is dropped too, because the generic createActivity accepts one with any type.
+ *    DO NOT "restore completeness" by removing either predicate.
  *
  * Selects `limit + 1` rows so the caller learns whether older entries exist WITHOUT a second COUNT;
  * the extra row is reported as `olderCount: 1, olderCountIsFloor: true` rather than being rendered.
@@ -333,9 +360,13 @@ export async function loadDealActivityNoteEntries(
              OR a.lead_id = (SELECT d.source_lead_id FROM deals d WHERE d.id = ${dealId})
            )
        -- ACCESS-CONTROL BOUNDARY, not a display filter. See this function's doc comment before
-       -- touching this line: email bodies are mailbox-owner-only in the CRM and a Procore note is
-       -- readable by every Bid Board user in the company.
+       -- touching either of these two lines: email bodies are mailbox-owner-only in the CRM and a
+       -- Procore note is readable by every Bid Board user in the company.
        AND a.type <> 'email'
+       -- Belt and braces on the same boundary. Every writer in email/service.ts pairs email_id with
+       -- type 'email', but the generic createActivity takes an arbitrary emailId with ANY type, so the
+       -- type check alone is one careless caller away from leaking a message body.
+       AND a.email_id IS NULL
      -- created_at/id break occurred_at ties so two same-instant activities can never swap order
      -- between the payload and a later re-render.
      ORDER BY a.occurred_at DESC, a.created_at DESC, a.id DESC

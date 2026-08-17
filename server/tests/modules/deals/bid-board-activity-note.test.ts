@@ -5,6 +5,7 @@ import {
   MAX_ENTRIES,
   MAX_LABEL_CHARS,
   MAX_NOTE_CHARS,
+  MAX_OUTCOME_CHARS,
   formatBidBoardActivityNote,
   type ActivityNoteEntry,
 } from "../../../src/modules/deals/bid-board-activity-note.js";
@@ -292,6 +293,123 @@ describe("formatBidBoardActivityNote", () => {
     });
   });
 
+  describe("astral characters are never split by a clamp", () => {
+    /**
+     * Finds a lone surrogate: a high surrogate not followed by a low one, or a low not preceded by a
+     * high. Such a string has no valid UTF-8 encoding — JSON.stringify emits a bare "\ud83d" escape and
+     * the job_queue INSERT fails with `invalid input syntax for type json`.
+     *
+     * That INSERT sits OUTSIDE loadCrmActivityLog's savepoint, so this does not degrade to a null note:
+     * it 500s the RFP trigger route and aborts the tenant transaction. Hence a hard test, not a nicety.
+     */
+    const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    const EMOJI = "🚧"; // U+1F6A7 — a surrogate PAIR in UTF-16, i.e. .length === 2
+
+    /** `n` single-unit chars, then an emoji whose HIGH surrogate sits at index `n`, then filler. */
+    const emojiAt = (n: number) => "x".repeat(n) + EMOJI + "tail".repeat(200);
+
+    function assertWellFormed(note: string | null, label: string) {
+      expect(note, label).not.toBeNull();
+      expect(LONE_SURROGATE.test(note!), `lone surrogate with ${label}`).toBe(false);
+      // The real consequence, asserted directly rather than by proxy.
+      expect(() => JSON.parse(JSON.stringify({ crmActivityLog: note })), label).not.toThrow();
+      expect(JSON.stringify(note), label).not.toMatch(/\\ud[89ab][0-9a-f]{2}/i);
+    }
+
+    /**
+     * Sweeps the emoji ACROSS a clamp boundary rather than hard-coding which index splits it.
+     *
+     * clampTo cuts at `max - 1` (one unit is reserved for the `…`), so the pair is split only when the
+     * HIGH surrogate lands at `max - 2`. That is an easy off-by-one, and getting it wrong makes the
+     * test pass vacuously against a broken implementation — which is exactly what happened on the
+     * first draft of this suite. Sweeping the neighbourhood removes the trap.
+     */
+    function sweepBoundary(boundary: number, build: (emojiIndex: number) => string | null) {
+      for (const offset of [-3, -2, -1, 0, 1]) {
+        const index = boundary + offset;
+        assertWellFormed(build(index), `emoji at index ${index} (boundary ${boundary} ${offset})`);
+      }
+    }
+
+    it("does not split a pair across the BODY clamp", () => {
+      sweepBoundary(MAX_BODY_CHARS, (i) =>
+        formatBidBoardActivityNote({
+          projectLabel: "TR-26-0412",
+          generatedAt: GENERATED_AT,
+          entries: [entry({ body: emojiAt(i) })],
+        })
+      );
+    });
+
+    it("does not split a pair across the SUBJECT clamp", () => {
+      sweepBoundary(MAX_BODY_CHARS, (i) =>
+        formatBidBoardActivityNote({
+          projectLabel: "TR-26-0412",
+          generatedAt: GENERATED_AT,
+          entries: [entry({ subject: emojiAt(i), body: "plain" })],
+        })
+      );
+    });
+
+    it("does not split a pair across the ACTOR clamp", () => {
+      // users.display_name > 80 chars ending mid-emoji at index 79 — entirely realistic.
+      sweepBoundary(MAX_ACTOR_CHARS, (i) =>
+        formatBidBoardActivityNote({
+          projectLabel: "TR-26-0412",
+          generatedAt: GENERATED_AT,
+          entries: [entry({ actorName: emojiAt(i) })],
+        })
+      );
+    });
+
+    it("does not split a pair across the OUTCOME clamp", () => {
+      sweepBoundary(MAX_OUTCOME_CHARS, (i) =>
+        formatBidBoardActivityNote({
+          projectLabel: "TR-26-0412",
+          generatedAt: GENERATED_AT,
+          entries: [entry({ type: "call", outcome: emojiAt(i) })],
+        })
+      );
+    });
+
+    it("does not split a pair across the LABEL clamp", () => {
+      // projectLabel falls back to deals.name, so a long emoji-bearing deal name reaches this.
+      sweepBoundary(MAX_LABEL_CHARS, (i) =>
+        formatBidBoardActivityNote({
+          projectLabel: emojiAt(i),
+          generatedAt: GENERATED_AT,
+          entries: [entry()],
+        })
+      );
+    });
+
+    it("does not split a pair at the whole-note backstop", () => {
+      // Drive the note past MAX_NOTE_CHARS with astral content everywhere, so the FINAL slice — not a
+      // per-field clamp — is what can land inside a pair.
+      sweepBoundary(MAX_BODY_CHARS, (i) => {
+        const note = formatBidBoardActivityNote({
+          projectLabel: emojiAt(i),
+          generatedAt: GENERATED_AT,
+          entries: Array.from({ length: 300 }, () =>
+            entry({ actorName: emojiAt(i), subject: emojiAt(i), body: emojiAt(i) })
+          ),
+          olderCount: 12,
+        });
+        expect(note!.length).toBeLessThanOrEqual(MAX_NOTE_CHARS);
+        return note;
+      });
+    });
+
+    it("keeps the emoji whole when it fits, rather than defensively dropping it", () => {
+      const note = formatBidBoardActivityNote({
+        projectLabel: "TR-26-0412",
+        generatedAt: GENERATED_AT,
+        entries: [entry({ body: `Roof hatch blocked ${EMOJI} — need access` })],
+      });
+      expect(note).toContain(`Roof hatch blocked ${EMOJI} — need access`);
+      assertWellFormed(note, "emoji well within the cap");
+    });
+  });
   describe("America/Chicago date rendering", () => {
     it("renders the CT calendar day, not the UTC one, for a late-evening CT timestamp", () => {
       // 02:00Z on Aug 15 is 21:00 CDT on Aug 14 — a rep writing up the day's calls. A UTC render would
