@@ -174,6 +174,18 @@ export const deals = pgTable(
      * in the CRM column. Nothing publishes this column's value to a user.
      */
     bidBoardDueDate: date("bid_board_due_date"),
+    /**
+     * PROVENANCE for the read-back (migration 0223): when the Bid Board sync last wrote `bid_due_date`.
+     * NULL means "this deal's bid due date did not come from the Bid Board".
+     *
+     * Required by the bid-due-date resolver's signal, together with a still-matching day. Neither alone is
+     * correct: comparing days alone accepts a COINCIDENCE (the mirror has been populated on prod for
+     * months, so a pre-existing date sharing the board's calendar day would look landed the instant the
+     * flag flipped, with no sync having run), and the stamp alone goes stale the moment a rep or the lead
+     * corrects the date. Deliberately never cleared — it records a historical fact; the day check is what
+     * revokes the override.
+     */
+    bidDueDateFromBidBoardAt: timestamp("bid_due_date_from_bid_board_at", { withTimezone: true }),
     bidBoardCustomerName: text("bid_board_customer_name"),
     bidBoardCustomerContactRaw: text("bid_board_customer_contact_raw"),
     bidBoardProjectNumber: text("bid_board_project_number"),

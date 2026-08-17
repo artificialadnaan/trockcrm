@@ -2542,6 +2542,7 @@ export async function getDealDetail(
   // on a surface this PR is supposed to leave untouched while the flag is off.
   const resolvedBidDueDate = resolveDealBidDueDateForRead({
     bidBoardDueDate: dealWithMetadata.bidBoardDueDate,
+    bidDueDateFromBidBoardAt: dealWithMetadata.bidDueDateFromBidBoardAt,
     bidBoardDetachedAt: dealWithMetadata.bidBoardDetachedAt,
     hasSourceLead: Boolean(sourceLeadBid),
     leadBidDueDate: sourceLeadBid?.bidDueDate ?? null,

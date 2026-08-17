@@ -55,6 +55,8 @@ async function setup() {
       estimator text, bid_board_estimator text,
       property_address text, property_city text, property_state text, property_zip text, property_country text,
       description text, bid_due_date timestamptz, bid_board_due_date date,
+      -- migration 0223: the resolver requires this provenance stamp, not a coincidental day match.
+      bid_due_date_from_bid_board_at timestamptz,
       -- migration 0200: the resolver refuses the Bid Board override on a severed deal.
       bid_board_detached_at timestamptz, created_at timestamptz DEFAULT now(),
       rfp_approval_request_event_id uuid, rfp_approval_request_id integer,
@@ -187,10 +189,12 @@ describe("enqueueRfpBidBoardCreate — DB-authoritative payload from a sparse { 
         await pg!.query(`UPDATE deals SET bid_board_due_date = $2 WHERE id = $1`, [DEAL, boardDay]);
       }
       if (options.landed) {
-        await pg!.query(`UPDATE deals SET bid_due_date = $2::timestamptz WHERE id = $1`, [
-          DEAL,
-          `${options.landed}T00:00:00.000Z`,
-        ]);
+        // Both halves of the signal, exactly as writeBidDueDateIfNeeded writes them: the value AND the
+        // provenance stamp. Setting only the value would model the COINCIDENCE case, not a landed write.
+        await pg!.query(
+          `UPDATE deals SET bid_due_date = $2::timestamptz, bid_due_date_from_bid_board_at = now() WHERE id = $1`,
+          [DEAL, `${options.landed}T00:00:00.000Z`]
+        );
       }
       if (options.detached) {
         await pg!.query(`UPDATE deals SET bid_board_detached_at = now() WHERE id = $1`, [DEAL]);

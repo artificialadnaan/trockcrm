@@ -9,10 +9,21 @@ import { isBidBoardDueDateReadbackEnabled } from "../../config/feature-flags.js"
  *   `deals.bid_board_due_date` IS NEVER READ AS A VALUE. It is read only as a SIGNAL.
  *
  * The value this resolver returns is ALWAYS one of `deals.bid_due_date` or `leads.bid_due_date` — never
- * the mirror column. The mirror's only job is to answer one question: "has the Bid Board's date actually
- * LANDED in the CRM column?", which is true when
- * `(deals.bid_due_date AT TIME ZONE 'UTC')::date == deals.bid_board_due_date`. When that holds, the deal
- * column WINS over the source lead. When it does not hold, the legacy precedence applies untouched.
+ * the mirror column. The mirror only helps answer one question: "has the Bid Board's date actually LANDED
+ * in the CRM column?", which requires BOTH
+ *   1. PROVENANCE — `deals.bid_due_date_from_bid_board_at` is set, i.e. the sync itself wrote the column
+ *      (migration 0223); and
+ *   2. CURRENCY — `(deals.bid_due_date AT TIME ZONE 'UTC')::date` still equals `deals.bid_board_due_date`.
+ * When both hold, the deal column WINS over the source lead. Otherwise the legacy precedence applies
+ * untouched.
+ *
+ * BOTH are required because each alone is wrong. The day check alone accepts a COINCIDENCE — the mirror
+ * has been populated on prod for months, so any deal whose pre-existing `bid_due_date` merely shares the
+ * board's calendar day would look landed the instant the flag flipped, changing a lead-backed deal's
+ * displayed date and, in a genuine estimating stage, its hold verdict and reported value, with no sync
+ * having run. The stamp alone goes stale the other way: it records that the sync wrote the column once,
+ * and would keep the override on after a rep or the lead corrected the date. The stamp is never cleared;
+ * the day check is what revokes.
  *
  * WHY, because the obvious design (read the mirror's value directly, mirror-beats-lead-beats-column) was
  * written first and is wrong in two ways that only show up in production:
@@ -62,6 +73,12 @@ export interface DealBidDueDateInput {
    * SIGNAL ONLY. Its value is never returned; it is only compared against the deal column's calendar day.
    */
   bidBoardDueDate?: Date | string | null;
+  /**
+   * `deals.bid_due_date_from_bid_board_at` (migration 0223) — when the Bid Board sync last WROTE
+   * `deals.bid_due_date`. NULL means the value did not come from the board, whatever the dates look like.
+   * Required for the override; see the module doc for why a day match alone is not provenance.
+   */
+  bidDueDateFromBidBoardAt?: Date | string | null;
   /**
    * `deals.bid_board_detached_at` (migration 0200) — non-null once "Move back to Opportunity" severed this
    * deal from Bid Board sync. Disables the override outright.
@@ -142,19 +159,29 @@ export function resolveDealBidDueDate(input: DealBidDueDateInput): ResolvedDealB
   const dealRaw = input.dealBidDueDate ?? null;
   const dealDay = bidDueDateToDateOnly(dealRaw);
 
-  // THE SIGNAL. Not "what does the board say?" but "has what the board says already landed in the column
-  // every SQL surface reads?". Compared on the CALENDAR DAY, because the column is a timestamptz at UTC
-  // midnight and the mirror is a date — the same comparison holdHorizonDateSql makes with
-  // `(bid_due_date AT TIME ZONE 'UTC')::date`.
+  // THE SIGNAL. Not "what does the board say?" but "did the SYNC put what the board says into the column
+  // every SQL surface reads, and is it still there?".
+  //
+  // PROVENANCE first: without the 0223 stamp this is a deal the sync has never written, whatever its dates
+  // happen to look like. This is the condition that makes the flag flip inert — at flip time no deal
+  // carries a stamp (the write-through is gated by the same flag), so the override fires for NOBODY until
+  // a sync writes, and thereafter only for the deals the census counted. A day match alone would accept a
+  // COINCIDENCE: the mirror has been populated on prod for months, so a pre-existing bid_due_date that
+  // merely shares the board's calendar day would look landed the instant the flag flipped.
+  //
+  // CURRENCY second, on the CALENDAR DAY, because the column is a timestamptz at UTC midnight and the
+  // mirror is a date — the same comparison holdHorizonDateSql makes with
+  // `(bid_due_date AT TIME ZONE 'UTC')::date`. This is what REVOKES the override when a rep or the lead
+  // later corrects the date, instead of latching it on forever behind a stamp that is never cleared.
   //
   // The detach check is belt-and-braces. A detached deal's column is never rewritten by the sync, so it
   // would fall back on its own — but that is a consequence of the data rather than a stated rule, and
-  // `bid_board_due_date` is NOT cleared on detach (buildBidBoardDetachUpdate), so the day a backfill or a
-  // hand-edit happens to align the two columns on a severed deal, the consequence quietly stops holding.
-  // An invariant this load-bearing gets its own predicate.
+  // neither the mirror nor the stamp is cleared on detach (buildBidBoardDetachUpdate), so a severed deal
+  // can carry both indefinitely. An invariant this load-bearing gets its own predicate.
   const mirrorDay = bidDueDateToDateOnly(input.bidBoardDueDate);
   const detached = input.bidBoardDetachedAt != null;
-  if (!detached && mirrorDay != null && dealDay != null && dealDay === mirrorDay) {
+  const writtenByBidBoard = input.bidDueDateFromBidBoardAt != null;
+  if (!detached && writtenByBidBoard && mirrorDay != null && dealDay != null && dealDay === mirrorDay) {
     // The DEAL COLUMN is returned — never the mirror. All this branch decides is that it outranks the
     // lead, so a stale lead value stops masking a bid date the Bid Board has already delivered.
     return { day: dealDay, raw: dealRaw, source: "bid_board" };
@@ -174,17 +201,19 @@ export function resolveDealBidDueDate(input: DealBidDueDateInput): ResolvedDealB
  * today's behaviour exactly on every surface, including the at-risk / effective-value verdicts
  * getDealDetail derives from this date.
  *
- * Note what the flag now buys, given the signal rule: at flip time nothing moves, because the
- * write-through is gated by the same flag and has therefore never run, so no deal's column matches its
- * mirror except by coincidence. The read side follows the write side rather than racing ahead of it, and
- * the census measures exactly the change the flip causes.
+ * Note what the flag buys, given the signal rule: at flip time nothing moves, because the write-through is
+ * gated by the same flag and has therefore never run, so NO deal carries the 0223 provenance stamp. The
+ * read side follows the write side rather than racing ahead of it, and the census measures exactly the
+ * change the flip causes.
  */
 export function resolveDealBidDueDateForRead(
   input: DealBidDueDateInput,
   env: NodeJS.ProcessEnv = process.env
 ): ResolvedDealBidDueDate {
   if (!isBidBoardDueDateReadbackEnabled(env)) {
-    return resolveDealBidDueDate({ ...input, bidBoardDueDate: null });
+    // Erase the SIGNAL, not merely one of its inputs: with the flag off neither the mirror nor the
+    // provenance stamp may influence the answer.
+    return resolveDealBidDueDate({ ...input, bidBoardDueDate: null, bidDueDateFromBidBoardAt: null });
   }
   return resolveDealBidDueDate(input);
 }

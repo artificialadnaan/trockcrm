@@ -56,6 +56,8 @@ describe("resolveDealBidDueDate — the SIGNAL rule (pure, flag-free)", () => {
   const LANDED_INSTANT = new Date(`${LANDED}T00:00:00.000Z`);
   const LEAD = "2026-06-01";
   const STALE_DEAL = new Date("2026-07-01T00:00:00.000Z");
+  /** The 0223 provenance stamp: the sync WROTE the column. Absent => a coincidence, never an override. */
+  const STAMP = new Date("2026-08-01T09:00:00.000Z");
 
   // ★ The rule the whole design rests on. Prove it once, unmistakably: the mirror's VALUE is never what
   // comes back. When the signal fires, the value returned is the DEAL COLUMN; all the signal decides is
@@ -78,6 +80,7 @@ describe("resolveDealBidDueDate — the SIGNAL rule (pure, flag-free)", () => {
       hasSourceLead: true,
       leadBidDueDate: LEAD,
       dealBidDueDate: LANDED_INSTANT,
+      bidDueDateFromBidBoardAt: STAMP,
     });
     // `raw` is the deal column's stored instant, NOT the mirror's date-only string.
     expect(resolved).toEqual({ day: LANDED, raw: LANDED_INSTANT, source: "bid_board" });
@@ -92,6 +95,7 @@ describe("resolveDealBidDueDate — the SIGNAL rule (pure, flag-free)", () => {
         hasSourceLead: true,
         leadBidDueDate: LEAD,
         dealBidDueDate: `${LANDED}T00:00:00.000Z`,
+        bidDueDateFromBidBoardAt: STAMP,
       }).source
     ).toBe("bid_board");
     // …and a legacy non-midnight instant on the same DAY still counts as landed, matching the
@@ -102,6 +106,7 @@ describe("resolveDealBidDueDate — the SIGNAL rule (pure, flag-free)", () => {
         hasSourceLead: true,
         leadBidDueDate: LEAD,
         dealBidDueDate: new Date(`${LANDED}T14:30:00.000Z`),
+        bidDueDateFromBidBoardAt: STAMP,
       }).source
     ).toBe("bid_board");
   });
@@ -116,6 +121,7 @@ describe("resolveDealBidDueDate — the SIGNAL rule (pure, flag-free)", () => {
       hasSourceLead: true,
       leadBidDueDate: LEAD,
       dealBidDueDate: LANDED_INSTANT,
+      bidDueDateFromBidBoardAt: STAMP,
     });
     expect(resolved).toEqual({ day: LEAD, raw: LEAD, source: "lead" });
   });
@@ -142,6 +148,7 @@ describe("resolveDealBidDueDate — the SIGNAL rule (pure, flag-free)", () => {
         hasSourceLead: true,
         leadBidDueDate: null,
         dealBidDueDate: LANDED_INSTANT,
+        bidDueDateFromBidBoardAt: STAMP,
       })
     ).toEqual({ day: LANDED, raw: LANDED_INSTANT, source: "bid_board" });
   });
@@ -153,6 +160,7 @@ describe("resolveDealBidDueDate — the SIGNAL rule (pure, flag-free)", () => {
       bidBoardDueDate: LANDED,
       hasSourceLead: false,
       dealBidDueDate: LANDED_INSTANT,
+      bidDueDateFromBidBoardAt: STAMP,
     });
     const notLanded = resolveDealBidDueDate({
       bidBoardDueDate: LANDED,
@@ -192,6 +200,41 @@ describe("resolveDealBidDueDate — the SIGNAL rule (pure, flag-free)", () => {
         hasSourceLead: true,
         leadBidDueDate: LEAD,
         dealBidDueDate: LANDED_INSTANT,
+        bidDueDateFromBidBoardAt: STAMP,
+      })
+    ).toEqual({ day: LEAD, raw: LEAD, source: "lead" });
+  });
+
+  // ★ THE COINCIDENCE. `bid_board_due_date` has been populated on prod for MONTHS, so a deal whose
+  // pre-existing bid_due_date merely shares the board's calendar day looks identical to a landed one on
+  // the dates alone. Without the provenance stamp the override would fire for it the instant the flag was
+  // flipped — no sync having run — changing a lead-backed deal's displayed date and, in a genuine
+  // estimating stage, its hold verdict and reported value. Provenance is what makes "the flip changes
+  // nothing until a sync writes" true.
+  it("REFUSES the override on a coincidental day match with no provenance stamp", () => {
+    expect(
+      resolveDealBidDueDate({
+        bidBoardDueDate: LANDED,
+        hasSourceLead: true,
+        leadBidDueDate: LEAD,
+        dealBidDueDate: LANDED_INSTANT,
+        // No bidDueDateFromBidBoardAt: the sync never wrote this column.
+      })
+    ).toEqual({ day: LEAD, raw: LEAD, source: "lead" });
+  });
+
+  // The other half: the stamp alone must not latch the override on. A rep or the lead correcting the date
+  // moves the column off the board's day and revokes it — which is why the stamp is never cleared and the
+  // day check exists.
+  it("REVOKES the override when a later edit moves the column off the board's day", () => {
+    expect(
+      resolveDealBidDueDate({
+        bidBoardDueDate: LANDED,
+        hasSourceLead: true,
+        leadBidDueDate: LEAD,
+        // The sync wrote it once (stamp present), but someone has since corrected the date.
+        dealBidDueDate: STALE_DEAL,
+        bidDueDateFromBidBoardAt: STAMP,
       })
     ).toEqual({ day: LEAD, raw: LEAD, source: "lead" });
   });
@@ -205,6 +248,7 @@ describe("resolveDealBidDueDateForRead — the flag gate", () => {
     hasSourceLead: true,
     leadBidDueDate: "2026-06-01",
     dealBidDueDate: new Date("2026-09-01T00:00:00.000Z"),
+    bidDueDateFromBidBoardAt: new Date("2026-08-01T09:00:00.000Z"),
   };
 
   it("flag ON: the landed deal column beats the stale lead", () => {
@@ -232,7 +276,12 @@ describe("resolveDealBidDueDateForRead — the flag gate", () => {
     const dealValue = new Date("2026-07-01T00:00:00.000Z");
     expect(
       resolveDealBidDueDateForRead(
-        { bidBoardDueDate: "2026-09-01", hasSourceLead: false, dealBidDueDate: dealValue },
+        {
+          bidBoardDueDate: "2026-09-01",
+          hasSourceLead: false,
+          dealBidDueDate: dealValue,
+          bidDueDateFromBidBoardAt: new Date("2026-08-01T09:00:00.000Z"),
+        },
         FLAG_OFF
       )
     ).toEqual({ day: "2026-07-01", raw: dealValue, source: "deal" });
@@ -250,12 +299,15 @@ describe("resolveDealBidDueDateForRead — the flag gate", () => {
   // time no deal's column has been rewritten and the read override fires for nobody. The read side follows
   // the write side instead of racing ahead of it — which is also what keeps these three TS read sites from
   // drifting away from holdHorizonDateSql and its ~50 SQL consumers.
-  it("is INERT at flip time — a deal whose column has not received the write-through is unchanged", () => {
+  it("is INERT at flip time — no deal carries the provenance stamp, so the override fires for nobody", () => {
+    // Deliberately the COINCIDENCE shape: dates that already agree, which is the state prod is in for some
+    // deals today. At flip time the write-through has never run, so no stamp exists, and flag ON must
+    // return exactly what flag OFF returns.
     const notYetWritten = {
       bidBoardDueDate: "2026-09-01",
       hasSourceLead: true,
       leadBidDueDate: "2026-06-01",
-      dealBidDueDate: new Date("2026-07-01T00:00:00.000Z"),
+      dealBidDueDate: new Date("2026-09-01T00:00:00.000Z"),
     };
     expect(resolveDealBidDueDateForRead(notYetWritten, FLAG_ON)).toEqual(
       resolveDealBidDueDateForRead(notYetWritten, FLAG_OFF)
@@ -307,7 +359,13 @@ describe("resolveRfpPayloadDueDates — the gated correction, and the rejected-m
     const landed = new Date(`${MIRROR}T00:00:00.000Z`);
     expect(
       resolveRfpPayloadDueDates(
-        { bidBoardDueDate: MIRROR, hasSourceLead: true, leadBidDueDate: LEAD, dealBidDueDate: landed },
+        {
+          bidBoardDueDate: MIRROR,
+          hasSourceLead: true,
+          leadBidDueDate: LEAD,
+          dealBidDueDate: landed,
+          bidDueDateFromBidBoardAt: new Date("2026-08-01T09:00:00.000Z"),
+        },
         FLAG_ON
       )
     ).toEqual({ bidDueDate: landed, bidBoardDueDate: null });
@@ -337,6 +395,7 @@ describe("resolveRfpPayloadDueDates — the gated correction, and the rejected-m
         hasSourceLead: true,
         leadBidDueDate: null,
         dealBidDueDate: landed,
+        bidDueDateFromBidBoardAt: new Date("2026-08-01T09:00:00.000Z"),
       },
       FLAG_ON
     );

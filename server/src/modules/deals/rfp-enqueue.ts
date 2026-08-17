@@ -147,6 +147,7 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, deal: { id: string }) {
   // BOTH date fields come from ONE decision — see the comment at their use below.
   const dueDates = resolveRfpPayloadDueDates({
     bidBoardDueDate: row.bid_board_due_date ?? null,
+    bidDueDateFromBidBoardAt: row.bid_due_date_from_bid_board_at ?? null,
     bidBoardDetachedAt: row.bid_board_detached_at ?? null,
     hasSourceLead: (row.sourceLeadRowId as string | null) != null,
     leadBidDueDate: row.sourceLeadBidDueDate ?? null,

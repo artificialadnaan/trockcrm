@@ -238,6 +238,7 @@ export async function getResolvedDeal(
       // deal-column case has to arrive in the same date-only shape a lead-backed deal produces.
       bidDueDate: resolveDealBidDueDateForRead({
         bidBoardDueDate: deal.bidBoardDueDate,
+        bidDueDateFromBidBoardAt: deal.bidDueDateFromBidBoardAt,
         bidBoardDetachedAt: deal.bidBoardDetachedAt,
         hasSourceLead: Boolean(sourceLead),
         leadBidDueDate: sourceLead?.bidDueDate ?? null,

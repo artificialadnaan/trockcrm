@@ -97,6 +97,8 @@ async function seed(options: {
   expectedCloseDate?: string | null;
   bidBoardTotalSales?: string | null;
   detachedAt?: Date | null;
+  /** Models writeBidDueDateIfNeeded's provenance stamp (0223). Absent => a coincidental day match. */
+  fromBidBoardAt?: Date | null;
 }) {
   await pg.exec(`DELETE FROM public.deals; DELETE FROM public.leads;`);
   if (options.hasLead) {
@@ -123,6 +125,7 @@ async function seed(options: {
     sourceLeadId: options.hasLead ? LEAD_ID : null,
     bidDueDate: options.dealInstant === undefined ? DEAL_INSTANT : options.dealInstant,
     bidBoardDueDate: options.mirrorDay ?? null,
+    bidDueDateFromBidBoardAt: options.fromBidBoardAt ?? null,
     bidBoardDetachedAt: options.detachedAt ?? null,
     expectedCloseDate: options.expectedCloseDate ?? null,
     bidBoardTotalSales: options.bidBoardTotalSales ?? null,
@@ -223,7 +226,12 @@ describe("Bid Board due date read precedence — flag ON", () => {
   // "Landed" = the write-through has run, so deals.bid_due_date already carries the mirror's day. That is
   // the ONLY state in which the override fires, and the value returned is the deal COLUMN — the same
   // column holdHorizonDateSql and its ~50 SQL consumers read, so TS and SQL cannot disagree.
-  const landed = { dealInstant: new Date(`${MIRROR_DAY}T00:00:00.000Z`), mirrorDay: MIRROR_DAY };
+  const landed = {
+    dealInstant: new Date(`${MIRROR_DAY}T00:00:00.000Z`),
+    mirrorDay: MIRROR_DAY,
+    // The 0223 stamp. Without it the same two dates are only a COINCIDENCE and the override must refuse.
+    fromBidBoardAt: new Date("2026-08-01T09:00:00.000Z"),
+  };
 
   it("getDealDetail: a LANDED deal column beats a differing lead value", async () => {
     await seed({ hasLead: true, leadDay: LEAD_DAY, ...landed });
@@ -292,6 +300,7 @@ describe("★ Bid Board due date read precedence — flag OFF (prod parity)", ()
       leadDay: LEAD_DAY,
       mirrorDay: MIRROR_DAY,
       dealInstant: new Date(`${MIRROR_DAY}T00:00:00.000Z`),
+      fromBidBoardAt: new Date("2026-08-01T09:00:00.000Z"),
     });
 
     expect(day((await detail())?.bidDueDate)).toBe(LEAD_DAY);
@@ -357,6 +366,7 @@ describe("hold / at-risk consequence of the resolved bid due date", () => {
       leadDay,
       mirrorDay: boardDay,
       dealInstant: new Date(`${boardDay}T00:00:00.000Z`),
+      fromBidBoardAt: new Date("2026-08-01T09:00:00.000Z"),
       // The close target is deliberately the OPPOSITE of the board's date, so a surface still reading
       // expected_close_date gives the wrong answer rather than accidentally agreeing.
       expectedCloseDate: leadDay,
