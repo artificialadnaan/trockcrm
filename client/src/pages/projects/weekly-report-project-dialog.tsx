@@ -151,10 +151,13 @@ function toPayload(form: FormState, includeDeal: boolean): WeeklyReportProjectPa
 
 export function WeeklyReportProjectDialog({
   project,
+  existingDealIds = [],
   onClose,
   onSaved,
 }: {
   project: WeeklyReportProject | null;
+  /** Deals that already have a live setup. Offering one leads to a 409 after the form is filled in. */
+  existingDealIds?: string[];
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -226,6 +229,7 @@ export function WeeklyReportProjectDialog({
             <DealPicker
               value={form.dealId}
               label={form.dealLabel}
+              excludeDealIds={existingDealIds}
               onPick={(deal) =>
                 setForm((prev) => ({
                   ...prev,
@@ -487,10 +491,12 @@ function DateWithNote({
 function DealPicker({
   value,
   label,
+  excludeDealIds,
   onPick,
 }: {
   value: string;
   label: string;
+  excludeDealIds: string[];
   onPick: (deal: { id: string; name: string; label: string }) => void;
 }) {
   const [search, setSearch] = useState("");
@@ -506,6 +512,15 @@ function DealPicker({
     { search: debounced, scope: "all", limit: 20, isActive: true },
     { enabled: debounced.length >= 2 },
   );
+
+  // A deal that already has a live setup cannot get a second one — the server answers 409 on the
+  // unique index. Offering it anyway lets someone pick it, fill in the whole form, and only then be
+  // told no. Filtered here rather than server-side because /deals is a general endpoint this feature
+  // does not own.
+  const selectable = useMemo(() => {
+    const taken = new Set(excludeDealIds);
+    return deals.filter((deal) => !taken.has(deal.id));
+  }, [deals, excludeDealIds]);
 
   if (value) {
     return (
@@ -541,10 +556,12 @@ function DealPicker({
         </div>
         {open && debounced.length >= 2 && (
           <div className="absolute z-20 mt-1 max-h-64 w-full overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-xl">
-            {deals.length === 0 && !loading ? (
-              <p className="px-3 py-2.5 text-[13px] font-semibold text-slate-400">No matching projects</p>
+            {selectable.length === 0 && !loading ? (
+              <p className="px-3 py-2.5 text-[13px] font-semibold text-slate-400">
+                {deals.length > 0 ? "Those projects already have a weekly report setup" : "No matching projects"}
+              </p>
             ) : (
-              deals.map((deal) => (
+              selectable.map((deal) => (
                 <button
                   key={deal.id}
                   type="button"

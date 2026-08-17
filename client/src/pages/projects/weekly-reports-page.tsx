@@ -150,6 +150,7 @@ export default function WeeklyReportsPage() {
       {(creating || editing) && (
         <WeeklyReportProjectDialog
           project={editing}
+          existingDealIds={projectsQuery.projects.map((p) => p.dealId)}
           onClose={() => {
             setCreating(false);
             setEditing(null);
@@ -374,7 +375,11 @@ const PROJECT_COLUMNS: ReadonlyArray<SortColumn<WeeklyReportProject>> = [
   { key: "client", type: "text", accessor: (row) => row.clientName },
   { key: "cadence", type: "number", accessor: (row) => row.cadenceWeekday },
   { key: "sent", type: "number", accessor: (row) => row.summary?.reportsSent ?? 0 },
-  { key: "lastSent", type: "date", accessor: (row) => row.summary?.lastSentWeekOf ?? null },
+  // lastSentAt (when it actually went out), NOT lastSentWeekOf (the week it covered). Approval can
+  // land a report days after its cadence date, and a column headed "Last sent" that shows the
+  // reporting week misstates how recently the client last heard from us — which is the one thing
+  // this column is read for.
+  { key: "lastSent", type: "date", accessor: (row) => row.summary?.lastSentAt ?? null },
   { key: "nextDue", type: "date", accessor: (row) => row.summary?.nextDueWeekOf ?? null },
 ];
 
@@ -489,7 +494,18 @@ function ProjectsTable({
                       {project.summary?.reportsSent ?? 0}
                     </td>
                     <td className="px-3.5 py-3 text-slate-600">
-                      {project.summary?.lastSentWeekOf ? fmtWeek(project.summary.lastSentWeekOf) : "—"}
+                      {project.summary?.lastSentAt ? (
+                        <>
+                          {fmtDateTime(project.summary.lastSentAt)}
+                          {project.summary.lastSentWeekOf && (
+                            <span className="ml-1.5 text-[11px] font-semibold text-slate-400">
+                              wk {fmtWeek(project.summary.lastSentWeekOf)}
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        "—"
+                      )}
                     </td>
                     <td className="px-3.5 py-3 text-slate-600">
                       {project.summary?.nextDueWeekOf ? fmtWeek(project.summary.nextDueWeekOf) : "—"}

@@ -71,6 +71,49 @@ describe("deal picker scope", () => {
   });
 });
 
+describe("deals that already have a setup", () => {
+  it("are not offered, so the form cannot be filled in for a project the server will refuse", () => {
+    // The unique index answers 409 on a second live setup. Offering the deal anyway let someone pick
+    // it, complete the whole form, and only then be told no.
+    mocks.useDeals.mockReturnValue({
+      deals: [
+        { id: "d-taken", name: "4123 Cedar Springs", dealNumber: "DFW-10432", projectNumber: "DFW-10432" },
+        { id: "d-free", name: "Katy Freeway Shops", dealNumber: "DFW-10433", projectNumber: "DFW-10433" },
+      ],
+      loading: false,
+      error: null,
+    });
+
+    act(() => {
+      root.render(
+        <WeeklyReportProjectDialog
+          project={null}
+          existingDealIds={["d-taken"]}
+          onClose={vi.fn()}
+          onSaved={vi.fn()}
+        />,
+      );
+    });
+    const search = document.querySelector<HTMLInputElement>('input[aria-label="Search for a project"]')!;
+    vi.useFakeTimers();
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+      setter.call(search, "DFW");
+      search.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    // The search is debounced by 250ms; without advancing it the results list never renders and the
+    // assertion below would pass for the wrong reason.
+    act(() => {
+      vi.advanceTimersByTime(300);
+    });
+    vi.useRealTimers();
+
+    const text = document.body.textContent ?? "";
+    expect(text).toContain("Katy Freeway Shops");
+    expect(text).not.toContain("4123 Cedar Springs");
+  });
+});
+
 describe("assignable users", () => {
   it("keeps an assigned-but-inactive person visible instead of silently reading as Unassigned", () => {
     const project = {
