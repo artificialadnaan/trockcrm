@@ -186,6 +186,7 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, deal: { id: string }) {
     // resolveDealBidDueDateForRead.
     bidDueDate: resolveRfpPayloadBidDueDate({
       bidBoardDueDate: row.bid_board_due_date ?? null,
+      bidBoardDetachedAt: row.bid_board_detached_at ?? null,
       hasSourceLead: (row.sourceLeadRowId as string | null) != null,
       leadBidDueDate: row.sourceLeadBidDueDate ?? null,
       dealBidDueDate: row.bid_due_date ?? null,

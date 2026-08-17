@@ -2525,9 +2525,9 @@ export async function getDealDetail(
   // deals.bid_due_date snapshot — which can be stale or null for a lead-backed deal whose lead value
   // was edited/cleared before the write-through existed. Resolved through the ONE shared resolver
   // ([[bid-due-date]]), which getResolvedDeal and the RFP payload also call, so the banner, the scoping
-  // field and the outbound RFP body cannot disagree: Bid Board mirror (flag-gated, OFF by default) ->
-  // a present source lead, INCLUDING a deliberately cleared null -> the deal's own column.
-  // One indexed lookup, sequential (tenantDb is a single tx client).
+  // field and the outbound RFP body cannot disagree: a present source lead wins, INCLUDING a deliberately
+  // cleared null, EXCEPT where the deal column already carries the Bid Board's landed date (flag-gated,
+  // OFF by default). One indexed lookup, sequential (tenantDb is a single tx client).
   const [sourceLeadBid] = dealWithMetadata.sourceLeadId
     ? await tenantDb
         .select({ bidDueDate: leads.bidDueDate })
@@ -2542,6 +2542,7 @@ export async function getDealDetail(
   // on a surface this PR is supposed to leave untouched while the flag is off.
   const resolvedBidDueDate = resolveDealBidDueDateForRead({
     bidBoardDueDate: dealWithMetadata.bidBoardDueDate,
+    bidBoardDetachedAt: dealWithMetadata.bidBoardDetachedAt,
     hasSourceLead: Boolean(sourceLeadBid),
     leadBidDueDate: sourceLeadBid?.bidDueDate ?? null,
     dealBidDueDate: dealWithMetadata.bidDueDate,

@@ -229,14 +229,16 @@ export async function getResolvedDeal(
       workflowRoute,
       description: sourceLead?.description ?? deal.description ?? null,
       // ONE canonical resolver, shared with the deal-detail banner and the RFP payload ([[bid-due-date]]).
-      // Precedence: the Bid Board mirror (flag-gated, OFF by default) -> the source lead — INCLUDING when
-      // it's been cleared to null, because the lead OWNS the field and scoping/readiness must see the
-      // clear rather than a stale pre-write-through deal snapshot -> the deal's own column. `.day`, not
-      // `.raw`: consumers here (scoping-service, the PATCH /resolved-fields response) guard on
-      // `typeof === "string"`, so the deal-column case has to arrive in the same date-only shape a
-      // lead-backed deal produces.
+      // The source lead owns this field — INCLUDING when it's been cleared to null, because
+      // scoping/readiness must see the clear rather than a stale deal snapshot — EXCEPT when the deal's
+      // own column already carries the Bid Board's landed date (flag-gated, OFF by default), which is the
+      // one case where a stale lead value would be masking a real answer. The mirror is only the signal;
+      // the value returned is always the deal column or the lead's. `.day`, not `.raw`: consumers here
+      // (scoping-service, the PATCH /resolved-fields response) guard on `typeof === "string"`, so the
+      // deal-column case has to arrive in the same date-only shape a lead-backed deal produces.
       bidDueDate: resolveDealBidDueDateForRead({
         bidBoardDueDate: deal.bidBoardDueDate,
+        bidBoardDetachedAt: deal.bidBoardDetachedAt,
         hasSourceLead: Boolean(sourceLead),
         leadBidDueDate: sourceLead?.bidDueDate ?? null,
         dealBidDueDate: deal.bidDueDate,

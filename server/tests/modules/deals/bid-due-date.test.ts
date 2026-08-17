@@ -51,54 +51,133 @@ describe("dateOnlyToUtcMidnightIso", () => {
   });
 });
 
-describe("resolveDealBidDueDate — precedence (pure, flag-free)", () => {
-  it("1. the Bid Board mirror wins over both the lead and the deal column", () => {
-    const resolved = resolveDealBidDueDate({
-      bidBoardDueDate: "2026-09-01",
+describe("resolveDealBidDueDate — the SIGNAL rule (pure, flag-free)", () => {
+  const LANDED = "2026-09-01";
+  const LANDED_INSTANT = new Date(`${LANDED}T00:00:00.000Z`);
+  const LEAD = "2026-06-01";
+  const STALE_DEAL = new Date("2026-07-01T00:00:00.000Z");
+
+  // ★ The rule the whole design rests on. Prove it once, unmistakably: the mirror's VALUE is never what
+  // comes back. When the signal fires, the value returned is the DEAL COLUMN; all the signal decides is
+  // that it outranks the lead.
+  it("NEVER returns the mirror's value — the mirror only decides whether the deal column beats the lead", () => {
+    const mirrorOnly = resolveDealBidDueDate({
+      bidBoardDueDate: LANDED,
       hasSourceLead: true,
-      leadBidDueDate: "2026-06-01",
-      dealBidDueDate: new Date("2026-07-01T00:00:00.000Z"),
+      leadBidDueDate: LEAD,
+      // The write-through has NOT run: the column still holds a different day.
+      dealBidDueDate: STALE_DEAL,
     });
-    expect(resolved).toEqual({ day: "2026-09-01", raw: "2026-09-01", source: "bid_board" });
+    expect(mirrorOnly.day).not.toBe(LANDED);
+    expect(mirrorOnly).toEqual({ day: LEAD, raw: LEAD, source: "lead" });
   });
 
-  it("2. with no mirror, a lead-backed deal takes the LEAD's value over its own column", () => {
+  it("signal FIRES when the deal column matches the mirror: the DEAL COLUMN beats the lead", () => {
     const resolved = resolveDealBidDueDate({
-      bidBoardDueDate: null,
+      bidBoardDueDate: LANDED,
       hasSourceLead: true,
-      leadBidDueDate: "2026-06-01",
-      dealBidDueDate: new Date("2026-07-01T00:00:00.000Z"),
+      leadBidDueDate: LEAD,
+      dealBidDueDate: LANDED_INSTANT,
     });
-    expect(resolved).toEqual({ day: "2026-06-01", raw: "2026-06-01", source: "lead" });
+    // `raw` is the deal column's stored instant, NOT the mirror's date-only string.
+    expect(resolved).toEqual({ day: LANDED, raw: LANDED_INSTANT, source: "bid_board" });
   });
 
-  it("3. a lead-backed deal's CLEARED lead value still beats a stale deal column", () => {
+  it("compares CALENDAR DAYS, so a UTC-midnight column matches a date-only mirror", () => {
+    // The column is a timestamptz at UTC midnight and the mirror is a date. Comparing instants (or raw
+    // strings) would never match and the signal would be dead on arrival.
+    expect(
+      resolveDealBidDueDate({
+        bidBoardDueDate: LANDED,
+        hasSourceLead: true,
+        leadBidDueDate: LEAD,
+        dealBidDueDate: `${LANDED}T00:00:00.000Z`,
+      }).source
+    ).toBe("bid_board");
+    // …and a legacy non-midnight instant on the same DAY still counts as landed, matching the
+    // write-through's own day-based guard.
+    expect(
+      resolveDealBidDueDate({
+        bidBoardDueDate: LANDED,
+        hasSourceLead: true,
+        leadBidDueDate: LEAD,
+        dealBidDueDate: new Date(`${LANDED}T14:30:00.000Z`),
+      }).source
+    ).toBe("bid_board");
+  });
+
+  // ★ H1. buildBidBoardDetachUpdate does NOT clear bid_board_due_date, so a detached deal can carry a
+  // mirror that still matches its column. Without the explicit guard it would keep sourcing its bid due
+  // date — and its hold horizon, at-risk verdict and effective value — from the board it was severed from.
+  it("DETACHED: the override is refused even when the column and the mirror agree", () => {
+    const resolved = resolveDealBidDueDate({
+      bidBoardDueDate: LANDED,
+      bidBoardDetachedAt: new Date("2026-07-20T12:00:00.000Z"),
+      hasSourceLead: true,
+      leadBidDueDate: LEAD,
+      dealBidDueDate: LANDED_INSTANT,
+    });
+    expect(resolved).toEqual({ day: LEAD, raw: LEAD, source: "lead" });
+  });
+
+  it("a lead-backed deal's CLEARED lead value still beats a stale deal column", () => {
     // The lead OWNS this field (DEAL_FIELD_OWNERSHIP.bidDueDate === "lead"); the deal column is only a
-    // compatibility snapshot. Falling back to it here would mask a deliberate clear behind a
-    // pre-write-through value — the documented behaviour of both existing read sites, and a regression
-    // this test exists to prevent.
-    const resolved = resolveDealBidDueDate({
-      bidBoardDueDate: null,
-      hasSourceLead: true,
-      leadBidDueDate: null,
-      dealBidDueDate: new Date("2026-07-01T00:00:00.000Z"),
-    });
-    expect(resolved).toEqual({ day: null, raw: null, source: "lead" });
+    // compatibility snapshot. Falling back to it here would mask a deliberate clear — the documented
+    // behaviour of both existing read sites, and a regression this test exists to prevent.
+    expect(
+      resolveDealBidDueDate({
+        bidBoardDueDate: LANDED,
+        hasSourceLead: true,
+        leadBidDueDate: null,
+        dealBidDueDate: STALE_DEAL,
+      })
+    ).toEqual({ day: null, raw: null, source: "lead" });
   });
 
-  it("4. a deal with NO source lead falls back to its own column, normalized to a calendar day", () => {
-    const dealValue = new Date("2026-07-01T00:00:00.000Z");
-    const resolved = resolveDealBidDueDate({
-      bidBoardDueDate: null,
+  it("…but a CLEARED lead loses once the Bid Board's date has landed in the column", () => {
+    // This is the lead-masking fix, and the only case the read change exists for.
+    expect(
+      resolveDealBidDueDate({
+        bidBoardDueDate: LANDED,
+        hasSourceLead: true,
+        leadBidDueDate: null,
+        dealBidDueDate: LANDED_INSTANT,
+      })
+    ).toEqual({ day: LANDED, raw: LANDED_INSTANT, source: "bid_board" });
+  });
+
+  it("a deal with NO source lead returns its own column either way — the signal changes nothing", () => {
+    // Only a lead-backed deal can be affected at all: with no lead there is nothing for the deal column to
+    // outrank, so the signal is inert by construction.
+    const landed = resolveDealBidDueDate({
+      bidBoardDueDate: LANDED,
       hasSourceLead: false,
-      leadBidDueDate: null,
-      dealBidDueDate: dealValue,
+      dealBidDueDate: LANDED_INSTANT,
     });
+    const notLanded = resolveDealBidDueDate({
+      bidBoardDueDate: LANDED,
+      hasSourceLead: false,
+      dealBidDueDate: STALE_DEAL,
+    });
+    expect(landed.raw).toBe(LANDED_INSTANT);
+    expect(notLanded.raw).toBe(STALE_DEAL);
     // `.day` is normalized for the resolved-fields consumers; `.raw` preserves the stored shape so the
     // deal-detail response keeps publishing the same bytes it always has.
-    expect(resolved.day).toBe("2026-07-01");
-    expect(resolved.raw).toBe(dealValue);
-    expect(resolved.source).toBe("deal");
+    expect(notLanded.day).toBe("2026-07-01");
+    expect(notLanded.source).toBe("deal");
+  });
+
+  it("a NULL deal column can never fire the signal, whatever the mirror says", () => {
+    // "Landed" means the value is IN the column every SQL surface reads. A null column has received
+    // nothing, so the legacy answer stands and TS cannot drift ahead of SQL.
+    expect(
+      resolveDealBidDueDate({
+        bidBoardDueDate: LANDED,
+        hasSourceLead: true,
+        leadBidDueDate: LEAD,
+        dealBidDueDate: null,
+      })
+    ).toEqual({ day: LEAD, raw: LEAD, source: "lead" });
   });
 
   it("returns null (not a fabricated date) when every source is empty", () => {
@@ -106,46 +185,38 @@ describe("resolveDealBidDueDate — precedence (pure, flag-free)", () => {
     expect(resolveDealBidDueDate({ hasSourceLead: true })).toEqual({ day: null, raw: null, source: "lead" });
   });
 
-  it("falls THROUGH an unparseable mirror value rather than resolving to null", () => {
-    // A mirror the resolver cannot read is not an answer — the lead/deal chain must still apply, or one
-    // corrupt column would blank the bid date on every surface at once.
-    const resolved = resolveDealBidDueDate({
-      bidBoardDueDate: "garbage",
-      hasSourceLead: true,
-      leadBidDueDate: "2026-06-01",
-    });
-    expect(resolved).toEqual({ day: "2026-06-01", raw: "2026-06-01", source: "lead" });
-  });
-
-  it("normalizes the mirror to a calendar day even when handed a timestamp", () => {
-    const resolved = resolveDealBidDueDate({
-      bidBoardDueDate: new Date("2026-09-01T00:00:00.000Z"),
-      hasSourceLead: false,
-    });
-    expect(resolved).toEqual({ day: "2026-09-01", raw: "2026-09-01", source: "bid_board" });
+  it("an unparseable mirror leaves the legacy chain intact rather than blanking the date", () => {
+    expect(
+      resolveDealBidDueDate({
+        bidBoardDueDate: "garbage",
+        hasSourceLead: true,
+        leadBidDueDate: LEAD,
+        dealBidDueDate: LANDED_INSTANT,
+      })
+    ).toEqual({ day: LEAD, raw: LEAD, source: "lead" });
   });
 });
 
 describe("resolveDealBidDueDateForRead — the flag gate", () => {
+  // The deal column ALREADY carries the Bid Board's date (the write-through has run) and the lead
+  // disagrees — the only shape where the flag changes an answer.
   const input = {
     bidBoardDueDate: "2026-09-01",
     hasSourceLead: true,
     leadBidDueDate: "2026-06-01",
-    dealBidDueDate: new Date("2026-07-01T00:00:00.000Z"),
+    dealBidDueDate: new Date("2026-09-01T00:00:00.000Z"),
   };
 
-  it("flag ON: the Bid Board mirror wins", () => {
+  it("flag ON: the landed deal column beats the stale lead", () => {
     expect(resolveDealBidDueDateForRead(input, FLAG_ON)).toEqual({
       day: "2026-09-01",
-      raw: "2026-09-01",
+      raw: input.dealBidDueDate,
       source: "bid_board",
     });
   });
 
-  // ★ THE PARITY TEST. bid_board_due_date is ALREADY populated on prod, so if the read precedence shipped
-  // ungated every deal carrying a mirror value would have its banner date — and, through
-  // attachAtRiskResult, its at-risk verdict and effective VALUE — change on deploy, with the
-  // write-through still off. Flag off must be indistinguishable from the mirror not existing.
+  // ★ THE PARITY TEST. Flag off must erase the SIGNAL entirely, so the answer is indistinguishable from a
+  // deal whose mirror column holds nothing.
   it("flag OFF: identical to the same input with NO mirror value at all", () => {
     expect(resolveDealBidDueDateForRead(input, FLAG_OFF)).toEqual(
       resolveDealBidDueDate({ ...input, bidBoardDueDate: null })
@@ -173,6 +244,22 @@ describe("resolveDealBidDueDateForRead — the flag gate", () => {
         resolveDealBidDueDateForRead(input, { BID_BOARD_DUE_DATE_READBACK: value } as NodeJS.ProcessEnv).source
       ).toBe("lead");
     }
+  });
+
+  // The property that makes the flip itself safe: the write-through is gated by the SAME flag, so at flip
+  // time no deal's column has been rewritten and the read override fires for nobody. The read side follows
+  // the write side instead of racing ahead of it — which is also what keeps these three TS read sites from
+  // drifting away from holdHorizonDateSql and its ~50 SQL consumers.
+  it("is INERT at flip time — a deal whose column has not received the write-through is unchanged", () => {
+    const notYetWritten = {
+      bidBoardDueDate: "2026-09-01",
+      hasSourceLead: true,
+      leadBidDueDate: "2026-06-01",
+      dealBidDueDate: new Date("2026-07-01T00:00:00.000Z"),
+    };
+    expect(resolveDealBidDueDateForRead(notYetWritten, FLAG_ON)).toEqual(
+      resolveDealBidDueDateForRead(notYetWritten, FLAG_OFF)
+    );
   });
 });
 
@@ -235,7 +322,24 @@ describe("resolveRfpPayloadBidDueDate — the gated precedence CORRECTION", () =
     ).toBe("2026-09-15");
   });
 
-  it("flag ON: the Bid Board mirror beats both", () => {
+  it("flag ON: once the Bid Board's date has LANDED in the column, that column beats the lead", () => {
+    // Note what this is NOT: the mirror's value is never returned. The column and the mirror agree here
+    // (the write-through has run), which is what promotes the column over the lead.
+    const landed = new Date("2026-12-24T00:00:00.000Z");
+    expect(
+      resolveRfpPayloadBidDueDate(
+        {
+          bidBoardDueDate: "2026-12-24",
+          hasSourceLead: true,
+          leadBidDueDate: "2026-09-15",
+          dealBidDueDate: landed,
+        },
+        FLAG_ON
+      )
+    ).toBe(landed);
+  });
+
+  it("flag ON: a mirror the column has NOT received leaves the corrected lead-first ordering in place", () => {
     expect(
       resolveRfpPayloadBidDueDate(
         {
@@ -246,7 +350,7 @@ describe("resolveRfpPayloadBidDueDate — the gated precedence CORRECTION", () =
         },
         FLAG_ON
       )
-    ).toBe("2026-12-24");
+    ).toBe("2026-09-15");
   });
 
   it("returns the winning value AS STORED in both branches — the flag changes the source, not the shape", () => {

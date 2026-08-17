@@ -96,6 +96,7 @@ async function seed(options: {
   dealInstant?: Date | null;
   expectedCloseDate?: string | null;
   bidBoardTotalSales?: string | null;
+  detachedAt?: Date | null;
 }) {
   await pg.exec(`DELETE FROM public.deals; DELETE FROM public.leads;`);
   if (options.hasLead) {
@@ -122,6 +123,7 @@ async function seed(options: {
     sourceLeadId: options.hasLead ? LEAD_ID : null,
     bidDueDate: options.dealInstant === undefined ? DEAL_INSTANT : options.dealInstant,
     bidBoardDueDate: options.mirrorDay ?? null,
+    bidBoardDetachedAt: options.detachedAt ?? null,
     expectedCloseDate: options.expectedCloseDate ?? null,
     bidBoardTotalSales: options.bidBoardTotalSales ?? null,
     stageEnteredAt: new Date(),
@@ -218,23 +220,55 @@ describe("Bid Board due date read precedence — flag ON", () => {
     process.env.BID_BOARD_DUE_DATE_READBACK = "true";
   });
 
-  it("getDealDetail surfaces the Bid Board date over a DIFFERING lead value", async () => {
-    await seed({ hasLead: true, leadDay: LEAD_DAY, mirrorDay: MIRROR_DAY });
+  // "Landed" = the write-through has run, so deals.bid_due_date already carries the mirror's day. That is
+  // the ONLY state in which the override fires, and the value returned is the deal COLUMN — the same
+  // column holdHorizonDateSql and its ~50 SQL consumers read, so TS and SQL cannot disagree.
+  const landed = { dealInstant: new Date(`${MIRROR_DAY}T00:00:00.000Z`), mirrorDay: MIRROR_DAY };
+
+  it("getDealDetail: a LANDED deal column beats a differing lead value", async () => {
+    await seed({ hasLead: true, leadDay: LEAD_DAY, ...landed });
 
     expect(day((await detail())?.bidDueDate)).toBe(MIRROR_DAY);
   });
 
-  it("getResolvedDeal surfaces the Bid Board date over a DIFFERING lead value", async () => {
-    await seed({ hasLead: true, leadDay: LEAD_DAY, mirrorDay: MIRROR_DAY });
+  it("getResolvedDeal: a LANDED deal column beats a differing lead value", async () => {
+    await seed({ hasLead: true, leadDay: LEAD_DAY, ...landed });
 
     expect(day((await resolved()).resolved.bidDueDate)).toBe(MIRROR_DAY);
   });
 
-  it("both sites agree for a deal with NO source lead, over its own stale column", async () => {
+  // ★ H2 — the drift guard. A mirror the write-through has NOT delivered must change NOTHING, or these
+  // three TS read sites would show the board's date while every SQL surface still read the deal column —
+  // permanently, for every deal the write-through skips (detached, off-export, null-attributor,
+  // multi-match, template rows).
+  it("a mirror the column has NOT received is ignored on both sites — no TS/SQL drift", async () => {
+    await seed({ hasLead: true, leadDay: LEAD_DAY, mirrorDay: MIRROR_DAY });
+
+    expect(day((await detail())?.bidDueDate)).toBe(LEAD_DAY);
+    expect(day((await resolved()).resolved.bidDueDate)).toBe(LEAD_DAY);
+  });
+
+  // ★ H1 — detach. buildBidBoardDetachUpdate never clears bid_board_due_date, so a severed deal can carry
+  // a mirror that still matches its column. It must fall back to the legacy answer anyway, or it would go
+  // on taking its hold horizon (and therefore its value) from the board it was disconnected from, forever.
+  it("a DETACHED deal ignores the override even when its column matches the mirror", async () => {
+    await seed({
+      hasLead: true,
+      leadDay: LEAD_DAY,
+      ...landed,
+      detachedAt: new Date("2026-07-20T12:00:00.000Z"),
+    });
+
+    expect(day((await detail())?.bidDueDate)).toBe(LEAD_DAY);
+    expect(day((await resolved()).resolved.bidDueDate)).toBe(LEAD_DAY);
+  });
+
+  it("a deal with NO source lead is unaffected either way — there is nothing to outrank", async () => {
+    await seed({ hasLead: false, ...landed });
+    expect(day((await detail())?.bidDueDate)).toBe(MIRROR_DAY);
+
     await seed({ hasLead: false, mirrorDay: MIRROR_DAY });
-
-    expect(day((await detail())?.bidDueDate)).toBe(MIRROR_DAY);
-    expect(day((await resolved()).resolved.bidDueDate)).toBe(MIRROR_DAY);
+    expect(day((await detail())?.bidDueDate)).toBe(DEAL_DAY);
   });
 
   // The 91%-null regression guard: with no mirror value the flag changes nothing at all, on either site.
@@ -250,8 +284,15 @@ describe("Bid Board due date read precedence — flag ON", () => {
 });
 
 describe("★ Bid Board due date read precedence — flag OFF (prod parity)", () => {
-  it("returns the LEAD value even though a DIFFERING Bid Board date is present, on both sites", async () => {
-    await seed({ hasLead: true, leadDay: LEAD_DAY, mirrorDay: MIRROR_DAY });
+  it("returns the LEAD value on a deal whose column HAS landed — the exact case the flag changes", async () => {
+    // Not a mirror-only fixture: with the signal rule that would pass whether or not the flag were read.
+    // The column and the mirror agree here, so flag ON returns the column — and flag OFF must not.
+    await seed({
+      hasLead: true,
+      leadDay: LEAD_DAY,
+      mirrorDay: MIRROR_DAY,
+      dealInstant: new Date(`${MIRROR_DAY}T00:00:00.000Z`),
+    });
 
     expect(day((await detail())?.bidDueDate)).toBe(LEAD_DAY);
     expect(day((await resolved()).resolved.bidDueDate)).toBe(LEAD_DAY);
@@ -288,8 +329,13 @@ describe("★ Bid Board due date read precedence — flag OFF (prod parity)", ()
 
 /**
  * ★ THE CONSEQUENCE. The bid due date is not a label: in a genuine estimating stage it IS the auto-park
- * horizon, so which date wins decides whether the deal reports its value or $0. This pins both directions
- * and — critically — pins that the flag-off answer is the OLD one on the very same fixture.
+ * horizon, so which date wins decides whether the deal reports its value or $0.
+ *
+ * Every fixture here is in the LANDED state (the write-through has run, so deals.bid_due_date carries the
+ * mirror's day) because that is the only state the read override fires in. Note what that makes these
+ * cases: with the flag ON, detail agrees with what the SQL surfaces have been saying all along, since they
+ * read the same column. With it OFF, the lead masks that column on the deal page while the board and the
+ * dashboards read it — the pre-existing detail-vs-aggregate gap this read change closes.
  */
 describe("hold / at-risk consequence of the resolved bid due date", () => {
   const VALUE = "241000.00";
@@ -304,17 +350,23 @@ describe("hold / at-risk consequence of the resolved bid due date", () => {
     return date.toISOString().slice(0, 10);
   };
 
-  it("a Bid Board horizon >90 CT-days out parks the estimating deal and zeroes its value", async () => {
-    process.env.BID_BOARD_DUE_DATE_READBACK = "true";
+  /** A deal whose column has RECEIVED the Bid Board's date, with the lead disagreeing. */
+  async function seedLanded(boardDay: string, leadDay: string) {
     await seed({
       hasLead: true,
-      leadDay: nearDay(),
-      mirrorDay: farOutDay(),
-      // The close target is deliberately NEAR, so a surface still reading expected_close_date would give
-      // the opposite answer rather than accidentally agreeing.
-      expectedCloseDate: nearDay(),
+      leadDay,
+      mirrorDay: boardDay,
+      dealInstant: new Date(`${boardDay}T00:00:00.000Z`),
+      // The close target is deliberately the OPPOSITE of the board's date, so a surface still reading
+      // expected_close_date gives the wrong answer rather than accidentally agreeing.
+      expectedCloseDate: leadDay,
       bidBoardTotalSales: VALUE,
     });
+  }
+
+  it("a landed horizon >90 CT-days out parks the estimating deal and zeroes its value", async () => {
+    process.env.BID_BOARD_DUE_DATE_READBACK = "true";
+    await seedLanded(farOutDay(), nearDay());
 
     const result = await detail();
     expect(result?.effectiveOnHold).toBe(true);
@@ -322,28 +374,33 @@ describe("hold / at-risk consequence of the resolved bid due date", () => {
   });
 
   it("…and the SAME fixture with the flag OFF reports the deal live, at its full value", async () => {
-    // This is the pair that makes the flag meaningful: the mirror is present and far out either way, so
-    // the ONLY difference is the gate.
-    await seed({
-      hasLead: true,
-      leadDay: nearDay(),
-      mirrorDay: farOutDay(),
-      expectedCloseDate: nearDay(),
-      bidBoardTotalSales: VALUE,
-    });
+    // The pair that makes the flag meaningful: identical rows, the only difference is the gate.
+    await seedLanded(farOutDay(), nearDay());
 
     const result = await detail();
     expect(result?.effectiveOnHold).toBe(false);
     expect(Number(result?.effectiveValue)).toBe(Number(VALUE));
   });
 
-  it("a Bid Board horizon <=90 days out does NOT park it, even with a far-out close target", async () => {
+  it("a landed horizon <=90 days out does NOT park it, even with a far-out close target", async () => {
+    process.env.BID_BOARD_DUE_DATE_READBACK = "true";
+    await seedLanded(nearDay(), farOutDay());
+
+    const result = await detail();
+    expect(result?.effectiveOnHold).toBe(false);
+    expect(Number(result?.effectiveValue)).toBe(Number(VALUE));
+  });
+
+  // A far-out board date that has NOT landed must not park anything: the column still holds the old value,
+  // so parking here would be TS inventing a verdict the SQL surfaces do not share.
+  it("a far-out mirror the column has NOT received parks nothing, flag on", async () => {
     process.env.BID_BOARD_DUE_DATE_READBACK = "true";
     await seed({
       hasLead: true,
-      leadDay: farOutDay(),
-      mirrorDay: nearDay(),
-      expectedCloseDate: farOutDay(),
+      leadDay: nearDay(),
+      mirrorDay: farOutDay(),
+      dealInstant: new Date(`${nearDay()}T00:00:00.000Z`),
+      expectedCloseDate: nearDay(),
       bidBoardTotalSales: VALUE,
     });
 

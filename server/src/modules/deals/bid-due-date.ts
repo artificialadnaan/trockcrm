@@ -1,17 +1,43 @@
 import { isBidBoardDueDateReadbackEnabled } from "../../config/feature-flags.js";
 
 /**
- * THE one place a deal's bid due date is resolved from its three possible sources, so the deal-detail
- * banner, the resolved-fields/scoping surface and the RFP payload can never disagree about it.
+ * THE one place a deal's bid due date is resolved, so the deal-detail banner, the resolved-fields/scoping
+ * surface and the RFP payload can never disagree about it.
  *
- * Precedence: Bid Board mirror -> source lead (when the deal is lead-backed) -> the deal's own column.
+ * ★ THE CENTRAL RULE, and the thing to understand before editing anything here:
  *
- * WHY THE MIRROR IS READ DIRECTLY, not inferred from the deal column: `deals.bid_board_due_date` IS the
- * Bid Board's answer (the ingest mirror writes it on every sync). Guessing provenance from
- * `deals.bid_due_date` — "it looks bid-board-shaped, so it probably came from the board" — would make the
- * rule dishonest the first time a rep hand-edited the field.
+ *   `deals.bid_board_due_date` IS NEVER READ AS A VALUE. It is read only as a SIGNAL.
  *
- * WHY THE RULE MATTERS BEYOND DISPLAY: since 2026-07-27 `deals.bid_due_date` is the auto-park HORIZON for
+ * The value this resolver returns is ALWAYS one of `deals.bid_due_date` or `leads.bid_due_date` — never
+ * the mirror column. The mirror's only job is to answer one question: "has the Bid Board's date actually
+ * LANDED in the CRM column?", which is true when
+ * `(deals.bid_due_date AT TIME ZONE 'UTC')::date == deals.bid_board_due_date`. When that holds, the deal
+ * column WINS over the source lead. When it does not hold, the legacy precedence applies untouched.
+ *
+ * WHY, because the obvious design (read the mirror's value directly, mirror-beats-lead-beats-column) was
+ * written first and is wrong in two ways that only show up in production:
+ *
+ *  1. DETACH. "Move back to Opportunity" (migration 0200) severs a deal from Bid Board sync, and the
+ *     write-through honours that — but `buildBidBoardDetachUpdate` never clears `bid_board_due_date`. A
+ *     value-reading resolver would therefore keep sourcing a detached deal's bid due date, and so its hold
+ *     horizon, at-risk verdict and effective value, from the board it was deliberately severed from —
+ *     forever. Under the signal rule a detached deal's column was never rewritten, so it falls straight
+ *     back to the legacy answer on its own. (Belt-and-braces, `bidBoardDetachedAt` also disables the
+ *     override outright: the fallback is a consequence of the data, and an invariant this load-bearing
+ *     should not depend on a consequence.)
+ *
+ *  2. TS/SQL DRIFT. Only these three TS read sites would move to the mirror; `holdHorizonDateSql` and its
+ *     ~50 SQL consumers keep reading `deals.bid_due_date`. So the deal page would show one date and every
+ *     board, dashboard, report and worker rollup another — not transiently, but PERMANENTLY for every deal
+ *     the write-through skips: detached deals, deals no longer on the export, rows skipped for a null
+ *     attributor, multi-match rows, template rows. Reading the same column SQL reads makes that class of
+ *     drift impossible by construction, and makes the flag flip inert until data actually flows.
+ *
+ * So the read change is not "show the Bid Board's date". It is narrower and safer: "once the Bid Board's
+ * date is in the CRM column, stop letting a stale lead value MASK it". That is the only reason a read
+ * change was needed at all, and it is all this does.
+ *
+ * WHY ANY OF IT MATTERS BEYOND DISPLAY: since 2026-07-27 `deals.bid_due_date` is the auto-park HORIZON for
  * genuine estimating-stage deals ([[deal-hold-risk]] resolveHoldHorizonDay and its SQL twin
  * holdHorizonDateSql in [[deal-reporting]]). A horizon more than CLOSE_TARGET_HOLD_HORIZON_DAYS (90)
  * CT-days out makes a deal effectively on hold, which ZEROES its value on cards, dashboards, at-risk
@@ -19,20 +45,33 @@ import { isBidBoardDueDateReadbackEnabled } from "../../config/feature-flags.js"
  * goes through `resolveDealBidDueDateForRead` (flag-gated) and never the raw resolver.
  */
 
-/** Which of the three sources supplied the resolved value (or would have, when all three are empty). */
+/**
+ * Which source supplied the resolved value.
+ *
+ * `"bid_board"` does NOT mean "the mirror column's value was returned" — nothing ever returns that. It
+ * means "the DEAL COLUMN was returned, and it beat the lead because it carries the Bid Board's landed
+ * value". See the module doc.
+ */
 export type DealBidDueDateSource = "bid_board" | "lead" | "deal";
 
 export interface DealBidDueDateInput {
   /**
    * `deals.bid_board_due_date` — the Bid Board export's Due Date, mirrored on every sync. A date-only
    * column, so node-pg/Drizzle hand it back as "YYYY-MM-DD".
+   *
+   * SIGNAL ONLY. Its value is never returned; it is only compared against the deal column's calendar day.
    */
   bidBoardDueDate?: Date | string | null;
+  /**
+   * `deals.bid_board_detached_at` (migration 0200) — non-null once "Move back to Opportunity" severed this
+   * deal from Bid Board sync. Disables the override outright.
+   */
+  bidBoardDetachedAt?: Date | string | null;
   /**
    * Whether the deal has a source lead AT ALL — deliberately NOT "whether that lead has a bid due date".
    * A lead-backed deal's CLEARED (null) lead value must still beat the deal column: the lead owns the
    * field (DEAL_FIELD_OWNERSHIP.bidDueDate === "lead") and the deal column is only a compatibility
-   * snapshot, so a deliberate clear must not be masked by a stale pre-write-through mirror.
+   * snapshot, so a deliberate clear must not be masked by a stale deal snapshot.
    */
   hasSourceLead: boolean;
   /** `leads.bid_due_date` — a date-only column ("YYYY-MM-DD"). */
@@ -48,10 +87,10 @@ export interface ResolvedDealBidDueDate {
    */
   day: string | null;
   /**
-   * The winning source's value EXACTLY AS STORED — a date-only string for the mirror and the lead, a
-   * `Date` for `deals.bid_due_date`. Present so a caller that already publishes the raw column shape on
-   * the wire (getDealDetail) keeps doing so byte-for-byte instead of silently narrowing an ISO instant to
-   * a date-only string for every non-lead-backed deal the moment this resolver is introduced.
+   * The winning source's value EXACTLY AS STORED — a date-only string from the lead, a `Date` from
+   * `deals.bid_due_date`. Present so a caller that already publishes the raw column shape on the wire
+   * (getDealDetail) keeps doing so byte-for-byte instead of silently narrowing an ISO instant to a
+   * date-only string for every non-lead-backed deal the moment this resolver is introduced.
    */
   raw: Date | string | null;
   source: DealBidDueDateSource;
@@ -100,12 +139,25 @@ export function dateOnlyToUtcMidnightIso(day: string): string {
  * `resolveDealBidDueDateForRead` instead — see that function for why the flag lives one level up.
  */
 export function resolveDealBidDueDate(input: DealBidDueDateInput): ResolvedDealBidDueDate {
-  const bidBoardDay = bidDueDateToDateOnly(input.bidBoardDueDate);
-  if (bidBoardDay != null) {
-    // Normalized rather than passed through raw: the mirror is a date-only column, so its stored shape and
-    // its calendar day are the same string anyway, and normalizing means a Date-valued mirror (a future
-    // caller, a test fixture typed as timestamptz) can never publish an instant here.
-    return { day: bidBoardDay, raw: bidBoardDay, source: "bid_board" };
+  const dealRaw = input.dealBidDueDate ?? null;
+  const dealDay = bidDueDateToDateOnly(dealRaw);
+
+  // THE SIGNAL. Not "what does the board say?" but "has what the board says already landed in the column
+  // every SQL surface reads?". Compared on the CALENDAR DAY, because the column is a timestamptz at UTC
+  // midnight and the mirror is a date — the same comparison holdHorizonDateSql makes with
+  // `(bid_due_date AT TIME ZONE 'UTC')::date`.
+  //
+  // The detach check is belt-and-braces. A detached deal's column is never rewritten by the sync, so it
+  // would fall back on its own — but that is a consequence of the data rather than a stated rule, and
+  // `bid_board_due_date` is NOT cleared on detach (buildBidBoardDetachUpdate), so the day a backfill or a
+  // hand-edit happens to align the two columns on a severed deal, the consequence quietly stops holding.
+  // An invariant this load-bearing gets its own predicate.
+  const mirrorDay = bidDueDateToDateOnly(input.bidBoardDueDate);
+  const detached = input.bidBoardDetachedAt != null;
+  if (!detached && mirrorDay != null && dealDay != null && dealDay === mirrorDay) {
+    // The DEAL COLUMN is returned — never the mirror. All this branch decides is that it outranks the
+    // lead, so a stale lead value stops masking a bid date the Bid Board has already delivered.
+    return { day: dealDay, raw: dealRaw, source: "bid_board" };
   }
 
   if (input.hasSourceLead) {
@@ -113,15 +165,19 @@ export function resolveDealBidDueDate(input: DealBidDueDateInput): ResolvedDealB
     return { day: bidDueDateToDateOnly(leadRaw), raw: leadRaw, source: "lead" };
   }
 
-  const dealRaw = input.dealBidDueDate ?? null;
-  return { day: bidDueDateToDateOnly(dealRaw), raw: dealRaw, source: "deal" };
+  return { day: dealDay, raw: dealRaw, source: "deal" };
 }
 
 /**
  * The read wrapper EVERY read site uses. Consults `BID_BOARD_DUE_DATE_READBACK` exactly once and, when it
- * is off, hands the pure resolver `bidBoardDueDate: null` — so flag-off reproduces today's behaviour
- * exactly on every surface, including the at-risk / effective-value verdicts getDealDetail derives from
- * this date. The mirror column is already populated on prod, so this gate is what makes the PR inert.
+ * is off, hands the pure resolver `bidBoardDueDate: null` — erasing the SIGNAL, so flag-off reproduces
+ * today's behaviour exactly on every surface, including the at-risk / effective-value verdicts
+ * getDealDetail derives from this date.
+ *
+ * Note what the flag now buys, given the signal rule: at flip time nothing moves, because the
+ * write-through is gated by the same flag and has therefore never run, so no deal's column matches its
+ * mirror except by coincidence. The read side follows the write side rather than racing ahead of it, and
+ * the census measures exactly the change the flip causes.
  */
 export function resolveDealBidDueDateForRead(
   input: DealBidDueDateInput,
@@ -155,6 +211,10 @@ export function resolveDealBidDueDateForRead(
  * Being the more correct precedence buys no exemption — it just means the fix rides along when the flag
  * flips. Returns the winning source's value AS STORED in both branches, so the flag changes only WHICH
  * source wins, never the shape (`cleanIso` in rfp-payload.ts normalizes either one identically).
+ *
+ * Given the signal rule, the two branches differ on a NARROW set: when the deal column already carries the
+ * Bid Board's landed date both branches return that column, so only a lead-backed deal whose column has
+ * NOT received the write-through can differ — which is exactly the lead-vs-column ordering being gated.
  */
 export function resolveRfpPayloadBidDueDate(
   input: DealBidDueDateInput,

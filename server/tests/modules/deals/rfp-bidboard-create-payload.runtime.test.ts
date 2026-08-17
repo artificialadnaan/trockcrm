@@ -54,7 +54,9 @@ async function setup() {
       awarded_amount numeric, bid_estimate numeric, dd_estimate numeric, forecast_revenue numeric,
       estimator text, bid_board_estimator text,
       property_address text, property_city text, property_state text, property_zip text, property_country text,
-      description text, bid_due_date timestamptz, bid_board_due_date date, created_at timestamptz DEFAULT now(),
+      description text, bid_due_date timestamptz, bid_board_due_date date,
+      -- migration 0200: the resolver refuses the Bid Board override on a severed deal.
+      bid_board_detached_at timestamptz, created_at timestamptz DEFAULT now(),
       rfp_approval_request_event_id uuid, rfp_approval_request_id integer,
       assigned_rep_id uuid, hubspot_owner_email text, created_by_user_id uuid,
       company_id uuid, primary_contact_id uuid, source_lead_id uuid
@@ -165,19 +167,33 @@ describe("enqueueRfpBidBoardCreate — DB-authoritative payload from a sparse { 
 
   /**
    * The RFP payload is the THIRD read site of the shared bid-due-date resolver, alongside the deal-detail
-   * banner and getResolvedDeal — but the ONLY one whose flag-OFF branch is not the shared precedence.
+   * banner and getResolvedDeal — and the ONLY one whose flag-OFF branch is not the shared precedence.
    *
-   * The fixture is lead-backed with THREE different dates in play (deal column 2026-08-01, lead
-   * 2026-09-15, mirror 2026-12-24), so each case below identifies exactly which source won rather than
-   * coincidentally agreeing. Flag OFF must reproduce today's answer for BOTH legs — the mirror ignored AND
-   * the legacy deal-column-first ordering preserved — because this value is typed into the Procore Bid
-   * Board project's Due Date, and nothing may change there before the census is read.
+   * The fixture is lead-backed with a deal column of 2026-08-01 and a lead of 2026-09-15, so every case
+   * identifies exactly which source won. `mirror` sets deals.bid_board_due_date; `landed` additionally
+   * rewrites the deal column to that day, modelling the state AFTER the write-through has run — the only
+   * state in which the Bid Board override fires at all (the mirror is a signal, never a value).
    */
   describe("Bid Board due-date read-back in the payload", () => {
-    async function dueDateFor(options: { env?: string; mirror?: string | null }): Promise<string> {
+    async function dueDateFor(options: {
+      env?: string;
+      mirror?: string;
+      landed?: string;
+      detached?: boolean;
+    }): Promise<string> {
       pg = await setup();
-      if (options.mirror) {
-        await pg!.query(`UPDATE deals SET bid_board_due_date = $2 WHERE id = $1`, [DEAL, options.mirror]);
+      const boardDay = options.landed ?? options.mirror;
+      if (boardDay) {
+        await pg!.query(`UPDATE deals SET bid_board_due_date = $2 WHERE id = $1`, [DEAL, boardDay]);
+      }
+      if (options.landed) {
+        await pg!.query(`UPDATE deals SET bid_due_date = $2::timestamptz WHERE id = $1`, [
+          DEAL,
+          `${options.landed}T00:00:00.000Z`,
+        ]);
+      }
+      if (options.detached) {
+        await pg!.query(`UPDATE deals SET bid_board_detached_at = now() WHERE id = $1`, [DEAL]);
       }
       const tdb: any = drizzle(pg as any);
       if (options.env === undefined) delete process.env.BID_BOARD_DUE_DATE_READBACK;
@@ -195,17 +211,26 @@ describe("enqueueRfpBidBoardCreate — DB-authoritative payload from a sparse { 
       expect(await dueDateFor({})).toContain("2026-08-01");
     });
 
-    it("flag OFF: a present Bid Board mirror is ignored, and the legacy ordering still holds", async () => {
-      // Both gated legs at once. Neither 2026-12-24 (the mirror) nor 2026-09-15 (the lead) may appear.
+    it("flag OFF: a LANDED Bid Board date is ignored and the legacy ordering still holds", async () => {
+      // Both gated legs at once, on the fixture where the flag would otherwise change the answer.
+      expect(await dueDateFor({ landed: "2026-12-24" })).toContain("2026-12-24");
+      // (the landed column IS 2026-12-24, so the legacy deal-column-first rule returns it too — the
+      // meaningful flag-off assertion is the lead-masking one below)
       expect(await dueDateFor({ mirror: "2026-12-24" })).toContain("2026-08-01");
     });
 
-    it("flag ON: the precedence CORRECTION lands — the lead beats the deal's own column", async () => {
+    it("flag ON: the precedence CORRECTION lands — the lead beats an un-landed deal column", async () => {
       expect(await dueDateFor({ env: "true" })).toContain("2026-09-15");
+      expect(await dueDateFor({ env: "true", mirror: "2026-12-24" })).toContain("2026-09-15");
     });
 
-    it("flag ON: the Bid Board date beats both the lead's and the deal's own", async () => {
-      expect(await dueDateFor({ env: "true", mirror: "2026-12-24" })).toContain("2026-12-24");
+    it("flag ON: once the board's date has LANDED in the column, that column beats the lead", async () => {
+      expect(await dueDateFor({ env: "true", landed: "2026-12-24" })).toContain("2026-12-24");
+    });
+
+    it("flag ON: a DETACHED deal refuses the override even with a landed column", async () => {
+      // Falls back to the corrected legacy chain (lead-first), never to the board's date.
+      expect(await dueDateFor({ env: "true", landed: "2026-12-24", detached: true })).toContain("2026-09-15");
     });
   });
 });
