@@ -12,6 +12,7 @@
 import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { deals, files, offices, users } from "@trock-crm/shared/schema";
+import { weeklyReportExpectedWeeks } from "@trock-crm/shared/types";
 import { migrationSql } from "../../../server/tests/helpers/migration-sql.js";
 import { tenantSchemaSql } from "../../../server/tests/helpers/tenant-schema-from-drizzle.js";
 import {
@@ -426,7 +427,31 @@ describe("buildBacklog", () => {
     expect(backlog).toHaveLength(1);
     expect(backlog[0]!.outstandingWeeks).toBe(25); // 26 in-window minus the current week
     expect(backlog[0]!.olderOutstandingCount).toBe(5);
-    expect(backlog[0]!.oldestWeekOf).toBe("2026-02-19");
+    // The TRUE oldest — the cadence start — not the oldest week that happens to fall inside the
+    // window. This previously read 2026-02-19, five weeks later, because oldestWeekOf was assigned
+    // only while walking the in-window slice: the digest told leadership the backlog was five weeks
+    // younger than it was, in the same line that admitted five older weeks existed.
+    expect(backlog[0]!.oldestWeekOf).toBe("2026-01-15");
+  });
+
+  it("still names the oldest week when the only outstanding weeks are beyond the window", () => {
+    // Recent weeks all filed, old ones not. Requiring an IN-WINDOW outstanding week dropped such a
+    // project from the digest entirely — the opposite of what a backlog report is for.
+    const long = { ...project, cadenceStartDate: "2026-01-15" };
+    const expectedWeeks = weeklyReportExpectedWeeks({
+      cadenceWeekday: long.cadenceWeekday,
+      cadenceStartDate: long.cadenceStartDate,
+      cadenceEndDate: long.cadenceEndDate,
+      throughDate: DUE,
+    });
+    // Deliver everything except the first two weeks.
+    const delivered = new Set(expectedWeeks.slice(2).map((weekOf) => `${long.id}|${weekOf}`));
+
+    const backlog = buildBacklog([long], DUE, delivered, new Set());
+    expect(backlog).toHaveLength(1);
+    expect(backlog[0]!.outstandingWeeks).toBe(0);
+    expect(backlog[0]!.olderOutstandingCount).toBe(2);
+    expect(backlog[0]!.oldestWeekOf).toBe("2026-01-15");
   });
 
   it("sorts worst-first by total outstanding, in-window plus older", () => {

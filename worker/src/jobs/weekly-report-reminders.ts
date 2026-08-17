@@ -979,14 +979,25 @@ export function buildBacklog(
       return !deliveredWeeks.has(key) && !dismissedWeeks.has(key);
     };
 
+    // `oldestWeekOf` is tracked across BOTH loops. Assigning it only inside the in-window slice made
+    // the digest read "(+5 older) · oldest Thursday, Feb 19" while one of those five older weeks was
+    // in fact the oldest — understating the backlog's age to the people whose job is to act on it.
+    // `expected` is ascending, so the first outstanding week seen is the earliest.
+    let oldestWeekOf: string | null = null;
+    const noteOldest = (weekOf: string) => {
+      if (oldestWeekOf == null) oldestWeekOf = weekOf;
+    };
+
     let olderOutstandingCount = 0;
     for (let i = 0; i < cutoffIndex; i += 1) {
       const weekOf = expected[i]!;
-      if (weekOf !== currentWeek && isOutstanding(weekOf)) olderOutstandingCount += 1;
+      if (weekOf !== currentWeek && isOutstanding(weekOf)) {
+        olderOutstandingCount += 1;
+        noteOldest(weekOf);
+      }
     }
 
     let outstandingWeeks = 0;
-    let oldestWeekOf: string | null = null;
     for (let i = cutoffIndex; i < expected.length; i += 1) {
       const weekOf = expected[i]!;
       // The current cadence week is the digest's own subject — it belongs in Filed/Outstanding above, not
@@ -994,9 +1005,12 @@ export function buildBacklog(
       if (weekOf === currentWeek) continue;
       if (!isOutstanding(weekOf)) continue;
       outstandingWeeks += 1;
-      if (oldestWeekOf == null) oldestWeekOf = weekOf;
+      noteOldest(weekOf);
     }
-    if (outstandingWeeks > 0 && oldestWeekOf != null) {
+    // Gated on ANY outstanding week, in-window or older. Requiring an in-window one dropped a project
+    // whose recent weeks are all filed but whose older backlog is not — it would disappear from the
+    // digest entirely, which is the opposite of what a backlog report is for.
+    if ((outstandingWeeks > 0 || olderOutstandingCount > 0) && oldestWeekOf != null) {
       entries.push({ projectName: project.projectName, outstandingWeeks, oldestWeekOf, olderOutstandingCount });
     }
   }
