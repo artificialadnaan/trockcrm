@@ -59,6 +59,22 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3
  * drift into a UI that hides a page the API still serves. A superintendent's surface is T-Rock Cam via
  * /api/field, which is a separate mount with its own authorisation.
  */
+/**
+ * Publication actions are mounted BEFORE the role gate, and authorised by ASSIGNMENT instead.
+ *
+ * The gate below admits only admin/director/rep, but the assigned PM is whoever the setup names — and
+ * `ASSIGNABLE_ROLES` deliberately includes `construction` and `field_contractor`, which is what a real
+ * PM usually is. Behind the gate, `canPublishWeeklyReport`'s assigned-PM branch was unreachable for
+ * exactly the people the feature is built around: they could approve a report and then be unable to
+ * send the client their link without leadership doing it for them.
+ *
+ * These three routes still sit on the tenant router (so `requireCrmUser` and office scoping apply) and
+ * each one calls `loadPublishableReport`, which refuses anyone who is not the assigned PM or
+ * leadership. The leadership dashboard, settings and setup CRUD stay behind the gate.
+ */
+const publicationRouter = Router();
+router.use(publicationRouter);
+
 router.use(requireRole("admin", "director", "rep"));
 
 function requireUuid(value: unknown, label: string): string {
@@ -449,7 +465,7 @@ async function loadPublishableReport(req: Request, id: string) {
  * Each call mints a NEW link rather than returning the existing one, so revoking the link you just emailed
  * cannot kill the one the client is already reading.
  */
-router.post("/reports/:id/share-link", async (req, res, next) => {
+publicationRouter.post("/reports/:id/share-link", async (req, res, next) => {
   try {
     const office = officeContextFrom(req);
     const actor = actorFrom(req);
@@ -484,7 +500,7 @@ router.post("/reports/:id/share-link", async (req, res, next) => {
   }
 });
 
-router.get("/reports/:id/share-link", async (req, res, next) => {
+publicationRouter.get("/reports/:id/share-link", async (req, res, next) => {
   try {
     const office = officeContextFrom(req);
     const tokens = await listWeeklyReportTokens(
@@ -499,7 +515,7 @@ router.get("/reports/:id/share-link", async (req, res, next) => {
   }
 });
 
-router.post("/reports/:id/share-link/:tokenId/revoke", async (req, res, next) => {
+publicationRouter.post("/reports/:id/share-link/:tokenId/revoke", async (req, res, next) => {
   try {
     const office = officeContextFrom(req);
     const reportId = requireUuid(req.params.id, "id");

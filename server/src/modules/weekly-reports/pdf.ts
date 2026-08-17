@@ -689,6 +689,15 @@ async function drawPhotoCell(
       mimeType: photo.mimeType,
     },
     signal,
+    // strictStorage: a TRANSIENT storage failure must fail the render, not degrade to a placeholder.
+    //
+    // This artifact is content-addressed and, for a sent report, treated as frozen — so an R2 timeout
+    // that quietly produced "Image unavailable" would be PUBLISHED as that report's PDF and then
+    // served for every later download, and attached to the client's email, permanently. The photos are
+    // most of what a client reads a progress report for. Failing loudly means the next download simply
+    // re-renders once R2 is healthy; a permanent, photo-specific failure still degrades to the
+    // placeholder, which is the case the placeholder is actually for.
+    true,
   );
   const opened = buffer ? openImageForLayout(doc, buffer, { id: photo.fileId, displayName: photo.fileId }) : null;
 
