@@ -32,6 +32,7 @@ function row(partial: Partial<CensusRow>): CensusRow {
     demo_shaped: false,
     is_ambiguous_procore_bid_id: false,
     is_ambiguous_project_number: false,
+    has_procore_bid_id: false,
     next_bid_due_day: "2026-09-01",
     is_test_data: false,
     bid_due_date_bid_board_project_number: "DFW-1-00001-aa",
@@ -205,6 +206,8 @@ describe("census-bid-board-due-date-readback — SQL", () => {
     expect(sql).toContain("AS is_ambiguous_procore_bid_id");
     expect(sql).toContain("o.procore_bid_id = d.procore_bid_id");
     expect(sql).toContain("d.procore_bid_id IS NOT NULL");
+    // …and projects whether tier 1 gets to answer at all, which is what makes the cascade expressible.
+    expect(sql).toContain("(d.procore_bid_id IS NOT NULL) AS has_procore_bid_id");
   });
 
   it("does NOT filter test deals out of the cohort — the ingest does not either", () => {
@@ -515,6 +518,7 @@ describe("census-bid-board-due-date-readback — summary", () => {
       "office_dallas",
       [
         row({
+          has_procore_bid_id: true,
           is_ambiguous_procore_bid_id: true,
           deal_value: "750000",
           currently_far_out: false,
@@ -534,17 +538,79 @@ describe("census-bid-board-due-date-readback — summary", () => {
     expect(summary.netValueDelta).toBe(0);
   });
 
-  it("counts a row colliding on BOTH identities once, but attributes it to each", () => {
-    // The two per-identity counters may overlap, so they do not necessarily sum to the row total —
-    // ambiguousRowsExcluded counts distinct ROWS.
+  // ★ TIER PRIORITY. resolveDealMatches stops at the FIRST tier that matches, so a unique procore_bid_id
+  // resolves the row at tier 1 and the ingest WRITES it — the project-number collision is never even
+  // looked at. Excluding it dropped a row the ingest writes, understating every number the flag flip is
+  // approved on.
+  it("INCLUDES a row with a shared project number when its procore_bid_id is unique", () => {
     const summary = summarizeCensus(
       "office_dallas",
-      [row({ is_ambiguous_procore_bid_id: true, is_ambiguous_project_number: true })],
+      [
+        row({
+          has_procore_bid_id: true,
+          is_ambiguous_procore_bid_id: false,
+          // Another active deal shares the canonical project number — irrelevant, tier 1 already answered.
+          is_ambiguous_project_number: true,
+          deal_value: "640000",
+          currently_far_out: false,
+          next_far_out: true,
+        }),
+      ],
+      10
+    );
+
+    expect(summary.ambiguousRowsExcluded).toBe(0);
+    expect(summary.touchedRows).toBe(1);
+    expect(summary.wouldWrite).toBe(1);
+    // It reaches the financial totals too — this is the understatement the old rule caused.
+    expect(summary.wouldPark).toBe(1);
+    expect(summary.parkedValue).toBe(640000);
+  });
+
+  it("EXCLUDES it when the procore_bid_id is itself shared — tier 1 refuses before tier 2 is reached", () => {
+    const summary = summarizeCensus(
+      "office_dallas",
+      [
+        row({
+          has_procore_bid_id: true,
+          is_ambiguous_procore_bid_id: true,
+          is_ambiguous_project_number: true,
+        }),
+      ],
       10
     );
     expect(summary.ambiguousRowsExcluded).toBe(1);
+    // Attributed to tier 1 ONLY: tier 2 never got a say, so counting it there would misdirect whoever
+    // goes looking for the collision.
     expect(summary.ambiguousByProcoreBidId).toBe(1);
+    expect(summary.ambiguousByProjectNumber).toBe(0);
+  });
+
+  it("falls through to tier 2 only when the deal carries no procore_bid_id", () => {
+    const summary = summarizeCensus(
+      "office_dallas",
+      [row({ has_procore_bid_id: false, is_ambiguous_project_number: true })],
+      10
+    );
+    expect(summary.ambiguousRowsExcluded).toBe(1);
     expect(summary.ambiguousByProjectNumber).toBe(1);
+    expect(summary.ambiguousByProcoreBidId).toBe(0);
+  });
+
+  it("keeps the two exclusion counters mutually exclusive, so they sum to the row total", () => {
+    const summary = summarizeCensus(
+      "office_dallas",
+      [
+        row({ has_procore_bid_id: true, is_ambiguous_procore_bid_id: true }),
+        row({ has_procore_bid_id: false, is_ambiguous_project_number: true }),
+        row({}),
+      ],
+      10
+    );
+    expect(summary.ambiguousByProcoreBidId + summary.ambiguousByProjectNumber).toBe(
+      summary.ambiguousRowsExcluded
+    );
+    expect(summary.ambiguousRowsExcluded).toBe(2);
   });
 
   it("separates rows the ingest UPDATES from rows whose DATE changes", () => {

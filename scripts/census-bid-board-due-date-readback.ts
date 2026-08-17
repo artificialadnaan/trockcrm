@@ -203,20 +203,29 @@ export function buildCensusSql(schemaName: string): string {
              -- See the is_test_data predicate below: TR-DEMO-* rows bypass the flag, so they are FLAGGED
              -- rather than silently trusted or silently dropped.
              (COALESCE(d.deal_number, '') LIKE 'TR-DEMO-%' OR COALESCE(d.project_number, '') LIKE 'TR-DEMO-%') AS demo_shaped,
-             -- AMBIGUITY. resolveDealMatches returns EVERY claimant at a tier — attached and detached
-             -- together — and the ingest refuses the row as a multi-match rather than writing an ambiguous
-             -- one. Such a row is never written, so counting it would overstate the blast radius.
+             -- AMBIGUITY, WITH TIER PRIORITY. resolveDealMatches walks its identity tiers in order and
+             -- STOPS at the first that matches anything: a tier returning exactly one deal resolves the
+             -- row, and a tier returning more than one refuses it as a multi-match. So whether a
+             -- lower-tier collision matters depends entirely on whether a higher tier already answered.
              --
-             -- Both identity tiers are modelled, and reported separately: when this number is ever
-             -- surprising, knowing WHICH identity collided is what makes it diagnosable.
+             -- THE CASCADE IS MODELLED HERE, not approximated. An earlier version of this comment claimed
+             -- it could not be ("tier priority is control flow, not a predicate") and excluded any row with
+             -- a project-number collision — which DROPPED rows the ingest writes, understating wouldWrite,
+             -- the page-change count and the dollar delta. Understating the blast radius is the one
+             -- direction a census must never err in, since the flag flip is approved on these numbers.
              --
-             -- Both run over the matcher's own base population (active, non-change-order), with detached
-             -- deals deliberately INCLUDED — they count toward ambiguity there too, and a detached deal
-             -- retaining its identity is the commonest real collision.
+             -- Why it is expressible: this query evaluates ONE CANDIDATE ROW AT A TIME. "Which tier
+             -- resolves THIS deal" is therefore a priority CASE over per-candidate predicates, not
+             -- iteration over a result set. The decision is made in summarizeCensus from the two flags
+             -- below plus has_procore_bid_id; see there for the three-way rule.
              --
-             -- TIER 1 — the Bid Board's own key. When the export's Procore Bid ID is shared by this
-             -- candidate and another deal, the matcher returns both AT TIER 1 and stops; the row is
-             -- refused. This case is EXACT: tier 1 runs first, so an ambiguity there is always fatal.
+             -- Both flags run over the matcher's own base population (active, non-change-order), with
+             -- detached deals deliberately INCLUDED — they count toward ambiguity there too, and a
+             -- detached deal retaining its identity is the commonest real collision.
+             --
+             -- TIER 1 — the Bid Board's own key, and the tier that runs FIRST. A unique non-null
+             -- procore_bid_id resolves the row outright (any tier-2 collision is then irrelevant); a
+             -- SHARED one refuses it.
              EXISTS (
                SELECT 1
                  FROM ${schemaName}.deals o
@@ -227,16 +236,21 @@ export function buildCensusSql(schemaName: string): string {
                   AND o.procore_bid_id = d.procore_bid_id
              ) AS is_ambiguous_procore_bid_id,
              -- TIER 2 — project_number / deal_number / bid_board_project_number, using the matcher's OWN
-             -- canonicalizer rather than a lookalike.
+             -- canonicalizer rather than a lookalike. CONSULTED ONLY when tier 1 did not resolve the row,
+             -- i.e. when procore_bid_id IS NULL.
              --
-             -- STRUCTURALLY APPROXIMATE, unlike tier 1, and this is the residue no amount of shared SQL
-             -- removes: the TIER CASCADE is control flow, not a predicate. "Tier 1 wins, then tier 2, then
-             -- tier 3" cannot be written as a WHERE clause, so a row that collides at tier 2 but resolves
-             -- UNIQUELY at tier 1 is excluded here even though the ingest would write it. That direction
-             -- understates rather than overstates the flip's effect, which is why the count is surfaced
-             -- (ambiguousByProjectNumber) instead of folded away. Tier 3 (name + created-at, reachable
-             -- only when bid_board_project_number IS NULL) is not modelled at all: this cohort requires a
-             -- mirrored due date, which those rows do not have.
+             -- TIER 3 (name + bid_board_created_at) is not modelled, and provably need not be: it requires
+             -- a NULL d.bid_board_project_number, while every member of this cohort carries a mirrored
+             -- due date — which the ingest only ever writes in the same UPDATE that sets
+             -- bid_board_project_number from a row it refused to process without a Project #. So no cohort
+             -- member can reach tier 3.
+             --
+             -- WHAT GENUINELY REMAINS APPROXIMATE, precisely: this models the matcher against the
+             -- identities the DEAL already carries, on the assumption that the next export row for this
+             -- project carries the same ones. That is an assumption about the export's CONTENT (e.g. a row
+             -- that stops populating its Bid Board Project ID column would fall to tier 2 where this
+             -- predicts tier 1), not about the matcher's control flow. Nothing about the cascade itself is
+             -- left unmodelled.
              EXISTS (
                SELECT 1
                  FROM ${schemaName}.deals o
@@ -250,6 +264,9 @@ export function buildCensusSql(schemaName: string): string {
                     OR ${canonicalProjectNumberSql("o.bid_board_project_number")} = ${canonicalProjectNumberSql("d.bid_board_project_number")}
                   )
              ) AS is_ambiguous_project_number,
+             -- Which tier gets to answer at all. Tier 1 only runs when the row carries a Bid Board Project
+             -- ID; the deal's own procore_bid_id is the CRM's record of that key.
+             (d.procore_bid_id IS NOT NULL) AS has_procore_bid_id,
              COALESCE(${value}, 0) AS deal_value
         FROM ${schemaName}.deals d
         LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
@@ -320,6 +337,7 @@ export function buildCensusSql(schemaName: string): string {
            w.demo_shaped,
            w.is_ambiguous_procore_bid_id,
            w.is_ambiguous_project_number,
+           w.has_procore_bid_id,
            w.next_bid_due_day,
            w.is_test_data,
            w.bid_due_date_bid_board_project_number,
@@ -400,11 +418,14 @@ export interface CensusSummary {
    * never writes them; reported so the exclusion is visible rather than silent.
    */
   ambiguousRowsExcluded: number;
-  /** Of those, collisions on procore_bid_id (matcher tier 1). Exact: tier 1 runs first, so it is fatal. */
+  /** Of those, refused at matcher tier 1 — a SHARED procore_bid_id. */
   ambiguousByProcoreBidId: number;
   /**
-   * Of those, collisions on the canonical project/deal number (matcher tier 2). May overlap with the tier-1
-   * count, so the two do not necessarily sum to `ambiguousRowsExcluded` — which counts distinct ROWS.
+   * Of those, refused at matcher tier 2 — a shared canonical project/deal number on a deal that carries no
+   * procore_bid_id for tier 1 to resolve it by.
+   *
+   * MUTUALLY EXCLUSIVE with the tier-1 count by construction (tier 2 is only consulted when the deal has
+   * no bid id), so the two always sum to `ambiguousRowsExcluded`.
    */
   ambiguousByProjectNumber: number;
   /** Rows that look like demo seed data (TR-DEMO-*) but carry no is_test_data flag — counted, NOT excluded. */
@@ -484,17 +505,28 @@ export function summarizeCensus(schemaName: string, rows: CensusRow[], limit: nu
 
   const movers: CensusMover[] = [];
   for (const row of rows) {
-    // Refused by the matcher before anything is written — counted, then excluded from everything else.
-    // Split by which identity collided, because a surprising total is only diagnosable if you know that.
+    // TIER PRIORITY, mirroring resolveDealMatches, which stops at the FIRST tier that matches anything:
     //
-    // Tier 1 is EXACT (it runs first, so a collision there always refuses the row). Tier 2 is
-    // structurally approximate — see the SQL comment: the tier CASCADE is control flow, not a predicate,
-    // so a row colliding at tier 2 but resolving uniquely at tier 1 is excluded here although the ingest
-    // would write it. Conservative, and surfaced rather than folded away silently.
-    if (row.is_ambiguous_procore_bid_id || row.is_ambiguous_project_number) {
+    //   procore_bid_id present + UNIQUE    -> tier 1 resolves this deal. The row is WRITTEN, and any
+    //                                          project/deal-number collision is irrelevant because tier 2
+    //                                          is never consulted.
+    //   procore_bid_id present + SHARED    -> tier 1 returns >1 and the row is refused. Fatal, always.
+    //   procore_bid_id NULL                -> tier 1 cannot match this deal, so tier 2 decides.
+    //
+    // Getting this wrong in the other direction — excluding any row with a project-number collision —
+    // dropped rows the ingest writes, understating wouldWrite, the page-change count and the dollar
+    // delta. This artifact gates a production flag flip, so under-reporting impact is the one error it
+    // must not make; "conservative" was never a defence for it.
+    const refusedByTier1 = row.has_procore_bid_id && row.is_ambiguous_procore_bid_id;
+    // Tier 2 only gets a say when tier 1 cannot answer. A deal whose bid id is UNIQUE is resolved at tier
+    // 1 and written — project-number collision or not — so it falls through to be counted like any other.
+    const refusedByTier2 = !row.has_procore_bid_id && row.is_ambiguous_project_number;
+    if (refusedByTier1 || refusedByTier2) {
+      // Counted, then excluded from everything else — and split by which identity actually collided,
+      // because a surprising total is only diagnosable if you know which one to go and look at.
       summary.ambiguousRowsExcluded += 1;
-      if (row.is_ambiguous_procore_bid_id) summary.ambiguousByProcoreBidId += 1;
-      if (row.is_ambiguous_project_number) summary.ambiguousByProjectNumber += 1;
+      if (refusedByTier1) summary.ambiguousByProcoreBidId += 1;
+      if (refusedByTier2) summary.ambiguousByProjectNumber += 1;
       continue;
     }
     summary.touchedRows += 1;
