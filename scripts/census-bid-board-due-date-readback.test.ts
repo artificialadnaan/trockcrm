@@ -28,6 +28,10 @@ function row(partial: Partial<CensusRow>): CensusRow {
     stored_on_hold: false,
     bid_board_last_updated_at: null,
     demo_shaped: false,
+    next_bid_due_day: "2026-09-01",
+    has_source_lead: false,
+    lead_bid_due_date: null,
+    bid_due_date_from_bid_board_at: null,
     from_null: true,
     is_genuine_estimating: true,
     is_terminal: false,
@@ -217,6 +221,99 @@ describe("census-bid-board-due-date-readback — summary", () => {
   // TR-DEMO-* seed rows land in the REAL tenant schema without is_test_data set, so the column predicate
   // cannot remove them. Excluding them by deal-number shape would make the census disagree with the app it
   // is predicting, so they are COUNTED and reported instead of silently trusted or silently dropped.
+  /**
+   * "How many pages change" is different information from "how many dollars move", and both feed the same
+   * decision — a reviewer looking at a net delta cannot tell whether it is three deals or three hundred.
+   *
+   * Derived by running the REAL resolver before and after, so these assertions also pin that the census
+   * agrees with the deal page about which source wins.
+   */
+  describe("visible deal-page changes", () => {
+    const BOARD = "2026-09-01";
+    const landedRow = (partial: Partial<CensusRow>) =>
+      row({
+        next_bid_due_day: BOARD,
+        next_bid_due_date: new Date(`${BOARD}T00:00:00.000Z`),
+        ...partial,
+      });
+
+    it("counts a lead-backed deal whose lead value was MASKING the board's date", () => {
+      const summary = summarizeCensus(
+        "office_dallas",
+        [
+          landedRow({
+            has_source_lead: true,
+            lead_bid_due_date: "2026-06-01",
+            current_bid_due_date: null,
+          }),
+        ],
+        10
+      );
+      expect(summary.pagesChanged).toBe(1);
+      // Attributed to the override starting to fire, not to the column being rewritten.
+      expect(summary.leadMaskedReveals).toBe(1);
+    });
+
+    it("does NOT count a lead-backed deal whose lead already shows the board's day", () => {
+      // The page reads the same calendar day before and after; nothing a rep can see changes.
+      const summary = summarizeCensus(
+        "office_dallas",
+        [
+          landedRow({
+            has_source_lead: true,
+            lead_bid_due_date: BOARD,
+            current_bid_due_date: new Date("2026-07-01T00:00:00.000Z"),
+          }),
+        ],
+        10
+      );
+      expect(summary.pagesChanged).toBe(0);
+      expect(summary.leadMaskedReveals).toBe(0);
+    });
+
+    it("counts a deal with NO source lead — its page changes because the column it shows was rewritten", () => {
+      const summary = summarizeCensus(
+        "office_dallas",
+        [
+          landedRow({
+            has_source_lead: false,
+            current_bid_due_date: new Date("2026-07-01T00:00:00.000Z"),
+          }),
+        ],
+        10
+      );
+      expect(summary.pagesChanged).toBe(1);
+      // Not an override reveal: there was no lead masking anything.
+      expect(summary.leadMaskedReveals).toBe(0);
+    });
+
+    it("counts a CLEARED lead value being replaced by the board's date", () => {
+      const summary = summarizeCensus(
+        "office_dallas",
+        [landedRow({ has_source_lead: true, lead_bid_due_date: null, current_bid_due_date: null })],
+        10
+      );
+      expect(summary.pagesChanged).toBe(1);
+      expect(summary.leadMaskedReveals).toBe(1);
+    });
+
+    it("compares CALENDAR DAYS — a shape difference alone is not a visible change", () => {
+      // Lead date-only string vs deal timestamptz at UTC midnight on the SAME day: identical to a rep.
+      const summary = summarizeCensus(
+        "office_dallas",
+        [
+          landedRow({
+            has_source_lead: true,
+            lead_bid_due_date: BOARD,
+            current_bid_due_date: `${BOARD}T00:00:00.000Z`,
+          }),
+        ],
+        10
+      );
+      expect(summary.pagesChanged).toBe(0);
+    });
+  });
+
   it("counts demo-shaped rows separately without excluding them", () => {
     const summary = summarizeCensus(
       "office_dallas",

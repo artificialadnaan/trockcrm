@@ -13,6 +13,10 @@ import {
   aliasedDealEstimatingValueSqlText,
 } from "../server/src/modules/shared/deal-value-sql.js";
 import { TERMINAL_STAGE_SLUGS } from "../server/src/modules/shared/pipeline-terminal-stages.js";
+import {
+  dateOnlyToUtcMidnightIso,
+  resolveDealBidDueDate,
+} from "../server/src/modules/deals/bid-due-date.js";
 import { resolveScriptDatabaseUrl } from "./lib/resolve-database-url.js";
 
 /**
@@ -32,7 +36,10 @@ import { resolveScriptDatabaseUrl } from "./lib/resolve-database-url.js";
  *   (b) how many of those are in a GENUINE estimating stage (the only ones whose hold verdict can change)
  *   (c) would_park / would_unpark counts
  *   (d) the NET effective-value dollar delta those transitions imply
- *   (e) the largest movers, with deal number, stage and old/new horizon date
+ *   (e) how many DEAL PAGES will show a different Bid Due Date (and how many of those because the read
+ *       override starts firing over a masking lead value) — the "is this three deals or three hundred?"
+ *       question the dollar figure cannot answer
+ *   (f) the largest movers, with deal number, stage and old/new horizon date
  *
  * FIDELITY: the park/un-park verdicts are computed with the app's OWN shared SQL builders —
  * `closeTargetFarOutSqlPredicate` and `holdHorizonDateSql` from [[deal-reporting]] — and the value with
@@ -176,6 +183,15 @@ export function buildCensusSql(schemaName: string): string {
              -- timestamptz above, which the horizon CTEs need in the column's own type.
              d.bid_board_due_date AS next_bid_due_day,
              d.bid_board_last_updated_at,
+             -- The remaining resolver inputs. The visible-change count below does NOT re-implement the
+             -- precedence in SQL — it runs the REAL resolver over these columns, twice (before/after), so
+             -- the census cannot disagree with the deal page about which source wins.
+             --
+             -- The JOINED lead's id, not d.source_lead_id: the resolver keys on whether the lead ROW exists, so a
+             -- dangling source_lead_id falls back to the deal column exactly as it does at every read site.
+             (l.id IS NOT NULL) AS has_source_lead,
+             l.bid_due_date AS lead_bid_due_date,
+             d.bid_due_date_from_bid_board_at,
              COALESCE(d.bid_board_stage_slug, '') AS bid_board_stage_slug,
              psc.slug AS stage_slug,
              COALESCE(psc.is_terminal, false) AS stage_is_terminal,
@@ -186,6 +202,7 @@ export function buildCensusSql(schemaName: string): string {
              COALESCE(${value}, 0) AS deal_value
         FROM ${schemaName}.deals d
         LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
+        LEFT JOIN ${schemaName}.leads l ON l.id = d.source_lead_id
         -- The population the ingest's row loop can actually reach: active, not a change-order child, not
         -- detached from Bid Board sync (migration 0200), and carrying a mirrored Due Date to write.
        WHERE d.is_active = true
@@ -225,6 +242,10 @@ export function buildCensusSql(schemaName: string): string {
            w.stored_on_hold,
            w.bid_board_last_updated_at,
            w.demo_shaped,
+           w.next_bid_due_day,
+           w.has_source_lead,
+           w.lead_bid_due_date,
+           w.bid_due_date_from_bid_board_at,
            (w.current_bid_due_date IS NULL) AS from_null,
            (w.stage_slug IN (${sqlStringList(GENUINE_ESTIMATING_DEAL_STAGE_SLUGS)})) AS is_genuine_estimating,
            -- Terminal EITHER by the CRM stage or by the Bid Board mirror, matching
@@ -253,6 +274,11 @@ export interface CensusRow {
   stored_on_hold: boolean;
   bid_board_last_updated_at: Date | string | null;
   demo_shaped: boolean;
+  /** `deals.bid_board_due_date` verbatim — the resolver's SIGNAL input, not a value it ever returns. */
+  next_bid_due_day: Date | string | null;
+  has_source_lead: boolean;
+  lead_bid_due_date: Date | string | null;
+  bid_due_date_from_bid_board_at: Date | string | null;
   from_null: boolean;
   is_genuine_estimating: boolean;
   is_terminal: boolean;
@@ -278,6 +304,17 @@ export interface CensusSummary {
   wouldWrite: number;
   /** Rows that look like demo seed data (TR-DEMO-*) but carry no is_test_data flag — counted, NOT excluded. */
   demoShapedRows: number;
+  /**
+   * Deals whose deal page will SHOW a different Bid Due Date once the write lands. Computed by running the
+   * real resolver before and after, so it answers "how many pages change", not "how many dollars move".
+   */
+  pagesChanged: number;
+  /**
+   * The subset of `pagesChanged` that changes because the READ OVERRIDE starts firing — lead-backed deals
+   * whose lead value has been masking the board's date. The remainder change simply because the column
+   * they already displayed was rewritten.
+   */
+  leadMaskedReveals: number;
   fromNull: number;
   fromDifferentDate: number;
   genuineEstimating: number;
@@ -313,6 +350,8 @@ export function summarizeCensus(schemaName: string, rows: CensusRow[], limit: nu
     schemaName,
     wouldWrite: rows.length,
     demoShapedRows: 0,
+    pagesChanged: 0,
+    leadMaskedReveals: 0,
     fromNull: 0,
     fromDifferentDate: 0,
     genuineEstimating: 0,
@@ -330,6 +369,45 @@ export function summarizeCensus(schemaName: string, rows: CensusRow[], limit: nu
     if (row.from_null) summary.fromNull += 1;
     else summary.fromDifferentDate += 1;
     if (row.is_genuine_estimating) summary.genuineEstimating += 1;
+
+    // WILL A REP SEE A DIFFERENT DATE? Answered by running the ACTUAL resolver twice rather than
+    // re-implementing its precedence in SQL — same reason the hold verdicts reuse the app's own builders.
+    // Every subtlety comes along for free: a cleared lead value still winning, a dangling source_lead_id
+    // falling back to the deal column, and the provenance/day-match signal deciding whether the override
+    // fires at all.
+    //
+    // BEFORE is the state right after the flag is flipped and before the sync writes — which, because no
+    // deal carries a provenance stamp yet, is also exactly what the page shows today. The stamp is read
+    // from the row rather than assumed null, so a census re-run mid-rollout stays accurate.
+    const displayedBefore = resolveDealBidDueDate({
+      bidBoardDueDate: row.next_bid_due_day,
+      bidDueDateFromBidBoardAt: row.bid_due_date_from_bid_board_at,
+      bidBoardDetachedAt: null, // the candidate set is already `bid_board_detached_at IS NULL`
+      hasSourceLead: row.has_source_lead,
+      leadBidDueDate: row.lead_bid_due_date,
+      dealBidDueDate: row.current_bid_due_date,
+    });
+    // AFTER: the write-through has stored the board's day at UTC midnight AND stamped provenance, which is
+    // what makes the deal eligible for the override.
+    const nextDay = dayString(row.next_bid_due_date);
+    const displayedAfter = resolveDealBidDueDate({
+      bidBoardDueDate: row.next_bid_due_day,
+      bidDueDateFromBidBoardAt: new Date(),
+      bidBoardDetachedAt: null,
+      hasSourceLead: row.has_source_lead,
+      leadBidDueDate: row.lead_bid_due_date,
+      dealBidDueDate: nextDay == null ? null : new Date(dateOnlyToUtcMidnightIso(nextDay)),
+    });
+    // Calendar days, consistent with the write guard and the write-set comparison — `.day` is already
+    // normalized, so a timestamptz/date-only shape difference can never masquerade as a visible change.
+    if (displayedBefore.day !== displayedAfter.day) {
+      summary.pagesChanged += 1;
+      // Attribute the cause: the override firing (the lead was masking the board's date) versus the
+      // column the page already displayed simply being rewritten.
+      if (displayedAfter.source === "bid_board" && displayedBefore.source === "lead") {
+        summary.leadMaskedReveals += 1;
+      }
+    }
 
     if (row.stored_on_hold || row.is_terminal) continue;
     const value = numeric(row.deal_value);
@@ -405,11 +483,18 @@ function printSummary(summary: CensusSummary): void {
       `  |  would_unpark: ${summary.wouldUnpark} (${money(summary.unparkedValue)} restored)`
   );
   console.log(`  (d) NET reported-pipeline delta: ${money(summary.netValueDelta)}`);
+  // The second question the flip decision needs, and one the dollar figure cannot answer: is that delta
+  // three deals or three hundred, and will reps notice anything on the pages they open every day?
+  console.log(
+    `  (e) deal pages that will SHOW a different Bid Due Date: ${summary.pagesChanged}` +
+      `  (of which ${summary.leadMaskedReveals} because the read override starts firing over a masking` +
+      ` lead value; the rest because the column they already displayed was rewritten)`
+  );
   if (summary.movers.length === 0) {
-    console.log("  (e) largest movers: none");
+    console.log("  (f) largest movers: none");
     return;
   }
-  console.log(`  (e) largest movers (top ${summary.movers.length}, horizon = the ${CLOSE_TARGET_HOLD_HORIZON_DAYS}-day auto-park date):`);
+  console.log(`  (f) largest movers (top ${summary.movers.length}, horizon = the ${CLOSE_TARGET_HOLD_HORIZON_DAYS}-day auto-park date):`);
   for (const mover of summary.movers) {
     console.log(
       `      ${mover.transition.toUpperCase().padEnd(6)} ${money(mover.value).padStart(12)}  ` +
