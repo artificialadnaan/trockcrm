@@ -36,6 +36,7 @@ function row(partial: Partial<CensusRow>): CensusRow {
     has_source_lead: false,
     lead_bid_due_date: null,
     bid_due_date_from_bid_board_at: null,
+    value_changes: true,
     from_null: true,
     is_genuine_estimating: true,
     is_terminal: false,
@@ -160,13 +161,36 @@ describe("census-bid-board-due-date-readback — SQL", () => {
   // The ingest has NO is_test_data predicate, so it writes those rows and counts them in
   // bid_due_date_updated_count. Filtering them out of the cohort would understate the very counter the
   // operator compares this against; they are dropped from the financial totals instead.
+  // Since the value/provenance guard split, the ingest UPDATEs strictly more rows than it changes dates
+  // on. The cohort has to follow, or a stamp-only row — whose page the override then flips — is invisible.
+  it("includes provenance-only rows in the cohort, not just date changes", () => {
+    expect(sql).toContain("bid_due_date_from_bid_board_at IS NULL");
+    expect(sql).toContain(
+      "bid_due_date_bid_board_project_number IS DISTINCT FROM bid_board_project_number"
+    );
+    // …and still labels which of them are real date changes, because the run-row counter records only
+    // those and the operator compares the two directly.
+    expect(sql).toContain("AS value_changes");
+  });
+
+  it("models a stamp-only row's prospective horizon as its CURRENT value, since its date is not rewritten", () => {
+    expect(sql).toContain(
+      "CASE WHEN value_changes THEN next_bid_due_date ELSE current_bid_due_date END AS bid_due_date"
+    );
+  });
+
   it("does NOT filter test deals out of the cohort — the ingest does not either", () => {
     expect(sql).not.toContain("COALESCE(d.is_test_data, false) = false");
     expect(sql).toContain("COALESCE(d.is_test_data, false) AS is_test_data");
   });
 
   it("contains no write verb at all", () => {
-    expect(sql).not.toMatch(/\b(INSERT|UPDATE|DELETE|ALTER|DROP|TRUNCATE)\b/i);
+    // Comments are stripped first so this asserts about the STATEMENT rather than the prose around it —
+    // the query is the thing that can write, and the explanatory comments legitimately discuss what the
+    // ingest's own UPDATE does. Without this the check fails on documentation, which trains people to
+    // weaken it.
+    const statementOnly = sql.replace(/--[^\n]*/g, "");
+    expect(statementOnly).not.toMatch(/\b(INSERT|UPDATE|DELETE|ALTER|DROP|TRUNCATE)\b/i);
   });
 
   // Every mover this census reports is by definition a genuine ESTIMATING deal — only that stage reads the
@@ -317,6 +341,63 @@ describe("census-bid-board-due-date-readback — summary", () => {
     // ★ P1. A deal detached and later linked to a NEW Bid Board project keeps its old dates and its old
     // stamp. The census must predict the resolver exactly, so it has to refuse the override for the same
     // reason the deal page does — otherwise it would report a page change that will not happen.
+    // ★ THE ROW THE COHORT USED TO DROP. Same UTC day in bid_due_date and bid_board_due_date, NO valid
+    // provenance stamp, lead-backed with a differing lead. The ingest performs a stamp-only update; the
+    // resolver then flips the page from the lead's date to the deal column's. No date moves and no dollar
+    // figure changes, which is exactly why the old value-only cohort filtered it out entirely.
+    it("counts a PROVENANCE-ONLY row whose page the override will flip", () => {
+      const summary = summarizeCensus(
+        "office_dallas",
+        [
+          landedRow({
+            value_changes: false,
+            // Already the board's day — nothing to write.
+            current_bid_due_date: new Date(`${BOARD}T00:00:00.000Z`),
+            // …but no stamp yet, so the override is not firing today.
+            bid_due_date_from_bid_board_at: null,
+            bid_due_date_bid_board_project_number: null,
+            bid_board_project_number: "DFW-1-00001-aa",
+            has_source_lead: true,
+            lead_bid_due_date: "2026-06-01",
+          }),
+        ],
+        10
+      );
+
+      expect(summary.touchedRows).toBe(1);
+      // NOT a date change: bid_due_date_updated_count will not include it, so neither may this.
+      expect(summary.wouldWrite).toBe(0);
+      // But the page does change, and that is the whole point.
+      expect(summary.pagesChanged).toBe(1);
+      expect(summary.leadMaskedReveals).toBe(1);
+      // And no dollars move — SQL surfaces read the column, which is untouched.
+      expect(summary.wouldPark).toBe(0);
+      expect(summary.wouldUnpark).toBe(0);
+      expect(summary.netValueDelta).toBe(0);
+    });
+
+    it("does not count a provenance-only row whose lead ALREADY shows the board's day", () => {
+      // Same stamp-only update, but nothing masked: the page reads the same day before and after.
+      const summary = summarizeCensus(
+        "office_dallas",
+        [
+          landedRow({
+            value_changes: false,
+            current_bid_due_date: new Date(`${BOARD}T00:00:00.000Z`),
+            bid_due_date_from_bid_board_at: null,
+            bid_due_date_bid_board_project_number: null,
+            bid_board_project_number: "DFW-1-00001-aa",
+            has_source_lead: true,
+            lead_bid_due_date: BOARD,
+          }),
+        ],
+        10
+      );
+      expect(summary.touchedRows).toBe(1);
+      expect(summary.wouldWrite).toBe(0);
+      expect(summary.pagesChanged).toBe(0);
+    });
+
     it("does not treat a stamp earned on a RETIRED project as landed", () => {
       const summary = summarizeCensus(
         "office_dallas",
@@ -369,6 +450,22 @@ describe("census-bid-board-due-date-readback — summary", () => {
   // Two populations, two rules — the reason "just filter test data" was the wrong instruction. The write
   // count must match what the ingest will do (it ignores is_test_data); the dollar figures must match what
   // production reports (which exclude them).
+  it("separates rows the ingest UPDATES from rows whose DATE changes", () => {
+    // touchedRows is every UPDATE; wouldWrite is what bid_due_date_updated_count will say. Conflating them
+    // would make the operator's side-by-side comparison disagree by the number of stamp-only rows.
+    const summary = summarizeCensus(
+      "office_dallas",
+      [
+        row({ value_changes: true }),
+        row({ value_changes: false, bid_due_date_from_bid_board_at: null }),
+        row({ value_changes: false, bid_due_date_from_bid_board_at: null }),
+      ],
+      10
+    );
+    expect(summary.touchedRows).toBe(3);
+    expect(summary.wouldWrite).toBe(1);
+  });
+
   it("keeps test deals IN the write count and OUT of the financial totals", () => {
     const summary = summarizeCensus(
       "office_dallas",

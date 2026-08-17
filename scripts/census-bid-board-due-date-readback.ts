@@ -224,18 +224,40 @@ export function buildCensusSql(schemaName: string): string {
          -- make the census understate the very counter the operator compares it against. They are dropped
          -- from the FINANCIAL totals instead (see summarizeCensus), because production value queries do
          -- exclude them — the right answer differs per number depending on what that number is for.
-    ), writes AS (
-      -- The write-through's own guard, reproduced EXACTLY: it compares CALENDAR DAYS
+    ), touched AS (
+      -- EVERY row writeBidDueDateIfNeeded will UPDATE — which since the value/provenance guard split is
+      -- strictly more than "rows whose date changes".
+      --
+      -- value_changes reproduces the write-through's VALUE guard exactly: it compares CALENDAR DAYS
       -- ((bid_due_date AT TIME ZONE 'UTC')::date IS DISTINCT FROM $3::date), not instants. Comparing
       -- instants here would count a legacy row stored at a non-midnight time on the SAME UTC day as the
       -- mirror — a row the real write-through skips — and the census must not overstate the blast radius
       -- of the thing it exists to size.
-      SELECT * FROM cand
+      --
+      -- provenance_stale reproduces its PROVENANCE guard, and carrying it here is not bookkeeping: a
+      -- lead-backed deal that already holds the right day but has no valid stamp gets a STAMP-ONLY update,
+      -- after which the resolver flips its page from the lead's date to the deal column's. Its date never
+      -- moves and no dollar figure changes, so the old cohort dropped it entirely — and the census stayed
+      -- silent about a deal page that visibly changes. The two guards are separate in the ingest, so they
+      -- have to be separate here too.
+      SELECT cand.*,
+             ((current_bid_due_date AT TIME ZONE 'UTC')::date IS DISTINCT FROM next_bid_due_day)
+               AS value_changes
+        FROM cand
        WHERE (current_bid_due_date AT TIME ZONE 'UTC')::date IS DISTINCT FROM next_bid_due_day
+          OR bid_due_date_from_bid_board_at IS NULL
+          OR bid_due_date_bid_board_project_number IS DISTINCT FROM bid_board_project_number
     ), cur AS (
-      SELECT id, stage_id, expected_close_date, current_bid_due_date AS bid_due_date FROM writes
+      SELECT id, stage_id, expected_close_date, current_bid_due_date AS bid_due_date FROM touched
     ), nxt AS (
-      SELECT id, stage_id, expected_close_date, next_bid_due_date AS bid_due_date FROM writes
+      -- A stamp-only row's column is NOT rewritten, so its prospective horizon is its CURRENT value. Using
+      -- the board date unconditionally would still land on the same calendar day (that is why it is
+      -- stamp-only), but modelling the write precisely keeps this honest if the guards ever diverge.
+      SELECT id,
+             stage_id,
+             expected_close_date,
+             CASE WHEN value_changes THEN next_bid_due_date ELSE current_bid_due_date END AS bid_due_date
+        FROM touched
     )
     SELECT w.id,
            w.deal_number,
@@ -255,6 +277,7 @@ export function buildCensusSql(schemaName: string): string {
            w.has_source_lead,
            w.lead_bid_due_date,
            w.bid_due_date_from_bid_board_at,
+           w.value_changes,
            (w.current_bid_due_date IS NULL) AS from_null,
            (w.stage_slug IN (${sqlStringList(GENUINE_ESTIMATING_DEAL_STAGE_SLUGS)})) AS is_genuine_estimating,
            -- Terminal EITHER by the CRM stage or by the Bid Board mirror, matching
@@ -265,7 +288,7 @@ export function buildCensusSql(schemaName: string): string {
            (${holdHorizonDateSql("nxt")}) AS next_horizon,
            (${closeTargetFarOutSqlPredicate("cur")}) AS currently_far_out,
            (${closeTargetFarOutSqlPredicate("nxt")}) AS next_far_out
-      FROM writes w
+      FROM touched w
       JOIN cur ON cur.id = w.id
       JOIN nxt ON nxt.id = w.id
   `;
@@ -291,6 +314,8 @@ export interface CensusRow {
   has_source_lead: boolean;
   lead_bid_due_date: Date | string | null;
   bid_due_date_from_bid_board_at: Date | string | null;
+  /** True when the ingest will rewrite the DATE; false for a stamp-only (provenance) update. */
+  value_changes: boolean;
   from_null: boolean;
   is_genuine_estimating: boolean;
   is_terminal: boolean;
@@ -314,6 +339,11 @@ export interface CensusMover {
 export interface CensusSummary {
   schemaName: string;
   wouldWrite: number;
+  /**
+   * Every row the ingest will UPDATE: value writes PLUS stamp-only provenance passes. Always >=
+   * `wouldWrite`; the difference is deals the Board confirms without correcting.
+   */
+  touchedRows: number;
   /** Rows that look like demo seed data (TR-DEMO-*) but carry no is_test_data flag — counted, NOT excluded. */
   demoShapedRows: number;
   /**
@@ -366,7 +396,11 @@ function numeric(value: string | number | null | undefined): number {
 export function summarizeCensus(schemaName: string, rows: CensusRow[], limit: number): CensusSummary {
   const summary: CensusSummary = {
     schemaName,
-    wouldWrite: rows.length,
+    // Rows the ingest will UPDATE at all (value writes + stamp-only provenance passes).
+    touchedRows: rows.length,
+    // Rows whose DATE actually changes. Deliberately NOT rows.length: `bid_due_date_updated_count` on the
+    // run row counts only these, and the operator compares the two directly.
+    wouldWrite: 0,
     demoShapedRows: 0,
     testDataRows: 0,
     pagesChanged: 0,
@@ -384,11 +418,17 @@ export function summarizeCensus(schemaName: string, rows: CensusRow[], limit: nu
 
   const movers: CensusMover[] = [];
   for (const row of rows) {
-    if (row.demo_shaped) summary.demoShapedRows += 1;
-    if (row.is_test_data) summary.testDataRows += 1;
-    if (row.from_null) summary.fromNull += 1;
-    else summary.fromDifferentDate += 1;
-    if (row.is_genuine_estimating) summary.genuineEstimating += 1;
+    // WRITE-LINE numbers describe the rows whose DATE moves, because that is exactly what the run row's
+    // bid_due_date_updated_count records. A stamp-only pass is an UPDATE but not a change, so it is
+    // counted in touchedRows and nowhere else on this line.
+    if (row.value_changes) {
+      summary.wouldWrite += 1;
+      if (row.demo_shaped) summary.demoShapedRows += 1;
+      if (row.is_test_data) summary.testDataRows += 1;
+      if (row.from_null) summary.fromNull += 1;
+      else summary.fromDifferentDate += 1;
+      if (row.is_genuine_estimating) summary.genuineEstimating += 1;
+    }
 
     // WILL A REP SEE A DIFFERENT DATE? Answered by running the ACTUAL resolver twice rather than
     // re-implementing its precedence in SQL — same reason the hold verdicts reuse the app's own builders.
@@ -410,8 +450,10 @@ export function summarizeCensus(schemaName: string, rows: CensusRow[], limit: nu
       leadBidDueDate: row.lead_bid_due_date,
       dealBidDueDate: row.current_bid_due_date,
     });
-    // AFTER: the write-through has stored the board's day at UTC midnight AND stamped provenance, which is
-    // what makes the deal eligible for the override.
+    // AFTER: the write-through has stamped provenance — which is what makes the deal eligible for the
+    // override — and, ONLY when the day differs, stored the board's day at UTC midnight. A stamp-only row
+    // keeps its existing column value, so modelling it as rewritten would be describing a write that does
+    // not happen.
     const nextDay = dayString(row.next_bid_due_date);
     const displayedAfter = resolveDealBidDueDate({
       bidBoardDueDate: row.next_bid_due_day,
@@ -422,7 +464,11 @@ export function summarizeCensus(schemaName: string, rows: CensusRow[], limit: nu
       bidBoardDetachedAt: null,
       hasSourceLead: row.has_source_lead,
       leadBidDueDate: row.lead_bid_due_date,
-      dealBidDueDate: nextDay == null ? null : new Date(dateOnlyToUtcMidnightIso(nextDay)),
+      dealBidDueDate: row.value_changes
+        ? nextDay == null
+          ? null
+          : new Date(dateOnlyToUtcMidnightIso(nextDay))
+        : row.current_bid_due_date,
     });
     // Calendar days, consistent with the write guard and the write-set comparison — `.day` is already
     // normalized, so a timestamptz/date-only shape difference can never masquerade as a visible change.
@@ -435,9 +481,16 @@ export function summarizeCensus(schemaName: string, rows: CensusRow[], limit: nu
       }
     }
 
-    // FINANCIAL totals from here down. Test deals are excluded because every production value query
-    // excludes them, so a parked or un-parked fixture moves no reported dollars — while the write counts
-    // above deliberately keep them, because the ingest will still write those rows.
+    // FINANCIAL totals from here down.
+    //
+    // A stamp-only row is excluded because its bid_due_date never moves, and every reported-pipeline
+    // surface (holdHorizonDateSql and its ~50 SQL consumers) reads that column — so no dashboard, board or
+    // rollup can shift. Its deal PAGE can, which is what pagesChanged above counts.
+    //
+    // Test deals are excluded because every production value query excludes them, so a parked or
+    // un-parked fixture moves no reported dollars — while the write counts above deliberately keep them,
+    // because the ingest will still write those rows.
+    if (!row.value_changes) continue;
     if (row.is_test_data) continue;
     if (row.stored_on_hold || row.is_terminal) continue;
     const value = numeric(row.deal_value);
@@ -502,13 +555,23 @@ function printSummary(summary: CensusSummary): void {
       `  (null->date: ${summary.fromNull}, date->different-date: ${summary.fromDifferentDate})` +
       `  — compare against bid_board_sync_runs.bid_due_date_updated_count`
   );
+  const stampOnly = summary.touchedRows - summary.wouldWrite;
+  if (stampOnly > 0) {
+    // Not a discrepancy: the ingest UPDATEs these rows to record that the Board confirms a date that was
+    // already correct. They move no dollars and are deliberately absent from the counter above — but they
+    // DO make the deal eligible for the read override, so they can still change a page (section e).
+    console.log(
+      `      + ${stampOnly} more will get a provenance-only update (the Board confirms a date already ` +
+        `correct). Not in the counter above; still counted in (e).`
+    );
+  }
   if (summary.testDataRows > 0) {
     console.log(
       `      ${summary.testDataRows} of them are is_test_data deals: the ingest writes and counts them, so` +
         ` they are IN the number above, and OUT of every dollar figure below.`
     );
   }
-  console.log(`  (b) of those, in a genuine estimating stage: ${summary.genuineEstimating}`);
+  console.log(`  (b) of the date changes, in a genuine estimating stage: ${summary.genuineEstimating}`);
   if (summary.demoShapedRows > 0) {
     console.log(
       `      ⚠️  ${summary.demoShapedRows} of them look like TR-DEMO-* seed data with no is_test_data flag — ` +
