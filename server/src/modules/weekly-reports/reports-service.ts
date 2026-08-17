@@ -617,6 +617,13 @@ export async function transitionWeeklyReport(
     params.push(actor.id);
     assignments.push(`reviewed_by = $${params.length}::uuid`, `reviewed_at = now()`);
   }
+  if (to === "sent") {
+    // Stamped when the PM commits to sending, not when the mail server acknowledges. Delivery is a
+    // separate concern tracked by send_attempts/send_error: leaving sent_at null on a `sent` row would
+    // make the dashboard and the per-project counters disagree with the status they are reading.
+    params.push(actor.id);
+    assignments.push(`sent_by = $${params.length}::uuid`, `sent_at = now()`);
+  }
   if (to === "draft") {
     // Bounced back for rework: clear the review stamps so the dashboard does not claim it was reviewed.
     assignments.push(`reviewed_by = NULL`, `reviewed_at = NULL`);

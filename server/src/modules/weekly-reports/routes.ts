@@ -1,6 +1,7 @@
 import { Router, type Request } from "express";
 import { businessToday } from "../../lib/period.js";
 import { AppError } from "../../middleware/error-handler.js";
+import { requireRole } from "../../middleware/rbac.js";
 import {
   createWeeklyReportProject,
   deactivateWeeklyReportProject,
@@ -308,7 +309,10 @@ router.get("/settings", async (req, res, next) => {
   }
 });
 
-router.put("/settings", async (req, res, next) => {
+// Who receives the due-day digest is a leadership decision, and this mount is reachable by every CRM
+// role — including `construction`, which is how superintendents get in. Anyone could otherwise quietly
+// remove themselves from the list that reports on them.
+router.put("/settings", requireRole("admin", "director"), async (req, res, next) => {
   try {
     const actor = actorFrom(req);
     const settings = await updateWeeklyReportSettings(

@@ -537,6 +537,20 @@ describe("a sent report is immutable", () => {
     return id;
   }
 
+  it("stamps sent_at, so status and the per-project counters agree", async () => {
+    const project = await seedProject();
+    const id = await sendReport(project.id);
+    const detail = await getWeeklyReportDetail(db, id);
+    expect(detail!.status).toBe("sent");
+    // A `sent` row with a null sent_at would make listWeeklyReportProjectSummaries report "never sent"
+    // for a report the client has already received.
+    expect(detail!.sentAt).not.toBeNull();
+
+    const [summary] = await listWeeklyReportProjectSummaries(db, WEEK_OF);
+    expect(summary!.reportsSent).toBe(1);
+    expect(summary!.lastSentAt).not.toBeNull();
+  });
+
   it("refuses content edits after send", async () => {
     const project = await seedProject();
     const id = await sendReport(project.id);
