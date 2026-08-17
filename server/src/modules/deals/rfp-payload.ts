@@ -383,7 +383,16 @@ function fitWithinBudget(body: NormalizedRfpRequestBody, budget: number, protect
   // so dropping it can never turn a 413 into a 422. The build-time caps in bid-board-activity-note.ts
   // (MAX_NOTE_CHARS) mean this is a rare backstop, not the normal path.
   if (body.deal?.crmActivityLog != null && serializedBytes(body) > budget) {
+    const droppedChars = body.deal.crmActivityLog.length;
     body.deal.crmActivityLog = null;
+    // Say so. Unlike `attachmentsOmitted` there is no field on the wire carrying this, so without a log
+    // line "why did this Bid Board project get no note?" has no answer anywhere — and since the
+    // build-time caps make this a rare backstop, a line here is also the signal that something upstream
+    // is producing notes far larger than MAX_NOTE_CHARS.
+    console.warn(
+      `[RFP] Dropped crmActivityLog (${droppedChars} chars) from the body for deal ${body.sourceDealId} ` +
+        `to fit the ${budget}-byte budget; the Bid Board project will get no activity note.`
+    );
   }
 
   const original = body.deal?.description;

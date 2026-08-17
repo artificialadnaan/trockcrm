@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   RFP_BODY_BYTE_BUDGET,
   SYNCHUB_JSON_BODY_LIMIT_BYTES,
@@ -224,6 +224,15 @@ describe("cap performance and priority", () => {
 });
 
 describe("crmActivityLog is the FIRST thing surrendered", () => {
+  // The limiter warns when it drops the log; keep that out of the suite's output but keep it assertable.
+  let warned: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    warned = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   // The activity log is a second unbounded input alongside the description, and it is the most
   // expendable field in the body: purely informational, with the full history one click away in the
   // CRM. Its build-time caps (MAX_NOTE_CHARS = 8000) mean the limiter is a backstop here rather than
@@ -270,6 +279,30 @@ describe("crmActivityLog is the FIRST thing surrendered", () => {
     expect(body.deal.crmActivityLog).toBeNull();
   });
 
+  it("says so when it drops the log", () => {
+    // Unlike attachmentsOmitted there is no field on the wire carrying this, so without a log line
+    // "why did this Bid Board project get no note?" has no answer anywhere.
+    buildNormalizedRfpRequestBody({
+      deal: { ...baseDeal, crmActivityLog: "A".repeat(200_000) },
+      sourceEventId: "crm:deal-stage:opportunity:evt-1",
+      attachments: [],
+    });
+
+    expect(warned).toHaveBeenCalledTimes(1);
+    const message = String(warned.mock.calls[0]![0]);
+    expect(message).toContain("crmActivityLog");
+    expect(message).toContain(baseDeal.id); // identifies WHICH deal lost its note
+  });
+
+  it("stays silent when the log survives", () => {
+    buildNormalizedRfpRequestBody({
+      deal: { ...baseDeal, crmActivityLog: "short note" },
+      sourceEventId: "crm:deal-stage:opportunity:evt-1",
+      attachments: [],
+    });
+    expect(warned).not.toHaveBeenCalled();
+  });
+
   it("keeps the log when the body already fits", () => {
     const note = "CRM Activity Log — 25-1234 (as of Aug 17, 2026)\n\nAug 14, 2026 · Call · Jane Rep\n  Scope confirmed.";
     const body = buildNormalizedRfpRequestBody({
@@ -311,6 +344,14 @@ describe("crmActivityLog is the FIRST thing surrendered", () => {
 });
 
 describe("capRfpRequestBody (retry path)", () => {
+  beforeEach(() => {
+    // The re-cap path can drop the activity log too, which warns; keep the suite output clean.
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("re-caps a body whose attachments were swapped in after the original pass", () => {
     // The retry route splices freshly-minted attachment URLs into the DEAD job's already-capped
     // body. Without re-running the limiter, a deal whose file set grew since the original enqueue
