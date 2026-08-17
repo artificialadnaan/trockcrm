@@ -21,6 +21,8 @@ const text = (value: SQL | undefined) => (value ? dialect.sqlToQuery(value).sql.
 import {
   UNASSIGNED_FILTER_SENTINEL,
   buildAssignedRepPredicate,
+  buildEstimatorPredicate,
+  buildAliasedEstimatorSql,
   buildAliasedInvolvedRepSql,
   buildAliasedOwnedRepSql,
   buildAliasedInvolvedRepInListSql,
@@ -54,6 +56,70 @@ describe("assigned-rep predicate", () => {
     expect(sql).toContain("is null");
     expect(sql).not.toContain("estimator_user_id");
     expect(sql).not.toContain(UNASSIGNED_FILTER_SENTINEL);
+  });
+});
+
+describe("estimator predicate", () => {
+  it("omits when unset", () => {
+    expect(buildEstimatorPredicate({})).toBeUndefined();
+  });
+  it("omits for an empty string rather than matching everyone with no estimator", () => {
+    expect(buildEstimatorPredicate({ estimatorId: "" })).toBeUndefined();
+  });
+  it("matches estimator_user_id and never consults the owner column", () => {
+    // The sibling of the rep filter, and deliberately a SEPARATE dimension. Asking "who is estimating
+    // this" is a different question from "whose deal is this"; the two are ANDed when both are sent, so
+    // an owner arm leaking in here would quietly turn an estimator filter into an owner-or-estimator one
+    // — the exact widening buildOwnedRepCondition exists to prevent.
+    // A well-formed uuid, because the predicate rejects malformed ids outright (see the 22P02 test below).
+    const sql = text(buildEstimatorPredicate({ estimatorId: "3f2504e0-4f89-41d3-9a0c-0305e82c3301" }));
+    expect(sql).toContain("estimator_user_id");
+    expect(sql).not.toContain("assigned_rep_id");
+  });
+  it("emits a no-match for a MALFORMED id instead of erroring on the uuid column (Codex #1067 P2)", () => {
+    // estimator_user_id is a uuid column, so Postgres casts the bound string and raises 22P02 on anything
+    // that is not a uuid. A hand-edited or shared URL therefore turned the board and the list into 500s
+    // rather than an empty result. `false` is the outcome the design always intended: a no-match, never a
+    // widening, and never an error.
+    const sql = text(buildEstimatorPredicate({ estimatorId: "not-a-uuid" }));
+    expect(sql).toContain("false");
+    expect(sql).not.toContain("estimator_user_id");
+  });
+  it("treats the Unassigned sentinel as malformed too — it is not a uuid", () => {
+    const sql = text(buildEstimatorPredicate({ estimatorId: UNASSIGNED_FILTER_SENTINEL }));
+    expect(sql).toContain("false");
+    expect(sql).not.toContain("is null");
+  });
+  it("still matches on a WELL-FORMED uuid (the guard is not a blanket reject)", () => {
+    const sql = text(buildEstimatorPredicate({ estimatorId: "3f2504e0-4f89-41d3-9a0c-0305e82c3301" }));
+    expect(sql).toContain("estimator_user_id");
+    expect(sql).not.toContain("false");
+  });
+
+  it("never maps the Unassigned sentinel to IS NULL — there is no 'unestimated' bucket", () => {
+    // The sentinel belongs to the assigned-rep dimension. Mapping it to estimator_user_id IS NULL would
+    // answer a question nobody asked, and on this dataset that is most of the board. It is rejected as a
+    // malformed uuid (above) rather than given a meaning here.
+    const sql = text(buildEstimatorPredicate({ estimatorId: UNASSIGNED_FILTER_SENTINEL }));
+    expect(sql).not.toContain("is null");
+  });
+});
+
+describe("aliased estimator SQL (raw, for the d-aliased stage-page query)", () => {
+  it("emits an aliased equality on estimator_user_id for a well-formed uuid", () => {
+    const sql = text(buildAliasedEstimatorSql("d", "3f2504e0-4f89-41d3-9a0c-0305e82c3301"));
+    expect(sql).toContain("d.estimator_user_id");
+    expect(sql).not.toContain("assigned_rep_id");
+  });
+  it("rejects a malformed id rather than handing it to the uuid column (22P02)", () => {
+    // This path is MORE exposed than the unaliased twin: the stage drill-down reads the id straight off
+    // the query string, so a shared or hand-edited link reaches it unvalidated.
+    const sql = text(buildAliasedEstimatorSql("d", "__unassigned__"));
+    expect(sql).toContain("false");
+    expect(sql).not.toContain("estimator_user_id");
+  });
+  it("still refuses an untrusted alias (identifier injection guard intact)", () => {
+    expect(() => buildAliasedEstimatorSql("d; drop table deals--", "3f2504e0-4f89-41d3-9a0c-0305e82c3301")).toThrow();
   });
 });
 

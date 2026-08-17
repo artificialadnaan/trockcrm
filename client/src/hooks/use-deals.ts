@@ -397,6 +397,11 @@ export interface DealFilters {
   stageIds?: string[];
   inactiveStageIds?: string[];
   assignedRepId?: string;
+  /** Deals this person is ESTIMATING. The sibling of assignedRepId — the server ANDs them, and the header
+   *  control writes one or the other, never both. Must be declared here AND serialized below: a spread of
+   *  `{ estimatorId }` into baseFilters type-checks either way, so omitting it drops the filter silently
+   *  and the list, totals and CSV keep every estimator's deals under a filtered board. */
+  estimatorId?: string;
   projectTypeId?: string;
   regionId?: string;
   source?: string;
@@ -563,6 +568,7 @@ export function buildDealsQueryParams(filters: DealFilters): URLSearchParams {
   if (filters.stageIds?.length) params.set("stageIds", filters.stageIds.join(","));
   if (filters.inactiveStageIds?.length) params.set("inactiveStageIds", filters.inactiveStageIds.join(","));
   if (filters.assignedRepId) params.set("assignedRepId", filters.assignedRepId);
+  if (filters.estimatorId) params.set("estimatorId", filters.estimatorId);
   if (filters.projectTypeId) params.set("projectTypeId", filters.projectTypeId);
   if (filters.regionId) params.set("regionId", filters.regionId);
   if (filters.source) params.set("source", filters.source);
@@ -639,6 +645,12 @@ export function useDeals(filters: DealFilters = {}, options: { enabled?: boolean
     filters.stageIds?.join(","),
     filters.inactiveStageIds?.join(","),
     filters.assignedRepId,
+    // This list is EXPLICIT SCALARS, not the filters object, so a field missing here is not merely a lint
+    // nit: fetchDeals keeps its identity, the effect that calls it never re-runs, and the list holds its
+    // previous rows, pagination and value total while the board above refetches. That is the real
+    // mechanism behind "the list does not follow the estimator" — distinct from the outer drill-down memo,
+    // which re-runs anyway because searchParams changes identity.
+    filters.estimatorId,
     filters.projectTypeId,
     filters.regionId,
     filters.source,
@@ -1070,7 +1082,10 @@ export function useDealBoard(
   previewLimit: number | null = 8,
   wonPeriodRange?: { from?: string; to?: string } | null,
   assignedRepId?: string,
-  estimateSentDateRange?: { from?: string; to?: string }
+  estimateSentDateRange?: { from?: string; to?: string },
+  /** Deals this person is ESTIMATING (deals.estimator_user_id) — the sibling of assignedRepId, never
+   *  both at once. See the deals dashboard header control. */
+  estimatorId?: string
 ) {
   const [board, setBoard] = useState<DealBoardResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1105,6 +1120,9 @@ export function useDealBoard(
     if (assignedRepId) {
       params.set("assignedRepId", assignedRepId);
     }
+    if (estimatorId) {
+      params.set("estimatorId", estimatorId);
+    }
     if (estimateSentDateRange?.from) {
       params.set("estimateSentFrom", estimateSentDateRange.from);
     }
@@ -1129,6 +1147,7 @@ export function useDealBoard(
       });
   }, [
     assignedRepId,
+    estimatorId,
     estimateSentDateRange?.from,
     estimateSentDateRange?.to,
     includeDd,
@@ -1163,6 +1182,10 @@ export function useDealStagePage(input: StagePageQuery & { stageId: string; scop
       sort: input.sort,
       search: input.search,
       ...(input.filters.assignedRepId ? { assignedRepId: input.filters.assignedRepId } : {}),
+      // The summary must narrow with the list it heads. Without this the stage page shows one estimator's
+      // deals under a count and value computed across every estimator — the same half-applied filtering
+      // this PR removed from the dashboard, reappearing one page over.
+      ...(input.filters.estimatorId ? { estimatorId: input.filters.estimatorId } : {}),
       ...(input.filters.estimateSentFrom ? { estimateSentFrom: input.filters.estimateSentFrom } : {}),
       ...(input.filters.estimateSentTo ? { estimateSentTo: input.filters.estimateSentTo } : {}),
       ...(input.filters.staleOnly ? { staleOnly: "true" } : {}),
@@ -1226,6 +1249,9 @@ export function useDealStagePage(input: StagePageQuery & { stageId: string; scop
     };
   }, [
     input.filters.assignedRepId,
+    // Without this the summary keeps a stale count when only the estimator changes: the request is built
+    // inside the effect, so a value the deps do not watch never triggers the refetch that would apply it.
+    input.filters.estimatorId,
     input.filters.estimateSentFrom,
     input.filters.estimateSentTo,
     input.filters.source,
@@ -1337,7 +1363,16 @@ export function usePendingRfp() {
     const isCurrent = () => requestId === requestIdRef.current;
     setLoading(true);
     setError(null);
-    return api<{ deals: PendingRfpDeal[] }>("/deals/pending-rfp")
+    // Carry the estimator filter through. The board's Pending RFP column IS narrowed by it (the predicate
+    // is ANDed into getDealsForPipeline's common conditions), and openStage forwards the whole query
+    // string here — so requesting the unfiltered queue made the destination list every pending RFP under
+    // a count that had been scoped to one estimator. `search` is already this callback's dependency, so
+    // changing the filter refetches.
+    const estimatorId = new URLSearchParams(search).get("estimatorId");
+    const path = estimatorId
+      ? `/deals/pending-rfp?estimatorId=${encodeURIComponent(estimatorId)}`
+      : "/deals/pending-rfp";
+    return api<{ deals: PendingRfpDeal[] }>(path)
       .then((r) => {
         if (isCurrent()) setDeals(r.deals);
         return r.deals;

@@ -128,6 +128,8 @@ export async function listUsers(officeId?: string) {
           u.reports_to,
           u.is_active,
           u.generates_sales,
+      u.estimates_jobs,
+          u.estimates_jobs,
           u.created_at
         FROM users u
         WHERE u.office_id = ${officeId}
@@ -149,6 +151,7 @@ export async function listUsers(officeId?: string) {
           reportsTo: users.reportsTo,
           isActive: users.isActive,
           generatesSales: users.generatesSales,
+          estimatesJobs: users.estimatesJobs,
           createdAt: users.createdAt,
         })
         .from(users)
@@ -166,6 +169,7 @@ export async function listUsers(officeId?: string) {
           reportsTo: row.reports_to,
           isActive: row.is_active,
           generatesSales: row.generates_sales,
+          estimatesJobs: row.estimates_jobs,
           createdAt: row.created_at,
         }
       : row
@@ -208,6 +212,10 @@ export interface CreateCrmUserInput {
    *  (true) instead would put every newly-created admin straight onto the dashboard — the exact clutter
    *  this flag exists to remove — so the create path always sends an explicit value. */
   generatesSales?: boolean;
+  /** Roster flag (migration 0222): may this person be offered under "Estimators" in the deals/leads
+   *  owner filters? Defaults false on create — unlike generatesSales there is no role that implies it,
+   *  and the list it feeds starts empty by design. */
+  estimatesJobs?: boolean;
 }
 
 // Pure, throwing validation — the create-flow's gate of record. The role decision is the gate-proven
@@ -233,6 +241,16 @@ export function assertCreatableCrmUser(input: CreateCrmUserInput): asserts input
   }
   if (input.role === "field_contractor") throw new AppError(400, "Field contractors are created in the field-user flow");
   if (!isAssignableCrmRole(input.role)) throw new AppError(400, `Invalid role: ${input.role}`);
+  // The roster flags get the same boolean check the PATCH path applies. The create route hands req.body
+  // straight to the insert, so without this a non-boolean reaches Postgres: some values coerce (`1`
+  // enrols the person in a roster nobody ticked them into) and others fail as a 500, where the update
+  // path answers a clean 400. Both flags are checked — generatesSales carried the identical gap.
+  if (input.generatesSales !== undefined && typeof input.generatesSales !== "boolean") {
+    throw new AppError(400, "generatesSales must be a boolean");
+  }
+  if (input.estimatesJobs !== undefined && typeof input.estimatesJobs !== "boolean") {
+    throw new AppError(400, "estimatesJobs must be a boolean");
+  }
 }
 
 /**
@@ -253,6 +271,21 @@ export function assertGeneratesSalesAllowedForRole(
 ): void {
   if (generatesSales === true && role === "field_contractor") {
     throw new AppError(400, "Field contractors cannot be marked as generating sales");
+  }
+}
+
+/**
+ * Same role gate for the estimator roster (migration 0222): a field contractor is not a CRM user and can
+ * never be a deal's estimator, so offering them under "Estimators" would be a filter option that always
+ * returns nothing. Kept as its own function rather than a shared boolean-and-message helper because the
+ * two flags are independent and their messages must name the right one.
+ */
+export function assertEstimatesJobsAllowedForRole(
+  estimatesJobs: boolean,
+  role: string | null | undefined
+): void {
+  if (estimatesJobs === true && role === "field_contractor") {
+    throw new AppError(400, "Field contractors cannot be marked as estimating jobs");
   }
 }
 
@@ -285,6 +318,8 @@ export async function createCrmUser(input: CreateCrmUserInput, actorUserId: stri
         reportsTo: input.reportsTo?.trim() || null,
         isActive: true,
         generatesSales: input.generatesSales ?? input.role === "rep",
+        // No role implies estimating, so there is nothing to derive: false unless the admin says so.
+        estimatesJobs: input.estimatesJobs ?? false,
         createdByUserId: actorUserId,
       })
       .returning();
@@ -310,6 +345,9 @@ export async function updateUser(
      *  person from the director-dashboard rosters and nothing else; it cannot hide commission they hold
      *  (getDirectorRepCommissionRows OR's this with an actually-earned EXISTS). */
     generatesSales: boolean;
+    /** Roster flag (0222) — see CreateCrmUserInput.estimatesJobs. Independent of generatesSales, but a
+     *  person ticked BOTH is listed under Sales Reps only: one person, one section. */
+    estimatesJobs: boolean;
     notificationPrefs: Record<string, unknown>;
     /** Legacy alias: pre-structure callers set a single rate here. Mapped to capxRateSolo (the
      *  effective rate under the default 'solo' structure) so a stale bundle / old script isn't
@@ -384,6 +422,21 @@ export async function updateUser(
       assertGeneratesSalesAllowedForRole(input.generatesSales, nextRole ?? existingUser.role);
       updates.generatesSales = input.generatesSales;
     }
+    if (input.estimatesJobs !== undefined) {
+      // Same reasoning as generatesSales above: reject a non-boolean rather than coercing, because
+      // `"false"` is truthy and would tick someone ON as the admin watched themselves tick them off.
+      if (typeof input.estimatesJobs !== "boolean") {
+        throw new AppError(400, "estimatesJobs must be a boolean");
+      }
+      assertEstimatesJobsAllowedForRole(input.estimatesJobs, nextRole ?? existingUser.role);
+      updates.estimatesJobs = input.estimatesJobs;
+    }
+    // NO role-change re-validation of the flags here, deliberately. Both asserts above reject exactly one
+    // role — field_contractor — and evaluateUpdateUserGuards has already rejected ANY transition into or
+    // out of that role with a 403 (isFieldContractorTransition), because contractors are created and
+    // managed solely by the field-invite flow. A role-only PATCH therefore cannot strand a true flag on a
+    // contractor through this path, and a re-validation block here would be unreachable. See the test
+    // pinning that 403, which is what makes this omission safe rather than an oversight.
     if (input.notificationPrefs !== undefined) updates.notificationPrefs = input.notificationPrefs;
 
     const hasBaseUserPatch = Object.keys(updates).length > 0;
@@ -650,6 +703,7 @@ export async function getUsersWithStats() {
       u.reports_to,
       u.is_active,
       u.generates_sales,
+      u.estimates_jobs,
       o.name AS office_name,
       COUNT(uoa.office_id)::int AS extra_office_count,
       cs.commission_rate,
@@ -677,6 +731,7 @@ export async function getUsersWithStats() {
       u.reports_to,
       u.is_active,
       u.generates_sales,
+      u.estimates_jobs,
       o.name,
       cs.commission_rate,
       cs.commission_structure,
@@ -781,6 +836,7 @@ export async function getUsersWithStats() {
     officeName: r.office_name,
     isActive: r.is_active,
     generatesSales: r.generates_sales,
+    estimatesJobs: r.estimates_jobs,
     extraOfficeCount: Number(r.extra_office_count ?? 0),
     commissionRate: Number(r.commission_rate ?? 0),
     commissionStructure: (r.commission_structure ?? "solo") as "solo" | "mixed",
