@@ -121,7 +121,15 @@ describe("enqueueRfpBidBoardCreate — DB-authoritative payload from a sparse { 
     expect(deal.description).toBe("Full roof replacement");
     expect(deal.estimator).toBe("Colby");
     expect(deal.address).toEqual({ street: "100 Main St", city: "Dallas", state: "TX", zip: "75001", country: "US" });
-    expect(deal.dueDate).toContain("2026-08-01"); // deal's own bid_due_date
+    // The SOURCE LEAD's bid_due_date (2026-09-15), not the deal's own column (2026-08-01).
+    //
+    // CHANGED DELIBERATELY with the shared bid-due-date resolver. This fixture is lead-backed, and the
+    // lead OWNS the bid due date (DEAL_FIELD_OWNERSHIP.bidDueDate === "lead") — the deal column is only a
+    // compatibility snapshot written through on save. The RFP payload used to prefer that snapshot while
+    // BOTH other read sites (getDealDetail's banner, getResolvedDeal's scoping field) preferred the lead,
+    // so a lead-backed deal whose due date was corrected on the lead shipped the STALE date to SyncHub
+    // while the deal page showed the corrected one. All three now resolve through one function.
+    expect(deal.dueDate).toContain("2026-09-15");
     expect(deal.name).toBe("Jason Ranches");
     expect(deal.projectNumber).toBe("TR-2001");
     // Resolved owner (assigned rep -> users) — NOT null:
@@ -153,5 +161,34 @@ describe("enqueueRfpBidBoardCreate — DB-authoritative payload from a sparse { 
     expect(body.deal.name).toBe("Untitled Deal");
     expect(body.deal.ownerEmail ?? null).toBeNull();
     expect(body.deal.companyName ?? null).toBeNull();
+  });
+
+  // The RFP payload is the THIRD read site of the shared bid-due-date resolver, alongside the deal-detail
+  // banner and getResolvedDeal. It is flag-gated exactly like the other two, and the flag-off half matters
+  // most: deals.bid_board_due_date is already populated on prod, so an ungated precedence would change the
+  // due date on outbound RFP bodies the day this deploys.
+  describe("Bid Board due-date read-back in the payload", () => {
+    async function dueDateFor(env: string | undefined): Promise<string> {
+      pg = await setup();
+      await pg!.query(`UPDATE deals SET bid_board_due_date = '2026-12-24' WHERE id = $1`, [DEAL]);
+      const tdb: any = drizzle(pg as any);
+      if (env === undefined) delete process.env.BID_BOARD_DUE_DATE_READBACK;
+      else process.env.BID_BOARD_DUE_DATE_READBACK = env;
+      try {
+        await enqueueRfpBidBoardCreate({ tenantDb: tdb, officeId: null, deal: { id: DEAL } });
+      } finally {
+        delete process.env.BID_BOARD_DUE_DATE_READBACK;
+      }
+      const jobs = (await pg!.query(`SELECT payload FROM public.job_queue`)).rows as any[];
+      return jobs[0].payload.body.deal.dueDate;
+    }
+
+    it("flag ON: the Bid Board date beats both the lead's and the deal's own", async () => {
+      expect(await dueDateFor("true")).toContain("2026-12-24");
+    });
+
+    it("flag OFF: the lead's date, exactly as before — the mirror is present but ignored", async () => {
+      expect(await dueDateFor(undefined)).toContain("2026-09-15");
+    });
   });
 });

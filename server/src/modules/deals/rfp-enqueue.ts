@@ -12,6 +12,7 @@ import {
   isR2Configured,
 } from "../../lib/r2-client.js";
 import { activeLatestFileConditions, buildDealFileScopeCondition } from "../files/service.js";
+import { resolveDealBidDueDateForRead } from "./bid-due-date.js";
 import { PUBLIC_VIEWER_PAGE_SIZE, generatePublicToken, isPublicProxyServable } from "../public-photo-tokens/service.js";
 import { publicPhotoShareUrlFromEnv, publicViewerBaseUrlFromEnv } from "../public-photo-tokens/public-share-url.js";
 import { buildNormalizedRfpRequestBody, buildRfpAttachments, buildRfpRequestDeliveryPayload, resolveSyncHubCreateFromRfpUrl, resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
@@ -121,6 +122,10 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, deal: { id: string }) {
            concat_ws(' ', pc.first_name, pc.last_name) AS "contactName",
            pc.email AS "clientEmail",
            pc.phone AS "clientPhone",
+           -- The JOINED lead's id, not d.source_lead_id: the bid-due-date resolver keys on whether the
+           -- lead ROW exists (a dangling source_lead_id must fall back to the deal column), exactly as
+           -- getResolvedDeal and getDealDetail do.
+           l.id AS "sourceLeadRowId",
            l.bid_due_date AS "sourceLeadBidDueDate",
            ptc.code AS "projectTypeCode"
       FROM deals d
@@ -169,8 +174,20 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, deal: { id: string }) {
     propertyZip: (row.property_zip as string | null) ?? null,
     propertyCountry: (row.property_country as string | null) ?? null,
     description: (row.description as string | null) ?? null,
-    // The deal's own bid_due_date wins; else fall back to the source lead's bid_due_date.
-    bidDueDate: row.bid_due_date ?? row.sourceLeadBidDueDate ?? null,
+    // Resolved through the ONE shared resolver ([[bid-due-date]]) that the deal-detail banner and
+    // getResolvedDeal also use, so the date on the outbound RFP body matches the date on the deal page.
+    //
+    // This CHANGES the lead/deal ordering here: it used to prefer the deal's own column and fall back to
+    // the lead, which was backwards relative to the other two read sites — the lead OWNS the field
+    // (DEAL_FIELD_OWNERSHIP.bidDueDate === "lead") and the deal column is only a compatibility snapshot,
+    // so a lead-backed deal whose lead value was edited/cleared shipped a stale date to SyncHub while the
+    // deal page showed the corrected one. The Bid Board leg on top of that is flag-gated (OFF by default).
+    bidDueDate: resolveDealBidDueDateForRead({
+      bidBoardDueDate: row.bid_board_due_date ?? null,
+      hasSourceLead: (row.sourceLeadRowId as string | null) != null,
+      leadBidDueDate: row.sourceLeadBidDueDate ?? null,
+      dealBidDueDate: row.bid_due_date ?? null,
+    }).day,
     bidBoardDueDate: row.bid_board_due_date ?? null,
     createdAt: row.created_at ?? null,
     // Round-precise event id for enqueueRfpBidBoardCreate's sourceEventId (authoritative, from the DB row).

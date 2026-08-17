@@ -12,6 +12,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import type { WorkflowRoute } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
 import { redactPropertyImageKeys } from "../properties/property-image-service.js";
+import { resolveDealBidDueDateForRead } from "./bid-due-date.js";
 import { applyProjectTypeChange, clearSalesSource, normalizeOptionalDealBidDueDate } from "./service.js";
 import { lockCurrentDealDescription, recordDescriptionHistoryChange } from "./deal-description-history.js";
 
@@ -182,20 +183,6 @@ async function getQuestionAnswersByKey(tenantDb: TenantDb, leadId: string) {
   return Object.fromEntries(rows.map((row) => [row.key, row.valueJson]));
 }
 
-/**
- * deals.bid_due_date is a timestamptz stored at UTC midnight; leads.bid_due_date is a date-only column
- * serialized as "YYYY-MM-DD". When a deal has NO source lead the deal column is the authoritative value,
- * so the resolver must surface it in the SAME date-only string shape lead-backed deals produce —
- * consumers (scoping-service, the PATCH /resolved-fields response) guard on `typeof === "string"`. Read
- * the UTC calendar day so there's no off-by-one against the UTC-midnight storage.
- */
-function dealBidDueDateToDateOnly(value: unknown): string | null {
-  if (value == null) return null;
-  const date = value instanceof Date ? value : new Date(value as string);
-  if (Number.isNaN(date.getTime())) return null;
-  return date.toISOString().slice(0, 10);
-}
-
 export async function getResolvedDeal(
   tenantDb: TenantDb,
   dealId: string
@@ -241,13 +228,19 @@ export async function getResolvedDeal(
       assignedRepId: sourceLead?.assignedRepId ?? deal.assignedRepId,
       workflowRoute,
       description: sourceLead?.description ?? deal.description ?? null,
-      // A lead-backed deal's bid due date is owned by the lead — INCLUDING when it's been cleared to
-      // null. Only fall back to the deal column when there's NO source lead at all, so a deliberately
-      // cleared lead value isn't masked by a stale pre-write-through deal snapshot (scoping/readiness
-      // must see the clear). No source lead → the deal column is authoritative (UTC date-only).
-      bidDueDate: sourceLead
-        ? sourceLead.bidDueDate ?? null
-        : dealBidDueDateToDateOnly(deal.bidDueDate) ?? null,
+      // ONE canonical resolver, shared with the deal-detail banner and the RFP payload ([[bid-due-date]]).
+      // Precedence: the Bid Board mirror (flag-gated, OFF by default) -> the source lead — INCLUDING when
+      // it's been cleared to null, because the lead OWNS the field and scoping/readiness must see the
+      // clear rather than a stale pre-write-through deal snapshot -> the deal's own column. `.day`, not
+      // `.raw`: consumers here (scoping-service, the PATCH /resolved-fields response) guard on
+      // `typeof === "string"`, so the deal-column case has to arrive in the same date-only shape a
+      // lead-backed deal produces.
+      bidDueDate: resolveDealBidDueDateForRead({
+        bidBoardDueDate: deal.bidBoardDueDate,
+        hasSourceLead: Boolean(sourceLead),
+        leadBidDueDate: sourceLead?.bidDueDate ?? null,
+        dealBidDueDate: deal.bidDueDate,
+      }).day,
     },
     ownership: DEAL_FIELD_OWNERSHIP,
   };

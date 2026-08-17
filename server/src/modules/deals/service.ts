@@ -40,6 +40,7 @@ import type * as schema from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { isDealBidBoardLinked } from "./bid-board-linkage.js";
+import { dateOnlyToUtcMidnightIso, resolveDealBidDueDateForRead } from "./bid-due-date.js";
 import { isCrmUserRole } from "../../middleware/field-auth.js";
 import { writeAuditLog } from "../../lib/audit-log.js";
 import { isUndefinedFunctionError } from "../../lib/db-errors.js";
@@ -304,7 +305,9 @@ export function normalizeOptionalDealBidDueDate(value: unknown) {
     throw new AppError(400, "bidDueDate must be an ISO date in YYYY-MM-DD format");
   }
 
-  return new Date(`${trimmed}T00:00:00.000Z`);
+  // UTC midnight via the shared helper, so the HTTP-input normalizer and the bid-board-sync write-through
+  // provably store the SAME instant — the one holdHorizonDateSql reads back with AT TIME ZONE 'UTC'.
+  return new Date(dateOnlyToUtcMidnightIso(trimmed));
 }
 
 async function resolveActiveOfficeScope(tenantDb: TenantDb, activeOfficeId: string) {
@@ -2520,9 +2523,11 @@ export async function getDealDetail(
 
   // The banner + detail header must show the AUTHORITATIVE bid due date, not the denormalized
   // deals.bid_due_date snapshot — which can be stale or null for a lead-backed deal whose lead value
-  // was edited/cleared before the write-through existed. Resolve it the same way getResolvedDeal does:
-  // a present source lead owns it (INCLUDING a deliberately cleared null); only a deal with no source
-  // lead falls back to its own column. One indexed lookup, sequential (tenantDb is a single tx client).
+  // was edited/cleared before the write-through existed. Resolved through the ONE shared resolver
+  // ([[bid-due-date]]), which getResolvedDeal and the RFP payload also call, so the banner, the scoping
+  // field and the outbound RFP body cannot disagree: Bid Board mirror (flag-gated, OFF by default) ->
+  // a present source lead, INCLUDING a deliberately cleared null -> the deal's own column.
+  // One indexed lookup, sequential (tenantDb is a single tx client).
   const [sourceLeadBid] = dealWithMetadata.sourceLeadId
     ? await tenantDb
         .select({ bidDueDate: leads.bidDueDate })
@@ -2530,9 +2535,17 @@ export async function getDealDetail(
         .where(eq(leads.id, dealWithMetadata.sourceLeadId))
         .limit(1)
     : [];
-  const resolvedBidDueDate = sourceLeadBid
-    ? sourceLeadBid.bidDueDate ?? null
-    : dealWithMetadata.bidDueDate ?? null;
+  // `.raw`, not `.day`: this value is published on the wire as the deal's `bidDueDate`, and the raw column
+  // shapes (a "YYYY-MM-DD" string from the lead, a UTC-midnight Date from deals.bid_due_date) are what
+  // every existing client consumer already receives. Taking `.day` would narrow the non-lead-backed case
+  // from an ISO instant to a date-only string for the ~9% of deals that carry the column — a wire change
+  // on a surface this PR is supposed to leave untouched while the flag is off.
+  const resolvedBidDueDate = resolveDealBidDueDateForRead({
+    bidBoardDueDate: dealWithMetadata.bidBoardDueDate,
+    hasSourceLead: Boolean(sourceLeadBid),
+    leadBidDueDate: sourceLeadBid?.bidDueDate ?? null,
+    dealBidDueDate: dealWithMetadata.bidDueDate,
+  }).raw;
 
   const currentStage = await getStageByIdForWorkflowRoute(dealWithMetadata.stageId, dealWithMetadata.workflowRoute);
 
