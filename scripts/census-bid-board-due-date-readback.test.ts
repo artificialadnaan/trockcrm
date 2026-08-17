@@ -30,7 +30,8 @@ function row(partial: Partial<CensusRow>): CensusRow {
     stored_on_hold: false,
     bid_board_last_updated_at: null,
     demo_shaped: false,
-    is_ambiguous: false,
+    is_ambiguous_procore_bid_id: false,
+    is_ambiguous_project_number: false,
     next_bid_due_day: "2026-09-01",
     is_test_data: false,
     bid_due_date_bid_board_project_number: "DFW-1-00001-aa",
@@ -185,7 +186,7 @@ describe("census-bid-board-due-date-readback — SQL", () => {
   // The commonest real shape is a DETACHED deal that kept the same project_number — exactly what the
   // detach preserves — so the ambiguity check must span detached deals too.
   it("flags rows the matcher's ambiguity guard will refuse, using the matcher's OWN canonicalizer", () => {
-    expect(sql).toContain("AS is_ambiguous");
+    expect(sql).toContain("AS is_ambiguous_project_number");
     // Not a lookalike normalization: the literal output of the ingest's builder, on both sides.
     expect(sql).toContain(canonicalProjectNumberSql("d.bid_board_project_number"));
     expect(sql).toContain(canonicalProjectNumberSql("o.project_number"));
@@ -196,6 +197,14 @@ describe("census-bid-board-due-date-readback — SQL", () => {
     expect(sql).toContain("o.is_active = true");
     expect(sql).toContain("COALESCE(o.is_change_order, false) = false");
     expect(sql).not.toContain("o.bid_board_detached_at IS NULL");
+  });
+
+  // TIER 1 is the Bid Board's own key and runs FIRST, so a collision there always refuses the row —
+  // exact, unlike the tier-2 approximation.
+  it("also flags tier-1 (procore_bid_id) collisions, over the same base population", () => {
+    expect(sql).toContain("AS is_ambiguous_procore_bid_id");
+    expect(sql).toContain("o.procore_bid_id = d.procore_bid_id");
+    expect(sql).toContain("d.procore_bid_id IS NOT NULL");
   });
 
   it("does NOT filter test deals out of the cohort — the ingest does not either", () => {
@@ -475,12 +484,19 @@ describe("census-bid-board-due-date-readback — summary", () => {
     const summary = summarizeCensus(
       "office_dallas",
       [
-        row({ is_ambiguous: true, deal_value: "900000", currently_far_out: false, next_far_out: true }),
-        row({ is_ambiguous: false }),
+        row({
+          is_ambiguous_project_number: true,
+          deal_value: "900000",
+          currently_far_out: false,
+          next_far_out: true,
+        }),
+        row({}),
       ],
       10
     );
     expect(summary.ambiguousRowsExcluded).toBe(1);
+    expect(summary.ambiguousByProjectNumber).toBe(1);
+    expect(summary.ambiguousByProcoreBidId).toBe(0);
     // Only the unambiguous row survives into every other number (it is a null->date change, so its own
     // page legitimately changes — the point is that the ambiguous row contributed nothing anywhere).
     expect(summary.touchedRows).toBe(1);
@@ -490,6 +506,45 @@ describe("census-bid-board-due-date-readback — summary", () => {
     // approved on.
     expect(summary.wouldPark).toBe(0);
     expect(summary.netValueDelta).toBe(0);
+  });
+
+  // ★ TIER 1. Two active deals sharing a procore_bid_id: resolveDealMatches returns BOTH at tier 1 and the
+  // ingest refuses the row, so the census must not count it as one that will be written.
+  it("excludes a row whose procore_bid_id is shared with another active deal", () => {
+    const summary = summarizeCensus(
+      "office_dallas",
+      [
+        row({
+          is_ambiguous_procore_bid_id: true,
+          deal_value: "750000",
+          currently_far_out: false,
+          next_far_out: true,
+        }),
+        row({}),
+      ],
+      10
+    );
+    expect(summary.ambiguousRowsExcluded).toBe(1);
+    expect(summary.ambiguousByProcoreBidId).toBe(1);
+    expect(summary.ambiguousByProjectNumber).toBe(0);
+    // It reaches none of the numbers the flip is approved on.
+    expect(summary.touchedRows).toBe(1);
+    expect(summary.wouldWrite).toBe(1);
+    expect(summary.wouldPark).toBe(0);
+    expect(summary.netValueDelta).toBe(0);
+  });
+
+  it("counts a row colliding on BOTH identities once, but attributes it to each", () => {
+    // The two per-identity counters may overlap, so they do not necessarily sum to the row total —
+    // ambiguousRowsExcluded counts distinct ROWS.
+    const summary = summarizeCensus(
+      "office_dallas",
+      [row({ is_ambiguous_procore_bid_id: true, is_ambiguous_project_number: true })],
+      10
+    );
+    expect(summary.ambiguousRowsExcluded).toBe(1);
+    expect(summary.ambiguousByProcoreBidId).toBe(1);
+    expect(summary.ambiguousByProjectNumber).toBe(1);
   });
 
   it("separates rows the ingest UPDATES from rows whose DATE changes", () => {
