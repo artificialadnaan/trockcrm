@@ -6,6 +6,7 @@ import {
   createWeeklyReportProject,
   deactivateWeeklyReportProject,
   getWeeklyReportProject,
+  getWeeklyReportProjectRow,
   getWeeklyReportSettings,
   listWeeklyReportAssignableUsers,
   listWeeklyReportProjects,
@@ -13,6 +14,7 @@ import {
   updateWeeklyReportSettings,
 } from "./projects-service.js";
 import {
+  canPublishWeeklyReport,
   createWeeklyReportDraft,
   getWeeklyReportDetail,
   listWeeklyReportPhotoCandidates,
@@ -27,6 +29,19 @@ import {
   getWeeklyReportDashboard,
   listWeeklyReportProjectSummaries,
 } from "./dashboard-service.js";
+import {
+  loadWeeklyReportPdfSource,
+  resolveArtifactKey,
+  weeklyReportPdfDownloadUrl,
+  weeklyReportPdfFilename,
+} from "./pdf-service.js";
+import {
+  isWeeklyReportShareableStatus,
+  listWeeklyReportTokens,
+  mintWeeklyReportToken,
+  revokeWeeklyReportToken,
+  weeklyReportShareUrl,
+} from "./tokens-service.js";
 import { isIsoDateString } from "@trock-crm/shared/types";
 
 const router = Router();
@@ -335,6 +350,140 @@ router.post("/reports/:id/transition", async (req, res, next) => {
     );
     await req.commitTransaction!();
     res.json(report);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PDF + the client share link
+// ---------------------------------------------------------------------------
+
+/** The office context both surfaces need. Absent means the request never went through tenantMiddleware. */
+function officeContextFrom(req: Request): { slug: string; tenantId: string } {
+  const slug = req.officeSlug;
+  const tenantId = req.user?.activeOfficeId;
+  if (!slug || !tenantId) throw new AppError(400, "Office context not available");
+  return { slug, tenantId };
+}
+
+/**
+ * A presigned download of the report PDF, rendering it first when the stored artifact is missing or stale.
+ *
+ * The transaction is COMMITTED before the render. Rendering downloads and transcodes every photo and then
+ * uploads to R2 — seconds of network and CPU — and holding a pooled connection across that is the
+ * documented cause of the API pool saturating and every deal list answering "Couldn't load deals".
+ *
+ * Presigned here, unlike on the public viewer, because the caller is CRM staff: the object key embeds the
+ * deal number, which is theirs to see and which the client's link deliberately hides.
+ */
+router.get("/reports/:id/pdf", async (req, res, next) => {
+  try {
+    const office = officeContextFrom(req);
+    const source = await loadWeeklyReportPdfSource(req.tenantClient!, requireUuid(req.params.id, "id"));
+    await req.commitTransaction!();
+    if (!source) throw new AppError(404, "Weekly report not found");
+
+    const r2Key = await resolveArtifactKey(office.slug, source);
+    const filename = weeklyReportPdfFilename(source.view);
+    res.json({ url: await weeklyReportPdfDownloadUrl(r2Key, filename), filename });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Load a report and assert the caller may put it, or take it back, in front of a client.
+ *
+ * The router's own gate is `admin | director | rep`, which is the read gate for the dashboard. Minting the
+ * 180-day unauthenticated URL is not a read — it IS the act of publication, so it takes the same
+ * assigned-PM-or-leadership check that moving the report to `sent` takes. Otherwise any rep in the office
+ * could publish a construction report to its client without the PM ever being involved.
+ */
+async function loadPublishableReport(req: Request, id: string) {
+  const report = await getWeeklyReportDetail(req.tenantClient!, id);
+  if (!report) throw new AppError(404, "Weekly report not found");
+  const project = await getWeeklyReportProjectRow(req.tenantClient!, report.weeklyReportProjectId);
+  if (!project) throw new AppError(404, "Weekly report project not found");
+  if (!canPublishWeeklyReport(project, actorFrom(req))) {
+    throw new AppError(403, "Only the assigned project manager can issue or withdraw a client link");
+  }
+  return report;
+}
+
+/**
+ * Mint a durable client link.
+ *
+ * Only for an APPROVED or SENT report. A link to a draft is a link to content no PM has reviewed, in front
+ * of the client — which defeats the approval gate rather than merely bending it. The viewer re-checks this
+ * on every request too (see isWeeklyReportShareableStatus): `approved` is not terminal, and a mint-time
+ * check alone would keep serving a report the superintendent had since pulled back and rewritten.
+ *
+ * Each call mints a NEW link rather than returning the existing one, so revoking the link you just emailed
+ * cannot kill the one the client is already reading.
+ */
+router.post("/reports/:id/share-link", async (req, res, next) => {
+  try {
+    const office = officeContextFrom(req);
+    const actor = actorFrom(req);
+    const id = requireUuid(req.params.id, "id");
+    const report = await loadPublishableReport(req, id);
+    if (!isWeeklyReportShareableStatus(report.status)) {
+      throw new AppError(409, "A client link can only be created once the PM has approved the report");
+    }
+
+    const { rawToken, token } = await mintWeeklyReportToken(req.tenantClient!, {
+      weeklyReportId: id,
+      tenantId: office.tenantId,
+      officeSlug: office.slug,
+      createdByUserId: actor.id,
+    });
+    await req.commitTransaction!();
+
+    // The link's host is config, and getting it wrong is invisible from in here: `/wr` is served by the API
+    // service, so a base URL pointing at the field host or an SPA-only frontend mints a 201 with a URL that
+    // 404s for the client and for nobody else. Warn loudly while the deploy prerequisite is outstanding.
+    if (!process.env.PUBLIC_SHARE_BASE_URL?.trim()) {
+      console.warn(
+        "[weekly-report] PUBLIC_SHARE_BASE_URL is unset — client links are being minted against FRONTEND_URL " +
+          "or the request host, neither of which is guaranteed to serve /wr.",
+      );
+    }
+    // The raw token is returned EXACTLY ONCE, here. Only its hash is stored, so this response is the only
+    // moment the usable link exists anywhere but in the email that carries it.
+    res.status(201).json({ url: weeklyReportShareUrl(req, rawToken), token });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/reports/:id/share-link", async (req, res, next) => {
+  try {
+    const office = officeContextFrom(req);
+    const tokens = await listWeeklyReportTokens(
+      req.tenantClient!,
+      requireUuid(req.params.id, "id"),
+      office.tenantId,
+    );
+    await req.commitTransaction!();
+    res.json({ tokens });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post("/reports/:id/share-link/:tokenId/revoke", async (req, res, next) => {
+  try {
+    const office = officeContextFrom(req);
+    const reportId = requireUuid(req.params.id, "id");
+    await loadPublishableReport(req, reportId);
+    const token = await revokeWeeklyReportToken(req.tenantClient!, {
+      tokenId: requireUuid(req.params.tokenId, "tokenId"),
+      tenantId: office.tenantId,
+      weeklyReportId: reportId,
+    });
+    await req.commitTransaction!();
+    res.json({ token });
   } catch (error) {
     next(error);
   }

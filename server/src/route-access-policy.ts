@@ -39,6 +39,10 @@ export const PUBLIC_ROUTE_MOUNTS = [
   "/api/public/photo-viewer",
   "/api/public/daily-summary",
   "/api/public/signature-logo",
+  // The client-facing weekly report viewer. NOT under /api: it serves HTML to a person, not JSON to a
+  // client app, and the link goes in an email — `/wr/<token>` survives being copied out of one where
+  // `/api/public/weekly-reports/<token>` does not. Unauthenticated by design; the token is the credential.
+  "/wr",
   "/api/integrations/synchub",
   // Internal RFP relay routes are public at the tenant middleware layer but
   // authenticate each request with HMAC using SYNCHUB_SHARED_SECRET and the

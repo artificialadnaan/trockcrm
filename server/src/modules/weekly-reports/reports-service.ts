@@ -189,6 +189,22 @@ function isElevated(actor: WeeklyReportActor): boolean {
   return ELEVATED_ROLES.has(actor.role);
 }
 
+/**
+ * May put this project's reports in front of a client: the assigned PM, or an admin/director.
+ *
+ * The same set `canTransitionAs` requires for `approved` and `sent`, factored out because minting the
+ * 180-day public link IS the act of publication — the link is what the client actually opens — and gating
+ * it any lower than the send it accompanies would route around the PM gate rather than enforce it. Not
+ * expressed through canTransitionAs itself because that also consults the status ladder, and `sent` has no
+ * onward transition: re-issuing a link for an already-sent report is legitimate and must not be refused.
+ */
+export function canPublishWeeklyReport(
+  projectRow: Record<string, any>,
+  actor: WeeklyReportActor,
+): boolean {
+  return isAssignedPm(projectRow, actor) || isElevated(actor);
+}
+
 /** May write the report's content: the assigned super, the assigned PM, or an admin/director. */
 export function canEditWeeklyReport(
   projectRow: Record<string, any>,

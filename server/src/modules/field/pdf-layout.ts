@@ -121,7 +121,13 @@ const FINDINGS_BULLET_SPACING = 9; // vertical gap between consecutive bullets
 const FINDINGS_BULLET_INDENT = 18; // text inset from the margin; the glyph sits in the gutter
 const FINDINGS_BULLET_TEXT_WIDTH = CONTENT_WIDTH - FINDINGS_BULLET_INDENT;
 
-type ReportFontSet = {
+/**
+ * The two font names a renderer draws with, already registered on the document — the embedded Geist pair,
+ * or the Helvetica fallback when the OTF assets are missing. Exported (with registerReportFonts below) so a
+ * SECOND branded renderer does not re-derive the asset paths: they are resolved relative to THIS file, and a
+ * copy in another module would silently fall back to Helvetica the moment the two directories diverged.
+ */
+export type ReportFontSet = {
   regular: string;
   bold: string;
 };
@@ -383,7 +389,7 @@ export function untranscodedFallback(buffer: Buffer, mime: string | null): Buffe
   return native && buffer.byteLength <= MAX_UNTRANSCODED_EMBED_BYTES ? buffer : null;
 }
 
-async function loadPhotoBuffer(
+export async function loadPhotoBuffer(
   photo: ReportRenderablePhoto,
   /**
    * Bounds the object read AND the transcode below. Phase D of the AI report re-reads and re-decodes every
@@ -577,12 +583,12 @@ function drawExecutiveSummaryPages(
   });
 }
 
-type OpenedImage = { width: number; height: number; orientation?: number };
+export type OpenedImage = { width: number; height: number; orientation?: number };
 
 // pdfkit's openImage isn't in @types/pdfkit. Decode once to get intrinsic dimensions (so we can tight-frame
 // the exact rendered rectangle) and reuse the opened image for the actual draw (no second decode). Returns
 // the EXIF-orientation-adjusted display size — pdfkit swaps w/h for orientations > 4 when it draws.
-function openImageForLayout(
+export function openImageForLayout(
   doc: PDFKit.PDFDocument,
   buffer: Buffer,
   photo: Pick<ReportRenderablePhoto, "id" | "displayName">,
@@ -951,7 +957,7 @@ function resolveBrandFontPaths(): { regular: string; bold: string } | null {
   };
 }
 
-function registerReportFonts(doc: PDFKit.PDFDocument): ReportFontSet {
+export function registerReportFonts(doc: PDFKit.PDFDocument): ReportFontSet {
   const fontPaths = resolveBrandFontPaths();
   if (!fontPaths) return fallbackReportFonts();
 

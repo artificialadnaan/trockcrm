@@ -54,6 +54,7 @@ import { userRoutes } from "./modules/users/routes.js";
 import { fieldRoutes } from "./modules/field/routes.js";
 import { fieldRespondersRoutes } from "./modules/field/field-responders-routes.js";
 import { weeklyReportRoutes } from "./modules/weekly-reports/routes.js";
+import { weeklyReportPublicRoutes } from "./modules/weekly-reports/public-routes.js";
 import {
   adminPhotoTokenRoutes,
   publicPhotoViewerRoutes,
@@ -135,6 +136,12 @@ export function createApp() {
   app.use("/api/public/photo-viewer", publicPhotoViewerRoutes);
   app.use("/api/public/daily-summary", dailySummaryPublicRoutes);
   app.use("/api/public/signature-logo", signatureLogoPublicRoutes);
+
+  // The client-facing weekly report page, served by THIS service so it is same-origin with /api (see
+  // public-share-url.ts). Mounted here with the other public surfaces — before the cookie-auth CSRF gate,
+  // which it does not need (GET only, no cookie auth) — and, critically, before the SPA fallback further
+  // down, which would otherwise answer index.html for every /wr URL.
+  app.use("/wr", weeklyReportPublicRoutes);
 
   app.use((req, res, next) => {
     const csrfCookieOptions = getCsrfCookieOptionsForRequest(process.env, {
