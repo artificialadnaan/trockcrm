@@ -154,7 +154,7 @@ beforeAll(async () => {
       -- The column under test: a timestamptz stored at UTC midnight (migration 0132).
       bid_due_date timestamptz,
       -- Migration 0223: the provenance stamp the read resolver requires.
-      bid_due_date_from_bid_board_at timestamptz,
+      bid_due_date_from_bid_board_at timestamptz, bid_due_date_bid_board_project_number text,
       won_closed_date date, contract_signed_date date, contract_signed_at timestamptz,
       actual_close_date date, lost_at timestamptz, bid_board_loss_outcome text,
       lost_reason_id uuid, lost_notes text, lost_competitor text,
@@ -251,6 +251,79 @@ describe("Bid Board Due Date -> deals.bid_due_date (flag ON)", () => {
          FROM ${SCHEMA}.deals WHERE id = '${DEAL}'`
     );
     expect(rows[0]).toEqual({ stamped: true, landed: true });
+  });
+
+  // ★ P2. A lead-backed legacy deal can already hold the RIGHT DAY while its lead says something else. The
+  // value guard correctly skips it — there is nothing to write — but if that also skipped the stamp the
+  // deal could never earn the override: every later sync carrying the same Board date would skip it again,
+  // forever, even though the Board plainly confirms the date.
+  it("STAMPS a deal whose day already matches, so a Board-confirmed date can still earn the override", async () => {
+    await seedDeals("2026-09-01T00:00:00.000Z");
+    expect((await dealRow()).bid_due_date_from_bid_board_at).toBeNull();
+
+    const result = await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
+
+    const after = await dealRow();
+    // Provenance recorded...
+    expect(after.bid_due_date_from_bid_board_at).not.toBeNull();
+    expect(after.bid_due_date_bid_board_project_number).toBe("DFW-1-00001-aa");
+    // ...the value untouched, and NOT counted as a change.
+    expect(new Date(after.bid_due_date).toISOString()).toBe("2026-09-01T00:00:00.000Z");
+    expect(result.metrics.bidDueDateUpdated).toBe(0);
+    expect(result.metrics.bidDueDateProvenanceStamped).toBe(1);
+    // No history row and no audit entry: nothing a human reads changed. (`updated_at` is deliberately
+    // NOT asserted — the ingest's own mirror UPDATE stamps it on every matched row regardless, so an
+    // assertion here would be pinning someone else's behaviour, exactly as noted on the no-op case above.
+    // The stamp-only branch's `updated_at = CASE ... ELSE d.updated_at END` is covered by the unit-level
+    // guard instead.)
+    expect((await historyRows()).filter((h) => h.field_name === "bid_due_date")).toHaveLength(0);
+    expect((await auditFieldChanges()).filter((c) => "bidDueDate" in c)).toHaveLength(0);
+  });
+
+  it("does not RE-stamp on every later sync once the provenance is already correct", async () => {
+    await seedDeals("2026-09-01T00:00:00.000Z");
+    await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
+
+    const second = await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
+
+    expect(second.metrics.bidDueDateProvenanceStamped).toBe(0);
+    expect(second.metrics.bidDueDateSkippedNoChange).toBe(1);
+  });
+
+  // ★ P1. A deal detached and later linked to a genuinely NEW Bid Board project keeps its old dates and
+  // its old stamp — the link callback clears only bid_board_detached_at. The stamp must stop counting the
+  // moment the deal leaves the project it was earned on, or the detached-deal leak returns through the
+  // front door where the detach guard cannot see it.
+  it("re-stamps for the NEW project after a re-link, so retired provenance never resurrects the override", async () => {
+    // Cycle 1: the deal earns provenance on its original project.
+    await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
+    expect((await dealRow()).bid_due_date_bid_board_project_number).toBe("DFW-1-00001-aa");
+
+    // Detach, then re-link to a DIFFERENT project — the shape the internal-RFP bid-board-created callback
+    // leaves behind: detach marker cleared, dates and stamp preserved, new project number.
+    await pg.query(
+      `UPDATE ${SCHEMA}.deals
+          SET bid_board_detached_at = NULL,
+              bid_board_project_number = 'DFW-2-99999-zz',
+              project_number = 'DFW-2-99999-zz',
+              deal_number = 'DFW-2-99999-zz'
+        WHERE id = $1`,
+      [DEAL]
+    );
+    const afterRelink = await dealRow();
+    // The stamp still names the RETIRED project, which is exactly what makes it void.
+    expect(afterRelink.bid_due_date_bid_board_project_number).toBe("DFW-1-00001-aa");
+    expect(afterRelink.bid_board_project_number).toBe("DFW-2-99999-zz");
+
+    // The next sync for the NEW project re-earns the stamp legitimately.
+    await ingestBidBoardRows({
+      office_slug: "test",
+      rows: [exportRow({ "Project #": "DFW-2-99999-zz", "Due Date": "2026-10-15" })],
+    });
+
+    const after = await dealRow();
+    expect(after.bid_due_date_bid_board_project_number).toBe("DFW-2-99999-zz");
+    expect(new Date(after.bid_due_date).toISOString()).toBe("2026-10-15T00:00:00.000Z");
   });
 
   it("does NOT stamp a deal the write-through skipped — a blank Due Date confers no provenance", async () => {

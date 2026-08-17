@@ -87,6 +87,12 @@ interface IngestionMetrics {
   bidDueDateUpdated: number;
   bidDueDateSkippedNoValue: number;
   bidDueDateSkippedNoChange: number;
+  /**
+   * Deals whose bid_due_date already matched the Board, so nothing was written, but whose PROVENANCE was
+   * (re-)stamped — which is what makes them eligible for the read override. Distinct from
+   * bidDueDateUpdated because no value moved, and from bidDueDateSkippedNoChange because something did.
+   */
+  bidDueDateProvenanceStamped: number;
 }
 
 interface DealMatch {
@@ -834,6 +840,8 @@ interface BidDueDateWritebackResult {
   updated: boolean;
   skippedNoValue: boolean;
   skippedNoChange: boolean;
+  /** The value was already correct, but the Board's confirmation was newly recorded (the 0223 stamps). */
+  provenanceStamped?: boolean;
   warning: string | null;
 }
 
@@ -1015,7 +1023,30 @@ async function writeBidDueDateIfNeeded(
   const nextValue = dateOnlyToUtcMidnightIso(nextDay);
   const updateResult = await client.query(
     `WITH existing AS (
-       SELECT bid_due_date
+       SELECT bid_due_date,
+              bid_board_project_number,
+              -- THE VALUE GUARD. Compared on the CALENDAR DAY, not the instant, and against an explicit
+              -- date parameter ($3) rather than a cast of $2 (casting a timestamptz to date resolves in
+              -- the SESSION timezone — the exact trap AT TIME ZONE 'UTC' exists to avoid).
+              --
+              -- Two reasons the day is the right unit. First, the day is the entire business value and the
+              -- only thing holdHorizonDateSql reads, so a legacy row stored at 14:30 on the correct day
+              -- needs no correction. Second, an instant comparison would rewrite that row and then emit a
+              -- deal_history entry reading "2026-06-01 -> 2026-06-01", because the guard compared instants
+              -- while the history renders days — a row that looks like a bug to whoever audits the first
+              -- enabled run. Any write that does happen still normalizes the column to UTC midnight ($2).
+              ((bid_due_date AT TIME ZONE 'UTC')::date IS DISTINCT FROM $3::date) AS value_changes,
+              -- THE PROVENANCE GUARD, deliberately NOT the same guard as the value one.
+              --
+              -- A lead-backed legacy deal can already hold the right DAY while its lead says something
+              -- else. The value guard skips it correctly — there is nothing to write — but if that also
+              -- skipped the stamp, the deal could never earn the read override: every later sync carrying
+              -- the same Board date would skip it again, forever, even though the Board plainly confirms
+              -- the date. It IS Board-confirmed; it simply needed no correction. So: skip the VALUE write,
+              -- still record the confirmation.
+              (bid_due_date_from_bid_board_at IS NULL
+                 OR bid_due_date_bid_board_project_number IS DISTINCT FROM bid_board_project_number)
+                AS provenance_stale
          FROM ${schemaName}.deals
         WHERE id = $1
           -- Detached deals keep their own bid due date: the matcher already excludes them, but repeating
@@ -1025,31 +1056,28 @@ async function writeBidDueDateIfNeeded(
         FOR UPDATE
      ), updated AS (
        UPDATE ${schemaName}.deals d
-          SET bid_due_date = $2::timestamptz,
-              -- PROVENANCE (migration 0223). The read resolver requires this stamp before it will let the
-              -- deal column outrank the source lead, so this write is what MAKES a deal eligible for the
-              -- override — a coincidental day match never does. Stamped in the same statement as the value
-              -- it vouches for, so the two can never disagree.
+          -- The value moves only when the day actually differs; the stamps are (re-)written either way.
+          SET bid_due_date = CASE WHEN existing.value_changes THEN $2::timestamptz ELSE d.bid_due_date END,
+              -- PROVENANCE (migration 0223): WHEN the sync wrote or confirmed this date, and WHICH Bid
+              -- Board project it did so for. The read resolver requires both before it will let the deal
+              -- column outrank the source lead, so this write is what MAKES a deal eligible for the
+              -- override — a coincidental day match never does. The project number is copied FROM the live
+              -- column in this same statement, so the stamp and the identity it names cannot disagree.
               bid_due_date_from_bid_board_at = NOW(),
-              updated_at = NOW()
+              bid_due_date_bid_board_project_number = d.bid_board_project_number,
+              -- Untouched on a stamp-only pass: confirming provenance is internal bookkeeping, not a
+              -- user-visible edit, so this row's updated_at must not move when nothing a human reads has.
+              updated_at = CASE WHEN existing.value_changes THEN NOW() ELSE d.updated_at END
          FROM existing
         WHERE d.id = $1
-          -- Compared on the CALENDAR DAY, not the instant, and against an explicit date parameter ($3)
-          -- rather than a cast of $2 (casting a timestamptz to date resolves in the SESSION timezone —
-          -- the exact trap AT TIME ZONE 'UTC' exists to avoid).
-          --
-          -- Two reasons the day is the right unit. First, the day is the entire business value and the
-          -- only thing holdHorizonDateSql reads, so a legacy row stored at 14:30 on the correct day needs
-          -- no correction. Second, an instant comparison would rewrite that row and then emit a
-          -- deal_history entry reading "2026-06-01 -> 2026-06-01", because the guard compared instants
-          -- while the history renders days — a row that looks like a bug to whoever audits the first
-          -- enabled run. Any write that does happen still normalizes the column to UTC midnight via $2.
-          AND (existing.bid_due_date AT TIME ZONE 'UTC')::date IS DISTINCT FROM $3::date
+          AND (existing.value_changes OR existing.provenance_stale)
         RETURNING existing.bid_due_date AS old_bid_due_date,
+                  existing.value_changes AS value_changed,
                   d.bid_due_date AS new_bid_due_date
      )
      SELECT existing.bid_due_date AS current_bid_due_date,
             updated.old_bid_due_date,
+            updated.value_changed,
             updated.new_bid_due_date
        FROM existing
        LEFT JOIN updated ON true`,
@@ -1057,8 +1085,18 @@ async function writeBidDueDateIfNeeded(
   );
 
   const rowResult = updateResult.rows[0];
-  if (!rowResult?.new_bid_due_date) {
-    return { updated: false, skippedNoValue: false, skippedNoChange: true, warning: null };
+  // No `updated` row at all (detached mid-sync, or already stamped for this project with the right day)
+  // OR a stamp-only pass: either way the VALUE did not move, so there is no deal_history row to write and
+  // nothing for the operator's changed-count to include. `provenanceStamped` distinguishes "the Board
+  // confirmed a date that was already right" from "nothing happened", which is otherwise invisible.
+  if (rowResult?.value_changed !== true) {
+    return {
+      updated: false,
+      skippedNoValue: false,
+      skippedNoChange: true,
+      provenanceStamped: rowResult?.value_changed === false,
+      warning: null,
+    };
   }
 
   // Recorded as calendar DAYS, not instants: the column's business value is date-only, and a
@@ -1085,7 +1123,13 @@ async function writeBidDueDateIfNeeded(
     bidDueDate: { from: oldValue, to: newValue },
   }, { source: BID_BOARD_DUE_DATE_SYNC_SOURCE, reason: BID_BOARD_DUE_DATE_SYNC_REASON });
 
-  return { updated: true, skippedNoValue: false, skippedNoChange: false, warning: null };
+  return {
+    updated: true,
+    skippedNoValue: false,
+    skippedNoChange: false,
+    provenanceStamped: true,
+    warning: null,
+  };
 }
 
 export async function writeStageIfSafe(
@@ -1315,6 +1359,7 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
     bidDueDateUpdated: 0,
     bidDueDateSkippedNoValue: 0,
     bidDueDateSkippedNoChange: 0,
+    bidDueDateProvenanceStamped: 0,
   };
 
   // Resolved ONCE per run, not per row: a flag flipped mid-run would otherwise write the date on some of
@@ -1551,6 +1596,9 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
         if (bidDueDateResult.updated) metrics.bidDueDateUpdated++;
         if (bidDueDateResult.skippedNoValue) metrics.bidDueDateSkippedNoValue++;
         if (bidDueDateResult.skippedNoChange) metrics.bidDueDateSkippedNoChange++;
+        if (bidDueDateResult.provenanceStamped && !bidDueDateResult.updated) {
+          metrics.bidDueDateProvenanceStamped++;
+        }
         if (bidDueDateResult.warning) warnings.push(bidDueDateResult.warning);
       }
 
