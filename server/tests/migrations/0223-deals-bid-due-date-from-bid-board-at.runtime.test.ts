@@ -17,14 +17,15 @@ import { migrationSql } from "../helpers/migration-sql.js";
 
 const MIGRATION = "0223_deals_bid_due_date_from_bid_board_at";
 const COLUMN = "bid_due_date_from_bid_board_at";
+const PROJECT_COLUMN = "bid_due_date_bid_board_project_number";
 
 let pg: PGlite;
 
-async function columnRow(schema: string) {
+async function columnRow(schema: string, column: string = COLUMN) {
   const result = await pg.query<{ is_nullable: string; column_default: string | null; data_type: string }>(
     `SELECT is_nullable, column_default, data_type FROM information_schema.columns
       WHERE table_schema = $1 AND table_name = 'deals' AND column_name = $2`,
-    [schema, COLUMN]
+    [schema, column]
   );
   return result.rows[0] ?? null;
 }
@@ -38,6 +39,7 @@ async function seedOffices(schemas: string[]) {
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
         bid_due_date timestamptz,
         bid_board_due_date date,
+        bid_board_project_number text,
         created_at timestamptz NOT NULL DEFAULT now()
       );
     `);
@@ -55,6 +57,7 @@ describe("migration 0223 — deals.bid_due_date_from_bid_board_at", () => {
 
     for (const schema of ["office_dallas", "office_atlanta"]) {
       expect(await columnRow(schema), schema).not.toBeNull();
+      expect(await columnRow(schema, PROJECT_COLUMN), `${schema}.${PROJECT_COLUMN}`).not.toBeNull();
     }
   });
 
@@ -66,6 +69,12 @@ describe("migration 0223 — deals.bid_due_date_from_bid_board_at", () => {
     expect(meta?.is_nullable).toBe("YES");
     expect(meta?.column_default).toBeNull();
     expect(meta?.data_type).toBe("timestamp with time zone");
+
+    // The identity half: which Bid Board project the stamp was earned on.
+    const projectMeta = await columnRow("office_dallas", PROJECT_COLUMN);
+    expect(projectMeta?.is_nullable).toBe("YES");
+    expect(projectMeta?.column_default).toBeNull();
+    expect(projectMeta?.data_type).toBe("text");
   });
 
   // ★ The one that matters. A deal whose existing bid_due_date happens to share a calendar day with the
@@ -83,7 +92,8 @@ describe("migration 0223 — deals.bid_due_date_from_bid_board_at", () => {
     await pg.exec(migrationSql(MIGRATION));
 
     const stamped = await pg.query<{ n: number }>(
-      `SELECT COUNT(*)::int AS n FROM office_dallas.deals WHERE ${COLUMN} IS NOT NULL`
+      `SELECT COUNT(*)::int AS n FROM office_dallas.deals
+        WHERE ${COLUMN} IS NOT NULL OR ${PROJECT_COLUMN} IS NOT NULL`
     );
     expect(stamped.rows[0]?.n).toBe(0);
   });
@@ -128,18 +138,24 @@ describe("migration 0223 — deals.bid_due_date_from_bid_board_at", () => {
   it("leaves the stamped write the ingest performs able to execute", async () => {
     await seedOffices(["office_dallas"]);
     await pg.exec(migrationSql(MIGRATION));
-    await pg.exec(`INSERT INTO office_dallas.deals (bid_board_due_date) VALUES ('2026-09-01');`);
+    await pg.exec(
+      `INSERT INTO office_dallas.deals (bid_board_due_date, bid_board_project_number) VALUES ('2026-09-01', 'DFW-1-00001-aa');`
+    );
 
     await pg.query(
-      `UPDATE office_dallas.deals SET bid_due_date = $1::timestamptz, ${COLUMN} = NOW()`,
+      `UPDATE office_dallas.deals
+          SET bid_due_date = $1::timestamptz,
+              ${COLUMN} = NOW(),
+              ${PROJECT_COLUMN} = bid_board_project_number`,
       ["2026-09-01T00:00:00.000Z"]
     );
 
-    const row = await pg.query<{ stamped: boolean; landed: boolean }>(
+    const row = await pg.query<{ stamped: boolean; landed: boolean; same_project: boolean }>(
       `SELECT ${COLUMN} IS NOT NULL AS stamped,
-              ((bid_due_date AT TIME ZONE 'UTC')::date = bid_board_due_date) AS landed
+              ((bid_due_date AT TIME ZONE 'UTC')::date = bid_board_due_date) AS landed,
+              (${PROJECT_COLUMN} IS NOT DISTINCT FROM bid_board_project_number) AS same_project
          FROM office_dallas.deals`
     );
-    expect(row.rows[0]).toEqual({ stamped: true, landed: true });
+    expect(row.rows[0]).toEqual({ stamped: true, landed: true, same_project: true });
   });
 });

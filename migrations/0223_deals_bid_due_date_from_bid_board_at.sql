@@ -1,4 +1,7 @@
--- Migration 0223: deals.bid_due_date_from_bid_board_at — PROVENANCE for the Bid Board due-date read-back.
+-- Migration 0223: PROVENANCE for the Bid Board due-date read-back.
+--
+--   bid_due_date_from_bid_board_at        -- WHEN the sync wrote deals.bid_due_date
+--   bid_due_date_bid_board_project_number -- WHICH Bid Board project it wrote it FOR
 --
 -- WHY A COLUMN AND NOT A COMPARISON
 -- The read resolver needs to know one thing: did the Bid Board sync put the value that is currently in
@@ -16,11 +19,29 @@
 -- on it fires only for deals the sync actually touched, which is precisely the population the census
 -- counts.
 --
--- The stamp is a historical fact ("the Bid Board sync wrote this column at time T") and is deliberately
--- never cleared. Currency is handled by the resolver's SEPARATE day check: a later manual edit or a
--- lead-side correction moves the column off the board's day and revokes the override, rather than leaving
--- it stuck on forever. Both conditions are required precisely because each one alone is wrong — the stamp
--- alone goes stale, the day check alone accepts a coincidence.
+-- WHY THE PROJECT NUMBER, AND NOT JUST A TIMESTAMP
+-- The stamp does not vouch for "the sync once wrote this value". It vouches for "the sync wrote this value
+-- FOR THE PROJECT THIS DEAL IS CURRENTLY ON". Those differ the moment a deal is detached ("Move back to
+-- Opportunity", 0200) and later linked to a genuinely NEW Bid Board project: the link callback clears
+-- bid_board_detached_at but PRESERVES bid_board_due_date, bid_due_date and a bare timestamp stamp — so the
+-- override would fire again on provenance earned from a project the deal is no longer on, and the
+-- detached-deal leak returns through the front door where the detach guard cannot see it.
+--
+-- Recording the project number the write was made for closes that structurally rather than by remembering
+-- to clear a column on every re-link path (0200's own header is a long argument about why ad-hoc clearing
+-- is the fragile choice). The detach already NULLs bid_board_project_number, so a stamped deal stops
+-- matching the instant it is detached, and a re-link to a different project stays non-matching until a
+-- sync writes for the NEW project — at which point the stamp is legitimately re-earned.
+--
+-- bid_board_project_number, not procore_bid_id: the latter is NULL on a large share of Bid Board-linked
+-- prod deals (they were linked without a Procore identity), and a NULL == NULL comparison is not identity.
+-- The project number is the matcher's own tier-2 key and is always present on a row the write-through can
+-- reach. It is copied FROM the live column in the same UPDATE, so no normalization mismatch is possible.
+--
+-- Neither stamp is ever cleared — both record historical facts. Currency is the resolver's SEPARATE day
+-- check: a later manual edit or a lead-side correction moves the column off the board's day and revokes
+-- the override. All three conditions are required precisely because each alone is wrong — the timestamp
+-- alone goes stale, the day check alone accepts a coincidence, and neither notices a change of project.
 --
 -- timestamptz, not boolean: "when" answers "did this predate the operator's flag flip / the backfill?"
 -- during an incident, which a flag cannot. Nullable with no default and no backfill — a NULL means "this
@@ -48,7 +69,8 @@ BEGIN
     IF to_regclass(format('%I.deals', schema_name)) IS NOT NULL THEN
       EXECUTE format(
         'ALTER TABLE %I.deals
-           ADD COLUMN IF NOT EXISTS bid_due_date_from_bid_board_at timestamptz',
+           ADD COLUMN IF NOT EXISTS bid_due_date_from_bid_board_at timestamptz,
+           ADD COLUMN IF NOT EXISTS bid_due_date_bid_board_project_number text',
         schema_name
       );
     END IF;
@@ -59,5 +81,6 @@ END $tenant$;
 -- office_dallas at migration time too (redundant with the DO-loop above, guarded by IF NOT EXISTS).
 -- TENANT_SCHEMA_START
 ALTER TABLE office_dallas.deals
-  ADD COLUMN IF NOT EXISTS bid_due_date_from_bid_board_at timestamptz;
+  ADD COLUMN IF NOT EXISTS bid_due_date_from_bid_board_at timestamptz,
+  ADD COLUMN IF NOT EXISTS bid_due_date_bid_board_project_number text;
 -- TENANT_SCHEMA_END

@@ -54,9 +54,9 @@ async function setup() {
       awarded_amount numeric, bid_estimate numeric, dd_estimate numeric, forecast_revenue numeric,
       estimator text, bid_board_estimator text,
       property_address text, property_city text, property_state text, property_zip text, property_country text,
-      description text, bid_due_date timestamptz, bid_board_due_date date,
+      description text, bid_due_date timestamptz, bid_board_due_date date, bid_board_project_number text,
       -- migration 0223: the resolver requires this provenance stamp, not a coincidental day match.
-      bid_due_date_from_bid_board_at timestamptz,
+      bid_due_date_from_bid_board_at timestamptz, bid_due_date_bid_board_project_number text,
       -- migration 0200: the resolver refuses the Bid Board override on a severed deal.
       bid_board_detached_at timestamptz, created_at timestamptz DEFAULT now(),
       rfp_approval_request_event_id uuid, rfp_approval_request_id integer,
@@ -84,13 +84,13 @@ async function setup() {
   await db.query(`INSERT INTO leads (id, bid_due_date) VALUES ($1, '2026-09-15T00:00:00Z')`, [LEAD]);
   await db.query(
     `INSERT INTO deals (
-       id, name, deal_number, project_number, project_type, workflow_route,
+       id, name, deal_number, project_number, bid_board_project_number, project_type, workflow_route,
        awarded_amount, description, estimator,
        property_address, property_city, property_state, property_zip, property_country,
        bid_due_date, rfp_approval_request_event_id, rfp_approval_request_id,
        assigned_rep_id, company_id, primary_contact_id, source_lead_id
      ) VALUES (
-       $1, 'Jason Ranches', 'TR-2001', 'TR-2001', 'roofing', 'normal',
+       $1, 'Jason Ranches', 'TR-2001', 'TR-2001', 'TR-2001', 'roofing', 'normal',
        '125000.00', 'Full roof replacement', 'Colby',
        '100 Main St', 'Dallas', 'TX', '75001', 'US',
        '2026-08-01T00:00:00Z', $2, NULL,
@@ -182,6 +182,8 @@ describe("enqueueRfpBidBoardCreate — DB-authoritative payload from a sparse { 
       mirror?: string;
       landed?: string;
       detached?: boolean;
+      /** Stamp the provenance against a DIFFERENT project than the deal is on (the re-link shape). */
+      stampedProject?: string;
     }): Promise<string> {
       pg = await setup();
       const boardDay = options.landed ?? options.mirror;
@@ -192,8 +194,12 @@ describe("enqueueRfpBidBoardCreate — DB-authoritative payload from a sparse { 
         // Both halves of the signal, exactly as writeBidDueDateIfNeeded writes them: the value AND the
         // provenance stamp. Setting only the value would model the COINCIDENCE case, not a landed write.
         await pg!.query(
-          `UPDATE deals SET bid_due_date = $2::timestamptz, bid_due_date_from_bid_board_at = now() WHERE id = $1`,
-          [DEAL, `${options.landed}T00:00:00.000Z`]
+          `UPDATE deals
+              SET bid_due_date = $2::timestamptz,
+                  bid_due_date_from_bid_board_at = now(),
+                  bid_due_date_bid_board_project_number = COALESCE($3, bid_board_project_number)
+            WHERE id = $1`,
+          [DEAL, `${options.landed}T00:00:00.000Z`, options.stampedProject ?? null]
         );
       }
       if (options.detached) {
@@ -230,6 +236,14 @@ describe("enqueueRfpBidBoardCreate — DB-authoritative payload from a sparse { 
 
     it("flag ON: once the board's date has LANDED in the column, that column beats the lead", async () => {
       expect(await dueDateFor({ env: "true", landed: "2026-12-24" })).toContain("2026-12-24");
+    });
+
+    it("flag ON: a stamp earned on a RETIRED project refuses the override", async () => {
+      // Detached and re-linked elsewhere: dates and stamp preserved, but the stamp names a project this
+      // deal is no longer on. Falls back to the corrected legacy chain (lead-first).
+      expect(
+        await dueDateFor({ env: "true", landed: "2026-12-24", stampedProject: "TR-RETIRED" })
+      ).toContain("2026-09-15");
     });
 
     it("flag ON: a DETACHED deal refuses the override even with a landed column", async () => {

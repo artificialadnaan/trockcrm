@@ -186,6 +186,18 @@ export const deals = pgTable(
      * revokes the override.
      */
     bidDueDateFromBidBoardAt: timestamp("bid_due_date_from_bid_board_at", { withTimezone: true }),
+    /**
+     * The Bid Board project the stamp above was earned ON (migration 0223) — a copy of
+     * `bid_board_project_number` taken in the same write.
+     *
+     * The stamp vouches for "the sync wrote this value FOR THE PROJECT THIS DEAL IS CURRENTLY ON", not
+     * merely "the sync once wrote this value". Without the project identity, a deal that was detached and
+     * later linked to a genuinely NEW Bid Board project would keep firing the override on provenance
+     * earned from the retired project — the link path clears `bid_board_detached_at` but preserves the
+     * dates and the stamp. The detach NULLs `bid_board_project_number`, so a mismatch is detected the
+     * instant a deal leaves its project and stays detected until a sync legitimately re-earns the stamp.
+     */
+    bidDueDateBidBoardProjectNumber: text("bid_due_date_bid_board_project_number"),
     bidBoardCustomerName: text("bid_board_customer_name"),
     bidBoardCustomerContactRaw: text("bid_board_customer_contact_raw"),
     bidBoardProjectNumber: text("bid_board_project_number"),

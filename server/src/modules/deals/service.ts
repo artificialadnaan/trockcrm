@@ -2543,6 +2543,8 @@ export async function getDealDetail(
   const resolvedBidDueDate = resolveDealBidDueDateForRead({
     bidBoardDueDate: dealWithMetadata.bidBoardDueDate,
     bidDueDateFromBidBoardAt: dealWithMetadata.bidDueDateFromBidBoardAt,
+    bidDueDateBidBoardProjectNumber: dealWithMetadata.bidDueDateBidBoardProjectNumber,
+    bidBoardProjectNumber: dealWithMetadata.bidBoardProjectNumber,
     bidBoardDetachedAt: dealWithMetadata.bidBoardDetachedAt,
     hasSourceLead: Boolean(sourceLeadBid),
     leadBidDueDate: sourceLeadBid?.bidDueDate ?? null,

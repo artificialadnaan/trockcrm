@@ -17,13 +17,16 @@ import { isBidBoardDueDateReadbackEnabled } from "../../config/feature-flags.js"
  * When both hold, the deal column WINS over the source lead. Otherwise the legacy precedence applies
  * untouched.
  *
- * BOTH are required because each alone is wrong. The day check alone accepts a COINCIDENCE — the mirror
- * has been populated on prod for months, so any deal whose pre-existing `bid_due_date` merely shares the
- * board's calendar day would look landed the instant the flag flipped, changing a lead-backed deal's
- * displayed date and, in a genuine estimating stage, its hold verdict and reported value, with no sync
- * having run. The stamp alone goes stale the other way: it records that the sync wrote the column once,
- * and would keep the override on after a rep or the lead corrected the date. The stamp is never cleared;
- * the day check is what revokes.
+ * ALL THREE are required because each alone is wrong. The day check alone accepts a COINCIDENCE — the
+ * mirror has been populated on prod for months, so any deal whose pre-existing `bid_due_date` merely
+ * shares the board's calendar day would look landed the instant the flag flipped, changing a lead-backed
+ * deal's displayed date and, in a genuine estimating stage, its hold verdict and reported value, with no
+ * sync having run. The timestamp alone goes stale the other way: it records that the sync wrote the column
+ * once, and would keep the override on after a rep or the lead corrected the date. And NEITHER notices a
+ * change of PROJECT: a deal detached and later linked to a new Bid Board project keeps its old dates and
+ * stamp (the link path clears only `bid_board_detached_at`), so the override would fire again on
+ * provenance earned from a project the deal is no longer on — the detached-deal leak returning where the
+ * detach guard cannot see it. Neither stamp is ever cleared; the day check and the identity check revoke.
  *
  * WHY, because the obvious design (read the mirror's value directly, mirror-beats-lead-beats-column) was
  * written first and is wrong in two ways that only show up in production:
@@ -79,6 +82,13 @@ export interface DealBidDueDateInput {
    * Required for the override; see the module doc for why a day match alone is not provenance.
    */
   bidDueDateFromBidBoardAt?: Date | string | null;
+  /**
+   * `deals.bid_due_date_bid_board_project_number` (migration 0223) — the Bid Board project the stamp was
+   * earned on, compared against `bidBoardProjectNumber` below. See the module doc.
+   */
+  bidDueDateBidBoardProjectNumber?: string | null;
+  /** `deals.bid_board_project_number` — the project the deal is on RIGHT NOW (NULL once detached). */
+  bidBoardProjectNumber?: string | null;
   /**
    * `deals.bid_board_detached_at` (migration 0200) — non-null once "Move back to Opportunity" severed this
    * deal from Bid Board sync. Disables the override outright.
@@ -169,19 +179,37 @@ export function resolveDealBidDueDate(input: DealBidDueDateInput): ResolvedDealB
   // COINCIDENCE: the mirror has been populated on prod for months, so a pre-existing bid_due_date that
   // merely shares the board's calendar day would look landed the instant the flag flipped.
   //
-  // CURRENCY second, on the CALENDAR DAY, because the column is a timestamptz at UTC midnight and the
+  // IDENTITY second: the stamp has to have been earned on the project this deal is on RIGHT NOW. A deal
+  // that was detached and later linked to a genuinely NEW Bid Board project keeps its old dates and its
+  // old stamp — the link callback clears only bid_board_detached_at — so without this the override would
+  // fire on provenance from a retired project, which is the detached-deal leak arriving through the front
+  // door. The detach itself NULLs bid_board_project_number, so a stamped deal stops matching the moment it
+  // leaves its project and stays non-matching until a sync re-earns the stamp for the new one.
+  //
+  // Both sides must be present: a NULL == NULL comparison is not identity, and would re-admit exactly the
+  // detached case (both columns NULL) this exists to exclude.
+  //
+  // CURRENCY third, on the CALENDAR DAY, because the column is a timestamptz at UTC midnight and the
   // mirror is a date — the same comparison holdHorizonDateSql makes with
   // `(bid_due_date AT TIME ZONE 'UTC')::date`. This is what REVOKES the override when a rep or the lead
-  // later corrects the date, instead of latching it on forever behind a stamp that is never cleared.
+  // later corrects the date, instead of latching it on forever behind stamps that are never cleared.
   //
-  // The detach check is belt-and-braces. A detached deal's column is never rewritten by the sync, so it
-  // would fall back on its own — but that is a consequence of the data rather than a stated rule, and
-  // neither the mirror nor the stamp is cleared on detach (buildBidBoardDetachUpdate), so a severed deal
-  // can carry both indefinitely. An invariant this load-bearing gets its own predicate.
+  // The detach check is belt-and-braces on top of the identity check — it states the invariant locally
+  // instead of leaving it to be inferred from which columns a detach happens to clear.
   const mirrorDay = bidDueDateToDateOnly(input.bidBoardDueDate);
   const detached = input.bidBoardDetachedAt != null;
   const writtenByBidBoard = input.bidDueDateFromBidBoardAt != null;
-  if (!detached && writtenByBidBoard && mirrorDay != null && dealDay != null && dealDay === mirrorDay) {
+  const stampedProject = input.bidDueDateBidBoardProjectNumber ?? null;
+  const currentProject = input.bidBoardProjectNumber ?? null;
+  const sameProject = stampedProject != null && currentProject != null && stampedProject === currentProject;
+  if (
+    !detached &&
+    writtenByBidBoard &&
+    sameProject &&
+    mirrorDay != null &&
+    dealDay != null &&
+    dealDay === mirrorDay
+  ) {
     // The DEAL COLUMN is returned — never the mirror. All this branch decides is that it outranks the
     // lead, so a stale lead value stops masking a bid date the Bid Board has already delivered.
     return { day: dealDay, raw: dealRaw, source: "bid_board" };
@@ -213,7 +241,12 @@ export function resolveDealBidDueDateForRead(
   if (!isBidBoardDueDateReadbackEnabled(env)) {
     // Erase the SIGNAL, not merely one of its inputs: with the flag off neither the mirror nor the
     // provenance stamp may influence the answer.
-    return resolveDealBidDueDate({ ...input, bidBoardDueDate: null, bidDueDateFromBidBoardAt: null });
+    return resolveDealBidDueDate({
+      ...input,
+      bidBoardDueDate: null,
+      bidDueDateFromBidBoardAt: null,
+      bidDueDateBidBoardProjectNumber: null,
+    });
   }
   return resolveDealBidDueDate(input);
 }

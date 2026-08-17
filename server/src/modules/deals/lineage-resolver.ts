@@ -239,6 +239,8 @@ export async function getResolvedDeal(
       bidDueDate: resolveDealBidDueDateForRead({
         bidBoardDueDate: deal.bidBoardDueDate,
         bidDueDateFromBidBoardAt: deal.bidDueDateFromBidBoardAt,
+        bidDueDateBidBoardProjectNumber: deal.bidDueDateBidBoardProjectNumber,
+        bidBoardProjectNumber: deal.bidBoardProjectNumber,
         bidBoardDetachedAt: deal.bidBoardDetachedAt,
         hasSourceLead: Boolean(sourceLead),
         leadBidDueDate: sourceLead?.bidDueDate ?? null,

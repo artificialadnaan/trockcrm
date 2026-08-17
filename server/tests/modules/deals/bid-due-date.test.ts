@@ -58,6 +58,8 @@ describe("resolveDealBidDueDate — the SIGNAL rule (pure, flag-free)", () => {
   const STALE_DEAL = new Date("2026-07-01T00:00:00.000Z");
   /** The 0223 provenance stamp: the sync WROTE the column. Absent => a coincidence, never an override. */
   const STAMP = new Date("2026-08-01T09:00:00.000Z");
+  /** The project the stamp was earned on == the project the deal is on now. */
+  const PROJECT = { bidDueDateBidBoardProjectNumber: "DFW-1-00001-aa", bidBoardProjectNumber: "DFW-1-00001-aa" };
 
   // ★ The rule the whole design rests on. Prove it once, unmistakably: the mirror's VALUE is never what
   // comes back. When the signal fires, the value returned is the DEAL COLUMN; all the signal decides is
@@ -81,6 +83,7 @@ describe("resolveDealBidDueDate — the SIGNAL rule (pure, flag-free)", () => {
       leadBidDueDate: LEAD,
       dealBidDueDate: LANDED_INSTANT,
       bidDueDateFromBidBoardAt: STAMP,
+      ...PROJECT,
     });
     // `raw` is the deal column's stored instant, NOT the mirror's date-only string.
     expect(resolved).toEqual({ day: LANDED, raw: LANDED_INSTANT, source: "bid_board" });
@@ -96,6 +99,8 @@ describe("resolveDealBidDueDate — the SIGNAL rule (pure, flag-free)", () => {
         leadBidDueDate: LEAD,
         dealBidDueDate: `${LANDED}T00:00:00.000Z`,
         bidDueDateFromBidBoardAt: STAMP,
+        ...PROJECT,
+      ...PROJECT,
       }).source
     ).toBe("bid_board");
     // …and a legacy non-midnight instant on the same DAY still counts as landed, matching the
@@ -107,6 +112,8 @@ describe("resolveDealBidDueDate — the SIGNAL rule (pure, flag-free)", () => {
         leadBidDueDate: LEAD,
         dealBidDueDate: new Date(`${LANDED}T14:30:00.000Z`),
         bidDueDateFromBidBoardAt: STAMP,
+        ...PROJECT,
+      ...PROJECT,
       }).source
     ).toBe("bid_board");
   });
@@ -122,6 +129,7 @@ describe("resolveDealBidDueDate — the SIGNAL rule (pure, flag-free)", () => {
       leadBidDueDate: LEAD,
       dealBidDueDate: LANDED_INSTANT,
       bidDueDateFromBidBoardAt: STAMP,
+      ...PROJECT,
     });
     expect(resolved).toEqual({ day: LEAD, raw: LEAD, source: "lead" });
   });
@@ -149,6 +157,8 @@ describe("resolveDealBidDueDate — the SIGNAL rule (pure, flag-free)", () => {
         leadBidDueDate: null,
         dealBidDueDate: LANDED_INSTANT,
         bidDueDateFromBidBoardAt: STAMP,
+        ...PROJECT,
+      ...PROJECT,
       })
     ).toEqual({ day: LANDED, raw: LANDED_INSTANT, source: "bid_board" });
   });
@@ -161,6 +171,7 @@ describe("resolveDealBidDueDate — the SIGNAL rule (pure, flag-free)", () => {
       hasSourceLead: false,
       dealBidDueDate: LANDED_INSTANT,
       bidDueDateFromBidBoardAt: STAMP,
+      ...PROJECT,
     });
     const notLanded = resolveDealBidDueDate({
       bidBoardDueDate: LANDED,
@@ -201,6 +212,8 @@ describe("resolveDealBidDueDate — the SIGNAL rule (pure, flag-free)", () => {
         leadBidDueDate: LEAD,
         dealBidDueDate: LANDED_INSTANT,
         bidDueDateFromBidBoardAt: STAMP,
+        ...PROJECT,
+      ...PROJECT,
       })
     ).toEqual({ day: LEAD, raw: LEAD, source: "lead" });
   });
@@ -226,6 +239,53 @@ describe("resolveDealBidDueDate — the SIGNAL rule (pure, flag-free)", () => {
   // The other half: the stamp alone must not latch the override on. A rep or the lead correcting the date
   // moves the column off the board's day and revokes it — which is why the stamp is never cleared and the
   // day check exists.
+  // ★ P1 — RETIRED PROJECT. A deal is detached and later linked to a genuinely NEW Bid Board project. The
+  // link callback clears bid_board_detached_at but preserves the dates AND the timestamp stamp, so without
+  // an identity check the override would fire again on provenance earned from a project this deal is no
+  // longer on — the detached-deal leak returning where the detach guard cannot see it.
+  it("REFUSES the override when the stamp was earned on a DIFFERENT Bid Board project", () => {
+    expect(
+      resolveDealBidDueDate({
+        bidBoardDueDate: LANDED,
+        hasSourceLead: true,
+        leadBidDueDate: LEAD,
+        dealBidDueDate: LANDED_INSTANT,
+        bidDueDateFromBidBoardAt: STAMP,
+        bidDueDateBidBoardProjectNumber: "DFW-9-RETIRED-zz",
+        bidBoardProjectNumber: "DFW-1-00001-aa",
+      })
+    ).toEqual({ day: LEAD, raw: LEAD, source: "lead" });
+  });
+
+  // The detach itself NULLs bid_board_project_number, so the identity check catches a severed deal too —
+  // and must not read NULL == NULL as a match, which would re-admit exactly that case.
+  it("REFUSES the override when the deal is on no project at all (NULL is not an identity)", () => {
+    expect(
+      resolveDealBidDueDate({
+        bidBoardDueDate: LANDED,
+        hasSourceLead: true,
+        leadBidDueDate: LEAD,
+        dealBidDueDate: LANDED_INSTANT,
+        bidDueDateFromBidBoardAt: STAMP,
+        bidDueDateBidBoardProjectNumber: null,
+        bidBoardProjectNumber: null,
+      })
+    ).toEqual({ day: LEAD, raw: LEAD, source: "lead" });
+  });
+
+  it("ALLOWS the override after a re-link to the SAME project — the stamp is still honest there", () => {
+    expect(
+      resolveDealBidDueDate({
+        bidBoardDueDate: LANDED,
+        hasSourceLead: true,
+        leadBidDueDate: LEAD,
+        dealBidDueDate: LANDED_INSTANT,
+        bidDueDateFromBidBoardAt: STAMP,
+        ...PROJECT,
+      }).source
+    ).toBe("bid_board");
+  });
+
   it("REVOKES the override when a later edit moves the column off the board's day", () => {
     expect(
       resolveDealBidDueDate({
@@ -235,6 +295,8 @@ describe("resolveDealBidDueDate — the SIGNAL rule (pure, flag-free)", () => {
         // The sync wrote it once (stamp present), but someone has since corrected the date.
         dealBidDueDate: STALE_DEAL,
         bidDueDateFromBidBoardAt: STAMP,
+        ...PROJECT,
+      ...PROJECT,
       })
     ).toEqual({ day: LEAD, raw: LEAD, source: "lead" });
   });
@@ -249,6 +311,8 @@ describe("resolveDealBidDueDateForRead — the flag gate", () => {
     leadBidDueDate: "2026-06-01",
     dealBidDueDate: new Date("2026-09-01T00:00:00.000Z"),
     bidDueDateFromBidBoardAt: new Date("2026-08-01T09:00:00.000Z"),
+    bidDueDateBidBoardProjectNumber: "DFW-1-00001-aa",
+    bidBoardProjectNumber: "DFW-1-00001-aa",
   };
 
   it("flag ON: the landed deal column beats the stale lead", () => {
@@ -365,6 +429,8 @@ describe("resolveRfpPayloadDueDates — the gated correction, and the rejected-m
           leadBidDueDate: LEAD,
           dealBidDueDate: landed,
           bidDueDateFromBidBoardAt: new Date("2026-08-01T09:00:00.000Z"),
+          bidDueDateBidBoardProjectNumber: "DFW-1-00001-aa",
+          bidBoardProjectNumber: "DFW-1-00001-aa",
         },
         FLAG_ON
       )
@@ -396,6 +462,8 @@ describe("resolveRfpPayloadDueDates — the gated correction, and the rejected-m
         leadBidDueDate: null,
         dealBidDueDate: landed,
         bidDueDateFromBidBoardAt: new Date("2026-08-01T09:00:00.000Z"),
+        bidDueDateBidBoardProjectNumber: "DFW-1-00001-aa",
+        bidBoardProjectNumber: "DFW-1-00001-aa",
       },
       FLAG_ON
     );

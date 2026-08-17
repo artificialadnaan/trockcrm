@@ -40,6 +40,7 @@ const OFFICE_ID = "00000000-0000-4000-8000-0000000000f1";
 const DEAL_ID = "00000000-0000-4000-8000-0000000000d1";
 const LEAD_ID = "00000000-0000-4000-8000-0000000000e1";
 const COMPANY_ID = "00000000-0000-4000-8000-0000000000c1";
+const PROJECT_NUMBER = "DFW-1-00001-aa";
 const PROPERTY_ID = "00000000-0000-4000-8000-0000000000b1";
 
 // The three dates are deliberately all DIFFERENT, so every assertion below distinguishes which source won
@@ -99,6 +100,8 @@ async function seed(options: {
   detachedAt?: Date | null;
   /** Models writeBidDueDateIfNeeded's provenance stamp (0223). Absent => a coincidental day match. */
   fromBidBoardAt?: Date | null;
+  /** The project the stamp was earned on. Defaults to the deal's current project when a stamp is set. */
+  stampedProjectNumber?: string | null;
 }) {
   await pg.exec(`DELETE FROM public.deals; DELETE FROM public.leads;`);
   if (options.hasLead) {
@@ -126,6 +129,13 @@ async function seed(options: {
     bidDueDate: options.dealInstant === undefined ? DEAL_INSTANT : options.dealInstant,
     bidBoardDueDate: options.mirrorDay ?? null,
     bidDueDateFromBidBoardAt: options.fromBidBoardAt ?? null,
+    bidBoardProjectNumber: PROJECT_NUMBER,
+    bidDueDateBidBoardProjectNumber:
+      options.stampedProjectNumber !== undefined
+        ? options.stampedProjectNumber
+        : options.fromBidBoardAt
+          ? PROJECT_NUMBER
+          : null,
     bidBoardDetachedAt: options.detachedAt ?? null,
     expectedCloseDate: options.expectedCloseDate ?? null,
     bidBoardTotalSales: options.bidBoardTotalSales ?? null,
@@ -265,6 +275,22 @@ describe("Bid Board due date read precedence — flag ON", () => {
       leadDay: LEAD_DAY,
       ...landed,
       detachedAt: new Date("2026-07-20T12:00:00.000Z"),
+    });
+
+    expect(day((await detail())?.bidDueDate)).toBe(LEAD_DAY);
+    expect(day((await resolved()).resolved.bidDueDate)).toBe(LEAD_DAY);
+  });
+
+  // ★ P1 — RETIRED PROJECT. Detached, then re-linked to a genuinely NEW Bid Board project: the link path
+  // clears bid_board_detached_at but preserves the dates and the stamp. The deal is no longer detached, so
+  // the detach guard cannot help — only the project identity can.
+  it("a stamp earned on a RETIRED project does not resurrect the override on either site", async () => {
+    await seed({
+      hasLead: true,
+      leadDay: LEAD_DAY,
+      ...landed,
+      // The deal now sits on a different project than the one the stamp names.
+      stampedProjectNumber: "DFW-9-RETIRED-zz",
     });
 
     expect(day((await detail())?.bidDueDate)).toBe(LEAD_DAY);
