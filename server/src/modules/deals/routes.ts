@@ -1085,6 +1085,11 @@ router.get("/pipeline", async (req, res, next) => {
         ),
       })),
       terminalStages: result.terminalStages,
+      // Board-wide aggregates computed over EVERY matching row, not the per-column card slice: the three
+      // At-Risk KPI counts and the synthetic Pending RFP column's count/$. The client used to derive
+      // both from the cards it received, which was only correct while it asked for 1000 cards per
+      // column — shrink that slice and the numbers silently under-report.
+      boardSummary: result.boardSummary,
     });
   } catch (err) {
     next(err);
