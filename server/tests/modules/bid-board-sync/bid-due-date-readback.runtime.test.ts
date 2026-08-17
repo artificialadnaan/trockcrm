@@ -81,6 +81,18 @@ async function auditFieldChanges(id = DEAL) {
   return rows.map((r) => r.changes).filter((c): c is Record<string, unknown> => c != null);
 }
 
+/**
+ * `deals.bid_board_due_date` as a calendar day, read through a SQL ::text cast rather than String(Date):
+ * node-pg/PGlite hand back a JS Date for a DATE column, whose default string form is rendered in the LOCAL
+ * zone and reads a day early west of UTC — the exact off-by-one this feature is careful about.
+ */
+async function mirrorDay(id = DEAL): Promise<string | null> {
+  const { rows } = await pg.query<{ mirror: string | null }>(
+    `SELECT bid_board_due_date::text AS mirror FROM ${SCHEMA}.deals WHERE id = '${id}'`
+  );
+  return rows[0]?.mirror ?? null;
+}
+
 async function latestRun() {
   const { rows } = await pg.query<Record<string, any>>(
     `SELECT * FROM ${SCHEMA}.bid_board_sync_runs ORDER BY created_at DESC LIMIT 1`
@@ -331,6 +343,70 @@ describe("Bid Board Due Date -> deals.bid_due_date (flag ON)", () => {
     expect(history).toHaveLength(0);
     // The instant is left exactly as it was; the day is all any surface reads.
     expect(new Date((await dealRow()).bid_due_date).toISOString()).toBe("2026-09-01T14:30:00.000Z");
+  });
+
+  // ★ THE SIGNAL-PRESERVATION TEST. The mirror column is what the read resolver compares the written date
+  // against, so if a blank cell on a later export CLEARED it while the written bid_due_date was
+  // deliberately preserved, the signal would stop holding: a lead-backed deal's detail page would silently
+  // revert to the lead's date while every raw-column surface kept reading the written one. One rule, both
+  // columns — a blank export is the absence of information, not an instruction to clear.
+  it("a blank export Due Date does NOT clear the MIRROR either, so the landed signal survives", async () => {
+    // Cycle 1: a real Due Date lands in both columns.
+    await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
+    const afterWrite = await mirrorDay();
+    expect(afterWrite).toBe("2026-09-01");
+
+    // Cycle 2: the same project, Due Date cell now empty.
+    const result = await ingestBidBoardRows({
+      office_slug: "test",
+      rows: [exportRow({ "Due Date": "" })],
+    });
+
+    expect(await mirrorDay()).toBe("2026-09-01");
+    expect(new Date((await dealRow()).bid_due_date).toISOString()).toBe("2026-09-01T00:00:00.000Z");
+    expect(result.metrics.bidDueDateSkippedNoValue).toBe(1);
+    // The two columns still agree, which is the whole point: the read override keeps firing.
+    const { rows } = await pg.query<{ landed: boolean }>(
+      `SELECT ((bid_due_date AT TIME ZONE 'UTC')::date = bid_board_due_date) AS landed
+         FROM ${SCHEMA}.deals WHERE id = '${DEAL}'`
+    );
+    expect(rows[0].landed).toBe(true);
+  });
+
+  it("a blank Due Date does not churn the row or claim a clear in the audit trail", async () => {
+    await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
+    await pg.exec(`DELETE FROM ${SCHEMA}.audit_log;`);
+
+    await ingestBidBoardRows({ office_slug: "test", rows: [exportRow({ "Due Date": "" })] });
+
+    // The mirror audit must not report `to: null` for a column that was left exactly as it was.
+    const cleared = (await auditFieldChanges()).filter((c) => {
+      const change = c.bidBoardDueDate as { to?: unknown } | undefined;
+      return change != null && change.to == null;
+    });
+    expect(cleared).toHaveLength(0);
+  });
+
+  it("a blank Due Date on a deal that never had one leaves the mirror NULL", async () => {
+    // The non-clearing rule must not fabricate a value either — COALESCE(NULL, NULL) is still NULL.
+    const result = await ingestBidBoardRows({
+      office_slug: "test",
+      rows: [exportRow({ "Due Date": "" })],
+    });
+
+    expect(await mirrorDay()).toBeNull();
+    expect((await dealRow()).bid_due_date).toBeNull();
+    expect(result.metrics.bidDueDateSkippedNoValue).toBe(1);
+  });
+
+  it("a LATER real Due Date still overwrites the mirror — non-clearing is not write-once", async () => {
+    await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
+    await ingestBidBoardRows({ office_slug: "test", rows: [exportRow({ "Due Date": "" })] });
+
+    await ingestBidBoardRows({ office_slug: "test", rows: [exportRow({ "Due Date": "2026-10-15" })] });
+
+    expect(await mirrorDay()).toBe("2026-10-15");
+    expect(new Date((await dealRow()).bid_due_date).toISOString()).toBe("2026-10-15T00:00:00.000Z");
   });
 
   it("also leaves it alone when the Due Date is present but UNPARSEABLE (the parser's null)", async () => {

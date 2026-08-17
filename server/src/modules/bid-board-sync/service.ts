@@ -384,7 +384,19 @@ export function buildBidBoardDealUpdateSql(schemaName: string): string {
            bid_board_profit_margin_pct = $8,
            bid_board_total_sales = $9,
            bid_board_created_at = $10,
-           bid_board_due_date = $11,
+           -- NON-CLEARING, unlike every other mirror column here: a BLANK export Due Date is the ABSENCE
+           -- of information, not an instruction to forget the last one the board gave us. So the column
+           -- means "last known Bid Board due date", and $11 only ever overwrites it with another date.
+           --
+           -- This is load-bearing for the read-back, not tidiness. writeBidDueDateIfNeeded already refuses
+           -- to clear deals.bid_due_date on a blank Due Date (same rule), and the read resolver's SIGNAL is
+           -- "does the deal column's day equal this mirror?". If a later export with an empty cell wiped
+           -- the mirror while the written date stayed, the signal would stop holding and a lead-backed
+           -- deal's detail page would silently revert to the lead's date while every raw-column surface
+           -- kept reading the written one — a detail-vs-aggregate split arriving unannounced, from a blank
+           -- spreadsheet cell, with nobody having touched anything. Verified before changing: nothing else
+           -- in the repo reads this column except the RFP payload and the audit mirror below.
+           bid_board_due_date = COALESCE($11::date, bid_board_due_date),
            bid_board_customer_name = $12,
            bid_board_customer_contact_raw = $13,
            bid_board_project_number = $14,
@@ -412,7 +424,9 @@ export function buildBidBoardDealUpdateSql(schemaName: string): string {
             bid_board_profit_margin_pct IS DISTINCT FROM $8 OR
             bid_board_total_sales IS DISTINCT FROM $9 OR
             bid_board_created_at IS DISTINCT FROM $10 OR
-            bid_board_due_date IS DISTINCT FROM $11 OR
+            -- Matches the COALESCE above: a NULL $11 writes nothing, so it must not make the row look
+            -- dirty either (that would churn updated_at every cycle for a project with a blank Due Date).
+            ($11::date IS NOT NULL AND bid_board_due_date IS DISTINCT FROM $11::date) OR
             bid_board_customer_name IS DISTINCT FROM $12 OR
             bid_board_customer_contact_raw IS DISTINCT FROM $13 OR
             bid_board_project_number IS DISTINCT FROM $14 OR
@@ -727,7 +741,9 @@ function buildBidBoardMirrorFieldChanges(deal: DealMatch, row: NormalizedBidBoar
     bidBoardProfitMarginPct: { from: deal.bid_board_profit_margin_pct, to: row.bidBoardProfitMarginPct },
     bidBoardTotalSales: { from: deal.bid_board_total_sales, to: row.bidBoardTotalSales },
     bidBoardCreatedAt: { from: deal.bid_board_created_at, to: row.bidBoardCreatedAt },
-    bidBoardDueDate: { from: deal.bid_board_due_date, to: row.bidBoardDueDate },
+    // `to` mirrors the COALESCE in buildBidBoardDealUpdateSql: a blank export Due Date leaves the column
+    // alone, so the audit trail must not claim it was cleared to null.
+    bidBoardDueDate: { from: deal.bid_board_due_date, to: row.bidBoardDueDate ?? deal.bid_board_due_date },
     bidBoardCustomerName: { from: deal.bid_board_customer_name, to: row.bidBoardCustomerName },
     bidBoardCustomerContactRaw: { from: deal.bid_board_customer_contact_raw, to: row.bidBoardCustomerContactRaw },
     bidBoardProjectNumber: { from: deal.bid_board_project_number, to: row.bidBoardProjectNumber },
