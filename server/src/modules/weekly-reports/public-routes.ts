@@ -303,7 +303,13 @@ weeklyReportPublicRoutes.get("/:token/photos/:fileId", async (req, res) => {
       return result.rows[0] ?? null;
     });
     // Same status gate as the page: a report pulled back for rework must not keep serving its photos either.
+    //
+    // no-store on the FAILURE, because this 404 is TRANSIENT. An already-open page lazy-loading a photo
+    // during a rework window gets it, and a bare 404 with no cache directive is heuristically cacheable
+    // — so the image would stay broken for that reader even after the PM re-approves and the page
+    // itself started working again.
     if (!photo?.r2_key || !isWeeklyReportShareableStatus(photo.status)) {
+      res.setHeader("Cache-Control", "no-store, private");
       res.status(404).end();
       return;
     }
@@ -313,6 +319,7 @@ weeklyReportPublicRoutes.get("/:token/photos/:fileId", async (req, res) => {
       ({ buffer } = await getObjectBuffer(photo.r2_key, { maxBytes: MAX_PHOTO_SOURCE_BYTES }));
     } catch (error) {
       if (error instanceof ObjectTooLargeError) {
+        res.setHeader("Cache-Control", "no-store, private");
         res.status(404).end();
         return;
       }

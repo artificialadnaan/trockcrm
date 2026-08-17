@@ -400,14 +400,41 @@ router.get("/reports/:id/pdf", async (req, res, next) => {
  * assigned-PM-or-leadership check that moving the report to `sent` takes. Otherwise any rep in the office
  * could publish a construction report to its client without the PM ever being involved.
  */
+/**
+ * Load a report for publication, LOCKING both rows it authorises against.
+ *
+ * The two inputs to that decision — the report's status and the project's assigned PM — are both
+ * mutable by other requests, and this one hands out a durable public credential. Plain reads left two
+ * windows open: a PM could pass the check, lose the assignment before commit, and still walk away with
+ * a live client URL; and a token minted while the report was concurrently withdrawn would start
+ * working by itself the moment anyone re-approved it.
+ *
+ * FOR UPDATE holds both until this transaction commits, so the credential can only be issued against
+ * the state that actually authorised it.
+ */
 async function loadPublishableReport(req: Request, id: string) {
-  const report = await getWeeklyReportDetail(req.tenantClient!, id);
-  if (!report) throw new AppError(404, "Weekly report not found");
-  const project = await getWeeklyReportProjectRow(req.tenantClient!, report.weeklyReportProjectId);
+  const locked = await req.tenantClient!.query(
+    `SELECT id, weekly_report_project_id, status
+       FROM weekly_reports
+      WHERE id = $1::uuid AND is_active
+      FOR UPDATE`,
+    [id],
+  );
+  if (!locked.rows[0]) throw new AppError(404, "Weekly report not found");
+
+  const lockedProject = await req.tenantClient!.query(
+    `SELECT * FROM weekly_report_projects WHERE id = $1::uuid AND is_active FOR UPDATE`,
+    [locked.rows[0].weekly_report_project_id],
+  );
+  const project = lockedProject.rows[0];
   if (!project) throw new AppError(404, "Weekly report project not found");
   if (!canPublishWeeklyReport(project, actorFrom(req))) {
     throw new AppError(403, "Only the assigned project manager can issue or withdraw a client link");
   }
+
+  // Re-read the full detail AFTER the lock, so status is the locked value rather than a pre-lock read.
+  const report = await getWeeklyReportDetail(req.tenantClient!, id);
+  if (!report) throw new AppError(404, "Weekly report not found");
   return report;
 }
 

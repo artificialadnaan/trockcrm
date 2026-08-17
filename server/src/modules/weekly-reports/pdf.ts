@@ -664,6 +664,7 @@ async function drawPhotoCell(
   photo: WeeklyReportPdfPhoto,
   x: number,
   y: number,
+  signal: AbortSignal | undefined,
 ) {
   doc.save();
   doc.rect(x, y, PHOTO_CELL_WIDTH, PHOTO_CELL_HEIGHT).lineWidth(0.8).strokeColor(BRAND_BORDER).stroke();
@@ -687,7 +688,7 @@ async function drawPhotoCell(
       externalThumbnailUrl: photo.externalThumbnailUrl,
       mimeType: photo.mimeType,
     },
-    undefined,
+    signal,
   );
   const opened = buffer ? openImageForLayout(doc, buffer, { id: photo.fileId, displayName: photo.fileId }) : null;
 
@@ -763,7 +764,24 @@ export function weeklyReportPhotoPageCount(photoCount: number): number {
 
 // --- Entry point ---------------------------------------------------------------------------------
 
-export async function renderWeeklyReportPdf(data: WeeklyReportPdfData): Promise<Buffer> {
+/**
+ * How long a whole render may spend waiting on R2 before it is abandoned.
+ *
+ * Not politeness — a hang here is self-amplifying. `pdf-service` coalesces concurrent downloads for a
+ * generation onto ONE promise, so a render that never settles means every later request for that report
+ * on this process joins the same permanent wait, while each stalled read holds its R2 socket open.
+ * A deadline turns "this process slowly stops serving PDFs" into "this download failed, try again".
+ */
+export const WEEKLY_REPORT_RENDER_TIMEOUT_MS = 60_000;
+
+export async function renderWeeklyReportPdf(
+  data: WeeklyReportPdfData,
+  options: { signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<Buffer> {
+  // A caller-supplied signal still applies; the deadline is an additional upper bound, not a replacement.
+  const deadline = AbortSignal.timeout(options.timeoutMs ?? WEEKLY_REPORT_RENDER_TIMEOUT_MS);
+  const signal = options.signal ? AbortSignal.any([options.signal, deadline]) : deadline;
+
   const doc = new PDFDocument({
     autoFirstPage: true,
     bufferPages: true,
@@ -796,6 +814,7 @@ export async function renderWeeklyReportPdf(data: WeeklyReportPdfData): Promise<
         photo,
         CONTENT_LEFT + column * (PHOTO_CELL_WIDTH + PHOTO_COLUMN_GAP),
         PHOTO_GRID_TOP + row * (PHOTO_CELL_HEIGHT + PHOTO_ROW_GAP),
+        signal,
       );
     }
   }
