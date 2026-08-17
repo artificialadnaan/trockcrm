@@ -10,6 +10,7 @@ import {
 // The app's OWN builders. Asserting the census EMBEDS these (rather than re-deriving the same strings by
 // hand here) is the point: if the platform's hold rule changes, the census changes with it or this fails.
 import { closeTargetFarOutSqlPredicate, holdHorizonDateSql } from "@trock-crm/shared/types";
+import { isSkippedBidBoardStatus } from "@trock-crm/shared/lib/bidBoardStatusMap";
 import {
   aliasedDealBestEstimateSqlText,
   aliasedDealEstimatingValueSqlText,
@@ -29,6 +30,9 @@ function row(partial: Partial<CensusRow>): CensusRow {
     bid_board_last_updated_at: null,
     demo_shaped: false,
     next_bid_due_day: "2026-09-01",
+    is_test_data: false,
+    bid_due_date_bid_board_project_number: "DFW-1-00001-aa",
+    bid_board_project_number: "DFW-1-00001-aa",
     has_source_lead: false,
     lead_bid_due_date: null,
     bid_due_date_from_bid_board_at: null,
@@ -125,7 +129,6 @@ describe("census-bid-board-due-date-readback — SQL", () => {
   it("only considers rows the ingest's loop could actually reach, and only real changes", () => {
     // Production value queries exclude test deals; a census quoting the dollar delta that gates a prod
     // flag flip must too, or fixtures inflate the number.
-    expect(sql).toContain("COALESCE(d.is_test_data, false) = false");
     expect(sql).toContain("d.is_active = true");
     expect(sql).toContain("COALESCE(d.is_change_order, false) = false");
     expect(sql).toContain("d.bid_board_detached_at IS NULL");
@@ -136,6 +139,30 @@ describe("census-bid-board-due-date-readback — SQL", () => {
       "(current_bid_due_date AT TIME ZONE 'UTC')::date IS DISTINCT FROM next_bid_due_day"
     );
     expect(sql).not.toContain("current_bid_due_date IS DISTINCT FROM next_bid_due_date");
+  });
+
+  // ingestBidBoardRows hits its template guard before matching or writing, so a Templates project can
+  // never receive a write. The census models what the ingest DOES.
+  it("excludes Templates-status rows, the way the ingest's own guard does", () => {
+    expect(sql).toContain("LOWER(BTRIM(COALESCE(d.bid_board_status, ''))) <> 'templates'");
+    // Fidelity with the shared guard rather than a lookalike: every spelling the SQL folds away must be
+    // one isSkippedBidBoardStatus also skips, and the ones it keeps must be kept.
+    for (const status of ["Templates", "templates", "  TEMPLATES  "]) {
+      expect(isSkippedBidBoardStatus(status), status).toBe(true);
+      expect(status.trim().toLowerCase()).toBe("templates");
+    }
+    for (const status of ["Estimate in Progress", "Won", "Lost"]) {
+      expect(isSkippedBidBoardStatus(status), status).toBe(false);
+      expect(status.trim().toLowerCase()).not.toBe("templates");
+    }
+  });
+
+  // The ingest has NO is_test_data predicate, so it writes those rows and counts them in
+  // bid_due_date_updated_count. Filtering them out of the cohort would understate the very counter the
+  // operator compares this against; they are dropped from the financial totals instead.
+  it("does NOT filter test deals out of the cohort — the ingest does not either", () => {
+    expect(sql).not.toContain("COALESCE(d.is_test_data, false) = false");
+    expect(sql).toContain("COALESCE(d.is_test_data, false) AS is_test_data");
   });
 
   it("contains no write verb at all", () => {
@@ -287,6 +314,31 @@ describe("census-bid-board-due-date-readback — summary", () => {
       expect(summary.leadMaskedReveals).toBe(0);
     });
 
+    // ★ P1. A deal detached and later linked to a NEW Bid Board project keeps its old dates and its old
+    // stamp. The census must predict the resolver exactly, so it has to refuse the override for the same
+    // reason the deal page does — otherwise it would report a page change that will not happen.
+    it("does not treat a stamp earned on a RETIRED project as landed", () => {
+      const summary = summarizeCensus(
+        "office_dallas",
+        [
+          landedRow({
+            has_source_lead: true,
+            lead_bid_due_date: "2026-06-01",
+            current_bid_due_date: new Date(`${BOARD}T00:00:00.000Z`),
+            bid_due_date_from_bid_board_at: new Date("2026-08-01T09:00:00.000Z"),
+            // Stamped on the project this deal has since left.
+            bid_due_date_bid_board_project_number: "DFW-9-RETIRED-zz",
+            bid_board_project_number: "DFW-1-00001-aa",
+          }),
+        ],
+        10
+      );
+      // Before: the lead (the stamp is void). After: the write re-stamps for the CURRENT project, so the
+      // page does change — but as a fresh, legitimately-earned override, not a resurrected one.
+      expect(summary.pagesChanged).toBe(1);
+      expect(summary.leadMaskedReveals).toBe(1);
+    });
+
     it("counts a CLEARED lead value being replaced by the board's date", () => {
       const summary = summarizeCensus(
         "office_dallas",
@@ -312,6 +364,27 @@ describe("census-bid-board-due-date-readback — summary", () => {
       );
       expect(summary.pagesChanged).toBe(0);
     });
+  });
+
+  // Two populations, two rules — the reason "just filter test data" was the wrong instruction. The write
+  // count must match what the ingest will do (it ignores is_test_data); the dollar figures must match what
+  // production reports (which exclude them).
+  it("keeps test deals IN the write count and OUT of the financial totals", () => {
+    const summary = summarizeCensus(
+      "office_dallas",
+      [
+        row({ is_test_data: true, deal_value: "500000", currently_far_out: false, next_far_out: true }),
+        row({ is_test_data: false, deal_value: "100000", currently_far_out: false, next_far_out: true }),
+      ],
+      10
+    );
+    // Both rows will be written by the ingest, and both land in bid_due_date_updated_count.
+    expect(summary.wouldWrite).toBe(2);
+    expect(summary.testDataRows).toBe(1);
+    // Only the real deal moves reported dollars.
+    expect(summary.wouldPark).toBe(1);
+    expect(summary.parkedValue).toBe(100000);
+    expect(summary.netValueDelta).toBe(-100000);
   });
 
   it("counts demo-shaped rows separately without excluding them", () => {

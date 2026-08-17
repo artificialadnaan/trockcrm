@@ -192,6 +192,9 @@ export function buildCensusSql(schemaName: string): string {
              (l.id IS NOT NULL) AS has_source_lead,
              l.bid_due_date AS lead_bid_due_date,
              d.bid_due_date_from_bid_board_at,
+             d.bid_due_date_bid_board_project_number,
+             d.bid_board_project_number,
+             COALESCE(d.is_test_data, false) AS is_test_data,
              COALESCE(d.bid_board_stage_slug, '') AS bid_board_stage_slug,
              psc.slug AS stage_slug,
              COALESCE(psc.is_terminal, false) AS stage_is_terminal,
@@ -209,15 +212,18 @@ export function buildCensusSql(schemaName: string): string {
          AND COALESCE(d.is_change_order, false) = false
          AND d.bid_board_detached_at IS NULL
          AND d.bid_board_due_date IS NOT NULL
-         -- Every production value query excludes test deals, so a census quoting the dollar delta that
-         -- gates a prod flag flip must too, or the number is inflated by fixtures.
-         --
-         -- KNOWN GAP, deliberately not papered over: the demo seeder inserts TR-DEMO-* deals into the REAL
-         -- tenant schema WITHOUT setting is_test_data, so this predicate cannot remove them. Excluding by
-         -- deal-number shape instead would make the census disagree with the app it is predicting, which
-         -- is worse. They are counted separately and reported (demoShapedRows) so the operator can see
-         -- whether the population is actually clean rather than assuming it.
-         AND COALESCE(d.is_test_data, false) = false
+         -- ingestBidBoardRows exits at its TEMPLATE guard before matching or writing anything, so a
+         -- Templates-status project can never receive a write and must not be counted as one. Matched on
+         -- the deal's mirrored status, which is the last status the sync saw. Case/whitespace-folded to
+         -- agree with isSkippedBidBoardStatus (its skip set is the single word "templates", which carries
+         -- no separators for that normalizer to rewrite).
+         AND LOWER(BTRIM(COALESCE(d.bid_board_status, ''))) <> 'templates'
+         -- NOTE what is deliberately NOT filtered here: is_test_data. The matcher and
+         -- writeBidDueDateIfNeeded have no such predicate, so the ingest WILL write those rows and count
+         -- them in bid_board_sync_runs.bid_due_date_updated_count. Excluding them from the cohort would
+         -- make the census understate the very counter the operator compares it against. They are dropped
+         -- from the FINANCIAL totals instead (see summarizeCensus), because production value queries do
+         -- exclude them — the right answer differs per number depending on what that number is for.
     ), writes AS (
       -- The write-through's own guard, reproduced EXACTLY: it compares CALENDAR DAYS
       -- ((bid_due_date AT TIME ZONE 'UTC')::date IS DISTINCT FROM $3::date), not instants. Comparing
@@ -243,6 +249,9 @@ export function buildCensusSql(schemaName: string): string {
            w.bid_board_last_updated_at,
            w.demo_shaped,
            w.next_bid_due_day,
+           w.is_test_data,
+           w.bid_due_date_bid_board_project_number,
+           w.bid_board_project_number,
            w.has_source_lead,
            w.lead_bid_due_date,
            w.bid_due_date_from_bid_board_at,
@@ -276,6 +285,9 @@ export interface CensusRow {
   demo_shaped: boolean;
   /** `deals.bid_board_due_date` verbatim — the resolver's SIGNAL input, not a value it ever returns. */
   next_bid_due_day: Date | string | null;
+  is_test_data: boolean;
+  bid_due_date_bid_board_project_number: string | null;
+  bid_board_project_number: string | null;
   has_source_lead: boolean;
   lead_bid_due_date: Date | string | null;
   bid_due_date_from_bid_board_at: Date | string | null;
@@ -304,6 +316,12 @@ export interface CensusSummary {
   wouldWrite: number;
   /** Rows that look like demo seed data (TR-DEMO-*) but carry no is_test_data flag — counted, NOT excluded. */
   demoShapedRows: number;
+  /**
+   * How many of `wouldWrite` are flagged test deals. INCLUDED in the write counts, because the ingest has
+   * no is_test_data predicate and will write and count them; EXCLUDED from every financial total, because
+   * production value queries drop them. Reported so the two sets of numbers are never confused.
+   */
+  testDataRows: number;
   /**
    * Deals whose deal page will SHOW a different Bid Due Date once the write lands. Computed by running the
    * real resolver before and after, so it answers "how many pages change", not "how many dollars move".
@@ -350,6 +368,7 @@ export function summarizeCensus(schemaName: string, rows: CensusRow[], limit: nu
     schemaName,
     wouldWrite: rows.length,
     demoShapedRows: 0,
+    testDataRows: 0,
     pagesChanged: 0,
     leadMaskedReveals: 0,
     fromNull: 0,
@@ -366,6 +385,7 @@ export function summarizeCensus(schemaName: string, rows: CensusRow[], limit: nu
   const movers: CensusMover[] = [];
   for (const row of rows) {
     if (row.demo_shaped) summary.demoShapedRows += 1;
+    if (row.is_test_data) summary.testDataRows += 1;
     if (row.from_null) summary.fromNull += 1;
     else summary.fromDifferentDate += 1;
     if (row.is_genuine_estimating) summary.genuineEstimating += 1;
@@ -382,6 +402,9 @@ export function summarizeCensus(schemaName: string, rows: CensusRow[], limit: nu
     const displayedBefore = resolveDealBidDueDate({
       bidBoardDueDate: row.next_bid_due_day,
       bidDueDateFromBidBoardAt: row.bid_due_date_from_bid_board_at,
+      // The identity half of the provenance signal — a stamp earned on a RETIRED project must not count.
+      bidDueDateBidBoardProjectNumber: row.bid_due_date_bid_board_project_number,
+      bidBoardProjectNumber: row.bid_board_project_number,
       bidBoardDetachedAt: null, // the candidate set is already `bid_board_detached_at IS NULL`
       hasSourceLead: row.has_source_lead,
       leadBidDueDate: row.lead_bid_due_date,
@@ -393,6 +416,9 @@ export function summarizeCensus(schemaName: string, rows: CensusRow[], limit: nu
     const displayedAfter = resolveDealBidDueDate({
       bidBoardDueDate: row.next_bid_due_day,
       bidDueDateFromBidBoardAt: new Date(),
+      // The write stamps the project it wrote FOR, copied from the live column.
+      bidDueDateBidBoardProjectNumber: row.bid_board_project_number,
+      bidBoardProjectNumber: row.bid_board_project_number,
       bidBoardDetachedAt: null,
       hasSourceLead: row.has_source_lead,
       leadBidDueDate: row.lead_bid_due_date,
@@ -409,6 +435,10 @@ export function summarizeCensus(schemaName: string, rows: CensusRow[], limit: nu
       }
     }
 
+    // FINANCIAL totals from here down. Test deals are excluded because every production value query
+    // excludes them, so a parked or un-parked fixture moves no reported dollars — while the write counts
+    // above deliberately keep them, because the ingest will still write those rows.
+    if (row.is_test_data) continue;
     if (row.stored_on_hold || row.is_terminal) continue;
     const value = numeric(row.deal_value);
 
@@ -469,8 +499,15 @@ function printSummary(summary: CensusSummary): void {
   console.log(`\n=== ${summary.schemaName} ===`);
   console.log(
     `  (a) would write bid_due_date: ${summary.wouldWrite}` +
-      `  (null->date: ${summary.fromNull}, date->different-date: ${summary.fromDifferentDate})`
+      `  (null->date: ${summary.fromNull}, date->different-date: ${summary.fromDifferentDate})` +
+      `  — compare against bid_board_sync_runs.bid_due_date_updated_count`
   );
+  if (summary.testDataRows > 0) {
+    console.log(
+      `      ${summary.testDataRows} of them are is_test_data deals: the ingest writes and counts them, so` +
+        ` they are IN the number above, and OUT of every dollar figure below.`
+    );
+  }
   console.log(`  (b) of those, in a genuine estimating stage: ${summary.genuineEstimating}`);
   if (summary.demoShapedRows > 0) {
     console.log(
