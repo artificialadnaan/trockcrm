@@ -287,6 +287,15 @@ function Wizard({
   const stepIndex = weeklyReportStepIndex(draft.step);
 
   function goBack() {
+    // Guarded on the SAME busy state as the footer and "Choose photos", and for the same reason.
+    // On any step past the first this handler changes the step rather than removing the route, so
+    // `usePreventRemove` never fires — the VoiceRecorder simply unmounts mid-recording and the audio
+    // is gone before the user could stop it and ask for a transcript. Losing a dictated section to a
+    // mistapped Back is exactly the failure this feature exists to spare people.
+    if (anyVoiceBusy) {
+      setNotice({ tone: "error", text: "Finish or cancel the recording first." });
+      return;
+    }
     if (draft.step === "photos" && photoView === "arrange") {
       setPhotoView("pick");
       return;

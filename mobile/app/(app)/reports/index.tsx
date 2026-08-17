@@ -198,16 +198,28 @@ export default function ReportsHubScreen() {
     const local = drafts.find((draft) => draft.reportId === item.reportId && draft.mode === "review");
     try {
       const detail = await getWeeklyReport(fetcher, item.reportId);
-      // Gated on canAPPROVE, not canEdit. This row's whole purpose is the approve action, and the two
-      // permissions come apart: if the report was bounced back to `draft` while this queue sat on
-      // screen, a PM still has canEdit — so the old check opened review mode, let them work through
-      // captions and photos, and the final tap would PATCH the content and REPLACE the photo set
-      // before the illegal draft -> approved transition 409'd. The mutations land; only the
-      // transition fails. Refusing up front is the only point at which nothing has been written yet.
-      if (!detail.permissions.canApprove) {
+      // The gate is "can this row's FINAL ACTION complete", which is not one permission flag.
+      //
+      //   pending_review -> the action is Approve, so it needs canApprove.
+      //   approved       -> the action is Save changes, so it needs canEdit. canApprove is FALSE here,
+      //                     because the ladder has no approved -> approved self-transition — gating on
+      //                     canApprove alone locked the PM out of approved-but-unsent reports, which
+      //                     this queue deliberately carries and which are only reachable from here for
+      //                     a prior week.
+      //   draft          -> bounced back to the super. A PM still has canEdit, so an edit-only check
+      //                     would open review mode, walk them through captions and photos, and the
+      //                     final tap would PATCH content and REPLACE the photo set before the illegal
+      //                     draft -> approved transition 409'd. The mutations land; only the
+      //                     transition fails.
+      //
+      // So: refuse when the report cannot be written at all, and refuse a review row that has gone
+      // back to draft. Everything else opens.
+      const { canEdit, canApprove } = detail.permissions;
+      const wentBackToDraft = detail.report.status === "draft";
+      if (!canEdit || (wentBackToDraft && !canApprove)) {
         Alert.alert(
           "This report has moved on",
-          detail.permissions.canEdit
+          wentBackToDraft
             ? "It went back to the superintendent for changes. Pull down to refresh."
             : "It has already been sent, or somebody else reviewed it. Pull down to refresh.",
         );
