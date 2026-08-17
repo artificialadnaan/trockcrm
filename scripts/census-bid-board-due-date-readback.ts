@@ -17,6 +17,7 @@ import {
   dateOnlyToUtcMidnightIso,
   resolveDealBidDueDate,
 } from "../server/src/modules/deals/bid-due-date.js";
+import { canonicalProjectNumberSql } from "../server/src/modules/bid-board-sync/project-number.js";
 import { resolveScriptDatabaseUrl } from "./lib/resolve-database-url.js";
 
 /**
@@ -202,6 +203,28 @@ export function buildCensusSql(schemaName: string): string {
              -- See the is_test_data predicate below: TR-DEMO-* rows bypass the flag, so they are FLAGGED
              -- rather than silently trusted or silently dropped.
              (COALESCE(d.deal_number, '') LIKE 'TR-DEMO-%' OR COALESCE(d.project_number, '') LIKE 'TR-DEMO-%') AS demo_shaped,
+             -- AMBIGUITY. resolveDealMatches returns EVERY claimant at a tier — attached and detached
+             -- together — and the ingest refuses the row as a multi-match rather than writing an ambiguous
+             -- one. The commonest real shape is a DETACHED deal that kept the same project_number or
+             -- deal_number, which is exactly what the detach preserves. Such a row is never written, so
+             -- counting it would overstate the blast radius.
+             --
+             -- Modelled on the matcher's tier-2 identity, using its OWN canonicalizer rather than a
+             -- lookalike, and over the matcher's own base population (active, non-change-order; detached
+             -- deals deliberately INCLUDED, because they count toward ambiguity there too).
+             EXISTS (
+               SELECT 1
+                 FROM ${schemaName}.deals o
+                WHERE o.id <> d.id
+                  AND o.is_active = true
+                  AND COALESCE(o.is_change_order, false) = false
+                  AND ${canonicalProjectNumberSql("d.bid_board_project_number")} IS NOT NULL
+                  AND (
+                       ${canonicalProjectNumberSql("o.project_number")} = ${canonicalProjectNumberSql("d.bid_board_project_number")}
+                    OR ${canonicalProjectNumberSql("o.deal_number")} = ${canonicalProjectNumberSql("d.bid_board_project_number")}
+                    OR ${canonicalProjectNumberSql("o.bid_board_project_number")} = ${canonicalProjectNumberSql("d.bid_board_project_number")}
+                  )
+             ) AS is_ambiguous,
              COALESCE(${value}, 0) AS deal_value
         FROM ${schemaName}.deals d
         LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
@@ -270,6 +293,7 @@ export function buildCensusSql(schemaName: string): string {
            w.stored_on_hold,
            w.bid_board_last_updated_at,
            w.demo_shaped,
+           w.is_ambiguous,
            w.next_bid_due_day,
            w.is_test_data,
            w.bid_due_date_bid_board_project_number,
@@ -344,6 +368,12 @@ export interface CensusSummary {
    * `wouldWrite`; the difference is deals the Board confirms without correcting.
    */
   touchedRows: number;
+  /**
+   * Rows the matcher's ambiguity guard will refuse (another active deal — commonly a DETACHED one that
+   * kept its project_number — claims the same identity). EXCLUDED from every other number here, because
+   * the ingest never writes them; reported so the exclusion is visible rather than silent.
+   */
+  ambiguousRowsExcluded: number;
   /** Rows that look like demo seed data (TR-DEMO-*) but carry no is_test_data flag — counted, NOT excluded. */
   demoShapedRows: number;
   /**
@@ -397,7 +427,8 @@ export function summarizeCensus(schemaName: string, rows: CensusRow[], limit: nu
   const summary: CensusSummary = {
     schemaName,
     // Rows the ingest will UPDATE at all (value writes + stamp-only provenance passes).
-    touchedRows: rows.length,
+    touchedRows: 0,
+    ambiguousRowsExcluded: 0,
     // Rows whose DATE actually changes. Deliberately NOT rows.length: `bid_due_date_updated_count` on the
     // run row counts only these, and the operator compares the two directly.
     wouldWrite: 0,
@@ -418,6 +449,17 @@ export function summarizeCensus(schemaName: string, rows: CensusRow[], limit: nu
 
   const movers: CensusMover[] = [];
   for (const row of rows) {
+    // Refused by the matcher before anything is written — counted, then excluded from everything else.
+    // NOTE the deliberate limit: this models tier-2 (project/deal number) ambiguity only. A row whose
+    // procore_bid_id resolves uniquely at tier 1 never reaches tier 2, so this can be CONSERVATIVE —
+    // it may exclude a deal the ingest would in fact write. Over-excluding understates rather than
+    // overstates the flip's effect, which is the wrong direction to be wrong in, so the count is
+    // surfaced rather than folded away silently.
+    if (row.is_ambiguous) {
+      summary.ambiguousRowsExcluded += 1;
+      continue;
+    }
+    summary.touchedRows += 1;
     // WRITE-LINE numbers describe the rows whose DATE moves, because that is exactly what the run row's
     // bid_due_date_updated_count records. A stamp-only pass is an UPDATE but not a change, so it is
     // counted in touchedRows and nowhere else on this line.
@@ -556,6 +598,12 @@ function printSummary(summary: CensusSummary): void {
       `  — compare against bid_board_sync_runs.bid_due_date_updated_count`
   );
   const stampOnly = summary.touchedRows - summary.wouldWrite;
+  if (summary.ambiguousRowsExcluded > 0) {
+    console.log(
+      `      (${summary.ambiguousRowsExcluded} row(s) excluded: another active deal claims the same ` +
+        `matcher identity, so the ingest refuses them as a multi-match and writes nothing.)`
+    );
+  }
   if (stampOnly > 0) {
     // Not a discrepancy: the ingest UPDATEs these rows to record that the Board confirms a date that was
     // already correct. They move no dollars and are deliberately absent from the counter above — but they

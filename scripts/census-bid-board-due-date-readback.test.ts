@@ -11,6 +11,7 @@ import {
 // hand here) is the point: if the platform's hold rule changes, the census changes with it or this fails.
 import { closeTargetFarOutSqlPredicate, holdHorizonDateSql } from "@trock-crm/shared/types";
 import { isSkippedBidBoardStatus } from "@trock-crm/shared/lib/bidBoardStatusMap";
+import { canonicalProjectNumberSql } from "../server/src/modules/bid-board-sync/project-number.js";
 import {
   aliasedDealBestEstimateSqlText,
   aliasedDealEstimatingValueSqlText,
@@ -29,6 +30,7 @@ function row(partial: Partial<CensusRow>): CensusRow {
     stored_on_hold: false,
     bid_board_last_updated_at: null,
     demo_shaped: false,
+    is_ambiguous: false,
     next_bid_due_day: "2026-09-01",
     is_test_data: false,
     bid_due_date_bid_board_project_number: "DFW-1-00001-aa",
@@ -177,6 +179,23 @@ describe("census-bid-board-due-date-readback — SQL", () => {
     expect(sql).toContain(
       "CASE WHEN value_changes THEN next_bid_due_date ELSE current_bid_due_date END AS bid_due_date"
     );
+  });
+
+  // resolveDealMatches returns every claimant at a tier and the ingest refuses the row as a multi-match.
+  // The commonest real shape is a DETACHED deal that kept the same project_number — exactly what the
+  // detach preserves — so the ambiguity check must span detached deals too.
+  it("flags rows the matcher's ambiguity guard will refuse, using the matcher's OWN canonicalizer", () => {
+    expect(sql).toContain("AS is_ambiguous");
+    // Not a lookalike normalization: the literal output of the ingest's builder, on both sides.
+    expect(sql).toContain(canonicalProjectNumberSql("d.bid_board_project_number"));
+    expect(sql).toContain(canonicalProjectNumberSql("o.project_number"));
+    expect(sql).toContain(canonicalProjectNumberSql("o.deal_number"));
+    expect(sql).toContain(canonicalProjectNumberSql("o.bid_board_project_number"));
+    // The matcher's own base population — detached deals deliberately NOT excluded, because they count
+    // toward ambiguity there.
+    expect(sql).toContain("o.is_active = true");
+    expect(sql).toContain("COALESCE(o.is_change_order, false) = false");
+    expect(sql).not.toContain("o.bid_board_detached_at IS NULL");
   });
 
   it("does NOT filter test deals out of the cohort — the ingest does not either", () => {
@@ -450,6 +469,29 @@ describe("census-bid-board-due-date-readback — summary", () => {
   // Two populations, two rules — the reason "just filter test data" was the wrong instruction. The write
   // count must match what the ingest will do (it ignores is_test_data); the dollar figures must match what
   // production reports (which exclude them).
+  // The ingest skips a multi-match before writing anything, so an ambiguous row must not appear in ANY
+  // number — not the write count, not the page-change count, not the dollars.
+  it("excludes rows the ambiguity guard will refuse, and reports the exclusion", () => {
+    const summary = summarizeCensus(
+      "office_dallas",
+      [
+        row({ is_ambiguous: true, deal_value: "900000", currently_far_out: false, next_far_out: true }),
+        row({ is_ambiguous: false }),
+      ],
+      10
+    );
+    expect(summary.ambiguousRowsExcluded).toBe(1);
+    // Only the unambiguous row survives into every other number (it is a null->date change, so its own
+    // page legitimately changes — the point is that the ambiguous row contributed nothing anywhere).
+    expect(summary.touchedRows).toBe(1);
+    expect(summary.wouldWrite).toBe(1);
+    expect(summary.pagesChanged).toBe(1);
+    // The ambiguous row was the only would-be parker, and its $900k must not reach the figure the flip is
+    // approved on.
+    expect(summary.wouldPark).toBe(0);
+    expect(summary.netValueDelta).toBe(0);
+  });
+
   it("separates rows the ingest UPDATES from rows whose DATE changes", () => {
     // touchedRows is every UPDATE; wouldWrite is what bid_due_date_updated_count will say. Conflating them
     // would make the operator's side-by-side comparison disagree by the number of stamp-only rows.
