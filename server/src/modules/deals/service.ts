@@ -308,7 +308,13 @@ export function normalizeOptionalDealBidDueDate(value: unknown) {
 }
 
 async function resolveActiveOfficeScope(tenantDb: TenantDb, activeOfficeId: string) {
-  const officeRows = await db
+  // Runs on the REQUEST's tenant client, not the global `db` pool. `public.offices` is reachable either
+  // way (the tenant search_path is `office_<slug>,public`, and offices exists only in public), but going
+  // through the global pool made a single API request hold TWO pool slots at once — the tenant
+  // middleware's checked-out client for the whole request, plus a second one for this lookup. With
+  // DB_POOL_MAX=20 that halves effective capacity and is the mechanism behind the "Couldn't load deals"
+  // saturation incidents. Same reason as the pipeline stage read in getDealsForPipeline.
+  const officeRows = await tenantDb
     .select({ slug: offices.slug, name: offices.name })
     .from(offices)
     .where(eq(offices.id, activeOfficeId))
@@ -3711,8 +3717,12 @@ export async function getDealsForPipeline(
   } & PipelineTerminalDateFilters,
   atRiskViewerRole: string = userRole
 ) {
-  // Get all stages ordered
-  const stages = await db
+  // Get all stages ordered. On the REQUEST's tenant client, not the global `db` pool: this is the FIRST
+  // query of the board load, so routing it through `db` meant every /deals/pipeline request occupied two
+  // pool slots (the tenant middleware already holds one for the request's whole transaction). See
+  // resolveActiveOfficeScope for the same fix; pipeline_stage_config lives only in public, which the
+  // tenant search_path (`office_<slug>,public`) covers, so the rows are identical.
+  const stages = await tenantDb
     .select()
     .from(pipelineStageConfig)
     .where(inArray(pipelineStageConfig.workflowFamily, ["standard_deal", "service_deal"]))

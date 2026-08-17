@@ -101,11 +101,20 @@ function awardedFirstValueForRow(row: {
   return value ?? 0;
 }
 
+// resolveActiveOfficeScope now runs its `public.offices` lookup on the REQUEST's tenant client instead of
+// the global `db` pool (it used to make one request hold TWO pool slots at once — see the comment on
+// resolveActiveOfficeScope). That lookup ends in `.limit(1)`, so this mock's `where()` has to be both
+// awaitable (for resolveActiveOfficeUserIds) and chainable into `.limit()`.
 function createOfficeScopeSelectMock(rows: any[] = [{ id: "rep-1" }]) {
-  return vi.fn(() => ({
-    from: vi.fn().mockReturnThis(),
-    where: vi.fn().mockResolvedValue(rows),
-  }));
+  return vi.fn(() => {
+    const chain: any = {
+      from: vi.fn(() => chain),
+      where: vi.fn(() => chain),
+      limit: vi.fn(() => chain),
+      then: (resolve: (value: any[]) => unknown) => resolve(rows),
+    };
+    return chain;
+  });
 }
 
 describe("listDealStagePage", () => {
@@ -947,9 +956,13 @@ describe("listDealStagePage", () => {
     ];
 
     const teamRows = [{ id: "rep-team-1" }, { id: "rep-team-2" }];
-    const teamQuery = {
-      from: vi.fn().mockReturnThis(),
-      where: vi.fn().mockResolvedValue(teamRows),
+    // Awaitable AND chainable into `.limit(1)`: the office lookup in resolveActiveOfficeScope runs on the
+    // tenant client now (see createOfficeScopeSelectMock above).
+    const teamQuery: any = {
+      from: vi.fn(() => teamQuery),
+      where: vi.fn(() => teamQuery),
+      limit: vi.fn(() => teamQuery),
+      then: (resolve: (value: any[]) => unknown) => resolve(teamRows),
     };
     const tenantDb = {
       select: vi.fn().mockReturnValue(teamQuery),

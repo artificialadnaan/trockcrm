@@ -15,12 +15,26 @@ function createChainableMock(rows: any[] = []) {
     then: vi.fn((resolve: (value: any[]) => unknown) => resolve(rows)),
   };
   chain.select.mockReturnValue(chain);
-  chain.from.mockReturnValue(chain);
+  // The board's pipeline_stage_config read runs on the REQUEST's tenant client now (it used to take a
+  // second pool slot from the global `db` pool), so answer it at `.from()` time — after the tenantDb
+  // stub has installed its own `then`.
+  chain.from.mockImplementation((table: unknown) => {
+    if (isPipelineStageConfigTable(table)) {
+      chain.then.mockImplementation((resolve: (value: any[]) => unknown) => resolve(dbState.stages));
+    }
+    return chain;
+  });
   chain.where.mockReturnValue(chain);
   chain.leftJoin.mockReturnValue(chain);
   chain.orderBy.mockReturnValue(chain);
   chain.limit.mockReturnValue(chain);
   return chain;
+}
+
+/** Drizzle's own name symbol, so the check needs no import inside a hoisted mock factory. */
+function isPipelineStageConfigTable(table: unknown): boolean {
+  if (!table || typeof table !== "object") return false;
+  return (table as Record<symbol, unknown>)[Symbol.for("drizzle:Name")] === "pipeline_stage_config";
 }
 
 function containsValue(value: unknown, expected: unknown, seen = new Set<unknown>()): boolean {
