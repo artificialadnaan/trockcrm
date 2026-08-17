@@ -94,7 +94,20 @@ export default function WeeklyReportWizardScreen() {
   const { fetcher, user, activeOfficeId } = useAuth();
   const ownerKey = uploadOwnerKey(user?.id, activeOfficeId ?? user?.tenantId ?? undefined);
 
-  const [loaded, setLoaded] = useState<WeeklyReportDraft | null | "missing">(null);
+  /**
+   * The loaded draft, TAGGED with the identity it was read for.
+   *
+   * A bare value is not safe here. `setLoaded(null)` runs inside an effect, i.e. AFTER the render in
+   * which `ownerKey` changed — so for one render the previous owner's draft would be handed to the
+   * wizard alongside the NEW owner key, and the wizard's autosave would write that draft into the new
+   * owner/office namespace before the effect could clear it. One person's report would appear under
+   * another's identity, or in the wrong office.
+   *
+   * Tagging and comparing on render closes the window: a mismatched pair simply renders as loading.
+   */
+  const [loaded, setLoaded] = useState<
+    { ownerKey: string; draftId: string; draft: WeeklyReportDraft | "missing" } | null
+  >(null);
 
   useEffect(() => {
     if (!ownerKey || !draftId) return;
@@ -104,19 +117,22 @@ export default function WeeklyReportWizardScreen() {
     let cancelled = false;
     void loadWeeklyReportDraft(ownerKey, draftId)
       .then((draft) => {
-        if (!cancelled) setLoaded(draft ?? "missing");
+        if (!cancelled) setLoaded({ ownerKey, draftId, draft: draft ?? "missing" });
       })
       .catch(() => {
         // A read failure must not strand the screen on "Loading…" — resolve to not-found so the user gets
         // a clear message and a way back.
-        if (!cancelled) setLoaded("missing");
+        if (!cancelled) setLoaded({ ownerKey, draftId, draft: "missing" });
       });
     return () => {
       cancelled = true;
     };
   }, [ownerKey, draftId]);
 
-  if (loaded === null) {
+  // Anything read for a different identity is treated as not-yet-loaded, never rendered.
+  const current = loaded && loaded.ownerKey === ownerKey && loaded.draftId === draftId ? loaded.draft : null;
+
+  if (current === null) {
     return (
       <SafeAreaView style={styles.safe} edges={["top"]}>
         <ScreenHeader onBack={() => router.back()} title="Weekly report" />
@@ -124,7 +140,7 @@ export default function WeeklyReportWizardScreen() {
       </SafeAreaView>
     );
   }
-  if (loaded === "missing") {
+  if (current === "missing") {
     return (
       <SafeAreaView style={styles.safe} edges={["top"]}>
         <ScreenHeader onBack={() => router.back()} title="Weekly report" />
@@ -134,7 +150,7 @@ export default function WeeklyReportWizardScreen() {
   }
 
   // `key` remounts the reducer host when a different draft arrives, so no state leaks between drafts.
-  return <Wizard key={draftId} initial={loaded} ownerKey={ownerKey!} draftId={draftId} />;
+  return <Wizard key={`${ownerKey}|${draftId}`} initial={current} ownerKey={ownerKey!} draftId={draftId} />;
 }
 
 type Notice = { tone: "success" | "error"; text: string };

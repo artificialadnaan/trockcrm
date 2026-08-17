@@ -198,12 +198,18 @@ export default function ReportsHubScreen() {
     const local = drafts.find((draft) => draft.reportId === item.reportId && draft.mode === "review");
     try {
       const detail = await getWeeklyReport(fetcher, item.reportId);
-      // Same server-owned check as authoring: a report sent from the CRM while this queue sat on screen
-      // is immutable, and Approve on it would 409 after the PM had already edited captions.
-      if (!detail.permissions.canEdit) {
+      // Gated on canAPPROVE, not canEdit. This row's whole purpose is the approve action, and the two
+      // permissions come apart: if the report was bounced back to `draft` while this queue sat on
+      // screen, a PM still has canEdit — so the old check opened review mode, let them work through
+      // captions and photos, and the final tap would PATCH the content and REPLACE the photo set
+      // before the illegal draft -> approved transition 409'd. The mutations land; only the
+      // transition fails. Refusing up front is the only point at which nothing has been written yet.
+      if (!detail.permissions.canApprove) {
         Alert.alert(
           "This report has moved on",
-          "It has already been sent, or somebody else reviewed it. Pull down to refresh.",
+          detail.permissions.canEdit
+            ? "It went back to the superintendent for changes. Pull down to refresh."
+            : "It has already been sent, or somebody else reviewed it. Pull down to refresh.",
         );
         return;
       }
