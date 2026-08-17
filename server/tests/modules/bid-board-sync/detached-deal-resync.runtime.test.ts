@@ -153,7 +153,11 @@ beforeAll(async () => {
       estimate_updated_count int DEFAULT 0, estimate_updated_higher_count int DEFAULT 0,
       estimate_updated_lower_count int DEFAULT 0, estimate_skipped_no_value_count int DEFAULT 0,
       estimate_skipped_no_change_count int DEFAULT 0, estimate_warning_count int DEFAULT 0,
-      estimate_skipped_terminal_count int DEFAULT 0, status text DEFAULT 'received',
+      estimate_skipped_terminal_count int DEFAULT 0,
+      -- Migration 0222 (Bid Board Due Date read-back). Every ingest run writes this column, so a fixture
+      -- missing it fails the whole run — which is exactly the signal it should give.
+      bid_due_date_updated_count int NOT NULL DEFAULT 0,
+      status text DEFAULT 'received',
       errors jsonb DEFAULT '[]', warnings jsonb DEFAULT '[]',
       unmatched_project_numbers jsonb DEFAULT '[]', created_at timestamptz NOT NULL DEFAULT now()
     );

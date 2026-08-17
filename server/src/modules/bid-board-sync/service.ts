@@ -7,6 +7,8 @@ import {
 } from "@trock-crm/shared/types";
 import { bidBoardStatusToCrmStage, normalizeBidBoardStatus } from "@trock-crm/shared/lib/bidBoardStatusMap";
 import { pool, releasePooledClient, isBrokenConnectionError } from "../../db.js";
+import { isBidBoardDueDateReadbackEnabled } from "../../config/feature-flags.js";
+import { bidDueDateToDateOnly, dateOnlyToUtcMidnightIso } from "../deals/bid-due-date.js";
 import { effectiveContractSignedDate, resolveWonClosedDateWriteThrough } from "../shared/won-close-date.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { buildAuditActorFromSystem } from "../audit/audit-logger.js";
@@ -78,6 +80,13 @@ interface IngestionMetrics {
   estimateSkippedNoChange: number;
   estimateSkippedTerminal: number;
   estimateWarnings: number;
+  // Bid Board Due Date -> deals.bid_due_date read-back (BID_BOARD_DUE_DATE_READBACK). All three stay 0
+  // while the flag is off, because the write-through is not even called. Only bidDueDateUpdated is
+  // persisted on the run row; the two skip counters are in-process/log signal, exactly like the estimate
+  // skips that also have no column.
+  bidDueDateUpdated: number;
+  bidDueDateSkippedNoValue: number;
+  bidDueDateSkippedNoChange: number;
 }
 
 interface DealMatch {
@@ -162,6 +171,8 @@ interface StageConfig {
 const MAX_UNMATCHED_PROJECT_NUMBERS = 100;
 const BID_BOARD_ESTIMATE_SYNC_SOURCE = "bid_board_sync";
 const BID_BOARD_ESTIMATE_SYNC_REASON = "Bid Board export sync - Total Sales -> Bid Estimate";
+const BID_BOARD_DUE_DATE_SYNC_SOURCE = "bid_board_sync";
+const BID_BOARD_DUE_DATE_SYNC_REASON = "Bid Board export sync - Due Date -> Bid Due Date";
 const BID_BOARD_MIRROR_UPDATE_SAVEPOINT = "bid_board_mirror_update";
 const BID_BOARD_PROJECT_NUMBER_UNIQUE_CONSTRAINT = "deals_bid_board_project_number_canonical_uidx";
 
@@ -733,6 +744,13 @@ interface EstimateWritebackResult {
   warning: string | null;
 }
 
+interface BidDueDateWritebackResult {
+  updated: boolean;
+  skippedNoValue: boolean;
+  skippedNoChange: boolean;
+  warning: string | null;
+}
+
 async function writeEstimateIfNeeded(
   client: { query: Function },
   schemaName: string,
@@ -858,6 +876,115 @@ async function writeEstimateIfNeeded(
     lower,
     warning,
   };
+}
+
+/**
+ * Bid Board Due Date -> `deals.bid_due_date`. Gated by BID_BOARD_DUE_DATE_READBACK; the caller does not
+ * even invoke this while the flag is off, so flag-off issues NO query.
+ *
+ * THIS WRITE MOVES REPORTED DOLLARS. Since 2026-07-27 `bid_due_date` is the auto-park HORIZON for genuine
+ * estimating-stage deals ([[deal-hold-risk]] / holdHorizonDateSql), so a date more than 90 CT-days out
+ * makes the deal effectively on hold and zeroes its value on cards, dashboards, at-risk counts and the
+ * worker rollups — and a nearer date UN-parks a deal that a far-out close target had parked. Both
+ * directions are real; the census script quantifies them before the flag is flipped.
+ *
+ * Three deliberate rules:
+ *  - BLANK NEVER CLEARS. A Procore field nobody filled in, or one export where the column fails to
+ *    populate, must not wipe a date reps rely on. Counted as skippedNoValue and nothing is touched.
+ *  - APPLIES REGARDLESS OF STAGE, unlike the estimate and stage writebacks. There is no financial or
+ *    attribution consequence to correcting a historical deal's bid date (the hold horizon's far-out leg is
+ *    terminal-exempt server-side), and skipping terminal deals would leave permanent drift against the
+ *    board.
+ *  - IS DISTINCT FROM guard, so a repeat sync of an unchanged date writes nothing at all — no updated_at
+ *    churn, no history row, no audit noise on a job that runs on a schedule.
+ */
+async function writeBidDueDateIfNeeded(
+  client: { query: Function },
+  schemaName: string,
+  deal: DealMatch,
+  row: NormalizedBidBoardRow,
+  changedByUserId: string | null
+): Promise<BidDueDateWritebackResult> {
+  // parseBidBoardDueDate already returned a validated date-only "YYYY-MM-DD" (or null for blank/garbage/
+  // out-of-range, which the caller has already warned about).
+  const nextDay = row.bidBoardDueDate;
+  if (!nextDay) {
+    return { updated: false, skippedNoValue: true, skippedNoChange: false, warning: null };
+  }
+
+  if (!changedByUserId) {
+    // Same posture as the estimate path: deal_history.changed_by is the audit trail for a value change
+    // that moves money, so we skip the write entirely rather than record an unattributable one.
+    return {
+      updated: false,
+      skippedNoValue: false,
+      skippedNoChange: false,
+      warning: `Skipped Bid Board bid due date update for deal ${deal.id}: no active admin/director user available for audit history`,
+    };
+  }
+
+  // UTC midnight — the convention every other deals.bid_due_date writer uses (migration 0132,
+  // normalizeOptionalDealBidDueDate) and the one holdHorizonDateSql reads back with AT TIME ZONE 'UTC'.
+  // A bare date literal would be resolved in the SESSION timezone and could land a day early.
+  const nextValue = dateOnlyToUtcMidnightIso(nextDay);
+  const updateResult = await client.query(
+    `WITH existing AS (
+       SELECT bid_due_date
+         FROM ${schemaName}.deals
+        WHERE id = $1
+          -- Detached deals keep their own bid due date: the matcher already excludes them, but repeating
+          -- the predicate at the write site keeps the invariant local (see buildBidBoardDealUpdateSql).
+          -- The CTE returns no row, so the caller reads skippedNoChange and nothing is written.
+          AND bid_board_detached_at IS NULL
+        FOR UPDATE
+     ), updated AS (
+       UPDATE ${schemaName}.deals d
+          SET bid_due_date = $2::timestamptz,
+              updated_at = NOW()
+         FROM existing
+        WHERE d.id = $1
+          AND existing.bid_due_date IS DISTINCT FROM $2::timestamptz
+        RETURNING existing.bid_due_date AS old_bid_due_date,
+                  d.bid_due_date AS new_bid_due_date
+     )
+     SELECT existing.bid_due_date AS current_bid_due_date,
+            updated.old_bid_due_date,
+            updated.new_bid_due_date
+       FROM existing
+       LEFT JOIN updated ON true`,
+    [deal.id, nextValue]
+  );
+
+  const rowResult = updateResult.rows[0];
+  if (!rowResult?.new_bid_due_date) {
+    return { updated: false, skippedNoValue: false, skippedNoChange: true, warning: null };
+  }
+
+  // Recorded as calendar DAYS, not instants: the column's business value is date-only, and a
+  // deal_history row a human reads should say "2026-09-01", not a timestamp whose timezone invites the
+  // exact off-by-one this module is careful about everywhere else.
+  const oldValue = bidDueDateToDateOnly(rowResult.old_bid_due_date ?? null);
+  const newValue = bidDueDateToDateOnly(rowResult.new_bid_due_date) ?? nextDay;
+  await client.query(
+    `INSERT INTO ${schemaName}.deal_history
+       (deal_id, field_name, old_value, new_value, changed_by, source, reason)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      deal.id,
+      "bid_due_date",
+      oldValue,
+      newValue,
+      changedByUserId,
+      BID_BOARD_DUE_DATE_SYNC_SOURCE,
+      BID_BOARD_DUE_DATE_SYNC_REASON,
+    ]
+  );
+
+  await logBidBoardActivity(client, schemaName, { ...deal, name: deal.name ?? row.name }, {
+    bidDueDate: { from: oldValue, to: newValue },
+  }, { source: BID_BOARD_DUE_DATE_SYNC_SOURCE, reason: BID_BOARD_DUE_DATE_SYNC_REASON });
+
+  return { updated: true, skippedNoValue: false, skippedNoChange: false, warning: null };
 }
 
 export async function writeStageIfSafe(
@@ -1084,7 +1211,14 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
     estimateSkippedNoChange: 0,
     estimateSkippedTerminal: 0,
     estimateWarnings: 0,
+    bidDueDateUpdated: 0,
+    bidDueDateSkippedNoValue: 0,
+    bidDueDateSkippedNoChange: 0,
   };
+
+  // Resolved ONCE per run, not per row: a flag flipped mid-run would otherwise write the date on some of
+  // an export's rows and not others, which is the hardest kind of partial application to explain later.
+  const bidDueDateReadbackEnabled = isBidBoardDueDateReadbackEnabled();
 
   const seenProjectNumbers = new Set<string>();
   const duplicateProjectNumbers = new Set<string>();
@@ -1300,6 +1434,23 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
         warnings.push(estimateResult.warning);
       }
 
+      // Bid Board Due Date -> deals.bid_due_date, in the SAME position as the estimate writeback: after
+      // the match / detach / template checks, so a detached deal is never touched. Flag off => the
+      // function is not called at all, so the run issues no extra query and every counter stays 0.
+      if (bidDueDateReadbackEnabled) {
+        const bidDueDateResult = await writeBidDueDateIfNeeded(
+          client,
+          schemaName,
+          matches[0],
+          normalized,
+          changedByUserId
+        );
+        if (bidDueDateResult.updated) metrics.bidDueDateUpdated++;
+        if (bidDueDateResult.skippedNoValue) metrics.bidDueDateSkippedNoValue++;
+        if (bidDueDateResult.skippedNoChange) metrics.bidDueDateSkippedNoChange++;
+        if (bidDueDateResult.warning) warnings.push(bidDueDateResult.warning);
+      }
+
       const targetStageSlug = bidBoardStatusToCrmStage(normalized.bidBoardStatus);
       if (!targetStageSlug) {
         metrics.skippedUnmappedStatus++;
@@ -1362,7 +1513,11 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
               estimate_skipped_no_change_count = $22,
               estimate_warning_count = $23,
               estimate_skipped_terminal_count = $24,
-              skipped_detached_count = $25
+              skipped_detached_count = $25,
+              -- Appended at the END of the parameter list on purpose: the existing positional params are
+              -- asserted by the string-mock suites ($6 = status, $24 = estimate_skipped_terminal_count),
+              -- so inserting in the middle would silently renumber them.
+              bid_due_date_updated_count = $26
         WHERE id = $1`,
       [
         runId,
@@ -1394,6 +1549,7 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
         metrics.estimateWarnings,
         metrics.estimateSkippedTerminal,
         metrics.skippedDetached,
+        metrics.bidDueDateUpdated,
       ]
     );
     await client.query("COMMIT");
