@@ -2,19 +2,19 @@ import type pg from "pg";
 
 // Mirrors the project-number / audit-log / bid-board / deal-stage-history index-migration pattern.
 //
-// Migration 0222 adds a (performed_by_user_id, deal_id) index to EVERY existing office's `activities` —
+// Migration 0224 adds a (performed_by_user_id, deal_id) index to EVERY existing office's `activities` —
 // the table every logged call, email, note and status change writes to, and the largest in a tenant
 // schema. A plain CREATE INDEX inside the file's DO block takes a write-blocking SHARE lock, and because
 // the whole loop is ONE statement those locks are all held until the last tenant's index finishes:
 // activity writes across every office would queue behind it and start failing on the app's 30/45s
 // timeouts.
 //
-// CREATE INDEX CONCURRENTLY cannot run inside a transaction block, so the runner intercepts 0222 and
+// CREATE INDEX CONCURRENTLY cannot run inside a transaction block, so the runner intercepts 0224 and
 // builds each tenant's index here first, one statement at a time. The file's plain
 // `CREATE INDEX IF NOT EXISTS` then no-ops on existing tenants, while still serving as the marker the
 // office provisioner replays for schemas created after this deploy.
 export const ACTIVITIES_PERFORMED_BY_USER_MIGRATION =
-  "0222_activities_performed_by_user_index.sql";
+  "0224_activities_performed_by_user_index.sql";
 
 export const ACTIVITIES_PERFORMED_BY_USER_INDEX_NAME = "activities_performed_by_user_deal_idx";
 
@@ -36,7 +36,7 @@ function validateOfficeSchemaName(schemaName: string): string {
   return schemaName;
 }
 
-/** Kept in lockstep with the plain CREATE INDEX in 0222, which no-ops once this has built it. */
+/** Kept in lockstep with the plain CREATE INDEX in 0224, which no-ops once this has built it. */
 export function buildActivitiesPerformedByUserIndexStatement(schemaName: string): string {
   const safeSchemaName = quoteIdentifier(validateOfficeSchemaName(schemaName));
   return `CREATE INDEX CONCURRENTLY IF NOT EXISTS ${ACTIVITIES_PERFORMED_BY_USER_INDEX_NAME}

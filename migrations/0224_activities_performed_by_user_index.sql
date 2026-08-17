@@ -1,4 +1,4 @@
--- Migration 0222: index activities.performed_by_user_id — the Mine-scope EXISTS the deals board runs
+-- Migration 0224: index activities.performed_by_user_id — the Mine-scope EXISTS the deals board runs
 -- twice per stage column.
 --
 -- 0021_activity_email_attribution_expansion added performed_by_user_id with a FOREIGN KEY and NO index,

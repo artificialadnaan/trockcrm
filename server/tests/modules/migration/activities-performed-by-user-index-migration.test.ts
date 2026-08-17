@@ -1,4 +1,4 @@
-import { readFileSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { resolve } from "path";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -8,10 +8,14 @@ import {
   runActivitiesPerformedByUserIndexMigration,
 } from "../../../src/migrations/activities-performed-by-user-index.js";
 
-const migrationPath = resolve(
-  import.meta.dirname,
-  "../../../../migrations/0222_activities_performed_by_user_index.sql"
-);
+// DERIVED from the constant the runner branches on, never hardcoded. The runner special-cases this
+// migration by EXACT FILENAME (`file === ACTIVITIES_PERFORMED_BY_USER_MIGRATION`) to build the index
+// CONCURRENTLY; if the constant and the file on disk ever disagree, the branch silently stops matching
+// and the file falls through to the ordinary in-transaction path — where CREATE INDEX CONCURRENTLY
+// cannot run at all. Resolving the path THROUGH the constant makes that drift a test failure instead.
+const migrationsDir = resolve(import.meta.dirname, "../../../../migrations");
+const migrationPath = resolve(migrationsDir, ACTIVITIES_PERFORMED_BY_USER_MIGRATION);
+const runnerPath = resolve(import.meta.dirname, "../../../src/migrations/runner.ts");
 
 describe("activities.performed_by_user_id index migration (CONCURRENTLY, every tenant)", () => {
   it("builds the index CONCURRENTLY in EVERY office schema, one statement at a time", async () => {
@@ -78,9 +82,28 @@ describe("activities.performed_by_user_id index migration (CONCURRENTLY, every t
     );
   });
 
+  it("names a migration file that actually EXISTS, so the runner's exact-filename branch can match", () => {
+    // The failure this guards is silent, not loud: a constant naming a file that is not there (a
+    // renumbered migration, a typo) never throws — the runner just never takes the CONCURRENTLY branch.
+    expect(existsSync(migrationPath)).toBe(true);
+    expect(ACTIVITIES_PERFORMED_BY_USER_MIGRATION).toMatch(
+      /^\d{4}_activities_performed_by_user_index\.sql$/
+    );
+  });
+
+  it("is still routed through the CONCURRENTLY path by the runner", () => {
+    const runner = readFileSync(runnerPath, "utf8");
+    // Keyed on the imported CONSTANT, not a copy of the filename — a second literal is exactly how the
+    // two drift apart during a renumber.
+    expect(runner).toContain("ACTIVITIES_PERFORMED_BY_USER_MIGRATION");
+    expect(runner).toContain("} else if (file === ACTIVITIES_PERFORMED_BY_USER_MIGRATION) {");
+    expect(runner).toContain("runActivitiesPerformedByUserIndexMigration(client)");
+    // And the runner must not carry its own hardcoded copy of the name.
+    expect(runner).not.toContain("_activities_performed_by_user_index.sql");
+  });
+
   it("keeps the migration SQL file in lockstep: runner intercept, plain no-op, and a NEW-TENANT block", () => {
     const sql = readFileSync(migrationPath, "utf8");
-    expect(ACTIVITIES_PERFORMED_BY_USER_MIGRATION).toBe("0222_activities_performed_by_user_index.sql");
     // The runner intercepts this file to build every tenant's index CONCURRENTLY first.
     expect(sql).toContain("server/src/migrations/activities-performed-by-user-index.ts");
     // The in-file plain build stays (it no-ops via IF NOT EXISTS once the helper has built it).
