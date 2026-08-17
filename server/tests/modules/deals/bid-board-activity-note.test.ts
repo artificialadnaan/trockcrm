@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  MAX_ACTOR_CHARS,
   MAX_BODY_CHARS,
   MAX_ENTRIES,
+  MAX_LABEL_CHARS,
   MAX_NOTE_CHARS,
   formatBidBoardActivityNote,
   type ActivityNoteEntry,
@@ -193,6 +195,55 @@ describe("formatBidBoardActivityNote", () => {
       expect(note!.length).toBeLessThanOrEqual(MAX_NOTE_CHARS);
     });
 
+    it("clamps a pathological project label so the HEADING alone cannot blow the cap", () => {
+      // projectLabel falls back to `deals.name`, an unbounded text column. Before the clamp the heading
+      // was added to the running total but never bounded itself, so the cap was not an invariant.
+      const note = formatBidBoardActivityNote({
+        projectLabel: "L".repeat(50_000),
+        generatedAt: GENERATED_AT,
+        entries: [entry()],
+      });
+
+      const heading = note!.split("\n")[0];
+      expect(heading.startsWith("CRM Activity Log — ")).toBe(true);
+      expect(heading.length).toBeLessThan(MAX_LABEL_CHARS + 80);
+      expect(note!.length).toBeLessThanOrEqual(MAX_NOTE_CHARS);
+    });
+
+    it("holds the cap for a SINGLE pathological entry", () => {
+      // The actor name is `users.display_name`, also unbounded text. One entry carrying 50k of it used
+      // to sail past the cap: the shed loop stopped with one entry left and never re-checked.
+      const note = formatBidBoardActivityNote({
+        projectLabel: "TR-26-0412",
+        generatedAt: GENERATED_AT,
+        entries: [entry({ actorName: "N".repeat(50_000), body: "B".repeat(50_000) })],
+        olderCount: 3,
+      });
+
+      expect(note!.length).toBeLessThanOrEqual(MAX_NOTE_CHARS);
+      expect(note!.split("\n")[0].startsWith("CRM Activity Log — TR-26-0412")).toBe(true);
+      // Clamped, not dropped — the entry is still readable.
+      expect(note).toContain("N".repeat(MAX_ACTOR_CHARS - 1) + "…");
+    });
+
+    it("holds the cap when EVERY unbounded input is pathological at once", () => {
+      const note = formatBidBoardActivityNote({
+        projectLabel: "L".repeat(50_000),
+        generatedAt: GENERATED_AT,
+        entries: Array.from({ length: 200 }, () =>
+          entry({
+            actorName: "N".repeat(50_000),
+            body: "B".repeat(50_000),
+            subject: "S".repeat(50_000),
+            outcome: "O".repeat(50_000),
+          })
+        ),
+        olderCount: 99,
+      });
+
+      expect(note!.length).toBeLessThanOrEqual(MAX_NOTE_CHARS);
+    });
+
     it("adds the loader's known-older count to the entries it dropped itself", () => {
       const entries = Array.from({ length: 45 }, (_, i) => entry({ body: `n${i}` }));
       const note = formatBidBoardActivityNote({
@@ -203,6 +254,28 @@ describe("formatBidBoardActivityNote", () => {
       });
       // 45 - 40 emitted = 5 dropped here, plus the 7 the loader already knew about.
       expect(note).toContain("… 12 older entries not shown");
+    });
+
+    it("says 'older entry' when exactly one is hidden", () => {
+      // An estimator reads this line in Procore; "1 older entries not shown" is a typo in production.
+      const note = formatBidBoardActivityNote({
+        projectLabel: "TR-26-0412",
+        generatedAt: GENERATED_AT,
+        entries: Array.from({ length: MAX_ENTRIES + 1 }, (_, i) => entry({ body: `n${i}` })),
+      });
+      expect(note).toContain("… 1 older entry not shown (open the deal in the CRM)");
+      expect(note).not.toContain("1 older entries");
+    });
+
+    it("keeps the plural for a floor of one (1+ means at least one, possibly many)", () => {
+      const note = formatBidBoardActivityNote({
+        projectLabel: "TR-26-0412",
+        generatedAt: GENERATED_AT,
+        entries: [entry()],
+        olderCount: 1,
+        olderCountIsFloor: true,
+      });
+      expect(note).toContain("… 1+ older entries not shown");
     });
 
     it("marks the count as a floor when the loader's window filled up", () => {

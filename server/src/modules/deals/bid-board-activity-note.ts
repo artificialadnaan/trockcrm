@@ -40,7 +40,20 @@ export const MAX_NOTE_CHARS = 8000;
  */
 export const ACTIVITY_NOTE_FETCH_LIMIT = 200;
 
-/** The first line, which is ALSO the idempotency marker SyncHub matches on before posting. */
+/**
+ * Ceilings for the note's OTHER unbounded inputs. Without these MAX_NOTE_CHARS is not an invariant:
+ * `users.display_name` / `first_name` / `last_name` and `deals.name` are all plain `text` columns, so a
+ * single pathological value blows past the total on its own no matter how few entries are emitted.
+ */
+export const MAX_LABEL_CHARS = 120;
+export const MAX_ACTOR_CHARS = 80;
+export const MAX_OUTCOME_CHARS = 100;
+
+/**
+ * The first line, which is ALSO the idempotency marker SyncHub matches on before posting. SyncHub
+ * matches this CONSTANT PREFIX, not the project label or the "as of" date — the label is stable for a
+ * given deal but the date is a render-time snapshot, so a re-render must not look like a new note.
+ */
 const NOTE_HEADING_PREFIX = "CRM Activity Log";
 
 export interface ActivityNoteEntry {
@@ -124,10 +137,15 @@ function cleanText(value: unknown): string | null {
   return text.length > 0 ? text : null;
 }
 
+/** Clamps a string so the RESULT (the `…` marker included) is at most `max` characters. */
+function clampTo(value: string, max: number): string {
+  if (value.length <= max) return value;
+  return value.slice(0, max - 1) + "…";
+}
+
 /** Clamps a body so the RESULT (marker included) is at most MAX_BODY_CHARS characters. */
 function clampBody(body: string): string {
-  if (body.length <= MAX_BODY_CHARS) return body;
-  return body.slice(0, MAX_BODY_CHARS - 1) + "…";
+  return clampTo(body, MAX_BODY_CHARS);
 }
 
 /** Indents a multi-line block two spaces, leaving blank lines genuinely blank (no trailing spaces). */
@@ -147,8 +165,10 @@ function renderEntry(entry: ActivityNoteEntry): string {
   const label = activityTypeLabel(entry.type);
 
   // Outcome is emitted VERBATIM (trimmed) rather than prettified: it is a free-ish varchar(100) and the
-  // estimator should see exactly what the CRM stored.
-  const outcome = cleanText(entry.outcome);
+  // estimator should see exactly what the CRM stored. Clamped anyway — the TS type says `string`, and
+  // this function must not depend on a column width it cannot see.
+  const outcomeText = cleanText(entry.outcome);
+  const outcome = outcomeText == null ? null : clampTo(outcomeText, MAX_OUTCOME_CHARS);
   const duration =
     typeof entry.durationMinutes === "number" && Number.isFinite(entry.durationMinutes)
       ? `${entry.durationMinutes} min`
@@ -156,8 +176,11 @@ function renderEntry(entry: ActivityNoteEntry): string {
   const qualifiers = [outcome, duration].filter((part): part is string => part != null);
   const typeSegment = qualifiers.length > 0 ? `${label} (${qualifiers.join(", ")})` : label;
 
-  // A missing actor drops its segment entirely rather than rendering an empty " · ".
-  const header = [date, typeSegment, cleanText(entry.actorName)]
+  // A missing actor drops its segment entirely rather than rendering an empty " · ". The name is an
+  // unbounded `text` column, so it is clamped — see MAX_ACTOR_CHARS.
+  const actorText = cleanText(entry.actorName);
+  const actor = actorText == null ? null : clampTo(actorText, MAX_ACTOR_CHARS);
+  const header = [date, typeSegment, actor]
     .filter((part): part is string => part != null && part.length > 0)
     .join(" · ");
 
@@ -174,8 +197,12 @@ function renderEntry(entry: ActivityNoteEntry): string {
 function renderNote(heading: string, blocks: string[], olderCount: number, olderCountIsFloor: boolean): string {
   const parts = [heading, "", ...blocks];
   if (olderCount > 0) {
+    // "1 older entry", not "1 older entries" — an estimator reads this line in Procore. A floor stays
+    // plural because "1+" means "at least one", which may well be several.
+    const singular = olderCount === 1 && !olderCountIsFloor;
     const count = olderCountIsFloor ? `${olderCount}+` : String(olderCount);
-    parts.push(`… ${count} older entries not shown (open the deal in the CRM)`);
+    const noun = singular ? "older entry" : "older entries";
+    parts.push(`… ${count} ${noun} not shown (open the deal in the CRM)`);
   }
   return parts.join("\n");
 }
@@ -197,7 +224,9 @@ export function formatBidBoardActivityNote(input: FormatBidBoardActivityNoteInpu
   if (entries.length === 0) return null;
 
   const generatedOn = chicagoNoteDate(input.generatedAt);
-  const label = cleanText(input.projectLabel) ?? "Deal";
+  // The label falls back to `deals.name` upstream, which is unbounded `text` — clamp it, or the heading
+  // alone can exceed MAX_NOTE_CHARS no matter how few entries are emitted.
+  const label = clampTo(cleanText(input.projectLabel) ?? "Deal", MAX_LABEL_CHARS);
   const heading = generatedOn
     ? `${NOTE_HEADING_PREFIX} — ${label} (as of ${generatedOn})`
     : `${NOTE_HEADING_PREFIX} — ${label}`;
@@ -222,14 +251,20 @@ export function formatBidBoardActivityNote(input: FormatBidBoardActivityNoteInpu
   let note = renderNote(heading, blocks, entries.length - emitted + knownOlder, olderCountIsFloor);
   // The trailing line's own length is not knowable until we know how many entries were dropped, so it
   // can push a note that just fit back over the cap. Give up entries from the tail until it fits again.
-  // Unreachable for realistic input (heading + one 400-char body + trailer is well under 8000) — this
-  // exists so "the note is never longer than MAX_NOTE_CHARS" is an invariant rather than a hope.
-  while (note.length > MAX_NOTE_CHARS && emitted > 1) {
+  //
+  // This sheds all the way to ZERO on purpose. Stopping at one entry left a hole: a single entry that
+  // is itself at the cap could still be pushed over by the trailing line, and "the note never exceeds
+  // MAX_NOTE_CHARS" has to hold for every input, not just the shapes we expect. A heading-plus-trailer
+  // note still tells the estimator there IS history and where to read it.
+  while (note.length > MAX_NOTE_CHARS && emitted > 0) {
     emitted -= 1;
     blocks.length = emitted;
     note = renderNote(heading, blocks, entries.length - emitted + knownOlder, olderCountIsFloor);
   }
-  return note;
+  // Absolute backstop, so the cap is an INVARIANT rather than an argument about which inputs are
+  // bounded. Unreachable once the label/actor/outcome/body clamps above are in place: heading +
+  // trailer is a few hundred characters. Slicing keeps the marker (the first line) intact.
+  return note.length > MAX_NOTE_CHARS ? note.slice(0, MAX_NOTE_CHARS) : note;
 }
 
 export interface LoadDealActivityNoteEntriesResult {
@@ -244,9 +279,24 @@ export interface LoadDealActivityNoteEntriesResult {
 /**
  * Loads a deal's activity history for the note, newest-first.
  *
+ * SCOPE — matches the CRM's own deal Activity tab (getActivities in modules/activities/service.ts):
+ *
+ *  - The SOURCE LEAD's activities are included. Nothing re-points `activities.deal_id` at conversion,
+ *    so a lead-converted deal's pre-conversion prospecting stays lead-scoped — and that is precisely
+ *    the history the estimator wants. The tab ORs in `lead_id` for exactly this reason, and the
+ *    sibling loadRfpAttachmentsForDeal already does the same for the lead's FILES.
+ *
+ *  - `email` activities are EXCLUDED, and this is an ACCESS-CONTROL BOUNDARY, not a formatting
+ *    preference. In the CRM those rows are visible only to the mailbox owner (the tab applies
+ *    `type <> 'email' OR responsible_user_id = <viewer>`), and their bodies carry up to 1000
+ *    characters of real message text lifted from the email body. A Procore Bid Board note has no
+ *    "viewer" — every Bid Board user in the company can read it — so the per-viewer rule cannot be
+ *    honoured here and the only safe answer is to drop the type entirely.
+ *    DO NOT "restore completeness" by removing this predicate.
+ *
  * Selects `limit + 1` rows so the caller learns whether older entries exist WITHOUT a second COUNT;
  * the extra row is reported as `olderCount: 1, olderCountIsFloor: true` rather than being rendered.
- * Covered by the `activities_deal_idx` index on (deal_id, occurred_at).
+ * Covered by the `activities_deal_idx` / `activities_lead_idx` indexes on (deal_id|lead_id, occurred_at).
  *
  * Actor: `performed_by_user_id` when set, else `responsible_user_id` (the NOT NULL column). The name
  * resolution mirrors resolveDealOwner in rfp-enqueue.ts — displayName → first+last → null.
@@ -275,7 +325,17 @@ export async function loadDealActivityNoteEntries(
            )                   AS "actorName"
       FROM activities a
       LEFT JOIN users u ON u.id = COALESCE(a.performed_by_user_id, a.responsible_user_id)
-     WHERE a.deal_id = ${dealId}
+     WHERE (
+             a.deal_id = ${dealId}
+             -- The source lead's own activities. An uncorrelated scalar subquery so this stays ONE
+             -- round trip inside the caller's tenant transaction; a null source_lead_id makes the
+             -- comparison null, i.e. false, so a non-converted deal is unaffected.
+             OR a.lead_id = (SELECT d.source_lead_id FROM deals d WHERE d.id = ${dealId})
+           )
+       -- ACCESS-CONTROL BOUNDARY, not a display filter. See this function's doc comment before
+       -- touching this line: email bodies are mailbox-owner-only in the CRM and a Procore note is
+       -- readable by every Bid Board user in the company.
+       AND a.type <> 'email'
      -- created_at/id break occurred_at ties so two same-instant activities can never swap order
      -- between the payload and a later re-render.
      ORDER BY a.occurred_at DESC, a.created_at DESC, a.id DESC
