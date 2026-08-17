@@ -3,12 +3,17 @@ import {
   buildCensusSql,
   officeSchemaName,
   parseCensusArgs,
+  runCensus,
   summarizeCensus,
   type CensusRow,
 } from "./census-bid-board-due-date-readback.js";
 // The app's OWN builders. Asserting the census EMBEDS these (rather than re-deriving the same strings by
 // hand here) is the point: if the platform's hold rule changes, the census changes with it or this fails.
 import { closeTargetFarOutSqlPredicate, holdHorizonDateSql } from "@trock-crm/shared/types";
+import {
+  aliasedDealBestEstimateSqlText,
+  aliasedDealEstimatingValueSqlText,
+} from "../server/src/modules/shared/deal-value-sql.js";
 
 function row(partial: Partial<CensusRow>): CensusRow {
   return {
@@ -100,6 +105,21 @@ describe("census-bid-board-due-date-readback — SQL", () => {
     expect(sql).not.toMatch(/\b(INSERT|UPDATE|DELETE|ALTER|DROP|TRUNCATE)\b/i);
   });
 
+  // Every mover this census reports is by definition a genuine ESTIMATING deal — only that stage reads the
+  // bid due date as its horizon — and that stage's board/list value chain puts DD ahead of bid. Quoting the
+  // default awarded-first chain for the whole population would understate or overstate the exact dollars
+  // being approved. Both chains are asserted as the app's own rendered text, not as a lookalike COALESCE.
+  it("values genuine estimating deals with the ESTIMATING chain and everything else with the default", () => {
+    expect(sql).toContain(aliasedDealEstimatingValueSqlText("d"));
+    expect(sql).toContain(aliasedDealBestEstimateSqlText("d"));
+    // The estimating chain must be the one guarded by the estimating-stage test, not the fallback.
+    expect(sql).toMatch(
+      new RegExp(
+        `THEN ${aliasedDealEstimatingValueSqlText("d").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} ELSE`
+      )
+    );
+  });
+
   it("refuses a schema name that is not an office schema", () => {
     expect(() => buildCensusSql("public")).toThrow(/Invalid schema name/);
     expect(() => buildCensusSql('office_x"; DROP SCHEMA public; --')).toThrow(/Invalid schema name/);
@@ -183,5 +203,78 @@ describe("census-bid-board-due-date-readback — summary", () => {
       currentHorizon: "2026-08-20",
       nextHorizon: "2027-08-20",
     });
+  });
+});
+
+/**
+ * A census that FAILS must never read as an all-clear. This artifact is the gate on flipping a prod flag
+ * that moves reported dollars, and the shape it replaced printed "Across 0 office(s): net delta $0" when
+ * every office had errored — a clean-looking "no impact" verdict produced by a broken run.
+ */
+describe("census-bid-board-due-date-readback — incomplete runs", () => {
+  /** A stub client that fails for the named schemas and returns no rows for the rest. */
+  function client(schemas: string[], failing: string[] = []) {
+    return {
+      query: async (text: string) => {
+        if (text.includes("pg_namespace")) return { rows: schemas.map((nspname) => ({ nspname })) };
+        const failed = failing.find((schema) => text.includes(`${schema}.deals`));
+        if (failed) throw new Error(`relation "${failed}.deals" does not exist`);
+        return { rows: [] };
+      },
+    };
+  }
+
+  async function runMain(argv: string[], schemas: string[], failing: string[] = []) {
+    const logs: string[] = [];
+    const errors: string[] = [];
+    const log = console.log;
+    const error = console.error;
+    console.log = (...args: unknown[]) => void logs.push(args.map(String).join(" "));
+    console.error = (...args: unknown[]) => void errors.push(args.map(String).join(" "));
+    try {
+      await runCensus(parseCensusArgs(argv), client(schemas, failing) as never);
+      return { logs, errors, threw: null as Error | null };
+    } catch (err) {
+      return { logs, errors, threw: err as Error };
+    } finally {
+      console.log = log;
+      console.error = error;
+    }
+  }
+
+  it("THROWS (non-zero exit) when an office fails, and says the run is incomplete", async () => {
+    const { errors, threw } = await runMain(
+      ["node", "census", "--all"],
+      ["office_dallas", "office_atlanta"],
+      ["office_atlanta"]
+    );
+    expect(threw?.message).toMatch(/incomplete/i);
+    expect(errors.join("\n")).toContain("INCOMPLETE");
+    expect(errors.join("\n")).toContain("office_atlanta");
+    expect(errors.join("\n")).toMatch(/Do NOT flip/);
+  });
+
+  it("THROWS when no office schema was examined at all, instead of printing a $0 all-clear", async () => {
+    const { threw } = await runMain(["node", "census", "--all"], []);
+    expect(threw?.message).toMatch(/no office schemas/i);
+  });
+
+  it("--json marks the run incomplete and lists the failures rather than emitting a bare array", async () => {
+    const { logs, threw } = await runMain(
+      ["node", "census", "--all", "--json"],
+      ["office_dallas", "office_atlanta"],
+      ["office_atlanta"]
+    );
+    expect(threw).toBeTruthy();
+    const payload = JSON.parse(logs.join("\n"));
+    expect(payload.complete).toBe(false);
+    expect(payload.failures).toHaveLength(1);
+    expect(payload.failures[0].schemaName).toBe("office_atlanta");
+  });
+
+  it("a fully successful run does NOT throw and reports itself complete", async () => {
+    const { threw, logs } = await runMain(["node", "census", "--all", "--json"], ["office_dallas"]);
+    expect(threw).toBeNull();
+    expect(JSON.parse(logs.join("\n")).complete).toBe(true);
   });
 });

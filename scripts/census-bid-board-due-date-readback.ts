@@ -8,7 +8,10 @@ import {
   closeTargetFarOutSqlPredicate,
   holdHorizonDateSql,
 } from "@trock-crm/shared/types";
-import { aliasedDealBestEstimateSqlText } from "../server/src/modules/shared/deal-value-sql.js";
+import {
+  aliasedDealBestEstimateSqlText,
+  aliasedDealEstimatingValueSqlText,
+} from "../server/src/modules/shared/deal-value-sql.js";
 import { TERMINAL_STAGE_SLUGS } from "../server/src/modules/shared/pipeline-terminal-stages.js";
 import { resolveScriptDatabaseUrl } from "./lib/resolve-database-url.js";
 
@@ -33,8 +36,12 @@ import { resolveScriptDatabaseUrl } from "./lib/resolve-database-url.js";
  *
  * FIDELITY: the park/un-park verdicts are computed with the app's OWN shared SQL builders —
  * `closeTargetFarOutSqlPredicate` and `holdHorizonDateSql` from [[deal-reporting]] — and the value with
- * `aliasedDealBestEstimateSqlText` (the awarded-first chain the platform's string callers use). A
- * hand-rolled copy of any of the three is how a census ends up disagreeing with what the app then does.
+ * the same STAGE-AWARE chain the deals board and list use (aliasedStageAwareEffectiveDealValueSql): the
+ * estimating chain, in which DD outranks bid, for a genuine estimating deal, and the default awarded-first
+ * chain everywhere else. That distinction is not academic here — every mover this census reports is BY
+ * DEFINITION a genuine estimating deal (only that stage reads the bid due date as its horizon), so the
+ * default chain alone would quote a bid-first number for the entire population being approved. A
+ * hand-rolled copy of any of these is how a census ends up disagreeing with what the app then does.
  *
  * READ-ONLY, enforced twice: the session runs inside `BEGIN; SET TRANSACTION READ ONLY;` (Postgres itself
  * rejects any write) and the run ends in ROLLBACK, and the arg parser REFUSES any write-shaped flag rather
@@ -126,7 +133,12 @@ export function buildCensusSql(schemaName: string): string {
   if (!/^office_[a-z][a-z0-9_]*$/.test(schemaName)) {
     throw new Error(`Invalid schema name: ${schemaName}`);
   }
-  const value = aliasedDealBestEstimateSqlText("d");
+  // Stage-aware, mirroring aliasedStageAwareEffectiveDealValueSql's estimating branch. Not zeroed for
+  // hold: the whole point is the value that MOVES when the hold verdict flips, and a hold-zeroed
+  // expression would report $0 for exactly the deals that are about to be parked or un-parked.
+  const value =
+    `CASE WHEN psc.slug IN (${sqlStringList(GENUINE_ESTIMATING_DEAL_STAGE_SLUGS)}) ` +
+    `THEN ${aliasedDealEstimatingValueSqlText("d")} ELSE ${aliasedDealBestEstimateSqlText("d")} END`;
   return `
     WITH cand AS (
       SELECT d.id,
@@ -356,6 +368,73 @@ function printSummary(summary: CensusSummary): void {
   }
 }
 
+/**
+ * The reporting core, over an already-open client. Split out of `main` so the completeness contract below
+ * — a failing office must never read as an all-clear — is testable without a database.
+ *
+ * THROWS on an incomplete run (any office failed, or no office was examined at all) AFTER printing what it
+ * did manage to gather, so the operator sees both the partial numbers and an unmissable warning that they
+ * are partial, and any wrapper sees a non-zero exit.
+ */
+export async function runCensus(args: CensusArgs, client: QueryClient): Promise<void> {
+  const schemas =
+    args.offices === "all" ? await discoverOfficeSchemas(client) : args.offices.map(officeSchemaName);
+
+  const summaries: CensusSummary[] = [];
+  const failures: Array<{ schemaName: string; error: string }> = [];
+  for (const schemaName of schemas) {
+    try {
+      const { rows } = await client.query(buildCensusSql(schemaName));
+      summaries.push(summarizeCensus(schemaName, rows as CensusRow[], args.limit));
+    } catch (schemaError) {
+      console.error(`\n=== ${schemaName} === FAILED:`, schemaError);
+      failures.push({
+        schemaName,
+        error: schemaError instanceof Error ? schemaError.message : String(schemaError),
+      });
+    }
+  }
+
+  // A per-schema failure must never read as "no impact". This artifact is the gate on a prod flag flip that
+  // moves reported dollars, and the shape this replaced printed "Across 0 office(s): net delta $0" — a
+  // clean-looking all-clear — when every office had errored, with `--json` emitting an empty array.
+  const complete = failures.length === 0 && schemas.length > 0;
+
+  if (args.json) {
+    console.log(
+      JSON.stringify({ generatedAt: new Date().toISOString(), complete, summaries, failures }, null, 2)
+    );
+  } else {
+    for (const summary of summaries) printSummary(summary);
+    const net = summaries.reduce((total, summary) => total + summary.netValueDelta, 0);
+    console.log(
+      `\n[bid-due-date-census] READ-ONLY. Across ${summaries.length} office(s): net reported-pipeline delta ${money(net)} ` +
+        `if BID_BOARD_DUE_DATE_READBACK is enabled and the next export matches today's mirror.`
+    );
+    if (!complete) {
+      console.error(
+        `[bid-due-date-census] ⚠️  INCOMPLETE — this is NOT an all-clear. ` +
+          (schemas.length === 0
+            ? "No office schema was examined at all."
+            : `${failures.length} of ${schemas.length} office(s) failed and are NOT counted above: ${failures
+                .map((f) => f.schemaName)
+                .join(", ")}.`) +
+          " Do NOT flip BID_BOARD_DUE_DATE_READBACK on these numbers."
+      );
+    }
+  }
+
+  if (!complete) {
+    throw new Error(
+      schemas.length === 0
+        ? "Census examined no office schemas — the run is incomplete, do not act on the result."
+        : `Census incomplete: ${failures.length} of ${schemas.length} office(s) failed (${failures
+            .map((f) => f.schemaName)
+            .join(", ")}).`
+    );
+  }
+}
+
 export async function main(argv = process.argv): Promise<void> {
   const args = parseCensusArgs(argv);
   const { url, ssl } = resolveScriptDatabaseUrl();
@@ -367,34 +446,12 @@ export async function main(argv = process.argv): Promise<void> {
     // even a future edit that added an UPDATE would fail loudly instead of silently touching prod.
     await client.query("BEGIN");
     await client.query("SET TRANSACTION READ ONLY");
-
-    const schemas =
-      args.offices === "all"
-        ? await discoverOfficeSchemas(client)
-        : args.offices.map(officeSchemaName);
-
-    const summaries: CensusSummary[] = [];
-    for (const schemaName of schemas) {
-      try {
-        const { rows } = await client.query(buildCensusSql(schemaName));
-        summaries.push(summarizeCensus(schemaName, rows as CensusRow[], args.limit));
-      } catch (schemaError) {
-        console.error(`\n=== ${schemaName} === SKIPPED due to error:`, schemaError);
-      }
+    try {
+      await runCensus(args, client);
+    } finally {
+      // Rolled back on the incomplete path too — the transaction is closed cleanly whatever happened.
+      await client.query("ROLLBACK").catch(() => {});
     }
-
-    if (args.json) {
-      console.log(JSON.stringify({ generatedAt: new Date().toISOString(), summaries }, null, 2));
-    } else {
-      for (const summary of summaries) printSummary(summary);
-      const net = summaries.reduce((total, summary) => total + summary.netValueDelta, 0);
-      console.log(
-        `\n[bid-due-date-census] READ-ONLY. Across ${summaries.length} office(s): net reported-pipeline delta ${money(net)} ` +
-          `if BID_BOARD_DUE_DATE_READBACK is enabled and the next export matches today's mirror.`
-      );
-    }
-
-    await client.query("ROLLBACK");
   } finally {
     await client.end();
   }
