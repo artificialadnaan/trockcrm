@@ -259,6 +259,7 @@ export async function listWeeklyReportProjectSummaries(
   const result = await client.query(
     `SELECT wrp.id,
             wrp.cadence_weekday,
+            wrp.cadence_start_date,
             wrp.cadence_end_date,
             wrp.status,
             COUNT(wr.id) FILTER (WHERE wr.status = 'sent')::int AS reports_sent,
@@ -268,13 +269,19 @@ export async function listWeeklyReportProjectSummaries(
        LEFT JOIN weekly_reports wr
               ON wr.weekly_report_project_id = wrp.id AND wr.is_active
       WHERE wrp.is_active
-      GROUP BY wrp.id, wrp.cadence_weekday, wrp.cadence_end_date, wrp.status`,
+      GROUP BY wrp.id, wrp.cadence_weekday, wrp.cadence_start_date, wrp.cadence_end_date, wrp.status`,
   );
 
   return result.rows.map((row) => {
     // A paused, completed or past-its-end-date project owes nothing. Printing a next-due date for one
     // would contradict the board, which excludes it from the cadence entirely.
-    const nextDue = weeklyReportWeekOf(Number(row.cadence_weekday), asOf);
+    //
+    // Computed from the LATER of today and the cadence start, so a setup that begins next month reports
+    // its first real obligation rather than a date inside a window that has not opened — the board
+    // correctly generates nothing for that date, and the two must not disagree.
+    const startDate = toIsoDate(row.cadence_start_date)!;
+    const anchor = startDate > asOf ? startDate : asOf;
+    const nextDue = weeklyReportWeekOf(Number(row.cadence_weekday), anchor);
     const endDate = toIsoDate(row.cadence_end_date);
     const stopped = row.status !== "active" || (endDate != null && nextDue > endDate);
 

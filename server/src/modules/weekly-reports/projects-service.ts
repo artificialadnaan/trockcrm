@@ -275,8 +275,11 @@ export async function createWeeklyReportProject(
   client: QueryExecutor,
   input: WeeklyReportProjectInput,
   actorUserId: string,
+  officeId: string,
 ): Promise<WeeklyReportProject> {
   const values = normalizeWeeklyReportProjectInput(input);
+  await assertAssignableUser(client, officeId, values.trockPmUserId, "Project manager");
+  await assertAssignableUser(client, officeId, values.trockSuperUserId, "Superintendent");
 
   // The deal must exist in THIS office, be live, and be WON.
   //
@@ -405,10 +408,43 @@ const COLUMN_CASTS: Record<string, string> = {
   cadence_end_date: "::date",
 };
 
+/** Which patch key, if supplied, authorises writing each column. Nested client-team keys are special-cased. */
+const COLUMN_PATCH_KEYS: Record<string, keyof WeeklyReportProjectInput> = {
+  property_display_name: "propertyDisplayName",
+  client_name: "clientName",
+  trock_pm_user_id: "trockPmUserId",
+  trock_super_user_id: "trockSuperUserId",
+  contract_date: "contractDate",
+  contract_date_note: "contractDateNote",
+  project_start_date: "projectStartDate",
+  project_start_date_note: "projectStartDateNote",
+  project_completion_date: "projectCompletionDate",
+  project_completion_date_note: "projectCompletionDateNote",
+  projected_duration_weeks: "projectedDurationWeeks",
+  cadence_weekday: "cadenceWeekday",
+  cadence_start_date: "cadenceStartDate",
+  cadence_end_date: "cadenceEndDate",
+  status: "status",
+};
+const CLIENT_TEAM_COLUMNS: Record<string, { role: WeeklyReportClientRole; field: "name" | "email" }> = {
+  client_doc_name: { role: "doc", field: "name" },
+  client_doc_email: { role: "doc", field: "email" },
+  client_pm_name: { role: "pm", field: "name" },
+  client_pm_email: { role: "pm", field: "email" },
+  client_rm_name: { role: "rm", field: "name" },
+  client_rm_email: { role: "rm", field: "email" },
+  client_cm_name: { role: "cm", field: "name" },
+  client_cm_email: { role: "cm", field: "email" },
+};
+
+/** Cadence columns: retroactively changing these rewrites which weeks were ever owed. */
+const CADENCE_COLUMNS = ["cadence_weekday", "cadence_start_date"] as const;
+
 export async function updateWeeklyReportProject(
   client: QueryExecutor,
   id: string,
   patch: Partial<WeeklyReportProjectInput>,
+  officeId: string,
 ): Promise<WeeklyReportProject> {
   const current = await getWeeklyReportProjectRow(client, id);
   if (!current) throw new AppError(404, "Weekly report project not found");
@@ -442,20 +478,66 @@ export async function updateWeeklyReportProject(
   };
   const values = normalizeWeeklyReportProjectInput(merged) as Record<string, any>;
 
+  // Assignees are re-validated on every patch, not just on create: the PATCH route is open to `rep`
+  // users, and `trock_pm_user_id` is exactly what decides who may approve and send.
+  if (Object.prototype.hasOwnProperty.call(patch, "trockPmUserId")) {
+    await assertAssignableUser(client, officeId, values.trockPmUserId, "Project manager");
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, "trockSuperUserId")) {
+    await assertAssignableUser(client, officeId, values.trockSuperUserId, "Superintendent");
+  }
+
+  // Write ONLY the columns this patch actually supplied. Writing every column from the merged row means
+  // two people editing different fields race: both read the same original, and whoever commits second
+  // restores the other's field from its stale fallback.
   const assignments: string[] = [];
   const params: unknown[] = [];
-  for (const [column, key] of Object.entries(UPDATABLE_COLUMNS)) {
-    params.push(values[key]);
+  const write = (column: string) => {
+    params.push(values[UPDATABLE_COLUMNS[column]!]);
     assignments.push(`${column} = $${params.length}${COLUMN_CASTS[column] ?? ""}`);
-  }
-  params.push(id);
+  };
 
-  await client.query(
+  const touchedCadence: string[] = [];
+  for (const [column, key] of Object.entries(COLUMN_PATCH_KEYS)) {
+    if (!Object.prototype.hasOwnProperty.call(patch, key)) continue;
+    if ((CADENCE_COLUMNS as readonly string[]).includes(column)) touchedCadence.push(column);
+    write(column);
+  }
+  for (const [column, { role, field }] of Object.entries(CLIENT_TEAM_COLUMNS)) {
+    const supplied = patch.clientTeam?.[role];
+    if (!supplied || !Object.prototype.hasOwnProperty.call(supplied, field)) continue;
+    write(column);
+  }
+
+  // Moving the cadence after reports exist retroactively rewrites which weeks were ever owed: the
+  // Thursdays already filed stop matching any generated date, and a run of Fridays nobody was asked for
+  // appears as missing and late. Blocked outright rather than modelled as an effective-dated cadence,
+  // which is a bigger change than this feature needs today. `cadence_end_date` is deliberately NOT in
+  // this set — stopping future reporting is a normal, forward-only act.
+  if (touchedCadence.length > 0) {
+    const filed = await client.query(
+      `SELECT 1 FROM weekly_reports WHERE weekly_report_project_id = $1::uuid AND is_active LIMIT 1`,
+      [id],
+    );
+    if (filed.rows.length > 0) {
+      throw new AppError(
+        409,
+        "Reporting has already started on this project — the reporting day and start date cannot be changed. Set a reporting end date and create a new setup instead.",
+      );
+    }
+  }
+
+  if (assignments.length === 0) return (await getWeeklyReportProject(client, id))!;
+
+  params.push(id);
+  const result = await client.query(
     `UPDATE weekly_report_projects
         SET ${assignments.join(", ")}, updated_at = now()
-      WHERE id = $${params.length}::uuid AND is_active`,
+      WHERE id = $${params.length}::uuid AND is_active
+      RETURNING id`,
     params,
   );
+  if (result.rows.length === 0) throw new AppError(404, "Weekly report project not found");
 
   const updated = await getWeeklyReportProject(client, id);
   if (!updated) throw new AppError(404, "Weekly report project not found");
@@ -521,6 +603,37 @@ export interface WeeklyReportAssignableUser {
   displayName: string;
   email: string;
   role: string;
+}
+
+/**
+ * Reject an assignee who is not on the office's assignable roster.
+ *
+ * This is an AUTHORISATION check, not form validation. `trock_pm_user_id` is what `isAssignedPm` reads
+ * to decide who may approve and send, and the project PATCH route is open to `rep` users — so without
+ * this a rep could set themselves as the PM of any project and thereby grant themselves the approval
+ * powers the whole review gate exists to withhold. The FK alone does not care: any real user id passes it.
+ */
+async function assertAssignableUser(
+  client: QueryExecutor,
+  officeId: string,
+  userId: string | null,
+  label: string,
+): Promise<void> {
+  if (!userId) return;
+  const result = await client.query(
+    `SELECT 1
+       FROM public.users
+      WHERE id = $1::uuid
+        AND office_id = $2::uuid
+        AND is_active = true
+        AND COALESCE(is_test_data, false) = false
+        AND role::text = ANY($3::text[])
+      LIMIT 1`,
+    [userId, officeId, [...ASSIGNABLE_ROLES]],
+  );
+  if (result.rows.length === 0) {
+    throw new AppError(400, `${label} must be an active member of this office's project team`);
+  }
 }
 
 export async function listWeeklyReportAssignableUsers(

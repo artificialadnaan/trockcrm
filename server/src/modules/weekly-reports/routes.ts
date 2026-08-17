@@ -58,6 +58,13 @@ function actorFrom(req: Request): WeeklyReportActor {
   return { id: req.user.id, role: String(req.user.role ?? "") };
 }
 
+/** The office the request is scoped to — the roster any assignee must belong to. */
+function officeIdFrom(req: Request): string {
+  const officeId = req.user?.activeOfficeId;
+  if (!officeId) throw new AppError(400, "Office context not available");
+  return officeId;
+}
+
 /**
  * "Today" in the OFFICE's timezone, not the browser's.
  *
@@ -132,9 +139,7 @@ router.get("/projects", async (req, res, next) => {
  */
 router.get("/assignable-users", async (req, res, next) => {
   try {
-    const officeId = req.user?.activeOfficeId;
-    if (!officeId) throw new AppError(400, "Office context not available");
-    const users = await listWeeklyReportAssignableUsers(req.tenantClient!, officeId);
+    const users = await listWeeklyReportAssignableUsers(req.tenantClient!, officeIdFrom(req));
     await req.commitTransaction!();
     res.json({ users });
   } catch (error) {
@@ -149,6 +154,7 @@ router.post("/projects", async (req, res, next) => {
       req.tenantClient!,
       { ...req.body, dealId: requireUuid(req.body?.dealId, "dealId") },
       actor.id,
+      officeIdFrom(req),
     );
     await req.commitTransaction!();
     res.status(201).json(project);
@@ -174,6 +180,7 @@ router.patch("/projects/:id", async (req, res, next) => {
       req.tenantClient!,
       requireUuid(req.params.id, "id"),
       req.body ?? {},
+      officeIdFrom(req),
     );
     await req.commitTransaction!();
     res.json(project);

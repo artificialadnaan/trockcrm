@@ -84,6 +84,27 @@ const db = {
 };
 
 /**
+ * A `db` that fires a concurrent send at a chosen moment mid-call.
+ *
+ * The races these guards exist for open BETWEEN the read the permission check runs against and the
+ * write that follows it. Mutating the row before the call instead lands on the up-front sent-report
+ * guard and proves nothing, so this wrapper marks the report `sent` immediately before the first
+ * statement matching `trigger` — standing in for another request committing in that window.
+ */
+function racingDb(reportId: string, trigger: string) {
+  let fired = false;
+  return {
+    query: async (text: string, params?: unknown[]) => {
+      if (!fired && text.includes(trigger)) {
+        fired = true;
+        await pg.query(`UPDATE office_dallas.weekly_reports SET status = 'sent' WHERE id = $1::uuid`, [reportId]);
+      }
+      return db.query(text, params);
+    },
+  } as typeof db;
+}
+
+/**
  * Assert a call fails with a specific AppError status.
  *
  * Deliberately awaits ONCE and fails loudly when the promise resolves — a helper that only asserts
@@ -175,7 +196,7 @@ function baseProjectInput(overrides: Record<string, unknown> = {}) {
 }
 
 async function seedProject(overrides: Record<string, unknown> = {}) {
-  return createWeeklyReportProject(db, baseProjectInput(overrides), DIRECTOR);
+  return createWeeklyReportProject(db, baseProjectInput(overrides), DIRECTOR, OFFICE);
 }
 
 let photoSeq = 0;
@@ -278,7 +299,7 @@ describe("project setup", () => {
 
   it("patches one field without clearing the others", async () => {
     const created = await seedProject();
-    const updated = await updateWeeklyReportProject(db, created.id, { clientName: "New Client LLC" });
+    const updated = await updateWeeklyReportProject(db, created.id, { clientName: "New Client LLC" }, OFFICE);
     expect(updated.clientName).toBe("New Client LLC");
     // The bug this guards: a PATCH built from the patch alone nulls every column the caller omitted.
     expect(updated.propertyDisplayName).toBe("4123 Cedar Springs");
@@ -289,7 +310,7 @@ describe("project setup", () => {
 
   it("distinguishes an omitted field from an explicit null", async () => {
     const created = await seedProject();
-    const cleared = await updateWeeklyReportProject(db, created.id, { clientName: null });
+    const cleared = await updateWeeklyReportProject(db, created.id, { clientName: null }, OFFICE);
     expect(cleared.clientName).toBeNull();
     expect(cleared.propertyDisplayName).toBe("4123 Cedar Springs");
   });
@@ -298,7 +319,7 @@ describe("project setup", () => {
     const created = await seedProject();
     // cadenceEndDate alone would pass a patch-only check — it has no start date to compare against.
     await expectAppError(
-      updateWeeklyReportProject(db, created.id, { cadenceEndDate: "2026-07-01" }),
+      updateWeeklyReportProject(db, created.id, { cadenceEndDate: "2026-07-01" }, OFFICE),
       400,
       /cannot precede/i,
     );
@@ -306,7 +327,7 @@ describe("project setup", () => {
 
   it("swapping the PM mid-project changes who is assigned, not the history", async () => {
     const created = await seedProject();
-    const updated = await updateWeeklyReportProject(db, created.id, { trockPmUserId: DIRECTOR });
+    const updated = await updateWeeklyReportProject(db, created.id, { trockPmUserId: DIRECTOR }, OFFICE);
     expect(updated.trockPmUserId).toBe(DIRECTOR);
     expect(updated.trockPmName).toBe("Takashi");
   });
@@ -434,7 +455,7 @@ describe("draft creation", () => {
 
   it("refuses a project whose reporting is paused", async () => {
     const project = await seedProject();
-    await updateWeeklyReportProject(db, project.id, { status: "paused" });
+    await updateWeeklyReportProject(db, project.id, { status: "paused" }, OFFICE);
     await expectAppError(
       createWeeklyReportDraft(
         db,
@@ -536,7 +557,7 @@ describe("the PM gate", () => {
     const submitted = await transitionWeeklyReport(db, id, "pending_review", SUPER_ACTOR);
     expect(submitted.remainingWeeks).toBe(14); // 19 projected − 5 elapsed weeks
 
-    await updateWeeklyReportProject(db, project.id, { projectedDurationWeeks: 40 });
+    await updateWeeklyReportProject(db, project.id, { projectedDurationWeeks: 40 }, OFFICE);
     const reread = await getWeeklyReportDetail(db, id);
     expect(reread!.remainingWeeks).toBe(14);
   });
@@ -830,7 +851,7 @@ describe("dashboard", () => {
 
   it("excludes a paused project from the cadence entirely", async () => {
     const project = await seedProject();
-    await updateWeeklyReportProject(db, project.id, { status: "paused" });
+    await updateWeeklyReportProject(db, project.id, { status: "paused" }, OFFICE);
     const dashboard = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
     expect(dashboard.rows).toHaveLength(0);
   });
@@ -906,7 +927,7 @@ describe("review findings", () => {
     });
 
     // Swap the PM and the client AFTER delivery. The client already read the old header.
-    await updateWeeklyReportProject(db, project.id, { trockPmUserId: DIRECTOR, clientName: "New Owner LLC" });
+    await updateWeeklyReportProject(db, project.id, { trockPmUserId: DIRECTOR, clientName: "New Owner LLC" }, OFFICE);
     const reread = await getWeeklyReportDetail(db, id);
     expect(reread!.snapshot).toMatchObject({
       clientName: "Mack Real Estate Group",
@@ -1014,6 +1035,7 @@ describe("review findings", () => {
         cadenceWeekday: 6, // Saturday — due later than Thursday
       }),
       DIRECTOR,
+      OFFICE,
     );
 
     const dashboard = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
@@ -1023,16 +1045,186 @@ describe("review findings", () => {
 
   it("reports no next-due date once reporting has stopped", async () => {
     const project = await seedProject();
-    await updateWeeklyReportProject(db, project.id, { status: "completed" });
+    await updateWeeklyReportProject(db, project.id, { status: "completed" }, OFFICE);
     const [summary] = await listWeeklyReportProjectSummaries(db, WEEK_OF);
     expect(summary!.nextDueWeekOf).toBeNull();
   });
 
   it("reports no next-due date past the cadence end date", async () => {
     const project = await seedProject();
-    await updateWeeklyReportProject(db, project.id, { cadenceEndDate: "2026-08-06" });
+    await updateWeeklyReportProject(db, project.id, { cadenceEndDate: "2026-08-06" }, OFFICE);
     const [summary] = await listWeeklyReportProjectSummaries(db, WEEK_OF);
     expect(summary!.nextDueWeekOf).toBeNull();
+  });
+});
+
+// Second Codex pass on the fixed commit. Nine further findings, all real.
+describe("review findings, round two", () => {
+  it("refuses an assignee who is not on the office roster", async () => {
+    // THE ESCALATION: the project PATCH route is open to `rep`, and trock_pm_user_id is what decides
+    // who may approve and send. Without this a rep sets themselves PM and unlocks the review gate.
+    await expectAppError(seedProject({ trockPmUserId: STRANGER }), 400, /project team/i);
+  });
+
+  it("refuses an assignee from another office", async () => {
+    const otherOffice = U("00003");
+    const outsider = U("22225");
+    await pg.query(`INSERT INTO public.offices (id, name, slug) VALUES ($1::uuid, 'Atlanta', 'atl')`, [otherOffice]);
+    await pg.query(
+      `INSERT INTO public.users (id, display_name, email, role, office_id)
+       VALUES ($1::uuid, 'Other Office PM', 'other@example.com', 'construction', $2::uuid)`,
+      [outsider, otherOffice],
+    );
+    await expectAppError(seedProject({ trockPmUserId: outsider }), 400, /project team/i);
+    await pg.query(`DELETE FROM public.users WHERE id = $1::uuid`, [outsider]);
+    await pg.query(`DELETE FROM public.offices WHERE id = $1::uuid`, [otherOffice]);
+  });
+
+  it("refuses a deactivated assignee", async () => {
+    await pg.query(`UPDATE public.users SET is_active = false WHERE id = $1::uuid`, [PM]);
+    await expectAppError(seedProject(), 400, /project team/i);
+    await pg.query(`UPDATE public.users SET is_active = true WHERE id = $1::uuid`, [PM]);
+  });
+
+  it("re-validates the assignee on PATCH, not just on create", async () => {
+    const project = await seedProject();
+    await expectAppError(
+      updateWeeklyReportProject(db, project.id, { trockPmUserId: STRANGER }, OFFICE),
+      400,
+      /project team/i,
+    );
+  });
+
+  it("writes only the fields the patch supplied, so concurrent edits do not clobber", async () => {
+    const project = await seedProject();
+    // Two readers, both holding the ORIGINAL row, editing different fields.
+    await updateWeeklyReportProject(db, project.id, { clientName: "Edited by A" }, OFFICE);
+    await updateWeeklyReportProject(db, project.id, { propertyDisplayName: "Edited by B" }, OFFICE);
+    const after = await getWeeklyReportProject(db, project.id);
+    // A full-row write from a stale merge would have restored the original client name here.
+    expect(after).toMatchObject({ clientName: "Edited by A", propertyDisplayName: "Edited by B" });
+  });
+
+  it("locks the reporting day once reports exist", async () => {
+    // Moving Thursday to Friday mid-project orphans every Thursday already filed and invents a run of
+    // Fridays nobody was ever asked for.
+    const project = await seedProject();
+    await seedDraft(project.id);
+    await expectAppError(
+      updateWeeklyReportProject(db, project.id, { cadenceWeekday: 5 }, OFFICE),
+      409,
+      /already started/i,
+    );
+    await expectAppError(
+      updateWeeklyReportProject(db, project.id, { cadenceStartDate: "2026-07-20" }, OFFICE),
+      409,
+      /already started/i,
+    );
+  });
+
+  it("still allows stopping future reporting once reports exist", async () => {
+    // cadence_end_date is forward-only and must stay editable — that is how a project winds down.
+    const project = await seedProject();
+    await seedDraft(project.id);
+    await expect(
+      updateWeeklyReportProject(db, project.id, { cadenceEndDate: "2026-12-31" }, OFFICE),
+    ).resolves.toMatchObject({ cadenceEndDate: "2026-12-31" });
+  });
+
+  it("allows changing the cadence before anything has been filed", async () => {
+    const project = await seedProject();
+    await expect(
+      updateWeeklyReportProject(db, project.id, { cadenceWeekday: 5 }, OFFICE),
+    ).resolves.toMatchObject({ cadenceWeekday: 5 });
+  });
+
+  it("does not let a content edit land on a report that has since been sent", async () => {
+    const project = await seedProject();
+    const id = await seedDraft(project.id);
+    await transitionWeeklyReport(db, id, "pending_review", SUPER_ACTOR);
+    await transitionWeeklyReport(db, id, "approved", PM_ACTOR);
+
+    // The permission check legitimately authorises an edit to an `approved` report. The send lands in
+    // the window BETWEEN that check and the write — flipping the row up front would just hit the
+    // sent-report guard and prove nothing about the race.
+    await expectAppError(
+      updateWeeklyReportContent(racingDb(id, "UPDATE weekly_reports SET"), id, { workCompleted: "raced in" }, PM_ACTOR),
+      409,
+      /changed while you were working/i,
+    );
+  });
+
+  it("does not let a photo swap land on a report that has since been sent", async () => {
+    const project = await seedProject();
+    const id = await seedDraft(project.id);
+    const photo = await seedPhoto({ takenAt: "2026-08-11" });
+    await transitionWeeklyReport(db, id, "pending_review", SUPER_ACTOR);
+    await transitionWeeklyReport(db, id, "approved", PM_ACTOR);
+
+    await expectAppError(
+      replaceWeeklyReportPhotos(racingDb(id, "DELETE FROM weekly_report_photos"), id, [{ fileId: photo }], PM_ACTOR),
+      409,
+      /changed while you were working/i,
+    );
+  });
+
+  it("does not let the super revoke the PM's approval", async () => {
+    // approved -> pending_review is withdrawing an approval, not submitting work. Sharing the
+    // permission branch with draft -> pending_review let the super reopen and then edit.
+    const project = await seedProject();
+    const id = await seedDraft(project.id);
+    await transitionWeeklyReport(db, id, "pending_review", SUPER_ACTOR);
+    await transitionWeeklyReport(db, id, "approved", PM_ACTOR);
+    await expectAppError(
+      transitionWeeklyReport(db, id, "pending_review", SUPER_ACTOR),
+      403,
+      /permission/i,
+    );
+  });
+
+  it("clears the review stamp when the PM withdraws approval", async () => {
+    const project = await seedProject();
+    const id = await seedDraft(project.id);
+    await transitionWeeklyReport(db, id, "pending_review", SUPER_ACTOR);
+    await transitionWeeklyReport(db, id, "approved", PM_ACTOR);
+    const reopened = await transitionWeeklyReport(db, id, "pending_review", PM_ACTOR);
+    expect(reopened.status).toBe("pending_review");
+    // Otherwise it reads "awaiting review" while stamped with the approval just revoked.
+    expect(reopened.reviewedAt).toBeNull();
+  });
+
+  it("rejects a malformed photo id with a 400 rather than a cast error", async () => {
+    const project = await seedProject();
+    const id = await seedDraft(project.id);
+    await expectAppError(
+      replaceWeeklyReportPhotos(db, id, [{ fileId: "not-a-uuid" }], SUPER_ACTOR),
+      400,
+      /valid UUID/i,
+    );
+  });
+
+  it("flags a photo only against EARLIER reports", async () => {
+    const project = await seedProject();
+    const photo = await seedPhoto({ takenAt: "2026-08-11" });
+
+    // A LATER week already picked this photo; filing the earlier missed week must not claim it was
+    // "already used" on a week that has not happened yet.
+    const laterId = await seedDraft(project.id, "2026-08-20", U("e2221"));
+    await replaceWeeklyReportPhotos(db, laterId, [{ fileId: photo }], SUPER_ACTOR);
+
+    const earlierId = await seedDraft(project.id, WEEK_OF, U("e2222"));
+    const candidates = await listWeeklyReportPhotoCandidates(db, earlierId);
+    expect(candidates.find((c) => c.fileId === photo)?.alreadyUsedOn).toBeNull();
+  });
+
+  it("does not advertise a next-due date inside a window that has not opened", async () => {
+    const project = await seedProject({ cadenceStartDate: "2026-09-17" });
+    const summary = (await listWeeklyReportProjectSummaries(db, WEEK_OF)).find(
+      (s) => s.weeklyReportProjectId === project.id,
+    );
+    // Asked on Aug 17, a Thursday cadence starting Sep 17 must not report Aug 20 — the board
+    // correctly generates no obligation for that date, and the two must agree.
+    expect(summary!.nextDueWeekOf).toBe("2026-09-17");
   });
 });
 

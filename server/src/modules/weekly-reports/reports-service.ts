@@ -17,6 +17,7 @@ export interface WeeklyReportActor {
 }
 
 const ELEVATED_ROLES = new Set(["admin", "director"]);
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export interface WeeklyReportPhoto {
   fileId: string;
@@ -227,7 +228,12 @@ export function canTransitionAs(
   const pmPowers = isAssignedPm(projectRow, actor) || isElevated(actor);
   switch (to) {
     case "pending_review":
-      // Submitting for review, or a PM bouncing it back for rework.
+      // Two different acts share this target and they are NOT equally permissioned.
+      //   draft -> pending_review is SUBMITTING: the super or the author may do it.
+      //   approved -> pending_review is WITHDRAWING A PM'S APPROVAL, and only PM powers may.
+      // Collapsing them let a superintendent revoke the PM's approval and then edit the reopened
+      // report — the review gate unlocked from the inside.
+      if (reportRow.status === "approved") return pmPowers;
       return isAssignedSuper(projectRow, actor) || pmPowers || reportRow.authored_by === actor.id;
     case "draft":
       return pmPowers;
@@ -375,11 +381,22 @@ export async function updateWeeklyReportContent(
   }
 
   params.push(id);
-  await client.query(
+  const idParam = params.length;
+  params.push(reportRow.status);
+
+  // CONDITIONED ON THE STATUS THE PERMISSION CHECK RAN AGAINST. `canEditWeeklyReport` can legitimately
+  // authorise an edit to an `approved` report; if a concurrent request sends it in between, an
+  // unconditional write lands on a report the client has already received — breaking the immutability
+  // guarantee and making the public page differ from the PDF that was generated from it.
+  const result = await client.query(
     `UPDATE weekly_reports SET ${assignments.join(", ")}, updated_at = now()
-      WHERE id = $${params.length}::uuid AND is_active`,
+      WHERE id = $${idParam}::uuid AND is_active AND status = $${params.length}
+      RETURNING id`,
     params,
   );
+  if (result.rows.length === 0) {
+    throw new AppError(409, "This report changed while you were working on it — reload and try again");
+  }
 
   const updated = await getWeeklyReportDetail(client, id);
   if (!updated) throw new AppError(404, "Weekly report not found");
@@ -480,6 +497,10 @@ export async function replaceWeeklyReportPhotos(
   const rows = selections.map((selection, index) => {
     const fileId = typeof selection?.fileId === "string" ? selection.fileId.trim() : "";
     if (!fileId) throw new AppError(400, "Each photo requires a fileId");
+    // Shape-checked BEFORE the query, because the ownership check casts this list to uuid[] — a
+    // malformed id would raise a Postgres cast error and surface as a generic 500 rather than the
+    // 400 the caller can act on.
+    if (!UUID_PATTERN.test(fileId)) throw new AppError(400, "Each photo fileId must be a valid UUID");
     if (seen.has(fileId)) throw new AppError(400, "The same photo cannot be selected twice");
     seen.add(fileId);
     return {
@@ -514,7 +535,18 @@ export async function replaceWeeklyReportPhotos(
       [id, row.fileId, row.caption, row.sortOrder],
     );
   }
-  await client.query(`UPDATE weekly_reports SET updated_at = now() WHERE id = $1::uuid`, [id]);
+  // Same concurrency guard as the content path: the permission check ran against a status read in an
+  // earlier statement, and a photo swap landing on an already-sent report would make the client's page
+  // disagree with the PDF they were emailed.
+  const stillOpen = await client.query(
+    `UPDATE weekly_reports SET updated_at = now()
+      WHERE id = $1::uuid AND is_active AND status = $2
+      RETURNING id`,
+    [id, reportRow.status],
+  );
+  if (stillOpen.rows.length === 0) {
+    throw new AppError(409, "This report changed while you were working on it — reload and try again");
+  }
 
   const updated = await getWeeklyReportDetail(client, id);
   if (!updated) throw new AppError(404, "Weekly report not found");
@@ -568,6 +600,10 @@ export async function listWeeklyReportPhotoCandidates(
              WHERE wrp.file_id = f.id
                AND wr.id <> $1::uuid
                AND wr.is_active
+               -- EARLIER weeks only. Without this, filing a missed week after a newer draft has
+               -- already picked the same photo warns that it was "already used" on a week that has
+               -- not happened yet.
+               AND wr.week_of < $5::date
              ORDER BY wr.week_of DESC
              LIMIT 1
        ) prior ON true
@@ -577,7 +613,7 @@ export async function listWeeklyReportPhotoCandidates(
         AND f.deleted_at IS NULL
         AND (COALESCE(f.taken_at, f.created_at))::date BETWEEN $3::date AND $4::date
       ORDER BY COALESCE(f.taken_at, f.created_at) DESC`,
-    [reportId, reportRow.deal_id, window.from, window.to],
+    [reportId, reportRow.deal_id, window.from, window.to, weekOf],
   );
 
   return result.rows.map((row) => ({
@@ -660,8 +696,10 @@ export async function transitionWeeklyReport(
     params.push(JSON.stringify(await buildWeeklyReportSnapshot(client, projectRow)));
     assignments.push(`snapshot = $${params.length}::jsonb`);
   }
-  if (to === "draft") {
-    // Bounced back for rework: clear the review stamps so the dashboard does not claim it was reviewed.
+  // Any move BACKWARDS out of `approved` clears the review stamps — bounced to draft, or approval
+  // withdrawn back into review. Clearing only on the draft path left a report reading "pending review"
+  // while still stamped with the reviewer and time of an approval that had just been revoked.
+  if (to === "draft" || (to === "pending_review" && reportRow.status === "approved")) {
     assignments.push(`reviewed_by = NULL`, `reviewed_at = NULL`);
   }
 
