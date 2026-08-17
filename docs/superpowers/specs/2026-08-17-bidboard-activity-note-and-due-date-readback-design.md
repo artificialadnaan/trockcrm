@@ -38,6 +38,13 @@ Both SyncHub paths flatten the CRM body into a `dealData` property bag before Pl
 
 The RFP body is **snapshotted at trigger time** and stored — the RFP is static after trigger (#875).
 
+**The voting path is the exception, and it predates this work.** `enqueueRfpBidBoardCreate`
+re-fetches *every* payload field from the database at approval time (`loadRfpPayloadDeal` is
+DB-authoritative by design, so a voter's committed edits flow into the created project). The activity
+log therefore reflects **approval** time on that path, exactly like `amount`, `description` and
+`estimator` do. Only the email-approval path — the live one today, since `ENABLE_RFP_VOTING=false` —
+carries a true trigger-time snapshot, because SyncHub stores the body it received.
+
 **Export path (Bid Board → CRM).** SyncHub scrapes the Bid Board export to Excel, forwards the raw
 rows (`row["Due Date"]` included) to the CRM's `POST /api/bid-board-sync/ingest`, which durably
 queues them; the worker runs `ingestBidBoardRows`. That already parses the due date
@@ -112,8 +119,24 @@ References:
   — pure, unit-tested, no DB. Returns `null` when there are no entries (the payload field is then
   `null` and SyncHub posts no note).
 
-Every activity type is included (call, note, meeting, email, site visit, voicemail, lunch,
-proposal_sent, task_completed, …) — the estimator wants the whole history, not just typed notes.
+Every activity type is included (call, note, meeting, site visit, voicemail, lunch, proposal_sent,
+task_completed, …) — the estimator wants the whole history, not just typed notes — **except email.**
+
+**`email`-type activities are excluded, and this is an access-control boundary, not a formatting
+preference.** `activities/service.ts` restricts email rows to the mailbox owner
+(`or(type <> 'email', responsibleUserId = viewerUserId)`), and those rows carry up to 1000 characters
+of real message body written by the Graph sync. A Procore note has no "viewer", so that per-viewer
+rule cannot be honoured on the far side — including them would bypass an existing access control and
+publish private correspondence to every Bid Board user. The query also excludes any row carrying an
+`email_id` regardless of type, because the generic `createActivity` accepts an arbitrary `emailId`
+with any type. Do not "restore completeness" here.
+
+**The source lead's activities ARE included.** The CRM's own deal Activity tab ORs in
+`activities.lead_id` for a lead-backed deal, and nothing re-points `activities.deal_id` at
+conversion — so a deal-id-only query silently omits all pre-conversion prospecting, which is exactly
+the history the estimator wants. This matches `loadRfpAttachmentsForDeal`, which already includes the
+source lead's files for the same reason. (A lead maps to at most one deal: `deals.source_lead_id`
+carries a partial UNIQUE index, so this cannot pull in another deal's activities.)
 
 **Dates render in America/Chicago**, the established business-timezone anchor
 (`shared/src/types/deal-hold-risk.ts` / `deal-reporting.ts`), not UTC. A UTC render would show the
@@ -130,7 +153,14 @@ wrong calendar day for anything logged after 6pm CT.
 So 40 entries is the ceiling, not the target: a deal with 40 long entries emits fewer than 40 and says
 so. Rationale for the byte target is in "Body budget" below.
 
-**Format.** The first line is also the idempotency marker SyncHub matches on:
+**Format.** The heading's constant prefix — the literal `CRM Activity Log —`, **not** the project
+number — is the idempotency marker SyncHub matches on. Notes are already scoped to a single project,
+so the number adds no discrimination, and keying on it was actively broken: the CRM heading falls back
+to the deal *name* when there is no display number, while the payload's `projectNumber` falls back to
+the deal UUID, so a number-keyed guard could never match for HubSpot-imported "Pending" deals and
+would have posted a duplicate on every run. The readable label stays in the heading for the human
+reading it in Procore; SyncHub ignores it. SyncHub also guarantees the marker on what it posts,
+prepending the heading if an incoming string somehow lacks it.
 
 ```
 CRM Activity Log — TR-26-0412 (as of Aug 17, 2026)
@@ -202,16 +232,30 @@ CRM). Therefore:
 
    - navigate to the project (`navigateToProject`, which already lands on
      `…/tools/bid-board/project/{id}/details`) and select the **Overview** tab
-   - read the existing notes list; if any note's first line starts with
-     `CRM Activity Log — <projectNumber>`, **return `{ skipped: true }`** — this is the idempotency
-     guard that keeps a retry, an adopted pre-existing project, or a duplicate command from stacking
-     four copies of the same note
+   - read the existing notes — the UNION of every note-row match and the section's own text, never
+     early-returning on the first selector that yields something, or an unrelated list suppresses the
+     fallback and hides an existing note
+   - if any of that text contains the constant marker `CRM Activity Log —`, **return
+     `{ skipped: true }`** — the idempotency guard that keeps a retry, an adopted pre-existing project,
+     or a duplicate command from stacking copies of the same note
+   - refuse outright when the deal being processed does not own the resolved mapping (a project-number
+     lookup can return a mapping owned by a DIFFERENT deal, and posting there would leak one deal's
+     sales history into another's project)
    - click the add (`+`) control in the Notes section, type the note, click **Create**
    - verify the note rendered; return a structured result either way
 
-5. **Selectors** go in `server/playwright/selectors.ts` under `bidboard.newUi.notes*`, layered the way
-   that file already does it: stable `aid-*` class first, then role/text fallbacks
-   (`getByRole('button', { name: /create/i })`).
+5. **Selectors** go in `server/playwright/selectors.ts` under `bidboard.newUi.notes*`, **tiered** rather
+   than merely ordered — `precise` (structural `aid-*` / `data-qa` hooks, acted on in any scope),
+   `scopedOnly` (acted on only inside an already-validated container), and `loose` (text-shaped, e.g.
+   `section:has-text("Notes")` or a bare `textarea` — **never acted on**).
+
+   When only `loose` candidates match, the module **refuses and reports not-found**. Since none of
+   these selectors has been seen against real DOM, that is today's state: **this ships inert and posts
+   nothing until the harness below is run and real hooks are substituted.** That is deliberate. A bare
+   `textarea` on the Bid Board project page is the Project *Description* — `bidboard.ts:2402` proves it
+   — and `fill()` clears before writing while the Create click blurs, so an unguarded page-wide
+   fallback would silently overwrite a real project's description with the activity dump. A note that
+   fails to post is a non-event; that is not.
 
 6. **Fail-open.** The note step runs *after* the project is confirmed created and after the existing
    description-verify retry, wrapped so any failure logs and writes an audit row
@@ -245,10 +289,17 @@ resolveDealBidDueDate({ bidBoardDueDate, hasSourceLead, leadBidDueDate, dealBidD
   → string | null   // date-only "YYYY-MM-DD"
 ```
 
-Precedence: **Bid Board mirror → lead (when lead-backed) → deal column.** Pure and unit-tested.
+**The resolver never reads the mirror's VALUE. It reads it as a SIGNAL.**
 
-Applied at all three read sites, so the banner, the scoping field and the RFP payload cannot
-disagree:
+- The authoritative CRM value is always `deals.bid_due_date` — the same column every SQL surface
+  reads. TS and SQL therefore cannot disagree, by construction.
+- `bid_board_due_date`'s only job is to answer *"has the Bid Board's value actually landed in the CRM
+  column?"* — true when `(deals.bid_due_date AT TIME ZONE 'UTC')::date` equals it. When that holds,
+  the **deal column wins over the lead** (this is the lead-masking fix, which was the only reason a
+  read change was needed at all). When it does not hold, the legacy precedence applies untouched.
+- The override is additionally skipped outright when `bid_board_detached_at IS NOT NULL`.
+
+Applied at all three read sites, so the banner, the scoping field and the RFP payload cannot disagree:
 
 | Site | File | Today |
 | --- | --- | --- |
@@ -256,8 +307,19 @@ disagree:
 | resolved fields / scoping readiness | `deals/lineage-resolver.ts` `getResolvedDeal` | lead wins, else deal column |
 | RFP payload | `deals/rfp-enqueue.ts` `loadRfpPayloadDeal` | deal column wins, else lead (already inconsistent with the other two) |
 
-The mirror column is read directly rather than inferring provenance from the deal column, which keeps
-the rule honest: `bid_board_due_date` *is* the Bid Board's answer.
+**Why not read the mirror directly** (the first draft of this spec did, and it was wrong twice over):
+
+1. *Detached deals leaked.* The write-through refuses deals with `bid_board_detached_at` set, but
+   detaching never clears `bid_board_due_date` — so a deal deliberately severed from the board would
+   have gone on taking its due date, hold horizon and dollar value from that board forever.
+2. *It guaranteed card-vs-aggregate drift.* The three TS read sites would move the instant the flag
+   flipped, while `holdHorizonDateSql` and its ~50 SQL consumers kept reading `deals.bid_due_date`
+   until the next sync wrote through — and **permanently** for detached deals, deals no longer on the
+   export, rows skipped for a null attributor, multi-match rows and template rows. That is precisely
+   the reconciliation-consistency failure this codebase has been bitten by before.
+
+The signal formulation dissolves both, and has a useful rollout property: **flipping the flag changes
+nothing until a sync actually writes**, so the census measures exactly the thing that moves.
 
 ### Write-through on ingest
 
@@ -289,18 +351,23 @@ detach (`skippedDetached`, migration 0200) and template checks, so a detached de
 `BID_BOARD_DUE_DATE_READBACK`, resolved through `server/src/config/feature-flags.ts` alongside the
 existing `is…Enabled` helpers, **default OFF**.
 
-It gates **both halves — the write-through and the read precedence.** This is not belt-and-braces; it
-is required for "ships inert" to be true. `deals.bid_board_due_date` is *already populated on prod*
-(the ingest has been writing it all along), so shipping the read precedence unconditionally would
-immediately change the date on the deal-detail banner — and, because `getDealDetail` feeds the
-resolved date into `attachAtRiskResult`, that deal's at-risk verdict and effective value — for every
-deal already carrying a mirror value, with the write-through still off. That is exactly the surprise
-the flag exists to prevent.
+It gates **both halves — the write-through and the read override.** This is not belt-and-braces; it is
+required for "ships inert" to be true. `deals.bid_board_due_date` is *already populated on prod* (the
+ingest has been writing it all along), so shipping the read override unconditionally would change
+which source wins on the deal-detail banner — and, because `getDealDetail` feeds the resolved date
+into `attachAtRiskResult`, that deal's at-risk verdict and effective value — with the write-through
+still off. That is exactly the surprise the flag exists to prevent.
 
 Mechanically: `resolveDealBidDueDate` stays pure and flag-free (so it is trivially unit-testable), and
-a thin `resolveDealBidDueDateForRead(...)` wrapper in the same module consults the flag once and passes
-`bidBoardDueDate: null` when it is off. All three read sites call the wrapper, never the raw resolver.
-Flag off therefore reproduces today's behaviour exactly, on every surface.
+a thin `resolveDealBidDueDateForRead(...)` wrapper in the same module consults the flag once. All three
+read sites call the wrapper, never the raw resolver. Flag off therefore reproduces today's behaviour
+exactly, on every surface — verified by an explicit parity test at each site, including the wire shape
+(a `Date` for a lead-less deal, a `"YYYY-MM-DD"` string for a lead-backed one).
+
+The counter column is also written **only when the flag is on**. A tenant schema that has not yet
+received migration 0222 would otherwise fail the run's UPDATE — inside its `BEGIN`, rolling back that
+office's entire sync — with the feature disabled. Migrations run on **API** deploy and the Worker does
+not run them, so a worker-ahead-of-API window is real.
 
 The flag exists at all because this sync runs on a schedule: unlike a manual prod write there is no
 human gate between deploy and the first mass write, and that write moves reported dollars (see "The
@@ -322,7 +389,14 @@ that reports, for deals matched by the most recent export:
 
 Computed with the same predicates the app uses (`holdHorizonDateSql`,
 `closeTargetFarOutSqlPredicate`) rather than a hand-rolled copy, so the census cannot disagree with
-what the app will do.
+what the app will do — and with the **estimating** value chain (`ESTIMATING_VALUE_CHAIN`, DD over
+bid), not the generic one, because every mover it reports is by definition a genuine estimating deal
+and that is the chain the deals board totals for that stage.
+
+**A failing census must not look like a clean one.** A per-schema error is not swallowed into a
+`SKIPPED` log while the run still prints `Across 0 office(s): net reported-pipeline delta $0` — that
+would be a reassuring "no impact" verdict on the single artifact gating a prod flag flip. It exits
+non-zero and says explicitly that the result is incomplete.
 
 ### Risks — change B
 
