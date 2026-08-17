@@ -472,3 +472,59 @@ describe("getActivePipelineSummary — empty state + NaN safety (R3)", () => {
     expect(Number.isFinite(summary.count)).toBe(true);
   });
 });
+
+describe("countAtRiskDeals — server board summary outranks the (capped) card array", () => {
+  // The board fetches BOARD_CARDS_PER_STAGE_LIMIT cards per column, so a column holding more deals than
+  // that arrives truncated. Counting the cards would then under-report every At-Risk KPI card. These pin
+  // the contract that makes shrinking the card slice safe: when the server ships counts, they win.
+  const truncatedBoard = () => [
+    // Two at-risk cards survived the slice; the server says the column really holds 41.
+    column("estimating", [
+      deal({ id: "c1", atRisk: true, value: 1000, projectTypeCode: "4" }),
+      deal({ id: "c2", atRisk: true, value: 1000, projectTypeCode: "1" }),
+    ]),
+    column("contract", [deal({ id: "c3", atRisk: true, value: 1000, projectTypeCode: "1" })]),
+    column("won", [deal({ id: "w1", atRisk: true, value: 1000 })]),
+  ];
+  const serverCounts = {
+    estimating: { service: 17, nonService: 24 },
+    contract: { service: 0, nonService: 6 },
+    // A terminal column can never contribute; if the server ever emitted one it must still be ignored.
+    won: { service: 99, nonService: 99 },
+  };
+
+  it("reports the server's totals, not the number of cards that fit in the slice", () => {
+    const columns = truncatedBoard();
+    expect(countAtRiskDeals(columns, "all", serverCounts)).toBe(47);
+    expect(countAtRiskDeals(columns, "service", serverCounts)).toBe(17);
+    expect(countAtRiskDeals(columns, "non_service", serverCounts)).toBe(30);
+    // The card-derived answer is what this replaces — 3 cards vs 47 real deals.
+    expect(countAtRiskDeals(columns, "all")).toBe(3);
+  });
+
+  it("keeps Service + Non-service === All on the server numbers too", () => {
+    const columns = truncatedBoard();
+    expect(
+      countAtRiskDeals(columns, "service", serverCounts) +
+        countAtRiskDeals(columns, "non_service", serverCounts)
+    ).toBe(countAtRiskDeals(columns, "all", serverCounts));
+  });
+
+  it("still excludes terminal columns when counting from the server summary", () => {
+    // The Won column carries 198 in the fixture above and one at-risk card; neither may be counted.
+    expect(countAtRiskDeals([column("won", [deal({ id: "w", atRisk: true })])], "all", serverCounts)).toBe(0);
+  });
+
+  it("treats a column the server did not mention as zero, not as 'fall back to cards'", () => {
+    // The server emits a bucket only for columns that HAVE at-risk rows. A missing key therefore means
+    // zero — falling back to the truncated cards there would double-count against the server's total.
+    const columns = [column("estimating", [deal({ id: "c1", atRisk: true })])];
+    expect(countAtRiskDeals(columns, "all", { contract: { service: 3, nonService: 3 } })).toBe(0);
+  });
+
+  it("falls back to the card count when there is NO summary (older payload)", () => {
+    const columns = truncatedBoard();
+    expect(countAtRiskDeals(columns, "all", null)).toBe(3);
+    expect(countAtRiskDeals(columns, "all", undefined)).toBe(3);
+  });
+});

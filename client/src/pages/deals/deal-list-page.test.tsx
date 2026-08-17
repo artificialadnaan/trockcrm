@@ -518,7 +518,7 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
       won: { preset: "all" },
       lost: { preset: "all" },
-    }, 1000, null, undefined);
+    }, 50, null, undefined, undefined, expect.any(Object));
     expect(html).toContain("Deals Dashboard"); // relabeled to distinguish the dashboard from /pipeline
     expect(html).toContain('placeholder="Search deals"');
     expect(html).toContain("Opportunity");
@@ -700,10 +700,12 @@ describe("DealListPage", () => {
       "all",
       true,
       { won: { preset: "all" }, lost: { preset: "all" } },
-      1000,
+      50,
       null,
       "rep-1"
-    );
+    ,
+      undefined,
+      expect.any(Object));
     expect(mocks.dealsListSectionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         lockedOwnerId: "rep-1",
@@ -1061,7 +1063,7 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
       won: { preset: "all" },
       lost: { preset: "all" },
-    }, 1000, null, undefined);
+    }, 50, null, undefined, undefined, expect.any(Object));
   });
 
   it("strips stale estimate_sent_* params from the URL on load — the removed control must not invisibly filter the board or a stage drill-down (Codex #600 P2)", async () => {
@@ -1080,7 +1082,7 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
       won: { preset: "all" },
       lost: { preset: "wtd" },
-    }, 1000, null, undefined);
+    }, 1000, null, undefined, undefined, expect.any(Object));
   });
 
   it("passes the selected page period to the board request so won aggregates match the drilldown window", () => {
@@ -1089,7 +1091,7 @@ describe("DealListPage", () => {
     expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
       won: { preset: "all" }, // Option A: the stale won_preset is collapsed; the board-wide won_period (arg5) windows Won
       lost: { preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-30" }, // Lost seeded from last_month
-    }, 1000, { from: "2026-04-01", to: "2026-04-30" }, undefined);
+    }, 50, { from: "2026-04-01", to: "2026-04-30" }, undefined, undefined, expect.any(Object));
   });
 
   describe("Option A: one board-wide date — Won & Lost columns mirror the shared ?period", () => {
@@ -1153,10 +1155,12 @@ describe("DealListPage", () => {
         "all",
         true,
         { won: { preset: "all" }, lost: { preset: "qtd" } },
-        1000,
+        50,
         expect.objectContaining({ from: expect.any(String), to: expect.any(String) }),
         undefined
-      );
+      ,
+        undefined,
+        expect.any(Object));
     });
 
     it("strips stale won_*/lost_* params from the URL on load so they can't leak into a stage drill-down", async () => {
@@ -1323,7 +1327,7 @@ describe("DealListPage", () => {
 
     renderPage("/deals", "director");
 
-    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("mine", true, expect.any(Object), 1000, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("mine", true, expect.any(Object), 50, null, undefined, undefined, expect.any(Object));
   });
 
   it("uses the board terminal filters when building terminal stage navigation", () => {
@@ -1375,16 +1379,16 @@ describe("DealListPage", () => {
 
   it("defaults the board scope by role when the query param is absent", () => {
     renderPage("/deals", "rep");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 50, null, undefined, undefined, expect.any(Object));
 
     renderPage("/deals", "director");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 50, null, undefined, undefined, expect.any(Object));
 
     renderPage("/deals", "admin");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 50, null, undefined, undefined, expect.any(Object));
 
     renderPage("/deals?scope=mine", "director");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 50, null, undefined, undefined, expect.any(Object));
   });
 
   it("hides the Team scope and coerces a requested team scope to mine (D-12b)", () => {
@@ -1394,7 +1398,7 @@ describe("DealListPage", () => {
     // coerced to the rendered fallback ("mine"); no dead placeholder is shown.
     expect(html).not.toContain(">Team</button>");
     expect(html).not.toContain("Team view is not yet configured");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 50, null, undefined, undefined, expect.any(Object));
   });
 
   it("drops a stale owner filter when a team bookmark is coerced to mine (D-12b)", () => {
@@ -1402,7 +1406,7 @@ describe("DealListPage", () => {
 
     // Coerced to mine AND the owner filter cleared (6th arg undefined), so the Mine board is
     // not intersected with rep-2's deals into an empty result.
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 50, null, undefined, undefined, expect.any(Object));
   });
 
   it("rewrites a parked team bookmark URL to mine and drops the stale owner param (D-12b)", async () => {
@@ -1425,7 +1429,7 @@ describe("DealListPage", () => {
   it("allows reps to opt into all-office scope", () => {
     const html = renderPage("/deals?scope=all", "rep");
 
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("all", true, expect.any(Object), 1000, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("all", true, expect.any(Object), 50, null, undefined, undefined, expect.any(Object));
     expect(html).toContain('aria-pressed="false">Mine');
     expect(html).toContain('aria-pressed="true">All');
     // Team is not an offered scope (D-12b).
@@ -1439,7 +1443,7 @@ describe("DealListPage", () => {
     expect(html).toContain('aria-pressed="false">Mine');
     expect(html).toContain('aria-pressed="false">All');
     // watched survives end-to-end (not silently coerced to mine) — the board hook receives it.
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("watched", true, expect.any(Object), 1000, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("watched", true, expect.any(Object), 50, null, undefined, undefined, expect.any(Object));
   });
   it("mounts the FULL FilterBar (incl. Rep, dl_-namespaced) on the BASE deal list, inheriting scope; Scope omitted", () => {
     renderPage("/deals?scope=mine", "director");
@@ -1664,10 +1668,12 @@ describe("DealListPage", () => {
       "all",
       true,
       expect.objectContaining({ lost: { preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-30" } }),
-      1000,
+      50,
       expect.objectContaining({ from: expect.any(String), to: expect.any(String) }),
       undefined
-    );
+    ,
+      undefined,
+      expect.any(Object));
 
     await view.cleanup();
   });
@@ -1885,10 +1891,12 @@ describe("DealListPage", () => {
         won: { preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-30" },
         lost: { preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-30" }, // Lost seeded from last_month (Codex #600 P2)
       },
-      1000,
+      50,
       { from: "2026-04-01", to: "2026-04-30" },
       undefined
-    );
+    ,
+      undefined,
+      expect.any(Object));
     expect(mocks.dealsListSectionMock).toHaveBeenCalledWith(
       expect.objectContaining({
         baseFilters: expect.objectContaining({
@@ -2275,7 +2283,7 @@ describe("DealListPage", () => {
     // Even with ?period=qtd, the board fetch must carry NO period on the at-risk/stale drill-down — else
     // the server windows the OPEN columns by stage_entered_at (won_period) and drops at-risk deals at the
     // SOURCE. The 5th arg (period range) must be null for current-state.
-    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, expect.any(Object), 1000, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, expect.any(Object), 1000, null, undefined, undefined, expect.any(Object));
 
     expect(html).toContain("QTD Stale Deal");
     expect(html).toContain("Second QTD Stale Deal");
@@ -2940,7 +2948,9 @@ describe("DealListPage", () => {
       1000,
       null,
       undefined
-    );
+    ,
+      undefined,
+      expect.any(Object));
     expect(mocks.dealsListSectionMock).not.toHaveBeenCalled();
     expect(html).toContain("Drill-down view: SLA filter applied to list and board.");
     expect(html).toContain("Filtered results");
@@ -3025,7 +3035,7 @@ describe("DealListPage", () => {
   it("coerces a requested team scope to mine in the scope toggle (D-12b)", () => {
     const html = renderPage("/deals?scope=team", "director");
 
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 50, null, undefined, undefined, expect.any(Object));
     expect(html).not.toContain(">Team</button>");
     expect(html).toContain('aria-pressed="true">Mine');
     expect(html).toContain('aria-pressed="false">All');
@@ -3058,4 +3068,46 @@ describe("DealListPage", () => {
 
     expect(html).toContain("No deals in selected range");
   });
+
+  describe("board request duplication — /deals must not ask for the pipeline more than once per view", () => {
+    // GET /api/deals/pipeline measured 1.6-2.5s in production and the page was firing it 2-3x per load.
+    // Two independent causes, both pinned here:
+    //   1. the saved Rep/timeframe restore rewrote the URL AFTER the first fetch had already gone out;
+    //   2. resolveDrilldownTerminalDateFilters returns a FRESH object every call, and that object is a
+    //      dependency of the fetch, so a no-op re-sync changed its identity and triggered another fetch.
+    const boardCalls = () => mocks.useDealBoardMock.mock.calls;
+    const enabledCalls = () =>
+      boardCalls().filter((call) => (call[7] as { enabled?: boolean } | undefined)?.enabled === true);
+
+    it("holds the fetch until the saved view is resolved, then asks with ONE stable parameter set", async () => {
+      const view = await renderPageDom("/deals?scope=all", "director");
+      try {
+        const enabled = enabledCalls();
+        expect(enabled.length).toBeGreaterThan(0);
+        // The FIRST render must not have fetched: the stored-view restore had not decided yet.
+        expect((boardCalls()[0]![7] as { enabled?: boolean }).enabled).toBe(false);
+
+        // Every enabled call carries the same board parameters, so useDealBoard's fetch callback keeps one
+        // identity and issues a single request no matter how many times the page re-renders.
+        const signature = (call: unknown[]) =>
+          JSON.stringify([call[0], call[1], call[2], call[3], call[4], call[5], call[6]]);
+        expect(new Set(enabled.map(signature)).size).toBe(1);
+      } finally {
+        await view.cleanup();
+      }
+    });
+
+    it("keeps the terminal-date-filter object IDENTITY stable across re-renders (arg 3 is a fetch dep)", async () => {
+      const view = await renderPageDom("/deals?scope=all", "director");
+      try {
+        const identities = new Set(enabledCalls().map((call) => call[2]));
+        // A fresh object per render is exactly what fired the duplicate request; one identity means the
+        // memoised fetch callback is never invalidated by a no-op re-sync.
+        expect(identities.size).toBe(1);
+      } finally {
+        await view.cleanup();
+      }
+    });
+  });
 });
+

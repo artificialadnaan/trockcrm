@@ -1,5 +1,5 @@
-import type { Deal, DealBoardColumn } from "@/hooks/use-deals";
-import { getEffectiveDealValue, pendingRfpSubStateForStatus } from "@trock-crm/shared/types";
+import type { Deal, DealBoardColumn, DealBoardSummary } from "@/hooks/use-deals";
+import { getEffectiveDealValue, isPendingRfpBoardCard } from "@trock-crm/shared/types";
 import {
   getDealBoardStageSlugs,
   getDealStageLabelBySlug,
@@ -141,7 +141,14 @@ export function buildCanonicalDealStageIdFamilies(
 
 export function buildCanonicalDealBoardColumns(
   rawColumns: DealBoardColumn[] | null | undefined,
-  stages: DealStageLike[]
+  stages: DealStageLike[],
+  /**
+   * Server-side board aggregates. When present, the Pending RFP column's count/$ (and therefore the
+   * matching subtraction from Opportunity) come from a count over EVERY matching row instead of the
+   * cards this response happened to carry — which is what lets the board request a small card slice
+   * without the column silently under-reporting.
+   */
+  boardSummary?: DealBoardSummary | null
 ): DealBoardColumn[] {
   const deals = dedupeDealsById((rawColumns ?? []).flatMap((column) => column.cards));
 
@@ -156,15 +163,9 @@ export function buildCanonicalDealBoardColumns(
       },
       stages,
     ).slug;
-  const isPendingRfpCard = (deal: Deal) =>
-    dealCanonicalSlug(deal) === "opportunity" &&
-    deal.isBidBoardOwned === false &&
-    deal.rfpOverrideDecision !== "denial_reconfirmed" &&
-    // An in-flight override approval (rfpOverrideState === "approving") stays rfpApprovalStatus
-    // "declined" until the SyncHub callback lands; the server queue + cancel route both exclude
-    // it, so the board must too — otherwise it shows as an actionable Pending RFP card.
-    deal.rfpOverrideState !== "approving" &&
-    pendingRfpSubStateForStatus(deal.rfpApprovalStatus) !== null;
+  // The SHARED board predicate — the same one the server folds its Pending RFP count/$ aggregate with,
+  // so the column's membership and the number on it cannot drift apart.
+  const isPendingRfpCard = (deal: Deal) => isPendingRfpBoardCard(deal, dealCanonicalSlug(deal));
   // DELIBERATELY owner-scoped: the synthetic Pending RFP column is derived from THIS board's own cards
   // (already scope-filtered, value-resolved, and at-risk-decorated by the server pipeline), NOT a separate
   // office-wide cross-rep query. A cross-rep version was built and then reverted (PR #834) because an
@@ -237,9 +238,16 @@ export function buildCanonicalDealBoardColumns(
   // Board `count`/`totalValue` are the active/reportable figures (on-hold cards are excluded), so the
   // moved-card adjustment + the synthetic column must count active cards only — otherwise an on-hold
   // pending RFP would be double-counted out of opportunity and shown as active here.
+  //
+  // PREFER THE SERVER AGGREGATE. Counting `pendingRfpCards` here only ever saw the cards this response
+  // carried, so with a capped per-column card slice both the Pending RFP column AND the Opportunity
+  // column it is subtracted from would under-report. The server counts the same predicate over every
+  // matching row. The card-derived numbers remain the fallback for a response without a summary.
   const activePendingRfp = pendingRfpCards.filter((d) => !d.onHold);
-  const pendingRfpCount = activePendingRfp.length;
-  const pendingRfpValue = activePendingRfp.reduce((sum, d) => sum + getDealValue(d, "opportunity"), 0);
+  const pendingRfpCount = boardSummary?.pendingRfp.count ?? activePendingRfp.length;
+  const pendingRfpValue =
+    boardSummary?.pendingRfp.totalValue ??
+    activePendingRfp.reduce((sum, d) => sum + getDealValue(d, "opportunity"), 0);
 
   const oppIndex = columns.findIndex((column) => column.stage.slug === "opportunity");
   // Always insert the synthetic Pending RFP column after Opportunity — even with zero pending cards — so the

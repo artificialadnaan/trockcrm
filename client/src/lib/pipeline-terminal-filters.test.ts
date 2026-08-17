@@ -15,7 +15,9 @@ import {
   setTerminalDateFilterSearchParams,
   readTerminalDateFiltersFromSearchParams,
   readTerminalDateFilter,
+  terminalDateFiltersEqual,
   writeTerminalDateFilter,
+  type TerminalDateFilter,
 } from "./pipeline-terminal-filters";
 
 describe("pipeline terminal filters", () => {
@@ -195,5 +197,44 @@ describe("resolveDatePreset (canonical platform-wide date-preset resolver)", () 
     for (const preset of ["wtd", "mtd", "qtd", "ytd"] as const) {
       expect(toDatePresetRange(preset, now)).toEqual(resolveDatePreset(preset, now));
     }
+  });
+});
+
+describe("terminalDateFiltersEqual (identity guard for the board fetch dependency)", () => {
+  // resolveDrilldownTerminalDateFilters builds a FRESH object every call, and that object is a
+  // dependency of useDealBoard's fetch callback. Re-setting state to a structurally identical value was
+  // therefore firing a SECOND /deals/pipeline request — a 1.6-2.5s query — for no change at all.
+  const won = (filter: TerminalDateFilter) => ({ won: filter, lost: { preset: "all" } as TerminalDateFilter });
+
+  it("treats structurally identical maps as equal, whatever their object identity", () => {
+    expect(
+      terminalDateFiltersEqual(
+        { won: { preset: "30" }, lost: { preset: "60" } },
+        { won: { preset: "30" }, lost: { preset: "60" } }
+      )
+    ).toBe(true);
+  });
+
+  it("compares BOTH outcomes — a change on either side is a real change", () => {
+    expect(terminalDateFiltersEqual(won({ preset: "30" }), won({ preset: "60" }))).toBe(false);
+    expect(
+      terminalDateFiltersEqual(
+        { won: { preset: "all" }, lost: { preset: "all" } },
+        { won: { preset: "all" }, lost: { preset: "qtd" } }
+      )
+    ).toBe(false);
+  });
+
+  it("compares the CUSTOM bounds, not just the preset (a moved window must refetch)", () => {
+    const a = won({ preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-30" });
+    expect(
+      terminalDateFiltersEqual(a, won({ preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-30" }))
+    ).toBe(true);
+    expect(
+      terminalDateFiltersEqual(a, won({ preset: "custom", customStart: "2026-05-01", customEnd: "2026-04-30" }))
+    ).toBe(false);
+    expect(
+      terminalDateFiltersEqual(a, won({ preset: "custom", customStart: "2026-04-01" }))
+    ).toBe(false);
   });
 });

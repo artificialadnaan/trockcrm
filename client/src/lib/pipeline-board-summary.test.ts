@@ -184,6 +184,7 @@ describe("buildDealBoardSummary", () => {
         },
       ],
       terminalStages: [],
+      summary: null,
     };
 
     expect(buildDealBoardSummary(board, now)).toEqual({
@@ -277,6 +278,7 @@ describe("buildDealBoardSummary", () => {
         },
       ],
       terminalStages: [],
+      summary: null,
     };
 
     expect(buildDealBoardSummary(board, now)).toEqual({

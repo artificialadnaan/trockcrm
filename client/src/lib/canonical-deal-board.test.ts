@@ -1270,3 +1270,75 @@ describe("buildCanonicalDealBoardColumns", () => {
     expect(columns[oppIndex]!.count + columns[prfpIndex]!.count).toBe(2);
   });
 });
+
+describe("Pending RFP column — server aggregate over ALL rows beats the (capped) card slice", () => {
+  // The board fetches a SLICE of each column's cards. Splitting the synthetic Pending RFP column out of
+  // Opportunity by counting those cards therefore under-reports BOTH columns the moment the Opportunity
+  // column holds more deals than the slice. These pin that the server's count/$ win when supplied.
+  function oppCard(id: string, options: { pending?: boolean; value?: string } = {}) {
+    return {
+      id,
+      stageId: "opp-stage",
+      workflowRoute: "normal",
+      isBidBoardOwned: false,
+      bidBoardStageSlug: null,
+      readOnlySyncedAt: null,
+      rfpApprovalStatus: options.pending ? "pending" : null,
+      rfpOverrideDecision: null,
+      rfpOverrideState: null,
+      bidEstimate: options.value ?? "10000",
+      ddEstimate: null,
+      awardedAmount: null,
+      onHold: false,
+    };
+  }
+
+  const rawColumns = () =>
+    [
+      {
+        stage: { id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false },
+        // The column really holds 300 active deals worth $3,000,000 — this response carries 3 cards.
+        count: 300,
+        totalValue: 3_000_000,
+        cards: [oppCard("p1", { pending: true }), oppCard("p2", { pending: true }), oppCard("o1")],
+      },
+    ] as any;
+  const stages = [{ id: "opp-stage", name: "Opportunity", slug: "opportunity", isTerminal: false }] as any;
+
+  it("uses the server's Pending RFP count/$ and subtracts exactly that from Opportunity", () => {
+    const columns = buildCanonicalDealBoardColumns(rawColumns(), stages, {
+      atRiskByStageSlug: {},
+      pendingRfp: { count: 42, totalValue: 420_000 },
+    });
+
+    const opp = columns.find((col) => col.stage.slug === "opportunity")!;
+    const pending = columns.find((col) => col.stage.slug === "pending_rfp")!;
+
+    expect(pending.count).toBe(42);
+    expect(pending.totalValue).toBe(420_000);
+    // Opportunity's backend aggregate minus the SAME server number, so the split still reconciles.
+    expect(opp.count).toBe(258);
+    expect(opp.totalValue).toBe(2_580_000);
+    expect(opp.count + pending.count).toBe(300);
+    expect(opp.totalValue + pending.totalValue).toBe(3_000_000);
+    // The cards still render where they belong; only the NUMBERS come from the server.
+    expect(pending.cards.map((d) => d.id)).toEqual(["p1", "p2"]);
+    expect(opp.cards.map((d) => d.id)).toEqual(["o1"]);
+  });
+
+  it("would under-report from the cards alone — which is exactly what the summary replaces", () => {
+    const columns = buildCanonicalDealBoardColumns(rawColumns(), stages);
+    const pending = columns.find((col) => col.stage.slug === "pending_rfp")!;
+    // Only the 2 pending cards that fit in the slice, not the 42 the column really holds.
+    expect(pending.count).toBe(2);
+  });
+
+  it("falls back to the card-derived split when the payload carries no summary", () => {
+    const withNull = buildCanonicalDealBoardColumns(rawColumns(), stages, null);
+    const withUndefined = buildCanonicalDealBoardColumns(rawColumns(), stages);
+    const pendingFromNull = withNull.find((col) => col.stage.slug === "pending_rfp")!;
+    const pendingFromUndefined = withUndefined.find((col) => col.stage.slug === "pending_rfp")!;
+    expect(pendingFromNull.count).toBe(pendingFromUndefined.count);
+    expect(pendingFromNull.totalValue).toBe(pendingFromUndefined.totalValue);
+  });
+});

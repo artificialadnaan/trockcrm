@@ -27,6 +27,7 @@ import {
   isTerminalStage,
   isTerminalOutcomeSlug,
   resolveDatePreset,
+  terminalDateFiltersEqual,
   toDatePresetRange,
   type TerminalDateFilter,
   type TerminalOutcome,
@@ -58,13 +59,34 @@ const SCOPE_OPTIONS = [
   { value: "on_hold", label: "On Hold" },
 ] as const satisfies readonly ScopeToggleOption<PipelineScope>[];
 
+/**
+ * The AT-RISK DRILL-DOWN still asks for the server maximum, and has to.
+ *
+ * That view's LIST is built by flattening the board's cards and paginating them client-side
+ * (`drilldownDeals`), so unlike the board its rows genuinely are the card array. It is also a deliberate
+ * click-through rather than the default page load, so its cost is paid once, on purpose. If this ever
+ * needs to come down, the prerequisite is a server-side at-risk ROW feed, not a smaller number here.
+ */
 const SLA_DRILLDOWN_PREVIEW_LIMIT = 1000;
-// Request the full per-stage card set (mirrors the server's
-// MAX_PIPELINE_CARDS_PER_STAGE_LIMIT) so each board column scrolls internally
-// through ALL its deals instead of an 8-card preview. Header counts/totals come
-// from independent backend aggregates, so this changes only how many cards are
-// fetched into the scroll list — not any displayed total.
-const BOARD_CARDS_PER_STAGE_LIMIT = 1000;
+/**
+ * How many cards the BOARD loads per column — deliberately a slice, not the whole column.
+ *
+ * It used to be 1000 (the server maximum). With includeDd the board answers 12 columns, each selecting
+ * all 153 deal columns, so a single load could ship several thousand full deal rows — measured at
+ * 1.6–2.5s per request in production, and the page issues this request more than once.
+ *
+ * What the user sees: each column renders its top cards under the SAME ordering the column has always
+ * used (active/non-zero first, then by effective value), a "View all N" control whenever the column
+ * holds more, and the full set on the stage drill-down that control opens — which is paginated,
+ * sortable and filterable, i.e. a better tool for a 300-deal column than an endless kanban scroll.
+ *
+ * What does NOT change: every NUMBER on the page. Column count/total come from backend aggregates and
+ * always did; the At-Risk KPI counts and the Pending RFP column now come from `boardSummary`, computed
+ * server-side over every matching row. The one honest trade-off is the board's client-side text search,
+ * which filters the cards in memory and therefore searches this slice — the list below the board
+ * searches server-side over everything.
+ */
+const BOARD_CARDS_PER_STAGE_LIMIT = 50;
 // Initial row-height estimate for the virtualized board column; the real height
 // of each variable-height DecoratedKanbanCard is measured after mount.
 const DEALS_KANBAN_CARD_ESTIMATE_HEIGHT = 132;
@@ -733,16 +755,39 @@ export function getAtRiskBoardColumns(
  *   count(cols,"service") + count(cols,"non_service") === count(cols,"all")
  * holds for ANY column set, by construction (asserted in at-risk-summary.runtime.test.ts).
  */
-export function countAtRiskDeals(columns: DealBoardColumn[], routeBucket: AtRiskRouteBucket): number {
-  return columns.reduce(
-    (sum, column) =>
+export function countAtRiskDeals(
+  columns: DealBoardColumn[],
+  routeBucket: AtRiskRouteBucket,
+  /**
+   * The server's per-canonical-column at-risk counts, computed over EVERY matching row. When present it
+   * is authoritative: the card array is a capped slice, so counting it would under-report the moment a
+   * column holds more deals than the board fetches. Omitted (older payload / unit tests without a
+   * summary) falls back to the original card count, which is exact whenever nothing was truncated.
+   */
+  atRiskByStageSlug?: Record<string, { service: number; nonService: number }> | null
+): number {
+  return columns.reduce((sum, column) => {
+    if (isTerminalStage(column.stage.slug)) return sum;
+    const serverBucket = atRiskByStageSlug?.[column.stage.slug];
+    if (serverBucket) {
+      return (
+        sum +
+        (routeBucket === "service"
+          ? serverBucket.service
+          : routeBucket === "non_service"
+            ? serverBucket.nonService
+            : serverBucket.service + serverBucket.nonService)
+      );
+    }
+    // A canonical column with no server entry has no at-risk rows at all (the server only emits a bucket
+    // when it counted one) — EXCEPT when there is no summary, where this is the original card count.
+    if (atRiskByStageSlug) return sum;
+    return (
       sum +
-      (isTerminalStage(column.stage.slug)
-        ? 0
-        : column.cards.filter((deal) => isEngineAtRiskDeal(deal) && matchesAtRiskRouteBucket(deal, routeBucket))
-            .length),
-    0
-  );
+      column.cards.filter((deal) => isEngineAtRiskDeal(deal) && matchesAtRiskRouteBucket(deal, routeBucket))
+        .length
+    );
+  }, 0);
 }
 
 /**
@@ -934,6 +979,8 @@ function DealsBoardColumn({
 }) {
   const totalValue =
     column.totalValue ?? sumNonOnHoldDealValues(column.cards);
+  const visibleCardCount = column.cards.length;
+  const renderedTotalCount = column.totalCount ?? column.count;
   const terminalOutcome = isTerminalOutcomeSlug(column.stage.slug) ? column.stage.slug : null;
   const hasBoardDate = periodValue != null && periodValue !== "__all__";
   const emptyText = terminalOutcome && hasBoardDate ? "No deals in selected range" : "No deals";
@@ -977,6 +1024,21 @@ function DealsBoardColumn({
       <p className="mt-1 text-xl font-semibold tabular-nums text-gray-900">
         {USD_COMPACT(totalValue)}
       </p>
+      {/*
+        The board loads a SLICE of each column (BOARD_CARDS_PER_STAGE_LIMIT), so a column holding more
+        has to say so rather than look complete at N cards. The header count above already shows the true
+        total; this names the gap and opens the stage drill-down, which is paginated, sortable and
+        filterable over the full set. Mirrors the same affordance on the shared pipeline board column.
+      */}
+      {visibleCardCount < renderedTotalCount ? (
+        <button
+          type="button"
+          className="mt-1 text-left text-[11px] font-semibold uppercase tracking-wide text-gray-500 hover:text-gray-900"
+          onClick={() => onOpenStage(column)}
+        >
+          Showing {visibleCardCount} of {renderedTotalCount} — view all
+        </button>
+      ) : null}
     </>
   );
 
@@ -1063,6 +1125,17 @@ function DealListPageContent({
     [assignees]
   );
 
+  /**
+   * Whether the saved-view restore below has DECIDED — either it had nothing to apply, or it applied it.
+   *
+   * The board fetch waits on this. Restoring a stored Rep/timeframe rewrites the URL, which changes the
+   * board's own query parameters, so fetching first meant every cold load of /deals issued the
+   * 1.6–2.5s pipeline query TWICE: once for the default view and once for the restored one, with the
+   * first response thrown away by useDealBoard's latest-wins guard. This does not change WHAT the board
+   * shows; it stops the page from asking for the wrong thing first.
+   */
+  const [storedViewResolved, setStoredViewResolved] = useState(false);
+
   // Remember the standing dashboard header filters (Rep + timeframe) per (user, effective office), the same
   // way Mine/All already persists — so opening a deal and returning to /deals restores the last selection.
   // This effect only RESTORES (reads the store); it never writes, so no navigation can wipe the saved
@@ -1070,8 +1143,8 @@ function DealListPageContent({
   // signal of an intentional change. Only a BARE view (no query beyond scope/officeId) hydrates; a `?filter=`
   // drill-down, a `dl_*` base-list link, or an explicit period/rep is authoritative.
   useEffect(() => {
-    if (searchParams.has("filter")) return;
-    if (!isBareDealsView(searchParams.toString())) return;
+    if (searchParams.has("filter")) return void setStoredViewResolved(true);
+    if (!isBareDealsView(searchParams.toString())) return void setStoredViewResolved(true);
     const stored = readStoredDealView(userId, effectiveOfficeId);
     // A saved Rep is only meaningful under scopes that narrow by rep. Under Mine (which the shared scope
     // preference can flip to from another page) it intersects the viewer's own deals and empties the board,
@@ -1086,11 +1159,15 @@ function DealListPageContent({
       // while the loaded list still belongs to a previous office (on an office switch the hook briefly
       // reports the old list with loading=false before its reload effect fires). Once settled — even to an
       // empty or errored list — drop just the rep and still restore the office-independent timeframe.
+      // The ONLY path that leaves the view unresolved, and deliberately so: a saved rep still has to be
+      // validated against this office's roster. Every other exit settles immediately, so the board is
+      // gated on a pending roster request ONLY for a user who actually has a rep filter saved.
       if (repOptionsLoading || repOptionsOfficeId !== effectiveOfficeId) return;
       if (!repOptions.some((rep) => rep.id === stored.assignedRepId)) delete stored.assignedRepId;
     }
     const next = applyStoredDealView(searchParams.toString(), stored);
     if (next !== null) setSearchParams(next, { replace: true });
+    setStoredViewResolved(true);
   }, [searchParams, setSearchParams, userId, effectiveOfficeId, scope, repOptions, repOptionsLoading, repOptionsOfficeId]);
 
   // Persist a single header control (Rep or timeframe) as a per-(user, office) preference. Per-key so
@@ -1165,7 +1242,9 @@ function DealListPageContent({
     // SOURCE, even though the client no longer filters by it. Send no board period on this drill-down so
     // the at-risk cohort (card/kanban/list) is the full current set. (Won columns are hidden here anyway.)
     isAtRiskDrilldown ? null : selectedPeriodRange,
-    selectedRepFilter
+    selectedRepFilter,
+    undefined,
+    { enabled: storedViewResolved }
   );
 
   // Sync the board's terminal (Won/Lost) date state from the URL — but key on the BOARD params only, so a
@@ -1173,7 +1252,14 @@ function DealListPageContent({
   // (Codex #589). searchParams is read live inside; it is current whenever the key changes.
   const boardParamKey = boardRelevantParamKey(searchParams.toString());
   useEffect(() => {
-    setTerminalDateFilters(resolveDrilldownTerminalDateFilters(searchParams));
+    // Set only on a REAL change. This resolver returns a fresh object every call, and that object is a
+    // dependency of useDealBoard's fetch callback — so re-setting a structurally identical value fired a
+    // second /deals/pipeline request on every mount, and again on any board-param edit that did not
+    // touch the terminal dates. Same value in, same identity out, no refetch.
+    setTerminalDateFilters((current) => {
+      const next = resolveDrilldownTerminalDateFilters(searchParams);
+      return terminalDateFiltersEqual(current, next) ? current : next;
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally keyed on board params only.
   }, [boardParamKey]);
 
@@ -1239,13 +1325,25 @@ function DealListPageContent({
     // useDealBoard does not cancel or order responses, so that stale fetch could win and leave the
     // board/cards on a blended date range (Codex #600 P2).
     setSearchParams(next);
-    setTerminalDateFilters(resolveDrilldownTerminalDateFilters(next));
+    setTerminalDateFilters((current) => {
+      const resolved = resolveDrilldownTerminalDateFilters(next);
+      return terminalDateFiltersEqual(current, resolved) ? current : resolved;
+    });
   }, [searchParams, setSearchParams, persistDealViewParam]);
 
   const boardColumns = useMemo(
-    () => buildCanonicalDealBoardColumns(board?.columns, stages),
-    [board?.columns, stages]
+    () => buildCanonicalDealBoardColumns(board?.columns, stages, board?.summary),
+    [board?.columns, board?.summary, stages]
   );
+  /**
+   * Server-side at-risk counts, keyed by canonical column slug and counted over EVERY matching row.
+   *
+   * The three At-Risk KPI cards used to be counted from `column.cards`, which is a capped slice — the
+   * board asks for BOARD_CARDS_PER_STAGE_LIMIT per column, so any column holding more than that would
+   * have silently under-reported all three numbers. Null on a payload without a summary, which puts
+   * countAtRiskDeals back on the card count.
+   */
+  const boardAtRiskByStageSlug = board?.summary?.atRiskByStageSlug ?? null;
   // Base-list board-mirror scope: the /deals board always includes DD (useDealBoard includeDd=true),
   // so showDd=true — the list defaults to the full visible-column set and lets terminal deals through,
   // exactly like the board it sits under (mirrors the /pipeline mount).
@@ -1390,9 +1488,9 @@ function DealListPageContent({
   // the exact reduce the single pre-split card used, so "All at risk" keeps today's number verbatim; the
   // other two are that same count with the route partition applied, so they sum back to it.
   const atRiskCounts: Record<AtRiskRouteBucket, number> = {
-    service: countAtRiskDeals(kpiAtRiskColumns, "service"),
-    non_service: countAtRiskDeals(kpiAtRiskColumns, "non_service"),
-    all: countAtRiskDeals(kpiAtRiskColumns, "all"),
+    service: countAtRiskDeals(kpiAtRiskColumns, "service", boardAtRiskByStageSlug),
+    non_service: countAtRiskDeals(kpiAtRiskColumns, "non_service", boardAtRiskByStageSlug),
+    all: countAtRiskDeals(kpiAtRiskColumns, "all", boardAtRiskByStageSlug),
   };
   // On the at-risk drill-down the Active Pipeline card DISPLAYS the at-risk cohort, so its click-through
   // must land on that same cohort — not the full active pipeline (which would show a larger, different set
@@ -1918,6 +2016,10 @@ function DealListPageContent({
             <DealsListSection
               workflowFamily="deal"
               scope={scope}
+              // Hand down the assignee list this page already loaded, so the section does not re-issue
+              // /tasks/assignees on every /deals load (it is name resolution + CSV only; the owner
+              // FILTER is the sales roster and is gated separately inside the section).
+              assignees={assignees}
               enableExport
               // Running-total card (#4): the summed effective value of the WHOLE filtered set across all
               // pages (server SUM over the list's exact WHERE), so it updates live as filters narrow and
@@ -1992,6 +2094,10 @@ function DealListPageContent({
             <DealsListSection
               workflowFamily="deal"
               scope={scope}
+              // Hand down the assignee list this page already loaded, so the section does not re-issue
+              // /tasks/assignees on every /deals load (it is name resolution + CSV only; the owner
+              // FILTER is the sales roster and is gated separately inside the section).
+              assignees={assignees}
               enableExport
               // Running-total card (#4) on the dashboard drill-down lists (Won / Active / Bid Board …) too.
               showValueTotal

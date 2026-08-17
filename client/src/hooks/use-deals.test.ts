@@ -322,6 +322,82 @@ async function renderStageResultProbe() {
   return root;
 }
 
+/**
+ * A board probe whose `enabled` gate is controlled from the test. /deals holds its first fetch until the
+ * saved Rep/timeframe restore has decided, because that restore rewrites the URL — i.e. the board's own
+ * parameters — and fetching first meant issuing the 1.6-2.5s pipeline query twice per cold load.
+ */
+let hookBoardEnabled = true;
+let latestGatedResult: ReturnType<typeof useDealBoard> | null = null;
+function GatedBoardProbe() {
+  latestGatedResult = useDealBoard("mine", false, undefined, 50, null, undefined, undefined, {
+    enabled: hookBoardEnabled,
+  });
+  return null;
+}
+
+describe("useDealBoard — the enabled gate", () => {
+  beforeEach(() => {
+    latestGatedResult = null;
+    hookBoardEnabled = true;
+    vi.mocked(api).mockReset();
+  });
+
+  it("issues NO request while disabled, and keeps reporting loading so the page shows its spinner", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValue({ pipelineColumns: [], terminalStages: [] } as never);
+    hookBoardEnabled = false;
+
+    const { document } = installFakeDom();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(GatedBoardProbe));
+      await flushEffects();
+    });
+
+    expect(apiMock).not.toHaveBeenCalled();
+    // NOT settled to false: an empty board rendered as "loaded" is a flash of "no deals".
+    expect(latestGatedResult?.loading).toBe(true);
+    expect(latestGatedResult?.board).toBeNull();
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+
+  it("issues exactly ONE request once enabled", async () => {
+    const apiMock = vi.mocked(api);
+    apiMock.mockResolvedValue({ pipelineColumns: [], terminalStages: [] } as never);
+    hookBoardEnabled = true;
+
+    const { document } = installFakeDom();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container as unknown as Element);
+    await act(async () => {
+      root.render(createElement(GatedBoardProbe));
+      await flushEffects();
+    });
+    await act(async () => {
+      await flushEffects();
+    });
+
+    expect(apiMock).toHaveBeenCalledTimes(1);
+    expect(String(apiMock.mock.calls[0]![0])).toContain("/deals/pipeline?");
+    expect(String(apiMock.mock.calls[0]![0])).toContain("previewLimit=50");
+
+    await act(async () => {
+      root.unmount();
+      await flushEffects();
+    });
+    vi.unstubAllGlobals();
+  });
+});
+
 describe("normalizeDealBoardResponse", () => {
   beforeEach(() => {
     latestResult = null;
