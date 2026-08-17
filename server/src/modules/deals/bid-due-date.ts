@@ -132,3 +132,37 @@ export function resolveDealBidDueDateForRead(
   }
   return resolveDealBidDueDate(input);
 }
+
+/**
+ * The RFP payload's bid due date — the ONE read site whose flag-OFF branch is NOT the shared precedence.
+ *
+ * `loadRfpPayloadDeal` has always preferred the deal's OWN column and fallen back to the source lead,
+ * which is backwards relative to the other two read sites: the lead owns the field
+ * (DEAL_FIELD_OWNERSHIP.bidDueDate === "lead") and the deal column is only a compatibility snapshot. That
+ * IS a bug, and the flag-ON branch below fixes it.
+ *
+ * ⚠️ DO NOT "simplify" this to `resolveDealBidDueDateForRead`. The legacy branch is DELIBERATE PARITY, not
+ * an oversight someone forgot to clean up.
+ *
+ * Two reasons the correction does not ship ahead of the flag:
+ *  1. This PR's whole contract is "flag off ⇒ zero delta on every surface". That is what makes the census
+ *     numbers meaningful (they describe the only change the flip causes) and the rollout reversible by
+ *     flipping an env var rather than by shipping a deploy.
+ *  2. Unlike the deal-detail banner and the scoping field, this value LEAVES the CRM: it travels to
+ *     SyncHub and is typed into the Procore Bid Board project's Due Date field. Correcting it ungated
+ *     would write a new date into an external system before anyone had looked at the census.
+ *
+ * Being the more correct precedence buys no exemption — it just means the fix rides along when the flag
+ * flips. Returns the winning source's value AS STORED in both branches, so the flag changes only WHICH
+ * source wins, never the shape (`cleanIso` in rfp-payload.ts normalizes either one identically).
+ */
+export function resolveRfpPayloadBidDueDate(
+  input: DealBidDueDateInput,
+  env: NodeJS.ProcessEnv = process.env
+): Date | string | null {
+  if (!isBidBoardDueDateReadbackEnabled(env)) {
+    // Verbatim legacy precedence, raw values and all: `row.bid_due_date ?? row.sourceLeadBidDueDate ?? null`.
+    return input.dealBidDueDate ?? input.leadBidDueDate ?? null;
+  }
+  return resolveDealBidDueDate(input).raw;
+}

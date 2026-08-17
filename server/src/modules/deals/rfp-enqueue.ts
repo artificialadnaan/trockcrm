@@ -12,7 +12,7 @@ import {
   isR2Configured,
 } from "../../lib/r2-client.js";
 import { activeLatestFileConditions, buildDealFileScopeCondition } from "../files/service.js";
-import { resolveDealBidDueDateForRead } from "./bid-due-date.js";
+import { resolveRfpPayloadBidDueDate } from "./bid-due-date.js";
 import { PUBLIC_VIEWER_PAGE_SIZE, generatePublicToken, isPublicProxyServable } from "../public-photo-tokens/service.js";
 import { publicPhotoShareUrlFromEnv, publicViewerBaseUrlFromEnv } from "../public-photo-tokens/public-share-url.js";
 import { buildNormalizedRfpRequestBody, buildRfpAttachments, buildRfpRequestDeliveryPayload, resolveSyncHubCreateFromRfpUrl, resolveSyncHubRfpRequestUrl } from "./rfp-payload.js";
@@ -174,20 +174,22 @@ async function loadRfpPayloadDeal(tenantDb: TenantDb, deal: { id: string }) {
     propertyZip: (row.property_zip as string | null) ?? null,
     propertyCountry: (row.property_country as string | null) ?? null,
     description: (row.description as string | null) ?? null,
-    // Resolved through the ONE shared resolver ([[bid-due-date]]) that the deal-detail banner and
-    // getResolvedDeal also use, so the date on the outbound RFP body matches the date on the deal page.
+    // FULLY gated on BID_BOARD_DUE_DATE_READBACK — including the lead/deal ordering, which this site has
+    // always had backwards relative to the deal-detail banner and getResolvedDeal. Flag OFF reproduces
+    // `row.bid_due_date ?? row.sourceLeadBidDueDate ?? null` verbatim; flag ON switches to the shared
+    // precedence (Bid Board mirror -> lead -> deal column).
     //
-    // This CHANGES the lead/deal ordering here: it used to prefer the deal's own column and fall back to
-    // the lead, which was backwards relative to the other two read sites — the lead OWNS the field
-    // (DEAL_FIELD_OWNERSHIP.bidDueDate === "lead") and the deal column is only a compatibility snapshot,
-    // so a lead-backed deal whose lead value was edited/cleared shipped a stale date to SyncHub while the
-    // deal page showed the corrected one. The Bid Board leg on top of that is flag-gated (OFF by default).
-    bidDueDate: resolveDealBidDueDateForRead({
+    // The backwards ordering is a real bug, and it is deliberately NOT fixed ahead of the flag: this value
+    // leaves the CRM for SyncHub and ends up typed into the Procore Bid Board project's Due Date, so
+    // correcting it ungated would write a new date into an external system before anyone had read the
+    // census. See resolveRfpPayloadBidDueDate for the full reasoning — do not collapse it into
+    // resolveDealBidDueDateForRead.
+    bidDueDate: resolveRfpPayloadBidDueDate({
       bidBoardDueDate: row.bid_board_due_date ?? null,
       hasSourceLead: (row.sourceLeadRowId as string | null) != null,
       leadBidDueDate: row.sourceLeadBidDueDate ?? null,
       dealBidDueDate: row.bid_due_date ?? null,
-    }).day,
+    }),
     bidBoardDueDate: row.bid_board_due_date ?? null,
     createdAt: row.created_at ?? null,
     // Round-precise event id for enqueueRfpBidBoardCreate's sourceEventId (authoritative, from the DB row).

@@ -4,6 +4,7 @@ import {
   dateOnlyToUtcMidnightIso,
   resolveDealBidDueDate,
   resolveDealBidDueDateForRead,
+  resolveRfpPayloadBidDueDate,
 } from "../../../src/modules/deals/bid-due-date.js";
 
 /**
@@ -172,5 +173,95 @@ describe("resolveDealBidDueDateForRead — the flag gate", () => {
         resolveDealBidDueDateForRead(input, { BID_BOARD_DUE_DATE_READBACK: value } as NodeJS.ProcessEnv).source
       ).toBe("lead");
     }
+  });
+});
+
+/**
+ * The RFP payload is the one read site whose flag-OFF branch is NOT the shared precedence: it has always
+ * preferred the deal's own column over the lead's, and that stays true until the flag flips because the
+ * value leaves the CRM for SyncHub and lands in the Procore project's Due Date field.
+ */
+describe("resolveRfpPayloadBidDueDate — the gated precedence CORRECTION", () => {
+  it("flag OFF: the DEAL column wins over the lead — the legacy ordering, verbatim", () => {
+    // If this ever starts returning the lead's date, someone has "simplified" the helper into
+    // resolveDealBidDueDateForRead and silently changed what the CRM sends Procore.
+    expect(
+      resolveRfpPayloadBidDueDate(
+        {
+          bidBoardDueDate: null,
+          hasSourceLead: true,
+          leadBidDueDate: "2026-09-15",
+          dealBidDueDate: new Date("2026-08-01T00:00:00.000Z"),
+        },
+        FLAG_OFF
+      )
+    ).toEqual(new Date("2026-08-01T00:00:00.000Z"));
+  });
+
+  it("flag OFF: falls back to the lead only when the deal column is empty — also legacy", () => {
+    expect(
+      resolveRfpPayloadBidDueDate(
+        { bidBoardDueDate: null, hasSourceLead: true, leadBidDueDate: "2026-09-15", dealBidDueDate: null },
+        FLAG_OFF
+      )
+    ).toBe("2026-09-15");
+  });
+
+  it("flag OFF: IGNORES a present Bid Board mirror entirely", () => {
+    expect(
+      resolveRfpPayloadBidDueDate(
+        {
+          bidBoardDueDate: "2026-12-24",
+          hasSourceLead: true,
+          leadBidDueDate: "2026-09-15",
+          dealBidDueDate: new Date("2026-08-01T00:00:00.000Z"),
+        },
+        FLAG_OFF
+      )
+    ).toEqual(new Date("2026-08-01T00:00:00.000Z"));
+  });
+
+  it("flag ON: the correction lands — the LEAD beats the deal column", () => {
+    expect(
+      resolveRfpPayloadBidDueDate(
+        {
+          bidBoardDueDate: null,
+          hasSourceLead: true,
+          leadBidDueDate: "2026-09-15",
+          dealBidDueDate: new Date("2026-08-01T00:00:00.000Z"),
+        },
+        FLAG_ON
+      )
+    ).toBe("2026-09-15");
+  });
+
+  it("flag ON: the Bid Board mirror beats both", () => {
+    expect(
+      resolveRfpPayloadBidDueDate(
+        {
+          bidBoardDueDate: "2026-12-24",
+          hasSourceLead: true,
+          leadBidDueDate: "2026-09-15",
+          dealBidDueDate: new Date("2026-08-01T00:00:00.000Z"),
+        },
+        FLAG_ON
+      )
+    ).toBe("2026-12-24");
+  });
+
+  it("returns the winning value AS STORED in both branches — the flag changes the source, not the shape", () => {
+    // cleanIso in rfp-payload.ts normalizes a Date and a date-only string to the same ISO instant, so a
+    // deal-column win must not be silently truncated to a calendar day on one side of the flag only.
+    const dealValue = new Date("2026-08-01T00:00:00.000Z");
+    const input = { bidBoardDueDate: null, hasSourceLead: false, dealBidDueDate: dealValue };
+    expect(resolveRfpPayloadBidDueDate(input, FLAG_OFF)).toBe(dealValue);
+    expect(resolveRfpPayloadBidDueDate(input, FLAG_ON)).toBe(dealValue);
+  });
+
+  it("a deal with no lead and no mirror is identical on both sides of the flag", () => {
+    const dealValue = new Date("2026-08-01T00:00:00.000Z");
+    expect(resolveRfpPayloadBidDueDate({ hasSourceLead: false, dealBidDueDate: dealValue }, FLAG_OFF)).toBe(
+      resolveRfpPayloadBidDueDate({ hasSourceLead: false, dealBidDueDate: dealValue }, FLAG_ON)
+    );
   });
 });

@@ -121,15 +121,15 @@ describe("enqueueRfpBidBoardCreate — DB-authoritative payload from a sparse { 
     expect(deal.description).toBe("Full roof replacement");
     expect(deal.estimator).toBe("Colby");
     expect(deal.address).toEqual({ street: "100 Main St", city: "Dallas", state: "TX", zip: "75001", country: "US" });
-    // The SOURCE LEAD's bid_due_date (2026-09-15), not the deal's own column (2026-08-01).
+    // The deal's OWN bid_due_date (2026-08-01), NOT the source lead's (2026-09-15) — with
+    // BID_BOARD_DUE_DATE_READBACK off, which is the default this test runs under.
     //
-    // CHANGED DELIBERATELY with the shared bid-due-date resolver. This fixture is lead-backed, and the
-    // lead OWNS the bid due date (DEAL_FIELD_OWNERSHIP.bidDueDate === "lead") — the deal column is only a
-    // compatibility snapshot written through on save. The RFP payload used to prefer that snapshot while
-    // BOTH other read sites (getDealDetail's banner, getResolvedDeal's scoping field) preferred the lead,
-    // so a lead-backed deal whose due date was corrected on the lead shipped the STALE date to SyncHub
-    // while the deal page showed the corrected one. All three now resolve through one function.
-    expect(deal.dueDate).toContain("2026-09-15");
+    // ⚠️ This is DELIBERATE PARITY, not a stale expectation. The RFP payload's deal-column-first ordering
+    // is backwards relative to the other two read sites (the lead owns the field), and the flag-ON branch
+    // corrects it — see the describe block at the bottom of this file. The correction is gated because
+    // this value leaves the CRM for SyncHub and is typed into the Procore Bid Board project's Due Date, so
+    // it must not change before the census has been read. Do not "fix" this line to 2026-09-15.
+    expect(deal.dueDate).toContain("2026-08-01");
     expect(deal.name).toBe("Jason Ranches");
     expect(deal.projectNumber).toBe("TR-2001");
     // Resolved owner (assigned rep -> users) — NOT null:
@@ -163,17 +163,25 @@ describe("enqueueRfpBidBoardCreate — DB-authoritative payload from a sparse { 
     expect(body.deal.companyName ?? null).toBeNull();
   });
 
-  // The RFP payload is the THIRD read site of the shared bid-due-date resolver, alongside the deal-detail
-  // banner and getResolvedDeal. It is flag-gated exactly like the other two, and the flag-off half matters
-  // most: deals.bid_board_due_date is already populated on prod, so an ungated precedence would change the
-  // due date on outbound RFP bodies the day this deploys.
+  /**
+   * The RFP payload is the THIRD read site of the shared bid-due-date resolver, alongside the deal-detail
+   * banner and getResolvedDeal — but the ONLY one whose flag-OFF branch is not the shared precedence.
+   *
+   * The fixture is lead-backed with THREE different dates in play (deal column 2026-08-01, lead
+   * 2026-09-15, mirror 2026-12-24), so each case below identifies exactly which source won rather than
+   * coincidentally agreeing. Flag OFF must reproduce today's answer for BOTH legs — the mirror ignored AND
+   * the legacy deal-column-first ordering preserved — because this value is typed into the Procore Bid
+   * Board project's Due Date, and nothing may change there before the census is read.
+   */
   describe("Bid Board due-date read-back in the payload", () => {
-    async function dueDateFor(env: string | undefined): Promise<string> {
+    async function dueDateFor(options: { env?: string; mirror?: string | null }): Promise<string> {
       pg = await setup();
-      await pg!.query(`UPDATE deals SET bid_board_due_date = '2026-12-24' WHERE id = $1`, [DEAL]);
+      if (options.mirror) {
+        await pg!.query(`UPDATE deals SET bid_board_due_date = $2 WHERE id = $1`, [DEAL, options.mirror]);
+      }
       const tdb: any = drizzle(pg as any);
-      if (env === undefined) delete process.env.BID_BOARD_DUE_DATE_READBACK;
-      else process.env.BID_BOARD_DUE_DATE_READBACK = env;
+      if (options.env === undefined) delete process.env.BID_BOARD_DUE_DATE_READBACK;
+      else process.env.BID_BOARD_DUE_DATE_READBACK = options.env;
       try {
         await enqueueRfpBidBoardCreate({ tenantDb: tdb, officeId: null, deal: { id: DEAL } });
       } finally {
@@ -183,12 +191,21 @@ describe("enqueueRfpBidBoardCreate — DB-authoritative payload from a sparse { 
       return jobs[0].payload.body.deal.dueDate;
     }
 
-    it("flag ON: the Bid Board date beats both the lead's and the deal's own", async () => {
-      expect(await dueDateFor("true")).toContain("2026-12-24");
+    it("flag OFF: the DEAL column wins over the lead — the legacy ordering, unchanged", async () => {
+      expect(await dueDateFor({})).toContain("2026-08-01");
     });
 
-    it("flag OFF: the lead's date, exactly as before — the mirror is present but ignored", async () => {
-      expect(await dueDateFor(undefined)).toContain("2026-09-15");
+    it("flag OFF: a present Bid Board mirror is ignored, and the legacy ordering still holds", async () => {
+      // Both gated legs at once. Neither 2026-12-24 (the mirror) nor 2026-09-15 (the lead) may appear.
+      expect(await dueDateFor({ mirror: "2026-12-24" })).toContain("2026-08-01");
+    });
+
+    it("flag ON: the precedence CORRECTION lands — the lead beats the deal's own column", async () => {
+      expect(await dueDateFor({ env: "true" })).toContain("2026-09-15");
+    });
+
+    it("flag ON: the Bid Board date beats both the lead's and the deal's own", async () => {
+      expect(await dueDateFor({ env: "true", mirror: "2026-12-24" })).toContain("2026-12-24");
     });
   });
 });
