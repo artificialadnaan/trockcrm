@@ -98,7 +98,12 @@ describe("census-bid-board-due-date-readback — SQL", () => {
     expect(sql).toContain("COALESCE(d.is_change_order, false) = false");
     expect(sql).toContain("d.bid_board_detached_at IS NULL");
     expect(sql).toContain("d.bid_board_due_date IS NOT NULL");
-    expect(sql).toContain("current_bid_due_date IS DISTINCT FROM next_bid_due_date");
+    // Compared on the DAY, exactly as writeBidDueDateIfNeeded's guard does — an instant comparison would
+    // count legacy non-midnight rows the real write-through skips and overstate the blast radius.
+    expect(sql).toContain(
+      "(current_bid_due_date AT TIME ZONE 'UTC')::date IS DISTINCT FROM next_bid_due_day"
+    );
+    expect(sql).not.toContain("current_bid_due_date IS DISTINCT FROM next_bid_due_date");
   });
 
   it("contains no write verb at all", () => {
@@ -212,30 +217,48 @@ describe("census-bid-board-due-date-readback — summary", () => {
  * every office had errored — a clean-looking "no impact" verdict produced by a broken run.
  */
 describe("census-bid-board-due-date-readback — incomplete runs", () => {
-  /** A stub client that fails for the named schemas and returns no rows for the rest. */
+  /**
+   * A stub client that fails for the named schemas and returns no rows for the rest, and that models the
+   * real transaction semantics the SAVEPOINT fix exists for: once an office's query has failed, every
+   * later statement errors with "current transaction is aborted" until a ROLLBACK TO SAVEPOINT clears it.
+   * Without that, the stub would pass whether or not the production code used savepoints at all.
+   */
   function client(schemas: string[], failing: string[] = []) {
-    return {
-      query: async (text: string) => {
-        if (text.includes("pg_namespace")) return { rows: schemas.map((nspname) => ({ nspname })) };
-        const failed = failing.find((schema) => text.includes(`${schema}.deals`));
-        if (failed) throw new Error(`relation "${failed}.deals" does not exist`);
+    const measured: string[] = [];
+    let aborted = false;
+    const query = async (text: string) => {
+      if (text.startsWith("ROLLBACK TO SAVEPOINT")) {
+        aborted = false;
         return { rows: [] };
-      },
+      }
+      if (aborted) throw new Error("current transaction is aborted, commands ignored until end of transaction block");
+      if (text.startsWith("SAVEPOINT") || text.startsWith("RELEASE SAVEPOINT")) return { rows: [] };
+      if (text.includes("pg_namespace")) return { rows: schemas.map((nspname) => ({ nspname })) };
+      const failed = failing.find((schema) => text.includes(`${schema}.deals`));
+      if (failed) {
+        aborted = true;
+        throw new Error(`relation "${failed}.deals" does not exist`);
+      }
+      const ok = schemas.find((schema) => text.includes(`${schema}.deals`));
+      if (ok) measured.push(ok);
+      return { rows: [] };
     };
+    return { query, measured };
   }
 
   async function runMain(argv: string[], schemas: string[], failing: string[] = []) {
     const logs: string[] = [];
     const errors: string[] = [];
+    const stub = client(schemas, failing);
     const log = console.log;
     const error = console.error;
     console.log = (...args: unknown[]) => void logs.push(args.map(String).join(" "));
     console.error = (...args: unknown[]) => void errors.push(args.map(String).join(" "));
     try {
-      await runCensus(parseCensusArgs(argv), client(schemas, failing) as never);
-      return { logs, errors, threw: null as Error | null };
+      await runCensus(parseCensusArgs(argv), stub as never);
+      return { logs, errors, measured: stub.measured, threw: null as Error | null };
     } catch (err) {
-      return { logs, errors, threw: err as Error };
+      return { logs, errors, measured: stub.measured, threw: err as Error };
     } finally {
       console.log = log;
       console.error = error;
@@ -270,6 +293,23 @@ describe("census-bid-board-due-date-readback — incomplete runs", () => {
     expect(payload.complete).toBe(false);
     expect(payload.failures).toHaveLength(1);
     expect(payload.failures[0].schemaName).toBe("office_atlanta");
+  });
+
+  // ★ P2. One broken office must not take the run down with it: a single read-only transaction is shared
+  // across offices, so without a per-office SAVEPOINT the first failure aborts it and every LATER office
+  // fails too — the census would report nothing measurable and name the wrong culprits.
+  it("keeps measuring the offices AFTER a failed one, instead of aborting the whole transaction", async () => {
+    const { measured, threw, errors } = await runMain(
+      ["node", "census", "--all"],
+      ["office_atlanta", "office_dallas", "office_houston"],
+      ["office_atlanta"]
+    );
+    // The two healthy offices were still measured, despite failing FIRST in the loop order.
+    expect(measured).toEqual(["office_dallas", "office_houston"]);
+    // …and the run is still reported incomplete, naming only the office that actually broke.
+    expect(threw?.message).toContain("1 of 3");
+    expect(errors.join("\n")).toContain("office_atlanta");
+    expect(errors.join("\n")).not.toContain("office_houston");
   });
 
   it("a fully successful run does NOT throw and reports itself complete", async () => {

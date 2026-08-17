@@ -153,6 +153,9 @@ export function buildCensusSql(schemaName: string): string {
              -- with AT TIME ZONE 'UTC', so anything that resolves in the SESSION timezone here would shift
              -- the calendar day by one and flip a verdict — and therefore a dollar figure.
              (d.bid_board_due_date::timestamp AT TIME ZONE 'UTC') AS next_bid_due_date,
+             -- The prospective value as a DATE too, for the change test below. Kept separate from the
+             -- timestamptz above, which the horizon CTEs need in the column's own type.
+             d.bid_board_due_date AS next_bid_due_day,
              d.bid_board_last_updated_at,
              COALESCE(d.bid_board_stage_slug, '') AS bid_board_stage_slug,
              psc.slug AS stage_slug,
@@ -168,8 +171,13 @@ export function buildCensusSql(schemaName: string): string {
          AND d.bid_board_detached_at IS NULL
          AND d.bid_board_due_date IS NOT NULL
     ), writes AS (
-      -- The write-through's own IS DISTINCT FROM guard: an unchanged value writes nothing at all.
-      SELECT * FROM cand WHERE current_bid_due_date IS DISTINCT FROM next_bid_due_date
+      -- The write-through's own guard, reproduced EXACTLY: it compares CALENDAR DAYS
+      -- ((bid_due_date AT TIME ZONE 'UTC')::date IS DISTINCT FROM $3::date), not instants. Comparing
+      -- instants here would count a legacy row stored at a non-midnight time on the SAME UTC day as the
+      -- mirror — a row the real write-through skips — and the census must not overstate the blast radius
+      -- of the thing it exists to size.
+      SELECT * FROM cand
+       WHERE (current_bid_due_date AT TIME ZONE 'UTC')::date IS DISTINCT FROM next_bid_due_day
     ), cur AS (
       SELECT id, stage_id, expected_close_date, current_bid_due_date AS bid_due_date FROM writes
     ), nxt AS (
@@ -383,15 +391,25 @@ export async function runCensus(args: CensusArgs, client: QueryClient): Promise<
   const summaries: CensusSummary[] = [];
   const failures: Array<{ schemaName: string; error: string }> = [];
   for (const schemaName of schemas) {
+    // Each office runs inside its own SAVEPOINT. Without one, a single failing office (a schema missing a
+    // column, a half-provisioned tenant) aborts the shared read-only transaction and EVERY subsequent
+    // office then fails too with "current transaction is aborted" — turning one broken office into a
+    // whole-run outage and reporting nothing measurable at all. Rolling back to the savepoint returns the
+    // transaction to a usable state, so `--all` reports the offices it CAN measure and names the ones it
+    // could not. (Requires the caller's BEGIN — `main` owns it.)
+    await client.query(`SAVEPOINT census_office`);
     try {
       const { rows } = await client.query(buildCensusSql(schemaName));
       summaries.push(summarizeCensus(schemaName, rows as CensusRow[], args.limit));
+      await client.query(`RELEASE SAVEPOINT census_office`);
     } catch (schemaError) {
       console.error(`\n=== ${schemaName} === FAILED:`, schemaError);
       failures.push({
         schemaName,
         error: schemaError instanceof Error ? schemaError.message : String(schemaError),
       });
+      await client.query(`ROLLBACK TO SAVEPOINT census_office`).catch(() => {});
+      await client.query(`RELEASE SAVEPOINT census_office`).catch(() => {});
     }
   }
 
