@@ -92,7 +92,7 @@ beforeAll(async () => {
       bid_board_profit_margin_pct numeric,
       bid_board_total_sales numeric,
       bid_board_created_at timestamptz,
-      bid_board_due_date date,
+      bid_board_due_date date, bid_due_date_from_bid_board_at timestamptz,
       bid_board_customer_name text,
       bid_board_customer_contact_raw text,
       bid_board_project_number text,

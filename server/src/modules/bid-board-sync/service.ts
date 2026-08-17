@@ -371,8 +371,22 @@ function hashRows(rows: RawBidBoardRow[]): string {
   return crypto.createHash("sha256").update(JSON.stringify(rows)).digest("hex");
 }
 
-export function buildBidBoardDealUpdateSql(schemaName: string): string {
+export function buildBidBoardDealUpdateSql(
+  schemaName: string,
+  // Flag-gated, DEFAULT FALSE = today's behaviour on main. See the bid_board_due_date SET clause below.
+  options: { preserveBlankDueDate?: boolean } = {}
+): string {
   const schema = validateSchemaName(schemaName);
+  // FLAG OFF must be byte-for-byte main: `bid_board_due_date = $11`, so a blank export CLEARS the mirror.
+  // That is externally visible even with the read-back off — the flag-off RFP payload still passes the
+  // mirror to SyncHub as its dueDate fallback, so preserving a stale date here would send one onward to
+  // Procore where main sent null. Parity is not negotiable for a value that leaves the CRM.
+  const bidBoardDueDateSet = options.preserveBlankDueDate
+    ? "COALESCE($11::date, bid_board_due_date)"
+    : "$11";
+  const bidBoardDueDateChanged = options.preserveBlankDueDate
+    ? "($11::date IS NOT NULL AND bid_board_due_date IS DISTINCT FROM $11::date)"
+    : "bid_board_due_date IS DISTINCT FROM $11";
   return `
     UPDATE ${schema}.deals
        SET name = $2,
@@ -384,19 +398,18 @@ export function buildBidBoardDealUpdateSql(schemaName: string): string {
            bid_board_profit_margin_pct = $8,
            bid_board_total_sales = $9,
            bid_board_created_at = $10,
-           -- NON-CLEARING, unlike every other mirror column here: a BLANK export Due Date is the ABSENCE
-           -- of information, not an instruction to forget the last one the board gave us. So the column
-           -- means "last known Bid Board due date", and $11 only ever overwrites it with another date.
+           -- FLAG ON: non-clearing, unlike every other mirror column here. A BLANK export Due Date is the
+           -- ABSENCE of information, not an instruction to forget the last one the board gave us, so the
+           -- column means "last known Bid Board due date" and $11 only ever overwrites it with another
+           -- date. Load-bearing for the read-back: writeBidDueDateIfNeeded already refuses to clear
+           -- deals.bid_due_date on a blank Due Date (same rule), and the resolver's CURRENCY check asks
+           -- whether the written day still equals this mirror. A blank cell wiping the mirror while the
+           -- written date stayed would revoke the override unannounced, from an empty spreadsheet cell,
+           -- with nobody having touched anything. Verified before changing: nothing else in the repo reads
+           -- this column except the RFP payload and the audit mirror below.
            --
-           -- This is load-bearing for the read-back, not tidiness. writeBidDueDateIfNeeded already refuses
-           -- to clear deals.bid_due_date on a blank Due Date (same rule), and the read resolver's SIGNAL is
-           -- "does the deal column's day equal this mirror?". If a later export with an empty cell wiped
-           -- the mirror while the written date stayed, the signal would stop holding and a lead-backed
-           -- deal's detail page would silently revert to the lead's date while every raw-column surface
-           -- kept reading the written one — a detail-vs-aggregate split arriving unannounced, from a blank
-           -- spreadsheet cell, with nobody having touched anything. Verified before changing: nothing else
-           -- in the repo reads this column except the RFP payload and the audit mirror below.
-           bid_board_due_date = COALESCE($11::date, bid_board_due_date),
+           -- FLAG OFF: a plain $11, clearing exactly as main does — see this function's header.
+           bid_board_due_date = ${bidBoardDueDateSet},
            bid_board_customer_name = $12,
            bid_board_customer_contact_raw = $13,
            bid_board_project_number = $14,
@@ -424,9 +437,10 @@ export function buildBidBoardDealUpdateSql(schemaName: string): string {
             bid_board_profit_margin_pct IS DISTINCT FROM $8 OR
             bid_board_total_sales IS DISTINCT FROM $9 OR
             bid_board_created_at IS DISTINCT FROM $10 OR
-            -- Matches the COALESCE above: a NULL $11 writes nothing, so it must not make the row look
-            -- dirty either (that would churn updated_at every cycle for a project with a blank Due Date).
-            ($11::date IS NOT NULL AND bid_board_due_date IS DISTINCT FROM $11::date) OR
+            -- Matches the SET clause above. Flag on, a NULL $11 writes nothing, so it must not make the
+            -- row look dirty either (that would churn updated_at every cycle for a project whose Due Date
+            -- cell is permanently blank). Flag off, the plain main-parity comparison.
+            ${bidBoardDueDateChanged} OR
             bid_board_customer_name IS DISTINCT FROM $12 OR
             bid_board_customer_contact_raw IS DISTINCT FROM $13 OR
             bid_board_project_number IS DISTINCT FROM $14 OR
@@ -729,7 +743,7 @@ function targetStageSlugForDeal(stageSlug: string, route: WorkflowRoute, row: No
   return stageSlug === "estimating" && (route === "service" || status === "service estimating") ? "service_estimating" : stageSlug;
 }
 
-function buildBidBoardMirrorFieldChanges(deal: DealMatch, row: NormalizedBidBoardRow, bidBoardLastUpdatedAt: string, estimatorUserId: string | null) {
+function buildBidBoardMirrorFieldChanges(deal: DealMatch, row: NormalizedBidBoardRow, bidBoardLastUpdatedAt: string, estimatorUserId: string | null, preserveBlankDueDate: boolean) {
   return {
     name: { from: deal.name, to: row.name },
     bidBoardEstimator: { from: deal.bid_board_estimator, to: row.bidBoardEstimator },
@@ -741,9 +755,13 @@ function buildBidBoardMirrorFieldChanges(deal: DealMatch, row: NormalizedBidBoar
     bidBoardProfitMarginPct: { from: deal.bid_board_profit_margin_pct, to: row.bidBoardProfitMarginPct },
     bidBoardTotalSales: { from: deal.bid_board_total_sales, to: row.bidBoardTotalSales },
     bidBoardCreatedAt: { from: deal.bid_board_created_at, to: row.bidBoardCreatedAt },
-    // `to` mirrors the COALESCE in buildBidBoardDealUpdateSql: a blank export Due Date leaves the column
-    // alone, so the audit trail must not claim it was cleared to null.
-    bidBoardDueDate: { from: deal.bid_board_due_date, to: row.bidBoardDueDate ?? deal.bid_board_due_date },
+    // `to` mirrors whichever SET clause buildBidBoardDealUpdateSql emitted: with the read-back on a blank
+    // export leaves the column alone, so the audit trail must not claim a clear that did not happen; with
+    // it off the column really is cleared and the trail must say so.
+    bidBoardDueDate: {
+      from: deal.bid_board_due_date,
+      to: preserveBlankDueDate ? row.bidBoardDueDate ?? deal.bid_board_due_date : row.bidBoardDueDate,
+    },
     bidBoardCustomerName: { from: deal.bid_board_customer_name, to: row.bidBoardCustomerName },
     bidBoardCustomerContactRaw: { from: deal.bid_board_customer_contact_raw, to: row.bidBoardCustomerContactRaw },
     bidBoardProjectNumber: { from: deal.bid_board_project_number, to: row.bidBoardProjectNumber },
@@ -1008,6 +1026,11 @@ async function writeBidDueDateIfNeeded(
      ), updated AS (
        UPDATE ${schemaName}.deals d
           SET bid_due_date = $2::timestamptz,
+              -- PROVENANCE (migration 0223). The read resolver requires this stamp before it will let the
+              -- deal column outrank the source lead, so this write is what MAKES a deal eligible for the
+              -- override — a coincidental day match never does. Stamped in the same statement as the value
+              -- it vouches for, so the two can never disagree.
+              bid_due_date_from_bid_board_at = NOW(),
               updated_at = NOW()
          FROM existing
         WHERE d.id = $1
@@ -1333,7 +1356,9 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
     );
     runId = runResult.rows[0]?.id ?? null;
 
-    const updateSql = buildBidBoardDealUpdateSql(schemaName);
+    const updateSql = buildBidBoardDealUpdateSql(schemaName, {
+      preserveBlankDueDate: bidDueDateReadbackEnabled,
+    });
     const changedByUserId = await findSystemChangedByUserId(client, officeSlug);
     const activeUserIds = await loadActiveUserIds(client);
 
@@ -1495,7 +1520,7 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
           client,
           schemaName,
           updateDeal,
-          buildBidBoardMirrorFieldChanges(matches[0], normalized, bidBoardLastUpdatedAt, writtenEstimatorUserId),
+          buildBidBoardMirrorFieldChanges(matches[0], normalized, bidBoardLastUpdatedAt, writtenEstimatorUserId, bidDueDateReadbackEnabled),
           { source: "bid_board_mirror", runId }
         );
       }

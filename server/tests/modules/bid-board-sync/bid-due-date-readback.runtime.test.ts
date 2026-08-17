@@ -153,6 +153,8 @@ beforeAll(async () => {
       bid_board_last_updated_at timestamptz, bid_estimate numeric, awarded_amount numeric,
       -- The column under test: a timestamptz stored at UTC midnight (migration 0132).
       bid_due_date timestamptz,
+      -- Migration 0223: the provenance stamp the read resolver requires.
+      bid_due_date_from_bid_board_at timestamptz,
       won_closed_date date, contract_signed_date date, contract_signed_at timestamptz,
       actual_close_date date, lost_at timestamptz, bid_board_loss_outcome text,
       lost_reason_id uuid, lost_notes text, lost_competitor text,
@@ -235,6 +237,28 @@ describe("Bid Board Due Date -> deals.bid_due_date (flag ON)", () => {
     );
     expect(rows[0].day).toBe("2026-09-01");
     expect(result.metrics.bidDueDateUpdated).toBe(1);
+  });
+
+  // ★ PROVENANCE (migration 0223). The read resolver refuses the override without this stamp, so the write
+  // is what makes a deal eligible — a coincidental day match never does. Stamped in the same statement as
+  // the value it vouches for.
+  it("stamps bid_due_date_from_bid_board_at on the SAME write, so the deal becomes override-eligible", async () => {
+    await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
+
+    const { rows } = await pg.query<{ stamped: boolean; landed: boolean }>(
+      `SELECT bid_due_date_from_bid_board_at IS NOT NULL AS stamped,
+              ((bid_due_date AT TIME ZONE 'UTC')::date = bid_board_due_date) AS landed
+         FROM ${SCHEMA}.deals WHERE id = '${DEAL}'`
+    );
+    expect(rows[0]).toEqual({ stamped: true, landed: true });
+  });
+
+  it("does NOT stamp a deal the write-through skipped — a blank Due Date confers no provenance", async () => {
+    await seedDeals("2026-06-01T00:00:00.000Z");
+
+    await ingestBidBoardRows({ office_slug: "test", rows: [exportRow({ "Due Date": "" })] });
+
+    expect((await dealRow()).bid_due_date_from_bid_board_at).toBeNull();
   });
 
   it("records exactly ONE deal_history row with the expected field/source/reason and both days", async () => {
@@ -530,6 +554,23 @@ describe("Bid Board Due Date read-back (flag OFF)", () => {
     expect(result.metrics.bidDueDateSkippedNoValue).toBe(0);
     expect(result.metrics.bidDueDateSkippedNoChange).toBe(0);
     expect((await latestRun()).bid_due_date_updated_count).toBe(0);
+  });
+
+  // ★ MIRROR PARITY. The non-clearing COALESCE is itself flag-gated, because it is externally visible even
+  // with the read-back off: the flag-off RFP payload still passes `bid_board_due_date` to SyncHub as its
+  // dueDate fallback, so preserving a stale date here would send one onward to Procore where main sent
+  // null. Flag off must clear exactly as main does.
+  it("a blank export Due Date CLEARS the mirror, exactly as main does", async () => {
+    process.env.BID_BOARD_DUE_DATE_READBACK = "true";
+    await ingestBidBoardRows({ office_slug: "test", rows: [exportRow()] });
+    expect(await mirrorDay()).toBe("2026-09-01");
+    delete process.env.BID_BOARD_DUE_DATE_READBACK;
+
+    await ingestBidBoardRows({ office_slug: "test", rows: [exportRow({ "Due Date": "" })] });
+
+    expect(await mirrorDay()).toBeNull();
+    // …and the written bid_due_date is still preserved — that half was never conditional.
+    expect(new Date((await dealRow()).bid_due_date).toISOString()).toBe("2026-09-01T00:00:00.000Z");
   });
 
   it("still mirrors bid_board_due_date and still writes the estimate — the flag gates ONLY the read-back", async () => {
