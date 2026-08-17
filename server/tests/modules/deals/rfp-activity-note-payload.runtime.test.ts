@@ -22,6 +22,11 @@ import {
   enqueueRfpVoteInvitation,
   insertOpportunityRfpRequestJob,
 } from "../../../src/modules/deals/rfp-enqueue.js";
+// Through the partial mock above, which spreads the real module — these are the genuine constants.
+import {
+  ACTIVITY_BODY_SQL_CHAR_LIMIT,
+  MAX_BODY_CHARS,
+} from "../../../src/modules/deals/bid-board-activity-note.js";
 
 /**
  * REAL-SQL (PGlite) proof that a deal's CRM activity history reaches the enqueued RFP payload.
@@ -345,6 +350,81 @@ describe("RFP payload carries the CRM activity log (real SQL)", () => {
     expect(JSON.stringify(jobs[0].payload)).not.toContain("CONFIDENTIAL-LEAD-EMAIL");
     // And a deal with no source lead must not pick up this lead's rows.
     expect(note).not.toContain("Owner confirmed scope");
+  });
+
+  describe("the SQL transfer bound cannot change what renders", () => {
+    // `LEFT(body, N)` exists so an unbounded `text` body cannot make this query drag megabytes into
+    // the caller's tenant transaction. It is defence in depth for the TRANSFER — if it ever alters a
+    // rendered note, it has become a silent truncation bug instead.
+    const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    const EMOJI = "🚧";
+
+    async function noteForBody(body: string): Promise<string> {
+      pg = await setup();
+      const tdb: any = drizzle(pg as any);
+      await pg!.query(`DELETE FROM activities`);
+      await pg!.query(
+        `INSERT INTO activities (id, type, deal_id, responsible_user_id, body, occurred_at)
+         VALUES ('00000000-0000-0000-0000-00000000ac10', 'note', $1, $2, $3, '2026-08-14T16:00:00Z')`,
+        [DEAL, REP, body],
+      );
+      await enqueueRfpBidBoardCreate({ tenantDb: tdb, officeId: null, deal: { id: DEAL } });
+      const jobs = (await pg!.query(`SELECT payload FROM public.job_queue`)).rows as any[];
+      return activityLogFor(jobs[0])!;
+    }
+
+    it("renders a body at exactly MAX_BODY_CHARS in full, with no … marker", async () => {
+      // The boundary the bound must not disturb. An off-by-one in the SQL limit shows up HERE first.
+      const body = "B".repeat(MAX_BODY_CHARS);
+      const note = await noteForBody(body);
+
+      expect(note).toContain(`  ${body}`);
+      expect(note).not.toContain("…\n");
+      expect(note.endsWith("…")).toBe(false);
+    });
+
+    it("clamps a body one character over the limit, marker and all", async () => {
+      // The other side of the same boundary: a SQL bound of exactly MAX_BODY_CHARS would deliver this
+      // as 400 chars and render it as if complete — losing a character AND the … that says so.
+      const note = await noteForBody("B".repeat(MAX_BODY_CHARS + 1));
+
+      expect(note).toContain(`  ${"B".repeat(MAX_BODY_CHARS - 1)}…`);
+      expect(note).not.toContain("B".repeat(MAX_BODY_CHARS));
+    });
+
+    it("renders a body far beyond the SQL bound exactly as a one-over body does", async () => {
+      // Everything past the formatter's cut is unobservable, so a 50k body and a 401-char body must
+      // produce byte-identical output. This is what proves the SQL bound is invisible.
+      const huge = await noteForBody("B".repeat(50_000));
+      const justOver = await noteForBody("B".repeat(MAX_BODY_CHARS + 1));
+
+      expect(huge).toBe(justOver);
+      expect(huge).toContain(`  ${"B".repeat(MAX_BODY_CHARS - 1)}…`);
+    });
+
+    it("survives an emoji straddling the SQL bound, where the two clamps compose", async () => {
+      // Postgres LEFT() counts CHARACTERS and JS .length counts UTF-16 code UNITS, so the two clamps
+      // measure differently. That mismatch is exactly where this class of bug hides, even though
+      // LEFT() cannot itself split a pair.
+      for (const offset of [-2, -1, 0, 1]) {
+        const index = ACTIVITY_BODY_SQL_CHAR_LIMIT + offset;
+        const note = await noteForBody("x".repeat(index) + EMOJI + "tail".repeat(500));
+
+        expect(LONE_SURROGATE.test(note), `emoji at SQL-bound offset ${offset}`).toBe(false);
+        expect(() => JSON.parse(JSON.stringify({ crmActivityLog: note }))).not.toThrow();
+      }
+    });
+
+    it("survives an all-emoji body, where characters and code units diverge throughout", async () => {
+      // 400 emojis = 400 characters but 800 code units: under the SQL bound, over the formatter's.
+      // The formatter's cut at 399 units lands mid-pair, so the surrogate guard has to fire on data
+      // that came back through the SQL clamp.
+      const note = await noteForBody(EMOJI.repeat(MAX_BODY_CHARS));
+
+      expect(LONE_SURROGATE.test(note)).toBe(false);
+      expect(() => JSON.parse(JSON.stringify({ crmActivityLog: note }))).not.toThrow();
+      expect(note).toContain("…");
+    });
   });
 
   it("enqueues crmActivityLog: null for a deal with no activity at all", async () => {

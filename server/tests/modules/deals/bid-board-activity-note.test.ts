@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  ACTIVITY_BODY_SQL_CHAR_LIMIT,
   MAX_ACTOR_CHARS,
   MAX_BODY_CHARS,
   MAX_ENTRIES,
@@ -149,6 +150,14 @@ describe("formatBidBoardActivityNote", () => {
       const emitted = note!.split("\n").filter((line) => line.startsWith("Aug ")).length;
       expect(emitted).toBe(MAX_ENTRIES);
       expect(note).toContain(`… ${50 - MAX_ENTRIES} older entries not shown (open the deal in the CRM)`);
+    });
+
+    it("keeps the SQL transfer bound strictly above the formatter's own limit", () => {
+      // Not a style preference — a load-bearing invariant. The formatter decides "was this clamped?"
+      // by `length <= MAX_BODY_CHARS`, so a SQL bound OF exactly MAX_BODY_CHARS would deliver a
+      // 401-char body as 400 and render it as though it were complete, silently losing a character
+      // and its `…`. Anything at or below MAX_BODY_CHARS here is a correctness bug, not a tuning one.
+      expect(ACTIVITY_BODY_SQL_CHAR_LIMIT).toBeGreaterThan(MAX_BODY_CHARS);
     });
 
     it("clamps each body to MAX_BODY_CHARS with a … marker", () => {

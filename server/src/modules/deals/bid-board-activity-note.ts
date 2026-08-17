@@ -41,6 +41,26 @@ export const MAX_NOTE_CHARS = 8000;
 export const ACTIVITY_NOTE_FETCH_LIMIT = 200;
 
 /**
+ * How much of each body/subject the QUERY transfers. Defence in depth for the TRANSFER only — the
+ * formatter still does the user-visible clamping, and nothing about the rendered note changes.
+ *
+ * `activities.body` is unbounded `text`, createActivity imposes no length limit, and the API accepts
+ * JSON up to 10 MB, so without this a deal with many large activities makes triggering an RFP transfer
+ * and materialise megabytes inside the caller's tenant transaction — a pooled client under a 30s
+ * statement_timeout, in a repo with a known pool-exhaustion failure mode.
+ *
+ * MUST stay strictly greater than MAX_BODY_CHARS, and the reason is subtle. The formatter decides
+ * "was this clamped?" by `length <= MAX_BODY_CHARS`, so a SQL bound OF exactly MAX_BODY_CHARS would
+ * make a 401-character body arrive as 400 and render as though it were complete — silently dropping a
+ * character AND its `…` marker. MAX_BODY_CHARS + 1 is the true minimum; the 2x below is headroom.
+ *
+ * Note the units differ and that is fine: Postgres `left()` counts CHARACTERS while JS `.length`
+ * counts UTF-16 code UNITS. Characters ≤ code units always, so any body within the formatter's
+ * 400-code-unit limit is at most 400 characters and passes through this bound untouched.
+ */
+export const ACTIVITY_BODY_SQL_CHAR_LIMIT = MAX_BODY_CHARS * 2;
+
+/**
  * Ceilings for the note's OTHER unbounded inputs. Without these MAX_NOTE_CHARS is not an invariant:
  * `users.display_name` / `first_name` / `last_name` and `deals.name` are all plain `text` columns, so a
  * single pathological value blows past the total on its own no matter how few entries are emitted.
@@ -342,8 +362,13 @@ export async function loadDealActivityNoteEntries(
   const result = await tenantDb.execute(sql`
     SELECT a.type::text        AS "type",
            a.occurred_at       AS "occurredAt",
-           a.subject           AS "subject",
-           a.body              AS "body",
+           -- Bounded in SQL as well as in the formatter, so an unbounded text body cannot make this
+           -- query transfer megabytes inside the caller's tenant transaction. Sized above
+           -- MAX_BODY_CHARS (see ACTIVITY_BODY_SQL_CHAR_LIMIT) so it can never change what renders:
+           -- the formatter's own clamp and its ellipsis marker still do all the user-visible work.
+           -- subject is already varchar(500), so its bound is belt-and-braces against a widening.
+           LEFT(a.subject, ${ACTIVITY_BODY_SQL_CHAR_LIMIT}) AS "subject",
+           LEFT(a.body, ${ACTIVITY_BODY_SQL_CHAR_LIMIT})    AS "body",
            a.outcome           AS "outcome",
            a.duration_minutes  AS "durationMinutes",
            COALESCE(
