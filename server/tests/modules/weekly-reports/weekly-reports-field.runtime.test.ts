@@ -241,6 +241,46 @@ describe("hub assignments", () => {
     expect(typeof view.projects[0]!.previousCompletionPercent).toBe("number");
   });
 
+  it("prefills each missed week from ITS OWN predecessor, never from a later one", async () => {
+    // Completion % and weather delays are CUMULATIVE. A single project-level predecessor seeded a
+    // missed July week with August's figures once August had been filed — overstating that week's
+    // progress and delay total on a document the client keeps as the record of it.
+    //
+    // Weeks: 07-23 filed, 07-30 GAP, 08-06 filed, 08-13 current.
+    const project = await seedProject({ cadenceStartDate: "2026-07-23" });
+
+    const firstId = await seedDraft(project.id, "2026-07-23");
+    await updateWeeklyReportContent(
+      db,
+      firstId,
+      { workCompleted: "- Mobilisation", completionPercent: 5, weatherDelayDays: 1 },
+      SUPER_ACTOR,
+    );
+    const laterId = await seedDraft(project.id, PRIOR_WEEK);
+    await updateWeeklyReportContent(
+      db,
+      laterId,
+      { workCompleted: "- Framing", completionPercent: 40, weatherDelayDays: 6 },
+      SUPER_ACTOR,
+    );
+
+    const view = await listWeeklyReportAssignments(db, { userId: SUPER, role: "construction", asOf: WEEK_OF });
+    const assignment = view.projects[0]!;
+
+    // THE BUG: the 07-30 gap must inherit 07-23's 5%/1d, not the LATER 08-06 report's 40%/6d.
+    expect(assignment.previousByWeekOf["2026-07-30"]).toMatchObject({
+      weekOf: "2026-07-23",
+      completionPercent: 5,
+      weatherDelayDays: 1,
+    });
+    // The current week still inherits the most recent filed week, as before.
+    expect(assignment.previousByWeekOf[WEEK_OF]).toMatchObject({
+      weekOf: PRIOR_WEEK,
+      completionPercent: 40,
+      weatherDelayDays: 6,
+    });
+  });
+
   it("prefills from nothing on the first week of a project", async () => {
     await seedProject();
     const view = await listWeeklyReportAssignments(db, { userId: SUPER, role: "construction", asOf: WEEK_OF });

@@ -164,9 +164,15 @@ export default function ReportsHubScreen() {
           dealId: project.dealId,
           projectName: project.projectName,
           weekOf,
-          // Last week's numbers, so step 5 is a nudge rather than re-entry.
-          completionPercent: project.previousCompletionPercent,
-          weatherDelayDays: project.previousWeatherDelayDays,
+          // The predecessor OF THIS WEEK, so step 5 is a nudge rather than re-entry.
+          //
+          // Keyed by weekOf rather than taking the project-level value: completion % and weather
+          // delays are cumulative, so filling a missed July week after August was filed would
+          // otherwise seed July with August's figures — overstating that week's progress on a
+          // document the client keeps as the record of it. Absent when no earlier week was filed,
+          // which correctly leaves the fields blank rather than guessing.
+          completionPercent: project.previousByWeekOf?.[weekOf]?.completionPercent ?? null,
+          weatherDelayDays: project.previousByWeekOf?.[weekOf]?.weatherDelayDays ?? null,
           now: Date.now(),
         });
       }

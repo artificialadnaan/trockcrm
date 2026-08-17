@@ -30,6 +30,13 @@ const ELEVATED_ROLES = new Set(["admin", "director"]);
  */
 export const APP_OUTSTANDING_WEEK_LIMIT = 5;
 
+/** The last filed week before a given week, and the cumulative figures it carried. */
+export interface WeeklyReportPredecessor {
+  weekOf: string;
+  completionPercent: number | null;
+  weatherDelayDays: number | null;
+}
+
 export interface WeeklyReportAssignment {
   weeklyReportProjectId: string;
   dealId: string;
@@ -64,6 +71,8 @@ export interface WeeklyReportAssignment {
   previousWeekOf: string | null;
   previousCompletionPercent: number | null;
   previousWeatherDelayDays: number | null;
+  /** Predecessor figures keyed by the week being filled. Cumulative values must not cross weeks. */
+  previousByWeekOf: Record<string, WeeklyReportPredecessor>;
 }
 
 export interface WeeklyReportReviewItem {
@@ -216,20 +225,39 @@ export async function listWeeklyReportAssignments(
     }
     outstanding.reverse();
 
-    // The most recent filed week BEFORE the current one, whatever its status — a draft the super started
-    // last week still carries the numbers they typed, and prefilling from it beats prefilling from nothing.
-    let previous: Record<string, any> | undefined;
-    let previousWeekOf: string | null = null;
-    for (let i = expected.length - 1; i >= 0; i -= 1) {
-      const weekOf = expected[i]!;
-      if (weekOf >= currentWeekOf) continue;
-      const found = reportByKey.get(`${project.id}|${weekOf}`);
-      if (found) {
-        previous = found;
-        previousWeekOf = weekOf;
-        break;
+    /**
+     * The most recent filed week strictly BEFORE `target`, whatever its status — a draft the super
+     * started still carries the numbers they typed, and prefilling from it beats prefilling from
+     * nothing.
+     *
+     * Resolved PER TARGET WEEK, not once. Completion % and weather delays are CUMULATIVE, so a single
+     * predecessor shared across every outstanding week seeded a missed July report with August's
+     * figures once August had been filed — overstating July's progress and its delay total on a
+     * document that goes to the client as a record of that week.
+     */
+    const predecessorFor = (target: string) => {
+      for (let i = expected.length - 1; i >= 0; i -= 1) {
+        const weekOf = expected[i]!;
+        if (weekOf >= target) continue;
+        const found = reportByKey.get(`${project.id}|${weekOf}`);
+        if (found) {
+          return {
+            weekOf,
+            completionPercent: toNumberOrNull(found.completion_percent),
+            weatherDelayDays: (found.weather_delay_days ?? null) as number | null,
+          };
+        }
       }
+      return null;
+    };
+
+    // One entry per week this hub can actually open: the current week plus every outstanding one.
+    const previousByWeekOf: Record<string, WeeklyReportPredecessor> = {};
+    for (const target of [currentWeekOf, ...outstanding]) {
+      const found = predecessorFor(target);
+      if (found) previousByWeekOf[target] = found;
     }
+    const previousForCurrent = previousByWeekOf[currentWeekOf] ?? null;
 
     projects.push({
       weeklyReportProjectId: project.id,
@@ -255,9 +283,11 @@ export async function listWeeklyReportAssignments(
       daysLate: outstanding.length > 0 ? weeklyReportDaysLate(outstanding[0]!, input.asOf) : 0,
       outstandingWeeks: outstanding,
       hasMoreOutstandingWeeks: olderStillOutstanding,
-      previousWeekOf,
-      previousCompletionPercent: toNumberOrNull(previous?.completion_percent),
-      previousWeatherDelayDays: previous?.weather_delay_days ?? null,
+      // Kept for the current week, which is what the primary card fills.
+      previousWeekOf: previousForCurrent?.weekOf ?? null,
+      previousCompletionPercent: previousForCurrent?.completionPercent ?? null,
+      previousWeatherDelayDays: previousForCurrent?.weatherDelayDays ?? null,
+      previousByWeekOf,
     });
   }
 

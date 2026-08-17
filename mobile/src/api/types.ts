@@ -324,6 +324,11 @@ export type WeeklyReportAssignment = {
   previousWeekOf: string | null;
   previousCompletionPercent: number | null;
   previousWeatherDelayDays: number | null;
+  /** Predecessor figures keyed by the week being filled — cumulative values must not cross weeks. */
+  previousByWeekOf?: Record<
+    string,
+    { weekOf: string; completionPercent: number | null; weatherDelayDays: number | null }
+  >;
 };
 
 /** One row of the PM's review queue. */
