@@ -61,6 +61,32 @@ export const ACTIVITY_NOTE_FETCH_LIMIT = 200;
 export const ACTIVITY_BODY_SQL_CHAR_LIMIT = MAX_BODY_CHARS * 2;
 
 /**
+ * The whitespace BTRIM strips BEFORE the transfer bound is applied, so the characters we transfer are
+ * characters of actual CONTENT.
+ *
+ * This ordering is load-bearing, not tidiness. POST /api/activities stores a body verbatim, so a body
+ * beginning with more than ACTIVITY_BODY_SQL_CHAR_LIMIT whitespace characters would otherwise come back
+ * as pure whitespace, cleanText would turn that into null, and the entry would render with no body at
+ * all. A transfer optimisation must never be able to delete content.
+ *
+ * The character set is SPELLED OUT because BTRIM's default is a SPACE ONLY — verified, not assumed:
+ * `btrim(E'\n\n\thi')` returns the string unchanged. Relying on the default would leave the single most
+ * likely real case, a body that starts with newlines, still broken.
+ *
+ * Every escape here is a documented Postgres E'' escape (`\v` deliberately is not one — an unrecognised
+ * escape is taken LITERALLY, which would have put the letter "v" in the trim set and eaten the leading
+ * character of a body like "very urgent"). \x0B is the vertical tab; \u00A0 is the non-breaking
+ * space that arrives with content pasted out of Outlook or Word. Both are written as ESCAPES rather
+ * than literal characters, so the set stays readable in source and reviewable in a diff.
+ *
+ * The set is a strict SUBSET of what JS `.trim()` removes, which is what keeps the rendered output
+ * identical: trimming in SQL and then again in cleanText is the same as trimming once in cleanText.
+ * The residual gap is the rest of Unicode's space separators (U+2000–U+200A, U+FEFF, …); losing a body
+ * to those needs 800+ CONSECUTIVE leading ones, which is not a shape real input takes.
+ */
+const SQL_WHITESPACE_TRIM_SET = String.raw`E' \t\n\r\f\x0B\u00A0'`;
+
+/**
  * Ceilings for the note's OTHER unbounded inputs. Without these MAX_NOTE_CHARS is not an invariant:
  * `users.display_name` / `first_name` / `last_name` and `deals.name` are all plain `text` columns, so a
  * single pathological value blows past the total on its own no matter how few entries are emitted.
@@ -366,9 +392,14 @@ export async function loadDealActivityNoteEntries(
            -- query transfer megabytes inside the caller's tenant transaction. Sized above
            -- MAX_BODY_CHARS (see ACTIVITY_BODY_SQL_CHAR_LIMIT) so it can never change what renders:
            -- the formatter's own clamp and its ellipsis marker still do all the user-visible work.
+           --
+           -- BTRIM runs INSIDE the bound, and the order is the whole point: bodies are stored verbatim,
+           -- so bounding first would let a body that opens with more than the limit in whitespace come
+           -- back blank and render with no body at all. Trim first and the characters we transfer are
+           -- characters of content. See SQL_WHITESPACE_TRIM_SET for why the set is spelled out.
            -- subject is already varchar(500), so its bound is belt-and-braces against a widening.
-           LEFT(a.subject, ${ACTIVITY_BODY_SQL_CHAR_LIMIT}) AS "subject",
-           LEFT(a.body, ${ACTIVITY_BODY_SQL_CHAR_LIMIT})    AS "body",
+           LEFT(BTRIM(a.subject, ${sql.raw(SQL_WHITESPACE_TRIM_SET)}), ${ACTIVITY_BODY_SQL_CHAR_LIMIT}) AS "subject",
+           LEFT(BTRIM(a.body, ${sql.raw(SQL_WHITESPACE_TRIM_SET)}), ${ACTIVITY_BODY_SQL_CHAR_LIMIT})    AS "body",
            a.outcome           AS "outcome",
            a.duration_minutes  AS "durationMinutes",
            COALESCE(

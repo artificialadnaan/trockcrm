@@ -415,6 +415,55 @@ describe("RFP payload carries the CRM activity log (real SQL)", () => {
       }
     });
 
+    it.each([
+      ["newlines", "\n"],
+      ["spaces", " "],
+      ["tabs", "\t"],
+      ["carriage returns", "\r"],
+      ["form feeds", "\f"],
+      ["vertical tabs", "\v"],
+      ["non-breaking spaces", "\u00A0"],
+    ])("renders content behind a long run of leading %s", async (_label, ws) => {
+      // The regression the bound introduced. Bodies are stored verbatim by POST /api/activities, so a
+      // body opening with more whitespace than the transfer bound came back as pure whitespace,
+      // cleanText turned it into null, and the entry rendered with NO BODY. Trimming inside the bound
+      // is what makes the transferred characters characters of content.
+      //
+      // Newlines are the case that matters most in practice and the one BTRIM's default set does NOT
+      // cover — its default is a space only.
+      const text = "Owner confirmed scope; wants alternates priced.";
+      const note = await noteForBody(ws.repeat(ACTIVITY_BODY_SQL_CHAR_LIMIT + 100) + text);
+
+      expect(note).toContain(`  ${text}`);
+    });
+
+    it("renders a whitespace-led body byte-identically to the same body without it", async () => {
+      // The strongest form: leading whitespace must be entirely invisible in the output, not merely
+      // survivable. cleanText trimmed the full body before the bound existed, so this is what pins
+      // that behaviour as unchanged.
+      const text = "Roof access via north stair only. " + "detail ".repeat(80);
+      const led = await noteForBody("\n".repeat(ACTIVITY_BODY_SQL_CHAR_LIMIT + 100) + text);
+      const plain = await noteForBody(text);
+
+      expect(led).toBe(plain);
+    });
+
+    it("still renders nothing for a body that is only whitespace", async () => {
+      // The trim must not invent content either: whitespace-only really is an empty body.
+      const note = await noteForBody(" ".repeat(ACTIVITY_BODY_SQL_CHAR_LIMIT + 100));
+      expect(note).toContain("Aug 14, 2026 · Note");
+      expect(note.split("\n").filter((l) => l.startsWith("  "))).toHaveLength(0);
+    });
+
+    it("does not eat leading letters that appear in the trim-set escapes", async () => {
+      // An unrecognised Postgres E'' escape is taken LITERALLY, so a set written with \v would have
+      // put the letter "v" in it and truncated this body's first character.
+      for (const text of ["very urgent — call back", "ux walkthrough booked", "0Bad access notes"]) {
+        const note = await noteForBody(text);
+        expect(note).toContain(`  ${text}`);
+      }
+    });
+
     it("survives an all-emoji body, where characters and code units diverge throughout", async () => {
       // 400 emojis = 400 characters but 800 code units: under the SQL bound, over the formatter's.
       // The formatter's cut at 399 units lands mid-pair, so the surrogate guard has to fire on data
