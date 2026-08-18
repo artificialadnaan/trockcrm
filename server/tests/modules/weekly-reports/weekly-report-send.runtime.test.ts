@@ -1554,6 +1554,155 @@ describe("the dashboard's view of a send", () => {
     expect(row!.sendStalled).toBe(false);
     expect(row!.sendRetryReportId).toBeNull();
   });
+
+  /**
+   * A CORRECTION OVER A WEEK THE CLIENT ALREADY HAS.
+   *
+   * The mirror image of the block above, and the one the correction feature introduced: there, a live
+   * row read as settled while a failure was still outstanding; here, a week the client received on time
+   * reads as outstanding because the live row is an unsent clone. `createWeeklyReportCorrection` is the
+   * first thing in the product that can produce an UNSENT HIGHER VERSION OVER A DELIVERED PREDECESSOR —
+   * superseding happens at send, so `version DESC` picks the clone, the undelivered query correctly
+   * returns nothing, and the week reports `approved` with no `sent_at` at all.
+   *
+   * A typo fix is not a missed report, and the board only asks who has not sent theirs.
+   */
+  it("does not resurrect a DELIVERED past week because a correction is being drafted over it", async () => {
+    const reportId = await sentWeek(PRIOR_WEEK);
+    await markDelivered(reportId);
+    // CONTROL: settled and gone before anybody touches it — the state the fix has to preserve, not
+    // reach by accident.
+    const before = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    expect(before.rows.some((entry) => entry.weekOf === PRIOR_WEEK)).toBe(false);
+
+    await createWeeklyReportCorrection(db, reportId, SENDER);
+
+    // Was: `{ weekOf: "2026-08-06", state: "approved", daysLate: 7, sentAt: null, waitingOn: "Adam
+    // Sherwood" }` — "Approved, not sent · 7 days late", indistinguishable from a week nobody filed.
+    // And because `rows.sort` is `b.daysLate - a.daysLate` first, the error scales with age: the same
+    // gesture on a report delivered six months ago lands at `daysLate ≈ 180`, above every report that
+    // really is missing.
+    const after = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    expect(after.rows.find((entry) => entry.weekOf === PRIOR_WEEK)).toBeUndefined();
+  });
+
+  it("reports the delivered version's stamps while its correction is unsent, not the clone's nulls", async () => {
+    // The CURRENT week always renders, so this is where the same lie is visible in full rather than as
+    // a missing row. The client has this week; the board must say so while the correction is drafted.
+    const reportId = await sentWeek(WEEK_OF);
+    await markDelivered(reportId);
+    const correction = await createWeeklyReportCorrection(db, reportId, SENDER);
+
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    const row = board.rows.find((entry) => entry.weekOf === WEEK_OF)!;
+    // The live version is still the correction — that part was always right.
+    expect(row.reportId).toBe(correction.id);
+    expect(row.reportVersion).toBe(2);
+    expect(row.state).toBe("approved");
+    // The clone carries neither stamp. Publishing its nulls says the week was never sent, to a client
+    // holding the email.
+    expect(row.sentAt).not.toBeNull();
+    expect(row.sendDeliveredAt).not.toBeNull();
+    expect(row.daysLate).toBe(0);
+    expect(row.sendFailed).toBe(false);
+    expect(row.sendStalled).toBe(false);
+  });
+
+  it("keeps a delivered old week OUT of the older-outstanding tally when a correction is drafted", async () => {
+    // ABSOLUTE ARITHMETIC, not a before/after delta: Thursdays from 2026-01-01 through the 2026-08-13
+    // board date are 33 expected weeks, of which `lookbackWeeks: 3` renders the last three and tallies
+    // the other 30. 2026-02-05 is one of the 30 and was delivered, so the honest tally is 29 — before
+    // the correction and after it.
+    const project = await seedProject({ cadenceStartDate: "2026-01-01" });
+    const { reportId } = await seedApprovedReport({ weekOf: "2026-02-05", projectId: project.id });
+    await sendWeeklyReport(db, {
+      reportId,
+      office: OFFICE_CONTEXT,
+      actor: SENDER,
+      payload: { recipients: ["jay@example.com"] },
+      shareUrlFor,
+    });
+    await markDelivered(reportId);
+    // CONTROL: the tally is live and one week short of the full 30 because that week is settled. Without
+    // it the assertion below could pass on a tally that never counted anything.
+    const before = await getWeeklyReportDashboard(db, { asOf: WEEK_OF, lookbackWeeks: 3 });
+    expect(before.olderOutstandingCounts[project.id]).toBe(29);
+
+    await createWeeklyReportCorrection(db, reportId, SENDER);
+
+    // Was 30: the banner told a director they were a week further behind than they are, about a report
+    // the client has had since February.
+    const after = await getWeeklyReportDashboard(db, { asOf: WEEK_OF, lookbackWeeks: 3 });
+    expect(after.olderOutstandingCounts[project.id]).toBe(29);
+  });
+
+  it("brings the week back when the CORRECTION itself fails to send", async () => {
+    // The control for the guard above, and the reason "delivered" is read per-week rather than latched:
+    // a copy in the client's inbox is not a licence to hide the next failure. v1 delivered, v2 sent and
+    // lost — the client is owed the correction they were told was coming, and v1 is superseded by now,
+    // which is exactly why the delivered lookup must not filter on `superseded_by_id`.
+    const reportId = await sentWeek(PRIOR_WEEK);
+    await markDelivered(reportId);
+    const correction = await createWeeklyReportCorrection(db, reportId, SENDER);
+    await sendWeeklyReport(db, {
+      reportId: correction.id,
+      office: OFFICE_CONTEXT,
+      actor: SENDER,
+      payload: { recipients: ["jay@example.com"] },
+      shareUrlFor,
+    });
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports SET send_error = 'Resend timed out', send_attempts = 3
+        WHERE id = $1::uuid`,
+      [correction.id],
+    );
+    expect((await reportRow(reportId)).superseded_by_id).toBe(correction.id);
+
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    const row = board.rows.find((entry) => entry.weekOf === PRIOR_WEEK);
+    expect(row).toBeDefined();
+    expect(row!.sendFailed).toBe(true);
+    expect(row!.sendRetryReportId).toBe(correction.id);
+    // Still not LATE, and both facts are true at once: the client has v1, and v2 never got out. The row
+    // is here for the delivery, which is the same thing the second pass says about a week the cadence
+    // has stopped generating.
+    expect(row!.daysLate).toBe(0);
+    expect(row!.sendDeliveredAt).not.toBeNull();
+  });
+
+  it("does not make the week late again when a correction is drafted over a FAILED correction", async () => {
+    // The one shape where the live row is UNSENT, the week is genuinely undelivered, and the client
+    // nonetheless holds a copy: v1 delivered, v2 sent and lost, v3 drafted over v2. Every other row on
+    // this board reaches `daysLate === 0` through `state === "sent"`, so this is the only case that can
+    // tell the lateness test apart from the status test — without the delivered lookup the row reads
+    // "approved · 7 days late" beside its own send-failure chip, and the cadence pass contradicts what
+    // the undelivered pass says about the identical shape one status change away.
+    const v1 = await sentWeek(PRIOR_WEEK);
+    await markDelivered(v1);
+    const v2 = await createWeeklyReportCorrection(db, v1, SENDER);
+    await sendWeeklyReport(db, {
+      reportId: v2.id,
+      office: OFFICE_CONTEXT,
+      actor: SENDER,
+      payload: { recipients: ["jay@example.com"] },
+      shareUrlFor,
+    });
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports SET send_error = 'Resend timed out' WHERE id = $1::uuid`,
+      [v2.id],
+    );
+    const v3 = await createWeeklyReportCorrection(db, v2.id, SENDER);
+
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    const row = board.rows.find((entry) => entry.weekOf === PRIOR_WEEK)!;
+    expect(row.reportId).toBe(v3.id);
+    expect(row.reportVersion).toBe(3);
+    expect(row.state).toBe("approved");
+    expect(row.daysLate).toBe(0);
+    // The outstanding delivery is still v2's, and Retry still points at the version that was sent.
+    expect(row.sendFailed).toBe(true);
+    expect(row.sendRetryReportId).toBe(v2.id);
+  });
 });
 
 /**
@@ -1686,6 +1835,49 @@ describe("a setup that has stopped reporting can still owe the client an email",
     expect(row!.waitingOn).toBe("Adam Sherwood");
     // Never LATE, though: lateness measures a report the cadence still expects, and it expects none.
     expect(row!.daysLate).toBe(0);
+  });
+
+  it("reports the delivered version's stamps here too, exactly as the cadence pass does", async () => {
+    // The consistency claim, at the one shape both passes can be made to describe: v1 delivered, v2 sent
+    // and lost, v3 drafted over it, and then the job finishes and somebody marks the setup completed.
+    // The row now comes from the undelivered pass rather than the cadence loop, and a week must not
+    // describe itself differently depending on which pass happens to render it.
+    const { projectId, reportId } = await seedApprovedReport();
+    await sendWeeklyReport(db, {
+      reportId,
+      office: OFFICE_CONTEXT,
+      actor: SENDER,
+      payload: { recipients: ["jay@example.com"] },
+      shareUrlFor,
+    });
+    await markDelivered(reportId);
+    const v2 = await createWeeklyReportCorrection(db, reportId, SENDER);
+    await sendWeeklyReport(db, {
+      reportId: v2.id,
+      office: OFFICE_CONTEXT,
+      actor: SENDER,
+      payload: { recipients: ["jay@example.com"] },
+      shareUrlFor,
+    });
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports SET send_error = 'Resend timed out' WHERE id = $1::uuid`,
+      [v2.id],
+    );
+    const v3 = await createWeeklyReportCorrection(db, v2.id, SENDER);
+    await pg.query(
+      `UPDATE office_dallas.weekly_report_projects SET status = 'completed' WHERE id = $1::uuid`,
+      [projectId],
+    );
+
+    const board = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
+    const row = board.rows.find((entry) => entry.weekOf === WEEK_OF)!;
+    expect(row.reportId).toBe(v3.id);
+    expect(row.sendRetryReportId).toBe(v2.id);
+    expect(row.sendFailed).toBe(true);
+    // v3 is an unsent clone and carries neither stamp. Publishing its nulls tells a client-facing
+    // surface the week never went out, to a client holding v1.
+    expect(row.sentAt).not.toBeNull();
+    expect(row.sendDeliveredAt).not.toBeNull();
   });
 
   it("keeps it after the project is marked completed, which is how this usually ends", async () => {
