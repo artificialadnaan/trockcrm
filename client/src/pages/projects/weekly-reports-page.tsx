@@ -391,10 +391,12 @@ function ThisWeekTable({
                   {(row.sendFailed || row.sendStalled) && row.sendRetryReportId ? (
                     // `sendRetryReportId`, not `reportId`: once a PM has drafted a correction over a
                     // failed send the live row is the unsent clone, and retrying THAT would replay a
-                    // report nobody sent.
+                    // report nobody sent. `sendRetrySentAt` for the same reason — the clone has no
+                    // `sent_at`, so measuring the provider's dedupe window off `row.sentAt` would warn
+                    // about a duplicate for a send committed minutes ago.
                     <RetryButton
                       reportId={row.sendRetryReportId}
-                      sentAt={row.sentAt}
+                      sentAt={row.sendRetrySentAt}
                       onRetried={onRetried}
                     />
                   ) : row.state === "approved" && row.reportId ? (

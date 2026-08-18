@@ -66,13 +66,15 @@ function dashboardRow(overrides: Record<string, unknown> = {}) {
     // Added with migration 0226. All three verdicts are derived on the SERVER — the CRM and the app must
     // not each decide what "Send failed" means — so the fixture carries them rather than the page
     // inferring anything. `sendRetryReportId` is which report a Retry addresses, which is NOT always the
-    // week's live report once a correction has been drafted over a failed send.
+    // week's live report once a correction has been drafted over a failed send — and `sendRetrySentAt`
+    // is THAT report's `sent_at`, which is what the provider's 24-hour dedupe window is measured against.
     sendDeliveredAt: null,
     sendAttempts: 0,
     sendFailed: false,
     sendStalled: false,
     sendPending: false,
     sendRetryReportId: null,
+    sendRetrySentAt: null,
     waitingOn: "Steve Sanchez",
     dismissalReason: null,
     ...overrides,
@@ -226,7 +228,10 @@ describe("This Week board", () => {
         state: "approved",
         reportId: "v2",
         sendRetryReportId: "v1",
-        sentAt: new Date().toISOString(),
+        // The LIVE row is the unsent clone, so it has no `sent_at` at all — the real shape of this state,
+        // and the reason the age of the send has to come off `sendRetrySentAt` instead.
+        sentAt: null,
+        sendRetrySentAt: new Date().toISOString(),
         sendError: "SMTP timeout",
         sendFailed: true,
       }),
@@ -241,7 +246,10 @@ describe("This Week board", () => {
     await act(async () => {
       retry.click();
     });
-    // Inside the provider's idempotency window, so no duplicate-risk acknowledgement is claimed.
+    // Inside the provider's idempotency window, so no duplicate-risk acknowledgement is claimed — and no
+    // confirmation was raised. Measured off `row.sentAt` the clone's null reads as "outside the window",
+    // and the PM is warned about a second copy the provider provably will not send: a false alarm on the
+    // one dialog on this page that is ever real.
     expect(mocks.retryWeeklyReportSend).toHaveBeenCalledWith("v1", false);
   });
 
@@ -257,6 +265,7 @@ describe("This Week board", () => {
         reportId: "r1",
         sendRetryReportId: "r1",
         sentAt: "2026-08-01T10:00:00.000Z",
+        sendRetrySentAt: "2026-08-01T10:00:00.000Z",
         sendError: "SMTP timeout",
         sendFailed: true,
       }),
@@ -281,6 +290,7 @@ describe("This Week board", () => {
         reportId: "r1",
         sendRetryReportId: "r1",
         sentAt: "2026-08-01T10:00:00.000Z",
+        sendRetrySentAt: "2026-08-01T10:00:00.000Z",
         sendError: "SMTP timeout",
         sendFailed: true,
       }),

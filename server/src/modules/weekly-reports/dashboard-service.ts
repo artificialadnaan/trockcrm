@@ -90,6 +90,18 @@ export interface WeeklyReportDashboardRow {
    * keeps the actual problem. Pointing Retry at the live row would retry a report that was never sent.
    */
   sendRetryReportId: string | null;
+  /**
+   * When the send a Retry would replay was COMMITTED — the age the provider's idempotency window is
+   * measured against.
+   *
+   * Separate from `sentAt` for the same reason `sendRetryReportId` is separate from `reportId`: once a
+   * correction has been drafted over a failed send the live row is the unsent clone, whose `sent_at` is
+   * null. A caller measuring the dedupe window off `sentAt` reads that null as "outside the window" and
+   * warns the PM that retrying will put a second copy in the client's inbox — for a send committed
+   * minutes ago, which the provider provably still dedupes. Wrong in the safe direction, but it teaches a
+   * PM to click through the one confirmation on this page that is ever real.
+   */
+  sendRetrySentAt: string | null;
   /** Who the week is waiting on, in plain words — the column a director actually reads. */
   waitingOn: string | null;
   dismissalReason: string | null;
@@ -380,6 +392,7 @@ export async function getWeeklyReportDashboard(
         sendStalled,
         sendPending,
         sendRetryReportId: undelivered?.id ?? null,
+        sendRetrySentAt: toIsoTimestamp(undelivered?.sent_at),
         // An undelivered send is waiting on the PM to deal with it. Left null, the column read "—" on the
         // one row on the board that needs a person.
         waitingOn:
@@ -415,6 +428,11 @@ export interface WeeklyReportProjectSummary {
    *
    * Without it, narrowing `reportsSent` to delivered sends would make a lost report disappear from BOTH
    * numbers, which is a quieter version of the same lie.
+   *
+   * SUPERSEDED VERSIONS ARE EXCLUDED, exactly as the board excludes them. A v1 whose email failed and
+   * whose correction then reached the client is not an outstanding delivery — the board stops naming it
+   * the moment v2 goes out, and a tab that kept counting it would leave a permanent "1 not delivered"
+   * beside a week the client has actually received. Two surfaces, one definition of "still owed".
    */
   undeliveredSends: number;
   /** Null when reporting has stopped — paused, completed, or past its cadence end date. */
@@ -447,7 +465,9 @@ export async function listWeeklyReportProjectSummaries(
             MAX(wr.week_of) FILTER (
               WHERE wr.status = 'sent' AND wr.send_delivered_at IS NOT NULL)       AS last_sent_week_of,
             COUNT(wr.id) FILTER (
-              WHERE wr.status = 'sent' AND wr.send_delivered_at IS NULL)::int      AS undelivered_sends
+              WHERE wr.status = 'sent'
+                AND wr.send_delivered_at IS NULL
+                AND wr.superseded_by_id IS NULL)::int                              AS undelivered_sends
        FROM weekly_report_projects wrp
        LEFT JOIN weekly_reports wr
               ON wr.weekly_report_project_id = wrp.id AND wr.is_active
