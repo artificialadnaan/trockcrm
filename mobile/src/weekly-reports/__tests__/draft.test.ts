@@ -2,14 +2,17 @@ import {
   MAX_WEEKLY_REPORT_CAPTION_CHARS,
   MAX_WEEKLY_REPORT_PHOTOS,
   MAX_WEEKLY_REPORT_SECTION_CHARS,
+  WEEKLY_REPORT_EMPTY_SIGNATURE,
   createWeeklyReportDraft,
   parseWeeklyReportDelayDays,
   parseWeeklyReportPercent,
+  weeklyReportContentSignature,
   weeklyReportDraftBlocker,
   weeklyReportDraftFromDetail,
   weeklyReportDraftPendingUploads,
   weeklyReportDraftReducer,
   weeklyReportDraftSectionsFilled,
+  weeklyReportDraftSignature,
   weeklyReportDraftToPatch,
   weeklyReportDraftToPhotoPayload,
   weeklyReportPhotoPreviewUri,
@@ -18,6 +21,7 @@ import {
   weeklyReportStepIndex,
   type WeeklyReportDraft,
   type WeeklyReportDraftPhoto,
+  type WeeklyReportSignableContent,
 } from "../draft";
 
 function newDraft(overrides: Partial<WeeklyReportDraft> = {}): WeeklyReportDraft {
@@ -368,6 +372,149 @@ describe("recording where the server moved the report", () => {
       status: "pending_review",
     });
     expect(draft.serverStatus).toBe("pending_review");
+  });
+
+  it("arms and disarms the lost-reply marker", () => {
+    // The only dispatcher of this action is the wizard's submit, and nothing exercised the branch — a
+    // reducer that simply returned the draft unchanged left every suite green. What it costs: the super
+    // taps Submit, the transition commits, the reply dies on LTE, and they tap Submit again in the SAME
+    // session (no app kill — the common case). `mayHaveCommitted` reads this field, finds null, and the
+    // wizard tells them somebody else moved the report. It was their own successful filing.
+    const armed = weeklyReportDraftReducer(newDraft(), {
+      type: "setPendingTransition",
+      to: "pending_review",
+    });
+    expect(armed.pendingTransitionTo).toBe("pending_review");
+    expect(
+      weeklyReportDraftReducer(armed, { type: "setPendingTransition", to: null }).pendingTransitionTo,
+    ).toBeNull();
+  });
+
+  it("takes the provenance a create handed back, keeps it when none is given, clears it on an explicit null", () => {
+    // `POST /reports` is idempotent, so it can answer 200 with a row that ALREADY HAS CONTENT on it. If
+    // the id landed without the provenance, the draft would go on believing its baseline was an empty
+    // report and every later open would report a conflict that is not there.
+    const fromServer = { status: "draft" as const, signature: "sig-server" };
+    const adopted = weeklyReportDraftReducer(newDraft(), {
+      type: "setReportId",
+      reportId: "rep-1",
+      seededFrom: fromServer,
+    });
+    expect(adopted).toMatchObject({ reportId: "rep-1", seededFrom: fromServer });
+    expect(
+      weeklyReportDraftReducer(adopted, { type: "setReportId", reportId: "rep-2" }).seededFrom,
+    ).toEqual(fromServer);
+    expect(
+      weeklyReportDraftReducer(adopted, { type: "setReportId", reportId: "rep-2", seededFrom: null })
+        .seededFrom,
+    ).toBeNull();
+  });
+
+  it("re-stamps the provenance from an acknowledged write without touching a word of the content", () => {
+    const before = newDraft({ workCompleted: "Framed levels 3 and 4.", photos: [galleryPhoto("a")] });
+    const after = weeklyReportDraftReducer(before, {
+      type: "setSeededFrom",
+      seededFrom: { status: "draft", signature: "sig-after-patch" },
+    });
+    expect(after.seededFrom).toEqual({ status: "draft", signature: "sig-after-patch" });
+    expect(after.workCompleted).toBe("Framed levels 3 and 4.");
+    expect(after.photos).toEqual(before.photos);
+  });
+});
+
+/**
+ * The content fingerprint, one input at a time.
+ *
+ * This is what "has the user typed anything?" and "has the server moved?" are BOTH computed from, so every
+ * input it drops turns "keep the user's work" into "destroy it, silently, under a link labelled Resume".
+ * It had no direct test at all: all coverage was incidental, through reconcile scenarios that always also
+ * edited a prose section — so three of its six inputs could be deleted with 1406 tests still green.
+ *
+ * Every case below therefore varies exactly ONE input and holds the rest fixed.
+ */
+describe("the content fingerprint", () => {
+  const BASE: WeeklyReportSignableContent = {
+    workCompleted: "Poured the north slab.",
+    nextWeekLookAhead: "Start unit framing.",
+    issuesConcerns: "Permit still with the city.",
+    completionPercent: "12.5",
+    weatherDelayDays: "2",
+    photos: [
+      { key: "file-a", fileId: "file-a", caption: "North slab" },
+      { key: "file-b", fileId: "file-b", caption: "Balcony mock-up" },
+    ],
+  };
+  const sign = (override: Partial<WeeklyReportSignableContent> = {}) =>
+    weeklyReportContentSignature({ ...BASE, ...override });
+
+  it.each<[string, Partial<WeeklyReportSignableContent>]>([
+    ["work completed", { workCompleted: "Poured the north slab. Stripped forms Friday." }],
+    // Rewriting only the look-ahead: with this input dropped, the rewrite is thrown away on the next open.
+    ["next week look ahead", { nextWeekLookAhead: "Start unit framing. Roof drain rough-in." }],
+    ["issues and concerns", { issuesConcerns: "Rebar delivery slipped a week." }],
+    ["completion %", { completionPercent: "18" }],
+    ["weather delay days", { weatherDelayDays: "3" }],
+    ["which photos are on the report", { photos: [BASE.photos[0]!] }],
+    // A PM who fixes six captions and changes nothing else. Dropping the caption from the photo tuple
+    // loses all six.
+    [
+      "a caption, with the same photos in the same order",
+      {
+        photos: [BASE.photos[0]!, { ...BASE.photos[1]!, caption: "Balcony mock-up, approved by the architect" }],
+      },
+    ],
+    // Order IS the print order — the sequence the client reads the report in.
+    ["the ORDER of the photos, and nothing else", { photos: [BASE.photos[1]!, BASE.photos[0]!] }],
+  ])("changes when %s changes", (_what, override) => {
+    expect(sign(override)).not.toBe(sign());
+  });
+
+  it.each<[string, Partial<WeeklyReportSignableContent>]>([
+    ["whitespace around a section", { workCompleted: "  Poured the north slab.  " }],
+    // "12.50" and "12.5" are one value, not a phantom edit that raises a conflict prompt.
+    ["a trailing zero on the completion %", { completionPercent: "12.50" }],
+    ["whitespace around a caption", { photos: [BASE.photos[0]!, { ...BASE.photos[1]!, caption: " Balcony mock-up " }] }],
+    // The local list key is only a fallback identity — once a photo has a file id, that is what it is.
+    ["the local list key of a photo that has a file id", { photos: [{ ...BASE.photos[0]!, key: "upload-1" }, BASE.photos[1]!] }],
+  ])("ignores %s", (_what, override) => {
+    expect(sign(override)).toBe(sign());
+  });
+
+  it("tells a blank number from one it cannot parse", () => {
+    // Both are "no value on the wire", but only one of them is something the user typed. Collapsing them
+    // makes a half-typed entry invisible to the freshness check.
+    expect(sign({ completionPercent: "" })).not.toBe(sign({ completionPercent: "abc" }));
+    expect(sign({ weatherDelayDays: "" })).not.toBe(sign({ weatherDelayDays: "half a day" }));
+  });
+
+  it("counts a photo that is still uploading, which has no server identity yet", () => {
+    // An imported photo IS a local edit before the upload gives it a file id, and two different imports
+    // are two different reports.
+    const uploading = { key: "upload-1", fileId: null, caption: "" };
+    expect(sign({ photos: [...BASE.photos, uploading] })).not.toBe(sign());
+    expect(sign({ photos: [uploading] })).not.toBe(
+      sign({ photos: [{ ...uploading, key: "upload-2" }] }),
+    );
+  });
+
+  it("is the same function the draft signature and the empty baseline are built from", () => {
+    // Two implementations of "what does the server hold" versus "what do I hold" would drift on the first
+    // field added, and the symptom would be a conflict prompt on every single open.
+    const draft = newDraft({
+      workCompleted: BASE.workCompleted,
+      nextWeekLookAhead: BASE.nextWeekLookAhead,
+      issuesConcerns: BASE.issuesConcerns,
+      completionPercent: BASE.completionPercent,
+      weatherDelayDays: BASE.weatherDelayDays,
+      photos: [
+        galleryPhoto("file-a", { caption: "North slab" }),
+        galleryPhoto("file-b", { caption: "Balcony mock-up" }),
+      ],
+    });
+    expect(weeklyReportDraftSignature(draft)).toBe(sign());
+    // A brand-new local draft is, by construction, the empty report `POST /reports` leaves behind — which
+    // is what makes "this draft has never been near the server" answerable at all.
+    expect(weeklyReportDraftSignature(newDraft())).toBe(WEEKLY_REPORT_EMPTY_SIGNATURE);
   });
 });
 

@@ -291,6 +291,17 @@ export type WeeklyReportDraftAction =
    * a row it ADOPTED is not, and the difference is what every later freshness check reads.
    */
   | { type: "setReportId"; reportId: string; seededFrom?: WeeklyReportSeedState | null }
+  /**
+   * Re-stamp the provenance from a write the SERVER acknowledged, leaving the content alone.
+   *
+   * Submit is three requests and only the last one files the report, so the middle of that sequence is a
+   * state the phone regularly lives in: the PATCH lands and the photo PUT does not, or both land and the
+   * transition does not. Without re-stamping, `seededFrom` still describes the row as it was BEFORE the
+   * submit, so the next open sees "the server moved" and "I have local edits" and raises a two-way
+   * conflict dialog naming a colleague who does not exist — whose destructive button then drops the
+   * photos this phone had just successfully uploaded.
+   */
+  | { type: "setSeededFrom"; seededFrom: WeeklyReportSeedState | null }
   /** The server moved the report; record it so the final button stops asking for a transition it made. */
   | { type: "setServerStatus"; status: WeeklyReportStatusValue }
   /** Arm (or disarm) the "I fired this transition and never heard back" marker. */
@@ -391,6 +402,8 @@ export function weeklyReportDraftReducer(
         // `undefined` means "leave the provenance alone"; an explicit null clears it.
         seededFrom: action.seededFrom === undefined ? draft.seededFrom : action.seededFrom,
       };
+    case "setSeededFrom":
+      return { ...draft, seededFrom: action.seededFrom };
     case "setServerStatus":
       return { ...draft, serverStatus: action.status };
     case "setPendingTransition":

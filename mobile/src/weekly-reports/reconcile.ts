@@ -43,9 +43,24 @@ export interface WeeklyReportLocalState {
   signature: string;
 }
 
+/**
+ * WHY a door refused, which is not a presentation detail.
+ *
+ *   unwritable   → the server will reject every write this user could make (sent, or approved and they
+ *                  are not the PM). Opening the local copy read-only is therefore SAFE: the wizard can
+ *                  render it and the text can be copied out, and the worst a mistaken Submit can do is
+ *                  earn a 403 that changes nothing.
+ *   bounced-back → a review door onto a report sent back to the superintendent. The PM still has
+ *                  `canEdit` here, so opening anything is NOT safe: the final tap PATCHes content and
+ *                  REPLACES the photo set before the illegal draft → approved 409s, and those mutations
+ *                  stick. There is also no lockout to relieve — the project card offers the same week in
+ *                  AUTHOR mode, which this gate deliberately allows.
+ */
+export type WeeklyReportRefusalReason = "unwritable" | "bounced-back";
+
 export type WeeklyReportReconciliation =
   /** The report cannot be acted on from this door at all — nothing is opened. */
-  | { kind: "refuse"; title: string; message: string }
+  | { kind: "refuse"; title: string; message: string; reason: WeeklyReportRefusalReason }
   /** Take the server's copy. Safe: the local draft holds nothing the user has not already seen. */
   | { kind: "reseed" }
   /** Open the local draft as it stands, re-stamped with the server state it has now been shown. */
@@ -81,15 +96,17 @@ export function weeklyReportOpenRefusal(input: {
   mode: "author" | "review";
   status: WeeklyReportStatusValue;
   permissions: { canEdit: boolean; canApprove: boolean };
-}): { title: string; message: string } | null {
+}): { title: string; message: string; reason: WeeklyReportRefusalReason } | null {
   if (!input.permissions.canEdit) {
     return {
+      reason: "unwritable",
       title: "This report has moved on",
       message: "It has already been sent, or somebody else reviewed it. Pull down to refresh.",
     };
   }
   if (input.mode === "review" && input.status === "draft" && !input.permissions.canApprove) {
     return {
+      reason: "bounced-back",
       title: "This report has moved on",
       message: "It went back to the superintendent for changes. Pull down to refresh.",
     };
@@ -195,16 +212,43 @@ export function weeklyReportWeekRowIsUntouched(server: {
 }
 
 /**
+ * Why the week could not be adopted, which is also which sentence the user gets.
+ *
+ *   has-work   → the hub names that week's row and it has content on it. Reconciling is a real next step:
+ *                the week is on screen and opening it asks which version to keep.
+ *   unreadable → the hub names the row, but THIS attempt could not read it. Same next step, different
+ *                cause, so the copy says "could not read" rather than implying a choice is waiting.
+ *   unlisted   → the hub does not name that week's row AT ALL, and there is therefore no button anywhere
+ *                to send anybody to. `weeklyReportServerReportId` resolves only the current week and the
+ *                capped `outstandingWeekReportIds` map, and the server drops a past week from that map the
+ *                moment its report moves past `draft` — which is exactly what has just happened here. The
+ *                previous copy told these users to "pull down to refresh, then open that week", which
+ *                refreshes into the same screen with nothing on it to tap.
+ */
+export type WeeklyReportWeekTakenOutcome = "has-work" | "unreadable" | "unlisted";
+
+/**
  * What to tell somebody whose week was started elsewhere and cannot be adopted on the spot.
  *
  * Says the three things the old verbatim 409 did not: what happened, that nothing they typed has left the
- * phone, and where the way forward is. `reachable` distinguishes "that row exists and has work on it, go
- * and choose" from "this phone could not even read it, go and refresh".
+ * phone, and where the way forward actually is — which is NOT the same place in all three cases, and
+ * naming a route the hub does not render is how the previous copy dead-ended people.
  */
-export function weeklyReportWeekTakenMessage(weekLabel: string, reachable: boolean): string {
-  return reachable
-    ? `The week of ${weekLabel} was already started on another device and has work on it. Nothing you typed here has been sent yet. Go back to Reports, pull down to refresh, then open that week — you will be asked which version to keep.`
-    : `The week of ${weekLabel} already has a report, started on another device, and this phone could not read it. Nothing you typed here has been sent yet. Go back to Reports, pull down to refresh, then open that week.`;
+export function weeklyReportWeekTakenMessage(
+  weekLabel: string,
+  outcome: WeeklyReportWeekTakenOutcome,
+): string {
+  const unsent = "Nothing you typed here has been sent yet.";
+  switch (outcome) {
+    case "has-work":
+      return `The week of ${weekLabel} was already started on another device and has work on it. ${unsent} Go back to Reports, pull down to refresh, then open that week — you will be asked which version to keep.`;
+    case "unreadable":
+      return `The week of ${weekLabel} already has a report, started on another device, and this phone could not read it. ${unsent} Go back to Reports, pull down to refresh, then open that week.`;
+    default:
+      // NO "open that week": there is nothing to open. Points at the two places the report can actually be
+      // seen, and says the copy on this phone is still here, because Discard is the only control left.
+      return `The week of ${weekLabel} was already reported from another device, and this phone cannot open that report from Reports. ${unsent} What you wrote is still on this phone — check the weekly report board in the CRM, or with whoever filed it, before you discard it.`;
+  }
 }
 
 /**

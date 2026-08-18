@@ -35,17 +35,12 @@ import { uploadCapture } from "../../../../src/capture/upload";
 import { getLiveGps } from "../../../../src/capture/metadata";
 import { formatDictationAsBullets } from "../../../../src/dictation/bullets";
 import { retryWeeklyReportPhotoUploads } from "../../../../src/weekly-reports/photo-import";
-import {
-  transitionWeeklyReportIdempotently,
-  weeklyReportTransitionOutcomeUnknown,
-} from "../../../../src/weekly-reports/transition";
 import { weeklyReportServerReportId } from "../../../../src/weekly-reports/hub";
+import { isWeeklyReportWeekTakenError } from "../../../../src/weekly-reports/reconcile";
 import {
-  WeeklyReportWeekTakenError,
-  isWeeklyReportWeekTakenError,
-  weeklyReportWeekRowIsUntouched,
-  weeklyReportWeekTakenMessage,
-} from "../../../../src/weekly-reports/reconcile";
+  adoptWeeklyReportWeekRow,
+  runWeeklyReportSubmit,
+} from "../../../../src/weekly-reports/submit";
 import {
   MAX_WEEKLY_REPORT_CAPTION_CHARS,
   MAX_WEEKLY_REPORT_PHOTOS,
@@ -56,7 +51,6 @@ import {
   weeklyReportDraftPendingUploads,
   weeklyReportDraftReducer,
   weeklyReportDraftToPatch,
-  weeklyReportDraftToPhotoPayload,
   weeklyReportPhotoPreviewUri,
   weeklyReportPickerCandidates,
   weeklyReportSeedStateFromDetail,
@@ -257,46 +251,31 @@ function Wizard({
    *
    * Adopting it is the only way forward: without this the create 409s identically on every retry, the
    * wizard has no path to that row, and everything the super typed here dies with a Discard whose copy
-   * never says so.
-   *
-   * Adoption is silent only while the existing row is UNTOUCHED, which is the ordinary case — the row is
-   * created empty on the photos step and stays empty until somebody submits, so there is nothing on it to
-   * lose. A row that already has content is somebody's writing, and blindly PATCHing this phone's copy
-   * over it is the same silent revert being fixed elsewhere in this file; that case is handed back with an
-   * explanation and a real next step (the hub reconciles it and offers the choice).
+   * never says so. The rule — and which of the three sentences the user gets — lives in submit.ts; this
+   * only supplies the two reads and the dispatch.
    */
-  const adoptExistingWeekRow = useCallback(async (): Promise<string> => {
-    const weekLabel = formatWeekOf(draft.weekOf);
-    // The assignment payload already names the row for every week this hub can open — the current week's
-    // id, plus `outstandingWeekReportIds` for the missed ones, which is exactly what a week sitting at
-    // `draft` on another device looks like. No new endpoint needed.
-    let existingId: string | null = null;
-    try {
-      const assignments = await getWeeklyReportAssignments(fetcher);
-      const project = assignments.projects.find(
-        (candidate) => candidate.weeklyReportProjectId === draft.weeklyReportProjectId,
-      );
-      existingId = project ? weeklyReportServerReportId(project, draft.weekOf) : null;
-    } catch {
-      existingId = null;
-    }
-    if (existingId) {
-      try {
-        const detail = await getWeeklyReport(fetcher, existingId);
-        const seededFrom = weeklyReportSeedStateFromDetail(detail.report);
-        if (weeklyReportWeekRowIsUntouched(seededFrom)) {
-          dispatch({ type: "setReportId", reportId: existingId, seededFrom });
-          return existingId;
-        }
-        throw new WeeklyReportWeekTakenError(weeklyReportWeekTakenMessage(weekLabel, true));
-      } catch (error) {
-        if (error instanceof WeeklyReportWeekTakenError) throw error;
-        // The row is there and this phone could not read it. The 409 already proved the week is taken, so
-        // that — not "check your connection" — is the useful thing to say.
-      }
-    }
-    throw new WeeklyReportWeekTakenError(weeklyReportWeekTakenMessage(weekLabel, false));
-  }, [draft.weekOf, draft.weeklyReportProjectId, fetcher]);
+  const adoptExistingWeekRow = useCallback(
+    (): Promise<string> =>
+      adoptWeeklyReportWeekRow(
+        { weekLabel: formatWeekOf(draft.weekOf) },
+        {
+          // The assignment payload already names the row for every week this hub can OPEN — the current
+          // week's id, plus `outstandingWeekReportIds` for the missed ones. No new endpoint needed, and
+          // "the hub does not name it" is exactly the case whose copy must not point at the hub.
+          findServerReportId: async () => {
+            const assignments = await getWeeklyReportAssignments(fetcher);
+            const project = assignments.projects.find(
+              (candidate) => candidate.weeklyReportProjectId === draft.weeklyReportProjectId,
+            );
+            return project ? weeklyReportServerReportId(project, draft.weekOf) : null;
+          },
+          read: async (reportId) => (await getWeeklyReport(fetcher, reportId)).report,
+          adopt: (reportId, seededFrom) =>
+            dispatch({ type: "setReportId", reportId, seededFrom }),
+        },
+      ),
+    [draft.weekOf, draft.weeklyReportProjectId, fetcher],
+  );
 
   /**
    * Make sure a server report exists, returning its id.
@@ -626,59 +605,28 @@ function Wizard({
     setSubmitting(true);
     setNotice(null);
     try {
-      const reportId = await ensureReport();
-      // Content, then photos, then the transition — in that order so the PM's queue never receives a
-      // report whose text or photo set is only half-written. Every step is retryable: the local draft is
-      // untouched until the transition succeeds.
-      //
-      // This sequence RELIES on the server granting edit rights to everyone it grants the submit to. It
-      // did not: `canEditWeeklyReport` recognised only the current assignments while `canTransitionAs`
-      // honoured `authored_by`, so a superintendent reassigned off the project mid-draft was shown
-      // `canSubmit: true` and then 403'd on this PATCH — with the transition they were entitled to make
-      // never reached, and their locally persisted work permanently unsubmitable. The alignment lives in
-      // reports-service.ts (the author may edit while the report is a DRAFT); if that clause is ever
-      // narrowed, this order has to be revisited with it.
-      await updateWeeklyReport(fetcher, reportId, patch);
-      await replaceWeeklyReportPhotos(fetcher, reportId, weeklyReportDraftToPhotoPayload(draft));
-      // `transitionTo` is null when the report is ALREADY in the state this button would ask for — a PM
-      // fixing a caption on an approved report. The ladder has no self-transition, so asking anyway would
-      // 409 on work that saved perfectly well.
-      if (finalAction.transitionTo) {
-        const to = finalAction.transitionTo;
-        // Read BEFORE the marker is armed, so it answers "did a PREVIOUS attempt of mine go unanswered?"
-        // rather than "did I just arm this?". That distinction is the whole guard: reaching the target
-        // status is only evidence of MY commit if I have a move outstanding. Without it, a report somebody
-        // else advanced answers 409, the re-read confirms the target, and a submit that reverted their
-        // work reports success.
-        const mayHaveCommitted = draft.pendingTransitionTo === to;
-        if (!mayHaveCommitted) await markPendingTransition(to);
-        try {
-          const outcome = await transitionWeeklyReportIdempotently({
-            to,
-            mayHaveCommitted,
-            transition: async () => {
-              const { report } = await transitionWeeklyReport(fetcher, reportId, to);
-              return report.status;
-            },
-            // Only reached on a 409. A transition that COMMITTED and then lost its response leaves the
-            // phone certain it failed: `serverStatus` was never recorded, so the retry asks for the same
-            // move and is refused for the rest of the draft's life. Asking the server where the report
-            // actually is turns that into the success it was.
-            readStatus: async () => (await getWeeklyReport(fetcher, reportId)).report.status,
-          });
-          // Record where the report landed BEFORE anything that can still fail. Everything after this
-          // point is local cleanup, and if the disk delete throws the user is left holding a draft whose
-          // report has already moved. This covers the IN-SESSION retry — the reducer state survives it —
-          // and the 409 recovery above covers the case it cannot: a phone restarted, or a draft reloaded
-          // from disk, after a response was lost in transit.
-          dispatch({ type: "setServerStatus", status: outcome.status });
-        } catch (error) {
-          // Disarm on a DEFINITE refusal. The move did not land, so a later 409 can only be somebody
-          // else's — and leaving the marker armed would let that be read as a lost reply of my own.
-          if (!weeklyReportTransitionOutcomeUnknown(error)) await markPendingTransition(null);
-          throw error;
-        }
-      }
+      // The ordering, the re-stamping and the lost-reply guard all live in submit.ts. `transitionTo` is
+      // null when the report is ALREADY in the state this button would ask for — a PM fixing a caption on
+      // an approved report — because the ladder has no self-transition and asking anyway would 409 on work
+      // that saved perfectly well.
+      await runWeeklyReportSubmit(
+        { draft, patch, transitionTo: finalAction.transitionTo },
+        {
+          ensureReport,
+          updateContent: async (reportId, body) =>
+            (await updateWeeklyReport(fetcher, reportId, body)).report,
+          replacePhotos: async (reportId, photos) =>
+            (await replaceWeeklyReportPhotos(fetcher, reportId, photos)).report,
+          // Each acknowledged write moves the baseline the NEXT open reconciles against. Autosaved with
+          // the rest of the draft by the effect above.
+          recordSeed: (seededFrom) => dispatch({ type: "setSeededFrom", seededFrom }),
+          markPendingTransition,
+          transition: async (reportId, to) =>
+            (await transitionWeeklyReport(fetcher, reportId, to)).report.status,
+          readStatus: async (reportId) => (await getWeeklyReport(fetcher, reportId)).report.status,
+          recordStatus: (status) => dispatch({ type: "setServerStatus", status }),
+        },
+      );
 
       // Stop autosaves BEFORE the delete, or a save already queued behind this one resurrects the draft.
       finalized.current = true;

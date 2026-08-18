@@ -11,7 +11,6 @@
 // the screen's use of these parts breaks these too.
 
 import {
-  weeklyReportDraftFromDetail,
   weeklyReportDraftReducer,
   weeklyReportDraftSignature,
   weeklyReportSeedStateFromDetail,
@@ -28,64 +27,7 @@ import {
   weeklyReportWeekTakenMessage,
 } from "../reconcile";
 
-const ALL_ALLOWED = { canEdit: true, canApprove: true };
-
-function serverReport(overrides: Partial<WeeklyReportSeedableReport> = {}): WeeklyReportSeedableReport {
-  return {
-    id: "rep-1",
-    weeklyReportProjectId: "wrp-1",
-    dealId: "deal-1",
-    weekOf: "2026-08-13",
-    status: "pending_review",
-    workCompleted: "Poured the north slab.",
-    nextWeekLookAhead: "Start unit framing.",
-    issuesConcerns: null,
-    completionPercent: 12.5,
-    weatherDelayDays: 2,
-    photos: [
-      {
-        fileId: "file-a",
-        caption: "North slab",
-        originalDescription: "slab",
-        takenAt: "2026-08-11T15:00:00Z",
-        thumbnailUrl: "https://example.test/a.jpg?sig=one",
-      },
-      {
-        fileId: "file-b",
-        caption: "Balcony mock-up",
-        originalDescription: null,
-        takenAt: "2026-08-12T15:00:00Z",
-        thumbnailUrl: "https://example.test/b.jpg?sig=one",
-      },
-    ],
-    ...overrides,
-  };
-}
-
-/** An empty row, exactly as `POST /reports` leaves it when a device reaches the photos step. */
-function emptyRow(overrides: Partial<WeeklyReportSeedableReport> = {}): WeeklyReportSeedableReport {
-  return serverReport({
-    status: "draft",
-    workCompleted: null,
-    nextWeekLookAhead: null,
-    issuesConcerns: null,
-    completionPercent: null,
-    weatherDelayDays: null,
-    photos: [],
-    ...overrides,
-  });
-}
-
-function seed(report: WeeklyReportSeedableReport, mode: "author" | "review", id = "draft-1") {
-  return weeklyReportDraftFromDetail({
-    id,
-    clientSubmissionId: `sub-${id}`,
-    projectName: "4123 Cedar Springs",
-    mode,
-    report,
-    now: 1_000,
-  });
-}
+import { ALL_ALLOWED, emptyRow, seed, serverReport } from "./fixtures";
 
 /**
  * One tap on a door: read the report, sign both sides, ask for a decision. Mirrors `openReconciled` in
@@ -142,6 +84,53 @@ describe("a PM who edits a review draft and comes back to it", () => {
     // And the assertion means something: reseeding really would have destroyed both edits.
     expect(resumed.seeded.issuesConcerns).toBe("");
     expect(resumed.seeded.photos[1]!.caption).toBe("Balcony mock-up");
+  });
+
+  it("keeps a rewrite that touched NOTHING but the captions", () => {
+    // The same finding, ISOLATED. The test above edits Issues *and* a caption, so it passes just as
+    // happily with the caption half of the fingerprint gone — and with that half gone, a PM who fixes six
+    // captions and nothing else has all six thrown away by the next Resume, silently, under the link that
+    // promised to bring the work back. Vary one input at a time or the assertion is about the other one.
+    const report = serverReport();
+    const draft = weeklyReportDraftReducer(openDoor({ mode: "review", report, local: null }).seeded, {
+      type: "setPhotoCaption",
+      key: "file-b",
+      caption: "Balcony mock-up, approved by the architect",
+    });
+    const resumed = openDoor({ mode: "review", report, local: draft });
+    expect(resumed.decision.kind).toBe("keep-local");
+    expect(resumed.seeded.photos[1]!.caption).toBe("Balcony mock-up");
+  });
+
+  it("keeps a reordering of the photos, which is the order they PRINT in", () => {
+    // Same shape again: the only thing that changed is the arrangement, which is what the client sees.
+    const report = serverReport();
+    const draft = weeklyReportDraftReducer(openDoor({ mode: "review", report, local: null }).seeded, {
+      type: "movePhoto",
+      key: "file-b",
+      direction: -1,
+    });
+    expect(draft.photos.map((photo) => photo.fileId)).toEqual(["file-b", "file-a"]);
+    expect(openDoor({ mode: "review", report, local: draft }).decision.kind).toBe("keep-local");
+  });
+
+  it("asks when the STATUS moved under an edit, though the words on the report did not", () => {
+    // `serverMoved` is "the signature differs OR the status differs", and only the first half was pinned.
+    // Without the second: this PM edits Issues locally and backs out; another PM approves the report
+    // exactly as it stands; this one reopens, is told nothing, keeps editing and keeps saving — over an
+    // APPROVED report. The review gate, defeated by a draft nobody knew was stale.
+    const report = serverReport({ status: "pending_review" });
+    const edited = weeklyReportDraftReducer(openDoor({ mode: "review", report, local: null }).seeded, {
+      type: "setSection",
+      key: "issuesConcerns",
+      value: "Client wants the balcony detail revisited.",
+    });
+    const approved = serverReport({ status: "approved" });
+    // The content really is identical, so the signature half of the check sees nothing whatsoever.
+    expect(weeklyReportSeedStateFromDetail(approved).signature).toBe(
+      weeklyReportSeedStateFromDetail(report).signature,
+    );
+    expect(openDoor({ mode: "review", report: approved, local: edited }).decision.kind).toBe("conflict");
   });
 
   it("reseeds silently when the PM changed nothing, however far the server has moved", () => {
@@ -318,6 +307,22 @@ describe("the refusal gate, applied by every door", () => {
       weeklyReportOpenRefusal({ mode: "author", status: "draft", permissions: { canEdit: true, canApprove: false } }),
     ).toBeNull();
   });
+
+  it("does NOT refuse a draft report to somebody who can actually approve it", () => {
+    // The `&& !canApprove` half of the review+draft clause, pinned deliberately rather than deleted as
+    // dead code. It IS unreachable through today's API — `canTransitionWeeklyReport("draft", "approved")`
+    // is false for everyone, so `canApprove` is always false at `draft` — but the refusal it guards says
+    // "it went back to the superintendent for changes", i.e. there is nothing here you can complete. If
+    // the ladder ever grows a draft -> approved move that sentence stops being true, and the gate has to
+    // stop firing rather than lock the one person who could finish the review out of it.
+    expect(
+      weeklyReportOpenRefusal({
+        mode: "review",
+        status: "draft",
+        permissions: { canEdit: true, canApprove: true },
+      }),
+    ).toBeNull();
+  });
 });
 
 describe("a week that got a report row from another device", () => {
@@ -434,15 +439,28 @@ describe("a week that got a report row from another device", () => {
     ).toBeNull();
   });
 
-  it("says what happened, that nothing has been sent, and where to go next", () => {
+  it("says what happened, that nothing has been sent, and a next step that EXISTS", () => {
     // The old surface was the raw server sentence on every retry, with a Discard dialog that never said
     // the text was unrecoverable.
-    for (const reachable of [true, false]) {
-      const message = weeklyReportWeekTakenMessage("Aug 13", reachable);
+    for (const outcome of ["has-work", "unreadable", "unlisted"] as const) {
+      const message = weeklyReportWeekTakenMessage("Aug 13", outcome);
       expect(message).toContain("Aug 13");
       expect(message).toMatch(/another device/i);
       expect(message).toMatch(/nothing you typed here has been sent/i);
-      expect(message).toMatch(/reports/i);
     }
+
+    // The two cases where the hub DOES name the row send the user to it…
+    expect(weeklyReportWeekTakenMessage("Aug 13", "has-work")).toMatch(/open that week/i);
+    expect(weeklyReportWeekTakenMessage("Aug 13", "unreadable")).toMatch(/open that week/i);
+
+    // …and the case where it does not must not, because there is no button to send them to.
+    // `weeklyReportServerReportId` resolves the current week and the capped outstanding map and nothing
+    // else, and the server drops a past week from that map the moment its report moves past `draft` — so
+    // "pull down to refresh, then open that week" refreshed into a screen with no such week on it. The
+    // identical dead end the raw 409 was, with wording that promised a route.
+    const unlisted = weeklyReportWeekTakenMessage("Aug 13", "unlisted");
+    expect(unlisted).not.toMatch(/open that week/i);
+    expect(unlisted).not.toMatch(/pull down to refresh/i);
+    expect(unlisted).toMatch(/still on this phone/i);
   });
 });

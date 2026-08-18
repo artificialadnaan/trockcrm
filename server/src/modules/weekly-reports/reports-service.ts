@@ -512,6 +512,14 @@ export async function updateWeeklyReportContent(
   // authorise an edit to an `approved` report; if a concurrent request sends it in between, an
   // unconditional write lands on a report the client has already received — breaking the immutability
   // guarantee and making the public page differ from the PDF that was generated from it.
+  //
+  // KNOWN GAP (not closed here): this guards the STATUS, not the CONTENT. Two people editing the same
+  // report at the same status are last-write-wins with no 409 and no prompt — a PM opens a review draft,
+  // the superintendent edits the same report from their phone, the PM taps Approve, and this UPDATE and
+  // the whole-set photo PUT below both succeed over work the PM never saw. The app reconciles at OPEN
+  // time (mobile/src/weekly-reports/door.ts) and carries no precondition on the write, so the window is
+  // "since the draft was opened". Closing it needs an If-Match / `updated_at` precondition on this
+  // statement and on `replaceWeeklyReportPhotos`, plus the client sending what it last read.
   const result = await client.query(
     `UPDATE weekly_reports SET ${assignments.join(", ")}, updated_at = now()
       WHERE id = $${idParam}::uuid AND is_active AND status = $${params.length}
@@ -661,7 +669,9 @@ export async function replaceWeeklyReportPhotos(
   }
   // Same concurrency guard as the content path: the permission check ran against a status read in an
   // earlier statement, and a photo swap landing on an already-sent report would make the client's page
-  // disagree with the PDF they were emailed.
+  // disagree with the PDF they were emailed. It carries the same KNOWN GAP — see the note on the content
+  // UPDATE above: a concurrent replacement AT THE SAME STATUS overwrites silently, because this is a
+  // whole-set PUT with no precondition on what the caller last read.
   const stillOpen = await client.query(
     `UPDATE weekly_reports SET updated_at = now()
       WHERE id = $1::uuid AND is_active AND status = $2

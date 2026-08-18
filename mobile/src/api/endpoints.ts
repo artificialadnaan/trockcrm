@@ -268,8 +268,12 @@ export const createWeeklyReport = (
   body: { clientSubmissionId: string; weeklyReportProjectId: string; weekOf: string },
 ) => f<WeeklyReportResponse>("/field/weekly-reports/reports", { method: "POST", body });
 
-export const getWeeklyReport = (f: Fetcher, id: string) =>
-  f<WeeklyReportDetailResponse>(`/field/weekly-reports/reports/${id}`);
+// `timeoutMs` is worth overriding on the hub's "Resume": that read sits between the user's tap and
+// anything happening on screen, and the 30s default is half a minute of a stationary button on exactly the
+// one-bar connection this feature is written for. Failing sooner is not a loss — the caller falls back to
+// the local draft.
+export const getWeeklyReport = (f: Fetcher, id: string, timeoutMs?: number) =>
+  f<WeeklyReportDetailResponse>(`/field/weekly-reports/reports/${id}`, timeoutMs ? { timeoutMs } : {});
 
 // PATCH semantics: an omitted key is left alone, an explicit null clears the column. The wizard always
 // sends all five, because the local draft is the authoritative copy of what the user typed.

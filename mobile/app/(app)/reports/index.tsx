@@ -1,5 +1,14 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from "react-native";
+import {
+  ActivityIndicator,
+  Alert,
+  Pressable,
+  RefreshControl,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import { useQuery } from "@tanstack/react-query";
@@ -12,7 +21,6 @@ import { newClientUploadId, uploadOwnerKey } from "../../../src/capture/upload-q
 import { newSubmissionId } from "../../../src/scorecards/ids";
 import {
   createWeeklyReportDraft,
-  weeklyReportDraftFromDetail,
   weeklyReportDraftSectionsFilled,
   weeklyReportDraftSignature,
   type WeeklyReportDraft,
@@ -24,9 +32,11 @@ import {
 } from "../../../src/weekly-reports/draft-store";
 import { weeklyReportOpenTarget } from "../../../src/weekly-reports/hub";
 import {
-  weeklyReportDiscardWarning,
-  weeklyReportReconcile,
-} from "../../../src/weekly-reports/reconcile";
+  WEEKLY_REPORT_DOOR_READ_TIMEOUT_MS,
+  openWeeklyReportDoor,
+  type WeeklyReportDoorChoice,
+} from "../../../src/weekly-reports/door";
+import { weeklyReportDiscardWarning } from "../../../src/weekly-reports/reconcile";
 import {
   formatWeekOf,
   weeklyReportDueLabel,
@@ -210,14 +220,10 @@ export default function ReportsHubScreen() {
    * THE ONE DOOR onto a report the server knows about — the review queue, the project card, the
    * In-progress Resume link, and a local draft whose week turns out to have a row from another device.
    *
-   * Re-reads the report and hands both sides to `weeklyReportReconcile`, which owns the decision. What
-   * this function must not do is guess: reseeding unconditionally is how a PM's un-submitted rewrite of
-   * Issues and six captions disappeared under the very "Resume" link that promised to bring it back, and
-   * opening the local copy unconditionally is how a superintendent's submitted report got reverted to a
-   * PM's older snapshot with every surface reporting success.
-   *
-   * The local copy is used as-is only when the READ fails, so somebody with no signal still sees what
-   * they had rather than being locked out.
+   * Nothing is decided here. `openWeeklyReportDoor` owns the read, the reconciliation and what gets
+   * written; this supplies fetch, disk, navigation and the two dialogs. The decisions used to live inline
+   * in this component, which no test in `mobile/` executes — and this app is not in CI and has no OTA, so
+   * a deleted branch here ships to phones. See door.ts for the three that were silently mutable.
    */
   async function openReconciled(input: {
     reportId: string;
@@ -228,60 +234,85 @@ export default function ReportsHubScreen() {
     if (!ownerKey) return;
     const local =
       (input.localDraftId ? drafts.find((draft) => draft.id === input.localDraftId) : undefined) ??
-      drafts.find((draft) => draft.reportId === input.reportId);
-    try {
-      const detail = await getWeeklyReport(fetcher, input.reportId);
-      const seeded = weeklyReportDraftFromDetail({
-        id: local?.id ?? newClientUploadId(),
-        clientSubmissionId: local?.clientSubmissionId ?? newSubmissionId(),
-        projectName: input.projectName,
-        mode: input.mode,
-        report: detail.report,
-        now: Date.now(),
-      });
-      const serverSeed = { status: detail.report.status, signature: weeklyReportDraftSignature(seeded) };
-      const decision = weeklyReportReconcile({
-        mode: input.mode,
-        server: { ...serverSeed, permissions: detail.permissions },
-        local: local
-          ? { seededFrom: local.seededFrom, signature: weeklyReportDraftSignature(local) }
-          : null,
-      });
+      drafts.find((draft) => draft.reportId === input.reportId) ??
+      null;
+    await openWeeklyReportDoor(
+      { reportId: input.reportId, projectName: input.projectName, mode: input.mode, local },
+      {
+        read: async (reportId) => {
+          const detail = await getWeeklyReport(fetcher, reportId, WEEKLY_REPORT_DOOR_READ_TIMEOUT_MS);
+          return { report: detail.report, permissions: detail.permissions };
+        },
+        newDraftId: newClientUploadId,
+        newClientSubmissionId: newSubmissionId,
+        now: Date.now,
+        commit: commitDraft,
+        open: openDraft,
+        // The second button is the READ PATH. A super whose week somebody else filed and had approved gets
+        // `canEdit: false` here, and with a one-button alert the draft becomes unopenable for good: the
+        // project card says "waiting", so there is no other door, and Discard — which deletes the writing
+        // for ever — is the only working control left.
+        refuse: ({ title, message, localCopy }) =>
+          Alert.alert(
+            title,
+            message,
+            localCopy
+              ? [
+                  { text: "OK", style: "cancel" },
+                  { text: "Open my copy", onPress: () => openDraft(localCopy) },
+                ]
+              : undefined,
+          ),
+        choose: (prompt) =>
+          new Promise<WeeklyReportDoorChoice>((resolve) => {
+            Alert.alert(
+              prompt.title,
+              prompt.message,
+              [
+                { text: "Cancel", style: "cancel", onPress: () => resolve("cancel") },
+                { text: prompt.keepLocalLabel, onPress: () => resolve("keep-local") },
+                {
+                  text: prompt.useServerLabel,
+                  style: "destructive",
+                  onPress: () => resolve("use-server"),
+                },
+              ],
+              // Android's back gesture dismisses an alert without firing any button; without this the
+              // promise never settles and the hub's controls stay disabled for the rest of the session.
+              { cancelable: true, onDismiss: () => resolve("cancel") },
+            );
+          }),
+        unavailable: () =>
+          Alert.alert("Couldn’t open that report", "Check your connection and try again."),
+      },
+    );
+  }
 
-      if (decision.kind === "refuse") {
-        Alert.alert(decision.title, decision.message);
-        return;
-      }
-      if (decision.kind === "reseed" || !local) {
-        await commitDraft(seeded);
-        return;
-      }
-      // Keeping the local CONTENT, but taking the server's identity: the draft now names the row it was
-      // reconciled against, knows where that row stands (so the final button asks for the right
-      // transition), and records what it has been shown (so the next open compares against that, not
-      // against a baseline the user has never seen).
-      const kept: WeeklyReportDraft = {
-        ...local,
-        reportId: detail.report.id,
-        mode: input.mode,
-        serverStatus: detail.report.status,
-        seededFrom: serverSeed,
-      };
-      if (decision.kind === "keep-local") {
-        await commitDraft(kept);
-        return;
-      }
-      Alert.alert(decision.title, decision.message, [
-        { text: "Cancel", style: "cancel" },
-        { text: decision.keepLocalLabel, onPress: () => void commitDraft(kept) },
-        { text: decision.useServerLabel, style: "destructive", onPress: () => void commitDraft(seeded) },
-      ]);
-    } catch {
-      if (local) {
-        openDraft(local);
-        return;
-      }
-      Alert.alert("Couldn’t open that report", "Check your connection and try again.");
+  /**
+   * The In-progress "Resume" row.
+   *
+   * Guarded and marked busy like every other control on this screen. Any draft that names a server row now
+   * does a read first, and an untapped-looking button for as long as that takes is how one tap becomes
+   * four — four concurrent reads, four writes to the same draft id, and up to four stacked conflict
+   * dialogs answered in an order nobody chose.
+   */
+  async function resumeDraft(draft: WeeklyReportDraft) {
+    if (!draft.reportId) {
+      // Purely local: no row exists anywhere, so there is nothing to reconcile and nothing to wait for.
+      openDraft(draft);
+      return;
+    }
+    if (opening) return;
+    setOpening(draft.id);
+    try {
+      await openReconciled({
+        reportId: draft.reportId,
+        projectName: draft.projectName,
+        mode: draft.mode,
+        localDraftId: draft.id,
+      });
+    } finally {
+      setOpening(null);
     }
   }
 
@@ -396,21 +427,14 @@ export default function ReportsHubScreen() {
             {drafts.map((draft) => (
               <View key={draft.id} style={styles.card}>
                 <Pressable
-                  onPress={() =>
-                    // Same rule as the card, and NOT keyed on mode: any draft that names a server row is
-                    // reconciled against it before it opens. Only a draft the server has never seen goes
-                    // straight to disk.
-                    draft.reportId
-                      ? void openReconciled({
-                          reportId: draft.reportId,
-                          projectName: draft.projectName,
-                          mode: draft.mode,
-                          localDraftId: draft.id,
-                        })
-                      : openDraft(draft)
-                  }
-                  style={styles.cardBody}
+                  // Same rule as the card, and NOT keyed on mode: any draft that names a server row is
+                  // reconciled against it before it opens. Only a draft the server has never seen goes
+                  // straight to disk.
+                  onPress={() => void resumeDraft(draft)}
+                  disabled={opening !== null}
+                  style={({ pressed }) => [styles.cardBody, pressed && { opacity: 0.7 }]}
                   accessibilityRole="button"
+                  accessibilityState={{ busy: opening === draft.id, disabled: opening !== null }}
                   accessibilityLabel={`Resume the weekly report for ${draft.projectName}, week of ${formatWeekOf(draft.weekOf)}`}
                 >
                   <View style={{ flex: 1 }}>
@@ -423,11 +447,18 @@ export default function ReportsHubScreen() {
                       {draft.photos.length === 1 ? "" : "s"}
                     </Text>
                   </View>
-                  <Text style={styles.resume}>Resume</Text>
+                  {opening === draft.id ? (
+                    <ActivityIndicator size="small" color={theme.color.brandRed} />
+                  ) : (
+                    <Text style={styles.resume}>Resume</Text>
+                  )}
                 </Pressable>
                 <Button
                   title="Discard"
                   variant="ghost"
+                  // Not while a read for this list is in flight: the destructive control must not be the
+                  // one thing that still responds while Resume is waiting on a signal.
+                  disabled={opening !== null}
                   onPress={() => confirmDiscard(draft)}
                   style={styles.discardButton}
                 />
