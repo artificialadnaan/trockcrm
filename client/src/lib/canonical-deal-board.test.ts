@@ -1432,3 +1432,120 @@ describe("column totalCount — ABSENT is not ZERO and not the ACTIVE count", ()
     expect(opp.count).toBe(45);
   });
 })
+
+describe("the card cap lives on the CANONICAL column, not the raw stage", () => {
+  /**
+   * The server caps per RAW stage, but a rendered column is a canonical FAMILY. On this stage config
+   * four of the six non-terminal columns merge two raw stages each, so a "50-card" column could render
+   * 100 and the "Showing N of M" notice described something the cap never did.
+   */
+  const card = (id: string, stageId: string, createdAt: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    stageId,
+    workflowRoute: "normal",
+    isBidBoardOwned: false,
+    bidBoardStageSlug: null,
+    readOnlySyncedAt: null,
+    rfpApprovalStatus: null,
+    rfpOverrideDecision: null,
+    rfpOverrideState: null,
+    bidEstimate: "10000",
+    ddEstimate: null,
+    awardedAmount: null,
+    onHold: false,
+    createdAt,
+    ...extra,
+  });
+
+  // estimating <- estimating + estimate_in_progress: two raw stages, one rendered column.
+  const mergedStages = [
+    { id: "est", name: "Estimating", slug: "estimating", workflowFamily: "standard_deal", isTerminal: false },
+    { id: "eip", name: "Estimate in Progress", slug: "estimate_in_progress", workflowFamily: "standard_deal", isTerminal: false },
+  ] as any;
+
+  const mergedRawColumns = () =>
+    [
+      {
+        stage: mergedStages[0],
+        count: 40,
+        totalCount: 45,
+        totalValue: 400000,
+        cards: Array.from({ length: 30 }, (_, i) =>
+          card(`est-${i}`, "est", `2026-05-${String(i + 1).padStart(2, "0")}T00:00:00.000Z`)
+        ),
+      },
+      {
+        stage: mergedStages[1],
+        count: 20,
+        totalCount: 25,
+        totalValue: 200000,
+        cards: Array.from({ length: 30 }, (_, i) =>
+          card(`eip-${i}`, "eip", `2026-04-${String(i + 1).padStart(2, "0")}T00:00:00.000Z`)
+        ),
+      },
+    ] as any;
+
+  it("caps the MERGED column at the limit, not each raw stage separately", () => {
+    const columns = buildCanonicalDealBoardColumns(mergedRawColumns(), mergedStages, null, undefined, 50);
+    const estimating = columns.find((col) => col.stage.slug === "estimating")!;
+    // 30 + 30 raw cards merge into one rendered column; without a canonical cap it rendered 60.
+    expect(estimating.cards).toHaveLength(50);
+  });
+
+  it("keeps the newest live deals when it caps, matching the server's own card order", () => {
+    const columns = buildCanonicalDealBoardColumns(mergedRawColumns(), mergedStages, null, undefined, 50);
+    const estimating = columns.find((col) => col.stage.slug === "estimating")!;
+    // Server order is tier, then created_at DESC — so May (est-*) outranks April (eip-*).
+    expect(estimating.cards[0]!.id).toBe("est-29");
+    expect(estimating.cards.filter((d) => d.id.startsWith("est-"))).toHaveLength(30);
+    expect(estimating.cards.filter((d) => d.id.startsWith("eip-"))).toHaveLength(20);
+  });
+
+  it("sinks on-hold / zero-value cards below live ones when capping, like the server's liveness tier", () => {
+    const raw = mergedRawColumns();
+    // Make the whole NEWER raw stage parked: it must lose to the older-but-live one.
+    raw[0].cards = raw[0].cards.map((c: any) => ({ ...c, onHold: true }));
+    const columns = buildCanonicalDealBoardColumns(raw, mergedStages, null, undefined, 50);
+    const estimating = columns.find((col) => col.stage.slug === "estimating")!;
+    expect(estimating.cards).toHaveLength(50);
+    // All 30 live (April) cards survive; only 20 of the parked (May) ones do.
+    expect(estimating.cards.filter((d) => d.id.startsWith("eip-"))).toHaveLength(30);
+    expect(estimating.cards.filter((d) => d.id.startsWith("est-"))).toHaveLength(20);
+    expect(estimating.cards[0]!.onHold).toBe(false);
+  });
+
+  it("uses the MERGED total as the affordance denominator, so it describes the capped column", () => {
+    const columns = buildCanonicalDealBoardColumns(mergedRawColumns(), mergedStages, null, undefined, 50);
+    const estimating = columns.find((col) => col.stage.slug === "estimating")!;
+    // 45 + 25 across the two raw stages — not one stage's 45, which would understate the column.
+    expect(estimating.totalCount).toBe(70);
+    expect(estimating.drilldownTotalCount).toBe(70);
+    expect(estimating.count).toBe(60);
+  });
+
+  it("leaves a single-source column's server ordering untouched (no re-sort, no divergence)", () => {
+    const single = [
+      {
+        stage: mergedStages[0],
+        count: 3,
+        totalCount: 3,
+        totalValue: 30000,
+        // Deliberately NOT in the server's order; an under-cap column must be passed through verbatim.
+        cards: [
+          card("a", "est", "2026-01-01T00:00:00.000Z"),
+          card("b", "est", "2026-06-01T00:00:00.000Z"),
+          card("c", "est", "2026-03-01T00:00:00.000Z"),
+        ],
+      },
+    ] as any;
+    const columns = buildCanonicalDealBoardColumns(single, [mergedStages[0]] as any, null, undefined, 50);
+    const estimating = columns.find((col) => col.stage.slug === "estimating")!;
+    expect(estimating.cards.map((d) => d.id)).toEqual(["a", "b", "c"]);
+  });
+
+  it("does not cap at all when no limit is supplied", () => {
+    const columns = buildCanonicalDealBoardColumns(mergedRawColumns(), mergedStages, null, undefined);
+    const estimating = columns.find((col) => col.stage.slug === "estimating")!;
+    expect(estimating.cards).toHaveLength(60);
+  });
+});

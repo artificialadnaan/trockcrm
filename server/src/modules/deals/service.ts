@@ -71,7 +71,10 @@ import { resolveDealCreationPolicy, type DealCreationOrigin } from "./direct-cre
 import { logActivity, type AuditContext } from "../audit/audit-logger.js";
 import { listDealChangeOrders, softDeleteChangeOrderChildren, sumDealChangeOrders } from "./change-order-service.js";
 import { loadRfpVoteDetail, type RfpVoteView } from "./rfp-vote-detail.js";
-import { aliasedPendingRfpBucketCondition } from "./pending-rfp-service.js";
+import {
+  aliasedNotPendingRfpBucketCondition,
+  aliasedPendingRfpBucketCondition,
+} from "./pending-rfp-service.js";
 import { isServiceRfp } from "./rfp-vote-service.js";
 import { computeRfpVoteState } from "@trock-crm/shared/lib/rfpVoteState";
 import {
@@ -4185,6 +4188,29 @@ export async function getDealsForPipeline(
       );
     }
 
+    /**
+     * The ordinary Opportunity column excludes the Pending RFP bucket BEFORE the cap.
+     *
+     * The client lifts those rows into the synthetic column, so fetching them here and letting the
+     * client discard them spent the 50-row slice on cards this column never renders: 50 high-ranked
+     * pending deals left the ordinary Opportunity column EMPTY under a correct header count — the same
+     * "right number, wrong board" shape as the Pending RFP column had from the other direction. They
+     * arrive through their own query (see the preview below), so nothing is lost.
+     *
+     * CARDS ONLY, deliberately. The summary above still counts the whole stage, because the client
+     * partitions those aggregates itself (`opportunity.totalCount - pendingRfp.totalCount`) and that
+     * arithmetic is also what keeps an older API's carve-out fallback correct. So the cards describe the
+     * RENDERED column and the summary describes the STAGE — and the affordance's denominator is the
+     * partitioned figure, which is the population the cards were drawn from.
+     */
+    const isOpportunityColumn =
+      !stage.isTerminal &&
+      normalizeDealBoardStageSlug(stage.slug, dealRouteForStageFamily(stage.workflowFamily)) ===
+        "opportunity";
+    const cardsWhere = isOpportunityColumn
+      ? and(where, aliasedNotPendingRfpBucketCondition("deals"))
+      : where;
+
     const stageDeals = await tenantDb
       .select({
         ...getTableColumns(deals),
@@ -4200,7 +4226,7 @@ export async function getDealsForPipeline(
       .from(deals)
       .leftJoin(companies, eq(companies.id, deals.companyId))
       .leftJoin(users, eq(users.id, deals.assignedRepId))
-      .where(where)
+      .where(cardsWhere)
       .orderBy(...buildPipelineStageCardsOrder(columnEffectiveValue, {
         prioritizeBillingAttention: isWonTerminalStage,
       }))

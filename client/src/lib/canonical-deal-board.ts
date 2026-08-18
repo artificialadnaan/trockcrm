@@ -139,6 +139,43 @@ export function buildCanonicalDealStageIdFamilies(
   return buildCanonicalDealStageFamilies(stages).map((family) => family.ids);
 }
 
+/**
+ * Re-impose the per-column card cap AFTER stage aliases have been merged.
+ *
+ * The server applies its preview limit per RAW stage, but a rendered column is a canonical FAMILY: with
+ * includeDd on this stage config, four of the six non-terminal columns merge two raw stages each
+ * (opportunity <- dd + opportunity; estimating <- estimating + estimate_in_progress;
+ * estimate_under_review and estimate_sent_to_client each <- their service_ alias). A "50-card" column
+ * could therefore render 100, and the cap was not the cap anyone reasoned about. It has to live on the
+ * canonical side, which is the same distinction the repo already draws elsewhere: canonical columns
+ * MERGE aliases, drill-downs query ONE stage.
+ *
+ * Ordering mirrors the server's buildPipelineStageCardsOrder for open columns — liveness tier, then
+ * created_at DESC, then id DESC — so the surviving cards are the ones the server would have returned had
+ * it capped the family itself. It re-sorts ONLY when the merged set actually exceeds the cap, so a
+ * single-source column keeps the server's own ordering byte-for-byte and no divergence is possible
+ * there. (The Won column's billing-attention key is not reproduced: Won emits exactly one raw stage in
+ * responseStages, so it never merges and never reaches this path.)
+ */
+function capMergedColumnCards(cards: Deal[], slug: string, limit: number | undefined): Deal[] {
+  if (limit === undefined || cards.length <= limit) return cards;
+  const createdAtMs = (deal: Deal) => {
+    const parsed = new Date(deal.createdAt as unknown as string).getTime();
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+  // The server's liveness tier: active, non-zero deals lead; parked or valueless rows sink.
+  const tierOf = (deal: Deal) => (!deal.onHold && getDealValue(deal, slug) !== 0 ? 0 : 1);
+  return [...cards]
+    .sort((left, right) => {
+      const tier = tierOf(left) - tierOf(right);
+      if (tier !== 0) return tier;
+      const created = createdAtMs(right) - createdAtMs(left);
+      if (created !== 0) return created;
+      return left.id < right.id ? 1 : left.id > right.id ? -1 : 0;
+    })
+    .slice(0, limit);
+}
+
 export function buildCanonicalDealBoardColumns(
   rawColumns: DealBoardColumn[] | null | undefined,
   stages: DealStageLike[],
@@ -154,7 +191,13 @@ export function buildCanonicalDealBoardColumns(
    * of the flattened Opportunity slice, which lost every pending deal ranked below the per-column cap —
    * a column whose header count said 42 rendering 2 cards. Falls back to the carve-out when absent.
    */
-  pendingRfpCards?: Deal[] | null
+  pendingRfpCards?: Deal[] | null,
+  /**
+   * The per-RENDERED-column card cap. The server caps per raw stage, so a column merging aliases can
+   * arrive over the limit; passing the same number the request asked for makes the cap mean what it
+   * says. Omit it to leave the merged sets untouched (callers that never truncate).
+   */
+  cardsPerColumnLimit?: number
 ): DealBoardColumn[] {
   const deals = dedupeDealsById((rawColumns ?? []).flatMap((column) => column.cards));
 
@@ -189,11 +232,15 @@ export function buildCanonicalDealBoardColumns(
       const columnRoute = workflowRouteFromColumn(column as RawColumnRouteLike);
       return normalizeDealStageSlug(rawSlug, columnRoute) === slug;
     });
-    const cards = deals.filter((deal) => {
-      if (dealCanonicalSlug(deal) !== slug) return false;
-      if (slug === "opportunity" && isPendingRfpCard(deal)) return false;
-      return true;
-    });
+    const cards = capMergedColumnCards(
+      deals.filter((deal) => {
+        if (dealCanonicalSlug(deal) !== slug) return false;
+        if (slug === "opportunity" && isPendingRfpCard(deal)) return false;
+        return true;
+      }),
+      slug,
+      cardsPerColumnLimit
+    );
 
     const matchingStage =
       stages.find((stage) => stage.slug === slug && stage.workflowFamily === "service_deal") ??
@@ -272,7 +319,11 @@ export function buildCanonicalDealBoardColumns(
   // column it is subtracted from would under-report. The server counts the same predicate over every
   // matching row. The card-derived numbers remain the fallback for a response without a summary.
   // The column's CARDS: the server's dedicated preview when present, else the historical carve-out.
-  const pendingRfpColumnCards = pendingRfpCards ?? carvedPendingRfpCards;
+  const pendingRfpColumnCards = capMergedColumnCards(
+    pendingRfpCards ?? carvedPendingRfpCards,
+    "opportunity",
+    cardsPerColumnLimit
+  );
   const activePendingRfp = carvedPendingRfpCards.filter((d) => !d.onHold);
   const pendingRfpCount = boardSummary?.pendingRfp.count ?? activePendingRfp.length;
   // Without a summary this falls back to counting the carved-out cards, which is a POPULATION only

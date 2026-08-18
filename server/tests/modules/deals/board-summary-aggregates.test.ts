@@ -254,6 +254,76 @@ describe("getDealsForPipeline — boardSummary counts ALL matching rows, not the
     expect(result.boardSummary.pendingRfp.totalCount).toBeGreaterThan(CARD_LIMIT);
   });
 
+
+  it("excludes the Pending RFP bucket from the ordinary Opportunity CARDS query, before the cap", async () => {
+    // The client lifts pending deals into the synthetic column, so fetching them into Opportunity's
+    // slice and discarding them there spent the cap on cards this column never renders: 50 high-ranked
+    // pending deals left the ordinary Opportunity column EMPTY under a correct header count.
+    dbState.stages = [OPPORTUNITY_STAGE];
+    const { tenantDb, chains } = buildBoard([summaryRow(1)], {
+      totalCount: 1,
+      activeCount: 1,
+      totalValue: 1000,
+    });
+
+    await runBoard(tenantDb);
+
+    const cardsChain = chains.find(
+      (chain) => !isPendingRfpChain(chain) && chain.leftJoin.mock.calls.length > 0
+    );
+    const summaryChain = chains.find(
+      (chain) => !chain._isStageConfigQuery && !isPendingRfpChain(chain) && chain.leftJoin.mock.calls.length === 0
+    );
+    const cardsSql = renderSql(cardsChain.where.mock.calls[0]?.[0]);
+    const summarySql = renderSql(summaryChain.where.mock.calls[0]?.[0]);
+
+    // The CARDS query carries the exclusion...
+    expect(cardsSql).toContain("rfp_approval_status");
+    expect(cardsSql).toContain("denial_reconfirmed");
+    // ...NULL-safely. A bare NOT(<bucket>) evaluates to NULL for the overwhelming majority of rows
+    // (rfp_approval_status IS NULL -> NULL IN (...) -> NULL), which a WHERE treats as false — it would
+    // drop every ordinary Opportunity deal instead of just the pending ones.
+    expect(cardsSql).toContain("coalesce");
+    expect(cardsSql).toContain("= false");
+
+    // ...and the SUMMARY deliberately does NOT: it counts the whole stage, because the client partitions
+    // those aggregates itself and that arithmetic is what keeps an older API's fallback correct.
+    expect(summarySql).not.toContain("rfp_approval_status");
+  });
+
+  it("leaves NON-opportunity columns' card queries untouched by the pending exclusion", async () => {
+    // The bucket predicate carries no stage bound, so applying it everywhere would drop an estimating
+    // deal that still holds a stale pending status — a row the board renders in Estimating.
+    dbState.stages = [
+      OPPORTUNITY_STAGE,
+      {
+        id: "stage-estimating",
+        slug: "estimating",
+        name: "Estimating",
+        workflowFamily: "standard_deal",
+        displayOrder: 2,
+        isTerminal: false,
+        isActivePipeline: true,
+      },
+    ];
+    const { tenantDb, chains } = buildBoard([summaryRow(1)], {
+      totalCount: 1,
+      activeCount: 1,
+      totalValue: 1000,
+    });
+
+    await runBoard(tenantDb);
+
+    const estimatingCards = chains.find(
+      (chain) =>
+        !isPendingRfpChain(chain) &&
+        chain.leftJoin.mock.calls.length > 0 &&
+        containsValue(chain.where.mock.calls[0]?.[0], "stage-estimating")
+    );
+    expect(estimatingCards).toBeDefined();
+    expect(renderSql(estimatingCards.where.mock.calls[0]?.[0])).not.toContain("rfp_approval_status");
+  });
+
   it("scopes the Pending RFP preview with the SAME conditions as the board columns", async () => {
     // Not an office-wide overlay: a cross-rep column cannot reconcile with a scope-filtered board, which
     // is why the cross-rep version was reverted (PR #834). The preview must carry commonConditions.

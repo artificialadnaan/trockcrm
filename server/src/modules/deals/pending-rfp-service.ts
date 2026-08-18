@@ -46,6 +46,22 @@ const NOT_OVERRIDE_APPROVING = sql`coalesce(${deals.rfpOverrideState}, '') <> 'a
  * differently: the cross-rep queue resolves every opportunity-canonical stage id, while the board bounds
  * to the opportunity-family columns it is actually rendering.
  */
+/**
+ * The COMPLEMENT of the bucket, NULL-safely.
+ *
+ * The ordinary Opportunity board column has to exclude these rows BEFORE its 50-row cap, not after: the
+ * client moves them into the synthetic column, so fetching them into Opportunity's slice and discarding
+ * them there meant 50 high-ranked pending deals could leave the ordinary column rendering EMPTY under a
+ * correct header count.
+ *
+ * A bare `NOT (<bucket>)` would be WRONG, and silently so. `rfp_approval_status` is NULL on almost every
+ * deal, `NULL IN (...)` is NULL, and `NOT NULL` is NULL — which a WHERE treats as false. That negation
+ * would therefore drop every ordinary Opportunity deal and keep only... nothing. Hence the COALESCE.
+ */
+export function aliasedNotPendingRfpBucketCondition(alias: string) {
+  return sql`coalesce(${aliasedPendingRfpBucketCondition(alias)}, false) = false`;
+}
+
 export function aliasedPendingRfpBucketCondition(alias: string) {
   const relation = sql.raw(`"${alias.replace(/"/g, '""')}"`);
   return sql`(

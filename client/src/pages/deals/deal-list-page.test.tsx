@@ -3188,6 +3188,58 @@ describe("DealListPage", () => {
       expect(html).toContain("Showing 50 of 312");
     });
 
+
+    it("renders the MERGED total as the denominator of a capped alias-merged column", () => {
+      // estimating <- estimating + estimate_in_progress. The server caps each raw stage at 50, so this
+      // column arrives with 60 cards; the canonical cap trims it to 50 and the notice has to describe the
+      // merged population (45 + 25), not one raw stage's share of it.
+      mocks.usePipelineStagesMock.mockReturnValue({
+        stages: [
+          { id: "est", name: "Estimating", slug: "estimating", workflowFamily: "standard_deal", displayOrder: 1 },
+          { id: "eip", name: "Estimate in Progress", slug: "estimate_in_progress", workflowFamily: "standard_deal", displayOrder: 1 },
+        ],
+      });
+      mocks.useDealBoardMock.mockReturnValue({
+        board: {
+          columns: [
+            {
+              stage: { id: "est", name: "Estimating", slug: "estimating" },
+              count: 40,
+              activeCount: 40,
+              totalCount: 45,
+              totalValue: 400000,
+              cards: Array.from({ length: 30 }, (_, i) =>
+                makeDeal({ id: `est-${i}`, stageId: "est", createdAt: `2026-05-${String(i + 1).padStart(2, "0")}T00:00:00.000Z` })
+              ),
+            },
+            {
+              stage: { id: "eip", name: "Estimate in Progress", slug: "estimate_in_progress" },
+              count: 20,
+              activeCount: 20,
+              totalCount: 25,
+              totalValue: 200000,
+              cards: Array.from({ length: 30 }, (_, i) =>
+                makeDeal({ id: `eip-${i}`, stageId: "eip", createdAt: `2026-04-${String(i + 1).padStart(2, "0")}T00:00:00.000Z` })
+              ),
+            },
+          ],
+          terminalStages: [],
+          summary: { atRiskByStageSlug: {}, pendingRfp: { count: 0, totalCount: 0, totalValue: 0 } },
+          pendingRfpCards: [],
+        },
+        loading: false,
+        error: null,
+      });
+
+      const html = renderPage("/deals?scope=all");
+
+      // 50 rendered (the cap, applied to the merged column) of 70 (45 + 25, the merged population).
+      expect(html).toContain("Showing 50 of 70");
+      expect(html).toContain("view all 70");
+      // Without the canonical cap this said "Showing 60 of 70" — a column capped at 50 rendering 60.
+      expect(html).not.toContain("Showing 60 of");
+    });
+
     it("does NOT render when the column is complete", () => {
       boardWith({
         count: 3,

@@ -1389,9 +1389,22 @@ function DealListPageContent({
     });
   }, [searchParams, setSearchParams, persistDealViewParam]);
 
+  // The SAME limit the request asked for, re-imposed after alias merging: the server caps per raw stage,
+  // and four of the six non-terminal columns merge two raw stages each, so a "50-card" column could
+  // otherwise render 100.
+  const boardCardsPerColumnLimit = isAtRiskDrilldown || serverOmitsBoardSummary
+    ? SLA_DRILLDOWN_PREVIEW_LIMIT
+    : BOARD_CARDS_PER_STAGE_LIMIT;
   const boardColumns = useMemo(
-    () => buildCanonicalDealBoardColumns(board?.columns, stages, board?.summary, board?.pendingRfpCards),
-    [board?.columns, board?.pendingRfpCards, board?.summary, stages]
+    () =>
+      buildCanonicalDealBoardColumns(
+        board?.columns,
+        stages,
+        board?.summary,
+        board?.pendingRfpCards,
+        boardCardsPerColumnLimit
+      ),
+    [board?.columns, board?.pendingRfpCards, board?.summary, boardCardsPerColumnLimit, stages]
   );
   /**
    * Server-side at-risk counts, keyed by canonical column slug and counted over EVERY matching row.
