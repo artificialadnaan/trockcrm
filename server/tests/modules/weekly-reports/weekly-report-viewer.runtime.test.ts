@@ -110,6 +110,9 @@ beforeAll(async () => {
   await pg.exec(tenantSchemaSql("office_dallas", [deals, files]));
   await pg.exec(`CREATE TABLE IF NOT EXISTS public.pipeline_stage_config (id uuid PRIMARY KEY, slug text);`);
   await pg.exec(migrationSql("0222_weekly_reports"));
+  // 0223 too. Nothing in the PDF path reads weekly_report_pauses today, but the cadence helpers
+  // these suites reach through do, and two sibling suites already failed exactly this way.
+  await pg.exec(migrationSql("0223_weekly_report_pauses"));
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES ('${OFFICE}', 'Dallas', 'dallas');
     INSERT INTO public.users (id, display_name, email, role, office_id) VALUES
