@@ -180,8 +180,8 @@ const PHOTO_ROW_PITCH = (PHOTO_ROWS_BOTTOM - PHOTO_ROWS_TOP + PHOTO_ROW_GAP) / P
  * reads as a mistake.
  *
  * FIXED at 560 rather than derived from PHOTO_ROW_PITCH: the caption block now sits BELOW the tile inside
- * the same cell, so the tile must leave room for it. The remainder (PHOTO_ROW_PITCH - PHOTO_TILE_HEIGHT,
- * ~112pt) is that room.
+ * the same cell, so the tile must leave room for it. The remainder (PHOTO_ROW_PITCH - PHOTO_TILE_HEIGHT =
+ * 682 - 560 = 122pt) is that room, of which ~98pt is usable once CAPTION_GAP and PHOTO_ROW_GAP are taken.
  */
 const PHOTO_TILE_HEIGHT = 560;
 /**
