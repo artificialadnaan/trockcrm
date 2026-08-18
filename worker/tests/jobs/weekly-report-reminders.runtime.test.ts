@@ -15,7 +15,11 @@ import { deals, files, offices, users } from "@trock-crm/shared/schema";
 import { weeklyReportExpectedWeeks } from "@trock-crm/shared/types";
 import { migrationSql } from "../../../server/tests/helpers/migration-sql.js";
 import { tenantSchemaSql } from "../../../server/tests/helpers/tenant-schema-from-drizzle.js";
+// Across the workspace boundary on purpose: the worker's lookback constant is a hand-copy of the CRM
+// board's, and an assertion is the only thing that can notice the two drifting apart.
+import { DEFAULT_OUTSTANDING_LOOKBACK_WEEKS } from "../../../server/src/modules/weekly-reports/dashboard-service.js";
 import {
+  acquireReminderAdvisoryLock,
   buildBacklog,
   buildWeeklyReportLeadershipDigestEmail,
   buildWeeklyReportReminderEmail,
@@ -23,6 +27,8 @@ import {
   formatDueDay,
   reminderKindForLeadDays,
   runWeeklyReportReminders,
+  WEEKLY_REPORT_DIGEST_LOOKBACK_WEEKS,
+  WEEKLY_REPORT_REMINDER_LOCK_KEY,
   weeklyReportAppDeepLinksEnabled,
   weeklyReportDashboardUrl,
   weeklyReportReminderLinks,
@@ -95,19 +101,29 @@ function emailSpy(behaviour: { fail?: boolean } = {}) {
   return { sent, sendEmail };
 }
 
+/** Captures what the job logged, at the level it logged it — the level IS the operator-facing contract. */
+function loggerSpy() {
+  const logs = { log: [] as string[], warn: [] as string[], error: [] as string[] };
+  const record = (bucket: string[]) => (...args: unknown[]) => {
+    bucket.push(String(args[0] ?? ""));
+  };
+  return { logs, logger: { log: record(logs.log), warn: record(logs.warn), error: record(logs.error) } };
+}
+
 async function run(onDate: string, behaviour: { fail?: boolean; env?: NodeJS.ProcessEnv } = {}) {
   const spy = emailSpy(behaviour);
+  const { logs, logger } = loggerSpy();
   const summary = await runWeeklyReportReminders({
     query,
     sendEmail: spy.sendEmail,
     env: behaviour.env ?? { FRONTEND_URL: "https://trockcrm.com", WEEKLY_REPORT_APP_DEEP_LINKS: "true" },
     now: atNoonUtc(onDate),
-    logger: { log: () => {}, warn: () => {}, error: () => {} },
-    // The advisory lock needs a real pooled pg connection; the single-flight behaviour is orthogonal to
-    // everything under test here, so the harness grants it.
+    logger,
+    // The advisory lock needs a real pooled pg connection; the single-flight behaviour is exercised
+    // directly against a fake pool below, so the harness grants it here.
     acquireLock: async () => async () => {},
   });
-  return { ...spy, summary };
+  return { ...spy, summary, logs };
 }
 
 async function reminderLedger() {
@@ -144,6 +160,15 @@ async function seedReport(input: {
       input.supersededById ?? null,
       input.isActive ?? true,
     ],
+  );
+}
+
+/** A stretch in the 0223 pause ledger. Half-open [from, to): the resume day is owed again. */
+async function seedPause(input: { projectId?: string; from: string; to?: string | null }) {
+  await pg.query(
+    `INSERT INTO office_dallas.weekly_report_pauses (weekly_report_project_id, paused_from, resumed_on)
+     VALUES ($1::uuid, $2::date, $3::date)`,
+    [input.projectId ?? PROJECT, input.from, input.to ?? null],
   );
 }
 
@@ -187,6 +212,7 @@ beforeEach(async () => {
     DELETE FROM office_dallas.weekly_report_reminders_sent;
     DELETE FROM office_dallas.weekly_report_dismissals;
     DELETE FROM office_dallas.weekly_reports;
+    DELETE FROM office_dallas.weekly_report_pauses;
     DELETE FROM office_dallas.weekly_report_projects;
     DELETE FROM office_dallas.weekly_report_settings;
   `);
@@ -259,8 +285,34 @@ describe("email links", () => {
     expect(links.webUrl).toContain("https://trockcrm.com/projects/weekly-reports?");
     // Office context is URL-driven in the CRM; dropping officeId lands the recipient on their home office.
     expect(links.webUrl).toContain(`officeId=${OFFICE}`);
-    expect(links.webUrl).toContain(`projectId=${PROJECT}`);
-    expect(links.webUrl).toContain("weekOf=2026-08-13");
+  });
+
+  it("emits NO query parameters the weekly-reports board does not read", () => {
+    // client/src/pages/projects/weekly-reports-page.tsx has no useSearchParams, no URLSearchParams and
+    // never touches location.search. `projectId` and `weekOf` therefore filtered nothing: the URL
+    // promised the recipient their project's row and delivered the whole unfiltered board. A parameter
+    // no page consumes is a promise to the reader only — these come back in the change that teaches the
+    // board to honour them, not before. `officeId` stays because office context genuinely IS URL-driven.
+    const links = weeklyReportReminderLinks({
+      frontendUrl: "https://trockcrm.com",
+      officeId: OFFICE,
+      weeklyReportProjectId: PROJECT,
+      weekOf: DUE,
+      appDeepLinksEnabled: false,
+    });
+    expect(links.webUrl).toBe(`https://trockcrm.com/projects/weekly-reports?officeId=${OFFICE}`);
+    expect(links.webUrl).not.toContain("projectId=");
+    expect(links.webUrl).not.toContain("weekOf=");
+    // ...and the deep link, which DOES route by project and week, keeps both.
+    const deepLinked = weeklyReportReminderLinks({
+      frontendUrl: "https://trockcrm.com",
+      officeId: null,
+      weeklyReportProjectId: PROJECT,
+      weekOf: DUE,
+      appDeepLinksEnabled: true,
+    });
+    expect(deepLinked.appUrl).toContain(`weekly/${PROJECT}?weekOf=2026-08-13`);
+    expect(deepLinked.webUrl).toBe("https://trockcrm.com/projects/weekly-reports");
   });
 
   it("keeps the dashboard URL usable without an office id", () => {
@@ -320,12 +372,13 @@ describe("buildWeeklyReportReminderEmail", () => {
 });
 
 describe("buildWeeklyReportLeadershipDigestEmail", () => {
-  const entry = (name: string, stateLabel: string) => ({
+  const entry = (name: string, stateLabel: string, reachable = { superReachable: true, pmReachable: true }) => ({
     projectName: name,
     projectNumber: null,
     superName: "Steve Sanchez",
     pmName: "Adam Sherwood",
     stateLabel,
+    ...reachable,
   });
 
   it("counts filed vs outstanding in the subject and names both sides", () => {
@@ -366,8 +419,10 @@ describe("buildWeeklyReportLeadershipDigestEmail", () => {
       dashboardUrl: "https://trockcrm.com/projects/weekly-reports",
     });
     expect(withBacklog.html).toContain("Still outstanding from earlier weeks");
-    expect(withBacklog.html).toContain("3 weeks (+2 older) · oldest Thursday, Jul 23");
-    expect(withBacklog.text).toContain("Katy Freeway: 3 weeks (+2 older) · oldest Thursday, Jul 23");
+    expect(withBacklog.html).toContain("5 weeks (2 older than the board shows) · oldest Thursday, Jul 23");
+    expect(withBacklog.text).toContain(
+      "Katy Freeway: 5 weeks (2 older than the board shows) · oldest Thursday, Jul 23",
+    );
 
     const withoutBacklog = buildWeeklyReportLeadershipDigestEmail({
       dueDate: DUE,
@@ -377,6 +432,127 @@ describe("buildWeeklyReportLeadershipDigestEmail", () => {
       dashboardUrl: "https://trockcrm.com/projects/weekly-reports",
     });
     expect(withoutBacklog.html).not.toContain("Still outstanding from earlier weeks");
+  });
+
+  it("leads a backlog row with the TOTAL, so a project with no in-window weeks does not read as '0 weeks'", () => {
+    // The entry gate counts older weeks too, so a project whose recent weeks are all filed and whose
+    // older ones are not appears here with outstandingWeeks = 0. Leading with that number rendered
+    // "0 weeks (+4 older)" — noise, in the row added for exactly this project.
+    const email = buildWeeklyReportLeadershipDigestEmail({
+      dueDate: DUE,
+      filed: [entry("Cedar Springs", "Sent")],
+      outstanding: [],
+      backlog: [
+        { projectName: "Preston Hollow", outstandingWeeks: 0, oldestWeekOf: "2026-01-15", olderOutstandingCount: 4 },
+      ],
+      dashboardUrl: "https://trockcrm.com/projects/weekly-reports",
+    });
+    expect(email.html).not.toContain("0 week");
+    // ...and "4 weeks (4 older)" would be its own kind of noise, so the whole-backlog case says so.
+    expect(email.text).toContain("Preston Hollow: 4 weeks (all older than the board shows) · oldest Thursday, Jan 15");
+    // Singular still reads correctly at a total of one.
+    const single = buildWeeklyReportLeadershipDigestEmail({
+      dueDate: DUE,
+      filed: [],
+      outstanding: [],
+      backlog: [
+        { projectName: "Preston Hollow", outstandingWeeks: 1, oldestWeekOf: "2026-08-06", olderOutstandingCount: 0 },
+      ],
+      dashboardUrl: "https://trockcrm.com/projects/weekly-reports",
+    });
+    expect(single.text).toContain("1 week · oldest Thursday, Aug 6");
+  });
+
+  it("puts the backlog in the SUBJECT — an all-filed cohort must not read as all clear", () => {
+    // The normal shape of this email once the feature beds in: everything due today is filed, while a
+    // job that stopped delivering in May sits below. Subject and preheader that report only the
+    // due-today cohort tell a director triaging on a phone there is nothing to do.
+    const email = buildWeeklyReportLeadershipDigestEmail({
+      dueDate: DUE,
+      filed: [entry("Cedar Springs", "Sent"), entry("Katy Freeway", "Sent")],
+      outstanding: [],
+      backlog: [
+        { projectName: "Preston Hollow", outstandingWeeks: 11, oldestWeekOf: "2026-05-28", olderOutstandingCount: 0 },
+      ],
+      dashboardUrl: "https://trockcrm.com/projects/weekly-reports",
+    });
+    expect(email.subject).toBe(
+      "Weekly reports due Thursday, Aug 13 — 2 filed, 0 outstanding, 11 weeks behind on 1 project",
+    );
+    expect(email.html).toContain("Everything due Thursday, Aug 13 has been filed. Earlier weeks: 11 weeks behind on 1 project.");
+
+    const twoProjects = buildWeeklyReportLeadershipDigestEmail({
+      dueDate: DUE,
+      filed: [],
+      outstanding: [entry("Cedar Springs", "Not started")],
+      backlog: [
+        { projectName: "Preston Hollow", outstandingWeeks: 3, oldestWeekOf: "2026-05-28", olderOutstandingCount: 1 },
+        { projectName: "Katy Freeway", outstandingWeeks: 1, oldestWeekOf: "2026-08-06", olderOutstandingCount: 0 },
+      ],
+      dashboardUrl: "https://trockcrm.com/projects/weekly-reports",
+    });
+    expect(twoProjects.subject).toContain("0 filed, 1 outstanding, 5 weeks behind on 2 projects");
+    expect(twoProjects.text).toContain("are still outstanding. Earlier weeks: 5 weeks behind on 2 projects.");
+  });
+
+  it("marks an outstanding project nobody could be reminded about", () => {
+    // Both addresses undeliverable — a departed super whose account was deactivated, and no PM. The job
+    // warns, counts a skip and sends nothing, so listing the project as ordinary Outstanding beside the
+    // departed name tells leadership to chase somebody who was never asked, every week, forever.
+    const email = buildWeeklyReportLeadershipDigestEmail({
+      dueDate: DUE,
+      filed: [],
+      outstanding: [
+        {
+          projectName: "Preston Hollow",
+          projectNumber: null,
+          superName: "Gone Fishing",
+          pmName: null,
+          stateLabel: "Not started",
+          superReachable: false,
+          pmReachable: false,
+        },
+        entry("Cedar Springs", "Not started"),
+      ],
+      backlog: [],
+      dashboardUrl: "https://trockcrm.com/projects/weekly-reports",
+    });
+    expect(email.html).toContain("Outstanding — 1 with nobody to remind");
+    expect(email.html).toContain("Super: Gone Fishing (unreachable) · PM: unassigned");
+    expect(email.html).toContain("No reminder was sent — no reachable super or PM email on this project.");
+    expect(email.text).toContain("Outstanding (2, 1 with nobody to remind)");
+    expect(email.text).toContain("No reminder was sent");
+    // The project that CAN be reminded carries neither the annotation nor the note.
+    expect(email.html).toContain("Super: Steve Sanchez · PM: Adam Sherwood");
+    expect(email.text.match(/No reminder was sent/g)).toHaveLength(1);
+  });
+
+  it("does not flag reachability on FILED projects — nobody is being chased there", () => {
+    const email = buildWeeklyReportLeadershipDigestEmail({
+      dueDate: DUE,
+      filed: [entry("Cedar Springs", "Sent", { superReachable: false, pmReachable: false })],
+      outstanding: [],
+      backlog: [],
+      dashboardUrl: "https://trockcrm.com/projects/weekly-reports",
+    });
+    expect(email.html).not.toContain("nobody to remind");
+    expect(email.html).not.toContain("(unreachable)");
+    expect(email.html).toContain("Super: Steve Sanchez · PM: Adam Sherwood");
+  });
+
+  it("says it is an UPDATE when a second digest re-lists the first one's projects", () => {
+    const email = buildWeeklyReportLeadershipDigestEmail({
+      dueDate: DUE,
+      filed: [entry("Cedar Springs", "Sent")],
+      outstanding: [entry("Katy Freeway", "Not started"), entry("Preston Hollow", "Not started")],
+      backlog: [],
+      dashboardUrl: "https://trockcrm.com/projects/weekly-reports",
+      followUpForProjects: ["Katy Freeway", "Preston Hollow"],
+    });
+    expect(email.subject).toBe("Update — Weekly reports due Thursday, Aug 13 — 1 filed, 2 outstanding");
+    expect(email.html).toContain("This updates the digest sent earlier today");
+    expect(email.html).toContain("Katy Freeway and Preston Hollow became due after it went out");
+    expect(email.text.startsWith("This updates the digest sent earlier today")).toBe(true);
   });
 });
 
@@ -390,12 +566,20 @@ describe("buildBacklog", () => {
     cadenceWeekday: THURSDAY,
     cadenceStartDate: "2026-07-23",
     cadenceEndDate: null,
+    pausedIntervals: null,
     superName: null,
     superEmail: null,
     pmName: null,
     pmEmail: null,
     dueDate: DUE,
   };
+
+  it("uses the SAME lookback the CRM board cuts on", () => {
+    // A hand-copied literal, because dashboard-service.ts lives in server/ and the worker cannot import
+    // it at runtime. Nothing else notices when one of the two moves, and the symptom would be an email
+    // whose backlog silently disagrees with the board it links to — for months, in one direction only.
+    expect(WEEKLY_REPORT_DIGEST_LOOKBACK_WEEKS).toBe(DEFAULT_OUTSTANDING_LOOKBACK_WEEKS);
+  });
 
   it("excludes the current cadence week so a project cannot be counted twice in one digest", () => {
     const backlog = buildBacklog([project], DUE, new Set(), new Set());
@@ -669,7 +853,10 @@ describe("due-date leadership digest", () => {
     expect(summary.digestsSent).toBe(1);
     expect(sent).toHaveLength(1);
     expect(sent[0]!.to).toEqual(["takashi@example.com", "shaw@example.com"]);
-    expect(sent[0]!.subject).toBe("Weekly reports due Thursday, Aug 13 — 1 filed, 1 outstanding");
+    // Both projects also owe 07-30 and 08-06, so the subject carries the backlog as well as the cohort.
+    expect(sent[0]!.subject).toBe(
+      "Weekly reports due Thursday, Aug 13 — 1 filed, 1 outstanding, 4 weeks behind on 2 projects",
+    );
     expect(sent[0]!.text).toContain("4123 Cedar Springs");
     expect(sent[0]!.text).toContain("Katy Freeway Shops");
     expect(sent[0]!.idempotencyKey).toMatch(
@@ -723,11 +910,122 @@ describe("due-date leadership digest", () => {
     expect(second.sent).toHaveLength(0);
   });
 
-  it("sends nothing and claims nothing when the leadership roster is empty", async () => {
+  it("sends nothing and claims nothing when the leadership roster is empty — and WARNS about it", async () => {
     await setLeadershipRecipients([]);
-    const { sent, summary } = await run(DUE);
+    const { sent, summary, logs } = await run(DUE);
     expect(sent).toHaveLength(0);
     expect(summary.skipped).toBe(1);
+    expect(await reminderLedger()).toEqual([]);
+    // `leadership_recipient_emails` defaults to '{}', so this is the state of every freshly migrated
+    // office and it means the whole leadership half of the feature is inert. At INFO that is
+    // indistinguishable from the run's routine chatter; the reminder side's no-recipient path warns.
+    expect(logs.warn.some((line) => line.includes("No leadership recipients configured"))).toBe(true);
+    expect(logs.log.some((line) => line.includes("No leadership recipients configured"))).toBe(false);
+  });
+
+  it("keeps the SAME idempotency key when a failed digest is retried", async () => {
+    // The key is what stops a double send when the failure was at the transport layer AFTER Resend
+    // accepted the message: the catch-up tick re-sends, and only a key that hashes the same cohort makes
+    // the provider recognise it. A key that rotated per attempt — random bytes, a timestamp — would pass
+    // every other test in this file and put two copies of the digest in front of leadership.
+    const failed = await run(DUE, { fail: true });
+    const retried = await run(DUE);
+    expect(failed.sent).toHaveLength(1);
+    expect(retried.sent).toHaveLength(1);
+    expect(retried.sent[0]!.idempotencyKey).toBe(failed.sent[0]!.idempotencyKey);
+  });
+
+  it("marks an outstanding project the job could not notify at all", async () => {
+    // A departed super (deactivated account, so the address is nulled) and no PM. The reminder path
+    // warns and skips; the digest used to list the project as ordinary Outstanding under the departed
+    // name, so leadership chased somebody who was never asked — every week, with nothing saying why.
+    await pg.query(
+      `UPDATE office_dallas.weekly_report_projects
+          SET trock_super_user_id = $1::uuid, trock_pm_user_id = NULL`,
+      [RETIRED_SUPER],
+    );
+
+    const headsUp = await run(T_MINUS_2);
+    expect(headsUp.sent).toHaveLength(0);
+    expect(headsUp.summary.skipped).toBe(1);
+
+    const { sent } = await run(DUE);
+    expect(sent[0]!.subject).toContain("0 filed, 1 outstanding");
+    expect(sent[0]!.html).toContain("Outstanding — 1 with nobody to remind");
+    expect(sent[0]!.text).toContain("Super: Gone Fishing (unreachable)");
+    expect(sent[0]!.text).toContain("No reminder was sent");
+  });
+
+  it("labels the SECOND digest of a day as an update, not a near-identical repeat", async () => {
+    const first = await run(DUE);
+    expect(first.sent[0]!.subject.startsWith("Update")).toBe(false);
+
+    // A project that becomes due today between ticks — a setup created this morning, a cadence weekday
+    // changed, a project un-paused. It claims its own row and triggers a second, FULL digest.
+    await pg.query(
+      `INSERT INTO office_dallas.weekly_report_projects
+         (id, deal_id, property_display_name, trock_super_user_id, cadence_weekday, cadence_start_date)
+       VALUES ($1::uuid, $2::uuid, 'Katy Freeway Shops', $3::uuid, ${THURSDAY}, '2026-07-27')`,
+      [OTHER_PROJECT, OTHER_DEAL, SUPER],
+    );
+    const second = await run(DUE);
+    expect(second.sent).toHaveLength(1);
+    expect(second.sent[0]!.subject).toContain("Update — Weekly reports due Thursday, Aug 13");
+    expect(second.sent[0]!.text).toContain("Katy Freeway Shops became due after it went out");
+    // It re-lists the first email's project, which is exactly why it has to say what it is.
+    expect(second.sent[0]!.text).toContain("4123 Cedar Springs");
+  });
+
+  it("claims the digest LAST, with nothing between the claim and the send", async () => {
+    // The claim must sit before the send (that is what stops a restart double-emailing), so everything
+    // that can throw — the filed/outstanding split, buildBacklog over EVERY active project, the render —
+    // has to sit before the claim. A throw in that window is swallowed by `guarded`, leaves the claims
+    // in place, and the 09:00/11:00 catch-up ticks then find the day already digested: no email, no
+    // retry, and a ledger row asserting a send that never happened. This pins the ordering.
+    const timeline: string[] = [];
+    const spy = emailSpy();
+    const summary = await runWeeklyReportReminders({
+      query: async (text: string, params?: unknown[]) => {
+        timeline.push(text);
+        return query(text, params);
+      },
+      sendEmail: async (to, subject, html, options) => {
+        timeline.push("SEND");
+        return spy.sendEmail(to, subject, html, options);
+      },
+      env: { FRONTEND_URL: "https://trockcrm.com" },
+      now: atNoonUtc(DUE),
+      logger: { log: () => {}, warn: () => {}, error: () => {} },
+      acquireLock: async () => async () => {},
+    });
+    expect(summary.digestsSent).toBe(1);
+    const sendIndex = timeline.indexOf("SEND");
+    expect(sendIndex).toBeGreaterThan(0);
+    const lastBeforeSend = timeline[sendIndex - 1]!;
+    expect(lastBeforeSend).toContain("INSERT INTO office_dallas.weekly_report_reminders_sent");
+    expect(lastBeforeSend).toContain("due_digest");
+  });
+
+  it("reads the pause ledger from the DATABASE, not just from a hand-built interval", async () => {
+    // The cadence's earlier weeks are 07-30 and 08-06; a pause covering both must reach buildBacklog
+    // through `weekly_report_pauses`. Without the DB read the digest bills a resumed project for weeks
+    // nobody ever owed and contradicts the board it links to.
+    await seedPause({ from: "2026-07-28", to: "2026-08-10" });
+    const { sent } = await run(DUE);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.text).not.toContain("Still outstanding from earlier weeks");
+    expect(sent[0]!.subject).toBe("Weekly reports due Thursday, Aug 13 — 0 filed, 1 outstanding");
+  });
+
+  it("owes nothing at all for a current week that fell inside a pause", async () => {
+    // [from, to) covers the due week itself, so the cadence never expects it: no digest, no t-2, and no
+    // ledger row. This is the suppression at the dueDate assignment, which no test reached before.
+    await seedPause({ from: "2026-08-11", to: "2026-08-14" });
+    const onDue = await run(DUE);
+    expect(onDue.sent).toHaveLength(0);
+    expect(onDue.summary.digestsSent).toBe(0);
+    const headsUp = await run(T_MINUS_2);
+    expect(headsUp.sent).toHaveLength(0);
     expect(await reminderLedger()).toEqual([]);
   });
 
@@ -875,6 +1173,41 @@ describe("office guards", () => {
     }
   });
 
+  it("skips an office that has 0222 but NOT 0223, instead of losing its whole tick", async () => {
+    // Migrations do not run on the worker's boot, and the weekly-report tables do not arrive together:
+    // `weekly_report_pauses` is 0223. A guard that probed only 0222's `weekly_report_projects` let this
+    // office through, and the pauses query then threw 42P01 out of processOffice — caught one level up,
+    // so the office silently lost its t-2, its t-1 AND its digest, visible only as one logger.error.
+    // Any database where 0222 applied and 0223 did not: a branch, a restore, a 0223 that errored.
+    await pg.exec(`CREATE SCHEMA IF NOT EXISTS office_austin;`);
+    await pg.exec(tenantSchemaSql("office_austin", [deals, files]));
+    // 0222's DO-loop walks every office_ schema, so this gives Austin the 0222 tables. 0223 is withheld.
+    await pg.exec(migrationSql("0222_weekly_reports"));
+    await pg.exec(`
+      INSERT INTO public.offices (id, name, slug) VALUES ('${U("00002")}', 'Austin', 'austin')
+        ON CONFLICT (id) DO NOTHING;
+      INSERT INTO office_austin.deals (id, name, deal_number, stage_id, project_number)
+        VALUES ('${U("11113")}', 'Congress Ave Retail', 'ATX-1', '${WON_STAGE}', 'ATX-1');
+    `);
+    await pg.query(
+      `INSERT INTO office_austin.weekly_report_projects
+         (id, deal_id, property_display_name, trock_super_user_id, cadence_weekday, cadence_start_date)
+       VALUES ($1::uuid, $2::uuid, 'Congress Ave Retail', $3::uuid, ${THURSDAY}, '2026-07-27')`,
+      [U("44443"), U("11113"), SUPER],
+    );
+    try {
+      const { summary, sent, logs } = await run(T_MINUS_2);
+      expect(summary.failed).toBe(0);
+      expect(summary.offices).toBe(1);
+      // Dallas is reminded as usual; Austin is skipped by NAME, not by exception.
+      expect(sent).toHaveLength(1);
+      expect(sent[0]!.subject).toContain("4123 Cedar Springs");
+      expect(logs.log.some((line) => line.includes("Weekly-report tables not present"))).toBe(true);
+    } finally {
+      await pg.exec(`DELETE FROM public.offices WHERE slug = 'austin'; DROP SCHEMA office_austin CASCADE;`);
+    }
+  });
+
   it("skips this tick entirely when another run holds the advisory lock", async () => {
     const spy = emailSpy();
     const summary = await runWeeklyReportReminders({
@@ -888,5 +1221,72 @@ describe("office guards", () => {
     expect(spy.sent).toHaveLength(0);
     expect(summary.offices).toBe(0);
     expect(await reminderLedger()).toEqual([]);
+  });
+});
+
+describe("acquireReminderAdvisoryLock", () => {
+  // Every run above injects `acquireLock`, so until now not one line of the real lock executed — while it
+  // is the ONLY thing stopping a second worker replica emailing every superintendent in the office twice.
+  // A fake pool exercises it without a live Postgres, which the PGlite harness cannot provide (a session
+  // advisory lock has to be taken and released on the SAME connection).
+  function fakePool(behaviour: { locked?: boolean; lockThrows?: boolean; unlockThrows?: boolean } = {}) {
+    const calls: Array<{ text: string; params: unknown[] }> = [];
+    const released: Array<Error | undefined> = [];
+    const client = {
+      query: async (text: string, params?: unknown[]) => {
+        calls.push({ text, params: params ?? [] });
+        if (text.includes("pg_advisory_unlock")) {
+          if (behaviour.unlockThrows) throw new Error("connection lost");
+          return { rows: [{ pg_advisory_unlock: true }] };
+        }
+        if (behaviour.lockThrows) throw new Error("connection lost");
+        return { rows: [{ locked: behaviour.locked ?? true }] };
+      },
+      release: (err?: Error) => {
+        released.push(err);
+      },
+    };
+    return { calls, released, connect: async () => client };
+  }
+
+  it("locks and unlocks the same connection under ONE stable key", async () => {
+    const pool = fakePool();
+    const release = await acquireReminderAdvisoryLock(pool);
+    expect(release).toBeTypeOf("function");
+    // Held: the connection stays checked out until the release, or the lock dies with it.
+    expect(pool.released).toEqual([]);
+
+    await release!();
+    expect(pool.calls.map((call) => call.text)).toEqual([
+      "SELECT pg_try_advisory_lock($1) AS locked",
+      "SELECT pg_advisory_unlock($1)",
+    ]);
+    // The SAME key both times. Unlocking a different one frees nothing and leaves the lock held for the
+    // life of the process — every later tick would then skip, silently, forever.
+    expect(pool.calls[0]!.params).toEqual([WEEKLY_REPORT_REMINDER_LOCK_KEY]);
+    expect(pool.calls[1]!.params).toEqual([WEEKLY_REPORT_REMINDER_LOCK_KEY]);
+    expect(pool.released).toEqual([undefined]);
+  });
+
+  it("returns null and hands the connection back when another replica holds the lock", async () => {
+    const pool = fakePool({ locked: false });
+    expect(await acquireReminderAdvisoryLock(pool)).toBeNull();
+    // Returned to the pool healthy — this run simply has nothing to do.
+    expect(pool.released).toEqual([undefined]);
+  });
+
+  it("releases the connection when the lock query itself throws", async () => {
+    const pool = fakePool({ lockThrows: true });
+    await expect(acquireReminderAdvisoryLock(pool)).rejects.toThrow("connection lost");
+    expect(pool.released).toEqual([undefined]);
+  });
+
+  it("DESTROYS the connection when the unlock fails rather than returning a locked one to the pool", async () => {
+    const pool = fakePool({ unlockThrows: true });
+    const release = await acquireReminderAdvisoryLock(pool);
+    await expect(release!()).rejects.toThrow("connection lost");
+    // release(err) evicts the client instead of pooling it; Postgres frees session locks on disconnect.
+    expect(pool.released).toHaveLength(1);
+    expect(pool.released[0]).toBeInstanceOf(Error);
   });
 });
