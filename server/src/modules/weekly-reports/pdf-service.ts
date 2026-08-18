@@ -126,6 +126,14 @@ export async function loadWeeklyReportPdfSource(
   };
 }
 
+/**
+ * Upper bound on a whole publish — render plus upload — after which the single-flight entry is freed.
+ *
+ * Wider than the render's own budget because it covers both phases; the point is not a tight SLA but
+ * that the entry can never be held forever by one stalled R2 socket.
+ */
+export const WEEKLY_REPORT_PUBLISH_TIMEOUT_MS = 90_000;
+
 const inFlightRenders = new Map<string, Promise<string>>();
 
 /**
@@ -237,7 +245,11 @@ export async function publishWeeklyReportPdf(
       // clock out of the document, but pdfkit's asynchronous PNG finalisation still renumbers objects
       // between runs (see WeeklyReportPdfData.creationDate). Bounded in practice — a sent report renders
       // once and its artifact then stays current — but it is not zero.
-      const pdf = await renderWeeklyReportPdf(source.view.pdf);
+      // ONE deadline covering render AND upload. Bounding only the render left the identical hang one
+      // step later: an accepted-then-stalled PUT never settles, the promise stays in `inFlightRenders`,
+      // and every later download for this generation on this process joins the same permanent wait.
+      const deadline = AbortSignal.timeout(WEEKLY_REPORT_PUBLISH_TIMEOUT_MS);
+      const pdf = await renderWeeklyReportPdf(source.view.pdf, { signal: deadline });
       const r2Key = weeklyReportPdfR2Key(
         officeSlug,
         source.dealNumber,
@@ -246,7 +258,7 @@ export async function publishWeeklyReportPdf(
         CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION,
         weeklyReportPdfDigest(pdf),
       );
-      await putObject(r2Key, pdf, "application/pdf");
+      await putObject(r2Key, pdf, "application/pdf", { signal: deadline });
 
       return withWeeklyReportOfficeClient(officeSlug, {}, (client) =>
         publishWeeklyReportPdfKey(client, {

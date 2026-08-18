@@ -428,7 +428,15 @@ router.get("/reports/:id/pdf", async (req, res, next) => {
  * FOR UPDATE holds both until this transaction commits, so the credential can only be issued against
  * the state that actually authorised it.
  */
-async function loadPublishableReport(req: Request, id: string) {
+async function loadPublishableReport(
+  req: Request,
+  id: string,
+  // Revoking must survive the setup being archived. A soft-deactivated project's links keep resolving
+  // for the rest of their 180 days by design, and there is no restore path — so an `is_active` filter
+  // here left a mistakenly-shared or compromised link permanently un-killable, by anyone, including
+  // leadership. Minting stays blocked for an archived setup; withdrawing does not.
+  options: { allowInactiveProject?: boolean } = {},
+) {
   const locked = await req.tenantClient!.query(
     `SELECT id, weekly_report_project_id, status
        FROM weekly_reports
@@ -439,7 +447,9 @@ async function loadPublishableReport(req: Request, id: string) {
   if (!locked.rows[0]) throw new AppError(404, "Weekly report not found");
 
   const lockedProject = await req.tenantClient!.query(
-    `SELECT * FROM weekly_report_projects WHERE id = $1::uuid AND is_active FOR UPDATE`,
+    `SELECT * FROM weekly_report_projects
+      WHERE id = $1::uuid ${options.allowInactiveProject ? "" : "AND is_active"}
+      FOR UPDATE`,
     [locked.rows[0].weekly_report_project_id],
   );
   const project = lockedProject.rows[0];
@@ -503,11 +513,15 @@ publicationRouter.post("/reports/:id/share-link", async (req, res, next) => {
 publicationRouter.get("/reports/:id/share-link", async (req, res, next) => {
   try {
     const office = officeContextFrom(req);
-    const tokens = await listWeeklyReportTokens(
-      req.tenantClient!,
-      requireUuid(req.params.id, "id"),
-      office.tenantId,
-    );
+    const reportId = requireUuid(req.params.id, "id");
+    // The SAME assignment check the mint and revoke handlers run. This router sits ahead of the role
+    // gate so an assigned PM on a `construction` role can reach it — which also means every OTHER
+    // construction user in the office could reach it, and without this an unassigned one could hand it
+    // any report's uuid and read back who minted each link and its active/revoked/expiry history.
+    // Archived setups are listable for the same reason they are revocable: you cannot withdraw a link
+    // you cannot see.
+    await loadPublishableReport(req, reportId, { allowInactiveProject: true });
+    const tokens = await listWeeklyReportTokens(req.tenantClient!, reportId, office.tenantId);
     await req.commitTransaction!();
     res.json({ tokens });
   } catch (error) {
@@ -519,7 +533,7 @@ publicationRouter.post("/reports/:id/share-link/:tokenId/revoke", async (req, re
   try {
     const office = officeContextFrom(req);
     const reportId = requireUuid(req.params.id, "id");
-    await loadPublishableReport(req, reportId);
+    await loadPublishableReport(req, reportId, { allowInactiveProject: true });
     const token = await revokeWeeklyReportToken(req.tenantClient!, {
       tokenId: requireUuid(req.params.tokenId, "tokenId"),
       tenantId: office.tenantId,
