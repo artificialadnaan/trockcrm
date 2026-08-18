@@ -197,6 +197,59 @@ describe("deal routes scope defaults", () => {
     );
   });
 
+  it("OMITS the gated fields from the SERIALIZED body a legacy caller receives", async () => {
+    /**
+     * Asserted on the JSON a client would actually parse, not on the object literal in the handler.
+     *
+     * The distinction is the whole finding: the route led its response with `...result`, which copied
+     * `boardSummary: null` in BEFORE the conditional spread that was supposed to gate it — and a
+     * conditional spread can only add a key, never remove one. So a legacy client received
+     * `"boardSummary": null`: a determination ("no at-risk data") where the contract promised an absence
+     * ("this response does not carry that"). Its fallbacks branch on the field being MISSING.
+     *
+     * `body.boardSummary == null` would pass in both the broken and the fixed state, which is exactly
+     * how this survived. `'boardSummary' in body` is the assertion that discriminates.
+     */
+    dealServiceMocks.getDealsForPipeline.mockResolvedValue({
+      pipelineColumns: [],
+      terminalStages: [],
+      // What the service returns for a caller that did not opt in.
+      boardSummary: null,
+      pendingRfpDeals: undefined,
+    });
+
+    const { res } = await invokeRoute("/pipeline", { includeDd: "true" });
+    // Round-trip through JSON: this is the wire, where undefined-valued keys vanish and null survives.
+    const wire = JSON.parse(JSON.stringify(res.body));
+
+    expect("boardSummary" in wire).toBe(false);
+    expect("pendingRfpDeals" in wire).toBe(false);
+    // The pre-change shape, exactly — no more keys than a legacy client already handled.
+    expect(Object.keys(wire).sort()).toEqual(["pipelineColumns", "terminalStages"]);
+  });
+
+  it("INCLUDES the gated fields in the serialized body once the caller opts in", async () => {
+    const summary = {
+      atRiskByStageSlug: { opportunity: { service: 1, nonService: 2 } },
+      pendingRfp: { count: 3, totalCount: 4, totalValue: 5 },
+    };
+    dealServiceMocks.getDealsForPipeline.mockResolvedValue({
+      pipelineColumns: [],
+      terminalStages: [],
+      boardSummary: summary,
+      pendingRfpDeals: [],
+    });
+
+    const { res } = await invokeRoute("/pipeline", { includeDd: "true", boardAggregates: "true" });
+    const wire = JSON.parse(JSON.stringify(res.body));
+
+    expect(wire.boardSummary).toEqual(summary);
+    // An EXPLICIT empty preview must still serialize as a present, empty array — the client reads that
+    // as "the server looked and the bucket is empty", which is not the same as an absent field.
+    expect("pendingRfpDeals" in wire).toBe(true);
+    expect(wire.pendingRfpDeals).toEqual([]);
+  });
+
   it("passes requester role separately from collaborative read role for stage At Risk results", async () => {
     accessMocks.getCollaborativeReadRole.mockReturnValueOnce("director");
     const { req } = await invokeRoute(

@@ -3111,15 +3111,28 @@ describe("DealListPage", () => {
       pending_rfp: { service: 0, nonService: 2 },
     };
 
+    /**
+     * Read the At-Risk total off its OWN element, via the data-testid the card already carries.
+     *
+     * This used to match `/text-4xl[^>]*>(\d+)</` — a CSS class as a stand-in for "the At-Risk card's
+     * number". That is an assertion about a representation, not about the thing: it happened to land on
+     * the right element only because the one earlier `text-4xl` node (the page <h1>) holds text rather
+     * than a digit. Restyle the card, or add any KPI above it whose value is a number, and the regex
+     * silently reads a DIFFERENT card's count while still passing.
+     */
+    const atRiskTotal = (html: string) => {
+      const match = html.match(/data-testid="at-risk-total"[^>]*>([^<]*)</);
+      expect(match, "at-risk-total element not found in the rendered board").not.toBeNull();
+      return match![1]!.trim();
+    };
+
     it("counts 1, not 3 — the pending-RFP deals belong to a column this view does not render", () => {
       boardWithAtRisk(SERVER_BUCKETS);
 
       const html = renderPage("/deals?scope=all&filter=opportunities", "director");
 
       expect(html).toContain("Opportunities");
-      // The At-Risk headline renders its count in a text-4xl block; assert the number that block holds.
-      const atRiskBlock = html.match(/text-4xl[^>]*>(\d+)</);
-      expect(atRiskBlock?.[1]).toBe("1");
+      expect(atRiskTotal(html)).toBe("1");
     });
 
     it("counts all 3 on the main board, where the pending_rfp column IS rendered", () => {
@@ -3127,8 +3140,7 @@ describe("DealListPage", () => {
 
       const html = renderPage("/deals?scope=all", "director");
 
-      const atRiskBlock = html.match(/text-4xl[^>]*>(\d+)</);
-      expect(atRiskBlock?.[1]).toBe("3");
+      expect(atRiskTotal(html)).toBe("3");
     });
   });
 

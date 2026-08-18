@@ -1080,39 +1080,46 @@ router.get("/pipeline", async (req, res, next) => {
     );
     await req.commitTransaction!();
     const includeHubspotId = shouldIncludeHubspotId(req.query, req.user!.role);
-    res.json({
-      ...result,
+    /**
+     * Built by CONSTRUCTION, never by spreading the service result and subtracting.
+     *
+     * `...result` used to lead this object, and it copied `boardSummary: null` in for a caller that did
+     * not opt in — the conditional spread below only ADDS a key, it cannot remove one already present.
+     * So a legacy client received `"boardSummary": null` on the wire: a determination ("there is no
+     * at-risk data") where the contract promised an absence ("this response does not carry that"). The
+     * two are not interchangeable — the client's fallbacks branch on the field being missing.
+     *
+     * `pendingRfpDeals` survived only because `res.json` drops undefined-valued keys, which is luck
+     * rather than design. Listing the response keys explicitly means a field added to the service's
+     * return type in future cannot ride along into the payload unreviewed.
+     */
+    const redactDeal = (deal: unknown) =>
+      stripPrivateDealFieldsForViewer(deal as Record<string, unknown>, {
+        isOwner: (deal as { assignedRepId?: string | null }).assignedRepId === req.user!.id,
+      });
+    const body: Record<string, unknown> = {
       pipelineColumns: result.pipelineColumns.map((column) => ({
         ...column,
-        deals: redactDealList(column.deals, { includeHubspotId }).map((deal) =>
-          stripPrivateDealFieldsForViewer(deal as Record<string, unknown>, {
-            isOwner: (deal as { assignedRepId?: string | null }).assignedRepId === req.user!.id,
-          })
-        ),
+        deals: redactDealList(column.deals, { includeHubspotId }).map(redactDeal),
       })),
       terminalStages: result.terminalStages,
-      // Board-wide aggregates computed over EVERY matching row, not the per-column card slice: the three
-      // At-Risk KPI counts and the synthetic Pending RFP column's count/$. The client used to derive
-      // both from the cards it received, which was only correct while it asked for 1000 cards per
-      // column — shrink that slice and the numbers silently under-report.
-      // OMITTED entirely when the caller did not opt in — not sent as null or []. A caller that never
-      // asked for these must see the pre-change response shape, and an empty array here would read as
-      // "the bucket is empty" rather than "this response does not carry it".
-      ...(result.boardSummary ? { boardSummary: result.boardSummary } : {}),
-      ...(result.pendingRfpDeals
-        ? {
-            // The synthetic Pending RFP column's OWN cards. Carving them out of the Opportunity slice on
-            // the client silently lost every pending deal ranked below the cap. Redacted on the same
-            // path as the column cards — these are full deal rows.
-            pendingRfpDeals: redactDealList(result.pendingRfpDeals as never, { includeHubspotId }).map(
-              (deal) =>
-                stripPrivateDealFieldsForViewer(deal as Record<string, unknown>, {
-                  isOwner: (deal as { assignedRepId?: string | null }).assignedRepId === req.user!.id,
-                })
-            ),
-          }
-        : {}),
-    });
+    };
+    // Board-wide aggregates computed over EVERY matching row, not the per-column card slice: the three
+    // At-Risk KPI counts and the synthetic Pending RFP column's count/$. Present ONLY for a caller that
+    // opted in via ?boardAggregates=true — see getDealsForPipeline's includeBoardAggregates for why the
+    // default has to be off in both deploy directions.
+    if (result.boardSummary) {
+      body.boardSummary = result.boardSummary;
+    }
+    if (result.pendingRfpDeals) {
+      // The synthetic Pending RFP column's OWN cards. Carving them out of the Opportunity slice on the
+      // client silently lost every pending deal ranked below the cap. Redacted on the same path as the
+      // column cards — these are full deal rows.
+      body.pendingRfpDeals = redactDealList(result.pendingRfpDeals as never, { includeHubspotId }).map(
+        redactDeal
+      );
+    }
+    res.json(body);
   } catch (err) {
     next(err);
   }
