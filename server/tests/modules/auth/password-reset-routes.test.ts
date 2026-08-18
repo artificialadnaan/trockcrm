@@ -29,19 +29,14 @@ vi.mock("../../../src/middleware/rate-limit.js", () => ({
 
 vi.mock("../../../src/modules/auth/password-reset-service.js", () => serviceMocks);
 
-vi.mock("../../../src/modules/auth/local-auth-service.js", async () => {
-  // importActual, so validatePasswordPolicy is the REAL policy rather than a hand-copied duplicate that
-  // could drift from the 12-character minimum this suite asserts on.
-  const actual = await vi.importActual<
-    typeof import("../../../src/modules/auth/local-auth-service.js")
-  >("../../../src/modules/auth/local-auth-service.js");
-  return {
-    ...actual,
-    loginWithLocalPassword: vi.fn(),
-    changeLocalPassword: vi.fn(),
-    getUserLocalAuthGate: vi.fn().mockResolvedValue({ mustChangePassword: false }),
-  };
-});
+// Plain factory, matching the sibling auth suites. The route reaches the password policy through
+// password-policy.js, which is NOT mocked here, so the real 12-character rule runs -- no importActual
+// and no hand-copied duplicate that could drift from it.
+vi.mock("../../../src/modules/auth/local-auth-service.js", () => ({
+  loginWithLocalPassword: vi.fn(),
+  changeLocalPassword: vi.fn(),
+  getUserLocalAuthGate: vi.fn().mockResolvedValue({ mustChangePassword: false }),
+}));
 
 const { authRoutes } = await import("../../../src/modules/auth/routes.js");
 const { errorHandler } = await import("../../../src/middleware/error-handler.js");

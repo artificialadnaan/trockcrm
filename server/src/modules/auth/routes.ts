@@ -51,7 +51,10 @@ import {
   loginWithLocalPassword,
 } from "./local-auth-service.js";
 import { loginMobileUser } from "./mobile-auth-service.js";
-import { validatePasswordPolicy } from "./local-auth-service.js";
+// From password-policy.js, NOT local-auth-service.js: several suites mock local-auth-service with a
+// plain factory, and reaching the policy through that module made this route depend on whichever mock
+// registered first in a worker.
+import { validatePasswordPolicy } from "./password-policy.js";
 import {
   applyPasswordReset,
   consumeResetToken,

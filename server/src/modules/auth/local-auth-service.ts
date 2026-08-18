@@ -19,10 +19,10 @@ import {
   type FieldTenantDb,
 } from "../field/cross-office.js";
 import { restartCorrectiveActionNotificationCycleForDeal } from "../field/corrective-actions-service.js";
+import { validatePasswordPolicy, PASSWORD_MIN_LENGTH } from "./password-policy.js";
 import { incrementTokenVersion } from "./session-invalidation.js";
 
 const scryptAsync = promisify(crypto.scrypt);
-const PASSWORD_MIN_LENGTH = 12;
 const TEMP_PASSWORD_LENGTH = 18;
 const INVITE_TTL_HOURS = 72;
 const MAX_FAILED_LOGIN_ATTEMPTS = 5;
@@ -59,16 +59,13 @@ function computeLockoutUntil(baseDate: Date): Date {
   return new Date(baseDate.getTime() + LOCKOUT_WINDOW_MINUTES * 60 * 1000);
 }
 
-// Exported so callers can enforce the policy BEFORE taking a destructive step. The reset route checks
-// it before consuming the single-use token, so a too-short password does not burn the user's link.
-export function validatePasswordPolicy(password: string) {
-  if (password.length < PASSWORD_MIN_LENGTH) {
-    throw new AppError(
-      400,
-      `Password must be at least ${PASSWORD_MIN_LENGTH} characters`
-    );
-  }
-}
+// The policy itself now lives in ./password-policy.js, which has no database imports so that callers
+// and tests can reach the real function without importing (or mocking) this module. Re-exported here
+// because existing callers import it from local-auth-service.
+//
+// `import` + `export`, never a bare `export { x } from` -- this module calls validatePasswordPolicy
+// internally (hashPassword, changeLocalPassword) and a bare re-export creates no local binding.
+export { validatePasswordPolicy, PASSWORD_MIN_LENGTH };
 
 type InviteEmailContent = {
   subject: string;
