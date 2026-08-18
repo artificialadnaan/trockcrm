@@ -212,7 +212,12 @@ export function WeeklyReportProjectDialog({
   };
 
   return (
-    <Dialog open onOpenChange={(open) => !open && onClose()}>
+    // Escape, the backdrop and the close control all arrive here, and all three are ignored while a
+    // request is in flight — the footer buttons being disabled is not enough. Closing mid-save does not
+    // merely lose the edit: the request still resolves into `onSaved`, which clears the page's shared
+    // creating/editing state and would therefore close whichever project dialog the user opened in the
+    // meantime, discarding that form instead.
+    <Dialog open onOpenChange={(open) => !open && !saving && onClose()}>
       <DialogContent className="max-h-[90vh] max-w-3xl overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{project ? "Edit weekly report project" : "New weekly report project"}</DialogTitle>
@@ -388,7 +393,9 @@ export function WeeklyReportProjectDialog({
                   </select>
                 </Field>
                 <p className="mt-1.5 text-[11.5px] font-semibold text-slate-400">
-                  Paused and completed projects stop generating weeks and stop sending reminders.
+                  Paused and completed projects stop generating weeks and stop sending reminders. Those
+                  weeks are not asked for again when reporting resumes — anything already missed before
+                  the pause stays on the board.
                 </p>
               </div>
             )}

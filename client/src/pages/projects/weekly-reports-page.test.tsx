@@ -9,13 +9,19 @@ const mocks = vi.hoisted(() => ({
   useWeeklyReportDashboard: vi.fn(),
   useWeeklyReportProjects: vi.fn(),
   dismissWeeklyReportWeek: vi.fn(),
+  historyRefetch: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-weekly-reports", () => ({
   useWeeklyReportDashboard: mocks.useWeeklyReportDashboard,
   useWeeklyReportProjects: mocks.useWeeklyReportProjects,
   dismissWeeklyReportWeek: mocks.dismissWeeklyReportWeek,
-  useWeeklyReportHistory: () => ({ reports: [], loading: false, error: null, refetch: vi.fn() }),
+  useWeeklyReportHistory: () => ({
+    reports: [],
+    loading: false,
+    error: null,
+    refetch: mocks.historyRefetch,
+  }),
   useWeeklyReportSettings: () => ({ settings: null, loading: false, error: null, refetch: vi.fn() }),
   useWeeklyReportAssignableUsers: () => ({ users: [], loading: false, error: null }),
   fetchWeeklyReportDetail: vi.fn(),
@@ -80,6 +86,7 @@ beforeEach(() => {
     error: null,
     refetch: vi.fn(),
   });
+  mocks.historyRefetch.mockReset();
 });
 
 afterEach(() => {
@@ -173,6 +180,40 @@ describe("This Week board", () => {
   it("marks a backlog week so it is not mistaken for this week's", () => {
     mockDashboard([dashboardRow({ isCurrentWeek: false, weekOf: "2026-08-06", daysLate: 7 })]);
     expect(renderPage()).toContain("backlog");
+  });
+});
+
+describe("Refresh", () => {
+  function clickButton(label: string) {
+    const button = Array.from(container.querySelectorAll("button")).find((candidate) =>
+      (candidate.textContent ?? "").includes(label),
+    );
+    if (!button) throw new Error(`No button labelled ${label}`);
+    act(() => {
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+  }
+
+  it("reloads the History table as well as the board", () => {
+    // History owns a SEPARATE request, keyed on the project picked inside the tab. A Refresh that only
+    // reloads the dashboard and the setup list leaves that table showing the state from before the
+    // report which prompted the refresh was ever sent.
+    mockDashboard([dashboardRow()]);
+    mocks.useWeeklyReportProjects.mockReturnValue({
+      projects: [{ id: "p1", dealId: "d1", propertyDisplayName: "4123 Cedar Springs", clientName: null }],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    renderPage();
+    clickButton("History");
+    // The hook is mocked, so nothing has fetched yet — anything counted here would be the mount, not
+    // the gesture under test.
+    expect(mocks.historyRefetch).not.toHaveBeenCalled();
+
+    clickButton("Refresh");
+    expect(mocks.historyRefetch).toHaveBeenCalledTimes(1);
   });
 });
 

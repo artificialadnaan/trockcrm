@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, CalendarClock, Loader2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
@@ -29,7 +29,14 @@ function fmtWeek(iso: string): string {
     : d.toLocaleDateString("en-US", { timeZone: "UTC", month: "short", day: "numeric", year: "numeric" });
 }
 
-export function WeeklyReportHistoryPanel({ projects }: { projects: WeeklyReportProject[] }) {
+export function WeeklyReportHistoryPanel({
+  projects,
+  refreshSignal,
+}: {
+  projects: WeeklyReportProject[];
+  /** Incremented by the page's Refresh button. This panel's request belongs to no one else. */
+  refreshSignal: number;
+}) {
   const [projectId, setProjectId] = useState<string>("");
 
   // Default to the first project once the list arrives, so the tab isn't an empty prompt on open.
@@ -37,9 +44,19 @@ export function WeeklyReportHistoryPanel({ projects }: { projects: WeeklyReportP
     if (!projectId && projects.length > 0) setProjectId(projects[0]!.id);
   }, [projects, projectId]);
 
-  const { reports, loading, error } = useWeeklyReportHistory(projectId || null);
+  const { reports, loading, error, refetch } = useWeeklyReportHistory(projectId || null);
   const [detail, setDetail] = useState<WeeklyReportDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+
+  // Re-run the history request when the page refreshes, but NOT on mount — the hook already loads on
+  // mount and on every project change, so an unguarded effect would fire a second, identical request
+  // alongside the first and let whichever answered last win.
+  const lastRefreshSignal = useRef(refreshSignal);
+  useEffect(() => {
+    if (refreshSignal === lastRefreshSignal.current) return;
+    lastRefreshSignal.current = refreshSignal;
+    void refetch();
+  }, [refreshSignal, refetch]);
 
   const selected = useMemo(() => projects.find((p) => p.id === projectId) ?? null, [projects, projectId]);
 

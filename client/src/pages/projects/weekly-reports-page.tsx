@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { AlertTriangle, CalendarClock, Loader2, Plus, RefreshCw, Search, Settings2 } from "lucide-react";
 import { toast } from "sonner";
 import { PageHeader } from "@/components/layout/page-header";
@@ -65,12 +65,18 @@ export default function WeeklyReportsPage() {
   const [editing, setEditing] = useState<WeeklyReportProject | null>(null);
   const [creating, setCreating] = useState(false);
 
+  const [historyRefreshSignal, setHistoryRefreshSignal] = useState(0);
+
   const dashboard = useWeeklyReportDashboard();
   const projectsQuery = useWeeklyReportProjects();
 
   const refreshAll = useCallback(() => {
     void dashboard.refetch();
     void projectsQuery.refetch();
+    // History runs its OWN request, keyed on the project picked inside that tab, so neither refetch
+    // above touches it. Left out, the table a director is looking at when they press Refresh is the one
+    // surface that keeps showing the state from before the report which prompted the gesture was sent.
+    setHistoryRefreshSignal((signal) => signal + 1);
   }, [dashboard, projectsQuery]);
 
   const outstanding = useMemo(
@@ -145,7 +151,9 @@ export default function WeeklyReportsPage() {
           onEdit={setEditing}
         />
       )}
-      {tab === "history" && <WeeklyReportHistoryPanel projects={projectsQuery.projects} />}
+      {tab === "history" && (
+        <WeeklyReportHistoryPanel projects={projectsQuery.projects} refreshSignal={historyRefreshSignal} />
+      )}
 
       {(creating || editing) && (
         <WeeklyReportProjectDialog

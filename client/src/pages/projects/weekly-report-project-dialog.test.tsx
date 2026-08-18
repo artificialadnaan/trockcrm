@@ -114,41 +114,46 @@ describe("deals that already have a setup", () => {
   });
 });
 
+function existingProject(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "p1",
+    dealId: "d1",
+    dealName: "4123 Cedar Springs",
+    dealNumber: "DFW-10432",
+    projectNumber: "DFW-10432",
+    propertyDisplayName: "4123 Cedar Springs",
+    clientName: "Mack Real Estate Group",
+    clientTeam: {
+      doc: { name: null, email: null },
+      pm: { name: null, email: null },
+      rm: { name: null, email: null },
+      cm: { name: null, email: null },
+    },
+    trockPmUserId: null,
+    trockPmName: null,
+    trockSuperUserId: null,
+    trockSuperName: null,
+    contractDate: null,
+    contractDateNote: null,
+    projectStartDate: null,
+    projectStartDateNote: null,
+    projectCompletionDate: null,
+    projectCompletionDateNote: null,
+    projectedDurationWeeks: null,
+    cadenceWeekday: 4,
+    cadenceStartDate: "2026-07-27",
+    cadenceEndDate: null,
+    status: "active" as const,
+    createdAt: "2026-07-27T00:00:00Z",
+    updatedAt: "2026-07-27T00:00:00Z",
+    ...overrides,
+  };
+}
+
 describe("assignable users", () => {
   it("keeps an assigned-but-inactive person visible instead of silently reading as Unassigned", () => {
-    const project = {
-      id: "p1",
-      dealId: "d1",
-      dealName: "4123 Cedar Springs",
-      dealNumber: "DFW-10432",
-      projectNumber: "DFW-10432",
-      propertyDisplayName: "4123 Cedar Springs",
-      clientName: "Mack Real Estate Group",
-      clientTeam: {
-        doc: { name: null, email: null },
-        pm: { name: null, email: null },
-        rm: { name: null, email: null },
-        cm: { name: null, email: null },
-      },
-      // Not in the roster the hook returned — deactivated, or moved office.
-      trockPmUserId: "u-gone",
-      trockPmName: "Departed PM",
-      trockSuperUserId: null,
-      trockSuperName: null,
-      contractDate: null,
-      contractDateNote: null,
-      projectStartDate: null,
-      projectStartDateNote: null,
-      projectCompletionDate: null,
-      projectCompletionDateNote: null,
-      projectedDurationWeeks: null,
-      cadenceWeekday: 4,
-      cadenceStartDate: "2026-07-27",
-      cadenceEndDate: null,
-      status: "active" as const,
-      createdAt: "2026-07-27T00:00:00Z",
-      updatedAt: "2026-07-27T00:00:00Z",
-    };
+    // Not in the roster the hook returned — deactivated, or moved office.
+    const project = existingProject({ trockPmUserId: "u-gone", trockPmName: "Departed PM" });
 
     act(() => {
       root.render(<WeeklyReportProjectDialog project={project} onClose={vi.fn()} onSaved={vi.fn()} />);
@@ -161,5 +166,65 @@ describe("assignable users", () => {
     // so the form would look Unassigned and re-save as such.
     expect(select!.value).toBe("u-gone");
     expect(Array.from(select!.options).map((option) => option.value)).toContain("u-gone");
+  });
+});
+
+describe("closing mid-save", () => {
+  function submitForm() {
+    const form = document.querySelector<HTMLFormElement>("form")!;
+    act(() => {
+      form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+  }
+
+  function clickCloseControl() {
+    const close = document.querySelector<HTMLElement>('[data-slot="dialog-close"]')!;
+    act(() => {
+      close.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+  }
+
+  it("ignores the close control while a save is in flight", async () => {
+    // The footer buttons are disabled during a save, but the close control, Escape and the backdrop are
+    // not. Closing here does not merely lose the edit: the in-flight request still resolves into
+    // `onSaved`, which clears the page's shared creating/editing state — closing whichever dialog the
+    // user has opened in the meantime.
+    let settle: (value: unknown) => void = () => {};
+    mocks.updateWeeklyReportProject.mockReturnValue(new Promise((resolve) => (settle = resolve)));
+    const onClose = vi.fn();
+    const onSaved = vi.fn();
+
+    act(() => {
+      root.render(
+        <WeeklyReportProjectDialog project={existingProject()} onClose={onClose} onSaved={onSaved} />,
+      );
+    });
+
+    submitForm();
+    expect(mocks.updateWeeklyReportProject).toHaveBeenCalledTimes(1);
+
+    clickCloseControl();
+    expect(onClose).not.toHaveBeenCalled();
+
+    // …and once the request lands the dialog is closable again, so a failed save is not a trap.
+    await act(async () => {
+      settle({});
+    });
+    clickCloseControl();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("still closes on the close control when nothing is saving", () => {
+    // The control case: without this, the assertion above would pass for a dialog whose close control
+    // never worked at all.
+    const onClose = vi.fn();
+    act(() => {
+      root.render(
+        <WeeklyReportProjectDialog project={existingProject()} onClose={onClose} onSaved={vi.fn()} />,
+      );
+    });
+
+    clickCloseControl();
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });
