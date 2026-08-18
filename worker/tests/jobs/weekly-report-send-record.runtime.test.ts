@@ -91,6 +91,10 @@ afterAll(async () => {
 
 beforeEach(async () => {
   vi.stubEnv("NODE_ENV", "production");
+  // An AUTHORISED production worker. The job refuses to email a customer from a deployment that has not
+  // said so explicitly, and NODE_ENV cannot be that signal — Dockerfile.worker bakes `production` into the
+  // image, so it reads identically on a staging worker running that same image.
+  vi.stubEnv("WEEKLY_REPORT_CLIENT_EMAIL_ENABLED", "true");
   await pg.exec(`DELETE FROM ${SCHEMA}.weekly_reports;`);
   await pg.query(
     `INSERT INTO ${SCHEMA}.weekly_reports
@@ -200,10 +204,74 @@ describe("recording a delivery", () => {
     expect(after.send_request.shareUrl).toBe(SHARE_URL);
   });
 
+  it("SENDS NOTHING for a version a correction replaced WHILE ITS PDF WAS RENDERING", async () => {
+    // The guard above reads `superseded_by_id` at the top of the handler and, until this was fixed, nothing
+    // read it again — across the longest thing this job does. Resolving the PDF downloads and transcodes
+    // every photo in the report and uploads the result to R2: seconds of network and CPU, during which a PM
+    // can complete a correction. `sendWeeklyReport` stamps `superseded_by_id` on THIS row and queues v2, and
+    // v1's worker sent anyway.
+    //
+    // The client then received BOTH, and neither message admitted the other existed: v1 carries a frozen
+    // `isCorrection: false`, and v2's own `isCorrection` was computed from `send_delivered_at IS NOT NULL`
+    // on v1 — still NULL at the moment v2 was committed — so v2 claimed not to be a correction either.
+    //
+    // Executed against real Postgres rather than a captured SQL string, because the re-read is a statement
+    // whose WHERE has to actually match the row.
+    await pg.query(
+      `UPDATE ${SCHEMA}.weekly_reports
+          SET send_request = jsonb_set(send_request, '{attachPdf}', 'true'::jsonb)
+        WHERE id = $1::uuid`,
+      [REPORT],
+    );
+    const sendEmail = vi.fn(async () => ({ success: true, messageId: "m1" }));
+
+    await handleWeeklyReportSend(payload(), null, {
+      query,
+      sendEmail,
+      // The correction lands mid-render, exactly as it would in production.
+      resolvePdfKey: async () => {
+        await pg.query(
+          `UPDATE ${SCHEMA}.weekly_reports SET superseded_by_id = $2::uuid WHERE id = $1::uuid`,
+          [REPORT, OTHER],
+        );
+        return null;
+      },
+      logger: SILENT_LOGGER,
+    });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    const after = await row();
+    expect(after.send_delivered_at).toBeNull();
+    expect(Number(after.send_attempts)).toBe(0);
+    expect(after.send_error).toBeNull();
+  });
+
   it("still delivers a version nothing has replaced", async () => {
-    // The control. Without it the guard above is satisfied by a handler that never sends anything.
+    // The control. Without it the guards above are satisfied by a handler that never sends anything.
     const sendEmail = vi.fn(async () => ({ success: true, messageId: "m1" }));
     await handleWeeklyReportSend(payload(), null, { query, sendEmail, logger: SILENT_LOGGER });
+
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    expect((await row()).send_delivered_at).not.toBeNull();
+  });
+
+  it("CONTROL: still delivers when the render finishes and nothing has changed", async () => {
+    // The same shape as the mid-render guard, minus the correction — so that guard cannot be satisfied by a
+    // handler that simply stopped sending whenever a PDF was rendered.
+    await pg.query(
+      `UPDATE ${SCHEMA}.weekly_reports
+          SET send_request = jsonb_set(send_request, '{attachPdf}', 'true'::jsonb)
+        WHERE id = $1::uuid`,
+      [REPORT],
+    );
+    const sendEmail = vi.fn(async () => ({ success: true, messageId: "m1" }));
+
+    await handleWeeklyReportSend(payload(), null, {
+      query,
+      sendEmail,
+      resolvePdfKey: async () => null,
+      logger: SILENT_LOGGER,
+    });
 
     expect(sendEmail).toHaveBeenCalledTimes(1);
     expect((await row()).send_delivered_at).not.toBeNull();
