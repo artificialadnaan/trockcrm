@@ -20,8 +20,95 @@
 // read calls the artifact current — permanently, because `approved` is where a shared report sits and
 // nothing moves `updated_at` again. Recording what was rendered instead leaves the live generation ahead of
 // the stored one, so the next read classifies it stale and re-renders. See 0224.
+//
+// A generation is carried as TEXT at Postgres's own resolution — see weeklyReportGenerationSql. Comparing
+// two generations at a coarser resolution than the database stores them at reopens the same hole one layer
+// down: `timestamptz` is microseconds, node-postgres materialises it as a millisecond JS Date, and two
+// generations 500µs apart then compare EQUAL. `current <= rendered` holds, the artifact classifies current,
+// and a report row, a photo selection or a header field that moved inside that millisecond is served from
+// the cache forever — for a `sent` report, forever literally, because nothing moves `updated_at` again.
 
 import { createHash } from "node:crypto";
+
+/**
+ * A content generation in its canonical form: `YYYY-MM-DDTHH:MM:SS.ffffffZ`.
+ *
+ * Fixed width, always UTC, always six fractional digits — Postgres's own `timestamptz` resolution, carried
+ * as text because node-postgres hands back a millisecond JS `Date` and the microseconds are gone before any
+ * of this code sees them. Selecting the columns THROUGH THIS EXPRESSION is what keeps them.
+ *
+ * The offset is pinned to `Z` rather than emitted with `OF` so the text does not change with the session
+ * TimeZone: the same instant must produce the same generation on every connection, or the publication CAS
+ * compares a value against a differently-spelled copy of itself.
+ *
+ * Give it a `timestamptz`. On a naive `timestamp` the same `AT TIME ZONE 'UTC'` converts the OTHER way —
+ * to a timestamptz, which `to_char` then renders in the session TimeZone — and the `Z` becomes a lie.
+ *
+ * `$n::timestamptz` parses this back to the exact microsecond it came from, so the same string serves as
+ * the value read, the value compared, and the value written — see weeklyReportContentGeneration.
+ */
+export function weeklyReportGenerationSql(expression: string): string {
+  return `to_char(${expression} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
+}
+
+const CANONICAL_GENERATION = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/;
+
+/**
+ * Normalise anything a caller might hold into the canonical generation text, or null if it is not a time.
+ *
+ * A `Date` is accepted, and WIDENED with three zero microseconds — a JS Date never had them, so recording
+ * `.123000` is the honest reading of `.123`. That path is for callers that genuinely only have a Date; the
+ * loader must not use it, because a generation read as a Date and one read as text are not comparable: the
+ * text side keeps `.123456` while the Date side claims `.123000`, and the artifact then reads stale on
+ * every single download. Everything the PDF path reads comes through weeklyReportGenerationSql.
+ */
+export function weeklyReportGeneration(value: Date | string | null | undefined): string | null {
+  if (value == null) return null;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (CANONICAL_GENERATION.test(trimmed)) return trimmed;
+    return widenToMicroseconds(new Date(trimmed));
+  }
+  return widenToMicroseconds(value);
+}
+
+function widenToMicroseconds(value: Date): string | null {
+  if (Number.isNaN(value.getTime())) return null;
+  return `${value.toISOString().slice(0, -1)}000Z`;
+}
+
+/**
+ * Epoch MICROSECONDS for a canonical generation, or NaN when it is not one.
+ *
+ * A number rather than a lexicographic comparison of the text: the canonical shape does order correctly
+ * under `<=`, but only while every value is a four-digit year with the same offset, and a comparison that
+ * is right by coincidence of formatting is the kind that fails silently. Epoch microseconds for a
+ * contemporary timestamp are ~1.8e15, comfortably inside Number.MAX_SAFE_INTEGER (9.0e15, reached in 2255).
+ */
+function toEpochMicroseconds(generation: string): number {
+  const match = /^(.*)\.(\d{6})Z$/.exec(generation);
+  if (!match) return Number.NaN;
+  const wholeSecondsMs = Date.parse(`${match[1]!}Z`);
+  if (Number.isNaN(wholeSecondsMs)) return Number.NaN;
+  return wholeSecondsMs * 1000 + Number(match[2]!);
+}
+
+/** The newest of several generations, canonicalised, or null when every one is absent or unparseable. */
+export function newestWeeklyReportGeneration(
+  values: Array<Date | string | null | undefined>,
+): string | null {
+  let newest: string | null = null;
+  let newestMicros = Number.NEGATIVE_INFINITY;
+  for (const value of values) {
+    const generation = weeklyReportGeneration(value);
+    if (generation == null) continue;
+    const micros = toEpochMicroseconds(generation);
+    if (Number.isNaN(micros) || micros <= newestMicros) continue;
+    newest = generation;
+    newestMicros = micros;
+  }
+  return newest;
+}
 
 /**
  * Revision of the weekly-report PDF renderer deployed by this server.
@@ -93,7 +180,14 @@ export function weeklyReportPdfDigest(pdf: Buffer): string {
   return createHash("sha256").update(pdf).digest("hex");
 }
 
-/** The persisted state that decides whether the stored artifact still represents the report. */
+/**
+ * The persisted state that decides whether the stored artifact still represents the report.
+ *
+ * Every generation below is canonical text — see weeklyReportGenerationSql. `Date` is in the type only for
+ * callers that have nothing better; feeding one in from the loader would silently claim `.000` microseconds
+ * for a value the database stores to the microsecond, and MIXING the two representations across a
+ * comparison is worse than either alone.
+ */
 export interface WeeklyReportPdfArtifactState {
   pdfR2Key: string | null;
   pdfRenderVersion: number;
@@ -205,16 +299,23 @@ export function classifyWeeklyReportArtifact(
  * (two requests either side of a header edit want different documents and must not share one in-flight
  * render), the publisher WRITES the value it read into pdf_content_generation, and the comparison above
  * reads it back. Anything that changes what the render sees must move this, or a cached PDF outlives it.
+ *
+ * All three now share one REPRESENTATION as well as one definition — the canonical text this returns is the
+ * coalescer key segment verbatim, the `$n::timestamptz` the publisher binds verbatim, and the left-hand side
+ * of the comparison verbatim. That is deliberate: the moment the key, the written value and the comparison
+ * are allowed to disagree about resolution, an artifact can be published under one generation and read back
+ * as covering a different one.
  */
-export function weeklyReportContentGeneration(state: WeeklyReportPdfArtifactState): Date | string | null {
+export function weeklyReportContentGeneration(state: WeeklyReportPdfArtifactState): string | null {
+  // Null updated_at means the row could not be read; a widened maximum over the remaining inputs would be a
+  // generation for a report nobody has actually seen. The caller's 404 handling owns that case.
   if (state.updatedAt == null) return null;
-  let newest = state.updatedAt;
-  // Frozen or not — see dealNameGeneration. It is null unless the render actually reads `deals.name`.
-  if (state.dealNameGeneration != null && toEpochMillis(state.dealNameGeneration) > toEpochMillis(newest)) {
-    newest = state.dealNameGeneration;
-  }
-  if (state.contentFrozen || state.liveInputGeneration == null) return newest;
-  return toEpochMillis(state.liveInputGeneration) > toEpochMillis(newest) ? state.liveInputGeneration : newest;
+  return newestWeeklyReportGeneration([
+    state.updatedAt,
+    // Frozen or not — see dealNameGeneration. It is null unless the render actually reads `deals.name`.
+    state.dealNameGeneration,
+    state.contentFrozen ? null : state.liveInputGeneration,
+  ]);
 }
 
 /**
@@ -228,21 +329,24 @@ export function weeklyReportContentGeneration(state: WeeklyReportPdfArtifactStat
  * A null CURRENT generation means the row could not be read — treated as current so an unreadable report
  * cannot spin a download in an endless regenerate loop; the caller's own 404 handling owns that case.
  *
- * Compared at MILLISECOND precision, because node-postgres materialises timestamps as millisecond Date
- * objects while Postgres retains microseconds. `<=` rather than `<`: the publisher writes the generation it
- * read, so a quiet report compares exactly EQUAL on every subsequent read, and a strict comparison would
- * call every freshly-published artifact stale and re-render on every download forever.
+ * Compared at MICROSECOND precision — Postgres's own `timestamptz` resolution, and the resolution both
+ * sides are read at (weeklyReportGenerationSql). Rounding to milliseconds first, which is all a JS `Date`
+ * can hold, makes two generations less than a millisecond apart compare EQUAL, and `<=` then classifies the
+ * artifact current: the page shows the edit, the cached PDF does not, and for a `sent` report nothing ever
+ * moves `updated_at` again to break the tie. A render reads its inputs and publishes microseconds later, so
+ * the sub-millisecond window is not hypothetical — it is exactly where a concurrent edit lands.
+ *
+ * `<=` rather than `<`: the publisher writes the generation it read, so a quiet report compares exactly
+ * EQUAL on every subsequent read, and a strict comparison would call every freshly-published artifact stale
+ * and re-render on every download forever.
  */
 function isRenderedGenerationCurrent(state: WeeklyReportPdfArtifactState): boolean {
   const generation = weeklyReportContentGeneration(state);
   if (generation == null) return true;
-  if (state.pdfContentGeneration == null) return false;
-  const rendered = toEpochMillis(state.pdfContentGeneration);
-  const current = toEpochMillis(generation);
+  const renderedGeneration = weeklyReportGeneration(state.pdfContentGeneration);
+  if (renderedGeneration == null) return false;
+  const rendered = toEpochMicroseconds(renderedGeneration);
+  const current = toEpochMicroseconds(generation);
   if (Number.isNaN(rendered) || Number.isNaN(current)) return false;
   return current <= rendered;
-}
-
-function toEpochMillis(value: Date | string): number {
-  return value instanceof Date ? value.getTime() : new Date(value).getTime();
 }

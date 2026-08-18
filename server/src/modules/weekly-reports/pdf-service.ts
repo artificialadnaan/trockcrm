@@ -4,7 +4,10 @@ import { withWeeklyReportOfficeClient } from "./office-connection.js";
 import {
   CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION,
   classifyWeeklyReportArtifact,
+  newestWeeklyReportGeneration,
   weeklyReportContentGeneration,
+  weeklyReportGeneration,
+  weeklyReportGenerationSql,
   weeklyReportPdfDigest,
   weeklyReportPdfR2Key,
   type WeeklyReportArtifactRecheck,
@@ -35,8 +38,12 @@ export interface WeeklyReportPdfSource {
   dealNumber: string | null;
   /** Set when a correction superseded this version. The old link keeps resolving and says so. */
   supersededById: string | null;
-  /** The `updated_at` this data was read at — the value the publication CAS is conditioned on. */
-  updatedAt: Date | string | null;
+  /**
+   * The `updated_at` this data was read at — the value the publication CAS is conditioned on, as canonical
+   * microsecond text (weeklyReportGenerationSql). The CAS matches it EXACTLY, so anything that rounds it
+   * would let a report edited inside the same millisecond as the read pass a CAS that exists to stop it.
+   */
+  updatedAt: string | null;
   view: WeeklyReportView;
   state: WeeklyReportPdfArtifactState;
   recheck: WeeklyReportArtifactRecheck;
@@ -52,20 +59,6 @@ const PHOTO_SELECT = `
      AND f.deleted_at IS NULL
    ORDER BY wrp.sort_order ASC, wrp.created_at ASC
 `;
-
-/** The latest of several nullable timestamps, or null when every one of them is absent or unparseable. */
-function newestTimestamp(values: Array<Date | string | null | undefined>): Date | string | null {
-  let newest: Date | string | null = null;
-  let newestMs = Number.NEGATIVE_INFINITY;
-  for (const value of values) {
-    if (value == null) continue;
-    const ms = value instanceof Date ? value.getTime() : new Date(value).getTime();
-    if (Number.isNaN(ms) || ms <= newestMs) continue;
-    newest = value;
-    newestMs = ms;
-  }
-  return newest;
-}
 
 async function loadPhotos(client: QueryExecutor, reportId: string): Promise<WeeklyReportPdfPhoto[]> {
   const result = await client.query(PHOTO_SELECT, [reportId]);
@@ -97,22 +90,30 @@ export async function loadWeeklyReportPdfSource(
             proj.property_display_name, proj.client_name,
             proj.client_doc_name, proj.client_pm_name, proj.client_rm_name, proj.client_cm_name,
             proj.trock_pm_user_id, proj.trock_super_user_id,
+            -- EVERY generation below is selected as canonical microsecond TEXT, never as the timestamptz
+            -- itself: node-postgres parses timestamptz into a millisecond JS Date, so reading one straight
+            -- throws away the microseconds Postgres stored — and two generations inside the same
+            -- millisecond then compare equal, which is the whole thing the comparison exists to catch. The
+            -- report's own updated_at is aliased rather than taken from wr.* because the raw Date is still
+            -- what the renderer pins /CreationDate to (see report-view.ts).
+            ${weeklyReportGenerationSql("wr.updated_at")}             AS updated_at_generation,
+            ${weeklyReportGenerationSql("wr.pdf_content_generation")} AS rendered_generation,
             -- The generations of everything the render reads that is NOT the report row. None of these
             -- touches weekly_reports.updated_at when it changes; see liveInputGeneration.
             -- deals is joined for the NAME, which the header falls back to when nothing else supplies a
             -- property name, so its generation has to be available too; see dealNameGeneration for why it
             -- is conditional and why it counts even for a frozen report.
-            d.updated_at     AS deal_updated_at,
-            proj.updated_at  AS project_updated_at,
-            pm.updated_at    AS trock_pm_updated_at,
-            sup.updated_at   AS trock_super_updated_at,
+            ${weeklyReportGenerationSql("d.updated_at")}    AS deal_generation,
+            ${weeklyReportGenerationSql("proj.updated_at")} AS project_generation,
+            ${weeklyReportGenerationSql("pm.updated_at")}   AS trock_pm_generation,
+            ${weeklyReportGenerationSql("sup.updated_at")}  AS trock_super_generation,
             -- Deliberately NOT filtered to the photos the render keeps. A soft delete leaves the row in
             -- place and stamps deleted_at without touching updated_at, so counting only live photos would
             -- miss the very change that removes one from the document.
-            (SELECT max(GREATEST(f.updated_at, COALESCE(f.deleted_at, f.updated_at)))
+            ${weeklyReportGenerationSql(`(SELECT max(GREATEST(f.updated_at, COALESCE(f.deleted_at, f.updated_at)))
                FROM weekly_report_photos wrp
                JOIN files f ON f.id = wrp.file_id
-              WHERE wrp.weekly_report_id = wr.id) AS photo_updated_at,
+              WHERE wrp.weekly_report_id = wr.id)`)} AS photo_generation,
             proj.contract_date, proj.contract_date_note,
             proj.project_start_date, proj.project_start_date_note,
             proj.project_completion_date, proj.project_completion_date_note,
@@ -145,18 +146,18 @@ export async function loadWeeklyReportPdfSource(
     pdfRenderVersion: Number(row.pdf_render_version ?? 0),
     // NOT pdf_generated_at. That column records when a render finished, which is a clock reading and not
     // comparable with a content generation — see the pdf-artifact.ts header for what comparing them cost.
-    pdfContentGeneration: row.pdf_content_generation ?? null,
-    updatedAt: row.updated_at ?? null,
-    liveInputGeneration: newestTimestamp([
-      row.project_updated_at,
-      row.trock_pm_updated_at,
-      row.trock_super_updated_at,
-      row.photo_updated_at,
+    pdfContentGeneration: row.rendered_generation ?? null,
+    updatedAt: row.updated_at_generation ?? null,
+    liveInputGeneration: newestWeeklyReportGeneration([
+      row.project_generation,
+      row.trock_pm_generation,
+      row.trock_super_generation,
+      row.photo_generation,
     ]),
     // Asked of the VIEW rather than re-deriving "is the property name blank?" here. Two opinions about the
     // same fallback is how an input slips out of a generation: the view decides what is printed, so it is
     // the only thing that can say whether `deals.name` was one of the inputs.
-    dealNameGeneration: view.propertyNameFromDeal ? (row.deal_updated_at ?? null) : null,
+    dealNameGeneration: view.propertyNameFromDeal ? (row.deal_generation ?? null) : null,
     // Only a sent report has every input frozen — see WeeklyReportPdfArtifactState.contentFrozen.
     contentFrozen: row.status === "sent",
     superseded: row.superseded_by_id != null,
@@ -167,7 +168,7 @@ export async function loadWeeklyReportPdfSource(
     dealId: row.deal_id,
     dealNumber: row.deal_number ?? null,
     supersededById: row.superseded_by_id ?? null,
-    updatedAt: row.updated_at ?? null,
+    updatedAt: row.updated_at_generation ?? null,
     view,
     state,
     recheck: classifyWeeklyReportArtifact(state),
@@ -247,9 +248,30 @@ export function coalesceWeeklyReportRender(key: string, factory: () => Promise<s
   return pending;
 }
 
-function generationToken(updatedAt: Date | string | null): string {
-  if (updatedAt == null) return "none";
-  return updatedAt instanceof Date ? updatedAt.toISOString() : new Date(updatedAt).toISOString();
+/**
+ * The canonical text for a generation, or the literal "none" for a report with none.
+ *
+ * "none" only ever reaches the coalescer key: `weekly_reports.updated_at` is NOT NULL and the loader has
+ * already found the row, so a null generation here would mean a row that does not exist.
+ */
+function generationToken(value: Date | string | null): string {
+  return weeklyReportGeneration(value) ?? "none";
+}
+
+/**
+ * The identity of the artifact a render is producing — what the single flight and the deadline backoff key
+ * on. Everything that changes the document is in it, and nothing that does not.
+ *
+ * The THIRD use of a content generation, and the one with no database behind it to catch a mistake. Two
+ * requests either side of an edit must land on different keys or the second joins the first's in-flight
+ * render and is handed a key for a document it did not ask for. Exported so that is actually asserted: when
+ * the generation was rounded to the millisecond, an edit and the render that preceded it produced the SAME
+ * key, and the collision was invisible from either the row or the object store.
+ */
+export function weeklyReportRenderCoalescerKey(officeSlug: string, source: WeeklyReportPdfSource): string {
+  const contentGeneration = generationToken(weeklyReportContentGeneration(source.state));
+  const rendering = source.state.superseded ? "superseded" : "current";
+  return `${officeSlug}:${source.reportId}:${CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION}:${contentGeneration}:${rendering}`;
 }
 
 /**
@@ -266,9 +288,9 @@ export async function publishWeeklyReportPdfKey(
     reportId: string;
     r2Key: string;
     bucket: string;
-    /** `weekly_reports.updated_at` as the render read it. */
+    /** `weekly_reports.updated_at` as the render read it, as canonical microsecond text. */
     generation: string;
-    /** The WIDENED generation as the render read it — what the bytes actually represent. */
+    /** The WIDENED generation as the render read it — what the bytes actually represent. Same form. */
     contentGeneration: string;
   },
 ): Promise<string> {
@@ -285,6 +307,12 @@ export async function publishWeeklyReportPdfKey(
   // staleness comparison reads back, and a clock reading taken after the render covers changes the bytes do
   // not contain. pdf_generated_at is still stamped, purely as the "when were these bytes made" record.
   // updated_at is deliberately untouched — bumping it here would make every render look like an edit.
+  //
+  // Both comparisons are at FULL microsecond precision, matching the reads. An earlier revision truncated
+  // each side to milliseconds so a Date-parsed parameter could match — which made a report edited less than
+  // a millisecond after the render read it compare EQUAL, so the CAS matched and published a PDF of the
+  // previous content. The parameters now carry every digit Postgres stored (weeklyReportGenerationSql), so
+  // `= $5` and `<= $6` are exact and a truncation would only reintroduce the collision.
   const published = await client.query(
     `UPDATE weekly_reports
         SET pdf_r2_key = $1,
@@ -294,10 +322,10 @@ export async function publishWeeklyReportPdfKey(
             pdf_render_version = $3
       WHERE id = $4::uuid
         AND is_active
-        AND date_trunc('milliseconds', updated_at) = $5::timestamptz
+        AND updated_at = $5::timestamptz
         AND pdf_render_version <= $3
         AND (pdf_content_generation IS NULL
-             OR date_trunc('milliseconds', pdf_content_generation) <= $6::timestamptz)
+             OR pdf_content_generation <= $6::timestamptz)
       RETURNING pdf_r2_key`,
     [
       input.r2Key,
@@ -364,8 +392,7 @@ export async function publishWeeklyReportPdf(
   // document that preceded it and get handed the wrong key back.
   const generation = generationToken(source.updatedAt);
   const contentGeneration = generationToken(weeklyReportContentGeneration(source.state));
-  const rendering = source.state.superseded ? "superseded" : "current";
-  const key = `${officeSlug}:${source.reportId}:${CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION}:${contentGeneration}:${rendering}`;
+  const key = weeklyReportRenderCoalescerKey(officeSlug, source);
   // A render of THIS artifact ran out of time recently. Re-entering would pay the same budget again and
   // store nothing again — see WEEKLY_REPORT_RENDER_BACKOFF_MS.
   if (recentRenderDeadlineFailure(key, Date.now())) {

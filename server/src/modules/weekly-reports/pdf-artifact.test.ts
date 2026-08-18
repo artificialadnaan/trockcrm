@@ -5,6 +5,10 @@ import {
   isContentAddressedWeeklyReportPdfKey,
   isFutureRendererWeeklyReportPdfStale,
   needsWeeklyReportPdfRegeneration,
+  newestWeeklyReportGeneration,
+  weeklyReportContentGeneration,
+  weeklyReportGeneration,
+  weeklyReportGenerationSql,
   weeklyReportPdfDigest,
   weeklyReportPdfKeyMarksSuperseded,
   weeklyReportPdfR2Key,
@@ -15,6 +19,10 @@ const DIGEST = "a".repeat(64);
 const V = CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION;
 /** The content generation the stored bytes were rendered FROM — not a clock reading of when. */
 const RENDERED_AT = new Date("2026-08-14T10:00:00.000Z");
+// Two generations 500 MICROSECONDS apart, spelled the way the loader reads them off Postgres. Both collapse
+// to the same JS Date, which is precisely why they are written out rather than derived from one.
+const MICRO_RENDERED = "2026-08-14T10:00:00.123400Z";
+const MICRO_EDITED = "2026-08-14T10:00:00.123900Z";
 
 function state(overrides: Partial<WeeklyReportPdfArtifactState> = {}): WeeklyReportPdfArtifactState {
   return {
@@ -106,6 +114,51 @@ describe("needsWeeklyReportPdfRegeneration", () => {
     ).toBe(true);
   });
 
+  it("regenerates for an edit LESS than a millisecond after the render", () => {
+    // `timestamptz` is MICROseconds; node-postgres materialises it as a millisecond JS Date. A comparison
+    // that goes through Date therefore calls these two generations equal, `current <= rendered` holds, and
+    // the artifact classifies current — the web page shows the edit and the cached PDF does not. A render
+    // reads its inputs and publishes microseconds later, so this window is where a concurrent edit lands,
+    // and for a SENT report nothing ever moves updated_at again to break the tie.
+    const edited = state({ pdfContentGeneration: MICRO_RENDERED, updatedAt: MICRO_EDITED });
+    expect(needsWeeklyReportPdfRegeneration(edited)).toBe(true);
+    expect(classifyWeeklyReportArtifact(edited)).toBe("stale");
+  });
+
+  it("regenerates for a LIVE input that moved less than a millisecond after the render", () => {
+    // Same defect through the other door: a photo soft-deleted or a superintendent swapped in the same
+    // millisecond the render read the row. weekly_reports.updated_at does not move for either.
+    const edited = state({
+      contentFrozen: false,
+      pdfContentGeneration: MICRO_RENDERED,
+      updatedAt: MICRO_RENDERED,
+      liveInputGeneration: MICRO_EDITED,
+    });
+    expect(needsWeeklyReportPdfRegeneration(edited)).toBe(true);
+    expect(classifyWeeklyReportArtifact(edited)).toBe("stale");
+  });
+
+  it("regenerates for a deal rename less than a millisecond after the render, even once SENT", () => {
+    // The one live input a frozen report still reads, so a sub-millisecond collision here is permanent.
+    const renamed = state({
+      contentFrozen: true,
+      pdfContentGeneration: MICRO_RENDERED,
+      updatedAt: MICRO_RENDERED,
+      dealNameGeneration: MICRO_EDITED,
+    });
+    expect(needsWeeklyReportPdfRegeneration(renamed)).toBe(true);
+    expect(classifyWeeklyReportArtifact(renamed)).toBe("stale");
+  });
+
+  it("still caches an artifact whose generation matches to the microsecond", () => {
+    // The other half of the same comparison: precision must not turn `<=` into a permanent re-render. The
+    // publisher writes the generation it read, so a quiet report compares exactly equal, microseconds and
+    // all, on every later download.
+    const quiet = state({ pdfContentGeneration: MICRO_RENDERED, updatedAt: MICRO_RENDERED });
+    expect(needsWeeklyReportPdfRegeneration(quiet)).toBe(false);
+    expect(classifyWeeklyReportArtifact(quiet)).toBe("current");
+  });
+
   it("regenerates when a key exists but records no generation", () => {
     // Never rendered, or rendered by an instance that predates the pdf_content_generation column (0224).
     // Either way nothing vouches for those bytes, so they are re-made once rather than trusted.
@@ -181,6 +234,50 @@ describe("needsWeeklyReportPdfRegeneration", () => {
         state({ contentFrozen: false, dealNameGeneration: null, liveInputGeneration: RENDERED_AT }),
       ),
     ).toBe(false);
+  });
+});
+
+describe("the generation representation", () => {
+  it("substitutes the expression it is given, so a caller cannot silently read the wrong column", () => {
+    // What this SQL actually EMITS is asserted by executing it — see the "a generation keeps every digit
+    // Postgres stored" case in weekly-report-share.runtime.test.ts. Matching the text here would only
+    // restate the implementation.
+    expect(weeklyReportGenerationSql("wr.updated_at")).toContain("wr.updated_at");
+    expect(weeklyReportGenerationSql("proj.updated_at")).not.toContain("wr.updated_at");
+  });
+
+  it("keeps a canonical generation verbatim, so the three uses cannot spell it differently", () => {
+    // The coalescer key, the value the publisher binds and the value the comparison reads back are this
+    // same string. Rewriting it here — even to an equivalent instant — would let them disagree.
+    expect(weeklyReportGeneration(MICRO_EDITED)).toBe(MICRO_EDITED);
+  });
+
+  it("WIDENS a Date with zero microseconds rather than inventing any", () => {
+    // A JS Date never had microseconds, so .123 is honestly .123000. What must never happen is a Date on
+    // one side of a comparison and microsecond text on the other: the text keeps .123456 while the Date
+    // claims .123000, and the artifact then reads stale on every single download. Hence the loader reads
+    // every generation through weeklyReportGenerationSql.
+    expect(weeklyReportGeneration(new Date("2026-08-14T10:00:00.123Z"))).toBe("2026-08-14T10:00:00.123000Z");
+    expect(weeklyReportGeneration(null)).toBeNull();
+    expect(weeklyReportGeneration("not a timestamp")).toBeNull();
+  });
+
+  it("takes the newest of several generations at microsecond resolution", () => {
+    expect(newestWeeklyReportGeneration([MICRO_RENDERED, null, MICRO_EDITED, "rubbish"])).toBe(MICRO_EDITED);
+    expect(newestWeeklyReportGeneration([null, undefined])).toBeNull();
+  });
+
+  it("returns the widened generation as the canonical text the publisher writes", () => {
+    // weeklyReportContentGeneration is the ONE definition, so what it returns is literally what goes into
+    // the coalescer key and into pdf_content_generation. A Date here would round-trip through the database
+    // as .000 microseconds and no longer match the row it was read from.
+    expect(
+      weeklyReportContentGeneration(
+        state({ contentFrozen: false, updatedAt: MICRO_RENDERED, liveInputGeneration: MICRO_EDITED }),
+      ),
+    ).toBe(MICRO_EDITED);
+    // An unreadable row still yields no generation at all — the caller's 404 handling owns that case.
+    expect(weeklyReportContentGeneration(state({ updatedAt: null }))).toBeNull();
   });
 });
 

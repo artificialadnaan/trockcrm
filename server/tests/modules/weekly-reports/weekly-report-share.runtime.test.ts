@@ -26,10 +26,12 @@ import {
   coalesceWeeklyReportRender,
   loadWeeklyReportPdfSource,
   publishWeeklyReportPdfKey,
+  weeklyReportRenderCoalescerKey,
 } from "../../../src/modules/weekly-reports/pdf-service.js";
 import {
   CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION,
   weeklyReportContentGeneration,
+  weeklyReportGenerationSql,
 } from "../../../src/modules/weekly-reports/pdf-artifact.js";
 import {
   hashWeeklyReportToken,
@@ -224,18 +226,36 @@ async function stampArtifact(reportId: string) {
   );
 }
 
-function generationOf(value: Date | string | null): string {
-  if (value == null) return new Date(0).toISOString();
-  return (value instanceof Date ? value : new Date(String(value))).toISOString();
+/**
+ * The canonical generation text, or the epoch when there is none.
+ *
+ * Deliberately NOT `new Date(value).toISOString()`. That is the bug this suite has to be able to see: a JS
+ * Date holds milliseconds, `timestamptz` holds microseconds, and rounding here would hand the publisher a
+ * generation half a millisecond away from the one the row actually carries — so the CAS would compare a
+ * value against a rounded copy of itself and every sub-millisecond case below would pass on a lie.
+ */
+function generationOf(value: string | null): string {
+  return value ?? "1970-01-01T00:00:00.000000Z";
 }
 
+/** `weekly_reports.updated_at` at the resolution Postgres stores it, exactly as the loader reads it. */
 async function currentGeneration(reportId: string): Promise<string> {
-  const row = await pg.query<{ updated_at: unknown }>(
-    `SELECT updated_at FROM office_dallas.weekly_reports WHERE id = $1::uuid`,
+  const row = await pg.query<{ generation: string }>(
+    `SELECT ${weeklyReportGenerationSql("updated_at")} AS generation
+       FROM office_dallas.weekly_reports WHERE id = $1::uuid`,
     [reportId],
   );
-  const value = (row.rows[0] as any).updated_at;
-  return (value instanceof Date ? value : new Date(String(value))).toISOString();
+  return (row.rows[0] as any).generation;
+}
+
+/** `pdf_content_generation` read back at full resolution — what the publisher claims the bytes cover. */
+async function storedRenderedGeneration(reportId: string): Promise<string | null> {
+  const row = await pg.query<{ generation: string | null }>(
+    `SELECT ${weeklyReportGenerationSql("pdf_content_generation")} AS generation
+       FROM office_dallas.weekly_reports WHERE id = $1::uuid`,
+    [reportId],
+  );
+  return (row.rows[0] as any).generation ?? null;
 }
 
 /** The widened generation the render would have read — what the publisher records as rendered. */
@@ -482,6 +502,42 @@ describe("the PDF source", () => {
     expect(await loadWeeklyReportPdfSource(db, U("dead1"))).toBeNull();
   });
 
+  it("reads a generation with every digit Postgres stored, and binds it back to the same instant", async () => {
+    // The read side of the microsecond fix, EXECUTED rather than asserted against the SQL text. node-postgres
+    // parses timestamptz into a millisecond JS Date, so a loader that took the column straight would hand
+    // the comparison `.123000` for a row stored at `.123456` — and the publication CAS, which matches this
+    // value exactly, would then never match at all.
+    const project = await seedProject();
+    const id = await seedDraft(project.id);
+    await sendReport(id);
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports SET updated_at = '2026-08-14T10:00:00.123456Z'::timestamptz
+        WHERE id = $1::uuid`,
+      [id],
+    );
+
+    const source = await loadWeeklyReportPdfSource(db, id);
+    expect(source!.updatedAt).toBe("2026-08-14T10:00:00.123456Z");
+    // A sent report is frozen, so its widened generation IS its updated_at — and this is the value the
+    // publisher writes and the comparison reads back, so it has to survive the round trip verbatim.
+    expect(weeklyReportContentGeneration(source!.state)).toBe("2026-08-14T10:00:00.123456Z");
+    const bound = await pg.query(
+      `SELECT 1 FROM office_dallas.weekly_reports WHERE id = $1::uuid AND updated_at = $2::timestamptz`,
+      [id, source!.updatedAt],
+    );
+    expect(bound.rows).toHaveLength(1);
+
+    // And it does not change with the session TimeZone. The offset is pinned to Z for exactly this reason:
+    // one connection spelling the instant `+00` and another `-05` would make the CAS compare a value
+    // against a differently-written copy of itself.
+    try {
+      await pg.exec(`SET TIME ZONE 'America/Chicago';`);
+      expect((await loadWeeklyReportPdfSource(db, id))!.updatedAt).toBe("2026-08-14T10:00:00.123456Z");
+    } finally {
+      await pg.exec(`SET TIME ZONE 'UTC';`);
+    }
+  });
+
   it("caches an APPROVED report's artifact, and drops it when the LIVE header moves", async () => {
     // Before send the header block is read live from weekly_report_projects and public.users, and neither
     // touches weekly_reports.updated_at. An earlier revision answered that by never caching an unfrozen
@@ -565,8 +621,9 @@ describe("publishing an artifact", () => {
     expect((row.rows[0] as any).pdf_generated_at).not.toBeNull();
     // The GENERATION IT WAS GIVEN, verbatim — never now(). This is the assertion that keeps the publisher
     // honest: a wall-clock stamp taken after a render swallows everything that moved while it ran, and the
-    // artifact then reads current forever. Compared as an instant, since the driver hands back a Date.
-    expect(new Date((row.rows[0] as any).pdf_content_generation).toISOString()).toBe(contentGeneration);
+    // artifact then reads current forever. Read back at full resolution, so a publisher that rounded on the
+    // way in could not pass by rounding again on the way out.
+    expect(await storedRenderedGeneration(id)).toBe(contentGeneration);
     // The artifact it just published must read as current, or every download re-renders forever.
     expect((await loadWeeklyReportPdfSource(db, id))!.recheck).toBe("current");
   });
@@ -637,13 +694,75 @@ describe("publishing an artifact", () => {
     expect(key).toBe(newerKey);
 
     const row = await pg.query(
-      `SELECT pdf_r2_key, pdf_content_generation FROM office_dallas.weekly_reports WHERE id = $1::uuid`,
+      `SELECT pdf_r2_key FROM office_dallas.weekly_reports WHERE id = $1::uuid`,
       [id],
     );
     // The NEWER artifact still owns the row, and the recorded generation was not walked backwards either.
     expect((row.rows[0] as any).pdf_r2_key).toBe(newerKey);
-    expect(new Date((row.rows[0] as any).pdf_content_generation).toISOString()).toBe(newerContentGeneration);
+    expect(await storedRenderedGeneration(id)).toBe(newerContentGeneration);
     expect((await loadWeeklyReportPdfSource(db, id))!.recheck).toBe("current");
+  });
+
+  it("refuses a publish whose read of updated_at was rounded to the millisecond", async () => {
+    // How the defect actually presented. The render was handed `updated_at` as a millisecond JS Date, and
+    // the CAS truncated the column to milliseconds so the two matched ANYWAY — a report edited 900µs after
+    // the render read it therefore passed a CAS whose entire job is to catch that, and the row was pointed
+    // at a PDF of the previous content. Worse, the same rounded value went into pdf_content_generation, so
+    // the artifact then read CURRENT forever: a sent report never moves updated_at again.
+    const id = await sentReport();
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports SET updated_at = '2026-08-14T10:00:00.123900Z'::timestamptz
+        WHERE id = $1::uuid`,
+      [id],
+    );
+
+    await expectAppError(
+      publishWeeklyReportPdfKey(db, {
+        reportId: id,
+        r2Key: artifactKey(id),
+        bucket: "test-bucket",
+        generation: "2026-08-14T10:00:00.123Z",
+        contentGeneration: "2026-08-14T10:00:00.123Z",
+      }),
+      503,
+      /changed while its PDF was rendering/i,
+    );
+    const row = await pg.query(`SELECT pdf_r2_key FROM office_dallas.weekly_reports WHERE id = $1::uuid`, [id]);
+    expect((row.rows[0] as any).pdf_r2_key).toBeNull();
+  });
+
+  it("refuses an older render whose recorded generation is less than a millisecond behind", async () => {
+    // The other CAS clause, at the same resolution. Two renders of different content produce different keys
+    // and take different coalescer entries, so `pdf_content_generation <= ours` is all that orders them —
+    // and truncating BOTH sides to milliseconds made a render 500µs older compare as "not older", so the
+    // slower one won. The report row is pinned older than either, so the loser is handed the winner's key
+    // rather than a stale verdict.
+    const id = await sentReport();
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports SET updated_at = '2026-08-14T10:00:00.123000Z'::timestamptz
+        WHERE id = $1::uuid`,
+      [id],
+    );
+    const generation = "2026-08-14T10:00:00.123000Z";
+    const newerKey = `office_dallas/deals/DFW-10432/documents/weekly-reports/${id}.${"d".repeat(64)}.v${CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION}.pdf`;
+
+    await publishWeeklyReportPdfKey(db, {
+      reportId: id,
+      r2Key: newerKey,
+      bucket: "test-bucket",
+      generation,
+      contentGeneration: "2026-08-14T10:00:00.123900Z",
+    });
+
+    const key = await publishWeeklyReportPdfKey(db, {
+      reportId: id,
+      r2Key: artifactKey(id),
+      bucket: "test-bucket",
+      generation,
+      contentGeneration: "2026-08-14T10:00:00.123400Z",
+    });
+    expect(key).toBe(newerKey);
+    expect(await storedRenderedGeneration(id)).toBe("2026-08-14T10:00:00.123900Z");
   });
 
   it("hands back a NEWER renderer's artifact rather than walking the row backwards", async () => {
@@ -716,6 +835,36 @@ describe("the render coalescer", () => {
     };
     await expect(coalesceWeeklyReportRender("k2", flaky)).rejects.toThrow(/R2 unavailable/);
     await expect(coalesceWeeklyReportRender("k2", flaky)).resolves.toBe("key-2");
+  });
+
+  it("keys two generations less than a millisecond apart APART", async () => {
+    // The third place a content generation is used, and the only one with no database behind it to catch a
+    // mistake. A generation rounded to the millisecond made a report and the edit that followed it 500µs
+    // later produce the SAME key — so the request that arrived after the edit joined the render that
+    // preceded it and was handed a key for the previous document, with nothing anywhere recording that it
+    // had happened.
+    const project = await seedProject();
+    const id = await seedDraft(project.id);
+    await sendReport(id);
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports SET updated_at = '2026-08-14T10:00:00.123400Z'::timestamptz
+        WHERE id = $1::uuid`,
+      [id],
+    );
+    const before = weeklyReportRenderCoalescerKey("dallas", (await loadWeeklyReportPdfSource(db, id))!);
+
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports SET updated_at = '2026-08-14T10:00:00.123900Z'::timestamptz
+        WHERE id = $1::uuid`,
+      [id],
+    );
+    const after = weeklyReportRenderCoalescerKey("dallas", (await loadWeeklyReportPdfSource(db, id))!);
+
+    expect(before).not.toBe(after);
+    // And it is the GENERATION that differs, not some other segment drifting — the key is the artifact's
+    // identity, so a change here has to be a change to what the render would produce.
+    expect(before).toContain("2026-08-14T10:00:00.123400Z");
+    expect(after).toContain("2026-08-14T10:00:00.123900Z");
   });
 
   it("keeps different artifacts apart", async () => {
