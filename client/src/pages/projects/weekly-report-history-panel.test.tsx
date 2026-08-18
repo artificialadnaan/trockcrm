@@ -54,10 +54,24 @@ function report(overrides: Record<string, unknown> = {}) {
     supersededById: null,
     sentAt: new Date().toISOString(),
     sendDeliveredAt: null,
+    sendDeliveryStatus: null,
+    sendDeliveryStatusAt: null,
+    sendDeliveryDetail: null,
     sendError: null,
     sendAttempts: 0,
     ...overrides,
   };
+}
+
+/** A report the provider ACCEPTED and then reported as undeliverable — the state this feature exists for. */
+function bounced(overrides: Record<string, unknown> = {}) {
+  return report({
+    sendDeliveredAt: "2026-08-13T22:00:00.000Z",
+    sendDeliveryStatus: "bounced",
+    sendDeliveryStatusAt: "2026-08-13T22:04:00.000Z",
+    sendDeliveryDetail: { bounceClass: "hard", message: "550 5.1.1 user unknown" },
+    ...overrides,
+  });
 }
 
 let container: HTMLDivElement;
@@ -231,5 +245,64 @@ describe("only the newest version of a week may be corrected", () => {
     ];
     render();
     expect(button("Send correction")).toBeDefined();
+  });
+});
+
+/**
+ * A BOUNCE IS THE ONE FAILURE THAT LOOKS LIKE A SUCCESS.
+ *
+ * `sendDeliveredAt` is SET on a bounced report — the provider accepted the message before the receiving
+ * server refused it — so every predicate on this page that asks "did it get out" answered yes, and the
+ * row rendered as an ordinary delivered week with a correction offered under the wording for a client who
+ * already has their copy.
+ */
+describe("a report the provider reported as undeliverable", () => {
+  it("says so on the row, rather than showing a plain Sent badge", () => {
+    mocks.reports = [bounced()];
+    render();
+    expect(container.textContent).toMatch(/Bounced — bad address/);
+  });
+
+  it("shows the provider's own message on hover, so the PM can see WHY", () => {
+    mocks.reports = [bounced()];
+    render();
+    const titles = Array.from(container.querySelectorAll("[title]")).map((el) => el.getAttribute("title"));
+    expect(titles).toContain("550 5.1.1 user unknown");
+  });
+
+  it("warns that the client did NOT receive it, and does not send them to Retry", () => {
+    // "Never reached the client — use Retry send instead" is the wrong advice here: a retry replays the
+    // identical message to the identical address under the same idempotency key. Only a correction, sent
+    // to a corrected address, can reach anybody.
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    mocks.reports = [bounced()];
+    render();
+    button("Send correction")!.click();
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/did not receive it/i));
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/email address/i));
+    expect(confirm).not.toHaveBeenCalledWith(expect.stringMatching(/Retry send instead/i));
+  });
+
+  it("still shows a delivered report as delivered — the control", () => {
+    // Without this the assertions above would pass against a component that labelled everything a bounce.
+    mocks.reports = [
+      report({
+        sendDeliveredAt: "2026-08-13T22:00:00.000Z",
+        sendDeliveryStatus: "delivered",
+        sendDeliveryStatusAt: "2026-08-13T22:04:00.000Z",
+      }),
+    ];
+    render();
+    expect(container.textContent).toMatch(/Delivered/);
+    expect(container.textContent).not.toMatch(/Bounced/);
+  });
+
+  it("says NOTHING when no verdict has arrived", () => {
+    // Silence is the honest answer. Every send made before the delivery webhook existed carries no tag,
+    // so nothing will ever speak for it — and filling that in with "Delivered" would recreate exactly the
+    // overclaim this feature removes.
+    mocks.reports = [report({ sendDeliveredAt: "2026-08-13T22:00:00.000Z" })];
+    render();
+    expect(container.textContent).not.toMatch(/Delivered|Bounced|Marked as spam/);
   });
 });

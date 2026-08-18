@@ -69,16 +69,29 @@ function dashboardRow(overrides: Record<string, unknown> = {}) {
     // week's live report once a correction has been drafted over a failed send — and `sendRetrySentAt`
     // is THAT report's `sent_at`, which is what the provider's 24-hour dedupe window is measured against.
     sendDeliveredAt: null,
+    // Added with 0227. `sendBounced` is a FOURTH verdict rather than a variant of the three above, and
+    // the only one whose `sendDeliveredAt` is set: the provider accepted the message and the receiving
+    // server then refused it, so every predicate keyed on a missing delivery reads it as a success.
+    sendDeliveryStatus: null,
     sendAttempts: 0,
     sendFailed: false,
     sendStalled: false,
     sendPending: false,
+    sendBounced: false,
     sendRetryReportId: null,
     sendRetrySentAt: null,
     waitingOn: "Steve Sanchez",
     dismissalReason: null,
     ...overrides,
   };
+}
+
+/** The "Send failures" stat card's number — the figure a director reads before anything else. */
+function sendFailureCount(): string | undefined {
+  const card = Array.from(container.querySelectorAll("div")).find((element) =>
+    Array.from(element.children).some((child) => child.textContent?.trim() === "Send failures"),
+  );
+  return card?.children[1]?.textContent?.trim();
 }
 
 function renderPage() {
@@ -361,6 +374,41 @@ describe("This Week board", () => {
     expect(text).not.toContain("Send failed");
     expect(text).not.toContain("Send stuck");
     expect(text).not.toContain("Sending…");
+  });
+
+  it("surfaces a week the provider reported as NOT DELIVERED, and counts it as a failure", () => {
+    // The state that used to be indistinguishable from success on this page. A bounced report carries
+    // `sendDeliveredAt`, so `sendFailed`, `sendStalled` and `sendPending` are all false — the fixture says
+    // so explicitly — and the row rendered as a plain sent week while the client had nothing.
+    mockDashboard([
+      dashboardRow({
+        state: "sent",
+        sendFailed: false,
+        sendStalled: false,
+        sendPending: false,
+        sendBounced: true,
+        sendDeliveryStatus: "bounced",
+        sendDeliveredAt: "2026-08-13T22:00:00.000Z",
+        waitingOn: "Adam Sherwood",
+      }),
+    ]);
+    const text = renderPage();
+    expect(text).toContain("Not delivered");
+    expect(text).not.toContain("Send stuck");
+    expect(text).not.toContain("Sending…");
+    // And it reaches the NUMBER a director reads, not only the row. Without it the card would read 0 on a
+    // board carrying a client who never got their report.
+    expect(sendFailureCount()).toBe("1");
+  });
+
+  it("does NOT say `Not delivered` for a week nothing has been reported on — the control", () => {
+    // A page that showed the chip unconditionally would pass the test above. A `sent` week with no
+    // verdict is unknown, not failed.
+    mockDashboard([
+      dashboardRow({ state: "sent", sendDeliveredAt: "2026-08-13T22:00:00.000Z", sendBounced: false }),
+    ]);
+    expect(renderPage()).not.toContain("Not delivered");
+    expect(sendFailureCount()).toBe("0");
   });
 
   it("offers Send on an approved week, so the PM never has to leave the board", () => {

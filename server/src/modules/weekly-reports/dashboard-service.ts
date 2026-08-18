@@ -1,3 +1,4 @@
+import { weeklyReportDeliveryFailed } from "@trock-crm/shared/lib/weeklyReportDelivery";
 import {
   shiftIsoDate,
   weeklyReportDaysLate,
@@ -68,10 +69,28 @@ export interface WeeklyReportDashboardRow {
   /**
    * When the mail provider ACCEPTED the message. Null on a `sent` week means it has not got that far.
    *
-   * Not proof a human received anything: there is no bounce webhook in this codebase, so a report
-   * addressed to a mistyped domain is accepted, hard-bounces, and reads here exactly like one that landed.
+   * Not proof a human received anything, and it is not supposed to be: a report addressed to a mistyped
+   * domain is accepted, hard-bounces, and reads here exactly like one that landed. What the provider said
+   * afterwards is `sendDeliveryStatus`, added by 0227 — this field kept its meaning precisely so the two
+   * can be told apart.
    */
   sendDeliveredAt: string | null;
+  /**
+   * The provider's own verdict on the live version's send, once its delivery webhook has spoken:
+   * `delayed | delivered | complained | failed | bounced`. Null means nothing has, which is the state of
+   * every send made before that webhook existed — "unknown", never "fine".
+   */
+  sendDeliveryStatus: string | null;
+  /**
+   * The provider told us this week's report did NOT reach the client.
+   *
+   * Derived on the server, next to its siblings, because the raw fact is counter-intuitive enough to be
+   * got wrong by anyone reading the columns directly: a BOUNCED report has `sendDeliveredAt` SET. The
+   * provider accepted it and only later said the receiving server refused it, so it satisfies none of
+   * `sendFailed`, `sendStalled` or `sendPending` — every one of which is keyed on an ABSENT delivery — and
+   * without this flag it is the one delivery failure the board renders as an ordinary sent week.
+   */
+  sendBounced: boolean;
   sendAttempts: number;
   /**
    * A send this week is undelivered and the last attempt REPORTED AN ERROR.
@@ -280,7 +299,7 @@ export async function getWeeklyReportDashboard(
   const reportsResult = await client.query(
     `SELECT DISTINCT ON (weekly_report_project_id, week_of)
             id, weekly_report_project_id, week_of, status, version, sent_at, send_error,
-            send_delivered_at, send_attempts
+            send_delivered_at, send_attempts, send_delivery_status
        FROM weekly_reports
       WHERE weekly_report_project_id = ANY($1::uuid[])
         AND is_active
@@ -395,8 +414,16 @@ export async function getWeeklyReportDashboard(
       // A `sent` week only counts as settled if the email actually got out. Testing the status alone was
       // the second place a lost send vanished: past the lookback window it was not even in the "and N
       // older" tally, so the page could not so much as hint that something was missing.
+      //
+      // A BOUNCE HAS TO BE TESTED SEPARATELY, and this is the subtle half. `undeliveredByKey` is keyed on
+      // `send_delivered_at IS NULL`, and a bounced report was ACCEPTED — it carries a delivery stamp — so
+      // it is not in that set and the first two conditions call it settled. It is the opposite of settled:
+      // the provider told us in so many words that the client does not have it.
       const settled =
-        dismissalByKey.has(key) || (report?.status === "sent" && !undeliveredByKey.has(key));
+        dismissalByKey.has(key) ||
+        (report?.status === "sent" &&
+          !undeliveredByKey.has(key) &&
+          !weeklyReportDeliveryFailed(report?.send_delivery_status));
       if (!settled) olderOutstanding += 1;
     }
     if (olderOutstanding > 0) olderOutstandingCounts[project.id] = olderOutstanding;
@@ -433,13 +460,24 @@ export async function getWeeklyReportDashboard(
         undelivered != null && undelivered.send_error == null && isStalledSend(undelivered, now);
       const sendPending = undelivered != null && !sendFailed && !sendStalled;
 
+      // THE FOURTH SHAPE, and the only one whose delivery stamp is present. `sendFailed`, `sendStalled`
+      // and `sendPending` are all keyed on `undelivered`, i.e. on `send_delivered_at IS NULL`; a bounce
+      // says the provider ACCEPTED the message and the receiving server then refused it, so the stamp is
+      // there and all three are false. Without this the board renders a bounced week as an ordinary
+      // delivered one — which is exactly the silence the webhook was built to break, reintroduced one
+      // layer up.
+      //
+      // Read off the LIVE report rather than the undelivered set, because that set cannot contain it.
+      const sendBounced = weeklyReportDeliveryFailed(report?.send_delivery_status);
+
       // A settled week that is not the current one carries no signal — drop it so the page shows what
       // needs attention rather than an ever-growing archive. History lives on the History tab. An
-      // undelivered send in ANY of its three shapes is not settled.
+      // undelivered send in ANY of its three shapes is not settled, and neither is a bounced one.
       if (
         !isCurrentWeek &&
         (state === "sent" || state === "dismissed") &&
-        undelivered == null
+        undelivered == null &&
+        !sendBounced
       ) {
         continue;
       }
@@ -468,16 +506,19 @@ export async function getWeeklyReportDashboard(
         // cloned correction still reports what went wrong on the version that was actually sent.
         sendError: undelivered?.send_error ?? report?.send_error ?? null,
         sendDeliveredAt: toIsoTimestamp(report?.send_delivered_at),
+        sendDeliveryStatus: report?.send_delivery_status ?? null,
         sendAttempts: Number((undelivered ?? report)?.send_attempts ?? 0),
         sendFailed,
         sendStalled,
         sendPending,
+        sendBounced,
         sendRetryReportId: undelivered?.id ?? null,
         sendRetrySentAt: toIsoTimestamp(undelivered?.sent_at),
         // An undelivered send is waiting on the PM to deal with it. Left null, the column read "—" on the
-        // one row on the board that needs a person.
+        // one row on the board that needs a person. A bounce is the same situation with a worse cause:
+        // the client's address is wrong and only the PM can fix it.
         waitingOn:
-          sendFailed || sendStalled
+          sendFailed || sendStalled || sendBounced
             ? (base.trockPmName ?? "Unassigned PM")
             : waitingOnFor({ state, ...base }),
         dismissalReason: dismissal?.reason ?? null,
@@ -557,10 +598,18 @@ export async function getWeeklyReportDashboard(
       sentAt: toIsoTimestamp(report?.sent_at),
       sendError: undelivered.send_error ?? null,
       sendDeliveredAt: toIsoTimestamp(report?.send_delivered_at),
+      sendDeliveryStatus: report?.send_delivery_status ?? null,
       sendAttempts: Number(undelivered.send_attempts ?? 0),
       sendFailed,
       sendStalled,
       sendPending: !sendFailed && !sendStalled,
+      // ALWAYS FALSE HERE, and structurally so rather than by choice: this pass is driven by the
+      // undelivered query (`send_delivered_at IS NULL`), and a bounced report carries a delivery stamp,
+      // so no row reaching this loop can be one. It is written out rather than left implicit because that
+      // leaves a real gap — a week the CADENCE no longer generates whose send bounced is on neither pass,
+      // and `weekly_reports_send_delivery_failed_idx` (0227) exists for the sweep that will claim it. It
+      // needs its own row-generation rule, not a flag flipped here.
+      sendBounced: false,
       sendRetryReportId: undelivered.id,
       sendRetrySentAt: toIsoTimestamp(undelivered.sent_at),
       // Always the PM: the ONLY reason this row exists is a delivery that has to be dealt with, and the

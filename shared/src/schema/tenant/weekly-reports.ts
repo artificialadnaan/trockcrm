@@ -183,6 +183,18 @@ export const weeklyReports = pgTable(
     /** Migration 0226. `sendAttempts` alone cannot tell "failed twice an hour ago and gave up" from
      *  "failed twice in the last minute and is still retrying". */
     sendLastAttemptAt: timestamp("send_last_attempt_at", { withTimezone: true }),
+    /** Migration 0227. What the provider said AFTERWARDS, on a webhook: delayed | delivered | complained
+     *  | failed | bounced. A separate fact from `sendDeliveredAt`, which is acceptance and stays that —
+     *  a bounced report was accepted, so it carries a delivery stamp and this column is the only thing
+     *  that says the client never got it. NULL until a webhook speaks for the send. */
+    sendDeliveryStatus: text("send_delivery_status"),
+    /** Migration 0227. THE PROVIDER'S timestamp for the event that produced `sendDeliveryStatus`, never
+     *  the time we received it. Webhooks arrive out of order, so this — not arrival — decides which
+     *  verdict wins; a late `delivered` must not overwrite a later `bounced`. */
+    sendDeliveryStatusAt: timestamp("send_delivery_status_at", { withTimezone: true }),
+    /** Migration 0227. The bounce class (hard/soft), the provider's own type/subtype, its message and the
+     *  message id, verbatim. A hard bounce and a full mailbox need opposite actions from the PM. */
+    sendDeliveryDetail: jsonb("send_delivery_detail"),
     isActive: boolean("is_active").default(true).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
@@ -198,11 +210,24 @@ export const weeklyReports = pgTable(
     index("weekly_reports_send_undelivered_idx")
       .on(table.weeklyReportProjectId, table.weekOf)
       .where(sql`is_active AND status = 'sent' AND send_delivered_at IS NULL`),
+    // Migration 0227. Sends the provider told us did NOT reach the client. Disjoint from the index above
+    // by construction: a bounced report WAS accepted, so it carries a `send_delivered_at` and cannot be
+    // in the undelivered set at all.
+    index("weekly_reports_send_delivery_failed_idx")
+      .on(table.weeklyReportProjectId, table.weekOf)
+      .where(sql`is_active AND status = 'sent' AND send_delivery_status IN ('bounced', 'failed')`),
     check(
       "weekly_reports_status_check",
       sql`${table.status} in ('draft', 'pending_review', 'approved', 'sent')`,
     ),
     check("weekly_reports_version_check", sql`${table.version} >= 1`),
+    // Migration 0227. The verdict vocabulary, made structural. The webhook maps a provider event type to
+    // one of these and drops anything it does not recognise, so a value outside the set can only come
+    // from a hand-written UPDATE — which is exactly what this refuses.
+    check(
+      "weekly_reports_send_delivery_status_check",
+      sql`${table.sendDeliveryStatus} is null or ${table.sendDeliveryStatus} in ('delayed', 'delivered', 'complained', 'failed', 'bounced')`,
+    ),
     check(
       "weekly_reports_completion_percent_check",
       sql`${table.completionPercent} is null or (${table.completionPercent} >= 0 and ${table.completionPercent} <= 100)`,

@@ -34,6 +34,17 @@ export interface SendSystemEmailAttachment {
   content: Buffer;
 }
 
+/**
+ * A provider tag: metadata that rides WITH the message and comes back on every webhook about it.
+ *
+ * Resend restricts both fields to ASCII letters, digits, `_` and `-`, max 256 characters. Anything else is
+ * rejected by the API, so a caller passing free text turns a send into a 4xx — the shape is the contract.
+ */
+export interface SendSystemEmailTag {
+  name: string;
+  value: string;
+}
+
 export interface SendSystemEmailOptions {
   cc?: string | string[];
   bcc?: string | string[];
@@ -41,6 +52,16 @@ export interface SendSystemEmailOptions {
   idempotencyKey?: string;
   /** File attachments (e.g. a rendered PDF). Passed through to Resend as { filename, content }. */
   attachments?: SendSystemEmailAttachment[];
+  /**
+   * Tags to attach to the message.
+   *
+   * Added for the weekly-report delivery webhook, which needs to know which SEND REQUEST an incoming
+   * bounce belongs to. A tag is the only correlation handle that exists BEFORE the provider answers: the
+   * message id only exists afterwards, and "provider accepted, process died before we wrote it down" is an
+   * ordinary outcome for this worker — so a bounce for a send whose id was never recorded would be
+   * unattributable, which is precisely the case a bounce matters most in.
+   */
+  tags?: SendSystemEmailTag[];
 }
 
 /**
@@ -187,6 +208,7 @@ export async function sendSystemEmailWithMetadata(
     ...(options.attachments?.length
       ? { attachments: options.attachments.map((a) => ({ filename: a.filename, content: a.content })) }
       : {}),
+    ...(options.tags?.length ? { tags: options.tags } : {}),
   }, options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : undefined);
 
   if (result.error) {

@@ -77,6 +77,10 @@
       "types": "./dist/lib/weeklyReportEmail.d.ts",
       "default": "./dist/lib/weeklyReportEmail.js"
     },
+    "./lib/weeklyReportDelivery": {
+      "types": "./dist/lib/weeklyReportDelivery.d.ts",
+      "default": "./dist/lib/weeklyReportDelivery.js"
+    },
     "./lib/userProvisioningGuards": {
       "types": "./dist/lib/userProvisioningGuards.d.ts",
       "default": "./dist/lib/userProvisioningGuards.js"

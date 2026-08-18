@@ -212,6 +212,10 @@ beforeAll(async () => {
   await pg.exec(migrationSql("0222_weekly_reports"));
   await pg.exec(migrationSql("0223_weekly_report_pauses"));
   await pg.exec(migrationSql("0226_weekly_report_send"));
+  // And 0227, which adds the DELIVERY VERDICT columns. Same reason again: `getWeeklyReportDashboard`
+  // selects `send_delivery_status`, and `priorVersionReachedClient` binds it — a suite that stops at 0226
+  // fails on a missing column rather than on its subject.
+  await pg.exec(migrationSql("0227_weekly_report_delivery_events"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES ('${OFFICE}', 'Dallas', 'dallas');

@@ -28,10 +28,17 @@ export interface WeeklyReportDashboardRow {
   /**
    * When the mail provider ACCEPTED it. Null on a `sent` week means it has not got that far.
    *
-   * Not proof anyone received anything — there is no bounce webhook, so a mistyped domain is accepted and
-   * then hard-bounces, and reads here exactly like a report that landed.
+   * Not proof anyone received anything, and never was: a mistyped domain is accepted and then hard-bounces
+   * and this field still reads like a report that landed. What the provider said afterwards is
+   * `sendDeliveryStatus`; the two are separate fields on purpose.
    */
   sendDeliveredAt: string | null;
+  /**
+   * The provider's later verdict, from its delivery webhook:
+   * `delayed | delivered | complained | failed | bounced`, or null while nothing has spoken for the send.
+   * Null is "unknown", not "fine".
+   */
+  sendDeliveryStatus: string | null;
   sendAttempts: number;
   /**
    * All three derived on the SERVER, not here — an error left over from an attempt a retry then won is
@@ -43,6 +50,14 @@ export interface WeeklyReportDashboardRow {
   sendStalled: boolean;
   /** Undelivered and still plausibly on its way. */
   sendPending: boolean;
+  /**
+   * The provider told us the client did NOT receive it — and the three flags above are all FALSE for it.
+   *
+   * They are keyed on an absent delivery stamp; a bounced report has one, because the provider accepted
+   * the message before the receiving server refused it. Without this flag a bounce renders as an ordinary
+   * delivered week.
+   */
+  sendBounced: boolean;
   /** Which report a Retry addresses — NOT always `reportId`, once a correction has been drafted over it. */
   sendRetryReportId: string | null;
   /** When THAT send was committed. `sentAt` is the live row's, which is null once a correction exists. */
@@ -137,7 +152,13 @@ export interface WeeklyReportDetail {
   sentAt: string | null;
   sendError: string | null;
   sendAttempts: number;
+  /** The provider ACCEPTED the message. Not delivery — see `sendDeliveryStatus`. */
   sendDeliveredAt: string | null;
+  /** `delayed | delivered | complained | failed | bounced`, once the delivery webhook has spoken. */
+  sendDeliveryStatus: string | null;
+  sendDeliveryStatusAt: string | null;
+  /** `{ eventType, emailId, bounceClass, bounceType, bounceSubType, message }`, as the provider gave it. */
+  sendDeliveryDetail: Record<string, unknown> | null;
   sendLastAttemptAt: string | null;
   pdfAvailable: boolean;
   photos: WeeklyReportPhoto[];

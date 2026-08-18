@@ -14,8 +14,15 @@ import {
   type WeeklyReportSenderContact,
   type WeeklyReportSendRequest,
 } from "@trock-crm/shared/lib/weeklyReportEmail";
+import {
+  WEEKLY_REPORT_DELIVERY_FAILURE_STATUSES,
+  weeklyReportDeliveryFailed,
+  weeklyReportDeliveryLabel,
+  isWeeklyReportDeliveryStatus,
+} from "@trock-crm/shared/lib/weeklyReportDelivery";
 import { canTransitionWeeklyReport } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
+import { registerWeeklyReportSendDelivery } from "./delivery-service.js";
 import { WEEKLY_REPORT_CLIENT_ROLES, type QueryExecutor } from "./projects-service.js";
 import {
   canPublishWeeklyReport,
@@ -166,8 +173,16 @@ function senderFrom(projectRow: Record<string, any>): WeeklyReportSenderContact 
  * hunting for an email that does not exist, and it is the second situation that is common, because a PM
  * looking at a "Send failed" chip reaches for the most prominent button on the row.
  *
- * `send_delivered_at` is the strongest evidence the platform holds. It records that the mail provider
- * ACCEPTED the message, not that a human read it — see the note on `retryWeeklyReportSend`.
+ * TWO FACTS, READ TOGETHER. `send_delivered_at` records that the mail provider ACCEPTED the message, which
+ * is all the send path can ever observe; `send_delivery_status` records what the provider said afterwards
+ * on its delivery webhook (0227). Acceptance alone used to be the whole answer here, and it was wrong in
+ * the one direction that matters: a v1 accepted and then HARD-BOUNCED reads as delivered, so the v2 that
+ * follows tells the client it "replaces the previous copy" of an email that never arrived — sending them
+ * to search a mailbox for something that is not in it. A bounced or never-sent version did not reach
+ * anybody, so it cannot be what a correction corrects.
+ *
+ * `complained` is deliberately NOT excluded: a spam complaint can only follow a delivery, so that client
+ * does have the report and the replacement wording is correct for them.
  */
 async function priorVersionReachedClient(
   client: QueryExecutor,
@@ -182,8 +197,16 @@ async function priorVersionReachedClient(
         AND is_active
         AND status = 'sent'
         AND send_delivered_at IS NOT NULL
+        AND (send_delivery_status IS NULL OR NOT (send_delivery_status = ANY($4::text[])))
       LIMIT 1`,
-    [input.weeklyReportProjectId, input.weekOf, input.version],
+    [
+      input.weeklyReportProjectId,
+      input.weekOf,
+      input.version,
+      // Bound from the shared vocabulary rather than spelled out here, so adding a verdict that means
+      // "the client did not get it" cannot leave this predicate quietly behind.
+      [...WEEKLY_REPORT_DELIVERY_FAILURE_STATUSES],
+    ],
   );
   return Boolean(result.rows[0]);
 }
@@ -429,6 +452,20 @@ export async function sendWeeklyReport(
     );
   }
 
+  // The delivery key's office, registered in `public` — the one thing that lets a bounce find its way home.
+  //
+  // In the CALLER's transaction with everything else, and that matters more than it looks. The delivery
+  // webhook is unauthenticated and arrives with no office context at all; this row is what turns a key into
+  // a schema. A `sent` report with no row here is a report whose bounce resolves to nothing and is dropped
+  // silently — the exact failure the webhook exists to end — so it must not be possible for the transition
+  // to commit without it.
+  await registerWeeklyReportSendDelivery(client, {
+    deliveryKey,
+    weeklyReportId: input.reportId,
+    tenantId: input.office.tenantId,
+    officeSlug: input.office.slug,
+  });
+
   await enqueueWeeklyReportSendJob(client, {
     reportId: input.reportId,
     office: input.office,
@@ -523,10 +560,36 @@ export async function retryWeeklyReportSend(
     );
   }
   if (reportRow.send_delivered_at) {
-    // Worded as what the platform can actually evidence. `send_delivered_at` records that the MAIL
-    // PROVIDER ACCEPTED the message — there is no bounce webhook anywhere in this codebase, so a report
-    // addressed to a mistyped domain is accepted, hard-bounces, and reads exactly like one that arrived.
-    // "This report has already reached the client" was a claim nothing here can support.
+    // Worded as what the platform can actually evidence, which is now two different things.
+    //
+    // `send_delivered_at` records that the MAIL PROVIDER ACCEPTED the message, and on its own that is all
+    // it has ever meant — "This report has already reached the client" was a claim nothing here could
+    // support. Since 0227 the provider's delivery webhook may have said more, and when it has said the
+    // message BOUNCED the bare acceptance wording is actively misleading: it points a PM at a correction
+    // as though the client merely needs a newer copy, when what they actually need is a different address.
+    //
+    // The refusal itself does not change, and that is deliberate. A retry replays the SAME message to the
+    // SAME recipients under the same idempotency key; inside the provider's window it is a no-op, and
+    // outside it, it bounces again off the same bad address. A correction is the only route that can reach
+    // anybody, because it is the only one that can be addressed differently.
+    const verdict = isWeeklyReportDeliveryStatus(reportRow.send_delivery_status)
+      ? reportRow.send_delivery_status
+      : null;
+    if (verdict && weeklyReportDeliveryFailed(verdict)) {
+      const detail = (reportRow.send_delivery_detail ?? null) as { bounceClass?: unknown } | null;
+      const label = weeklyReportDeliveryLabel(
+        verdict,
+        typeof detail?.bounceClass === "string"
+          ? (detail.bounceClass as "hard" | "soft" | "unknown")
+          : null,
+      );
+      throw new AppError(
+        409,
+        `The mail provider accepted this report and then reported it as not delivered (${label}). ` +
+          "Re-sending would repeat the same message to the same address — check the client's email " +
+          "address on the project and issue a correction to send it again.",
+      );
+    }
     throw new AppError(
       409,
       "This report's email was already accepted by the mail provider — issue a correction to send it again",

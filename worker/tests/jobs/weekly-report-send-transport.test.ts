@@ -153,6 +153,45 @@ describe("what Resend is actually handed", () => {
     });
   });
 
+  it("TAGS the message with the delivery key, which is how a bounce finds its way back", async () => {
+    // Asserted here, through the real transport, rather than against a `deps.sendEmail` stub — the tag
+    // has to survive `sendSystemEmailWithMetadata`'s own rewriting of the payload, and a stub cannot show
+    // that. Without it the delivery webhook has no correlation handle at all: the provider's message id
+    // only exists after it answers, and "accepted, then the process died before we wrote it down" is an
+    // ordinary outcome for this worker — so a bounce for that send would be unattributable.
+    vi.stubEnv("SYSTEM_EMAIL_BCC", "");
+    await deliver();
+
+    expect(sendMock.mock.calls[0]![0].tags).toEqual([
+      { name: "weekly_report_delivery_key", value: DELIVERY_KEY },
+    ]);
+  });
+
+  it("keeps the tag under the EMAIL_OVERRIDE_RECIPIENT redirect", async () => {
+    // The redirect rewrites recipients and the subject. If it dropped the tag, a staging worker's events
+    // would arrive uncorrelatable — which is precisely the environment where somebody is trying to
+    // exercise this path on purpose.
+    vi.stubEnv("EMAIL_OVERRIDE_RECIPIENT", "dev@trockconstruction.com");
+    await deliver();
+
+    expect(sendMock.mock.calls[0]![0].tags).toEqual([
+      { name: "weekly_report_delivery_key", value: DELIVERY_KEY },
+    ]);
+  });
+
+  it("uses a tag value the provider will actually accept", async () => {
+    // Resend restricts tag names and values to ASCII letters, digits, `_` and `-`. A value outside that
+    // is a 4xx on the SEND — so getting this wrong would not fail to record a bounce, it would stop the
+    // client's report going out at all.
+    vi.stubEnv("SYSTEM_EMAIL_BCC", "");
+    await deliver();
+
+    for (const tag of sendMock.mock.calls[0]![0].tags as Array<{ name: string; value: string }>) {
+      expect(tag.name).toMatch(/^[A-Za-z0-9_-]{1,256}$/);
+      expect(tag.value).toMatch(/^[A-Za-z0-9_-]{1,256}$/);
+    }
+  });
+
   it("treats a Resend error as a failure rather than a delivery", async () => {
     // `sendSystemEmailWithMetadata` returns `{ success: false }` for a provider error instead of
     // throwing, which a handler reading only the throw would stamp as delivered.
