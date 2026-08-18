@@ -604,7 +604,7 @@ Tile width and height were independent constants and **both** had to change. Mor
 | Caption | beside the tile | **below it** |
 | Fit | contain | contain (unchanged) |
 
-~3x the visible photo area for the narrow case, which renders 256x556 with about 4pt of letterbox.
+~12.6x the visible photo area for the narrow case (11.3k -> 142.3k pt^2), which renders 256x556 with about 4pt of letterbox.
 
 ## Cropping was considered and rejected
 
