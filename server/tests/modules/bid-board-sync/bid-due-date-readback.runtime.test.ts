@@ -548,7 +548,8 @@ describe("Bid Board Due Date -> deals.bid_due_date (flag ON)", () => {
         m.bidDueDateProvenanceStamped +
         m.bidDueDateSkippedNoValue +
         m.bidDueDateSkippedNoChange +
-        m.bidDueDateSkippedNoAttributor
+        m.bidDueDateSkippedNoAttributor +
+        m.bidDueDateSkippedDuplicateProjectNumber
     ).toBe(m.matched);
 
     // A second identical sync: nothing left to do, and the no-change counter is where they land.
@@ -567,8 +568,79 @@ describe("Bid Board Due Date -> deals.bid_due_date (flag ON)", () => {
         second.metrics.bidDueDateProvenanceStamped +
         second.metrics.bidDueDateSkippedNoValue +
         second.metrics.bidDueDateSkippedNoChange +
-        second.metrics.bidDueDateSkippedNoAttributor
+        second.metrics.bidDueDateSkippedNoAttributor +
+        second.metrics.bidDueDateSkippedDuplicateProjectNumber
     ).toBe(second.metrics.matched);
+  });
+
+  // ★ AMBIGUOUS SOURCE. Two export rows share a canonical Project # but disagree about the Due Date. The
+  // pre-scan already detects the duplicate and warns; before this, BOTH rows still reached the
+  // write-through and the second overwrote the first — so the export's ROW ORDER decided which date landed
+  // on the deal, and therefore which auto-park horizon its reported value was computed from.
+  it("refuses the due-date write when a duplicate Project # carries CONFLICTING Due Dates", async () => {
+    await seedDeals("2026-06-01T00:00:00.000Z");
+
+    const result = await ingestBidBoardRows({
+      office_slug: "test",
+      rows: [
+        exportRow({ "Due Date": "2026-09-01" }),
+        exportRow({ "Due Date": "2026-10-15" }),
+      ],
+    });
+
+    // Neither date wins — the CRM value is left exactly as it was.
+    expect(new Date((await dealRow()).bid_due_date).toISOString()).toBe("2026-06-01T00:00:00.000Z");
+    expect(result.metrics.bidDueDateUpdated).toBe(0);
+    expect(result.metrics.bidDueDateSkippedDuplicateProjectNumber).toBe(2);
+    expect((await historyRows()).filter((h) => h.field_name === "bid_due_date")).toHaveLength(0);
+    // …and the operator is told which project to fix on the board, not just that a duplicate exists.
+    expect(result.warnings.join(" ")).toContain("appears more than once in this export with different Due Dates");
+  });
+
+  it("still writes when duplicate rows AGREE on the Due Date — a repeat is not a conflict", async () => {
+    // Procore appends "(N)" to duplicated project names, so repeats are normal. Only DISAGREEMENT is
+    // ambiguous; refusing every repeat would strand deals whose board rows simply appear twice.
+    await seedDeals("2026-06-01T00:00:00.000Z");
+
+    const result = await ingestBidBoardRows({
+      office_slug: "test",
+      rows: [exportRow(), exportRow()],
+    });
+
+    expect(new Date((await dealRow()).bid_due_date).toISOString()).toBe("2026-09-01T00:00:00.000Z");
+    expect(result.metrics.bidDueDateUpdated).toBe(1);
+    expect(result.metrics.bidDueDateSkippedDuplicateProjectNumber).toBe(0);
+  });
+
+  it("treats a blank duplicate as no opinion, not as a conflict", async () => {
+    // A blank cell never clears, so "one row dated, one row blank" has exactly one opinion in it.
+    await seedDeals("2026-06-01T00:00:00.000Z");
+
+    const result = await ingestBidBoardRows({
+      office_slug: "test",
+      rows: [exportRow(), exportRow({ "Due Date": "" })],
+    });
+
+    expect(new Date((await dealRow()).bid_due_date).toISOString()).toBe("2026-09-01T00:00:00.000Z");
+    expect(result.metrics.bidDueDateSkippedDuplicateProjectNumber).toBe(0);
+  });
+
+  // The skip is scoped to the DUE DATE only. A `continue` here would also have skipped the stage
+  // writeback, quietly widening an ambiguous date into an ambiguous stage.
+  it("still applies the STAGE writeback for a conflicting-duplicate row", async () => {
+    await seedDeals("2026-06-01T00:00:00.000Z");
+
+    const result = await ingestBidBoardRows({
+      office_slug: "test",
+      rows: [
+        exportRow({ Status: "Won", "Due Date": "2026-09-01" }),
+        exportRow({ Status: "Won", "Due Date": "2026-10-15" }),
+      ],
+    });
+
+    expect((await dealRow()).stage_id).toBe(ST_WON);
+    expect(result.metrics.stageUpdated).toBe(1);
+    expect(result.metrics.bidDueDateSkippedDuplicateProjectNumber).toBe(2);
   });
 
   it("counts the null-attributor refusal under its own metric, keeping the sum intact", async () => {

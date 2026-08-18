@@ -95,6 +95,12 @@ interface IngestionMetrics {
   bidDueDateProvenanceStamped: number;
   /** Matched rows whose due-date write was refused for lack of an admin/director to attribute it to. */
   bidDueDateSkippedNoAttributor: number;
+  /**
+   * Matched rows refused because this payload carries the same canonical Project # more than once with
+   * DIFFERENT Due Dates. Writing them would let export order decide which date — and therefore which
+   * auto-park horizon — lands on the deal.
+   */
+  bidDueDateSkippedDuplicateProjectNumber: number;
 }
 
 interface DealMatch {
@@ -1410,6 +1416,7 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
     bidDueDateSkippedNoChange: 0,
     bidDueDateProvenanceStamped: 0,
     bidDueDateSkippedNoAttributor: 0,
+    bidDueDateSkippedDuplicateProjectNumber: 0,
   };
 
   // Resolved ONCE per run, not per row: a flag flipped mid-run would otherwise write the date on some of
@@ -1418,6 +1425,11 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
 
   const seenProjectNumbers = new Set<string>();
   const duplicateProjectNumbers = new Set<string>();
+  // Distinct parsed Due Date DAYS seen per canonical Project #. A payload can legitimately repeat a
+  // project (Procore appends "(N)" to duplicated names), but when the repeats DISAGREE about the due date
+  // there is no way to tell which one the board means — and without this the row loop would write both in
+  // sequence, leaving EXPORT ORDER to decide which date lands on the deal. Silently.
+  const dueDateDaysByProjectNumber = new Map<string, Set<string>>();
   for (const row of rows) {
     const projectNumber = normalizeBidBoardProjectNumber(row["Project #"]);
     if (!projectNumber) {
@@ -1426,11 +1438,23 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
     }
     if (seenProjectNumbers.has(projectNumber)) duplicateProjectNumbers.add(projectNumber);
     seenProjectNumbers.add(projectNumber);
+    // Only PARSEABLE dates count toward a conflict: a blank cell never clears (see
+    // writeBidDueDateIfNeeded), so "one row dated, one row blank" is not a disagreement — the dated row
+    // is simply the only one with an opinion.
+    const parsedDay = parseBidBoardDueDate(row["Due Date"]).value;
+    if (parsedDay) {
+      const days = dueDateDaysByProjectNumber.get(projectNumber) ?? new Set<string>();
+      days.add(parsedDay);
+      dueDateDaysByProjectNumber.set(projectNumber, days);
+    }
   }
   metrics.duplicateProjectNumbers = duplicateProjectNumbers.size;
   for (const projectNumber of duplicateProjectNumbers) {
     warnings.push(`Incoming payload contains duplicate Project #: ${projectNumber}`);
   }
+  const conflictingDueDateProjectNumbers = new Set(
+    [...dueDateDaysByProjectNumber].filter(([, days]) => days.size > 1).map(([projectNumber]) => projectNumber)
+  );
 
   const client = await pool.connect();
   let releaseErr: unknown;
@@ -1638,20 +1662,35 @@ export async function ingestBidBoardRows(payload: BidBoardSyncPayload) {
       // the match / detach / template checks, so a detached deal is never touched. Flag off => the
       // function is not called at all, so the run issues no extra query and every counter stays 0.
       if (bidDueDateReadbackEnabled) {
-        const bidDueDateResult = await writeBidDueDateIfNeeded(
-          client,
-          schemaName,
-          matches[0],
-          normalized,
-          changedByUserId
-        );
-        // Exactly one of these fires per matched row — see BidDueDateWritebackResult.
-        if (bidDueDateResult.updated) metrics.bidDueDateUpdated++;
-        if (bidDueDateResult.provenanceStamped) metrics.bidDueDateProvenanceStamped++;
-        if (bidDueDateResult.skippedNoValue) metrics.bidDueDateSkippedNoValue++;
-        if (bidDueDateResult.skippedNoChange) metrics.bidDueDateSkippedNoChange++;
-        if (bidDueDateResult.skippedNoAttributor) metrics.bidDueDateSkippedNoAttributor++;
-        if (bidDueDateResult.warning) warnings.push(bidDueDateResult.warning);
+        // AMBIGUOUS SOURCE. Two rows in this payload carry the same canonical Project # and DIFFERENT
+        // parsed Due Dates, so "the Bid Board's date" is not a single value. Writing both in sequence
+        // would let the export's row order pick the winner — and this column is the auto-park horizon, so
+        // that silently decides the deal's reported value too. Refuse instead, and say so: an operator can
+        // fix the duplicate on the board, which is the only real remedy.
+        // Scoped to THIS write only — deliberately not a `continue`, which would also skip the stage
+        // writeback below and silently widen an ambiguous due date into an ambiguous stage.
+        const canonicalProjectNumber = normalizeBidBoardProjectNumber(normalized.bidBoardProjectNumber);
+        if (canonicalProjectNumber && conflictingDueDateProjectNumbers.has(canonicalProjectNumber)) {
+          metrics.bidDueDateSkippedDuplicateProjectNumber++;
+          warnings.push(
+            `Skipped Bid Board bid due date update for deal ${matches[0].id}: Project # ${normalized.bidBoardProjectNumber} appears more than once in this export with different Due Dates, so the correct date is ambiguous`
+          );
+        } else {
+          const bidDueDateResult = await writeBidDueDateIfNeeded(
+            client,
+            schemaName,
+            matches[0],
+            normalized,
+            changedByUserId
+          );
+          // Exactly one of these fires per matched row — see BidDueDateWritebackResult.
+          if (bidDueDateResult.updated) metrics.bidDueDateUpdated++;
+          if (bidDueDateResult.provenanceStamped) metrics.bidDueDateProvenanceStamped++;
+          if (bidDueDateResult.skippedNoValue) metrics.bidDueDateSkippedNoValue++;
+          if (bidDueDateResult.skippedNoChange) metrics.bidDueDateSkippedNoChange++;
+          if (bidDueDateResult.skippedNoAttributor) metrics.bidDueDateSkippedNoAttributor++;
+          if (bidDueDateResult.warning) warnings.push(bidDueDateResult.warning);
+        }
       }
 
       const targetStageSlug = bidBoardStatusToCrmStage(normalized.bidBoardStatus);

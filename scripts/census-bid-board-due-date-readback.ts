@@ -262,6 +262,12 @@ export function buildCensusSql(schemaName: string): string {
              -- AMBIGUITY, WITH TIER PRIORITY — see MATCHER MODEL above buildCensusSql for the
              -- full rule, why the cascade is expressible here, and which residues over- vs under-state.
              -- TIER 1 (runs first): a SHARED procore_bid_id refuses the row outright.
+             EXISTS (
+               SELECT 1
+                 FROM ${schemaName}.deals o
+                WHERE o.id <> d.id
+                  AND o.is_active = true
+                  AND COALESCE(o.is_change_order, false) = false
                   AND d.procore_bid_id IS NOT NULL
                   AND o.procore_bid_id = d.procore_bid_id
              ) AS is_ambiguous_procore_bid_id,
