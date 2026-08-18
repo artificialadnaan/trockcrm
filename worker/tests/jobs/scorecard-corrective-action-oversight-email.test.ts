@@ -73,8 +73,9 @@ interface ScorecardOverrides {
   pdfR2Key?: string | null;
   pdfRenderVersion?: number;
   status?: string;
-  pdfContentGeneration?: Date | null;
-  updatedAt?: Date;
+  /** `Date | string`: a microsecond literal is the ONLY way to express a sub-millisecond difference. */
+  pdfContentGeneration?: Date | string | null;
+  updatedAt?: Date | string;
   /** false => the guarded stamp UPDATE matches no row (superseded mid-send). */
   stampMatches?: boolean;
   storedNonce?: string | null;
@@ -84,9 +85,11 @@ interface ScorecardOverrides {
   revalidatePhaseStamp?: Date | null;
   revalidateStatus?: string;
   /** updated_at the delivery-time recheck sees — an edit landing during preparation. */
-  revalidateUpdatedAt?: Date;
+  revalidateUpdatedAt?: Date | string;
   /** Generation the POST-FETCH artifact recheck sees, modelling an edit during the R2 read. */
-  postFetchGeneration?: Date | null;
+  postFetchGeneration?: Date | string | null;
+  /** updated_at the POST-FETCH recheck sees — a change landing during the R2 read itself. */
+  postFetchUpdatedAt?: Date | string;
   /** Key the POST-FETCH recheck sees — a replacement artifact published during the R2 read. */
   postFetchKey?: string | null;
   /** [] => the card became non-browsable during preparation. */
@@ -121,7 +124,10 @@ function makeQuery(
     if (sql.includes("SELECT 1 FROM")) return { rows: over.rowAlive ? [{ "?column?": 1 }] : [] };
     // The final pre-delivery revalidation — a narrow SELECT, distinct from the snapshot join above.
     // The POST-FETCH artifact recheck — narrower than both the snapshot and the delivery revalidation.
-    if (sql.includes("SELECT pdf_r2_key, pdf_content_generation")) {
+    // Matched on the leading column alone: the two generation columns are now selected THROUGH to_char,
+    // so a matcher spelling out "pdf_r2_key, pdf_content_generation" silently stopped matching and this
+    // whole branch fell through to the empty default.
+    if (/SELECT pdf_r2_key,/.test(sql)) {
       return {
         rows: [
           {
@@ -133,7 +139,7 @@ function makeQuery(
               over.postFetchGeneration === undefined
                 ? (over.pdfContentGeneration === undefined ? GENERATION : over.pdfContentGeneration)
                 : over.postFetchGeneration,
-            updated_at: over.updatedAt ?? GENERATION,
+            updated_at: over.postFetchUpdatedAt ?? over.updatedAt ?? GENERATION,
           },
         ],
       };
@@ -555,6 +561,94 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
       string[], string, string, { attachments?: unknown[] },
     ];
     expect(options.attachments).toBeUndefined();
+  });
+
+  it("REGRESSION: does NOT attach a PDF rendered less than a millisecond before the response", async () => {
+    // `timestamptz` is microseconds; a JS Date is milliseconds. Compared through millisecond values, a
+    // render that read the card at .123456 and the corrective-action response that committed at .123900
+    // classify as the SAME generation — so this email attaches a PDF showing every item still Open under a
+    // headline announcing the corrective action was completed. That is the defect migration 0200 exists to
+    // prevent, surviving one resolution down.
+    //
+    // Explicit microsecond LITERALS, not values derived from a clock: neither JS nor Postgres-in-wasm can
+    // produce a sub-millisecond difference organically, so a derived fixture could not express the failure.
+    const { query } = makeQuery({
+      status: "corrective_action_closed",
+      pdfContentGeneration: "2026-07-27T14:00:00.123456Z",
+      updatedAt: "2026-07-27T14:00:00.123900Z",
+    });
+    const sendEmail = makeSend();
+    const getPdf = vi.fn(async () => Buffer.from("%PDF-1.4 pre-response"));
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "closed" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      getPdf: getPdf as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    expect(getPdf).not.toHaveBeenCalled();
+    const [, , , options] = sendEmail.mock.calls[0] as unknown as [
+      string[], string, string, { attachments?: unknown[] },
+    ];
+    expect(options.attachments).toBeUndefined();
+  });
+
+  it("REGRESSION: drops the attachment when the POST-FETCH generation moved by less than a millisecond", async () => {
+    // The revalidation after the R2 read exists because an edit landing during the fetch leaves every
+    // pre-fetch check passing. At millisecond resolution it could not see a change inside the millisecond
+    // it was re-reading, so it revalidated nothing in exactly the window it was written for.
+    const { query } = makeQuery({
+      status: "corrective_action_closed",
+      pdfContentGeneration: "2026-07-27T14:00:00.123456Z",
+      updatedAt: "2026-07-27T14:00:00.123456Z",
+      postFetchGeneration: "2026-07-27T14:00:00.123456Z",
+      postFetchUpdatedAt: "2026-07-27T14:00:00.123900Z",
+    });
+    const sendEmail = makeSend();
+    const getPdf = vi.fn(async () => Buffer.from("%PDF-1.4 fetched"));
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "closed" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      getPdf: getPdf as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    expect(getPdf).toHaveBeenCalledOnce();
+    expect(sendEmail).toHaveBeenCalledOnce();
+    const [, , , options] = sendEmail.mock.calls[0] as unknown as [
+      string[], string, string, { attachments?: unknown[] },
+    ];
+    expect(options.attachments).toBeUndefined();
+  });
+
+  it("attaches when the generations match to the microsecond", async () => {
+    // The other side of the same coin: full-precision equality must still read as current, or every
+    // completed corrective action would go out without its record attached.
+    const { query } = makeQuery({
+      status: "corrective_action_closed",
+      pdfContentGeneration: "2026-07-27T14:00:00.123456Z",
+      updatedAt: "2026-07-27T14:00:00.123456Z",
+    });
+    const sendEmail = makeSend();
+    const getPdf = vi.fn(async () => Buffer.from("%PDF-1.4 current"));
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "closed" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      getPdf: getPdf as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    expect(getPdf).toHaveBeenCalledOnce();
+    const [, , , options] = sendEmail.mock.calls[0] as unknown as [
+      string[], string, string, { attachments?: unknown[] },
+    ];
+    expect(options.attachments).toHaveLength(1);
   });
 
   it("does NOT attach a pre-migration artifact with a null rendered generation", async () => {

@@ -1,4 +1,30 @@
 import { createHash } from "node:crypto";
+import { sql } from "drizzle-orm";
+import type { AnyPgColumn } from "drizzle-orm/pg-core";
+import {
+  SCORECARD_GENERATION_SQL_PREFIX,
+  SCORECARD_GENERATION_SQL_SUFFIX,
+  scorecardGenerationsMatch,
+} from "@trock-crm/shared/lib/scorecardGeneration";
+
+/**
+ * A `timestamptz` column read as CANONICAL MICROSECOND TEXT, for a Drizzle select list.
+ *
+ * The one and only way the PDF cache is allowed to read a content generation. Selecting the column itself
+ * hands back a JS `Date`, which is milliseconds: every digit Postgres stores below that is discarded before
+ * any of this code sees it, and a comparison, a CAS bound or a stored value built from what survives is a
+ * thousand-fold coarser than the data it claims to describe. See shared/src/lib/scorecardGeneration.ts.
+ *
+ * The formatter is SPLICED from the shared constants around the column reference rather than restated here,
+ * so the server's Drizzle fragment and the worker's raw SQL cannot drift into two spellings of "the
+ * canonical generation". Passing the column object (not a literal name) lets Drizzle qualify it, which
+ * matters on the joined artifact-state reads where `files` also has an `updated_at`.
+ */
+export function scorecardGenerationColumn(column: AnyPgColumn) {
+  return sql<
+    string
+  >`${sql.raw(SCORECARD_GENERATION_SQL_PREFIX)}${column}${sql.raw(SCORECARD_GENERATION_SQL_SUFFIX)}`;
+}
 
 /**
  * Revision of the scorecard PDF renderer currently deployed by the server.
@@ -19,7 +45,16 @@ import { createHash } from "node:crypto";
  */
 export const CURRENT_SCORECARD_PDF_RENDER_VERSION = 4;
 
-/** Minimal persisted state needed to decide whether a scorecard PDF artifact must be rendered again. */
+/**
+ * Minimal persisted state needed to decide whether a scorecard PDF artifact must be rendered again.
+ *
+ * BOTH generations must be loaded THE SAME WAY, and the way is `scorecardGenerationColumn` — canonical
+ * microsecond text. `Date` remains in the type for the callers that genuinely have nothing better (test
+ * fixtures, and the worker's mocked rows), and `scorecardGeneration` widens one honestly with `.000`
+ * microseconds; but a state that mixes a `Date` on one side with database text on the other compares a
+ * widened `.123000` against a true `.123456` and reads stale on every download, forever. See
+ * shared/src/lib/scorecardGeneration.ts.
+ */
 export interface ScorecardPdfArtifactState {
   pdfR2Key: string | null;
   pdfRenderVersion: number;
@@ -91,24 +126,21 @@ export function classifyScorecardArtifactRecheck(state: ScorecardPdfArtifactStat
  *
  * A null RENDERED generation (every pre-0200 row) is stale. A null CURRENT generation means the row could
  * not be read — treated as current so a vanished/unreadable card cannot spin the download in an endless
- * regenerate loop; the caller's own 404/availability handling owns that case.
+ * regenerate loop; the caller's own 404/availability handling owns that case. An unparseable value on
+ * either side is stale, which is the safe direction; scorecardGenerationsMatch owns that.
  *
- * Compared at millisecond precision: node-postgres materializes timestamps as millisecond Date objects
- * while Postgres retains microseconds, so a raw comparison would report every artifact stale forever.
+ * Compared at MICROSECOND precision — Postgres's own `timestamptz` resolution, and the resolution both
+ * sides are read at (scorecardGenerationColumn here, scorecardGenerationSql in the worker). This used to
+ * round both sides to milliseconds, which is all a JS `Date` can hold, so two generations less than a
+ * millisecond apart compared EQUAL: a render that read the pre-response card published under a generation
+ * indistinguishable from the post-response one, this check called the result current, and the download
+ * served a PDF missing the corrective action — the exact defect migration 0200 exists to prevent. See
+ * shared/src/lib/scorecardGeneration.ts.
  */
 function isRenderedGenerationCurrent(state: ScorecardPdfArtifactState): boolean {
   if (state.currentGeneration == null) return true;
   if (state.pdfContentGeneration == null) return false;
-  const rendered = toEpochMillis(state.pdfContentGeneration);
-  const current = toEpochMillis(state.currentGeneration);
-  // An unparseable timestamp on either side must not silently read as "current" (NaN !== NaN would make
-  // every comparison stale, which is the safe direction, but be explicit about it).
-  if (Number.isNaN(rendered) || Number.isNaN(current)) return false;
-  return rendered === current;
-}
-
-function toEpochMillis(value: Date | string): number {
-  return value instanceof Date ? value.getTime() : new Date(value).getTime();
+  return scorecardGenerationsMatch(state.pdfContentGeneration, state.currentGeneration);
 }
 
 /** True only for the immutable SHA-256 key shape emitted by the current artifact publisher. */

@@ -57,6 +57,10 @@
       "types": "./dist/lib/responderNameMatch.d.ts",
       "default": "./dist/lib/responderNameMatch.js"
     },
+    "./lib/scorecardGeneration": {
+      "types": "./dist/lib/scorecardGeneration.d.ts",
+      "default": "./dist/lib/scorecardGeneration.js"
+    },
     "./lib/rfpReviewerEmails": {
       "types": "./dist/lib/rfpReviewerEmails.d.ts",
       "default": "./dist/lib/rfpReviewerEmails.js"

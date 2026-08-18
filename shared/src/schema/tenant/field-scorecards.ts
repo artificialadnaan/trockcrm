@@ -68,6 +68,13 @@ export const fieldScorecards = pgTable(
      * same guarded CAS UPDATE that publishes pdf_r2_key. needsScorecardPdfRegeneration compares it against
      * the live updated_at, so any content change — including a corrective-action response — invalidates the
      * cached artifact. NULL on every pre-migration row, which reads as stale.
+     *
+     * `timestamptz` is a MICROSECOND type, and this column is meaningful only to the extent it holds the
+     * same digits `updated_at` does. Never read it, compare it or write it as a Drizzle timestamp: `pg`
+     * materialises one as a millisecond JS `Date`, so a value written that way lands as `.mmm000` and a
+     * comparison made that way cannot distinguish two generations less than a millisecond apart. Every
+     * access goes through `shared/src/lib/scorecardGeneration.ts` — canonical microsecond text, cast back
+     * with `::timestamptz`.
      */
     pdfContentGeneration: timestamp("pdf_content_generation", { withTimezone: true }),
     emailSentAt: timestamp("email_sent_at", { withTimezone: true }),

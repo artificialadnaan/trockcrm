@@ -10,6 +10,10 @@ import { resolveFieldScorecardRecipients } from "@trock-crm/shared/lib/fieldScor
 import { resolveCorrectiveActionApprovers } from "@trock-crm/shared/lib/correctiveActionApprovers";
 import { orderCorrectiveActions } from "@trock-crm/shared/lib/correctiveActionOrder";
 import {
+  scorecardGenerationSql,
+  scorecardGenerationsMatch,
+} from "@trock-crm/shared/lib/scorecardGeneration";
+import {
   BROWSABLE_PROJECT_SQL,
   LOST_EXCLUDED_SLUGS,
   WON_BROWSABLE_SLUGS,
@@ -306,7 +310,13 @@ export async function handleScorecardCorrectiveActionOversightEmail(
     `SELECT sc.deal_id, sc.project_number, sc.week_of, sc.total_score, sc.average_score, sc.rating,
             sc.form_version, sc.status, sc.action_items, sc.critical_deficiencies,
             sc.pdf_r2_key, sc.pdf_render_version,
-            sc.pdf_content_generation, sc.updated_at,
+            -- BOTH generations as canonical MICROSECOND text. As raw timestamptz they arrive as millisecond
+            -- JS Dates, and isStoredPdfCurrent then cannot tell a render that read the PRE-response card
+            -- from one that read the post-response card when the response landed inside the same
+            -- millisecond — so this email attaches the document that is missing the corrective action it
+            -- was sent to announce. See shared/src/lib/scorecardGeneration.ts.
+            ${scorecardGenerationSql("sc.pdf_content_generation")} AS pdf_content_generation,
+            ${scorecardGenerationSql("sc.updated_at")} AS updated_at,
             sc.corrective_action_oversight_opened_at, sc.corrective_action_oversight_closed_at,
             sc.corrective_action_approval_requested_at,
             sc.corrective_action_cycle_nonce, sc.corrective_action_oversight_cycle,
@@ -728,8 +738,8 @@ async function loadPdfAttachment(
   // refresh that regenerates the PDF after a response is best-effort (an R2 blip or a restart makes it a
   // no-op), so a v3 artifact rendered BEFORE the response still shows every item Open. Attaching that to an
   // email headed "Corrective Action Completed" would be the very defect this feature fixes, one level down.
-  // Same comparison the server's staleness check makes (migration 0200), at millisecond precision because
-  // node-postgres yields millisecond Dates while Postgres retains microseconds.
+  // Same comparison the server's staleness check makes (migration 0200), at Postgres's own MICROSECOND
+  // resolution — both generations are read as canonical text for exactly that reason.
   if (!isStoredPdfCurrent(scorecard)) {
     logger.warn(
       "[CorrectiveActionOversightEmail] Stored PDF predates the corrective-action response - sending without attachment (the CRM link regenerates on download)",
@@ -764,7 +774,11 @@ async function loadPdfAttachment(
     // rerender succeeds. Marker, status and phase stamp would all still match, so only re-reading the
     // generation catches it. Drop the attachment rather than send a "Completed" notice with stale bytes.
     const fresh = await query(
-      `SELECT pdf_r2_key, pdf_content_generation, updated_at
+      // Same canonical microsecond text as the main read — a revalidation at a coarser resolution than the
+      // check it is revalidating would be no revalidation at all.
+      `SELECT pdf_r2_key,
+              ${scorecardGenerationSql("pdf_content_generation")} AS pdf_content_generation,
+              ${scorecardGenerationSql("updated_at")} AS updated_at
          FROM ${tenantSchema}.field_scorecards WHERE id = $1::uuid LIMIT 1`,
       [scorecardId],
     );
@@ -797,16 +811,10 @@ async function loadPdfAttachment(
  * and an un-provable attachment is not worth the risk of contradicting the email's own headline.
  */
 function isStoredPdfCurrent(scorecard: ScorecardRow): boolean {
-  const rendered = toEpochMillis(scorecard.pdf_content_generation);
-  const current = toEpochMillis(scorecard.updated_at);
-  if (rendered == null || current == null) return false;
-  return rendered === current;
-}
-
-function toEpochMillis(value: Date | string | null): number | null {
-  if (value == null) return null;
-  const ms = value instanceof Date ? value.getTime() : new Date(value).getTime();
-  return Number.isNaN(ms) ? null : ms;
+  if (scorecard.pdf_content_generation == null || scorecard.updated_at == null) return false;
+  // MICROSECOND-exact, and the same comparison the server's download classification makes — the two must
+  // agree, or this email attaches bytes the CRM download would refuse to presign.
+  return scorecardGenerationsMatch(scorecard.pdf_content_generation, scorecard.updated_at);
 }
 
 /** Deep link to the deal's Scorecards tab, office-qualified so cross-office watchers land in the right tenant. */

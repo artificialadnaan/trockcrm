@@ -42,14 +42,18 @@ const SCORECARD_EMAIL_RUN_AFTER_SECONDS = 120;
  * A STRICTLY INCREASING scorecard generation token.
  *
  * `field_scorecards.updated_at` is the PDF artifact's staleness token (migration 0200) AND the single-flight
- * key for finalizeFieldScorecardArtifacts. A bare `new Date()` can land in the SAME millisecond as the write
- * before it — two responders answering the final two items typically commit microseconds apart — and then:
- *   - the publish CAS (`date_trunc('milliseconds', updated_at) = <read generation>`) still passes, so a render
- *     that read the PRE-second-resolve state stamps its stale bytes as current; and
- *   - needsScorecardPdfRegeneration sees rendered == current and never repairs it, permanently.
- *   - the second finalize builds the same single-flight key and coalesces onto the stale in-flight render.
- * Matches the expression scorecard evidence invalidation already uses for exactly this reason
- * (modules/files/service.ts) and the +1ms guard on the scorecard edit path (scorecards-service.ts).
+ * key for finalizeFieldScorecardArtifacts. A bare `new Date()` is a millisecond value and can land on the
+ * EXACT instant of the write before it — two responders answering the final two items typically commit
+ * microseconds apart — and an unchanged generation means a render of the pre-second-resolve state is stamped
+ * as current and never repaired, while the second finalize coalesces onto that same in-flight render.
+ *
+ * The comparisons that consume this token are now microsecond-exact (shared/lib/scorecardGeneration.ts), so
+ * `NOW()` alone would already produce a distinct generation for two writes a microsecond apart. This stays
+ * because "strictly increasing" is the property the token needs and `GREATEST` is what guarantees it: a
+ * millisecond-resolution `new Date()` elsewhere, a repeated `NOW()` inside one transaction, or any writer
+ * that reads the value through a JS `Date` can otherwise reproduce or LOWER it, and a generation that moves
+ * backwards makes a stale artifact compare equal again. Matches the expression scorecard evidence
+ * invalidation uses (modules/files/service.ts) and the +1ms guard on the edit path (scorecards-service.ts).
  *
  * Built per call rather than held in a module-level constant: a top-level `sql` template dereferences
  * `fieldScorecards.updatedAt` at IMPORT time, which throws for any consumer that partially mocks

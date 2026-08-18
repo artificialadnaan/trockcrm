@@ -30,6 +30,7 @@ vi.mock("../../../src/lib/r2-client.js", () => {
 
 import {
   finalizeFieldScorecardArtifacts,
+  recheckScorecardArtifactCurrency,
   renderAndStoreFieldScorecardArtifacts,
 } from "../../../src/modules/field/scorecards-service.js";
 import { CURRENT_SCORECARD_PDF_RENDER_VERSION } from "../../../src/modules/field/scorecard-pdf-artifact.js";
@@ -68,6 +69,15 @@ const CONTENT_GENERATION_CARD = "55555555-5555-5555-5555-000000000009";
 const THREAD_CARD = "55555555-5555-5555-5555-000000000011";
 const THREAD_CORRECTIVE_ACTION = "77777777-7777-7777-7777-000000000004";
 const GENERATION_UNPUBLISHED_CARD = "55555555-5555-5555-5555-000000000010";
+const MICROSECOND_CAS_CARD = "55555555-5555-5555-5555-000000000012";
+const MICROSECOND_LEGACY_CARD = "55555555-5555-5555-5555-000000000013";
+// Two generations 444 MICROSECONDS apart. Written as literals, never derived from a clock: PGlite's now()
+// is millisecond-only (Emscripten's gettimeofday is backed by Date.now()) and a JS Date cannot hold
+// microseconds at all, so a derived fixture could not express this failure.
+const GENERATION_READ = "2026-07-27T12:00:00.123456Z";
+const GENERATION_MOVED = "2026-07-27T12:00:00.123900Z";
+// What a pre-fix publish stamped: the same instant put through a JS Date, so the microseconds are gone.
+const GENERATION_TRUNCATED = "2026-07-27T12:00:00.123000Z";
 const EVIDENCE_PNG = readFileSync(new URL("../../../../client-field/public/favicon-32x32.png", import.meta.url));
 
 let pg: PGlite;
@@ -381,10 +391,19 @@ describe("finalizeFieldScorecardArtifacts", () => {
     expect(row.rows[0]).toMatchObject({ pdf_r2_key: key, pdf_render_version: CURRENT_SCORECARD_PDF_RENDER_VERSION });
   });
 
-  it("stamps pdf_content_generation with the updated_at the render read", async () => {
+  it("stamps pdf_content_generation with the updated_at the render read, to the MICROSECOND", async () => {
     // The staleness check compares this against the live updated_at, so a render that does not stamp it
     // leaves the artifact permanently "stale" and re-renders on every single download.
+    //
+    // Stamped EXACTLY, not to the nearest millisecond. Written as a JS Date the column landed as `.mmm000`
+    // on every row whose updated_at carried microseconds — so it did not hold the value its own
+    // documentation claims, and the comparison had no choice but to round the live side to match it, which
+    // is the collision this branch exists to close.
     await seedScorecard(CONTENT_GENERATION_CARD);
+    await db.execute(sql`
+      UPDATE field_scorecards SET updated_at = ${GENERATION_READ}::timestamptz
+       WHERE id = ${CONTENT_GENERATION_CARD}::uuid
+    `);
 
     const key = await finalizeFieldScorecardArtifacts(
       { id: "office-1", slug: "dallas" },
@@ -393,12 +412,120 @@ describe("finalizeFieldScorecardArtifacts", () => {
     );
     expect(key).toBeTruthy();
 
+    // Asked of POSTGRES, at Postgres's own resolution. Reading the two columns into JavaScript would hand
+    // back millisecond Dates and compare them equal whatever was actually stored — a check that cannot fail.
     const row = await db.execute(sql`
-      SELECT pdf_content_generation, updated_at FROM field_scorecards WHERE id = ${CONTENT_GENERATION_CARD}::uuid
+      SELECT pdf_content_generation IS NOT NULL AND pdf_content_generation = updated_at AS exact,
+             to_char(pdf_content_generation AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS stamped
+        FROM field_scorecards WHERE id = ${CONTENT_GENERATION_CARD}::uuid
     `);
-    const { pdf_content_generation: stamped, updated_at: current } = row.rows[0] as Record<string, Date>;
-    expect(stamped).not.toBeNull();
-    expect(new Date(stamped).getTime()).toBe(new Date(current).getTime());
+    expect(row.rows[0]).toMatchObject({ exact: true, stamped: GENERATION_READ });
+  });
+
+  it("reads the same canonical generation whatever the session TimeZone is, and casts it back exactly", async () => {
+    // EXECUTED, not string-matched. Two properties the representation depends on and that no assertion
+    // about the SQL text can establish:
+    //   • `to_char` renders a timestamptz in the SESSION TimeZone, so the `AT TIME ZONE 'UTC'` in front of
+    //     it is the only reason the literal `Z` is true. Without it a connection with TimeZone set to
+    //     America/Chicago produces different text for the same instant, and the publication CAS then binds
+    //     one spelling and compares it against another.
+    //   • `$n::timestamptz` has to parse that text back to the EXACT microsecond, because the same string is
+    //     the value read, the value compared, the CAS bound and the value stored.
+    await seedScorecard(MICROSECOND_CAS_CARD);
+    await db.execute(sql`
+      UPDATE field_scorecards SET updated_at = ${GENERATION_READ}::timestamptz
+       WHERE id = ${MICROSECOND_CAS_CARD}::uuid
+    `);
+    const read = async () =>
+      (
+        await db.execute(sql`
+          SELECT to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS generation,
+                 to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')::timestamptz = updated_at
+                   AS round_trips
+            FROM field_scorecards WHERE id = ${MICROSECOND_CAS_CARD}::uuid
+        `)
+      ).rows[0];
+
+    try {
+      await db.execute(sql`SET TimeZone = 'America/Chicago'`);
+      expect(await read()).toMatchObject({ generation: GENERATION_READ, round_trips: true });
+      await db.execute(sql`SET TimeZone = 'UTC'`);
+      expect(await read()).toMatchObject({ generation: GENERATION_READ, round_trips: true });
+    } finally {
+      await db.execute(sql`SET TimeZone = 'UTC'`);
+    }
+  });
+
+  it("REGRESSION: a change less than a millisecond after the render's read cannot win the publish CAS", async () => {
+    // The publication CAS was `date_trunc('milliseconds', updated_at) = <the generation the render read>`,
+    // which matches ANY value inside that millisecond. A corrective-action response committing 444µs later
+    // therefore left the CAS matching: the render published a PDF of the PRE-response card and stamped it
+    // as that card's current generation. The read side then agreed, and the oversight email attached the
+    // document missing the corrective action it was sent to announce.
+    await seedScorecard(MICROSECOND_CAS_CARD);
+    await db.execute(sql`
+      UPDATE field_scorecards SET updated_at = ${GENERATION_READ}::timestamptz
+       WHERE id = ${MICROSECOND_CAS_CARD}::uuid
+    `);
+
+    r2Mocks.putObject.mockImplementation(async () => undefined);
+    r2Mocks.putObject.mockImplementationOnce(async () => {
+      // The response lands while the bytes are being stored — after the render read the card, before the
+      // CAS runs. Same millisecond, different microsecond.
+      await db.execute(sql`
+        UPDATE field_scorecards SET updated_at = ${GENERATION_MOVED}::timestamptz
+         WHERE id = ${MICROSECOND_CAS_CARD}::uuid
+      `);
+    });
+
+    await expect(
+      finalizeFieldScorecardArtifacts({ id: "office-1", slug: "dallas" }, USER, MICROSECOND_CAS_CARD),
+    ).rejects.toMatchObject({ statusCode: 503, code: "SCORECARD_CONTENT_CHANGED" });
+
+    const row = await db.execute(sql`
+      SELECT pdf_r2_key, pdf_render_version, pdf_content_generation
+        FROM field_scorecards WHERE id = ${MICROSECOND_CAS_CARD}::uuid
+    `);
+    expect(row.rows[0]).toMatchObject({
+      pdf_r2_key: null,
+      pdf_render_version: 1,
+      pdf_content_generation: null,
+    });
+  });
+
+  it("reads a millisecond-truncated legacy row stale ONCE, then settles", async () => {
+    // What happens to the rows already in the database. Every artifact published before this fix stamped
+    // pdf_content_generation through a JS Date, so it holds `.123000` while updated_at holds `.123456`.
+    // Under the exact comparison those rows are stale — once. The re-render republishes with the full
+    // precision Postgres stored, and every read after that is current. No migration, and no thrash: the
+    // CAS requires updated_at to BE the generation the render read and writes that same string, so the two
+    // columns cannot end up disagreeing again.
+    await seedScorecard(MICROSECOND_LEGACY_CARD);
+    const legacyKey = `office_dallas/deals/DFW-10432/documents/scorecards/${MICROSECOND_LEGACY_CARD}.${"a".repeat(64)}.v${CURRENT_SCORECARD_PDF_RENDER_VERSION}.pdf`;
+    await db.execute(sql`
+      UPDATE field_scorecards
+         SET updated_at = ${GENERATION_READ}::timestamptz,
+             pdf_content_generation = ${GENERATION_TRUNCATED}::timestamptz,
+             pdf_r2_key = ${legacyKey},
+             pdf_render_version = ${CURRENT_SCORECARD_PDF_RENDER_VERSION}
+       WHERE id = ${MICROSECOND_LEGACY_CARD}::uuid
+    `);
+
+    const office = { id: "office-1", slug: "dallas" };
+    expect(await recheckScorecardArtifactCurrency(office, MICROSECOND_LEGACY_CARD, legacyKey)).toBe("stale");
+
+    r2Mocks.putObject.mockImplementation(async () => undefined);
+    const republished = await finalizeFieldScorecardArtifacts(office, USER, MICROSECOND_LEGACY_CARD);
+    expect(republished).toBeTruthy();
+
+    // Settled, and it stays settled — two consecutive rechecks, so a re-render loop would show up here.
+    expect(await recheckScorecardArtifactCurrency(office, MICROSECOND_LEGACY_CARD, republished!)).toBe("current");
+    expect(await recheckScorecardArtifactCurrency(office, MICROSECOND_LEGACY_CARD, republished!)).toBe("current");
+    const row = await db.execute(sql`
+      SELECT pdf_content_generation = updated_at AS exact
+        FROM field_scorecards WHERE id = ${MICROSECOND_LEGACY_CARD}::uuid
+    `);
+    expect(row.rows[0]).toMatchObject({ exact: true });
   });
 
   it("leaves pdf_content_generation untouched when the render never publishes", async () => {
