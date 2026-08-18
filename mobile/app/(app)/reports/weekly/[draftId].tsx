@@ -20,6 +20,7 @@ import { theme } from "../../../../src/theme/theme";
 import { useAuth } from "../../../../src/auth/AuthContext";
 import {
   createWeeklyReport,
+  formatWeeklyReportDictation,
   getTranscriptionConfig,
   getWeeklyReport,
   getWeeklyReportAssignments,
@@ -33,7 +34,10 @@ import { qk } from "../../../../src/query/keys";
 import { newClientUploadId, uploadOwnerKey } from "../../../../src/capture/upload-queue";
 import { uploadCapture } from "../../../../src/capture/upload";
 import { getLiveGps } from "../../../../src/capture/metadata";
-import { formatDictationAsBullets } from "../../../../src/dictation/bullets";
+import {
+  weeklyReportDictationText,
+  type WeeklyReportDictationPort,
+} from "../../../../src/weekly-reports/dictation";
 import { retryWeeklyReportPhotoUploads } from "../../../../src/weekly-reports/photo-import";
 import { weeklyReportServerReportId } from "../../../../src/weekly-reports/hub";
 import { isWeeklyReportWeekTakenError } from "../../../../src/weekly-reports/reconcile";
@@ -208,6 +212,19 @@ function Wizard({
     staleTime: 5 * 60_000,
   });
   const voiceEnabled = transcribeConfig.data?.configured ?? false;
+
+  /**
+   * The server-side dictation pass, bound to this session.
+   *
+   * Memoised on `fetcher` so the three section recorders share one identity and a re-render mid-dictation
+   * cannot hand a half-finished turn a different port. It carries the transcript and a character count and
+   * nothing else — never the section's text, which is what makes "the server cannot overwrite what I
+   * typed" a property of the request rather than a promise about the handler.
+   */
+  const dictationPort = useCallback<WeeklyReportDictationPort>(
+    (body) => formatWeeklyReportDictation(fetcher, body),
+    [fetcher],
+  );
 
   useEffect(() => {
     if (finalized.current) return;
@@ -710,6 +727,7 @@ function Wizard({
                 value={draft.workCompleted}
                 voiceEnabled={voiceEnabled}
                 onBusyChange={getVoiceBusyHandler("workCompleted")}
+                dictationPort={dictationPort}
                 dispatch={dispatch}
               />
             ) : null}
@@ -723,6 +741,7 @@ function Wizard({
                 value={draft.nextWeekLookAhead}
                 voiceEnabled={voiceEnabled}
                 onBusyChange={getVoiceBusyHandler("nextWeekLookAhead")}
+                dictationPort={dictationPort}
                 dispatch={dispatch}
               />
             ) : null}
@@ -736,6 +755,7 @@ function Wizard({
                 value={draft.issuesConcerns}
                 voiceEnabled={voiceEnabled}
                 onBusyChange={getVoiceBusyHandler("issuesConcerns")}
+                dictationPort={dictationPort}
                 dispatch={dispatch}
               />
             ) : null}
@@ -822,6 +842,7 @@ function SectionStep({
   value,
   voiceEnabled,
   onBusyChange,
+  dictationPort,
   dispatch,
 }: {
   sectionKey: WeeklyReportSectionKey;
@@ -831,6 +852,7 @@ function SectionStep({
   value: string;
   voiceEnabled: boolean;
   onBusyChange: (busy: boolean) => void;
+  dictationPort: WeeklyReportDictationPort;
   dispatch: React.Dispatch<WeeklyReportDraftAction>;
 }) {
   return (
@@ -850,11 +872,24 @@ function SectionStep({
         <VoiceRecorder
           label="🎤 Dictate"
           onBusyChange={onBusyChange}
-          onTranscript={(text) =>
-            // Formatted into dash bullets on the way in, because that is how the report prints. It lands
-            // in this same editable box, so anything the split got wrong is one tap from being fixed.
-            dispatch({ type: "appendSection", key: sectionKey, text: formatDictationAsBullets(text) })
-          }
+          onTranscript={async (text) => {
+            // Cleaned into dash bullets on the way in, because that is how the report prints — server-side
+            // when there is a signal, by the on-device split when there is not. Either way it is APPENDED,
+            // never substituted for the box: whatever the superintendent typed by hand is untouched, and
+            // the request never carries that text in the first place.
+            //
+            // AWAITED by the recorder, which is what keeps `voiceBusy` (and therefore the leave guard) in
+            // force across the round trip rather than only across transcription.
+            const outcome = await weeklyReportDictationText(
+              // `value` is this render's copy of the section. Typing during a dictation would make it
+              // stale by a few characters; the reducer's own cap is the backstop for that, and this
+              // number only ever decides how much room the addition is allowed.
+              { transcript: text, existingChars: value.length },
+              dictationPort,
+            );
+            if (!outcome.text) return;
+            dispatch({ type: "appendSection", key: sectionKey, text: outcome.text });
+          }}
         />
       ) : null}
     </View>

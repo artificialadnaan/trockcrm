@@ -448,6 +448,14 @@ export type WeeklyReportDetailResponse = {
   project: WeeklyReportProjectView;
   permissions: WeeklyReportPermissions;
 };
+/**
+ * What the server-side dictation pass hands back: an ADDITION, never a replacement for the section.
+ *
+ * `source` says which pass produced it — `"model"` when Claude cleaned the transcript, `"local"` when the
+ * server fell back to its own sentence split (no API key configured, or the model call failed). Both are
+ * appended identically; it exists so a degraded deploy is legible rather than invisible.
+ */
+export type WeeklyReportDictationResponse = { text: string; source?: "model" | "local" };
 export type WeeklyReportPhotoCandidatesResponse = {
   photos: WeeklyReportPhotoCandidate[];
   /**
