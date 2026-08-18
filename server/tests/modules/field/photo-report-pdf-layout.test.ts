@@ -193,9 +193,13 @@ describe("renderFieldPhotoReportPdf page count", () => {
     const tileRights = [...streams.matchAll(/([\d.]+) 72 l/g)].map((m) => Number(m[1]) + RADIUS);
     const rightEdges = [...new Set(tileRights)].sort((a, b) => a - b);
     expect(rightEdges.length).toBe(2);
-    // Nothing may cross the right margin (612 - 32 = 580).
+    // Nothing may cross the right margin (612 - 32 = 580). This is the assertion with teeth: a tile width
+    // of 300 escapes all 37 tests in the other two pdf-layout suites and is caught only here.
     expect(Math.max(...rightEdges)).toBeLessThanOrEqual(612 - 32);
-    // ...and the left tile must end before the right tile begins, or the two photographs overlap.
+    // ...and the left tile ends before the right tile begins. STRICTLY REDUNDANT at a single tile width —
+    // the margin check above fails at width > 264 while this one needs > 284, so it can never fire first,
+    // and no single-constant mutation trips it alone. Kept because it states the invariant a reader is
+    // actually looking for; not counted as coverage.
     expect(rightEdges[0]).toBeLessThanOrEqual(distinct[1]);
   });
 
@@ -211,9 +215,27 @@ describe("renderFieldPhotoReportPdf page count", () => {
     // title and the footer are all drawn at PAGE_MARGIN too. The caption could vanish entirely and it still
     // passed. Identifying the caption needs its FONT SIZE as well (see `cellTextRuns`), and its position
     // needs to be checked on the axis the change actually moved it along — down.
+    // The description is deliberately MULTI-LINE. With a one-line caption the ordering assertion at the end
+    // of this test degenerates into "is the metadata baseline below the description baseline", which a
+    // partial regression walks straight past: changing `cursor += descriptionHeight + 4` to `cursor += 4`
+    // leaves 49/49 green while metadata prints 3.5pt from the description baseline, i.e. on top of it. It
+    // only caught the FULL drop, and only by 0.50pt — the 8pt-vs-7.5pt ascent difference, which is a font
+    // metric rather than a layout invariant. Three lines make the gap real.
     const buffer = await renderFieldPhotoReportPdf({
       cover,
-      sections: [{ title: "Doors", photos: [photo(1)] }],
+      sections: [
+        {
+          title: "Doors",
+          photos: [
+            {
+              ...photo(1),
+              description:
+                "North elevation door frame shows efflorescence along the lower hinge and the strike plate " +
+                "is out of alignment; recommend re-shimming before the next freeze cycle.",
+            },
+          ],
+        },
+      ],
     });
 
     // A single photo occupies the LEFT cell, so a caption drawn beside a 256pt tile would land at
@@ -234,15 +256,17 @@ describe("renderFieldPhotoReportPdf page count", () => {
     // should it ever be left-aligned it would land inside the tile and correctly fail this assertion.)
     expect(Math.max(...cellRuns.map((run) => run.y))).toBeLessThan(TILE_BOTTOM_PDF_Y);
 
-    // ...and inside the band, the description comes FIRST and the metadata below it — they must not
-    // collide. The band is drawn with a running `cursor` that the description advances by its own measured
-    // height; if that advance is ever dropped, the metadata is drawn on top of the description. Both
-    // footer-clearance tests are blind to that, because the collision moves text UP, away from the footer —
-    // sabotage confirmed they stay green through it. Ordering is the only thing that sees it.
+    // ...and inside the band, the whole description comes FIRST and the metadata below ALL of it — they
+    // must not collide. The band is drawn with a running `cursor` that the description advances by its own
+    // measured height; if that advance is dropped or shortened, metadata is drawn over the description.
+    // Both footer-clearance tests are blind to this, because the collision moves text UP, away from the
+    // footer — sabotage confirmed they stay green through it. Ordering is the only thing that sees it, and
+    // only against a multi-line description (see the fixture note above).
     const descriptionYs = cellRuns.filter((run) => Math.abs(run.size - 8) < 0.01).map((run) => run.y);
     const metadataYs = cellRuns.filter((run) => Math.abs(run.size - 7.5) < 0.01).map((run) => run.y);
-    expect(descriptionYs.length).toBeGreaterThan(0);
+    expect(descriptionYs.length).toBeGreaterThanOrEqual(3); // the fixture must really wrap, or this is weak
     expect(metadataYs.length).toBe(2); // this fixture's date + uploader; project matches the cover's
+    // Below the LAST description line, not merely below the first.
     expect(Math.max(...metadataYs)).toBeLessThan(Math.min(...descriptionYs));
   });
 
@@ -294,8 +318,18 @@ describe("renderFieldPhotoReportPdf page count", () => {
     // cell text printed UNDER the footer and off the page.
     //
     // Word-structured text is what maximises height: each ~17-char word is too wide to share a line's
-    // remainder, so every line ends early and the block needs more of them. This fixture reaches the cap,
-    // which is what makes the clamp a live guard rather than a backstop.
+    // remainder, so every line ends early and the block needs more of them.
+    //
+    // WHAT THIS STILL DOES NOT PIN, stated because an earlier draft of this comment got it backwards and
+    // claimed the opposite. Two guards bound the description — `clampText(..., 200)` and the
+    // `descriptionAvailable` (64pt) ellipsis — and they are NOT both covered. Reaching the 64pt cap makes
+    // the CAP live; it makes the CLAMP redundant, because once the text is ellipsised at 64pt the clamp
+    // value cannot change a single rendered glyph. Verified by sabotage: raising the clamp to 400, or to
+    // 100000 (i.e. removing it), leaves all 49 tests in the three pdf-layout suites green.
+    //
+    // So the clamp is a backstop for a future in which the band grows, and nothing here tests it. Recorded
+    // plainly, because the version of this comment that claimed "this fixture makes the clamp a live guard"
+    // would have let someone raise the limit, see green, and ship untested.
     const worstCase = {
       ...photo(1),
       // Differs from cover.projectName, so metaLines gets its third entry — AND long enough that it needs

@@ -347,10 +347,12 @@ function formatPhotoDate(value: string | null, fallback: string): string {
  * carry historical photos or straddle a year boundary, and "Jul 31, 4:52 PM" then reads identically for a
  * 2025 and a 2026 capture, which for an evidence document is a real loss.
  *
- * It fits, with room to spare: measured against Geist at META_FONT_SIZE, the long form is 74.7pt (82.4pt
- * worst case) — and since the caption moved BELOW the tile it now has the tile's full 256pt to sit in,
- * rather than the ~106pt side column that measurement was originally taken against. The width worry that
- * prompted the short form came from the one-up grid's 8.5pt text and did not survive the move to 7.5pt.
+ * It fits, with room to spare: re-measured against Geist at META_FONT_SIZE across all twelve months, the
+ * long form runs 71.8-83.7pt — and since the caption moved BELOW the tile it now has the tile's full 256pt
+ * to sit in, rather than the ~106pt side column the original measurement was taken against. The width
+ * worry that prompted the short form came from the one-up grid's 8.5pt text and did not survive the move
+ * to 7.5pt. (The figures previously quoted here, "74.7pt (82.4pt worst case)", could not be reproduced for
+ * any month/hour combination; they predate the move and are replaced by the measured range.)
  */
 function formatPhotoDateCompact(value: string | null, fallback: string): string {
   const date = new Date(value ?? fallback);
