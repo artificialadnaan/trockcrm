@@ -25,15 +25,26 @@ export interface WeeklyReportDashboardRow {
   reportVersion: number | null;
   sentAt: string | null;
   sendError: string | null;
-  /** When the mail provider accepted it. Null on a `sent` week means the client has not received it. */
+  /**
+   * When the mail provider ACCEPTED it. Null on a `sent` week means it has not got that far.
+   *
+   * Not proof anyone received anything — there is no bounce webhook, so a mistyped domain is accepted and
+   * then hard-bounces, and reads here exactly like a report that landed.
+   */
   sendDeliveredAt: string | null;
   sendAttempts: number;
   /**
-   * Derived on the SERVER, not here — an error left over from an attempt a retry then won is not a
-   * failure, and neither is a null delivery on a send queued seconds ago. The CRM and the app must agree
-   * on what the chip means, so neither of them decides it.
+   * All three derived on the SERVER, not here — an error left over from an attempt a retry then won is
+   * not a failure, and neither is a null delivery on a send queued seconds ago. The CRM and the app must
+   * agree on what the chip means, so neither of them decides it.
    */
   sendFailed: boolean;
+  /** Undelivered, no error recorded, and too old to still be in flight — the silent failure. */
+  sendStalled: boolean;
+  /** Undelivered and still plausibly on its way. */
+  sendPending: boolean;
+  /** Which report a Retry addresses — NOT always `reportId`, once a correction has been drafted over it. */
+  sendRetryReportId: string | null;
   waitingOn: string | null;
   dismissalReason: string | null;
 }
@@ -53,9 +64,13 @@ export interface WeeklyReportClientContact {
 
 export interface WeeklyReportProjectSummary {
   weeklyReportProjectId: string;
+  /** Reports whose email the provider ACCEPTED — a committed send that never got out is not one. */
   reportsSent: number;
   lastSentAt: string | null;
   lastSentWeekOf: string | null;
+  /** Sends this project committed that never reached the provider. Shown so narrowing the count above
+   *  does not simply make a lost report disappear from both numbers. */
+  undeliveredSends: number;
   /** Null once reporting has stopped — paused, completed, or past the cadence end date. */
   nextDueWeekOf: string | null;
 }
@@ -308,8 +323,6 @@ export interface WeeklyReportSendDraft {
   contextParagraph: string;
   sender: WeeklyReportSenderContact;
   attachPdf: boolean;
-  /** Null until the report is sent — the raw token exists exactly once, at send. */
-  shareUrl: string | null;
   bodyPreview: string;
 }
 
@@ -331,8 +344,18 @@ export function sendWeeklyReport(reportId: string, payload: WeeklyReportSendPayl
   });
 }
 
-export function retryWeeklyReportSend(reportId: string) {
-  return api<WeeklyReportDetail>(`/weekly-reports/reports/${reportId}/send/retry`, { method: "POST" });
+/**
+ * Queue the same message again.
+ *
+ * `acknowledgeDuplicateRisk` is only set once the caller has told the PM, in words, that the mail
+ * provider's 24-hour idempotency window has closed and a replay is now a genuinely second email. The
+ * server refuses without it rather than trusting the UI to have asked.
+ */
+export function retryWeeklyReportSend(reportId: string, acknowledgeDuplicateRisk = false) {
+  return api<WeeklyReportDetail>(`/weekly-reports/reports/${reportId}/send/retry`, {
+    method: "POST",
+    json: { acknowledgeDuplicateRisk },
+  });
 }
 
 /** Clone a sent report to the next version. It is NOT sent, and the original is not superseded yet. */

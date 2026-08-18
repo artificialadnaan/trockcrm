@@ -8,8 +8,9 @@ import { getObjectBuffer } from "../lib/r2-client.js";
 import { escapeHtml, normalizeText, isSafeTenantSchema } from "../lib/email-format.js";
 import {
   normalizeWeeklyReportRecipients,
-  weeklyReportEmailParagraphs,
+  weeklyReportEmailParagraphBlocks,
   weeklyReportEmailBodyText,
+  weeklyReportSignatureLines,
   type WeeklyReportEmailParts,
   type WeeklyReportSenderContact,
 } from "@trock-crm/shared/lib/weeklyReportEmail";
@@ -162,24 +163,36 @@ export function weeklyReportAttachmentFilename(input: {
  * webfonts do not load in Outlook or Gmail desktop.
  */
 export function buildWeeklyReportClientEmail(parts: WeeklyReportEmailParts & { subject: string }) {
-  const paragraphs = weeklyReportEmailParagraphs(parts);
+  const paragraphs = weeklyReportEmailParagraphBlocks(parts);
   const text = weeklyReportEmailBodyText(parts);
   const shareUrl = (parts.shareUrl ?? "").trim();
   const safeShareUrl = escapeHtml(shareUrl);
 
   const htmlParagraphs = paragraphs
     .map((paragraph) => {
-      // The link line is rendered as a button below, so it is not repeated as text. Everything else is
-      // escaped and newline-preserved.
-      if (shareUrl && paragraph.includes(shareUrl)) return "";
+      // The link paragraph is rendered as a button below, so it is not repeated as text. Selected by its
+      // KIND, never by searching its text for the URL: that earlier test dropped the PM's entire message
+      // whenever they happened to paste the link into it — and only from the HTML part, so the plain-text
+      // alternative still carried it and the two halves of one email disagreed.
+      if (paragraph.kind === "link") return "";
       return `
           <tr>
             <td style="padding:0 28px 14px 28px;font-family:Arial,Helvetica,sans-serif;font-size:14.5px;line-height:22px;color:#111111;">${escapeHtml(
-              paragraph,
+              paragraph.text,
             ).replace(/\n/g, "<br />")}</td>
           </tr>`;
     })
     .join("");
+
+  // THE FOOTER MUST NOT PROMISE A REPLY PATH THAT DOES NOT EXIST. It used to read "Reply to this email to
+  // reach your project manager", and nothing routes a reply anywhere near the PM: no Reply-To is set (the
+  // shared `sendSystemEmailWithMetadata` does not support one, and teaching a helper used by fifteen jobs
+  // a new header is a wider change than this earns), so replies land on RESEND_FROM_ADDRESS, which nobody
+  // watches. Carrying the PM's own address and phone in the signature instead is a fair trade; printing a
+  // false instruction to a paying customer is not.
+  const footerNote = weeklyReportSignatureLines(parts.sender).length > 1
+    ? "Sent by T Rock Construction. This mailbox is not monitored — please use your project manager's contact details above."
+    : "Sent by T Rock Construction. This mailbox is not monitored.";
 
   const linkBlock = shareUrl
     ? `
@@ -224,7 +237,9 @@ export function buildWeeklyReportClientEmail(parts: WeeklyReportEmailParts & { s
           </tr>${htmlParagraphs}${linkBlock}
           <tr>
             <td style="padding:16px 24px;border-top:1px solid #e2e8f0;background-color:#fafafa;">
-              <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:18px;color:#94a3b8;">Sent by T Rock Construction. Reply to this email to reach your project manager.</p>
+              <p style="margin:0;font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:18px;color:#94a3b8;">${escapeHtml(
+                footerNote,
+              )}</p>
             </td>
           </tr>
         </table>
@@ -244,6 +259,13 @@ export function buildWeeklyReportClientEmail(parts: WeeklyReportEmailParts & { s
  * Conditioned on the report still being an undelivered `sent` — the same discipline every other write in
  * this feature follows. Without it, a stamp from a slow attempt could land on a report that a correction
  * or a concurrent success had already moved on, reporting a failure for a delivery that succeeded.
+ *
+ * ON DELIVERY IT ALSO DROPS THE RAW CLIENT LINK. `send_request.shareUrl` is the only place the unhashed
+ * 180-day token ever comes to rest: public.weekly_report_tokens stores a SHA-256 hash precisely so that a
+ * database read — a support query, a backup, a pg_dump — cannot reconstruct a live link to a client's
+ * report, and a jsonb column keeping the URL forever handed that property straight back for every report
+ * the office has ever sent. It is needed only until the message goes out; a retry is refused once
+ * delivery is stamped, so nothing downstream reads it again.
  */
 async function recordAttempt(
   query: typeof pool.query,
@@ -256,9 +278,36 @@ async function recordAttempt(
         SET send_attempts = send_attempts + 1,
             send_last_attempt_at = NOW(),
             send_error = $2,
-            send_delivered_at = CASE WHEN $3::boolean THEN NOW() ELSE send_delivered_at END
+            send_delivered_at = CASE WHEN $3::boolean THEN NOW() ELSE send_delivered_at END,
+            send_request = CASE
+              WHEN $3::boolean AND send_request IS NOT NULL THEN send_request - 'shareUrl'
+              ELSE send_request
+            END
       WHERE id = $1::uuid AND is_active AND status = 'sent' AND send_delivered_at IS NULL`,
     [reportId, outcome.error, outcome.delivered],
+  );
+}
+
+/**
+ * Refuse to email a real client from anything but production.
+ *
+ * EVERY OTHER SYSTEM EMAIL IN THIS CODEBASE GOES TO COLLEAGUES. This is the first job whose recipient list
+ * comes from a CUSTOMER contact table, and the only thing standing between a staging or laptop worker with
+ * a copied RESEND_API_KEY and a real client's inbox is `EMAIL_OVERRIDE_RECIPIENT` — which ships empty in
+ * .env.example and is unset in production by design. "Remember to set the override" is not a control.
+ *
+ * Keyed on NODE_ENV, which `Dockerfile.worker` sets to `production` for the deployed image, so the
+ * deployed worker is unaffected. A dev or staging worker that genuinely wants to exercise the real path
+ * sets `EMAIL_OVERRIDE_RECIPIENT` — which redirects everything to one internal mailbox — and this stands
+ * aside. Throwing rather than skipping: the send is not abandoned quietly, it fails visibly with a
+ * `send_error` that says exactly what happened.
+ */
+function assertMayEmailRealClients(recipients: string[]): void {
+  if (process.env.NODE_ENV === "production") return;
+  if (process.env.EMAIL_OVERRIDE_RECIPIENT?.trim()) return;
+  throw new Error(
+    `Refusing to email ${recipients.length} client address(es) from a non-production worker ` +
+      "(NODE_ENV is not `production` and EMAIL_OVERRIDE_RECIPIENT is unset)",
   );
 }
 
@@ -283,6 +332,19 @@ export async function handleWeeklyReportSend(
     // A malformed payload is not retryable — nothing about waiting makes it well-formed. Logged and
     // dropped rather than thrown, so it does not burn three attempts before dead-lettering.
     logger.warn("[WeeklyReportSend] Invalid job payload - skipping", { tenantSchema, reportId, officeSlug });
+    return;
+  }
+  // `officeSlug` and `tenantSchema` arrive as INDEPENDENT fields and address two different things: the row
+  // is read out of `tenantSchema` while the PDF is rendered for `officeSlug`. Nothing but this line stops
+  // them naming different offices, and the consequence of divergence is another office's report attached
+  // to this client's email. The enqueue writes both from one value, so they can only ever disagree through
+  // a bug or a hand-edited row — which is exactly when a shape-only payload check is not enough.
+  if (tenantSchema !== `office_${officeSlug}`) {
+    logger.warn("[WeeklyReportSend] Payload office does not match its tenant schema - skipping", {
+      tenantSchema,
+      officeSlug,
+      reportId,
+    });
     return;
   }
 
@@ -392,29 +454,29 @@ export async function handleWeeklyReportSend(
   }
 
   const email = buildWeeklyReportClientEmail(parts);
+  const sendEmail = deps.sendEmail ?? sendSystemEmailWithMetadata;
 
+  // Keyed on the SEND REQUEST, not on the report. A retry of the same request replays this key and the
+  // provider refuses to send twice — which is what makes retrying a job whose outcome is unknown safe. A
+  // correction is a different report row with its own key and genuinely does go out. NOTE the key only
+  // dedupes for 24 hours (see WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS); the API's retry route is
+  // what enforces that boundary, because only it knows how old the request is.
+  const idempotencyKey = `weekly-report-${tenantSchema}-${reportId}-${deliveryKey}`;
+
+  // THE SEND ITSELF. Only this call is inside the failure-recording catch. Everything after it has already
+  // put the report in the client's inbox, and must never be written down as a send failure.
+  let result: SendSystemEmailResult;
   try {
-    const sendEmail = deps.sendEmail ?? sendSystemEmailWithMetadata;
-    const result = await sendEmail(recipients, email.subject, email.html, {
+    assertMayEmailRealClients(recipients);
+    result = await sendEmail(recipients, email.subject, email.html, {
       text: email.text,
-      // Keyed on the SEND REQUEST, not on the report. A retry of the same request replays this key and the
-      // provider refuses to send twice — which is what makes retrying a job whose outcome is unknown safe.
-      // A correction is a different report row with its own key and genuinely does go out.
-      idempotencyKey: `weekly-report-${tenantSchema}-${reportId}-${deliveryKey}`,
+      idempotencyKey,
       // No Reply-To override. `sendSystemEmailWithMetadata` does not support one, and teaching a helper
       // shared by fifteen jobs a new header to route this one email is a wider change than it earns —
-      // the PM's own address and phone are in the signature, which is the route the spec specifies.
+      // the PM's own address and phone are in the signature, and the footer no longer claims otherwise.
       attachments,
     });
     if (!result.success) throw new Error("Email provider returned unsuccessful result");
-
-    await recordAttempt(query, tenantSchema, reportId, { delivered: true, error: null });
-    logger.log("[WeeklyReportSend] Delivered weekly report", {
-      reportId,
-      recipientCount: recipients.length,
-      hadPdf: Boolean(attachments),
-      messageId: result.messageId,
-    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     // Written BEFORE the rethrow, so the failure is visible on the dashboard whether the queue retries or
@@ -426,4 +488,33 @@ export async function handleWeeklyReportSend(
     logger.error("[WeeklyReportSend] Failed to deliver weekly report", { reportId, error });
     throw error;
   }
+
+  // DELIVERED. The stamp used to live inside the try above, which meant a database that went away between
+  // the provider accepting the message and the row being updated was recorded as "Resend timed out" — a
+  // send failure, for a send that succeeded. The catch could not tell the two apart, so the board offered
+  // a Retry for an email the client already had, and the failure chip was simply false.
+  //
+  // A throw here is the right answer: the queue retries, the replay carries the same idempotency key, the
+  // provider answers "already delivered", and the stamp is attempted again. What it must NOT do is write
+  // an error. If every attempt fails, the row is left `sent` with no delivery and no error — which the
+  // dashboard now surfaces on its own after WEEKLY_REPORT_SEND_STALL_MINUTES rather than losing it.
+  try {
+    await recordAttempt(query, tenantSchema, reportId, { delivered: true, error: null });
+  } catch (error) {
+    logger.error("[WeeklyReportSend] DELIVERED but the delivery could not be recorded", {
+      reportId,
+      error,
+    });
+    throw new Error(
+      `Weekly report was delivered but recording the delivery failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  logger.log("[WeeklyReportSend] Delivered weekly report", {
+    reportId,
+    recipientCount: recipients.length,
+    hadPdf: Boolean(attachments),
+    messageId: result.messageId,
+  });
 }

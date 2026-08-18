@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { WEEKLY_REPORT_SEND_REQUEST_KEYS } from "@trock-crm/shared/lib/weeklyReportEmail";
 import {
   buildWeeklyReportClientEmail,
   handleWeeklyReportSend,
@@ -32,6 +33,16 @@ const SEND_REQUEST = {
 };
 
 const SILENT_LOGGER = { log: () => {}, warn: () => {}, error: () => {} };
+
+// THESE TESTS DESCRIBE THE DEPLOYED WORKER, which Dockerfile.worker runs with NODE_ENV=production. The
+// job refuses to email a client from anything else unless EMAIL_OVERRIDE_RECIPIENT redirects the mail
+// somewhere internal — see "not from a laptop" below, which unsets this to assert the refusal.
+beforeEach(() => {
+  vi.stubEnv("NODE_ENV", "production");
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 function payload(overrides: Record<string, unknown> = {}) {
   return {
@@ -77,6 +88,16 @@ function baseRow(overrides: Record<string, unknown> = {}) {
 function okSend() {
   return vi.fn(async () => ({ success: true, messageId: "msg_1" }));
 }
+
+describe("the stored request is the API's, not this file's idea of it", () => {
+  it("uses a fixture carrying EXACTLY the keys the API writes", async () => {
+    // Without this the suite below is circular: every assertion about what the worker sends is read out
+    // of SEND_REQUEST, which is hand-written here — so a field the API stopped writing (the PM's edited
+    // subject, the whole signature block, the attach-PDF toggle) would break nothing in either package.
+    // The key list lives in shared and the API asserts its own row against the same one.
+    expect(Object.keys(SEND_REQUEST).sort()).toEqual([...WEEKLY_REPORT_SEND_REQUEST_KEYS].sort());
+  });
+});
 
 describe("delivering the report", () => {
   it("sends the stored message, with the link and the PM's details, and stamps delivery", async () => {
@@ -181,6 +202,27 @@ describe("never sending twice", () => {
     expect(sendEmail).not.toHaveBeenCalled();
   });
 
+  it("drops a payload whose office and tenant schema disagree", async () => {
+    // The two are INDEPENDENT fields addressing different things: the row is read out of `tenantSchema`
+    // while the PDF is rendered for `officeSlug`. Divergence attaches another office's report to this
+    // client's email. The enqueue writes both from one value, so they can only disagree through a bug —
+    // which is precisely when a shape-only check is not enough.
+    const { query, updates } = fakeQuery(baseRow());
+    const sendEmail = okSend();
+    const resolvePdfKey = vi.fn(async () => "some/key.pdf");
+    await expect(
+      handleWeeklyReportSend(payload({ officeSlug: "houston" }), null, {
+        query,
+        sendEmail,
+        resolvePdfKey,
+        logger: SILENT_LOGGER,
+      }),
+    ).resolves.toBeUndefined();
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(resolvePdfKey).not.toHaveBeenCalled();
+    expect(updates).toHaveLength(0);
+  });
+
   it("refuses a malformed payload without burning retries on it", async () => {
     const sendEmail = okSend();
     const { query } = fakeQuery(baseRow());
@@ -281,6 +323,97 @@ describe("making failure visible", () => {
   });
 });
 
+describe("a delivery that succeeded is never written down as a failure", () => {
+  it("does NOT record an error when the provider accepted but the stamp could not be written", async () => {
+    // The bug: the delivered stamp used to sit INSIDE the same try as the send, so a database that went
+    // away between Resend accepting the message and the row being updated was recorded as a send failure
+    // — for a send that succeeded. The catch could not tell the two apart, so the board raised a chip
+    // that was simply false and offered a Retry for an email the client already had.
+    const updates: Array<{ sql: string; params: unknown[] }> = [];
+    const query = vi.fn(async (sql: string, params: unknown[] = []) => {
+      if (/^\s*SELECT/i.test(sql)) return { rows: [baseRow()], rowCount: 1 };
+      updates.push({ sql, params });
+      throw new Error("timeout exceeded when trying to connect");
+    }) as any;
+    const sendEmail = okSend();
+
+    await expect(
+      handleWeeklyReportSend(payload(), null, {
+        query,
+        sendEmail,
+        resolvePdfKey: async () => null,
+        logger: SILENT_LOGGER,
+      }),
+    ).rejects.toThrow(/delivered but recording the delivery failed/i);
+
+    // The client HAS the report — exactly once.
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    // Exactly one write was attempted, and it was the DELIVERED one. Nothing tried to record a failure.
+    expect(updates).toHaveLength(1);
+    expect(updates[0]!.params).toEqual([REPORT, null, true]);
+    expect(updates.some((update) => update.params[1] !== null)).toBe(false);
+  });
+
+  it("still throws, so the queue replays the same idempotency key rather than giving up", async () => {
+    // Rethrowing is the right answer: the replay carries the same key, the provider answers "already
+    // delivered", and the stamp is attempted again. Swallowing it would leave the row permanently
+    // undelivered with nothing to retry it.
+    const { query } = fakeQuery(baseRow());
+    const failing = vi.fn(async (sql: string, params: unknown[] = []) => {
+      if (/^\s*SELECT/i.test(sql)) return query(sql, params);
+      throw new Error("connection terminated");
+    }) as any;
+    await expect(
+      handleWeeklyReportSend(payload(), null, {
+        query: failing,
+        sendEmail: okSend(),
+        resolvePdfKey: async () => null,
+        logger: SILENT_LOGGER,
+      }),
+    ).rejects.toThrow();
+  });
+});
+
+describe("not from a laptop", () => {
+  it("refuses to email a real client from a non-production worker with no override", async () => {
+    // EMAIL_OVERRIDE_RECIPIENT was the only thing standing between a staging or local worker holding a
+    // copied RESEND_API_KEY and a real client's inbox, and it ships EMPTY in .env.example. Every other
+    // system email in this codebase goes to colleagues; this one goes to a customer contact table.
+    vi.stubEnv("NODE_ENV", "development");
+    const { query, updates } = fakeQuery(baseRow());
+    const sendEmail = okSend();
+
+    await expect(
+      handleWeeklyReportSend(payload(), null, {
+        query,
+        sendEmail,
+        resolvePdfKey: async () => null,
+        logger: SILENT_LOGGER,
+      }),
+    ).rejects.toThrow(/non-production worker/i);
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    // Refused loudly, not silently: the row says exactly what happened.
+    expect(String(updates.find((u) => u.sql.includes("send_attempts"))!.params[1])).toMatch(
+      /non-production worker/i,
+    );
+  });
+
+  it("stands aside when an override redirects the mail somewhere internal", async () => {
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("EMAIL_OVERRIDE_RECIPIENT", "dev@trockconstruction.com");
+    const { query } = fakeQuery(baseRow());
+    const sendEmail = okSend();
+    await handleWeeklyReportSend(payload(), null, {
+      query,
+      sendEmail,
+      resolvePdfKey: async () => null,
+      logger: SILENT_LOGGER,
+    });
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("the PDF attachment is a convenience, not a precondition", () => {
   it("still sends when the PDF cannot be produced", async () => {
     // The link in the body is the primary artifact and the CRM regenerates the PDF on demand. Refusing
@@ -360,6 +493,79 @@ describe("the message itself", () => {
     expect(email.text).toContain("Here's the link to your weekly report: " + SHARE_URL);
     // Outlook needs the VML fallback or the button renders as nothing at all.
     expect(email.html).toContain("v:roundrect");
+  });
+
+  it("puts EVERY paragraph in the HTML, not only in the plain-text part", async () => {
+    // The assertion this file was missing entirely. Every positive body assertion elsewhere reads
+    // `options.text`, and the one test that proved a paragraph reaches the HTML passed `shareUrl: null`
+    // and so took the other branch — so the whole HTML body (greeting, correction notice, the PM's
+    // message, the signature) could be deleted and the client would receive a logo and a button, with the
+    // suite completely green.
+    const email = buildWeeklyReportClientEmail({
+      subject: "S",
+      greetingName: "Jay Stauble",
+      contextParagraph: "Framing is complete on levels 3 and 4.",
+      shareUrl: SHARE_URL,
+      sender: { name: "Adam Sherwood", email: "adam@example.com", phone: "(214) 555-0142" },
+      isCorrection: true,
+    });
+    expect(email.html).toContain("Hello Jay,");
+    expect(email.html).toContain("This is a revised version of a report that was sent to you earlier.");
+    expect(email.html).toContain("Framing is complete on levels 3 and 4.");
+    expect(email.html).toContain("Adam Sherwood");
+    expect(email.html).toContain("adam@example.com");
+    expect(email.html).toContain("(214) 555-0142");
+  });
+
+  it("keeps a message that happens to quote the link, instead of deleting the paragraph", async () => {
+    // The dedupe used to drop any paragraph CONTAINING the share URL — the whole paragraph, not the
+    // duplicated sentence — and only from the HTML part. A PM who pasted the link into their own note
+    // lost their entire message for every client reading HTML, while the plain-text alternative still
+    // carried it: two halves of one email saying different things.
+    const message = `Here is your report — you can also open it directly at ${SHARE_URL} if the button does not work.`;
+    const email = buildWeeklyReportClientEmail({
+      subject: "S",
+      greetingName: "Jay",
+      contextParagraph: message,
+      shareUrl: SHARE_URL,
+      sender: { name: "Adam Sherwood", email: null, phone: null },
+      isCorrection: false,
+    });
+    expect(email.html).toContain("if the button does not work");
+    expect(email.text).toContain("if the button does not work");
+    // And the composed link SENTENCE is still not repeated as body text — the button carries it.
+    expect(email.html).not.toContain("Here&#39;s the link to your weekly report");
+    expect(email.html).not.toContain("Here's the link to your weekly report");
+  });
+
+  it("does not promise a reply path the platform does not have", async () => {
+    // The footer read "Reply to this email to reach your project manager". Nothing routes a reply
+    // anywhere near the PM: no Reply-To is set, so replies land on RESEND_FROM_ADDRESS, which nobody
+    // watches. Carrying the PM's details in the signature is a fair trade; printing a false instruction
+    // to a paying customer is not.
+    const withPm = buildWeeklyReportClientEmail({
+      subject: "S",
+      greetingName: "Jay",
+      contextParagraph: "Body.",
+      shareUrl: null,
+      sender: { name: "Adam Sherwood", email: "adam@example.com", phone: null },
+      isCorrection: false,
+    });
+    expect(withPm.html).not.toMatch(/Reply to this email/i);
+    expect(withPm.html).toMatch(/not monitored/i);
+    expect(withPm.html).toMatch(/project manager's contact details above/i);
+
+    // With no PM on file there are no details above to point at, so it does not point at them either.
+    const withoutPm = buildWeeklyReportClientEmail({
+      subject: "S",
+      greetingName: null,
+      contextParagraph: "Body.",
+      shareUrl: null,
+      sender: { name: null, email: null, phone: null },
+      isCorrection: false,
+    });
+    expect(withoutPm.html).toMatch(/not monitored/i);
+    expect(withoutPm.html).not.toMatch(/contact details above/i);
   });
 
   it("escapes the content it interpolates", async () => {

@@ -5,8 +5,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import {
+  WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS,
+  weeklyReportRetryIsProviderDeduped,
+} from "@trock-crm/shared/lib/weeklyReportEmail";
+import {
   createWeeklyReportCorrection,
   fetchWeeklyReportDetail,
+  retryWeeklyReportSend,
   useWeeklyReportHistory,
   type WeeklyReportDetail,
   type WeeklyReportProject,
@@ -68,6 +73,18 @@ export function WeeklyReportHistoryPanel({
   }, [refreshSignal, refetch]);
 
   const selected = useMemo(() => projects.find((p) => p.id === projectId) ?? null, [projects, projectId]);
+
+  // The highest live version per week. "Send correction" is offered on the newest version of a week and
+  // nowhere else: a report is only marked superseded when its replacement is SENT, so a PM who drafts a
+  // v2 and comes back to the same v1 row would otherwise be offered the button a second time and get a
+  // v3 nobody wanted. The server refuses that outright; this stops the UI inviting it.
+  const latestVersionByWeek = useMemo(() => {
+    const highest = new Map<string, number>();
+    for (const report of reports) {
+      highest.set(report.weekOf, Math.max(highest.get(report.weekOf) ?? 0, report.version));
+    }
+    return highest;
+  }, [reports]);
 
   const openDetail = async (reportId: string) => {
     setDetailLoading(true);
@@ -168,20 +185,32 @@ export function WeeklyReportHistoryPanel({
                           Send
                         </Button>
                       )}
-                      {/* Only on the LIVE version. A report already superseded by a correction has nothing
-                          left to correct — the fix is on the version that replaced it. */}
-                      {report.status === "sent" && !report.supersededById && (
-                        <CorrectionButton
-                          reportId={report.id}
-                          onCreated={(correction) => {
-                            void refetch();
-                            onChanged();
-                            // Straight into the send modal on the new version: a correction nobody sends
-                            // is just a second draft, and the original keeps standing as current.
-                            onSend(correction.id);
-                          }}
-                        />
+                      {/* A sent report the client has NOT been shown to have received needs its delivery
+                          retrying, not a correction. Offered first, and prominently, because the obvious
+                          button to reach for on a failed send used to be "Send correction" — which
+                          creates a v2, takes the failure off the board, and leaves the client with
+                          nothing at all if the PM is pulled away before finishing it. */}
+                      {report.status === "sent" && !report.sendDeliveredAt && (
+                        <RetryButton reportId={report.id} sentAt={report.sentAt} onRetried={onChanged} />
                       )}
+                      {/* Only on the LIVE, NEWEST version. A report already superseded by a correction has
+                          nothing left to correct — the fix is on the version that replaced it — and an
+                          older version with a newer one already drafted has the same problem. */}
+                      {report.status === "sent" &&
+                        !report.supersededById &&
+                        report.version >= (latestVersionByWeek.get(report.weekOf) ?? report.version) && (
+                          <CorrectionButton
+                            reportId={report.id}
+                            delivered={Boolean(report.sendDeliveredAt)}
+                            onCreated={(correction) => {
+                              void refetch();
+                              onChanged();
+                              // Straight into the send modal on the new version: a correction nobody sends
+                              // is just a second draft, and the original keeps standing as current.
+                              onSend(correction.id);
+                            }}
+                          />
+                        )}
                     </div>
                   </td>
                 </tr>
@@ -242,9 +271,12 @@ export function WeeklyReportHistoryPanel({
  */
 function CorrectionButton({
   reportId,
+  delivered,
   onCreated,
 }: {
   reportId: string;
+  /** Whether the version being corrected actually reached the client. Changes what a correction MEANS. */
+  delivered: boolean;
   onCreated: (correction: WeeklyReportDetail) => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -256,7 +288,11 @@ function CorrectionButton({
       onClick={async () => {
         if (
           !window.confirm(
-            "Issue a correction? This creates a new version of the report. Once you send it, the client is told it replaces the copy they already have and their old link shows a notice.",
+            delivered
+              ? "Issue a correction? This creates a new version of the report. Once you send it, the client is told it replaces the copy they already have and their old link shows a notice."
+              : // The wording the old copy was missing entirely, and the case a PM staring at a "Send
+                // failed" chip is most likely to be in. A correction is NOT how a failed send is fixed.
+                "This report's email never reached the client. A correction is a new version, not a re-send — if you only need the delivery to go out, use Retry send instead. Create a new version anyway?",
           )
         ) {
           return;
@@ -272,6 +308,58 @@ function CorrectionButton({
       }}
     >
       {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Send correction"}
+    </Button>
+  );
+}
+
+/**
+ * Queue the same client email again.
+ *
+ * The same control the board carries, on the History tab, so a PM who lands here from a failed send has
+ * the right button in front of them rather than only the one that makes a new version. Past the
+ * provider's 24-hour idempotency window a replay is a genuinely second email, so the PM is told and the
+ * acknowledgement is passed on — the server refuses without it.
+ */
+function RetryButton({
+  reportId,
+  sentAt,
+  onRetried,
+}: {
+  reportId: string;
+  sentAt: string | null;
+  onRetried: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      disabled={busy}
+      onClick={async () => {
+        const deduped = weeklyReportRetryIsProviderDeduped(sentAt);
+        if (
+          !deduped &&
+          !window.confirm(
+            `This send is more than ${WEEKLY_REPORT_PROVIDER_IDEMPOTENCY_WINDOW_HOURS} hours old, so the ` +
+              "mail provider will no longer treat a retry as a duplicate. If the first email did go out, " +
+              "the client will receive a second copy. Send it again?",
+          )
+        ) {
+          return;
+        }
+        setBusy(true);
+        try {
+          await retryWeeklyReportSend(reportId, !deduped);
+          toast.success("Send queued again");
+          onRetried();
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Couldn't retry that send");
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Retry send"}
     </Button>
   );
 }

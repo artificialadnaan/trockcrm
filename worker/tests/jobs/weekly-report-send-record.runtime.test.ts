@@ -1,0 +1,188 @@
+import { PGlite } from "@electric-sql/pglite";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { handleWeeklyReportSend } from "../../src/jobs/weekly-report-send.js";
+
+// The delivery bookkeeping, EXECUTED rather than string-matched.
+//
+// `recordAttempt`'s UPDATE is the only thing that turns a send into a fact anyone can see, and the rest of
+// this job's suite asserts it by capturing the SQL text and checking substrings — which cannot tell a
+// clause that is present from a clause that works. Running it against a real Postgres (PGlite) is what
+// proves the WHERE actually refuses a row it should refuse, and that the jsonb surgery does what it says.
+//
+// The table below carries the columns 0222 and 0226 give `weekly_reports`; the migrations themselves are
+// loaded from disk and asserted column-by-column in the API's runtime suite, which has the deals/files
+// dependencies 0222 needs. What is under test here is the worker's statement, not the schema.
+
+const SCHEMA = "office_dallas";
+const REPORT = "6b1f6f2e-9d1a-4e4a-9c2b-1f4d8a0c5e31";
+const OTHER = "7c2f7f3e-8d2a-4e4a-9c2b-1f4d8a0c5e32";
+const DELIVERY_KEY = "9f2a1c44-3f6b-4a2f-9d55-6e7c8b9a0d12";
+const SHARE_URL = "https://reports.example.com/wr/AbCdEfGh";
+
+const SILENT_LOGGER = { log: () => {}, warn: () => {}, error: () => {} };
+
+const SEND_REQUEST = {
+  recipients: ["jay@example.com"],
+  subject: "4123 Cedar Springs — Weekly Progress Report, Week of 8/13/26",
+  greetingName: "Jay Stauble",
+  contextParagraph: "Framing is complete on levels 3 and 4.",
+  shareUrl: SHARE_URL,
+  sender: { name: "Adam Sherwood", email: "adam@trockconstruction.com", phone: "(214) 555-0142" },
+  attachPdf: false,
+  isCorrection: false,
+  requestedBy: "00000000-0000-4000-8000-000000000001",
+  requestedAt: "2026-08-13T21:00:00.000Z",
+  requestVersion: 1,
+};
+
+let pg: PGlite;
+
+const query = (async (text: string, params?: unknown[]) => {
+  const result = await pg.query(text, params as any[]);
+  return {
+    rows: result.rows as any[],
+    rowCount: (result as { affectedRows?: number }).affectedRows ?? result.rows.length,
+  };
+}) as any;
+
+async function row(id = REPORT): Promise<Record<string, any>> {
+  const result = await pg.query(`SELECT * FROM ${SCHEMA}.weekly_reports WHERE id = $1::uuid`, [id]);
+  return result.rows[0] as Record<string, any>;
+}
+
+function payload(overrides: Record<string, unknown> = {}) {
+  return {
+    reportId: REPORT,
+    officeSlug: "dallas",
+    tenantSchema: SCHEMA,
+    deliveryKey: DELIVERY_KEY,
+    ...overrides,
+  };
+}
+
+beforeAll(async () => {
+  pg = new PGlite();
+  await pg.exec(`CREATE SCHEMA IF NOT EXISTS ${SCHEMA};`);
+  await pg.exec(`
+    CREATE TABLE ${SCHEMA}.weekly_reports (
+      id                   uuid PRIMARY KEY,
+      is_active            boolean NOT NULL DEFAULT true,
+      status               text NOT NULL,
+      week_of              date NOT NULL,
+      version              integer NOT NULL DEFAULT 1,
+      snapshot             jsonb,
+      sent_at              timestamptz,
+      send_request         jsonb,
+      send_delivery_key    uuid,
+      send_delivered_at    timestamptz,
+      send_last_attempt_at timestamptz,
+      send_attempts        integer NOT NULL DEFAULT 0,
+      send_error           text
+    );
+  `);
+});
+
+afterAll(async () => {
+  await pg.close();
+});
+
+beforeEach(async () => {
+  vi.stubEnv("NODE_ENV", "production");
+  await pg.exec(`DELETE FROM ${SCHEMA}.weekly_reports;`);
+  await pg.query(
+    `INSERT INTO ${SCHEMA}.weekly_reports
+       (id, status, week_of, snapshot, sent_at, send_request, send_delivery_key)
+     VALUES ($1::uuid, 'sent', '2026-08-13', $2::jsonb, now(), $3::jsonb, $4::uuid)`,
+    [
+      REPORT,
+      JSON.stringify({ propertyDisplayName: "4123 Cedar Springs" }),
+      JSON.stringify(SEND_REQUEST),
+      DELIVERY_KEY,
+    ],
+  );
+});
+
+describe("recording a delivery", () => {
+  it("DROPS the raw client link from the row once the email has gone", async () => {
+    // `send_request.shareUrl` is the only place the unhashed 180-day token comes to rest.
+    // public.weekly_report_tokens stores a SHA-256 hash precisely so that a database read — a support
+    // query, a backup, a pg_dump — cannot reconstruct a live link to a client's report, and a jsonb
+    // column that keeps the URL forever hands that property straight back for every report the office has
+    // ever sent. The URL is needed only until the message is out.
+    expect((await row()).send_request.shareUrl).toBe(SHARE_URL);
+
+    await handleWeeklyReportSend(payload(), null, {
+      query,
+      sendEmail: async () => ({ success: true, messageId: "m1" }),
+      logger: SILENT_LOGGER,
+    });
+
+    const after = await row();
+    expect(after.send_delivered_at).not.toBeNull();
+    // Asserted as key ABSENCE. A `shareUrl: null` would satisfy a null check and still be a schema in
+    // which the key is populated again the next time somebody edits this statement.
+    expect(Object.keys(after.send_request)).not.toContain("shareUrl");
+    // And nothing else about the request was lost with it — the row still describes what was sent.
+    expect(after.send_request.recipients).toEqual(["jay@example.com"]);
+    expect(after.send_request.subject).toBe(SEND_REQUEST.subject);
+    expect(after.send_request.sender.phone).toBe("(214) 555-0142");
+  });
+
+  it("KEEPS the link on a failed attempt, because the retry has to send the same message", async () => {
+    await expect(
+      handleWeeklyReportSend(payload(), null, {
+        query,
+        sendEmail: async () => {
+          throw new Error("Resend timed out");
+        },
+        logger: SILENT_LOGGER,
+      }),
+    ).rejects.toThrow(/Resend timed out/);
+
+    const after = await row();
+    expect(after.send_request.shareUrl).toBe(SHARE_URL);
+    expect(after.send_delivered_at).toBeNull();
+    expect(after.send_error).toBe("Resend timed out");
+    expect(Number(after.send_attempts)).toBe(1);
+    expect(after.send_last_attempt_at).not.toBeNull();
+  });
+
+  it("writes nothing to a report a concurrent success has already delivered", async () => {
+    // The WHERE is not decoration: without it a stamp from a slow attempt lands on a row that has since
+    // moved on, reporting a failure for a delivery that succeeded. Executed, not grepped.
+    await pg.query(
+      `UPDATE ${SCHEMA}.weekly_reports SET send_delivered_at = now() - interval '1 minute'
+        WHERE id = $1::uuid`,
+      [REPORT],
+    );
+    const before = await row();
+
+    await handleWeeklyReportSend(payload(), null, {
+      query,
+      sendEmail: async () => ({ success: true, messageId: "m1" }),
+      logger: SILENT_LOGGER,
+    });
+
+    const after = await row();
+    expect(after.send_delivered_at).toEqual(before.send_delivered_at);
+    expect(Number(after.send_attempts)).toBe(0);
+  });
+
+  it("touches only its own report", async () => {
+    await pg.query(
+      `INSERT INTO ${SCHEMA}.weekly_reports (id, status, week_of, send_request, send_delivery_key)
+       VALUES ($1::uuid, 'sent', '2026-08-06', $2::jsonb, $3::uuid)`,
+      [OTHER, JSON.stringify(SEND_REQUEST), DELIVERY_KEY],
+    );
+
+    await handleWeeklyReportSend(payload(), null, {
+      query,
+      sendEmail: async () => ({ success: true, messageId: "m1" }),
+      logger: SILENT_LOGGER,
+    });
+
+    const other = await row(OTHER);
+    expect(other.send_delivered_at).toBeNull();
+    expect(other.send_request.shareUrl).toBe(SHARE_URL);
+  });
+});

@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   useWeeklyReportProjects: vi.fn(),
   dismissWeeklyReportWeek: vi.fn(),
   historyRefetch: vi.fn(),
+  retryWeeklyReportSend: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-weekly-reports", () => ({
@@ -31,7 +32,7 @@ vi.mock("@/hooks/use-weekly-reports", () => ({
   deleteWeeklyReportProject: vi.fn(),
   // The send flow's exports. vi.mock replaces the WHOLE module, so anything the page or the panels
   // import has to appear here or the import resolves to undefined at render time.
-  retryWeeklyReportSend: vi.fn(),
+  retryWeeklyReportSend: mocks.retryWeeklyReportSend,
   fetchWeeklyReportSendDraft: vi.fn(),
   sendWeeklyReport: vi.fn(),
   createWeeklyReportCorrection: vi.fn(),
@@ -62,11 +63,16 @@ function dashboardRow(overrides: Record<string, unknown> = {}) {
     reportVersion: null,
     sentAt: null,
     sendError: null,
-    // Added with migration 0226. `sendFailed` is derived on the SERVER — the CRM and the app must not
-    // each decide what "Send failed" means — so the fixture carries it rather than the page inferring it.
+    // Added with migration 0226. All three verdicts are derived on the SERVER — the CRM and the app must
+    // not each decide what "Send failed" means — so the fixture carries them rather than the page
+    // inferring anything. `sendRetryReportId` is which report a Retry addresses, which is NOT always the
+    // week's live report once a correction has been drafted over a failed send.
     sendDeliveredAt: null,
     sendAttempts: 0,
     sendFailed: false,
+    sendStalled: false,
+    sendPending: false,
+    sendRetryReportId: null,
     waitingOn: "Steve Sanchez",
     dismissalReason: null,
     ...overrides,
@@ -98,6 +104,7 @@ beforeEach(() => {
     refetch: vi.fn(),
   });
   mocks.historyRefetch.mockReset();
+  mocks.retryWeeklyReportSend.mockReset();
 });
 
 afterEach(() => {
@@ -178,6 +185,7 @@ describe("This Week board", () => {
       dashboardRow({
         state: "sent",
         reportId: "r1",
+        sendRetryReportId: "r1",
         sendError: "SMTP timeout",
         sendAttempts: 2,
         sendFailed: true,
@@ -188,12 +196,115 @@ describe("This Week board", () => {
     expect(text).toContain("Retry send");
   });
 
+  it("surfaces a send that failed with NO error recorded at all", () => {
+    // The delivery job writes its own outcome to the same database whose absence is the likeliest reason
+    // it failed, so "committed, never delivered, nothing written down" is an ordinary end state. Keyed on
+    // the error text it looked exactly like a send queued five seconds ago, and the row then disappeared
+    // from the board entirely the following week.
+    mockDashboard([
+      dashboardRow({
+        state: "sent",
+        reportId: "r1",
+        sendRetryReportId: "r1",
+        sendError: null,
+        sendAttempts: 0,
+        sendStalled: true,
+      }),
+    ]);
+    const text = renderPage();
+    expect(text).toContain("Send stuck");
+    expect(text).toContain("Retry send");
+  });
+
+  it("points Retry at the undelivered report, not at the correction drafted over it", async () => {
+    // The live row is the unsent v2; the report that needs retrying is v1. Retrying the live row would
+    // replay a report nobody ever sent — so this asserts the ID THE CALL CARRIES, not merely that a
+    // button rendered. A button pointed at the wrong report renders exactly the same.
+    mocks.retryWeeklyReportSend.mockResolvedValue({});
+    mockDashboard([
+      dashboardRow({
+        state: "approved",
+        reportId: "v2",
+        sendRetryReportId: "v1",
+        sentAt: new Date().toISOString(),
+        sendError: "SMTP timeout",
+        sendFailed: true,
+      }),
+    ]);
+    const text = renderPage();
+    expect(text).toContain("Send failed");
+
+    const retry = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Retry send",
+    );
+    if (!retry) throw new Error("Retry send button not found");
+    await act(async () => {
+      retry.click();
+    });
+    // Inside the provider's idempotency window, so no duplicate-risk acknowledgement is claimed.
+    expect(mocks.retryWeeklyReportSend).toHaveBeenCalledWith("v1", false);
+  });
+
+  it("makes the PM acknowledge the duplicate risk on a send too old to be deduped", async () => {
+    // Resend forgets an idempotency key after 24 hours while this chip lives on the board for 26 weeks,
+    // so a replay past the window is a genuinely second email. The server refuses without the
+    // acknowledgement; this is the UI that earns it.
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    mocks.retryWeeklyReportSend.mockResolvedValue({});
+    mockDashboard([
+      dashboardRow({
+        state: "sent",
+        reportId: "r1",
+        sendRetryReportId: "r1",
+        sentAt: "2026-08-01T10:00:00.000Z",
+        sendError: "SMTP timeout",
+        sendFailed: true,
+      }),
+    ]);
+    renderPage();
+    const retry = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Retry send",
+    );
+    await act(async () => {
+      retry!.click();
+    });
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/second copy/i));
+    expect(mocks.retryWeeklyReportSend).toHaveBeenCalledWith("r1", true);
+    confirm.mockRestore();
+  });
+
+  it("sends nothing when the PM declines that confirmation", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    mockDashboard([
+      dashboardRow({
+        state: "sent",
+        reportId: "r1",
+        sendRetryReportId: "r1",
+        sentAt: "2026-08-01T10:00:00.000Z",
+        sendError: "SMTP timeout",
+        sendFailed: true,
+      }),
+    ]);
+    renderPage();
+    const retry = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Retry send",
+    );
+    await act(async () => {
+      retry!.click();
+    });
+    expect(mocks.retryWeeklyReportSend).not.toHaveBeenCalled();
+    confirm.mockRestore();
+  });
+
   it("does not call a send that is merely still queued a failure", () => {
     // No error yet — the job was enqueued seconds ago. Calling that "Send failed" would have PMs
     // re-sending on top of deliveries that are simply in flight.
-    mockDashboard([dashboardRow({ state: "sent", sendFailed: false, sendDeliveredAt: null })]);
+    mockDashboard([
+      dashboardRow({ state: "sent", sendFailed: false, sendPending: true, sendDeliveredAt: null }),
+    ]);
     const text = renderPage();
     expect(text).not.toContain("Send failed");
+    expect(text).not.toContain("Send stuck");
     expect(text).toContain("Sending…");
   });
 
@@ -203,11 +314,14 @@ describe("This Week board", () => {
         state: "sent",
         sendError: "SMTP timeout",
         sendFailed: false,
+        sendStalled: false,
+        sendPending: false,
         sendDeliveredAt: "2026-08-13T22:00:00.000Z",
       }),
     ]);
     const text = renderPage();
     expect(text).not.toContain("Send failed");
+    expect(text).not.toContain("Send stuck");
     expect(text).not.toContain("Sending…");
   });
 
