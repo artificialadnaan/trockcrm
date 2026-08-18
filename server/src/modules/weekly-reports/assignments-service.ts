@@ -13,6 +13,7 @@
 import {
   weeklyReportDaysLate,
   weeklyReportExpectedWeeks,
+  type WeeklyReportPauseInterval,
   weeklyReportWeekOf,
   type WeeklyReportStatus,
   type WeeklyReportWeekState,
@@ -200,6 +201,24 @@ export async function listWeeklyReportAssignments(
     dismissedKeys.add(`${row.weekly_report_project_id}|${toIsoDate(row.week_of)}`);
   }
 
+  // The pause ledger, exactly as dashboard-service loads it. Without it the hub and the CRM board
+  // disagree about which weeks are owed: a project paused for six weeks comes back showing six
+  // outstanding cards, reports false lateness against them, and lets a superintendent file CLIENT
+  // reports for weeks the project never owed.
+  const pausesResult = await client.query(
+    `SELECT weekly_report_project_id, paused_from, resumed_on
+       FROM weekly_report_pauses
+      WHERE weekly_report_project_id = ANY($1::uuid[])
+      ORDER BY weekly_report_project_id, paused_from`,
+    [projectIds],
+  );
+  const pausesByProject = new Map<string, WeeklyReportPauseInterval[]>();
+  for (const row of pausesResult.rows) {
+    const intervals = pausesByProject.get(row.weekly_report_project_id) ?? [];
+    intervals.push({ from: toIsoDate(row.paused_from)!, to: toIsoDate(row.resumed_on) });
+    pausesByProject.set(row.weekly_report_project_id, intervals);
+  }
+
   const projects: WeeklyReportAssignment[] = [];
   for (const project of projectsResult.rows) {
     const cadenceWeekday = Number(project.cadence_weekday);
@@ -209,6 +228,7 @@ export async function listWeeklyReportAssignments(
       cadenceStartDate: toIsoDate(project.cadence_start_date)!,
       cadenceEndDate: toIsoDate(project.cadence_end_date),
       throughDate: currentWeekOf,
+      pausedIntervals: pausesByProject.get(project.id) ?? null,
     });
     // A project whose cadence has not started yet owes nothing at all. It stays off the hub rather than
     // showing a card whose only action would be rejected by assertValidWeekOf.

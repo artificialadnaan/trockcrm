@@ -318,6 +318,23 @@ describe("hub assignments", () => {
     });
   });
 
+  it("does not bill a resumed project for the weeks it was paused", async () => {
+    // The hub regenerated the cadence without the pause ledger, so a project paused for weeks came
+    // back showing every one of them as an outstanding card — disagreeing with the CRM board, which
+    // loads the ledger, and letting a superintendent file CLIENT reports for weeks nobody owed.
+    const project = await seedProject({ cadenceStartDate: "2026-07-23" });
+    await pg.query(
+      `INSERT INTO office_dallas.weekly_report_pauses (weekly_report_project_id, paused_from, resumed_on)
+       VALUES ($1::uuid, '2026-07-27'::date, '2026-08-13'::date)`,
+      [project.id],
+    );
+
+    const view = await listWeeklyReportAssignments(db, { userId: SUPER, role: "construction", asOf: WEEK_OF });
+    const assignment = view.projects[0]!;
+    // 07-23 was owed before the pause and stays owed; 07-30 and 08-06 fell inside it.
+    expect(assignment.outstandingWeeks).toEqual(["2026-07-23"]);
+  });
+
   it("drops a paused project off the hub entirely", async () => {
     const project = await seedProject();
     await updateWeeklyReportProject(db, project.id, { status: "paused" }, OFFICE);
