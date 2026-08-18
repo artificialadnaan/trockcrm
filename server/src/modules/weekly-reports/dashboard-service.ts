@@ -6,6 +6,10 @@ import {
   type WeeklyReportPauseInterval,
   type WeeklyReportWeekState,
 } from "@trock-crm/shared/types";
+import {
+  WEEKLY_REPORT_SEND_STALL_MINUTES,
+  weeklyReportSendHasStalled,
+} from "@trock-crm/shared/lib/weeklyReportSendStall";
 import { AppError } from "../../middleware/error-handler.js";
 import type { QueryExecutor } from "./projects-service.js";
 
@@ -33,18 +37,15 @@ export const DEFAULT_OUTSTANDING_LOOKBACK_WEEKS = 26;
  * How long a `sent` report may sit undelivered before the board stops calling it "in flight".
  *
  * THE FAILURE THIS EXISTS FOR HAS NO ERROR MESSAGE. Every other signal on this page is a string somebody
- * wrote to the database; this one is the case where nothing was written at all. The delivery job's outcome
- * — `send_attempts`, `send_error`, `send_delivered_at` — is recorded in THE SAME DATABASE whose
- * unavailability is the likeliest reason the delivery failed in the first place, and the queue gives up
- * after three attempts with 3s/9s/27s backoff. A fault lasting a couple of minutes therefore dead-letters
- * the job having written nothing, leaving a row that reads `status = 'sent'`, `sent_at` set, `send_error`
- * NULL, `send_delivered_at` NULL, `send_attempts` 0 — indistinguishable, to a predicate keyed on the error
- * text, from a send queued five seconds ago. The client never receives their report and no surface says so.
+ * wrote to the database; this one is the case where nothing was written at all — see the shared module for
+ * the full account, which is also where the threshold and the arithmetic now live.
  *
- * Time is the only evidence left, so time is what this uses. Generous enough that an ordinary queue backlog
- * does not cry wolf, short enough that a lost report is caught the same working day.
+ * Re-exported rather than defined here because the worker's dead-letter sweep ages the SAME rows against
+ * the SAME clock and emails leadership about what it finds. Two definitions would let this page call a
+ * send "Sending…" while an email announced it stalled — and the first thing that email's recipient does is
+ * click through to this board.
  */
-export const WEEKLY_REPORT_SEND_STALL_MINUTES = 30;
+export { WEEKLY_REPORT_SEND_STALL_MINUTES };
 
 export interface WeeklyReportDashboardRow {
   weeklyReportProjectId: string;
@@ -142,47 +143,6 @@ function toIsoTimestamp(value: unknown): string | null {
   if (value == null) return null;
   if (value instanceof Date) return value.toISOString();
   return String(value);
-}
-
-function toDate(value: unknown): Date | null {
-  if (value == null) return null;
-  const parsed = value instanceof Date ? value : new Date(String(value));
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
-}
-
-/**
- * WHEN THIS DELIVERY WAS LAST HANDED TO THE QUEUE — the moment the stall clock runs from.
- *
- * The LATER of the two stamps, and both are needed:
- *
- *   `sent_at`              the PM's commit. The only timestamp that exists in the case this whole
- *                          mechanism is for, where the job dead-lettered having written nothing at all.
- *   `send_last_attempt_at` written by the worker after every attempt, and — since it is also the only
- *                          record a retry leaves — by `retryWeeklyReportSend` when it re-queues.
- *
- * Ageing off `sent_at` alone is what made every legitimate retry read as a failure. `sent_at` is stamped
- * once at commit and never moves, so a send committed ninety minutes ago and retried five seconds ago was
- * still ninety minutes old by that measure: the chip flipped straight from "Send failed" to "Send stuck",
- * the PM got no acknowledgement that their click had done anything, and past the provider's dedupe window
- * a PM who clicked Retry, cleared the duplicate-risk confirmation and saw nothing change would reasonably
- * click it again — a second acknowledged replay, which is a second real copy in the client's inbox.
- *
- * A row with neither stamp cannot be aged and is left alone rather than guessed at: `sent` guarantees
- * `sent_at`, so that is a corrupt row and inventing a failure for it would be a chip nobody can act on.
- */
-function lastSendActivityAt(row: { sent_at?: unknown; send_last_attempt_at?: unknown }): Date | null {
-  const sentAt = toDate(row.sent_at);
-  const lastAttemptAt = toDate(row.send_last_attempt_at);
-  if (sentAt == null) return lastAttemptAt;
-  if (lastAttemptAt == null) return sentAt;
-  return lastAttemptAt.getTime() > sentAt.getTime() ? lastAttemptAt : sentAt;
-}
-
-/** Has this send been undelivered for longer than a delivery plausibly takes? */
-function isStalledSend(row: { sent_at?: unknown; send_last_attempt_at?: unknown }, now: Date): boolean {
-  const since = lastSendActivityAt(row);
-  if (since == null) return false;
-  return now.getTime() - since.getTime() > WEEKLY_REPORT_SEND_STALL_MINUTES * 60_000;
 }
 
 const REPORT_STATE_BY_STATUS: Record<string, WeeklyReportWeekState> = {
@@ -430,7 +390,7 @@ export async function getWeeklyReportDashboard(
       // the app would say "Send stuck" — no error to show, nobody to chase — for a delivery that recorded
       // exactly why it failed.
       const sendStalled =
-        undelivered != null && undelivered.send_error == null && isStalledSend(undelivered, now);
+        undelivered != null && undelivered.send_error == null && weeklyReportSendHasStalled(undelivered, now);
       const sendPending = undelivered != null && !sendFailed && !sendStalled;
 
       // A settled week that is not the current one carries no signal — drop it so the page shows what
@@ -534,7 +494,7 @@ export async function getWeeklyReportDashboard(
     // cadence has stopped generating an OLD FAILED send is the typical case rather than the exotic one,
     // so without it these rows routinely report both verdicts and the app says "Send stuck" — no error to
     // show, nobody to chase — for a delivery that recorded exactly why it failed.
-    const sendStalled = undelivered.send_error == null && isStalledSend(undelivered, now);
+    const sendStalled = undelivered.send_error == null && weeklyReportSendHasStalled(undelivered, now);
 
     rows.push({
       weeklyReportProjectId: project.id,

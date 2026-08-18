@@ -212,6 +212,9 @@ beforeAll(async () => {
   await pg.exec(migrationSql("0222_weekly_reports"));
   await pg.exec(migrationSql("0223_weekly_report_pauses"));
   await pg.exec(migrationSql("0226_weekly_report_send"));
+  // 0227 adds `send_stall_alerted_at`, which the retry path clears in the same statement that moves the
+  // stall clock. Without it every retry here fails on an undefined column.
+  await pg.exec(migrationSql("0227_weekly_report_send_stall_alerted"));
 
   await pg.exec(`
     INSERT INTO public.offices (id, name, slug) VALUES ('${OFFICE}', 'Dallas', 'dallas');
@@ -1112,6 +1115,26 @@ describe("retrying a failed send", () => {
     const detail = await retryWeeklyReportSend(db, reportId, SENDER, OFFICE_CONTEXT);
     expect(detail.sendError).toBeNull();
     expect(detail.sendAttempts).toBe(3);
+  });
+
+  it("RE-ARMS the dead-letter alert, so a retry that also goes quiet is reported", async () => {
+    // `send_stall_alerted_at` (0227) is the worker sweep's memory of having already told leadership this
+    // delivery stopped moving, and it is what stops the sweep emailing every fifteen minutes about the
+    // same stuck report. A retry is a transition OUT of stalled: somebody saw the alert and acted, so if
+    // this attempt goes quiet too that is a NEW incident. Left set, a report retried three times and
+    // stalled three times would be announced once and then never again.
+    const reportId = await failedSend();
+    await pg.query(
+      `UPDATE office_dallas.weekly_reports SET send_stall_alerted_at = now() WHERE id = $1::uuid`,
+      [reportId],
+    );
+    expect((await reportRow(reportId)).send_stall_alerted_at).not.toBeNull();
+
+    await retryWeeklyReportSend(db, reportId, SENDER, OFFICE_CONTEXT);
+
+    expect((await reportRow(reportId)).send_stall_alerted_at).toBeNull();
+    // ...and the clock the sweep ages against moved with it, so the retry is not instantly stalled again.
+    expect((await reportRow(reportId)).send_last_attempt_at).not.toBeNull();
   });
 
   it("refuses once the provider has accepted it — and says only what it can evidence", async () => {
