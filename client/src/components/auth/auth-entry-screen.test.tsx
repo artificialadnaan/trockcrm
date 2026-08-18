@@ -9,14 +9,19 @@ import { AuthEntryScreen } from "./auth-entry-screen";
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const { localLoginMock } = vi.hoisted(() => ({
+const { localLoginMock, apiMock } = vi.hoisted(() => ({
   localLoginMock: vi.fn(),
+  apiMock: vi.fn(),
 }));
 
 vi.mock("@/lib/auth", () => ({
   useAuth: () => ({
     localLogin: localLoginMock,
   }),
+}));
+
+vi.mock("@/lib/api", () => ({
+  api: apiMock,
 }));
 
 function normalize(source: string) {
@@ -46,6 +51,13 @@ describe("AuthEntryScreen source contract", () => {
     expect(source).not.toContain("Dev login");
     expect(source).not.toContain("Register");
     expect(source).not.toContain("Sign up");
+  });
+
+  it("self-serves the password reset instead of mailing an administrator", () => {
+    expect(source).not.toContain("mailto:");
+    expect(source).toContain("/auth/password-reset/request");
+    // The TTL is quoted to the user, so it is pinned here as well as in the rendered-copy assertion below.
+    expect(source).toContain("const RESET_LINK_TTL_MINUTES = 60;");
   });
 });
 
@@ -85,8 +97,32 @@ async function submitLogin(email = "test-admin@trock.test", password = "dev123!"
   });
 }
 
+async function requestPasswordReset(email = "known@trockgc.com") {
+  const trigger = Array.from(container.querySelectorAll("button")).find((button) =>
+    button.textContent?.includes("Forgot password?"),
+  );
+  if (!trigger) throw new Error("Forgot-password trigger did not render");
+
+  act(() => {
+    trigger.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+
+  const emailInput = container.querySelector<HTMLInputElement>("#reset-email");
+  const form = emailInput?.closest("form");
+  if (!emailInput || !form) throw new Error("Reset request form did not render");
+
+  await act(async () => {
+    setInputValue(emailInput, email);
+    form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await Promise.resolve();
+  });
+
+  return container.querySelector('[role="status"]')?.textContent ?? "";
+}
+
 beforeEach(() => {
   localLoginMock.mockReset();
+  apiMock.mockReset();
 });
 
 afterEach(() => {
@@ -144,13 +180,14 @@ describe("AuthEntryScreen form behavior", () => {
     expect(container.querySelector('[role="alert"]')?.textContent).toContain("Invalid email or password");
   });
 
-  it("renders the forgot-password admin contact as a real mailto link (no self-service reset exists)", () => {
+  it("offers self-service password reset instead of the old admin mailto", () => {
     renderAuthEntry();
 
-    const link = container.querySelector<HTMLAnchorElement>('a[href^="mailto:aiqbal@trockgc.com"]');
-    expect(link).not.toBeNull();
-    expect(link?.textContent).toContain("Contact your administrator");
+    expect(container.querySelector('a[href^="mailto:"]')).toBeNull();
     expect(container.textContent).toContain("Forgot password?");
+    // The email field only appears once the user asks for it, so the default screen stays a single
+    // sign-in form.
+    expect(container.querySelector("#reset-email")).toBeNull();
   });
 
   it("lets the user unmask the password to verify what they typed", () => {
@@ -167,5 +204,60 @@ describe("AuthEntryScreen form behavior", () => {
     });
 
     expect(container.querySelector<HTMLInputElement>("#password")?.type).toBe("text");
+  });
+});
+
+describe("AuthEntryScreen password reset request", () => {
+  it("posts the address to the reset-request endpoint", async () => {
+    apiMock.mockResolvedValue({ ok: true });
+    renderAuthEntry();
+
+    await requestPasswordReset("known@trockgc.com");
+
+    expect(apiMock).toHaveBeenCalledWith("/auth/password-reset/request", {
+      method: "POST",
+      json: { email: "known@trockgc.com" },
+    });
+  });
+
+  it("shows a byte-identical confirmation for a known address, an unknown address, and a failed request", async () => {
+    // Anti-enumeration: the screen must not tell an attacker which addresses have accounts, so the
+    // three outcomes have to be indistinguishable — including the network-failure path, where a
+    // "couldn't send" message would itself be a signal.
+    apiMock.mockResolvedValue({ ok: true });
+    renderAuthEntry();
+    const known = await requestPasswordReset("known@trockgc.com");
+
+    act(() => {
+      root.unmount();
+    });
+    container.remove();
+    apiMock.mockRejectedValue(new Error("No account found for nobody@trockgc.com"));
+    renderAuthEntry();
+    const unknown = await requestPasswordReset("nobody@trockgc.com");
+
+    act(() => {
+      root.unmount();
+    });
+    container.remove();
+    apiMock.mockRejectedValue(new TypeError("Failed to fetch"));
+    renderAuthEntry();
+    const offline = await requestPasswordReset("known@trockgc.com");
+
+    expect(known).toContain("If that address has an account");
+    expect(known).toContain("60 minutes");
+    expect(unknown).toBe(known);
+    expect(offline).toBe(known);
+    expect(container.textContent).not.toContain("No account found");
+    expect(container.textContent).not.toContain("Failed to fetch");
+  });
+
+  it("hides the email field once the request is acknowledged so the screen cannot be probed in place", async () => {
+    apiMock.mockResolvedValue({ ok: true });
+    renderAuthEntry();
+
+    await requestPasswordReset();
+
+    expect(container.querySelector("#reset-email")).toBeNull();
   });
 });
