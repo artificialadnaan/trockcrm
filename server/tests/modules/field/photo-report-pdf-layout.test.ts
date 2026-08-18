@@ -120,6 +120,100 @@ describe("renderFieldPhotoReportPdf page count", () => {
     expect(distinct[1] + 256).toBeLessThanOrEqual(612 - 32);
   });
 
+  it("draws the caption BELOW its tile, not beside it", async () => {
+    // The caption used to sit in the leftover column width to the right of the tile. At a 256pt tile in a
+    // 264pt column that space is gone (264 - 256 - 10 = -2pt), so the block moves underneath.
+    //
+    // Asserting on the drawn text's X ORIGIN is what distinguishes "moved below" from "still beside, just
+    // clipped off the page" — a page count cannot see that difference and neither can a byte length.
+    //
+    // NOTE ON TECHNIQUE: do NOT try to locate the caption by searching the stream for its text. PDFKit
+    // SUBSETS the embedded font, so the literal characters do not appear in the content stream — a
+    // `streams.indexOf("SomeName")` lookup silently returns -1 and the test degrades into asserting
+    // nothing. Verified against pdfkit directly before writing this. What IS emitted, per text run, is a
+    // text matrix `1 0 0 1 <x> <y> Tm`, so the x values are readable even when the glyphs are not.
+    const buffer = await renderFieldPhotoReportPdf({
+      cover,
+      sections: [{ title: "Doors", photos: [photo(1)] }],
+    });
+    const streams = [...buffer.toString("latin1").matchAll(/stream\r?\n([\s\S]*?)endstream/g)]
+      .map((m) => {
+        try {
+          return zlib.inflateSync(Buffer.from(m[1], "latin1")).toString("latin1");
+        } catch {
+          return "";
+        }
+      })
+      .join("\n");
+
+    const textXs = [...streams.matchAll(/[\d.\-]+ [\d.\-]+ [\d.\-]+ [\d.\-]+ ([\d.\-]+) [\d.\-]+ Tm/g)].map((m) =>
+      Number(m[1]),
+    );
+    expect(textXs.length).toBeGreaterThan(0); // guard: a regex that matched nothing must fail, not pass
+
+    // A single photo occupies the LEFT cell, so a caption drawn beside a 256pt tile would land at
+    // 32 + 256 + 10 = 298. Nothing may be drawn there.
+    expect(textXs.filter((x) => Math.abs(x - 298) < 1)).toEqual([]);
+    // ...and the caption is drawn at the tile's own left edge instead.
+    expect(textXs.some((x) => Math.abs(x - 32) < 1)).toBe(true);
+  });
+
+  it("keeps the caption band clear of the page footer", async () => {
+    // PHOTO_TILE_HEIGHT is a hand-tuned literal (560) rather than a derivation, so it no longer moves with
+    // PHOTO_ROW_PITCH. If the row geometry is ever retuned without revisiting it, the caption band would
+    // silently overrun the footer — a defect no page-count assertion can see. This pins the invariant.
+    //
+    // PDF y-coordinates are flipped relative to the layout's top-down space: pdfkit emits `... x y Tm`
+    // where y counts UP from the page bottom, so a caption/metadata run sitting safely above the footer in
+    // layout terms renders with a LARGER Tm y than the footer's.
+    const buffer = await renderFieldPhotoReportPdf({
+      cover,
+      sections: [{ title: "Doors", photos: [photo(1), photo(2)] }],
+    });
+    const streams = [...buffer.toString("latin1").matchAll(/stream\r?\n([\s\S]*?)endstream/g)]
+      .map((m) => {
+        try {
+          return zlib.inflateSync(Buffer.from(m[1], "latin1")).toString("latin1");
+        } catch {
+          return "";
+        }
+      })
+      .join("\n");
+
+    // Pair each text run's position with its font size: the page footer's OWN left-aligned label is drawn at
+    // `PAGE_MARGIN` (x=32, `drawFooter`) — the identical x as this layout's left caption column, on every
+    // content page — so an x-only filter cannot tell the two apart. The footer always runs at 10pt; the
+    // cell's caption/metadata run at 8pt (description) or META_FONT_SIZE=7.5pt (metadata). Filtering on BOTH
+    // x and size is what actually isolates cell content.
+    //
+    // PDFKit emits each text run as `Tm` (position) followed by `Tf` (font/size) — position BEFORE size, not
+    // after — verified directly against pdfkit's raw output before writing this; the naive assumption that
+    // Tf precedes its Tm silently pairs every position with the PRECEDING run's size instead of its own.
+    const runs = [...streams.matchAll(/([\d.\-]+) [\d.\-]+ [\d.\-]+ [\d.\-]+ ([\d.\-]+) ([\d.\-]+) Tm|\/(\S+) ([\d.\-]+) Tf/g)];
+    let pending: { x: number; y: number } | null = null;
+    const cellTextYs: number[] = [];
+    for (const run of runs) {
+      if (run[2] !== undefined) {
+        // Tm: remember the position; it is completed once the following Tf supplies the font size.
+        pending = { x: Number(run[2]), y: Number(run[3]) };
+        continue;
+      }
+      if (run[5] !== undefined && pending) {
+        // Tf immediately after a Tm: this is the size for the run just remembered.
+        const size = Number(run[5]);
+        const inCellColumn = Math.abs(pending.x - 32) < 1 || Math.abs(pending.x - 316) < 1;
+        const inCellFontSize = Math.abs(size - 7.5) < 0.01 || Math.abs(size - 8) < 0.01;
+        if (inCellColumn && inCellFontSize) cellTextYs.push(pending.y);
+        pending = null;
+      }
+    }
+    expect(cellTextYs.length).toBeGreaterThan(0);
+
+    // 52 = comfortably above the footer's own rendered position (~34) and well below the lowest real cell
+    // text observed in this fixture (~117). Nothing from a cell may reach it.
+    expect(Math.min(...cellTextYs)).toBeGreaterThan(52);
+  });
+
   it("preserves a single-section custom title compactly without adding a divider page", async () => {
     const buffer = await renderFieldPhotoReportPdf({
       cover,

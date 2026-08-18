@@ -90,10 +90,27 @@ const PHOTO_ROW_HEIGHT = PHOTO_TILE_HEIGHT;
 // matters is the number of LINES the band can hold, and a larger face buys fewer of them.
 const META_FONT_SIZE = 7.5;
 const META_LINE_PITCH = 10;
-// Caption + metadata sit to the RIGHT of the tile inside the same cell, BOTTOM-aligned to it, so the last
-// line always lands on the tile's bottom edge no matter how tall the photograph rendered.
+// Caption + metadata sit BELOW the tile inside the same cell, running the tile's full width.
+//
+// They used to sit to its RIGHT, in whatever column width the tile did not use. At a 256pt tile inside a
+// 264pt column that leftover is -2pt, so there is no "beside" left to sit in — and the move is what let the
+// tile take the width in the first place. CAPTION_GAP is now a VERTICAL gap (tile bottom -> first text
+// baseline) rather than a horizontal one.
 const CAPTION_GAP = 10;
-const CAPTION_WIDTH = COLUMN_WIDTH - PHOTO_TILE_WIDTH - CAPTION_GAP;
+const CAPTION_WIDTH = PHOTO_TILE_WIDTH;
+/**
+ * Fail LOUDLY if the cell geometry is ever retuned into an impossible caption box.
+ *
+ * pdfkit does not throw on a negative or zero text width — `doc.text` and `heightOfString` silently render
+ * nothing — so a bad constant here costs every caption and every metadata line in the report with no error
+ * anywhere. That is exactly the failure this layout briefly had between two commits, and it is invisible to
+ * a page-count test. Verified at module load because there is no later point where it would be cheaper.
+ */
+if (CAPTION_WIDTH <= 0) {
+  throw new Error(
+    `[field-photo-report] CAPTION_WIDTH must be positive, got ${CAPTION_WIDTH} — check PHOTO_TILE_WIDTH against COLUMN_WIDTH`,
+  );
+}
 const IMAGE_BOX_WIDTH = PHOTO_TILE_WIDTH;
 const IMAGE_BOX_HEIGHT = PHOTO_TILE_HEIGHT;
 
@@ -717,24 +734,49 @@ async function drawPhotoEntry(
   // Badge on the TILE corner, not the image corner, so it sits in the same place in every cell.
   drawIndexBadge(doc, fonts, left, top, photo.reportIndex);
 
-  // --- Caption + metadata, to the right of the tile and BOTTOM-aligned to it ------------------------
-  // Bottom-aligned rather than top-aligned, so the last line always lands on the tile's bottom edge.
+  // --- Caption + metadata, BELOW the tile ----------------------------------------------------------
+  // Top-anchored to the tile's bottom edge and flowing downward: description first, then metadata. The old
+  // layout bottom-anchored this group to the tile's bottom-right, which only made sense while it lived in a
+  // narrow side column. Below the tile there is a fixed band, so ordinary top-down reading order is both
+  // simpler and what a reader expects under a photograph.
   //
-  // The "Project:"/"Date:"/"Creator:" labels are GONE. In a ~106pt cell column they would have eaten 40% of
-  // the width to restate what the values obviously are, and the project name they introduced is already the
-  // page header, the footer and the cover title. It is printed here ONLY when a photograph actually belongs
-  // to some other project than the report's — the case where it is information rather than furniture.
-  const captionLeft = left + PHOTO_TILE_WIDTH + CAPTION_GAP;
+  // The "Project:"/"Date:"/"Creator:" labels stay GONE — the values are self-evident, and the project name
+  // is already the page header, the footer and the cover title. It is printed here ONLY when a photograph
+  // belongs to some other project than the report's, the case where it is information rather than furniture.
+  const captionLeft = left;
+  const captionTop = top + boxHeight + CAPTION_GAP;
+
   const metaLines = [formatPhotoDateCompact(photo.takenAt, photo.createdAt), photo.uploaderName];
   if (photo.projectName.trim() && photo.projectName.trim() !== coverProjectName.trim()) {
     metaLines.push(photo.projectName);
   }
-  const metaTop = top + boxHeight - metaLines.length * META_LINE_PITCH;
+
+  // The description gets whatever vertical room is left after the metadata rows are reserved, so a long
+  // caption can never push the metadata out of the cell and into the page furniture below it.
+  const metaBlockHeight = metaLines.length * META_LINE_PITCH;
+  const captionBandHeight = PHOTO_ROW_PITCH - boxHeight - CAPTION_GAP - PHOTO_ROW_GAP;
+  const descriptionAvailable = Math.max(0, captionBandHeight - metaBlockHeight - 4);
+
+  let cursor = captionTop;
+  const description = clampText(photo.descriptionOverride ?? photo.description ?? "", 200);
+  if (description && descriptionAvailable > 0) {
+    doc.fillColor(BRAND_BLACK).font(fonts.regular).fontSize(8);
+    const measured = doc.heightOfString(description, { width: CAPTION_WIDTH, lineGap: 1.5 });
+    const descriptionHeight = Math.min(measured, descriptionAvailable);
+    doc.text(description, captionLeft, cursor, {
+      width: CAPTION_WIDTH,
+      lineGap: 1.5,
+      height: descriptionHeight,
+      ellipsis: true,
+    });
+    cursor += descriptionHeight + 4;
+  }
+
   metaLines.forEach((value, index) => {
     doc.fillColor(BRAND_MUTED).font(fonts.regular).fontSize(META_FONT_SIZE);
-    // One line each, ellipsised, so a 500-char project name truncates instead of wrapping into the cell
-    // below it.
-    doc.text(value, captionLeft, metaTop + index * META_LINE_PITCH, {
+    // One line each, ellipsised, so a 500-char project name truncates instead of wrapping into the page
+    // furniture below the cell.
+    doc.text(value, captionLeft, cursor + index * META_LINE_PITCH, {
       width: CAPTION_WIDTH,
       align: "left",
       lineBreak: false,
@@ -742,25 +784,6 @@ async function drawPhotoEntry(
       ellipsis: true,
     });
   });
-
-  // The crew's caption (or the AI's finding) sits DIRECTLY above the metadata, as one bottom-anchored
-  // group. Pinning it to the top of the tile instead left ~100pt of dead air between the caption and the
-  // data it describes — the two belong together, and the whitespace then falls above the group where it
-  // reads as breathing room rather than a gap. Only drawn when there is one: an absent caption leaves clean
-  // space rather than the words "No description".
-  const description = clampText(photo.descriptionOverride ?? photo.description ?? "", 200);
-  if (description) {
-    doc.fillColor(BRAND_BLACK).font(fonts.regular).fontSize(8);
-    const available = metaTop - top - 6;
-    const measured = doc.heightOfString(description, { width: CAPTION_WIDTH, lineGap: 1.5 });
-    const descriptionHeight = Math.min(measured, available);
-    doc.text(description, captionLeft, metaTop - 6 - descriptionHeight, {
-      width: CAPTION_WIDTH,
-      lineGap: 1.5,
-      height: descriptionHeight,
-      ellipsis: true,
-    });
-  }
 }
 
 export type ParsedFinding = {
