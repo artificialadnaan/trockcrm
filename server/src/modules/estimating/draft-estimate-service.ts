@@ -104,7 +104,16 @@ export async function loadApprovedRecommendationsForRun(
           // takes `overrideQuantity ?? <fallback>`, and for everything else the extraction's. So the
           // three alternatives below are mutually exclusive BY CONSTRUCTION, not by luck:
           //
-          //   * a MANUAL row promotes its own manualQuantity; its extraction match is only an anchor.
+          //   * a MANUAL row promotes its own quantity — so it is judged on THAT, not on the extraction
+          //     its match anchors it to. "It promotes its own manualQuantity" was previously written as
+          //     a blanket `source_type = 'manual'` exemption, and that is only true when the row HAS
+          //     one: `manual_quantity` is nullable, `updateManualEstimateRow` writes a cleared value
+          //     straight through into BOTH `manual_quantity` and `recommended_quantity`, and nothing
+          //     resets the review status when it does. Nonpositive was the live half of the hole — 0 and
+          //     -5 are truthy strings, so the completeness check upstream passed them and they promoted
+          //     AS THEMSELVES: a $0.00 line and a -$1,250.00 line on a client-facing estimate, with no
+          //     row error raised. Held to the same standard as the override branch below, for the same
+          //     reason.
           //   * an override WITH a quantity of its own is judged on that quantity ALONE. The extraction
           //     fallback is explicitly excluded for it — otherwise an override carrying 0, a negative
           //     or NaN would fail its own alternative, be admitted by a healthy extraction, and then be
@@ -117,7 +126,17 @@ export async function loadApprovedRecommendationsForRun(
           // NaN is refused explicitly throughout: Postgres orders numeric NaN ABOVE all finite values,
           // so `NaN > 0` is TRUE and a positive test alone would admit it.
           sql`(
-      ${estimatePricingRecommendations.sourceType} = 'manual'
+      (
+        ${estimatePricingRecommendations.sourceType} = 'manual'
+        -- COALESCED, because the two columns are the two halves of one number.
+        -- resolvePromotionLineValues reads manualQuantity then recommendedQuantity for a manual row
+        -- (and the reverse order on the catalog-option branch), so whichever is present is what
+        -- reaches the estimate; a manual row with NEITHER has no quantity anywhere and used to be
+        -- fabricated as one unit.
+        and coalesce(${estimatePricingRecommendations.manualQuantity}, ${estimatePricingRecommendations.recommendedQuantity}) is not null
+        and coalesce(${estimatePricingRecommendations.manualQuantity}, ${estimatePricingRecommendations.recommendedQuantity}) > 0
+        and coalesce(${estimatePricingRecommendations.manualQuantity}, ${estimatePricingRecommendations.recommendedQuantity}) <> 'NaN'::numeric
+      )
       or (
         ${estimatePricingRecommendations.selectedSourceType} = 'override'
         and ${estimatePricingRecommendations.overrideQuantity} is not null
@@ -283,12 +302,32 @@ function buildMissingRecommendationError(recommendationId: string) {
   };
 }
 
+/** The only quantity this service will put on a line: present, finite and greater than zero.
+ *
+ *  The gate above already refuses everything else, so this is a backstop rather than the primary
+ *  defence — but the two do not agree by construction. `resolvePromotionLineValues` coalesces
+ *  `manualQuantity ?? recommendedQuantity` on the manual branch and `recommendedQuantity ??
+ *  manualQuantity` on the catalog-option one, while the gate coalesces in a single fixed order, so a
+ *  row whose two columns disagree can satisfy the gate on one column and promote the other. On a money
+ *  path that is worth one comparison at the point of use. */
+function isPromotableQuantity(value: string | null): value is string {
+  if (value === null) return false;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0;
+}
+
 function resolvePromotionLineValues(
   row: ReturnType<typeof deriveEstimatePricingWorkbenchRows>[number],
   selectedOptionLabel?: string | null
 ) {
   let description = selectedOptionLabel ?? row.description;
-  let quantity = row.quantity ?? "1";
+  // NO `?? "1"`. That fallback is the defect this PR is named for, sitting on the other end of the same
+  // pipeline as the worker's: "nobody said how much" became "one of them", and one unit of anything has
+  // a price. It fabricated a number on a client-facing line rather than refusing to write one, and
+  // `createLineItem` carries an identical `String(input.quantity ?? "1")` behind it — so removing this
+  // one alone would only move the fabrication a function further down. The caller refuses the row
+  // instead; see `isPromotableQuantity`.
+  let quantity: string | null = row.quantity ?? null;
   let unit = row.unit ?? undefined;
   let unitPrice = row.unitPrice ?? "0";
   let notes = row.notes ?? undefined;
@@ -461,6 +500,20 @@ export async function promoteApprovedRecommendationsToEstimate({
           line,
           selectedOption?.optionLabel ?? null
         );
+
+        // NO NUMBER, NO LINE. Refused here rather than defaulted, because the only alternative on this
+        // path is to invent one: `createLineItem` turns a null quantity into `"1"` of its own accord,
+        // so falling through would put a fabricated unit on a client-facing estimate exactly as before.
+        // An error the estimator can see beats a number nobody chose.
+        if (!isPromotableQuantity(lineValues.quantity)) {
+          rowErrors.push({
+            recommendationId: line.recommendationId,
+            code: "unpriceable_quantity",
+            message:
+              "Recommendation has no usable quantity to promote. Supply a positive quantity before promoting it.",
+          });
+          continue;
+        }
 
         const lineItem = await createLineItem(tx as any, dealId, section.id, {
           description: lineValues.description,

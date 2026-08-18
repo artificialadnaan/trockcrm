@@ -66,6 +66,9 @@ async function seedPromotionChain(schema: string) {
       source_type text,
       selected_source_type text,
       override_quantity numeric(14,3),
+      -- On the read path since the manual exemption stopped being a blanket one: a manual row promotes
+      -- its OWN quantity, so whether it is exempt depends on whether it has one. Same width as prod.
+      manual_quantity numeric(14,3),
       -- The number promotion actually wrote onto the line: resolvePromotionLineValues falls back to
       -- one unit over this column, so COALESCE(recommended_quantity, 1) is what an untouched promoted
       -- line still carries. Widths match the real schema (14,3), so a value this fixture accepts is
@@ -222,11 +225,16 @@ describe("migration 0215 — parking already-priced rows that never had a usable
   });
 
   it("does NOT flag a line that never took its number from the extraction", async () => {
-    // A manual recommendation promotes its own manualQuantity; an override with a quantity of its own
-    // promotes that. For both the anchor extraction is only an artifact link, so the quoted line can be
-    // perfectly correct even though the extraction is unpriceable. Telling an estimator such a line was
-    // fabricated as one unit and asking them to void it is a FALSE remediation task — worse than none,
-    // because it teaches people to ignore the queue.
+    // A manual recommendation WITH a quantity of its own promotes that; an override with a quantity of
+    // its own promotes that. For both the anchor extraction is only an artifact link, so the quoted line
+    // can be perfectly correct even though the extraction is unpriceable. Telling an estimator such a
+    // line was fabricated as one unit and asking them to void it is a FALSE remediation task — worse
+    // than none, because it teaches people to ignore the queue.
+    //
+    // The two exempt rows below carry `recommended_quantity` MATCHING their line, so the
+    // last-carried-number predicate does not exclude them for free: the ONLY thing keeping them out of
+    // the result is the exemption itself. Without that they were excluded twice over, and removing the
+    // exemption left this test green.
     await seed("office_dallas");
     await seedPromotionChain("office_dallas");
     await pg.exec(`
@@ -244,19 +252,20 @@ describe("migration 0215 — parking already-priced rows that never had a usable
         ('cccccccc-cccc-4ccc-8ccc-cccccccccccc', 25);
       INSERT INTO office_dallas.estimate_pricing_recommendations
         (id, deal_id, extraction_match_id, promoted_estimate_line_item_id,
-         source_type, selected_source_type, override_quantity) VALUES
+         source_type, selected_source_type, override_quantity, manual_quantity,
+         recommended_quantity) VALUES
         -- extraction-derived: priced as one unit, MUST be flagged
         ('44444444-4444-4444-8444-444444444444', '55555555-5555-4555-8555-555555555555',
          '22222222-2222-4222-8222-222222222222', '33333333-3333-4333-8333-333333333333',
-         'extracted', NULL, NULL),
-        -- manual: promotes manualQuantity, must NOT be flagged
+         'extracted', NULL, NULL, NULL, NULL),
+        -- manual WITH a quantity of its own: promoted 40, must NOT be flagged
         ('99999999-9999-4999-8999-999999999999', '55555555-5555-4555-8555-555555555555',
          '77777777-7777-4777-8777-777777777777', '88888888-8888-4888-8888-888888888888',
-         'manual', NULL, NULL),
+         'manual', NULL, NULL, 40, 40),
         -- override with its own quantity: promotes overrideQuantity, must NOT be flagged
         ('dddddddd-dddd-4ddd-8ddd-dddddddddddd', '55555555-5555-4555-8555-555555555555',
          'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
-         'extracted', 'override', 25);
+         'extracted', 'override', 25, NULL, 25);
     `);
 
     await pg.exec(MIGRATION_SQL);
@@ -268,6 +277,43 @@ describe("migration 0215 — parking already-priced rows that never had a usable
     expect(rows.map((row) => row.subject_id)).toEqual([
       "33333333-3333-4333-8333-333333333333",
     ]);
+  });
+
+  it("DOES flag a manual line that had no quantity of its own and was priced as one unit", async () => {
+    // THE CLASS THE BLANKET EXEMPTION HID. "A manual recommendation promotes its own manualQuantity" is
+    // true only when it HAS one: `manual_quantity` is nullable, `updateManualEstimateRow` writes a
+    // cleared value into it AND into `recommended_quantity`, and promotion then fell through to the same
+    // fabricated one unit this migration exists to surface. Exempting every manual row meant the one
+    // kind of manual line that IS fabricated was the one kind the queue could never show — and the
+    // reason text ("priced at a quantity of 1, which was not measured") is exactly true of it.
+    await seed("office_dallas");
+    await seedPromotionChain("office_dallas");
+    await pg.exec(`
+      INSERT INTO office_dallas.estimate_extractions (id, status, quantity) VALUES
+        ('66666666-6666-4666-8666-666666666666', 'processed', NULL);
+      INSERT INTO office_dallas.estimate_extraction_matches (id, extraction_id) VALUES
+        ('77777777-7777-4777-8777-777777777777', '66666666-6666-4666-8666-666666666666');
+      INSERT INTO office_dallas.estimate_line_items (id, quantity) VALUES
+        ('88888888-8888-4888-8888-888888888888', 1);
+      INSERT INTO office_dallas.estimate_pricing_recommendations
+        (id, deal_id, extraction_match_id, promoted_estimate_line_item_id,
+         source_type, selected_source_type, override_quantity, manual_quantity,
+         recommended_quantity) VALUES
+        ('99999999-9999-4999-8999-999999999999', '55555555-5555-4555-8555-555555555555',
+         '77777777-7777-4777-8777-777777777777', '88888888-8888-4888-8888-888888888888',
+         'manual', NULL, NULL, NULL, NULL);
+    `);
+
+    await pg.exec(MIGRATION_SQL);
+
+    const { rows } = (await pg.query(
+      `SELECT subject_id::text AS subject_id, reason FROM office_dallas.estimate_review_events`
+    )) as { rows: Array<{ subject_id: string; reason: string }> };
+
+    expect(rows.map((row) => row.subject_id)).toEqual([
+      "88888888-8888-4888-8888-888888888888",
+    ]);
+    expect(rows[0].reason).toContain("priced at a quantity of 1");
   });
 
   it("does NOT flag a line an estimator has ALREADY corrected", async () => {

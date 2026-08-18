@@ -116,11 +116,20 @@ BEGIN
               WHERE e.status = 'needs_quantity'
                 AND r.promoted_estimate_line_item_id IS NOT NULL
                 -- ONLY LINES WHOSE NUMBER ACTUALLY CAME FROM THIS EXTRACTION. A manual recommendation
-                -- promotes its own manualQuantity, and an override with a quantity of its own promotes
-                -- that — for both, the anchor extraction is only an artifact link, and the quoted line
-                -- may be perfectly correct. Flagging those would tell an estimator a valid line was
-                -- fabricated as one unit and ask them to void it: a false remediation task is worse
-                -- than none, because it teaches people to ignore the queue.
+                -- promotes its own quantity, and an override with a quantity of its own promotes that —
+                -- for both, the anchor extraction is only an artifact link, and the quoted line may be
+                -- perfectly correct. Flagging those would tell an estimator a valid line was fabricated
+                -- as one unit and ask them to void it: a false remediation task is worse than none,
+                -- because it teaches people to ignore the queue.
+                --
+                -- THE MANUAL EXEMPTION IS CONDITIONAL, because "it promotes its own manualQuantity" is
+                -- only true when it HAS one. `manual_quantity` is nullable and so is
+                -- `recommended_quantity`, which is written from it; a manual row with NEITHER promoted
+                -- through `resolvePromotionLineValues`, whose fallback was the same fabricated one unit
+                -- this migration exists to surface. Exempting it wholesale meant the one class of
+                -- manual line that IS fabricated was the one class the remediation could never see, and
+                -- the reason text quoted below ("priced at a quantity of 1, which was not measured") is
+                -- exactly true of it.
                 --
                 -- DELIBERATELY NOT THE PROMOTE PREDICATE'S OVERRIDE BRANCH, which additionally requires
                 -- the override quantity to be positive and finite. The two ask different questions:
@@ -134,7 +143,10 @@ BEGIN
                 -- recommendation-persistence-service.ts writes NULL, and the two carry-forward inserts
                 -- in draft-estimate-service.ts only copy an existing value — so it is not a claim this
                 -- migration should invent. Every non-null override quantity is excluded here.
-                AND r.source_type IS DISTINCT FROM 'manual'
+                AND NOT (
+                  r.source_type = 'manual'
+                  AND COALESCE(r.manual_quantity, r.recommended_quantity) IS NOT NULL
+                )
                 AND NOT (
                   r.selected_source_type = 'override'
                   AND r.override_quantity IS NOT NULL

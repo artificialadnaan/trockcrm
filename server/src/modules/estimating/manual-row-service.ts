@@ -173,6 +173,30 @@ async function ensureGenerationRunBelongsToDeal(
   }
 }
 
+/** A manual quantity, refused unless it is a number somebody could actually be billed for.
+ *
+ *  `normalizeOptionalNumeric` accepts `^-?\d+(\.\d+)?$`, so "0" and "-5" arrived here as perfectly
+ *  valid values, were written into `manual_quantity` AND `recommended_quantity`, and promoted onto a
+ *  client-facing estimate AS THEMSELVES — a $0.00 line, or a -$1,250.00 one, with no row error raised.
+ *  An OVERRIDE quantity of 0 was already refused by the promote gate; this is the same rule applied to
+ *  the column that was missing it, and applied at the door so the refusal names the field.
+ *
+ *  ABSENT IS STILL ALLOWED, deliberately. A row being edited may legitimately have no quantity yet, and
+ *  the promote gate and the workbench's readiness flag both refuse to promote one — so a blank is a
+ *  visible not-ready state rather than a silent fabrication. Zero and negative are different: they are
+ *  assertions about a number, and both are wrong. */
+function normalizeManualQuantity(value?: string | null) {
+  const normalized = normalizeOptionalNumeric(value, "Manual quantity");
+  if (normalized === null) return null;
+
+  const numeric = Number(normalized);
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    throw new AppError(400, "Manual quantity must be greater than zero");
+  }
+
+  return normalized;
+}
+
 function normalizeManualFields(input: {
   manualQuantity?: string | null;
   manualUnit?: string | null;
@@ -180,7 +204,7 @@ function normalizeManualFields(input: {
   manualNotes?: string | null;
 }) {
   return {
-    manualQuantity: normalizeOptionalNumeric(input.manualQuantity, "Manual quantity"),
+    manualQuantity: normalizeManualQuantity(input.manualQuantity),
     manualUnit: normalizeOptionalText(input.manualUnit),
     manualUnitPrice: normalizeOptionalNumeric(input.manualUnitPrice, "Manual unit price"),
     manualNotes: normalizeOptionalText(input.manualNotes),
@@ -622,7 +646,13 @@ export function resolveManualPromotionValues(row: {
 }) {
   return {
     description: row.manualLabel ?? "",
-    quantity: row.overrideQuantity ?? row.manualQuantity ?? "1",
+    // NO `?? "1"` HERE EITHER, for the same reason it is gone from `resolvePromotionLineValues`: the
+    // two early-return paths in `promoteManualRowToLocalCatalog` reach this WITHOUT the
+    // `candidateQuantity` guard the fresh-promotion path applies, so a row with no quantity anywhere
+    // was handed back a catalog item whose `defaultQuantity` was an invented 1 — a fabrication that
+    // then seeds every future line drawn from that catalog entry. Null says "there isn't one", which
+    // is the true answer.
+    quantity: row.overrideQuantity ?? row.manualQuantity ?? null,
     unit: row.overrideUnit ?? row.manualUnit ?? undefined,
     unitPrice: row.overrideUnitPrice ?? row.manualUnitPrice ?? "0",
     notes: row.overrideNotes ?? row.manualNotes ?? undefined,

@@ -776,11 +776,35 @@ export async function buildEstimatingWorkbenchState(
    * silently dropped the row and answered `recommendation_unavailable`. A readiness signal that
    * disagrees with the thing it gates is worse than no signal.
    *
-   * Manual rows are exempt for the same reason they are exempt there: they promote their own
-   * `manualQuantity`, and their extraction match is only an active-artifact anchor.
+   * Manual rows are judged on THEIR OWN quantity rather than on the extraction, for the same reason
+   * they are there: their extraction match is an active-artifact anchor, not a quantity source. Not
+   * exempt, though — "it promotes its own manualQuantity" holds only when it HAS one, and
+   * `hasManualPromotionValues` above only asks whether the string is non-empty, so "0" and "-5" walked
+   * through it and promoted as themselves.
    */
   const hasPriceableExtraction = (row: (typeof derivedPricingRows)[number]): boolean => {
-    if (row.sourceType === "manual") return true;
+    if (row.sourceType === "manual") {
+      // AN OVERRIDE STILL WINS, exactly as the promote query's disjunction has it: a manual row whose
+      // `selectedSourceType` is `override` promotes `overrideQuantity`, so it is judged by the override
+      // branch below rather than refused here for lacking a manual number.
+      if (
+        row.selectedSourceType === "override" &&
+        row.overrideQuantity !== undefined &&
+        row.overrideQuantity !== null
+      ) {
+        const overrideQuantity = Number(row.overrideQuantity);
+        return Number.isFinite(overrideQuantity) && overrideQuantity > 0;
+      }
+      // The same coalesce the promote query applies, and the same reason: whichever of the two columns
+      // is present is the number `resolvePromotionLineValues` will reach for.
+      const manualQuantity = row.manualQuantity ?? row.recommendedQuantity;
+      // An ABSENT column is not a claim — the same rule the extraction branch below follows, so a future
+      // narrowing of the select cannot silently mark every manual row unpromotable.
+      if (manualQuantity === undefined) return true;
+      if (manualQuantity === null) return false;
+      const quantity = Number(manualQuantity);
+      return Number.isFinite(quantity) && quantity > 0;
+    }
     // AN OVERRIDE WITH ITS OWN QUANTITY, mirroring the promote query's exemption exactly.
     // `resolvePromotionLineValues` promotes `overrideQuantity` for these rows, so the anchor
     // extraction's quantity is not what reaches the estimate — and an override's `sourceType` is
@@ -857,11 +881,16 @@ export async function buildEstimatingWorkbenchState(
     approved: activeExtractionRows.filter((row) => row.status === "approved").length,
     rejected: activeExtractionRows.filter((row) => row.status === "rejected").length,
     unmatched: activeExtractionRows.filter((row) => row.status === "unmatched").length,
-    // A HUMAN-ACTION-REQUIRED BUCKET, without which these counts stop reconciling with `total`. The
-    // generation job now parks a quantity-less row at `needs_quantity` instead of pricing it as one
-    // unit, and such a row belongs to none of the four buckets above — so a consumer summing them
-    // silently loses rows, and the one state that actually needs somebody to act is the one it cannot
-    // show.
+    // A HUMAN-ACTION-REQUIRED BUCKET. The generation job now parks a quantity-less row at
+    // `needs_quantity` instead of pricing it as one unit, and that is the one state on this summary
+    // that names work only a person can clear — so it has to be visible.
+    //
+    // NOT A PARTITION, and an earlier version of this comment claimed it was: it said the bucket was
+    // needed so the counts "reconcile with `total`". They never did and still do not. `processed` is
+    // the terminal state of every successfully priced row and has no bucket here at all, and neither
+    // does `overridden`; summing these five has always come out under `total` on any deal that has been
+    // priced. `total` is the row count, the rest are named states of interest, and a consumer that
+    // subtracts them to infer a remainder is reading a guarantee this object does not make.
     needsQuantity: activeExtractionRows.filter((row) => row.status === "needs_quantity").length,
   };
 

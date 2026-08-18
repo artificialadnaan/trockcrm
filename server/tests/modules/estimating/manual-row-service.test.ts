@@ -202,6 +202,74 @@ describe("manual-row-service", () => {
     ).rejects.toThrow("Manual quantity must be a valid number");
   });
 
+  it.each(["0", "-5", "0.000"])(
+    "refuses a manual quantity of %s, which is not a number anyone can be billed for",
+    async (manualQuantity) => {
+      // `normalizeOptionalNumeric` accepts `^-?\\d+(\\.\\d+)?$`, so these were perfectly valid values:
+      // written into `manual_quantity` AND `recommended_quantity`, then promoted AS THEMSELVES onto a
+      // client-facing estimate — a $0.00 line, or a -$1,250.00 one, with no row error raised anywhere.
+      // The `hasManualPricingValues` check upstream only asks whether the string is non-empty, and "0"
+      // is not empty. An OVERRIDE quantity of 0 was already refused by the promote gate; this is the
+      // same rule reaching the column that was missing it, at the door, so the refusal names the field.
+      const tenantDb = {
+        select: makeActiveMatchSelect(),
+      } as any;
+
+      await expect(
+        createManualEstimateRow({
+          tenantDb,
+          dealId: "deal-1",
+          userId: "user-1",
+          input: {
+            generationRunId: "run-1",
+            extractionMatchId: "match-1",
+            estimateSectionName: "Roofing",
+            manualLabel: "Nonpositive quantity row",
+            manualQuantity,
+            manualUnitPrice: "250.00",
+          },
+        })
+      ).rejects.toThrow("Manual quantity must be greater than zero");
+    }
+  );
+
+  it("refuses a nonpositive manual quantity on UPDATE as well as on create", async () => {
+    // The update path is the one the reported scenario goes through: a complete row is approved, then
+    // PATCHed. It shares `normalizeManualFields` with create, and the guard belongs there rather than at
+    // one call site, or the two verbs disagree about what a quantity is.
+    const tenantDb = {
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(() => ({
+            limit: vi.fn().mockResolvedValue([
+              {
+                id: "rec-1",
+                dealId: "deal-1",
+                sourceType: "manual",
+                manualIdentityKey: "identity-1",
+                manualLabel: "Coping metal",
+                manualQuantity: "10",
+                manualUnitPrice: "250.00",
+                selectedSourceType: "manual",
+                evidenceJson: {},
+              },
+            ]),
+          })),
+        })),
+      })),
+    } as any;
+
+    await expect(
+      updateManualEstimateRow({
+        tenantDb,
+        dealId: "deal-1",
+        recommendationId: "rec-1",
+        userId: "user-1",
+        input: { manualQuantity: "-5" },
+      })
+    ).rejects.toThrow("Manual quantity must be greater than zero");
+  });
+
   it("requires quantity and unit price for catalog-backed manual rows", async () => {
     const tenantDb = {
       select: makeActiveMatchSelect(),

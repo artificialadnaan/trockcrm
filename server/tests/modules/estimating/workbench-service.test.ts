@@ -747,6 +747,107 @@ describe("buildEstimatingWorkbenchState", () => {
     ]);
   });
 
+  it("keeps a MANUAL row promotable on its own quantity, and clears it when that quantity is unusable", async () => {
+    // THE EXEMPTION THAT WAS TOO WIDE. `sourceType === "manual"` returned true unconditionally, on the
+    // stated grounds that a manual row promotes its own `manualQuantity` — which holds only when it HAS
+    // one. `hasManualPromotionValues` upstream is a TRUTHINESS check on the string, so "0" and "-5"
+    // sailed through it and this gate then waved them past too: the workbench called the row ready and
+    // promotion wrote a $0.00 line and a -$1,250.00 line onto a client-facing estimate.
+    //
+    // The anchor extraction is unpriceable on every row here on purpose — that is the real shape of a
+    // manual row, whose match is an active-artifact anchor rather than a quantity source. So this test
+    // is about the manual column and nothing else.
+    const seedManual = (id: string, manualQuantity: string | null) => ({
+      id,
+      extractionMatchId: "match-1",
+      status: "approved",
+      createdByRunId: "run-1",
+      sourceType: "manual",
+      selectedSourceType: "manual",
+      manualLabel: id,
+      manualQuantity,
+      manualUnitPrice: "250.00",
+      recommendedQuantity: manualQuantity,
+      recommendedUnitPrice: "250.00",
+      normalizedIntent: id,
+      sourceRowIdentity: `manual:${id}`,
+      sectionName: "Roof",
+    });
+
+    const { tenantDb } = makeDb({
+      documents: [{ id: "doc-1", activeParseRunId: "run-1", ocrStatus: "completed" }],
+      extractions: [
+        {
+          id: "ext-1",
+          documentId: "doc-1",
+          status: "approved",
+          quantity: null,
+          metadataJson: { sourceParseRunId: "run-1", activeArtifact: true },
+        },
+      ],
+      matches: [{ id: "match-1", extractionId: "ext-1", status: "selected" }],
+      pricing: [
+        seedManual("rec-manual-10", "10"),
+        seedManual("rec-manual-0", "0"),
+        seedManual("rec-manual-negative", "-5"),
+      ],
+    });
+
+    const state = await buildEstimatingWorkbenchState(tenantDb, "deal-1");
+
+    expect(state.summary.pricing.readyToPromote).toBe(1);
+    expect(state.pricingRows).toEqual([
+      expect.objectContaining({ id: "rec-manual-10", promotable: true }),
+      expect.objectContaining({ id: "rec-manual-0", promotable: false }),
+      expect.objectContaining({ id: "rec-manual-negative", promotable: false }),
+    ]);
+  });
+
+  it("keeps a MANUAL row promotable when its OVERRIDE carries the quantity", async () => {
+    // Tightening the manual branch must not strand a manual row that legitimately promotes an override
+    // quantity instead of its own — the promote query's alternatives are an OR, and this surface has to
+    // answer the same way or the button and the gate disagree again.
+    const { tenantDb } = makeDb({
+      documents: [{ id: "doc-1", activeParseRunId: "run-1", ocrStatus: "completed" }],
+      extractions: [
+        {
+          id: "ext-1",
+          documentId: "doc-1",
+          status: "approved",
+          quantity: null,
+          metadataJson: { sourceParseRunId: "run-1", activeArtifact: true },
+        },
+      ],
+      matches: [{ id: "match-1", extractionId: "ext-1", status: "selected" }],
+      pricing: [
+        {
+          id: "rec-manual-override",
+          extractionMatchId: "match-1",
+          status: "overridden",
+          createdByRunId: "run-1",
+          sourceType: "manual",
+          selectedSourceType: "override",
+          manualLabel: "Coping metal",
+          manualQuantity: null,
+          manualUnitPrice: "250.00",
+          overrideQuantity: "12",
+          recommendedQuantity: "12",
+          recommendedUnitPrice: "250.00",
+          normalizedIntent: "coping metal",
+          sourceRowIdentity: "manual:coping-1",
+          sectionName: "Roof",
+        },
+      ],
+    });
+
+    const state = await buildEstimatingWorkbenchState(tenantDb, "deal-1");
+
+    expect(state.summary.pricing.readyToPromote).toBe(1);
+    expect(state.pricingRows).toEqual([
+      expect.objectContaining({ id: "rec-manual-override", promotable: true }),
+    ]);
+  });
+
   it("keeps promotion duplicate-blocking behavior intact", async () => {
     const { tenantDb } = makeDb({
       documents: [{ id: "doc-1", activeParseRunId: "run-1", ocrStatus: "completed" }],
