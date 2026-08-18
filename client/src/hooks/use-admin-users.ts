@@ -15,6 +15,10 @@ export interface AdminUser {
    *  rosters (migration 0219). Independent of `role`, which decides what they may see and do — an
    *  estimator can hold role='rep' for CRM access without ever selling, and a director can sell. */
   generatesSales: boolean;
+  /** Does this person estimate jobs? Decides whether they appear in the ESTIMATORS section of the deals
+   *  dashboard rep filter (migration 0222). Independent of `generatesSales`, but the roster lists each
+   *  person exactly once and SALES WINS: someone with both flags stays under Sales. */
+  estimatesJobs: boolean;
   extraOfficeCount: number;
   commissionRate?: number;
   commissionStructure?: "solo" | "mixed";

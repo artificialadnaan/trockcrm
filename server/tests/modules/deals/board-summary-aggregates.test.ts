@@ -336,12 +336,22 @@ describe("getDealsForPipeline — boardSummary counts ALL matching rows, not the
       totalValue: 1000,
     });
 
-    await runBoard(tenantDb, { assignedRepId: "rep-77" });
+    // A REAL uuid: buildEstimatorCondition degrades a malformed id to `sql\`false\`` (main's no-match
+    // guard against a 22P02), so a fixture like "est-88" would silently assert nothing.
+    await runBoard(tenantDb, {
+      assignedRepId: "rep-77",
+      estimatorId: "00000000-0000-4000-8000-000000000088",
+    });
 
     const pendingChain = chains.find(isPendingRfpChain);
     expect(pendingChain).toBeDefined();
     const where = pendingChain.where.mock.calls[0]?.[0];
     expect(containsValue(where, "rep-77")).toBe(true);
+    // CROSS-FEATURE (#1067 x this PR): the estimator dimension lands in commonConditions, which this
+    // preview spreads — so the column's cards, its server-computed count, and the /deals/pending-rfp
+    // queue that "open full queue" navigates to are all narrowed by the same estimator. Merging the two
+    // features textually would not have guaranteed this; sharing commonConditions is what does.
+    expect(containsValue(where, "00000000-0000-4000-8000-000000000088")).toBe(true);
     const text = renderSql(where);
     expect(text).toContain("rfp_approval_status");
     expect(text).toContain("is_bid_board_owned");

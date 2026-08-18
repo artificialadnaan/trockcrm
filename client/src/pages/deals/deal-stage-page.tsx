@@ -57,8 +57,18 @@ export function buildStageSummaryFilters(
     if (raw === undefined || raw.trim() === "") return undefined;
     return Number.isFinite(Number(raw)) ? raw : undefined;
   };
+  // Estimator wins over the INHERITED BARE owner param only — never over the visible fb_ control.
+  //
+  // The distinction is load-bearing. The bare param is the dual-filter trap: a direct URL carrying both
+  // dimensions would compute the header against owner AND estimator while the page shows one control.
+  // But fb_assignedRepId is the Rep control the admin can SEE and just used, and the list applies it
+  // regardless of what this function decides. Dropping it here too (which an earlier version of this fix
+  // did) leaves the header estimator-wide while the rows and pagination are narrowed to that estimator's
+  // deals owned by the selected rep — a header that disagrees with the list beneath it, which is the
+  // failure this whole summary function exists to prevent.
+  const estimatorId = baseFilters.estimatorId ?? (searchParams.get("estimatorId") || undefined);
   const assignedRepId = options.ownRep
-    ? fb("assignedRepId") ?? (searchParams.get("assignedRepId") || undefined)
+    ? fb("assignedRepId") ?? (estimatorId ? undefined : searchParams.get("assignedRepId") || undefined)
     : undefined;
   // Resolve the bar's date the SAME way the list does (withResolvedDateWindow): a relative preset such
   // as fb_datePreset=30/ytd re-derives a fresh window for now, so a bookmark's stale fb_dateFrom/dateTo
@@ -234,6 +244,10 @@ export function DealStagePage() {
         visibleStages={[stage]}
         baseFilters={{
           stageIds: listStageIds,
+          // Inherited from the board. It is not a bar dimension, so it stays a base filter — that keeps the
+          // list narrowed to the same set the card counted, and matches the summary above (which receives
+          // it through route.query.filters).
+          ...(route.query.filters.estimatorId ? { estimatorId: route.query.filters.estimatorId } : {}),
           ...(excludeOnHold ? { excludeOnHold: true } : {}),
           // Pair with the summary's boardPopulation so the header/pagination and this list describe ONE
           // population. Non-terminal only: a won/lost list is realized and legitimately carries terminal

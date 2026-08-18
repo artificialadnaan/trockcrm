@@ -773,7 +773,14 @@ export function DealsListSection({
   //
   // `assignees` is NOT gated: its map resolves owner names for the rows and the CSV export, which every
   // mode renders.
-  const { reps: repOptions } = useRepRoster({ enabled: !filterBarMode && !hideOwnerFilter });
+  const { reps: rosterAllGroups } = useRepRoster({ enabled: !filterBarMode && !hideOwnerFilter });
+  // SALES ONLY: this control writes an OWNER filter (effectiveAssignedRepId → assignedRepId), so an
+  // estimator picked here would filter by deals they own — nothing, for a pure estimator. The estimator
+  // dimension lives on the deals dashboard header, which writes ?estimatorId instead.
+  const repOptions = useMemo(
+    () => rosterAllGroups.filter((rep) => rep.group !== "estimator"),
+    [rosterAllGroups]
+  );
   // The assignee feed is likewise GATED when the mounting page already has it: /deals loads
   // /tasks/assignees for its own header Rep control and hands the result down, so the page no longer
   // issues the same request twice on every load. Un-passed mounts fetch it themselves, unchanged — and

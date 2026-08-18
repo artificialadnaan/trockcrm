@@ -25,7 +25,9 @@ function storageKey(userId: string, officeId: string | null | undefined) {
 
 /** Allowlist (not denylist) of the query params that represent a STANDING /deals header preference. */
 export function isPersistableDealViewParam(key: string): boolean {
-  return key === "period" || key === "assignedRepId";
+  // estimatorId joins the allowlist as the rep filter's sibling: the header control writes one or the
+  // other, so a saved Estimators pick must survive a return to a bare /deals exactly as a saved rep does.
+  return key === "period" || key === "assignedRepId" || key === "estimatorId";
 }
 
 // Context params that describe WHICH board is shown, not a filter on it — a bare view may carry these and

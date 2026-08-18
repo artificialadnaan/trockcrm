@@ -15,7 +15,7 @@ beforeAll(async () => {
     CREATE TABLE deals (
       id uuid PRIMARY KEY, sales_source_user_id uuid, name text, is_change_order boolean NOT NULL DEFAULT false, project_number text, deal_number text, workflow_route text,
       stage_id uuid, is_bid_board_owned boolean DEFAULT false, is_active boolean DEFAULT true,
-      is_test_data boolean DEFAULT false, assigned_rep_id uuid,
+      is_test_data boolean DEFAULT false, assigned_rep_id uuid, estimator_user_id uuid,
       rfp_approval_status text, rfp_approval_requested_at timestamptz, rfp_approval_requested_by uuid,
       rfp_declined_reason text, rfp_approval_request_event_id uuid, rfp_declined_at timestamptz,
       rfp_approval_request_id integer, rfp_approval_token text,
@@ -47,12 +47,41 @@ beforeAll(async () => {
     INSERT INTO deals (id,name,stage_id,rfp_approval_status,rfp_override_decision) VALUES ('00000000-0000-0000-0000-00000000d008','Reconfirmed','00000000-0000-0000-0000-0000000000aa','declined','denial_reconfirmed');
     -- pending RFP whose stage is the legacy "dd" alias (canonicalizes to opportunity) → must be included
     INSERT INTO deals (id,name,workflow_route,stage_id,rfp_approval_status,rfp_approval_requested_at) VALUES ('00000000-0000-0000-0000-00000000d009','Legacy DD','normal','00000000-0000-0000-0000-0000000000dd','pending','2026-06-20T00:00:00Z');
+    -- Estimators on two of the INCLUDED rows, so the filter test below can tell "narrowed" from "empty".
+    UPDATE deals SET estimator_user_id = '00000000-0000-0000-0000-0000000000e1' WHERE id = '00000000-0000-0000-0000-00000000d001';
+    UPDATE deals SET estimator_user_id = '00000000-0000-0000-0000-0000000000e2' WHERE id = '00000000-0000-0000-0000-00000000d009';
     -- declined but override-approval is in flight (being created on Bid Board) → not actionable, excluded
     INSERT INTO deals (id,name,stage_id,rfp_approval_status,rfp_override_state) VALUES ('00000000-0000-0000-0000-00000000d010','OverrideApproving','00000000-0000-0000-0000-0000000000aa','declined','approving');
   `);
   tdb = drizzle(pg);
 });
 afterAll(async () => { await pg?.close?.(); });
+
+describe("getPendingRfpDeals — estimator filter (Codex #1067 P1)", () => {
+  // Runs against PGlite, i.e. REAL SQL. That matters more than usual here: the board's Pending RFP column
+  // is narrowed by the estimator predicate and clicking it lands on this endpoint, which previously
+  // ignored the filter and listed every pending RFP under a count scoped to one person. Executing the
+  // query is also the only way to catch a predicate that parses but does not run.
+  it("narrows to the estimator's pending RFPs, keeping the oldest-first order", async () => {
+    const rows = await getPendingRfpDeals(tdb, { estimatorId: "00000000-0000-0000-0000-0000000000e1" });
+    expect(rows.map((r) => r.id)).toEqual(["00000000-0000-0000-0000-00000000d001"]);
+  });
+
+  it("returns the OTHER estimator's row for the other id — not a constant subset", async () => {
+    const rows = await getPendingRfpDeals(tdb, { estimatorId: "00000000-0000-0000-0000-0000000000e2" });
+    expect(rows.map((r) => r.id)).toEqual(["00000000-0000-0000-0000-00000000d009"]);
+  });
+
+  it("is unfiltered when no estimator is passed (existing callers unchanged)", async () => {
+    const rows = await getPendingRfpDeals(tdb);
+    expect(rows.length).toBe(3);
+  });
+
+  it("emits a no-match rather than a 22P02 for a malformed id", async () => {
+    // estimator_user_id is uuid; a hand-edited ?estimatorId would otherwise error the whole endpoint.
+    await expect(getPendingRfpDeals(tdb, { estimatorId: "not-a-uuid" })).resolves.toEqual([]);
+  });
+});
 
 describe("getPendingRfpDeals", () => {
   it("returns pending-RFP opportunity-family deals oldest-first; excludes approved/owned/wrong-stage/test/inactive/reconfirmed-denial", async () => {

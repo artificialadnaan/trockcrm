@@ -671,6 +671,9 @@ function readStageInput(req: Parameters<typeof router.get>[1] extends never ? ne
     sort: normalizeStagePageSort(req.query.sort as string | undefined),
     search: req.query.search as string | undefined,
     assignedRepId: req.query.assignedRepId as string | undefined,
+    // Carried from the board through buildDealStageWorkspacePath so the drill-down keeps the estimator
+    // filter the card was counted under.
+    estimatorId: readOptionalStringParam(req.query.estimatorId, "estimatorId"),
     estimateSentFrom: assertOptionalIsoDateQueryParam(
       (req.query.estimateSentFrom as string | undefined) ?? (req.query.estimate_sent_since as string | undefined),
       "estimateSentFrom"
@@ -954,6 +957,7 @@ router.get("/", async (req, res, next) => {
         ? (req.query.inactiveStageIds as string).split(",")
         : undefined,
       assignedRepId: req.query.assignedRepId as string | undefined,
+      estimatorId: readOptionalStringParam(req.query.estimatorId, "estimatorId"),
       projectTypeId: req.query.projectTypeId as string | undefined,
       regionId: req.query.regionId as string | undefined,
       source: req.query.source as string | undefined,
@@ -1018,7 +1022,10 @@ router.get("/", async (req, res, next) => {
 // Sales-role gated: this is a cross-rep read, so keep non-sales CRM roles (e.g. construction) out.
 router.get("/pending-rfp", requireRole("admin", "director", "rep"), async (req, res, next) => {
   try {
-    const deals = await getPendingRfpDeals(req.tenantDb!);
+    const deals = await getPendingRfpDeals(req.tenantDb!, {
+      // Forwarded from the board's Pending RFP column so the destination matches the count that opened it.
+      estimatorId: readOptionalStringParam(req.query.estimatorId, "estimatorId"),
+    });
     await req.commitTransaction!();
     res.json({ deals });
   } catch (err) {
@@ -1050,6 +1057,7 @@ router.get("/pipeline", async (req, res, next) => {
     );
     const filters = {
       assignedRepId: req.query.assignedRepId as string | undefined,
+      estimatorId: readOptionalStringParam(req.query.estimatorId, "estimatorId"),
       estimateSentFrom,
       estimateSentTo,
       scope,

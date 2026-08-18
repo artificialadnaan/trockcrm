@@ -3,6 +3,10 @@ import { normalizeDealStageSlug, workflowRouteFromStage } from "@/lib/pipeline-o
 
 export interface StagePageFilters {
   assignedRepId?: string;
+  /** Deals this person is ESTIMATING, inherited from the board. Deliberately NOT in
+   *  STAGE_ROUTE_FILTER_KEYS: those are translated into the bar's fb_ namespace and stripped on mount, and
+   *  the bar has no estimator dimension — listing it there would DELETE the filter instead of applying it. */
+  estimatorId?: string;
   estimateSentFrom?: string;
   estimateSentTo?: string;
   staleOnly: boolean;
@@ -100,7 +104,10 @@ export function normalizeStagePageQuery(input: Record<string, string | undefined
     sort: input.sort ?? "",
     search: input.search?.trim() ?? "",
     filters: {
-      assignedRepId: input.assignedRepId,
+      // Estimator wins, matching the dashboard and the bar redirect above — this covers the pre-redirect
+      // first paint, where both bare params are still on the URL.
+      assignedRepId: input.estimatorId ? undefined : input.assignedRepId,
+      estimatorId: input.estimatorId,
       estimateSentFrom,
       estimateSentTo: input.estimateSentTo ?? input.estimate_sent_until ?? estimateSentPresetRangeValue?.to,
       staleOnly: input.staleOnly === "true",
@@ -236,7 +243,14 @@ const STAGE_ROUTE_FILTER_TO_BAR_KEY: Record<string, string> = {
 export function getStagePageBarRedirectSearch(params: URLSearchParams, prefix = "fb_"): string | null {
   if (!STAGE_ROUTE_FILTER_KEYS.some((key) => params.has(key))) return null;
   const next = new URLSearchParams(params);
+  // ESTIMATOR WINS on a DIRECT stage URL too. The link builders no longer emit both dimensions, but a
+  // bookmarked or hand-edited URL still can, and this loop would translate the owner into the VISIBLE
+  // fb_assignedRepId control while estimatorId stays a base filter — the two then AND, so the page is
+  // narrower than the one control on screen explains, and clearing that control leaves it still filtered.
+  // Dropping the owner here (it is stripped below either way) keeps the visible state and the query honest.
+  const hasEstimator = Boolean(params.get("estimatorId"));
   for (const [bareKey, barKey] of Object.entries(STAGE_ROUTE_FILTER_TO_BAR_KEY)) {
+    if (bareKey === "assignedRepId" && hasEstimator) continue;
     const value = params.get(bareKey);
     const fbKey = `${prefix}${barKey}`;
     if (value && !next.has(fbKey)) next.set(fbKey, value);

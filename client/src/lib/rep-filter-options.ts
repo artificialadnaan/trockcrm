@@ -1,6 +1,15 @@
 export interface RepFilterOption {
   id: string;
   displayName: string;
+  /**
+   * Which question this person answers — "sales" (owns) or "estimator" (is estimating).
+   *
+   * Optional because an APPENDED off-roster selection has no group: the wide assignee feed knows the
+   * person's name and nothing else about them. Callers partitioning the list must treat a missing group
+   * as "sales", the historical meaning of every entry here, so an appended id can never vanish from both
+   * sections and become unselectable.
+   */
+  group?: "sales" | "estimator";
 }
 
 /**

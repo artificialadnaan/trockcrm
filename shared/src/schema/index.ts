@@ -22,6 +22,7 @@ export { procoreWebhookLog } from "./public/procore-webhook-log.js";
 export { syncHubWebhookOrphans } from "./public/synchub-webhook-orphans.js";
 export { portfolioProjectStageEventReceipts } from "./public/portfolio-project-stage-event-receipts.js";
 export { publicPhotoTokens } from "./public/public-photo-tokens.js";
+export { weeklyReportTokens } from "./public/weekly-report-tokens.js";
 export { hubspotOwnerMappings } from "./public/hubspot-owner-mappings.js";
 export { hubspotActivityBackfillLedger } from "./public/hubspot-activity-backfill-ledger.js";
 export { userGraphTokens, graphTokenStatusEnum } from "./public/user-graph-tokens.js";
@@ -169,6 +170,15 @@ export {
   fieldScorecardEditUploads,
 } from "./tenant/field-scorecards.js";
 export { glassesWalkthroughs } from "./tenant/glasses-walkthroughs.js";
+export {
+  weeklyReportProjects,
+  weeklyReports,
+  weeklyReportPhotos,
+  weeklyReportDismissals,
+  weeklyReportPauses,
+  weeklyReportRemindersSent,
+  weeklyReportSettings,
+} from "./tenant/weekly-reports.js";
 export { scorecardCorrectiveActions } from "./tenant/scorecard-corrective-actions.js";
 export { scorecardCorrectiveActionTokens } from "./tenant/scorecard-corrective-action-tokens.js";
 export { scorecardCorrectiveActionEvents } from "./tenant/scorecard-corrective-action-events.js";

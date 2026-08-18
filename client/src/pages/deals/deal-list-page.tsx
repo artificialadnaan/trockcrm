@@ -4,7 +4,7 @@ import { ArrowRight, Briefcase, Plus, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { MetricCard } from "@/components/shared/metric-card";
 import { ScopeToggle, type ScopeToggleOption } from "@/components/shared/scope-toggle";
 import { USD_COMPACT } from "@/components/shared/formatters";
@@ -645,10 +645,18 @@ export function buildDealsPageKpiDrilldownPath(
       queryParams instanceof URLSearchParams
         ? Array.from(queryParams.entries())
         : Object.entries(queryParams);
+    // Same estimator-wins precedence the page applies when READING these two, so a drill-down link built
+    // from a URL carrying both cannot hand on the owner param the page suppressed.
+    const hasEstimator = entries.some(([key, value]) => key === "estimatorId" && Boolean(value));
     for (const [key, value] of entries) {
       if (!value) continue;
+      if (key === "assignedRepId" && hasEstimator) continue;
       if (
         key === "assignedRepId" ||
+        // The estimator dimension travels with the owner one. A card counted under "Sidney's estimated
+        // deals" must open a destination holding exactly those; forwarding only assignedRepId widens the
+        // drill-down back to every estimator and the destination stops reconciling with the card.
+        key === "estimatorId" ||
         // Office context is URL-driven: api() reads ?officeId from window.location.search and sends it as
         // x-office-id. A KPI card that drops it silently returns a cross-office viewer to their ACTIVE
         // office, so the drill-down lists a DIFFERENT office's deals than the card counted. Forward it on
@@ -1065,8 +1073,10 @@ function DealsBoardColumn({
           {/*
             Two shapes, because the destination is not always countable. A stage drill-down lists
             `drilldownTotalCount` rows, so the link may name it. The Pending RFP column instead opens the
-            office-wide CROSS-REP queue while this column is scope-filtered (PR #834) — naming a number
-            there would promise a set size the board cannot know, so it names none.
+            CROSS-REP queue while this column is scope-filtered (PR #834) — naming a number there would
+            promise a set size the board cannot know, so it names none. That queue DOES now inherit the
+            estimator filter (#1067 forwards ?estimatorId to /deals/pending-rfp, and openStage passes the
+            whole query string), but not the rep/scope narrowing, so the two still differ.
           */}
           Showing {visibleCardCount} of {cardPopulationCount}
           {drilldownTotalCount != null ? ` — view all ${drilldownTotalCount}` : " — open full queue"}
@@ -1200,6 +1210,12 @@ function DealListPageContent({
     // preference can flip to from another page) it intersects the viewer's own deals and empties the board,
     // so drop it there; Watched/On Hold/All keep it. The timeframe is always restored.
     if (scope === "mine") delete stored.assignedRepId;
+    // The estimator sibling is dropped under Mine too. The owner rationale (an intersection that EMPTIES
+    // the board) is admittedly weaker here — "my deals that Sidney estimates" is a coherent, often
+    // non-empty question — but a bare /deals return should show the viewer's board, not a silently
+    // narrowed slice of it, and having the two header dimensions behave identically under scope coercion
+    // is far easier to reason about than a split rule. Re-picking is one click.
+    if (scope === "mine") delete stored.estimatorId;
     if (stored.assignedRepId) {
       // Don't inject a rep who is no longer selectable (deactivated, not in this office, or unticked from
       // the sales roster) — it would show an unresolved "Selected rep" and silently narrow the board. That
@@ -1209,11 +1225,35 @@ function DealListPageContent({
       // while the loaded list still belongs to a previous office (on an office switch the hook briefly
       // reports the old list with loading=false before its reload effect fires). Once settled — even to an
       // empty or errored list — drop just the rep and still restore the office-independent timeframe.
-      // The ONLY path that leaves the view unresolved, and deliberately so: a saved rep still has to be
-      // validated against this office's roster. Every other exit settles immediately, so the board is
-      // gated on a pending roster request ONLY for a user who actually has a rep filter saved.
+      // One of the TWO paths that leave the view unresolved (the estimator block below is the other), and
+      // deliberately so: a saved rep still has to be validated against this office's roster. Every other
+      // exit settles immediately, so the board fetch waits on a pending roster request ONLY for a user who
+      // actually has one of the two header filters saved — and it MUST wait, or it issues a request for the
+      // unfiltered board and then a second one for the restored view.
       if (repOptionsLoading || repOptionsOfficeId !== effectiveOfficeId) return;
-      if (!repOptions.some((rep) => rep.id === stored.assignedRepId)) delete stored.assignedRepId;
+      // GROUP-AWARE, not just id membership. Plain id membership was sufficient while this roster was
+      // sales-only — the two were the same test. Adding the Estimators group broke that equivalence: a
+      // saved owner who has since been reclassified (generates_sales off, estimates_jobs on) is still IN
+      // the roster, so an id check passes and restores ?assignedRepId, while their only menu value is now
+      // `est:<id>`. The board ends up narrowed by an owner filter the dropdown cannot display or clear.
+      // A missing group counts as sales (RepFilterOption.group), so appended off-roster ids still pass.
+      if (!repOptions.some((rep) => rep.id === stored.assignedRepId && rep.group !== "estimator")) {
+        delete stored.assignedRepId;
+      }
+    }
+    if (stored.estimatorId) {
+      // The same settle-then-validate discipline, but against the ESTIMATOR group specifically. Persisting
+      // this param without the check would re-apply a saved estimator after they are deactivated, moved out
+      // of the office, or simply have "Estimates Jobs" unticked — leaving the board narrowed to someone the
+      // dropdown no longer offers, with no visible control to clear it. Checking the GROUP (not just id
+      // membership) also releases the pick when Sales-wins moves them: ticking "Generates Sales" makes them
+      // a Sales entry, and a saved `?estimatorId` for them would otherwise still ask the estimator question.
+      // Same deal: leaving the view unresolved here is what keeps the board from fetching under an
+      // estimator filter that is about to be validated away (see setStoredViewResolved below).
+      if (repOptionsLoading || repOptionsOfficeId !== effectiveOfficeId) return;
+      if (!repOptions.some((rep) => rep.id === stored.estimatorId && rep.group === "estimator")) {
+        delete stored.estimatorId;
+      }
     }
     const next = applyStoredDealView(searchParams.toString(), stored);
     if (next !== null) setSearchParams(next, { replace: true });
@@ -1223,7 +1263,7 @@ function DealListPageContent({
   // Persist a single header control (Rep or timeframe) as a per-(user, office) preference. Per-key so
   // changing one control never drops the other — important on a drill-down whose URL omits ?period.
   const persistDealViewParam = useCallback(
-    (key: "period" | "assignedRepId", value: string | null) => {
+    (key: "period" | "assignedRepId" | "estimatorId", value: string | null) => {
       const stored = readStoredDealView(userId, effectiveOfficeId);
       if (value) stored[key] = value;
       else delete stored[key];
@@ -1248,9 +1288,37 @@ function DealListPageContent({
   // When a parked ?scope=team bookmark is coerced to mine, drop any stale owner filter from
   // the URL too -- otherwise the Mine board (the viewer's deals) is intersected with another
   // rep's owner filter and renders empty instead of the intended Mine view (D-12b).
+  // Read the estimator FIRST, because it takes precedence over the owner param — see below.
+  const requestedEstimatorId =
+    requestedScope === "team" ? undefined : searchParams.get("estimatorId") || undefined;
+  // ESTIMATOR WINS when a URL somehow carries both. The control cannot produce that state
+  // (updateSelectedRep always clears the sibling), but a hand-edited, shared or half-migrated bookmark
+  // can. Left alone, both params reach the board and the list, the server ANDs them, and the trigger
+  // reads "Sidney Gibson (estimating)" over deals Sidney estimated AND some hidden rep owns — usually
+  // empty, and lying about why. Matching the precedence the label already uses keeps the control and the
+  // result telling the same story. Normalized at READ so no extra history entry is written; the next
+  // interaction rewrites the URL cleanly anyway.
   const selectedRepId =
-    requestedScope === "team" ? "__all__" : searchParams.get("assignedRepId") || "__all__";
+    requestedScope === "team" || requestedEstimatorId
+      ? "__all__"
+      : searchParams.get("assignedRepId") || "__all__";
   const selectedRepFilter = selectedRepId === "__all__" ? undefined : selectedRepId;
+  // The ESTIMATOR dimension, a sibling of the rep one rather than a mode of it.
+  //
+  // Two params, mutually exclusive, because they ask different questions: ?assignedRepId means "deals this
+  // person OWNS" and ?estimatorId means "deals this person is ESTIMATING". Keeping them separate is what
+  // lets an estimator who owns nothing be reachable at all — a rep filter means OWNS (see
+  // buildOwnedRepCondition), so Sidney Gibson, owner of 0 deals and estimator on 137, returned an empty
+  // board from the only control that existed.
+  //
+  // The dropdown carries the group in its VALUE (`est:<id>`) rather than looking the id up in the roster,
+  // so the reader of the URL never has to re-derive which question was asked. Sales values stay bare ids,
+  // so every existing link, bookmark and saved preference keeps working untouched.
+  const selectedEstimatorFilter = requestedEstimatorId;
+  const ESTIMATOR_VALUE_PREFIX = "est:";
+  const selectedRosterValue = selectedEstimatorFilter
+    ? `${ESTIMATOR_VALUE_PREFIX}${selectedEstimatorFilter}`
+    : selectedRepId;
   // The roster plus the current selection when that falls outside it, so the control can name and clear a
   // pinned off-roster owner instead of pretending nothing is selected.
   const headerRepOptions = useMemo(
@@ -1260,12 +1328,36 @@ function DealListPageContent({
   // The nested FilterBar keys off its OWN dl_-prefixed param, not the header's, so it needs its own
   // reconciliation — a bookmarked dl_assignedRepId is exactly where the "All reps" mislabel showed up.
   const listRepFilterId = searchParams.get("dl_assignedRepId") || undefined;
-  const listRepOptions = useMemo(
-    () => buildRepFilterOptions(repOptions, listRepFilterId, (id) => assigneeNameById.get(id)),
-    [repOptions, listRepFilterId, assigneeNameById]
+  // SALES ONLY, like every other control whose value maps to the OWNER dimension. This bar writes
+  // `dl_assignedRepId`, so offering a pure estimator here would search for deals they OWN and hand back an
+  // empty list — the very bug the Estimators group exists to fix, reintroduced one control over. The
+  // header dropdown is the only place the estimator dimension is selectable.
+  const salesOnlyRoster = useMemo(
+    () => repOptions.filter((rep) => rep.group !== "estimator"),
+    [repOptions]
   );
-  const selectedRepLabel =
-    selectedRepId === "__all__"
+  const listRepOptions = useMemo(
+    () => buildRepFilterOptions(salesOnlyRoster, listRepFilterId, (id) => assigneeNameById.get(id)),
+    [salesOnlyRoster, listRepFilterId, assigneeNameById]
+  );
+  // Split once, rendered as two labelled groups. The server already orders sales-then-estimator and puts
+  // each person in exactly one group, so this only partitions — it never decides membership.
+  const salesRepOptions = useMemo(
+    () => headerRepOptions.filter((rep) => rep.group !== "estimator"),
+    [headerRepOptions]
+  );
+  const estimatorOptions = useMemo(
+    () => headerRepOptions.filter((rep) => rep.group === "estimator"),
+    [headerRepOptions]
+  );
+  // Named for what was actually selected, so the trigger cannot read "All reps" while an estimator narrows
+  // the board. The estimator branch is checked FIRST because a person could in principle appear under both
+  // if the server rule is ever relaxed, and the URL param is the authoritative statement of intent.
+  const selectedRepLabel = selectedEstimatorFilter
+    ? `${estimatorOptions.find((rep) => rep.id === selectedEstimatorFilter)?.displayName
+        ?? assigneeNameById.get(selectedEstimatorFilter)
+        ?? "Selected estimator"} (estimating)`
+    : selectedRepId === "__all__"
       ? "All reps"
       : headerRepOptions.find((rep) => rep.id === selectedRepId)?.displayName ?? "Selected rep";
   const dashboardView = useMemo(
@@ -1295,7 +1387,10 @@ function DealListPageContent({
     // the at-risk cohort (card/kanban/list) is the full current set. (Won columns are hidden here anyway.)
     isAtRiskDrilldown ? null : selectedPeriodRange,
     selectedRepFilter,
+    // estimateSentDateRange is a board control this page does not drive; passed through as undefined so
+    // the estimator argument lands in the right position.
     undefined,
+    selectedEstimatorFilter,
     { enabled: storedViewResolved }
   );
 
@@ -1329,6 +1424,11 @@ function DealListPageContent({
     const next = new URLSearchParams(searchParams);
     next.set("scope", "mine");
     next.delete("assignedRepId");
+    // The estimator sibling must go with it. selectedEstimatorFilter suppresses it while the URL still
+    // says scope=team, but this rewrite flips scope to mine — so a retained estimatorId springs back to
+    // life on the next render and silently narrows the Mine board, the exact stale-filter behaviour the
+    // owner half of this coercion exists to prevent.
+    next.delete("estimatorId");
     setSearchParams(next, { replace: true });
   }, [requestedScope, searchParams, setSearchParams]);
 
@@ -1349,13 +1449,25 @@ function DealListPageContent({
     setSearchParams(next, { replace: true });
   }, [searchParams, setSearchParams]);
 
-  const updateSelectedRep = useCallback((repId: string) => {
-    const repValue = !repId || repId === "__all__" ? null : repId;
+  const updateSelectedRep = useCallback((rosterValue: string) => {
+    // One control, two params. An "est:"-prefixed value came from the Estimators group and writes
+    // ?estimatorId; anything else is a sales rep and writes ?assignedRepId exactly as before.
+    const raw = !rosterValue || rosterValue === "__all__" ? null : rosterValue;
+    const isEstimator = raw?.startsWith(ESTIMATOR_VALUE_PREFIX) ?? false;
+    const repValue = raw && !isEstimator ? raw : null;
+    const estimatorValue = raw && isEstimator ? raw.slice(ESTIMATOR_VALUE_PREFIX.length) : null;
+
     persistDealViewParam("assignedRepId", repValue); // remember the selection (incl. from a drill-down)
+    persistDealViewParam("estimatorId", estimatorValue);
     setSearchParams((current) => {
       const next = new URLSearchParams(current);
+      // ALWAYS clear the sibling. The two are mutually exclusive, and leaving a stale one behind would
+      // AND them server-side — "deals Sidney estimates that Colby also owns" — which is a question the
+      // control cannot express and the user never asked.
       if (repValue) next.set("assignedRepId", repValue);
       else next.delete("assignedRepId");
+      if (estimatorValue) next.set("estimatorId", estimatorValue);
+      else next.delete("estimatorId");
       return next;
     });
   }, [persistDealViewParam, setSearchParams]);
@@ -1660,11 +1772,19 @@ function DealListPageContent({
     () => ({
       ...layeredListBaseFilters,
       ...(selectedRepFilter ? { assignedRepId: selectedRepFilter } : {}),
+      // The estimator dimension travels with the rep one, or the list below the board would ignore it
+      // and show a different population than the kanban above (the reconciliation rule this page keeps).
+      ...(selectedEstimatorFilter ? { estimatorId: selectedEstimatorFilter } : {}),
       // Won drill-down: exclude on-hold (migration parking-lot) deals so the list reconciles to the Won
       // KPI / board column, both of which drop on-hold from the Won count (Codex P2).
       ...(dashboardView.filter === "won" ? { excludeOnHold: true } : {}),
     }),
-    [layeredListBaseFilters, selectedRepFilter, dashboardView.filter]
+    // selectedEstimatorFilter is read in the body, so it belongs here for exhaustive-deps hygiene.
+    // It is NOT load-bearing today: the estimator lives in the URL, dashboardView memoizes on
+    // [searchParams], and searchParams takes a new identity on every URL change — so
+    // dashboardView.listBaseFilters -> drilldownBaseFilters -> layeredListBaseFilters all change identity
+    // and this memo re-runs anyway. Listed so it stays correct if any of those are ever stabilized.
+    [layeredListBaseFilters, selectedRepFilter, selectedEstimatorFilter, dashboardView.filter]
   );
 
   const updateScope = (nextScope: PipelineScope) => {
@@ -1766,17 +1886,50 @@ function DealListPageContent({
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <Select value={selectedRepId} onValueChange={(value) => updateSelectedRep(value ?? "__all__")}>
-            <SelectTrigger className="h-10 w-[13rem] bg-white">
+          <Select
+            value={selectedRosterValue}
+            onValueChange={(value) => updateSelectedRep(value ?? "__all__")}
+          >
+            {/* Named like its neighbours (Period, Won/Lost date range). Without this the control's only
+                accessible name is its current VALUE, so a screen reader announces "Brett Jones" with no
+                indication of what the control does — and now that it filters by two different questions,
+                the value alone is genuinely ambiguous. */}
+            <SelectTrigger className="h-10 w-[13rem] bg-white" aria-label="Rep filter">
               <SelectValue placeholder="All reps">{selectedRepLabel}</SelectValue>
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="__all__">All reps</SelectItem>
-              {headerRepOptions.map((rep) => (
-                <SelectItem key={rep.id} value={rep.id}>
-                  {rep.displayName}
-                </SelectItem>
-              ))}
+              {/* The group headings are only worth their space when there is something to distinguish —
+                  with no estimators ticked this renders exactly the flat list it always did. */}
+              {estimatorOptions.length === 0 ? (
+                salesRepOptions.map((rep) => (
+                  <SelectItem key={rep.id} value={rep.id}>
+                    {rep.displayName}
+                  </SelectItem>
+                ))
+              ) : (
+                <>
+                  <SelectGroup>
+                    <SelectLabel>Sales Reps</SelectLabel>
+                    {salesRepOptions.map((rep) => (
+                      <SelectItem key={rep.id} value={rep.id}>
+                        {rep.displayName}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                  <SelectGroup>
+                    <SelectLabel>Estimators</SelectLabel>
+                    {estimatorOptions.map((rep) => (
+                      // Prefixed so the handler knows which QUESTION was asked without re-deriving it
+                      // from the roster — picking someone here filters what they ESTIMATE, not what
+                      // they own.
+                      <SelectItem key={rep.id} value={`${ESTIMATOR_VALUE_PREFIX}${rep.id}`}>
+                        {rep.displayName}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                </>
+              )}
             </SelectContent>
           </Select>
           <Select value={selectedPeriod ?? "__all__"} onValueChange={(value) => updatePeriod(value ?? "__all__")}>
@@ -2113,9 +2266,10 @@ function DealListPageContent({
               // laterDate/earlierDate (the merged date-floor), so the bar Date can't widen past ?period — the
               // same nesting model as Rep (period control).
               baseFilters={
-                selectedRepFilter || selectedPeriodRange?.from || selectedPeriodRange?.to
+                selectedRepFilter || selectedEstimatorFilter || selectedPeriodRange?.from || selectedPeriodRange?.to
                   ? {
                       ...(selectedRepFilter ? { assignedRepId: selectedRepFilter } : {}),
+                      ...(selectedEstimatorFilter ? { estimatorId: selectedEstimatorFilter } : {}),
                       ...(selectedPeriodRange?.from ? { dateFrom: selectedPeriodRange.from } : {}),
                       ...(selectedPeriodRange?.to ? { dateTo: selectedPeriodRange.to } : {}),
                     }

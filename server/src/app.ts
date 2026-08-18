@@ -53,6 +53,7 @@ import { salesReviewRoutes } from "./modules/sales-review/routes.js";
 import { userRoutes } from "./modules/users/routes.js";
 import { fieldRoutes } from "./modules/field/routes.js";
 import { fieldRespondersRoutes } from "./modules/field/field-responders-routes.js";
+import { weeklyReportRoutes } from "./modules/weekly-reports/routes.js";
 import {
   adminPhotoTokenRoutes,
   publicPhotoViewerRoutes,
@@ -268,6 +269,7 @@ export function createApp() {
     [CRM_ONLY_TENANT_ROUTE_MOUNTS[20], aiCopilotRoutes],
     ["/usage", usageRoutes],
     [CRM_ONLY_TENANT_ROUTE_MOUNTS[22], fieldRespondersRoutes],
+    [CRM_ONLY_TENANT_ROUTE_MOUNTS[23], weeklyReportRoutes],
   ] as const;
 
   for (const [mount, routes] of crmOnlyTenantRoutes) {
