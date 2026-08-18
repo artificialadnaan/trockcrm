@@ -1118,8 +1118,9 @@ export async function renderFieldPhotoReportPdf(input: {
     }
 
     // The findings layout gives every photo its own page, so it drives its own page/pageMeta loop rather
-    // than the 3-per-page chunking. It also skips the compact section title: that band (y=50..63) would
-    // collide with the full-width image at y=62, and the executive summary already introduces the findings.
+    // than the grid's PHOTOS_PER_PAGE chunking. It also skips the compact section title: that band
+    // (y=50..63) would collide with the full-width image at y=62, and the executive summary already
+    // introduces the findings.
     if (photoLayout === "findings") {
       for (const photo of section.photos) {
         await drawFindingsPhotoPages(

@@ -265,7 +265,7 @@ export async function prepareFieldPhotoReport(
       photoOverrides?: Array<{ id: string; description?: string | null }>;
     }>;
     /**
-     * Per-photo page layout. Omitted (the mobile/web "Generate PDF" path) keeps the 3-per-page grid.
+     * Per-photo page layout. Omitted (the mobile/web "Generate PDF" path) keeps the 2-per-page grid.
      * The AI report passes "findings" so each photo gets a full page with its bulleted assessment.
      */
     photoLayout?: ReportPhotoLayout;
