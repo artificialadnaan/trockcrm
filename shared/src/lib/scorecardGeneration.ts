@@ -82,10 +82,20 @@ export function scorecardGeneration(value: Date | string | null | undefined): st
   if (typeof value === "string") {
     const trimmed = value.trim();
     if (CANONICAL_GENERATION.test(trimmed)) return trimmed;
+    // A non-canonical string carrying SUB-MILLISECOND digits is refused rather than widened. `new Date`
+    // parses at millisecond resolution, so `…123456+00:00` would come back `.123000Z` — three zeros this
+    // value never had, silently standing in for `456`. Widening is honest for a Date, which genuinely had
+    // no microseconds; for a string that HAD them it manufactures a match against a real `.123000Z` and
+    // reports two different instants as the same one, which is the unsafe direction. Null instead: every
+    // caller treats it as "not provably the same" and re-renders.
+    if (SUB_MILLISECOND_FRACTION.test(trimmed)) return null;
     return widenToMicroseconds(new Date(trimmed));
   }
   return widenToMicroseconds(value);
 }
+
+/** A fractional-seconds field with more digits than `new Date` can carry. */
+const SUB_MILLISECOND_FRACTION = /\.\d{4,}/;
 
 function widenToMicroseconds(value: Date): string | null {
   if (Number.isNaN(value.getTime())) return null;

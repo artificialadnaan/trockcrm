@@ -543,7 +543,13 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   // the lifecycle status or the cycle marker at all, so a check that omitted it would still deliver a notice
   // whose CRM link 404s. A miss here is indistinguishable from the row being gone: no send, no stamp.
   const revalidated = await query(
-    `SELECT sc.corrective_action_oversight_cycle, sc.status, sc.updated_at, sc.${column} AS phase_stamp
+    // `updated_at` as canonical MICROSECOND text, matching the main read. Selected raw it arrives as a
+    // millisecond JS Date, and the drift check below then compares a microsecond string against a truncated
+    // Date — so an item answered inside the same millisecond as the snapshot reads as no change at all, and
+    // the notice ships describing the state before that answer. A revalidation at a coarser resolution than
+    // the check it is revalidating is no revalidation at all.
+    `SELECT sc.corrective_action_oversight_cycle, sc.status,
+            ${scorecardGenerationSql("sc.updated_at")} AS updated_at, sc.${column} AS phase_stamp
        FROM ${tenantSchema}.field_scorecards sc
        JOIN ${tenantSchema}.deals d ON d.id = sc.deal_id
        LEFT JOIN public.pipeline_stage_config psc ON psc.id = d.stage_id
@@ -604,7 +610,7 @@ export async function handleScorecardCorrectiveActionOversightEmail(
   if (
     scorecard.updated_at != null &&
     current.updated_at != null &&
-    new Date(scorecard.updated_at).getTime() !== new Date(current.updated_at).getTime()
+    !scorecardGenerationsMatch(scorecard.updated_at, current.updated_at)
   ) {
     logger.warn(
       "[CorrectiveActionOversightEmail] Scorecard changed while preparing the notice - throwing to retry against the settled state",

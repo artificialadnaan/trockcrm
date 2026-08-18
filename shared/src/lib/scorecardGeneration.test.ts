@@ -46,6 +46,18 @@ describe("scorecardGeneration", () => {
     expect(scorecardGeneration(new Date("2026-07-27T12:00:00.123Z"))).toBe("2026-07-27T12:00:00.123000Z");
   });
 
+  it("refuses a non-canonical string that carries microseconds, rather than truncating it", () => {
+    // `new Date` reads at millisecond resolution, so widening this would yield `.123000Z` — and then claim
+    // it is the SAME INSTANT as a genuine `.123000Z` written 456µs earlier. Refusing costs one re-render;
+    // matching serves a stale artifact forever.
+    expect(scorecardGeneration("2026-07-27T12:00:00.123456+00:00")).toBeNull();
+    expect(scorecardGenerationsMatch("2026-07-27T12:00:00.123456+00:00", "2026-07-27T12:00:00.123000Z")).toBe(
+      false,
+    );
+    // Three digits or fewer is a real millisecond value that never had microseconds — widening stays honest.
+    expect(scorecardGeneration("2026-07-27T12:00:00.123+00:00")).toBe("2026-07-27T12:00:00.123000Z");
+  });
+
   it("is null for absent or unparseable values", () => {
     expect(scorecardGeneration(null)).toBeNull();
     expect(scorecardGeneration(undefined)).toBeNull();

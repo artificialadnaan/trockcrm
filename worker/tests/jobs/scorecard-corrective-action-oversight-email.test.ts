@@ -1203,6 +1203,7 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
     const { query, stampUpdates } = makeQuery({
       revalidateUpdatedAt: new Date("2026-07-27T18:00:00.000Z"),
     });
+
     const sendEmail = makeSend();
 
     await expect(
@@ -1216,6 +1217,54 @@ describe("handleScorecardCorrectiveActionOversightEmail", () => {
 
     expect(sendEmail).not.toHaveBeenCalled();
     expect(stampUpdates).toHaveLength(0);
+  });
+
+  it("retries when the card changed less than a MILLISECOND after the snapshot", async () => {
+    // Both reads now return canonical microsecond text, so this check can finally see a change the old
+    // `new Date(...).getTime()` comparison could not: 444µs of drift truncated to the same millisecond and
+    // read as "nothing moved". The item answered in that window is exactly the one the notice announces, so
+    // the email would have shipped describing the state before it.
+    //
+    // The sibling test above drifts by four HOURS and passes either way — it cannot express this, which is
+    // why the resolution has its own case rather than a tighter fixture on that one.
+    const { query, stampUpdates } = makeQuery({
+      updatedAt: "2026-07-27T14:00:00.123456Z",
+      revalidateUpdatedAt: "2026-07-27T14:00:00.123900Z",
+    });
+    const sendEmail = makeSend();
+
+    await expect(
+      handleScorecardCorrectiveActionOversightEmail(payload(), null, {
+        query: query as never,
+        sendEmail: sendEmail as never,
+        env,
+        logger: makeLogger(),
+      }),
+    ).rejects.toThrow(/went stale/i);
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    expect(stampUpdates).toHaveLength(0);
+  });
+
+  it("still delivers when the two reads are the SAME microsecond instant", async () => {
+    // The control. Without it the test above passes for a guard that refuses everything, and a notice that
+    // never sends is a worse failure than one that sends stale.
+    const { query } = makeQuery({
+      status: "corrective_action_closed",
+      updatedAt: "2026-07-27T14:00:00.123456Z",
+      revalidateUpdatedAt: "2026-07-27T14:00:00.123456Z",
+    });
+    const sendEmail = makeSend();
+
+    await handleScorecardCorrectiveActionOversightEmail(payload({ phase: "closed" }), null, {
+      query: query as never,
+      sendEmail: sendEmail as never,
+      getPdf: (async () => Buffer.from("%PDF-1.4")) as never,
+      env,
+      logger: makeLogger(),
+    });
+
+    expect(sendEmail).toHaveBeenCalled();
   });
 
   it("renders a response time with the TIME OF DAY, not just a UTC calendar date", async () => {
