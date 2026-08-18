@@ -515,10 +515,20 @@ describe("DealListPage", () => {
   it("renders a readonly deal board with canonical stage labels", () => {
     const html = renderPage();
 
-    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith(
+      "all",
+      true,
+      {
       won: { preset: "all" },
       lost: { preset: "all" },
-    }, 1000, null, undefined, undefined, undefined);
+    },
+      50,
+      null,
+      undefined,
+      undefined,
+      undefined,
+      expect.any(Object)
+    );
     expect(html).toContain("Deals Dashboard"); // relabeled to distinguish the dashboard from /pipeline
     expect(html).toContain('placeholder="Search deals"');
     expect(html).toContain("Opportunity");
@@ -700,11 +710,12 @@ describe("DealListPage", () => {
       "all",
       true,
       { won: { preset: "all" }, lost: { preset: "all" } },
-      1000,
+      50,
       null,
       "rep-1",
       undefined,
-      undefined
+      undefined,
+      expect.any(Object)
     );
     expect(mocks.dealsListSectionMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1060,10 +1071,20 @@ describe("DealListPage", () => {
   it("collapses standalone won_*/lost_* params when there is no shared period — the board reads ?period, not per-column overrides (Option A)", () => {
     renderPage("/deals?scope=all&won_preset=30&lost_preset=60");
 
-    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith(
+      "all",
+      true,
+      {
       won: { preset: "all" },
       lost: { preset: "all" },
-    }, 1000, null, undefined, undefined, undefined);
+    },
+      50,
+      null,
+      undefined,
+      undefined,
+      undefined,
+      expect.any(Object)
+    );
   });
 
   it("strips stale estimate_sent_* params from the URL on load — the removed control must not invisibly filter the board or a stage drill-down (Codex #600 P2)", async () => {
@@ -1079,19 +1100,39 @@ describe("DealListPage", () => {
     // Deals-at-Risk is current-state: the board-wide period (arg 5) is null even with ?period=week, so the
     // server does not window the OPEN columns by stage_entered_at and drops no at-risk deals at the source.
     // (The Won/Lost terminal presets in arg 3 are moot here — terminal columns aren't shown on this view.)
-    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith(
+      "all",
+      true,
+      {
       won: { preset: "all" },
       lost: { preset: "wtd" },
-    }, 1000, null, undefined, undefined, undefined);
+    },
+      1000,
+      null,
+      undefined,
+      undefined,
+      undefined,
+      expect.any(Object)
+    );
   });
 
   it("passes the selected page period to the board request so won aggregates match the drilldown window", () => {
     renderPage("/deals?scope=all&period=last_month&won_preset=30", "director");
 
-    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, {
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith(
+      "all",
+      true,
+      {
       won: { preset: "all" }, // Option A: the stale won_preset is collapsed; the board-wide won_period (arg5) windows Won
       lost: { preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-30" }, // Lost seeded from last_month
-    }, 1000, { from: "2026-04-01", to: "2026-04-30" }, undefined, undefined, undefined);
+    },
+      50,
+      { from: "2026-04-01", to: "2026-04-30" },
+      undefined,
+      undefined,
+      undefined,
+      expect.any(Object)
+    );
   });
 
   describe("Option A: one board-wide date — Won & Lost columns mirror the shared ?period", () => {
@@ -1155,11 +1196,12 @@ describe("DealListPage", () => {
         "all",
         true,
         { won: { preset: "all" }, lost: { preset: "qtd" } },
-        1000,
+        50,
         expect.objectContaining({ from: expect.any(String), to: expect.any(String) }),
         undefined,
         undefined,
-        undefined
+        undefined,
+        expect.any(Object)
       );
     });
 
@@ -1327,7 +1369,7 @@ describe("DealListPage", () => {
 
     renderPage("/deals", "director");
 
-    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("mine", true, expect.any(Object), 1000, null, undefined, undefined, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("mine", true, expect.any(Object), 50, null, undefined, undefined, undefined, expect.any(Object));
   });
 
   it("uses the board terminal filters when building terminal stage navigation", () => {
@@ -1379,16 +1421,16 @@ describe("DealListPage", () => {
 
   it("defaults the board scope by role when the query param is absent", () => {
     renderPage("/deals", "rep");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined, undefined, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 50, null, undefined, undefined, undefined, expect.any(Object));
 
     renderPage("/deals", "director");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined, undefined, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 50, null, undefined, undefined, undefined, expect.any(Object));
 
     renderPage("/deals", "admin");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined, undefined, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 50, null, undefined, undefined, undefined, expect.any(Object));
 
     renderPage("/deals?scope=mine", "director");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined, undefined, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 50, null, undefined, undefined, undefined, expect.any(Object));
   });
 
   it("hides the Team scope and coerces a requested team scope to mine (D-12b)", () => {
@@ -1398,7 +1440,7 @@ describe("DealListPage", () => {
     // coerced to the rendered fallback ("mine"); no dead placeholder is shown.
     expect(html).not.toContain(">Team</button>");
     expect(html).not.toContain("Team view is not yet configured");
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined, undefined, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 50, null, undefined, undefined, undefined, expect.any(Object));
   });
 
   it("drops a stale owner filter when a team bookmark is coerced to mine (D-12b)", () => {
@@ -1406,7 +1448,7 @@ describe("DealListPage", () => {
 
     // Coerced to mine AND the owner filter cleared (6th arg undefined), so the Mine board is
     // not intersected with rep-2's deals into an empty result.
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined, undefined, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 50, null, undefined, undefined, undefined, expect.any(Object));
   });
 
   it("rewrites a parked team bookmark URL to mine and drops the stale owner param (D-12b)", async () => {
@@ -1429,7 +1471,7 @@ describe("DealListPage", () => {
   it("allows reps to opt into all-office scope", () => {
     const html = renderPage("/deals?scope=all", "rep");
 
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("all", true, expect.any(Object), 1000, null, undefined, undefined, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("all", true, expect.any(Object), 50, null, undefined, undefined, undefined, expect.any(Object));
     expect(html).toContain('aria-pressed="false">Mine');
     expect(html).toContain('aria-pressed="true">All');
     // Team is not an offered scope (D-12b).
@@ -1443,7 +1485,7 @@ describe("DealListPage", () => {
     expect(html).toContain('aria-pressed="false">Mine');
     expect(html).toContain('aria-pressed="false">All');
     // watched survives end-to-end (not silently coerced to mine) — the board hook receives it.
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("watched", true, expect.any(Object), 1000, null, undefined, undefined, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("watched", true, expect.any(Object), 50, null, undefined, undefined, undefined, expect.any(Object));
   });
   it("mounts the FULL FilterBar (incl. Rep, dl_-namespaced) on the BASE deal list, inheriting scope; Scope omitted", () => {
     renderPage("/deals?scope=mine", "director");
@@ -1683,11 +1725,12 @@ describe("DealListPage", () => {
       "all",
       true,
       expect.objectContaining({ lost: { preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-30" } }),
-      1000,
+      50,
       expect.objectContaining({ from: expect.any(String), to: expect.any(String) }),
       undefined,
       undefined,
-      undefined
+      undefined,
+      expect.any(Object)
     );
 
     await view.cleanup();
@@ -1906,11 +1949,12 @@ describe("DealListPage", () => {
         won: { preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-30" },
         lost: { preset: "custom", customStart: "2026-04-01", customEnd: "2026-04-30" }, // Lost seeded from last_month (Codex #600 P2)
       },
-      1000,
+      50,
       { from: "2026-04-01", to: "2026-04-30" },
       undefined,
       undefined,
-      undefined
+      undefined,
+      expect.any(Object)
     );
     expect(mocks.dealsListSectionMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -2298,7 +2342,7 @@ describe("DealListPage", () => {
     // Even with ?period=qtd, the board fetch must carry NO period on the at-risk/stale drill-down — else
     // the server windows the OPEN columns by stage_entered_at (won_period) and drops at-risk deals at the
     // SOURCE. The 5th arg (period range) must be null for current-state.
-    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, expect.any(Object), 1000, null, undefined, undefined, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenCalledWith("all", true, expect.any(Object), 1000, null, undefined, undefined, undefined, expect.any(Object));
 
     expect(html).toContain("QTD Stale Deal");
     expect(html).toContain("Second QTD Stale Deal");
@@ -2964,7 +3008,8 @@ describe("DealListPage", () => {
       null,
       undefined,
       undefined,
-      undefined
+      undefined,
+      expect.any(Object)
     );
     expect(mocks.dealsListSectionMock).not.toHaveBeenCalled();
     expect(html).toContain("Drill-down view: SLA filter applied to list and board.");
@@ -3050,7 +3095,7 @@ describe("DealListPage", () => {
   it("coerces a requested team scope to mine in the scope toggle (D-12b)", () => {
     const html = renderPage("/deals?scope=team", "director");
 
-    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 1000, null, undefined, undefined, undefined);
+    expect(mocks.useDealBoardMock).toHaveBeenLastCalledWith("mine", true, expect.any(Object), 50, null, undefined, undefined, undefined, expect.any(Object));
     expect(html).not.toContain(">Team</button>");
     expect(html).toContain('aria-pressed="true">Mine');
     expect(html).toContain('aria-pressed="false">All');
@@ -3082,6 +3127,421 @@ describe("DealListPage", () => {
     const html = renderPage("/deals?scope=all&period=qtd");
 
     expect(html).toContain("No deals in selected range");
+  });
+
+
+
+  describe("At-Risk KPI on the ?filter=opportunities drill-down (server bucket == the rendered column)", () => {
+    /**
+     * That route narrows the board to slugs ["opportunity"], which EXCLUDES the synthetic pending_rfp
+     * column. The pre-PR count came from opportunity.cards, and buildCanonicalDealBoardColumns strips
+     * every pending-RFP card out of that array — so pending deals were never counted there. Bucketing
+     * them under `opportunity` server-side made all three cards jump on this one route while the main
+     * board (which sums both columns) stayed right and hid it.
+     */
+    function boardWithAtRisk(atRiskByStageSlug: Record<string, { service: number; nonService: number }>) {
+      mocks.useDealBoardMock.mockReturnValue({
+        board: {
+          columns: [
+            {
+              stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+              count: 3,
+              activeCount: 3,
+              totalCount: 3,
+              totalValue: 300000,
+              cards: [
+                makeDeal({ id: "o1" }),
+                makeDeal({ id: "p1", rfpApprovalStatus: "pending", isBidBoardOwned: false }),
+                makeDeal({ id: "p2", rfpApprovalStatus: "pending", isBidBoardOwned: false }),
+              ],
+            },
+          ],
+          terminalStages: [],
+          summary: { atRiskByStageSlug, pendingRfp: { count: 2, totalCount: 2, totalValue: 200000 } },
+          pendingRfpCards: [],
+        },
+        loading: false,
+        error: null,
+      });
+    }
+
+    // 3 at-risk opportunity-canonical deals, 2 of them pending RFP — the reviewer's executed fixture.
+    const SERVER_BUCKETS = {
+      opportunity: { service: 0, nonService: 1 },
+      pending_rfp: { service: 0, nonService: 2 },
+    };
+
+    /**
+     * Read the At-Risk total off its OWN element, via the data-testid the card already carries.
+     *
+     * This used to match `/text-4xl[^>]*>(\d+)</` — a CSS class as a stand-in for "the At-Risk card's
+     * number". That is an assertion about a representation, not about the thing: it happened to land on
+     * the right element only because the one earlier `text-4xl` node (the page <h1>) holds text rather
+     * than a digit. Restyle the card, or add any KPI above it whose value is a number, and the regex
+     * silently reads a DIFFERENT card's count while still passing.
+     */
+    const atRiskTotal = (html: string) => {
+      const match = html.match(/data-testid="at-risk-total"[^>]*>([^<]*)</);
+      expect(match, "at-risk-total element not found in the rendered board").not.toBeNull();
+      return match![1]!.trim();
+    };
+
+    it("counts 1, not 3 — the pending-RFP deals belong to a column this view does not render", () => {
+      boardWithAtRisk(SERVER_BUCKETS);
+
+      const html = renderPage("/deals?scope=all&filter=opportunities", "director");
+
+      expect(html).toContain("Opportunities");
+      expect(atRiskTotal(html)).toBe("1");
+    });
+
+    it("counts all 3 on the main board, where the pending_rfp column IS rendered", () => {
+      boardWithAtRisk(SERVER_BUCKETS);
+
+      const html = renderPage("/deals?scope=all", "director");
+
+      expect(atRiskTotal(html)).toBe("3");
+    });
+  });
+
+  describe("truncation affordance — the ONLY route to the deals the card slice hides", () => {
+    /**
+     * The board renders a SLICE ordered by tier then `created_at DESC` — the 50 NEWEST live deals, not
+     * the 50 largest. A column's biggest deals can therefore be entirely absent from it, which makes
+     * "view all" load-bearing rather than decorative. These pin the two ways it failed:
+     *   - it did not render at all when enough of the column was on hold, because the denominator was
+     *     the ACTIVE count while the cards include held rows;
+     *   - it advertised a number the drill-down target does not list (Opportunity, pending-RFP split).
+     */
+    function boardWith(column: Record<string, unknown>, extra: Record<string, unknown> = {}) {
+      mocks.useDealBoardMock.mockReturnValue({
+        board: {
+          columns: [{ stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" }, ...column }],
+          terminalStages: [],
+          summary: null,
+          pendingRfpCards: [],
+          ...extra,
+        },
+        loading: false,
+        error: null,
+      });
+    }
+
+    it("renders when a column is truncated, using the ALL-ROWS total as the denominator", () => {
+      boardWith({
+        // 70 matching rows, 25 of them on hold -> active count 45, cards 50 (held rows included).
+        count: 45,
+        activeCount: 45,
+        totalCount: 70,
+        totalValue: 900000,
+        cards: Array.from({ length: 50 }, (_, i) => makeDeal({ id: `deal-${i}` })),
+      });
+
+      const html = renderPage("/deals?scope=all");
+
+      // Against the ACTIVE count this read `50 < 45` — false — and the control never rendered: 20 deals
+      // unreachable behind a page that looked complete.
+      expect(html).toContain("Showing 50 of 70");
+      expect(html).toContain("view all 70");
+    });
+
+    it("renders for an on-hold-heavy column under ?scope=on_hold, where every row is held", () => {
+      boardWith({
+        // scope=on_hold: the active count is 0 by construction, the column is still full of cards.
+        count: 0,
+        activeCount: 0,
+        totalCount: 312,
+        totalValue: 0,
+        cards: Array.from({ length: 50 }, (_, i) => makeDeal({ id: `held-${i}`, onHold: true })),
+      });
+
+      const html = renderPage("/deals?scope=on_hold");
+
+      expect(html).toContain("Showing 50 of 312");
+    });
+
+
+    it("renders the MERGED total as the denominator of a capped alias-merged column", () => {
+      // estimating <- estimating + estimate_in_progress. The server caps each raw stage at 50, so this
+      // column arrives with 60 cards; the canonical cap trims it to 50 and the notice has to describe the
+      // merged population (45 + 25), not one raw stage's share of it.
+      mocks.usePipelineStagesMock.mockReturnValue({
+        stages: [
+          { id: "est", name: "Estimating", slug: "estimating", workflowFamily: "standard_deal", displayOrder: 1 },
+          { id: "eip", name: "Estimate in Progress", slug: "estimate_in_progress", workflowFamily: "standard_deal", displayOrder: 1 },
+        ],
+      });
+      mocks.useDealBoardMock.mockReturnValue({
+        board: {
+          columns: [
+            {
+              stage: { id: "est", name: "Estimating", slug: "estimating" },
+              count: 40,
+              activeCount: 40,
+              totalCount: 45,
+              totalValue: 400000,
+              cards: Array.from({ length: 30 }, (_, i) =>
+                makeDeal({ id: `est-${i}`, stageId: "est", createdAt: `2026-05-${String(i + 1).padStart(2, "0")}T00:00:00.000Z` })
+              ),
+            },
+            {
+              stage: { id: "eip", name: "Estimate in Progress", slug: "estimate_in_progress" },
+              count: 20,
+              activeCount: 20,
+              totalCount: 25,
+              totalValue: 200000,
+              cards: Array.from({ length: 30 }, (_, i) =>
+                makeDeal({ id: `eip-${i}`, stageId: "eip", createdAt: `2026-04-${String(i + 1).padStart(2, "0")}T00:00:00.000Z` })
+              ),
+            },
+          ],
+          terminalStages: [],
+          summary: { atRiskByStageSlug: {}, pendingRfp: { count: 0, totalCount: 0, totalValue: 0 } },
+          pendingRfpCards: [],
+        },
+        loading: false,
+        error: null,
+      });
+
+      const html = renderPage("/deals?scope=all");
+
+      // 50 rendered (the cap, applied to the merged column) of 70 (45 + 25, the merged population).
+      expect(html).toContain("Showing 50 of 70");
+      expect(html).toContain("view all 70");
+      // Without the canonical cap this said "Showing 60 of 70" — a column capped at 50 rendering 60.
+      expect(html).not.toContain("Showing 60 of");
+    });
+
+    it("does NOT render when the column is complete", () => {
+      boardWith({
+        count: 3,
+        activeCount: 3,
+        totalCount: 3,
+        totalValue: 1000,
+        cards: Array.from({ length: 3 }, (_, i) => makeDeal({ id: `deal-${i}` })),
+      });
+
+      const html = renderPage("/deals?scope=all");
+
+      expect(html).not.toContain("Showing 3 of");
+      expect(html).not.toContain("view all");
+    });
+
+    it("advertises the count the Opportunity drill-down will actually list (pending RFP included)", () => {
+      // The stage page filters by Opportunity stage ids and does NOT exclude the pending bucket, so the
+      // link must name the UNADJUSTED stage total even though this column's own cards/total exclude it.
+      mocks.useDealBoardMock.mockReturnValue({
+        board: {
+          columns: [
+            {
+              stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+              count: 100,
+              activeCount: 100,
+              totalCount: 120,
+              totalValue: 1000000,
+              cards: Array.from({ length: 50 }, (_, i) => makeDeal({ id: `deal-${i}` })),
+            },
+          ],
+          terminalStages: [],
+          summary: {
+            atRiskByStageSlug: {},
+            pendingRfp: { count: 18, totalCount: 20, totalValue: 18000 },
+          },
+          pendingRfpCards: [],
+        },
+        loading: false,
+        error: null,
+      });
+
+      const html = renderPage("/deals?scope=all");
+
+      // Cards + totalCount are partitioned (120 - 20 pending = 100 rows this column renders from)...
+      expect(html).toContain("Showing 50 of 100");
+      // ...while the link names what the stage page lists: all 120.
+      expect(html).toContain("view all 120");
+    });
+
+    it("puts NO number on the Pending RFP link — its target is the office-wide cross-rep queue", () => {
+      mocks.useDealBoardMock.mockReturnValue({
+        board: {
+          columns: [
+            {
+              stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+              count: 5,
+              activeCount: 5,
+              totalCount: 5,
+              totalValue: 1000,
+              cards: [makeDeal({ id: "opp-1" })],
+            },
+          ],
+          terminalStages: [],
+          summary: {
+            atRiskByStageSlug: {},
+            pendingRfp: { count: 60, totalCount: 63, totalValue: 60000 },
+          },
+          pendingRfpCards: Array.from({ length: 50 }, (_, i) =>
+            makeDeal({ id: `pending-${i}`, rfpApprovalStatus: "pending", isBidBoardOwned: false })
+          ),
+        },
+        loading: false,
+        error: null,
+      });
+
+      const html = renderPage("/deals?scope=all");
+
+      expect(html).toContain("Showing 50 of 63");
+      expect(html).toContain("open full queue");
+      // A scope-filtered board cannot know the cross-rep queue's size, so it must not claim one.
+      expect(html).not.toContain("view all 63");
+    });
+  });
+
+
+  describe("rolling deploy — a board response without boardSummary must not be truncated", () => {
+    /**
+     * The client and the server ship in one PR but deploy as two services. Against an API that predates
+     * `boardSummary`, EVERY aggregate on this page falls back to counting the card array — the three
+     * At-Risk KPI counts, the Pending RFP column, and the Opportunity total it is subtracted from.
+     * Those fallbacks are correct only over an UNTRUNCATED set, which is what they had before this PR
+     * shrank the slice to 50. So a summary-less response widens the request back to the full set for
+     * the rest of the session, rather than quietly under-reporting for the length of the deploy.
+     */
+    function boardWithoutSummary() {
+      mocks.useDealBoardMock.mockReturnValue({
+        board: {
+          columns: [
+            {
+              stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+              count: 45,
+              activeCount: 45,
+              totalCount: 70,
+              totalValue: 900000,
+              cards: Array.from({ length: 50 }, (_, i) => makeDeal({ id: `deal-${i}` })),
+            },
+          ],
+          terminalStages: [],
+          summary: null,
+          // Absent, exactly as an older API sends it.
+          pendingRfpCards: undefined,
+        },
+        loading: false,
+        error: null,
+      });
+    }
+
+    const previewLimitsRequested = () =>
+      mocks.useDealBoardMock.mock.calls.map((call) => call[3] as number);
+
+    it("re-requests the FULL per-stage set once it sees a summary-less response", async () => {
+      boardWithoutSummary();
+      const view = await renderPageDom("/deals?scope=all", "director");
+      try {
+        const limits = previewLimitsRequested();
+        // It starts at the small slice...
+        expect(limits[0]).toBe(50);
+        // ...and settles on the pre-PR full set once the response proves the API cannot aggregate.
+        expect(limits[limits.length - 1]).toBe(1000);
+      } finally {
+        await view.cleanup();
+      }
+    });
+
+    it("does NOT widen when the server DOES send a summary", async () => {
+      mocks.useDealBoardMock.mockReturnValue({
+        board: {
+          columns: [
+            {
+              stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+              count: 45,
+              activeCount: 45,
+              totalCount: 70,
+              totalValue: 900000,
+              cards: Array.from({ length: 50 }, (_, i) => makeDeal({ id: `deal-${i}` })),
+            },
+          ],
+          terminalStages: [],
+          summary: { atRiskByStageSlug: {}, pendingRfp: { count: 0, totalCount: 0, totalValue: 0 } },
+          pendingRfpCards: [],
+        },
+        loading: false,
+        error: null,
+      });
+
+      const view = await renderPageDom("/deals?scope=all", "director");
+      try {
+        expect(new Set(previewLimitsRequested())).toEqual(new Set([50]));
+      } finally {
+        await view.cleanup();
+      }
+    });
+
+    it("hides the truncation notice when the row total is UNKNOWN rather than inventing one", () => {
+      mocks.useDealBoardMock.mockReturnValue({
+        board: {
+          columns: [
+            {
+              stage: { id: "stage-opportunity", name: "Opportunity", slug: "opportunity" },
+              count: 45, // ACTIVE only; no totalCount on the wire
+              activeCount: 45,
+              totalValue: 900000,
+              cards: Array.from({ length: 50 }, (_, i) => makeDeal({ id: `deal-${i}` })),
+            },
+          ],
+          terminalStages: [],
+          summary: null,
+          pendingRfpCards: undefined,
+        },
+        loading: false,
+        error: null,
+      });
+
+      const html = renderPage("/deals?scope=all");
+
+      // Quoting `count` here would read "Showing 50 of 45". Say nothing instead.
+      expect(html).not.toContain("Showing 50 of");
+      expect(html).not.toContain("view all");
+    });
+  });
+
+  describe("board request duplication — /deals must not ask for the pipeline more than once per view", () => {
+    // GET /api/deals/pipeline measured 1.6-2.5s in production and the page was firing it 2-3x per load.
+    // Two independent causes, both pinned here:
+    //   1. the saved Rep/timeframe restore rewrote the URL AFTER the first fetch had already gone out;
+    //   2. resolveDrilldownTerminalDateFilters returns a FRESH object every call, and that object is a
+    //      dependency of the fetch, so a no-op re-sync changed its identity and triggered another fetch.
+    const boardCalls = () => mocks.useDealBoardMock.mock.calls;
+    const enabledCalls = () =>
+      boardCalls().filter((call) => (call[8] as { enabled?: boolean } | undefined)?.enabled === true);
+
+    it("holds the fetch until the saved view is resolved, then asks with ONE stable parameter set", async () => {
+      const view = await renderPageDom("/deals?scope=all", "director");
+      try {
+        const enabled = enabledCalls();
+        expect(enabled.length).toBeGreaterThan(0);
+        // The FIRST render must not have fetched: the stored-view restore had not decided yet.
+        expect((boardCalls()[0]![8] as { enabled?: boolean }).enabled).toBe(false);
+
+        // Every enabled call carries the same board parameters, so useDealBoard's fetch callback keeps one
+        // identity and issues a single request no matter how many times the page re-renders.
+        const signature = (call: unknown[]) =>
+          JSON.stringify([call[0], call[1], call[2], call[3], call[4], call[5], call[6], call[7]]);
+        expect(new Set(enabled.map(signature)).size).toBe(1);
+      } finally {
+        await view.cleanup();
+      }
+    });
+
+    it("keeps the terminal-date-filter object IDENTITY stable across re-renders (arg 3 is a fetch dep)", async () => {
+      const view = await renderPageDom("/deals?scope=all", "director");
+      try {
+        const identities = new Set(enabledCalls().map((call) => call[2]));
+        // A fresh object per render is exactly what fired the duplicate request; one identity means the
+        // memoised fetch callback is never invalidated by a no-op re-sync.
+        expect(identities.size).toBe(1);
+      } finally {
+        await view.cleanup();
+      }
+    });
   });
 
   describe("Estimators section in the rep filter", () => {
@@ -3120,11 +3580,12 @@ describe("DealListPage", () => {
         "all",
         true,
         expect.any(Object),
-        1000,
+        50,
         null,
         undefined,
         undefined,
-        "est-1"
+        "est-1",
+        expect.any(Object)
       );
     });
 
@@ -3199,11 +3660,12 @@ describe("DealListPage", () => {
         "all",
         true,
         expect.any(Object),
-        1000,
+        50,
         null,
         undefined,
         undefined,
-        "est-1"
+        "est-1",
+        expect.any(Object)
       );
     });
 
@@ -3342,3 +3804,4 @@ describe("DealListPage", () => {
     });
   });
 });
+

@@ -56,7 +56,7 @@ beforeAll(async () => {
       estimator_user_id uuid, sales_source_user_id uuid, bid_board_office text, bid_board_status text,
       bid_board_sales_price_per_area text, bid_board_project_cost numeric(14, 2),
       bid_board_profit_margin_pct numeric(9, 4), bid_board_total_sales numeric(14, 2),
-      bid_board_created_at timestamptz, bid_board_due_date date, bid_board_customer_name text,
+      bid_board_created_at timestamptz, bid_board_due_date date, bid_due_date_from_bid_board_at timestamptz, bid_due_date_bid_board_project_number text, bid_board_customer_name text,
       bid_board_customer_contact_raw text, bid_board_project_number text, project_number text,
       bid_board_linked_at timestamptz, bid_board_last_updated_at timestamptz, bid_board_assigned_pm text,
       bid_board_detached_at timestamptz, bid_board_detached_by uuid, bid_board_detach_reason text,

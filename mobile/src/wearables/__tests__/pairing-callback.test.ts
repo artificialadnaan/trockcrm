@@ -173,6 +173,11 @@ describe("the app's own deep links", () => {
     expect(pairing.isRetainablePairingUrl("trockcam://some-unknown-meta-path")).toBe(true);
     expect(pairing.isRetainablePairingUrl("trockcam://accept-invite?token=abc")).toBe(false);
     expect(pairing.isRetainablePairingUrl("trockcam://Scorecards/corrective-action/1")).toBe(false);
+    // The Weekly Reports group. Unlisted, this link would be retained as a possible Meta callback and
+    // evict a real held one — the app's own deep link silently breaking glasses pairing.
+    expect(pairing.isRetainablePairingUrl("trockcam://reports/weekly/abc")).toBe(false);
+    expect(pairing.isRetainablePairingUrl("trockcam://Reports")).toBe(false);
+    expect(pairing.isRetainablePairingUrl("https://field.example.com/reports/weekly/abc")).toBe(false);
   });
 
   it("REGRESSION: the route is read from the PATH of an https link, not its host", () => {

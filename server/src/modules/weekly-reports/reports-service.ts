@@ -11,7 +11,12 @@ import {
   type WeeklyReportStatus,
 } from "@trock-crm/shared/types";
 import { AppError } from "../../middleware/error-handler.js";
-import { getWeeklyReportProjectRow, type QueryExecutor } from "./projects-service.js";
+import {
+  getWeeklyReportProject,
+  getWeeklyReportProjectRow,
+  type QueryExecutor,
+  type WeeklyReportProject,
+} from "./projects-service.js";
 
 /** Who is acting. `role` only ever GRANTS extra power (admin/director); it never removes assignment rights. */
 export interface WeeklyReportActor {
@@ -208,7 +213,15 @@ export function canPublishWeeklyReport(
   return isAssignedPm(projectRow, actor) || isElevated(actor);
 }
 
-/** May write the report's content: the assigned super, the assigned PM, or an admin/director. */
+/** Whoever created the row. Survives a reassignment, which is the whole point of consulting it. */
+function isAuthor(reportRow: Record<string, any>, actor: WeeklyReportActor): boolean {
+  return Boolean(reportRow.authored_by) && reportRow.authored_by === actor.id;
+}
+
+/**
+ * May write the report's content: the assigned super, the assigned PM, an admin/director — or the person
+ * who started it, while it is still a draft.
+ */
 export function canEditWeeklyReport(
   projectRow: Record<string, any>,
   reportRow: Record<string, any>,
@@ -226,7 +239,43 @@ export function canEditWeeklyReport(
   // rather than merely bending it.
   if (reportRow.status === "approved") return pmPowers;
 
+  // THE AUTHOR, WHILE IT IS STILL A DRAFT. `canViewWeeklyReport` already lets them open what they wrote
+  // after a reassignment and `canTransitionAs` already lets them submit it, so without the matching write
+  // right the payload advertised `canSubmit: true` on a report the same person could not save — and the
+  // app's submit is a PATCH and a photo PUT *before* the transition, so both 403'd and the work they were
+  // still holding on the phone could never be filed at all.
+  //
+  // DRAFT ONLY. Past submission the report is the PM's, and a former assignee has no more claim on it than
+  // any other ex-assignee; extending this to `pending_review` would let somebody who is no longer on the
+  // project rewrite what the PM is in the middle of reviewing.
+  if (reportRow.status === "draft" && isAuthor(reportRow, actor)) return true;
+
   return isAssignedSuper(projectRow, actor) || pmPowers;
+}
+
+/**
+ * May READ the report.
+ *
+ * Separate from `canEditWeeklyReport` because a SENT report is readable by everyone who could ever act on
+ * it and editable by nobody — collapsing the two would either hide a delivered report from the crew that
+ * wrote it or reopen it for editing. The author is included alongside the two assignments so a report
+ * survives a reassignment: whoever wrote it can still open what they wrote.
+ *
+ * This exists for the field surface. The CRM router is gated to admin/director/rep as a whole, but
+ * /api/field admits every superintendent in the company, so without a per-report check any of them could
+ * read any project's report by id — including the client contact block frozen into its snapshot.
+ */
+export function canViewWeeklyReport(
+  projectRow: Record<string, any>,
+  reportRow: Record<string, any>,
+  actor: WeeklyReportActor,
+): boolean {
+  return (
+    isAssignedSuper(projectRow, actor) ||
+    isAssignedPm(projectRow, actor) ||
+    isElevated(actor) ||
+    isAuthor(reportRow, actor)
+  );
 }
 
 /**
@@ -253,7 +302,10 @@ export function canTransitionAs(
       // Collapsing them let a superintendent revoke the PM's approval and then edit the reopened
       // report — the review gate unlocked from the inside.
       if (reportRow.status === "approved") return pmPowers;
-      return isAssignedSuper(projectRow, actor) || pmPowers || reportRow.authored_by === actor.id;
+      // Kept in step with `canEditWeeklyReport`'s draft-author clause: the app PATCHes the content and
+      // PUTs the photos before asking for this transition, so a submit right the edit rules do not also
+      // grant is a promise the write path cannot keep.
+      return isAssignedSuper(projectRow, actor) || pmPowers || isAuthor(reportRow, actor);
     case "draft":
       return pmPowers;
     case "approved":
@@ -264,11 +316,75 @@ export function canTransitionAs(
   }
 }
 
+/**
+ * What this actor may do with this report, resolved SERVER-SIDE and shipped with the payload.
+ *
+ * Both clients render the same wizard, so if each one re-derived "can I approve this?" from a status and
+ * a pair of user ids, the two would eventually disagree with each other and with the service that
+ * actually enforces it — and the visible failure is a button that 403s. One answer, computed by the same
+ * predicates the mutations use.
+ */
+export interface WeeklyReportPermissions {
+  canEdit: boolean;
+  canSubmit: boolean;
+  canApprove: boolean;
+  canReturnToDraft: boolean;
+}
+
+export interface WeeklyReportForActor {
+  report: WeeklyReportDetail;
+  project: WeeklyReportProject;
+  permissions: WeeklyReportPermissions;
+}
+
+/**
+ * Load a report for someone, refusing it outright if they have no business seeing it.
+ *
+ * 404 rather than 403 on a report the actor cannot view: a 403 confirms the id names a real report on a
+ * project they are not on, which is exactly the probe a per-report check exists to defeat.
+ */
+export async function getWeeklyReportForActor(
+  client: QueryExecutor,
+  id: string,
+  actor: WeeklyReportActor,
+): Promise<WeeklyReportForActor> {
+  const { reportRow, projectRow } = await loadReportWithProject(client, id);
+  if (!canViewWeeklyReport(projectRow, reportRow, actor)) {
+    throw new AppError(404, "Weekly report not found");
+  }
+
+  const report = await getWeeklyReportDetail(client, id);
+  if (!report) throw new AppError(404, "Weekly report not found");
+  const project = await getWeeklyReportProject(client, reportRow.weekly_report_project_id);
+  if (!project) throw new AppError(404, "Weekly report project not found");
+
+  return {
+    report,
+    project,
+    permissions: {
+      canEdit: canEditWeeklyReport(projectRow, reportRow, actor),
+      canSubmit: canTransitionAs(projectRow, reportRow, "pending_review", actor),
+      canApprove: canTransitionAs(projectRow, reportRow, "approved", actor),
+      canReturnToDraft: canTransitionAs(projectRow, reportRow, "draft", actor),
+    },
+  };
+}
+
 export interface CreateWeeklyReportInput {
   clientSubmissionId: string;
   weeklyReportProjectId: string;
   weekOf: string;
 }
+
+/**
+ * Machine-readable tag on "this week already has a row, started by somebody else".
+ *
+ * The phone has to tell this 409 apart from the other one `POST /reports` can answer ("Weekly reporting is
+ * paused for this project"), because the two want opposite handling: the first is recoverable by adopting
+ * the existing row for the week, the second is not recoverable at all. Matching on the prose would break
+ * the moment the copy is improved.
+ */
+export const WEEKLY_REPORT_WEEK_EXISTS_CODE = "WEEKLY_REPORT_WEEK_EXISTS";
 
 /**
  * Create (or return) the draft for a project/week.
@@ -318,7 +434,7 @@ export async function createWeeklyReportDraft(
     [input.weeklyReportProjectId, input.weekOf],
   );
   if (existingForWeek.rows[0]) {
-    throw new AppError(409, "A report already exists for this week");
+    throw new AppError(409, "A report already exists for this week", WEEKLY_REPORT_WEEK_EXISTS_CODE);
   }
 
   // ON CONFLICT DO NOTHING rather than trusting the pre-flight SELECTs. Those two lookups do not
@@ -354,7 +470,7 @@ export async function createWeeklyReportDraft(
       if (!report) throw new AppError(404, "Weekly report not found");
       return { report, created: false };
     }
-    throw new AppError(409, "A report already exists for this week");
+    throw new AppError(409, "A report already exists for this week", WEEKLY_REPORT_WEEK_EXISTS_CODE);
   }
 
   const report = await getWeeklyReportDetail(client, result.rows[0].id);
@@ -415,6 +531,14 @@ export async function updateWeeklyReportContent(
   // authorise an edit to an `approved` report; if a concurrent request sends it in between, an
   // unconditional write lands on a report the client has already received — breaking the immutability
   // guarantee and making the public page differ from the PDF that was generated from it.
+  //
+  // KNOWN GAP (not closed here): this guards the STATUS, not the CONTENT. Two people editing the same
+  // report at the same status are last-write-wins with no 409 and no prompt — a PM opens a review draft,
+  // the superintendent edits the same report from their phone, the PM taps Approve, and this UPDATE and
+  // the whole-set photo PUT below both succeed over work the PM never saw. The app reconciles at OPEN
+  // time (mobile/src/weekly-reports/door.ts) and carries no precondition on the write, so the window is
+  // "since the draft was opened". Closing it needs an If-Match / `updated_at` precondition on this
+  // statement and on `replaceWeeklyReportPhotos`, plus the client sending what it last read.
   const result = await client.query(
     `UPDATE weekly_reports SET ${assignments.join(", ")}, updated_at = now()
       WHERE id = $${idParam}::uuid AND is_active AND status = $${params.length}
@@ -565,7 +689,9 @@ export async function replaceWeeklyReportPhotos(
   }
   // Same concurrency guard as the content path: the permission check ran against a status read in an
   // earlier statement, and a photo swap landing on an already-sent report would make the client's page
-  // disagree with the PDF they were emailed.
+  // disagree with the PDF they were emailed. It carries the same KNOWN GAP — see the note on the content
+  // UPDATE above: a concurrent replacement AT THE SAME STATUS overwrites silently, because this is a
+  // whole-set PUT with no precondition on what the caller last read.
   const stillOpen = await client.query(
     `UPDATE weekly_reports SET updated_at = now()
       WHERE id = $1::uuid AND is_active AND status = $2
@@ -595,6 +721,20 @@ const MAX_REPORT_PHOTOS = WEEKLY_REPORT_MAX_PHOTOS;
  * the attached PDF did not. See WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS for how the number was chosen.
  */
 const MAX_CAPTION_CHARS = WEEKLY_REPORT_PHOTO_CAPTION_MAX_CHARS;
+/**
+ * Cap on the picker's candidate set, newest first.
+ *
+ * A busy jobsite produces hundreds of photos in a fortnight, and the field route presigns two URLs for
+ * every candidate it returns — so an unbounded set is a large JSON body on precisely the LTE connection
+ * the rest of this feature is shaped around. Five times the per-report photo cap is more than anyone
+ * scrolls, and the newest-first ordering means what is dropped is the far end of the window.
+ *
+ * A TRANSPORT cap, so it is reported rather than applied silently — the same standard the review queue and
+ * the outstanding-week backlog hold themselves to. What it drops is not neutral: the window is anchored on
+ * `week_of`, not on today, so the far end is the EARLIEST days of the fortnight the report is about, which
+ * is exactly what somebody filing a late report is looking for.
+ */
+export const MAX_PHOTO_CANDIDATES = 300;
 
 function normalizeCaption(value: unknown): string | null {
   if (value == null) return null;
@@ -627,50 +767,78 @@ function boundedDefaultCaption(value: unknown): string | null {
  * `alreadyUsedOn` marks photos that appeared on an earlier report so the super does not repeat them —
  * shown rather than hidden, because re-using a photo is sometimes right (a defect photographed last
  * week that is now fixed).
+ *
+ * `total` is the size of the WHOLE candidate set, so the caller can say what it is not showing. Two
+ * things follow from the cap being reported rather than hidden, and both are load-bearing:
+ *
+ *   - A photo ALREADY ON THIS REPORT is never dropped, however far down the window it sits (and even if
+ *     it has since fallen outside the window, which an import with old EXIF can do). It would otherwise
+ *     vanish from the grid while still counting toward the picker's "N selected", leaving the count and
+ *     the visible ticks disagreeing with no way to reconcile them — and no way to DESELECT it.
+ *   - Everything else is ranked strictly newest-first, so the rows the cap removes are the oldest, which
+ *     is what the header tells the user.
  */
 export async function listWeeklyReportPhotoCandidates(
   client: QueryExecutor,
   reportId: string,
-): Promise<Array<WeeklyReportPhoto & { alreadyUsedOn: string | null; selected: boolean }>> {
+): Promise<{
+  photos: Array<WeeklyReportPhoto & { alreadyUsedOn: string | null; selected: boolean }>;
+  total: number;
+}> {
   const { reportRow } = await loadReportWithProject(client, reportId);
   const weekOf = toIsoDate(reportRow.week_of)!;
   const window = weeklyReportPhotoWindow(weekOf);
 
   const result = await client.query(
-    `SELECT f.id AS file_id,
-            f.description AS original_description,
-            f.taken_at, f.created_at, f.mime_type,
-            selected.caption AS selected_caption,
-            selected.sort_order AS selected_sort_order,
-            (selected.file_id IS NOT NULL) AS selected,
-            prior.week_of AS already_used_on
-       FROM files f
-       LEFT JOIN weekly_report_photos selected
-              ON selected.file_id = f.id AND selected.weekly_report_id = $1::uuid
-       LEFT JOIN LATERAL (
-            SELECT wr.week_of
-              FROM weekly_report_photos wrp
-              JOIN weekly_reports wr ON wr.id = wrp.weekly_report_id
-             WHERE wrp.file_id = f.id
-               AND wr.id <> $1::uuid
-               AND wr.is_active
-               -- EARLIER weeks only. Without this, filing a missed week after a newer draft has
-               -- already picked the same photo warns that it was "already used" on a week that has
-               -- not happened yet.
-               AND wr.week_of < $5::date
-             ORDER BY wr.week_of DESC
-             LIMIT 1
-       ) prior ON true
-      WHERE f.deal_id = $2::uuid
-        AND f.category = 'photo'
-        AND f.is_active = true
-        AND f.deleted_at IS NULL
-        AND (COALESCE(f.taken_at, f.created_at))::date BETWEEN $3::date AND $4::date
-      ORDER BY COALESCE(f.taken_at, f.created_at) DESC`,
+    `WITH candidate AS (
+       SELECT f.id AS file_id,
+              f.description AS original_description,
+              f.taken_at, f.created_at, f.mime_type,
+              selected.caption AS selected_caption,
+              selected.sort_order AS selected_sort_order,
+              (selected.file_id IS NOT NULL) AS selected,
+              prior.week_of AS already_used_on,
+              COALESCE(f.taken_at, f.created_at) AS sort_at
+         FROM files f
+         LEFT JOIN weekly_report_photos selected
+                ON selected.file_id = f.id AND selected.weekly_report_id = $1::uuid
+         LEFT JOIN LATERAL (
+              SELECT wr.week_of
+                FROM weekly_report_photos wrp
+                JOIN weekly_reports wr ON wr.id = wrp.weekly_report_id
+               WHERE wrp.file_id = f.id
+                 AND wr.id <> $1::uuid
+                 AND wr.is_active
+                 -- EARLIER weeks only. Without this, filing a missed week after a newer draft has
+                 -- already picked the same photo warns that it was "already used" on a week that has
+                 -- not happened yet.
+                 AND wr.week_of < $5::date
+               ORDER BY wr.week_of DESC
+               LIMIT 1
+         ) prior ON true
+        WHERE f.deal_id = $2::uuid
+          AND f.category = 'photo'
+          AND f.is_active = true
+          AND f.deleted_at IS NULL
+          AND ((COALESCE(f.taken_at, f.created_at))::date BETWEEN $3::date AND $4::date
+               OR selected.file_id IS NOT NULL)
+     ), ranked AS (
+       SELECT candidate.*,
+              -- Evaluated before the outer WHERE, so this is the true depth on every returned row and
+              -- costs no second round trip. file_id breaks ties so the cap falls in the same place on
+              -- every refetch rather than shuffling two photos taken in the same second.
+              COUNT(*) OVER () AS total_count,
+              ROW_NUMBER() OVER (ORDER BY sort_at DESC, file_id) AS window_rank
+         FROM candidate
+     )
+     SELECT * FROM ranked
+      WHERE selected OR window_rank <= ${MAX_PHOTO_CANDIDATES}
+      ORDER BY sort_at DESC, file_id`,
     [reportId, reportRow.deal_id, window.from, window.to, weekOf],
   );
 
-  return result.rows.map((row) => ({
+  const total = Number(result.rows[0]?.total_count ?? 0);
+  const photos = result.rows.map((row) => ({
     fileId: row.file_id,
     // For an ALREADY-SELECTED photo the stored caption wins outright, null included: `??` treated a
     // deliberately cleared caption as absent and restored the capture description, so the user could
@@ -684,6 +852,7 @@ export async function listWeeklyReportPhotoCandidates(
     alreadyUsedOn: toIsoDate(row.already_used_on),
     selected: Boolean(row.selected),
   }));
+  return { photos, total };
 }
 
 /**

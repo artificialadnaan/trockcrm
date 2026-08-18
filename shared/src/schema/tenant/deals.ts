@@ -163,7 +163,41 @@ export const deals = pgTable(
     bidBoardProfitMarginPct: numeric("bid_board_profit_margin_pct", { precision: 9, scale: 4 }),
     bidBoardTotalSales: numeric("bid_board_total_sales", { precision: 14, scale: 2 }),
     bidBoardCreatedAt: timestamp("bid_board_created_at", { withTimezone: true }),
+    /**
+     * LAST KNOWN Bid Board Due Date — not "the current export's Due Date". The ingest mirror writes it
+     * through a COALESCE (buildBidBoardDealUpdateSql), so a blank cell on a later export leaves the last
+     * date we were given in place rather than clearing it: a blank export is the absence of information,
+     * not an instruction to forget.
+     *
+     * Read as a SIGNAL, never as a value: the bid-due-date resolver ([[bid-due-date]]) compares this
+     * against `(bid_due_date AT TIME ZONE 'UTC')::date` to decide whether the Bid Board's date has LANDED
+     * in the CRM column. Nothing publishes this column's value to a user.
+     */
     bidBoardDueDate: date("bid_board_due_date"),
+    /**
+     * PROVENANCE for the read-back (migration 0225): when the Bid Board sync last wrote `bid_due_date`.
+     * NULL means "this deal's bid due date did not come from the Bid Board".
+     *
+     * Required by the bid-due-date resolver's signal, together with a still-matching day. Neither alone is
+     * correct: comparing days alone accepts a COINCIDENCE (the mirror has been populated on prod for
+     * months, so a pre-existing date sharing the board's calendar day would look landed the instant the
+     * flag flipped, with no sync having run), and the stamp alone goes stale the moment a rep or the lead
+     * corrects the date. Deliberately never cleared — it records a historical fact; the day check is what
+     * revokes the override.
+     */
+    bidDueDateFromBidBoardAt: timestamp("bid_due_date_from_bid_board_at", { withTimezone: true }),
+    /**
+     * The Bid Board project the stamp above was earned ON (migration 0225) — a copy of
+     * `bid_board_project_number` taken in the same write.
+     *
+     * The stamp vouches for "the sync wrote this value FOR THE PROJECT THIS DEAL IS CURRENTLY ON", not
+     * merely "the sync once wrote this value". Without the project identity, a deal that was detached and
+     * later linked to a genuinely NEW Bid Board project would keep firing the override on provenance
+     * earned from the retired project — the link path clears `bid_board_detached_at` but preserves the
+     * dates and the stamp. The detach NULLs `bid_board_project_number`, so a mismatch is detected the
+     * instant a deal leaves its project and stays detected until a sync legitimately re-earns the stamp.
+     */
+    bidDueDateBidBoardProjectNumber: text("bid_due_date_bid_board_project_number"),
     bidBoardCustomerName: text("bid_board_customer_name"),
     bidBoardCustomerContactRaw: text("bid_board_customer_contact_raw"),
     bidBoardProjectNumber: text("bid_board_project_number"),

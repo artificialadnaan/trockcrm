@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { deals, userOfficeAccess, users } from "@trock-crm/shared/schema";
+import { deals, offices, pipelineStageConfig, userOfficeAccess, users } from "@trock-crm/shared/schema";
 import { PgDialect } from "drizzle-orm/pg-core";
 
 const dbState = vi.hoisted(() => ({
@@ -79,11 +79,35 @@ const sqlText = (value: unknown) => dialect.sqlToQuery(value as never).sql.toLow
 function officeScopeStub() {
   return { from: vi.fn().mockReturnThis(), where: vi.fn().mockResolvedValue([]) };
 }
+
+/**
+ * getDealsForPipeline reads BOTH `public.pipeline_stage_config` and `public.offices` through the
+ * REQUEST's tenant client now. They used to go through the global `db` pool, which made one board
+ * request hold TWO pool slots at once — the tenant middleware's client for the whole request plus a
+ * second one for these lookups — and could deadlock the pool once every slot held a tenant client.
+ * Every tenantDb stub in this file routes through this prelude so both reads are answered.
+ */
+function tenantPreludeQuery(table: unknown): any | null {
+  if (table === pipelineStageConfig) {
+    return { where: vi.fn(() => ({ orderBy: vi.fn(async () => dbState.stages) })) };
+  }
+  if (table === offices) {
+    const chain: any = {
+      where: vi.fn(() => chain),
+      limit: vi.fn(async () => [{ slug: "dallas", name: "Dallas" }]),
+    };
+    return chain;
+  }
+  return null;
+}
+
 function officeScopedTenantDb(dealQuery: any) {
   return {
     select: vi.fn(() => ({
-      from: vi.fn((table: unknown) =>
-        table === users || table === userOfficeAccess ? officeScopeStub() : dealQuery
+      from: vi.fn(
+        (table: unknown) =>
+          tenantPreludeQuery(table) ??
+          (table === users || table === userOfficeAccess ? officeScopeStub() : dealQuery)
       ),
     })),
   } as any;
@@ -117,11 +141,17 @@ describe("getDealsForPipeline team scope", () => {
       leftJoin: vi.fn().mockReturnThis(),
       where: vi.fn().mockReturnThis(),
       orderBy: vi.fn().mockReturnThis(),
+      // The per-stage SUMMARY query has no .limit(), so the builder itself is awaited. An OPEN column's
+      // summary now returns the matching ROWS (narrow projection + window aggregates) that feed the
+      // board-wide at-risk / Pending RFP counts, so it has to resolve to an ARRAY like drizzle does.
+      then: (resolve: (rows: unknown[]) => unknown) => resolve([]),
       limit: vi.fn().mockResolvedValue([]),
     };
     const tenantDb = {
       select: vi.fn((fields?: Record<string, unknown>) => ({
         from: vi.fn((table: unknown) => {
+          const prelude = tenantPreludeQuery(table);
+          if (prelude) return prelude;
           if (table === users) return teamQuery;
           if (table === userOfficeAccess) return accessQuery;
           if (table === deals) return dealQuery;
@@ -150,6 +180,10 @@ describe("getDealsForPipeline team scope", () => {
       leftJoin: vi.fn().mockReturnThis(),
       where: vi.fn().mockReturnThis(),
       orderBy: vi.fn().mockReturnThis(),
+      // The per-stage SUMMARY query has no .limit(), so the builder itself is awaited. An OPEN column's
+      // summary now returns the matching ROWS (narrow projection + window aggregates) that feed the
+      // board-wide at-risk / Pending RFP counts, so it has to resolve to an ARRAY like drizzle does.
+      then: (resolve: (rows: unknown[]) => unknown) => resolve([]),
       limit: vi.fn().mockImplementation(async () => [
         {
           id: "deal-1",
@@ -167,6 +201,8 @@ describe("getDealsForPipeline team scope", () => {
         selectedDealFields = fields;
         return {
           from: vi.fn((table: unknown) => {
+          const prelude = tenantPreludeQuery(table);
+          if (prelude) return prelude;
             if (table === users || table === userOfficeAccess) return officeScopeStub();
             if (table === deals) return dealQuery;
             return dealQuery;
@@ -198,11 +234,17 @@ describe("getDealsForPipeline team scope", () => {
       leftJoin: vi.fn().mockReturnThis(),
       where: vi.fn().mockReturnThis(),
       orderBy: vi.fn().mockReturnThis(),
+      // The per-stage SUMMARY query has no .limit(), so the builder itself is awaited. An OPEN column's
+      // summary now returns the matching ROWS (narrow projection + window aggregates) that feed the
+      // board-wide at-risk / Pending RFP counts, so it has to resolve to an ARRAY like drizzle does.
+      then: (resolve: (rows: unknown[]) => unknown) => resolve([]),
       limit: vi.fn().mockResolvedValue([]),
     };
     const tenantDb = {
       select: vi.fn((fields?: Record<string, unknown>) => ({
         from: vi.fn((table: unknown) => {
+          const prelude = tenantPreludeQuery(table);
+          if (prelude) return prelude;
           if (table === users && fields && "id" in fields) return teamQuery;
           if (table === userOfficeAccess) return accessQuery;
           if (table === deals) return dealQuery;
@@ -254,6 +296,10 @@ describe("getDealsForPipeline team scope", () => {
       leftJoin: vi.fn().mockReturnThis(),
       where: vi.fn().mockReturnThis(),
       orderBy: vi.fn().mockReturnThis(),
+      // The per-stage SUMMARY query has no .limit(), so the builder itself is awaited. An OPEN column's
+      // summary now returns the matching ROWS (narrow projection + window aggregates) that feed the
+      // board-wide at-risk / Pending RFP counts, so it has to resolve to an ARRAY like drizzle does.
+      then: (resolve: (rows: unknown[]) => unknown) => resolve([]),
       limit: vi.fn().mockResolvedValue([]),
     };
     const tenantDb = officeScopedTenantDb(dealQuery);
@@ -298,12 +344,15 @@ describe("getDealsForPipeline team scope", () => {
     const tenantDb = {
       select: vi.fn(() => ({
         from: vi.fn((table: unknown) => {
+          const prelude = tenantPreludeQuery(table);
+          if (prelude) return prelude;
           if (table === users || table === userOfficeAccess) return officeScopeStub();
           if (table === deals) {
             const dealQuery = {
               leftJoin: vi.fn().mockReturnThis(),
               where: vi.fn().mockReturnThis(),
               orderBy: vi.fn().mockReturnThis(),
+              then: (resolve: (rows: unknown[]) => unknown) => resolve([]),
               limit: vi.fn().mockResolvedValue([]),
             };
             dealQueries.push(dealQuery);
@@ -313,6 +362,7 @@ describe("getDealsForPipeline team scope", () => {
             leftJoin: vi.fn().mockReturnThis(),
             where: vi.fn().mockReturnThis(),
             orderBy: vi.fn().mockReturnThis(),
+            then: (resolve: (rows: unknown[]) => unknown) => resolve([]),
             limit: vi.fn().mockResolvedValue([]),
           };
           dealQueries.push(fallbackQuery);
@@ -364,6 +414,10 @@ describe("getDealsForPipeline team scope", () => {
       leftJoin: vi.fn().mockReturnThis(),
       where: vi.fn().mockReturnThis(),
       orderBy: vi.fn().mockReturnThis(),
+      // The per-stage SUMMARY query has no .limit(), so the builder itself is awaited. An OPEN column's
+      // summary now returns the matching ROWS (narrow projection + window aggregates) that feed the
+      // board-wide at-risk / Pending RFP counts, so it has to resolve to an ARRAY like drizzle does.
+      then: (resolve: (rows: unknown[]) => unknown) => resolve([]),
       limit: vi.fn().mockResolvedValue([]),
     };
     const tenantDb = officeScopedTenantDb(dealQuery);
@@ -412,6 +466,10 @@ describe("getDealsForPipeline team scope", () => {
       leftJoin: vi.fn().mockReturnThis(),
       where: vi.fn().mockReturnThis(),
       orderBy: vi.fn().mockReturnThis(),
+      // The per-stage SUMMARY query has no .limit(), so the builder itself is awaited. An OPEN column's
+      // summary now returns the matching ROWS (narrow projection + window aggregates) that feed the
+      // board-wide at-risk / Pending RFP counts, so it has to resolve to an ARRAY like drizzle does.
+      then: (resolve: (rows: unknown[]) => unknown) => resolve([]),
       limit: vi.fn().mockResolvedValue([]),
     };
     const tenantDb = officeScopedTenantDb(dealQuery);
@@ -447,6 +505,10 @@ describe("getDealsForPipeline team scope", () => {
       leftJoin: vi.fn().mockReturnThis(),
       where: vi.fn().mockReturnThis(),
       orderBy: vi.fn().mockReturnThis(),
+      // The per-stage SUMMARY query has no .limit(), so the builder itself is awaited. An OPEN column's
+      // summary now returns the matching ROWS (narrow projection + window aggregates) that feed the
+      // board-wide at-risk / Pending RFP counts, so it has to resolve to an ARRAY like drizzle does.
+      then: (resolve: (rows: unknown[]) => unknown) => resolve([]),
       limit: vi.fn().mockResolvedValue([]),
     };
     const tenantDb = officeScopedTenantDb(dealQuery);
@@ -503,6 +565,10 @@ describe("getDealsForPipeline team scope", () => {
       leftJoin: vi.fn().mockReturnThis(),
       where: vi.fn().mockReturnThis(),
       orderBy: vi.fn().mockReturnThis(),
+      // The per-stage SUMMARY query has no .limit(), so the builder itself is awaited. An OPEN column's
+      // summary now returns the matching ROWS (narrow projection + window aggregates) that feed the
+      // board-wide at-risk / Pending RFP counts, so it has to resolve to an ARRAY like drizzle does.
+      then: (resolve: (rows: unknown[]) => unknown) => resolve([]),
       limit: vi.fn().mockResolvedValue([]),
     };
     const tenantDb = officeScopedTenantDb(dealQuery);
@@ -551,6 +617,10 @@ describe("getDealsForPipeline team scope", () => {
       leftJoin: vi.fn().mockReturnThis(),
       where: vi.fn().mockReturnThis(),
       orderBy: vi.fn().mockReturnThis(),
+      // The per-stage SUMMARY query has no .limit(), so the builder itself is awaited. An OPEN column's
+      // summary now returns the matching ROWS (narrow projection + window aggregates) that feed the
+      // board-wide at-risk / Pending RFP counts, so it has to resolve to an ARRAY like drizzle does.
+      then: (resolve: (rows: unknown[]) => unknown) => resolve([]),
       limit: vi.fn().mockResolvedValue([]),
     };
     const tenantDb = officeScopedTenantDb(dealQuery);

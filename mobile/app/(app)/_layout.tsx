@@ -137,14 +137,22 @@ export default function AppLayout() {
         name="capture"
         options={{ title: "Capture", tabBarIcon: ({ color }) => <TabIcon name="camera-outline" color={color} /> }}
       />
+      {/* Renamed from "Scorecard" when the weekly client report joined the two scorecards under one
+          roof. The tab now points at a hub; the scorecard screens themselves are unchanged and stay
+          where they were (see the hidden `scorecards` registration below). */}
       <Tabs.Screen
-        name="scorecards"
-        options={{ title: "Scorecard", tabBarIcon: ({ color }) => <TabIcon name="clipboard-outline" color={color} /> }}
+        name="reports"
+        options={{ title: "Reports", tabBarIcon: ({ color }) => <TabIcon name="clipboard-outline" color={color} /> }}
       />
       <Tabs.Screen
         name="profile"
         options={{ title: "Profile", tabBarIcon: ({ color }) => <TabIcon name="person-outline" color={color} /> }}
       />
+      {/* The scorecard screens keep their routes so every in-progress local draft and every deep link
+          (`/scorecards/<draftId>`, the corrective-action links in outbound email) still resolves — they
+          are simply entered from the Reports hub now instead of owning a tab. Same auto-registration
+          trap as `dev-wearables`: without href: null this ships as a fifth tab beside its own hub. */}
+      <Tabs.Screen name="scorecards" options={{ href: null }} />
       {/* __DEV__-gated diagnostic screen (renders null in release builds). Expo Router auto-adds
           any route under this layout as a tab, so without this explicit registration it ships as
           a fifth "dev-wearables" tab that a crew can tap into a blank screen. href: null keeps it

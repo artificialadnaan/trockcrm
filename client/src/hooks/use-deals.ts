@@ -474,9 +474,59 @@ export interface DealBoardColumn {
   };
   count: number;
   activeCount?: number;
+  /**
+   * EVERY matching row in this column, on-hold included — the population `cards` is a slice OF.
+   *
+   * The only honest denominator for the "Showing N of M" notice. `count` is the ACTIVE figure (the
+   * server filters `COALESCE(on_hold,false)=false`) while the card query applies no such filter, so
+   * comparing `cards.length` against `count` can make a truncated column look complete: 70 rows with 25
+   * on hold gives count=45 against 50 cards, and `50 < 45` is false — no "view all", 20 deals invisible.
+   */
   totalCount?: number;
+  /**
+   * How many rows this column's "view all" target will list, when that target is a stage drill-down.
+   *
+   * Separate from `totalCount` because they legitimately differ on Opportunity: its cards (and therefore
+   * `totalCount`) exclude the Pending RFP bucket, which the stage page does NOT filter out. Undefined
+   * when the column has no stage drill-down that can be counted — the synthetic Pending RFP column opens
+   * the office-wide cross-rep queue, whose size a scope-filtered board cannot know.
+   */
+  drilldownTotalCount?: number;
   totalValue: number;
   cards: Deal[];
+}
+
+/**
+ * Board-wide aggregates the SERVER computes over EVERY matching row, not the per-column card slice.
+ *
+ * The At-Risk KPI counts and the synthetic Pending RFP column used to be derived here from
+ * `column.cards`, which is a capped preview. That was only ever correct because the board asked for
+ * 1000 cards per column; the moment the slice shrinks those numbers under-report silently. Anything in
+ * here is authoritative and must be preferred over a card-derived count.
+ *
+ * Optional so a client can still render against an older API response (and so the existing card-derived
+ * fallbacks stay exercised in tests) — but on a live board it is always present.
+ */
+export interface DealBoardSummary {
+  /**
+   * At-risk deal counts keyed by CANONICAL board column slug, split by workflow route. Service +
+   * non-service partition the cohort exactly, so `all` is simply their sum.
+   *
+   * Keyed by canonical slug, not by the raw column the row was queried from, because a card does not
+   * necessarily render in the column it came from: a Bid Board-owned deal can sit in the CRM
+   * `opportunity` stage while its Bid Board slug puts it under Estimate Sent. This is the same grouping
+   * buildCanonicalDealBoardColumns applies, so summing these per rendered column reproduces the
+   * card-derived total exactly.
+   */
+  atRiskByStageSlug: Record<string, { service: number; nonService: number }>;
+  /** The synthetic Pending RFP column's ACTIVE (non-on-hold) count and $. */
+  pendingRfp: {
+    /** ACTIVE (non-on-hold) count — the column header figure, and what Opportunity's is reduced by. */
+    count: number;
+    /** Every pending-RFP row incl. on-hold: the population the preview cards are a slice of. */
+    totalCount: number;
+    totalValue: number;
+  };
 }
 
 export interface DealBoardResponse {
@@ -489,6 +539,18 @@ export interface DealBoardResponse {
     totalValue?: number;
     deals?: Deal[];
   }>;
+  summary: DealBoardSummary | null;
+  /**
+   * The synthetic Pending RFP column's own card slice, fetched server-side rather than carved out of the
+   * Opportunity column's (capped) slice — where every pending deal below the cap used to disappear.
+   *
+   * OPTIONAL, and the distinction is load-bearing: `undefined` means "this API does not send the field"
+   * and MUST fall back to carving the cards out of Opportunity; `[]` means "the server looked and the
+   * bucket is empty". Normalizing absence to `[]` would make the fallback unreachable and render an
+   * empty Pending RFP column under a non-zero header count — which is exactly the window a rolling
+   * deploy opens, where a new bundle talks to an API that predates the field.
+   */
+  pendingRfpCards?: Deal[];
 }
 
 export interface DealStagePageResponse {
@@ -531,6 +593,8 @@ interface DealBoardApiResponse {
   }>;
   terminalStages: DealBoardResponse["terminalStages"];
   columns?: DealBoardApiColumn[];
+  boardSummary?: DealBoardSummary;
+  pendingRfpDeals?: Deal[];
 }
 
 export function normalizeDealBoardResponse(result: DealBoardApiResponse): DealBoardResponse {
@@ -539,7 +603,11 @@ export function normalizeDealBoardResponse(result: DealBoardApiResponse): DealBo
     return {
       ...column,
       activeCount: sourceColumn.activeCount ?? sourceColumn.count,
-      totalCount: sourceColumn.totalCount ?? sourceColumn.count,
+      // NOT `?? count`. `count` is the ACTIVE figure while `cards` includes on-hold rows, so substituting
+      // it produces exactly the denominator that hid the truncation notice. An API that does not send
+      // totalCount leaves it undefined, and the consumers that need a real row total say "unknown"
+      // instead of quoting a number they cannot substantiate.
+      totalCount: sourceColumn.totalCount,
       cards: sourceColumn.cards ?? sourceColumn.deals ?? [],
     };
   });
@@ -552,7 +620,28 @@ export function normalizeDealBoardResponse(result: DealBoardApiResponse): DealBo
       totalCount: terminal.totalCount ?? terminal.count,
       totalValue: terminal.totalValue ?? 0,
     })),
+    // Guard the SHAPE, not just presence: a malformed payload here would otherwise be read as
+    // "0 at risk" — a wrong number rendered confidently — where a null falls back to counting cards.
+    summary: normalizeDealBoardSummary(result.boardSummary),
+    // ABSENT stays absent. `Array.isArray(...) ? ... : []` collapsed "the API predates this field" into
+    // "the bucket is empty", and `[]` never triggers the `?? carvedPendingRfpCards` fallback.
+    pendingRfpCards: Array.isArray(result.pendingRfpDeals) ? result.pendingRfpDeals : undefined,
   };
+}
+
+function normalizeDealBoardSummary(summary: DealBoardSummary | undefined): DealBoardSummary | null {
+  if (!summary || typeof summary !== "object") return null;
+  const atRisk = summary.atRiskByStageSlug;
+  const pending = summary.pendingRfp;
+  if (!atRisk || typeof atRisk !== "object" || !pending || typeof pending !== "object") return null;
+  if (
+    !Number.isFinite(pending.count) ||
+    !Number.isFinite(pending.totalCount) ||
+    !Number.isFinite(pending.totalValue)
+  ) {
+    return null;
+  }
+  return summary;
 }
 
 /**
@@ -1085,8 +1174,24 @@ export function useDealBoard(
   estimateSentDateRange?: { from?: string; to?: string },
   /** Deals this person is ESTIMATING (deals.estimator_user_id) — the sibling of assignedRepId, never
    *  both at once. See the deals dashboard header control. */
-  estimatorId?: string
+  estimatorId?: string,
+  /**
+   * `enabled: false` holds the fetch without ever settling `loading`, so the caller keeps rendering its
+   * loading state rather than flashing an empty board.
+   *
+   * This exists for one specific waste: /deals restores a saved Rep + timeframe from localStorage into
+   * the URL on mount, which changes the board's own parameters. Fetching before that lands meant the
+   * page issued the 1.6–2.5s pipeline query twice on every cold load — once for the default view, then
+   * again for the restored one, with the first result discarded by the latest-wins guard below.
+   *
+   * LAST, deliberately: `estimatorId` was already the 8th positional argument on main, so the options bag
+   * takes the 9th rather than displacing it. Getting that order wrong is caught by the compiler at any
+   * call site that passes the bag (`{ enabled }` is not a `string`) — which is exactly how the merge that
+   * introduced this ninth parameter found the one probe that had been passing it in the 8th slot.
+   */
+  options: { enabled?: boolean } = {}
 ) {
+  const { enabled = true } = options;
   const [board, setBoard] = useState<DealBoardResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1097,6 +1202,7 @@ export function useDealBoard(
   const boardRequestIdRef = useRef(0);
 
   const refetch = useCallback(() => {
+    if (!enabled) return Promise.resolve<DealBoardResponse | null>(null);
     const requestId = boardRequestIdRef.current + 1;
     boardRequestIdRef.current = requestId;
     setLoading(true);
@@ -1104,6 +1210,11 @@ export function useDealBoard(
     const params = new URLSearchParams({
       scope,
       includeDd: String(includeDd),
+      // Opt in to the board-aggregates contract: `boardSummary`, the Pending RFP column's own capped
+      // preview, and the Opportunity cards being pending-free because we render those rows from that
+      // preview. Server-side default is OFF so mobile-crm (which never reads the summary) and any web
+      // bundle predating this change keep the response they already had — see includeBoardAggregates.
+      boardAggregates: "true",
     });
     if (previewLimit !== null) {
       params.set("previewLimit", String(previewLimit));
@@ -1147,6 +1258,7 @@ export function useDealBoard(
       });
   }, [
     assignedRepId,
+    enabled,
     estimatorId,
     estimateSentDateRange?.from,
     estimateSentDateRange?.to,

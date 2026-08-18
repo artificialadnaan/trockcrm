@@ -38,6 +38,11 @@ import type {
   CorrectiveActionsResponse,
   CorrectiveActionUploadUrlResponse,
   CorrectiveActionConfirmUploadResponse,
+  WeeklyReportAssignmentsResponse,
+  WeeklyReportDetailResponse,
+  WeeklyReportPhotoCandidatesResponse,
+  WeeklyReportResponse,
+  WeeklyReportStatusValue,
 } from "./types";
 import type { ScorecardSubmissionPayload, ScorecardUpdatePayload } from "../scorecards/draft";
 import type {
@@ -241,6 +246,66 @@ export const getScorecard = (f: Fetcher, id: string) =>
 // (view/[id].tsx) turns that into a "still generating" toast rather than a crash.
 export const getScorecardDownload = (f: Fetcher, id: string) =>
   f<ScorecardDownloadResponse>(`/field/scorecards/${id}/download`);
+
+// ── Weekly reports ────────────────────────────────────────────────────────────
+// `/field/weekly-reports/...`, NOT `/weekly-reports`. This app signs in through `/auth/field-login`, which
+// mints a `surface: "field"` token the server rejects on every CRM route by design (#722) — and the CRM
+// weekly-report router is additionally gated to admin/director/rep, so a superintendent could never reach
+// it even with a CRM session. Addressed at the CRM mount these would 401 on every call, which this app
+// reads as a dead session and signs the user out.
+
+// Everything the Reports hub renders, in one round trip: the projects this user owes reports on, plus
+// anything sitting in their PM queue. One call because a jobsite LTE connection makes every extra request
+// another chance to paint half a screen.
+export const getWeeklyReportAssignments = (f: Fetcher) =>
+  f<WeeklyReportAssignmentsResponse>("/field/weekly-reports/assignments");
+
+// Start (or recover) the week's report. Idempotent on clientSubmissionId — stamped ONCE when the local
+// draft is created and reused on every retry — so a request that times out on the way back never produces
+// a second report for the week. 200 on a retry, 201 on a genuine create.
+export const createWeeklyReport = (
+  f: Fetcher,
+  body: { clientSubmissionId: string; weeklyReportProjectId: string; weekOf: string },
+) => f<WeeklyReportResponse>("/field/weekly-reports/reports", { method: "POST", body });
+
+// `timeoutMs` is worth overriding on the hub's "Resume": that read sits between the user's tap and
+// anything happening on screen, and the 30s default is half a minute of a stationary button on exactly the
+// one-bar connection this feature is written for. Failing sooner is not a loss — the caller falls back to
+// the local draft.
+export const getWeeklyReport = (f: Fetcher, id: string, timeoutMs?: number) =>
+  f<WeeklyReportDetailResponse>(`/field/weekly-reports/reports/${id}`, timeoutMs ? { timeoutMs } : {});
+
+// PATCH semantics: an omitted key is left alone, an explicit null clears the column. The wizard always
+// sends all five, because the local draft is the authoritative copy of what the user typed.
+export const updateWeeklyReport = (
+  f: Fetcher,
+  id: string,
+  body: {
+    workCompleted?: string | null;
+    nextWeekLookAhead?: string | null;
+    issuesConcerns?: string | null;
+    completionPercent?: number | null;
+    weatherDelayDays?: number | null;
+  },
+) => f<WeeklyReportResponse>(`/field/weekly-reports/reports/${id}`, { method: "PATCH", body });
+
+// The picker's candidate set: this deal's photos from the 14 days ENDING ON week_of. Anchored on the week
+// the report covers rather than on today, so a report filed four days late still offers the right photos.
+export const getWeeklyReportPhotoCandidates = (f: Fetcher, id: string) =>
+  f<WeeklyReportPhotoCandidatesResponse>(`/field/weekly-reports/reports/${id}/photo-candidates`);
+
+// Whole-set replacement: the array IS the selection and its ORDER is the print order (the server ignores
+// any client-supplied sortOrder in favour of array position).
+export const replaceWeeklyReportPhotos = (
+  f: Fetcher,
+  id: string,
+  photos: Array<{ fileId: string; caption?: string | null }>,
+) => f<WeeklyReportResponse>(`/field/weekly-reports/reports/${id}/photos`, { method: "PUT", body: { photos } });
+
+// Submit for review / approve / bounce back. The PM gate is server-side: a superintendent posting
+// `{"to":"approved"}` is refused regardless of what this app's buttons allow.
+export const transitionWeeklyReport = (f: Fetcher, id: string, to: WeeklyReportStatusValue) =>
+  f<WeeklyReportResponse>(`/field/weekly-reports/reports/${id}/transition`, { method: "POST", body: { to } });
 
 // ── Corrective actions ────────────────────────────────────────────────────────
 // Read a below-band scorecard's corrective-action items + their inline responses. Session auth in-app

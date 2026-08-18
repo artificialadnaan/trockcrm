@@ -111,6 +111,30 @@ export function mapWeeklyReportProject(row: Record<string, any>): WeeklyReportPr
   };
 }
 
+/**
+ * The project header T-Rock Cam renders, and NOTHING else off the setup row.
+ *
+ * `WeeklyReportProject` carries `clientTeam` — four client contacts, by name and email. The CRM dashboard
+ * needs those; the phone does not, and /api/field is reachable by every field user in the company. An
+ * explicit projection rather than a delete-list, so a column added to the setup row later is off the
+ * field surface by default instead of on it.
+ */
+export function toFieldWeeklyReportProject(project: WeeklyReportProject) {
+  return {
+    id: project.id,
+    dealId: project.dealId,
+    dealName: project.dealName,
+    propertyDisplayName: project.propertyDisplayName,
+    clientName: project.clientName,
+    trockPmName: project.trockPmName,
+    trockSuperName: project.trockSuperName,
+    projectStartDate: project.projectStartDate,
+    projectCompletionDate: project.projectCompletionDate,
+    projectedDurationWeeks: project.projectedDurationWeeks,
+    cadenceWeekday: project.cadenceWeekday,
+  };
+}
+
 export interface WeeklyReportProjectInput {
   dealId: string;
   propertyDisplayName?: string | null;

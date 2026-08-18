@@ -40,6 +40,27 @@ export type TerminalDateFilter =
     }
   | { preset: "custom"; customStart: string; customEnd?: string };
 
+/**
+ * Whether two resolved terminal-date filter maps mean the same thing.
+ *
+ * `resolveDrilldownTerminalDateFilters` builds a FRESH object every call, and that object is a
+ * dependency of the board fetch. Re-setting state to a structurally identical value therefore used to
+ * fire a SECOND /deals/pipeline request on every mount — a 1.6–2.5s query issued twice for no change at
+ * all. Callers compare before setting so identity only changes when the filter actually does.
+ */
+export function terminalDateFiltersEqual(
+  left: Record<TerminalOutcome, TerminalDateFilter>,
+  right: Record<TerminalOutcome, TerminalDateFilter>
+): boolean {
+  return (["won", "lost"] as const).every((outcome) => {
+    const a = left[outcome];
+    const b = right[outcome];
+    return (
+      a.preset === b.preset && a.customStart === b.customStart && a.customEnd === b.customEnd
+    );
+  });
+}
+
 const TERMINAL_FILTER_STORAGE_KEYS: Record<TerminalOutcome, string> = {
   won: "deals.kanban.wonFilter",
   lost: "deals.kanban.lostFilter",

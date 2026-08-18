@@ -34,6 +34,41 @@ export async function getLiveGps(): Promise<PhotoMetadata> {
   }
 }
 
+/** True when a shot carries a usable fix. BOTH coordinates — one without the other is not a location. */
+export function hasPhotoCoords(metadata: PhotoMetadata): boolean {
+  return metadata.latitude !== undefined && metadata.longitude !== undefined;
+}
+
+/**
+ * Merge an already-resolved live GPS fix into a shot's EXIF, but ONLY its location.
+ *
+ * Pure, so a batch import can fetch live GPS once and reuse it across every coordless asset — the
+ * per-asset `getLiveGps` it replaces serialised up to 8s per photo, which is minutes on a large indoor
+ * import.
+ *
+ * `takenAt` is deliberately NOT taken from `live`. `getLiveGps` always stamps `takenAt: now`, so a plain
+ * spread silently replaces a photo's real capture time with the moment it was imported. That is wrong as
+ * provenance, and it also breaks the weekly report's picker: candidates are filtered on
+ * `COALESCE(taken_at, created_at)` against the 14 days ending on `week_of`, so a photo restamped to today
+ * falls outside the window of a report filed late and disappears from its own selection on reload.
+ * Location-stripped images — anything shared through a messaging app — are the common case, not the edge.
+ */
+export function mergeLiveGpsIntoExif(
+  exif: PhotoMetadata,
+  live: PhotoMetadata | null,
+): PhotoMetadata {
+  if (hasPhotoCoords(exif)) return exif;
+  if (live && hasPhotoCoords(live)) {
+    return {
+      ...exif,
+      latitude: live.latitude,
+      longitude: live.longitude,
+      addressSource: live.addressSource ?? exif.addressSource,
+    };
+  }
+  return exif;
+}
+
 // An EXIF value can be a plain number (iOS decimal degrees), a [num, den]
 // rational, or a degrees/minutes/seconds array of numbers/rationals.
 function asNumber(x: unknown): number {

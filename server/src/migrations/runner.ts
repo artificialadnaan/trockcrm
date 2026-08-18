@@ -19,6 +19,10 @@ import {
   DEAL_STAGE_HISTORY_CREATED_AT_MIGRATION,
   runDealStageHistoryCreatedAtIndexMigration,
 } from "./deal-stage-history-created-at-index.js";
+import {
+  ACTIVITIES_PERFORMED_BY_USER_MIGRATION,
+  runActivitiesPerformedByUserIndexMigration,
+} from "./activities-performed-by-user-index.js";
 
 dotenv.config({
   path: join(dirname(fileURLToPath(import.meta.url)), "../../../.env"),
@@ -73,6 +77,15 @@ async function runMigrations(): Promise<void> {
         // tenant's index CONCURRENTLY first; the file's plain statement then no-ops on existing schemas
         // while remaining the marker the office provisioner replays for new ones.
         await runDealStageHistoryCreatedAtIndexMigration(client);
+        const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
+        await client.query(sql);
+      } else if (file === ACTIVITIES_PERFORMED_BY_USER_MIGRATION) {
+        // Same reason again, and the sharpest case of it: `activities` is the biggest table in a tenant
+        // schema and is written by nearly every CRM action, so a plain CREATE INDEX inside the file's DO
+        // block would hold a write-blocking SHARE lock across ALL offices until the last one finished.
+        // Build each tenant's index CONCURRENTLY first; the file's plain statement then no-ops on
+        // existing schemas while remaining the marker the office provisioner replays for new ones.
+        await runActivitiesPerformedByUserIndexMigration(client);
         const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf-8");
         await client.query(sql);
       } else if (file === BID_BOARD_INGEST_MIGRATION) {

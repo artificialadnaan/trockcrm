@@ -329,12 +329,14 @@ router.patch("/reports/:id", async (req, res, next) => {
 
 router.get("/reports/:id/photo-candidates", async (req, res, next) => {
   try {
-    const photos = await listWeeklyReportPhotoCandidates(
+    // `total` travels with the list because the set is CAPPED. A picker that shows 300 of 412 without
+    // saying so reads as the whole window, and the rows it drops are the oldest days of it.
+    const { photos, total } = await listWeeklyReportPhotoCandidates(
       req.tenantClient!,
       requireUuid(req.params.id, "id"),
     );
     await req.commitTransaction!();
-    res.json({ photos });
+    res.json({ photos, total });
   } catch (error) {
     next(error);
   }

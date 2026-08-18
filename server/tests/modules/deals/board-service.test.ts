@@ -4,6 +4,15 @@ const dbState = vi.hoisted(() => ({
   responses: [] as any[][],
 }));
 
+/**
+ * True for the `public.pipeline_stage_config` table object, identified by Drizzle's own name symbol so
+ * the check does not depend on importing the schema inside a hoisted `vi.mock` factory.
+ */
+function isPipelineStageConfigTable(table: unknown): boolean {
+  if (!table || typeof table !== "object") return false;
+  return (table as Record<symbol, unknown>)[Symbol.for("drizzle:Name")] === "pipeline_stage_config";
+}
+
 function createChainableMock() {
   const chain: any = {
     select: vi.fn(),
@@ -16,7 +25,21 @@ function createChainableMock() {
   };
 
   chain.select.mockReturnValue(chain);
-  chain.from.mockReturnValue(chain);
+  // getDealsForPipeline reads pipeline_stage_config through the REQUEST's tenant client now — it used to
+  // go through the global `db` pool, which made a single board request hold TWO pool slots at once (the
+  // tenant middleware already holds one for the whole request) and could deadlock the pool under load.
+  // Each test builds its own `tenantDb.select` mock with a per-stage `then` override, so serve the stage
+  // list HERE, at `.from()` time: production calls `.from()` AFTER the test has installed its override,
+  // so this wins for the stage query and leaves every other query to the test's own logic.
+  chain.from.mockImplementation((table: unknown) => {
+    if (isPipelineStageConfigTable(table)) {
+      chain._isStageConfigQuery = true;
+      chain.then.mockImplementation((resolve: (value: any[]) => unknown) =>
+        resolve(dbState.responses.shift() ?? [])
+      );
+    }
+    return chain;
+  });
   chain.where.mockReturnValue(chain);
   chain.leftJoin.mockReturnValue(chain);
   chain.orderBy.mockReturnValue(chain);
@@ -57,6 +80,7 @@ function findStageCardsChain(chains: any[], stageId: string) {
 function findStageSummaryChain(chains: any[], stageId: string) {
   return chains.find(
     (chain) =>
+      !chain._isStageConfigQuery &&
       chain.leftJoin.mock.calls.length === 0 &&
       containsValue(chain.where.mock.calls[0]?.[0], stageId)
   );
@@ -1671,7 +1695,11 @@ describe("getDealsForPipeline", () => {
       assignedRepId: "rep-1",
     });
 
-    const summaryChain = tenantChains.find((chain) => chain.leftJoin.mock.calls.length === 0);
+    // The board's FIRST tenant query is now the pipeline_stage_config read (it used to take a second
+    // pool slot from the global `db` pool), and it has no leftJoin either — skip it explicitly.
+    const summaryChain = tenantChains.find(
+      (chain) => !chain._isStageConfigQuery && chain.leftJoin.mock.calls.length === 0
+    );
     const summarySelect = summaryChain?._selectArgs?.[0] as { totalValue?: unknown } | undefined;
     const summarySelectText = extractSqlText(summarySelect?.totalValue).toLowerCase();
     expect(summarySelectText).toContain("on_hold");

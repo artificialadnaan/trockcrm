@@ -36,6 +36,11 @@ export const bidBoardSyncRuns = pgTable(
     estimateSkippedNoChangeCount: integer("estimate_skipped_no_change_count").default(0).notNull(),
     estimateSkippedTerminalCount: integer("estimate_skipped_terminal_count").default(0).notNull(),
     estimateWarningCount: integer("estimate_warning_count").default(0).notNull(),
+    // Deals whose deals.bid_due_date the export's Due Date rewrote this run (migration 0222), behind
+    // BID_BOARD_DUE_DATE_READBACK. Worth its own column because bid_due_date is the auto-park horizon for
+    // estimating deals, so this counter is the operator's only scheduled-run view of how many deals just
+    // had their reported VALUE moved. The blank-Due-Date and unchanged-value skips stay in the logs.
+    bidDueDateUpdatedCount: integer("bid_due_date_updated_count").default(0).notNull(),
     status: text("status").default("received").notNull(),
     errors: jsonb("errors").$type<string[]>().default([]).notNull(),
     warnings: jsonb("warnings").$type<string[]>().default([]).notNull(),
