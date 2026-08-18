@@ -218,6 +218,34 @@ describe("This Week board", () => {
     expect(text).toContain("Retry send");
   });
 
+  it("does not tell the PM nothing was recorded when three attempts were", async () => {
+    // "Send stuck" replaces "Send failed" once a retry clears the error, and its title used to read
+    // flatly "This report was marked sent but no delivery was ever recorded" — which contradicted the
+    // "· 3 attempts" the PM was reading a moment earlier, on a row whose error text this platform had
+    // itself just erased. The chip now carries the count and the title says what actually happened.
+    mockDashboard([
+      dashboardRow({
+        state: "sent",
+        reportId: "r1",
+        sendRetryReportId: "r1",
+        sendError: null,
+        sendAttempts: 3,
+        sendStalled: true,
+      }),
+    ]);
+    const text = renderPage();
+    expect(text).toContain("Send stuck");
+    expect(text).toContain("3 attempts");
+
+    const chip = Array.from(container.querySelectorAll("div[title]")).find((element) =>
+      (element.textContent ?? "").includes("Send stuck"),
+    );
+    if (!chip) throw new Error("Send stuck chip not found");
+    const title = chip.getAttribute("title") ?? "";
+    expect(title).toMatch(/attempted 3 times/i);
+    expect(title).not.toMatch(/no delivery was ever/i);
+  });
+
   it("points Retry at the undelivered report, not at the correction drafted over it", async () => {
     // The live row is the unsent v2; the report that needs retrying is v1. Retrying the live row would
     // replay a report nobody ever sent — so this asserts the ID THE CALL CARRIES, not merely that a

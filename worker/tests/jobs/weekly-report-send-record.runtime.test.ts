@@ -77,7 +77,10 @@ beforeAll(async () => {
       send_delivered_at    timestamptz,
       send_last_attempt_at timestamptz,
       send_attempts        integer NOT NULL DEFAULT 0,
-      send_error           text
+      send_error           text,
+      -- Stamped on an older version when a LATER one is actually sent. The handler reads it, so the
+      -- column has to be here or its SELECT is a syntax error rather than a guard.
+      superseded_by_id     uuid
     );
   `);
 });
@@ -166,6 +169,44 @@ describe("recording a delivery", () => {
     const after = await row();
     expect(after.send_delivered_at).toEqual(before.send_delivered_at);
     expect(Number(after.send_attempts)).toBe(0);
+  });
+
+  it("SENDS NOTHING for a version a correction has already replaced", async () => {
+    // The worker is the last line, and it needs its own: a delivery queued for v1 can still be sitting in
+    // job_queue when the PM sends v2. When it is picked up the payload is perfectly well-formed — status
+    // still `sent`, delivery key still matching, nothing delivered — so every other guard here waves it
+    // through, and the message it would build carries `isCorrection: false`, so nothing in it would
+    // explain to the client why the older report arrived after the newer one. The link in it opens a page
+    // that then tells them their version is out of date.
+    //
+    // The API's retry route refuses this state too. Both are needed because they are two different ways
+    // in, and the CRM button is a third.
+    await pg.query(
+      `UPDATE ${SCHEMA}.weekly_reports SET superseded_by_id = $2::uuid WHERE id = $1::uuid`,
+      [REPORT, OTHER],
+    );
+    const sendEmail = vi.fn(async () => ({ success: true, messageId: "m1" }));
+
+    await handleWeeklyReportSend(payload(), null, { query, sendEmail, logger: SILENT_LOGGER });
+
+    expect(sendEmail).not.toHaveBeenCalled();
+    const after = await row();
+    // Skipped, not recorded as an attempt: no amount of retrying makes a superseded report the right
+    // thing to send, so it must not burn attempts or leave a failure a PM would try to act on.
+    expect(after.send_delivered_at).toBeNull();
+    expect(Number(after.send_attempts)).toBe(0);
+    expect(after.send_error).toBeNull();
+    // And the stored request is untouched — this row is history now, not an outbox entry.
+    expect(after.send_request.shareUrl).toBe(SHARE_URL);
+  });
+
+  it("still delivers a version nothing has replaced", async () => {
+    // The control. Without it the guard above is satisfied by a handler that never sends anything.
+    const sendEmail = vi.fn(async () => ({ success: true, messageId: "m1" }));
+    await handleWeeklyReportSend(payload(), null, { query, sendEmail, logger: SILENT_LOGGER });
+
+    expect(sendEmail).toHaveBeenCalledTimes(1);
+    expect((await row()).send_delivered_at).not.toBeNull();
   });
 
   it("touches only its own report", async () => {

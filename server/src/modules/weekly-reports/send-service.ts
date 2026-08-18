@@ -498,6 +498,30 @@ export async function retryWeeklyReportSend(
   if (reportRow.status !== "sent") {
     throw new AppError(409, "Only a report that has been sent can have its delivery retried");
   }
+  // A SUPERSEDED VERSION IS NEVER RETRIED, AND THIS IS THE LAYER THAT HAS TO SAY SO.
+  //
+  // Checked before the delivery and window gates because it is the only refusal that is true of a report
+  // whose email must never go out AT ALL, and because the "issue a correction instead" wording of those
+  // two would be actively wrong here: a correction already exists and has already been sent.
+  //
+  // The state is ordinary, not exotic. v1 is sent Monday and its delivery fails; the PM issues a
+  // correction; v2 is sent and delivered Tuesday. v1 is then `sent`, `superseded_by_id` = v2,
+  // `send_delivered_at` still NULL — every predicate the retry path checks is satisfied — and its
+  // `send_request` still carries the live share URL, which is only dropped on delivery. Replaying it
+  // emails a paying client the version they were told was replaced, with `isCorrection: false` so the
+  // message itself says nothing about it, pointing at a page that then shows them a superseded notice.
+  // Irreversible, and no dashboard reports it: the board's undelivered query already carries
+  // `superseded_by_id IS NULL`, so it is silent on this row by construction.
+  //
+  // Stated here rather than only on the button because the CRM is not the only way in — the deferred
+  // field mount reuses this service unchanged, and the worker refuses the same state independently.
+  if (reportRow.superseded_by_id) {
+    throw new AppError(
+      409,
+      "A newer version of this report has already been sent to the client, so this one must not go out " +
+        "again — retry the delivery on the newest version instead",
+    );
+  }
   if (reportRow.send_delivered_at) {
     // Worded as what the platform can actually evidence. `send_delivered_at` records that the MAIL
     // PROVIDER ACCEPTED the message — there is no bounce webhook anywhere in this codebase, so a report
@@ -529,8 +553,19 @@ export async function retryWeeklyReportSend(
   // Clear the error but NOT send_attempts. The count is the record of how much trouble this delivery has
   // been; zeroing it on every retry would hide a report that has failed nine times behind a chip that
   // always reads "attempt 1".
+  //
+  // AND MOVE THE CLOCK. `send_last_attempt_at` is what the board ages a stall against (see
+  // `lastSendActivityAt` in dashboard-service.ts); `sent_at` is stamped once at commit and never moves.
+  // Writing nothing here meant the retry cleared the error and left the row measurably ninety minutes
+  // old, so the chip flipped straight from "Send failed · 3 attempts" to "Send stuck" — the PM's click
+  // produced no positive signal at all, and past the provider's dedupe window a PM who acknowledged the
+  // duplicate risk, saw the row unchanged and clicked again put a second real copy in the client's inbox.
+  // With the stamp the row reads "Sending…" and offers no second Retry until the threshold passes again.
+  //
+  // It is honest to write it here: the column records when this delivery was last attempted, and handing
+  // it to the queue is the start of an attempt. The worker overwrites it when that attempt finishes.
   await client.query(
-    `UPDATE weekly_reports SET send_error = NULL, updated_at = now()
+    `UPDATE weekly_reports SET send_error = NULL, send_last_attempt_at = now(), updated_at = now()
       WHERE id = $1::uuid AND is_active AND status = 'sent' AND send_delivered_at IS NULL`,
     [reportId],
   );

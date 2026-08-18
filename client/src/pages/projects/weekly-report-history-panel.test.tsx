@@ -153,6 +153,58 @@ describe("a sent report the provider accepted", () => {
   });
 });
 
+describe("a superseded version is never re-sent", () => {
+  // THE STATE: v1 goes out Monday and its delivery fails. The PM issues a correction. v2 is sent and
+  // DELIVERED on Tuesday, which stamps `superseded_by_id` on v1. v1 is now `sent`, superseded, and still
+  // `sendDeliveredAt: null` — every predicate the Retry branch used to check is satisfied — and its
+  // stored send request still carries the live share URL, because that is only dropped on delivery.
+  //
+  // Clicking Retry there emails a paying client the version they were already told was replaced, with
+  // `isCorrection: false` so the message says nothing about it, linking to a page that then shows them a
+  // superseded notice. Irreversible, and nothing on any dashboard reports it: the board's undelivered
+  // query carries `superseded_by_id IS NULL`, so it is silent on this row by construction. History was
+  // the one surface offering the action.
+  function correctedWeek() {
+    return [
+      report({ id: "v2", version: 2, sendDeliveredAt: "2026-08-14T22:00:00.000Z" }),
+      report({
+        id: "v1",
+        version: 1,
+        supersededById: "v2",
+        // The whole trap: undelivered, so the guard the button DID have passes.
+        sendDeliveredAt: null,
+        sendError: "Resend timed out",
+        sendAttempts: 3,
+      }),
+    ];
+  }
+
+  it("offers no Retry on the superseded version", () => {
+    mocks.reports = correctedWeek();
+    render();
+    expect(button("Retry send")).toBeUndefined();
+  });
+
+  it("still offers the correction on the version that replaced it, so the row is not left dead", () => {
+    // Guards against "fixed" by hiding every control on the week. The newest version keeps its action.
+    mocks.reports = correctedWeek();
+    render();
+    expect(button("Send correction")).toBeDefined();
+  });
+
+  it("keeps Retry on an undelivered version nothing has replaced yet", () => {
+    // The other direction, and the reason the predicate is `supersededById` rather than "a v2 exists":
+    // superseding happens at SEND, so a v1 with an unsent v2 drafted beside it is still the version the
+    // client is owed, and retrying it is exactly right. The board points its own Retry at v1 here too.
+    mocks.reports = [
+      report({ id: "v2", version: 2, status: "approved", sentAt: null, sendDeliveredAt: null }),
+      report({ id: "v1", version: 1, supersededById: null, sendError: "Resend timed out" }),
+    ];
+    render();
+    expect(button("Retry send")).toBeDefined();
+  });
+});
+
 describe("only the newest version of a week may be corrected", () => {
   it("hides the button on an older version once a correction exists", () => {
     // A report is only marked superseded when its replacement is SENT, so a v1 with an unsent v2 sitting

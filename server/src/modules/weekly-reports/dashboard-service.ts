@@ -128,19 +128,45 @@ function toIsoTimestamp(value: unknown): string | null {
   return String(value);
 }
 
+function toDate(value: unknown): Date | null {
+  if (value == null) return null;
+  const parsed = value instanceof Date ? value : new Date(String(value));
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
 /**
- * Has this send been undelivered for longer than a delivery plausibly takes?
+ * WHEN THIS DELIVERY WAS LAST HANDED TO THE QUEUE — the moment the stall clock runs from.
  *
- * `sent_at` rather than `send_last_attempt_at`: the case this is here for is the one where NO attempt was
- * ever recorded, so the only timestamp that exists is the moment the PM committed. A row with no `sent_at`
- * at all cannot be aged and is left alone rather than guessed at — `sent` guarantees the stamp, so this is
- * a corrupt row, and inventing a failure for it would be a chip nobody can act on.
+ * The LATER of the two stamps, and both are needed:
+ *
+ *   `sent_at`              the PM's commit. The only timestamp that exists in the case this whole
+ *                          mechanism is for, where the job dead-lettered having written nothing at all.
+ *   `send_last_attempt_at` written by the worker after every attempt, and — since it is also the only
+ *                          record a retry leaves — by `retryWeeklyReportSend` when it re-queues.
+ *
+ * Ageing off `sent_at` alone is what made every legitimate retry read as a failure. `sent_at` is stamped
+ * once at commit and never moves, so a send committed ninety minutes ago and retried five seconds ago was
+ * still ninety minutes old by that measure: the chip flipped straight from "Send failed" to "Send stuck",
+ * the PM got no acknowledgement that their click had done anything, and past the provider's dedupe window
+ * a PM who clicked Retry, cleared the duplicate-risk confirmation and saw nothing change would reasonably
+ * click it again — a second acknowledged replay, which is a second real copy in the client's inbox.
+ *
+ * A row with neither stamp cannot be aged and is left alone rather than guessed at: `sent` guarantees
+ * `sent_at`, so that is a corrupt row and inventing a failure for it would be a chip nobody can act on.
  */
-function isStalledSend(sentAt: unknown, now: Date): boolean {
-  if (sentAt == null) return false;
-  const stamped = sentAt instanceof Date ? sentAt : new Date(String(sentAt));
-  if (Number.isNaN(stamped.getTime())) return false;
-  return now.getTime() - stamped.getTime() > WEEKLY_REPORT_SEND_STALL_MINUTES * 60_000;
+function lastSendActivityAt(row: { sent_at?: unknown; send_last_attempt_at?: unknown }): Date | null {
+  const sentAt = toDate(row.sent_at);
+  const lastAttemptAt = toDate(row.send_last_attempt_at);
+  if (sentAt == null) return lastAttemptAt;
+  if (lastAttemptAt == null) return sentAt;
+  return lastAttemptAt.getTime() > sentAt.getTime() ? lastAttemptAt : sentAt;
+}
+
+/** Has this send been undelivered for longer than a delivery plausibly takes? */
+function isStalledSend(row: { sent_at?: unknown; send_last_attempt_at?: unknown }, now: Date): boolean {
+  const since = lastSendActivityAt(row);
+  if (since == null) return false;
+  return now.getTime() - since.getTime() > WEEKLY_REPORT_SEND_STALL_MINUTES * 60_000;
 }
 
 const REPORT_STATE_BY_STATUS: Record<string, WeeklyReportWeekState> = {
@@ -203,8 +229,20 @@ export async function getWeeklyReportDashboard(
       ? DEFAULT_OUTSTANDING_LOOKBACK_WEEKS
       : Math.max(1, Math.min(Math.trunc(requested), 260));
 
+  // EVERY LIVE SETUP, not only the ones still reporting.
+  //
+  // The CADENCE is still generated for `status = 'active'` alone — a paused or completed project owes
+  // nothing, and generating weeks for one would contradict what the CRM told whoever stopped it. What the
+  // wider scope buys is the second pass at the bottom: an UNDELIVERED SEND on a stopped setup.
+  //
+  // That is the common end state, not an edge case. The last report of a job fails to send, the job
+  // finishes, somebody marks the setup completed — and with `wrp.status = 'active'` here the board had no
+  // row for it in This Week, nothing in the "and N older" tally, and therefore no Retry, while the
+  // Projects tab (`listWeeklyReportProjectSummaries`, scoped to `wrp.is_active` alone) kept showing a
+  // permanent red "1 not delivered" for it. Two surfaces claiming one definition of "still owed" while
+  // disagreeing about which projects it covers.
   const projectsResult = await client.query(
-    `SELECT wrp.id, wrp.deal_id, wrp.property_display_name, wrp.client_name,
+    `SELECT wrp.id, wrp.deal_id, wrp.property_display_name, wrp.client_name, wrp.status,
             wrp.cadence_weekday, wrp.cadence_start_date, wrp.cadence_end_date,
             wrp.trock_pm_user_id, wrp.trock_super_user_id,
             d.name AS deal_name, d.project_number,
@@ -213,7 +251,7 @@ export async function getWeeklyReportDashboard(
        JOIN deals d ON d.id = wrp.deal_id
        LEFT JOIN public.users pm  ON pm.id = wrp.trock_pm_user_id
        LEFT JOIN public.users sup ON sup.id = wrp.trock_super_user_id
-      WHERE wrp.is_active AND wrp.status = 'active'`,
+      WHERE wrp.is_active`,
   );
   if (projectsResult.rows.length === 0) {
     return { asOf, rows: [], olderOutstandingCounts: {}, lookbackWeeks };
@@ -265,9 +303,10 @@ export async function getWeeklyReportDashboard(
       WHERE weekly_report_project_id = ANY($1::uuid[])`,
     [projectIds],
   );
-  // Every project here is `status = 'active'`, so nothing is paused RIGHT NOW — these are the stretches
-  // it was stopped for and has since come back from. Without them a project paused for six weeks returns
-  // owing all six, which is the opposite of what the CRM told whoever paused it.
+  // Read for the CADENCE loop, whose projects are all `status = 'active'` — so for those nothing is
+  // paused RIGHT NOW and these are the stretches they were stopped for and have since come back from.
+  // Without them a project paused for six weeks returns owing all six, which is the opposite of what the
+  // CRM told whoever paused it. The stopped-setup pass below reads no cadence and needs none of this.
   const pausesResult = await client.query(
     `SELECT weekly_report_project_id, paused_from, resumed_on
        FROM weekly_report_pauses
@@ -298,7 +337,10 @@ export async function getWeeklyReportDashboard(
   const rows: WeeklyReportDashboardRow[] = [];
   const olderOutstandingCounts: Record<string, number> = {};
 
-  for (const project of projectsResult.rows) {
+  // Every project here is `status = 'active'`, so nothing is paused RIGHT NOW — see the pauses query.
+  const activeProjects = projectsResult.rows.filter((project) => project.status === "active");
+
+  for (const project of activeProjects) {
     const cadenceWeekday = Number(project.cadence_weekday);
     const currentWeekOf = weeklyReportWeekOf(cadenceWeekday, asOf);
     const expected = weeklyReportExpectedWeeks({
@@ -348,8 +390,14 @@ export async function getWeeklyReportDashboard(
       // failed send cannot take the failure off the board with it.
       const undelivered = undeliveredByKey.get(key) ?? null;
       const sendFailed = undelivered != null && undelivered.send_error != null;
+      // `send_error == null` is not redundant with the CRM checking `sendFailed` first. This is a
+      // PUBLISHED field the deferred T-Rock Cam surface reads directly, and the whole reason the three
+      // verdicts are derived here rather than on each client is that the two surfaces must not be able to
+      // disagree about what the chip means. Without it a failed send that is also old reports BOTH, and
+      // the app would say "Send stuck" — no error to show, nobody to chase — for a delivery that recorded
+      // exactly why it failed.
       const sendStalled =
-        undelivered != null && undelivered.send_error == null && isStalledSend(undelivered.sent_at, now);
+        undelivered != null && undelivered.send_error == null && isStalledSend(undelivered, now);
       const sendPending = undelivered != null && !sendFailed && !sendStalled;
 
       // A settled week that is not the current one carries no signal — drop it so the page shows what
@@ -404,6 +452,65 @@ export async function getWeeklyReportDashboard(
     }
   }
 
+  // A SETUP THAT HAS STOPPED REPORTING CAN STILL OWE THE CLIENT AN EMAIL.
+  //
+  // Second pass rather than folding these projects into the loop above, because the two questions are
+  // genuinely different. Above: "which weeks does the cadence say are owed" — a question a paused or
+  // completed project has no answer to, and generating one for it would contradict the CRM's own promise
+  // that pausing stops the obligation (a completed setup often has no `cadence_end_date` at all, so the
+  // generator would simply keep producing weeks forever). Here: "which sends never got out" — which does
+  // not depend on the cadence and does not stop mattering when the job does.
+  //
+  // These rows carry the same `sendRetryReportId` as any other, so the Retry that the Projects tab's
+  // "1 not delivered" counter implies actually exists on the board, rather than living only on History.
+  const projectById = new Map(projectsResult.rows.map((project) => [project.id, project]));
+  for (const undelivered of undeliveredResult.rows) {
+    const project = projectById.get(undelivered.weekly_report_project_id);
+    // Active projects already had this week decided by the cadence loop; emitting it again here would
+    // double every failed send on the board.
+    if (!project || project.status === "active") continue;
+
+    const weekOf = toIsoDate(undelivered.week_of)!;
+    // The LIVE version of the week, exactly as the loop above reads it — so a correction drafted over
+    // this failed send still shows as the week's current state while the failure keeps its own facts.
+    const report = reportByKey.get(`${project.id}|${weekOf}`);
+    const sendFailed = undelivered.send_error != null;
+    const sendStalled = undelivered.send_error == null && isStalledSend(undelivered, now);
+
+    rows.push({
+      weeklyReportProjectId: project.id,
+      dealId: project.deal_id,
+      projectName: project.property_display_name ?? project.deal_name ?? "Untitled project",
+      projectNumber: project.project_number ?? null,
+      clientName: project.client_name ?? null,
+      trockPmUserId: project.trock_pm_user_id ?? null,
+      trockSuperUserId: project.trock_super_user_id ?? null,
+      trockSuperName: project.trock_super_name ?? null,
+      trockPmName: project.trock_pm_name ?? null,
+      weekOf,
+      isCurrentWeek: weekOf === weeklyReportWeekOf(Number(project.cadence_weekday), asOf),
+      state: report ? REPORT_STATE_BY_STATUS[report.status] ?? "sent" : "sent",
+      // Never late. Lateness measures a report the cadence still expects, and this setup is not
+      // expecting any — the row is here for the delivery, not for the week.
+      daysLate: 0,
+      reportId: report?.id ?? null,
+      reportVersion: report ? Number(report.version) : null,
+      sentAt: toIsoTimestamp(report?.sent_at),
+      sendError: undelivered.send_error ?? null,
+      sendDeliveredAt: toIsoTimestamp(report?.send_delivered_at),
+      sendAttempts: Number(undelivered.send_attempts ?? 0),
+      sendFailed,
+      sendStalled,
+      sendPending: !sendFailed && !sendStalled,
+      sendRetryReportId: undelivered.id,
+      sendRetrySentAt: toIsoTimestamp(undelivered.sent_at),
+      // Always the PM: the ONLY reason this row exists is a delivery that has to be dealt with, and
+      // nobody is waiting on the superintendent for a project that has stopped reporting.
+      waitingOn: project.trock_pm_name ?? "Unassigned PM",
+      dismissalReason: null,
+    });
+  }
+
   // Most overdue first, then SOONEST DUE, then alphabetical. The middle term matters: before their
   // deadlines every row has daysLate === 0, so falling straight to the name would put a Saturday
   // report above one due tomorrow purely because of how it is spelled.
@@ -433,6 +540,12 @@ export interface WeeklyReportProjectSummary {
    * whose correction then reached the client is not an outstanding delivery — the board stops naming it
    * the moment v2 goes out, and a tab that kept counting it would leave a permanent "1 not delivered"
    * beside a week the client has actually received. Two surfaces, one definition of "still owed".
+   *
+   * The PROJECT scope matches too, and did not always: this aggregate covers every `wrp.is_active` setup
+   * while the board once generated rows only for `wrp.status = 'active'` ones. A completed or paused
+   * project whose last send failed — the common way this feature ends — counted here and appeared nowhere
+   * on the board, so the number had no row behind it and no Retry beside it. `getWeeklyReportDashboard`
+   * now emits a row for an undelivered send whatever the setup's status.
    */
   undeliveredSends: number;
   /** Null when reporting has stopped — paused, completed, or past its cadence end date. */

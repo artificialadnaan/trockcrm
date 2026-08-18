@@ -365,11 +365,29 @@ function ThisWeekTable({
                     // Committed, never delivered, and nothing was ever written down about why. Worded
                     // differently from "Send failed" because there is no error to show and no provider
                     // to blame — the report simply never went anywhere.
+                    //
+                    // The title SPLITS on the attempt count, because the flat "no delivery was ever
+                    // recorded" was false in the state a PM most often reads it in: a send that failed
+                    // three times and was then retried has an attempt history, and the retry is what
+                    // erased the error text this chip is standing in for. Telling them nothing was ever
+                    // recorded contradicts the "· 3 attempts" they were looking at a moment earlier.
                     <div
                       className="mt-1 flex items-center gap-1 text-[11.5px] font-bold text-brand-red"
-                      title="This report was marked sent but no delivery was ever recorded."
+                      title={
+                        row.sendAttempts > 0
+                          ? `This report was marked sent and its delivery has been attempted ${
+                              row.sendAttempts
+                            } time${row.sendAttempts === 1 ? "" : "s"}, but the mail provider has never ` +
+                            "been recorded as accepting it and the last attempt reported no error."
+                          : "This report was marked sent but no delivery was ever attempted or recorded."
+                      }
                     >
                       <AlertTriangle className="h-3 w-3" /> Send stuck
+                      {row.sendAttempts > 0 && (
+                        <span className="font-semibold text-slate-400">
+                          · {row.sendAttempts} attempt{row.sendAttempts === 1 ? "" : "s"}
+                        </span>
+                      )}
                     </div>
                   ) : (
                     // Undelivered, no error, and recent enough to still be a queued job rather than a
