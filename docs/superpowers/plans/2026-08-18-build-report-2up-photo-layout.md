@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make photos in the standard field photo report ("Build Report" on the T-Rock Cam app, "Generate Report" on trockcam.com) roughly 3× larger by going from 8 photos per page to 2, widening the tile, and moving each caption from beside its photo to below it.
+**Goal:** Make photos in the standard field photo report ("Build Report" on the T-Rock Cam app, "Generate Report" on trockcam.com) roughly 12× larger in visible area by going from 8 photos per page to 2, widening the tile, and moving each caption from beside its photo to below it.
 
 **Architecture:** One server-side renderer (`server/src/modules/field/pdf-layout.ts`) produces the PDF for both surfaces — neither the mobile app nor the web app renders its own photo grid, so changing this single file changes both. The change is: `PHOTO_ROWS_PER_PAGE` 4→1, `PHOTO_TILE_WIDTH` 148→256, `PHOTO_TILE_HEIGHT` (currently derived) →560 fixed, and the caption block in `drawPhotoEntry` relocated from the right of the tile to underneath it. Contain-fit (no cropping) is preserved exactly — it is a deliberate evidence-document constraint.
 
@@ -39,7 +39,7 @@ CAPTION_GAP=10  CAPTION_WIDTH=106   (caption sits to the RIGHT of the tile)
 PHOTO_ROWS_PER_PAGE=1  →  PHOTOS_PER_PAGE=2   PHOTO_ROW_PITCH=682
 PHOTO_TILE_WIDTH=256   PHOTO_TILE_HEIGHT=560  (fixed, NOT derived from pitch)
 CAPTION_GAP=10 (now vertical)   CAPTION_WIDTH=256 (full tile width)
-caption block occupies the ~112pt between tile bottom (72+560=632) and the next row start
+caption block occupies the 122pt between tile bottom (72+560=632) and the next row start (~98pt usable after CAPTION_GAP + PHOTO_ROW_GAP)
 ```
 
 **Do NOT change:** `PHOTO_COLUMNS` (stays 2), the contain-fit/clip logic, the index badge, the `"findings"` layout (AI Report — separate code path, 1 photo/page already), caption *content*.
@@ -188,11 +188,11 @@ const PHOTO_TILE_HEIGHT = 560;
  * Nearly the full column width, and a tall tile — sized for the narrow captures the app actually produces.
  *
  * A 0.46:1 photograph (the measured shape of the app's current captures) is WIDTH-bound: at the old 148pt
- * tile it rendered 148x322 no matter how tall the tile got, so making rows taller alone would have grown
- * the grey box and not the photograph. 256x560 renders that same photograph at 256x556 — the letterbox
- * bars come to about 4pt, and the visible area roughly triples. A 3:4 portrait renders 256x341 and a 4:3
- * landscape 256x193; both are larger than before, with more surrounding grey, because one fixed tile shape
- * cannot be optimal for every aspect ratio and the narrow case is the one that was unreadable.
+ * 148x156.5 tile: it rendered 72x156.5, and widening the tile alone would not have helped it while the tile
+ * stayed short. At 256x560 the same photograph is WIDTH-bound and renders 256x556 — about 4pt of letterbox,
+ * and ~12.6x the visible area (11.3k -> 142.3k pt^2). A 3:4 portrait goes 117x156.5 -> 256x341, a 4:3
+ * landscape 148x111 -> 256x192; all three are larger, with more surrounding grey on the wider shapes,
+ * because one fixed tile cannot be optimal for every aspect ratio and the narrow case is the unreadable one.
  */
 const PHOTO_TILE_WIDTH = 256;
 ```
@@ -320,7 +320,7 @@ In `drawPhotoEntry`, replace everything from the comment `// --- Caption + metad
   // --- Caption + metadata, BELOW the tile ----------------------------------------------------------
   // Top-anchored to the tile's bottom edge and flowing downward: description first, then metadata. The old
   // layout bottom-anchored this group to the tile's bottom-right, which only made sense while it lived in a
-  // narrow side column. Below the tile there is a fixed ~112pt band, so ordinary top-down reading order is
+  // narrow side column. Below the tile there is a fixed ~98pt usable band, so ordinary top-down reading order is
   // both simpler and what a reader expects under a photograph.
   //
   // The "Project:"/"Date:"/"Creator:" labels stay GONE — the values are self-evident, and the project name
@@ -589,11 +589,11 @@ gh pr create --title "feat(field-report): two photos per page, sized for the app
 
 Photos in the Build Report (T-Rock Cam) / Generate Report (trockcam.com) were too small to make out.
 
-Measured from a real report rather than assumed: the app's captures are **884x1920px, ~0.46:1** — much narrower than a normal phone photo (3:4). Against the old 148pt-wide tile they rendered as 148x322pt strips.
+Measured from a real report rather than assumed: the app's captures are **884x1920px, ~0.46:1** — much narrower than a normal phone photo (3:4). In the old 148x156.5pt tile they contain-fit height-bound to **72x156.5pt** — a 72pt-wide strip.
 
 ## Why "fewer rows" alone would not have worked
 
-Tile width and height were independent constants, and at 148pt these photos are **width-bound** — they render 148x322 no matter how tall the tile gets. Reducing rows per page alone would have grown the grey box and left the photograph the same size. Fixing width required moving the caption out from beside the tile.
+Tile width and height were independent constants and **both** had to change. More height alone caps out at the 148pt width; more width alone caps out at the 156.5pt height (the photo stays 72pt wide). The width could only come from the space the caption occupied beside the tile, which is why the caption moved below it.
 
 ## The change
 

@@ -36,9 +36,9 @@ const CONTENT_WIDTH = PAGE_WIDTH - PAGE_MARGIN * 2;
  * TWO photo cells per row, ONE row down: two photographs a page.
  *
  * The 8-up grid this replaces fit eight cells a page, which made every photograph small — and the app's
- * captures are much narrower than a normal phone photo (measured 884x1920, ~0.46:1, against a 148pt-wide
- * tile), so they rendered as thin strips nobody could read. Two cells a page is what buys the width back.
- * The cost is stated plainly: four times the pages for the same number of photographs.
+ * captures are much narrower than a normal phone photo (measured 884x1920, ~0.46:1), so in a 148x156.5 tile
+ * they contain-fit HEIGHT-bound to 72x156.5: a 72pt-wide strip nobody could read. Two cells a page is what
+ * buys the width back. The cost is stated plainly: four times the pages for the same number of photographs.
  */
 const PHOTO_COLUMNS = 2;
 const PHOTO_ROWS_PER_PAGE = 1;
@@ -60,20 +60,24 @@ const PHOTO_ROW_PITCH = (PHOTO_ROWS_BOTTOM - PHOTO_ROWS_TOP + PHOTO_ROW_GAP) / P
  * shape, and letterboxing onto grey reads as deliberate framing where the identical letterbox on white just
  * reads as a mistake.
  *
- * FIXED at 560 rather than derived from PHOTO_ROW_PITCH: the caption block now sits BELOW the tile inside
- * the same cell, so the tile must leave room for it. The remainder (PHOTO_ROW_PITCH - PHOTO_TILE_HEIGHT =
+ * FIXED at 560 rather than derived from PHOTO_ROW_PITCH, because the caption block is moving BELOW the tile
+ * (next commit) and the tile has to leave room for it. The remainder (PHOTO_ROW_PITCH - PHOTO_TILE_HEIGHT =
  * 682 - 560 = 122pt) is that room, of which ~98pt is usable once CAPTION_GAP and PHOTO_ROW_GAP are taken.
+ *
+ * Being a literal rather than a derivation is the trade: it no longer moves with PHOTO_ROW_PITCH, so if
+ * PHOTO_ROWS_TOP/BOTTOM/GAP are ever retuned this number must be revisited by hand or the caption band
+ * silently overruns the footer.
  */
 const PHOTO_TILE_HEIGHT = 560;
 /**
  * Nearly the full column width, and a tall tile — sized for the narrow captures the app actually produces.
  *
- * A 0.46:1 photograph (the measured shape of the app's current captures) is WIDTH-bound: at the old 148pt
- * tile it rendered 148x322 no matter how tall the tile got, so making rows taller alone would have grown
- * the grey box and not the photograph. 256x560 renders that same photograph at 256x556 — the letterbox
- * bars come to about 4pt, and the visible area roughly triples. A 3:4 portrait renders 256x341 and a 4:3
- * landscape 256x193; both are larger than before, with more surrounding grey, because one fixed tile shape
- * cannot be optimal for every aspect ratio and the narrow case is the one that was unreadable.
+ * A 0.46:1 photograph (the measured shape of the app's current captures) was HEIGHT-bound in the old
+ * 148x156.5 tile: it rendered 72x156.5, and widening the tile alone would not have helped it while the tile
+ * stayed short. At 256x560 the same photograph is WIDTH-bound and renders 256x556 — about 4pt of letterbox,
+ * and ~12.6x the visible area (11.3k -> 142.3k pt^2). A 3:4 portrait goes 117x156.5 -> 256x341, a 4:3
+ * landscape 148x111 -> 256x192; all three are larger, with more surrounding grey on the wider shapes,
+ * because one fixed tile cannot be optimal for every aspect ratio and the narrow case is the unreadable one.
  */
 const PHOTO_TILE_WIDTH = 256;
 const PHOTO_TILE_RADIUS = 8;
@@ -81,8 +85,9 @@ const PHOTO_TILE_FILL = "#F4F5F7";
 const PHOTO_ROW_HEIGHT = PHOTO_TILE_HEIGHT;
 // Metadata is drawn as single-line, ellipsised rows. Each is capped to ONE line so a long deal/project name
 // (the deal schema allows up to 500 chars) can never wrap and push the block past the cell below it — the
-// blank-page/overlap regression the report layout exists to avoid. Smaller than the one-up grid's 8.5pt
-// because the cell column is now ~106pt rather than ~264pt.
+// blank-page/overlap regression the report layout exists to avoid. Kept at 7.5 rather than restored toward
+// the one-up grid's 8.5pt even though the caption is about to run the tile's full 256pt: the cap that
+// matters is the number of LINES the band can hold, and a larger face buys fewer of them.
 const META_FONT_SIZE = 7.5;
 const META_LINE_PITCH = 10;
 // Caption + metadata sit to the RIGHT of the tile inside the same cell, BOTTOM-aligned to it, so the last
