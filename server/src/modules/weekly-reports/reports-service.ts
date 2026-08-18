@@ -1,4 +1,5 @@
 import {
+  WEEKLY_REPORT_SECTION_MAX_CHARS,
   canTransitionWeeklyReport,
   isIsoDateString,
   isWeeklyReportStatus,
@@ -432,8 +433,9 @@ function has<T extends object>(obj: T, key: keyof T): boolean {
 }
 
 // 20k characters is roughly 8x the longest section on the reference report. It exists to stop a runaway
-// dictation loop writing an unbounded row, not to constrain anyone writing prose.
-const MAX_SECTION_CHARS = 20_000;
+// dictation loop writing an unbounded row, not to constrain anyone writing prose. Shared with both
+// renderers, so what the API accepts is exactly what the PDF and the client's page print.
+const MAX_SECTION_CHARS = WEEKLY_REPORT_SECTION_MAX_CHARS;
 
 function normalizeBody(value: unknown): string | null {
   if (value == null) return null;

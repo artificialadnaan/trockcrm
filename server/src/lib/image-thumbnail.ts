@@ -117,7 +117,12 @@ export async function withHeicDecodePermit<T>(decode: (permit: symbol) => Promis
   }
 }
 
-function isHeicOrHeif(mimeType: string | null | undefined): boolean {
+/**
+ * True for the mime types whose decode goes through the WASM converter — i.e. the ones that must hold the
+ * process-wide permit above. Exported so a caller can acquire that permit BEFORE fetching the original
+ * rather than while holding it; see generateEvidenceJpeg's note on why the order matters.
+ */
+export function isHeicOrHeif(mimeType: string | null | undefined): boolean {
   const mime = mimeType?.split(";", 1)[0]?.trim().toLowerCase();
   return mime === "image/heic" || mime === "image/heif";
 }

@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
+import { inflateSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
+import { WEEKLY_REPORT_SECTION_MAX_CHARS } from "@trock-crm/shared/types";
 import {
   WEEKLY_REPORT_PHOTOS_PER_PAGE,
+  WEEKLY_REPORT_SUPERSEDED_NOTICE,
+  boundWeeklyReportSectionText,
   formatWeeklyReportDate,
   renderWeeklyReportPdf,
   splitTextAtHeight,
@@ -64,9 +68,35 @@ function data(overrides: Partial<WeeklyReportPdfData> = {}): WeeklyReportPdfData
     duration: { projectedWeeks: 19, remainingWeeks: 0 },
     photos: [],
     version: 1,
+    superseded: false,
     creationDate: CREATION_DATE,
     ...overrides,
   };
+}
+
+/**
+ * How many text runs the document draws, read out of its own content streams.
+ *
+ * NOT the strings themselves: the Geist fonts are embedded as subsets, so every glyph is a subset index
+ * and the readable text simply is not in the file. Counting the `TJ` operators is the honest structural
+ * question — "did the renderer put something more on the page?" — and it is what a stamp that is missing
+ * entirely fails. Streams are Flate-compressed, so searching the raw bytes finds nothing and an assertion
+ * written that way would pass for the wrong reason.
+ */
+function pdfTextRuns(pdf: Buffer): number {
+  const raw = pdf.toString("latin1");
+  let runs = 0;
+  const streams = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
+  for (let match = streams.exec(raw); match; match = streams.exec(raw)) {
+    let body: string;
+    try {
+      body = inflateSync(Buffer.from(match[1], "latin1")).toString("latin1");
+    } catch {
+      continue; // not a Flate content stream (an embedded image, a font file)
+    }
+    runs += body.match(/\]\s*TJ/g)?.length ?? 0;
+  }
+  return runs;
 }
 
 describe("formatWeeklyReportDate", () => {
@@ -225,6 +255,55 @@ describe("renderWeeklyReportPdf", () => {
     // Different content must still render to different bytes, or the key would stop addressing content.
     const edited = await renderWeeklyReportPdf(data({ photos: photos(3), workCompleted: "- Something else" }));
     expect(digest(edited)).not.toBe(digest(first));
+  });
+
+  it("keeps flowing a section past the old 6,000-character cap instead of truncating it", async () => {
+    // The defect this closes: the renderer stopped at 6,000 characters and printed "… (continued in the
+    // CRM)". The client's page has no cap and prints all 20,000, so the two surfaces a client compares side
+    // by side disagreed — and the marker pointed a CLIENT at a system they have no account for.
+    //
+    // Asserted as a DIFFERENCE between two lengths rather than an absolute page count. Under the old cap
+    // both of these truncated to the same 6,000 characters and rendered to the same number of pages, so
+    // this comparison is exactly what the bug defeats.
+    const section = (chars: number) => {
+      let text = "";
+      for (let i = 0; text.length < chars; i += 1) text += `- Bullet ${i} describing work carried out on site\n`;
+      return text.slice(0, chars);
+    };
+    const atOldCap = pdfPageCount(await renderWeeklyReportPdf(data({ workCompleted: section(6_000) })));
+    const wellPast = pdfPageCount(await renderWeeklyReportPdf(data({ workCompleted: section(18_000) })));
+    expect(wellPast).toBeGreaterThan(atOldCap);
+  });
+
+  it("bounds both surfaces at exactly the limit the API enforces", () => {
+    // Shared with the public web page, which calls this same helper. A cap on one surface only is how the
+    // two came to disagree in the first place.
+    const atLimit = "x".repeat(WEEKLY_REPORT_SECTION_MAX_CHARS);
+    expect(boundWeeklyReportSectionText(atLimit)).toBe(atLimit);
+
+    const overLimit = "y".repeat(WEEKLY_REPORT_SECTION_MAX_CHARS + 1);
+    const bounded = boundWeeklyReportSectionText(overLimit);
+    // Whatever the backstop says, it must not send a client to a system they have no account for.
+    expect(bounded).not.toContain("CRM");
+    expect(bounded).toContain("y".repeat(100));
+  });
+
+  it("stamps a superseded report inside the DOCUMENT, not only on the page it came from", async () => {
+    // A PDF is the half of this report that gets forwarded, printed and filed. A client reading a detached
+    // copy has nothing but the document itself to tell them a corrected version was issued after it.
+    const stamped = await renderWeeklyReportPdf(data({ superseded: true }));
+    const plain = await renderWeeklyReportPdf(data());
+    expect(pdfTextRuns(stamped)).toBeGreaterThan(pdfTextRuns(plain));
+    // …and it is the whole sentence, not an ellipsised fragment: the notice wraps over several lines of
+    // the right panel, so the extra runs are more than the one a single clipped line would add.
+    expect(pdfTextRuns(stamped) - pdfTextRuns(plain)).toBeGreaterThan(1);
+    expect(WEEKLY_REPORT_SUPERSEDED_NOTICE).toContain("newer version");
+  });
+
+  it("keeps the superseded stamp off the page count", async () => {
+    // Drawn into the free strip at the foot of the right panel. A stamp that pushed the layout would turn
+    // the one-page summary this format exists to be into two.
+    expect(pdfPageCount(await renderWeeklyReportPdf(data({ superseded: true })))).toBe(1);
   });
 
   it("survives a property name long enough to wrap out of its box", async () => {

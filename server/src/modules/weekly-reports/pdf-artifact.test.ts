@@ -6,6 +6,7 @@ import {
   isFutureRendererWeeklyReportPdfStale,
   needsWeeklyReportPdfRegeneration,
   weeklyReportPdfDigest,
+  weeklyReportPdfKeyMarksSuperseded,
   weeklyReportPdfR2Key,
   type WeeklyReportPdfArtifactState,
 } from "./pdf-artifact.js";
@@ -20,8 +21,10 @@ function state(overrides: Partial<WeeklyReportPdfArtifactState> = {}): WeeklyRep
     pdfRenderVersion: V,
     pdfGeneratedAt: RENDERED_AT,
     updatedAt: RENDERED_AT,
-    // The default is a SENT report, because that is the only state whose artifact is cacheable at all.
+    liveInputGeneration: new Date(RENDERED_AT.getTime() - 60_000),
+    // The default is a SENT report.
     contentFrozen: true,
+    superseded: false,
     ...overrides,
   };
 }
@@ -118,13 +121,74 @@ describe("needsWeeklyReportPdfRegeneration", () => {
     expect(needsWeeklyReportPdfRegeneration(state({ pdfRenderVersion: V + 1 }))).toBe(false);
   });
 
-  it("NEVER caches an artifact for a report that has not been sent", () => {
-    // Before send, the header block is read live from weekly_report_projects and public.users, and none of
-    // those tables touch weekly_reports.updated_at when they change. So renaming the property or swapping
-    // the superintendent would leave a cached PDF looking current while the web page — which reads live —
-    // showed something else, on two surfaces that are meant to be the same document.
-    expect(needsWeeklyReportPdfRegeneration(state({ contentFrozen: false }))).toBe(true);
-    expect(classifyWeeklyReportArtifact(state({ contentFrozen: false }))).toBe("stale");
+  it("CACHES the artifact of an approved report whose header has not moved", () => {
+    // The defect this closes: `contentFrozen` is `status === "sent"`, and an earlier revision treated any
+    // unfrozen report as stale unconditionally. An approved report is exactly what a client's link points
+    // at, so every anonymous download re-rendered and re-uploaded — landing on a NEW content-addressed key
+    // each time, because the render is not byte-reproducible, with nothing that ever deletes the last one.
+    expect(needsWeeklyReportPdfRegeneration(state({ contentFrozen: false }))).toBe(false);
+    expect(classifyWeeklyReportArtifact(state({ contentFrozen: false }))).toBe("current");
+  });
+
+  it("regenerates an approved report's artifact when a LIVE input moved", () => {
+    // The reason the unfrozen case was blanket-stale in the first place. Before send the render also reads
+    // weekly_report_projects, public.users and the selected files, none of which touches
+    // weekly_reports.updated_at — so renaming the property, swapping the superintendent or soft-deleting a
+    // photo has to be caught here, or the cached PDF says one thing while the live web page says another.
+    const edited = state({
+      contentFrozen: false,
+      liveInputGeneration: new Date(RENDERED_AT.getTime() + 1),
+    });
+    expect(needsWeeklyReportPdfRegeneration(edited)).toBe(true);
+    expect(classifyWeeklyReportArtifact(edited)).toBe("stale");
+  });
+
+  it("ignores a live-header edit once the report is SENT", () => {
+    // A sent report renders from its own snapshot. A PM swapped in September must not invalidate — or
+    // silently rewrite — the PDF a client was emailed in August.
+    expect(
+      needsWeeklyReportPdfRegeneration(
+        state({ contentFrozen: true, liveInputGeneration: new Date(RENDERED_AT.getTime() + 5_000) }),
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("a superseded report", () => {
+  // Being superseded moves no timestamp on this row — the correction is a different row entirely — so the
+  // generation comparison cannot see it. Without the key marker a report superseded after publication would
+  // keep serving the unmarked PDF, and a client forwarding it could not tell it had been replaced.
+  it("regenerates once when the stored artifact predates the correction", () => {
+    const s = state({ superseded: true });
+    expect(needsWeeklyReportPdfRegeneration(s)).toBe(true);
+    expect(classifyWeeklyReportArtifact(s)).toBe("stale");
+  });
+
+  it("is current again once the stored key records it", () => {
+    const s = state({
+      superseded: true,
+      pdfR2Key: weeklyReportPdfR2Key("dallas", "DFW-10432", "deal-1", "report-1", V, DIGEST, true),
+    });
+    expect(needsWeeklyReportPdfRegeneration(s)).toBe(false);
+    expect(classifyWeeklyReportArtifact(s)).toBe("current");
+  });
+
+  it("does not serve a superseded rendering for a report that is not superseded", () => {
+    const s = state({
+      superseded: false,
+      pdfR2Key: weeklyReportPdfR2Key("dallas", "DFW-10432", "deal-1", "report-1", V, DIGEST, true),
+    });
+    expect(needsWeeklyReportPdfRegeneration(s)).toBe(true);
+  });
+
+  it("keys the two renderings apart, so neither can overwrite the other", () => {
+    const plain = weeklyReportPdfR2Key("dallas", "D-1", "deal", "report", V, DIGEST);
+    const marked = weeklyReportPdfR2Key("dallas", "D-1", "deal", "report", V, DIGEST, true);
+    expect(marked).not.toBe(plain);
+    expect(weeklyReportPdfKeyMarksSuperseded(marked)).toBe(true);
+    expect(weeklyReportPdfKeyMarksSuperseded(plain)).toBe(false);
+    // Both are still the current publisher's shape, or the marked one would re-render forever.
+    expect(isContentAddressedWeeklyReportPdfKey(marked, V)).toBe(true);
   });
 });
 
@@ -144,10 +208,14 @@ describe("the rolling-deploy case", () => {
     expect(classifyWeeklyReportArtifact(s)).toBe("current");
   });
 
-  it("treats a newer-renderer artifact for an UNSENT report as retryable, never as current", () => {
-    // This instance cannot re-render it (the CAS would match nothing) and cannot vouch for it either,
-    // because an unsent report's live inputs move without touching updated_at.
-    const s = state({ pdfRenderVersion: V + 1, contentFrozen: false });
+  it("treats a newer-renderer artifact whose LIVE header moved as retryable, never as current", () => {
+    // This instance cannot re-render it (the CAS would match nothing) and cannot vouch for it either. The
+    // header rows are what makes the difference for an unsent report — updated_at alone would look fine.
+    const s = state({
+      pdfRenderVersion: V + 1,
+      contentFrozen: false,
+      liveInputGeneration: new Date(RENDERED_AT.getTime() + 5_000),
+    });
     expect(classifyWeeklyReportArtifact(s)).toBe("awaiting-newer-renderer");
   });
 });

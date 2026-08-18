@@ -1,4 +1,4 @@
-import type { WeeklyReportPdfContact } from "./pdf.js";
+import { boundWeeklyReportSectionText, type WeeklyReportPdfContact } from "./pdf.js";
 import type { WeeklyReportView } from "./report-view.js";
 
 // The page behind the client's link: server-rendered HTML, no JavaScript, no build step.
@@ -140,8 +140,12 @@ body {
 `;
 
 function section(title: string, body: string | null): string {
-  const content = body?.trim()
-    ? `<p class="prose">${escapeHtml(body.trim())}</p>`
+  // Bounded through the SAME helper the PDF uses. A cap on one surface only is how the two came to disagree
+  // once already: the renderer stopped at 6,000 characters while this page printed everything, on a
+  // document a client reads here and then downloads to compare.
+  const bounded = boundWeeklyReportSectionText(body);
+  const content = bounded
+    ? `<p class="prose">${escapeHtml(bounded)}</p>`
     : `<p class="prose empty">Nothing reported this week.</p>`;
   return `<section class="card"><h2>${escapeHtml(title)}</h2>${content}</section>`;
 }

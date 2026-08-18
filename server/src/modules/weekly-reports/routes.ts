@@ -59,23 +59,21 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3
  * drift into a UI that hides a page the API still serves. A superintendent's surface is T-Rock Cam via
  * /api/field, which is a separate mount with its own authorisation.
  */
-/**
- * Publication actions are mounted BEFORE the role gate, and authorised by ASSIGNMENT instead.
- *
- * The gate below admits only admin/director/rep, but the assigned PM is whoever the setup names — and
- * `ASSIGNABLE_ROLES` deliberately includes `construction` and `field_contractor`, which is what a real
- * PM usually is. Behind the gate, `canPublishWeeklyReport`'s assigned-PM branch was unreachable for
- * exactly the people the feature is built around: they could approve a report and then be unable to
- * send the client their link without leadership doing it for them.
- *
- * These three routes still sit on the tenant router (so `requireCrmUser` and office scoping apply) and
- * each one calls `loadPublishableReport`, which refuses anyone who is not the assigned PM or
- * leadership. The leadership dashboard, settings and setup CRUD stay behind the gate.
- */
-const publicationRouter = Router();
-router.use(publicationRouter);
-
 router.use(requireRole("admin", "director", "rep"));
+
+// THE SHARE-LINK ROUTES BELONG BEHIND THIS GATE TOO, AND A PREVIOUS REVISION HOISTED THEM AHEAD OF IT.
+//
+// The intent was to let an assigned PM on a `construction` role mint and revoke their own client link —
+// `ASSIGNABLE_ROLES` includes `construction` and `field_contractor`, which is what a real PM usually is.
+// Hoisting delivered none of that: `GET /reports/:id` and `POST /reports/:id/transition` stayed behind
+// the gate, and the client gates /projects/weekly-reports on the same three roles, so a construction PM
+// has no way to obtain a report id to pass in. What it DID deliver was every construction and
+// field_contractor user in the office reaching all three endpoints, each of which reveals its refusal
+// only after `loadPublishableReport` has taken FOR UPDATE on two rows.
+//
+// The assigned PM's publication action belongs on the FIELD router (/api/field/weekly-reports), where
+// that PM actually works and where their app already authenticates. Deliberately deferred to the
+// send-flow PR rather than half-built here.
 
 function requireUuid(value: unknown, label: string): string {
   if (typeof value !== "string" || !UUID_PATTERN.test(value)) {
@@ -479,7 +477,7 @@ async function loadPublishableReport(
  * Each call mints a NEW link rather than returning the existing one, so revoking the link you just emailed
  * cannot kill the one the client is already reading.
  */
-publicationRouter.post("/reports/:id/share-link", async (req, res, next) => {
+router.post("/reports/:id/share-link", async (req, res, next) => {
   try {
     const office = officeContextFrom(req);
     const actor = actorFrom(req);
@@ -514,14 +512,13 @@ publicationRouter.post("/reports/:id/share-link", async (req, res, next) => {
   }
 });
 
-publicationRouter.get("/reports/:id/share-link", async (req, res, next) => {
+router.get("/reports/:id/share-link", async (req, res, next) => {
   try {
     const office = officeContextFrom(req);
     const reportId = requireUuid(req.params.id, "id");
-    // The SAME assignment check the mint and revoke handlers run. This router sits ahead of the role
-    // gate so an assigned PM on a `construction` role can reach it — which also means every OTHER
-    // construction user in the office could reach it, and without this an unassigned one could hand it
-    // any report's uuid and read back who minted each link and its active/revoked/expiry history.
+    // The SAME assignment check the mint and revoke handlers run. The role gate is not enough on its
+    // own: it admits every rep in the office, and without this any of them could hand this route another
+    // rep's report uuid and read back who minted each link and its active/revoked/expiry history.
     // Archived setups are listable for the same reason they are revocable: you cannot withdraw a link
     // you cannot see.
     await loadPublishableReport(req, reportId, { allowInactiveProject: true });
@@ -533,7 +530,7 @@ publicationRouter.get("/reports/:id/share-link", async (req, res, next) => {
   }
 });
 
-publicationRouter.post("/reports/:id/share-link/:tokenId/revoke", async (req, res, next) => {
+router.post("/reports/:id/share-link/:tokenId/revoke", async (req, res, next) => {
   try {
     const office = officeContextFrom(req);
     const reportId = requireUuid(req.params.id, "id");

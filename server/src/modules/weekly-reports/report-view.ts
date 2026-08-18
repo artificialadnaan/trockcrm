@@ -213,6 +213,10 @@ export function buildWeeklyReportView(input: WeeklyReportViewInput): WeeklyRepor
       },
       photos: input.photos,
       version: integerOrNull(report.version) ?? 1,
+      // Read here so BOTH surfaces get it from the same place. The web page used to be told separately by
+      // its route while the PDF was never told at all, which is how a client could download an unmarked
+      // copy of a report the page had just warned them was out of date.
+      superseded: report.superseded_by_id != null,
       // The report's own content generation, so the same content always renders to the same bytes. See
       // WeeklyReportPdfData.creationDate — without a fixed value, content-addressing addresses the clock.
       // The epoch fallback only fires for a row with no updated_at, which the schema does not permit; it

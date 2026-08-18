@@ -1,4 +1,5 @@
 import PDFDocument from "pdfkit";
+import { WEEKLY_REPORT_SECTION_MAX_CHARS } from "@trock-crm/shared/types";
 import { TROCK_LOGO_PNG_BASE64 } from "../field/pdf-logo.js";
 import {
   loadPhotoBuffer,
@@ -55,6 +56,9 @@ const LEFT_PANEL_WIDTH = PROPERTY_BOX_LEFT - 12 - CONTENT_LEFT;
 const RIGHT_PANEL_LEFT = PROPERTY_BOX_LEFT;
 const RIGHT_PANEL_WIDTH = PROPERTY_BOX_WIDTH;
 
+/** Below the T-Rock team rows, above the revision line — the free strip at the foot of the right panel. */
+const SUPERSEDED_NOTICE_TOP = 344;
+
 const WORK_BOX_TOP = 132;
 const WORK_BOX_HEIGHT = 126;
 const LOOKAHEAD_BOX_TOP = 294;
@@ -100,15 +104,30 @@ const BODY_FONT_SIZE = 8.5;
 const BODY_LINE_GAP = 1.5;
 
 /**
- * Ceiling on ONE section's text before the renderer stops paginating it.
+ * Ceiling on ONE section's text — the API's own limit, deliberately not a tighter one.
  *
- * The service already caps a section at 20,000 characters, which is roughly 30 continuation pages of
- * 8.5pt text — far past the point where a client-facing weekly update is still a weekly update, and a
- * lot of buffered pages for the worker that renders it. Past this the tail is dropped with a visible
- * marker rather than silently, so the reader knows there is more and can ask for it.
+ * A previous revision stopped at 6,000 characters and printed a marker. The client's web page has no such
+ * cap, so a superintendent who wrote 8,000 characters produced a PDF that silently said less than the page
+ * it is attached to, on two surfaces report-view.ts requires to agree absolutely. Everything the API
+ * accepts now flows onto continuation pages instead; 20,000 characters is about 30 sheets of 8.5pt text,
+ * which is a lot of paper but is the superintendent's account of the week and the client's to read.
+ *
+ * The marker below is therefore unreachable for anything written through the API, and remains only as a
+ * backstop for a row written some other way. Its wording does NOT point at the CRM: the reader is a client
+ * with no account there, and telling them to go somewhere they cannot go is worse than saying nothing.
  */
-const MAX_SECTION_RENDER_CHARS = 6_000;
-const TRUNCATION_NOTICE = "… (continued in the CRM)";
+const MAX_SECTION_RENDER_CHARS = WEEKLY_REPORT_SECTION_MAX_CHARS;
+const TRUNCATION_NOTICE = "… (this section was too long to print in full)";
+
+/**
+ * What a reader on a superseded link is told — ONE sentence, printed by both renderers.
+ *
+ * A correction clones the report to a new version and stamps `superseded_by_id` on the original. The
+ * original link keeps resolving, because a client who bookmarked it must never hit a 404, but neither the
+ * page NOR the attached PDF may present superseded content as current.
+ */
+export const WEEKLY_REPORT_SUPERSEDED_NOTICE =
+  "A newer version of this report has since been issued. Please refer to the most recent email.";
 
 export interface WeeklyReportPdfPhoto {
   fileId: string;
@@ -146,6 +165,15 @@ export interface WeeklyReportPdfData {
   photos: WeeklyReportPdfPhoto[];
   /** Printed as a revision banner when > 1. A client who kept the first link must see which one this is. */
   version: number;
+  /**
+   * True once a correction has replaced this version.
+   *
+   * Part of the render input rather than something stamped on afterwards: the artifact is immutable and
+   * content-addressed, so a stored PDF can never be annotated in place. See WeeklyReportPdfArtifactState —
+   * the stored key records which of the two documents it holds, so a report that becomes superseded after
+   * publication re-renders exactly once and then stays cached.
+   */
+  superseded: boolean;
   /**
    * The PDF's `/CreationDate`, pinned to the report's content generation rather than to the wall clock.
    *
@@ -246,7 +274,14 @@ function bodyMeasurer(doc: PDFKit.PDFDocument, fonts: ReportFontSet, width: numb
   };
 }
 
-function boundSectionText(value: string | null | undefined): string {
+/**
+ * The exact text BOTH surfaces print for one section.
+ *
+ * Exported and used by the public web page too, so the PDF and the page can never disagree about how much
+ * of a section a client is shown. See MAX_SECTION_RENDER_CHARS: for anything the API accepted this is the
+ * trimmed value unchanged.
+ */
+export function boundWeeklyReportSectionText(value: string | null | undefined): string {
   const text = typeof value === "string" ? value.trim() : "";
   if (text.length <= MAX_SECTION_RENDER_CHARS) return text;
   return `${text.slice(0, MAX_SECTION_RENDER_CHARS).trimEnd()}\n${TRUNCATION_NOTICE}`;
@@ -470,12 +505,12 @@ function drawSummaryPage(doc: PDFKit.PDFDocument, fonts: ReportFontSet, data: We
   const issuesBoxWidth = ISSUES_PANEL_WIDTH - PANEL_PAD * 2 + 4;
 
   const work = splitTextAtHeight(
-    boundSectionText(data.workCompleted),
+    boundWeeklyReportSectionText(data.workCompleted),
     WORK_BOX_HEIGHT - 12,
     bodyMeasurer(doc, fonts, textWidth - 12),
   );
   const lookAhead = splitTextAtHeight(
-    boundSectionText(data.nextWeekLookAhead),
+    boundWeeklyReportSectionText(data.nextWeekLookAhead),
     LOOKAHEAD_BOX_HEIGHT - 12,
     bodyMeasurer(doc, fonts, textWidth - 12),
   );
@@ -484,7 +519,7 @@ function drawSummaryPage(doc: PDFKit.PDFDocument, fonts: ReportFontSet, data: We
   // box, and the client silently lost the tail of the concerns section — the exact failure the overflow
   // pages exist to prevent, reintroduced by measuring the wrong rectangle.
   const issues = splitTextAtHeight(
-    boundSectionText(data.issuesConcerns),
+    boundWeeklyReportSectionText(data.issuesConcerns),
     ISSUES_BOX_HEIGHT - 12,
     bodyMeasurer(doc, fonts, issuesBoxWidth - 12),
   );
@@ -512,6 +547,22 @@ function drawSummaryPage(doc: PDFKit.PDFDocument, fonts: ReportFontSet, data: We
 
   drawUnderlinedHeading(doc, fonts, "T-Rock Project Team:", rightLeft, BODY_TOP + 176, 12, rightWidth);
   drawContactRows(doc, fonts, data.trockTeam, rightLeft, BODY_TOP + 200, rightWidth, 18);
+
+  // The superseded stamp goes IN THE DOCUMENT, not only on the web page it is downloaded from. A PDF is
+  // the half of this report that gets forwarded, printed and filed, and a client reading a detached copy
+  // has nothing else to tell them a corrected version was issued after it. Same sentence as the page's
+  // banner, so the two do not become two different claims about the same fact.
+  if (data.superseded) {
+    doc.save();
+    doc.font(fonts.bold).fontSize(8).fillColor(BRAND_RED);
+    doc.text(WEEKLY_REPORT_SUPERSEDED_NOTICE, rightLeft, SUPERSEDED_NOTICE_TOP, {
+      width: rightWidth,
+      height: BODY_BOTTOM - 24 - SUPERSEDED_NOTICE_TOP,
+      lineGap: 1,
+      ellipsis: true,
+    });
+    doc.restore();
+  }
 
   if (data.version > 1) {
     doc.save();

@@ -3,7 +3,7 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { pool } from "../../db.js";
 import { weeklyReportPublicLimiter } from "../../middleware/rate-limit.js";
-import { generateEvidenceJpeg } from "../../lib/image-thumbnail.js";
+import { generateEvidenceJpeg, isHeicOrHeif, withHeicDecodePermit } from "../../lib/image-thumbnail.js";
 import {
   buildContentDisposition,
   getObjectBuffer,
@@ -11,6 +11,7 @@ import {
   isR2Configured,
   ObjectTooLargeError,
 } from "../../lib/r2-client.js";
+import { WEEKLY_REPORT_SUPERSEDED_NOTICE } from "./pdf.js";
 import { withWeeklyReportOfficeClient } from "./office-connection.js";
 import {
   loadWeeklyReportPdfSource,
@@ -56,6 +57,25 @@ const MAX_PHOTO_SOURCE_BYTES = 40 * 1024 * 1024;
 /** Sharp on a retina phone at full container width, without shipping a 12-megapixel original. */
 const VIEWER_PHOTO_MAX_EDGE = 1400;
 
+/**
+ * Ceiling on ONE photo request, covering the HEIC permit wait, the R2 read and the re-encode together.
+ *
+ * A page of twenty HEIC photos fires twenty parallel requests at this route, and every HEIC decode in the
+ * process queues on ONE permit (image-thumbnail.ts). Without a deadline the twentieth waits for the other
+ * nineteen decodes however long they take, holding a socket the whole time — and the queue it is sitting in
+ * is shared with the field scorecard and AI-report renders, so an unauthenticated page can hold those up
+ * too. Generous enough that a legitimately slow decode still succeeds; finite so the queue always drains.
+ */
+const VIEWER_PHOTO_TIMEOUT_MS = 20_000;
+/**
+ * Ceiling on streaming one stored PDF out of R2.
+ *
+ * Same reasoning one layer up: this route is unauthenticated, the S3 client carries no request timeout, and
+ * a GET that R2 accepts and then stalls mid-body holds the request and its socket with nothing able to
+ * abort it. Wider than the photo budget because a photo sheet report is several megabytes.
+ */
+const PDF_STREAM_TIMEOUT_MS = 60_000;
+
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** public.weekly_report_tokens is schema-qualified and needs no tenant search_path, so it reads off the pool. */
@@ -71,6 +91,39 @@ weeklyReportPublicRoutes.use((_req, res, next) => {
   next();
 });
 weeklyReportPublicRoutes.use(weeklyReportPublicLimiter);
+
+/**
+ * Reject as soon as `signal` fires, whatever `work` is still waiting on.
+ *
+ * Needed because the HEIC permit queue is not cancellable and must not be made so — the field scorecard and
+ * AI-report renders depend on its current behaviour. This does not shorten the queue; it releases the
+ * REQUEST from it. The abandoned work stays attached (so a later rejection is never unhandled) and, because
+ * the deadline is re-checked the moment the permit is granted, an abandoned waiter gives it back rather
+ * than fetching and decoding for a reader who has gone.
+ *
+ * Exported for test: its failure mode — an abandoned promise whose later rejection nothing is listening for
+ * — takes the process down, and it does so long after the request that started it was answered.
+ */
+export function withDeadline<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+  });
+}
 
 function sendHtml(res: Response, status: number, html: string) {
   res.status(status);
@@ -204,12 +257,8 @@ weeklyReportPublicRoutes.get("/:token", async (req, res) => {
         view: source.view,
         photoUrl: (fileId) => `/wr/${encodeURIComponent(rawToken)}/photos/${encodeURIComponent(fileId)}`,
         pdfUrl: `/wr/${encodeURIComponent(rawToken)}/pdf`,
-        // A correction clones the report to a new version and stamps superseded_by_id on the original. The
-        // original link keeps resolving — a client who bookmarked it must never hit a 404 — but it says so
-        // rather than presenting superseded content as current.
-        supersededNotice: source.supersededById
-          ? "A newer version of this report has since been issued. Please refer to the most recent email."
-          : null,
+        // The same sentence the PDF prints, from the same constant — see WEEKLY_REPORT_SUPERSEDED_NOTICE.
+        supersededNotice: source.view.pdf.superseded ? WEEKLY_REPORT_SUPERSEDED_NOTICE : null,
       }),
     );
   } catch (error) {
@@ -232,23 +281,30 @@ weeklyReportPublicRoutes.get("/:token/pdf", async (req, res) => {
 
     // This CAN render on an anonymous request, which is a deliberate trade rather than an oversight. A
     // client whose PDF is missing (the send job failed, or the renderer was upgraded) must still be able to
-    // download their report. The exposure is bounded on three sides: a SENT report is immutable, so its
-    // artifact stays current after the first render; the single-flight coalescer collapses concurrent
-    // requests for the same generation into one render; and the router's IP rate limit caps how often a
-    // link holder can ask at all.
+    // download their report. The exposure is bounded on three sides: the artifact is CACHED for every
+    // shareable status, approved as well as sent, so a link holder can only cause a render when the report
+    // has actually changed since the last one; the single-flight coalescer collapses concurrent requests
+    // for the same generation into one render; and the router's IP rate limit caps how often a link holder
+    // can ask at all. Caching approved reports is not an optimisation — without it every request on this
+    // route rendered again and uploaded another content-addressed object that nothing ever deletes.
     const r2Key = await resolveArtifactKey(token.officeSlug, source);
 
     // STREAMED, never presigned. A presigned R2 URL embeds the object key, which carries the deal number —
     // an internal identifier this surface has no reason to hand a client. Same reasoning as the public
     // photo proxy.
-    const object = await getObjectStream(r2Key);
+    //
+    // On a deadline covering BOTH halves. R2 can answer the GET promptly and then stall mid-body, which is
+    // the shape that pins a request and its socket open indefinitely, so the signal goes to the request and
+    // to the pipe that drains it.
+    const deadline = AbortSignal.timeout(PDF_STREAM_TIMEOUT_MS);
+    const object = await getObjectStream(r2Key, { signal: deadline });
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", buildContentDisposition("attachment", weeklyReportPdfFilename(source.view)));
     res.setHeader("Cache-Control", "no-store, private");
     res.setHeader("X-Content-Type-Options", "nosniff");
     // pipeline rather than a hand-rolled write/drain loop: it propagates a source error and destroys both
     // ends, where an awaited "drain" that never arrives would hang the request until the socket timed out.
-    await pipeline(Readable.from(object.stream), res);
+    await pipeline(Readable.from(object.stream), res, { signal: deadline });
   } catch (error) {
     if (res.headersSent) {
       // Bytes are already on the wire, so the status cannot change — abort rather than append an HTML page
@@ -280,8 +336,18 @@ weeklyReportPublicRoutes.get("/:token/photos/:fileId", async (req, res) => {
     // Shape-gated before the query, exactly as the token is. Binding a non-UUID to `$2::uuid` raises 22P02,
     // which costs a pooled connection and a BEGIN/ROLLBACK per request and surfaces as a 500 — on a route
     // anyone can call up to the rate limit.
-    if (!UUID_PATTERN.test(fileId) || !isR2Configured()) {
+    //
+    // PERMANENT, so it is the one failure on this route that may be cached: no id of this shape will ever
+    // name a photo.
+    if (!UUID_PATTERN.test(fileId)) {
       res.status(404).end();
+      return;
+    }
+    // Storage being unconfigured is OUR outage, not a missing photo — 503 and no-store, so a reader whose
+    // page loaded during a bad deploy is not left with the broken image frozen in their browser.
+    if (!isR2Configured()) {
+      res.setHeader("Cache-Control", "no-store, private");
+      res.status(503).end();
       return;
     }
 
@@ -314,26 +380,62 @@ weeklyReportPublicRoutes.get("/:token/photos/:fileId", async (req, res) => {
       return;
     }
 
-    let buffer: Buffer;
-    try {
-      ({ buffer } = await getObjectBuffer(photo.r2_key, { maxBytes: MAX_PHOTO_SOURCE_BYTES }));
-    } catch (error) {
-      if (error instanceof ObjectTooLargeError) {
-        res.setHeader("Cache-Control", "no-store, private");
-        res.status(404).end();
-        return;
-      }
-      throw error;
-    }
+    // ONE deadline over everything that follows — the permit wait, the R2 read and the decode.
+    const deadline = AbortSignal.timeout(VIEWER_PHOTO_TIMEOUT_MS);
 
-    // ALWAYS re-encoded, never proxied raw. The re-encode is what strips EXIF — including the GPS
-    // coordinates a phone writes into every jobsite photo — and it is also what makes a HEIC or WebP
-    // original viewable in a client's browser at all. A decode failure 404s rather than falling back to the
-    // original bytes, which would defeat the stripping it is the fallback for.
-    let jpeg: Buffer;
+    /** null means "this object cannot be turned into a picture", which is a 404. Anything else throws. */
+    const transcode = async (heicDecodePermit?: symbol): Promise<Buffer | null> => {
+      // Queued behind the permit past the deadline: hand it straight back rather than starting a fetch
+      // nobody is waiting on any more.
+      deadline.throwIfAborted();
+      let buffer: Buffer;
+      try {
+        ({ buffer } = await getObjectBuffer(photo.r2_key, {
+          maxBytes: MAX_PHOTO_SOURCE_BYTES,
+          signal: deadline,
+        }));
+      } catch (error) {
+        if (error instanceof ObjectTooLargeError) return null;
+        throw error;
+      }
+      // ALWAYS re-encoded, never proxied raw. The re-encode is what strips EXIF — including the GPS
+      // coordinates a phone writes into every jobsite photo — and it is also what makes a HEIC or WebP
+      // original viewable in a client's browser at all. A decode failure 404s rather than falling back to
+      // the original bytes, which would defeat the stripping it is the fallback for.
+      try {
+        return await generateEvidenceJpeg(buffer, photo.mime_type, {
+          maxEdge: VIEWER_PHOTO_MAX_EDGE,
+          quality: 78,
+          heicDecodePermit,
+        });
+      } catch {
+        return null;
+      }
+    };
+
+    // THE PERMIT IS TAKEN BEFORE THE R2 GET, not around the decode — the rule image-thumbnail.ts states
+    // and the scorecard resolver follows. generateEvidenceJpeg would otherwise acquire it for us, but only
+    // AFTER this request had already pulled up to 40 MB of original into memory: twenty HEIC photos on one
+    // client page would then hold twenty source buffers while queuing on a semaphore that admits one.
+    let jpeg: Buffer | null;
     try {
-      jpeg = await generateEvidenceJpeg(buffer, photo.mime_type, { maxEdge: VIEWER_PHOTO_MAX_EDGE, quality: 78 });
-    } catch {
+      jpeg = await withDeadline(
+        isHeicOrHeif(photo.mime_type) ? withHeicDecodePermit(transcode) : transcode(),
+        deadline,
+      );
+    } catch (error) {
+      if (!deadline.aborted) throw error;
+      // Gave up rather than queued forever. no-store for the same reason as every other transient failure
+      // here, and 504 rather than 404 because the photo is fine and the next request will very likely get it.
+      res.setHeader("Cache-Control", "no-store, private");
+      res.status(504).end();
+      return;
+    }
+    if (!jpeg) {
+      // Oversized original or bytes sharp cannot decode. no-store because a decode failure is not reliably
+      // permanent — sharp fails transiently under memory pressure, and a cached 404 would freeze the broken
+      // image in this reader's browser long after the process recovered.
+      res.setHeader("Cache-Control", "no-store, private");
       res.status(404).end();
       return;
     }

@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { WEEKLY_REPORT_SECTION_MAX_CHARS } from "@trock-crm/shared/types";
+import { boundWeeklyReportSectionText } from "./pdf.js";
 import {
   escapeHtml,
   renderWeeklyReportUnavailableHtml,
@@ -44,6 +46,7 @@ function view(overrides: Partial<WeeklyReportView["pdf"]> = {}, top: Partial<Wee
         },
       ],
       version: 1,
+      superseded: false,
       creationDate: new Date("2026-08-13T21:00:00.000Z"),
       ...overrides,
     },
@@ -92,6 +95,15 @@ describe("the client-facing report page", () => {
 
   it("is marked noindex — a forwarded link must not reach a search index", () => {
     expect(render()).toContain('<meta name="robots" content="noindex, nofollow, noarchive">');
+  });
+
+  it("prints a section through the SAME bound the PDF uses, so the two cannot disagree", () => {
+    // report-view.ts: the page and the attachment are one document seen twice, and a client compares them
+    // side by side. The PDF once stopped at 6,000 characters while this page printed everything.
+    const long = "z".repeat(WEEKLY_REPORT_SECTION_MAX_CHARS + 500);
+    const html = render({ workCompleted: long });
+    expect(html).toContain(boundWeeklyReportSectionText(long));
+    expect(html).not.toContain(long);
   });
 
   it("offers the PDF and loads photos through the token, never from R2 directly", () => {

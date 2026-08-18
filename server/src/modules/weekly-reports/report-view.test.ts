@@ -81,6 +81,19 @@ describe("buildWeeklyReportView — a draft reads the live setup row", () => {
     ]);
   });
 
+  it("carries the superseded flag into the render input for BOTH surfaces", () => {
+    // It used to reach only the web page, told separately by its route, so a client who downloaded the
+    // attachment from a superseded link got an unmarked copy of a report that had been replaced.
+    expect(buildWeeklyReportView({ report: report(), project: LIVE_PROJECT, photos: [] }).pdf.superseded).toBe(false);
+    expect(
+      buildWeeklyReportView({
+        report: report({ superseded_by_id: "00000000-0000-4000-8000-000000000009" }),
+        project: LIVE_PROJECT,
+        photos: [],
+      }).pdf.superseded,
+    ).toBe(true);
+  });
+
   it("prints the note where a date is unknown, as the reference report does", () => {
     const view = buildWeeklyReportView({ report: report(), project: LIVE_PROJECT, photos: [] });
     expect(view.pdf.schedule.contractDate).toBe("7/8/26");

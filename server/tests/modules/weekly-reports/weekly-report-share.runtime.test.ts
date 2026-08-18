@@ -27,6 +27,7 @@ import {
   loadWeeklyReportPdfSource,
   publishWeeklyReportPdfKey,
 } from "../../../src/modules/weekly-reports/pdf-service.js";
+import { CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION } from "../../../src/modules/weekly-reports/pdf-artifact.js";
 import {
   hashWeeklyReportToken,
   isWeeklyReportTokenShape,
@@ -189,16 +190,18 @@ async function sendReport(reportId: string) {
 }
 
 const ARTIFACT_DIGEST = "a".repeat(64);
+// Derived from the render version rather than written out, so a renderer bump does not leave this suite
+// asserting against a key shape the publisher no longer emits.
 const artifactKey = (reportId: string) =>
-  `office_dallas/deals/DFW-10432/documents/weekly-reports/${reportId}.${ARTIFACT_DIGEST}.v1.pdf`;
+  `office_dallas/deals/DFW-10432/documents/weekly-reports/${reportId}.${ARTIFACT_DIGEST}.v${CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION}.pdf`;
 
 /** Stand in for the publisher: stamp a content-addressed key at the row's current generation. */
 async function stampArtifact(reportId: string) {
   await pg.query(
     `UPDATE office_dallas.weekly_reports
-        SET pdf_r2_key = $2, pdf_r2_bucket = 'test', pdf_generated_at = now(), pdf_render_version = 1
+        SET pdf_r2_key = $2, pdf_r2_bucket = 'test', pdf_generated_at = now(), pdf_render_version = $3
       WHERE id = $1::uuid`,
-    [reportId, artifactKey(reportId)],
+    [reportId, artifactKey(reportId), CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION],
   );
 }
 
@@ -449,20 +452,38 @@ describe("the PDF source", () => {
     expect(await loadWeeklyReportPdfSource(db, U("dead1"))).toBeNull();
   });
 
-  it("is stale for an APPROVED report even with a fresh artifact stamped on it", async () => {
-    // Before send, the header block is read live from weekly_report_projects and public.users, and neither
-    // touches weekly_reports.updated_at. A cached PDF would therefore keep looking current while the client's
-    // page — which reads live — showed a different property name, PM or contract date.
+  it("caches an APPROVED report's artifact, and drops it when the LIVE header moves", async () => {
+    // Before send the header block is read live from weekly_report_projects and public.users, and neither
+    // touches weekly_reports.updated_at. An earlier revision answered that by never caching an unfrozen
+    // report at all — which made every anonymous request on the client's link re-render and re-upload,
+    // forever. The answer is to compare against those rows' generations too.
     const project = await seedProject();
     const id = await seedDraft(project.id);
     await transitionWeeklyReport(db, id, "pending_review", SUPER_ACTOR);
     await transitionWeeklyReport(db, id, "approved", PM_ACTOR);
     await stampArtifact(id);
+    expect((await loadWeeklyReportPdfSource(db, id))!.recheck).toBe("current");
+
+    // Rename the property on the setup row. weekly_reports.updated_at does not move; the PDF must still go.
+    await pg.query(
+      `UPDATE office_dallas.weekly_report_projects
+          SET property_display_name = 'Renamed', updated_at = now() + interval '1 second'
+        WHERE id = $1::uuid`,
+      [project.id],
+    );
     expect((await loadWeeklyReportPdfSource(db, id))!.recheck).toBe("stale");
 
-    // Once sent, everything the render reads is frozen, so the same artifact becomes trustworthy.
+    // Once sent the render comes from the report's own snapshot, so a later header edit stops counting —
+    // a PM swapped in September must not rewrite the PDF a client was emailed in August.
+    await stampArtifact(id);
     await transitionWeeklyReport(db, id, "sent", PM_ACTOR);
     await stampArtifact(id);
+    await pg.query(
+      `UPDATE office_dallas.weekly_report_projects
+          SET property_display_name = 'Renamed again', updated_at = now() + interval '1 hour'
+        WHERE id = $1::uuid`,
+      [project.id],
+    );
     expect((await loadWeeklyReportPdfSource(db, id))!.recheck).toBe("current");
   });
 
@@ -504,7 +525,11 @@ describe("publishing an artifact", () => {
          FROM office_dallas.weekly_reports WHERE id = $1::uuid`,
       [id],
     );
-    expect(row.rows[0]).toMatchObject({ pdf_r2_key: artifactKey(id), pdf_r2_bucket: "test-bucket", pdf_render_version: 1 });
+    expect(row.rows[0]).toMatchObject({
+      pdf_r2_key: artifactKey(id),
+      pdf_r2_bucket: "test-bucket",
+      pdf_render_version: CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION,
+    });
     expect((row.rows[0] as any).pdf_generated_at).not.toBeNull();
     // The artifact it just published must read as current, or every download re-renders forever.
     expect((await loadWeeklyReportPdfSource(db, id))!.recheck).toBe("current");
@@ -533,15 +558,16 @@ describe("publishing an artifact", () => {
 
   it("hands back a NEWER renderer's artifact rather than walking the row backwards", async () => {
     // A rolling deploy: an instance on the old renderer finishes late. Its bytes are not wrong, but the
-    // row already points at a v2 artifact and must not be downgraded to v1.
+    // row already points at a NEWER artifact and must not be walked backwards.
+    const newerVersion = CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION + 1;
     const id = await sentReport();
     const generation = await currentGeneration(id);
-    const newerKey = `office_dallas/deals/DFW-10432/documents/weekly-reports/${id}.${"b".repeat(64)}.v2.pdf`;
+    const newerKey = `office_dallas/deals/DFW-10432/documents/weekly-reports/${id}.${"b".repeat(64)}.v${newerVersion}.pdf`;
     await pg.query(
       `UPDATE office_dallas.weekly_reports
-          SET pdf_r2_key = $2, pdf_r2_bucket = 'test', pdf_generated_at = now(), pdf_render_version = 2
+          SET pdf_r2_key = $2, pdf_r2_bucket = 'test', pdf_generated_at = now(), pdf_render_version = $3
         WHERE id = $1::uuid`,
-      [id, newerKey],
+      [id, newerKey, newerVersion],
     );
 
     const key = await publishWeeklyReportPdfKey(db, {
@@ -552,7 +578,7 @@ describe("publishing an artifact", () => {
     });
     expect(key).toBe(newerKey);
     const row = await pg.query(`SELECT pdf_render_version FROM office_dallas.weekly_reports WHERE id = $1::uuid`, [id]);
-    expect((row.rows[0] as any).pdf_render_version).toBe(2);
+    expect((row.rows[0] as any).pdf_render_version).toBe(newerVersion);
   });
 
   it("404s a report that vanished during the render", async () => {

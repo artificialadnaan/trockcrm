@@ -4,6 +4,7 @@ import { withWeeklyReportOfficeClient } from "./office-connection.js";
 import {
   CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION,
   classifyWeeklyReportArtifact,
+  weeklyReportContentGeneration,
   weeklyReportPdfDigest,
   weeklyReportPdfR2Key,
   type WeeklyReportArtifactRecheck,
@@ -48,6 +49,20 @@ const PHOTO_SELECT = `
    ORDER BY wrp.sort_order ASC, wrp.created_at ASC
 `;
 
+/** The latest of several nullable timestamps, or null when every one of them is absent or unparseable. */
+function newestTimestamp(values: Array<Date | string | null | undefined>): Date | string | null {
+  let newest: Date | string | null = null;
+  let newestMs = Number.NEGATIVE_INFINITY;
+  for (const value of values) {
+    if (value == null) continue;
+    const ms = value instanceof Date ? value.getTime() : new Date(value).getTime();
+    if (Number.isNaN(ms) || ms <= newestMs) continue;
+    newest = value;
+    newestMs = ms;
+  }
+  return newest;
+}
+
 async function loadPhotos(client: QueryExecutor, reportId: string): Promise<WeeklyReportPdfPhoto[]> {
   const result = await client.query(PHOTO_SELECT, [reportId]);
   return result.rows.map((row: Record<string, any>) => ({
@@ -78,6 +93,18 @@ export async function loadWeeklyReportPdfSource(
             proj.property_display_name, proj.client_name,
             proj.client_doc_name, proj.client_pm_name, proj.client_rm_name, proj.client_cm_name,
             proj.trock_pm_user_id, proj.trock_super_user_id,
+            -- The generations of everything the render reads that is NOT the report row. None of these
+            -- touches weekly_reports.updated_at when it changes; see liveInputGeneration.
+            proj.updated_at  AS project_updated_at,
+            pm.updated_at    AS trock_pm_updated_at,
+            sup.updated_at   AS trock_super_updated_at,
+            -- Deliberately NOT filtered to the photos the render keeps. A soft delete leaves the row in
+            -- place and stamps deleted_at without touching updated_at, so counting only live photos would
+            -- miss the very change that removes one from the document.
+            (SELECT max(GREATEST(f.updated_at, COALESCE(f.deleted_at, f.updated_at)))
+               FROM weekly_report_photos wrp
+               JOIN files f ON f.id = wrp.file_id
+              WHERE wrp.weekly_report_id = wr.id) AS photo_updated_at,
             proj.contract_date, proj.contract_date_note,
             proj.project_start_date, proj.project_start_date_note,
             proj.project_completion_date, proj.project_completion_date_note,
@@ -110,8 +137,15 @@ export async function loadWeeklyReportPdfSource(
     pdfRenderVersion: Number(row.pdf_render_version ?? 0),
     pdfGeneratedAt: row.pdf_generated_at ?? null,
     updatedAt: row.updated_at ?? null,
+    liveInputGeneration: newestTimestamp([
+      row.project_updated_at,
+      row.trock_pm_updated_at,
+      row.trock_super_updated_at,
+      row.photo_updated_at,
+    ]),
     // Only a sent report has every input frozen — see WeeklyReportPdfArtifactState.contentFrozen.
     contentFrozen: row.status === "sent",
+    superseded: row.superseded_by_id != null,
   };
 
   return {
@@ -233,9 +267,15 @@ export async function publishWeeklyReportPdf(
   if (!isR2Configured()) {
     throw new AppError(503, "File storage is not configured, so the report PDF cannot be produced.");
   }
+  // TWO generations, deliberately. The CAS can only be conditioned on the report row's own updated_at,
+  // because that is the only row it locks; the COALESCER keys on everything the render actually reads, so a
+  // request arriving after a header edit — or after a correction — does not join an in-flight render of the
+  // document that preceded it and get handed the wrong key back.
   const generation = generationToken(source.updatedAt);
+  const contentGeneration = generationToken(weeklyReportContentGeneration(source.state));
+  const rendering = source.state.superseded ? "superseded" : "current";
   return coalesceWeeklyReportRender(
-    `${officeSlug}:${source.reportId}:${CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION}:${generation}`,
+    `${officeSlug}:${source.reportId}:${CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION}:${contentGeneration}:${rendering}`,
     async () => {
       // Render FIRST, then derive the key from the bytes that were actually produced, so two instances
       // rendering different content can never collide on one object name.
@@ -257,6 +297,7 @@ export async function publishWeeklyReportPdf(
         source.reportId,
         CURRENT_WEEKLY_REPORT_PDF_RENDER_VERSION,
         weeklyReportPdfDigest(pdf),
+        source.state.superseded,
       );
       await putObject(r2Key, pdf, "application/pdf", { signal: deadline });
 

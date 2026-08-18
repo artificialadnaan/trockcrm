@@ -344,14 +344,14 @@ describe("project setup", () => {
     expect(updated.trockPmUserId).toBe(PM);
     expect(updated.projectedDurationWeeks).toBe(19);
     expect(updated.clientTeam.doc.name).toBe("Jay Stauble");
-  }, OFFICE);
+  });
 
   it("distinguishes an omitted field from an explicit null", async () => {
     const created = await seedProject();
     const cleared = await updateWeeklyReportProject(db, created.id, { clientName: null }, OFFICE);
     expect(cleared.clientName).toBeNull();
     expect(cleared.propertyDisplayName).toBe("4123 Cedar Springs");
-  }, OFFICE);
+  });
 
   it("validates cross-field rules against the MERGED row, not the patch", async () => {
     const created = await seedProject();
@@ -361,14 +361,14 @@ describe("project setup", () => {
       400,
       /cannot precede/i,
     );
-  }, OFFICE);
+  });
 
   it("swapping the PM mid-project changes who is assigned, not the history", async () => {
     const created = await seedProject();
     const updated = await updateWeeklyReportProject(db, created.id, { trockPmUserId: DIRECTOR }, OFFICE);
     expect(updated.trockPmUserId).toBe(DIRECTOR);
     expect(updated.trockPmName).toBe("Takashi");
-  }, OFFICE);
+  });
 
   it("soft-deletes so past reports keep resolving", async () => {
     const created = await seedProject();
@@ -503,7 +503,7 @@ describe("draft creation", () => {
       409,
       /paused/i,
     );
-  }, OFFICE);
+  });
 });
 
 async function seedDraft(projectId: string, weekOf = WEEK_OF, submissionId = U("cccc1")) {
@@ -598,7 +598,7 @@ describe("the PM gate", () => {
     await updateWeeklyReportProject(db, project.id, { projectedDurationWeeks: 40 }, OFFICE);
     const reread = await getWeeklyReportDetail(db, id);
     expect(reread!.remainingWeeks).toBe(14);
-  }, OFFICE);
+  });
 
   it("reports the full duration remaining for a project that has not started", async () => {
     // The reference PDF shows Remaining 0 against Projected 19 for a "TBD Permit" start. That is a blank
@@ -892,7 +892,7 @@ describe("dashboard", () => {
     await updateWeeklyReportProject(db, project.id, { status: "paused" }, OFFICE);
     const dashboard = await getWeeklyReportDashboard(db, { asOf: WEEK_OF });
     expect(dashboard.rows).toHaveLength(0);
-  }, OFFICE);
+  });
 
   it("sorts the most overdue first", async () => {
     await seedProject();
@@ -1106,7 +1106,7 @@ describe("review findings", () => {
     expect(reread!.snapshot).toMatchObject({
       clientName: "Mack Real Estate Group",
       trockTeam: { pmName: "Adam Sherwood" },
-    }, OFFICE);
+    });
   });
 
   it("rejects a transition raced against a status that has since moved on", async () => {
@@ -1222,14 +1222,14 @@ describe("review findings", () => {
     await updateWeeklyReportProject(db, project.id, { status: "completed" }, OFFICE);
     const [summary] = await listWeeklyReportProjectSummaries(db, WEEK_OF);
     expect(summary!.nextDueWeekOf).toBeNull();
-  }, OFFICE);
+  });
 
   it("reports no next-due date past the cadence end date", async () => {
     const project = await seedProject();
     await updateWeeklyReportProject(db, project.id, { cadenceEndDate: "2026-08-06" }, OFFICE);
     const [summary] = await listWeeklyReportProjectSummaries(db, WEEK_OF);
     expect(summary!.nextDueWeekOf).toBeNull();
-  }, OFFICE);
+  });
 });
 
 // Second Codex pass on the fixed commit. Nine further findings, all real.
@@ -1267,7 +1267,7 @@ describe("review findings, round two", () => {
       400,
       /project team/i,
     );
-  }, OFFICE);
+  });
 
   it("writes only the fields the patch supplied, so concurrent edits do not clobber", async () => {
     const project = await seedProject();
@@ -1277,7 +1277,7 @@ describe("review findings, round two", () => {
     const after = await getWeeklyReportProject(db, project.id);
     // A full-row write from a stale merge would have restored the original client name here.
     expect(after).toMatchObject({ clientName: "Edited by A", propertyDisplayName: "Edited by B" });
-  }, OFFICE);
+  });
 
   it("locks the reporting day once reports exist", async () => {
     // Moving Thursday to Friday mid-project orphans every Thursday already filed and invents a run of
@@ -1294,7 +1294,7 @@ describe("review findings, round two", () => {
       409,
       /already started/i,
     );
-  }, OFFICE);
+  });
 
   it("still allows stopping future reporting once reports exist", async () => {
     // cadence_end_date is forward-only and must stay editable — that is how a project winds down.
@@ -1303,14 +1303,14 @@ describe("review findings, round two", () => {
     await expect(
       updateWeeklyReportProject(db, project.id, { cadenceEndDate: "2026-12-31" }, OFFICE),
     ).resolves.toMatchObject({ cadenceEndDate: "2026-12-31" });
-  }, OFFICE);
+  });
 
   it("allows changing the cadence before anything has been filed", async () => {
     const project = await seedProject();
     await expect(
       updateWeeklyReportProject(db, project.id, { cadenceWeekday: 5 }, OFFICE),
     ).resolves.toMatchObject({ cadenceWeekday: 5 });
-  }, OFFICE);
+  });
 
   it("does not let a content edit land on a report that has since been sent", async () => {
     const project = await seedProject();
@@ -1490,7 +1490,7 @@ describe("review findings, round three", () => {
       /text value/i,
     );
     expect((await getWeeklyReportProject(db, project.id))!.clientName).toBe("Mack Real Estate Group");
-  }, OFFICE);
+  });
 
   it("answers a duplicate setup with a conflict even when the pre-flight check is bypassed", async () => {
     // The existence SELECT serialises nothing; the unique index is what actually holds. Reaching the
@@ -1542,7 +1542,7 @@ describe("settings", () => {
   });
 
   it("upserts a single row no matter how many times it is saved", async () => {
-    await updateWeeklyReportSettings(db, ["adam@example.com"], DIRECTOR, OFFICE);
+    await updateWeeklyReportSettings(db, ["adam@example.com"], DIRECTOR);
     await updateWeeklyReportSettings(db, ["adam@example.com", "takashi@example.com"], DIRECTOR);
     const settings = await getWeeklyReportSettings(db);
     expect(settings.leadershipRecipientEmails).toEqual(["adam@example.com", "takashi@example.com"]);

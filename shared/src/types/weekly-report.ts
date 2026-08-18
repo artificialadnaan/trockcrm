@@ -42,6 +42,15 @@ export type WeeklyReportWeekState = (typeof WEEKLY_REPORT_WEEK_STATES)[number];
 /** How many days of photos the picker offers, ending on `week_of` inclusive. */
 export const WEEKLY_REPORT_PHOTO_WINDOW_DAYS = 14;
 
+/**
+ * Longest one narrative section may be — the API's validation limit AND the ceiling both renderers honour.
+ *
+ * Shared because the PDF and the public web page are the SAME document seen two ways, and a client compares
+ * them side by side. A renderer with a tighter cap of its own silently prints less than the page does, on
+ * the surface the client is most likely to forward.
+ */
+export const WEEKLY_REPORT_SECTION_MAX_CHARS = 20_000;
+
 /** Days before the due date that each reminder fires. `due_digest` fires ON the due date. */
 export const WEEKLY_REPORT_REMINDER_OFFSET_DAYS: Record<WeeklyReportReminderKind, number> = {
   t_minus_2: 2,
