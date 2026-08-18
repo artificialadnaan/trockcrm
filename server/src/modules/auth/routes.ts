@@ -398,11 +398,25 @@ router.post("/local/change-password", authMiddleware, async (req, res, next) => 
       throw new AppError(400, "Current password and new password are required");
     }
 
-    await changeLocalPassword({
+    const { tokenVersion } = await changeLocalPassword({
       userId: req.user!.id,
       currentPassword,
       newPassword,
     });
+
+    // The change bumped users.token_version, which invalidates EVERY session including this one. Hand
+    // the caller a token at the new version so the device they just used stays signed in while all the
+    // others die. Role/office come from the HOME values (baseRole, officeId) exactly as /local/login
+    // mints them — the active-office override is request scoped and must never be baked into a token.
+    const token = signJwt({
+      userId: req.user!.id,
+      email: req.user!.email,
+      officeId: req.user!.officeId,
+      role: req.user!.baseRole ?? req.user!.role,
+      tokenVersion,
+      authMethod: req.user!.authMethod ?? "local",
+    });
+    refreshAuthTokenCookie(req, res, token);
 
     res.json(withCsrfToken(req, res, {
       user: await withOnboardingGate({

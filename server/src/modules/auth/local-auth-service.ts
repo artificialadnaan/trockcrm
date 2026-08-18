@@ -13,6 +13,7 @@ import {
   type FieldTenantDb,
 } from "../field/cross-office.js";
 import { restartCorrectiveActionNotificationCycleForDeal } from "../field/corrective-actions-service.js";
+import { incrementTokenVersion } from "./session-invalidation.js";
 
 const scryptAsync = promisify(crypto.scrypt);
 const PASSWORD_MIN_LENGTH = 12;
@@ -664,22 +665,46 @@ export async function changeLocalPassword(input: {
   const nextHash = await hashPassword(input.newPassword);
   const currentTime = now();
 
-  await db
-    .update(userLocalAuth)
-    .set({
-      passwordHash: nextHash,
-      mustChangePassword: false,
-      inviteExpiresAt: null,
-      failedLoginAttempts: 0,
-      lastFailedLoginAt: null,
-      lockedUntil: null,
-      passwordChangedAt: currentTime,
-      updatedAt: currentTime,
-    })
-    .where(eq(userLocalAuth.userId, input.userId));
+  // The new hash and the session kill go in ONE transaction. Committing the hash without the bump is
+  // the exact failure this fixes — the password looks changed while every stolen session stays live.
+  const tokenVersion = await db.transaction(async (tx) => {
+    await tx
+      .update(userLocalAuth)
+      .set({
+        passwordHash: nextHash,
+        mustChangePassword: false,
+        inviteExpiresAt: null,
+        failedLoginAttempts: 0,
+        lastFailedLoginAt: null,
+        lockedUntil: null,
+        passwordChangedAt: currentTime,
+        updatedAt: currentTime,
+      })
+      .where(eq(userLocalAuth.userId, input.userId));
+
+    // Invalidates every session carrying the old version. People change a password precisely because
+    // they think it leaked; leaving the attacker's 30-day cookie alive would defeat the whole action.
+    await incrementTokenVersion(tx, input.userId);
+
+    const [bumped] = await tx
+      .select({ tokenVersion: users.tokenVersion })
+      .from(users)
+      .where(eq(users.id, input.userId))
+      .limit(1);
+
+    // Read back rather than guessing. Signing the caller a token at a stale version would sign them
+    // straight out, and defaulting to 0 here would do it silently.
+    if (bumped?.tokenVersion == null) {
+      throw new AppError(404, "User not found");
+    }
+    return bumped.tokenVersion;
+  });
 
   await recordLocalAuthEvent({
     userId: input.userId,
     eventType: "password_changed",
   });
+
+  // The caller re-mints THIS session's cookie at the returned version; see /local/change-password.
+  return { tokenVersion };
 }
