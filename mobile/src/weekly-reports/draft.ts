@@ -386,7 +386,14 @@ export function weeklyReportDraftToPhotoPayload(
     .map((photo) => ({ fileId: photo.fileId, caption: photo.caption.trim() || null }));
 }
 
-/** Imported photos whose upload has not produced a `files` row yet. Non-empty ⇒ submit must wait. */
+/**
+ * Imported photos whose upload has not produced a `files` row yet. Non-empty ⇒ submit is blocked.
+ *
+ * "Not uploaded yet" and "failed to upload" are indistinguishable from here — both are simply a photo
+ * with no `fileId` — which is why the wizard offers a RETRY rather than telling the user to wait. A
+ * failed upload is not transient on its own: nothing re-drives it, so without the retry this predicate
+ * blocks the report forever and the only escape is deleting the photos.
+ */
 export function weeklyReportDraftPendingUploads(draft: WeeklyReportDraft): WeeklyReportDraftPhoto[] {
   return draft.photos.filter((photo) => !photo.fileId);
 }
@@ -413,7 +420,7 @@ export function weeklyReportDraftBlocker(draft: WeeklyReportDraft): string | nul
   }
   const pending = weeklyReportDraftPendingUploads(draft).length;
   if (pending > 0) {
-    return `${pending} photo${pending === 1 ? " is" : "s are"} still uploading — wait for them to finish.`;
+    return `${pending} photo${pending === 1 ? " has" : "s have"} not uploaded — tap Retry uploads, or remove ${pending === 1 ? "it" : "them"}.`;
   }
   return null;
 }

@@ -163,3 +163,39 @@ export function weeklyReportImportNotice(outcome: WeeklyReportImportOutcome): st
   }
   return parts.length > 0 ? parts.join(" ") : null;
 }
+
+/**
+ * Re-upload photos that are already durably attached to the draft but never reached the server.
+ *
+ * Phase 3 leaves a failed photo attached with no `fileId`, which correctly blocks submit — but nothing
+ * re-drove it, so "N photos still uploading" was a terminal state, not a transient one. A super who
+ * imported on a jobsite with no signal could not file the report at all once back in coverage: waiting
+ * did nothing, re-importing created duplicates beside the dead rows, and the only escape was deleting
+ * and re-picking every photo. The durable local copy needed to just try again was already sitting there.
+ *
+ * Takes the same `upload`/`resolveUpload` deps as the batch import so there is one upload path, not two.
+ */
+export async function retryWeeklyReportPhotoUploads(
+  pending: ReadonlyArray<{ clientUploadId: string; localUri: string; width?: number; height?: number }>,
+  deps: Pick<WeeklyReportImportDeps, "upload" | "resolveUpload">,
+): Promise<{ retried: number; failedToUpload: number }> {
+  let failedToUpload = 0;
+  for (const entry of pending) {
+    try {
+      const uploaded = await deps.upload({
+        uri: entry.localUri,
+        width: entry.width,
+        height: entry.height,
+        // No metadata re-derivation: the EXIF that mattered was sent with the original attempt's
+        // provenance, and a live fix taken now would record where the phone is TODAY, not where the
+        // photo was taken.
+        metadata: {},
+        clientUploadId: entry.clientUploadId,
+      });
+      deps.resolveUpload(entry.clientUploadId, uploaded.fileId, uploaded.remoteUrl);
+    } catch {
+      failedToUpload += 1;
+    }
+  }
+  return { retried: pending.length, failedToUpload };
+}

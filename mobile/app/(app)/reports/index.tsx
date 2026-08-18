@@ -130,6 +130,14 @@ export default function ReportsHubScreen() {
       const local = drafts.find(
         (draft) => draft.weeklyReportProjectId === project.weeklyReportProjectId && draft.weekOf === weekOf,
       );
+      // A REVIEW draft is never opened from the local copy without re-reading the server first — see
+      // openReviewFresh. An AUTHORING draft is the opposite case: it is the durability unit, may hold
+      // text typed with no signal that the server has never seen, and seeding from the server copy would
+      // discard exactly the work the store exists to protect.
+      if (local?.mode === "review" && local.reportId) {
+        await openReviewFresh(local.reportId, project.projectName);
+        return;
+      }
       if (local) {
         openDraft(local);
         return;
@@ -202,9 +210,28 @@ export default function ReportsHubScreen() {
   async function openForReview(item: WeeklyReportReviewItem) {
     if (!ownerKey || opening) return;
     setOpening(item.reportId);
-    const local = drafts.find((draft) => draft.reportId === item.reportId && draft.mode === "review");
     try {
-      const detail = await getWeeklyReport(fetcher, item.reportId);
+      await openReviewFresh(item.reportId, item.projectName);
+    } finally {
+      setOpening(null);
+    }
+  }
+
+  /**
+   * Open a REVIEW draft only after re-reading the report from the server.
+   *
+   * Every entry point to a review draft must come through here. The freshness check used to live inside
+   * openForReview alone, but the same report is reachable from the project card (which routes into
+   * `openWeek` with mode "review") and from the In-progress list's Resume — and both of those opened the
+   * LOCAL draft outright. A day-old review draft then replays a PATCH of explicit nulls plus a whole-set
+   * photo PUT over work the superintendent rewrote in the meantime, and the PM approves, in good faith,
+   * something other than what they just read. Two of the three doors were unlocked.
+   */
+  async function openReviewFresh(reportId: string, projectName: string) {
+    if (!ownerKey) return;
+    const local = drafts.find((draft) => draft.reportId === reportId && draft.mode === "review");
+    try {
+      const detail = await getWeeklyReport(fetcher, reportId);
       // The gate is "can this row's FINAL ACTION complete", which is not one permission flag.
       //
       //   pending_review -> the action is Approve, so it needs canApprove.
@@ -236,7 +263,7 @@ export default function ReportsHubScreen() {
       const draft = weeklyReportDraftFromDetail({
         id: local?.id ?? newClientUploadId(),
         clientSubmissionId: local?.clientSubmissionId ?? newSubmissionId(),
-        projectName: item.projectName,
+        projectName,
         mode: "review",
         report,
         now: Date.now(),
@@ -252,8 +279,6 @@ export default function ReportsHubScreen() {
         return;
       }
       Alert.alert("Couldn’t open that report", "Check your connection and try again.");
-    } finally {
-      setOpening(null);
     }
   }
 
@@ -362,7 +387,12 @@ export default function ReportsHubScreen() {
             {drafts.map((draft) => (
               <View key={draft.id} style={styles.card}>
                 <Pressable
-                  onPress={() => openDraft(draft)}
+                  onPress={() =>
+                    // Same rule as the card: a review draft is re-read before it is opened.
+                    draft.mode === "review" && draft.reportId
+                      ? void openReviewFresh(draft.reportId, draft.projectName)
+                      : openDraft(draft)
+                  }
                   style={styles.cardBody}
                   accessibilityRole="button"
                   accessibilityLabel={`Resume the weekly report for ${draft.projectName}, week of ${formatWeekOf(draft.weekOf)}`}

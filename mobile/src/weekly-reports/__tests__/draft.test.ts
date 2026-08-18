@@ -338,7 +338,7 @@ describe("the submit gate", () => {
     expect(weeklyReportDraftBlocker(newDraft())).toMatch(/completed this week/i);
   });
 
-  it("blocks on a bad number and on a photo still uploading", () => {
+  it("blocks on a bad number and on a photo that has not uploaded", () => {
     expect(weeklyReportDraftBlocker(newDraft({ workCompleted: "done", completionPercent: "999" })))
       .toMatch(/between 0 and 100/i);
     expect(
@@ -348,7 +348,7 @@ describe("the submit gate", () => {
           photos: [{ ...galleryPhoto("p"), key: "p", fileId: null, clientUploadId: "p" }],
         }),
       ),
-    ).toMatch(/still uploading/i);
+    ).toMatch(/not uploaded/i);
   });
 
   it("clears once the report says something and every photo has landed", () => {
