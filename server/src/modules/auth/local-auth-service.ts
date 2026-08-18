@@ -1,7 +1,13 @@
 import crypto from "crypto";
 import { promisify } from "util";
 import { and, eq, sql } from "drizzle-orm";
-import { dealTeamMembers, userLocalAuth, userLocalAuthEvents, users } from "@trock-crm/shared/schema";
+import {
+  dealTeamMembers,
+  localAuthEventTypeEnum,
+  userLocalAuth,
+  userLocalAuthEvents,
+  users,
+} from "@trock-crm/shared/schema";
 import { db } from "../../db.js";
 import { AppError } from "../../middleware/error-handler.js";
 import { sendSystemEmail } from "../../lib/resend-client.js";
@@ -148,17 +154,19 @@ function inviteLoginUrl(inputUrl?: string): string {
   return inputUrl ?? process.env.ONBOARDING_CLEANUP_URL ?? DEFAULT_CLEANUP_LOGIN_URL;
 }
 
-async function recordLocalAuthEvent(input: {
+/**
+ * Every value the local_auth_event_type Postgres enum accepts, derived from the Drizzle enum rather
+ * than hand-listed.
+ *
+ * This union used to be retyped by hand and had already drifted: 'password_change_forced' existed in
+ * both the Postgres and Drizzle enums but was missing here, so a legal event type was a type error at
+ * the call site. Deriving it means adding a value in one place is enough, forever.
+ */
+export type LocalAuthEventType = (typeof localAuthEventTypeEnum.enumValues)[number];
+
+export async function recordLocalAuthEvent(input: {
   userId: string;
-  eventType:
-    | "invite_previewed"
-    | "invite_sent"
-    | "invite_resent"
-    | "invite_revoked"
-    | "login_succeeded"
-    | "login_failed"
-    | "login_locked"
-    | "password_changed";
+  eventType: LocalAuthEventType;
   actorUserId?: string | null;
   metadata?: Record<string, unknown> | null;
 }) {
